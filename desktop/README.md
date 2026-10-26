@@ -184,7 +184,7 @@ hosted public downloads or GitHub download permissions.
 - The sidebar update button checks, downloads and prepares updates, then offers
   Update and restart. Preview builds keep their updates disabled.
 
-Other workers (a homelab box, a remote managed worker) are managed inside the
+Other workers (a ServerWorker box, a remote managed worker) are managed inside the
 web UI under Devices, as on the web and on Android. The app itself only ever
 runs the local one.
 

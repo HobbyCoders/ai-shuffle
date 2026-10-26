@@ -234,8 +234,8 @@ def test_workspace_metadata_needs_local_access_or_authenticated_remote(app, tmp_
     ('local', '8.8.8.8', 'http://192.168.1.20:8000', {}),
     ('local', '169.254.1.1', 'http://192.168.1.20:8000', {}),
     ('local', '192.168.1.50', 'http://attacker.example:8000', {}),
-    ('local', '100.101.102.103', 'http://tower.ts.net.attacker.example:8000', {}),
-    ('local', '8.8.8.8', 'http://100.126.184.54:8000', {}),
+    ('local', '100.101.102.103', 'http://example-tailnet.ts.net.attacker.example:8000', {}),
+    ('local', '8.8.8.8', 'http://100.88.77.66:8000', {}),
     ('local', '192.168.1.50', 'http://192.168.1.20:8000', {'X-Forwarded-For': '127.0.0.1'}),
     ('local', '192.168.1.50', 'http://192.168.1.20:8000', {'X-Forwarded-Host': 'localhost'}),
     ('local', '192.168.1.50', 'http://192.168.1.20:8000', {'Forwarded': 'for=127.0.0.1'}),
@@ -250,7 +250,7 @@ def test_untrusted_requests_cannot_become_local_owner(app, ingress, peer, origin
     assert c.post('/api/v1/auth/setup', headers=extra, json={}).status_code == 403
 
 
-@pytest.mark.parametrize('origin', ['http://100.126.184.54:8000', 'http://tower.tail1234.ts.net:8000'])
+@pytest.mark.parametrize('origin', ['http://100.88.77.66:8000', 'http://example-tailnet.ts.net:8000'])
 def test_tailscale_peer_is_a_local_owner(app, origin):
     """Shuffle is reached over the owner's own networks only; a tailnet is one of them."""
     c = client(app, 'local', '100.101.102.103', origin)

@@ -274,7 +274,7 @@ describe('Overview saves keep local tuning', () => {
 	it('a rename sends every model back with its local_settings', async () => {
 		start([gatewayRow({ models: [{ ...qwen, local_settings: tuned }, other] })]);
 		await open('mp:gw-1');
-		const name = screen.getByDisplayValue('Homelab vLLM');
+		const name = screen.getByDisplayValue('ServerWorker vLLM');
 		await fireEvent.focus(name);
 		await fireEvent.input(name, { target: { value: 'Local llama' } });
 		await fireEvent.blur(name);

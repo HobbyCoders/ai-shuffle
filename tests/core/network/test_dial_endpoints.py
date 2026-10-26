@@ -168,7 +168,7 @@ def test_all_numeric_link_local_and_out_of_range_hosts_are_refused(url, enabled,
     ("http://[fd00::1]:8000", True), ("http://169.254.1.1:8000", True), ("http://[fe80::1]:8000", True),
     ("http://[::ffff:10.0.0.5]:8000", True),
     ("http://100.64.3.2:8000", True), ("http://100.127.255.254", True), ("http://100.128.0.1", False),
-    ("http://desk.tail1234.ts.net:8000", True), ("http://desk.local:8000", True),
+    ("http://desk.example-tailnet.ts.net:8000", True), ("http://desk.local:8000", True),
     ("http://8.8.8.8:8000", False), ("http://[2001:4860:4860::8888]:8000", False),
     ("http://[::ffff:8.8.8.8]:8000", False), ("http://worker.example.com:8000", False), ("http://desk", False),
     ("https://worker.example.com", True), ("https://8.8.8.8", True), ("ftp://10.0.0.1", False), ("http://", False),
@@ -198,7 +198,7 @@ async def test_join_over_plain_http_is_refused_outside_a_local_path(workers, mon
                 await enrollment.start_enrollment(endpoint_url=public, code="ABCD-EFGH-JKLM")
         assert calls == []  # refused before the code left this worker
         local = ("http://10.0.0.5:8000", "http://100.64.3.2:8000", "http://desk.local:8000",
-                 "http://desk.tail1234.ts.net:8000", "https://worker.example.com")
+                 "http://desk.example-tailnet.ts.net:8000", "https://worker.example.com")
         for address in local:
             with pytest.raises(enrollment.EnrollmentError, match="HTTP 502"):
                 await enrollment.start_enrollment(endpoint_url=address, code="ABCD-EFGH-JKLM")

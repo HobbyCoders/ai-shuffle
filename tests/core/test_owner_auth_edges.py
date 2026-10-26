@@ -142,7 +142,7 @@ def lan(monkeypatch):
 def test_direct_lan_request_is_local(lan):
     assert owner_auth.direct_local(_request())
     assert owner_auth.direct_local(_request(host="workstation.lan:8000"))
-    assert owner_auth.direct_local(_request(host="box.tail1234.ts.net", peer="100.100.1.2"))
+    assert owner_auth.direct_local(_request(host="box.example-tailnet.ts.net", peer="100.100.1.2"))
     assert owner_auth.local_access(_request())
 
 

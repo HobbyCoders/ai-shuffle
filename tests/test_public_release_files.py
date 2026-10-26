@@ -123,27 +123,72 @@ def test_private_agent_files_and_working_notes_are_not_tracked():
     assert tracked == [], f"keep these out of the public repo: {tracked}"
 
 
+# Hash the original values, not substitutes: regressions must still catch a
+# real leak without publishing the sensitive strings in the guard itself.
+OWNER_DETAIL_HASHES = frozenset({
+    "8be0b5445fca6eb16d14c6f4eaff1cf1d1a3362ef660bfb2b66e74bf309b7e61",  # machine-one
+    "6baff1894abb437cfa6086c13670ed2dd5ecfb8178a36f1b8b42fc7c6f588912",  # machine-two
+    "8e08b724734fcbc0af03e2469bbe556b37c8330296e4a4a7736a0572bf39522e",  # private-address
+    "167ed9eb3a83f4f32378c4b195f745ee5c16116f74d7cc8afe5a09a1d77f219f",  # tailnet-address
+    "660bd4b3315cfd8a19cf6050f83741778bd1ee5b9fb25e9c7907c92cad322986",  # home-folder
+    "4be591bebbdaca82fab8546a25738a9c9d4e3a6b02fe55bfe2d3636ef455da3b",  # tailnet-name-1
+    "b3abbaeb6353ff23d26dbe1dd39f47933d15f686d8d82ca5fe84c9ef0b99220a",  # tailnet-name-2
+})
+OWNER_DETAIL_PATTERNS = (
+    r"\b\w+\b",  # worker words, also inside URLs and hyphenated names
+    r"\b(?:\d{1,3}\\?\.){3}\d{1,3}\b",  # IPv4, including regex literals
+    r"\b(?=([\w-]+(?:\.[\w-]+)*\.ts\.net)\b)",  # overlapping hostname suffixes
+    r"/home/[\w.-]+",  # the home directory prefix, including in a longer path
+)
+
+
+def _has_owner_detail(text):
+    return any(
+        hashlib.sha256(token.replace(r"\.", ".").casefold().encode()).hexdigest()
+        in OWNER_DETAIL_HASHES
+        for pattern in OWNER_DETAIL_PATTERNS
+        for token in re.findall(pattern, text, re.I)
+    )
+
+
 def test_owner_machine_names_stay_out_of_tracked_files():
-    import subprocess
-    _tracked_files()
-    hits = subprocess.run(
-        ["git", "-C", str(ROOT), "grep", "-lE", r"\b(HomeLab|GamingPC|10\.0\.0\.251)\b", "--", "."],
-        capture_output=True, text=True,
-    ).stdout.split()
-    assert [h for h in hits if h != "tests/test_public_release_files.py"] == []
+    hits = [
+        path for path in _tracked_files()
+        if _has_owner_detail((ROOT / path).read_bytes().decode("utf-8", errors="ignore"))
+    ]
+    # No exemption for this test file, and no private contents in failure output.
+    assert hits == [], f"remove owner-specific details from tracked files: {hits}"
+
 
 @pytest.mark.parametrize("detail, blocked", [
-    pytest.param("HomeLab", True, id="machine-one"),
-    pytest.param("GamingPC", True, id="machine-two"),
-    pytest.param("10.0.0.251", True, id="private-address"),
-    pytest.param("192.0.2.10", False, id="documentation-address"),
+    pytest.param("ServerWorker", True, id="machine-one"),
+    pytest.param("DesktopWorker", True, id="machine-two"),
+    pytest.param("desktopworker", True, id="case-insensitive-worker"),
+    pytest.param("https://ServerWorker.local:8000", True, id="worker-hostname"),
+    pytest.param("ServerWorker-backup", True, id="hyphenated-worker"),
+    pytest.param("192.0.2.10", True, id="private-address"),
+    pytest.param("http://192.0.2.10:8000/path", True, id="address-in-url"),
+    pytest.param(r"192\.0\.2\.10", True, id="address-in-regex"),
+    pytest.param("example-tailnet.ts.net.attacker.example", True, id="spoofed-tailnet"),
+    pytest.param("node.example-tailnet.ts.net", True, id="tailnet-subdomain"),
+    pytest.param("/home/owner/Documents/project", True, id="home-directory"),
+    pytest.param("192.0.2.11", False, id="documentation-address"),
     pytest.param("ExampleWorker", False, id="generic-worker"),
+    pytest.param("NotServerWorker", False, id="worker-word-boundary"),
+    pytest.param("/home/owner-example", False, id="different-home-directory"),
+    pytest.param("other-tailnet.ts.net", False, id="different-tailnet"),
 ])
 def test_owner_detail_guard_checks_actual_tracked_content(tmp_path, monkeypatch, detail, blocked):
     import shutil
     import subprocess
     if shutil.which("git") is None:
         pytest.skip("git unavailable")
+    # Neutral fixtures exercise the same matcher. The original forbidden-value
+    # digests above remain installed; the fixture digests only extend them.
+    fixture_values = ("ServerWorker", "DesktopWorker", "192.0.2.10", "example-tailnet.ts.net", "/home/owner")
+    monkeypatch.setitem(globals(), "OWNER_DETAIL_HASHES", OWNER_DETAIL_HASHES | {
+        hashlib.sha256(value.casefold().encode()).hexdigest() for value in fixture_values
+    })
     subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
     (tmp_path / "fixture.txt").write_text(detail, encoding="utf-8")
     subprocess.run(["git", "-C", str(tmp_path), "add", "fixture.txt"], check=True, capture_output=True)

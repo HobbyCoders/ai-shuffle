@@ -101,7 +101,7 @@ def test_membership_chain_certificate_revocation_and_key_rotation():
     cert3 = membership.issue_certificate(
         network_id=net, issuer_device_id=joiner["id"], issuer_signing_private=joiner["signing"],
         device_id=third["id"], signing_public=third["public"], encryption_public=third["enc_public"],
-        name="Homelab", kind="worker", generation=2)
+        name="ServerWorker", kind="worker", generation=2)
     members = membership.apply_record(cert3, network_id=net, members=members, founder_device_id=founder["id"])
 
     # Revoke the joiner; its certificate for the third device stays valid.

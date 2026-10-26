@@ -87,7 +87,7 @@ const registry = {
 		},
 		{
 			id: 'gw-1',
-			name: 'Homelab vLLM',
+			name: 'ServerWorker vLLM',
 			provider_type: 'custom',
 			auth_kind: 'api',
 			default_model: null,
@@ -158,7 +158,7 @@ describe('the model list', () => {
 		expect(names).toEqual([
 			'GPT-6.1 Sol Effort High 2 routes',
 			// The tile letter of a gateway without a brand mark comes first.
-			'H Qwen3 Coder No adjustable settings',
+			'S Qwen3 Coder No adjustable settings',
 			'Mystery Effort not known yet',
 			'Opus Effort Auto (High)'
 		]);
