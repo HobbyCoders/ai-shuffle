@@ -1,12 +1,11 @@
-# Handoff — wire the continual harness into ai-shuffle (2026-08-31)
+# Continual harness integration notes for ai-shuffle (2026-08-31)
 
-For a fresh session. The fluid side of the continual-memory plan is done and
-merged to `main` (Phases 0, 1, and 2 — see
+Historical integration plan after the fluid side of the continual-memory
+work merged to `main` (Phases 0, 1, and 2). See
 [continual-memory-handoff.md](continual-memory-handoff.md) for what shipped
 and [continual-memory-study.md](continual-memory-study.md) Part II for the
-ai-shuffle audit this work list comes from). What remains is entirely in the
-**ai-shuffle repo: `D:\Development\ai-shuffle`** — do the work there, on a
-branch off its `main`.
+ai-shuffle audit behind this work list. The remaining integration points
+are in ai-shuffle.
 
 Line numbers below are from the 2026-08-30 audit; verify before editing —
 ai-shuffle moves.
@@ -39,11 +38,9 @@ works there until the re-vendor (step 1).
 
 ### 1. Re-vendor fluid
 
-Follow the vendor-copy + VENDORED-hash flow (no rsync; the flow is described
-in the repo's vendoring docs and the `ai-shuffle-vendoring` memory note:
-vendor copy, venv, VENDORED hash file). Pick up fluid main through commit
-`3ab8e4a`. The unraid Docker image needs a manual docker-publish dispatch
-afterwards — do not forget it, nothing auto-publishes.
+Use the repository's vendor-copy and `VENDORED` hash procedure to update
+the bundled fluid sources through commit `3ab8e4a`. Build and validate the
+distributable artifacts after updating the vendored code.
 
 ### 2. Fix the dead journal wire (audit item 0.4)
 
@@ -78,8 +75,8 @@ the natural follow-up (its own decision; do not bolt it on silently).
 
 The `# Project memory` prompt section (`~/.fluid/projects/<slug>/memory/`,
 `MEMORY.md` index) tells the model to "save one fact per file" but the
-write tool was removed in ai-shuffle PR #997 — the dir is empty on the dev
-machine and the promise is kept by nothing. Decide explicitly, don't drift:
+write tool was removed in ai-shuffle PR #997, leaving no supported write
+path for that promise. Decide explicitly, don't drift:
 either restore a scoped write path (a Memory tool that writes only inside
 the dir, no permission prompt), or remove the section. Given the fluid
 learner + Remember now covers durable facts, **removing the section is the
@@ -121,12 +118,6 @@ explicitly supported — no proposals are drafted without `session_model`.
 - Testing doctrine everywhere: build the situation, never name the tool;
   assert the flow fired plus the artifact landed (journal entry,
   memories.json, log line, event).
-- ai-shuffle's test suite runs ~35 min locally and has one env-dependent
-  failure (event_gateway DSN) — pre-existing, not yours.
-- Windows: `OPENROUTER_API_KEY` lives in user-scope env; long-running
-  processes don't inherit `setx` — read it at runtime via
-  `[Environment]::GetEnvironmentVariable(..., "User")`. If it 401s "API
-  key expired", ask the user for a fresh key before burning time.
 - Fluid E2E rig recipe (fake HOME, config.toml, provider-block `model`
   gotcha) is in [continual-memory-handoff.md](continual-memory-handoff.md)
   — useful as the shape for ai-shuffle-side live verification too.

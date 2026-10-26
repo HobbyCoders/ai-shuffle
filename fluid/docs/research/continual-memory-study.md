@@ -7,10 +7,8 @@ full audit of fluid's continual-learning pipeline plus ai-shuffle's memory
 architecture. File references are into this repo unless prefixed
 `ai-shuffle/`.
 
-The prompt for this study: fluid has a form of continual learning that no
-model has ever visibly used; memory in ai-shuffle is opaque even to its
-owner; and the goal is frontier-leading memory plus a harness that evolves
-itself so it does not need hand-modification every time a new model ships.
+This study examines how to make continual learning and memory observable,
+and how a harness can evolve without hand-modification for each new model.
 
 ---
 
@@ -157,7 +155,7 @@ The ai-shuffle audit found four unrelated systems sharing the name:
   read path, prompt section telling the model to "save one fact per file" —
   and **no write tool** since PR #997 removed the Memory builtin. The model
   would have to `Write` to an absolute out-of-tree path through a permission
-  prompt. The dir on the dev machine is empty; the prompt makes a promise
+  prompt. Without a supported write path, the prompt makes a promise
   every turn that nothing keeps.
 - **B. The continual learner** (`memories.json` in the fluid skills root):
   **the one that actually works.** Live, current, 8 entries, journal at 3 MB.

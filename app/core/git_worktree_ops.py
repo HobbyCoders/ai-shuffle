@@ -216,7 +216,7 @@ class GitWorktreeMixin:
         """
         # Shared-DB clusters (a primary + a worker sharing one Postgres) carry
         # project/worktree rows whose repo paths belong to another install — e.g.
-        # the primary's Windows path ``D:\Development\ai-shuffle`` reaching a Linux
+        # the primary's Windows path ``C:\Projects\example-project`` reaching a Linux
         # worker. That path cannot exist locally, so running git with it as cwd
         # raises FileNotFoundError, which previously surfaced as a repeated
         # ERROR-level stack ("Error listing worktrees"). A foreign install's

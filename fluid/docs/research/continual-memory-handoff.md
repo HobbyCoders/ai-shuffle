@@ -1,29 +1,23 @@
-# Handoff — continual harness & memory work (2026-08-30)
+# Continual harness & memory implementation notes (2026-08-30)
 
-For the next session picking this up. Complete context: what was asked, what
-was found, what shipped, what's verified, and exactly what remains. Companion
-documents: [continual-memory-study.md](continual-memory-study.md) (the full
-research + plan + implementation appendix) and the published report artifact
-at https://claude.ai/code/artifact/7a7c913b-2e31-4a4c-b834-61ee5c0a7606.
+Historical context for the continual-memory implementation: research,
+shipped features, verification scenarios, and follow-up work. Companion
+document: [continual-memory-study.md](continual-memory-study.md), with the
+full research, plan, and implementation appendix.
 
-## Where you are
+## Historical implementation state
 
-- Repo: `D:\Development\omni-harness` (fluid, the agent harness).
-- Branch: `claude/harness-memory-continual-learning-4034cf`, worktree
-  `.claude/worktrees/fluid-slash-commands-841724`. Base branch: `main`.
 - Two commits carry this work: `57a9f51` (feature) and `41ee683`
-  (visibility fixes found by live testing). Both on top of `13b1c43`.
-- Tests: `python -m pytest tests/unit` → 1299 passed, 5 skipped. New pins
-  live in `tests/unit/test_continual_v3.py` (23 tests).
-- Nothing is pushed and no PR exists yet.
+  (visibility fixes found by live testing), on top of `13b1c43`.
+- The unit suite recorded 1299 passed and 5 skipped. New pins live in
+  `tests/unit/test_continual_v3.py` (23 tests).
 
-## The mission (user's words, condensed)
+## Design goal
 
-Frontier-leading memory plus a continually self-evolving harness, so the
-harness never needs hand-modification for a new model. Testing philosophy is
-non-negotiable: never tell the model which tool to use — create situations
-that should trigger the flow. "The goal is when we are done even the
-stupidest of local models can use the harness properly and effectively."
+Make memory observable and let the harness evolve without hand-modification
+for each new model. Tests should create situations that trigger the flow,
+not tell the model which tool to use, so they measure whether the harness
+works across models.
 
 ## Research that grounds the design (already done, don't redo)
 
@@ -95,18 +89,15 @@ publicly revealed). Every scenario natural phrasing, zero tool names:
 
 ### How to run the E2E rig again
 
-- The key: `OPENROUTER_API_KEY` is set **user-scope** in Windows env. Fresh
-  long-running processes don't inherit `setx`; read it at runtime:
-  `[Environment]::GetEnvironmentVariable("OPENROUTER_API_KEY","User")`.
-  Never print it.
-- The rig from this session lived in the session scratchpad (`e2e/` — fake
-  `HOME` with its own `~/.fluid/config.toml`, a `proj/` with `.git`, a
-  `run.ps1` wrapper) — scratchpads are session-scoped, so rebuild it; the
-  recipe: config.toml with `default_provider="openrouter"`,
-  `default_model="z-ai/glm-5.3-flash"`, `continual=true`, provider block
-  with `api_key_env="OPENROUTER_API_KEY"`; then
-  `python -m fluid.cli run --cwd <proj> "<prompt>"` from the worktree root
-  with `HOME`/`USERPROFILE` pointed at the fake home.
+- Supply a test credential through `api_key_env="OPENROUTER_API_KEY"` in
+  the isolated test process. Never print or commit credentials.
+- Use a disposable home directory with its own `~/.fluid/config.toml` and
+  a temporary project containing `.git`. Configure
+  `default_provider="openrouter"`, `default_model="z-ai/glm-5.3-flash"`,
+  `continual=true`, and a provider block with
+  `api_key_env="OPENROUTER_API_KEY"`; then run
+  `python -m fluid.cli run --cwd <proj> "<prompt>"` from the repository root
+  with `HOME`/`USERPROFILE` pointed at the disposable home.
 - Gotchas: the module is `fluid.cli`, not `fluid`. CLI `--continual` forces
   `code_mode=true`; JSON-mode continual needs `continual=true` in config
   with code mode off. Default approval policy `on_write` + one-shot
@@ -116,22 +107,16 @@ publicly revealed). Every scenario natural phrasing, zero tool names:
   block**, not only `default_model`: `BUILTIN_DEFAULTS` ships
   `providers.openrouter.model = "openai/gpt-5-mini"`, a provider block
   without its own `model` line inherits it via deep-merge, and the
-  per-provider model beats `default_model` in `model_for` — the 2026-08-30
-  anchor-gate E2E silently ran against gpt-5-mini because of this.
-- The key expired late 2026-08-30 and the user refreshed it the same
-  session (`setx OPENROUTER_API_KEY …`); the full anchor-gate E2E then ran
-  green. If it 401s again ("API key expired"), ask the user for a fresh
-  key before burning time — confirm with the `/api/v1/key` endpoint.
+  per-provider model beats `default_model` in `model_for`. Otherwise, a test may
+  silently run against the inherited provider model.
 - Synthesis on glm takes ~35s/pass; the close budget is 90s
   (`Synthesizer.close_timeout`). Slow passes are abandoned by design and
   retried next session — check `.synthesis-log.jsonl` before assuming loss.
 
-## What remains (in priority order)
+## Implementation status and follow-up work
 
-1. **Push / PR.** The branch is local-only. The commit series is clean;
-   PR against `main` of `HobbyCoders`'s repo when the user wants it.
-2. ~~**Phase 2.1/2.2 — anchor sets + commit gate**~~ DONE (2026-08-30, this
-   branch): design round in [anchor-gate-design.md](anchor-gate-design.md);
+1. ~~**Phase 2.1/2.2 — anchor sets + commit gate**~~ DONE (2026-08-30):
+   design round in [anchor-gate-design.md](anchor-gate-design.md);
    `fluid/codemode/anchors.py` (store + outcome-shaped checks),
    `fluid/codemode/evolution.py` (validity → improvement → retention gate,
    `parked.jsonl` + `.evolution-log.jsonl`), `fluid/cli/replay.py`
@@ -139,7 +124,7 @@ publicly revealed). Every scenario natural phrasing, zero tool names:
    `fluid/cli/evolve.py` + `fluid anchors …` / `fluid evolve …` CLI.
    `anchor_budget` config knob (default 1). Pinned in
    `tests/unit/test_anchor_gate.py` (20 tests, offline). Live E2E against
-   glm-5.3-flash, all three regimes: **error path** (dead key → provider
+   glm-5.3-flash, all three regimes: **error path** (provider authentication
    errors surface as failed baselines with detail; also caught the
    unchanged-motivation hole — a family-scoped edit under a mismatched
    model short-circuited its motivating case to `unchanged` and committed
@@ -153,8 +138,8 @@ publicly revealed). Every scenario natural phrasing, zero tool names:
    `contains` check false-passed — anchors protecting an assertion need a
    paired `--forbid` for the plausible wrong answer (now in the design doc
    and the harvest drafting prompt).
-3. ~~**Phase 2.3 full — model_guidance as learned data.**~~ DONE
-   (2026-08-31, this branch): the synthesizer drafts `<guidance stem="…">`
+2. ~~**Phase 2.3 full — model_guidance as learned data.**~~ DONE
+   (2026-08-31): the synthesizer drafts `<guidance stem="…">`
    proposals from journal evidence — prompt shows it the session model id +
    current matching guidance file(s); queue-time validation enforces stem ⊂
    session model and a mandatory motivation case; drafts queue to
@@ -171,8 +156,7 @@ publicly revealed). Every scenario natural phrasing, zero tool names:
    (channel rule in the synth prompt, ≥2-char tool-directive names,
    parked records keep the motivation, motivation-authoring rules) — the
    design doc's 2.3 section has the details.
-4. **ai-shuffle wiring** (separate repo, `D:\Development\ai-shuffle`) —
-   now spelled out for a fresh session in
+3. **ai-shuffle wiring** — integration follow-up is described in
    [ai-shuffle-wiring-handoff.md](ai-shuffle-wiring-handoff.md); the raw
    audit items, for reference:
    - 0.4: pass `journal=` to its `NativeLoop` construction
@@ -184,11 +168,11 @@ publicly revealed). Every scenario natural phrasing, zero tool names:
    - 0.6b: the delegated Claude leg (the app's default) has zero app
      memory — bridge Recall/SessionSearch + the Remember channel via MCP,
      or document CLI-native memory as the answer.
-   - Re-vendor fluid (vendor copy + VENVDORED hash flow — see the
-     ai-shuffle-vendoring memory note) to pick up these commits, and wire
+   - Re-vendor fluid using the repository's vendor-copy and `VENDORED`
+     hash procedure to pick up these commits, and wire
      `memories_dir`'s new project scoping (its `memories.json` is
      install-global today; entries m4/m5 there leak across projects).
-5. **Small fluid polish, optional:** `[learned]` rendering in the TUI
+4. **Small fluid polish, optional:** `[learned]` rendering in the TUI
    (`fluid/cli/tui.py` untouched); Recall over prose-skill index; surfacing
    `.synthesis-log.jsonl` via a CLI command.
 

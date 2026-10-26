@@ -133,25 +133,39 @@ OWNER_DETAIL_HASHES = frozenset({
     "660bd4b3315cfd8a19cf6050f83741778bd1ee5b9fb25e9c7907c92cad322986",  # home-folder
     "4be591bebbdaca82fab8546a25738a9c9d4e3a6b02fe55bfe2d3636ef455da3b",  # tailnet-name-1
     "b3abbaeb6353ff23d26dbe1dd39f47933d15f686d8d82ca5fe84c9ef0b99220a",  # tailnet-name-2
+    "c23fbc9537dd5bb88eef798b887c4948c17c349f729583146d9883fdfd21f634",  # research-artifact-1
+    "87274b4f9f72acc805c05b3ced451499c0aa1d795c399112f2c0cbac55b43bb9",  # research-branch-1
+    "a68c1f4657a0416721a8148a20443e0a70c383344b91bd4772a96b49d3d51f21",  # research-worktree-1
+    "61e1affb401d8062e7732e625e1ca1c8c5937a383681b4ce3baa576bd0eac126",  # research-memory-path-1
+    "ed79ee2278242f7851224d74a17df3b97d6dcab6e1db5bd87289a41ea8d800c6",  # research-artifact-2
+    "95119a49a78b052307fa0511a5386deb6409bbcb4850571268243a1e298c00b9",  # research-checkout-1
+    "9038006871154a43afa40dafaaac8edb4d0f919a2e4a6c57b88d0e2c7f8d4a10",  # research-branch-2
+    "003dcea77b63d29547399dac003a401a27fe26235d87a6c405205b47016cc42e",  # research-worktree-2
+    "83da9489f41a8387e4504781d8948da4356fc07b6eb9b931100192e882d877d3",  # credential-location-command-1
+    "ecb1bdcd5b485a522660951ad0fee754e45566f74e996046bbff0ff8e3a0f199",  # research-checkout-2
+    "6a5a14cb2b2845c24b94719b2b91b8940be56590c40a719bcdee59629f14603c",  # credential-location-command-2
 })
 OWNER_DETAIL_PATTERNS = (
     r"\b\w+\b",  # worker words, also inside URLs and hyphenated names
     r"\b(?:\d{1,3}\\?\.){3}\d{1,3}\b",  # IPv4, including regex literals
     r"\b(?=([\w-]+(?:\.[\w-]+)*\.ts\.net)\b)",  # overlapping hostname suffixes
     r"/home/[\w.-]+",  # the home directory prefix, including in a longer path
+    r"(?:https?://|[A-Z]:[\\/]|~[/\\]|\.claude/)[^\s`<>\"()]+",  # URLs and local paths
+    r"\b[\w.-]+(?:/[\w.-]+)+",  # branch and worktree path tokens
+    r"`([^`\n]+)`",  # code-quoted setup commands, including embedded spaces
 )
 
 
 def _has_owner_detail(text):
     return any(
-        hashlib.sha256(token.replace(r"\.", ".").casefold().encode()).hexdigest()
+        hashlib.sha256(token.replace(r"\.", ".").rstrip(".,;:").casefold().encode()).hexdigest()
         in OWNER_DETAIL_HASHES
         for pattern in OWNER_DETAIL_PATTERNS
         for token in re.findall(pattern, text, re.I)
     )
 
 
-def test_owner_machine_names_stay_out_of_tracked_files():
+def test_owner_setup_details_stay_out_of_tracked_files():
     hits = [
         path for path in _tracked_files()
         if _has_owner_detail((ROOT / path).read_bytes().decode("utf-8", errors="ignore"))
@@ -177,6 +191,20 @@ def test_owner_machine_names_stay_out_of_tracked_files():
     pytest.param("NotServerWorker", False, id="worker-word-boundary"),
     pytest.param("/home/owner-example", False, id="different-home-directory"),
     pytest.param("other-tailnet.ts.net", False, id="different-tailnet"),
+    pytest.param("https://example.com/artifact/research-review", True, id="research-artifact"),
+    pytest.param("See https://example.com/artifact/research-review.", True, id="artifact-sentence"),
+    pytest.param("[report](https://example.com/artifact/research-review)", True, id="artifact-link"),
+    pytest.param("https://example.com/artifact/public-example", False, id="different-artifact"),
+    pytest.param("review/research-harness", True, id="research-branch"),
+    pytest.param(".claude/worktrees/research-review", True, id="research-worktree"),
+    pytest.param(r"C:\Projects\harness", True, id="research-checkout"),
+    pytest.param("~/.claude/projects/example/memory/review.md", True, id="research-memory-path"),
+    pytest.param(
+        '`[Environment]::GetEnvironmentVariable("EXAMPLE_API_KEY", "User")`',
+        True, id="credential-location-command",
+    ),
+    pytest.param("review/public-example", False, id="different-branch"),
+    pytest.param(r"C:\Projects\public-example", False, id="different-checkout"),
 ])
 def test_owner_detail_guard_checks_actual_tracked_content(tmp_path, monkeypatch, detail, blocked):
     import shutil
@@ -185,7 +213,13 @@ def test_owner_detail_guard_checks_actual_tracked_content(tmp_path, monkeypatch,
         pytest.skip("git unavailable")
     # Neutral fixtures exercise the same matcher. The original forbidden-value
     # digests above remain installed; the fixture digests only extend them.
-    fixture_values = ("ServerWorker", "DesktopWorker", "192.0.2.10", "example-tailnet.ts.net", "/home/owner")
+    fixture_values = (
+        "ServerWorker", "DesktopWorker", "192.0.2.10", "example-tailnet.ts.net", "/home/owner",
+        "https://example.com/artifact/research-review", "review/research-harness",
+        ".claude/worktrees/research-review", r"C:\Projects\harness",
+        "~/.claude/projects/example/memory/review.md",
+        '[Environment]::GetEnvironmentVariable("EXAMPLE_API_KEY", "User")',
+    )
     monkeypatch.setitem(globals(), "OWNER_DETAIL_HASHES", OWNER_DETAIL_HASHES | {
         hashlib.sha256(value.casefold().encode()).hexdigest() for value in fixture_values
     })
@@ -195,6 +229,6 @@ def test_owner_detail_guard_checks_actual_tracked_content(tmp_path, monkeypatch,
     monkeypatch.setitem(globals(), "ROOT", tmp_path)
     if blocked:
         with pytest.raises(AssertionError):
-            test_owner_machine_names_stay_out_of_tracked_files()
+            test_owner_setup_details_stay_out_of_tracked_files()
     else:
-        test_owner_machine_names_stay_out_of_tracked_files()
+        test_owner_setup_details_stay_out_of_tracked_files()
