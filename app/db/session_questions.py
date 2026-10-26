@@ -8,22 +8,45 @@ from __future__ import annotations
 
 import re
 
-
 # JavaScript \s/trim include BOM but not Python's extra control separators.
-_JS_SPACE = "\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
-_SPACE = f"[{_JS_SPACE}]"
+_JS_SPACE = (
+    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
+    "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
 _NONSPACE = f"[^{_JS_SPACE}]"
-_TRIM = re.compile(f"^{_SPACE}+|{_SPACE}+$")
+
+
+def _strip_url(match: re.Match) -> str:
+    target = match[1]
+    end = len(target.rstrip(".,;:!?)]'\""))
+    return target[end:] if end else match[0]
+
+
+def _strip_trailing_list(prose: str) -> str:
+    # Keep the full input: a list/code span may extend beyond any bounded tail.
+    lines = prose.split("\n")
+    end = len(lines) - 1
+    while end > 0 and re.fullmatch(r"[ \t\r]*", lines[end]):
+        end -= 1
+    list_end = end
+    while end > 0 and re.match(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]", lines[end]):
+        end -= 1
+    # A list needs a preceding newline; do not strip the first line or blanks
+    # before the list. The old \r?\n also consumed one preceding CR.
+    return "\n".join(lines[:end + 1]).removesuffix("\r") if end < list_end else prose
 
 
 def asks_question(content: str) -> bool:
     """A final question, not an earlier self-question followed by narration."""
     prose = re.sub(r"`[^`]*`", "", content)
-    prose = re.sub(r"\]\([^\)" + _JS_SPACE + r"]*\)", "]", prose)
-    prose = re.sub(r"<https?://[^>" + _JS_SPACE + r"]*>", "", prose)
-    prose = re.sub(r"(?<![a-zA-Z0-9_])https?://" + _NONSPACE + r"*[^" + _JS_SPACE + r".,;:!?)\]'\"]", "", prose)
+    # Consume failed candidates too, unchanged, so nested openers are not retried.
+    prose = re.sub(r"\]\([^\)" + _JS_SPACE + r"]*\)?",
+                   lambda m: "]" if m[0].endswith(")") else m[0], prose)
+    prose = re.sub(r"<https?://[^>" + _JS_SPACE + r"]*>?",
+                   lambda m: "" if m[0].endswith(">") else m[0], prose)
+    prose = re.sub(r"(?<![a-zA-Z0-9_])https?://(" + _NONSPACE + r"+)", _strip_url, prose)
     # A trailing list can contain the choices offered by the final question.
-    prose = re.sub(r"(?:\r?\n[ \t]*(?:[-*+]|\d+[.)])[ \t]+[^\n]*)+[ \t\r\n]*$", "", prose)
+    prose = _strip_trailing_list(prose)
     # Markdown emphasis, link labels and quotes may wrap the last sentence.
     return re.search(r"\?[\"'’”)*_\]" + _JS_SPACE + r"]*$", prose) is not None
 
@@ -110,7 +133,7 @@ def trailing_question_seq(cursor, session_id):
     dropped_since = None
 
     def finish():
-        text = _TRIM.sub("", "".join(reversed(pieces)))
+        text = "".join(reversed(pieces)).strip(_JS_SPACE)
         if not text or (dropped_since is not None and origin > dropped_since):
             return False, None
         answered_mid_stream = user_seq is not None and origin < user_seq < position
@@ -156,12 +179,12 @@ def trailing_question_seq(cursor, session_id):
             if not hidden:
                 return None
         if kind == "message.assistant" and payload.get("kind") in (None, "text"):
-            text = _TRIM.sub("", payload.get("content") or "")
+            text = (payload.get("content") or "").strip(_JS_SPACE)
             if text and not hidden:
                 return seq if seq > inactive_through and asks_question(text) else None
         if kind == "assistant.text_delta":
             # A live tail cannot ask yet. Read a stream only once it closes.
-            if not closed and _TRIM.sub("", payload.get("text") or ""):
+            if not closed and (payload.get("text") or "").strip(_JS_SPACE):
                 return None
             if position is None:
                 position = seq

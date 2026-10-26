@@ -134,5 +134,41 @@
   {
     "content": "Why? I will compare these.\n1. Red\n2. Blue",
     "expected": false
+  },
+  {
+    "content": "Which?\n- item\n \r\t\n",
+    "expected": true
+  },
+  {
+    "content": "Which?\n- item\n\n- other",
+    "expected": false
+  },
+  {
+    "content": "- first?\n- second",
+    "expected": true
+  },
+  {
+    "content": "Which?\n- item\nclosing prose.",
+    "expected": false
+  },
+  {
+    "content": "Which?\n-",
+    "expected": false
+  },
+  {
+    "content": "Which? https://???",
+    "expected": true
+  },
+  {
+    "content": "Which? <https://<https://",
+    "expected": false
+  },
+  {
+    "content": "[Which?](https://https://)",
+    "expected": true
+  },
+  {
+    "content": "Which? ](](unclosed",
+    "expected": false
   }
 ]

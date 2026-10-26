@@ -291,15 +291,32 @@ export function isProtectedProse(content: string): boolean {
 function questionProse(content: string): string {
 	return content
 		.replace(/`[^`]*`/g, '')
-		.replace(/\]\([^)\s]*\)/g, ']')
-		.replace(/<https?:\/\/[^>\s]*>/g, '')
-		.replace(/\bhttps?:\/\/\S*[^\s.,;:!?)\]'"]/g, '');
+		// Consume failed candidates too, unchanged, so nested openers are not retried.
+		.replace(/\]\([^)\s]*\)?/g, (match) => match.endsWith(')') ? ']' : match)
+		.replace(/<https?:\/\/[^>\s]*>?/g, (match) => match.endsWith('>') ? '' : match)
+		.replace(/\bhttps?:\/\/(\S+)/g, (match, target: string) => {
+			let end = target.length;
+			while (end > 0 && ".,;:!?)]'\"".includes(target[end - 1])) end--;
+			return end ? target.slice(end) : match;
+		});
+}
+
+function stripTrailingList(prose: string): string {
+	// Keep the full input: a list/code span may extend beyond any bounded tail.
+	const lines = prose.split('\n');
+	let end = lines.length - 1;
+	while (end > 0 && /^[ \t\r]*$/.test(lines[end])) end--;
+	const listEnd = end;
+	while (end > 0 && /^[ \t]*(?:[-*+]|\d+[.)])[ \t]/.test(lines[end])) end--;
+	// A list needs a preceding newline; do not strip the first line or blanks
+	// before the list. The old \r?\n also consumed one preceding CR.
+	return end < listEnd ? lines.slice(0, end + 1).join('\n').replace(/\r$/, '') : prose;
 }
 
 /** A final prose question; callers must also check that all work has ended. */
 export function asksQuestion(content: string): boolean {
 	// A trailing list can contain the choices offered by the final question.
-	const prose = questionProse(content).replace(/(?:\r?\n[ \t]*(?:[-*+]|\d+[.)])[ \t]+[^\n]*)+[ \t\r\n]*$/, '');
+	const prose = stripTrailingList(questionProse(content));
 	// Only the final sentence can ask for an answer. An earlier self-question
 	// followed by more narration does not stop the work or need the owner.
 	return /\?["'’”)*_\]\s]*$/.test(prose);
