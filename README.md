@@ -6,6 +6,8 @@ AI Shuffle is a free, open-source workspace for running AI agents on your PC, ho
 
 [Watch the tour](https://hobbycoders.com/ai-shuffle) · [Download](https://hobbycoders.com/ai-shuffle/downloads) · [Docs](docs/content/getting-started/_index.md) · [Discord](https://hobbycoders.com/discord)
 
+In development since January 2026 and open-sourced in October 2026.
+
 ![Chat transcript with a folded Worked for work log](docs/images/readme/folded-work-log.png)
 
 ## Why AI Shuffle
