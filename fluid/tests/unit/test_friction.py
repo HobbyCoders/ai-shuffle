@@ -126,6 +126,29 @@ def test_repeat_work_markers_match_the_real_notes() -> None:
     assert any(m in repeat_search_pointer("head\nrow") for m in _REPEAT_MARKERS)
 
 
+def test_the_claude_clis_own_wording_counts_as_friction() -> None:
+    """The delegated leg journals the CLI's Read results, whose not-found and
+    unchanged-re-read texts differ from fluid's builtins (#687)."""
+    detector = FrictionDetector()
+    [missing] = detector.observe(
+        "Read", {"file_path": "/repo/nope.py"},
+        "<tool_use_error>File does not exist. Note: your current working "
+        "directory is /repo.</tool_use_error>", True,
+    )
+    assert missing["signal"] == "path_not_found"
+    [missing_dir] = detector.observe(
+        "Glob", {"path": "/repo/gone"}, "Directory does not exist: /repo/gone.", True,
+    )
+    assert missing_dir["signal"] == "path_not_found"
+    [reread] = detector.observe(
+        "Read", {"file_path": "/repo/a.py"},
+        "File unchanged since last read. The content from the earlier Read "
+        "tool_result in this conversation is still current — refer to that "
+        "instead of re-reading.", False,
+    )
+    assert reread["signal"] == "repeat_work"
+
+
 def test_empty_result_retried_with_near_identical_arguments() -> None:
     detector = FrictionDetector()
     header = "Grep(pattern=handleClick) in /repo"

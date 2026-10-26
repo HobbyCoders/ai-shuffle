@@ -74,8 +74,10 @@ _FRICTION_ARGS_CAP = 200
 NEAR_IDENTICAL_RATIO = 0.9
 
 # Not-found diagnostics emitted by the file/search builtins (read.py, edit.py,
-# glob.py, grep.py) plus the raw OS phrasing that reaches Bash and MCP tools.
-# Matched case-insensitively against an error result only.
+# glob.py, grep.py) plus the raw OS phrasing that reaches Bash and MCP tools,
+# and the delegated Claude CLI's own Read/Edit/Glob/Grep wording ("File does
+# not exist.", "Directory does not exist: ..."). Matched case-insensitively
+# against an error result only.
 _NOT_FOUND_MARKERS = (
     "file not found:",
     "path not found:",
@@ -83,16 +85,20 @@ _NOT_FOUND_MARKERS = (
     "directory not found:",
     "notebook not found:",
     "no such file or directory",
+    "file does not exist",
+    "directory does not exist",
 )
 
 # Verbatim heads of the repeat-work notes in fluid/tools/builtins/_util.py
 # (``unchanged_read_note`` / ``repeat_search_pointer``). The repeat-work
 # registries on ToolCtx already did the detection; this hooks their signal
 # rather than rebuilding it. tests/unit/test_friction.py pins these against
-# the real note text so a rewording there cannot silently unhook us.
+# the real note text so a rewording there cannot silently unhook us. The last
+# one is the delegated Claude CLI's answer to an unchanged re-read.
 _REPEAT_MARKERS = (
     "[note: unchanged since your earlier read this session",
     "[identical search already run this session",
+    "File unchanged since last read.",
 )
 
 # Result bodies that mean "this call found nothing" without being an error.
