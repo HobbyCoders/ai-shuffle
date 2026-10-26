@@ -113,6 +113,23 @@ def test_drift_without_a_change(repo):
     assert report["summary"] == "Live on: ServerWorker ✗ · DesktopWorker ✓"
 
 
+def test_behind_counts_main_changes_not_merged_in_history(repo):
+    root, shas = repo
+    branch = _git(root, "symbolic-ref", "--short", "HEAD")
+    _git(root, "checkout", "-q", "--orphan", "archive")
+    _git(root, "rm", "-rqf", ".")
+    for number in range(5):
+        _commit(root, "old.py", f"archived {number}")
+    _git(root, "checkout", "-q", branch)
+    _git(root, "merge", "-q", "-s", "ours", "--allow-unrelated-histories", "--no-edit", "archive")
+    _git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
+    report = ds.assess([_row("ServerWorker", shas["a"], is_self=True), _row("DesktopWorker", shas["c"])],
+                       repo=root, refresh=False)
+    unraid, gaming = report["workers"]
+    assert unraid["behind"] == 3 and "3 behind" in unraid["action"]
+    assert gaming["behind"] == 1
+
+
 def test_pr_resolves_via_squash_subject_and_reports_containment(repo):
     root, shas = repo
     report = ds.assess([_row("ServerWorker", shas["a"], offered=shas["c"][:12]), _row("DesktopWorker", shas["b"])],

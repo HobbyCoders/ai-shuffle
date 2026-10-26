@@ -2883,7 +2883,7 @@ def create_builtin_tools_server(
     @tool(
         "DeployStatus",
         "Report which paired workers run a change: per worker the running "
-        "revision, app version, update channel, commits behind origin/main, "
+        "revision, app version, update channel, first-parent commits behind origin/main, "
         "whether it contains the given PR or commit, and the next action "
         "(up to date / update this worker / publish edge first). Also says "
         "whether Android needs a new Play build (only for android/ changes). "

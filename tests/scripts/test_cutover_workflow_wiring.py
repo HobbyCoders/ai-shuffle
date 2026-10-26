@@ -1,5 +1,10 @@
 """Mutate real release workflow inputs/steps; the wiring verifier must reject them."""
+import os
 from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
 
 import pytest
 import yaml
@@ -80,3 +85,40 @@ def test_workflow_preflight_rejects_broken_release_delivery(tmp_path, mutation):
     else:
         with pytest.raises(ValueError):
             release_wiring.verify(tmp_path)
+
+
+def _source_step(workflow, job):
+    data = yaml.load((ROOT / ".github/workflows" / workflow).read_text(), Loader=yaml.BaseLoader)
+    return next(step for step in data["jobs"][job]["steps"] if step.get("id") == "source")["run"]
+
+
+def test_no_workflow_hides_a_failing_command_in_an_output_echo():
+    # echo "name=$(cmd)" >> "$GITHUB_OUTPUT" discards cmd's exit status and
+    # records an empty value (an empty APPLICATION_SEQUENCE reached a build).
+    for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        for line in path.read_text().splitlines():
+            if "GITHUB_OUTPUT" in line and re.search(r'echo\s+"?[A-Za-z_]+=\$\(', line):
+                assert "|| true" in line, f"{path.name}: {line.strip()}"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or sys.platform == "win32", reason="GitHub's Linux bash step")
+@pytest.mark.parametrize("workflow,job", [("container-postgres.yml", "container-postgres"),
+                                          ("docker-publish.yml", "build")])
+@pytest.mark.parametrize("sequence,ok", [("print(3081)", True), ('raise SystemExit("boom")', False),
+                                         ("print('')", False), ("print(0)", False)])
+def test_source_step_fails_loudly_on_a_bad_sequence(tmp_path, workflow, job, sequence, ok):
+    repo = tmp_path / "repo"
+    (repo / "scripts/release").mkdir(parents=True)
+    (repo / "android/ci").mkdir(parents=True)
+    (repo / "scripts/release/sequence_offset.py").write_text(sequence + "\n")
+    (repo / "android/ci/resolve-version-name.py").write_text("print('1.1.0')\n")
+    for args in (["init", "-q"], ["-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                                  "commit", "-q", "--allow-empty", "-m", "x"]):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    output = tmp_path / "output"
+    env = {**os.environ, "GITHUB_OUTPUT": str(output), "GITHUB_WORKSPACE": str(repo), "RELEASE_TAG": ""}
+    result = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", _source_step(workflow, job)],
+                            cwd=repo, env=env, capture_output=True, text=True)
+    assert (result.returncode == 0) is ok, result.stderr
+    written = output.read_text() if output.exists() else ""
+    assert ("sequence=3081\n" in written) if ok else "sequence=" not in written

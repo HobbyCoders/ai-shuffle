@@ -3,7 +3,7 @@
 Read-only. Answers "is PR #N / commit X running on ServerWorker yet?" without the
 owner checking every worker by hand. Each worker reports the revision it runs,
 its app version and update channel; a local ai-shuffle git checkout turns that
-into commits behind origin/main and "contains the change". Nothing here
+into first-parent commits behind origin/main and "contains the change". Nothing here
 raises: a worker, the git checkout or GitHub that cannot answer degrades to
 ``None`` plus a ``reason``.
 
@@ -130,7 +130,9 @@ def _resolve(repo: Path, rev: Optional[str]) -> Optional[str]:
 
 
 def _behind(repo: Path, full: str) -> Optional[int]:
-    value = _out(repo, "rev-list", "--count", f"{full}..{MAIN}")
+    # First parents: main changes, not every merged-in commit. Imported
+    # history (the archive joined as a second parent) counts as one change.
+    value = _out(repo, "rev-list", "--first-parent", "--count", f"{full}..{MAIN}")
     return int(value) if value and value.isdigit() else None
 
 
