@@ -83,7 +83,7 @@ import time
 import weakref
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, NamedTuple, Optional, Tuple, cast
 
 import httpx
 
@@ -401,6 +401,10 @@ class HarnessAdapter(ProviderAdapter):
         # ``_announce_continual``). Both None/"" when continual is off.
         self._continual_bus: Optional[Any] = None
         self._continual_fallback_sid: str = ""
+        # The delegated leg's memory-learner client (``_LearnerProvider``),
+        # closed after the engine (whose close drains the learner). None on
+        # the native leg, whose learner shares the session's client.
+        self._learner_provider: Optional["_LearnerProvider"] = None
         # Highest seq that already existed when the CURRENT turn was submitted.
         # A terminal event at or below it belongs to an earlier turn, so it can
         # never settle this one (see ``receive_events``).
@@ -680,9 +684,19 @@ class HarnessAdapter(ProviderAdapter):
                 inject_claude_code_auth, dict(options.env or {}),
                 options.extra.get("provider_id"),
             )
+            # The learning journal, as on the native JSON-mode leg (#687).
+            delegated_journal, delegated_bus = await self._delegated_journal(
+                options, fluid_session_id
+            )
             self._engine = DelegatedLoop(
                 store=store,
                 model=options.model,
+                # The continual journal DelegatedLoop feeds from the CLI's
+                # frames (user text, each tool result with its input, the
+                # final reply), and the bus its learner announces on (None
+                # with learning off: the loop defaults its own).
+                journal=delegated_journal,
+                bus=delegated_bus,
                 system=delegated_system,
                 append_system_prompt=delegated_append,
                 permission_mode=options.permission_mode,
@@ -948,54 +962,14 @@ class HarnessAdapter(ProviderAdapter):
                     )
                     synthesizer = None
                     if settings.fluid_continual:
-                        # Materialized HERE rather than letting NativeLoop
-                        # default one, for the same reason fluid's loader does
-                        # it: the synthesizer's ContinualUpdate announcements
-                        # must publish to the SAME bus the engine streams from.
-                        from fluid.events.bus import EventBus
-
-                        engine_bus = EventBus()
-                        self._continual_bus = engine_bus
-                        self._continual_fallback_sid = fluid_session_id or ""
-
-                        async def _announce(changes: list) -> None:
-                            # Learning that lands invisibly might as well not
-                            # have happened — announce what the pass changed.
-                            await self._announce_continual(list(changes))
-
                         # Session provider; fluid_continual_model pins synthesis
                         # to one model so skill quality doesn't drift with the
-                        # session's provider choice. ``project`` scopes what the
-                        # learner writes: a project-tagged fact lands under this
-                        # cwd's key (the SAME key the prompt compiler renders
-                        # the # Memory snapshot under) instead of leaking into
-                        # every other project's sessions. Passes are background
-                        # and best-effort (see fluid/codemode/continual.py).
-                        # ``session_model``/``guidance_snapshot`` open
-                        # fluid's guidance-proposal channel. ``session_model``
-                        # is ``options.model`` — NOT the resolved api id above
-                        # — because it must be the same string the guidance
-                        # read path keys on (``_model_guidance_blocks`` and
-                        # ``prompt_guidance_blocks``): a proposal's stem has to
-                        # be a substring of it or the committed file would
-                        # never load. The snapshot is the raw text of the very
-                        # files this session's prompt carries, so the
-                        # synthesizer amends rather than blindly overwrites.
-                        # Drafts are queued and validated, never applied — the
-                        # commit gate disposes of them out-of-band
-                        # (app/core/guidance_surface.py).
-                        session_model = options.model or cast(str, native_model)
-                        synthesizer = Synthesizer(
+                        # session's provider choice.
+                        synthesizer, engine_bus = self._learner_synthesizer(
                             provider_client,
                             settings.fluid_continual_model or cast(str, native_model),
-                            skills,
-                            project=memory_project,
-                            workflow_cwd=options.cwd,
-                            on_change=_announce,
-                            session_model=session_model,
-                            guidance_snapshot=_session_guidance_snapshot(
-                                session_model
-                            ),
+                            skills, memory_project, options, fluid_session_id,
+                            session_model=options.model or cast(str, native_model),
                             # The session model's resolved window sizes the
                             # learner's request; a pinned learner model has no
                             # resolved window here and falls back to fluid's
@@ -1491,6 +1465,12 @@ class HarnessAdapter(ProviderAdapter):
                 except Exception:
                     pass
                 self._provider_http = None
+            learner, self._learner_provider = self._learner_provider, None
+            if learner is not None:
+                try:
+                    await learner.aclose()
+                except Exception:
+                    pass
             self._connected = False
             # DROP the engine reference too. The fluid client still holds the
             # httpx client we just closed, so an adapter that keeps its engine
@@ -2598,6 +2578,111 @@ class HarnessAdapter(ProviderAdapter):
                 yield translated
                 if isinstance(translated, ResultMessage):
                     return
+
+    def _learner_synthesizer(
+        self, provider: Any, model: str, skills: Any, memory_project: Optional[str],
+        options: SessionOptions, fluid_session_id: Optional[str], *,
+        session_model: Optional[str], context_window: Optional[int],
+    ) -> tuple:
+        """``(Synthesizer, EventBus)``: the memory learner, for either leg.
+
+        The bus is materialized here rather than defaulted by the engine, for
+        the same reason fluid's loader does it: the learner's ContinualUpdate
+        announcements must publish to the SAME bus the engine streams from,
+        so the caller hands it to the engine.
+
+        ``memory_project`` scopes what the learner writes: a project-tagged
+        fact lands under this cwd's key (the SAME key the prompt renders the
+        # Memory snapshot under) instead of leaking into every other
+        project's sessions. Passes are background and best-effort, paced and
+        capped by the store's shared daily budget (fluid/codemode/continual.py).
+
+        ``session_model``/``guidance_snapshot`` open fluid's
+        guidance-proposal channel. ``session_model`` is ``options.model``, NOT
+        a resolved api id, because it must be the same string the guidance
+        read path keys on (``_model_guidance_blocks`` and
+        ``prompt_guidance_blocks``): a proposal's stem has to be a substring of
+        it or the committed file would never load. The snapshot is the raw text
+        of the very files this session's prompt carries, so the learner amends
+        rather than blindly overwrites. Drafts are queued and validated, never
+        applied: the commit gate disposes of them out-of-band
+        (app/core/guidance_surface.py).
+        """
+        from fluid.events.bus import EventBus
+
+        engine_bus = EventBus()
+        self._continual_bus = engine_bus
+        self._continual_fallback_sid = fluid_session_id or ""
+
+        async def _announce(changes: list) -> None:
+            # Learning that lands invisibly might as well not have happened:
+            # announce what the pass changed.
+            await self._announce_continual(list(changes))
+
+        synthesizer = Synthesizer(
+            provider,
+            model,
+            skills,
+            project=memory_project,
+            workflow_cwd=options.cwd,
+            on_change=_announce,
+            session_model=session_model,
+            guidance_snapshot=_session_guidance_snapshot(session_model),
+            context_window=context_window,
+        )
+        return synthesizer, engine_bus
+
+    async def _delegated_journal(
+        self, options: SessionOptions, fluid_session_id: Optional[str],
+    ) -> tuple:
+        """``(ToolJournal or None, EventBus or None)`` for the delegated leg.
+
+        The same journal the native JSON-mode leg gets: the session's owner
+        store, stamped with the app session id, the project key and the
+        checkout, so DelegatedLoop's user, tool (with friction) and assistant
+        records land in that store's ``journal.jsonl`` exactly as native ones.
+
+        The CLI is not a provider the learner can call, so passes run on the
+        client :func:`_delegated_learner_target` picks. With none, the journal
+        is kept without a learner: its entries wait for the next pass any
+        session on the same store runs. Off (None, None) with continual
+        learning off, on an auxiliary request, or with no app session. Never
+        raises: learning never fails a connect.
+        """
+        from app.core.config import settings
+
+        if not settings.fluid_continual or options.extra.get("assistant_proactive") is not None:
+            return None, None
+        try:
+            app_session_id = self._resolve_app_session_id()
+            if not app_session_id:
+                return None, None
+            skills, memory_project, target = await asyncio.to_thread(
+                _delegated_learning_inputs, app_session_id, options,
+            )
+            synthesizer = engine_bus = None
+            if target is not None:
+                provider = _LearnerProvider(target.kind, target.options)
+                self._learner_provider = provider
+                synthesizer, engine_bus = self._learner_synthesizer(
+                    provider, target.model, skills, memory_project, options,
+                    fluid_session_id, session_model=options.model,
+                    context_window=target.context_window,
+                )
+            else:
+                logger.debug(
+                    "[HarnessAdapter] delegated session %s journals without a "
+                    "learner: no learner provider is configured for it",
+                    fluid_session_id,
+                )
+            return ToolJournal(skills, synthesizer), engine_bus
+        except Exception:  # noqa: BLE001 — the session runs, unjournaled
+            logger.warning(
+                "[HarnessAdapter] delegated learning setup FAILED (fluid "
+                "session=%s); this session does not journal",
+                fluid_session_id, exc_info=True,
+            )
+            return None, None
 
     async def _announce_continual(self, changes: list) -> None:
         """Publish a ``ContinualUpdate`` for a synthesis pass — and persist it.
@@ -8191,6 +8276,158 @@ def _usage_capture_http_client(provider_id: str, use_codex_backend: bool) -> htt
         event_hooks={"response": [_on_response]},
         verify=_provider_tls_verify(),
     )
+
+
+#: Leg kinds a memory learner can call: the native provider clients.
+_LEARNER_KINDS = frozenset({"anthropic", "openai_responses", "openrouter"})
+
+
+class _LearnerTarget(NamedTuple):
+    """Where a delegated session's memory-learner passes run."""
+
+    kind: str
+    #: The binding :func:`_build_provider_client` reads (provider row id and
+    #: shape); never the session's own options.
+    options: SessionOptions
+    model: str
+    context_window: Optional[int]
+    #: ``"session"`` (the session's own provider row) or ``"subscription"``.
+    source: str
+
+
+def _delegated_learner_target(options: SessionOptions, owner: str) -> Optional[_LearnerTarget]:
+    """The provider and model a delegated session's learner passes use, or None.
+
+    The Claude CLI is not a provider client, so the native rule ("the
+    session's own provider") has nothing to point at unless the session is
+    bound to an API row. In order:
+
+    1. The session's bound provider row, when it is one a native client can
+       call: the same client and model choice as a native session on that
+       row (``fluid_continual_model``, else the session's model).
+    2. For the installation owner's sessions only, a usable flat-rate
+       subscription row (ChatGPT, SuperGrok; see
+       :func:`credential_gate.subscription_provider_model`), on the row that
+       curates ``fluid_continual_model`` when one does, else its default model.
+       An API-key row is never picked here: nothing configured it for this,
+       and its calls are billed per token. An API user's session never
+       spends the owner's subscription.
+    3. None: the journal is kept without a learner.
+
+    Blocking (provider-row reads); callers run it in a thread. Never raises.
+    """
+    from app.core.config import settings
+
+    pinned = settings.fluid_continual_model
+    try:
+        provider_id = options.extra.get("provider_id")
+        if provider_id:
+            shape = (
+                options.extra.get("provider_type"),
+                options.extra.get("provider_auth_mode"),
+                options.extra.get("provider_dialect"),
+            )
+            if not shape[0]:
+                shape = _lookup_provider_row_shape(str(provider_id))
+            kind = _provider_row_kind(*shape)
+            if kind in _LEARNER_KINDS:
+                model = pinned or (
+                    _native_api_model(options.model, options)
+                    if kind == "anthropic" else options.model
+                )
+                if model:
+                    return _LearnerTarget(
+                        kind=cast(str, kind),
+                        options=_learner_binding(model, str(provider_id), shape),
+                        model=model,
+                        context_window=None if pinned else _native_context_window(cast(str, kind), options),
+                        source="session",
+                    )
+        if owner != "local":
+            return None
+        from app.core.credential_gate import subscription_provider_model
+
+        picked = subscription_provider_model(pinned)
+        if picked is None:
+            return None
+        row, model = picked
+        shape = (row.get("provider_type"), row.get("auth_mode"), row.get("api_dialect"))
+        kind = _provider_row_kind(*shape)
+        if kind not in _LEARNER_KINDS or not row.get("id"):
+            return None
+        return _LearnerTarget(
+            kind=cast(str, kind),
+            options=_learner_binding(model, str(row["id"]), shape),
+            model=model,
+            context_window=None,
+            source="subscription",
+        )
+    except Exception:  # noqa: BLE001 — no learner is the safe answer
+        logger.warning("[HarnessAdapter] learner provider lookup failed", exc_info=True)
+        return None
+
+
+def _learner_binding(model: str, provider_id: str, shape: tuple) -> SessionOptions:
+    extra: Dict[str, Any] = {"provider_id": provider_id}
+    for key, value in zip(("provider_type", "provider_auth_mode", "provider_dialect"), shape):
+        if value:
+            extra[key] = value
+    return SessionOptions(model=model, extra=extra)
+
+
+def _delegated_learning_inputs(app_session_id: str, options: SessionOptions) -> tuple:
+    """``(store, project key, learner target)`` for a delegated session.
+
+    The native leg's store setup: the owner's store, an opportunistic
+    lifecycle pass, and the journal stamps (session, project, checkout).
+    Blocking (DB and disk); runs in a thread.
+    """
+    from app.core.fluid_memory import session_memory
+
+    skills, memory_project = session_memory(app_session_id, options.cwd)
+    try:
+        # Interval-gated, deterministic, archive-not-delete (SkillStore.curate);
+        # never blocks an engine build.
+        skills.curate()
+    except Exception:  # noqa: BLE001
+        pass
+    skills.journal_context(session_id=app_session_id, project=memory_project, cwd=options.cwd)
+    owner = getattr(getattr(skills, "_facts", None), "owner", "local")
+    return skills, memory_project, _delegated_learner_target(options, owner)
+
+
+class _LearnerProvider:
+    """A delegated session's learner client, built on the learner's first pass.
+
+    Most sessions end without a due pass (the store's daily budget is shared),
+    so the credential read and the HTTP client wait until a pass needs them.
+    Speaks the one method the learner calls, ``stream``, and carries the
+    client's ``name``. The adapter closes it after the engine.
+    """
+
+    def __init__(self, kind: str, options: SessionOptions) -> None:
+        self.name = kind
+        self._kind = kind
+        self._options = options
+        self._client: Any = None
+        self._http: Optional[httpx.AsyncClient] = None
+        self._lock = asyncio.Lock()
+
+    async def _ensure(self) -> Any:
+        async with self._lock:
+            if self._client is None:
+                self._client, self._http = await _build_provider_client(self._kind, self._options)
+            return self._client
+
+    async def stream(self, request: Any) -> AsyncIterator[Any]:
+        client = await self._ensure()
+        async for chunk in client.stream(request):
+            yield chunk
+
+    async def aclose(self) -> None:
+        http, self._http, self._client = self._http, None, None
+        if http is not None:
+            await http.aclose()
 
 
 async def _build_provider_client(

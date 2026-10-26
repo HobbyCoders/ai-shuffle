@@ -850,6 +850,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # The continual journal (fluid.codemode.journal.ToolJournal), fed from
         # the frames the CLI reports; None when learning is off.
         self._journal = journal
+        # In-flight skill-load counts (see _note_skill_read); held so a
+        # pending one is not garbage-collected mid-write.
+        self._skill_read_tasks: set[asyncio.Task] = set()
         # "Allow always" answers to the CLI's own permission prompts, keyed by
         # tool name. Scoped the way PermissionEngine.allow_always scopes: the
         # registry spec of the same name (Bash) narrows it to the programs the
@@ -2209,6 +2212,28 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         except Exception:  # noqa: BLE001
             logger.debug("journal turn end failed", exc_info=True)
 
+    def _note_skill_read(self, event: Event, mapper: StreamJsonMapper) -> None:
+        """Count a successful Read of a listed skill's SKILL.md as a load.
+
+        This leg lists skills by path and the model Reads the file, where the
+        native leg calls the Skill tool; both now reach ``.usage.json``.
+        Discovery and the sidecar write run in a thread, off the turn.
+        """
+        if not isinstance(event, ToolResult) or event.is_error:
+            return
+        if event.name.rsplit("__", 1)[-1] != "Read":
+            return
+        path = mapper.tool_inputs.get(event.tool_use_id, {}).get("file_path")
+        if not isinstance(path, str) or os.path.basename(path).lower() != "skill.md":
+            return
+        from fluid.tools.builtins.skill import note_skill_file_read
+
+        task = asyncio.get_running_loop().create_task(asyncio.to_thread(
+            note_skill_file_read, path, self.cwd, self.setting_sources,
+        ))
+        self._skill_read_tasks.add(task)
+        task.add_done_callback(self._skill_read_tasks.discard)
+
     # ─── mid-turn steering ───────────────────────────────────────────────
 
     async def _deliver_steer(self, op: Steer) -> None:
@@ -3077,6 +3102,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 else:
                     await self._emit(event)
                 self._journal_event(event, mapper)
+                self._note_skill_read(event, mapper)
                 if isinstance(event, Usage) and not event.context_usage:
                     # The call's own record is out: a snapshot of it that
                     # arrived first follows it now.

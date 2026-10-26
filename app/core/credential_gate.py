@@ -474,6 +474,38 @@ def default_provider_model(*, servable_only: bool = False) -> Optional[Tuple[str
     return None
 
 
+def subscription_provider_model(
+    prefer_model: Optional[str] = None,
+) -> Optional[Tuple[dict, str]]:
+    """``(row, model id)`` on a usable flat-rate subscription row, or None.
+
+    For background work no session names a provider for (the memory learner
+    behind a Claude Code session): only a subscription sign-in (ChatGPT,
+    SuperGrok) qualifies, never an API-key row, whose calls are billed per
+    token. Newest row first, as :func:`usable_provider_rows` lists them; the
+    first row that curates ``prefer_model`` wins, else the first row's own
+    default model (its first curated model when no default is set), the same
+    per-row pick as :func:`default_provider_model`. Never raises.
+    """
+    try:
+        from app.core.model_registry import _is_subscription_row
+        from app.core.provider_agent import curated_model_ids, default_model_for_provider
+
+        rows = [r for r in _default_candidate_rows(False) if _is_subscription_row(r)]
+        if prefer_model:
+            for row in rows:
+                if prefer_model in curated_model_ids(row):
+                    return row, prefer_model
+        for row in rows:
+            ids = curated_model_ids(row)
+            model = default_model_for_provider(row) or (ids[0] if ids else None)
+            if model:
+                return row, model
+    except Exception:  # noqa: BLE001 — no pick is the safe answer
+        logger.warning("Could not pick a subscription provider", exc_info=True)
+    return None
+
+
 def _claude_ready_for_default(probe: bool) -> bool:
     """Whether Claude has its credential, for choosing a default model.
 

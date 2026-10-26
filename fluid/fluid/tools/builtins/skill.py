@@ -9,6 +9,7 @@ this tool, keeping the prefix small and cache-stable.
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,43 @@ def _note_usage(skill_path: str) -> None:
         sidecar.write_text(json.dumps(usage, indent=2), encoding="utf-8")
     except OSError:
         pass
+
+
+def note_skill_file_read(
+    path: str, cwd: str | None, sources: Any = None,
+) -> str | None:
+    """Count a direct read of a discovered skill's ``SKILL.md`` as a load.
+
+    The delegated Claude leg lists skills with their SKILL.md paths and the
+    model Reads the file instead of calling Skill, so without this its loads
+    never reach ``.usage.json``. Only a file the Skill tool itself would
+    resolve (same discovery, same scope gates) counts; any other path named
+    SKILL.md is ignored. Returns the counted skill path, or None. Blocking
+    disk IO (discovery walks the skill roots), never raises.
+    """
+    try:
+        if not path or os.path.basename(path).lower() != "skill.md":
+            return None
+        user_on = sources is None or "user" in sources
+        project_on = sources is None or "project" in sources
+        from fluid.context.plugins import discover_plugins
+
+        plugins = (
+            discover_plugins(cwd or ".", sources=sources)
+            if user_on and sources is not None else None
+        )
+        skills = discover_skills(
+            cwd or ".", include_global=user_on, include_project=project_on,
+            include_plugins=user_on, plugins=plugins,
+        )
+        target = os.path.normcase(os.path.realpath(path))
+        for skill in skills:
+            if os.path.normcase(os.path.realpath(skill.path)) == target:
+                _note_usage(skill.path)
+                return skill.path
+    except Exception:  # noqa: BLE001 — telemetry never fails a turn
+        return None
+    return None
 
 
 def _local(name: str) -> str:

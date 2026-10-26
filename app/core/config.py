@@ -472,15 +472,17 @@ class Settings(BaseSettings):
     # PR 4: migrate this area-owned legacy behaviour field.
     xai_token_refresh_interval_seconds: int = 300
 
-    # fluid code-mode + continual harness (native legs only — the delegated
-    # claude-CLI leg has code_mode capped off and is untouched). Code-mode moves
-    # the tool surface into a persistent Python kernel; the continual harness
-    # journals every executed cell and distills recurring workflows into saved
-    # skills in the background. Both default ON; env overrides are the usual
-    # pydantic ones (FLUID_CODE_MODE=false, FLUID_CONTINUAL=false, ...).
+    # fluid code-mode + continual harness. Code mode is native-only (the
+    # delegated claude-CLI leg has no kernel); the continual harness journals
+    # every executed cell or tool call, on both legs, and distills recurring
+    # workflows into saved skills in the background. Both default ON; env
+    # overrides are the usual pydantic ones (FLUID_CODE_MODE=false,
+    # FLUID_CONTINUAL=false, ...).
     #   - fluid_continual_model: pins skill synthesis to one model so skill
     #     quality doesn't drift with the session's provider choice. None = the
-    #     session's own model.
+    #     session's own model. A Claude Code session's learner runs on another
+    #     provider (docs/MEMORY_ARCHITECTURE.md, "Learning from Claude Code
+    #     sessions"), where this picks the model when that row lists it.
     #   - fluid_skills_dir: where saved skills + the episodic journal live.
     #     None = <data_dir>/fluid/skills (never fluid's ~/.fluid default).
     # PR 2: migrate this area-owned legacy behaviour field.

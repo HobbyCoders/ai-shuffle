@@ -43,6 +43,37 @@ render with a hint to confirm them with Remember. Recall exposes a conflict's
 ID and revision for an explicit correction, rather than presenting a guessed
 winner as fact. Saved text is data, not an instruction layer.
 
+## Learning from Claude Code sessions
+
+Claude Code (delegated) sessions feed the same journal as native JSON-mode
+sessions. The adapter builds a `ToolJournal` on the session owner's store,
+stamped with the app session, the project key and the checkout. `DelegatedLoop`
+records the user text with the app's reminders stripped, one `tool` entry per
+tool result the CLI reports, and the final reply. Each tool entry carries the
+compact input, a clipped output and an error flag. `friction` entries come from
+the same detector, which also recognizes the CLI's own wording for a missing
+file and an unchanged re-read. There are no `cell` entries: the CLI has no
+Python kernel, so every call is a direct `tool` record, as in native JSON mode.
+The same caps, the low-value read filter and the secret screen on saved facts
+apply.
+
+A finished reply kicks a learner pass and closing the session drains it, under
+the store's shared pacing and daily budget. The CLI is not a client the learner
+can call, so passes use, in order: the session's own provider row when a native
+client can call it, with `FLUID_CONTINUAL_MODEL` or the session model; for the
+installation owner's sessions only, a usable flat-rate subscription row
+(ChatGPT, SuperGrok), on the row that lists `FLUID_CONTINUAL_MODEL` when one
+does, else that row's default model. An API-key row is never picked for this,
+and an API user's session never uses the owner's subscription. With no such
+provider, the session still journals and its entries wait for the next pass any
+session on the same store runs. The learner client is built only when a pass
+first needs it. Passes announce their changes on the session's event stream,
+as on the native leg.
+
+These sessions list skills by their `SKILL.md` path and the model reads the
+file instead of calling Skill. A successful Read of a discovered skill's
+`SKILL.md` counts as a load in `~/.fluid/skills/.usage.json`.
+
 ## Grounded prose workflow proposals
 
 Python helper synthesis remains separate from prose `SKILL.md` workflows.
