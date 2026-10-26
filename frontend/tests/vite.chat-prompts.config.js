@@ -24,10 +24,10 @@ const CLUSTER = {
 
 const PRICE = { currency: 'USD', unit: 'item', amount: '0.025', total: '0.025', status: 'estimated' };
 const INCLUDED = { currency: 'USD', unit: 'item', amount: '0', total: '0', status: 'included' };
-const GROK_CHOICE = { source: 'supergrok', account: 'grok-1', worker: 'gamingpc', model: 'grok-imagine-image', options: { size: '1k', format: 'jpeg' } };
+const GROK_CHOICE = { source: 'supergrok', account: 'grok-1', worker: 'DesktopWorker', model: 'grok-imagine-image', options: { size: '1k', format: 'jpeg' } };
 const OPTIONS = [
 	{
-		source: 'fal', account: 'fal-ai', worker: 'gamingpc', model: 'fal-ai/flux/dev', options: { image_size: 'square', num_images: 1 },
+		source: 'fal', account: 'fal-ai', worker: 'DesktopWorker', model: 'fal-ai/flux/dev', options: { image_size: 'square', num_images: 1 },
 		verified: false, price: PRICE, quick_settings: { image_size: 'square', num_images: 1 }, available: true, reason: null,
 		schema: { fields: [
 			{ name: 'image_size', type: 'enum', title: 'Image size', enum: ['square', 'landscape_16_9'], default: 'square' },
@@ -50,7 +50,7 @@ function answer(url, page) {
 	if (path.endsWith('/cluster/projects')) return CLUSTER;
 	if (path.endsWith('/generation/choices')) {
 		const remembered = page.includes('only=settings') ? { image: GROK_CHOICE } : {};
-		return { remembered, last: {}, worker: 'gamingpc' };
+		return { remembered, last: {}, worker: 'DesktopWorker' };
 	}
 	if (path.endsWith('/generation/quote')) return { ok: true, price: { currency: 'USD', unit: 'item', amount: '0.05', total: '0.05', status: 'estimated' } };
 	return {};

@@ -87,7 +87,7 @@ const registry = {
 		},
 		{
 			id: 'gw-1',
-			name: 'Homelab vLLM',
+			name: 'ServerWorker vLLM',
 			provider_type: 'custom',
 			auth_kind: 'api',
 			default_model: null,

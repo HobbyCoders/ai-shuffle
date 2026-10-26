@@ -174,7 +174,7 @@ it('a gateway has no Usage tab', async () => {
 		rows: [
 			row({
 				id: 'gw-1',
-				name: 'Homelab vLLM',
+				name: 'ServerWorker vLLM',
 				provider_type: 'custom',
 				base_url: 'http://10.0.0.20:8000/v1'
 			})

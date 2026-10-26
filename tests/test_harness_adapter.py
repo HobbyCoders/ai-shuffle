@@ -13,8 +13,8 @@ live API calls). They exercise:
   5. The provider-kind decision logic.
   6. The SDK @tool -> fluid InprocTool bridge.
 
-Run:  cd /home/shayne/Documents/AI-Shuffle && \
-      /home/shayne/Documents/fluid-harness/.venv/bin/python -m pytest \
+Run:  cd /home/owner/Documents/AI-Shuffle && \
+      /home/owner/Documents/fluid-harness/.venv/bin/python -m pytest \
           tests/test_harness_adapter.py -q
 """
 
