@@ -694,6 +694,11 @@ class Synthesizer:
         # Until the day rolls over ``due()`` is False, so a kick per cell
         # does not append hundreds of identical budget rows to the pass log.
         self._budget_spent_day: int | None = None
+        # The budget in force when the day was found spent, and whether the
+        # latch was checked against the budget as last resolved (see
+        # _budget_raised).
+        self._latched_budget: LearnerBudget | None = None
+        self._latch_checked = False
         # The last completion's stop reason, for the pass log.
         self.last_stop_reason: str | None = None
         # A pass is one model call plus verification kernels; bound it so a
@@ -775,9 +780,11 @@ class Synthesizer:
 
     def due(self, *, closing: bool = False) -> bool:
         if self._budget_spent_day is not None:
-            if int(time.time() // 86400) == self._budget_spent_day:
+            if (int(time.time() // 86400) == self._budget_spent_day
+                    and not self._budget_raised()):
                 return False
             self._budget_spent_day = None
+            self._latch_checked = False
         try:
             backoff = self._store.learner_backoff(self._model)
         except Exception:
@@ -833,9 +840,44 @@ class Synthesizer:
                 or now - self._budget_at >= BUDGET_REFRESH_SECONDS):
             setting = self._resolve(self._daily_calls)
             billing = self._resolve(self._billing)
-            self._resolved_budget = learner_budget(setting, billing if isinstance(billing, str) else None)
+            self._resolved_budget = learner_budget(
+                setting, billing if isinstance(billing, str) else None,
+            )
             self._budget_at = now
         return self._resolved_budget
+
+    def _latch_spent_day(self) -> None:
+        """A claim was refused: wait quietly until the UTC day rolls over
+        or the budget is raised (see due())."""
+        self._budget_spent_day = int(time.time() // 86400)
+        self._latched_budget = self._resolved_budget
+        self._latch_checked = False
+
+    def _budget_raised(self) -> bool:
+        """Whether a budget found spent today has room again: the setting
+        was raised (or the pass's billing changed) since, and the store's
+        calls today are under the new cap. Re-checked only when the budget
+        is re-resolved (at most every BUDGET_REFRESH_SECONDS), so a latched
+        ``due()`` stays cheap."""
+        resolved_at = self._budget_at
+        effective = self._budget()
+        if self._budget_at == resolved_at and self._latch_checked:
+            return False
+        self._latch_checked = True
+        latched = self._latched_budget
+        if latched is not None and effective.daily - effective.reserved <= (
+                latched.daily - latched.reserved):
+            return False
+        try:
+            spent = self._store._facts.inference_budget()
+        except Exception:  # noqa: BLE001 — unreadable: keep waiting, the claim decides
+            return False
+        calls = int(spent.get("calls") or 0) if spent.get("day") == self._budget_spent_day else 0
+        # The cap the next claim is checked against: the metered default
+        # claims against the fact store's own (see _claim_limit).
+        from fluid.codemode import facts as facts_mod
+        cap = self._claim_limit() or facts_mod.MAX_INFERENCE_CALLS_PER_DAY
+        return calls < cap - effective.reserved
 
     @staticmethod
     def _resolve(value: Any) -> Any:
@@ -939,7 +981,7 @@ class Synthesizer:
         except InferenceBudgetExhausted as exc:
             # The slice stays unconsumed (cursor untouched, journal lines
             # retained by reap) and is retried once the UTC day rolls over.
-            self._budget_spent_day = int(time.time() // 86400)
+            self._latch_spent_day()
             self.last_error = f"{type(exc).__name__}: {exc}"
             # No call was made, so this is not a silent pass.
             self._log_pass("synthesis", [], error=self.last_error, ran=False)
@@ -957,7 +999,7 @@ class Synthesizer:
                     self._consolidate_locked(), timeout=self._pass_timeout
                 )
             except InferenceBudgetExhausted as exc:
-                self._budget_spent_day = int(time.time() // 86400)
+                self._latch_spent_day()
                 self._log_pass(
                     "consolidation", [], error=f"{type(exc).__name__}: {exc}", ran=False,
                 )
@@ -1169,7 +1211,7 @@ class Synthesizer:
         # pass itself still succeeded and is logged below.
         retry = None
         if isinstance(stop, InferenceBudgetExhausted):
-            self._budget_spent_day = int(time.time() // 86400)
+            self._latch_spent_day()
             self.last_error = f"{type(stop).__name__}: {stop}"
         elif stop is not None:
             self.last_error = str(stop)

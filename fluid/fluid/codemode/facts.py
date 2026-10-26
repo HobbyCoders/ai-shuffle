@@ -459,7 +459,7 @@ class FactStore:
             after = self._prepare()
             return max(0, before - len(after["entries"]) - len(after["archived"]))
 
-    def claim_inference_call(self, reserve=0, limit=None):
+    def claim_inference_call(self, reserve=0, limit: int | None = None):
         """Claim one of the day's inference calls, leaving ``reserve`` unclaimed.
 
         ``limit`` is the day's cap (the learner's configured budget); None

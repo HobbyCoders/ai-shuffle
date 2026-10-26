@@ -440,7 +440,9 @@ def journal_drop_tier(entry: object) -> int:
     if kind not in ("cell", "tool") or entry.get("error"):
         return 2
     calls = entry.get("calls")
-    if isinstance(calls, list) and any(isinstance(c, dict) and c.get("ok") is False for c in calls):
+    if isinstance(calls, list) and any(
+        isinstance(c, dict) and c.get("ok") is False for c in calls
+    ):
         return 2
     from fluid.codemode.continual import low_value_entry
     try:
@@ -1205,7 +1207,8 @@ class SkillStore:
         Normally only lines *behind* the synthesis cursor are droppable —
         nothing the synthesizer has yet to read is removed (a slice the
         daily budget could not pay for stays until a pass consumes it), the
-        backlog overflow below excepted. Beyond that, two rules decide how much of the consumed prefix survives:
+        backlog overflow below excepted. Beyond that, two rules decide how
+        much of the consumed prefix survives:
         the line tail (``JOURNAL_KEEP_ENTRIES`` recent lines stay), and the
         byte target — while the file is over ``JOURNAL_REAP_FRACTION`` of
         ``JOURNAL_MAX_BYTES``, consumed lines go oldest-first regardless of

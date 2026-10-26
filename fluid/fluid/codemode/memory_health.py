@@ -29,6 +29,7 @@ from fluid.codemode.skills import (
     JOURNAL_LOSS_FILE,
     JOURNAL_LOSS_KINDS,
     MAX_MEMORIES,
+    SkillStore,
     atomic_write_text,
     read_journal_loss,
 )
@@ -350,7 +351,9 @@ def _loss_samples(store, now, previous) -> tuple[list[list[float]], int, int | N
     return kept[start:][-LOSS_SAMPLES_KEPT:], total, dropped
 
 
-def _kind_samples(store, now, previous) -> tuple[list, dict[str, int] | None]:
+def _kind_samples(
+    store: SkillStore, now: float, previous: dict,
+) -> tuple[list, dict[str, int] | None]:
     """``(kind_samples, dropped_by_kind_in_window)``, kept like
     :func:`_loss_samples` keeps totals: ``[at, {kind: dropped}]`` from
     ``journal_loss.json``'s ``dropped_by_kind``. The window value is None
@@ -364,7 +367,10 @@ def _kind_samples(store, now, previous) -> tuple[list, dict[str, int] | None]:
         if (isinstance(sample, list) and len(sample) == 2 and isinstance(sample[0], (int, float))
                 and isinstance(sample[1], dict) and sample[0] <= now):
             counts = {k: sample[1].get(k, 0) for k in JOURNAL_LOSS_KINDS}
-            kept.append([float(sample[0]), {k: v for k, v in counts.items() if type(v) is int and v > 0}])
+            kept.append([
+                float(sample[0]),
+                {k: v for k, v in counts.items() if type(v) is int and v > 0},
+            ])
     kept.sort(key=lambda s: s[0])
     window = None
     if kept:
@@ -443,9 +449,11 @@ def _learner_outcome(store, now, coverage) -> dict:
     if dropped and dropped >= MIN_NEW_ENTRIES and dropped >= DROPPED_SHARE * taken_in:
         # The reap keeps conversation and friction for last, so a drop there
         # is the loss to name.
-        high = sum((coverage["dropped_3d_by_kind"] or {}).get(k, 0) for k in JOURNAL_HIGH_VALUE_KINDS)
+        by_kind = coverage["dropped_3d_by_kind"] or {}
+        high = sum(by_kind.get(k, 0) for k in JOURNAL_HIGH_VALUE_KINDS)
         high_note = (
-            f" {high} user/assistant/friction {'entry' if high == 1 else 'entries'} dropped unread."
+            f" {high} user/assistant/friction"
+            f" {'entry' if high == 1 else 'entries'} dropped unread."
             if high else ""
         )
         return _signal(

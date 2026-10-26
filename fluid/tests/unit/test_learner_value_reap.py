@@ -324,7 +324,8 @@ def test_health_names_dropped_user_assistant_and_friction_entries(tmp_path):
     assert learner["detail"]["dropped_3d_by_kind"] == {
         "cell": 3_300, "tool": 82, "user": 5, "assistant": 2, "friction": 1,
     }
-    assert "3390 were dropped unread. 8 user/assistant/friction entries dropped unread." in learner["reason"]
+    assert ("3390 were dropped unread. 8 user/assistant/friction entries dropped unread."
+            in learner["reason"])
 
 
 def test_health_without_high_value_loss_or_kind_history(tmp_path):
@@ -388,6 +389,66 @@ def test_a_subscription_learner_stays_due_where_a_metered_one_is_spent(tmp_path,
     assert not subscription.due(), "still paced: the gap shrinks with the budget, not to zero"
 
 
+async def test_a_raised_setting_wakes_a_learner_whose_day_was_spent(tmp_path, monkeypatch):
+    from fluid.codemode import facts as facts_mod
+
+    clock = [(MIDDAY // DAY) * DAY + 22 * 3600]  # late in the UTC day: pacing has room
+    fake = SimpleNamespace(time=lambda: clock[0], monotonic=time.monotonic,
+                           perf_counter=time.perf_counter, sleep=time.sleep)
+    monkeypatch.setattr(continual_mod, "time", fake)
+    monkeypatch.setattr(facts_mod, "time", fake)
+    store = SkillStore(tmp_path)
+    store.journal_append(edit_cell(1))
+    set_budget(store, day=int(clock[0] // DAY), calls=46, last_at=clock[0] - 3600)
+    setting = [0]
+    model = NoChanges()
+    synth = Synthesizer(model, "gpt-test", store, min_new_entries=1,
+                        daily_calls=lambda: setting[0], billing="metered")
+    await synth._run_safe()
+    assert model.prompts == [] and rows(store)[-1]["ran"] is False, "48 a day is spent"
+    assert synth._budget_spent_day == int(clock[0] // DAY)
+    assert not synth.due()
+    setting[0] = 96  # the owner raises the budget; same process, same learner
+    clock[0] += continual_mod.BUDGET_REFRESH_SECONDS + 1
+    assert synth.due(), "the latch re-reads the budget instead of sleeping until midnight"
+    assert synth._budget_spent_day is None
+    await synth._run_safe()
+    assert len(model.prompts) == 1, "a pass runs the same day"
+    assert rows(store)[-1]["budget"] == {"daily": 96, "reserved": 4, "source": "setting"}
+    assert store._facts.inference_budget()["calls"] == 47
+
+
+def test_a_spent_latch_rereads_the_budget_only_when_it_is_refreshed(tmp_path, monkeypatch):
+    clock = [(MIDDAY // DAY) * DAY + 22 * 3600]
+    monkeypatch.setattr(continual_mod, "time", SimpleNamespace(time=lambda: clock[0]))
+    store = SkillStore(tmp_path)
+    store.journal_append(edit_cell(1))
+    set_budget(store, day=int(clock[0] // DAY), calls=46, last_at=clock[0] - 3600)
+    setting = [0]
+    synth = Synthesizer(NoChanges(), "gpt-test", store, billing="metered", min_new_entries=1,
+                        daily_calls=lambda: setting[0])
+    resolves = []
+    real_resolve = synth._resolve
+    synth._resolve = lambda value: resolves.append(1) or real_resolve(value)
+    synth._budget(refresh=True)
+    synth._latch_spent_day()  # as a refused claim does
+    reads = []
+    real = store._facts.inference_budget
+    store._facts.inference_budget = lambda: reads.append(1) or real()
+    resolves.clear()
+    for _ in range(50):  # due() runs per journaled cell
+        assert not synth.due()
+    assert resolves == [] and reads == [], "cached: no setting or store read per cell"
+    clock[0] += continual_mod.BUDGET_REFRESH_SECONDS + 1
+    assert not synth.due() and len(resolves) == 2 and reads == [], "unchanged budget: still spent"
+    setting[0] = 12  # lowered: still spent
+    clock[0] += continual_mod.BUDGET_REFRESH_SECONDS + 1
+    assert not synth.due() and reads == []
+    setting[0] = 96  # raised: the store's calls decide
+    clock[0] += continual_mod.BUDGET_REFRESH_SECONDS + 1
+    assert synth.due() and len(reads) == 2, "the latch check, then pacing"
+
+
 async def test_the_setting_overrides_and_applies_from_the_next_pass(tmp_path):
     store = SkillStore(tmp_path)
     setting = [0]
@@ -395,7 +456,9 @@ async def test_the_setting_overrides_and_applies_from_the_next_pass(tmp_path):
                         daily_calls=lambda: setting[0], billing="subscription")
     store.journal_append(edit_cell(1))
     await synth._run_safe()
-    assert rows(store)[-1]["budget"] == {"daily": 200, "reserved": 8, "source": "subscription_default"}
+    assert rows(store)[-1]["budget"] == {
+        "daily": 200, "reserved": 8, "source": "subscription_default",
+    }
     setting[0] = 96  # the owner changes it; no restart, no new learner
     store.journal_append(edit_cell(2))
     await synth._run_safe()
