@@ -343,7 +343,7 @@ def test_legacy_seed_is_redundant_only_for_a_relative_copy_of_a_base_folder(proj
 
 
 def test_names_same_folder_handles_windows_paths():
-    assert checkouts._names_same_folder(r"D:\Development\AI-Shuffle", "ai-shuffle")
+    assert checkouts._names_same_folder(r"C:\Projects\Example-Project", "example-project")
     assert checkouts._names_same_folder("/w/a/b", "a/b")
-    assert not checkouts._names_same_folder("/w/AI-Shuffle", "ai-shuffle")
+    assert not checkouts._names_same_folder("/w/Example-Project", "example-project")
     assert not checkouts._names_same_folder("/w/b", "a/b")

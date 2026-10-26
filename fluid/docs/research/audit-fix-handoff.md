@@ -1,22 +1,16 @@
-# Handoff — finish the 2026-09-01 audit fixes
+# Historical audit fixes — 2026-09-01
 
-For a fresh session. A full code review of fluid at `eb84ce7` produced 146
-verified findings; eleven fix batches have landed as commits on branch
-`claude/fluid-codebase-review-7f7cd2`, worked in the git worktree
-`.claude/worktrees/readme-rewrite-review-cef785`. This document says what
-was done, what was left out, and how the work has been run, so a later
-session can pick up the remaining items without the conversation.
+A code review of fluid at `eb84ce7` produced 146 verified findings,
+addressed in eleven fix batches. These notes preserve the implementation
+choices, deferred items, and regression-test references.
 
-The full report, with every finding, its evidence and its fix, is the
-artifact **Fluid Harness Audit**:
-https://claude.ai/code/artifact/143fefe8-c896-4d4a-9e5f-6923510657ec
-Finding ids below (CFG-, PRM-, CL-, CTX-, ENG-, STO-) refer to it. Line
-numbers in the report are from `eb84ce7`; grep for the symbols, the files
-have moved.
+Finding ids below (CFG-, PRM-, CL-, CTX-, ENG-, STO-) identify the audit
+items summarized here. Historical line numbers refer to `eb84ce7`; locate
+symbols in the current source before applying a finding.
 
-## State of the branch
+## Historical audit batches
 
-Base `eb84ce7`, then eight commits, each green on its own:
+Base `eb84ce7`, followed by eleven commits, each green on its own:
 
 | Commit | Batch | Suite |
 |---|---|---|
@@ -32,43 +26,9 @@ Base `eb84ce7`, then eight commits, each green on its own:
 | `0eb98d7` | 10 engine mediums: Bash stdin closed, output capped while streaming, timeout clamped; allow-always labels for wrappers and subcommand programs, unscopable calls one-shot; subagent surface inside the parent's; serving monitors excluded from `busy` and `wait_idle`; MCP `readOnlyHint` honoured only under `trust_annotations`; catalog descriptions defanged; kernel restart on an interrupted cell, `SystemExit` kept in the cell, stderr drained with a death diagnostic, checkpoint budget in the child, host paths scrubbed from tracebacks, POSIX process group; stdout budget ellipsis paid from its share | 1910 |
 | `59c68ed` | 11 lows: registration item as diagnostic, plugin path dedup, `CLAUDE_PLUGIN_ROOT` exported, instruction cap documented, synthesis cursor over corrupt lines, memory order after eviction, cache-probe rotation on empty retries, store session cache bounded, `/context` after resume, "chars truncated", `.env.example` allowed, deltas without `block_start`, MCP resource/audio/structured results, `tools/list_changed`, question timeout, bus close generation | 1920 |
 
-Working tree is clean. Every batch in the fix order has landed; what was
-left out is listed under "Left out" below. Run the suite with:
-
-```bash
-uv run --extra dev pytest tests/unit -q -p no:cacheprovider
-```
-
-Expect 1920 passed, 4 skipped, about 80 s on Windows.
-
-## How the work has been run
-
-These are the owner's standing rules for this campaign; keep them.
-
-- **The main agent does the work itself.** Batches 1 to 5 were delegated to
-  pairs of code subagents; from batch 6 on, do not. Read the files, make the
-  edits, write the tests, run the suite, all in the main session. A `haiku`
-  explore agent is fine for a broad read-only search when the answer is a
-  location rather than a judgment, but no subagent edits code.
-- **Work one batch at a time, in the order below,** and within a batch one
-  finding at a time: read the code around it, make the smallest correct
-  change, add a regression test in the existing module for that area, run
-  that module plus the neighbours it touches, then move on. Run the full
-  suite once per batch before reporting.
-- **Re-verify before reporting.** Re-run the audit's original reproduction
-  for each finding against the fixed code (the report gives the exact input
-  and the wrong output); say plainly what could not be done and why.
-- **Commit only when the owner says so**, one commit per batch, plain commit
-  messages, no attribution lines. Doing the work in one session removes the
-  need to split shared files by hunk, so finish a batch and commit it before
-  starting the next; do not let two batches accumulate in the tree.
-- **CRLF.** `core.autocrlf=true`; the checkout is CRLF. A whole-file rewrite
-  can come out LF; harmless for the index, but prefer targeted edits.
-- **Prose.** The owner's global CLAUDE.md loads the `unnslop` skill: plain,
-  specific wording in comments, docstrings, docs, commit text.
-- **Pyright noise.** The IDE reports stale "unknown import symbol" errors
-  for symbols added in the same session and pre-existing `Mixin` attribute
-  complaints. Trust pytest, not those.
+The final batch recorded 1920 passed and 4 skipped in the fluid unit
+suite. These are historical results, not a statement about the current
+checkout.
 
 ## What was done, in order
 
@@ -377,13 +337,12 @@ as the home (the 2026-08-20 and 2026-08-23 commits `f45f03f` and `72cb5e7`
 made that decision for safety reasons, and batch 5 made the importer
 lossless), then add opt-in `setting_sources` entries such as `claude` and
 `codex` that read `~/.claude` and `~/.codex` live, for users who want zero
-conversion. Not started. It is a feature, not a fix; slot it after batch 7
-or later. The owner has not yet approved it explicitly.
+conversion. This remains a separate feature proposal rather than part of
+the audit fixes.
 
 ## Verification recipes
 
-- The reviewer's long-session and oversize-turn scripts lived in the
-  session scratchpad and are gone. Their assertions now live in
+- Long-session and oversize-turn recovery assertions are covered by
   `tests/unit/test_overflow_ladder.py` and
   `tests/unit/test_hardening.py::test_context_overflow_recovers_an_oversize_current_turn`
   (a `SizeLimitedProvider` that rejects prompts over N tokens).
@@ -402,8 +361,6 @@ or later. The owner has not yet approved it explicitly.
 
 ## Related notes
 
-- Memory file for this campaign:
-  `~/.claude/projects/D--Development-omni-harness/memory/fluid-full-audit-2026-09-01.md`.
 - `docs/CLAUDE_ECOSYSTEM_COMPAT_PLAN.md` is superseded (batch 5 marked it);
   `docs/configuration.md` and `docs/hooks.md` are the current references.
 - Earlier handoffs for the continual-memory and ai-shuffle work:
