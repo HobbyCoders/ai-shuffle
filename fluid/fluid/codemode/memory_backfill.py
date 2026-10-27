@@ -191,6 +191,15 @@ def _synthesizer(store):
                        daily_calls=config.learner_daily_calls)
 
 
+def _open_store(root: Path) -> SkillStore:
+    # App stores are owner-pinned, unlike fluid's default "local" store.
+    # Keep that boundary on both live opens and disposable dry-run copies.
+    owner = load_json_document(root / "memories.json", {}).get("owner", "local")
+    if not isinstance(owner, str) or not owner:
+        raise ValueError("Invalid memory store owner")
+    return SkillStore(root, owner=owner)
+
+
 async def _command(args) -> Result:
     # Constructing SkillStore can migrate/reap a legacy document. A dry run
     # therefore copies BEFORE opening it, including quota/backoff state, and
@@ -204,8 +213,8 @@ async def _command(args) -> Result:
                     target = shadow / name
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(source, target)
-            return await run(_synthesizer(SkillStore(shadow)), limit=args.limit)
-    return await run(_synthesizer(SkillStore(args.store)), limit=args.limit)
+            return await run(_synthesizer(_open_store(shadow)), limit=args.limit)
+    return await run(_synthesizer(_open_store(args.store)), limit=args.limit)
 
 
 def main(argv=None) -> int:

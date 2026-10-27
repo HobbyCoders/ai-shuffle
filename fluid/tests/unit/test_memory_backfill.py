@@ -219,7 +219,7 @@ def test_health_reports_missing_live_and_archived_then_clears(tmp_path):
 
 @pytest.mark.parametrize("show", [False, True])
 def test_cli_dry_run_writes_nothing_and_only_show_discloses_lines(tmp_path, monkeypatch, capsys, show):
-    store = SkillStore(tmp_path)
+    store = SkillStore(tmp_path, owner="account-1")
     saved = fact(store, protected=True)
     before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
     monkeypatch.setattr(backfill, "_synthesizer", learner)
@@ -234,7 +234,7 @@ def test_cli_dry_run_writes_nothing_and_only_show_discloses_lines(tmp_path, monk
 
 
 def test_cli_write_outputs_counts_only(tmp_path, monkeypatch, capsys):
-    store = SkillStore(tmp_path)
+    store = SkillStore(tmp_path, owner="account-1")
     saved = fact(store, protected=True)
     monkeypatch.setattr(backfill, "_synthesizer", learner)
     assert backfill.main(["--store", str(tmp_path)]) == 0
