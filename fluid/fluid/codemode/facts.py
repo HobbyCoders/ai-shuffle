@@ -1090,7 +1090,9 @@ class FactStore:
 
     @staticmethod
     def _metadata_differs(old, when, always):
-        return ((when is not None and (when != old.get("when") or old.get("when_basis")))
+        # Against the line the fact is listed by: re-sending the line an agent
+        # was shown is no change, and a stale backfill line counts as none.
+        return ((when is not None and when != written_when(old))
                 or (always is not None and always != bool(old.get("always"))))
 
     def _edit_metadata(self, doc, old, when, always, *, protected, expected_revision, exclude):
@@ -1230,7 +1232,7 @@ class FactStore:
             if old.get("revision", 1) != expected_revision:
                 raise ValueError("Memory changed since it was read; recall it before retrying")
             if (metadata_stamp(old, "when") != expected
-                    or (expected_when_at is None and old.get("when"))):
+                    or (expected_when_at is None and written_when(old))):
                 raise ValueError("The when-line changed since it was read; recall it before retrying")
             basis = when_basis(old["text"])
             if old.get("when") != when or old.get("when_basis") != basis:

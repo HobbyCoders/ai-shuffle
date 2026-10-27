@@ -2017,7 +2017,8 @@ class SkillStore:
             index.append((entry, f"- {label} {when_line(entry)}{hint}"))
         identity.sort(key=lambda item: item[0].key != "profile.name")  # stable: rank order after
         # ALWAYS memories in full within their own budget; one that does not
-        # fit (a replica merged past it) is listed first in the index instead.
+        # fit (a replica merged past it) is listed first in the index instead
+        # (an identity fact keeps its bounded text line).
         always_room = ALWAYS_CHARS
         shown_always: list[tuple[MemoryEntry, str]] = []
         overflow: list[tuple[MemoryEntry, str]] = []

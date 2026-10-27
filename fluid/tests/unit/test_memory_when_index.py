@@ -197,6 +197,32 @@ def test_an_owner_when_line_beats_a_later_backfill_line_from_an_unsynced_replica
     assert c.memories()[0].when == d.memories()[0].when == ROUTING_WHEN
 
 
+def test_resending_a_backfilled_owner_fact_as_shown_is_a_no_op(tmp_path):
+    store = SkillStore(tmp_path)
+    fact = store.save_memory(DEPLOY, protected=True)
+    store.annotate_memory(fact.id, when=DEPLOY_WHEN, expected_revision=1)
+    # An agent re-sends the owner's fact exactly as the index showed it.
+    same = store.save_memory(DEPLOY, durable=True, when=DEPLOY_WHEN)
+    assert same.id == fact.id and same.revision == 1 and same.when == DEPLOY_WHEN
+    assert store.memories()[0].protected
+
+
+def test_a_stale_unstamped_backfill_line_is_rewritten_not_retried_forever(tmp_path):
+    store = SkillStore(tmp_path)
+    fact = store.save_memory(DEPLOY, protected=True)
+    store.annotate_memory(fact.id, when=DEPLOY_WHEN, expected_revision=1)
+    raw = json.loads((tmp_path / "memories.json").read_text())
+    for e in raw["entries"]:
+        e["when_basis"] = facts.when_basis("some older text")  # stale
+        e.pop("when_at", None)  # and no usable stamp
+    (tmp_path / "memories.json").write_text(json.dumps(raw))
+    store = SkillStore(tmp_path)
+    [e] = missing(store)
+    store.annotate_memory(e["id"], when="When releasing", expected_revision=1,
+                          expected_when_at=e.get("when_at"))
+    assert store.memories()[0].when == "When releasing" and missing(store) == []
+
+
 def test_a_garbled_backfill_mark_drops_the_line_rather_than_trusting_it(tmp_path):
     a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
     fact = a.save_memory(DEPLOY, protected=True)

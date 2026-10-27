@@ -1030,11 +1030,12 @@ class Synthesizer:
                 # Synthesis finished; the when-line backfill after it ran out
                 # of the close budget synthesis shares with it. That says
                 # nothing about the provider: no backoff, no failure count,
-                # no failed synthesis pass. Its lines stay missing and the
-                # next session's backfill picks them up.
+                # no failed synthesis pass. Its lines stay missing; the facts
+                # it had picked count as tried today (the daily bound on a
+                # stuck provider) and are retried after the UTC day rolls over.
                 self._in_backfill = False
                 _log.info("when-line backfill on close was cut off after %.0fs; "
-                          "it resumes next session", self._close_timeout)
+                          "its facts are retried tomorrow (UTC)", self._close_timeout)
             else:
                 self.last_error = (
                     f"synthesis on close exceeded {self._close_timeout:.0f}s and was abandoned"
