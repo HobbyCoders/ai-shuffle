@@ -46,6 +46,9 @@ def _emulator_tools_listed(monkeypatch):
 # the pref.<topic> wording went and overlapping Remember sentences merged, so
 # Remember stays flat (2,100 -> 2,102), Recall 820 -> 832, eager +14
 # (53,073 -> 53,087) with no budget change; delegated append 14,820 -> 14,825.
+# Bounded WorkingRecord pages (#681): the deferred doc gains get/limit and the
+# paging rule, 792 -> 976 chars; combined_full 133,593 -> 133,777, eager
+# unchanged (53,087). The working record itself left the system prompt (#680).
 MEASURED_FULL = 133_376
 MEASURED_EAGER = 52_573
 MEASURED_DELEGATED_APPEND = 14_716

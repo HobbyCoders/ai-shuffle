@@ -103,6 +103,18 @@ def items(*, include_resolved: bool = False, limit: int = 100, offset: int = 0,
         return [dict(row) for row in cur.fetchall()]
 
 
+def item(item_id: str) -> dict[str, Any] | None:
+    """One owner item (open or resolved) with its acknowledgement status."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT w.*, CASE WHEN a.item_id IS NULL THEN 'open' ELSE 'resolved' END AS status "
+                    "FROM owner_working_items w LEFT JOIN owner_working_acknowledgements a "
+                    "ON a.item_id=w.id AND a.owner_key=w.owner_key WHERE w.owner_key=%s AND w.id=%s",
+                    (OWNER, item_id))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
 def _changed(item_id: str, *, collection: str = "working_record") -> None:
     # The regular scanner retries while publication is held/offline. Kick it,
     # just as other shared owner edits do; don't require a peer to save an item.

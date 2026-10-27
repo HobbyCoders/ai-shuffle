@@ -1156,13 +1156,13 @@ def build_options_from_profile(
         else:
             final_system_prompt += "\n\n" + APP_CONFIG_SYSTEM_PROMPT
 
-    if (owner_coordinator or owner_chat) and session_id:
-        from app.core.working_record import summary as working_summary
-        record_context = working_summary(session_id, owner_row=_binding_row)
-        if isinstance(final_system_prompt, dict):
-            final_system_prompt["append"] = final_system_prompt.get("append", "") + "\n\n" + record_context
-        else:
-            final_system_prompt += "\n\n" + record_context
+    # The owner working record is NOT part of the system prompt: it changes
+    # whenever a report lands or an item moves, and a system-prompt change
+    # re-bills the whole cached prefix and replaces the pooled client on an
+    # ordinary wake (#680). The harness adapter appends the current snapshot to
+    # the turn's user message instead (app.core.working_record.turn_note);
+    # only the stable eligibility flag rides on the options.
+    working_record_context = bool((owner_coordinator or owner_chat) and session_id)
 
     # ── The session's own run binding ───────────────────────────────────────
     #
@@ -2110,6 +2110,7 @@ def build_options_from_profile(
     # sees a lane CHANGE rather than an absent field on one side.
     options.aih_session_mode = session_mode
     options.aih_owner_coordinator = owner_coordinator
+    options.aih_working_record = working_record_context
 
     options.aih_tool_allowlist = intersect_tool_surfaces(
         access.allowed, _dispatch_surface
