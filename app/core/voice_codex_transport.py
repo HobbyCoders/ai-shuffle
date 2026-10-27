@@ -2,7 +2,8 @@
 
 Wire contract: openai/codex 430a16799d90e296fb27b1e94f206023902b7e56,
 realtime_call.rs and methods_frameless_bidi.rs. Never log upstream bodies,
-headers, SDP, bearer tokens or account identifiers. No automatic retry.
+headers, SDP, bearer tokens or account identifiers. No automatic retry after
+failures; only the shared, bounded session-renewal path may create a new call.
 """
 from __future__ import annotations
 
@@ -11,6 +12,18 @@ import base64
 from collections import deque
 from fractions import Fraction
 import json
+import math
+
+
+class CodexCallRefused(ValueError):
+    def __init__(self, status: int):
+        self.status = status
+        super().__init__(f"ChatGPT voice refused call creation (HTTP {status}).")
+
+
+class CodexPeerClosed(Exception):
+    """A send raced with the provider ending its session."""
+
 
 CALL_URL = "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas"
 CODEX_MODEL = "gpt-live-1-codex"
@@ -33,8 +46,21 @@ def incoming_event(event: dict) -> dict | None:
     kind = event.get("type")
     if kind in ("error", "session.error"):
         return {"type": "error", "error": {"message": "ChatGPT voice rejected the session or event."}}
-    if kind in ("session.started", "session.updated", "session.closed"):
-        return {"type": kind}
+    if kind in ("session.started", "session.updated"):
+        result = {"type": kind}
+        session = event.get("session")
+        expiry = session.get("expires_at") if isinstance(session, dict) else None
+        # The pinned Codex parser consumes only id/instructions, not an expiry.
+        # Preserve a reported expiry if present, without exposing other metadata.
+        if isinstance(expiry, (int, float)) and not isinstance(expiry, bool) and math.isfinite(expiry):
+            result["session"] = {"expires_at": expiry}
+        return result
+    if kind == "session.closed":
+        session = event.get("session")
+        reason = event.get("reason") or (session.get("reason") if isinstance(session, dict) else None)
+        # Never relay arbitrary upstream reason text or retry a rejected session.
+        safe_reason = reason if reason in ("expired", "connection_lost") else "other" if reason else "closed"
+        return {"type": kind, "reason": safe_reason}
     if kind in ("input_transcript.added", "output_transcript.added"):
         return {"type": "session.input_transcript.delta" if kind.startswith("input") else "session.output_transcript.delta",
                 "delta": (event.get("item") or {}).get("text") or ""}
@@ -67,6 +93,7 @@ class CodexPeer:
         self.events = asyncio.Queue(maxsize=128)
         self.closed = False
         self.failed = False
+        self.ended = False
         self.feed_audio = None
 
     def make_peer(self):
@@ -100,7 +127,7 @@ class CodexPeer:
         return pc, feed, lambda sdp: RTCSessionDescription(sdp=sdp, type="answer")
 
     def enqueue(self, event):
-        if self.closed or self.failed:
+        if self.closed or self.failed or self.ended:
             return
         if self.events.full():
             # Never silently drop a handoff or error. End a stalled call instead.
@@ -109,6 +136,13 @@ class CodexPeer:
                 self.events.get_nowait()
             event = {"type": "error", "error": {"message": "ChatGPT voice event backlog exceeded."}}
         self.events.put_nowait(json.dumps(event))
+        if event.get("type") == "session.closed":
+            self.ended = True
+
+    def connection_ended(self):
+        # WebRTC/data-channel closes have no provider reason. The stream decides
+        # whether the session was old enough to look like expiry, never an error.
+        self.enqueue({"type": "session.closed", "reason": "connection_lost"})
 
     async def receive_audio(self, track):
         from av import AudioResampler
@@ -140,6 +174,10 @@ class CodexPeer:
             if event:
                 self.enqueue(event)
 
+        @self.channel.on("close")
+        def channel_closed():
+            self.connection_ended()
+
         @self.pc.on("track")
         def track_received(track):
             if track.kind == "audio":
@@ -150,7 +188,7 @@ class CodexPeer:
         @self.pc.on("connectionstatechange")
         async def connection_changed():
             if self.pc.connectionState in ("failed", "closed", "disconnected") and not self.closed:
-                self.enqueue({"type": "error", "error": {"message": "ChatGPT voice connection ended."}})
+                self.connection_ended()
 
         try:
             await self.pc.setLocalDescription(await self.pc.createOffer())
@@ -165,7 +203,7 @@ class CodexPeer:
             if self.closed:
                 raise ValueError("ChatGPT voice connection is closed.")
             if response.status_code != 201:
-                raise ValueError(f"ChatGPT voice refused call creation (HTTP {response.status_code}).")
+                raise CodexCallRefused(response.status_code)
             await self.pc.setRemoteDescription(answer(response.text))
             if self.closed:
                 raise ValueError("ChatGPT voice connection is closed.")
@@ -174,13 +212,14 @@ class CodexPeer:
             raise
 
     async def send(self, raw):
+        if self.closed or self.ended or self.channel.readyState != "open":
+            self.connection_ended()
+            raise CodexPeerClosed()
         event = json.loads(raw)
         if event.get("type") == "session.input_audio.append":
             self.feed_audio(base64.b64decode(event["audio"], validate=True))
         else:
             from app.core.voice_progress import split_bytes
-            if self.channel.readyState != "open":
-                raise ValueError("ChatGPT voice data channel is not open.")
             # Codex caps each context append at 500 UTF-8 bytes.
             for chunk in split_bytes(event.get("content", ""), 500):
                 wire = outgoing_event({**event, "content": chunk})
