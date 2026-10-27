@@ -6,8 +6,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 from app.core import voice_stream
-from app.core.voice_grok import GrokVoiceStream, grok_session
-from app.core.voice_models import GROK_MODEL, GROK_VOICES, LIVE_VOICES, transport_for
+from app.core.voice_grok import GrokVoiceStream, SuperGrokVoiceStream, grok_session
+from app.core.voice_models import (
+    GROK_MODEL, GROK_VOICES, LIVE_VOICES, SUPERGROK_MODEL, transport_for,
+)
 from app.core.voice_options import validate_options
 from app.db import database as db
 from tests.api.test_voice_api import _make_provider, _enable_voice, VOICE_SETTINGS, VOICE_ROOT
@@ -92,6 +94,97 @@ async def test_grok_wire_transcripts_and_same_chat_delegation(monkeypatch):
     call.websocket.send_json.assert_any_await({"type": "clear"})
     await call.send({"type": "session.input_audio.append", "audio": "AAA="})
     assert json.loads(call.upstream.sent[-1]) == {"type": "input_audio_buffer.append", "audio": "AAA="}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream_class,model", [
+    (GrokVoiceStream, GROK_MODEL), (SuperGrokVoiceStream, SUPERGROK_MODEL),
+])
+@pytest.mark.parametrize("completions,deltas", [
+    pytest.param(
+        [("a", "We need"), ("a", "We need to work"), ("a", "We need to work on this.")],
+        ["We need", " to work", " on this."], id="growing-prefixes",
+    ),
+    pytest.param(
+        [(None, "We need"), (None, "We need to work"), (None, "We need to work")],
+        ["We need", " to work"], id="cumulative-without-item-id",
+    ),
+    pytest.param(
+        [("a", "We need to work."), ("a", "We need to work.")],
+        ["We need to work."], id="exact-repeat",
+    ),
+    pytest.param(
+        [("a", "Like"), ("b", "We need"), ("a", "Like")],
+        ["Like", " We need"], id="distinct-items-and-late-repeat",
+    ),
+    pytest.param(
+        [("a", "Try"), ("b", "Try")], ["Try", " Try"], id="distinct-identical-items",
+    ),
+    pytest.param(
+        [("a", "Use red"), ("a", "Use blue"), ("a", "Use blue now"), ("a", "Use red please")],
+        ["Use red", " please"], id="revision-keeps-emitted-prefix",
+    ),
+    pytest.param(
+        [(None, "Like"), (None, "We need")], ["Like", " We need"], id="unkeyed-utterances",
+    ),
+    pytest.param(
+        [("a", ""), ("a", None), ("b", "We need")], ["We need"], id="empty-completions",
+    ),
+])
+async def test_grok_input_completions_become_only_new_caption_text(
+    stream_class, model, completions, deltas,
+):
+    call = stream_class(AsyncMock(), {"id": "s"}, {"model": model, "voice": "eve"}, "secret", 5)
+    call.upstream = Upstream([json.dumps({
+        "type": "conversation.item.input_audio_transcription.completed", "transcript": text,
+        **({"item_id": item_id} if item_id is not None else {}),
+    }) for item_id, text in completions])
+    await call.receive_upstream()
+    assert call.pending["user"] == "".join(deltas)
+    assert "".join(entry["text"] for entry in call.transcript) == "".join(deltas)
+    captions = [args.args[0] for args in call.websocket.send_json.await_args_list]
+    assert [event["delta"] for event in captions if event["type"] == "caption"] == deltas
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream_class,model", [
+    (GrokVoiceStream, GROK_MODEL), (SuperGrokVoiceStream, SUPERGROK_MODEL),
+])
+@pytest.mark.parametrize("item_id", ["speech-1", None])
+async def test_grok_repeated_request_prefixes_are_stored_and_delegated_once(
+    monkeypatch, stream_class, model, item_id,
+):
+    from app.core import turn_recorder
+
+    chunks = ["We need to fix suggested replies. Like", ", respond as if", " the user wrote them."]
+    request = "".join(chunks)
+    prefixes = ["".join(chunks[:end]) for end in range(1, len(chunks) + 1)]
+    call = stream_class(
+        AsyncMock(), {"id": "same-chat"}, {"model": model, "voice": "eve"}, "secret", 5,
+    )
+    call.upstream = Upstream([json.dumps({
+        "type": "conversation.item.input_audio_transcription.completed", "transcript": text,
+        **({"item_id": item_id} if item_id is not None else {}),
+    }) for text in [*prefixes, request]] + [json.dumps({
+        "type": "response.function_call_arguments.done",
+        "name": "delegate_to_chat_agent", "call_id": "tool-1",
+    })])
+    call.settle_speech = AsyncMock()
+    store = AsyncMock()
+    delegate = AsyncMock(return_value="I will fix it.")
+    monkeypatch.setattr(turn_recorder, "record_voice_exchange", store)
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    await call.receive_upstream()
+    await call.delegation_task
+    store.assert_awaited_once_with(
+        "same-chat", request, None, model=model, user_source="voice",
+    )
+    delegate.assert_awaited_once_with(
+        "same-chat",
+        "Live conversation context (only the latest new request needs action):\n"
+        f"user: {request}\n",
+        spoken=request, command=f"voice:{call.call_key}:tool-1",
+    )
 
 
 @pytest.mark.asyncio

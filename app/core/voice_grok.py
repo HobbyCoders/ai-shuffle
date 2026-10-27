@@ -48,6 +48,7 @@ class GrokVoiceStream(VoiceStream):
         self.speech_active = False
         self.speech_pending = False
         self.speech_resume_task = None
+        self.input_transcripts: dict[str | None, str] = {}
 
     async def cancel_speech_resume(self):
         if self.speech_resume_task is not None:
@@ -150,6 +151,27 @@ class GrokVoiceStream(VoiceStream):
             }})
             await self.request_speech()
 
+    def input_transcript_delta(self, event):
+        """xAI completions carry whole transcripts, not caption deltas."""
+        text = event.get("transcript") or ""
+        if not text:
+            return ""
+        item_id = event.get("item_id")
+        previous = self.input_transcripts.get(item_id, "")
+        if previous and not text.startswith(previous):
+            if item_id is not None:
+                # Captions are append-only. Keep the emitted version rather
+                # than append a correction as another copy of the request.
+                return ""
+            # Without an item ID, unrelated text is the next utterance.
+            previous = ""
+        delta = text[len(previous):]
+        if delta:
+            if not previous and self.input_transcripts:
+                delta = " " + delta
+            self.input_transcripts[item_id] = text
+        return delta
+
     async def upstream_frames(self):
         # Translate only documented xAI events to the shared transcript and
         # delegation contracts. Function args cannot choose a model or tools.
@@ -162,7 +184,9 @@ class GrokVoiceStream(VoiceStream):
             elif kind in ("response.output_audio_transcript.delta", "response.audio_transcript.delta"):
                 translated = {"type": "session.output_transcript.delta", "delta": event.get("delta", "")}
             elif kind == "conversation.item.input_audio_transcription.completed":
-                translated = {"type": "session.input_transcript.delta", "delta": event.get("transcript", "")}
+                delta = self.input_transcript_delta(event)
+                if delta:
+                    translated = {"type": "session.input_transcript.delta", "delta": delta}
             elif kind == "response.created":
                 await self.cancel_speech_resume()
                 if not self.response_active and not self.speech_active:
