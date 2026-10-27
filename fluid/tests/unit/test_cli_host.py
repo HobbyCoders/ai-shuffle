@@ -212,7 +212,7 @@ async def test_task_background_child_text_reaches_parent_wake(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("mode", ["sync", "Sync", " sync "])
-async def test_task_sync_returns_child_text_inline(tmp_path, mode) -> None:
+async def test_task_sync_returns_child_text_inline(tmp_path, mode, isolate_home) -> None:
     provider = RoutingProvider(
         parent=[_task_call(mode), _text("done")],
         child=[_text("sync child report")],
@@ -228,6 +228,20 @@ async def test_task_sync_returns_child_text_inline(tmp_path, mode) -> None:
     result_block = provider.requests[-1].messages[-1].content[0]
     assert result_block.content[0].text == "sync child report"
     assert not result_block.is_error
+
+    # Exercise the real environment-fact producer, not a pre-seeded memory.
+    # The CLI's default continual store must live in this test's private home.
+    from fluid.codemode.skills import project_key_for
+    from fluid.context.runtime_facts import harvest_environment_facts
+
+    memories = isolate_home / ".fluid" / "skills" / "memories.json"
+    entries = json.loads(memories.read_text(encoding="utf-8"))["entries"]
+    pytest_fact = dict(harvest_environment_facts(str(tmp_path)))["env.pytest"]
+    assert any(
+        e["text"] == pytest_fact and e["scope"] == project_key_for(tmp_path)
+        and e["key"] == "env.pytest" and e["provenance"] == "tool"
+        for e in entries
+    )
 
 
 async def test_task_uses_agent_definition_prompt_and_tools(tmp_path) -> None:
