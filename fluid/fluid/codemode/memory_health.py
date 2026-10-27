@@ -102,6 +102,7 @@ LABELS = {
     "protected": "Your saved facts",
     "saves": "Saving",
     "proposals": "Questions for you",
+    "when": "Memory when-lines",
 }
 
 _WORD = re.compile(r"[a-z0-9]{4,}")
@@ -312,6 +313,10 @@ def check(store, *, now: float | None = None, learning_enabled: bool = True,
     signals.append(protected_signal)
     signals.append(_saves_signal(store, now))
     signals.append(_proposals_signal(store, live, now))
+    no_when = sum(1 for e in live + _local(doc, "archived") if not e.get("when"))
+    if no_when:
+        signals.append(_signal("when", False, f"{no_when} memories still have no when-line",
+                               missing=no_when))
     attention = [s for s in signals if s["state"] == "attention"]
     return {
         "state": "attention" if attention else "healthy",

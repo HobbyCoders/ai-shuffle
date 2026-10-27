@@ -344,6 +344,30 @@ line unless it passes a new one. Facts without one (older stores, learned facts)
 are listed by their first sentence instead. That line is derived when the
 snapshot is built and is never stored.
 
+After a successful learner pass, a bounded backfill annotates up to 40 facts
+without a written `when` line: live facts first, then archived, most useful
+first within each group. It uses the learner's model, routing, budget and
+failure backoff, at most three calls per UTC day per store, leaving at least
+half the daily budget for synthesis and its curation reserve. It only writes
+`when`, revision and replication clock; user-saved text, flags, provenance,
+history and usefulness timestamps stay unchanged. Memory health reports how
+many facts still need a line.
+
+To run one batch on demand with fluid's configured provider and
+`continual_model` (or the configured default model):
+
+```sh
+python -m fluid.codemode.memory_backfill --store <skills-dir> --limit 40
+python -m fluid.codemode.memory_backfill --store <skills-dir> --dry-run --show
+```
+
+The command prints counts only unless `--dry-run --show` is given for review.
+A dry run uses a disposable copy, including the current budget/backoff/quota,
+and never modifies the source store; model calls still use the configured
+provider and may be billed, but their accounting stays in the copy. Do not
+repeat dry runs to bypass the live store's daily budget. The ordinary command
+shares the automatic backfill's quota and stops when no lines are missing.
+
 The `# Memory` snapshot has two parts:
 
 - **ALWAYS memories.** These are user facts saved with `always: true` because

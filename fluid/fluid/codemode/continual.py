@@ -1079,6 +1079,10 @@ class Synthesizer:
                 self._log_budget_spent("consolidation")
             except Exception as exc:  # consolidation is opportunistic, never fatal
                 self._consolidation_failed(f"{type(exc).__name__}: {exc}")
+        if not (self.last_pass_failed or self.last_pass_skipped):
+            from fluid.codemode.memory_backfill import run as backfill_when
+            backfilled = await backfill_when(self)
+            changed += ["memory-when:" + mid for mid in backfilled.lines]
         await self._notify(changed)
         return changed
 

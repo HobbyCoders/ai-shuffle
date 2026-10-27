@@ -1105,6 +1105,8 @@ class FactStore:
 
         Revision-guarded like a correction; bumps the clock so replicas take
         it. Live or archived facts on this worker. Returns the entry."""
+        if isinstance(when, str) and ("\n" in when or "\r" in when):
+            raise ValueError("when must be one line")
         when = validate_when(when)
         with file_transaction(self.lock):
             doc = self._prepare()
