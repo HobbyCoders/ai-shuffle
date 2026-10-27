@@ -306,8 +306,9 @@ async function verifyFreshComposerCall(width, worktree) {
 	await h.close();
 }
 
-// A call only attaches to a conversation on this install, so with another
-// device picked as the runner the button is unavailable and a tap says why.
+// #700: with another device picked as the runner, the call creates the
+// conversation on that runner and attaches; the call itself runs here and
+// forwards to it.
 async function verifyFreshComposerCallOnWorker(width) {
 	const h = await harness(width, 844);
 	const { page } = h;
@@ -316,16 +317,14 @@ async function verifyFreshComposerCallOnWorker(width) {
 	await page.waitForTimeout(350);
 	const call = page.locator('.controls-dock .voice-call-btn');
 	await call.waitFor();
-	assert.equal(await call.getAttribute('aria-disabled'), 'true');
-	const reason = await call.getAttribute('title');
-	assert.match(reason, /Switch the runner to Local.*Studio PC/);
-	await call.tap({ force: true });
-	const banner = page.locator('.banner-host');
-	await banner.waitFor();
-	assert.ok((await banner.innerText()).includes(reason), 'tap shows the tooltip reason');
+	assert.equal(await call.getAttribute('aria-disabled'), null, 'a runner pick no longer blocks the call');
+	await call.tap();
+	await page.waitForFunction(() => window.fixtureCalls.some(c => c.method === 'POST' && c.path.endsWith('/attach')));
 	const posts = await page.evaluate(() => window.fixtureCalls.filter(c => c.method === 'POST'));
-	assert.deepEqual(posts, [], 'nothing is created or called');
-	console.log(`PASS ${width}px: fresh-composer call with a worker runner explains itself and creates nothing`);
+	const create = posts.find(c => c.path === '/api/v1/sessions');
+	assert.ok(create, `the conversation is created first: ${JSON.stringify(posts)}`);
+	assert.equal(create.body.target_instance_id, 'worker-1', 'on the picked runner');
+	console.log(`PASS ${width}px: fresh-composer call with a worker runner creates the conversation there, then attaches`);
 	await h.close();
 }
 

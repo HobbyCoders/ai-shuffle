@@ -191,13 +191,34 @@ describe('a local or chat compose', () => {
 		expect(post).toHaveBeenCalledTimes(1);
 	});
 
-	it('refuses a picked runner on another device without creating anything', async () => {
+	it('creates the conversation on a picked runner and spends the pick (#700)', async () => {
+		post.mockResolvedValueOnce({ session_id: 'remote-1', mode: 'chat' });
+		const h = setup({ mode: 'chat', project: '', deviceIntent: { id: 'worker-1', name: 'Studio PC' } });
+
+		await expect(h.sender.startSessionWithoutPrompt()).resolves.toBe('remote-1');
+
+		expect(post).toHaveBeenCalledExactlyOnceWith('/sessions', expect.objectContaining({ target_instance_id: 'worker-1' }));
+		expectAdopted(h, 'remote-1');
+		expect(h.state().deviceIntent).toBeNull();
+	});
+
+	it('keeps the pick when the runner refuses, so a retry still goes there', async () => {
+		post.mockRejectedValueOnce({ detail: 'Studio PC is offline. Bring it online or pick another device.' });
 		const h = setup({ deviceIntent: { id: 'worker-1', name: 'Studio PC' } });
 
 		await expect(h.sender.startSessionWithoutPrompt()).resolves.toBeNull();
 
-		expect(post).not.toHaveBeenCalled();
-		expect(h.state().error).toMatch(/Switch the runner to Local.*Studio PC/);
+		expect(h.state().error).toMatch(/Studio PC is offline/);
+		expect(h.state().deviceIntent).toEqual({ id: 'worker-1', name: 'Studio PC' });
+	});
+
+	it('sends no target for a local compose', async () => {
+		post.mockResolvedValueOnce({ session_id: 'local-1', mode: 'code' });
+		const h = setup();
+
+		await h.sender.startSessionWithoutPrompt();
+
+		expect(post.mock.calls[0][1].target_instance_id).toBeUndefined();
 	});
 });
 

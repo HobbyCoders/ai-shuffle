@@ -46,12 +46,20 @@ Ask for something in plain words, for example "fix the failing test" or "summari
 
 ## Calling a chat while it works
 
-You can call any of your chats at any time, even while its agent is busy. Only a chat another device is running refuses a call. A call never starts by itself: nothing listens until you press the call button.
+You can call any of your chats at any time, even while its agent is busy. A call never starts by itself: nothing listens until you press the call button.
 
 - **Ask for status**, such as "what are you working on?" or "is it done yet?". It answers from the app's task list.
 - **Finished jobs** are mentioned at the next pause.
 - **Approvals:** when work needs your permission, the agent asks one plain question, and you can answer it out loud or by typing. Only a clear yes approves and a clear no declines. An unclear spoken answer is asked once more, then declined. A typed message that is not a clear yes or no never answers: it goes to the agent as an ordinary message and the request stays open.
 - **Secrets stay on screen.** Private access requests are answered on screen, and the agent tells you when that is needed.
+
+## Calling a chat another worker runs
+
+You can call a chat that runs on another of your workers, or pick another worker in **Runs on** on the new-session screen and press the call button. The call runs on the worker you are connected to, with that worker's voice settings and voice login. What you ask for goes to the chat on the worker that runs it, as a typed message would, and that worker records it. Replies, finished jobs and approval questions reach the call as that worker's chat updates arrive.
+
+- The spoken back-and-forth is not saved in that chat. Only your requests and the agent's replies are.
+- Spoken yes and no answers are sent to the worker that runs the chat.
+- If that worker is offline, the call button says so and no call starts.
 
 ## Background noise
 

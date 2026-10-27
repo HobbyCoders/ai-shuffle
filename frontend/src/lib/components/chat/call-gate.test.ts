@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CALL_ELSEWHERE_REASON, callBusyReason } from './call-gate';
+import { callBusyReason, freshCallReason } from './call-gate';
 
 const ready = { sessionId: 'chat', isStreaming: false, activeTasks: [], pendingPermissions: [], pendingQuestions: [] };
 const row = (extra: Record<string, unknown> = {}) => ({ id: 'chat', is_remote: false, controllable: true, remote_runtime_state: null, has_running_tasks: false, parked_task_kind: null, ...extra }) as never;
@@ -13,7 +13,25 @@ describe('callBusyReason', () => {
 		expect(callBusyReason(ready, row({ parked_task_kind: 'agent', has_running_tasks: true }))).toBeNull();
 	});
 
-	it('blocks a conversation another device runs', () => {
-		expect(callBusyReason(ready, row({ is_remote: true, remote_runtime_state: 'working' }))).toBe(CALL_ELSEWHERE_REASON);
+	it('lets a conversation another worker runs take a call while that worker is online (#700)', () => {
+		expect(callBusyReason(ready, row({ is_remote: true, remote_runtime_state: 'working' }))).toBeNull();
+	});
+
+	it('names an offline owning worker', () => {
+		expect(callBusyReason(ready, row({ is_remote: true, controllable: false, device_name: 'GamingPC' })))
+			.toMatch(/^GamingPC is offline/);
+		expect(callBusyReason(ready, row({ is_remote: true, controllable: false })))
+			.toMatch(/^The worker that runs this conversation is offline/);
+	});
+});
+
+describe('freshCallReason', () => {
+	it('lets a picked runner take the new conversation (#700)', () => {
+		expect(freshCallReason({ isStreaming: false, isCreatingWorktree: false })).toBeNull();
+	});
+
+	it('waits while a first message or worktree is creating the session', () => {
+		expect(freshCallReason({ isStreaming: true, isCreatingWorktree: false })).toMatch(/once this session is created/);
+		expect(freshCallReason({ isStreaming: false, isCreatingWorktree: true })).toMatch(/once this session is created/);
 	});
 });

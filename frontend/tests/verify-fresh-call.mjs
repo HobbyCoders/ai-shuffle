@@ -67,15 +67,19 @@ try {
 		await page.close();
 	}
 	{
+		// #700: the call runs here and forwards to the picked runner, so the
+		// conversation is created there (target_instance_id) and then called.
 		const { page, call, posts, errors } = await open('?device=worker');
-		assert.equal(await call.isDisabled(), true);
-		assert.match(await call.getAttribute('title'), /Switch the runner to Local.*Studio PC/);
-		await call.click({ force: true });
-		await page.waitForTimeout(200);
-		assert.deepEqual(await posts(), [], 'nothing is created or called');
+		assert.equal(await call.isDisabled(), false, 'available with another runner picked');
+		assert.equal(await call.getAttribute('title'), 'Start a call in a new conversation');
+		await call.click();
+		await page.waitForFunction(() => window.fixtureCalls.some(c => c.path.endsWith('/attach')));
+		const sent = await posts();
+		assert.deepEqual(sent.map(c => c.path), ['/api/v1/sessions', '/api/v1/voice/sessions/fixture-call-session/attach']);
+		assert.equal(sent[0].body.target_instance_id, 'worker-1', 'the conversation is created on the picked runner');
 		await page.screenshot({ path: `${output}/fresh-call-worker.png` });
 		assert.deepEqual(errors, []);
-		console.log('PASS 1280x800: with another device picked the button is disabled with the reason');
+		console.log('PASS 1280x800: with another device picked the call creates the conversation there, then attaches');
 		await page.close();
 	}
 	console.log(`PASS all fresh-call checks; screenshots: ${output}`);
