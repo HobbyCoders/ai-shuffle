@@ -13,6 +13,8 @@ declare global {
 			mobileDrawer?: boolean;
 			/** Set while the chat controls panel's Back entry is on the stack. */
 			mobileControls?: boolean;
+			/** The Chat controls page (Model, Agent…) whose own Back entry is on the stack. */
+			mobileControlsPage?: string;
 		}
 		// interface Platform {}
 	}

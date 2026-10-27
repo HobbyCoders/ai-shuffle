@@ -412,6 +412,31 @@ describe('ContextUsageBar — popover positioning', () => {
 });
 
 describe('ContextUsageBar — pill', () => {
+	it('renders the details in place with no ring button when inline (the phone sheet\'s page)', async () => {
+		const { container } = render(ContextUsageBar, { props: { inline: true } });
+		expect(container.querySelector('.usage-indicator')).toBeNull();
+		const details = container.querySelector('.usage-popover.inline');
+		expect(details).not.toBeNull();
+		expect(details?.getAttribute('role')).toBe('region');
+		expect(details?.querySelector('.ctx-section')).not.toBeNull();
+		// Always open: a click elsewhere or Escape does not close it.
+		await fireEvent.click(document.body);
+		await fireEvent.keyDown(document, { key: 'Escape' });
+		expect(container.querySelector('.usage-popover.inline')).not.toBeNull();
+	});
+
+	it('reports the tokens used and the window for a caller that shows them elsewhere', async () => {
+		let used = '';
+		let windowSize: string | null = 'unset';
+		render(ContextUsageBar, { props: {
+			get usedTokens() { return used; }, set usedTokens(v: string) { used = v; },
+			get windowTokens() { return windowSize; }, set windowTokens(v: string | null) { windowSize = v; }
+		} });
+		await tick();
+		expect(used).toMatch(/\d/);
+		expect(windowSize === null || /\d/.test(windowSize)).toBe(true);
+	});
+
 	it('always renders the pill as a bare progress ring (no inline percent text)', () => {
 		const { container } = render(ContextUsageBar);
 		const pill = container.querySelector('.usage-indicator') as HTMLButtonElement;

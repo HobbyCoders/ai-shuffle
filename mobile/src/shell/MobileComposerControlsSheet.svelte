@@ -6,6 +6,7 @@
 	}
 </script>
 
+
 <script lang="ts">
 	/**
 	 * The phone's chat controls (issue #1816, design 4): a quick bar under the
@@ -15,15 +16,27 @@
 	 * its state through its own icon and label. A tap opens a compact picker
 	 * (Effort, Access) or a page (Model, usage); a sideways swipe on Effort or
 	 * Access steps one level but never lands on Bypass. Dragging the bar up, or
-	 * tapping Controls, opens the panel; dragging its header down or tapping
-	 * the scrim closes it. Every gesture follows the finger and has a tap.
+	 * tapping Controls, opens the panel; dragging its grip or header down, the
+	 * scrim and Escape close it. Every gesture follows the finger and has a tap.
 	 *
-	 * The panel is portaled to <body> so no composer ancestor clips it. It
-	 * holds the model (the app's own ModelPickerPanel), context and usage, the
-	 * chat's setup (the shared ContextPillBar selectors, including "Runs on"
-	 * with its busy rule), Away, Fast mode, effort, tool access, a running-tasks
-	 * summary and the Call / Browser / Export actions. Prompts never render in
-	 * it: they dock above the composer (MobilePromptDock).
+	 * The panel is portaled to <body> so no composer ancestor clips it. Its
+	 * main page is an inset grouped list: status chips (running work, worker,
+	 * project and branch), then Model (model, context and usage, reasoning
+	 * effort, Fast mode), Permissions (tool access, Away) and Setup (the
+	 * shared ContextPillBar selectors drawn as rows), over a pinned action bar
+	 * (Call / Browser / Terminal / Export). Rows with a chevron open a page
+	 * that slides in from the right inside the same sheet, under a centred
+	 * title and a Back arrow:
+	 *   Model           the app's own ModelPickerPanel;
+	 *   Context/usage   the shared ContextUsageBar details, inline;
+	 *   Agent, Runs on  the shared selectors' own menus, hosted on the page
+	 *                   (menuHost), so the busy rule for moving a chat stays
+	 *                   the desktop's; picking closes the menu and slides back;
+	 *   Running tasks   RunningTasksList as a page;
+	 *   Export chat     ChatExportActions as a page with a pinned button.
+	 * There is no visible close button; a visually hidden one stays for
+	 * keyboard and screen-reader users. Prompts never render here: they dock
+	 * above the composer (MobilePromptDock).
 	 *
 	 * ControlsDock (shared $lib) computes every value and owns the open state;
 	 * this component only renders and reports intent.
@@ -32,18 +45,23 @@
 	import { pushState } from '$app/navigation';
 	import { page } from '$app/state';
 	import {
-		Activity, ArrowLeft, Check, ChevronDown, ChevronRight, Cpu, Download, FilePen, Globe,
-		Hand, LoaderCircle, Lock, Moon, ShieldOff, SlidersHorizontal, Sparkles, SquareTerminal, Zap
+		ChevronLeft, ChevronRight, Cpu, Download, FilePen, Globe, Hand, Lightbulb, LoaderCircle, Lock,
+		Moon, ShieldCheck, ShieldOff, SlidersHorizontal, Sparkles, SquareTerminal, Zap
 	} from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { watches } from '$lib/stores/watches';
 	import { watchCount } from '$lib/components/chat/running-tasks';
 	import { notify } from '$lib/stores/notifications';
+	import { clusterProjects, projects, sessions } from '$lib/stores/app-data.svelte';
+	import { gitStatus } from '$lib/stores/git.svelte';
+	import { workerInstalls } from '$lib/stores/worker-presence';
+	import { closeDropdown } from '$lib/stores/header-dropdowns';
 	import ContextPillBar from '$lib/components/chat/ContextPillBar.svelte';
 	import ContextUsageBar from '$lib/components/chat/ContextUsageBar.svelte';
 	import RunningTasksList from '$lib/components/chat/RunningTasksList.svelte';
 	import ChatExportActions from '$lib/components/layout/ChatExportActions.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
+	import ProviderGlyph from '$lib/components/settings/ProviderGlyph.svelte';
 	import type { PickerGroup } from '$lib/constants/model-picker';
 	import type { ComposerSheetProps as Props } from '$lib/components/chat/composer-shell';
 	import EffortMeter from './EffortMeter.svelte';
@@ -64,7 +82,18 @@
 	}: Props = $props();
 
 	type Picker = 'effort' | 'access';
-	type Page = 'main' | 'model' | 'export';
+	type Page = 'main' | 'model' | 'usage' | 'agent' | 'runner' | 'tasks' | 'export';
+	const PAGE_TITLE: Record<Page, string> = {
+		main: 'Chat controls',
+		model: 'Model',
+		usage: 'Context and usage',
+		agent: 'Agent',
+		runner: 'Runs on',
+		tasks: 'Running tasks',
+		export: 'Export chat'
+	};
+	/** How long a page takes to slide; content stays mounted until it is off screen. */
+	const PAGE_SLIDE_MS = 320;
 
 	// ── Derived state ─────────────────────────────────────────────────────
 	const railGroups = $derived.by<PickerGroup[]>(() => {
@@ -78,6 +107,11 @@
 		}
 		return [...groups.values()];
 	});
+	/** The current model's provider mark; ProviderGlyph draws its own default for anything unknown. */
+	const modelGlyph = $derived.by(() => {
+		const key = modelOptions.find((o) => o.value === modelValue)?.groupKey;
+		return railGroups.find((g) => g.key === key)?.glyph ?? 'custom';
+	});
 
 	const effortLocked = $derived(modelLocked || !effortKnown || effortOptions.length === 0);
 	const effortValues = $derived(effortOptions.map((o) => o.value));
@@ -90,6 +124,8 @@
 			: effortValue ? (effortOptions.find((o) => o.value === effortValue)?.label ?? 'Auto')
 			: 'Auto'
 	);
+	/** The effort row's value: the level, or why there is no choice. */
+	const panelEffortValue = $derived(effortLocked && effortKnown ? 'Set by the model' : effortLabel);
 	const effortA11y = $derived(
 		!effortKnown ? `Reasoning effort: ${effortValue ?? 'unknown'}`
 			: !effortOptions.length ? 'Reasoning effort: set by the model'
@@ -102,7 +138,6 @@
 	// showing Ask would be a guess, and stepping from a guess picks the wrong one.
 	const accessValue = $derived(permissionPending ? '' : (permissionValue ?? 'default'));
 	const accessIcons: Record<string, typeof Hand> = { default: Hand, auto: Sparkles, acceptEdits: FilePen, bypassPermissions: ShieldOff };
-	const showSetupTiles = $derived(showSetup);
 	const awayShown = $derived(accessShown && !!onToggleAway);
 	/** Away as the quick bar shows it: the desktop composer's "· Away" badge. */
 	const awayOn = $derived(awayShown && awayEnabled && awayAvailable);
@@ -110,7 +145,7 @@
 
 	const runningTasks = $derived(($activeSession.activeTasks ?? []).filter((t) => t.status === 'running'));
 	// The owner's watches (#371) open the same list. They are long-lived, so
-	// they get the row but not the Controls badge, which means work running now.
+	// they get the chip but not the Controls badge, which means work running now.
 	const liveWatches = $derived($watches.list.filter((w) => w.status !== 'stopped').length);
 	const pausedWatches = $derived($watches.list.filter((w) => w.status === 'paused').length);
 	// A worker chosen for new watches stays changeable with no watch live (#565).
@@ -127,8 +162,31 @@
 	const runHead = $derived(
 		runningTasks.length ? `${runningTasks.length} running` : preferenceOnly ? 'Watches' : watchCount(liveWatches)
 	);
-	const chatTitle = $derived($activeSession.title?.trim() || 'New chat');
+	const runChipLabel = $derived(
+		runningTasks.length ? `${runningTasks.length} ${runningTasks.length === 1 ? 'task' : 'tasks'} running` : runHead
+	);
+	const showRunChip = $derived(runningTasks.length > 0 || liveWatches > 0 || preferenceOnly);
 	const canExport = $derived(!!$activeSession.sessionId && $activeSession.messages.length > 0);
+
+	// Status chips: where this chat runs and what it works on, when known.
+	const sessionRow = $derived($sessions.find((s) => s.id === $activeSession.sessionId) ?? null);
+	const selfName = $derived($workerInstalls?.find((i) => i.is_self)?.device_name ?? null);
+	const workerName = $derived.by((): string | null => {
+		if (!$activeSession.sessionId) return $activeSession.deviceIntent?.name ?? selfName;
+		if (sessionRow?.is_remote ?? $activeSession.isRemote) return sessionRow?.device_name ?? $activeSession.ownerDeviceName ?? null;
+		return selfName ?? sessionRow?.device_name ?? null;
+	});
+	const projectName = $derived(
+		$activeSession.mode === 'chat' ? null
+			: $projects.find((p) => p.id === $activeSession.project)?.name
+				?? $clusterProjects.find((p) => p.project_v2_id === $activeSession.projectV2Id)?.name
+				?? null
+	);
+	const branchName = $derived(
+		!projectName ? null
+			: $activeSession.worktreeBranch || $activeSession.selectedWorktreeBranch
+				|| ($activeSession.project ? ($gitStatus?.current_branch ?? null) : null)
+	);
 
 	// ── Quick bar: pickers and sideways steps ─────────────────────────────
 	let picker = $state<Picker | null>(null);
@@ -143,8 +201,15 @@
 	let usageOverLimit = $state(false);
 	/** Tokens used when the model's context window is unknown (no percentage then). */
 	let usageUnknownUsed = $state<string | null>(null);
-	const RING_C = 2 * Math.PI * 6;
+	let usageUsedTokens = $state('');
+	let usageWindowTokens = $state<string | null>(null);
+	const RING_C = 2 * Math.PI * 11;
 	const usageSeverity = $derived(usagePercent > 90 ? 'danger' : usagePercent >= 70 ? 'warning' : 'ok');
+	const usageTokensLine = $derived(
+		usageUnknownUsed != null ? `${usageUnknownUsed} tokens used`
+			: usageUsedTokens && usageWindowTokens ? `${usageUsedTokens} of ${usageWindowTokens} tokens`
+			: null
+	);
 
 	const shownEffortIndex = $derived(preview?.cell === 'effort' ? effortValues.indexOf(preview.value) : effortIndex);
 	const shownEffortLabel = $derived(preview?.cell === 'effort' ? (effortOptions.find((o) => o.value === preview!.value)?.label ?? effortLabel) : effortLabel);
@@ -191,13 +256,25 @@
 
 	// ── Panel open state, pages and Android Back ──────────────────────────
 	let pageName = $state<Page>('main');
-	/** Opened straight to a page from the bar: Back closes the panel. */
+	/** The page sliding out after Back: kept mounted until it is off screen. */
+	let leaving = $state<Page | null>(null);
+	let leaveTimer: ReturnType<typeof setTimeout> | undefined;
+	/** Opened straight to a page from the bar: Escape and Android Back close the panel. */
 	let direct = $state(false);
+	/** The row that opened the current page, focused again on the way back. */
+	let opener: HTMLElement | null = null;
 	let panelRef = $state<HTMLElement | null>(null);
 	let bodyRef = $state<HTMLElement | null>(null);
+	let backRef = $state<HTMLButtonElement | null>(null);
+	/** The Agent and "Runs on" pages host the shared selectors' own menus. */
+	let agentHost = $state<HTMLElement | null>(null);
+	let runnerHost = $state<HTMLElement | null>(null);
+	const menuHosts = $derived({ agent: agentHost, runner: runnerHost });
 	/** Stays true through the closing slide so content does not vanish mid-move. */
 	let rendered = $state(false);
 	let renderTimer: ReturnType<typeof setTimeout> | undefined;
+	const onSubPage = $derived(pageName !== 'main');
+	const mounted = (p: Page) => pageName === p || leaving === p;
 
 	function requestOpen(next: boolean) {
 		if (onOpenChange) onOpenChange(next);
@@ -206,39 +283,128 @@
 
 	function openPanel(target: Page = 'main') {
 		closePicker();
-		pageName = target;
+		setPage(target);
 		direct = target !== 'main';
+		opener = null;
 		if (!open) requestOpen(true);
 		else void focusPanel();
 	}
 
+	/** Set from a close request until the panel opens again: the close pops every history entry itself. */
+	let closingPanel = false;
+
 	function closePanel() {
+		closingPanel = true;
+		dismissHostedMenus();
 		requestOpen(false);
 	}
 
 	async function focusPanel() {
 		await tick();
-		panelRef?.querySelector<HTMLElement>('.mcp-head .mcp-icon-btn')?.focus({ preventScroll: true });
+		if (pageName === 'main') panelRef?.focus({ preventScroll: true });
+		else backRef?.focus({ preventScroll: true });
 	}
 
-	function goTo(target: Page) {
-		pageName = target;
+	/** Switch pages, telling the dock while the usage details are on screen (it polls limits then). */
+	function setPage(next: Page) {
+		const was = pageName;
+		if (was === next) return;
+		pageName = next;
+		if (was === 'usage') onUsageOpenChange?.(false);
+		if (next === 'usage') onUsageOpenChange?.(true);
+	}
+
+	function goTo(target: Page, from: HTMLElement | null = null) {
+		clearTimeout(leaveTimer);
+		leaving = null;
+		if (from) opener = from;
+		setPage(target);
 		direct = false;
-		void tick().then(() => { if (bodyRef) bodyRef.scrollTop = 0; });
+		pushPageEntry(target);
+		void tick().then(() => {
+			panelRef?.querySelector<HTMLElement>(`[data-page="${target}"] .mcp-scroll`)?.scrollTo?.({ top: 0 });
+			backRef?.focus({ preventScroll: true });
+		});
 	}
 
+	/** Back from a page to the main list; `fromHistory` when Android Back already popped its entry. */
+	function backToMain(fromHistory = false) {
+		if (pageName === 'main') return;
+		if (pageEntry && !closingPanel) {
+			pageEntry = false;
+			if (!fromHistory && page.state?.mobileControlsPage) history.back();
+		}
+		const from = pageName;
+		dismissHostedMenus();
+		leaving = from;
+		setPage('main');
+		direct = false;
+		clearTimeout(leaveTimer);
+		leaveTimer = setTimeout(() => { if (leaving === from) leaving = null; }, PAGE_SLIDE_MS);
+		const row = opener;
+		opener = null;
+		void tick().then(() => (row?.isConnected ? row : panelRef)?.focus({ preventScroll: true }));
+	}
+
+	/** Escape and Android Back: a page opened straight from the bar closes the panel. */
 	function back() {
 		if (direct || pageName === 'main') { closePanel(); return; }
-		pageName = 'main';
-		void tick().then(() => { if (bodyRef) bodyRef.scrollTop = bodyRef.scrollHeight; });
+		backToMain();
 	}
 
+	/**
+	 * Close a selector menu hosted on the Agent or "Runs on" page. The shared
+	 * selectors close their menus on an outside click; the store-driven ones
+	 * close directly, and a click on the page body reaches the rest.
+	 */
+	function dismissHostedMenus() {
+		if (!agentHost?.childElementCount && !runnerHost?.childElementCount) return;
+		closeDropdown('sheet-profile');
+		closeDropdown('runner');
+		document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+	}
+
+	/** A hosted menu opened (its row was tapped) or closed (a pick, Escape). */
+	function syncHostedPage() {
+		const hosted: Page | null = runnerHost?.childElementCount ? 'runner' : agentHost?.childElementCount ? 'agent' : null;
+		if (hosted && pageName !== hosted) {
+			const row = panelRef?.querySelector<HTMLElement>(
+				hosted === 'agent' ? '.mcp-setup .context-selector-btn' : '.mcp-setup .ctx-chip.runner, .mcp-setup .mode-trigger'
+			);
+			goTo(hosted, row ?? null);
+		} else if (!hosted && (pageName === 'agent' || pageName === 'runner')) {
+			backToMain();
+		}
+	}
+
+	$effect(() => {
+		const hosts = [agentHost, runnerHost].filter((h): h is HTMLElement => !!h);
+		if (!hosts.length || typeof MutationObserver === 'undefined') return;
+		const observer = new MutationObserver(() => syncHostedPage());
+		for (const host of hosts) observer.observe(host, { childList: true });
+		return () => observer.disconnect();
+	});
+
 	let historyEntry = false;
+	/** A page has its own history entry over the panel's, so Android Back returns to the list. */
+	let pageEntry = false;
+
+	function pushPageEntry(target: Page) {
+		if (!historyEntry || pageEntry) return;
+		try {
+			pushState('', { ...(page.state ?? {}), mobileControls: true, mobileControlsPage: target });
+			pageEntry = true;
+		} catch {
+			// Router not ready (tests): Back closes the panel instead.
+		}
+	}
+
 	$effect(() => {
 		const isOpen = open;
 		untrack(() => {
 			clearTimeout(renderTimer);
 			if (isOpen) {
+				closingPanel = false;
 				rendered = true;
 				picker = null;
 				void focusPanel();
@@ -251,20 +417,38 @@
 					}
 				}
 				void tick().then(() => {
-					if (bodyRef && pageName === 'main') bodyRef.scrollTop = bodyRef.scrollHeight;
+					if (bodyRef && pageName === 'main') bodyRef.scrollTop = 0;
 				});
 			} else {
+				dismissHostedMenus();
 				renderTimer = setTimeout(() => {
 					rendered = false;
-					pageName = 'main';
+					setPage('main');
+					leaving = null;
 					direct = false;
+					opener = null;
 				}, 400);
 				if (panelRef?.contains(document.activeElement)) controlsCellRef?.focus({ preventScroll: true });
 				if (historyEntry) {
 					historyEntry = false;
-					if (page.state?.mobileControls) history.back();
+					// Pop the page's entry too, so no dead Back press is left behind.
+					if (page.state?.mobileControls) history.go(pageEntry && page.state?.mobileControlsPage ? -2 : -1);
 				}
+				pageEntry = false;
 			}
+		});
+	});
+
+	$effect(() => () => {
+		clearTimeout(leaveTimer);
+		clearTimeout(renderTimer);
+	});
+
+	// Android Back on a page pops that page's entry: return to the list.
+	$effect(() => {
+		const pageInHistory = !!page.state?.mobileControlsPage;
+		untrack(() => {
+			if (!pageInHistory && pageEntry && open) backToMain(true);
 		});
 	});
 
@@ -292,7 +476,7 @@
 		back();
 	}
 
-	// ── Drag: pull the bar up to open, the header down to close ──────────
+	// ── Drag: pull the bar up to open, the grip or header down to close ──
 	interface Drag {
 		id: number;
 		x: number;
@@ -416,12 +600,12 @@
 			closePicker();
 			if (d.kind === 'open') {
 				rendered = true;
-				pageName = 'main';
+				setPage('main');
+				leaving = null;
 				direct = false;
 				d.height = panelHeight();
 				dragHeight = d.height;
-				// The controls changed most often sit at the bottom, under the thumb.
-				void tick().then(() => { if (bodyRef) bodyRef.scrollTop = bodyRef.scrollHeight; });
+				void tick().then(() => { if (bodyRef) bodyRef.scrollTop = 0; });
 			}
 			try { d.el?.setPointerCapture?.(event.pointerId); } catch { /* synthetic pointer */ }
 		}
@@ -510,68 +694,11 @@
 	const scrimOpacity = $derived(dragOffset !== null && dragHeight > 0 ? Math.max(0, Math.min(1, 1 - dragOffset / dragHeight)) : open ? 1 : 0);
 	const panelVisible = $derived(open || dragOffset !== null);
 
-	// ── Effort scrub across the panel's bars ──────────────────────────────
-	let scrub = $state<string | null>(null);
-	let scrubId = -1;
-	let barsRef = $state<HTMLElement | null>(null);
-
-	function scrubAt(clientX: number) {
-		if (!barsRef || !effortValues.length) return;
-		const r = barsRef.getBoundingClientRect();
-		if (!r.width) return;
-		const i = Math.min(effortValues.length - 1, Math.max(0, Math.floor(((clientX - r.left) / r.width) * effortValues.length)));
-		scrub = effortValues[i];
-	}
-
-	function scrubStart(event: PointerEvent) {
-		if (effortLocked || event.button !== 0) return;
-		scrubId = event.pointerId;
-		try { (event.currentTarget as Element).setPointerCapture?.(event.pointerId); } catch { /* synthetic pointer */ }
-		scrubAt(event.clientX);
-	}
-
-	function scrubMove(event: PointerEvent) {
-		if (event.pointerId !== scrubId) return;
-		scrubAt(event.clientX);
-	}
-
-	function scrubEnd(event: PointerEvent) {
-		if (event.pointerId !== scrubId) return;
-		scrubId = -1;
-		const value = scrub;
-		scrub = null;
-		if (value && value !== effortValue && event.type !== 'pointercancel') onEffortSelect(value);
-	}
-
-	const panelEffortIndex = $derived(scrub ? effortValues.indexOf(scrub) : effortIndex);
-	const panelEffortLabel = $derived(scrub ? (effortOptions.find((o) => o.value === scrub)?.label ?? effortLabel) : effortLabel);
-
 	// ── Panel actions ─────────────────────────────────────────────────────
-	function openUsage() {
-		closePicker();
-		const wasOpen = open;
-		if (wasOpen) closePanel();
-		// After this tap's click reaches the document: the popover closes on
-		// any click outside itself, including the one that asked for it.
-		setTimeout(() => usageBar?.openDetails(), wasOpen ? 320 : 0);
-	}
-
-	/**
-	 * The running-tasks list. RunningTasksList (shared, being built in
-	 * $lib/components/chat) is not on this branch yet; until it lands this
-	 * opens the transcript's own list (ActiveTasks) at the end of the chat.
-	 * Hook-up point: render <RunningTasksList variant="sheet"> here instead.
-	 */
-	let tasksOpen = $state(false);
-	// Fresh watch counts while the panel is up (the chat's list also tracks).
+	/** Fresh watch counts while the panel is up (the chat's list also tracks). */
 	$effect(() => {
 		if (open) return watches.track();
 	});
-
-	function openRunningTasks() {
-		closePanel();
-		tasksOpen = true;
-	}
 
 	function toggleBrowser() {
 		closePanel();
@@ -581,6 +708,18 @@
 	function toggleTerminal() {
 		closePanel();
 		terminal?.toggle();
+	}
+
+	function toggleAway() {
+		if (awayAvailable && !awayBusy) onToggleAway?.();
+	}
+
+	function pickPanelEffort(value: string) {
+		if (value !== effortValue) onEffortSelect(value);
+	}
+
+	function pickPanelAccess(value: string) {
+		if (value !== accessValue && !permissionUpdating) onPermissionSelect(value);
 	}
 </script>
 
@@ -663,7 +802,7 @@
 			style:--usage-drag={usageDragOffset !== null ? `${usageDragOffset}px` : undefined}
 			style:--usage-fade={usageFade ?? undefined}
 		>
-			<ContextUsageBar bind:this={usageBar} bind:percent={usagePercent} bind:overLimit={usageOverLimit} bind:unknownWindowUsed={usageUnknownUsed} onOpenChange={handleUsageOpenChange} showPercent>
+			<ContextUsageBar bind:this={usageBar} bind:percent={usagePercent} bind:overLimit={usageOverLimit} bind:unknownWindowUsed={usageUnknownUsed} bind:usedTokens={usageUsedTokens} bind:windowTokens={usageWindowTokens} onOpenChange={handleUsageOpenChange} showPercent>
 				{#snippet grip()}
 					<!-- Pointer-only: Escape and a tap outside close the sheet for everyone. -->
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -747,33 +886,164 @@
 		class="mcp"
 		class:dragging={dragOffset !== null}
 		class:shown={panelVisible}
+		class:sub={onSubPage}
 		role="dialog"
 		aria-modal="true"
-		aria-label={pageName === 'model' ? 'Choose model' : pageName === 'export' ? 'Export chat' : 'Chat controls'}
+		aria-label={PAGE_TITLE[pageName]}
 		aria-hidden={!panelVisible}
 		inert={!open}
+		tabindex="-1"
 		style:transform={`translateY(${panelShift})`}
 	>
+		<!-- Grip and title: dragging either down closes the sheet from any page. -->
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<header class="mcp-head" onpointerdown={startHeadDrag}>
 			<span class="mcp-grab" aria-hidden="true"></span>
 			<div class="mcp-head-row">
-				{#if pageName !== 'main' && !direct}
-					<button type="button" class="mcp-icon-btn" aria-label="Back to chat controls" onclick={back}><ArrowLeft size={20} aria-hidden="true" /></button>
-				{:else}
-					<button type="button" class="mcp-icon-btn" aria-label="Close chat controls" onclick={closePanel}><ChevronDown size={22} aria-hidden="true" /></button>
-				{/if}
-				<div class="mcp-title">
-					<strong>{pageName === 'model' ? 'Model' : pageName === 'export' ? 'Export chat' : 'Chat controls'}</strong>
-					<span>{chatTitle}</span>
-				</div>
-				<span></span>
+				<button bind:this={backRef} type="button" class="mcp-back" aria-label="Back to chat controls" tabindex={onSubPage ? 0 : -1}
+					aria-hidden={!onSubPage} onclick={() => backToMain()}><ChevronLeft size={24} strokeWidth={2.4} aria-hidden="true" /></button>
+				<h2 class="mcp-title" aria-live="polite">{PAGE_TITLE[pageName]}</h2>
+				<button type="button" class="mcp-close" onclick={closePanel}>Close chat controls</button>
 			</div>
 		</header>
 
-		<div class="mcp-body" class:fill={pageName === 'model'} bind:this={bodyRef}>
-			{#if rendered || panelVisible}
-				{#if pageName === 'model'}
+		<div class="mcp-pages">
+			<!-- ═══ Main: the inset grouped list ═══ -->
+			<section class="mcp-page" data-page="main" class:active={!onSubPage} class:under={onSubPage} inert={onSubPage} aria-label="Chat controls">
+				<div class="mcp-scroll" bind:this={bodyRef}>
+					{#if rendered || panelVisible}
+						{#if showRunChip || workerName || projectName}
+							<div class="mcp-status">
+								{#if showRunChip}
+									<button type="button" class="mcp-chip run" class:quiet={!runningTasks.length}
+										aria-label={`${runHead}: ${runSummary}. Open the list`}
+										onclick={(e) => goTo('tasks', e.currentTarget)}>
+										<i aria-hidden="true"></i>{runChipLabel}
+									</button>
+								{/if}
+								{#if workerName}<span class="mcp-chip" title="Runs on">{workerName}</span>{/if}
+								{#if projectName}<span class="mcp-chip" title="Project and branch">{projectName}{#if branchName}<span class="mcp-chip-sep" aria-hidden="true">·</span>{branchName}{/if}</span>{/if}
+							</div>
+						{/if}
+
+						<h3 class="mcp-glabel">Model</h3>
+						<div class="mcp-group">
+							<button type="button" class="mcp-row" disabled={modelLocked} aria-label={`Model: ${modelLabel}${modelLocked ? ', locked' : ''}`}
+								onclick={(e) => goTo('model', e.currentTarget)}>
+								<span class="mcp-ic glyph" aria-hidden="true"><ProviderGlyph kind={modelGlyph} size={17} /></span>
+								<span class="mcp-lbl"><span>Model</span></span>
+								<span class="mcp-val">{modelLabel}</span>
+								{#if modelLocked}<Lock size={16} class="mcp-chev" aria-hidden="true" />{:else}<ChevronRight size={18} class="mcp-chev" aria-hidden="true" />{/if}
+							</button>
+							<button type="button" class="mcp-row" onclick={(e) => goTo('usage', e.currentTarget)}
+								aria-label={`Context and usage: ${usageUnknownUsed != null ? `${usageUnknownUsed} tokens used` : usageOverLimit ? 'over the limit' : `${usagePercent}% used`}`}>
+								<svg class="mcp-ring {usageSeverity}" class:unknown={usageUnknownUsed != null} width="30" height="30" viewBox="0 0 30 30" aria-hidden="true">
+									<circle class="ring-track" cx="15" cy="15" r="11" fill="none" stroke-width="3.5" />
+									{#if usageUnknownUsed == null}
+										<circle class="ring-progress" cx="15" cy="15" r="11" fill="none" stroke-width="3.5" stroke-linecap="round"
+											stroke-dasharray={RING_C} stroke-dashoffset={RING_C * (1 - Math.min(100, Math.max(0, usagePercent)) / 100)} />
+									{/if}
+								</svg>
+								<span class="mcp-lbl"><span>Context and usage</span>{#if usageTokensLine}<small>{usageTokensLine}</small>{/if}</span>
+								<span class="mcp-val" class:warn={usageSeverity === 'warning'} class:danger={usageSeverity === 'danger' || usageOverLimit}>
+									{usageUnknownUsed != null ? '—' : usageOverLimit ? 'Over' : `${usagePercent}%`}
+								</span>
+								<ChevronRight size={18} class="mcp-chev" aria-hidden="true" />
+							</button>
+							<div class="mcp-stack" data-row="effort">
+								<div class="mcp-rowhead">
+									<span class="mcp-ic" aria-hidden="true"><Lightbulb size={17} /></span>
+									<span class="mcp-lbl"><span>Reasoning effort</span>{#if effortLocked && effortExplanation && effortExplanation !== panelEffortValue}<small>{effortExplanation}</small>{/if}</span>
+									<span class="mcp-val">{panelEffortValue}</span>
+								</div>
+								{#if !effortLocked}
+									<div class="mcp-seg accent" role="radiogroup" aria-label="Reasoning effort" style:--n={effortOptions.length}>
+										{#each effortOptions as option (option.value)}
+											<button type="button" role="radio" aria-checked={option.value === effortValue}
+												class:auto={!effortValue && option.value === effortDefaultValue}
+												title={option.description} onclick={() => pickPanelEffort(option.value)}>{option.label}</button>
+										{/each}
+									</div>
+								{/if}
+							</div>
+							{#if fastShown}
+								<button type="button" class="mcp-row" role="switch" aria-label={fastPending ? 'Fast mode: loading' : 'Fast mode'}
+									aria-checked={fastPending ? false : fastEnabled} aria-busy={fastPending || undefined} disabled={fastPending}
+									onclick={() => { if (!fastPending) onToggleFast?.(); }}>
+									<span class="mcp-ic" aria-hidden="true"><Zap size={17} /></span>
+									<span class="mcp-lbl"><span>Fast mode</span><small>Higher price</small></span>
+									{#if fastPending}<LoaderCircle size={18} class="mcc-spin mcp-chev" aria-hidden="true" />{:else}<span class="mcp-sw" aria-hidden="true"></span>{/if}
+								</button>
+							{/if}
+						</div>
+						{#if modelNotice}<p class="mcp-note warn">{modelNotice}</p>{/if}
+
+						{#if accessShown}
+							<h3 class="mcp-glabel">Permissions</h3>
+							<div class="mcp-group">
+								<div class="mcp-stack" data-row="access">
+									<div class="mcp-rowhead">
+										<span class="mcp-ic" aria-hidden="true">{#if accessValue === BYPASS}<ShieldOff size={17} />{:else}<ShieldCheck size={17} />{/if}</span>
+										<span class="mcp-lbl"><span>Tool access</span></span>
+										<span class="mcp-val" class:danger={accessValue === BYPASS}>{accessValue ? (ACCESS_LABEL[accessValue] ?? accessValue) : 'Loading…'}</span>
+									</div>
+									<div class="mcp-seg" role="radiogroup" aria-label="Tool access" aria-busy={permissionUpdating} style:--n={permissionOptions.length}>
+										{#each permissionOptions as option (option.value)}
+											<button type="button" role="radio" class:danger={option.value === BYPASS}
+												aria-checked={option.value === accessValue} aria-label={ACCESS_LABEL[option.value] ?? option.label}
+												disabled={permissionUpdating} onclick={() => pickPanelAccess(option.value)}>{ACCESS_SHORT[option.value] ?? option.label}</button>
+										{/each}
+									</div>
+									{#if permissionUpdating || ACCESS_HELP[accessValue]}
+										<p class="mcp-help access-help" class:danger={!permissionUpdating && accessValue === BYPASS} aria-live="polite">
+											{#if permissionUpdating}<LoaderCircle size={13} class="mcc-spin" aria-hidden="true" />Saving{:else}{ACCESS_HELP[accessValue]}{/if}
+										</p>
+									{/if}
+								</div>
+								{#if awayShown}
+									<button type="button" class="mcp-row" role="switch" aria-label="Away mode" aria-checked={awayEnabled && awayAvailable}
+										aria-disabled={!awayAvailable || awayBusy || undefined} onclick={toggleAway}>
+										<span class="mcp-ic" aria-hidden="true"><Moon size={17} /></span>
+										<span class="mcp-lbl"><span>Away mode</span><small>{awayAvailable ? 'Takes recommended defaults' : 'Available after the first message'}</small></span>
+										{#if awayBusy}<LoaderCircle size={18} class="mcc-spin mcp-chev" aria-hidden="true" />{:else}<span class="mcp-sw" aria-hidden="true"></span>{/if}
+									</button>
+								{/if}
+							</div>
+						{/if}
+
+						{#if showSetup && rendered}
+							<h3 class="mcp-glabel">Setup</h3>
+							<div class="mcp-group mcp-setup"><ContextPillBar sheetMode {menuHosts} /></div>
+						{/if}
+					{/if}
+				</div>
+
+				<footer class="mcp-foot">
+					<div class="actions" role="group" aria-label="More actions">
+						{#if callAction}
+							<div class="act call-act">{@render callAction()}<span class="act-label" aria-hidden="true">Call</span></div>
+						{/if}
+						{#if onBrowserToggle}
+							<button type="button" class="act" aria-pressed={browserOpen} onpointerenter={onBrowserPreload} onfocus={onBrowserPreload} onclick={toggleBrowser} aria-label="Live browser view">
+								<Globe size={18} aria-hidden="true" /><span class="act-label">Browser</span>
+							</button>
+						{/if}
+						{#if terminal}
+							<button type="button" class="act" aria-pressed={terminal.open} onpointerenter={terminal.preload} onfocus={terminal.preload}
+								onclick={toggleTerminal} aria-label="Terminal" title={terminal.disabledReason ?? undefined}>
+								<SquareTerminal size={18} aria-hidden="true" /><span class="act-label">Terminal</span>
+							</button>
+						{/if}
+						<button type="button" class="act" disabled={!canExport} onclick={(e) => goTo('export', e.currentTarget)} aria-label="Export chat">
+							<Download size={18} aria-hidden="true" /><span class="act-label">Export</span>
+						</button>
+					</div>
+				</footer>
+			</section>
+
+			<!-- ═══ Sub-pages: slide in from the right ═══ -->
+			<section class="mcp-page" data-page="model" class:active={pageName === 'model'} inert={pageName !== 'model'} aria-label="Model">
+				{#if mounted('model')}
 					<div class="mcp-model">
 						<ModelPickerPanel
 							groups={railGroups}
@@ -788,153 +1058,43 @@
 							onRequestClose={back}
 						/>
 					</div>
-				{:else if pageName === 'export'}
-					<div class="mcp-stack">
-						{#if $activeSession.sessionId}
-							<div class="mcp-export"><ChatExportActions sessionId={$activeSession.sessionId} menu /></div>
-						{/if}
-						<p class="mcp-note">Review before sharing.</p>
-					</div>
-				{:else}
-					<div class="mcp-stack">
-						{#if runningTasks.length || liveWatches || preferenceOnly}
-							<button type="button" class="tile run-row" onclick={openRunningTasks} aria-label={`${runHead}: ${runSummary}. Open the list`}>
-								<span class="run-ic"><Activity size={18} aria-hidden="true" /></span>
-								<span class="run-copy"><b>{runHead}</b><small>{runSummary}</small></span>
-								<ChevronRight size={20} class="mcp-chev" aria-hidden="true" />
-							</button>
-						{/if}
-
-						<section class="sec" aria-label="Model and setup">
-							<h3 class="sec-h">Model and setup</h3>
-							<button type="button" class="tile model-tile" disabled={modelLocked} onclick={() => goTo('model')} aria-label={`Model: ${modelLabel}${modelLocked ? ', locked' : ''}`}>
-								<span><span class="tile-label">Model</span><span class="nm">{modelLabel}</span></span>
-								{#if modelLocked}<Lock size={18} class="mcp-chev" aria-hidden="true" />{:else}<ChevronRight size={20} class="mcp-chev" aria-hidden="true" />{/if}
-							</button>
-							{#if modelNotice}<p class="mcp-warn">{modelNotice}</p>{/if}
-							<button type="button" class="tile usage-row" onclick={openUsage}>
-								<svg class="usage-ring {usageSeverity}" class:unknown={usageUnknownUsed != null} width="22" height="22" viewBox="0 0 16 16" aria-hidden="true">
-									<circle class="ring-track" cx="8" cy="8" r="6" fill="none" stroke-width="2.4" />
-									{#if usageUnknownUsed == null}
-										<circle class="ring-progress" cx="8" cy="8" r="6" fill="none" stroke-width="2.4" stroke-linecap="round"
-											stroke-dasharray={RING_C} stroke-dashoffset={RING_C * (1 - Math.min(100, Math.max(0, usagePercent)) / 100)} />
-									{/if}
-								</svg>
-								<b>Context and usage</b>
-								<span class="pct">{usageUnknownUsed != null ? `${usageUnknownUsed} used` : usageOverLimit ? 'Over limit' : `${usagePercent}%`}</span>
-								<ChevronRight size={20} class="mcp-chev" aria-hidden="true" />
-							</button>
-							{#if showSetupTiles && rendered}
-								<div class="mcp-setup"><ContextPillBar sheetMode /></div>
-							{/if}
-						</section>
-
-						<section class="sec" aria-label="This chat">
-							<h3 class="sec-h">This chat</h3>
-							{#if awayShown || fastShown}
-								<div class="toggles" style:--n={(awayShown ? 1 : 0) + (fastShown ? 1 : 0)}>
-									{#if awayShown}
-										<button type="button" class="tile toggle" role="switch" aria-label="Away mode" aria-checked={awayEnabled && awayAvailable}
-											aria-disabled={!awayAvailable || awayBusy || undefined}
-											onclick={() => { if (awayAvailable && !awayBusy) onToggleAway?.(); else if (!awayAvailable) notify('Away works after the first message', { severity: 'info' }); }}>
-											<span class="tg-top"><Moon size={20} aria-hidden="true" fill={awayEnabled && awayAvailable ? 'currentColor' : 'none'} />
-												<span class="tg-state">{#if !awayAvailable}<Lock size={14} aria-hidden="true" />{:else if awayBusy}<LoaderCircle size={14} class="mcc-spin" aria-hidden="true" />{:else}{awayEnabled ? 'On' : 'Off'}{/if}</span></span>
-											<span><span class="tg-name">Away</span>{#if !awayAvailable}<small class="tg-help">After first message</small>{/if}</span>
-										</button>
-									{/if}
-									{#if fastShown}
-										<button type="button" class="tile toggle" role="switch" aria-label={fastPending ? 'Fast mode: loading' : 'Fast mode'}
-											aria-checked={fastPending ? false : fastEnabled} aria-busy={fastPending || undefined} disabled={fastPending}
-											onclick={() => { if (!fastPending) onToggleFast?.(); }}>
-											<span class="tg-top"><Zap size={20} aria-hidden="true" /><span class="tg-state">{#if fastPending}<LoaderCircle size={14} class="mcc-spin" aria-hidden="true" />{:else}{fastEnabled ? 'On' : 'Off'}{/if}</span></span>
-											<span><span class="tg-name">Fast mode</span><small class="tg-help">Higher price</small></span>
-										</button>
-									{/if}
-								</div>
-							{/if}
-
-							<div class="tile effort-tile">
-								<div class="tile-row"><span class="tile-label">Reasoning effort</span><span class="tile-value">{effortLocked ? (effortKnown ? 'Set by the model' : effortLabel) : panelEffortLabel}</span></div>
-								{#if !effortLocked}
-									<!-- The bars are the tab stops; the group takes the scrub. -->
-									<!-- svelte-ignore a11y_interactive_supports_focus -->
-									<div
-										bind:this={barsRef}
-										class="bars"
-										role="radiogroup"
-										aria-label="Reasoning effort"
-										style:--n={effortOptions.length}
-										onpointerdown={scrubStart}
-										onpointermove={scrubMove}
-										onpointerup={scrubEnd}
-										onpointercancel={scrubEnd}
-									>
-										{#each effortOptions as option, i (option.value)}
-											<button type="button" class="bar" class:lit={i <= panelEffortIndex} role="radio" aria-checked={option.value === (scrub ?? effortValue)}
-												style:--h={`${Math.round(10 + ((i + 1) / effortOptions.length) * 30)}px`}
-												onclick={() => { if (option.value !== effortValue) onEffortSelect(option.value); }}>
-												<span class="bar-fill"></span>
-												<span class="bar-label">{option.label}</span>
-											</button>
-										{/each}
-									</div>
-								{/if}
-							</div>
-
-							{#if accessShown}
-								<div class="tile">
-									<div class="tile-row"><span class="tile-label">Tool access</span></div>
-									<div class="segs" role="radiogroup" aria-label="Tool access" aria-busy={permissionUpdating} style:--n={permissionOptions.length}>
-										{#each permissionOptions as option (option.value)}
-											{@const Icon = accessIcons[option.value] ?? Hand}
-											<button type="button" class="seg" role="radio"
-												aria-checked={option.value === accessValue} disabled={permissionUpdating}
-												onclick={() => { if (option.value !== accessValue) onPermissionSelect(option.value); }}>
-												<Icon size={18} aria-hidden="true" />
-												<span>{ACCESS_LABEL[option.value] ?? option.label}</span>
-											</button>
-										{/each}
-									</div>
-									{#if permissionUpdating || ACCESS_HELP[accessValue]}
-										<p class="access-help" aria-live="polite">{#if permissionUpdating}<LoaderCircle size={14} class="mcc-spin" aria-hidden="true" />Saving{:else}{ACCESS_HELP[accessValue]}{/if}</p>
-									{/if}
-								</div>
-							{/if}
-						</section>
-					</div>
 				{/if}
-			{/if}
-		</div>
+			</section>
 
-		{#if pageName === 'main'}
-			<footer class="mcp-foot">
-				<div class="actions" role="group" aria-label="More actions">
-					{#if callAction}
-						<div class="act call-act">{@render callAction()}<span class="act-label" aria-hidden="true">Call</span></div>
+			<section class="mcp-page" data-page="usage" class:active={pageName === 'usage'} inert={pageName !== 'usage'} aria-label="Context and usage">
+				<div class="mcp-scroll">
+					{#if mounted('usage')}
+						<div class="mcp-usage"><ContextUsageBar inline /></div>
 					{/if}
-					{#if onBrowserToggle}
-						<button type="button" class="act" aria-pressed={browserOpen} onpointerenter={onBrowserPreload} onfocus={onBrowserPreload} onclick={toggleBrowser} aria-label="Live browser view">
-							<Globe size={20} aria-hidden="true" /><span class="act-label">Browser</span>
-						</button>
-					{/if}
-					{#if terminal}
-						<button type="button" class="act" aria-pressed={terminal.open} onpointerenter={terminal.preload} onfocus={terminal.preload}
-							onclick={toggleTerminal} aria-label="Terminal" title={terminal.disabledReason ?? undefined}>
-							<SquareTerminal size={20} aria-hidden="true" /><span class="act-label">Terminal</span>
-						</button>
-					{/if}
-					<button type="button" class="act" disabled={!canExport} onclick={() => goTo('export')} aria-label="Export chat">
-						<Download size={20} aria-hidden="true" /><span class="act-label">Export</span>
-					</button>
 				</div>
-			</footer>
-		{/if}
+			</section>
+
+			<section class="mcp-page" data-page="agent" class:active={pageName === 'agent'} inert={pageName !== 'agent'} aria-label="Agent">
+				<div class="mcp-scroll">
+					<div class="mcp-host agent-host" bind:this={agentHost}></div>
+				</div>
+			</section>
+
+			<section class="mcp-page" data-page="runner" class:active={pageName === 'runner'} inert={pageName !== 'runner'} aria-label="Runs on">
+				<div class="mcp-scroll">
+					<div class="mcp-host runner-host" bind:this={runnerHost}></div>
+				</div>
+			</section>
+
+			<section class="mcp-page" data-page="tasks" class:active={pageName === 'tasks'} inert={pageName !== 'tasks'} aria-label="Running tasks">
+				{#if mounted('tasks')}
+					<RunningTasksList sessionId={$activeSession.sessionId} variant="page" onClose={closePanel} />
+				{/if}
+			</section>
+
+			<section class="mcp-page" data-page="export" class:active={pageName === 'export'} inert={pageName !== 'export'} aria-label="Export chat">
+				{#if mounted('export') && $activeSession.sessionId}
+					<ChatExportActions sessionId={$activeSession.sessionId} page />
+				{/if}
+			</section>
+		</div>
 	</div>
 </div>
-
-{#if tasksOpen && $activeSession.sessionId}
-	<RunningTasksList sessionId={$activeSession.sessionId} variant="sheet" onClose={() => (tasksOpen = false)} />
-{/if}
 
 <style>
 	/* ── Quick bar ───────────────────────────────────────────────────── */
@@ -1164,6 +1324,8 @@
 	.mcp-scrim.live { pointer-events: auto; }
 	.mcp-scrim.dragging { transition: none; }
 	.mcp {
+		--mcp-ease: cubic-bezier(0.22, 1, 0.36, 1);
+		--mcp-row-radius: calc(var(--radius) * 1.15);
 		position: fixed;
 		left: 0;
 		right: 0;
@@ -1172,194 +1334,509 @@
 		z-index: 121;
 		display: flex;
 		flex-direction: column;
-		background: var(--background);
+		overflow: hidden;
+		background: var(--popover);
 		color: var(--foreground);
 		border-top: 1px solid var(--border-strong);
 		border-radius: calc(var(--radius) * 2) calc(var(--radius) * 2) 0 0;
 		box-shadow: var(--shadow-l);
+		outline: none;
 		visibility: hidden;
-		transition: transform 0.36s cubic-bezier(0.22, 1, 0.36, 1), visibility 0s linear 0.36s;
+		transition: transform 0.36s var(--mcp-ease), visibility 0s linear 0.36s;
 		will-change: transform;
 	}
-	.mcp.shown { visibility: visible; transition: transform 0.36s cubic-bezier(0.22, 1, 0.36, 1), visibility 0s; }
+	.mcp.shown { visibility: visible; transition: transform 0.36s var(--mcp-ease), visibility 0s; }
 	.mcp.dragging { transition: none; }
-	.mcp-head { flex-shrink: 0; padding: 8px 8px 6px; touch-action: none; cursor: grab; }
-	.mcp-grab { display: block; width: 40px; height: 4px; margin: 0 auto 4px; border-radius: 2px; background: var(--border-strong); }
-	.mcp-head-row { display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; align-items: center; gap: 6px; }
-	.mcp-title { min-width: 0; text-align: center; }
-	.mcp-title strong { display: block; font-size: 15px; font-weight: 600; }
-	.mcp-title span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted-foreground); }
-	.mcp-icon-btn { width: 44px; height: 44px; display: grid; place-items: center; border: 0; border-radius: var(--radius); background: transparent; color: var(--foreground); cursor: pointer; }
-	.mcp-icon-btn:hover { background: var(--hover-overlay); }
-	.mcp-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 2px 14px 12px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
-	.mcp-body::-webkit-scrollbar { display: none; }
-	.mcp-body.fill { padding: 0; overflow: hidden; }
-	.mcp-stack { margin-top: auto; display: flex; flex-direction: column; gap: 18px; }
-	.sec { display: flex; flex-direction: column; gap: 8px; }
-	.sec-h { margin: 0 2px; font-size: 13px; font-weight: 600; color: var(--foreground); }
-	.tile {
-		width: 100%;
-		padding: 12px;
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius);
-		background: var(--card);
+
+	/* Header: the grip, then one row with the title centred. */
+	.mcp-head { flex-shrink: 0; padding: 8px 12px 6px; touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
+	.mcp-grab { display: block; width: 38px; height: 5px; margin: 0 auto 6px; border-radius: 3px; background: var(--border-strong); transition: width 0.15s, background-color 0.15s; }
+	.mcp.dragging .mcp-grab, .mcp-head:hover .mcp-grab { width: 48px; background: var(--muted-foreground); }
+	.mcp.dragging .mcp-head { cursor: grabbing; }
+	.mcp-head-row { position: relative; display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; align-items: center; min-height: 44px; }
+	.mcp-title {
+		grid-column: 2;
+		margin: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		text-align: center;
+		font-size: 17px;
+		font-weight: 650;
+		letter-spacing: -0.01em;
+	}
+	.mcp-back {
+		grid-column: 1;
+		grid-row: 1;
+		display: grid;
+		place-items: center;
+		width: 44px;
+		height: 44px;
+		margin-left: -6px;
+		padding: 0;
+		border: 0;
+		border-radius: 50%;
+		background: transparent;
+		color: var(--foreground);
+		cursor: pointer;
+		opacity: 0;
+		pointer-events: none;
+		transform: translateX(6px);
+		transition: opacity 0.2s ease, transform 0.3s var(--mcp-ease), background-color 0.15s;
+	}
+	.mcp.sub .mcp-back { opacity: 1; pointer-events: auto; transform: none; }
+	.mcp-back:hover { background: var(--hover-overlay); }
+	.mcp-back:active { background: var(--active-overlay); }
+	/* Close: visually hidden until keyboard focus reaches it. */
+	.mcp-close {
+		position: absolute;
+		top: 50%;
+		right: 0;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		overflow: hidden;
+		clip-path: inset(50%);
+		white-space: nowrap;
+		border: 0;
+		background: var(--muted);
 		color: var(--foreground);
 		font: inherit;
-		text-align: left;
-		transition: background-color 0.18s, border-color 0.18s;
-	}
-	button.tile { cursor: pointer; }
-	button.tile:hover:not(:disabled) { background: color-mix(in oklch, var(--card) 85%, var(--foreground) 6%); }
-	button.tile:disabled { cursor: default; }
-	.tile-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-	.tile-label { display: block; font-size: 12.5px; font-weight: 500; color: var(--muted-foreground); }
-	.tile-value { font-size: 13.5px; font-weight: 600; }
-	.mcp-stack :global(.mcp-chev) { color: var(--muted-foreground); flex-shrink: 0; }
-	.mcp-warn { margin: -2px 2px 0; font-size: 12px; color: var(--warning); }
-	.mcp-note { margin: 0 2px; font-size: 12.5px; color: var(--muted-foreground); }
-
-	.run-row { min-height: 60px; display: grid; grid-template-columns: 34px minmax(0, 1fr) 20px; align-items: center; gap: 10px; }
-	.run-ic { display: grid; place-items: center; width: 34px; height: 34px; border-radius: calc(var(--radius) - 2px); background: color-mix(in oklab, var(--primary) 13%, var(--card)); color: var(--primary); }
-	.run-copy b { display: block; font-size: 14.5px; font-weight: 600; }
-	.run-copy small { display: block; font-size: 12px; color: var(--muted-foreground); }
-
-	.model-tile { min-height: 60px; display: grid; grid-template-columns: minmax(0, 1fr) 20px; align-items: center; gap: 10px; }
-	.model-tile .nm { display: block; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15.5px; font-weight: 600; }
-	.usage-row { min-height: 52px; display: grid; grid-template-columns: 22px minmax(0, 1fr) auto 20px; align-items: center; gap: 10px; }
-	.usage-row b { font-size: 13.5px; font-weight: 550; }
-	.usage-row .pct { font-size: 13px; color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
-	.usage-ring { display: block; transform: rotate(-90deg); }
-	.usage-ring .ring-track { stroke: var(--border-strong); }
-	.usage-ring .ring-progress { stroke: var(--primary); transition: stroke-dashoffset 0.3s ease; }
-	.usage-ring.warning .ring-progress { stroke: var(--warning); }
-	.usage-ring.danger .ring-progress { stroke: var(--destructive); }
-	.usage-ring.unknown .ring-track { stroke-dasharray: 2.4 2.31; }
-
-	.toggles { display: grid; grid-template-columns: repeat(var(--n, 2), minmax(0, 1fr)); gap: 8px; }
-	.toggle { min-height: 80px; display: flex; flex-direction: column; justify-content: space-between; gap: 6px; }
-	.tg-top { display: flex; align-items: center; justify-content: space-between; color: var(--muted-foreground); }
-	.tg-state { display: flex; align-items: center; gap: 4px; font-size: 12px; }
-	.tg-name { display: block; font-size: 14px; font-weight: 600; }
-	.tg-help { display: block; margin-top: 1px; font-size: 11.5px; color: var(--muted-foreground); }
-	.toggle[aria-checked='true'] { background: color-mix(in oklab, var(--primary) 13%, var(--card)); border-color: color-mix(in oklch, var(--primary) 40%, transparent); }
-	.toggle[aria-checked='true'] .tg-top { color: var(--primary); }
-	.toggle[aria-disabled='true'] .tg-name { color: var(--muted-foreground); }
-	.toggle[aria-disabled='true'] .tg-top { color: var(--subtle-foreground); }
-
-	.effort-tile { padding-bottom: 8px; }
-	.bars { display: grid; grid-template-columns: repeat(var(--n, 5), minmax(0, 1fr)); gap: 6px; margin-top: 8px; touch-action: pan-y; cursor: ew-resize; }
-	.bar { height: 64px; display: flex; flex-direction: column; align-items: stretch; justify-content: flex-end; gap: 5px; padding: 0; border: 0; border-radius: calc(var(--radius) - 2px); background: transparent; font: inherit; cursor: pointer; }
-	.bar-fill { height: var(--h); border-radius: 4px; background: color-mix(in oklch, var(--muted-foreground) 22%, var(--card)); transition: background-color 0.15s, height 0.2s; }
-	.bar.lit .bar-fill { background: color-mix(in oklab, var(--primary) 70%, var(--card)); }
-	.bar[aria-checked='true'] .bar-fill { background: var(--primary); }
-	.bar-label { font-size: 11.5px; color: var(--muted-foreground); text-align: center; }
-	.bar[aria-checked='true'] .bar-label { color: var(--foreground); font-weight: 600; }
-	.tile .segs { margin-top: 8px; }
-	.access-help { display: flex; align-items: center; gap: 6px; margin: 7px 2px 0; font-size: 12.5px; color: var(--muted-foreground); }
-
-	/* Setup tiles: the shared ContextPillBar selectors (sheet mode) drawn as
-	   label-over-value cells. The labels are generated so the selectors stay
-	   the shared components; their own aria-labels already name each one. */
-	.mcp-setup :global(.context-pill-bar.sheet-mode) { gap: 8px; }
-	.mcp-setup :global(.sheet-mode .ctx-chip) {
-		position: relative;
-		height: auto;
-		min-height: 58px;
-		padding: 22px 12px 9px;
-		align-items: center;
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius);
-		background: var(--card);
 		font-size: 13px;
 		font-weight: 550;
+		cursor: pointer;
+	}
+	.mcp-close:focus-visible {
+		width: auto;
+		height: 32px;
+		padding: 0 12px;
+		margin-top: -16px;
+		clip-path: none;
+		border-radius: 999px;
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+
+	/* Pages: the active one in place, the main list shifted left and dimmed
+	   under a sub-page, the rest waiting off to the right. */
+	.mcp-pages { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+	.mcp-page {
+		position: absolute;
+		inset: 0;
+		display: flex;
+		flex-direction: column;
+		background: var(--popover);
+		transform: translateX(100%);
+		transition: transform 0.32s var(--mcp-ease), opacity 0.32s var(--mcp-ease);
+	}
+	.mcp-page.active { transform: none; }
+	.mcp-page.under { transform: translateX(-28%); opacity: 0.4; }
+	.mcp-page:not(.active):not(.under) { visibility: hidden; transition: transform 0.32s var(--mcp-ease), opacity 0.32s var(--mcp-ease), visibility 0s linear 0.32s; }
+	.mcp-scroll {
+		flex: 1;
+		min-height: 0;
+		padding: 4px 14px 18px;
+		overflow-x: hidden;
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		scrollbar-width: none;
+		-webkit-overflow-scrolling: touch;
+	}
+	.mcp-scroll::-webkit-scrollbar { display: none; }
+
+	/* Status chips */
+	.mcp-status { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 4px 14px; }
+	.mcp-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		max-width: 100%;
+		min-height: 28px;
+		padding: 4px 11px;
+		overflow: hidden;
+		border: 0;
+		border-radius: 999px;
+		background: var(--muted);
+		color: var(--muted-foreground);
+		font: inherit;
+		font-size: 12.5px;
+		font-weight: 500;
+		line-height: 1.2;
+		white-space: nowrap;
+		text-overflow: ellipsis;
+	}
+	.mcp-chip-sep { opacity: 0.6; }
+	button.mcp-chip { cursor: pointer; }
+	.mcp-chip.run { color: var(--primary); background: color-mix(in oklab, var(--primary) 14%, transparent); font-weight: 600; }
+	.mcp-chip.run:active { background: color-mix(in oklab, var(--primary) 22%, transparent); }
+	.mcp-chip.run i { width: 6px; height: 6px; flex: none; border-radius: 50%; background: currentColor; animation: mcp-pulse 1.6s ease-in-out infinite; }
+	.mcp-chip.run.quiet i { animation: none; opacity: 0.6; }
+	@keyframes mcp-pulse { 50% { opacity: 0.3; } }
+
+	/* Grouped list */
+	.mcp-glabel { margin: 0; padding: 4px 8px 7px; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted-foreground); }
+	.mcp-group { margin-bottom: 18px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--mcp-row-radius); background: var(--card); }
+	.mcp-group + .mcp-note { margin-top: -10px; }
+	.mcp-row {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		width: 100%;
+		min-height: 52px;
+		padding: 10px 14px;
+		border: 0;
+		background: transparent;
+		color: var(--foreground);
+		font: inherit;
+		font-size: 15px;
+		text-align: left;
+		cursor: pointer;
+		-webkit-tap-highlight-color: transparent;
+		transition: background-color 0.15s;
+	}
+	.mcp-row:hover:not(:disabled):not([aria-disabled='true']) { background: var(--hover-overlay); }
+	.mcp-row:active:not(:disabled):not([aria-disabled='true']) { background: var(--muted); }
+	.mcp-row:disabled { cursor: default; }
+	.mcp-group > * + * { border-top: 1px solid var(--border); }
+	.mcp-ic {
+		display: grid;
+		place-items: center;
+		width: 30px;
+		height: 30px;
+		flex: none;
+		border-radius: calc(var(--radius) * 0.65);
+		background: var(--muted);
+		color: var(--foreground);
+	}
+	.mcp-lbl { flex: 1; min-width: 0; }
+	.mcp-lbl > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.mcp-lbl small { display: block; margin-top: 1px; font-size: 12.5px; color: var(--muted-foreground); line-height: 1.3; }
+	.mcp-val { max-width: 48%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14.5px; color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
+	.mcp-val.warn { color: var(--warning); }
+	.mcp-val.danger { color: var(--destructive); }
+	.mcp-scroll :global(.mcp-chev) { flex: none; color: var(--muted-foreground); opacity: 0.75; }
+	.mcp-row:disabled .mcp-val { color: var(--subtle-foreground, var(--muted-foreground)); }
+
+	/* Usage ring */
+	.mcp-ring { display: block; flex: none; transform: rotate(-90deg); }
+	.mcp-ring .ring-track { stroke: var(--border-strong); }
+	.mcp-ring .ring-progress { stroke: var(--primary); transition: stroke-dashoffset 0.3s ease; }
+	.mcp-ring.warning .ring-progress { stroke: var(--warning); }
+	.mcp-ring.danger .ring-progress { stroke: var(--destructive); }
+	.mcp-ring.unknown .ring-track { stroke-dasharray: 3 2.7; }
+
+	/* Switch rows */
+	.mcp-sw { position: relative; width: 46px; height: 28px; flex: none; border-radius: 999px; background: var(--border-strong); transition: background-color 0.2s; }
+	.mcp-sw::after {
+		content: '';
+		position: absolute;
+		top: 3px;
+		left: 3px;
+		width: 22px;
+		height: 22px;
+		border-radius: 50%;
+		background: var(--background);
+		box-shadow: 0 1px 3px color-mix(in oklch, var(--foreground) 35%, transparent);
+		transition: transform 0.22s var(--mcp-ease);
+	}
+	.mcp-row[aria-checked='true'] .mcp-sw { background: var(--primary); }
+	.mcp-row[aria-checked='true'] .mcp-sw::after { transform: translateX(18px); background: var(--primary-foreground); }
+	.mcp-row[aria-disabled='true'] { cursor: default; }
+	.mcp-row[aria-disabled='true'] .mcp-lbl > span, .mcp-row[aria-disabled='true'] .mcp-ic { opacity: 0.5; }
+	.mcp-row[aria-disabled='true'] .mcp-sw { opacity: 0.4; }
+
+	/* Stacked rows: label over a segmented control */
+	.mcp-stack { padding: 12px 14px 14px; }
+	.mcp-rowhead { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; font-size: 15px; }
+	.mcp-seg {
+		display: grid;
+		grid-template-columns: repeat(var(--n, 4), minmax(0, 1fr));
+		gap: 3px;
+		padding: 3px;
+		border: 1px solid var(--border);
+		border-radius: calc(var(--radius) * 0.9);
+		background: var(--background);
+	}
+	.mcp-seg button {
+		min-width: 0;
+		min-height: 38px;
+		padding: 4px 2px;
+		overflow: hidden;
+		border: 0;
+		border-radius: calc(var(--radius) * 0.65);
+		background: transparent;
+		color: var(--muted-foreground);
+		font: inherit;
+		font-size: 13.5px;
+		font-weight: 500;
+		line-height: 1.15;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		cursor: pointer;
+		-webkit-tap-highlight-color: transparent;
+		transition: background-color 0.15s, color 0.15s, box-shadow 0.15s;
+	}
+	.mcp-seg button:hover:not(:disabled) { color: var(--foreground); }
+	.mcp-seg button[aria-checked='true'] {
+		background: var(--muted);
+		color: var(--foreground);
+		font-weight: 600;
+		box-shadow: inset 0 0 0 1px var(--border-strong);
+	}
+	.mcp-seg.accent button[aria-checked='true'] {
+		background: color-mix(in oklab, var(--primary) 20%, var(--muted));
+		box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 55%, transparent);
+	}
+	/* No pinned level: the model's default is marked, not selected. */
+	.mcp-seg button.auto { box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 40%, transparent); color: var(--foreground); }
+	.mcp-seg button.danger[aria-checked='true'] {
+		background: color-mix(in oklab, var(--destructive) 18%, var(--muted));
+		color: var(--destructive);
+		box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--destructive) 50%, transparent);
+	}
+	.mcp-seg[aria-busy='true'] button { cursor: wait; opacity: 0.6; }
+	.mcp-help { display: flex; align-items: center; gap: 6px; margin: 9px 2px 0; font-size: 12.5px; color: var(--muted-foreground); }
+	.mcp-help.danger { color: var(--destructive); }
+	.mcp-note { margin: -8px 8px 18px; font-size: 12.5px; color: var(--muted-foreground); }
+	.mcp-note.warn { color: var(--warning); }
+
+	/* Focus */
+	.mcp-row:focus-visible, .mcp-seg button:focus-visible, .mcp-chip:focus-visible, .mcp-back:focus-visible, .act:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: -2px;
+	}
+	.mcp-back:focus-visible, .mcp-chip:focus-visible { outline-offset: 2px; }
+
+	/* Setup rows: the shared ContextPillBar selectors (sheet mode), drawn as
+	   list rows. The labels are generated so the selectors stay the shared
+	   components; their own aria-labels already name each one. Agent and
+	   "Runs on" open their menus on their own pages (menuHost). */
+	.mcp-setup { padding: 0; }
+	.mcp-setup :global(.context-pill-bar.sheet-mode) { display: flex; flex-direction: column; gap: 0; margin: -1px 0 0; }
+	.mcp-setup :global(.sheet-mode .ctx-sep) { display: none; }
+	.mcp-setup :global(.sheet-mode :is(.selector-wrapper, .runner-badge-wrap, .execution-mode-bar, .mode-bar-row, .branch-wt-row, .mode-selector, .branch-selector, .workspace-folder-selector)) {
+		display: flex;
+		flex-direction: column;
+		align-items: stretch;
+		width: 100%;
+		gap: 0;
+		margin: 0;
+		padding: 0;
+	}
+	.mcp-setup :global(.sheet-mode .runner-badge-wrap) { flex-direction: row; flex-wrap: wrap; align-items: center; }
+	.mcp-setup :global(.sheet-mode .ctx-chip) {
+		position: relative;
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		width: 100%;
+		height: auto;
+		min-height: 52px;
+		margin: 0;
+		padding: 10px 14px;
+		border: 0;
+		border-top: 1px solid var(--border);
+		border-radius: 0;
+		background: transparent;
+		color: var(--foreground);
+		font-size: 15px;
+		font-weight: 400;
+		text-align: left;
+		box-shadow: none;
+	}
+	.mcp-setup :global(.sheet-mode button.ctx-chip:not(:disabled)) { cursor: pointer; }
+	.mcp-setup :global(.sheet-mode button.ctx-chip:hover:not(:disabled)) { background: var(--hover-overlay); }
+	.mcp-setup :global(.sheet-mode button.ctx-chip:active:not(:disabled)) { background: var(--muted); }
+	.mcp-setup :global(.sheet-mode .ctx-chip:focus-visible) { outline: 2px solid var(--ring); outline-offset: -2px; }
+	/* Icon tile · name · value · chevron */
+	.mcp-setup :global(.sheet-mode .ctx-chip > svg:first-of-type) {
+		order: 0;
+		box-sizing: border-box;
+		width: 30px;
+		height: 30px;
+		flex: none;
+		padding: 7px;
+		border-radius: calc(var(--radius) * 0.65);
+		background: var(--muted);
+		color: var(--foreground);
 	}
 	.mcp-setup :global(.sheet-mode .ctx-chip::before) {
-		position: absolute;
-		top: 8px;
-		left: 12px;
-		font-size: 11.5px;
-		font-weight: 450;
-		color: var(--muted-foreground);
+		order: 1;
+		flex: 1;
+		min-width: 0;
+		position: static;
+		font-size: 15px;
+		font-weight: 400;
+		color: var(--foreground);
 	}
+	.mcp-setup :global(.sheet-mode .ctx-chip > :not(svg:first-of-type)) { order: 2; }
+	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-label) {
+		flex: 0 1 auto;
+		max-width: 52%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: 14.5px;
+		font-weight: 400;
+		color: var(--muted-foreground);
+		text-align: right;
+	}
+	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-chev),
+	.mcp-setup :global(.sheet-mode .ctx-chip > svg.lucide-chevron-down) { order: 3; transform: rotate(-90deg); width: 16px; height: 16px; color: var(--muted-foreground); }
+	/* Agent and "Runs on" open a page: draw the list chevron. */
+	.mcp-setup :global(.sheet-mode :is(.context-selector-btn, .ctx-chip.runner, .mode-trigger)::after) {
+		content: '';
+		order: 4;
+		width: 8px;
+		height: 8px;
+		flex: none;
+		margin: 0 3px 0 -2px;
+		border-top: 2px solid var(--muted-foreground);
+		border-right: 2px solid var(--muted-foreground);
+		transform: rotate(45deg);
+		opacity: 0.75;
+	}
+	.mcp-setup :global(.sheet-mode :is(.context-selector-btn .ctx-chip-chev, .mode-trigger > svg.lucide-chevron-down)) { display: none; }
 	.mcp-setup :global(.sheet-mode .context-selector-btn::before) { content: 'Agent'; }
 	.mcp-setup :global(.sheet-mode .ctx-chip.runner::before),
 	.mcp-setup :global(.sheet-mode .mode-trigger::before),
-	.mcp-setup :global(.sheet-mode .ctx-chip.readonly:not(.wt-indicator):has(.lucide-monitor)::before) { content: 'Runs on'; }
+	.mcp-setup :global(.sheet-mode .ctx-chip.readonly:not(.wt-indicator):has(.lucide-monitor)::before),
+	.mcp-setup :global(.sheet-mode .ctx-chip.readonly:not(.wt-indicator):has(.lucide-monitor-off)::before) { content: 'Runs on'; }
 	.mcp-setup :global(.sheet-mode .repo-chip::before) { content: 'Project'; }
 	.mcp-setup :global(.sheet-mode .branch-btn::before),
 	.mcp-setup :global(.sheet-mode .branch-trigger::before),
 	.mcp-setup :global(.sheet-mode .ctx-chip.readonly:has(.branch-name)::before) { content: 'Branch'; }
 	.mcp-setup :global(.sheet-mode .wt-indicator::before),
-	.mcp-setup :global(.sheet-mode .wt-chip::before) { content: 'Worktree'; }
-	/* The Project tile names the project; the Branch tile shows the branch alone. */
+	.mcp-setup :global(.sheet-mode .wt-chip::before) { content: 'Worktree'; padding-left: 42px; }
+	.mcp-setup :global(.sheet-mode .degraded::before) { content: 'Runs on'; }
+	/* The Project row names the project; the Branch row shows the branch alone. */
 	.mcp-setup :global(.sheet-mode .branch-btn .project-name),
-	.mcp-setup :global(.sheet-mode .branch-btn .separator),
-	.mcp-setup :global(.sheet-mode .branch-btn > svg:first-child) { display: none; }
-	.mcp-setup :global(.sheet-mode .ctx-chip.runner) { color: var(--foreground); background: var(--card); }
-	.mcp-setup :global(.sheet-mode .ctx-chip.runner.busy) {
-		border-color: color-mix(in oklch, var(--warning) 40%, transparent);
-		background: color-mix(in oklab, var(--warning) 14%, var(--card));
-		color: var(--warning);
-	}
-	.mcp-setup :global(.sheet-mode .queued-cancel) { width: 44px; height: 44px; margin-left: 6px; border-radius: var(--radius); }
-	/* An open move menu takes the whole row so it never runs off the side. */
-	.mcp-setup :global(.sheet-mode .runner-badge-wrap:has(.runner-dropdown)) { grid-column: 1 / -1; }
-	.mcp-setup :global(.sheet-mode .runner-dropdown) { width: 100%; max-width: none; max-height: none; }
-	.mcp-setup :global(.runner-dropdown), .mcp-setup :global(.runner-item) { font-size: 13.5px; }
-	.mcp-setup :global(.runner-item) { min-height: 44px; }
+	.mcp-setup :global(.sheet-mode .branch-btn .separator) { display: none; }
+	.mcp-setup :global(.sheet-mode .ctx-chip.runner) { color: var(--foreground); }
+	.mcp-setup :global(.sheet-mode .ctx-chip.runner svg) { color: inherit; }
+	.mcp-setup :global(.sheet-mode .ctx-chip.runner.busy) { background: color-mix(in oklab, var(--warning) 12%, transparent); }
+	.mcp-setup :global(.sheet-mode .ctx-chip.runner.busy .ctx-chip-label) { color: var(--warning); white-space: normal; text-align: right; }
+	.mcp-setup :global(.sheet-mode .ctx-chip.degraded) { color: var(--warning); }
+	.mcp-setup :global(.sheet-mode .ctx-chip.degraded .ctx-chip-label) { color: var(--warning); }
+	.mcp-setup :global(.sheet-mode .runner-badge-wrap > .ctx-chip.runner) { flex: 1 1 0; width: auto; }
+	.mcp-setup :global(.sheet-mode .queued-cancel) { width: 44px; height: 44px; margin: 0 8px 0 0; border-radius: 50%; }
+	/* A selector that still opens in place (project, branch) drops below its row. */
+	.mcp-setup :global(.sheet-mode :is(.branch-dropdown, .selector-dropdown, .wf-menu)) { margin: 0 10px 10px; }
 
+	/* Pages hosting a selector's own menu (Agent, "Runs on") as a full list. */
+	.mcp-page .mcp-host:empty { display: none; }
+	.mcp-page .mcp-host :global(:is(.selector-dropdown, .runner-dropdown, .mode-dropdown)) {
+		position: static;
+		inset: auto;
+		translate: none;
+		width: 100%;
+		min-width: 0;
+		max-width: none;
+		max-height: none;
+		margin: 0;
+		padding: 0;
+		overflow: hidden;
+		border: 1px solid var(--border);
+		border-radius: var(--mcp-row-radius);
+		background: var(--card);
+		box-shadow: none;
+		animation: none;
+		--selector-scroll-height: none;
+	}
+	.mcp-page .mcp-host :global(:is(.menu-item, .runner-item)) {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		width: 100%;
+		min-height: 52px;
+		margin: 0;
+		padding: 10px 14px;
+		border-radius: 0;
+		font-size: 15px;
+	}
+	.mcp-page .mcp-host :global(:is(.menu-item, .runner-item) + :is(.menu-item, .runner-item, span[hidden] + .runner-item)),
+	.mcp-page .mcp-host :global(span[hidden] + .runner-item) { border-top: 1px solid var(--border); }
+	.mcp-page .mcp-host :global(.menu-item.selected), .mcp-page .mcp-host :global(.runner-item.checked) { background: transparent; color: var(--foreground); font-weight: 600; }
+	.mcp-page .mcp-host :global(.menu-item .check-icon), .mcp-page .mcp-host :global(.worker-row-check) { width: 20px; height: 20px; color: var(--primary); }
+	.mcp-page .mcp-host :global(.menu-divider) { height: 0; margin: 0; border-top: 1px solid var(--border); }
+	.mcp-page .mcp-host :global(.menu-item .item-desc) { font-size: 12.5px; font-weight: 400; margin-top: 1px; }
+	.mcp-page .mcp-host :global(.panel-label) { padding: 10px 14px 4px; }
+	/* A worker that cannot take the chat keeps its greyed name and says why in its tag. */
+	.mcp-page .mcp-host :global(.worker-row-note) { font-size: 11.5px; padding: 3px 8px; border-radius: 999px; }
+	.mcp-page .mcp-host :global(:is(.runner-busy, .runner-error, .runner-loading)) { padding: 12px 14px; font-size: 13.5px; }
+	.mcp-page .mcp-host :global(.runner-item.primary) { color: var(--primary); }
+	.mcp-page .mcp-host :global(.runner-item.danger) { color: var(--destructive); }
+
+	/* Model page: the shared picker, sized to the page. */
 	.mcp-model { display: flex; flex: 1; min-height: 0; --mpp-width: 100%; --mpp-height: 100%; }
 	.mcp-model :global(.mpp-list), .mcp-model :global(.mpp-rail) { touch-action: pan-y; -webkit-overflow-scrolling: touch; }
-	.mcp-export { padding: 4px; border: 1px solid var(--border-subtle); border-radius: var(--radius); background: var(--card); }
 
-	.mcp-foot { flex-shrink: 0; padding: 6px 12px calc(10px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--border-subtle); background: var(--popover); }
-	.actions { display: flex; gap: 4px; }
+	/* Context and usage page: the shared details on a card. */
+	.mcp-usage { padding: 14px; border: 1px solid var(--border); border-radius: var(--mcp-row-radius); background: var(--card); }
+
+	/* Pinned action bar */
+	.mcp-foot { flex-shrink: 0; padding: 10px 14px calc(12px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--border); background: var(--popover); }
+	/* One equal column per action that is actually shown (Call hides itself when the composer has none). */
+	.actions { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 8px; }
 	.act {
 		position: relative;
-		flex: 1 1 0;
-		min-height: 56px;
+		min-width: 0;
+		height: 46px;
 		display: flex;
-		flex-direction: column;
 		align-items: center;
 		justify-content: center;
-		gap: 4px;
-		border: 0;
-		border-radius: var(--radius);
-		background: transparent;
+		gap: 7px;
+		padding: 0 6px;
+		border: 1px solid var(--border);
+		border-radius: calc(var(--radius) * 0.9);
+		background: var(--card);
 		color: var(--foreground);
 		font: inherit;
-		font-size: 11.5px;
+		font-size: 14px;
+		font-weight: 500;
 		cursor: pointer;
+		-webkit-tap-highlight-color: transparent;
+		transition: background-color 0.15s, transform 0.15s;
 	}
+	.act :global(svg) { flex: none; color: var(--muted-foreground); }
 	.act:hover:not(:disabled) { background: var(--hover-overlay); }
-	.act[aria-pressed='true'] { background: color-mix(in oklab, var(--primary) 13%, var(--card)); color: var(--primary); }
+	.act:active:not(:disabled) { transform: scale(0.97); }
+	.act[aria-pressed='true'] { background: color-mix(in oklab, var(--primary) 14%, var(--card)); border-color: color-mix(in oklab, var(--primary) 45%, transparent); }
+	.act[aria-pressed='true'] :global(svg), .act[aria-pressed='true'] .act-label { color: var(--primary); }
 	.act:disabled { opacity: 0.45; cursor: not-allowed; }
-	.act-label { color: var(--muted-foreground); pointer-events: none; }
-	.act[aria-pressed='true'] .act-label { color: var(--primary); }
+	.act-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
+	/* Four actions: icon over label so every name fits at 360px. */
+	.actions:has(:global(.voice-call-btn)):has(> button:nth-of-type(3)) .act { flex-direction: column; gap: 3px; height: 54px; font-size: 12px; }
 	/* Call is the composer's own VoiceCallButton, stretched over the cell. */
 	.call-act :global(.voice-call-btn) {
 		position: absolute;
 		inset: 0;
 		width: 100%;
 		height: 100%;
-		padding-bottom: 18px;
-		display: grid;
-		place-items: center;
+		display: flex;
+		align-items: center;
+		justify-content: flex-start;
+		padding: 0 0 0 calc(50% - 28px);
 		border: 0;
-		border-radius: var(--radius);
+		border-radius: inherit;
 		background: transparent;
-		color: var(--foreground);
+		color: var(--muted-foreground);
 	}
-	.call-act :global(.voice-call-btn svg) { width: 20px; height: 20px; }
-	.call-act .act-label { position: absolute; bottom: 9px; }
-	.call-act:not(:has(.voice-call-btn)) { display: none; }
+	.call-act :global(.voice-call-btn svg) { width: 18px; height: 18px; }
+	.call-act .act-label { padding-left: 25px; }
+	.actions:has(:global(.voice-call-btn)):has(> button:nth-of-type(3)) .call-act :global(.voice-call-btn) { justify-content: center; align-items: flex-start; padding: 9px 0 0; }
+	.actions:has(:global(.voice-call-btn)):has(> button:nth-of-type(3)) .call-act .act-label { padding: 21px 0 0; }
+	.call-act:not(:has(:global(.voice-call-btn))) { display: none; }
 
 	:global(.mcc-spin) { animation: mcc-spin 0.9s linear infinite; }
 	@keyframes mcc-spin { to { transform: rotate(360deg); } }
 
 	@media (prefers-reduced-motion: reduce) {
 		.qpick, .qcell.usage :global(.usage-popover) { animation: none; }
-		.mcp, .mcp.shown, .mcp-scrim, .qcell, .qbar-grip, .usage-grip span, .bar-fill, .tile, .qcell.usage :global(.usage-popover) { transition: none; }
+		.mcp, .mcp.shown, .mcp-scrim, .qcell, .qbar-grip, .usage-grip span, .bar-fill, .tile, .qcell.usage :global(.usage-popover),
+		.mcp-grab, .mcp-back, .mcp-page, .mcp-page:not(.active):not(.under),
+		.mcp-row, .mcp-sw, .mcp-sw::after, .mcp-seg button, .act, .mcp-ring .ring-progress { transition: none; }
+		.mcp-chip.run i { animation: none; }
 		:global(.mcc-spin) { animation: none; }
 	}
 </style>

@@ -8,6 +8,7 @@
  */
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
 import { platform } from '$lib/stores/platform.svelte';
 import '$lib/test-stubs/composer-dom';
@@ -17,6 +18,7 @@ import { api } from '$lib/api/client';
 import { hydrateModelRegistry } from '$lib/constants/models';
 import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 import { __resetWatches } from '$lib/stores/watches';
+import { page } from '$app/state';
 
 vi.hoisted(() => {
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({}) }));
@@ -30,6 +32,7 @@ afterEach(() => {
 	appMode.set('code');
 	activeSession.newChat();
 	__resetWatches();
+	page.state = {};
 	document.querySelectorAll('.mcp-portal').forEach((n) => n.remove());
 });
 
@@ -184,7 +187,7 @@ describe('quick bar', () => {
 });
 
 describe('Chat controls panel', () => {
-	it('opens from Controls, and closes from its chevron, the scrim and Escape', async () => {
+	it('opens from Controls, and closes from its hidden Close button, the scrim and Escape', async () => {
 		const onOpenChange = vi.fn();
 		const view = render(MobileComposerControlsSheet, { props: props({ onOpenChange }) });
 		expect(panel().getAttribute('aria-hidden')).toBe('true');
@@ -193,7 +196,11 @@ describe('Chat controls panel', () => {
 		await view.rerender(props({ onOpenChange, open: true }));
 		expect(panel().getAttribute('aria-hidden')).toBe('false');
 		expect(screen.getByRole('dialog', { name: 'Chat controls' })).toBe(panel());
-		await fireEvent.click(screen.getByRole('button', { name: 'Close chat controls' }));
+		// No visible close: the button is there for keyboards and screen readers only.
+		const close = screen.getByRole('button', { name: 'Close chat controls' });
+		expect(close.classList.contains('mcp-close')).toBe(true);
+		expect(within(panel()).getByRole('heading', { name: 'Chat controls' })).toBeTruthy();
+		await fireEvent.click(close);
 		expect(onOpenChange).toHaveBeenLastCalledWith(false);
 		onOpenChange.mockClear();
 		await fireEvent.click(document.querySelector('.mcp-scrim')!);
@@ -402,7 +409,8 @@ describe('Chat controls panel', () => {
 		render(MobileComposerControlsSheet, { props: props({ open: true, onToggleAway, awayAvailable: false }) });
 		const away = within(panel()).getByRole('switch', { name: 'Away mode' });
 		expect(away.getAttribute('aria-disabled')).toBe('true');
-		expect(away.textContent).toContain('After first message');
+		expect(away.getAttribute('aria-checked')).toBe('false');
+		expect(away.textContent).toContain('Available after the first message');
 		await fireEvent.click(away);
 		expect(onToggleAway).not.toHaveBeenCalled();
 	});
@@ -441,8 +449,13 @@ describe('Chat controls panel', () => {
 			open: true, modelOptions: catalog.options, modelGroups: catalog.groups,
 			modelValue: 'prov:codex:gpt-6.1-sol', modelLabel: 'Sol 6.1', onModelSelect, onContextChoiceSelect
 		}) });
-		await fireEvent.click(within(panel()).getByRole('button', { name: 'Model: Sol 6.1' }));
-		expect(screen.getByRole('dialog', { name: 'Choose model' })).toBe(panel());
+		const row = within(panel()).getByRole('button', { name: 'Model: Sol 6.1' });
+		// The row carries the provider's own mark, not a letter tile.
+		expect(row.querySelector('svg.provider-glyph')).toBeTruthy();
+		await fireEvent.click(row);
+		expect(screen.getByRole('dialog', { name: 'Model' })).toBe(panel());
+		expect(panel().classList.contains('sub')).toBe(true);
+		expect(within(panel()).getByRole('button', { name: 'Back to chat controls' })).toBeTruthy();
 		expect(within(panel()).getByRole('textbox', { name: /Search models/i })).toBeTruthy();
 		await fireEvent.click(within(panel()).getByRole('radio', { name: '1M · Extended' }));
 		expect(onContextChoiceSelect).toHaveBeenLastCalledWith('1m');
@@ -451,17 +464,22 @@ describe('Chat controls panel', () => {
 		await waitFor(() => expect(screen.getByRole('dialog', { name: 'Chat controls' })).toBe(panel()));
 	});
 
-	it('shows a running-tasks summary row that opens the running list', async () => {
+	it('shows a running-tasks chip that opens the running list as a page', async () => {
 		Object.assign(activeSession.current, {
 			activeTasks: [{ id: 'a', subject: 'Agent', status: 'running', kind: 'agent', summary: null, toolUseId: null, startedAt: '', updatedAt: '' }]
 		});
 		activeSession.setDraft('');
 		const onOpenChange = vi.fn();
 		render(MobileComposerControlsSheet, { props: props({ open: true, onOpenChange }) });
+		// The stubbed router never records the panel's history entry; ignore its mount-time close.
+		onOpenChange.mockClear();
 		const row = within(panel()).getByRole('button', { name: '1 running: 1 agent. Open the list' });
-		expect(row.textContent).toContain('1 agent');
+		expect(row.textContent).toContain('1 task running');
 		await fireEvent.click(row);
-		expect(onOpenChange).toHaveBeenLastCalledWith(false);
+		// A page inside the same sheet: the panel stays open.
+		expect(onOpenChange).not.toHaveBeenCalledWith(false);
+		expect(screen.getByRole('dialog', { name: 'Running tasks' })).toBe(panel());
+		expect(within(panel().querySelector<HTMLElement>('[data-page="tasks"]')!).getByRole('searchbox', { name: 'Search tasks' })).toBeTruthy();
 	});
 
 	it('gives the owner\'s watches the same row, without the running badge (#371)', async () => {
@@ -478,7 +496,6 @@ describe('Chat controls panel', () => {
 		render(MobileComposerControlsSheet, { props: props({ open: true }) });
 		const row = await within(panel()).findByRole('button', { name: '2 watches: 1 paused. Open the list' });
 		expect(row.textContent).toContain('2 watches');
-		expect(row.textContent).toContain('1 paused');
 		expect(cell(/^All chat controls$/)).toBeTruthy();
 	});
 
@@ -512,6 +529,72 @@ describe('Chat controls panel', () => {
 		expect(within(panel()).queryByRole('button', { name: /phone|emulator/i })).toBeNull();
 	});
 
+	it('draws Bypass in the destructive colour: value, selected segment and help line', () => {
+		render(MobileComposerControlsSheet, { props: props({ open: true, permissionValue: 'bypassPermissions' }) });
+		const access = within(panel()).getByRole('radiogroup', { name: 'Tool access' });
+		const bypass = within(access).getByRole('radio', { name: 'Bypass' });
+		expect(bypass.getAttribute('aria-checked')).toBe('true');
+		expect(bypass.classList.contains('danger')).toBe(true);
+		const stack = access.closest('.mcp-stack')!;
+		expect(stack.querySelector('.mcp-val')!.classList.contains('danger')).toBe(true);
+		expect(stack.querySelector('.access-help')!.classList.contains('danger')).toBe(true);
+	});
+
+	it('slides a page in, and Back, Escape and a header drag all leave it', async () => {
+		const onOpenChange = vi.fn();
+		render(MobileComposerControlsSheet, { props: props({ open: true, onOpenChange }) });
+		// The stubbed router never records the panel's history entry; ignore its mount-time close.
+		onOpenChange.mockClear();
+		const usage = within(panel()).getByRole('button', { name: /^Context and usage/ });
+		await fireEvent.click(usage);
+		expect(panel().getAttribute('aria-label')).toBe('Context and usage');
+		expect(panel().querySelector('[data-page="usage"]')!.classList.contains('active')).toBe(true);
+		expect(panel().querySelector('[data-page="main"]')!.classList.contains('under')).toBe(true);
+		// Back returns to the list, focused on the row that opened the page.
+		await fireEvent.click(within(panel()).getByRole('button', { name: 'Back to chat controls' }));
+		expect(panel().getAttribute('aria-label')).toBe('Chat controls');
+		await waitFor(() => expect(document.activeElement).toBe(usage));
+		// Escape on a page goes back first, then closes.
+		await fireEvent.click(usage);
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		expect(panel().getAttribute('aria-label')).toBe('Chat controls');
+		expect(onOpenChange).not.toHaveBeenCalledWith(false);
+		// Dragging the header down closes the whole sheet from a page.
+		await fireEvent.click(usage);
+		Object.defineProperty(panel(), 'offsetHeight', { configurable: true, value: 700 });
+		await drag(document.querySelector('.mcp-head')!, 0, 400, { x: 200, y: 120 });
+		expect(onOpenChange).toHaveBeenLastCalledWith(false);
+	});
+
+	it('returns from a page to the list on Android Back, keeping the panel open', async () => {
+		const onOpenChange = vi.fn();
+		page.state = { mobileControls: true };
+		render(MobileComposerControlsSheet, { props: props({ open: true, onOpenChange }) });
+		onOpenChange.mockClear();
+		await fireEvent.click(within(panel()).getByRole('button', { name: /^Context and usage/ }));
+		expect(panel().getAttribute('aria-label')).toBe('Context and usage');
+		// The page pushed its own entry over the panel's; Back pops just that one.
+		page.state = { mobileControls: true, mobileControlsPage: 'usage' };
+		await tick();
+		page.state = { mobileControls: true };
+		await waitFor(() => expect(panel().getAttribute('aria-label')).toBe('Chat controls'));
+		expect(onOpenChange).not.toHaveBeenCalledWith(false);
+	});
+
+	it('opens Export as a page with its button pinned under the choices', async () => {
+		Object.assign(activeSession.current, { sessionId: 'chat-1', messages: [{ role: 'user', content: 'hi' }] });
+		activeSession.setDraft('');
+		render(MobileComposerControlsSheet, { props: props({ open: true }) });
+		await fireEvent.click(within(within(panel()).getByRole('group', { name: 'More actions' })).getByRole('button', { name: 'Export chat' }));
+		expect(panel().getAttribute('aria-label')).toBe('Export chat');
+		const page = panel().querySelector<HTMLElement>('[data-page="export"]')!;
+		const choices = within(page).getByRole('radiogroup', { name: 'Export format' });
+		expect(within(choices).getByRole('radio', { name: /Export for sharing/ }).getAttribute('aria-checked')).toBe('true');
+		await fireEvent.click(within(choices).getByRole('radio', { name: /Private backup/ }));
+		const primary = within(page).getByRole('button', { name: 'Download private backup' });
+		expect(primary.closest('.page-foot')).toBeTruthy();
+	});
+
 	it('shows a Terminal cell only when the worker offers terminals, and it closes the sheet', async () => {
 		const { unmount } = render(MobileComposerControlsSheet, { props: props({ open: true }) });
 		expect(within(panel()).queryByRole('button', { name: 'Terminal' })).toBeNull();
@@ -539,6 +622,8 @@ describe('every chat (#371 step 5)', () => {
 		expect(within(dialog).getByRole('switch', { name: 'Fast mode' })).toBeTruthy();
 		expect(within(dialog).getByRole('switch', { name: 'Away mode' })).toBeTruthy();
 		expect(within(dialog).getByRole('radiogroup', { name: 'Tool access' })).toBeTruthy();
-		expect(within(dialog).getByRole('heading', { name: 'Model and setup' })).toBeTruthy();
+		expect(within(dialog).getByRole('heading', { name: 'Model' })).toBeTruthy();
+		expect(within(dialog).getByRole('heading', { name: 'Permissions' })).toBeTruthy();
+		expect(within(dialog).queryByRole('heading', { name: 'Setup' })).toBeNull();
 	});
 });

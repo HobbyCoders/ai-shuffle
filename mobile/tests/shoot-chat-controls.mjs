@@ -43,7 +43,7 @@ const scenarios = {
 		await page.getByRole('button', { name: /^All chat controls/ }).click();
 		await page.waitForTimeout(500);
 		await shot(page, `${theme}-4-panel`);
-		await page.locator('.mcp-body').evaluate((el) => { el.scrollTop = 0; });
+		await page.locator('.mcp [data-page="main"] .mcp-scroll').evaluate((el) => { el.scrollTop = 0; });
 		await page.waitForTimeout(200);
 		await shot(page, `${theme}-5-panel-top`);
 		await page.getByRole('button', { name: /^Model:/ }).last().click();
@@ -132,9 +132,9 @@ const scenarios = {
 			await shot(page, `${theme}-21-context-${bound}-bar`);
 			await page.getByRole('button', { name: /^All chat controls/ }).click();
 			await page.waitForTimeout(500);
-			console.log(`${bound}: panel row "${await page.locator('.mcp .usage-row .pct').textContent()}"`);
+			console.log(`${bound}: panel row "${await page.locator('.mcp [data-page="main"] .mcp-row:has(.mcp-ring) .mcp-val').textContent()}"`);
 			await shot(page, `${theme}-22-context-${bound}-panel`);
-			await page.locator('.mcp .usage-row').click();
+			await page.locator('.mcp [data-page="main"] .mcp-row:has(.mcp-ring)').click();
 			await page.waitForTimeout(800);
 			await shot(page, `${theme}-23-context-${bound}-details`);
 			await page.close();

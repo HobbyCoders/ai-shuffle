@@ -16,6 +16,11 @@
 	 * that names how many it stops. `onClose` is called by Back, Escape and the
 	 * scrim; the caller unmounts it.
 	 *
+	 * variant="page" is the sheet's content alone (search, filters, Stop all
+	 * and the list) for a host that draws its own page chrome: the phone's
+	 * Chat controls slides it in as its "Running tasks" page. The host owns
+	 * the title, Back and Escape.
+	 *
 	 * Watches (#371 step 3) are the owner's, not this chat's, so every chat
 	 * lists all of them: what each watches, when it last fired and its cost,
 	 * with Pause / Resume and Stop (terminal, so it confirms). Stop all never
@@ -108,8 +113,11 @@
 
 	interface Props {
 		sessionId: string | null | undefined;
-		variant?: 'sheet' | 'inline';
-		/** Close the sheet (Back, Escape, scrim). The caller unmounts it. */
+		variant?: 'sheet' | 'inline' | 'page';
+		/**
+		 * Close the sheet (Back, Escape, scrim). The caller unmounts it. A page
+		 * host also hears it when a row opens a transcript.
+		 */
 		onClose?: () => void;
 	}
 
@@ -287,7 +295,7 @@
 	// ── Live clock ────────────────────────────────────────────────────────────
 	let now = $state(Date.now());
 	let timer: ReturnType<typeof setInterval> | null = null;
-	const sheetVisible = $derived(variant === 'sheet' || ownSheetOpen);
+	const sheetVisible = $derived(variant === 'sheet' || variant === 'page' || ownSheetOpen);
 	const onScreen = $derived(sheetVisible || (variant === 'inline' && inlineOpen && !mobileShell));
 	// Elapsed times tick each second; a watch's "Fired 5m ago" needs far less.
 	const tickMs = $derived(!onScreen ? 0 : hasRunning ? 1000 : watchRows.length ? 30_000 : 0);
@@ -564,7 +572,7 @@
 		confirmingWatch = null;
 		movingWatch = null;
 		prefOpen = null;
-		if (variant === 'sheet') {
+		if (variant === 'sheet' || variant === 'page') {
 			onClose?.();
 			return;
 		}
@@ -584,6 +592,18 @@
 			void tick().then(() => el.focus({ preventScroll: true }));
 		}
 	});
+
+	/** In a host page, Escape first backs out of an open confirm; otherwise the host's Back. */
+	function onPageKeydown(event: KeyboardEvent) {
+		if (event.key !== 'Escape' || !(confirmingAll || confirmingSwarm || confirmingWatch || movingWatch || prefOpen)) return;
+		event.preventDefault();
+		event.stopPropagation();
+		if (confirmingAll) confirmingAll = false;
+		else if (confirmingSwarm) confirmingSwarm = null;
+		else if (confirmingWatch) confirmingWatch = null;
+		else if (movingWatch) movingWatch = null;
+		else prefOpen = null;
+	}
 
 	function onSheetKeydown(event: KeyboardEvent) {
 		if (event.key === 'Escape') {
@@ -1127,90 +1147,101 @@
 			tabindex="-1"
 			onkeydown={onSheetKeydown}
 		>
-			<header class="rt-head">
-				<div class="rt-top">
-					<button bind:this={closeRef} type="button" class="icon-btn back" aria-label="Close running tasks" onclick={closeSheet}>
-						<ArrowLeft size={20} class="back-arrow" /><X size={18} class="back-x" />
-					</button>
-					<div class="rt-title">
-						<h2 id="{titleId}-title">Running tasks</h2>
-						<p aria-live="polite">{counts.running ? `${counts.running} running · ${fullSummary}` : fullSummary}</p>
-					</div>
-					<button
-						type="button"
-						class="stop-all"
-						disabled={stopScope.length === 0 || confirmingAll}
-						aria-label="Stop all{stopScope.length ? `: ${plural(stopScope.length, 'task')}` : ''}"
-						onclick={() => (confirmingAll = true)}
-					>Stop all</button>
-				</div>
-				{#if confirmingAll}
-					<div class="confirm" role="alertdialog" aria-labelledby="{titleId}-confirm">
-						<span id="{titleId}-confirm">{stopAllQuestion(stopScope.length, filter)}</span>
-						<button type="button" class="btn ghost" onclick={() => (confirmingAll = false)}>Cancel</button>
-						<button type="button" class="btn danger" onclick={stopAll}>Stop {stopScope.length}</button>
-					</div>
-				{/if}
-				<label class="rt-search">
-					<Search size={16} aria-hidden="true" />
-					<input type="search" placeholder="Search tasks" aria-label="Search tasks" bind:value={query} autocomplete="off" />
-					{#if query}
-						<button type="button" class="clear" aria-label="Clear search" onclick={() => (query = '')}><X size={14} /></button>
-					{/if}
-				</label>
-				<div class="rt-chips" role="group" aria-label="Show" class:four={filters.length > 3}>
-					{#each filters as f (f.id)}
-						<button
-							type="button"
-							class="chip"
-							aria-pressed={filter === f.id}
-							aria-label="{f.label}, {filterCount(f.id)}"
-							onclick={() => pickFilter(f.id)}
-						><span class="chip-label">{f.label}</span><span class="chip-count">{filterCount(f.id)}</span></button>
-					{/each}
-				</div>
-			</header>
-			<div class="rt-list">
-				{#if swarmError && sessionSwarms.length}
-					<p class="rt-warn" role="status">Swarm status could not be refreshed. <button type="button" class="link" onclick={() => sessionId && swarms.hydrate(sessionId)}>Retry</button></p>
-				{/if}
-				{#if $watches.error}
-					<!-- Shown even with no rows: a failed first load must not read as "no watches". -->
-					<p class="rt-warn" role="status" data-testid="watches-error">
-						{watchesUnknown ? 'Watches could not be loaded.' : 'Watches could not be refreshed.'}
-						<button type="button" class="link" onclick={() => watches.refresh()}>Retry</button>
-					</p>
-				{/if}
-				{#if shown.length === 0 && shownWatches.length === 0}
-					<div class="rt-empty">
-						{#if confirmedEmpty}<CircleCheck size={28} aria-hidden="true" />{/if}
-						<p>{emptyMessage}</p>
-					</div>
-					{#if filter === 'watches' && !watchesUnknown && showPreference}
-						<div class="empty-pref">{@render preferenceButton('roomy')}</div>
-						<div class="empty-pref-body">{@render preferencePicker('roomy')}</div>
-					{/if}
-				{:else}
-					{@render groupView('Agents', groups.agents, 'roomy', 'agents')}
-					{@render groupView('Shell', groups.shell, 'roomy', 'shell')}
-					{@render watchGroup(shownWatches, 'roomy')}
-				{/if}
-				{#if showFinished && sessionId}
-					<details class="finished">
-						<summary>
-							<ChevronDown size={14} class="finished-chev" aria-hidden="true" />
-							<span>Finished swarms</span> <span class="group-count">{finishedSwarms}</span>
-						</summary>
-						<div class="finished-body"><SwarmHistory {sessionId} finishedOnly /></div>
-					</details>
-				{/if}
-			</div>
+			{@render sheetContent(false)}
 		</div>
+	</div>
+{/snippet}
+
+{#snippet sheetContent(embedded: boolean)}
+	<header class="rt-head">
+		<div class="rt-top">
+			{#if !embedded}
+				<button bind:this={closeRef} type="button" class="icon-btn back" aria-label="Close running tasks" onclick={closeSheet}>
+					<ArrowLeft size={20} class="back-arrow" /><X size={18} class="back-x" />
+				</button>
+			{/if}
+			<div class="rt-title">
+				{#if !embedded}<h2 id="{titleId}-title">Running tasks</h2>{/if}
+				<p aria-live="polite">{counts.running ? `${counts.running} running · ${fullSummary}` : fullSummary}</p>
+			</div>
+			<button
+				type="button"
+				class="stop-all"
+				disabled={stopScope.length === 0 || confirmingAll}
+				aria-label="Stop all{stopScope.length ? `: ${plural(stopScope.length, 'task')}` : ''}"
+				onclick={() => (confirmingAll = true)}
+			>Stop all</button>
+		</div>
+		{#if confirmingAll}
+			<div class="confirm" role="alertdialog" aria-labelledby="{titleId}-confirm">
+				<span id="{titleId}-confirm">{stopAllQuestion(stopScope.length, filter)}</span>
+				<button type="button" class="btn ghost" onclick={() => (confirmingAll = false)}>Cancel</button>
+				<button type="button" class="btn danger" onclick={stopAll}>Stop {stopScope.length}</button>
+			</div>
+		{/if}
+		<label class="rt-search">
+			<Search size={16} aria-hidden="true" />
+			<input type="search" placeholder="Search tasks" aria-label="Search tasks" bind:value={query} autocomplete="off" />
+			{#if query}
+				<button type="button" class="clear" aria-label="Clear search" onclick={() => (query = '')}><X size={14} /></button>
+			{/if}
+		</label>
+		<div class="rt-chips" role="group" aria-label="Show" class:four={filters.length > 3}>
+			{#each filters as f (f.id)}
+				<button
+					type="button"
+					class="chip"
+					aria-pressed={filter === f.id}
+					aria-label="{f.label}, {filterCount(f.id)}"
+					onclick={() => pickFilter(f.id)}
+				><span class="chip-label">{f.label}</span><span class="chip-count">{filterCount(f.id)}</span></button>
+			{/each}
+		</div>
+	</header>
+	<div class="rt-list">
+		{#if swarmError && sessionSwarms.length}
+			<p class="rt-warn" role="status">Swarm status could not be refreshed. <button type="button" class="link" onclick={() => sessionId && swarms.hydrate(sessionId)}>Retry</button></p>
+		{/if}
+		{#if $watches.error}
+			<!-- Shown even with no rows: a failed first load must not read as "no watches". -->
+			<p class="rt-warn" role="status" data-testid="watches-error">
+				{watchesUnknown ? 'Watches could not be loaded.' : 'Watches could not be refreshed.'}
+				<button type="button" class="link" onclick={() => watches.refresh()}>Retry</button>
+			</p>
+		{/if}
+		{#if shown.length === 0 && shownWatches.length === 0}
+			<div class="rt-empty">
+				{#if confirmedEmpty}<CircleCheck size={28} aria-hidden="true" />{/if}
+				<p>{emptyMessage}</p>
+			</div>
+			{#if filter === 'watches' && !watchesUnknown && showPreference}
+				<div class="empty-pref">{@render preferenceButton('roomy')}</div>
+				<div class="empty-pref-body">{@render preferencePicker('roomy')}</div>
+			{/if}
+		{:else}
+			{@render groupView('Agents', groups.agents, 'roomy', 'agents')}
+			{@render groupView('Shell', groups.shell, 'roomy', 'shell')}
+			{@render watchGroup(shownWatches, 'roomy')}
+		{/if}
+		{#if showFinished && sessionId}
+			<details class="finished">
+				<summary>
+					<ChevronDown size={14} class="finished-chev" aria-hidden="true" />
+					<span>Finished swarms</span> <span class="group-count">{finishedSwarms}</span>
+				</summary>
+				<div class="finished-body"><SwarmHistory {sessionId} finishedOnly /></div>
+			</details>
+		{/if}
 	</div>
 {/snippet}
 
 {#if variant === 'sheet'}
 	{@render sheet()}
+{:else if variant === 'page'}
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div class="rt-page" class:mobile={mobileShell} onkeydown={onPageKeydown}>
+		{@render sheetContent(true)}
+	</div>
 {:else if hasContent}
 	{#if mobileShell}
 		<!-- Phone: one summary row; the full list opens as a sheet. -->
@@ -1989,6 +2020,11 @@
 
 	/* Phone: the sheet is a full-height page. */
 	.rt-layer.mobile { align-items: stretch; justify-content: stretch; }
+	/* In a host page: the host draws the title and Back; the summary line,
+	   Stop all, search and filters lead the page. */
+	.rt-page { display: flex; flex-direction: column; flex: 1; min-height: 0; background: var(--background); color: var(--foreground); }
+	.rt-page .rt-head { padding: 4px 12px 10px; }
+	.rt-page .rt-top { grid-template-columns: minmax(0, 1fr) auto; padding-left: 4px; }
 	.rt-layer.mobile .rt-sheet {
 		width: 100%;
 		height: 100%;

@@ -80,7 +80,7 @@ describe('mobile tool-access persistence', () => {
 		await fireEvent.click(access.getByRole('radio', { name: 'Accept edits' }));
 		expect(put).toHaveBeenCalledWith('/sessions/mobile-permissions/permission-mode', { permission_mode: 'acceptEdits' });
 		expect(access.getByRole('radio', { name: 'Ask' }).getAttribute('aria-checked')).toBe('true');
-		expect(access.getAllByRole('radio')[0].closest('.tile')!.querySelector('.access-help')).toBeTruthy();
+		expect(access.getAllByRole('radio')[0].closest('[data-row="access"]')!.querySelector('.access-help')?.textContent).toContain('Saving');
 		for (const button of access.getAllByRole('radio')) expect((button as HTMLButtonElement).disabled).toBe(true);
 		acknowledge({ permission_mode: 'acceptEdits' });
 		await waitFor(() => expect(access.getByRole('radio', { name: 'Accept edits' }).getAttribute('aria-checked')).toBe('true'));
