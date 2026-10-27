@@ -1,6 +1,7 @@
 import type { Readable } from 'svelte/store';
 import { notify } from '$lib/stores/notifications';
 import type { VoiceCallStatus, VoiceCallStoreState } from './voiceCall';
+import { APP_UPDATED_MESSAGE, reportChunkLoadFailure } from './app-update';
 
 type CallOutcome = Pick<VoiceCallStoreState, 'status' | 'sessionId' | 'error' | 'notice'>;
 
@@ -22,10 +23,15 @@ function clearOutcome(): void {
 
 function showOutcome(message: string, severity: 'error' | 'warning', sessionId: string | null): void {
 	clearOutcome();
+	// The worker updated under this page and the call's code is gone: the
+	// only way forward is a reload, so the banner offers it.
+	const stale = message === APP_UPDATED_MESSAGE;
 	outcomeBanner = notify.banner(message, {
-		severity,
-		persist: true,
+		severity: stale ? 'warning' : severity,
+		category: stale ? 'app-update' : undefined,
+		persist: !stale,
 		session_id: sessionId ?? undefined,
+		action: stale ? { label: 'Reload', onClick: () => window.location.reload() } : undefined,
 	});
 }
 
@@ -92,7 +98,10 @@ export function watchCallOutcomes(source: Readable<CallOutcome>): void {
  */
 export function reportCallStartFailure(error: unknown, sessionId: string | null): void {
 	const detail = (error as { detail?: unknown } | null)?.detail;
-	const message = typeof detail === 'string' && detail
+	// A missing chunk: the worker updated under this page (app-update.ts).
+	const message = reportChunkLoadFailure(error)
+		? APP_UPDATED_MESSAGE
+		: typeof detail === 'string' && detail
 		? detail
 		: error instanceof Error && error.message
 			? error.message

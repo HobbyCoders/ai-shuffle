@@ -37,6 +37,7 @@
 	import { appData } from '$lib/stores/app-data.svelte';
 	import { initDesktop } from '$lib/services/desktop';
 	import { installFileLinkGuard } from '$lib/utils/file-link-guard';
+	import { appUpdateMonitor, installAppUpdateWatch } from '$lib/services/app-update-watch';
 	let teardownLiveSync: (() => void) | undefined;
 	let teardownDesktop: (() => void) | null = null;
 
@@ -57,23 +58,18 @@
 	let teardownErrorHandlers: (() => void) | null = null;
 	let teardownVisualViewport: (() => void) | null = null;
 	let teardownFileLinks: (() => void) | null = null;
+	let teardownAppUpdates: (() => void) | null = null;
 
-	// When a new build activates while THIS tab is visible, the PWA store defers
-	// the reload (so it can't wipe an in-progress composer draft) and flips
-	// `updateReady`. Surface that as a non-blocking, sticky banner whose action
-	// applies the update on demand. Fires once per pending update.
 	// The composer's default model follows which providers can run (see getDefaultModel).
 	$effect(() => { setReadyProviders($agentGate?.ready_providers ?? null); });
 
-	let updateBannerShown = false;
+	// When a new build activates while THIS tab is visible, the PWA store defers
+	// the reload (so it can't wipe an in-progress composer draft) and flips
+	// `updateReady`. The app-update watcher owns the one "App updated — Reload"
+	// banner every client shows (the phone UI has no service worker and finds
+	// a new build through its version check), so hand it the news.
 	$effect(() => {
-		if (pwa.current.updateReady && !updateBannerShown) {
-			updateBannerShown = true;
-			notify.banner('A new version is ready — click to refresh', {
-				duration_ms: 0,
-				action: { label: 'Refresh', onClick: () => pwa.applyUpdate() }
-			});
-		}
+		if (pwa.current.updateReady) appUpdateMonitor()?.markStale();
 	});
 
 	// Auth poll: detects gh login/logout happening in a terminal.
@@ -180,6 +176,9 @@
 		// shown by the phone apps) gets no service worker and drops a stale one.
 		if (!mobileApp) pwa.init();
 		else void pwa.removeAppServiceWorkers();
+		// Every client, the phone UI included: notice when the worker serves a
+		// newer build than this page runs, and reload or offer to (#707).
+		teardownAppUpdates = installAppUpdateWatch();
 
 		// Funnel uncaught frontend errors into the durable error_log so agents
 		// can read them via GetAppErrors. Gated on auth inside the reporter.
@@ -205,6 +204,8 @@
 		teardownVisualViewport = null;
 		teardownFileLinks?.();
 		teardownFileLinks = null;
+		teardownAppUpdates?.();
+		teardownAppUpdates = null;
 	});
 </script>
 

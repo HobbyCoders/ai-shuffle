@@ -5,6 +5,7 @@ vi.mock('$lib/stores/auth.svelte', () => ({ auth: { current: { status: { authent
 import { api } from '$lib/api/client';
 import { notify, notifications } from '$lib/stores/notifications';
 import { createCallOutcomeReporter, reportCallStartFailure, watchCallOutcomes } from './voiceCallOutcome';
+import { APP_UPDATED_MESSAGE } from './app-update';
 
 beforeEach(() => {
 	for (const n of notifications.current.live) notify.dismissLive(n.id);
@@ -94,6 +95,31 @@ it('a call-button failure shares the banner and the next call clears it', () => 
 	expect(live()).toEqual([expect.objectContaining({ severity: 'error', message: 'End the current voice call before starting another.' })]);
 	report(connecting('s'));
 	expect(live()).toEqual([]);
+});
+
+// #707: the worker updated under the page and the call's code was gone. The
+// browser's import error is meaningless to the user; the way forward is a reload.
+it('a start that failed on a missing chunk says the app was updated, with a Reload', () => {
+	const reload = vi.fn();
+	vi.stubGlobal('location', { ...window.location, reload });
+	try {
+		reportCallStartFailure(new TypeError('Failed to fetch dynamically imported module: https://w.example/_app/immutable/chunks/Old.js'), 'fresh');
+		const [banner] = live();
+		expect(banner).toMatchObject({ severity: 'warning', message: APP_UPDATED_MESSAGE, session_id: 'fresh', action: { label: 'Reload' } });
+		// Nothing for the inbox: after the reload the reason no longer applies.
+		expect(api.post).not.toHaveBeenCalled();
+		banner.action!.onClick();
+		expect(reload).toHaveBeenCalledTimes(1);
+	} finally {
+		vi.unstubAllGlobals();
+	}
+});
+
+it('an ending carrying the app-updated reason gets the Reload too', () => {
+	const report = createCallOutcomeReporter();
+	report(connecting('s'));
+	report(failed('s', APP_UPDATED_MESSAGE));
+	expect(live()).toEqual([expect.objectContaining({ message: APP_UPDATED_MESSAGE, action: expect.objectContaining({ label: 'Reload' }) })]);
 });
 
 // The reviewed bug: every ChatView built its own reporter, and the call store

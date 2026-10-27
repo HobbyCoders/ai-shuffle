@@ -26,6 +26,7 @@ import { hydrateModelRegistry } from '$lib/constants/models';
 import { notify } from '$lib/stores/notifications';
 import { feedController } from '$lib/stores/session/v2/feed-controller';
 import { lastGetFailed, lastGetStartedAt, startupDedupeEnabled } from '$lib/api/client';
+import { reportServerReconnected } from './app-update';
 
 /** The read that answers each resource-sync name, for the first sync_ready. */
 const FIRST_SYNC_READS: Record<string, string> = {
@@ -132,7 +133,8 @@ export function startLiveSync() {
    if (data.type === 'sync_ready') {
     attempts = 0;
     const first = !syncedBefore;
-    if (syncedBefore) resyncFeedAfterGap();
+    // A reconnect after a gap: the worker may have restarted on a new build.
+    if (syncedBefore) { resyncFeedAfterGap(); reportServerReconnected(); }
     syncedBefore = true;
     if (first && startupDedupeEnabled()) {
      // Nothing to catch up on yet (sync_reconcile repairs a missed change):
