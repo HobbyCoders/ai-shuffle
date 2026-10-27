@@ -1051,9 +1051,50 @@ def test_resume_refuses_a_folder_left_by_a_stopped_archive(repo, worker_runtime)
     git(base, "update-ref", "refs/fluid-archive/chore/task-stopped", git(path, "rev-parse", "HEAD"))
     ok, note = worker_checkout.restore_worker_checkout("stopped")
     assert ok is False
-    assert "removal stopped part-way" in note and "refs/fluid-archive/chore/task-stopped" in note
+    assert "cleanup may have stopped part-way" in note and "refs/fluid-archive/chore/task-stopped" in note
     assert "branch chore/task-stopped-restored refs/fluid-archive/chore/task-stopped" in note
     assert worker_checkout.restore_reclaimed_worker_checkout("stopped") is False
+
+
+def test_restore_onto_existing_branch_explains_the_retained_archive(repo, worker_runtime):
+    row, parent, base, _ = repo
+    worker_runtime.work["restored"] = commit_in
+    outcome = dispatch(worker="restored")
+    assert outcome.ok, outcome.error
+    path = Path(database.get_session("restored")["worktree_path"])
+    head = git(path, "rev-parse", "HEAD")
+    ref = "refs/fluid-archive/chore/task-restored"
+    snapshot = git(base, "commit-tree", head + "^{tree}", "-p", head, "-m", "archived snapshot")
+    git(base, "update-ref", ref, snapshot)
+    assert git_service.remove_worktree(str(base), str(path), force=False)
+    assert worker_checkout.restore_worker_checkout("restored") == (True, None)
+    assert git(path, "rev-parse", "HEAD") == head
+    assert git(base, "rev-parse", ref) == snapshot  # branch doesn't hold this snapshot
+    ok, note = worker_checkout.restore_worker_checkout("restored")
+    assert ok is False
+    assert "a restore retained the snapshot" in note and ref in note
+    assert "was archived but removal stopped" not in note
+    assert "Dispatch a new Task" in note
+
+
+def test_untouched_finish_keeps_the_only_ref_to_a_parent_commit(repo, worker_runtime):
+    row, parent, base, parent_tip = repo
+    published = git(base, "rev-parse", "refs/remotes/origin/parent-branch")
+
+    def parent_drops_tip(path):
+        # Move the test parent's ref back during the worker's turn, without
+        # touching the worker's clean checkout or its single-entry reflog.
+        git(base, "update-ref", "refs/heads/parent-branch", published, parent_tip)
+
+    worker_runtime.work["only-ref"] = parent_drops_tip
+    outcome = dispatch(worker="only-ref")
+    assert outcome.ok, outcome.error
+    path = Path(database.get_session("only-ref")["worktree_path"])
+    assert path.is_dir()
+    assert git(path, "status", "--porcelain") == ""
+    assert git(base, "for-each-ref", "--format=%(refname)", "--contains", parent_tip) == "refs/heads/chore/task-only-ref"
+    assert not worker_checkout.reclaim_untouched_worker_checkout("only-ref")
+    assert git(base, "rev-parse", "chore/task-only-ref") == parent_tip
 
 
 def test_reviewer_finish_keeps_a_starting_commit_only_its_branch_holds(repo, worker_runtime, monkeypatch):

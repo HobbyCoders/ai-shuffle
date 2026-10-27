@@ -426,12 +426,15 @@ clipboard text and nothing else; the server does all the cleaning:
    includes ESC, so the text cannot close the bracketed-paste wrapper or send
    ^C/^D.
 3. Trailing newlines are stripped.
-4. The server waits (up to 5 s) for the shell to be at its prompt, then
-   refuses with `409 terminal_busy` if a command holds the terminal.
+4. The server waits (up to 5 s) for the shell's prompt or quiet output, then
+   refreshes foreground status. A running program can receive a single cleaned
+   line (including a hidden password prompt or REPL); it never gets a multi-line
+   paste or a bracketed wrapper. The paste does not send Enter.
 5. The text is sent as `ESC[200~` + text + `ESC[201~` only when it is
    certain bash's readline will hold it. Embedded newlines then stay in the
    line editor and nothing runs until the user presses Enter.
    `mode: "bracketed"`. All of these must be true at paste time:
+   - no other foreground program holds the terminal;
    - the terminal was created as `bash` (the shell kind recorded at
      creation; `sh` never gets the wrapper);
    - the most recent bracketed-paste mode sequence in the output was "on"
@@ -462,7 +465,7 @@ clipboard text and nothing else; the server does all the cleaning:
 {"mode": "bracketed", "terminal": {"id": "term_…", "…": "…"}}
 ```
 
-Errors: `paste_too_large`, `terminal_exited`, `terminal_busy`,
+Errors: `paste_too_large`, `terminal_exited`,
 `paste_multiline_unsupported`, `terminal_unresponsive`, `not_found`.
 
 Clients must use this route for clipboard paste. Text sent as WebSocket
@@ -614,7 +617,6 @@ text and output are never logged.
 | `not_found` | 404 | That terminal is closed or never existed. |
 | `not_exited` | 409 | This terminal is still running. Close it or wait for it to exit. |
 | `terminal_exited` | 409 | This terminal has exited. Restart it to type again. |
-| `terminal_busy` | 409 | A command is running in this terminal. Paste when it's back at the prompt. |
 | `terminal_unresponsive` | 409 | The terminal isn't reading input right now. Try again in a moment. |
 | `paste_too_large` | 413 | That's too much text to paste at once (limit 256 KB). |
 | `paste_multiline_unsupported` | 422 | This shell can't hold a multi-line command without running it. Paste one line, or use bash. (sh) / This terminal can't hold a multi-line command without running it right now (bash's line editor or its bracketed paste is off). Paste one line. (bash) |

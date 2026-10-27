@@ -37,6 +37,26 @@ def worker(runtime, owner, worker_id, name="Helper", roster_name=None):
     return engine
 
 
+async def test_resume_unavailable_preserves_archive_restore_note(runtime, monkeypatch):
+    from unittest.mock import Mock
+    from app.core import provider_agent, worker_checkout, worktree_reclaim
+    from app.db import sessions
+
+    target = "archived-worker"
+    note = ("Its checkout could not be restored; " +
+            worktree_reclaim.archive_note("/fixture/project", "chore/task-" + target))
+    monkeypatch.setattr(sessions, "get_session", lambda sid: {"id": sid})
+    monkeypatch.setattr(turn_scheduler, "_latest_context_turn", lambda sid: {"id": "turn", "profile_id": "coder"})
+    monkeypatch.setattr(provider_agent, "final_turn_outcome", lambda sid: {})
+    monkeypatch.setattr(turn_scheduler, "_turn_terminal_payload", lambda *args: {})
+    restore = Mock(return_value=(False, note))
+    monkeypatch.setattr(worker_checkout, "restore_worker_checkout", restore)
+    refusal = await messaging.resume_unavailable(target, {"status": "completed"})
+    assert refusal == note
+    assert "refs/fluid-archive/chore/task-archived-worker" in refusal
+    restore.assert_called_once_with(target)
+
+
 @pytest.mark.parametrize("address", ["Helper", "worker", "Helper [worker]"])
 async def test_task_roster_and_delivery(runtime, address):
     engine = worker(runtime, "parent", "worker")

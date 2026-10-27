@@ -434,23 +434,51 @@ async def test_bash_without_readline_ignores_a_stale_bracketed_on(reg, tmp_path,
     assert _ran(tmp_path) == []
 
 
-async def test_busy_terminal_refuses_paste(reg, tmp_path):
+@pytest.mark.parametrize("read_flags", ["", "-s", "-e"])
+async def test_busy_read_accepts_paste_only_after_enter(reg, tmp_path, read_flags):
+    term = await reg.create(created_by="owner", cwd=str(tmp_path), shell="bash")
+    await _ready(term)
+    # A child bash holds the foreground PTY while read waits, including hidden
+    # password-style input and readline. The ready marker isn't in the echo.
+    command = ('bash --noprofile --norc -c \'printf "INPUT_%s" READY; '
+               f'IFS= read -r {read_flags} value; '
+               'printf "\\nRECEIVED:%s\\n" "$value"\'\n')
+    await term.write(command.encode())
+    assert await _until(lambda: b"INPUT_READY" in term.scrollback.snapshot())
+    term.refresh_busy()
+    assert term.busy
+    with pytest.raises(T.TerminalError) as err:
+        await reg.paste(term.id, "first line\nsecond line")
+    assert err.value.code == "paste_multiline_unsupported" and err.value.status == 422
+    assert await reg.paste(term.id, "input-canary\r\n\x03") == "plain"
+    await asyncio.sleep(0.2)
+    assert b"RECEIVED:input-canary" not in term.scrollback.snapshot()
+    term.refresh_busy()
+    assert term.busy  # paste did not submit the input or send Ctrl-C
+    await term.write(b"\r")
+    assert await _until(lambda: b"RECEIVED:input-canary" in term.scrollback.snapshot())
+
+
+async def test_busy_program_cannot_claim_safe_multiline_paste(reg, tmp_path):
+    term = await reg.create(created_by="owner", cwd=str(tmp_path), shell="bash")
+    await _ready(term)
+    await term.write(b'bash -c \'stty -icanon -echo; printf "\\033[?2004hINPUT_%s" READY; sleep 20\'\n')
+    assert await _until(lambda: b"INPUT_READY" in term.scrollback.snapshot())
+    term.refresh_busy()
+    assert term.busy and term.holds_bracketed_paste()
+    with pytest.raises(T.TerminalError) as err:
+        await reg.paste(term.id, "first\nsecond")
+    assert err.value.code == "paste_multiline_unsupported"
+
+
+async def test_paste_size_limit_still_applies_while_busy(reg, tmp_path):
     term = await reg.create(created_by="owner", cwd=str(tmp_path), shell="bash")
     await _ready(term)
     await term.write(b"sleep 20\n")
-    assert await _until(lambda: term.refresh_busy() or term.busy)
+    assert await _until(lambda: (term.refresh_busy(), term.busy)[1])
     with pytest.raises(T.TerminalError) as err:
-        await reg.paste(term.id, "echo nope")
-    assert err.value.code == "terminal_busy"
-    # Ctrl-C sent between bash's fork and sleep's exec is swallowed by the
-    # child (it still has bash's SIGINT handling), so keep sending it until
-    # the shell has the terminal back, as a person would.
-    deadline = asyncio.get_running_loop().time() + 8.0
-    while asyncio.get_running_loop().time() < deadline:
-        await term.write(b"\x03")
-        if await _until(lambda: (term.refresh_busy(), not term.busy)[1], timeout=0.5):
-            break
-    assert (term.refresh_busy(), not term.busy)[1]
+        await reg.paste(term.id, "x" * (T.PASTE_MAX_CHARS + 1))
+    assert err.value.code == "paste_too_large" and err.value.status == 413
 
 
 async def test_close_kills_the_whole_process_session(reg, tmp_path):

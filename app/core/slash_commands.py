@@ -32,6 +32,7 @@ class SlashCommand:
     disable_model_invocation: bool = False
     type: str = "custom"
     user_invocable: bool = True
+    expand_in_app: bool = False  # Delegated commands not installed in Claude Code.
 
     def get_display_name(self) -> str:
         """Get display name with leading /"""
@@ -199,7 +200,7 @@ def _scan_commands_directory(
 
 
 def _delegated_commands(working_dir: str, setting_sources=None) -> List[SlashCommand]:
-    """Read Claude's selected settings and package roots, never Fluid's plugins."""
+    """Claude's own commands, plus approved app-authored plugin commands."""
     from fluid.context.plugins import discover_plugins
     from fluid.context.settings_stack import _load_json, merge_settings, project_dirs
     from app.core.plugin_models import _get_claude_dir
@@ -238,6 +239,10 @@ def _delegated_commands(working_dir: str, setting_sources=None) -> List[SlashCom
                     cmd.type = kind
                     if kind != "skill" or cmd.user_invocable:
                         by_name.setdefault(cmd.name, cmd)
+    for cmd in _fluid_commands(working_dir, setting_sources, authored_only=True):
+        cmd.expand_in_app = True
+        # Claude's own commands keep their precedence and CLI execution path.
+        by_name.setdefault(cmd.name, cmd)
     return list(by_name.values())
 
 
@@ -248,8 +253,8 @@ def _runtime_commands(working_dir, provider_kind, setting_sources):
     return discover(working_dir, setting_sources)
 
 
-def _fluid_commands(working_dir: str, setting_sources=None) -> List[SlashCommand]:
-    """Use the native runtime's discovery, including its plugin settings stack."""
+def _fluid_commands(working_dir: str, setting_sources=None, *, authored_only=False) -> List[SlashCommand]:
+    """Use native discovery and approval checks, optionally only authored plugins."""
     from fluid.context.instructions import discover_commands as native_commands
     from fluid.context.instructions import discover_skills as native_skills
     from fluid.context.plugins import discover_plugins
@@ -259,7 +264,12 @@ def _fluid_commands(working_dir: str, setting_sources=None) -> List[SlashCommand
     project_on = "project" in sources
     # Native prompt compilation and the Skill tool gate plugins on user scope.
     plugins = discover_plugins(working_dir, sources=sources) if user_on else []
-    options = dict(include_global=user_on, include_project=project_on,
+    if authored_only:
+        from fluid.context.plugin_authoring import AUTHORED_SOURCE
+
+        plugins = [plugin for plugin in plugins if plugin.marketplace == AUTHORED_SOURCE]
+    options = dict(include_global=user_on and not authored_only,
+                   include_project=project_on and not authored_only,
                    include_plugins=True, plugins=plugins)
     plugin_sources = {entry.path: plugin.ref for plugin in plugins
                       for entry in [*plugin.commands, *plugin.skills]}
@@ -327,6 +337,17 @@ def expand_native_command(working_dir: str, prompt: str, *, setting_sources=None
         return prompt
     cmd = get_command_by_name(working_dir, name, provider_kind="native", setting_sources=setting_sources)
     if cmd is None:
+        return prompt
+    return expand_command_prompt(cmd, arguments)
+
+
+def expand_delegated_command(working_dir: str, prompt: str, *, setting_sources=None) -> str:
+    """Expand app-authored plugins; leave Claude's own commands exactly as typed."""
+    name, arguments = parse_command_input(prompt)
+    if not name:
+        return prompt
+    cmd = get_command_by_name(working_dir, name, setting_sources=setting_sources)
+    if cmd is None or not cmd.expand_in_app:
         return prompt
     return expand_command_prompt(cmd, arguments)
 
