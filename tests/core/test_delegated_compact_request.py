@@ -33,7 +33,7 @@ FAKE_CLI = textwrap.dedent(
     r'''
     import json, os, sys, time
 
-    MODE = os.environ["COMPACT_MODE"]  # "ok" or "refuse"
+    MODE = os.environ["COMPACT_MODE"]  # "ok", "refuse" or "noop"
     RECORD = os.environ["COMPACT_RECORD"]
     SID = "cli-compact-req"
     CONTEXT = int(os.environ.get("COMPACT_CONTEXT") or 0)  # Messages tokens, 0: no breakdown
@@ -98,6 +98,10 @@ FAKE_CLI = textwrap.dedent(
         if text.startswith("/compact"):
             if MODE == "refuse":
                 emit(result("Not enough messages to compact."))
+                continue
+            if MODE == "noop":
+                # The mod skipped a manual compaction Fluid could not shrink.
+                emit(result("Not compacted \u00b7 Nothing more to compact"))
                 continue
             emit({"type": "system", "subtype": "status", "status": "compacting",
                   "session_id": SID})
@@ -282,4 +286,29 @@ async def test_a_refused_compact_shows_as_failed_with_the_reason(monkeypatch, tm
     assert _system(messages, "compact_boundary") == []
     assert _system(messages, "compact_failed") == [{
         "reason": "Not enough messages to compact.", "requested_by": "user",
+    }]
+
+
+@pytest.mark.asyncio
+async def test_a_compact_with_nothing_left_to_reclaim_is_a_no_op_not_a_failure(monkeypatch, tmp_path):
+    """A manual compaction Fluid could not shrink never ran Claude Code's
+    summarizer: the chat says nothing more could be compacted, plainly, with
+    no "Compaction Failed" alarm and no compacted card."""
+    from fluid.engine.delegated import NOTHING_TO_COMPACT, DelegatedLoop
+
+    original = DelegatedLoop._report_skipped_compaction
+
+    async def bridge_said_noop(self, sid, turn_id, mapper):
+        self._compact_noop = True  # what the compaction route records
+        await original(self, sid, turn_id, mapper)
+
+    monkeypatch.setattr(DelegatedLoop, "_report_skipped_compaction", bridge_said_noop)
+    adapter = await _adapter(monkeypatch, tmp_path, "noop")
+    try:
+        messages = await _turn(adapter, "/compact")
+    finally:
+        await adapter.disconnect()
+    assert _system(messages, "compact_boundary") == []
+    assert _system(messages, "compact_failed") == [{
+        "reason": NOTHING_TO_COMPACT, "nothing_to_compact": True, "requested_by": "user",
     }]

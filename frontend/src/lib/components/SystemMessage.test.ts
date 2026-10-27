@@ -594,4 +594,25 @@ describe('SystemMessage — agent compaction', () => {
 		expect(text).toContain('The agent did not compact the context. Reason: Not enough messages to compact.');
 		expect(text).not.toContain('Context Compacted');
 	});
+
+	it('shows a compaction with nothing left to reclaim as a no-op, not a failure', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'compact_failed',
+					systemData: {
+						reason: 'Nothing more to compact: the context is already as small as it gets',
+						nothing_to_compact: true,
+						requested_by: 'user'
+					}
+				})
+			}
+		});
+		const text = container.textContent ?? '';
+		expect(text).toContain('Nothing More to Compact');
+		expect(text).toContain('left as it is');
+		expect(text).toContain('Nothing was summarized.');
+		expect(text).not.toContain('Compaction Failed');
+		expect(text).not.toContain('Context Compacted');
+	});
 });

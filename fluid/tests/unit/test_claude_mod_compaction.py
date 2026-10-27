@@ -40,6 +40,23 @@ def history():
     return nodes, rows
 
 
+def recoverable(nodes, rows, needle):
+    """Whether ``needle`` is in a stored node a HistoryExpand ref in ``rows``
+    covers, read back verbatim through that ref (paging by node)."""
+    import re
+
+    from fluid.context.recall import parse_ref
+    index = {n.node_id: i for i, n in enumerate(nodes)}
+    for row in rows:
+        for ref in re.findall(r'HistoryExpand\("([^"]+)"', row['text']):
+            start, end = parse_ref(ref)
+            for node in nodes[index[start]:index[end] + 1]:
+                text, error = expand_ref(nodes, node.node_id, max_chars=10**6)
+                if not error and needle in text:
+                    return True
+    return False
+
+
 def config(**kw):
     return CompactionConfig(trim=TrimConfig(keep_recent_tool_results=2), **kw)
 
@@ -119,12 +136,15 @@ def test_handles_originals_pairs_and_recovery():
     assert all(a['role'] != b['role'] for a, b in zip(answer, answer[1:]))
 
 
-def test_errors_are_not_trimmed():
+def test_errors_stay_verbatim_while_recent_and_old_ones_keep_an_excerpt_and_a_ref():
     nodes, rows = history()
-    nodes[2].message.content[0].is_error = True
-    rows[2]['toolResults'][0]['isError'] = True
-    answer = compact_messages(rows, nodes, config=config())
-    assert rows[2] in answer
+    for k in (2, len(rows) - 2):  # the oldest result and the newest
+        nodes[k].message.content[0].is_error = True
+        rows[k]['toolResults'][0]['isError'] = True
+    answer = compact_messages(rows, nodes, config=config(), context_window=20_000)
+    assert rows[-2] in answer  # recent: the CLI's own row, verbatim
+    assert rows[2] not in answer  # old: no longer a floor that never shrinks
+    assert recoverable(nodes, answer, 'original-0 ' + 'x' * 6000)
 
 
 @pytest.mark.parametrize('mutation', ['orphan', 'duplicate', 'no_handle', 'wrong_role'])
@@ -142,11 +162,18 @@ def test_invalid_input_fails_closed(mutation):
         compact_messages(rows, nodes, config=config())
 
 
-def test_unknown_cli_messages_are_kept_not_given_fake_refs():
+def test_unknown_cli_messages_are_kept_while_recent_and_never_given_fake_refs():
     nodes, rows = history()
-    rows.insert(0, dict(role='user', text='CLI-only attachment', toolUses=[], handle='opaque'))
-    answer = compact_messages(rows, nodes, config=config())
-    assert answer[0] == rows[0]
+    old = {'role': 'user', 'text': 'CLI-only attachment', 'toolUses': [], 'handle': 'opaque'}
+    recent = {'role': 'user', 'text': 'CLI-only reminder', 'toolUses': [], 'handle': 'opaque-recent'}
+    rows.insert(0, old)
+    rows.insert(len(rows) - 1, recent)
+    answer = compact_messages(rows, nodes, config=config(), context_window=40_000)
+    assert recent in answer
+    assert old not in answer
+    [note] = [r for r in answer if 'Fluid compaction note' in r['text']]
+    assert '1 older rows' in note['text'] and 'CLI-only attachment' in note['text']
+    assert 'HistoryExpand' not in note['text'].split('\n\n')[0]
     assert 'HistoryExpand' in json.dumps(answer)
 
 
@@ -155,7 +182,7 @@ def test_all_three_tiers_keep_real_refs_and_never_invoke_a_summary():
     answer = compact_messages(rows, nodes, config=config(
         keep_recent_turns=1, max_resident_span_digests=2, epoch_fold_spans=2,
         summary_enabled=True,
-    ))
+    ), context_window=4_000)
     text = json.dumps(answer)
     assert 'epoch' in text.lower()
     assert 'HistoryExpand' in text
@@ -313,7 +340,7 @@ async def test_parallel_frames_compact_as_paired_built_groups():
             nodes.append(node)
             rows.append({**project(message), 'handle': new_id('handle')})
     output = compact_messages(rows, nodes)
-    assert all(a['role'] != b['role'] for a, b in zip(output, output[1:]))
+    assert_mod_accepts(output, rows)
     calls = {u['tool_use_id'] for r in output for u in r['toolUses']}
     results = {t['tool_use_id'] for r in output for t in r.get('toolResults', [])}
     assert calls == results
@@ -385,36 +412,49 @@ def test_parallel_group_listed_out_of_stream_order_compacts(order):
         assert not error and restored, ref
 
 
-def test_group_with_an_error_result_is_kept_whole():
-    nodes, rows = streamed_parallel_history('calls_first', error_at=(1, 1))
-    output = compact_messages(rows, nodes)
+def test_a_recent_group_with_an_error_result_is_kept_whole():
+    nodes, rows = streamed_parallel_history('calls_first', error_at=(7, 1))
+    output = compact_messages(rows, nodes, context_window=40_000)
     assert_mod_accepts(output, rows)
     text = json.dumps(output)
     for part in range(3):
         # Call and result of every member, untrimmed, not just the error.
-        assert f'"p1-{part}.py"' in text
-        assert f'parallel-p1-{part} ' * 600 in text
+        assert f'"p7-{part}.py"' in text
+        assert f'parallel-p7-{part} ' * 600 in text
+
+
+def test_an_old_group_with_an_error_result_is_digested_with_its_error():
+    nodes, rows = streamed_parallel_history('calls_first', error_at=(1, 1))
+    output = compact_messages(rows, nodes, context_window=40_000)
+    assert_mod_accepts(output, rows)
+    assert not any(u['tool_use_id'] == 'p1-1' for r in output for u in r['toolUses'])
+    assert recoverable(nodes, output, 'parallel-p1-1 ' * 600)
 
 
 @pytest.mark.parametrize('order', ['calls_first', 'interleaved'])
-def test_group_with_a_member_only_the_cli_can_rebuild_stays_its_own_rows(order):
+def test_a_recent_member_only_the_cli_can_rebuild_keeps_its_own_row(order):
     # ToolSearch's tool_reference result: the CLI lists it with no text, the
-    # stream stored it as text, so it never matches and must keep its handle.
+    # stream stored it as text. Its tool id still places it; while recent it
+    # keeps its handle, so nothing the CLI holds is rebuilt.
     nodes, rows = streamed_parallel_history(order)
-    opaque = next(r for r in rows if r['handle'] == 'rp1-1')
+    opaque = next(r for r in rows if r['handle'] == 'rp7-1')
     opaque['toolResults'][0]['text'] = ''
     output = compact_messages(rows, nodes)
     assert_mod_accepts(output, rows)
-    # The calls may merge into one built row; the results keep their handles
-    # (one of them cannot be rebuilt), right after the calls, in order.
-    start = next(i for i, r in enumerate(output) if any(u['tool_use_id'] == 'p1-0' for u in r['toolUses']))
-    import itertools
-    call_rows = list(itertools.takewhile(lambda r: r['toolUses'], output[start:]))
-    assert [u['tool_use_id'] for r in call_rows for u in r['toolUses']] == ['p1-0', 'p1-1', 'p1-2']
-    after = output[start + len(call_rows):][:3]
-    assert [r.get('handle') for r in after] == ['rp1-0', 'rp1-1', 'rp1-2']
-    assert after[1] == opaque
+    assert opaque in output
     assert len(json.dumps(output)) < len(json.dumps(rows))
+
+
+@pytest.mark.parametrize('order', ['calls_first', 'interleaved'])
+def test_an_old_member_only_the_cli_can_rebuild_leaves_with_its_whole_group(order):
+    nodes, rows = streamed_parallel_history(order)
+    opaque = next(r for r in rows if r['handle'] == 'rp1-1')
+    opaque['toolResults'][0]['text'] = ''
+    output = compact_messages(rows, nodes, context_window=40_000)
+    assert_mod_accepts(output, rows)
+    assert opaque not in output
+    assert not any(u['tool_use_id'].startswith('p1-') for r in output for u in r['toolUses'])
+    assert recoverable(nodes, output, 'parallel-p1-1 ' * 600)
 
 
 async def test_a_refused_compaction_is_logged_without_content(caplog):
@@ -426,8 +466,9 @@ async def test_a_refused_compaction_is_logged_without_content(caplog):
     _, rows = history()  # nothing stored for them: no safe saving
     try:
         with caplog.at_level('INFO', logger='fluid.engine.delegated'):
-            status, _ = await request(loop._socket_path, {'v': 1, 'messages': rows}, token=loop._mod_token)
-        assert status == 400
+            status, body = await request(loop._socket_path, {'v': 1, 'trigger': 'auto', 'messages': rows},
+                                         token=loop._mod_token)
+        assert status == 200 and set(body) == {'skip'}
         assert 'fell back to the CLI summarizer: no safe compaction saving' in caplog.text
         assert 'original-0' not in caplog.text
     finally:

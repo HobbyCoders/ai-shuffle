@@ -287,6 +287,21 @@ async def test_delegated_leg_sends_mod_usage_to_the_claude_usage_store(monkeypat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("pinned", [None, 400_000])
+async def test_delegated_leg_sizes_fluid_compaction_by_the_models_window(monkeypatch, tmp_path, pinned):
+    """Fluid's compaction of a Claude chat aims at the chat's real window: a
+    pinned window when one is saved, else the registry's for the model."""
+    from app.core.model_registry import get_context_window
+
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
+    monkeypatch.setattr(ha, "DelegatedLoop", _KwargsLoop)
+    extra = {} if pinned is None else {"context_window": pinned}
+    await ha.HarnessAdapter().connect(_preset_options(tmp_path, **extra))
+    expected = pinned or get_context_window("fable", delegated=True)
+    assert _KwargsLoop.captured["compaction_window"] == expected
+
+
+@pytest.mark.asyncio
 async def test_delegated_leg_puts_the_turn_note_back_after_a_compaction(monkeypatch, tmp_path):
     """The loop's ``compact_context`` renders the same note every user
     message carries (date and branch, memory, Away mode), fresh, and the

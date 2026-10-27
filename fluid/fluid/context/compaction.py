@@ -1259,7 +1259,21 @@ class Compactor:
             return [n.message for n in nodes]
         return self._render(nodes)
 
+    def view_segments(self, nodes: list[SessionNode]) -> list[tuple[int, int, Message]]:
+        """:meth:`view` with the node range each message renders:
+        ``(first, last, message)``, inclusive indexes into ``nodes``.
+
+        A message covering one node that is that node's own ``Message``
+        object is the node unchanged. Read-only, like :meth:`view`.
+        """
+        if not self.active:
+            return [(i, i, n.message) for i, n in enumerate(nodes)]
+        return self._render_segments(nodes)
+
     def _render(self, nodes: list[SessionNode]) -> list[Message]:
+        return [message for _, _, message in self._render_segments(nodes)]
+
+    def _render_segments(self, nodes: list[SessionNode]) -> list[tuple[int, int, Message]]:
         index = {n.node_id: i for i, n in enumerate(nodes)}
         # Decided state only: apply() owns the consume-once image decision
         # (pressure plus a turn boundary); rendering just replays it, so a
@@ -1286,7 +1300,7 @@ class Compactor:
             pin_end = self._span_pin_ends.get((start, end))
             return index.get(pin_end) if pin_end is not None else None
 
-        out: list[Message] = []
+        out: list[tuple[int, int, Message]] = []
         i = 0
         while i < len(nodes):
             node = nodes[i]
@@ -1296,10 +1310,10 @@ class Compactor:
             if summary is not None:
                 end, text = summary
                 j = index[end]
-                out.append(_carry_pins(
+                out.append((i, j, _carry_pins(
                     self._summary_message(node.node_id, end, text), pins, i, j,
                     as_of(node.node_id, end),
-                ))
+                )))
                 i = j + 1
                 continue
             if not self.config.enabled:
@@ -1307,38 +1321,38 @@ class Compactor:
                 # persisted one rehydrated from a session that *did* run the
                 # ladder stays inert rather than digesting history behind the
                 # host app's back.
-                out.append(_carry_pins(
+                out.append((i, i, _carry_pins(
                     self._render_live(node, trimmed, consumed, calls, elide), pins, i, i,
-                ))
+                )))
                 i += 1
                 continue
             end_id = self._epoch_by_start.get(node.node_id)
             if end_id is not None and end_id in index and index[end_id] >= i:
                 j = index[end_id]
-                out.append(_carry_pins(
+                out.append((i, j, _carry_pins(
                     render_epoch_stub(
                         split_spans(nodes[i : j + 1]),
                         self._config_at(node.node_id, end_id),
                     ),
                     pins, i, j, as_of(node.node_id, end_id),
-                ))
+                )))
                 i = j + 1
                 continue
             end_id = self._digest_by_start.get(node.node_id)
             if end_id is not None and end_id in index and index[end_id] >= i:
                 j = index[end_id]
-                out.append(_carry_pins(
+                out.append((i, j, _carry_pins(
                     render_span_digest(
                         nodes[i : j + 1], self._config_at(node.node_id, end_id)
                     ),
                     pins, i, j, as_of(node.node_id, end_id),
-                ))
+                )))
                 i = j + 1
                 continue
             # An intake stub hides a long user text block, reminders included.
-            out.append(_carry_pins(
+            out.append((i, i, _carry_pins(
                 self._render_live(node, trimmed, consumed, calls, elide), pins, i, i,
-            ))
+            )))
             i += 1
         return out
 
@@ -3298,6 +3312,39 @@ class Compactor:
             if force and not resident:
                 break
         return folded
+
+    def merge_epochs(
+        self, nodes: list[SessionNode], *, before: int | None = None,
+    ) -> tuple[str, str] | None:
+        """Fold every epoch stub on the path, and everything between them,
+        into one coarser epoch stub; the merged ``(start, end)`` or None.
+
+        Recursive folding for a history that keeps growing: each fold is
+        bounded (a call inventory and an intent pin of fixed budgets), so
+        one epoch in place of many keeps the old region from growing with the
+        number of folds. The range between the oldest and the newest epoch is
+        older than an epoch already is, so nothing recent can be inside it;
+        ``before`` (an index into ``nodes``) additionally caps where the
+        merged range may end. Contained decisions retire, as in a live fold.
+        Originals stay recoverable through the merged range's ref.
+        """
+        self._settle_replay(nodes)
+        index = {n.node_id: i for i, n in enumerate(nodes)}
+        epochs = sorted(
+            (index[start], index[end])
+            for (start, end), kind in self._digested.items()
+            if kind == EPOCH_STUB and start in index and end in index
+            and (before is None or index[end] < before)
+        )
+        if len(epochs) < 2:
+            return None
+        lo, hi = epochs[0][0], max(end for _, end in epochs)
+        for start, end in list(self._digested):
+            if start in index and end in index and lo <= index[start] and index[end] <= hi:
+                self._retire((start, end))
+        key = (nodes[lo].node_id, nodes[hi].node_id)
+        self._mark_span(*key, EPOCH_STUB, pin_end=nodes[-1].node_id)
+        return key
 
     # ── Stats (for the context-usage breakdown) ──────────────────────────
 

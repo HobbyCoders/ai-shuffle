@@ -291,6 +291,17 @@
 			}
 
 			case 'compact_failed': {
+				// Nothing left to reclaim is a no-op, not a failure: the chat is
+				// left as it is and nothing summarized it.
+				if (data.nothing_to_compact === true) {
+					return {
+						title: 'Nothing More to Compact',
+						content:
+							'The context is already as small as compaction can make it without dropping recent work, so it was left as it is. Nothing was summarized.',
+						badge: 'no change',
+						badgeColor: 'gray'
+					};
+				}
 				// A /compact the agent did not carry out. No "compacted" card
 				// is shown for it; this one says so, with the CLI's reason.
 				const reason = typeof data.reason === 'string' ? data.reason.trim() : '';

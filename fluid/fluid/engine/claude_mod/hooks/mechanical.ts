@@ -30,6 +30,24 @@ export function postedRows(messages: readonly Row[]): Row[] {
   }))
 }
 
+/** How long the hook waits for Fluid's answer: it compacts the whole stored
+ * conversation, which can take longer than a usage post may. */
+export const COMPACT_TIMEOUT_MS = 60_000
+
+/** The bridge's answer: rows that stand in the conversation's place, or a
+ * skip (Fluid has nothing more to reclaim) with the reason Claude Code prints
+ * after "Not compacted · ". Anything else is refused. */
+export function compactionAnswer(body: unknown, originals: readonly Row[]): { messages: Row[] } | { skip: string } {
+  if (body && typeof body === 'object' && 'skip' in body) {
+    const skip = (body as { skip: unknown }).skip
+    if ('messages' in body || typeof skip !== 'string' || skip.length === 0 || skip.length > 500) {
+      throw new Error('validation')
+    }
+    return { skip }
+  }
+  return { messages: compactedRows(body, originals) }
+}
+
 export function compactedRows(body: unknown, originals: readonly Row[]): Row[] {
   if (!body || typeof body !== 'object' || !('messages' in body)) throw new Error('validation')
   const rows = body.messages

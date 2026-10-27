@@ -675,6 +675,9 @@ class HarnessAdapter(ProviderAdapter):
             # Settings > Providers > Claude > Sessions, read on the executing
             # worker. Fixed for this connection's CLI process.
             claude_compaction_on = await asyncio.to_thread(claude_compaction.read)
+            # What Fluid's compaction of this chat sizes its target and its
+            # recency tail against (the window the CLI is pinned to).
+            delegated_window = await asyncio.to_thread(_delegated_context_window, options)
 
             # Never put Claude cloud credentials in SessionOptions.env, which
             # also feeds tools and MCPs. This private copy is for claude only.
@@ -784,6 +787,7 @@ class HarnessAdapter(ProviderAdapter):
                 # (the owner's Claude compaction setting, on by default). A CLI
                 # without the mod compacts on its own, as with it off.
                 claude_mod_compaction=claude_compaction_on,
+                compaction_window=delegated_window,
                 # The plan usage the mod reports after each turn goes into
                 # the same Claude usage store the stream's rate_limit events
                 # feed (usage panel, peer publication, broadcast).
@@ -4218,6 +4222,9 @@ class HarnessAdapter(ProviderAdapter):
             # A /compact that Claude Code did not carry out: say so, with its
             # reason, instead of leaving the owner to assume it worked.
             failure: Dict[str, Any] = {"reason": getattr(event, "message", "") or ""}
+            if (getattr(event, "data", None) or {}).get("nothing_to_compact"):
+                # Fluid had nothing more to reclaim: a no-op, not a failure.
+                failure["nothing_to_compact"] = True
             if self._compact_requested_by:
                 failure["requested_by"] = self._compact_requested_by
             return [SystemMessage(subtype="compact_failed", data=failure)]
@@ -7815,6 +7822,30 @@ def _agent_context(
             "text": definition.body,
         })
     return index, descriptors
+
+
+def _delegated_context_window(options: SessionOptions) -> int:
+    """Context window (tokens) of a DELEGATED (Claude Code) leg's model.
+
+    The same resolution the CLI's window pins come from: a selected window,
+    else the bound provider row's model, else the registry's Claude window
+    (200k when the slug is unknown).
+    """
+    selected = (options.extra or {}).get("context_window")
+    try:
+        window = int(selected) if selected else 0
+    except (TypeError, ValueError):
+        window = 0
+    if window > 0:
+        return window
+    provider_id = (options.extra or {}).get("provider_id")
+    if provider_id:
+        found = resolve_provider_context_window(
+            _lookup_provider_row(str(provider_id)), options.model
+        )
+        if found:
+            return int(found)
+    return get_context_window(options.model, delegated=True)
 
 
 def _native_context_window(kind: str, options: SessionOptions) -> Optional[int]:
