@@ -457,24 +457,111 @@ def test_fuzz_no_stored_message_is_ever_lost(seed):
         assert not _held_or_named(chat, chat.cli)
 
 
-def test_claude_code_rows_of_the_newest_request_stay_verbatim():
+def _skill_turn(chat: Chat, name: str, steps: int, *, first: int = 0) -> dict:
+    """A request that runs a skill: the prompt (stored), the skill's body
+    (Claude Code's own text, never stored) and some heavy tool calls."""
+    chat.cli.append(chat._add(Message('user', [Text(f'/{name} run it')])))
+    body = {'role': 'user', 'handle': f'body-{name}', 'toolUses': [],
+            'text': f'SKILL-BODY {name}: step 1 never push to main; ' + 'S' * 3000}
+    chat.cli.append(body)
+    _steps(chat, name, first, steps)
+    return body
+
+
+def _steps(chat: Chat, name: str, first: int, last: int) -> None:
+    for g in range(first, last):
+        tid = f'{name}-{g}'
+        chat.cli.append(chat._add(Message('assistant', [ToolUseBlock(tid, 'Bash', {'command': f'{g}'})])))
+        chat.cli.append(chat._add(Message('user', [ToolResultBlock(tid, [Text(f'OUT-{tid} ' + 'o' * 3000)])])))
+
+
+def _note_cites(rows: list[dict], archive: list[dict], marker: str) -> bool:
+    """The note names the archived copy of the row that carried ``marker``."""
+    refs = {e['node_id'] for e in archive if marker in e['text']}
+    return bool(refs) and any(ref in r['text'] for r in rows if 'Fluid compaction note' in r['text']
+                              for ref in refs)
+
+
+RESUME = ("[auto-resume] Your previous turn was stopped by the provider's usage limit, which has now "
+          "reset. Continue the task you were working on, picking up exactly where you left off.")
+CONTINUE = ("[auto-continue] Your previous turn was cut off at the context limit and the context was "
+            "compacted. Continue where you left off.")
+
+
+@pytest.mark.parametrize('newest', [None, RESUME, CONTINUE, '[hand-off] Moved from Unraid to GamingPC',
+                                    '<task-notification>bg done</task-notification>', '/compact',
+                                    'also update the changelog'])
+def test_claude_code_rows_of_the_newest_request_stay_verbatim(newest):
     """A skill body (Claude Code's own text, never stored) is the work in
-    hand: it stays verbatim however much of the newest turn compacts."""
+    hand: it stays verbatim however much compacts after it, through turns the
+    host starts on its own (a usage-limit resume, a context continuation, a
+    hand-off, a notification, a compaction) and through a short follow-up."""
     chat = Chat()
     chat.grow(6)
-    chat.cli.append(chat._add(Message('user', [Text('/deploy-skill run the deploy')])))
-    skill = {'role': 'user', 'handle': 'skillbody', 'toolUses': [],
-             'text': 'SKILL-BODY: step 1 never push to main; ' + 'S' * 3000}
-    chat.cli.append(skill)
-    for g in range(12):
-        tid = f'z{g}'
-        chat.cli.append(chat._add(Message('assistant', [ToolUseBlock(tid, 'Bash', {'command': f'{g}'})])))
-        chat.cli.append(chat._add(Message('user', [ToolResultBlock(tid, [Text(f'OUT-{g} ' + 'o' * 3000)])])))
+    body = _skill_turn(chat, 'deploy-skill', 8)
+    if newest is not None:
+        chat.cli.append(chat._add(Message('assistant', [Text('API Error: usage limit')])))
+        chat.cli.append(chat._add(Message('user', [Text(newest)])))
+        _steps(chat, 'deploy-skill', 8, 14)
     for trigger in ('manual', 'auto'):
-        rows = [dict(r) for r in chat.cli]
-        out = compact_messages(rows, chat.stored, trigger=trigger)
-        assert skill in out
-        assert not any('SKILL-BODY' in r['text'] for r in out if 'Fluid compaction note' in r['text'])
+        archive: list[dict] = []
+        out = compact_messages([dict(r) for r in chat.cli], chat.stored, trigger=trigger, archive=archive)
+        assert body in out
+        assert not any('SKILL-BODY' in e['text'] for e in archive)
+
+
+def test_only_the_newest_earlier_skill_stays_pinned():
+    """A short follow-up keeps the skill it follows in context. A second
+    skill request replaces it: the newer skill stays, the older one leaves
+    context with its whole text archived behind a real ref."""
+    chat = Chat()
+    chat.grow(4)
+    first = _skill_turn(chat, 'skill-one', 8)
+    chat.cli.append(chat._add(Message('assistant', [Text('Deployed.')])))
+    chat.cli.append(chat._add(Message('user', [Text('also update the changelog')])))
+    _steps(chat, 'follow', 0, 8)
+    archive: list[dict] = []
+    out = compact_messages([dict(r) for r in chat.cli], chat.stored, archive=archive)
+    assert first in out
+    assert not any('SKILL-BODY' in e['text'] for e in archive)
+
+    chat.cli.append(chat._add(Message('assistant', [Text('Changelog updated.')])))
+    second = _skill_turn(chat, 'skill-two', 8)
+    chat.cli.append(chat._add(Message('assistant', [Text('Done.')])))
+    chat.cli.append(chat._add(Message('user', [Text('thanks, one more check')])))
+    _steps(chat, 'check', 0, 8)
+    archive = []
+    out = compact_messages([dict(r) for r in chat.cli], chat.stored, archive=archive)
+    assert second in out
+    assert first not in out
+    assert _note_cites(out, archive, 'SKILL-BODY skill-one')
+    [entry] = [e for e in archive if 'SKILL-BODY skill-one' in e['text']]
+    assert entry['text'] == first['text']
+
+
+@pytest.mark.parametrize('resume', [RESUME, CONTINUE])
+def test_a_host_started_turn_is_not_a_request_of_its_own(resume):
+    """Two skill requests, then the host resumes the second: the resume
+    continues that request, so both skills stay pinned (counted as a request
+    it would push the older skill out)."""
+    chat = Chat()
+    chat.grow(4)
+    first = _skill_turn(chat, 'skill-one', 6)
+    chat.cli.append(chat._add(Message('assistant', [Text('Done.')])))
+    second = _skill_turn(chat, 'skill-two', 6)
+    chat.cli.append(chat._add(Message('assistant', [Text('API Error: usage limit')])))
+    chat.cli.append(chat._add(Message('user', [Text(resume)])))
+    _steps(chat, 'skill-two', 6, 12)
+    out = compact_messages([dict(r) for r in chat.cli], chat.stored, archive=[])
+    assert first in out and second in out
+
+
+def test_host_started_turns_are_the_ones_the_app_sends():
+    """The prefixes this module skips are the ones AI Shuffle writes."""
+    from fluid.engine.claude_mod_compaction import HOST_TURN_PREFIXES
+
+    for text in (RESUME, CONTINUE, '[hand-off] Moved from Unraid to GamingPC'):
+        assert text.startswith(HOST_TURN_PREFIXES)
 
 
 async def test_older_claude_code_rows_are_archived_and_read_back_whole():

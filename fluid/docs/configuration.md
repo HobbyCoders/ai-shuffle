@@ -605,7 +605,9 @@ What the child CLI is given, and what it is not:
   `compaction_window`: no summarizer call. Fluid's own digest, epoch, note
   and stand-in rows name the stored ranges they cover and fold again next
   time. Claude Code's own rows (skill and command text, attachments, hook
-  context) stay verbatim from the newest user request on; older ones leave
+  context) stay verbatim for the newest user request and the newest earlier
+  request that has any (host-started turns such as `[auto-resume]` do not
+  count as requests); older ones leave
   context with their whole text stored as a `ContextArchived` event, which
   `HistoryExpand` and `HistorySearch` read. Rows with blocks Fluid cannot
   rebuild (images, `ToolSearch` results) are kept or left out whole, never

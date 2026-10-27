@@ -385,3 +385,17 @@ async def test_a_cli_skip_without_fluid_shows_the_failure_card_without_a_reply(m
     assert "nothing_to_compact" not in card
     assert not [m for m in messages if isinstance(m, AssistantMessage)
                 and "Not compacted" in json.dumps(getattr(m, "content", ""), default=str)]
+
+
+def test_the_turns_the_app_starts_are_not_requests_to_fluid_compaction():
+    """Fluid's Claude compaction keeps Claude Code's own rows (a skill body)
+    for the newest request a person made; the turns AI Shuffle starts on its
+    own must not count as one, or the skill they continue would be archived."""
+    from fluid.engine.claude_mod_compaction import HOST_TURN_PREFIXES
+
+    from app.core.compact_continue import AUTO_CONTINUE_PROMPT
+    from app.core.limit_resume import RESUME_PROMPT
+    from app.core.wakeup_service import WATCHDOG_NUDGE_PROMPT
+
+    for prompt in (RESUME_PROMPT, AUTO_CONTINUE_PROMPT, WATCHDOG_NUDGE_PROMPT, "[hand-off] Moved"):
+        assert prompt.startswith(HOST_TURN_PREFIXES), prompt[:30]

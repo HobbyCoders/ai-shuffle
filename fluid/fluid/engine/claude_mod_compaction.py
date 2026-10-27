@@ -657,14 +657,51 @@ def _opaque_nodes(nodes: list[SessionNode], owners: dict[str, int]) -> set[int]:
     return opaque
 
 
-def _newest_request(view: list[SessionNode]) -> int:
-    """View position of the newest turn a person started (not a wake)."""
-    for p in range(len(view) - 1, -1, -1):
-        node = view[p]
-        if is_turn_start(node) and not is_wake_text(strip_system_reminders(
-                "".join(b.text for b in node.message.content if isinstance(b, Text)))):
-            return p
-    return len(view)
+# Turns the host starts on the owner's behalf: they continue the request
+# before them and are not requests of their own (AI Shuffle's usage-limit
+# resume, idle and context-limit continuations, a hand-off; a bare /compact).
+HOST_TURN_PREFIXES = ("[auto-resume]", "[auto-continue]", "[hand-off]")
+_COMPACT_COMMAND = re.compile(r"/compact(?:\s|$)")
+
+
+def _is_request(node: SessionNode) -> bool:
+    """A turn a person started: not a wake, a peer's message, a task
+    notification or a turn the host started for them."""
+    if not is_turn_start(node):
+        return False
+    text = strip_system_reminders(
+        "".join(b.text for b in node.message.content if isinstance(b, Text))).strip()
+    return not (is_wake_text(text) or text.startswith(HOST_TURN_PREFIXES)
+                or _COMPACT_COMMAND.match(text))
+
+
+def _pinned_requests(view: list[SessionNode], unknown: list[tuple[int, dict[str, Any]]]) -> tuple[
+        list[int], set[int]]:
+    """The view positions of the requests a person made, and those whose
+    Claude Code rows stay verbatim: the newest request, and the newest
+    earlier one that has any (a short follow-up must not push the skill or
+    command it follows out of context). Two at most, so it stays bounded."""
+    requests = [p for p, node in enumerate(view) if _is_request(node)]
+    if not requests:
+        return requests, set()
+    pinned = {requests[-1]}
+    owners = {_owner(requests, position) for position, _ in unknown}
+    earlier = [r for r in requests[:-1] if r in owners]
+    if earlier:
+        pinned.add(earlier[-1])
+    return requests, pinned
+
+
+def _owner(requests: list[int], position: int) -> int | None:
+    """The request a Claude Code row belongs to: the newest one at or before
+    the view position it precedes (rows a turn's host-started continuations
+    add belong to the request they continue)."""
+    owner = None
+    for r in requests:
+        if r > position:
+            break
+        owner = r
+    return owner
 
 
 def compact_messages(
@@ -675,8 +712,9 @@ def compact_messages(
     """Claude Code's rows, compacted mechanically against the stored path.
 
     Rows only Claude Code holds (skill and command text, attachments, hook
-    context) stay verbatim from the newest request a person made onward;
-    older ones leave through the compaction note, their whole text appended
+    context) stay verbatim for the newest request a person made and for the
+    newest earlier request that has any (:func:`_pinned_requests`); older
+    ones leave through the compaction note, their whole text appended
     to ``archive`` (see :func:`_note_row`), which the caller must persist.
 
     Raises :class:`NothingToCompact` when the result would not be smaller
@@ -849,9 +887,14 @@ def compact_messages(
 
     last_compacted = max((last for first, last, m in segments if compacted(first, last, m)),
                          default=-1)
-    # Claude Code's own rows from the newest request on are the work in hand
-    # (a skill being followed, a command's expansion): never dropped.
-    pinned_from = _newest_request(view)
+    # Claude Code's own rows of the newest request, and of the newest earlier
+    # request that has any, are the work in hand (a skill being followed, a
+    # command's expansion): never dropped.
+    requests, pinned = _pinned_requests(view, unknown)
+
+    def kept(position: int) -> bool:
+        return _owner(requests, position) in pinned
+
     calls = {use["tool_use_id"] for row in rows for use in row["toolUses"]}
     out: list[dict[str, Any]] = []
     dropped: list[dict[str, Any]] = []
@@ -861,14 +904,14 @@ def compact_messages(
     def take(upto: int) -> None:
         while pending and pending[0][0] <= upto:
             position, row = pending.pop(0)
-            old = position <= last_compacted and position < pinned_from
+            old = position <= last_compacted and not kept(position)
             (dropped if old else out).append(row)
 
     for first, last, message in segments:
         take(first)
         while pending and pending[0][0] <= last:  # inside a fold
             position, row = pending.pop(0)
-            (out if position >= pinned_from else dropped).append(row)
+            (out if kept(position) else dropped).append(row)
         if first == last and first in unit_of:
             positions = unit_of[first]
             head = positions[0]

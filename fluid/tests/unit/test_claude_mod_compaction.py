@@ -165,11 +165,16 @@ def test_invalid_input_fails_closed(mutation):
 def test_unknown_cli_messages_are_kept_while_recent_and_never_given_fake_refs():
     nodes, rows = history()
     old = {'role': 'user', 'text': 'CLI-only attachment', 'toolUses': [], 'handle': 'opaque'}
+    middle = {'role': 'user', 'text': 'CLI-only skill text', 'toolUses': [], 'handle': 'opaque-middle'}
     recent = {'role': 'user', 'text': 'CLI-only reminder', 'toolUses': [], 'handle': 'opaque-recent'}
+    rows.insert(4 * 4 + 1, middle)  # after request 4's prompt
     rows.insert(0, old)
     rows.insert(len(rows) - 1, recent)
     answer = compact_messages(rows, nodes, config=config(), context_window=40_000)
+    # The newest request's rows, and those of the newest earlier request
+    # that has any, stay; older ones leave through the note.
     assert recent in answer
+    assert middle in answer
     assert old not in answer
     [note] = [r for r in answer if 'Fluid compaction note' in r['text']]
     assert '1 older rows' in note['text'] and 'CLI-only attachment' in note['text']
