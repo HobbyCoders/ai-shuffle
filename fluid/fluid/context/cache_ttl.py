@@ -15,8 +15,10 @@ DEFAULT_COLD_GAP_SECONDS = 300.0
 
 
 def is_real_main_call(usage: Mapping[str, Any]) -> bool:
-    """Snapshots (zero prompt) and auxiliary calls cannot refresh main-cache age."""
-    return not usage.get("auxiliary_source") and sum(
+    """Snapshots, auxiliary calls and estimates cannot refresh main-cache age."""
+    return not any(usage.get(key) for key in (
+        "auxiliary_source", "usage_estimated", "input_tokens_estimated", "output_tokens_estimated",
+    )) and sum(
         value for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
         if isinstance(value := usage.get(key), (int, float)) and not isinstance(value, bool)
     ) > 0
@@ -28,7 +30,7 @@ def last_real_main_usage(usages: Iterable[Mapping[str, Any]]) -> Mapping[str, An
 
 
 def delegated_cache_write_ttl(usage: Mapping[str, Any] | None = None) -> Literal["1h", "5m"]:
-    """Only the last REAL main call's 5m-only writes override the CLI default."""
+    """The most recent real main cache-writing call supplies the write TTL."""
     if usage and is_real_main_call(usage):
         creation = usage.get("cache_creation")
         if isinstance(creation, Mapping):
@@ -75,7 +77,11 @@ def resolve_cache_ttl(
             # No guaranteed lifetime; 5m is a heuristic. Our Responses requests
             # already send prompt_cache_key for routing affinity.
             return 300.0
-        if host == "api.openai.com" or (not base_url and ptype == "openai"):
+        if host == "api.openai.com" or (not base_url and (
+            ptype == "openai" or (not ptype and not mode)
+        )):
+            # Bare/legacy GPT sessions and OPENAI_API_KEY use the client's
+            # api.openai.com default even when there is no stored provider row.
             # https://platform.openai.com/docs/guides/prompt-caching
             # GPT-5.6+ default: >=30 min; older default 24h retention is
             # "typically ~30 min". Use 30 min for ALL API models, no wire opt-in.

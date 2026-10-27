@@ -43,7 +43,7 @@ def test_cache_state_reads_the_snapshot_then_the_last_call(monkeypatch):
     from app.db import database
 
     monkeypatch.setattr(limit_resume, "session_leg", lambda s: "delegated")
-    monkeypatch.setattr(send_cost, "_last_call", lambda sid: {
+    monkeypatch.setattr(send_cost, "_last_call", lambda sid, **kwargs: {
         "at": NOW - 7200,
         "usage": {"input_tokens": 4, "cache_read_input_tokens": 300_000,
                   "cache_creation_input_tokens": 5_000},
@@ -212,7 +212,7 @@ def test_cache_state_resolves_session_route(monkeypatch, leg, row, model, idle, 
     monkeypatch.setattr(limit_resume, "session_leg", lambda s: leg)
     monkeypatch.setattr(harness_adapter, "_lookup_provider_row", lambda pid: row)
     monkeypatch.setattr(harness_adapter, "_catalog_pricing_resolver", lambda options: None)
-    monkeypatch.setattr(send_cost, "_last_call", lambda sid: {"at": NOW - idle, "usage": usage})
+    monkeypatch.setattr(send_cost, "_last_call", lambda sid, **kwargs: {"at": NOW - idle, "usage": usage})
     monkeypatch.setattr(database, "get_session_context_usage_snapshot", lambda sid: None)
     state = send_cost.cache_state({"id": "cache-route", "model": f"prov:p1:{model}"}, now=NOW)
     assert state["context_tokens"] == 400_000
@@ -251,3 +251,111 @@ def test_delegated_last_real_call_survives_snapshot_pages_and_auxiliary_calls(mo
     assert state["cache_write_ttl"] == "5m" and state["cache_ttl_seconds"] == 300
     assert state["warn"] is True
     assert state["cost_comparison"]["cold_resume_usd"] == pytest.approx(1.02)
+
+
+@pytest.mark.parametrize("idle,warn", [(20 * 60, False), (40 * 60, True)])
+def test_bare_openai_session_uses_the_default_api_route(monkeypatch, idle, warn):
+    from app.core import limit_resume
+    from app.core.provider import harness_adapter
+    from app.db import database
+
+    monkeypatch.setattr(limit_resume, "session_leg", lambda s: "openai_responses")
+    monkeypatch.setattr(harness_adapter, "_lookup_provider_row",
+                        lambda pid: pytest.fail("a bare model has no provider row"))
+    monkeypatch.setattr(send_cost, "_last_call", lambda sid: {
+        "at": NOW - idle, "usage": {"input_tokens": 400_000},
+    })
+    monkeypatch.setattr(database, "get_session_context_usage_snapshot", lambda sid: None)
+    state = send_cost.cache_state({"id": "legacy-openai", "model": "gpt-5.6"}, now=NOW)
+    assert state["cache_ttl_seconds"] == 1800
+    assert state["warn"] is warn
+
+
+@pytest.mark.parametrize("write_ttl,ttl,cost", [("5m", 300, 1.02), ("1h", 3600, None)])
+def test_delegated_read_only_call_keeps_the_most_recent_write_evidence(mock_db, write_ttl, ttl, cost):
+    from datetime import datetime, timezone
+    from app.db import database, session_events
+    from app.db.base import get_db
+
+    sid = "read-only-cache"
+    database.create_session(sid, "default", model="sonnet")
+    # An older write of the opposite kind must not win.
+    other = "1h" if write_ttl == "5m" else "5m"
+    for write in (other, write_ttl):
+        session_events.append_events(sid, [{"type": "turn.usage", "payload": {"usage": {
+            "cache_creation_input_tokens": 400_000,
+            "cache_creation": {f"ephemeral_{write}_input_tokens": 400_000},
+        }}}])
+    session_events.append_events(sid, [{"type": "turn.usage", "payload": {"usage": {
+        "cache_read_input_tokens": 400_000, "cache_creation_input_tokens": 0,
+        "output_tokens": 2000,
+    }}}])
+    with get_db() as conn:
+        conn.cursor().execute(
+            "UPDATE session_events SET created_at=%s WHERE session_id=%s "
+            "AND seq=(SELECT MAX(seq) FROM session_events WHERE session_id=%s)", (
+                datetime.fromtimestamp(NOW - 360, timezone.utc).isoformat(), sid, sid))
+    # Neither a snapshot, auxiliary write nor estimated main write is evidence.
+    misleading = [
+        {"input_tokens": True},
+        {"input_tokens": "not a token count"},
+        {"cache_creation": {"ephemeral_1h_input_tokens": 400_000}},
+        {"cache_creation_input_tokens": 400_000, "auxiliary_source": "summary"},
+        *({"cache_creation_input_tokens": 400_000, flag: True} for flag in (
+            "usage_estimated", "input_tokens_estimated", "output_tokens_estimated")),
+    ]
+    session_events.append_events(sid, [{"type": "turn.usage", "payload": {"usage": usage}}
+                                       for usage in misleading])
+    state = send_cost.cache_state(database.get_session(sid), now=NOW)
+    assert state["idle_seconds"] == 360  # age follows the real read, not the write/snapshot
+    assert state["context_tokens"] == 400_000
+    assert state["cache_ttl_seconds"] == ttl
+    assert state["cache_write_ttl"] == write_ttl
+    assert state["warn"] is (write_ttl == "5m")
+    if cost is not None:
+        assert state["cost_comparison"]["cold_resume_usd"] == pytest.approx(cost)
+
+
+def test_last_call_projects_only_needed_fields_with_bounded_queries(monkeypatch):
+    from unittest.mock import MagicMock
+    from app.db import base
+
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [
+        {"seq": 200, "created_at": NOW, **dict.fromkeys(send_cost._TOKEN_FIELDS + send_cost._WRITE_FIELDS),
+         "cache_read_input_tokens": "400000"},
+        {**dict.fromkeys(send_cost._TOKEN_FIELDS + send_cost._WRITE_FIELDS),
+         "cache_creation_input_tokens": "400000", "ephemeral_5m_input_tokens": "400000"},
+    ]
+    conn = MagicMock()
+    conn.__enter__.return_value.cursor.return_value = cursor
+    monkeypatch.setattr(base, "get_db", lambda: conn)
+    result = send_cost._last_call("bounded", include_cache_write=True)
+    assert result["usage"]["cache_read_input_tokens"] == 400_000
+    assert result["cache_write_usage"]["cache_creation"]["ephemeral_5m_input_tokens"] == 400_000
+    assert cursor.execute.call_count == cursor.fetchone.call_count == 2
+    cursor.fetchall.assert_not_called()
+    for call in cursor.execute.call_args_list:
+        sql, _ = call.args
+        assert sql.endswith("ORDER BY seq DESC LIMIT 1")
+        select = sql.split(" FROM session_events", 1)[0]
+        assert all(f"AS {key}" in select for key in send_cost._TOKEN_FIELDS + send_cost._WRITE_FIELDS)
+        assert "payload FROM" not in sql and "SELECT payload " not in sql
+        assert "jsonb_typeof" in sql and "usage_estimated" in sql
+
+
+@pytest.mark.parametrize("value,kind", [
+    (0, "number"), (1.5, "number"), (True, "boolean"), (False, "boolean"),
+    ("tokens", "string"), (None, "null"), ({}, "object"), ([], "array"),
+])
+def test_real_call_json_type_guard_has_postgres_semantics_in_the_shim(value, kind):
+    import json
+    import sqlite3
+    from tests.pg_shim import translate_sql
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        query = translate_sql("SELECT jsonb_typeof(value) FROM (SELECT %s AS value)")
+        assert conn.execute(query, (json.dumps(value),)).fetchone()[0] == kind
+    finally:
+        conn.close()

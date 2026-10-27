@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any, Dict, Literal, Optional
 
 from fluid.context.cache_ttl import (
-    delegated_cache_write_ttl, last_real_main_usage, resolve_cache_ttl,
+    delegated_cache_write_ttl, resolve_cache_ttl,
 )
 
 #: A context at least this large is worth a warning when its cache is cold.
@@ -33,35 +33,80 @@ def _epoch(value: Any) -> Optional[float]:
     return None
 
 
-def _last_call(session_id: str) -> Optional[Dict[str, Any]]:
-    """Newest REAL main call, scanning past zero-prompt turn snapshots. Sync."""
-    from app.db.base import get_db, parse_jsonb
+# Keep filtering and projection in PostgreSQL: turn snapshots can contain large
+# diagnostic payloads, but the send path needs at most two small usage records.
+_PROMPT_SQL = " + ".join(
+    f"CASE WHEN jsonb_typeof(payload->'usage'->'{key}') = 'number' "
+    f"THEN (payload->'usage'->>'{key}')::numeric ELSE 0 END"
+    for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+)
+_REAL_CALL_SQL = (
+    "session_id=%s AND event_type='turn.usage' "
+    "AND COALESCE(payload->'usage'->>'auxiliary_source', '') = '' "
+    + "".join(
+        f"AND COALESCE(CAST(payload->'usage'->>'{key}' AS TEXT), 'false') NOT IN ('true', '1') "
+        for key in ("usage_estimated", "input_tokens_estimated", "output_tokens_estimated")
+    )
+    + f"AND ({_PROMPT_SQL}) > 0 "
+)
+_TOKEN_FIELDS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens")
+_WRITE_FIELDS = ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
+_USAGE_SQL = ", ".join(
+    f"CASE WHEN jsonb_typeof({path}->'{key}') = 'number' "
+    f"THEN ({path}->>'{key}')::numeric ELSE NULL END AS {key}"
+    for path, fields in (("payload->'usage'", _TOKEN_FIELDS),
+                         ("payload->'usage'->'cache_creation'", _WRITE_FIELDS))
+    for key in fields
+)
+
+
+def _projected_usage(row: Any) -> Dict[str, Any]:
+    usage: Dict[str, Any] = {key: int(row[key]) for key in _TOKEN_FIELDS if row[key] is not None}
+    writes = {key: int(row[key]) for key in _WRITE_FIELDS if row[key] is not None}
+    if writes:
+        usage["cache_creation"] = writes
+    return usage
+
+
+def _last_call(session_id: str, *, include_cache_write: bool = False) -> Optional[Dict[str, Any]]:
+    """Newest real main call; optionally retain the last cache-writing evidence.
+
+    Each query returns at most one projected row, never a page of whole payloads.
+    Only delegated read-only calls need the second lookup, on the same connection.
+    """
+    from app.db.base import get_db
 
     with get_db() as conn:
         cursor = conn.cursor()
-        before = None
-        while True:
-            cursor.execute(
-                "SELECT seq, created_at, payload FROM session_events WHERE session_id=%s "
-                "AND event_type='turn.usage' "
-                "AND COALESCE(payload->'usage'->>'auxiliary_source', '') = '' "
-                + ("AND seq < %s " if before is not None else "")
-                + "ORDER BY seq DESC LIMIT 100",
-                (session_id, before) if before is not None else (session_id,),
-            )
-            rows = cursor.fetchall()
-            if not rows:
-                return None
-            calls = []
-            for row in rows:
-                payload = parse_jsonb(row["payload"])
-                usage = (payload or {}).get("usage") if isinstance(payload, dict) else None
-                calls.append({"at": _epoch(row["created_at"]),
-                              "usage": usage if isinstance(usage, dict) else {}})
-            real = last_real_main_usage(call["usage"] for call in calls)
-            if real is not None:
-                return next(call for call in calls if call["usage"] is real)
-            before = rows[-1]["seq"]
+        cursor.execute(
+            f"SELECT seq, created_at, {_USAGE_SQL} FROM session_events WHERE "
+            + _REAL_CALL_SQL + "ORDER BY seq DESC LIMIT 1",
+            (session_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        usage = _projected_usage(row)
+        result = {"at": _epoch(row["created_at"]), "usage": usage}
+        if include_cache_write:
+            write_usage = usage
+            if not usage.get("cache_creation_input_tokens"):
+                cursor.execute(
+                    f"SELECT {_USAGE_SQL} FROM session_events WHERE "
+                    + _REAL_CALL_SQL + "AND seq <= %s "
+                    "AND CASE WHEN jsonb_typeof(payload->'usage'->'cache_creation_input_tokens') "
+                    "= 'number' THEN (payload->'usage'->>'cache_creation_input_tokens')::numeric "
+                    "ELSE 0 END > 0 ORDER BY seq DESC LIMIT 1",
+                    (session_id, row["seq"]),
+                )
+                written = cursor.fetchone()
+                write_usage = _projected_usage(written) if written else None
+            result["cache_write_usage"] = write_usage
+        return result
+
+
+def _cache_write_usage(last: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    return (last or {}).get("cache_write_usage", (last or {}).get("usage"))
 
 
 def _prompt_tokens(usage: Dict[str, Any]) -> int:
@@ -120,8 +165,8 @@ def compare_costs(
     """Price one resumed call, with and without compaction, from the same budget.
 
     Neither path assumes a cache hit: a rewritten prompt cannot reuse the old
-    cached history. Delegated calls also pay the last real call's cache-write
-    rate (1h by default, 5m on credits/API key). Native checkpoints also pay for
+    cached history. Delegated calls also pay the most recent real main cache
+    write's rate (1h by default, 5m on credits/API key). Native checkpoints also pay for
     a summary side call.
     Unknown input/output rates must stay unknown, not become a free option.
     """
@@ -191,7 +236,7 @@ def _comparison(
     return compare_costs(
         model=model, leg=leg, context_tokens=tokens, compacted_context_tokens=retained,
         reply_tokens=reply, summary_tokens=SUMMARY_OUTPUT_TOKENS, resolver=resolver,
-        cache_write_ttl=delegated_cache_write_ttl((last or {}).get("usage")),
+        cache_write_ttl=delegated_cache_write_ttl(_cache_write_usage(last)),
     )
 
 
@@ -215,7 +260,7 @@ def cache_state(session: Dict[str, Any], *, now: Optional[float] = None) -> Dict
 
     session_id = session["id"]
     leg = session_leg(session)
-    last = _last_call(session_id)
+    last = _last_call(session_id, include_cache_write=True) if leg == "delegated" else _last_call(session_id)
     raw_model = session.get("model") or session.get("launched_model")
     decoded = decode_provider_model(raw_model) if raw_model else None
     model = decoded[1] if decoded else raw_model
@@ -223,7 +268,7 @@ def cache_state(session: Dict[str, Any], *, now: Optional[float] = None) -> Dict
     row = (_lookup_provider_row(provider_id) or {}) if provider_id else {}
     ttl = resolve_cache_ttl(
         leg, provider_type=row.get("provider_type"), auth_mode=row.get("auth_mode"),
-        base_url=row.get("base_url"), model=model, last_usage=(last or {}).get("usage"),
+        base_url=row.get("base_url"), model=model, last_usage=_cache_write_usage(last),
     ) if leg in ("delegated", "anthropic", "openai_responses", "openrouter") else None
     context_tokens: Optional[int] = None
     data: Dict[str, Any] = {}
@@ -258,7 +303,7 @@ def cache_state(session: Dict[str, Any], *, now: Optional[float] = None) -> Dict
         # Preserve the existing fixed-threshold warning and estimate fallback
         # when the floor is unknown. Never price using an out-of-date projection.
         data = {**data, "compaction": None}
-    state["cache_write_ttl"] = delegated_cache_write_ttl((last or {}).get("usage")) \
+    state["cache_write_ttl"] = delegated_cache_write_ttl(_cache_write_usage(last)) \
         if leg == "delegated" else None
     state["cost_comparison"] = None
     if state["warn"] and context_tokens is not None:

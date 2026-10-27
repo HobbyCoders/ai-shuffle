@@ -287,6 +287,17 @@ def translate_sql(sql: str) -> str:
     # writer; strip them so the SELECT parses.
     s = re.sub(r"\bFOR\s+SHARE\b", "", s, flags=re.I)
     s = re.sub(r"\bFOR\s+(?:NO\s+KEY\s+)?UPDATE\b", "", s, flags=re.I)
+    # PostgreSQL groups JSON integers/reals as "number" and true/false as
+    # "boolean"; SQLite's json_type distinguishes them. Keep numeric guards
+    # faithful so tests execute the same real-call predicate as PostgreSQL.
+    s = re.sub(
+        r"\bjsonb_typeof\(([^()]+)\)",
+        lambda m: f"(CASE json_type({m[1]}) WHEN 'integer' THEN 'number' "
+                  f"WHEN 'real' THEN 'number' WHEN 'true' THEN 'boolean' "
+                  f"WHEN 'false' THEN 'boolean' WHEN 'text' THEN 'string' "
+                  f"ELSE json_type({m[1]}) END)",
+        s, flags=re.I,
+    )
     # JSONB key extraction as text: `col ->> 'key'` -> json_extract(col,'$.key').
     # JSONB columns become TEXT here, and SQLite's json_extract reads that text
     # with the same "missing key yields NULL" semantics ->> has. Only the

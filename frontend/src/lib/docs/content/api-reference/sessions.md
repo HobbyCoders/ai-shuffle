@@ -508,14 +508,14 @@ Whether a message sent now would read a large context with a cold provider cache
 }
 ```
 
-`cold` is `true` when the last real main model call is older than the route's `cache_ttl_seconds`. Zero-prompt snapshots and auxiliary calls do not refresh that time. Lifetimes are idle heuristics, not promises of a hit:
+`cold` is `true` when the last real main model call is older than the route's `cache_ttl_seconds`. Zero-prompt snapshots, auxiliary calls and estimated usage do not refresh that time. Lifetimes are idle heuristics, not promises of a hit:
 
 | Route | Idle gap |
 | --- | --- |
-| Claude Code subscription | 3600 seconds; 300 when the last real main call wrote only 5-minute entries (credits/API-key mode) |
+| Claude Code subscription | 3600 seconds; 300 when the most recent real main cache-writing call wrote only 5-minute entries (credits/API-key mode); read-only calls preserve that evidence |
 | Native Anthropic API | 300 seconds |
 | ChatGPT subscription / Codex backend | `null`: idle time alone never marks it cold |
-| OpenAI Responses API | 1800 seconds |
+| OpenAI Responses API | 1800 seconds, including legacy sessions without a provider row |
 | xAI API / SuperGrok | 300 seconds (heuristic) |
 | OpenRouter | Upstream TTL capped at 600 seconds: `openai/` 600, `anthropic/` and other slugs 300 |
 | Legs without a cache | `null` |

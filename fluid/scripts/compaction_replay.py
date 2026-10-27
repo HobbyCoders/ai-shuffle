@@ -15,7 +15,9 @@ the calls before the first real compaction maps the chars/4 estimate to the
 billed prompt, so the numbers read as measured tokens. The cache signal comes
 from the recorded calls: their request times, their system and tool hashes,
 their hit rates and the session's park and unpark events. Use it to compare
-modes on one session, not as an exact cost model.
+modes on one session, not as an exact cost model. Recorded TTL metadata wins;
+otherwise route metadata resolves the shared policy. Old exports without route
+information retain the documented 300-second fallback.
 
 Usage::
 
@@ -36,6 +38,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fluid.context.cache_signal import CacheSignal, update_p_cold  # noqa: E402
+from fluid.context.cache_ttl import DEFAULT_COLD_GAP_SECONDS, resolve_cache_ttl  # noqa: E402
 from fluid.context.compaction import (  # noqa: E402
     WAKE_TURN_SOURCES,
     CompactionConfig,
@@ -68,6 +71,7 @@ class Call:
     billed: int
     hit_rate: float
     resumed: bool
+    ttl_seconds: float | None = DEFAULT_COLD_GAP_SECONDS
 
 
 @dataclass
@@ -100,12 +104,14 @@ def load(path: Path) -> Session:
     boundary = False
     resumed = True
     seq = 0
+    provider = model = None
     with path.open(encoding="utf-8") as fh:
         for line in fh:
             event = json.loads(line)["event"]
             cls = event["_cls"]
             seq += 1
             if cls == "TurnStarted":
+                provider, model = event.get("provider"), event.get("model")
                 nid = event.get("node_id") or f"node_{seq:012x}"
                 s.nodes.append(_node(nid, "user", [Text("u" * USER_TURN_CHARS)]))
                 if event.get("source") in WAKE_TURN_SOURCES:
@@ -129,6 +135,18 @@ def load(path: Path) -> Session:
                 uncached = int(event.get("input_tokens") or raw.get("input_tokens") or 0)
                 cached = int(event.get("cache_read_tokens") or 0)
                 billed = uncached + cached
+                signal = (raw.get("compaction_decision") or {}).get("cache_signal") or {}
+                if "cache_ttl_seconds" in raw:
+                    ttl = raw["cache_ttl_seconds"]  # Explicit null means no idle expiry.
+                elif "ttl_seconds" in signal:
+                    ttl = signal["ttl_seconds"]
+                else:
+                    ttl = resolve_cache_ttl(
+                        raw.get("provider") or provider,
+                        provider_type=raw.get("provider_type"), auth_mode=raw.get("auth_mode"),
+                        base_url=raw.get("endpoint") or raw.get("base_url"),
+                        model=raw.get("model") or model,
+                    )
                 s.calls.append(Call(
                     prefix=len(s.nodes), boundary=boundary,
                     requested_at=float(hashes.get("_requested_at") or event.get("ts") or 0),
@@ -136,7 +154,7 @@ def load(path: Path) -> Session:
                     overhead=int(hashes.get("_tokens_tools") or 0),
                     billed=billed,
                     hit_rate=cached / billed if billed else 0.0,
-                    resumed=resumed,
+                    resumed=resumed, ttl_seconds=ttl,
                 ))
                 boundary = resumed = False
                 blocks: list[Any] = []
@@ -216,6 +234,7 @@ def replay(s: Session, mode: str, *, window: int, reserve: int,
         overhead = int(call.overhead / scale)
         before = overhead + estimate_tokens_of_messages(compactor.view(nodes))
         signal = CacheSignal(
+            ttl_seconds=call.ttl_seconds,
             gap_s=None if previous is None else max(
                 0.0, call.requested_at - previous.requested_at),
             static_changed=previous is not None and call.static != previous.static,

@@ -32,7 +32,8 @@ from fluid.context.cache_ttl import (
     ("local", {}, 300),
     ("unknown", {}, 300),
     (None, {}, 300),
-    ("openai_responses", {}, 300),
+    ("openai_responses", {}, 1800),
+    ("openai_responses", {"model": "gpt-5.6"}, 1800),
     ("openai_responses", {"base_url": "https://proxy.example/v1/responses"}, 300),
     # A lookalike hostname must not inherit Codex's non-expiry policy.
     ("openai_responses", {"base_url": "https://chatgpt.com.example/backend-api/codex"}, 300),
@@ -54,6 +55,9 @@ def _writes(five=0, hour=0, **usage):
     ({"input_tokens": 100}, 3600),  # missing evidence is not evidence of 5m
     ({"cache_read_input_tokens": 100}, 3600),
     (_writes(five=100, auxiliary_source="checkpoint_summary"), 3600),
+    (_writes(five=100, usage_estimated=True), 3600),
+    (_writes(five=100, input_tokens_estimated=True), 3600),
+    (_writes(five=100, output_tokens_estimated=True), 3600),
     (_writes(five=100, cache_creation_input_tokens=0), 3600),  # zero-prompt snapshot
 ])
 def test_delegated_write_evidence(usage, ttl):
