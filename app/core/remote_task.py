@@ -726,7 +726,7 @@ def _parse(body: Mapping[str, Any], from_device: str) -> _Start:
         agent_name=_text(body, "agent_name", 200),
         prompt=defang_harness_markers(prompt),
         label=defang_harness_markers(_text(body, "label", MAX_LABEL_CHARS)),
-        roster_name=_optional_text(body, "name", 60),
+        roster_name=_optional_text(body, "name", 64),
         provider_id=_optional_text(body, "provider_id", 200),
         model=_optional_text(body, "model", 200),
         effort=effort,

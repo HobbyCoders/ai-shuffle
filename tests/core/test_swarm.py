@@ -446,7 +446,8 @@ async def _start_blocked_swarm(
     monkeypatch.setattr(turn_scheduler, "_on_task_terminal_locked", AsyncMock())
     gate = asyncio.Event()
     async def worker(**kwargs: Any) -> None:
-        task_registry.start_task(sid, kwargs["worker_session_id"], "agent", "worker")
+        task_registry.start_task(sid, kwargs["worker_session_id"], "agent", "worker",
+                                 name=kwargs.get("roster_name"))
         await gate.wait()
     monkeypatch.setattr(provider_agent, "dispatch_worker", worker)
     ctx = ToolCtx(extra={"task_dispatch": task_dispatch.make_fluid_dispatcher(sid)})
@@ -500,6 +501,31 @@ async def _restart(sid: str, *, hydrate: bool = True) -> None:
     assert mark_stale_background_tasks_killed()
     if hydrate:
         await task_registry.ensure_hydrated(sid)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("alias", ["review-backend", "a" * 63 + "x"])
+async def test_swarm_alias_survives_roster_reconstruction(agents, monkeypatch, alias):
+    from app.core import turn_scheduler
+    from fluid.tools.builtins import send_message
+
+    sid = "durable-alias-parent"
+    _, workers = await _start_blocked_swarm(agents, monkeypatch, sid, ids=(alias,))
+    worker_id = workers[alias]
+    roster = agent_messaging.make_roster(lambda: sid)
+    before = await roster({}, ToolCtx())
+    assert any(row["name"] == alias and row["worker_session_id"] == worker_id for row in before)
+    # Real task persistence + hydration; discard the coordinator and live registry.
+    await _restart(sid)
+    after = await roster({}, ToolCtx())
+    assert any(row["name"] == alias and row["worker_session_id"] == worker_id for row in after)
+    monkeypatch.setattr(agent_messaging, "resume_unavailable", AsyncMock(return_value=None))
+    enqueue = AsyncMock(return_value="resumed-turn")
+    monkeypatch.setattr(turn_scheduler, "on_agent_message", enqueue)
+    result = await send_message.handler({"to": alias, "message": "Continue the review"},
+        ToolCtx(extra={"agent_message": agent_messaging.make_message(lambda: sid)}))
+    assert not result.is_error, result.text
+    enqueue.assert_awaited_once_with(worker_id, sid, "Continue the review", reply_to=sid)
 
 
 async def _finish_resumed_worker(

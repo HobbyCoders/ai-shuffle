@@ -1882,7 +1882,8 @@ async def _dispatch_task_tool(
     # fluid's Task hands over ``name``: a short slug derived from the task
     # ("fix-flaky-login") that the worker is listed and addressed by, so
     # SendMessage can find it by name.
-    roster_name = str(args.get("name") or "").strip()[:60] or None
+    # Swarm's logical task IDs allow 64 characters; do not truncate their alias.
+    roster_name = str(args.get("name") or "").strip()[:64] or None
 
     if remote_worker is not None:
         # A remote child skips local admission, so it has no queue for the

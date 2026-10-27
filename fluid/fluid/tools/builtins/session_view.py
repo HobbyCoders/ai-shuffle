@@ -42,8 +42,10 @@ def describe(tools: frozenset[str] | None = None) -> str:
     return (
         "Open a past session's title, date and message window (one line per tool call). "
         "Defaults to the TAIL: final delivery and open work. Use for 'continue where we "
-        "left off' or to check how something was done before redoing it. Page with "
-        "offset/count (see parameters); a budget-truncation footer gives the next offset. "
+        "left off' or to check how something was done before redoing it. Text previews "
+        "are capped at 700 characters; read one message with offset and text_offset=0, "
+        "then follow text_offset to continue within the page budget. Page messages "
+        "with offset/count; output-budget footers give the next message offset. "
         "Accepts store or app session IDs across the owner's workers. This is recall, "
         "not live state: verify against current files before acting."
         + find_route
@@ -73,6 +75,15 @@ SPEC = ToolSpec(
             "count": {
                 "type": "integer",
                 "description": f"Messages to show (default {_DEFAULT_COUNT}, max {_MAX_COUNT}).",
+            },
+            "text_offset": {
+                "type": "integer",
+                "minimum": 0,
+                "description": (
+                    "Start character in one message's text; 0 reads from its start. "
+                    "Text only, within the page budget; implies count=1. Select the "
+                    "message with offset and follow the returned text_offset to continue."
+                ),
             },
             "show": {
                 "type": "string",
@@ -115,7 +126,16 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     session_id = str(input.get("session_id", "")).strip()
     if not session_id:
         return ToolOutcome(text="session_id is required", is_error=True)
-    count = min(_MAX_COUNT, max(1, int(input.get("count") or _DEFAULT_COUNT)))
+    text_offset = input.get("text_offset")
+    if text_offset is not None:
+        if int(text_offset) < 0 or int(input.get("count", 1)) != 1 or input.get("show") == "tools":
+            return ToolOutcome(
+                text="text_offset requires a nonnegative character offset, count=1 and text (not show='tools').",
+                is_error=True,
+            )
+        count = 1
+    else:
+        count = min(_MAX_COUNT, max(1, int(input.get("count") or _DEFAULT_COUNT)))
     raw_offset = input.get("offset")
     start = int(raw_offset) if raw_offset is not None else -count
 
@@ -148,6 +168,8 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                 f"(offset {start})."
             )
         )
+    if text_offset is not None:
+        return _text_page(window, int(text_offset), title, stamp)
     show = str(input.get("show") or "all").strip().lower()
     if show not in _SHOW_MODES:
         show = "all"
@@ -196,9 +218,31 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     return ToolOutcome(text=text)
 
 
+def _text_page(window: Any, start: int, title: str, stamp: str) -> ToolOutcome:
+    """Lossless character paging; metadata and continuation fit the same budget."""
+    msg = window.messages[0]
+    if start > len(msg.text):
+        return ToolOutcome(text=f"text_offset exceeds message length ({len(msg.text)} characters).", is_error=True)
+    heading = clip_text(
+        f"session {window.session_id}{title} — {stamp}, {window.total} messages; "
+        f"message {window.start}, text from character {start} of {len(msg.text)}:",
+        1_000,
+    )
+    prefix = f"{heading}\n[{window.start} {msg.role}] "
+    budget = _OUTPUT_CAP - len(prefix) - _FOOTER_RESERVE
+    end = min(len(msg.text), start + budget)
+    footer = (
+        f"[message text continues — offset={window.start}, count=1, text_offset={end}]"
+        if end < len(msg.text) else "[end of message text]"
+    )
+    return ToolOutcome(text=prefix + msg.text[start:end] + "\n" + footer)
+
+
 def _render(index: int, msg: Any, show: str) -> list[str]:
     """One message's printed lines under ``show``; [] when it shows nothing."""
     text = clip_text(msg.text, _TEXT_CAP) if msg.text.strip() else ""
+    if text and len(msg.text) > _TEXT_CAP and show != "tools":
+        text += f" [text preview clipped — read with offset={index}, count=1, text_offset=0]"
     if show == "conversation":
         return [f"[{index} {msg.role}] {text}"] if text else []
     if show == "tools":

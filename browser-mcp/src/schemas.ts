@@ -142,7 +142,7 @@ export const readTextSchema: JsonSchema = {
 export const evalSchema: JsonSchema = {
   type: "object",
   properties: {
-    code: { type: "string", description: "JavaScript; top-level await works. A single expression returns its value; otherwise use return." },
+    code: { type: "string", description: "JavaScript; top-level await works. A single expression returns its value; otherwise use return. 5000 ms deadline; timeout does not cancel page-side work. Inspect state before retrying mutations; use browser_wait for long waits." },
   },
   required: ["code"],
   additionalProperties: false,
