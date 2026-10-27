@@ -247,7 +247,7 @@ describe('Voice page', () => {
 		await fireEvent.input(field('Max call length'), { target: { value: '0' } });
 		await fireEvent.blur(field('Max call length'));
 		expect(transport.put).toHaveBeenCalledExactlyOnceWith('/settings/voice', { voice_max_call_minutes: 0 });
-		expect(await screen.findByText('No limit: lasts while connected')).toBeTruthy();
+		expect(await screen.findByText('No limit')).toBeTruthy();
 		expect(field('Max call length').value).toBe('0');
 		expect(screen.queryByText('0 means no limit')).toBeNull();
 	});
@@ -266,7 +266,7 @@ describe('Voice page', () => {
 		server = settings('marin', 0);
 		await mountPage();
 		expect(field('Max call length').value).toBe('0');
-		expect(screen.getByText('No limit: lasts while connected')).toBeTruthy();
+		expect(screen.getByText('No limit')).toBeTruthy();
 		await fireEvent.click(screen.getByRole('button', { name: /Reset Max call length/ }));
 		expect(transport.put).toHaveBeenCalledExactlyOnceWith('/settings/voice', { voice_max_call_minutes: 240 });
 	});

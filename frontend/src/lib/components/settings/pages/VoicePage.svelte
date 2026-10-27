@@ -349,7 +349,7 @@
 			id="voice.maxCall"
 			dim={!callsOn}
 			value={s?.voice_max_call_minutes}
-			hint={s?.voice_max_call_minutes === NO_CALL_LIMIT ? 'No limit: lasts while connected' : undefined}
+			hint={s?.voice_max_call_minutes === NO_CALL_LIMIT ? 'No limit' : undefined}
 			onReset={() => voice.save({ voice_max_call_minutes: defaultOf<number>('voice.maxCall') })}
 		>
 			<NumberField
