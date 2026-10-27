@@ -959,8 +959,14 @@ class FactStore:
         return [{"id": e["id"], "revision": e.get("revision", 1), "text": e["text"]}
                 for *_, e in sorted(hits, key=lambda h: h[:3])[:MAX_SIMILAR]]
 
-    def propose_supersession(self, old_id, new_id, *, old_revision, new_revision):
-        """Apply a learner/curator proposal only against its exact fact snapshot."""
+    def propose_supersession(self, old_id, new_id, *, old_revision, new_revision,
+                             protected_conflict=False):
+        """Apply a learner/curator proposal only against its exact fact snapshot.
+
+        A user-kept (protected) old fact is refused unless
+        ``protected_conflict`` is set and the new fact is user-kept too: the
+        pair is then linked unconfirmed, both texts stay as they are, and the
+        snapshot asks the owner to resolve it (see preferences.py)."""
         from fluid.codemode.supersession import replacement_evidence
         from fluid.context.screening import screen_findings
         with file_transaction(self.lock):
@@ -971,7 +977,9 @@ class FactStore:
                 return False
             if old.get("revision", 1) != old_revision or new.get("revision", 1) != new_revision:
                 raise ValueError("Memory changed since the supersession proposal was read")
-            if (old.get("protected") or old.get("conflicted") or new.get("conflicted") or new.get("superseded_by")
+            if old.get("protected") and not (protected_conflict and new.get("protected")):
+                return False
+            if (old.get("conflicted") or new.get("conflicted") or new.get("superseded_by")
                     or screen_findings(new["text"]) or not replacement_evidence(old, new, proposed=True)):
                 return False
             old["superseded_by"] = global_id(new)

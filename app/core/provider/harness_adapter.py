@@ -8383,11 +8383,18 @@ def _delegated_learner_target(options: SessionOptions, owner: str) -> Optional[_
         kind = _provider_row_kind(*shape)
         if kind not in _LEARNER_KINDS or not row.get("id"):
             return None
+        # The row's own window for the model (models_json, preset roster,
+        # row column). Without it fluid sized every pass for a small local
+        # model and the live learner read about 37 entries a pass.
+        try:
+            window = resolve_provider_context_window(row, model)
+        except Exception:  # noqa: BLE001 — unknown window: fluid's own fallback
+            window = None
         return _LearnerTarget(
             kind=cast(str, kind),
             options=_learner_binding(model, str(row["id"]), shape),
             model=model,
-            context_window=None,
+            context_window=window,
             source="subscription",
         )
     except Exception:  # noqa: BLE001 — no learner is the safe answer

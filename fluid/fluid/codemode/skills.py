@@ -1709,8 +1709,18 @@ class SkillStore:
         finds the fact and a later save can bring it back."""
         return self._facts.retire(memory_id, reason=reason, expected_revision=expected_revision)
 
-    def propose_memory_supersession(self, old_id: str, new_id: str, *, old_revision: int, new_revision: int) -> bool:
-        return self._facts.propose_supersession(old_id, new_id, old_revision=old_revision, new_revision=new_revision)
+    def propose_memory_supersession(self, old_id: str, new_id: str, *, old_revision: int, new_revision: int,
+                                    protected_conflict: bool = False) -> bool:
+        return self._facts.propose_supersession(old_id, new_id, old_revision=old_revision, new_revision=new_revision,
+                                                protected_conflict=protected_conflict)
+
+    def learner_proposal_footer(self, project: str | None = None, entries: list | None = None) -> str:
+        """The ``# Memory`` footer's lines for open learner proposals (see
+        fluid.codemode.preferences): one line per proposed ``pref.<topic>``
+        update, "" when none. Never raises."""
+        from fluid.codemode.preferences import preference_proposal_lines
+        lines = preference_proposal_lines(self, project, entries=entries)
+        return "\n\n" + "\n".join(lines) if lines else ""
 
     def purge_forgotten_evidence(self) -> None:
         cutoff = self._facts.snapshot().get("forgotten_before", 0)
@@ -1816,6 +1826,7 @@ class SkillStore:
                 f"\n\n({in_archive} archived fact{'' if in_archive == 1 else 's'} not shown; "
                 f"Recall finds {'it' if in_archive == 1 else 'them'} by keyword.)"
             )
+        footer += self.learner_proposal_footer(project, entries)  # learner proposals (preferences.py)
         if not shown and not over_budget and not held and not in_archive:
             return EMPTY_MEMORY_SECTION + footer
         if held:
@@ -2240,6 +2251,21 @@ class SkillStore:
         if isinstance(table, dict) and model in table:
             table.pop(model)
             self._save_meta(meta)
+
+    def claim_budget_row(self, day: int) -> bool:
+        """True for the first caller on UTC ``day`` to report the daily
+        learner budget as spent; every later caller that day (any session
+        over this store) leaves no row. Under its own lock: two sessions
+        that hit the cap together must not both write the row."""
+        with journal_lock(self.root / "budget-row", wait=1.0) as held:
+            if not held:
+                return False
+            meta = self._load_meta()
+            if meta.get("budget_row_day") == int(day):
+                return False
+            meta["budget_row_day"] = int(day)
+            self._save_meta(meta)
+            return True
 
     def consolidation_retry_at(self) -> float:
         return float(self._load_meta().get("consolidation_retry_at", 0.0))

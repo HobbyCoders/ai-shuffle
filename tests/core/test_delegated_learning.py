@@ -352,6 +352,17 @@ def test_learner_target_uses_the_pinned_model_on_a_subscription_row(monkeypatch)
     assert (target.kind, target.model, target.source) == ("openai_responses", "gpt-sub-mini", "subscription")
 
 
+def test_a_subscription_learner_is_sized_for_its_models_window(monkeypatch):
+    """Without the row's window fluid sized every pass for a small local
+    model (about 37 entries a pass on the live store)."""
+    row = {**SUBSCRIPTION_ROW, "models_json": [{"id": "gpt-sub", "context_window": 272_000}]}
+    _offer_subscription(monkeypatch, row)
+    target = ha._delegated_learner_target(SessionOptions(model="opus"), "local")
+    assert target.context_window == 272_000
+    _offer_subscription(monkeypatch)  # a model the row says nothing about
+    assert ha._delegated_learner_target(SessionOptions(model="opus"), "local").context_window is None
+
+
 def test_an_api_users_session_never_spends_the_owners_subscription(monkeypatch):
     picks = _offer_subscription(monkeypatch)
     assert ha._delegated_learner_target(SessionOptions(model="opus"), "api:u1") is None
