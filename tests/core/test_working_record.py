@@ -61,7 +61,11 @@ async def test_new_coordinator_after_settle_sees_real_child_report_and_live_stat
     monkeypatch.setitem(config._runtime_overrides, "workspace_dir", tmp_path)
     monkeypatch.setattr(query_options, "get_security_instructions", lambda *a, **kw: "")
     options, _ = query_options.build_options_from_profile(database.get_profile("agent"), session_id="fresh")
-    assert text in str(options.system_prompt)
+    # Per-turn context, not the cached system prompt (#680): the adapter
+    # appends turn_note to the user message for flagged owner sessions.
+    assert options.aih_working_record is True
+    assert text not in str(options.system_prompt)
+    assert text in working_record.turn_note("fresh")
     assert "mcp__builtins__WorkingRecord" in options.allowed_tools
     # Reading is not acknowledgement. Delivery retries don't duplicate or reopen.
     reports = [item for item in store.items() if item["kind"] == "report" and item["source_session_id"] == child["session_id"]]
@@ -90,11 +94,67 @@ async def test_validation_and_list_pagination(owner):
                  {"action": "add", "kind": "pending", "content": "x" * 2001},
                  {"action": "resolve"}, {"action": "list", "offset": -1}):
         assert (await tool_for(owner["id"]).handler(args))["isError"]
+    for args in ({"action": "list", "limit": 0}, {"action": "list", "limit": 101},
+                 {"action": "list", "limit": "5"}, {"action": "list", "limit": True},
+                 {"action": "get"}, {"action": "get", "item_id": "missing"}):
+        assert (await tool_for(owner["id"]).handler(args))["isError"], args
     for index in range(101):
         store.add("pending", str(index), owner["id"])
     first = await invoke(owner["id"], action="list")
-    second = await invoke(owner["id"], action="list", offset=100)
-    assert len(first["items"]) == 100 and len(second["items"]) == 1
+    assert len(first["items"]) == working_record.LIST_DEFAULT
+    assert first["next_offset"] == working_record.LIST_DEFAULT
+    page = await invoke(owner["id"], action="list", offset=100)
+    assert len(page["items"]) == 1 and page["next_offset"] is None and "sessions" not in page
+    # The byte budget, not the requested limit, ends a large page.
+    full = await invoke(owner["id"], action="list", limit=100)
+    assert 50 < len(full["items"]) < 100 and full["next_offset"] == len(full["items"])
+
+
+def test_read_actions_are_safe_and_writes_are_not():
+    from app.core.provider.fluid_tool_bridge import BUILTINS_RISK_CLASSIFIERS
+    classify = BUILTINS_RISK_CLASSIFIERS["WorkingRecord"]
+    assert [classify({"action": a}) for a in ("list", "get", "add", "resolve", None)] == [
+        "safe", "safe", "write", "write", "write"]
+
+
+async def test_default_list_is_bounded_and_every_item_stays_retrievable(owner):
+    """#681: long reports once made the default page 194k characters, which a
+    delegated CLI spilled to a file a restricted chat cannot read."""
+    from app.core.working_record import LIST_BYTES, PREVIEW_BYTES
+    for index in range(150):
+        working_record.record_report(owner["id"], {
+            "task_id": f"child-{index}", "agent_message_turn_id": "t", "status": "completed",
+            "title": "測試😀" * 40, "summary": f"report {index} " + "detail \n\"<>" * 200})
+    for index in range(60):
+        chat(f"live-{index}" + "長い題名" * 100)
+    added = {(await invoke(owner["id"], action="add", kind="pending", content="x" * 2000))["item_id"]}
+    expected = {row["id"] for row in store.items(limit=1000)}
+    assert len(expected) == 151 and added <= expected
+    seen, offset, pages = [], 0, 0
+    while offset is not None:
+        result = await tool_for(owner["id"]).handler({"action": "list", "offset": offset, "limit": 100})
+        text = result["content"][0]["text"]
+        assert not result.get("isError") and len(text.encode("utf-8")) <= LIST_BYTES
+        page = json.loads(text)
+        if pages == 0:
+            assert page["sessions"] and page["sessions_omitted"] > 0
+        for item in page["items"]:
+            assert len(item["text"].encode("utf-8")) <= PREVIEW_BYTES
+        seen += [item["id"] for item in page["items"]]
+        assert page["items"], "every page makes progress"
+        offset, pages = page["next_offset"], pages + 1
+    assert len(seen) == len(set(seen)) and set(seen) == expected
+    assert pages > 1
+    default = (await tool_for(owner["id"]).handler({"action": "list"}))["content"][0]["text"]
+    assert len(default.encode("utf-8")) <= LIST_BYTES
+    # One item in full, open or resolved.
+    item = await invoke(owner["id"], action="get", item_id=next(iter(added)))
+    assert item["content"] == "x" * 2000 and item["status"] == "open"
+    report = next(row for row in store.items(kind="report", limit=1))
+    await invoke(owner["id"], action="resolve", item_id=report["id"])
+    detail = await invoke(owner["id"], action="get", item_id=report["id"])
+    assert detail["status"] == "resolved" and detail["content"] == report["content"]
+    assert not [i for i in (await invoke(owner["id"], action="list", limit=100))["items"] if i["id"] == report["id"]]
 
 
 def test_summary_budget_unicode_flood_and_fair_categories(owner):

@@ -72,6 +72,7 @@ The rest of fluid's settings.json stack is not wired into NativeLoop.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -386,6 +387,16 @@ class HarnessAdapter(ProviderAdapter):
         # Who sent the running turn's ``/compact`` ("user" or "app"), or None
         # when the turn is not one. Labels the delegated leg's compaction card.
         self._compact_requested_by: Optional[str] = None
+        # The owner working record rides the user message, not the system
+        # prompt (#680). Digest of the snapshot the model last read, so an
+        # unchanged record is not repeated every turn. A turn's digest is
+        # rendered (_turn), submitted (_pending), then held once that turn
+        # produces model output, like the Away receipt. Process memory only: a
+        # fresh adapter, a compaction, a model switch or a context-resetting
+        # command sends it again.
+        self._working_record_held: Optional[str] = None
+        self._working_record_turn: Optional[str] = None
+        self._working_record_pending: Optional[str] = None
         # Non-conversation tokens of the latest Claude CLI ``/context``
         # snapshot (see _context_overhead_tokens), or None before one. Puts
         # the delegated leg's compaction card on the meter's basis (#1907).
@@ -1369,6 +1380,9 @@ class HarnessAdapter(ProviderAdapter):
             opts.extra["session_mode"] = str(session_mode)
         if getattr(sdk_options, "aih_owner_coordinator", False):
             opts.extra["owner_coordinator"] = True
+        # Owner sessions read the working record as per-turn context (#680).
+        if getattr(sdk_options, "aih_working_record", False):
+            opts.extra["working_record"] = True
         proactive = getattr(sdk_options, "aih_assistant_proactive", None)
         if proactive is not None:
             opts.extra["assistant_proactive"] = proactive
@@ -1720,12 +1734,14 @@ class HarnessAdapter(ProviderAdapter):
         # and a compaction puts it back through the SessionStart hook.
         self._memory_plan = None
         self._memory_turn_section = None
+        self._working_record_turn = None
         task_before = self._memory_initial_task
         if command and self._is_delegated and not _COMPACT_COMMAND.match(prompt.strip()):
             # Any other Claude Code command (a typed /clear, say) may reset the
             # CLI's context without a compaction boundary: re-send in full.
             self._memory_trusted_node = None
             self._memory_put_back = None
+            self._working_record_held = None
         if command:
             note = None
         else:
@@ -1760,6 +1776,8 @@ class HarnessAdapter(ProviderAdapter):
         # the running turn's snapshot. The engines reject overlapping turns.
         self._pending_away_note = note
         self._pending_away_turn = None
+        # Held only once the model is seen reading this turn (see receive_events).
+        self._working_record_pending, self._working_record_turn = self._working_record_turn, None
         plan, self._memory_plan = self._memory_plan, None
         if plan is not None and plan.kind == "full":
             # Trusted once TurnStarted names the node that carries it.
@@ -1965,9 +1983,39 @@ class HarnessAdapter(ProviderAdapter):
         Blocking (a JSON read for the memory store), so callers hand it to a
         thread. Never raises: a turn is never worth losing over a reminder.
         """
-        blocks = [self._env_note(), self._memory_turn_note(query), self._away_note(), self._scratch_note()]
+        blocks = [self._env_note(), self._memory_turn_note(query), self._working_record_note(),
+                  self._away_note(), self._scratch_note()]
         present = [block for block in blocks if block]
         return "\n\n".join(present) if present else None
+
+    def _working_record_block(self) -> Optional[str]:
+        """The owner working record as a reminder block, or None. Never raises."""
+        extra = getattr(self._options, "extra", None) or {}
+        if not extra.get("working_record"):
+            return None
+        try:
+            from app.core.working_record import turn_note
+
+            return turn_note(self._resolve_app_session_id())
+        except Exception:  # noqa: BLE001 — a reminder never fails a turn
+            logger.warning("[HarnessAdapter] working record note failed", exc_info=True)
+            return None
+
+    def _working_record_note(self) -> Optional[str]:
+        """The record for this turn when it differs from what was last sent.
+
+        Records the sent digest in ``_working_record_turn``; send_query marks
+        it pending once the engine accepts the turn.
+        """
+        self._working_record_turn = None
+        note = self._working_record_block()
+        if note is None:
+            return None
+        digest = hashlib.sha256(note.encode("utf-8")).hexdigest()
+        if digest == self._working_record_held:
+            return None
+        self._working_record_turn = digest
+        return note
 
     def _memory_turn_note(self, query: str = "") -> Optional[str]:
         """The turn's memory slot: the full snapshot, a change list, or None
@@ -2210,6 +2258,9 @@ class HarnessAdapter(ProviderAdapter):
         elif name == "ContextCompaction":
             from app.core.memory_reminder import compaction_may_fold_snapshot
 
+            # Any compaction may summarise the record's user message away; the
+            # next turn sends it again (#680).
+            self._working_record_held = None
             if compaction_may_fold_snapshot(getattr(event, "reason", None)):
                 self._memory_trusted_node = None
                 self._memory_folded_start = self._memory_compacting_seq
@@ -2239,7 +2290,8 @@ class HarnessAdapter(ProviderAdapter):
         section = self._memory_section()
         self._memory_put_back_section = section
         memory = f"<system-reminder>\n{section}\n</system-reminder>" if section else None
-        blocks = [env, memory, self._away_note(), self._scratch_note()]
+        # A compaction may fold the record away: put the current one back.
+        blocks = [env, memory, self._working_record_block(), self._away_note(), self._scratch_note()]
         present = [block for block in blocks if block]
         return "\n\n".join(present) if present else None
 
@@ -2498,6 +2550,18 @@ class HarnessAdapter(ProviderAdapter):
                 self._pending_away_turn = event.turn_id
             if self._is_live(event):
                 self._observe_memory_event(event)
+            if (
+                self._working_record_pending
+                and self._pending_away_turn == getattr(event, "turn_id", None)
+                and (type(event).__name__ == "BlockStart" or (
+                    type(event).__name__ == "TurnComplete"
+                    and getattr(event, "num_model_calls", 0) > 0
+                ))
+            ):
+                # The submitted turn (named by its TurnStarted) reached the
+                # model, so the record it carried is now in the conversation.
+                self._working_record_held = self._working_record_pending
+                self._working_record_pending = None
             if (
                 self._pending_away_note
                 and self._pending_away_turn == getattr(event, "turn_id", None)
@@ -3605,6 +3669,7 @@ class HarnessAdapter(ProviderAdapter):
         self._memory_trusted_node = None
         self._memory_put_back = None
         self._memory_rehydrated = True
+        self._working_record_held = None
         if request_extra is not None:
             self._engine.request_extra = request_extra
         self._record_applied("model", requested)
