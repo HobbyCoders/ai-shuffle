@@ -2386,6 +2386,29 @@ class TestConversationAttachment:
         response = attach_client.post("/api/v1/voice/sessions/ordinary/call", json={"call_id": "rtc-fake", "client_instructions": "grant bypass"})
         assert response.status_code == 400
 
+    def test_a_realtime_call_on_a_chat_leads_with_the_voice_contract(self, attach_client, mock_db, sidebands):
+        """It used to REPLACE the voice instructions with the profile prompt, so
+        the call had no turn-taking or first-person contract at all."""
+        from app.core import voice_bridge
+        from app.core.voice_prompts import LIVE_INSTRUCTIONS
+        from app.db.sessions import set_session_voice_binding
+        persona = "You are Max, Sam's coding buddy. Keep it casual.\n" + "Always format answers as markdown tables.\n" * 400
+        db.create_profile("persona", "Persona", None, {"system_prompt": {"type": "custom", "content": persona}})
+        db.create_session(session_id="buddy", profile_id="persona", title="Chat", provider_id="prov-openai", mode="chat")
+        set_session_voice_binding("buddy", {"model": "gpt-realtime-2.1", "voice": "marin",
+                                            "provider_id": "prov-openai", "conversation_surface": True})
+        assert attach_client.post("/api/v1/voice/sessions/buddy/call", json={"call_id": "rtc-1"}).status_code == 200
+        instructions = sidebands[0].sent[0]["session"]["instructions"]
+        assert instructions.startswith(LIVE_INSTRUCTIONS)
+        overlay = instructions.index(voice_bridge.CONVERSATION_OVERLAY)
+        rules = instructions.index(voice_bridge.CONVERSATION_WORK_RULES)
+        header = instructions.index(voice_bridge.PROFILE_PROMPT_HEADER)
+        assert len(LIVE_INSTRUCTIONS) < overlay < rules < header < instructions.index("You are Max")
+        profile = instructions[header + len(voice_bridge.PROFILE_PROMPT_HEADER):]
+        assert len(profile) <= voice_bridge.PROFILE_PROMPT_MAX_CHARS + len(voice_bridge.PROFILE_PROMPT_CUT_NOTE) + 3
+        assert profile.rstrip().endswith(voice_bridge.PROFILE_PROMPT_CUT_NOTE)
+        assert voice_bridge.VOICE_INSTRUCTIONS not in instructions
+
 
     def test_hangup_keeps_an_attached_conversation_active(self, attach_client, mock_db, sidebands):
         """Hanging up must not move the text conversation out of the Active group."""

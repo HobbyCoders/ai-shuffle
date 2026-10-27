@@ -1375,15 +1375,23 @@ async def attach_voice_call(
         )
 
     # Compose the agent's system prompt: the base contract, plus the appendix
-    # for the client's session mode (browser calls have none).
+    # for the client's session mode (browser calls have none), plus, for a
+    # call on a chat, the conversation overlay and the agent's capped prompt.
     config = session_config(session_row, voice_settings)
     from app.core.voice_options import effective_options
     options = effective_options(config)
     instructions_override = options["instructions"] or voice_bridge.VOICE_INSTRUCTIONS
+    conversation = None
     if session_row.get("mode") != "voice":
         # Audio is an overlay, not a new agent. Substantive work runs through
         # the same conversation queue, profile, model and permission ceiling.
-        instructions_override = await run_sync(voice_bridge.conversation_instructions, session_row)
+        # The call speaks under the same voice contract as every other call on
+        # a chat. The Realtime engine's own prompt option is the standalone
+        # voice agent's (VOICE_INSTRUCTIONS, with dispatch tools), which does
+        # not apply here.
+        from app.core.voice_prompts import LIVE_INSTRUCTIONS
+        instructions_override = LIVE_INSTRUCTIONS
+        conversation = await run_sync(voice_bridge.conversation_instructions, session_row)
         if client_tools:
             raise HTTPException(400, "Conversation calls do not expose client-side action tools.")
         if client_instructions:
@@ -1391,6 +1399,9 @@ async def attach_voice_call(
     if session_mode is not None:
         appendix = voice_bridge.DEFAULT_MODE_INSTRUCTIONS[session_mode]
         instructions_override = f"{instructions_override}\n\n{appendix}"
+    if conversation:
+        # Contract first, then the overlay, work rules and the agent's prompt.
+        instructions_override = f"{instructions_override}\n\n{conversation}"
 
     # The app-configuration tools the voice agent may use directly. Same
     # admission rule as a chat session's app-config server: never for an

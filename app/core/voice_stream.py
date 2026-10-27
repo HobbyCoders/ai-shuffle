@@ -57,10 +57,10 @@ _BACKCHANNEL_WORDS = frozenset({
 _NOISE_WORDS = frozenset({"uh", "um", "umm", "hm", "hmm", "mm", "mmm", "mhm", "ah", "oh", "er", "erm", "huh"})
 
 
-NO_REQUEST_NOTE = ("No words were heard for that handoff, so nothing was sent to the chat agent. "
+NO_REQUEST_NOTE = ("No words were heard for that handoff, so nothing was handed off. "
                    "Do not report work. If the user did ask for something, ask them to repeat it.")
 APPROVAL_ANSWER_NOTE = ("The caller's words were taken as their answer to the waiting approval question, "
-                        "so nothing was sent to the chat agent. The app will report the decision. If they "
+                        "so nothing was handed off. The app will report the decision. If they "
                         "asked for something else, ask them to repeat it once the approval is settled.")
 # A spoken approval answer is heard once the caller has been quiet this long
 # (or as soon as the voice starts replying, which means GPT Live heard the end
@@ -70,7 +70,7 @@ APPROVAL_SETTLE_S = 1.5
 # longer when the caller spoke last and the voice has not answered yet.
 PAUSE_QUIET_S = 1.5
 PAUSE_AFTER_CALLER_S = 3.0
-MERGED_REQUEST_NOTE = ("This handoff was combined with the request already sent to the chat agent "
+MERGED_REQUEST_NOTE = ("This handoff was combined with the request already handed off "
                        "while the user was still speaking; its result will follow.")
 # Call health (#1824). The browser is told how long ago the last microphone
 # frame arrived every HEALTH_PUSH_S; one INFO line per HEALTH_LOG_S records the
@@ -953,7 +953,7 @@ class VoiceStream:
                         self.settling.append(did)
                     elif len(_workers) >= 8:
                         await self.send({"type": "session.commentary.append", "delegation_id": did,
-                                         "content": "The backend is busy with another task. Ask the user to repeat this new request after it finishes."})
+                                         "content": "Too much work is already running to take this request. Ask the user to repeat it once the current work finishes."})
                     else:
                         self.settling = [did]
                         self.delegation_task = asyncio.create_task(self.dispatch_when_settled())

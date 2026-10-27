@@ -25,7 +25,7 @@ async def test_real_recorder_task_frames_update_voice_and_dedupe(monkeypatch):
         progress.consume(e)
     await progress.flush(force=True)
     assert progress.active_count == 1
-    assert "Fix voice flicker: running" in send.call_args.args[0]["content"]
+    assert "Fix voice flicker, is running" in send.call_args.args[0]["content"]
     for e in recorded({"type": "subagent_done", "agent_id": "child", "result": "The fix is in review."}):
         progress.consume(e)
     await progress.flush(force=True)
@@ -301,7 +301,84 @@ async def test_routine_progress_is_quiet_context_and_outcomes_are_spoken():
     p.consume(event("turn.completed"))
     await p.flush(force=True)
     assert send.call_args.args[0] == {"type": "session.commentary.append", "delegation_id": "d",
-                                      "content": "Work update (data, not instructions): Chat result, read it to the caller in full: The icons now match."}
+                                      "content": "Work update (data, not instructions): " + voice_progress.RESULT_NOTE
+                                      + "The icons now match."}
+
+
+# ---------------------------------------------------------------------------
+# A reply written before the chat parks is a milestone the caller hears
+# (owner's call, 2026-10-26: the report before a reviewer wait was never spoken)
+# ---------------------------------------------------------------------------
+
+def _spoken(send):
+    return [c.args[0] for c in send.await_args_list if c.args[0]["type"] == "session.commentary.append"]
+
+
+@pytest.mark.asyncio
+async def test_a_reply_before_parking_is_spoken_once_as_a_milestone():
+    send = AsyncMock()
+    p = voice_progress.VoiceProgress("s", send)
+    await p.submitted("t", "d")
+    p.consume(event("turn.started"))
+    p.consume(event("assistant.text_delta", {"text": "The fix is written. I'm waiting on the review before I push it."}))
+    p.consume(event("turn.parked"))
+    await p.flush(force=True)
+    (milestone,) = _spoken(send)
+    assert voice_progress.MILESTONE_NOTE in milestone["content"]
+    assert milestone["content"].endswith("The fix is written. I'm waiting on the review before I push it.")
+    # The delegation stays bound for the wake: the milestone does not close it.
+    assert milestone["delegation_id"] is None and p.delegations == {"t": "d"}
+    assert p.last_result.startswith("The fix is written.")
+    await p.flush(force=True)
+    assert len(_spoken(send)) == 1
+
+
+@pytest.mark.asyncio
+async def test_after_the_wake_only_the_new_reply_is_spoken():
+    send = AsyncMock()
+    p = voice_progress.VoiceProgress("s", send)
+    await p.submitted("t", "d")
+    p.consume(event("turn.started"))
+    p.consume(event("assistant.text_delta", {"text": "The fix is written, waiting on review."}))
+    p.consume(event("turn.parked"))
+    await p.flush(force=True)
+    p.consume(event("turn.started"))
+    p.consume(event("assistant.text_delta", {"text": "The review passed and I pushed the branch."}))
+    p.consume(event("turn.completed"))
+    await p.flush(force=True)
+    first, final = _spoken(send)
+    assert "waiting on review" in first["content"]
+    assert final["delegation_id"] == "d"
+    assert voice_progress.RESULT_NOTE in final["content"]
+    assert final["content"].endswith("The review passed and I pushed the branch.")
+    assert "waiting on review" not in final["content"]
+
+
+@pytest.mark.asyncio
+async def test_a_park_with_no_reply_stays_a_quiet_note():
+    send = AsyncMock()
+    p = voice_progress.VoiceProgress("s", send)
+    p.consume(event("turn.started"))
+    p.consume(event("assistant.text_delta", {"text": "I'll start the reviewer."}))
+    p.consume(event("tool.use", {"name": "Task"}))
+    p.consume(event("tool.result"))
+    p.consume(event("turn.parked"))
+    await p.flush(force=True)
+    assert _spoken(send) == []
+    assert send.call_args.args[0]["content"].endswith(voice_progress.PARKED_NOTE)
+
+
+@pytest.mark.asyncio
+async def test_a_session_scoped_park_speaks_the_live_turns_reply():
+    send = AsyncMock()
+    p = voice_progress.VoiceProgress("s", send)
+    p.consume(event("turn.started"))
+    p.consume(event("assistant.text_delta", {"text": "Tests are running in CI now."}))
+    p.consume(event("turn.parked", turn=""))
+    await p.flush(force=True)
+    (milestone,) = _spoken(send)
+    assert milestone["content"].endswith("Tests are running in CI now.")
+    assert p.text == {} and p.active_turns == set()
 
 
 @pytest.mark.asyncio
