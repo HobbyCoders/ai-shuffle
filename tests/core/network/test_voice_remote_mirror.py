@@ -25,9 +25,9 @@ def shared_active_rows(session_id):
 
 
 def network(workers):
-    owner, viewer = workers("gamingpc"), workers("unraid")
+    owner, viewer = workers("office-pc"), workers("home-server")
     with owner.active():
-        engine.create_network("Home", device_name="GamingPC")
+        engine.create_network("Home", device_name="Office PC")
     join(owner, viewer)
     _new_session(owner, "peer-chat", "Rail icons")
     converge([owner, viewer])

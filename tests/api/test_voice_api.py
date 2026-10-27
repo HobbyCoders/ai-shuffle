@@ -2194,7 +2194,7 @@ class TestConversationAttachment:
 
     # -- #700: a conversation another network worker runs --------------------
 
-    PEER = "peer-device-gamingpc"
+    PEER = "peer-device-office-pc"
 
     def _owned_by_peer(self, monkeypatch, *, online=True, status="active", session_id="peer-chat", mode="chat"):
         from types import SimpleNamespace
@@ -2208,7 +2208,7 @@ class TestConversationAttachment:
                                                                        device_id="this-device"))
         real_install = database.get_install
         monkeypatch.setattr(database, "get_install", lambda d: {
-            "id": self.PEER, "device_name": "GamingPC", "online": online, "approved": True,
+            "id": self.PEER, "device_name": "Office PC", "online": online, "approved": True,
         } if d == self.PEER else real_install(d))
         return session_id
 
@@ -2240,7 +2240,7 @@ class TestConversationAttachment:
         response = attach_client.post(f"/api/v1/voice/sessions/{session_id}/attach", json={})
 
         assert response.status_code == 409
-        assert response.json()["detail"].startswith("GamingPC is offline")
+        assert response.json()["detail"].startswith("Office PC is offline")
 
     def test_attach_refuses_an_owner_that_left_the_network(self, attach_client, mock_db, monkeypatch):
         session_id = self._owned_by_peer(monkeypatch, status="removed")

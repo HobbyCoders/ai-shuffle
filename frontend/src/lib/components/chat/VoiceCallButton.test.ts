@@ -48,7 +48,7 @@ describe('call action on a conversation', () => {
 });
 describe('a conversation another worker runs (#700)', () => {
  it('takes a call that runs here and forwards to that worker', async () => {
-  rows.set([{ id: 'home', status: 'active', is_remote: true, controllable: true, device_name: 'GamingPC' }]);
+  rows.set([{ id: 'home', status: 'active', is_remote: true, controllable: true, device_name: 'Office PC' }]);
   render(VoiceCallButton);
   const button = await callButton() as HTMLButtonElement;
   expect(button.disabled).toBe(false);
@@ -57,11 +57,11 @@ describe('a conversation another worker runs (#700)', () => {
   expect(mocks.startCallForSession).toHaveBeenCalledWith('home', { attach: true });
  });
  it('names the offline worker instead of calling into nothing', async () => {
-  rows.set([{ id: 'home', status: 'active', is_remote: true, controllable: false, device_name: 'GamingPC' }]);
+  rows.set([{ id: 'home', status: 'active', is_remote: true, controllable: false, device_name: 'Office PC' }]);
   render(VoiceCallButton);
   const button = await callButton() as HTMLButtonElement;
   expect(button.disabled).toBe(true);
-  expect(button.title).toMatch(/GamingPC is offline/);
+  expect(button.title).toMatch(/Office PC is offline/);
   await fireEvent.click(button);
   expect(mocks.startCallForSession).not.toHaveBeenCalled();
  });

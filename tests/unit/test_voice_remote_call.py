@@ -16,7 +16,7 @@ from app.core import turn_manager, voice_bridge, voice_stream
 from app.db import database, session_events, turns
 from app.network import control
 
-PEER = "peer-device-gamingpc"
+PEER = "peer-device-office-pc"
 SESSION = "chat-on-peer"
 
 
@@ -100,7 +100,7 @@ async def test_a_spoken_request_goes_to_the_owner_and_nothing_is_written_here(mi
 @pytest.mark.asyncio
 async def test_an_unreachable_owner_is_said_aloud_and_nothing_is_queued_here(mirror, monkeypatch):
     async def offline(*_args, **_kwargs):
-        raise control.RunnerUnreachable("Couldn't reach GamingPC from Unraid.")
+        raise control.RunnerUnreachable("Couldn't reach Office PC from Home Server.")
 
     monkeypatch.setattr(control, "call", offline)
     call = streamed_call()
@@ -113,7 +113,7 @@ async def test_an_unreachable_owner_is_said_aloud_and_nothing_is_queued_here(mir
     call.progress.submitted.assert_not_awaited()
     spoken = call.upstream.sent[0]
     assert spoken["type"] == "session.commentary.append"
-    assert "could not take the request" in spoken["content"] and "Couldn't reach GamingPC" in spoken["content"]
+    assert "could not take the request" in spoken["content"] and "Couldn't reach Office PC" in spoken["content"]
     assert_mirror_untouched(mirror)
 
 
@@ -234,7 +234,7 @@ async def test_a_forwarded_request_carries_a_stable_command_id(mirror):
 @pytest.mark.asyncio
 async def test_a_lost_answer_says_it_may_have_reached_the_chat(mirror, monkeypatch):
     async def lost(*_args, **_kwargs):
-        raise control.MaybeApplied("GamingPC did not answer in time.")
+        raise control.MaybeApplied("Office PC did not answer in time.")
 
     monkeypatch.setattr(control, "call", lost)
     call = streamed_call()

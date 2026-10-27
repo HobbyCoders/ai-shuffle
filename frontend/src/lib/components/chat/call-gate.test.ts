@@ -18,8 +18,8 @@ describe('callBusyReason', () => {
 	});
 
 	it('names an offline owning worker', () => {
-		expect(callBusyReason(ready, row({ is_remote: true, controllable: false, device_name: 'GamingPC' })))
-			.toMatch(/^GamingPC is offline/);
+		expect(callBusyReason(ready, row({ is_remote: true, controllable: false, device_name: 'Office PC' })))
+			.toMatch(/^Office PC is offline/);
 		expect(callBusyReason(ready, row({ is_remote: true, controllable: false })))
 			.toMatch(/^The worker that runs this conversation is offline/);
 	});

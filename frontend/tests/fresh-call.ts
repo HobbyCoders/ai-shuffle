@@ -8,7 +8,7 @@ import '../src/app.css';
 // microphone is always denied, so a call stops before any audio or realtime
 // connection. `?fail=1` makes the session create fail; `?device=worker` picks
 // another install as the runner. `?remote=online|offline` opens an existing
-// conversation another worker (GamingPC) runs, with that worker online or
+// conversation another worker (Office PC) runs, with that worker online or
 // offline (#700).
 const params = new URLSearchParams(location.search);
 const CREATED = 'fixture-call-session';
@@ -16,8 +16,8 @@ const REMOTE = 'fixture-remote-chat';
 const remote = params.get('remote');
 const remoteRow = {
 	id: REMOTE, title: 'Rail icon sizes', status: 'active', mode: 'chat', profile_id: 'fixture-agent',
-	is_remote: true, controllable: remote !== 'offline', device_name: 'GamingPC', device_online: remote !== 'offline',
-	remote_runtime_state: remote === 'offline' ? 'offline' : 'idle', instance_id: 'gamingpc', owner_device_id: 'gamingpc',
+	is_remote: true, controllable: remote !== 'offline', device_name: 'Office PC', device_online: remote !== 'offline',
+	remote_runtime_state: remote === 'offline' ? 'offline' : 'idle', instance_id: 'office-pc', owner_device_id: 'office-pc',
 	created_at: '2026-10-26T23:00:00Z', updated_at: '2026-10-26T23:10:00Z',
 };
 const calls: { method: string; path: string; body: unknown }[] = [];

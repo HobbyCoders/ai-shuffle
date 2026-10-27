@@ -175,7 +175,7 @@ class TestRunsOnAnotherWorker:
     def owner(self, db):
         from unittest.mock import AsyncMock
         from app.network import control
-        db.get_install.return_value = {"id": self.PEER, "device_name": "GamingPC", "online": True, "approved": True}
+        db.get_install.return_value = {"id": self.PEER, "device_name": "Office PC", "online": True, "approved": True}
         db.get_session.side_effect = lambda sid: {"id": sid, "instance_id": self.PEER, "context_window": None}
         with patch.object(control, "owner_of", return_value=self.PEER) as owner_of, \
                 patch.object(control, "create_session", new=AsyncMock(return_value={"session_id": "x"})) as create:
@@ -203,8 +203,8 @@ class TestRunsOnAnotherWorker:
 
     @pytest.mark.parametrize("install, detail", [
         (None, "Unknown device"),
-        ({"id": "peer-device-1", "device_name": "GamingPC", "online": False}, "GamingPC is offline"),
-        ({"id": "peer-device-1", "device_name": "GamingPC", "online": True, "approved": False}, "waiting for admin approval"),
+        ({"id": "peer-device-1", "device_name": "Office PC", "online": False}, "Office PC is offline"),
+        ({"id": "peer-device-1", "device_name": "Office PC", "online": True, "approved": False}, "waiting for admin approval"),
     ])
     def test_a_runner_that_cannot_take_it_is_refused_before_anything_is_created(
             self, client, db, owner, install, detail):
@@ -218,11 +218,11 @@ class TestRunsOnAnotherWorker:
 
     def test_an_owner_that_refuses_leaves_no_mirror_behind(self, client, db, owner):
         from app.network import control
-        owner["create"].side_effect = control.RunnerUnreachable("Couldn't reach GamingPC from Unraid.")
+        owner["create"].side_effect = control.RunnerUnreachable("Couldn't reach Office PC from Home Server.")
         response = client.post("/api/v1/sessions", json={"profile_id": "agent-a", "target_instance_id": self.PEER})
 
         assert response.status_code == 409
-        assert "Couldn't reach GamingPC" in response.json()["detail"]
+        assert "Couldn't reach Office PC" in response.json()["detail"]
         db.delete_session.assert_called_once_with(_created(db)["session_id"])
 
     def test_a_lost_answer_is_asked_once_more_and_keeps_the_copy(self, client, db, owner):
