@@ -62,6 +62,12 @@ def reply_text(text: str, *, output_tokens: int = 60, input_tokens: int = 9000):
     return chunks
 
 
+def reply_when_lines(request):
+    """The maintenance call has a different output contract from synthesis."""
+    records = json.loads(prompt_of(request))
+    return reply_text(json.dumps({e["id"]: "When running repository tests" for e in records}))(request)
+
+
 def reply_reasoning_only(output_tokens: int = 900):
     """A reasoning model that spends its output on thinking and says nothing."""
     def chunks(request):
@@ -167,7 +173,7 @@ async def test_desktop_store_pass_sees_the_journal_and_writes_memories_json(tmp_
     provider = FakeInference(reply_text(
         '<memory scope="project">The user runs pytest with PYTHONPATH=fluid '
         'from the repository root.</memory>'
-    ))
+    ), reply_when_lines)
     synth = Synthesizer(provider, "gpt-test", store, project=PROJECT, session_model="gpt-test")
     run_session(store, synth, fact=fact)
     await settle(synth)
@@ -178,16 +184,18 @@ async def test_desktop_store_pass_sees_the_journal_and_writes_memories_json(tmp_
     assert "[assistant] All suites pass." in prompt
     assert "older facts not listed" in prompt
     assert " explicit: Fact " in prompt  # explicit saves are marked read-only
-    # Explicit facts cannot be merged or retired, so 95 of them do not make a
-    # consolidation call due (they used to, every week).
-    assert len(provider.requests) == 1
+    # Explicit facts cannot be merged or retired, so these do not make a
+    # consolidation call due. They can receive metadata-only when-lines.
+    assert len(provider.requests) == 2
+    assert [r["kind"] for r in log_rows(store)] == ["synthesis", "memory_backfill"]
+    assert log_rows(store)[-1]["consumed"] == 40
 
     learned = [e for e in memories_doc(store)["entries"] if not e.get("protected")]
     assert [e["text"] for e in learned] == [
         "The user runs pytest with PYTHONPATH=fluid from the repository root."
     ]
     assert learned[0]["scope"] == PROJECT and learned[0]["provenance"] == "user"
-    row = log_rows(store)[-1]
+    row = log_rows(store)[0]
     assert row["changed"] == [f"memory:{learned[0]['id']}"]
     assert row["stop_reason"] == "end_turn" and row["consumed"] >= 20
     assert "error" not in row
@@ -241,11 +249,13 @@ async def test_provider_rejection_is_logged_backs_off_and_skips_consolidation(
     fixed = FakeInference(
         reply_text("<memory>The user prefers the bundled interpreter.</memory>"),
         reply_text("NO_CHANGES"),
+        reply_when_lines,
     )
     healed = Synthesizer(fixed, "gpt-codex", store, project=PROJECT)
     changed = await healed._run_safe()
     assert changed and changed[0].startswith("memory:")
-    assert len(fixed.requests) == 2
+    assert len(fixed.requests) == 3  # synthesis, consolidation, when-line backfill
+    assert log_rows(store)[-1]["kind"] == "memory_backfill"
     assert store.learner_backoff("gpt-codex") == {}
     assert store.last_consolidated_at() > 0
     assert any(

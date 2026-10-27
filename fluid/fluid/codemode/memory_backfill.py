@@ -92,7 +92,8 @@ async def run(synth, *, limit: int = BATCH_SIZE) -> Result:
             if not candidates or limit <= 0:
                 return result
             now = time.time()
-            if now < float(store.learner_backoff(synth._model).get("until", 0)):
+            if (now < float(store.learner_backoff(synth._model).get("until", 0))
+                    or now < store.consolidation_retry_at()):
                 return result
             path = store.root / STATE_FILE
             day = int(now // 86400)

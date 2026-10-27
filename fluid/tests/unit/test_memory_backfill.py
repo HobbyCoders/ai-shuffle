@@ -156,6 +156,10 @@ async def test_configured_budget_and_shared_backoff(tmp_path):
     store.note_learner_failure("test-model", "temporary", now=time.time(), base=60, cap=60)
     assert (await backfill.run(learner(store, model))).calls == 0
     assert not model.requests
+    store.clear_learner_backoff("test-model")
+    store.set_consolidation_retry_at(time.time() + 60)
+    assert (await backfill.run(learner(store, model))).calls == 0
+    assert not model.requests
 
 
 @pytest.mark.parametrize("reply", ["not JSON", "```json\n{}\n```", "[]", '{"unknown": "When testing"}',
@@ -209,7 +213,8 @@ def test_health_reports_missing_live_and_archived_then_clears(tmp_path):
     assert signal["reason"] == "2 memories still have no when-line"
     for m in (a, b):
         store.annotate_memory(m.id, when="When planning a release", expected_revision=row(store, m.id)["revision"])
-    assert not any(s["id"] == "when" for s in memory_health.check(store)["signals"])
+    signal = next(s for s in memory_health.check(store)["signals"] if s["id"] == "when")
+    assert signal["reason"] == "All memories have a when-line." and signal["detail"]["missing"] == 0
 
 
 @pytest.mark.parametrize("show", [False, True])

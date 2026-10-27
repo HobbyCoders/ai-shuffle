@@ -314,9 +314,9 @@ def check(store, *, now: float | None = None, learning_enabled: bool = True,
     signals.append(_saves_signal(store, now))
     signals.append(_proposals_signal(store, live, now))
     no_when = sum(1 for e in live + _local(doc, "archived") if not e.get("when"))
-    if no_when:
-        signals.append(_signal("when", False, f"{no_when} memories still have no when-line",
-                               missing=no_when))
+    when_reason = (f"{no_when} memories still have no when-line" if no_when
+                   else "All memories have a when-line.")
+    signals.append(_signal("when", False, when_reason, missing=no_when))
     attention = [s for s in signals if s["state"] == "attention"]
     return {
         "state": "attention" if attention else "healthy",
