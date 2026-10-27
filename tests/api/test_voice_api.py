@@ -2357,6 +2357,63 @@ class TestConversationAttachment:
 
         assert seen == [self.PEER]
 
+    @pytest.mark.parametrize("principal, caller", [
+        ("owner", "authenticated"), ("preview", "preview"), ("api_user", "authenticated"), (None, "unknown"),
+    ])
+    def test_the_audio_socket_stamps_the_call_with_who_it_authenticated(
+            self, attach_client, mock_db, monkeypatch, principal, caller):
+        """#654: the stream submits as the socket's authenticated principal
+        (ws_auth), never a value the browser sends."""
+        from app.api import ws_auth
+        from app.core import mobile_tool_identity as identity, voice_stream
+        from app.db import database
+        database.create_session("here", "default", mode="chat")
+        database.set_system_setting("voice_model", "gpt-live-1")
+        assert attach_client.post("/api/v1/voice/sessions/here/attach", json={}).status_code == 200
+        seen = []
+
+        class _Stream:
+            def __init__(self, websocket, row, config, key, max_minutes, **identity_kwargs):
+                self.caller = identity_kwargs.get("caller")
+
+            async def run(self):
+                seen.append(self.caller)
+
+        async def authenticate(websocket, token):
+            websocket.state.mobile_tool_principal = {
+                "owner": identity.principal("admin", "install", "owner-token"),
+                "preview": identity.preview_principal(),
+                "api_user": {"kind": "api_user", "principal_id": "key-user", "owner": "api_user:key-user"},
+            }.get(principal)
+            return True, None
+
+        monkeypatch.setattr(voice_stream, "VoiceStream", _Stream)
+        monkeypatch.setattr(ws_auth, "authenticate_websocket", authenticate)
+        with attach_client.websocket_connect("/api/v1/voice/sessions/here/audio?caller=authenticated"):
+            pass
+
+        assert seen == [caller]
+
+    def test_the_sideband_route_attaches_the_call_with_its_requests_caller(
+            self, attach_client, mock_db, monkeypatch):
+        """#654: POST /call hands the bridge the caller its own request authenticated."""
+        from unittest.mock import AsyncMock
+        from app.api import voice
+        from app.core import voice_bridge
+        from app.db import database
+        database.create_session("here", "default", mode="chat", voice_config={
+            "model": "gpt-realtime-2.1", "voice": "marin", "provider_id": "prov-openai",
+            "conversation_surface": True})
+        attach = AsyncMock()
+        monkeypatch.setattr(voice_bridge.registry, "attach", attach)
+        monkeypatch.setattr(voice, "_request_caller", lambda request: "authenticated")
+
+        response = attach_client.post("/api/v1/voice/sessions/here/call",
+                                      json={"call_id": "rtc_1", "caller": "preview"})
+
+        assert response.status_code == 200, response.text
+        assert attach.await_args.kwargs["caller"] == "authenticated"
+
     def test_a_session_of_another_install_outside_a_network_stays_refused(self, attach_client, mock_db):
         """No network owner and not this install: nothing forwards, so no call."""
         from app.db import database

@@ -551,6 +551,90 @@ async def test_the_realtime_bridge_takes_a_long_result_as_one_item():
     assert "Paragraph 0 " in only["content"] and "Paragraph 19 " in only["content"]
 
 
+def _grok_call():
+    from app.core.voice_grok import GrokVoiceStream
+    from app.core.voice_models import GROK_MODEL
+    call = GrokVoiceStream(AsyncMock(), {"id": "s"}, {"model": GROK_MODEL, "voice": "ara"}, "secret", 5)
+    call.upstream = AsyncMock()
+    return call
+
+
+def _grok_wire(call):
+    return [json.loads(c.args[0]) for c in call.upstream.send.await_args_list]
+
+
+def _assert_one_spoken_response(call, *needles):
+    """One conversation item holding the whole note, and one response for it."""
+    wire = _grok_wire(call)
+    items = [e for e in wire if e["type"] == "conversation.item.create"]
+    assert [e["type"] for e in wire].count("response.create") == 1
+    (item,) = items
+    text = json.dumps(item)
+    for needle in needles:
+        assert needle in text
+    # No second response is queued to re-tell the reply once this one ends.
+    assert call.speech_pending is False
+
+
+@pytest.mark.asyncio
+async def test_a_long_result_on_grok_is_one_item_and_one_spoken_response():
+    """#732: split into 400-byte appends, Grok started a reply from the first
+    piece and a second response told the whole reply again."""
+    call = _grok_call()
+    reply = _long_reply()
+    assert len(reply.encode()) > 1200
+    # As VoiceStream.run builds it for this transport.
+    p = voice_progress.VoiceProgress("s", call.send, quiet=call.is_quiet, append_bytes=call.append_bytes)
+    p.consume(event("assistant.text_delta", {"text": reply}))
+    p.consume(event("turn.completed"))
+
+    await p.flush(force=True)
+
+    _assert_one_spoken_response(call, "Paragraph 0 ", "Paragraph 19 ")
+
+
+@pytest.mark.asyncio
+async def test_a_long_handoff_answer_on_grok_is_one_item_and_one_spoken_response(monkeypatch):
+    """The direct delegation path (no progress feed) sends its answer whole too."""
+    from app.core import voice_stream
+    call = _grok_call()
+    reply = _long_reply()
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", AsyncMock(return_value=reply))
+    call.flush = AsyncMock()
+    call.transcript.append({"role": "user", "text": "Summarize the change.", "seq": 1})
+
+    await call.run_delegation("tool-1")
+
+    _assert_one_spoken_response(call, "Paragraph 0 ", "Paragraph 19 ")
+
+
+@pytest.mark.asyncio
+async def test_gpt_live_still_takes_a_long_handoff_answer_in_bounded_appends(monkeypatch):
+    from app.core import voice_stream
+    call = voice_stream.VoiceStream(AsyncMock(), {"id": "s"}, {"model": "gpt-live-1", "voice": "marin"}, "k", 5)
+    call.upstream = AsyncMock()
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", AsyncMock(return_value=_long_reply()))
+    call.flush = AsyncMock()
+    call.transcript.append({"role": "user", "text": "Summarize the change.", "seq": 1})
+
+    await call.run_delegation("d1")
+
+    pieces = [json.loads(c.args[0]) for c in call.upstream.send.await_args_list]
+    assert len(pieces) > 1 and all(len(e["content"].encode()) <= voice_progress.MAX_NOTE_BYTES for e in pieces)
+    assert voice_stream.VoiceStream.append_bytes == voice_progress.MAX_NOTE_BYTES
+
+
+def test_interim_progress_is_framed_as_unfinished_work():
+    """#732: a passing remark from a running turn is not a conclusion."""
+    note = voice_progress.PROGRESS_NOTE.lower()
+    assert "still unfinished" in note and "not a result" in note and "never present this" in note
+    p = voice_progress.VoiceProgress("s", AsyncMock())
+    p.consume(event("assistant.text_delta", {"text": "The call looks healthy so far; checking one oddity next."}))
+    p.consume(event("tool.use"))
+    text, _, urgent = p.pending["chat"]
+    assert text.startswith(voice_progress.PROGRESS_NOTE) and urgent is False
+
+
 @pytest.mark.asyncio
 async def test_the_end_of_a_long_streamed_reply_survives_accumulation():
     send = AsyncMock()

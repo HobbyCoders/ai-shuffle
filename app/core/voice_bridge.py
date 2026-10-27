@@ -850,6 +850,9 @@ def conversation_instructions(row):
 class VoiceBridge:
     """One live sideband attachment for one voice session."""
 
+    # Who attached the call (set per instance); None stamps its turns unknown.
+    _caller: Optional[str] = None
+
     def __init__(
         self,
         session_id: str,
@@ -872,6 +875,7 @@ class VoiceBridge:
         conversation_surface: bool = False,
         greet: bool = False,
         api_user_id: Optional[str] = None,
+        caller: Optional[str] = None,
     ) -> None:
         self.session_id = session_id
         self.call_id = call_id
@@ -883,6 +887,11 @@ class VoiceBridge:
         # The API key that attached the call (None for the owner); spoken
         # approvals re-check its access the way a tap on the card does.
         self._api_user_id = api_user_id
+        # Who attached the call, as the route authenticated them
+        # (``session_modes.caller_of``); never a value the voice model or the
+        # browser supplies. Stamped on every turn this call submits, as the
+        # chat socket stamps a typed send (#654). None stamps them unknown.
+        self._caller = caller
         # Who is talking right now, so held notes wait for a natural pause.
         self._responding = False
         self._user_speaking = False
@@ -1742,7 +1751,8 @@ class VoiceBridge:
                     from app.core.voice_remote import command_id
                     # One id per tool call of this call: a repeat on the owner is deduped.
                     error = await delegate_to_selected_model(self.session_id, request_text, on_submitted=submitted,
-                                                             command=command_id(self.call_id, call_id))
+                                                             command=command_id(self.call_id, call_id),
+                                                             caller=self._caller)
                     result = {"ok": not bool(error), "turn_id": submitted_ids[0] if submitted_ids else None,
                               "session_id": self.session_id, "status": "queued", "error": error or None}
             elif name == "dispatch_agent":
@@ -2076,6 +2086,9 @@ class VoiceBridge:
                            if key != "workspace_project_ids"},
                 # The voice model wrote this message: never an owner answer.
                 payload={"voice_delegation": True, **({"api_user_id": api_user_id} if api_user_id else {})},
+                # Who started the call (#654); the copied overrides' stamp is
+                # replaced by it, never kept.
+                caller=self._caller,
             )
         except Exception as exc:  # noqa: BLE001 — surfaced to the model
             logger.warning(
@@ -3078,6 +3091,7 @@ class VoiceCallRegistry:
         conversation_surface: bool = False,
         greet: bool = False,
         api_user_id: Optional[str] = None,
+        caller: Optional[str] = None,
     ) -> VoiceBridge:
         """Attach the sideband, REPLACING any existing attachment.
 
@@ -3128,6 +3142,9 @@ class VoiceCallRegistry:
                 conversation_surface=conversation_surface,
                 greet=bool(greet) and first_attach,
                 api_user_id=api_user_id,
+                # Each attach's own caller: a replacement is a new request,
+                # authenticated again by the route.
+                caller=caller,
             )
             # Only record the epoch once the connect actually succeeded — a
             # failed attach must not leave a clock running for a call that never

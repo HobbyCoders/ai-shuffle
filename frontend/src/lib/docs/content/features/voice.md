@@ -57,6 +57,7 @@ You can call any of your chats at any time, even while its agent is busy. A call
 - **Finished jobs** are mentioned at the next pause.
 - **Approvals:** when work needs your permission, the agent asks one plain question, and you can answer it out loud or by typing. Only a clear yes approves and a clear no declines. An unclear spoken answer is asked once more, then declined. A typed message that is not a clear yes or no never answers: it goes to the agent as an ordinary message and the request stays open.
 - **Secrets stay on screen.** Private access requests are answered on screen, and the agent tells you when that is needed.
+- **Same tools as typing.** What you ask for by voice runs with the tools a message you typed from the same login would get. On your own chat without a project, a call you started signed in gets the full code tools. A call from an API key keeps that key's restricted tools.
 
 ## Calling a chat another worker runs
 
@@ -65,6 +66,7 @@ You can call a chat that runs on another of your workers, or pick another worker
 - The spoken back-and-forth is not saved in that chat. Only your requests and the agent's replies are.
 - Spoken yes and no answers are sent to the worker that runs the chat.
 - If that worker is offline, the call button says so and no call starts.
+- Your requests run there with the same tools as a message you typed from the same login.
 
 ## Background noise
 

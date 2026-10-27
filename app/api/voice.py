@@ -1078,6 +1078,21 @@ def _refuse_preview_elsewhere(request, row) -> None:
         raise HTTPException(403, "The preview link can't call a chat another worker runs.")
 
 
+def _request_caller(request) -> str:
+    """Who a call-opening request comes from (``session_modes.caller_of``).
+
+    The identity the route already authenticated, named as a typed REST send
+    names it (``chat_query``): the preview cookie is ``preview``, the owner,
+    a paired device or an API key ``authenticated``. Every turn the call
+    submits is stamped with it (#654), and the owner checks that follow
+    still decide whose chat it is. Never read from the request body.
+    Blocking (a paired device's account lookup).
+    """
+    from app.api.chat_query import _request_query_principal
+    from app.core.session_modes import caller_of
+    return caller_of(_request_query_principal(request))
+
+
 def _refuse_remote_voice_lane(row) -> None:
     """A legacy voice-lane session is its own call record, written by the
     worker that hosts the call; one another worker owns is never driven from
@@ -1432,6 +1447,7 @@ async def attach_voice_call(
         raise HTTPException(400, "This voice model uses the audio stream, not the Realtime sideband.")
     provider_row = await run_sync(_resolve_provider_row, config["provider_id"], None, api_user, config["model"])
     api_key = await _provider_api_key(provider_row, api_user=api_user)
+    caller = await run_sync(_request_caller, http_request)
 
     try:
         await voice_bridge.registry.attach(
@@ -1450,6 +1466,7 @@ async def attach_voice_call(
             conversation_surface=session_row.get("mode") != "voice",
             greet=greet,
             api_user_id=(api_user or {}).get("id"),
+            caller=caller,
         )
     except HTTPException:
         raise
@@ -1625,8 +1642,12 @@ async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optio
             stream_cls = SuperGrokVoiceStream
         else:
             stream_cls = GrokVoiceStream if config["model"] == GROK_MODEL else voice_stream.VoiceStream
+        from app.core.session_modes import caller_of
         call = stream_cls(websocket, row, config, key, settings["voice_max_call_minutes"],
-                                        api_user_id=(api_user or {}).get("id"))
+                          api_user_id=(api_user or {}).get("id"),
+                          # Who this socket authenticated (ws_auth), stamped on
+                          # every request the call submits (#654).
+                          caller=caller_of(getattr(websocket.state, "mobile_tool_principal", None)))
         # A reopened socket is the same call carrying on: it never greets again.
         call.resumed = resume == "1"
         # A conversation another worker runs: the call forwards, never writes (#700).

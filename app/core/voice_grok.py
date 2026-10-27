@@ -61,6 +61,11 @@ class GrokVoiceStream(VoiceStream):
 
     provider_label = "Grok"
     close_event = None  # xAI has no session.close event; the socket close ends it.
+    # Every work note becomes its own conversation item and spoken response
+    # here (send_now), so a long chat reply is sent whole: split, its first
+    # piece started a reply from part of the text and a second response told
+    # it all again (#732). The bound on one note is NOTE_MAX_TOTAL_BYTES.
+    append_bytes = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

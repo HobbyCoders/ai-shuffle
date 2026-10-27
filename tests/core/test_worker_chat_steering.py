@@ -403,10 +403,14 @@ def _folders_options_resolve(session_id, overrides):
     return normalize_workspace_project_ids(resolve.call_args.args[0])
 
 
-async def test_a_voice_follow_up_to_a_finished_worker_keeps_its_stored_folders(mock_db, monkeypatch):
+@pytest.mark.parametrize("caller, stamp", [(None, CALLER_UNKNOWN), (CALLER_AUTHENTICATED, CALLER_AUTHENTICATED)])
+async def test_a_voice_follow_up_to_a_finished_worker_keeps_its_stored_folders(mock_db, monkeypatch, caller, stamp):
     """#1852: a voice follow-up is a ``queue`` row built from the worker's latest
     turn. The copied folder list must neither run nor be saved back on the chat
-    after the owner removed a folder from it."""
+    after the owner removed a folder from it.
+
+    #654: the row carries the caller the call was attached by, never the stamp
+    copied from the worker's latest turn."""
     from app.core import voice_bridge
     from app.core.task_registry import task_registry
     from app.core.workspace_folders import normalize_workspace_project_ids
@@ -414,7 +418,9 @@ async def test_a_voice_follow_up_to_a_finished_worker_keeps_its_stored_folders(m
     _worker_session("w-voice")
     database.set_session_run_binding("w-voice", workspace_project_ids=["docs", "api"])
     # The person resumed the finished worker's chat as an ordinary one.
-    earlier = _start("w-voice", "user", overrides={"model": "opus", "workspace_project_ids": ["docs", "api"]})
+    # The earlier turn's stamp is copied with its overrides; it must not survive.
+    earlier = _start("w-voice", "user", overrides={"model": "opus", "workspace_project_ids": ["docs", "api"],
+                                                    CALLER_KEY: CALLER_AUTHENTICATED if caller is None else CALLER_UNKNOWN})
     turns_db.settle_turn(earlier["id"], "completed")
     database.set_session_run_binding("w-voice", workspace_project_ids=["docs"])
     monkeypatch.setattr(task_registry, "get_task",
@@ -424,6 +430,8 @@ async def test_a_voice_follow_up_to_a_finished_worker_keeps_its_stored_folders(m
     bridge.session_id = "parent"
     bridge._start_watcher = lambda *a, **k: None
     bridge._ensure_approval_poller = lambda: None
+    if caller is not None:
+        bridge._caller = caller  # As registry.attach sets it from the route's authentication.
 
     with patch.object(turn_manager, "_kick"):
         out = await bridge._tool_message_agent({"task_id": "w-voice", "message": "one more thing"})
@@ -431,6 +439,7 @@ async def test_a_voice_follow_up_to_a_finished_worker_keeps_its_stored_folders(m
     assert out["ok"] is True, out
     assert normalize_workspace_project_ids(database.get_session("w-voice")["workspace_project_ids"]) == ["docs"]
     (row,) = [t for t in turns_db.get_queued_turns("w-voice") if t["source"] == "queue"]
-    # The voice bridge names no caller, so the queued turn fails closed (#641).
-    assert row["overrides"] == {"model": "opus", CALLER_KEY: CALLER_UNKNOWN}
+    # A call nobody authenticated fails closed (#641); an authenticated one
+    # stamps its caller (#654).
+    assert row["overrides"] == {"model": "opus", CALLER_KEY: stamp}
     assert _folders_options_resolve("w-voice", turns_db.start_turn(row["id"])["overrides"]) == ["docs"]

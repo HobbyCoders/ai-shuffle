@@ -62,7 +62,11 @@ MILESTONE_NOTE = ("You reached a milestone and are now waiting on background wor
                   "job) before you finish. Tell the caller in your own words, in the first person and "
                   "completely, including any question or next step, and what you are now waiting on, if "
                   "the reply doesn't already say it. Your reply so far: ")
-PROGRESS_NOTE = "What you are doing now, in your own words (for when the caller asks): "
+# Interim text from a turn that is still running. Framed as unfinished, so the
+# voice never tells the caller a passing remark as the conclusion (#732).
+PROGRESS_NOTE = ("What you are doing now, still unfinished and not a result. If the caller asks, say in your "
+                 "own words that you are still working on it, and never present this as an answer or a "
+                 "conclusion: ")
 PARKED_NOTE = "You are waiting for background work to finish before you reply."
 
 
@@ -305,6 +309,9 @@ class VoiceProgress:
         # Submitted rows not seen starting yet: a steered one never will.
         self.unstarted = set()
         self.last_row_check = -ROW_CHECK_INTERVAL
+        # The event cursor at the last remote check that saw the owner idle
+        # with requests waiting to settle; None when that check did not.
+        self.remote_idle_seq = None
         self.pending = OrderedDict()
         self.last_sent = -UPDATE_INTERVAL
         self.last_note = ""
@@ -574,14 +581,30 @@ class VoiceProgress:
         is settled once a turn has ended since it was sent and the owner
         reports no work left: a request still queued there keeps the owner
         "working" and starts with its own ``turn.started``.
+
+        The owner samples its runtime summary before it publishes the events
+        behind it, and publishes events in capped passes, so an idle summary
+        can arrive while a queued request's ``turn.started`` is still in the
+        owner's backlog. Settling on that summary presented the earlier
+        turn's reply as the request's answer (#706). So a request settles
+        only when two checks in a row see the owner idle with no owner event
+        received in between.
         """
         from app.core import voice_remote
         waiting = [t for t in self.unstarted if self.turn_ends > self.sent_at_end.get(t, self.turn_ends)]
         if not waiting:
+            self.remote_idle_seq = None
             return
         state = await run_sync(voice_remote.work_state, self.session_id, self.owner)
         if state not in ("idle", "parked"):
+            self.remote_idle_seq = None
             return
+        if self.remote_idle_seq != self.seq:
+            # The first idle reading since the last owner event: wait for
+            # one more check to show the events have caught up.
+            self.remote_idle_seq = self.seq
+            return
+        self.remote_idle_seq = None
         for turn_id in waiting:
             self.unstarted.discard(turn_id)
             self.active_turns.discard(turn_id)

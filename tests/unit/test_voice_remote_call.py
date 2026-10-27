@@ -397,9 +397,96 @@ async def test_a_request_the_owner_steered_into_its_running_turn_is_settled(mirr
 
     publish_runtime("idle")
     await desk.check_unstarted(now=200)
+    # One idle reading is not enough: the events behind it may still be on
+    # their way (#706).
+    assert desk.unstarted == {"owner-turn-1"}
+
+    await desk.check_unstarted(now=300)  # Still idle, and no owner event since.
 
     assert "owner-turn-1" not in desk.active_turns and not desk.unstarted
     assert desk.pending["steer:owner-turn-1"] == (REMOTE_STEERED_NOTE, "delegation-1", False)
+
+
+@pytest.mark.asyncio
+async def test_an_idle_summary_ahead_of_the_events_does_not_settle_a_queued_request(mirror):
+    """#706: the owner samples its summary before it publishes the events.
+
+    T1 runs, request R is queued behind it, T1 ends, R runs and ends. On this
+    copy T1's end has arrived and the summary already says idle, but R's
+    ``turn.started`` is still in the owner's event backlog. R must not be
+    settled as steered (that read T1's reply out as R's answer).
+    """
+    from app.core.voice_progress import REMOTE_STEERED_NOTE
+    publish_runtime("working")
+    desk, _ = progress()
+    await desk.submitted("owner-turn-1", "delegation-1")
+    desk.seq = 10
+    desk.consume(event("message.assistant", "running-turn", content="T1's answer.", kind="text"))
+    desk.consume(event("turn.completed", "running-turn"))
+    publish_runtime("idle")  # Sampled after R ran; R's events are not here yet.
+
+    await desk.check_unstarted(now=100)
+    assert desk.unstarted == {"owner-turn-1"}
+
+    # The backlog drains: R's own events arrive before the next check.
+    desk.seq = 11
+    desk.consume(event("turn.started", "owner-turn-1"))
+    desk.seq = 12
+    desk.consume(event("message.assistant", "owner-turn-1", content="R's answer.", kind="text"))
+    desk.seq = 13
+    desk.consume(event("turn.completed", "owner-turn-1"))
+    await desk.check_unstarted(now=200)
+
+    assert "steer:owner-turn-1" not in desk.pending
+    assert all(text != REMOTE_STEERED_NOTE for text, _, _ in desk.pending.values())
+    assert desk.pending["turn:owner-turn-1"][0].endswith("R's answer.")
+    assert desk.pending["turn:owner-turn-1"][1] == "delegation-1"
+
+
+@pytest.mark.asyncio
+async def test_an_owner_event_between_idle_checks_restarts_the_wait(mirror):
+    publish_runtime("idle")
+    desk, _ = progress()
+    await desk.submitted("owner-turn-1", "delegation-1")
+    desk.consume(event("turn.completed", "running-turn"))
+
+    await desk.check_unstarted(now=100)
+    desk.seq += 1  # Some owner event arrived (not this request's).
+    await desk.check_unstarted(now=200)
+    assert desk.unstarted == {"owner-turn-1"}
+
+    publish_runtime("working")  # A non-idle reading also restarts it.
+    await desk.check_unstarted(now=300)
+    publish_runtime("idle")
+    await desk.check_unstarted(now=400)
+    assert desk.unstarted == {"owner-turn-1"}
+
+    await desk.check_unstarted(now=500)
+    assert not desk.unstarted and "steer:owner-turn-1" in desk.pending
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_forward_the_owner_took_without_a_turn_id_is_said_aloud(mirror, monkeypatch):
+    """#706: with no turn id no events follow, so the call says it was sent."""
+    from app.core.voice_remote import SENT_NOTE
+
+    async def no_turn(device_id, action, body=None, **_kwargs):
+        mirror.sent.append((device_id, action, body))
+        return {"session_id": body["session_id"]}
+
+    monkeypatch.setattr(control, "call", no_turn)
+    call = streamed_call()
+    call.upstream = Upstream()
+    call.progress = SimpleNamespace(submitted=AsyncMock())
+    await call.caption("user", "Run the tests.")
+
+    await call.run_delegation("delegation-1")
+
+    call.progress.submitted.assert_not_awaited()
+    spoken = [e for e in call.upstream.sent if e["type"] == "session.commentary.append"]
+    assert "".join(e["content"] for e in spoken) == SENT_NOTE
+    assert {e["delegation_id"] for e in spoken} == {"delegation-1"}
+    assert_mirror_untouched(mirror)
 
 
 @pytest.mark.asyncio
