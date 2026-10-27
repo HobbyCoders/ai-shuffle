@@ -101,6 +101,11 @@ split independent facts, and omit transient detail rather than exceeding the
 limit. A user's task-specific choice is not automatically a general habit;
 retain its scope and exceptions. Facts do not grant permission for actions.
 
+A [user] entry correcting HOW the agent works (model per job, delegation,
+reviews, CI, deploys, process) is a standing-preference proposal, not a
+memory: the whole current rule in the user's words, under the topic of the
+pref.* memory it changes or a new snake_case one. The owner confirms it.
+
 A journal entry marked [friction] is the HARNESS's own mechanical record of a
 call that wasted work — a path that did not exist, one tool failing over and
 over, content re-read after it was already delivered, a search that found
@@ -112,9 +117,8 @@ called); friction that is the model mis-driving the harness the same way twice
 belongs in a model-guidance proposal. A single one-off is noise — say nothing,
 and never turn friction into a negative claim about a tool.
 
-Channel rule: a recurring mechanical failure of the MODEL itself — narrating
-an action instead of performing it, repeatedly malformed calls, drifting from
-a stated format — is not fixed by a memory (a memory tells the next session
+Channel rule: a recurring mechanical failure of the MODEL itself (the kinds
+listed under model guidance below) is not fixed by a memory (a memory tells the next session
 what is true; it cannot change how the model behaves). That evidence belongs
 in a model-guidance proposal (below), optionally alongside a memory about the
 user's preference.
@@ -175,6 +179,7 @@ Output format — nothing else:
 - newer listed fact replaces older non-explicit (same subject, not temporary): <supersede-memory old="m3" new="m4"/>
 - a memory listed as "explicit" was saved on the user's request: never
   rewrite or delete it, and do not add a new memory that repeats it
+- standing preference: <preference topic="subagent_models">rule</preference>
 - to propose a model-guidance edit (queued for the replay gate, not applied):
   <guidance stem="glm">
   {"content": "full replacement guidance file",
@@ -241,6 +246,9 @@ _DELETE_MEMORY_RE = re.compile(r'<delete-memory id="([A-Za-z0-9_:.\-]{1,160})"\s
 _SUPERSEDE_RE = re.compile(r'<supersede-memory old="([A-Za-z0-9_:.\-]{1,160})" new="([A-Za-z0-9_:.\-]{1,160})"\s*/>')
 _GUIDANCE_RE = re.compile(
     r'<guidance stem="([^"]{1,64})">\n?(.*?)</guidance>', re.DOTALL
+)
+_PREFERENCE_RE = re.compile(
+    r'<preference((?:\s+[a-z_]+="[^"]*")*)\s*>\n?(.*?)</preference>', re.DOTALL
 )
 
 _WORD_RE = re.compile(r"[a-z0-9]{4,}")
@@ -369,6 +377,11 @@ class InferenceBudgetExhausted(RuntimeError):
     """The store's daily inference-call budget is spent (see facts.py)."""
 
 
+BUDGET_SPENT_MESSAGE = (
+    "Daily inference-model budget reached; explicit memory saves remain available"
+)
+
+
 # Journal lines one pass reads. Low-value lines (see low_value_entry) are
 # consumed without being shown, so this bounds the read, not the prompt: the
 # prompt is bounded by PROMPT_CHAR_LIMIT below. At 40 lines and 32k chars a
@@ -395,8 +408,12 @@ JOURNAL_MIN_PROMPT_CHARS = 8_000
 # read-only, the explicit ones they might contradict, grouped by topic. A
 # store larger than this is reviewed a rotating section per pass.
 CONSOLIDATE_MEMORY_CHARS = 24_000
-# Rough cost of a "--- session ... ---" divider when sizing the journal.
+# Rough cost of a "--- session ... ---" divider when the previous entry's
+# session is unknown (see Synthesizer._entry_cost).
 _SESSION_LABEL_ALLOWANCE = 80
+# Slack the journal fit leaves for section headers and the memory list's
+# "older facts not listed" line, which their budgets do not count.
+_PROMPT_HEADROOM = 400
 # Failed passes back off per model, shared through meta.json: 5 min, 10,
 # 20, ... up to 6 h. A deterministic rejection then costs about a dozen
 # calls a day instead of the whole 48-call budget.
@@ -463,6 +480,18 @@ PACE_PRESSURE_FRACTION = 0.6
 # what the repository records anyway.
 OK_CELL_CODE_CHARS = 1_200
 OK_CELL_OUTPUT_CHARS = 400
+# The same for a successful JSON-surface tool call (one journal line per
+# call; delegated sessions write nothing else between turns). On a busy
+# worker 976 tool lines averaged 581 rendered chars and held 86% of a
+# 48-minute journal's text, so a pass's slice ended a few turns in.
+OK_TOOL_INPUT_CHARS = 300
+OK_TOOL_OUTPUT_CHARS = 200
+# The window a learner on a flat-rate subscription (ChatGPT/Codex,
+# SuperGrok) is sized for when neither the host nor fluid's table knows its
+# model: those are hosted models with far larger windows, and the small
+# default (meant for a local model) cut the live learner's passes to about
+# 37 entries while some 360 waited behind them.
+SUBSCRIPTION_ASSUMED_WINDOW = 128_000
 # Tools whose successful calls only read: file and search reads and task
 # listings (MCP-namespaced ids match on their last segment). TaskGet and
 # TaskOutput are not here: they carry a worker's findings.
@@ -685,9 +714,11 @@ class Synthesizer:
         # The request size this learner model can take: ``context_window``
         # from the host when it knows the model's window, else fluid's
         # table, else the small default (see prompt_char_limit).
-        self._prompt_limit = prompt_char_limit(
-            context_window or context_window_for(model), max_tokens,
-        )
+        self._window = context_window or context_window_for(model)
+        self._prompt_limit = prompt_char_limit(self._window, max_tokens)
+        # The limit the window gave; a pass re-derives it while it is still
+        # in force (see _size_request), never over a value set on purpose.
+        self._window_limit = self._prompt_limit
         self._effort = effort
         self._task: asyncio.Task | None = None
         # UTC day (time // 86400) on which the daily budget was found spent.
@@ -812,6 +843,8 @@ class Synthesizer:
         shown = [entry for _, entry in indexed if not low_value_entry(entry)]
         if not shown:
             return len(indexed) >= self._min_new  # drain read-only slices free
+        if self._waits_for_conversation(indexed, [(0, entry) for entry in shown]):
+            return False
         now = time.time()
         # Missing legacy timestamps are uncertain: consume rather than starve.
         oldest = min(entry.get("ts") if type(entry.get("ts")) in (int, float) else 0 for entry in shown)
@@ -845,6 +878,47 @@ class Synthesizer:
             )
             self._budget_at = now
         return self._resolved_budget
+
+    def _size_request(self) -> None:
+        """Size this pass's request. With no known window a learner billed
+        as a subscription is a hosted model: it gets
+        SUBSCRIPTION_ASSUMED_WINDOW instead of the small local-model
+        default. A limit set on purpose (not the one the window gave) is
+        left alone."""
+        if self._window or self._prompt_limit != self._window_limit:
+            return
+        billing = self._resolve(self._billing)
+        window = SUBSCRIPTION_ASSUMED_WINDOW if billing == BILLING_SUBSCRIPTION else None
+        self._prompt_limit = self._window_limit = prompt_char_limit(window, self._max_tokens)
+
+    def _journal_pressure(self) -> bool:
+        """True when the journal is heading for the overflow reap (past
+        PACE_PRESSURE_FRACTION of its cap): reading beats waiting."""
+        try:
+            return self._store._journal_size() > JOURNAL_MAX_BYTES * PACE_PRESSURE_FRACTION
+        except Exception:  # noqa: BLE001 — unknown size: do not hold a pass back
+            return True
+
+    def _waits_for_conversation(self, indexed: list, shown: list) -> bool:
+        """Whether a pass over this slice should wait instead of calling.
+
+        A slice of successful tool calls only (no conversation entry, no
+        friction, no failure, no code-mode cell) shows work without the
+        request behind it or the user's reaction to it: on the live store
+        976 of a 48-minute journal's 1,137 lines were such calls, and the
+        passes over them came back NO_CHANGES. It waits until a turn's
+        prompt or reply lands, unless waiting cannot help: the read is
+        already full (the next conversation line is past it), or the journal
+        is near the overflow reap and would drop the slice unread. Cells
+        still run on their own: they are what skills are distilled from,
+        and friction and failures are evidence by themselves."""
+        if not shown or any(
+            entry.get("kind") != "tool" or entry.get("error") for _, entry in shown
+        ):
+            return False
+        if len(indexed) >= self._max_entries:
+            return False
+        return not self._journal_pressure()
 
     def _latch_spent_day(self) -> None:
         """A claim was refused: wait quietly until the UTC day rolls over
@@ -983,8 +1057,10 @@ class Synthesizer:
             # retained by reap) and is retried once the UTC day rolls over.
             self._latch_spent_day()
             self.last_error = f"{type(exc).__name__}: {exc}"
-            # No call was made, so this is not a silent pass.
-            self._log_pass("synthesis", [], error=self.last_error, ran=False)
+            # No call was made, so this is not a silent pass. One row a day
+            # per store says why the learner is idle; every session that
+            # reached the cap used to add its own (324 of a live log's 648).
+            self._log_budget_spent("synthesis")
             # Synthesis stops short of CONSOLIDATE_RESERVED_CALLS, so a due
             # curation pass can still run on the calls it left.
             changed = []
@@ -998,15 +1074,26 @@ class Synthesizer:
                 changed += await asyncio.wait_for(
                     self._consolidate_locked(), timeout=self._pass_timeout
                 )
-            except InferenceBudgetExhausted as exc:
+            except InferenceBudgetExhausted:
                 self._latch_spent_day()
-                self._log_pass(
-                    "consolidation", [], error=f"{type(exc).__name__}: {exc}", ran=False,
-                )
+                self._log_budget_spent("consolidation")
             except Exception as exc:  # consolidation is opportunistic, never fatal
                 self._consolidation_failed(f"{type(exc).__name__}: {exc}")
         await self._notify(changed)
         return changed
+
+    def _log_budget_spent(self, kind: str) -> None:
+        """The day's single "budget spent" row for this store (``ran``
+        False, so memory health never counts it as a failed pass)."""
+        try:
+            first = self._store.claim_budget_row(int(time.time() // 86400))
+        except Exception:  # noqa: BLE001 — unknown: one more row beats none
+            first = True
+        if first:
+            self._log_pass(
+                kind, [], error=f"{InferenceBudgetExhausted.__name__}: {BUDGET_SPENT_MESSAGE}",
+                ran=False,
+            )
 
     def _note_failure(self, error: str) -> float:
         """Record a failed pass in the store's shared backoff; returns the
@@ -1066,6 +1153,7 @@ class Synthesizer:
         self.last_pass_failed = False
         self.last_pass_skipped = False
         self._budget(refresh=True)  # a changed setting applies from this pass on
+        self._size_request()
         with journal_lock(self._store.root / SYNTHESIS_LOCK) as held:
             if not held:
                 self.last_pass_skipped = True
@@ -1129,6 +1217,11 @@ class Synthesizer:
                 self._store.reap_journal()
             except Exception:
                 pass
+            return []
+        if self._waits_for_conversation(indexed, shown):
+            # Not a verdict: nothing consumed, no call, no row (like a pass
+            # pacing holds back). Session close and urgency land here too.
+            self.last_pass_skipped = True
             return []
         # Only what the prompt can show is consumed: the rest of the slice
         # stays behind the cursor for the next pass. Each project in the
@@ -1437,6 +1530,12 @@ class Synthesizer:
             self._store.reap()
         except Exception:  # cleanup is opportunistic, never fatal
             pass
+        # Model-free: two user-kept facts on one how-the-agent-works topic
+        # where the newer changes the rule become an owner question (both
+        # kept; the snapshot shows the conflict line). The model below may
+        # not touch user-kept facts at all.
+        from fluid.codemode.preferences import curate_protected_conflicts
+        curated = curate_protected_conflicts(self._store)
         lines = ["## Memory store (id, recalls, age, scope, tier, text), grouped by topic"]
         now = time.time()
         everything = [m for m in self._store.memories() if not m.conflicted]
@@ -1489,8 +1588,8 @@ class Synthesizer:
                 stop_reason=exc.stop_reason,
                 provider_status=getattr(exc, "status", None),
             )
-            return []
-        changed: list[str] = []
+            return curated
+        changed: list[str] = list(curated)
         errors: list[str] = []
         for memory_id, scope_attr, memory_text, problem in _memory_tags(text):
             if problem:
@@ -1645,12 +1744,15 @@ class Synthesizer:
             )
             return [f"[{kind}]{scope_hint} {str(e.get('text', '')).strip()}"]
         if kind == "tool":
-            # JSON-surface call (ToolJournal): one compact line.
-            outcome = "error" if e.get("error") else str(e.get("output", "")).strip()
-            return [(
-                f"[tool] {e.get('name')}({str(e.get('input', '')).strip()}) "
-                f"-> {outcome}"
-            )]
+            # JSON-surface call (ToolJournal): one compact line, clipped
+            # like a successful cell when it succeeded.
+            arguments = str(e.get("input", "")).strip()
+            if e.get("error"):
+                outcome = "error"
+            else:
+                arguments = _clip(arguments, OK_TOOL_INPUT_CHARS)
+                outcome = _clip(str(e.get("output", "")).strip(), OK_TOOL_OUTPUT_CHARS)
+            return [f"[tool] {e.get('name')}({arguments}) -> {outcome}"]
         code = str(e.get("code", "")).rstrip("\n")
         summary = {
             k: e[k]
@@ -1666,8 +1768,21 @@ class Synthesizer:
             lines.append(f"outcome: {json.dumps(summary, ensure_ascii=False)}")
         return lines
 
-    def _entry_cost(self, e: dict) -> int:
-        return len("\n".join(self._render_entry(e, 0))) + 1 + _SESSION_LABEL_ALLOWANCE
+    def _entry_cost(self, e: dict, current: tuple[Any, Any] | None = ()) -> int:
+        """Characters ``e`` adds to the journal section after an entry of
+        session/agent tag ``current``: its lines, plus the divider when the
+        tag changes. ``current=()`` (unknown) charges a divider allowance;
+        charging one to every line cost a 37-line slice about 3,000 chars."""
+        cost = len("\n".join(self._render_entry(e, 0))) + 1
+        if e.get("kind", "cell") == "cell":
+            cost += 4  # "### cell 0" renders a few digits wider later in a slice
+        tag = (e.get("session"), e.get("agent"))
+        if current == ():
+            return cost + _SESSION_LABEL_ALLOWANCE
+        if any(tag) and tag != current:
+            label = f"--- session {tag[0] or '?'}" + (f", agent {tag[1]}" if tag[1] else "") + " ---"
+            cost += len(label) + 1
+        return cost
 
     def _journal_budget(self) -> int:
         """Characters the journal may use in one pass's prompt: the request
@@ -1690,15 +1805,20 @@ class Synthesizer:
         Always at least one entry, so an oversized line cannot stall the
         cursor; it is clipped when rendered.
         """
-        budget = self._journal_budget()
+        # Headroom for the section headers and the memory list's count line.
+        budget = self._journal_budget() - _PROMPT_HEADROOM
         out: list[tuple[int, dict]] = []
         used = 0
+        current: tuple[Any, Any] | None = None
         for n, e in indexed:
-            cost = self._entry_cost(e)
+            cost = self._entry_cost(e, current)
             if out and used + cost > budget:
                 break
             out.append((n, e))
             used += cost
+            tag = (e.get("session"), e.get("agent"))
+            if any(tag):
+                current = tag
         return out
 
     def _journal_lines(self, entries: list[dict]) -> list[str]:
@@ -1834,9 +1954,7 @@ Never claim a workflow is installed because it was proposed."""
         limit = self._claim_limit()
         claim = {"reserve": reserve} if limit is None else {"reserve": reserve, "limit": limit}
         if not self._store._facts.claim_inference_call(**claim):
-            raise InferenceBudgetExhausted(
-                "Daily inference-model budget reached; explicit memory saves remain available"
-            )
+            raise InferenceBudgetExhausted(BUDGET_SPENT_MESSAGE)
         if len(prompt) > self._prompt_limit:
             # _prompt keeps the journal inside the limit; reaching this cut
             # means an oversized guidance file, and it is worth a line.
@@ -1896,6 +2014,40 @@ Never claim a workflow is installed because it was proposed."""
                     changed.append(f"superseded-memory:{old_id}")
             except ValueError as exc:
                 errors.append(f"supersession: {exc}")
+        return changed
+
+    def _apply_preference_proposals(self, text: str, entries: list[dict] | None,
+                                    errors: list[str]) -> list[str]:
+        """Queue each ``<preference topic=...>`` the output proposes (see
+        fluid.codemode.preferences); never saves a fact. A proposal must be
+        in the user's own words from this slice (``memory_provenance`` says
+        ``user``): the model that proposes it is the one tool output may
+        have steered."""
+        from fluid.codemode.preferences import PreferenceProposals
+        tags = list(_PREFERENCE_RE.finditer(text or ""))
+        if not tags:
+            return []
+        changed: list[str] = []
+        queue = PreferenceProposals(self._store)
+        sessions = list(dict.fromkeys(
+            str(e["session"]) for e in entries or () if e.get("kind") == "user" and e.get("session")))
+        for match in tags[:3]:
+            attrs = dict(_ATTR_RE.findall(match.group(1) or ""))
+            topic, body = attrs.get("topic"), " ".join(match.group(2).split())
+            if entries is None or memory_provenance(body, entries) != "user":
+                errors.append(f"preference {str(topic)[:40]}: not in a [user] entry's words")
+                continue
+            try:
+                outcome = queue.propose(
+                    topic, body, scope=self._resolve_scope(attrs.get("scope")) or "global",
+                    sessions=sessions,
+                )
+            except ValueError as exc:
+                errors.append(f"preference {str(topic)[:40]}: {exc}")
+                continue
+            if outcome == "proposed":
+                from fluid.codemode.preferences import normalize_topic
+                changed.append(f"preference-proposal:{normalize_topic(topic)}")
         return changed
 
     async def _apply(self, text: str, entries: list[dict] | None = None, *,
@@ -1978,6 +2130,7 @@ Never claim a workflow is installed because it was proposed."""
                 errors.append(f"memory {match.group(1)}: {exc}")
         changed.extend(self._apply_supersession_proposals(
             text, getattr(self, "_supersession_revisions", {}), errors))
+        changed.extend(self._apply_preference_proposals(text, entries, errors))
         # Prose workflows are queued only: synthesis cannot install, approve
         # permissions or overwrite an existing prose skill.
         from fluid.codemode.workflows import WorkflowProposals

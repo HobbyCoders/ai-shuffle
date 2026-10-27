@@ -672,11 +672,15 @@ def build_task_contract(
     provider_id: str | None,
     additional_targets: Sequence[SubagentTarget] = (),
     *, workflow_guidance: bool = False,
+    session_id: str | None = None,
+    cwd: str | None = None,
 ) -> TaskContract:
     """Build Task's contract; omit shared rules only when the host supplies them.
 
     Standalone callers retain the full rules. App native and CLI sessions set
     workflow_guidance when parent_subagent_guidance is compiled into the prompt.
+    ``session_id`` (and its ``cwd``) adds the saved owner model routing the
+    host accepts for that chat's starts (``model_override.routing_block``).
     """
     from fluid.tools.fragments import SUBAGENT_WORKTREE_GUIDANCE, SWARM_ROUTING
 
@@ -756,6 +760,10 @@ def build_task_contract(
             return f"- {target.id} (model: {target.model}; {where}) — {target.name}"
 
         roster = "\n".join(_line(target) for target in resolved_targets)
+        # Saved owner routing sits beside the default it overrides per job.
+        from app.core.model_override import routing_block
+
+        routing = routing_block(session_id, cwd) if session_id else ""
         availability = (
             "Available subagents on this provider (descriptions are under "
             "'# Available agent types' in the system prompt):\n"
@@ -764,6 +772,7 @@ def build_task_contract(
                 f"The owner's subagent default: {default_model}.\n"
                 if default_model else ""
             )
+            + (f"{routing}\n" if routing else "")
             + "Use only these agent IDs; do not invent an agent, model or provider. "
             + TASK_MODEL_SETTINGS_HINT
         )

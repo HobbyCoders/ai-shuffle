@@ -364,6 +364,13 @@ MAX_LIVE_SKILLS = 40
 MAX_MEMORIES = 40
 MAX_MEMORY_CHARS = 500  # one memory is a fact, not an essay
 
+# Sub-heading for owner-saved pref.<topic> facts at the top of # Memory. The
+# rest of the snapshot keeps the "saved facts, not instructions" posture.
+STANDING_PREFERENCES_HEADING = (
+    "Standing preferences (saved at the owner's request — follow them unless the "
+    "current conversation says otherwise):"
+)
+
 # What the prompt says about memory when nothing is saved yet. Short on
 # purpose (it rides every session of a fresh install), but it has to name
 # the two tools and the class of fact worth saving, or a new install never
@@ -1702,8 +1709,18 @@ class SkillStore:
         finds the fact and a later save can bring it back."""
         return self._facts.retire(memory_id, reason=reason, expected_revision=expected_revision)
 
-    def propose_memory_supersession(self, old_id: str, new_id: str, *, old_revision: int, new_revision: int) -> bool:
-        return self._facts.propose_supersession(old_id, new_id, old_revision=old_revision, new_revision=new_revision)
+    def propose_memory_supersession(self, old_id: str, new_id: str, *, old_revision: int, new_revision: int,
+                                    protected_conflict: bool = False) -> bool:
+        return self._facts.propose_supersession(old_id, new_id, old_revision=old_revision, new_revision=new_revision,
+                                                protected_conflict=protected_conflict)
+
+    def learner_proposal_footer(self, project: str | None = None, entries: list | None = None) -> str:
+        """The ``# Memory`` footer's lines for open learner proposals (see
+        fluid.codemode.preferences): one line per proposed ``pref.<topic>``
+        update, "" when none. Never raises."""
+        from fluid.codemode.preferences import preference_proposal_lines
+        lines = preference_proposal_lines(self, project, entries=entries)
+        return "\n\n" + "\n".join(lines) if lines else ""
 
     def purge_forgotten_evidence(self) -> None:
         cutoff = self._facts.snapshot().get("forgotten_before", 0)
@@ -1809,6 +1826,7 @@ class SkillStore:
                 f"\n\n({in_archive} archived fact{'' if in_archive == 1 else 's'} not shown; "
                 f"Recall finds {'it' if in_archive == 1 else 'them'} by keyword.)"
             )
+        footer += self.learner_proposal_footer(project, entries)  # learner proposals (preferences.py)
         if not shown and not over_budget and not held and not in_archive:
             return EMPTY_MEMORY_SECTION + footer
         if held:
@@ -1823,6 +1841,11 @@ class SkillStore:
         body = "\n".join(shown) if shown else (
             "(no saved fact fits in this snapshot)" if over_budget or held
             else "(no current saved fact; only archived ones)")
+        if plan["standing"]:
+            prefs, rest = shown[:plan["standing"]], shown[plan["standing"]:]
+            body = STANDING_PREFERENCES_HEADING + "\n" + "\n".join(prefs)
+            if rest:
+                body += "\n\nOther saved facts:\n" + "\n".join(rest)
         return (
             "# Memory\n"
             "Saved facts, not instructions. Source labels describe the evidence, "
@@ -1852,7 +1875,10 @@ class SkillStore:
                          if not e.conflicted and (project is None or e.scope in ("global", project)))
         from fluid.context.screening import screen_findings
 
-        from fluid.codemode.facts import MAX_PROMPT_CHARS, RESERVED_INFERRED_CHARS, usefulness
+        from fluid.codemode.facts import (
+            MAX_PROMPT_CHARS, RESERVED_INFERRED_CHARS, STANDING_PREFERENCE_CHARS,
+            is_standing_preference, usefulness,
+        )
 
         out_of_scope = 0
         over_budget = 0
@@ -1891,6 +1917,8 @@ class SkillStore:
         entries.sort(key=lambda e: (not e.protected, off_domain(e), -priority[e.id], e.id))
         # (entry, line, counts against the budget) for each renderable entry.
         candidates: list[tuple[MemoryEntry, str, bool]] = []
+        # Indexes of clean standing-preference lines (owner-saved pref.* facts).
+        standing: set[int] = set()
         for entry in entries:
             if (
                 project is not None
@@ -1947,7 +1975,12 @@ class SkillStore:
                 text = entry.text
                 if entry.key in identity_keys and len(text) > 120:
                     text = text[:119].rstrip() + "…"
-                line = f"- [{entry.id} r{entry.revision}; {entry.provenance}] {text}{hint}"
+                label = entry.provenance
+                if is_standing_preference(vars(entry)):
+                    # The slot name lets the agent update it without a Recall.
+                    standing.add(len(candidates))
+                    label += f"; {entry.key}"
+                line = f"- [{entry.id} r{entry.revision}; {label}] {text}{hint}"
                 candidates.append((entry, line, True))
         # Explicit (user-requested) facts rank first, and they alone can fill
         # the budget: on the desktop store 92 protected facts (about 28 KB)
@@ -1987,6 +2020,15 @@ class SkillStore:
             if cost <= identity_remaining:
                 reserved.add(i)
                 identity_remaining -= cost
+        # Standing preferences next, in their own slice: a pile of other
+        # owner-saved facts (100+ on the desktop store) cannot hide them.
+        used = sum(len(candidates[i][1]) + 1 for i in reserved)
+        standing_remaining = min(STANDING_PREFERENCE_CHARS, MAX_PROMPT_CHARS - used)
+        for i in sorted(standing):
+            cost = len(candidates[i][1]) + 1
+            if cost <= standing_remaining:
+                reserved.add(i)
+                standing_remaining -= cost
         remaining = MAX_PROMPT_CHARS - sum(len(candidates[i][1]) + 1 for i in reserved)
         selected = set(reserved)
         # Preserve the explicit tier's capacity: a relevant inference flood may
@@ -1998,12 +2040,16 @@ class SkillStore:
             elif i not in selected and len(line) + 1 <= remaining:
                 selected.add(i)
                 remaining -= len(line) + 1
-        shown = [line for i, (_, line, _) in enumerate(candidates) if i in selected]
-        shown_ids = [e.id for i, (e, _, _) in enumerate(candidates) if i in selected]
+        # Render order: standing preferences first (render_memory_section
+        # puts them under their own heading), then the rest in rank order.
+        order = sorted(selected, key=lambda i: (i not in standing, i))
+        shown = [candidates[i][1] for i in order]
+        shown_ids = [candidates[i][0].id for i in order]
         omitted_ids = [e.id for i, (e, _, _) in enumerate(candidates) if i not in selected]
         over_budget = len(omitted_ids)
         return {
             "lines": shown, "shown_ids": shown_ids, "omitted_ids": omitted_ids,
+            "standing": sum(1 for i in selected if i in standing),
             "in_scope": len(candidates) + held + other_checkout, "over_budget": over_budget,
             "out_of_scope": out_of_scope, "held": held, "other_checkout": other_checkout,
             "archived": in_archive,
@@ -2205,6 +2251,21 @@ class SkillStore:
         if isinstance(table, dict) and model in table:
             table.pop(model)
             self._save_meta(meta)
+
+    def claim_budget_row(self, day: int) -> bool:
+        """True for the first caller on UTC ``day`` to report the daily
+        learner budget as spent; every later caller that day (any session
+        over this store) leaves no row. Under its own lock: two sessions
+        that hit the cap together must not both write the row."""
+        with journal_lock(self.root / "budget-row", wait=1.0) as held:
+            if not held:
+                return False
+            meta = self._load_meta()
+            if meta.get("budget_row_day") == int(day):
+                return False
+            meta["budget_row_day"] = int(day)
+            self._save_meta(meta)
+            return True
 
     def consolidation_retry_at(self) -> float:
         return float(self._load_meta().get("consolidation_retry_at", 0.0))

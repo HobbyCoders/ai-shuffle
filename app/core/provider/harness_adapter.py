@@ -7053,6 +7053,16 @@ convention you cannot see. Saved facts arrive once as the "# Memory" reminder \
 on a user turn, and as "# Memory changes" when they change; it is not \
 repeated every turn. If no "# Memory" reminder is visible, use Recall."""
 
+# How a correction of the way the agent works is saved. The native leg carries
+# it in Remember's eager description; on the delegated leg Remember's docs are
+# deferred, so this line sits beside the memory block instead (once per leg).
+DELEGATED_PREFERENCE_RULE = (
+    "When the user corrects how you work (models, delegation, review, deploy, "
+    "process), update the matching pref.<topic> fact with Remember, folding in "
+    "what still holds, with replaces=[older rows on that topic], instead of "
+    "adding a dated rule. Task-specific decisions are not preferences."
+)
+
 # The native leg's copy also covers fluid's Note and Ledger tools, which the
 # delegated leg does not have; that leg uses _MEMORY_BLOCK_CORE alone.
 MEMORY_BLOCK = _MEMORY_BLOCK_CORE + """ Note and Ledger are \
@@ -7522,6 +7532,7 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
         blocks.append(RECALL_BLOCK)
     if memory:
         blocks.append(_MEMORY_BLOCK_CORE)
+        blocks.append(DELEGATED_PREFERENCE_RULE)
     if (options.extra or {}).get("github_connected") and permitted("Bash"):
         blocks.append(GITHUB_BLOCK)
     return blocks
@@ -7878,6 +7889,8 @@ def _native_task_contract(options: SessionOptions) -> Any:
             provider_id,
             file_subagent_targets(discovered_registry, options.model),
             workflow_guidance=bool((options.extra or {}).get("automatic_workflows")),
+            session_id=(options.extra or {}).get("app_session_id"),
+            cwd=options.cwd,
         )
     except Exception:  # noqa: BLE001 — must never break session connect
         logger.warning(
@@ -8370,11 +8383,18 @@ def _delegated_learner_target(options: SessionOptions, owner: str) -> Optional[_
         kind = _provider_row_kind(*shape)
         if kind not in _LEARNER_KINDS or not row.get("id"):
             return None
+        # The row's own window for the model (models_json, preset roster,
+        # row column). Without it fluid sized every pass for a small local
+        # model and the live learner read about 37 entries a pass.
+        try:
+            window = resolve_provider_context_window(row, model)
+        except Exception:  # noqa: BLE001 — unknown window: fluid's own fallback
+            window = None
         return _LearnerTarget(
             kind=cast(str, kind),
             options=_learner_binding(model, str(row["id"]), shape),
             model=model,
-            context_window=None,
+            context_window=window,
             source="subscription",
         )
     except Exception:  # noqa: BLE001 — no learner is the safe answer

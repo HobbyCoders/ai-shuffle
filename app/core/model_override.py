@@ -39,7 +39,24 @@ runs only when the user asked for it, checked here by the host:
    name, case-insensitively with separators ignored ("GPT-6 Astra",
    "gpt 6 astra", "gpt6astra"), or for one distinctive word of its name
    ("astra") when no other eligible model shares that word.
-2. **Approved by the owner.** Otherwise :func:`confirm` raises the ordinary
+2. **Remembered by the owner.** Otherwise (after the recent-message window,
+   before the slower older-history search) :func:`remembered_by_owner`
+   reads the calling chat's principal's saved memories, one snapshot per
+   start. A model counts when a live memory names it positively: saved at
+   the user's request (``protected``; an agent's own durable save and
+   learned or inferred facts are the agent's word, not the owner's), not
+   harvested from tool output, not archived, superseded or conflicted,
+   visible on this worker, scoped ``global`` or to the calling chat's
+   project, and clean under the injection screen. Names match exactly as
+   in 1. A name only in a negated clause ("NEVER use any Fable model",
+   "..., not GPT 6.1 Sol", "Sol is poor at frontend") does not count
+   (:func:`affirmed_clauses`); a negation also covers the rest of its list
+   ("NEVER use Fable, Mythos or Grok") until a part starts with "use ...".
+   Nothing is saved for this path: a corrected, superseded or forgotten memory stops authorizing at the next start. The
+   start's receipt and log name the memory ("model gpt-6.1-sol accepted:
+   owner memory m260"). The Task roster lists these memories under the
+   subagent default (:func:`routing_block`) so the agent can pick per job.
+3. **Approved by the owner.** Otherwise :func:`confirm` raises the ordinary
    permission prompt ("Start ... on GPT-6 Astra instead of Opus?"), in every
    permission mode, Bypass included, and never from a saved rule. Away mode,
    a denial or no answer refuses the start; nothing falls back to the
@@ -64,9 +81,11 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
-# How the prompt and the receipts name the two ways a model is accepted.
+# How the prompt and the receipts name the ways a model is accepted.
 NAMED = "named_by_user"
+REMEMBERED = "remembered_by_owner"
 APPROVED = "approved_by_owner"
+SOURCES = (NAMED, REMEMBERED, APPROVED)
 
 # The pseudo-tool the owner's prompt is raised under. Its own name keeps a
 # remembered "always" answer on this prompt from ever approving the
@@ -97,6 +116,20 @@ class Choice:
     model: str
     provider_id: Optional[str]
     model_id: str
+
+
+@dataclass(frozen=True)
+class Acceptance:
+    """How a start's model was accepted: one of :data:`SOURCES`, and for
+    :data:`REMEMBERED` the memory id and the line the receipt shows."""
+    source: str
+    memory_id: Optional[str] = None
+    note: Optional[str] = None
+
+    def record(self) -> Dict[str, Any]:
+        """The receipt fields beyond ``source``/``instead_of``."""
+        return {key: value for key, value in (("memory_id", self.memory_id),
+                                               ("accepted", self.note)) if value}
 
 
 # ---------------------------------------------------------------------------
@@ -500,12 +533,16 @@ def _user_evidence(session_id: str) -> List[Dict[str, Any]]:
         return []
 
 
-def _find_named(session_id: str, model: str) -> Optional[Dict[str, Any]]:
-    evidence = _user_evidence(session_id)
+def _find_named(session_id: str, model: str, *, recent: bool = True,
+                older: bool = True) -> Optional[Dict[str, Any]]:
+    """The user's message naming ``model``: ``recent`` searches the bounded
+    newest-first window, ``older`` the paged five-second fallback."""
     catalog = _catalog()
-    match = next((row for row in evidence if named_by_user(model, [row["text"]], catalog)), None)
-    if match:
-        return match
+    if recent:
+        evidence = _user_evidence(session_id)
+        match = next((row for row in evidence if named_by_user(model, [row["text"]], catalog)), None)
+        if match or not older:
+            return match
     # First use after upgrade must not discard an old standing instruction.
     # Page by the indexed turn position rather than loading all history. A
     # five-second budget bounds the fallback, not the age of the instruction.
@@ -568,6 +605,192 @@ def _find_named(session_id: str, model: str) -> Optional[Dict[str, Any]]:
 def user_texts(session_id: str) -> List[str]:
     """Same-principal typed messages inside the bounded launch-chain window."""
     return [row["text"] for row in _user_evidence(session_id)]
+
+
+# ---------------------------------------------------------------------------
+# What the owner saved
+# ---------------------------------------------------------------------------
+
+# Sentence breaks: ; newline and dashes anywhere; . ! ? only before a space or
+# the end, so "GPT 6.1 Sol" stays whole. Within a sentence, , and : (again only
+# before a space, so "prov:lane:astra" stays whole) separate list parts.
+_SENTENCE_BREAK = re.compile(r"[;\n—–]|[.!?](?=\s|$)")
+_PART_BREAK = re.compile(r"[,:](?=\s|$)")
+# A part with one of these says what NOT to use: every model in it is left out.
+_NEGATION = re.compile(
+    r"\b(?:never|not|no|dont|don't|do\s+not|avoid|stop\s+using|\w+n't)\b"
+    r"|\b(?:is|are|was|were)\s+(?:\w+\s+)?(?:poor|bad|crap)\b", re.I)
+# A negation carries into the following parts of its sentence ("NEVER use
+# Fable, Mythos or Grok"; "Models to avoid: Fable, Mythos") until a part names
+# a fresh instruction to use something: a part that starts with an imperative
+# ("use Opus ..."). Only that ends it, not "anything using Grok", so the rule errs
+# toward caution: an ambiguous start falls back to the owner's prompt.
+_AFFIRM = re.compile(
+    r"^\s*(?:(?:and|or|but|then)\s+)?(?:use|run|route|send|prefer|pick|default"
+    r"|go\s+to|switch\s+to|move\s+to)\b", re.I)
+# "Use Opus instead of Sol": the words after the cue are the rejected ones.
+_CONTRAST = re.compile(r"\b(?:instead\s+of|rather\s+than)\b", re.I)
+# The roster's block of saved routing (see routing_block).
+ROUTING_BUDGET = 1200
+ROUTING_HEADER = ("Saved owner model routing (the host accepts models these name; "
+                  "pick per job and pass model):")
+# (memory id, revision, catalog key) -> models it names; memory text and
+# revision change together, so a correction is a new key.
+_ROUTING_CACHE: Dict[Tuple[str, int, int], Tuple[str, ...]] = {}
+_ROUTING_CACHE_LIMIT = 2048
+
+
+def affirmed_clauses(text: str) -> List[str]:
+    """The parts of ``text`` that may name a model to use.
+
+    Sentences split on ``.``/``!``/``?``/``;``/dashes/newlines, then into parts
+    on ``,``/``:``. A part with a negation (never, not, no, don't, do not,
+    avoid, stop using, "X is poor|bad|crap") is dropped, and so is every later
+    part of that sentence until one starts with an instruction to use something
+    (use, run, route, send, prefer, pick, default, go to, switch to, move to). "instead of"/"rather than"
+    drops the words after it, and the rest of the sentence's list.
+    """
+    clauses = []
+    for sentence in _SENTENCE_BREAK.split(str(text or "").replace("’", "'")):
+        negated = False
+        for part in _PART_BREAK.split(sentence):
+            if negated and _AFFIRM.search(part) and not _NEGATION.search(part):
+                negated = False
+            if negated:
+                continue
+            contrast = _CONTRAST.search(part)
+            if contrast:
+                part, negated = part[:contrast.start()], True
+            if _NEGATION.search(part):
+                negated = True
+                continue
+            if part.strip():
+                clauses.append(part)
+    return clauses
+
+
+def memory_names(model: str, text: str,
+                 catalog: Optional[Dict[str, Tuple[str, ...]]] = None) -> bool:
+    """Whether saved ``text`` names ``model`` outside a negated clause."""
+    return named_by_user(model, affirmed_clauses(text), catalog)
+
+
+def _memory_scope(row: Dict[str, Any], cwd: Optional[str] = None) -> Optional[str]:
+    """The project key the chat's memories are scoped to (the one
+    ``fluid_memory.session_memory`` uses), or None when only global facts
+    apply: never the server's own working directory."""
+    project = row.get("project_v2_id") or row.get("project_id")
+    if project:
+        return f"project:{project}"
+    where = cwd or row.get("worktree_path")
+    if not where:
+        return None
+    from fluid.codemode.skills import project_key_for
+
+    return project_key_for(where)
+
+
+def owner_memories(session_id: str, cwd: Optional[str] = None) -> List[Any]:
+    """The live saved memories that may route ``session_id``'s starts, most
+    useful first (:func:`fluid.codemode.facts.usefulness`).
+
+    The chat's principal's store (the owner's, or an API user's own), read in
+    one snapshot. Only facts saved at the user's request count; see the
+    module docstring for the full screen. Never raises and never creates a
+    store.
+    """
+    try:
+        from app.core.api_user_scope import session_api_user_id
+        from app.core.fluid_memory import owner_root, store_for_owner
+        from app.db import database
+        from fluid.codemode.facts import usefulness, visible_on
+        from fluid.context.screening import screen_findings
+
+        row = database.get_session(session_id)
+        if not row:
+            return []
+        principal = session_api_user_id(row)
+        owner = f"api:{principal}" if principal else "local"
+        if not (owner_root(owner) / "memories.json").exists():
+            return []
+        store = store_for_owner(owner)
+        scopes = {"global", _memory_scope(row, cwd)} - {None}
+        doc = store._facts.snapshot()
+        local = doc["store_id"]
+        live = [entry for entry in doc["entries"]
+                if entry.get("protected") is True
+                and entry.get("provenance", "session") != "tool"
+                and not entry.get("superseded_by") and not entry.get("conflicted")
+                and not entry.get("retired_at")
+                and visible_on(entry, local)
+                and entry.get("scope", "global") in scopes
+                and isinstance(entry.get("text"), str) and entry["text"].strip()
+                and not screen_findings(entry["text"])]
+        live.sort(key=lambda entry: (-usefulness(entry), str(entry.get("id"))))
+        return [store._facts._entry(entry) for entry in live]
+    except Exception:  # noqa: BLE001 — an unreadable store authorizes nothing
+        logger.warning("Could not read saved model routing for %s", session_id, exc_info=True)
+        return []
+
+
+def remembered_by_owner(session_id: str, model: str) -> Optional[Any]:
+    """The saved owner memory that names ``model`` for this chat, or None."""
+    catalog = _catalog()
+    for entry in owner_memories(session_id):
+        if memory_names(model, entry.text, catalog):
+            return entry
+    return None
+
+
+def _routed_models(entry: Any, catalog: Dict[str, Tuple[str, ...]], catalog_key: int) -> Tuple[str, ...]:
+    """Every catalog model ``entry`` names positively (cached per revision)."""
+    key = (str(entry.id), int(entry.revision or 0), catalog_key)
+    cached = _ROUTING_CACHE.get(key)
+    if cached is not None:
+        return cached
+    clauses = affirmed_clauses(entry.text)
+    joined = "".join(token for clause in clauses for token in _tokens(clause))
+    named = []
+    if joined:
+        for model, spelled in catalog.items():
+            # Cheap screen first: any full name or distinctive word of the
+            # model must appear in the clauses' run of words.
+            if not any(token in joined for name in spelled for token in _tokens(name)):
+                continue
+            if named_by_user(model, clauses, catalog):
+                named.append(model)
+    if len(_ROUTING_CACHE) >= _ROUTING_CACHE_LIMIT:
+        _ROUTING_CACHE.clear()
+    _ROUTING_CACHE[key] = result = tuple(named)
+    return result
+
+
+def routing_block(session_id: Optional[str], cwd: Optional[str] = None,
+                  budget: int = ROUTING_BUDGET) -> str:
+    """The roster's "Saved owner model routing" block, or "" when no saved
+    memory names an eligible model. At most ``budget`` characters, most
+    useful memory first; a memory that does not fit is left out whole
+    (only a first one longer than the budget is cut, with an ellipsis)."""
+    if not session_id:
+        return ""
+    entries = owner_memories(session_id, cwd)
+    if not entries:
+        return ""
+    catalog = _catalog()
+    catalog_key = hash(tuple(sorted(catalog.items())))
+    lines: List[str] = []
+    used = len(ROUTING_HEADER)
+    for entry in entries:
+        if not _routed_models(entry, catalog, catalog_key):
+            continue
+        line = "- [" + str(entry.id) + "] " + " ".join(entry.text.split())
+        if used + 1 + len(line) > budget:
+            if lines:
+                continue
+            line = line[:max(0, budget - used - 2)].rstrip() + "…"
+        lines.append(line)
+        used += 1 + len(line)
+    return "\n".join([ROUTING_HEADER, *lines]) if lines else ""
 
 
 # ---------------------------------------------------------------------------
@@ -690,7 +913,24 @@ def _refusal(model: str, baseline: Optional[str], why: str) -> str:
 
 async def confirm(session_id: str, profile_id: Optional[str], *, model: str,
                   baseline: Optional[str], action: str) -> str:
-    """How the user asked for ``model``: :data:`NAMED` or :data:`APPROVED`.
+    """How the user asked for ``model``: one of :data:`SOURCES`.
+
+    See :func:`accept`, which also names the memory that accepted it.
+    """
+    return (await accept(session_id, profile_id, model=model, baseline=baseline,
+                         action=action)).source
+
+
+def _accepted_note(model: str, memory_id: str) -> str:
+    from app.core.query_options import decode_provider_model
+
+    decoded = decode_provider_model(model)
+    return f"model {decoded[1] if decoded else model} accepted: owner memory {memory_id}"
+
+
+async def accept(session_id: str, profile_id: Optional[str], *, model: str,
+                 baseline: Optional[str], action: str) -> Acceptance:
+    """How the user asked for ``model``: named, remembered or approved.
 
     ``action`` completes "Do you want me to ..." in the owner's prompt, e.g.
     "start the chat “Review” on GPT-6 Astra (Lane) instead of Opus".
@@ -703,16 +943,36 @@ async def confirm(session_id: str, profile_id: Optional[str], *, model: str,
     key = (await asyncio.to_thread(chat_of, session_id), model)
     cache_key = (*key, await asyncio.to_thread(viewer_api_user_id, key[0]))
     if cache_key in _APPROVED:
-        return APPROVED
+        return Acceptance(APPROVED)
     if await asyncio.to_thread(_has_approval, *key):
         _APPROVED.add(cache_key)
-        return APPROVED
+        return Acceptance(APPROVED)
     if await asyncio.to_thread(_has_named, *key):
-        return NAMED
-    evidence = await asyncio.to_thread(_find_named, session_id, model)
+        return Acceptance(NAMED)
+    evidence = await asyncio.to_thread(lambda: _find_named(session_id, model, older=False))
+    if not evidence:
+        # Read fresh on every start, never saved: a corrected or superseded
+        # memory stops authorizing at once.
+        memory = await asyncio.to_thread(remembered_by_owner, session_id, model)
+        if memory is not None:
+            note = _accepted_note(model, memory.id)
+            logger.info("%s (session %s)", note, session_id)
+            return Acceptance(REMEMBERED, memory_id=str(memory.id), note=note)
+        evidence = await asyncio.to_thread(lambda: _find_named(session_id, model, recent=False))
     if evidence:
         await asyncio.to_thread(_remember_named, *key, evidence)
-        return NAMED
+        return Acceptance(NAMED)
+    return Acceptance(await _approve(session_id, profile_id, model=model, baseline=baseline,
+                                     action=action, cache_key=cache_key, key=key))
+
+
+async def _approve(session_id: str, profile_id: Optional[str], *, model: str,
+                   baseline: Optional[str], action: str, cache_key: Tuple[Any, ...],
+                   key: Tuple[str, str]) -> str:
+    """:data:`APPROVED` from the owner's prompt (shared by concurrent starts),
+    else ``PermissionError`` with the refusal."""
+    import asyncio
+
     while cache_key not in _APPROVED:
         pending = _ASKING.get(cache_key)
         if pending is None:

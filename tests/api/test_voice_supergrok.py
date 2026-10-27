@@ -257,8 +257,7 @@ async def test_stream_opens_xai_realtime_with_the_login_and_drops_it(monkeypatch
     assert await call.open_upstream() == "socket"
     assert connect.await_args.args == (GROK_URL,)
     assert connect.await_args.kwargs["additional_headers"] == {"Authorization": "Bearer " + FAKE_LOGIN_TOKEN}
-    assert call.api_key == ""
-    assert call.reconnect_reason(None, set()) is None  # Never a silent re-dial.
+    assert call.api_key == ""  # Renewals read the login fresh instead (connect_provider).
 
 
 def _invalid_status(status):
@@ -371,3 +370,43 @@ async def test_delegation_submits_to_the_same_chat_with_the_saved_prompt(monkeyp
     assert kwargs["payload"][VOICE_INSTRUCTIONS] == "Be terse."
     assert kwargs["payload"][turn_manager.VOICE_DELEGATION] is True
     on_submitted.assert_awaited_once_with("turn-1")
+
+
+@pytest.mark.asyncio
+async def test_renewal_reads_the_login_fresh_and_never_an_api_key(monkeypatch):
+    from app.core import voice_grok
+    load = _load_login(monkeypatch, return_value="rotated-login-token")
+    connect = AsyncMock(return_value="socket")
+    monkeypatch.setattr(voice_grok, "connect", connect)
+    call = _stream()
+    call.api_key = ""  # Dropped once the call's first socket opened.
+    assert await call.connect_provider() == "socket"
+    load.assert_awaited_once_with("prov-grok")
+    assert connect.await_args.args == (GROK_URL,)
+    assert connect.await_args.kwargs["additional_headers"] == {"Authorization": "Bearer rotated-login-token"}
+
+
+@pytest.mark.asyncio
+async def test_renewal_refused_with_401_renews_the_login_for_the_next_attempt(monkeypatch, caplog):
+    from app.core import voice_grok, xai_token_refresh
+    caplog.set_level(logging.DEBUG)
+    _load_login(monkeypatch)
+    refresh = AsyncMock(return_value=True)
+    monkeypatch.setattr(voice_grok, "connect", AsyncMock(side_effect=_invalid_status(401)))
+    monkeypatch.setattr(xai_token_refresh, "refresh_on_401_once", refresh)
+    with pytest.raises(ValueError) as raised:
+        await _stream().connect_provider()
+    assert str(raised.value) == "SuperGrok voice could not reconnect (HTTP 401)."
+    assert raised.value.__context__ is None and FAKE_LOGIN_TOKEN not in repr(raised.value)
+    refresh.assert_awaited_once_with("prov-grok", stale_access_token=FAKE_LOGIN_TOKEN)
+    assert FAKE_LOGIN_TOKEN not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_renewal_without_a_usable_login_fails_plainly(monkeypatch):
+    from app.core import voice_grok
+    from app.core.provider.fluid_credentials import ProviderCredentialError
+    _load_login(monkeypatch, side_effect=ProviderCredentialError("needs reauth"))
+    monkeypatch.setattr(voice_grok, "connect", AsyncMock(side_effect=AssertionError("no login, no dial")))
+    with pytest.raises(ValueError, match="SuperGrok login is unavailable"):
+        await _stream().connect_provider()

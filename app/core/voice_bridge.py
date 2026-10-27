@@ -484,8 +484,9 @@ BACKEND_NOTE_PREFIXES: Tuple[str, ...] = (
 INJECTED_REPORT_MAX_CHARS = 1200
 
 # Hard ceiling on how long a completion watcher waits for its worker, whatever
-# the call-duration setting says. A worker outliving this just stops being
-# announced — it keeps running and stays readable via check_agent.
+# the call-duration setting says (it is also the wait when the call has no
+# limit). A worker outliving this just stops being announced — it keeps running
+# and stays readable via check_agent.
 WATCHER_MAX_SECONDS = 3600.0
 
 # Teardown reason stamped on a worker the user stopped by voice.
@@ -551,6 +552,14 @@ MODEL_PRICES_PER_MTOK: Dict[str, Dict[str, float]] = {
 # window /call and /secret answer 409 so the FE's automatic reconnect cannot
 # start a fresh clock without the user hanging up first.
 CAP_GRACE_SECONDS = 300.0
+
+# How long a bridge whose sideband closed waits to be replaced before the call
+# is treated as over. OpenAI ends its side when the browser's peer goes away
+# (and at its 60-minute session wall), and the FE re-handshakes onto a new
+# call_id within seconds, so a bridge left unreplaced this long belongs to a
+# browser that is gone. Without it a call with no length limit would keep its
+# approval poller and active flag forever.
+SIDEBAND_ABANDONED_SECONDS = 600.0
 
 
 # ============================================================================
@@ -818,6 +827,7 @@ class VoiceBridge:
         usage_totals: Optional[Dict[str, int]] = None,
         persisted_usage: Optional[Dict[str, int]] = None,
         on_duration_cap: Optional[Callable[[], None]] = None,
+        on_abandoned: Optional[Callable[["VoiceBridge"], Any]] = None,
         client_tools: Optional[List[Dict[str, Any]]] = None,
         client_instructions: Optional[str] = None,
         instructions_override: Optional[str] = None,
@@ -869,6 +879,7 @@ class VoiceBridge:
             persisted_usage if persisted_usage is not None else {}
         )
         self._on_duration_cap = on_duration_cap
+        self._on_abandoned = on_abandoned
 
         self.started_at: Optional[float] = None
         self.ended_at: Optional[float] = None
@@ -963,6 +974,8 @@ class VoiceBridge:
             "usage": dict(self.usage),
             "estimated_cost_usd": estimate_cost_usd(self.model, self.usage),
             "active_tasks": _active_task_count(self.session_id),
+            "max_call_minutes": self.call_limit_minutes(),
+            "remaining_seconds": self.remaining_seconds(),
         }
 
     async def start(self) -> None:
@@ -1007,9 +1020,13 @@ class VoiceBridge:
         self._reader_task = asyncio.create_task(
             self._read_loop(), name=f"voice-sideband-{self.session_id}"
         )
-        self._deadline_task = asyncio.create_task(
-            self._duration_cap(), name=f"voice-deadline-{self.session_id}"
-        )
+        # A call with no length limit (``voice_max_call_minutes`` 0) never
+        # gets a deadline; the FE's re-handshake keeps renewing OpenAI's own
+        # 60-minute session for as long as the caller stays.
+        if self.call_limit_minutes():
+            self._deadline_task = asyncio.create_task(
+                self._duration_cap(), name=f"voice-deadline-{self.session_id}"
+            )
 
         # The spoken approval poller is the ONLY surface a caller has: the FE
         # suppresses the GUI permission modal for the whole call. It starts with
@@ -1139,19 +1156,30 @@ class VoiceBridge:
             self.session_id, self.call_id, reason,
         )
 
-    def remaining_seconds(self) -> float:
+    def call_limit_minutes(self) -> int:
+        """The call-length limit in minutes; 0 means the call has no limit."""
+        return max(int(self.max_call_minutes or 0), 0)
+
+    def remaining_seconds(self) -> Optional[float]:
         """Seconds left on the call cap, measured from the CALL's epoch.
 
-        Reconnecting mid-call re-attaches a new bridge to the same epoch, so the
-        deadline keeps counting down instead of starting over.
+        ``None`` when the call has no limit. Reconnecting mid-call re-attaches a
+        new bridge to the same epoch, so the deadline keeps counting down
+        instead of starting over.
         """
-        window = max(int(self.max_call_minutes or 0), 0) * SECONDS_PER_MINUTE
-        return window - (time.time() - self.call_started_at)
+        limit = self.call_limit_minutes()
+        if not limit:
+            return None
+        window = limit * SECONDS_PER_MINUTE
+        return max(window - (time.time() - self.call_started_at), 0.0)
 
     async def _duration_cap(self) -> None:
         """Close the call once it exceeds ``voice_max_call_minutes``."""
+        remaining = self.remaining_seconds()
+        if remaining is None:
+            return  # No limit: nothing to enforce.
         try:
-            await asyncio.sleep(max(self.remaining_seconds(), 0.0))
+            await asyncio.sleep(remaining)
         except asyncio.CancelledError:
             raise
         logger.warning(
@@ -1289,11 +1317,27 @@ class VoiceBridge:
             )
         finally:
             # Reconnect is FE-driven with a fresh call_id: all we
-            # do here is stop claiming to be connected.
+            # do here is stop claiming to be connected, and end the call if
+            # no re-attach replaces this bridge in time.
             self.connected = False
             logger.info(
                 "Voice: sideband stream closed for session %s", self.session_id,
             )
+            if not self._stopped and self._on_abandoned is not None:
+                task = asyncio.create_task(
+                    self._end_if_abandoned(), name=f"voice-abandoned-{self.session_id}",
+                )
+                self._call_tasks.add(task)
+                task.add_done_callback(self._call_tasks.discard)
+
+    async def _end_if_abandoned(self) -> None:
+        await asyncio.sleep(SIDEBAND_ABANDONED_SECONDS)
+        if self.active and not self.connected and self._on_abandoned is not None:
+            logger.warning(
+                "Voice: session %s had no sideband for %d s and was not re-attached; "
+                "ending the call", self.session_id, int(SIDEBAND_ABANDONED_SECONDS),
+            )
+            await self._on_abandoned(self)
 
     def _is_quiet(self) -> bool:
         """A natural pause: nobody is talking, so a held note may be spoken."""
@@ -2189,8 +2233,10 @@ class VoiceBridge:
 
     def _watch_timeout(self) -> float:
         """How long a watcher waits for its worker before giving up."""
-        window = max(int(self.max_call_minutes or 0), 1) * SECONDS_PER_MINUTE
-        return min(float(window), WATCHER_MAX_SECONDS)
+        limit = self.call_limit_minutes()
+        if not limit:
+            return WATCHER_MAX_SECONDS  # No call limit: the hard ceiling applies.
+        return min(float(limit * SECONDS_PER_MINUTE), WATCHER_MAX_SECONDS)
 
     def _start_watcher(self, worker_session_id: str, label: Optional[str]) -> None:
         task = asyncio.create_task(
@@ -2966,6 +3012,7 @@ class VoiceCallRegistry:
                 "started_at": None, "model": None,
                 "usage": {}, "estimated_cost_usd": None,
                 "active_tasks": _active_task_count(session_id),
+                "max_call_minutes": None, "remaining_seconds": None,
             }
         return bridge.state()
 
@@ -3027,6 +3074,7 @@ class VoiceCallRegistry:
                 on_duration_cap=lambda: self.mark_capped(
                     session_id, max_call_minutes,
                 ),
+                on_abandoned=lambda gone: self.end_abandoned(session_id, gone),
                 client_tools=client_tools,
                 client_instructions=client_instructions,
                 instructions_override=instructions_override,
@@ -3043,6 +3091,15 @@ class VoiceCallRegistry:
             self._epochs[session_id] = epoch
             self._bridges[session_id] = bridge
             return bridge
+
+    async def end_abandoned(self, session_id: str, bridge: VoiceBridge) -> None:
+        """End a call whose browser is gone, unless a re-attach replaced it."""
+        async with self._lock:
+            if self._bridges.get(session_id) is not bridge:
+                return
+            self._bridges.pop(session_id, None)
+            self._epochs.pop(session_id, None)
+        await bridge.stop(reason="abandoned")
 
     async def detach(self, session_id: str) -> bool:
         """Stop and drop the session's bridge. ``False`` when there was none.

@@ -1866,6 +1866,8 @@ def create_builtin_tools_server(
         provider_id,
         file_subagent_targets(agent_registry, model),
         workflow_guidance=workflow_guidance,
+        session_id=session_id,
+        cwd=cwd,
     )
 
     @tool("Task", task_contract.description, task_contract.input_schema)

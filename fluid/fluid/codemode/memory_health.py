@@ -101,6 +101,7 @@ LABELS = {
     "curation": "Curation",
     "protected": "Your saved facts",
     "saves": "Saving",
+    "proposals": "Questions for you",
 }
 
 _WORD = re.compile(r"[a-z0-9]{4,}")
@@ -310,6 +311,7 @@ def check(store, *, now: float | None = None, learning_enabled: bool = True,
     protected_signal, protected_ids, lost = _protected_signal(doc, previous, now)
     signals.append(protected_signal)
     signals.append(_saves_signal(store, now))
+    signals.append(_proposals_signal(store, live, now))
     attention = [s for s in signals if s["state"] == "attention"]
     return {
         "state": "attention" if attention else "healthy",
@@ -460,6 +462,18 @@ def _learner_outcome(store, now, coverage) -> dict:
             "learner", True,
             f"The learner read {coverage['read_3d']} of {taken_in} journal entries in the "
             f"last 3 days; {dropped} were dropped unread." + high_note + budget_note, **detail)
+    try:
+        spent_today = int(now // DAY) in store._facts.inference_budget_spent_days()
+    except Exception:  # noqa: BLE001 — unreadable: say nothing about the budget
+        spent_today = False
+    detail["budget_spent_today"] = spent_today
+    if spent_today and pending:
+        # Idle by design, not broken: the passes resume at 00:00 UTC.
+        return _signal(
+            "learner", False,
+            f"Learning is idle until the daily budget resets at 00:00 UTC; "
+            f"{_plural(pending, 'journal entry', 'journal entries')} "
+            f"{'is' if pending == 1 else 'are'} waiting." + budget_note, **detail)
     if recent_user < ACTIVE_MIN_USER_ENTRIES and not passes:
         return _signal("learner", False, "Too little recent activity to judge." + budget_note, **detail)
     if not passes and pending >= MIN_NEW_ENTRIES:
@@ -630,6 +644,32 @@ def _saves_signal(store, now) -> dict:
     if recent:
         return _signal("saves", True, f"{_plural(len(recent), 'save')} failed to write this week.", **detail)
     return _signal("saves", False, "Saves are writing normally.", **detail)
+
+
+def _proposals_signal(store, live, now) -> dict:
+    """What the learner is waiting to ask the owner: proposed ``pref.*``
+    updates and pairs of user-kept facts that disagree. Informational: the
+    sessions ask, so this never raises attention."""
+    from fluid.codemode.preferences import PreferenceProposals, open_conflicts
+    try:
+        proposals = PreferenceProposals(store).open(None, entries=live, now=now)
+    except Exception:  # noqa: BLE001 — an unreadable queue has nothing to ask
+        proposals = []
+    conflicts = open_conflicts(live)
+    detail = {"preference_proposals": len(proposals), "conflicts": conflicts,
+              "topics": sorted({str(r.get("topic")) for r in proposals})}
+    parts = []
+    if proposals:
+        parts.append(_plural(len(proposals), "proposed preference update"))
+    if conflicts:
+        parts.append(_plural(conflicts, "pair of saved facts that disagree",
+                             "pairs of saved facts that disagree"))
+    if not parts:
+        return _signal("proposals", False, "Nothing is waiting for your answer.", **detail)
+    waiting = "is" if len(proposals) + conflicts == 1 else "are"
+    return _signal("proposals", False,
+                   f"{' and '.join(parts)} {waiting} waiting for your answer; sessions ask you "
+                   "about them.", **detail)
 
 
 # ─── the scheduled run ─────────────────────────────────────────────────────

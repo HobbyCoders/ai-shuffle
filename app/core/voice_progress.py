@@ -374,6 +374,8 @@ class VoiceProgress:
         self.active_turns.add(turn_id)
         self.unstarted.add(turn_id)
         self.sent_at_end[turn_id] = self.turn_ends
+        # Only requests that have not started need theirs (bounded on long calls).
+        self.sent_at_end = {t: end for t, end in self.sent_at_end.items() if t in self.unstarted}
         self.note("chat", "The chat agent has received the request and is working on it.")
         await self.flush(force=True)
 
