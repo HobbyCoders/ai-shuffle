@@ -375,8 +375,10 @@ def _stranded_review_head(main_dir: str, path: str, branch: str, base_commit: st
 
     The own branch must still point at ``base_commit`` (the caller proved its
     reflog has only its creation), the checkout must not be on that branch,
-    the tree must be clean with only disposable ignored files, and HEAD must be
-    reachable from a remote-tracking ref.
+    the tree must be clean with only disposable ignored files, HEAD must be
+    reachable from a remote-tracking ref, and so must every other commit the
+    checkout's HEAD visited (a commit made detached before checking out the
+    PR commit survives only in that reflog).
     """
     from app.core import worktree_reclaim
     from app.core.git_service import git_service
@@ -391,7 +393,11 @@ def _stranded_review_head(main_dir: str, path: str, branch: str, base_commit: st
         return False
     if worktree_reclaim._ignored_reason(path) is not None:
         return False
-    return worktree_reclaim._on_remote(main_dir, head_commit)
+    if not worktree_reclaim._on_remote(main_dir, head_commit):
+        return False
+    # The worker's own starting commit is exempt: untouched-worker reclaim
+    # already releases it, and the caller's branch still holds it.
+    return worktree_reclaim._unpublished_history(main_dir, path, None, exempt=(head_commit, base_commit)) == []
 
 
 def discard_unused_worker_checkout(checkout: WorkerCheckout) -> bool:

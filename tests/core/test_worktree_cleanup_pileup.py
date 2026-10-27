@@ -97,14 +97,22 @@ def test_proof_from_an_exact_merged_pr_or_a_commit_github_lists_in_one(repositor
     path = checkout(repository)
     commit(path, "unique.txt", "never merged locally\n")
     tip = git(path, "rev-parse", "HEAD")
-    merged_head = SimpleNamespace(number=7, state="MERGED", head_sha=tip)
-    contains = SimpleNamespace(number=8, state="MERGED", head_sha="0" * 40, contains_commit=tip)
-    still_open = SimpleNamespace(number=9, state="OPEN", head_sha=tip)
-    assert wr.integration_proof(str(repo), "main", tip, [merged_head]) == "PR #7 merged at this commit"
-    assert wr.integration_proof(str(repo), "main", tip, [contains]) == "PR #8 merged with this commit in it"
-    assert wr.integration_proof(str(repo), "main", tip, [still_open]) is None
-    other = SimpleNamespace(number=10, state="MERGED", head_sha="1" * 40, contains_commit="2" * 40)
-    assert wr.integration_proof(str(repo), "main", tip, [other]) is None
+    merged_head = SimpleNamespace(number=7, state="MERGED", head_sha=tip, base_branch="main")
+    contains = SimpleNamespace(number=8, state="MERGED", head_sha="0" * 40, contains_commit=tip, base_branch="main")
+    still_open = SimpleNamespace(number=9, state="OPEN", head_sha=tip, base_branch="main")
+
+    def proof(pulls, base="main"):
+        return wr.integration_proof(str(repo), "main", tip, pulls, base_branch=base)
+
+    assert proof([merged_head]) == "PR #7 merged at this commit"
+    assert proof([contains]) == "PR #8 merged with this commit in it"
+    assert proof([still_open]) is None
+    other = SimpleNamespace(number=10, state="MERGED", head_sha="1" * 40, contains_commit="2" * 40, base_branch="main")
+    assert proof([other]) is None
+    # Merged into some other branch is not integrated; without a base no PR counts.
+    stacked = SimpleNamespace(number=11, state="MERGED", head_sha=tip, base_branch="feat/stack")
+    assert proof([stacked]) is None
+    assert proof([merged_head], base=None) is None
 
 
 def test_squash_merged_then_edited_worktree_is_reclaimed(repository):
@@ -262,21 +270,43 @@ def test_reviewer_head_github_lists_in_a_pr_counts_as_pushed(repository, monkeyp
 def test_orphan_branches_go_only_when_proven(repository):
     repo, _ = repository
     git(repo, "branch", "pr670")  # at main: contained
-    git(repo, "branch", "wip", content_commit(repo, "wip.txt"))
-    path = checkout(repository, "squashed")
+    git(repo, "branch", "chore/task-wip", content_commit(repo, "wip.txt"))
+    git(repo, "branch", "experiment")  # hand-made, at main: never a candidate
+    git(repo, "branch", "fix/old-pr")  # hand-made, at main: never a candidate
+    path = checkout(repository, "chore/task-squashed")
     squash_then_edit(repo, path)
     git(repo, "worktree", "remove", str(path))  # disposable fixture: leaves the branch behind
     repository[1]["registered"].pop()  # ... and its registration was already retired
-    checkout(repository, "in-use")
+    checkout(repository, "chore/task-in-use")
     rows = {r["branch"]: r for r in branches()["items"]}
-    assert set(rows) == {"pr670", "wip", "squashed"}  # never main or a checked-out branch
+    assert set(rows) == {"pr670", "chore/task-wip", "chore/task-squashed"}  # never main or a checked-out branch
     assert rows["pr670"]["decision"] == "delete"
-    assert rows["squashed"]["decision"] == "delete" and "every commit's change" in rows["squashed"]["reason"]
-    assert rows["wip"]["decision"] == "keep" and rows["wip"]["reason"] == "unmerged and not pushed; integration not proven"
+    squashed = rows["chore/task-squashed"]
+    assert squashed["decision"] == "delete" and "every commit's change" in squashed["reason"]
+    wip = rows["chore/task-wip"]
+    assert wip["decision"] == "keep" and wip["reason"] == "unmerged and not pushed; integration not proven"
     result = branches(dry_run=False)
     assert result["deleted"] == 2
     listed = git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads").split()
-    assert sorted(listed) == ["in-use", "main", "wip"]
+    assert sorted(listed) == ["chore/task-in-use", "chore/task-wip", "experiment", "fix/old-pr", "main"]
+
+
+@pytest.mark.parametrize("name,app_made", [("chore/task-1", True), ("task/1", True), ("chore/chat-ab12", True),
+                                           ("pr702", True), ("pr702b", True), ("pr-702", True),
+                                           ("experiment", False), ("main2", False), ("pr702/x", False),
+                                           ("fix/pr702", False), ("chore/task-", False), ("prx", False)])
+def test_branch_sweep_only_considers_app_and_gh_names(repository, name, app_made):
+    repo, _ = repository
+    git(repo, "branch", name)  # at main: integrated either way
+    rows = branches()["items"]
+    assert [r["branch"] for r in rows] == ([name] if app_made else [])
+    branches(dry_run=False, observations=None)
+    assert bool(git(repo, "branch", "--list", name)) is (not app_made)
+    if not app_made:
+        source = repository[1]
+        context = rc._context(source)
+        row = rc._plan_branch(source, context, name, git(repo, "rev-parse", name), pulls=[])
+        assert row["decision"] == "keep" and row["reason"] == "not a branch the app or gh pr checkout created"
 
 
 def test_pushed_branch_needs_a_finished_pr(repository, monkeypatch):
@@ -294,6 +324,9 @@ def test_pushed_branch_needs_a_finished_pr(repository, monkeypatch):
     assert row["decision"] == "keep" and row["reason"].startswith("pushed, but no merged or closed PR")
     state["pulls"] = [SimpleNamespace(number=113, state="OPEN", head_branch="feat/x", head_sha=tip)]
     assert branches()["items"][0]["reason"].startswith("open PR")
+    # A finished PR whose head is another commit: the remote ref may be stale.
+    state["pulls"] = [SimpleNamespace(number=113, state="CLOSED", head_branch="feat/x", head_sha="3" * 40)]
+    assert branches()["items"][0]["reason"].startswith("pushed, but no merged or closed PR")
     state["pulls"] = [SimpleNamespace(number=113, state="CLOSED", head_branch="feat/x", head_sha=tip)]
     row = branches()["items"][0]
     assert row["decision"] == "delete" and row["reason"] == "tip is pushed (origin/feat/x); PR #113 closed"
@@ -301,16 +334,16 @@ def test_pushed_branch_needs_a_finished_pr(repository, monkeypatch):
     assert git(repo, "rev-parse", "refs/remotes/origin/feat/x") == tip
 
 
-@pytest.mark.parametrize("session", [{"id": "s", "branch": "done", "is_active": True},
-                                     {"id": "s", "worktree_branch": "done", "running": True},
-                                     {"id": "s", "branch": "done", "pr_state": "open", "pr_number": 3,
+@pytest.mark.parametrize("session", [{"id": "s", "branch": "chore/task-done", "is_active": True},
+                                     {"id": "s", "worktree_branch": "chore/task-done", "running": True},
+                                     {"id": "s", "branch": "chore/task-done", "pr_state": "open", "pr_number": 3,
                                       "updated_at": OLD, "finished_at": OLD}])
 def test_orphan_branch_bound_to_live_session_or_open_pr_is_kept(repository, monkeypatch, session):
     repo, _ = repository
-    git(repo, "branch", "done")
+    git(repo, "branch", "chore/task-done")
     monkeypatch.setattr(rc, "_project_sessions", lambda source: [session])
     assert branches(dry_run=False)["deleted"] == 0
-    assert git(repo, "rev-parse", "done")
+    assert git(repo, "rev-parse", "chore/task-done")
 
 
 def test_branch_of_a_detached_registered_checkout_is_left_to_the_worktree_sweep(repository):
@@ -323,15 +356,15 @@ def test_branch_of_a_detached_registered_checkout_is_left_to_the_worktree_sweep(
 
 def test_branch_delete_is_compare_and_delete(repository, monkeypatch):
     repo, _ = repository
-    git(repo, "branch", "done")
+    git(repo, "branch", "chore/task-done")
     moved = content_commit(repo, "late.txt", "new work after the check\n")
-    assert rc._delete_branch(str(repo), "done", moved) is False  # wrong expected tip: refused
-    assert git(repo, "rev-parse", "done") == git(repo, "rev-parse", "main")
+    assert rc._delete_branch(str(repo), "chore/task-done", moved) is False  # wrong expected tip: refused
+    assert git(repo, "rev-parse", "chore/task-done") == git(repo, "rev-parse", "main")
     original = rc._prepare_branch
 
     def race(source, name, preview):
         result = original(source, name, preview)
-        git(repo, "update-ref", "refs/heads/done", moved)
+        git(repo, "update-ref", "refs/heads/chore/task-done", moved)
         return result
 
     monkeypatch.setattr(rc, "_prepare_branch", race)
@@ -345,13 +378,13 @@ def test_branch_delete_is_compare_and_delete(repository, monkeypatch):
 
     monkeypatch.setattr(rc.git_service, "_run_git", record)
     row = branches(dry_run=False)["items"][0]
-    assert row["applied"] is False and git(repo, "rev-parse", "done") == moved
+    assert row["applied"] is False and git(repo, "rev-parse", "chore/task-done") == moved
     assert all(len(args) == 4 for args in calls)  # every delete names the expected SHA
 
 
 def test_automatic_branch_grace(repository, monkeypatch):
     repo, _ = repository
-    git(repo, "branch", "done")
+    git(repo, "branch", "chore/task-done")
     observations = {}
     now = time.time()
     monkeypatch.setattr(rc.time, "time", lambda: now)
@@ -450,6 +483,7 @@ def test_unverified_snapshot_never_forces_removal(repository, monkeypatch):
     row = reclaim(dry_run=False)["items"][0]
     assert row["decision"] == "keep" and row.get("error")
     remove.assert_not_called()
+    rc._stamp_head.assert_not_called()  # an unverified snapshot is never recorded as the tip
     assert (path / "notes.txt").exists() and git(repo, "rev-parse", "chore/task-w2")
     assert not rc.wr._git(str(repo), "for-each-ref", "refs/fluid-archive")  # its ref was dropped
 
@@ -628,3 +662,129 @@ def test_every_pass_visits_every_project(repository, tmp_path, monkeypatch):
     asyncio.run(rc.automatic_pass())
     assert not first.exists() and not path.exists()  # one broken project starved neither
     assert rc.INTERVAL_SECONDS == 2 * 3600
+
+
+
+# --- Review regressions -----------------------------------------------------------
+
+
+def test_partial_forced_removal_keeps_the_archive_ref(repository, monkeypatch):
+    """Once forced removal starts, the snapshot may be the only copy: keep its ref."""
+    repo, path, head = abandoned(repository, monkeypatch)
+
+    def partial(main, target, force=False):
+        (path / "notes.txt").unlink()  # forced removal got this far ...
+        return False  # ... then failed (busy file, timeout)
+
+    monkeypatch.setattr(rc.git_service, "remove_worktree", partial)
+    row = reclaim(dry_run=False)["items"][0]
+    assert row["decision"] == "keep" and row.get("error")
+    snapshot = git(repo, "rev-parse", "refs/fluid-archive/chore/task-w2")
+    assert git(repo, "show", f"{snapshot}:notes.txt") == "untracked findings"
+    assert rc._stamp_head.call_args.args[1]["head_sha"] == snapshot  # stamped only after verification
+    # The next pass refuses to overwrite the surviving snapshot.
+    again = reclaim(dry_run=False)["items"][0]
+    assert again["decision"] == "keep"
+    assert git(repo, "rev-parse", "refs/fluid-archive/chore/task-w2") == snapshot
+
+
+def test_nested_repository_is_never_archived(repository, monkeypatch):
+    """git add records a nested repository as a gitlink only: archiving would lose it."""
+    repo, path, _ = abandoned(repository, monkeypatch)
+    nested = path / "vendorlib"
+    nested.mkdir()
+    git(nested, "init", "-q")
+    git(nested, "config", "user.name", "Test")
+    git(nested, "config", "user.email", "test@example.invalid")
+    (nested / "lib.txt").write_text("local-only nested work\n")
+    git(nested, "add", ".")
+    git(nested, "commit", "-qm", "nested")
+    (nested / "lib.txt").write_text("uncommitted nested edit\n")
+    age_directory(path)
+    preview = reclaim()["items"][0]
+    assert preview["decision"] == "keep"
+    assert "not archived: holds a nested Git repository: vendorlib/" in preview["reason"]
+    remove = Mock(wraps=rc.git_service.remove_worktree)
+    monkeypatch.setattr(rc.git_service, "remove_worktree", remove)
+    assert reclaim(dry_run=False)["reclaimed"] == 0
+    remove.assert_not_called()
+    assert (nested / "lib.txt").read_text() == "uncommitted nested edit\n"
+    assert not rc.wr._git(str(repo), "for-each-ref", "refs/fluid-archive")
+    # The snapshot step itself refuses a gitlink too (second line of defence).
+    with pytest.raises(ValueError, match="nested Git repository: vendorlib"):
+        rc._worktree_tree(path, git(path, "rev-parse", "HEAD"))
+
+
+def test_patch_equivalence_never_proves_a_branch_with_merge_commits(repository):
+    """git cherry skips merges, so content added while resolving a merge would pass."""
+    repo, _ = repository
+    path = checkout(repository)
+    commit(path, "a.txt", "feature change\n")
+    feature = git(path, "rev-parse", "HEAD")
+    edit_on_main(repo, "b.txt", "main moved on\n")
+    git(path, "merge", "-q", "--no-ff", "--no-commit", "main")
+    (path / "resolution.txt").write_text("only exists in the merge commit\n")
+    git(path, "add", "resolution.txt")
+    git(path, "commit", "-qm", "merge main with extra content")
+    git(repo, "cherry-pick", feature)  # main now holds the feature patch, not the merge content
+    tip = git(path, "rev-parse", "HEAD")
+    cherry = git(repo, "cherry", "main", tip)
+    assert cherry and all(line.startswith("- ") for line in cherry.splitlines())  # cherry alone would "prove" it
+    assert wr.integration_proof(str(repo), "main", tip, label="main") is None
+    row = reclaim()["items"][0]
+    assert row["decision"] == "keep" and "integration not proven" in row["reason"]
+
+
+def test_reviewer_checkout_with_a_detached_local_commit_in_its_reflog_is_kept(repository):
+    repo, _ = repository
+    path = checkout(repository, "chore/task-reviewer")
+    git(path, "checkout", "-q", "--detach")
+    (path / "fixup.txt").write_text("review fixup that was never pushed\n")
+    git(path, "add", "fixup.txt")
+    git(path, "commit", "-qm", "local-only fixup")
+    lost = git(path, "rev-parse", "HEAD")
+    git(path, "checkout", "-q", "--detach", pushed_commit(repo))
+    age_directory(path)
+    assert rc._unpublished_history(str(repo), str(path), "main", exempt=(git(path, "rev-parse", "HEAD"),)) == [lost]
+    row = reclaim()["items"][0]
+    assert row["decision"] == "keep" and "not its registered branch" in row["reason"]
+    assert reclaim(dry_run=False)["reclaimed"] == 0 and path.exists()
+    assert git(repo, "cat-file", "-t", lost) == "commit"
+
+
+def test_report_cache_serves_repeat_lookups_and_the_sweeper_never_uses_it(monkeypatch):
+    from app.core.github_service import github_service
+
+    rc._report_cache.clear()
+    calls = []
+    monkeypatch.setattr(github_service, "list_commit_pulls", lambda repo, sha: calls.append(sha) or [])
+    monkeypatch.setattr(github_service, "list_pulls", lambda *a, **k: calls.append(k.get("head")) or [])
+    report_context = {"github_repo": "example/repo", "report_cache": True}
+    sweeper_context = {"github_repo": "example/repo"}
+    for _ in range(3):
+        rc._commit_pulls(report_context, "a" * 40)
+        rc._pulls(report_context, "chore/task-x")
+    assert calls == ["a" * 40, "chore/task-x"]
+    rc._commit_pulls(sweeper_context, "a" * 40)
+    rc._pulls(sweeper_context, "chore/task-x")
+    assert len(calls) == 4
+    now = time.monotonic()
+    monkeypatch.setattr(rc.time, "monotonic", lambda: now + rc.REPORT_CACHE_SECONDS + 1)
+    rc._commit_pulls(report_context, "a" * 40)
+    assert len(calls) == 5  # expired
+    rc._report_cache.clear()
+
+
+def test_report_stops_at_its_deadline(repository, monkeypatch):
+    repo, source = repository
+    checkout(repository, "one")
+    checkout(repository, "two")
+    rows = rc.plan_preview(source, deadline=time.monotonic() - 1)
+    assert {r["cleanup"] for r in rows.values()} == {rc.NOT_CHECKED}
+    assert all(r["decision"] == "keep" for r in rows.values())
+    monkeypatch.setattr(wr, "REPORT_SECONDS", 0)
+    monkeypatch.setattr(wr, "_project_repos", lambda **k: [source])
+    result = wr.report("p")
+    worktrees = result["projects"][0]["worktrees"]
+    assert len(worktrees) == 2
+    assert all(w["reason"].startswith("not checked (time limit)") and w["reclaimable"] is False for w in worktrees)

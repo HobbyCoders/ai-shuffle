@@ -144,7 +144,8 @@ def test_pr_head_must_match_and_open_always_wins(repository, monkeypatch, state,
     path = checkout(repository)
     commit(path)
     git(repo, "remote", "add", "origin", "https://github.com/example/disposable.git")
-    pr = SimpleNamespace(state=state, head_sha=git(path, "rev-parse", "HEAD") if exact else "0" * 40)
+    pr = SimpleNamespace(state=state, head_sha=git(path, "rev-parse", "HEAD") if exact else "0" * 40,
+                         base_branch="main")
     if state == "OPEN":
         git(repo, "merge", "--ff-only", "feature")  # integrated but still protected by the open PR
     monkeypatch.setattr(github_service, "list_pulls", lambda *a, **k: [pr])

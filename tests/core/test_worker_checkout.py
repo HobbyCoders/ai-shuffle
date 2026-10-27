@@ -945,21 +945,23 @@ def test_mismatch_diagnosis_does_not_report_an_enclosing_repo_branch(repo):
     assert "on branch 'elsewhere'" in project_resolver.describe_checkout_mismatch(row)
 
 
-@pytest.mark.parametrize("pushed", [True, False])
-def test_reviewer_moved_head_is_reclaimed_at_finish_only_when_pushed(repo, worker_runtime, pushed):
+@pytest.mark.parametrize("case", ["pushed", "local-head", "local-commit-then-pushed"])
+def test_reviewer_moved_head_is_reclaimed_at_finish_only_when_pushed(repo, worker_runtime, case):
     """A reviewer worker that ran ``gh pr checkout`` / ``git checkout --detach``
-    leaves its own branch untouched: released at finish when HEAD is pushed."""
+    leaves its own branch untouched: released at finish when HEAD and every
+    commit it visited are pushed."""
     row, parent, base, _ = repo
     published = git(base, "rev-parse", "refs/remotes/origin/parent-branch")
+    pushed = case == "pushed"
 
     def review(path):
-        if pushed:
-            git(path, "checkout", "--detach", published)
-        else:
+        if case != "pushed":
             git(path, "checkout", "--detach")
             (path / "local.txt").write_text("review fixup never pushed")
             git(path, "add", "local.txt")
             git(path, "commit", "-m", "local only")
+        if case != "local-head":
+            git(path, "checkout", "--detach", published)
 
     worker_runtime.work["reviewer"] = review
     outcome = dispatch(worker="reviewer")
@@ -967,7 +969,7 @@ def test_reviewer_moved_head_is_reclaimed_at_finish_only_when_pushed(repo, worke
     path = Path(database.get_session("reviewer")["worktree_path"])
     assert path.exists() is (not pushed)
     assert bool(git(parent, "branch", "--list", "chore/task-reviewer")) is (not pushed)
-    if not pushed:
+    if case == "local-head":
         assert (path / "local.txt").read_text() == "review fixup never pushed"
 
 

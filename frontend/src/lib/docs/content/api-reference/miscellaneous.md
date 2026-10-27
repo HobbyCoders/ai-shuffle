@@ -441,8 +441,9 @@ branches, processes inside the checkout, and recently active checkouts. Apply mu
 match the previewed `{path, head_sha}` pairs and rechecks safety before removal.
 A branch counts as integrated when it is contained in the default branch, when
 merging it changes nothing there (a squash merge), when every one of its commits'
-changes is already there (`git cherry`), or when GitHub shows a merged pull request
-at that commit or containing it. Ignored files also keep a checkout, except for the
+changes is already there (`git cherry`, only for branches with no merge commits),
+or when GitHub shows a pull request merged into the default branch at that commit
+or containing it. Ignored files also keep a checkout, except for the
 already-handled dependency folders (`node_modules`, `venv`, `.venv`), known tool
 caches (`.pytest_cache`, `__pycache__`, `.svelte-kit`, `.ruff_cache`, `.mypy_cache`,
 `.hypothesis`, `.turbo`, `.parcel-cache`, `.eslintcache`, `*.pyc`, `*.tsbuildinfo`)
@@ -458,16 +459,21 @@ Besides integrated checkouts it also removes:
 
 - a worker checkout (`chore/task-*`) that a reviewer moved to another commit
   (detached, or `gh pr checkout`), when its own branch has no commits, the tree is
-  clean and the commit it shows is pushed, integrated or part of a pull request;
-- local branches with no worktree that are proven integrated, or whose tip is a
-  pushed branch with a merged or closed pull request, and that no active session or
-  open pull request uses;
+  clean, the commit it shows is pushed, integrated or part of a pull request, and
+  every other commit it visited is pushed;
+- local branches with no worktree that the app or `gh pr checkout` named
+  (`chore/task-*`, `task/*`, `chore/chat-*`, `pr702`, `pr702b`, `pr-702`) and that
+  are proven integrated, or whose tip is pushed and is the exact head of a merged
+  or closed pull request, and that no active session or open pull request uses.
+  Branches you name yourself are never touched;
 - a worker checkout that still holds unintegrated work after the worker and its
   parent session have been idle for 7 days, with no open pull request. Its work,
   uncommitted files included, is first committed to a snapshot kept at
   `refs/fluid-archive/<branch>`; resuming that worker restores it, and
   `git branch <branch> refs/fluid-archive/<branch>` restores it by hand. Chat
-  checkouts and named branches are never archived.
+  checkouts, named branches and checkouts holding a nested Git repository are never
+  archived, and once removal of an archived checkout has started its snapshot ref
+  is never deleted.
 
 Every branch delete is a compare-and-delete against the tip that was checked.
 

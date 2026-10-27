@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -57,22 +58,26 @@ def parse_worktree_list(porcelain: str) -> List[Dict[str, Any]]:
 
 
 def integration_proof(repo: str, default: str, head: Optional[str], pulls=(), *,
-                      label: str = "the default branch", local: bool = True) -> Optional[str]:
+                      label: str = "the default branch", local: bool = True,
+                      base_branch: Optional[str] = None) -> Optional[str]:
     """How ``head`` is proven integrated into ``default``, or None when it is not.
 
     The one proof the sweeper and the report share. Each step only reads Git:
     (a) ancestry; (b) ``merge-tree --write-tree`` yields default's own tree
     (a squash or rebase merge); (c) patch equivalence: ``git cherry`` lists no
     commit whose change is missing from default (catches squash merges that
-    main later edited); (d) a merged PR whose head is exactly ``head``, or that
-    GitHub lists ``head`` as one of its commits (``pulls`` entries with
-    ``contains_commit``, from ``github_service.list_commit_pulls``).
-    Errors and unsupported Git versions are "not proven", never "proven".
+    main later edited). ``git cherry`` skips merge commits, so this step is
+    used only when ``head`` has no merge commit of its own; (d) a merged PR
+    into ``base_branch`` (the default branch name) whose head is exactly
+    ``head``, or that GitHub lists ``head`` as one of its commits (``pulls``
+    entries with ``contains_commit``, from ``github_service.list_commit_pulls``).
+    Without ``base_branch`` no PR counts. Errors and unsupported Git versions
+    are "not proven", never "proven".
     """
     if not head or not default:
         return None
     if not local:
-        return _pr_proof(head, pulls)
+        return _pr_proof(head, pulls, base_branch)
     try:
         probe = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", head, default],
                                capture_output=True, timeout=15, env=scrub_child_env())
@@ -84,17 +89,25 @@ def integration_proof(repo: str, default: str, head: Optional[str], pulls=(), *,
     merged = _git(repo, "merge-tree", "--write-tree", default, head, timeout=30)
     if tree and merged and merged.strip() == tree.strip():
         return f"squash-merged (merging it changes nothing in {label})"
-    cherry = _git(repo, "cherry", default, head, timeout=60)
-    lines = [line for line in (cherry or "").splitlines() if line.strip()]
-    if cherry is not None and lines and all(line.startswith("- ") for line in lines):
-        return f"every commit's change is already in {label}"
-    return _pr_proof(head, pulls)
+    # A merge commit can carry its own content (a conflict resolution) that
+    # git cherry never compares: no patch-equivalence proof across merges.
+    merges = _git(repo, "rev-list", "--merges", "--max-count=1", f"{default}..{head}", timeout=30)
+    if merges is not None and not merges.strip():
+        cherry = _git(repo, "cherry", default, head, timeout=60)
+        lines = [line for line in (cherry or "").splitlines() if line.strip()]
+        if cherry is not None and lines and all(line.startswith("- ") for line in lines):
+            return f"every commit's change is already in {label}"
+    return _pr_proof(head, pulls, base_branch)
 
 
-def _pr_proof(head: str, pulls) -> Optional[str]:
+def _pr_proof(head: str, pulls, base_branch: Optional[str]) -> Optional[str]:
+    if not base_branch:
+        return None
     for pr in pulls or ():
         if str(getattr(pr, "state", "")).lower() != "merged":
             continue
+        if str(getattr(pr, "base_branch", "") or "").casefold() != base_branch.casefold():
+            continue  # merged into another branch is not integrated
         number = getattr(pr, "number", None)
         name = f"PR #{number}" if number else "a PR"
         if getattr(pr, "head_sha", None) == head:
@@ -274,7 +287,11 @@ def _project_repos(*, active_only: bool = False) -> List[Dict[str, Any]]:
     return list(repos.values())
 
 
-def _planner(project_sources, source):
+#: The whole report, planner included, stops inspecting rows after this long.
+REPORT_SECONDS = 25
+
+
+def _planner(project_sources, source, deadline=None):
     """The sweeper's dry-run verdicts for this project, or an error string."""
     from app.core import worktree_reclaim
 
@@ -282,7 +299,7 @@ def _planner(project_sources, source):
     if local is None:
         return {}, "automatic cleanup does not cover this project on this worker (no local Git base checkout)"
     try:
-        return worktree_reclaim.plan_preview(local), None
+        return worktree_reclaim.plan_preview(local, deadline), None
     except Exception as exc:  # noqa: BLE001 — reported, never fatal to the report
         return {}, f"automatic cleanup cannot inspect this project: {exc}"
 
@@ -313,6 +330,7 @@ def report(project: Optional[str] = None, *, include_retired: bool = False) -> D
     out unless ``include_retired``; registrations whose folder and branch are
     both gone are folded into ``history_folded``.
     """
+    deadline = time.monotonic() + REPORT_SECONDS
     sessions = _sessions_by_path()
     projects = []
     project_sources: Dict[str, Any] = {}
@@ -340,13 +358,19 @@ def report(project: Optional[str] = None, *, include_retired: bool = False) -> D
             item.setdefault("registry_ids", []).extend(
                 i for i in registered.get("registry_ids", []) if i not in item.get("registry_ids", [])
             )
-        planned, planner_error = _planner(project_sources, source) if repo_valid else ({}, None)
+        planned, planner_error = _planner(project_sources, source, deadline) if repo_valid else ({}, None)
         default = ((_git(repo["path"], "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
                     if repo_valid else None) or "origin/main").strip()
         rows = []
         folded = 0
         for key, item in items.items():
             path = item["path"]
+            plan = planned.get(key)
+            if time.monotonic() >= deadline or (plan and plan.get("not_checked")):
+                rows.append({"path": path, "branch": item.get("branch"), "reclaimable": False,
+                             "reason": "not checked (time limit); run the report again",
+                             "cleanup": "kept: not checked (time limit); run the report again"})
+                continue
             state, error, binding_warning = "valid", None, None
             root_valid = _is_checkout_root(path)
             if not Path(path).exists():
@@ -377,7 +401,6 @@ def report(project: Optional[str] = None, *, include_retired: bool = False) -> D
             if not head and state == "missing" and item.get("branch") and repo_valid:
                 head = (_git(repo["path"], "rev-parse", "--verify", f"refs/heads/{item['branch']}") or "").strip()
             row_sessions = sessions.get(key, [])
-            plan = planned.get(key)
             if plan and plan.get("pr_states"):
                 # GitHub's answer from the sweeper's lookup beats a session's cached PR state.
                 row_sessions = [{**s, "pr_state": plan["pr_states"].get(s.get("pr_number"), s.get("pr_state"))}
@@ -396,8 +419,10 @@ def report(project: Optional[str] = None, *, include_retired: bool = False) -> D
                 # Reuse the sweeper's proof for this exact HEAD (it can also use
                 # an exact merged PR head); compute it only when the planner
                 # stopped before proving anything.
-                planned_proof = plan.get("proof") if plan and plan.get("head_sha") == head else None
-                merged = planned_proof or integration_proof(comparison_repo, default, head, label=default) or False
+                if plan and plan.get("head_sha") == head:
+                    merged = plan.get("proof") or False  # the planner already ran the proof
+                else:
+                    merged = integration_proof(comparison_repo, default, head, label=default) or False
             pushed = bool(ahead and not merged and _git(
                 comparison_repo, "for-each-ref", "--count=1", "--format=%(refname)", "--contains", head, "refs/remotes"))
             row = assess(item, row_sessions, dirty, ahead, merged, pushed)

@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import os
+import re
 import subprocess
 import threading
 import time
@@ -170,7 +171,8 @@ def _proof(repo, context, head, prs=()):
     # exact merged PR head). It never touches the index or working tree;
     # conflicts and Git errors fail closed.
     return wr.integration_proof(repo, context["default_sha"], head, prs,
-                                label=context.get("default_label") or context["default_branch"])
+                                label=context.get("default_label") or context["default_branch"],
+                                base_branch=context["default_branch"])
 
 
 def _worker_session_id(branch):
@@ -187,6 +189,30 @@ def _on_remote(repo, sha):
     """Whether ``sha`` is reachable from any remote-tracking ref (it was pushed)."""
     found = wr._git(repo, "for-each-ref", "--count=1", "--format=%(refname)", "--contains", sha, "refs/remotes")
     return bool(found and found.strip())
+
+
+def _unpublished_history(repo, path, default, exempt=()):
+    """Commits this checkout's HEAD has pointed at (its HEAD reflog) that no
+    remote-tracking ref and not ``default`` contain; None when unreadable.
+
+    A reviewer who committed on a detached HEAD and then checked out a pushed
+    commit leaves that commit reachable only from the reflog. ``exempt`` holds
+    commits accounted for otherwise (the current HEAD, proven on GitHub, and
+    the worker's own starting commit).
+    """
+    listing = wr._git(path, "log", "-g", "--format=%H", "HEAD")
+    if listing is None:
+        return None
+    exempt = [sha for sha in exempt if sha]
+    shas = [sha for sha in dict.fromkeys(listing.split()) if sha not in exempt]
+    if not shas:
+        return []
+    # Exempt commits' ancestors are accounted for with them.
+    args = ["rev-list", *shas, "--not", "--remotes", *exempt]
+    if default:
+        args.append(default)
+    left = wr._git(repo, *args, timeout=60)
+    return None if left is None else left.split()
 
 
 def _untouched_branch(repo, branch):
@@ -229,6 +255,13 @@ def _stranded_reviewer(repo, path, branch, context, pulls=None):
             how = f"HEAD is a commit of PR #{getattr(on_github[0], 'number', '?')} on GitHub"
         else:
             return None
+    # Every other commit HEAD visited must be published too (a detached commit
+    # followed by checking out a PR commit leaves it only in the reflog).
+    # The worker's own starting commit (its untouched branch tip) is exempt,
+    # exactly as when an untouched worker checkout is released at finish.
+    left = _unpublished_history(repo, path, context["default_sha"], exempt=(head, branch_sha))
+    if left is None or left:
+        return None
     return {"head": head, "branch_sha": branch_sha, "how": how}
 
 
@@ -310,11 +343,36 @@ def _bound_sessions(context, registered, branch):
     return bound
 
 
+#: Report-only cache of GitHub answers: (kind, repository, key) -> (time, answer).
+#: The sweeper never reads it; removal decisions always use a fresh lookup.
+REPORT_CACHE_SECONDS = 600
+_report_cache = {}
+_report_cache_lock = threading.Lock()
+
+
+def _cached(context, key, fetch):
+    if not context.get("report_cache"):
+        return fetch()
+    now = time.monotonic()
+    with _report_cache_lock:
+        hit = _report_cache.get(key)
+        if hit and now - hit[0] < REPORT_CACHE_SECONDS:
+            return hit[1]
+    answer = fetch()
+    with _report_cache_lock:
+        if len(_report_cache) > 2000:
+            for stale in [k for k, (t, _) in _report_cache.items() if now - t >= REPORT_CACHE_SECONDS]:
+                del _report_cache[stale]
+        _report_cache[key] = (now, answer)
+    return answer
+
+
 def _pulls(context, branch):
     from app.core.github_service import github_service
 
     if branch and context["github_repo"]:
-        return github_service.list_pulls(context["github_repo"], state="all", head=branch, limit=100)
+        return _cached(context, ("branch", context["github_repo"], branch),
+                       lambda: github_service.list_pulls(context["github_repo"], state="all", head=branch, limit=100))
     return []
 
 
@@ -340,7 +398,8 @@ def _commit_pulls(context, sha):
     from app.core.github_service import github_service
 
     if sha and context["github_repo"]:
-        return github_service.list_commit_pulls(context["github_repo"], sha)
+        return _cached(context, ("commit", context["github_repo"], sha),
+                       lambda: github_service.list_commit_pulls(context["github_repo"], sha))
     return []
 
 
@@ -503,6 +562,7 @@ def _plan(source, registered, context, *, pulls=None):
     missing = not target.exists()
     reviewer = None
     dirty = 0
+    nested = []
     if not missing:
         if not item or not wr._is_checkout_root(path):
             return keep("not a linked worktree of this repository")
@@ -522,6 +582,7 @@ def _plan(source, registered, context, *, pulls=None):
         if status is None:
             return keep("git status unavailable")
         dirty = len([line for line in status.splitlines() if line.strip()])
+        nested = _nested_repositories(path, status)
         # Only an abandoned worker checkout on its own branch may continue
         # dirty: it can be archived (snapshot first), never plainly removed.
         if dirty and (reviewer or not _worker_session_id(row["branch"])):
@@ -584,6 +645,10 @@ def _plan(source, registered, context, *, pulls=None):
             return keep(f"{reason}; not archived: {blocker}")
         if not branch_head or head != branch_head:
             return keep("branch moved away from checkout HEAD")
+        if nested:
+            # A snapshot would hold only a gitlink: the nested repository's own
+            # commits and edits would be lost with the folder.
+            return keep(f"{reason}; not archived: holds a nested Git repository: {', '.join(nested[:5])}")
         return {**row, "decision": "archive",
                 "reason": f"{reason}; abandoned worker checkout (worker and parent idle "
                           f"{ARCHIVE_IDLE_SECONDS // 86400}+ days): snapshot kept at {ARCHIVE_REF_PREFIX}{branch}"}
@@ -679,6 +744,29 @@ def _delete_branch(repo, branch, sha):
     return True
 
 
+def _nested_repositories(path, status):
+    """Untracked folders (``?? name/`` in status) that are Git repositories."""
+    found = []
+    for line in (status or "").splitlines():
+        if line.startswith("?? ") and line.rstrip().endswith("/"):
+            name = line[3:].strip().strip('"')
+            if (Path(path) / name / ".git").exists():
+                found.append(name)
+    return found
+
+
+def _gitlinks(path, treeish):
+    listing = wr._git(path, "ls-tree", "-r", "-z", treeish)
+    if listing is None:
+        raise ValueError("snapshot tree could not be listed")
+    links = set()
+    for entry in listing.split("\0"):
+        meta, _, name = entry.partition("\t")
+        if meta.startswith("160000 "):
+            links.add(name)
+    return links
+
+
 def _worktree_tree(path, head):
     """The tree of ``head`` plus every tracked change and unignored untracked
     file in the checkout, built in a private index (the checkout's own index,
@@ -697,7 +785,15 @@ def _worktree_tree(path, head):
 
         run("read-tree", head)
         run("add", "-A", "--", ".")
-        return run("write-tree")
+        tree = run("write-tree")
+    # ``git add`` records a nested repository (or a submodule) as a gitlink
+    # only; its commits and files would not be in the snapshot. Never archive
+    # a checkout holding one.
+    links = _gitlinks(path, tree)
+    if links:
+        raise ValueError("snapshot would hold only a gitlink for nested Git repository: "
+                         + ", ".join(sorted(links)[:5]))
+    return tree
 
 
 def _snapshot(path, head, branch):
@@ -721,8 +817,10 @@ def _archive_checkout(repo, row, before_remove=None):
     verify it, then remove the checkout (forced: the snapshot holds its work).
 
     ``before_remove(snapshot)`` runs after verification, before removal (the
-    restore stamp). Returns the snapshot SHA. Any failure before removal drops
-    the archive ref and raises, leaving the checkout as it was.
+    restore stamp). Returns the snapshot SHA. A failure before removal drops
+    the archive ref and raises, leaving the checkout as it was. Once forced
+    removal has started the ref is never dropped, whatever the outcome: files
+    may already be gone and the snapshot is then their only copy.
     """
     path, branch, head = row["path"], row["branch"], row["head_sha"]
     ref = ARCHIVE_REF_PREFIX + branch
@@ -739,16 +837,17 @@ def _archive_checkout(repo, row, before_remove=None):
         parent_ok = snapshot == head or (wr._git(repo, "rev-parse", "--verify", snapshot + "^1") or "").strip() == head
         current = (wr._git(path, "rev-parse", "--verify", "HEAD") or "").strip()
         tree = (wr._git(repo, "rev-parse", "--verify", snapshot + "^{tree}") or "").strip()
-        if before_remove:
-            before_remove(snapshot)
         if not (stored == snapshot and parent_ok and current == head and tree == _worktree_tree(path, head)):
             raise ValueError("snapshot verification failed; checkout kept")
-        if not git_service.remove_worktree(repo, path, True):
-            raise ValueError("archived checkout removal refused")
+        # Only a verified snapshot is recorded as the tip to restore.
+        if before_remove:
+            before_remove(snapshot)
     except BaseException:
-        if Path(path).exists():
-            git_service._run_git(repo, ["update-ref", "-d", ref, snapshot], timeout=10)
+        git_service._run_git(repo, ["update-ref", "-d", ref, snapshot], timeout=10)
         raise
+    # From here on the archive ref stays, even if removal fails part-way.
+    if not git_service.remove_worktree(repo, path, True):
+        raise ValueError(f"archived checkout removal failed; its snapshot stays at {ref}")
     return snapshot
 
 
@@ -911,10 +1010,20 @@ async def reclaim(project_id, *, dry_run=True, limit=MAX_ITEMS, offset=0, observ
 # --- Local branches with no worktree -----------------------------------------
 #
 # ``gh pr checkout`` leftovers (pr702, pr702b) and branches of reclaimed
-# checkouts pile up: nothing else removes a branch that has no worktree. A
-# branch goes only when it is checked out nowhere, is not the default branch,
-# no active/running session or open PR uses it, and its tip is proven
-# integrated or is a pushed branch tip whose PR is merged or closed.
+# checkouts pile up: nothing else removes a branch that has no worktree. Only
+# branches the app or ``gh pr checkout`` name are candidates; a hand-made
+# branch is never touched. A candidate goes only when it is checked out
+# nowhere, is not the default branch, no active/running session or open PR
+# uses it, and its tip is proven integrated or is a pushed branch tip that a
+# merged or closed PR has at exactly that commit.
+
+#: Worker (chore/task-*, legacy task/*), chat (chore/chat-*) and
+#: ``gh pr checkout -b`` style names (pr702, pr702b, pr-702).
+APP_BRANCH_PATTERN = re.compile(r"(?:chore/task-|task/|chore/chat-)[^/].*|pr\d+[a-z]?|pr-\d+")
+
+
+def _app_branch(name):
+    return bool(APP_BRANCH_PATTERN.fullmatch(name or ""))
 
 
 def _local_branches(repo):
@@ -975,6 +1084,8 @@ def _plan_branch(source, context, name, sha, *, pulls=None):
     def keep(reason):
         return {**row, "reason": reason}
 
+    if not _app_branch(name):
+        return keep("not a branch the app or gh pr checkout created")
     if any(item.get("branch") == name for item in context["items"].values()):
         return keep("checked out in a worktree")
     if any(item.get("branch") == name for item in source["registered"]):
@@ -1000,9 +1111,11 @@ def _plan_branch(source, context, name, sha, *, pulls=None):
         return {**row, "decision": "delete", "reason": f"integrated: {proof}"}
     remote = _remote_refs_at(repo, sha)
     names = {ref.split("/", 3)[3] for ref in remote if len(ref.split("/", 3)) == 4}
+    # The PR itself must hold this exact tip: its recorded head, or GitHub
+    # listing the commit in it. A possibly stale remote ref alone is not enough.
     finished = [pr for pr in prs if str(pr.state).lower() in ("merged", "closed")
-                and getattr(pr, "head_branch", None) in names]
-    if remote and finished:
+                and (getattr(pr, "head_sha", None) == sha or getattr(pr, "contains_commit", None) == sha)]
+    if remote and names and finished:
         pr = finished[0]
         return {**row, "decision": "delete",
                 "reason": f"tip is pushed ({remote[0].removeprefix('refs/remotes/')}); "
@@ -1062,7 +1175,8 @@ async def reclaim_branches(project_id, *, dry_run=True, limit=MAX_ITEMS, offset=
         context = await asyncio.to_thread(_context, source)
         checked_out = {i.get("branch") for i in context["items"].values() if i.get("branch")}
         branches = [(name, sha) for name, sha in await asyncio.to_thread(_local_branches, source["path"])
-                    if name not in checked_out and name.casefold() != context["default_branch"].casefold()]
+                    if _app_branch(name) and name not in checked_out
+                    and name.casefold() != context["default_branch"].casefold()]
         items = []
         started = time.monotonic()
         for name, sha in branches[offset:offset + min(max(limit, 1), 200)]:
@@ -1231,32 +1345,42 @@ def _report_facts(source, candidate, context, row):
         row["pr_states"] = {pr.number: str(pr.state).lower() for pr in _pulls(context, branch)}
     proof = _proof(repo, context, head)
     if not proof:
-        proof = wr.integration_proof(repo, context["default_sha"], head, _commit_pulls(context, head), local=False)
+        proof = wr.integration_proof(repo, context["default_sha"], head, _commit_pulls(context, head), local=False,
+                                     base_branch=context["default_branch"])
     row["proof"] = proof
     return row
 
 
-def plan_preview(source):
+NOT_CHECKED = "kept: not checked (time limit); run the report again"
+
+
+def plan_preview(source, deadline=None):
     """Blocking and read-only: the sweeper's dry-run verdict per registered
     checkout of one local project, keyed by path key.
 
-    ``source`` is an entry of :func:`_local_sources`. Raises ValueError when
-    the project cannot be inspected (the report says so instead).
+    ``source`` is an entry of :func:`_local_sources`. ``deadline`` is a
+    ``time.monotonic()`` value; checkouts not started by then are reported as
+    not checked. GitHub answers come from a 10-minute report-only cache.
+    Raises ValueError when the project cannot be inspected (the report says
+    so instead).
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    context = _context(source)
+    context = {**_context(source), "report_cache": True}
     observations = _load_state().get("observations", {})
     now = time.time()
 
     def one(candidate):
         key = wr._path_key(candidate["path"])
+        if deadline is not None and time.monotonic() >= deadline:
+            return key, {**_ambiguous_row(candidate), "reason": "not checked (time limit)",
+                         "not_checked": True, "cleanup": NOT_CHECKED}
         try:
             row = _ambiguous_row(candidate) if candidate.get("ambiguous") else _plan(source, candidate, context)
         except Exception as exc:  # noqa: BLE001 — a report row, not a removal
             return key, {**_ambiguous_row(candidate), "cleanup": f"kept: safety check failed ({type(exc).__name__})"}
         cleanup = describe_cleanup(row, observations.get(key), now)
-        if row["decision"] == "keep" and not row.get("proof"):
+        if row["decision"] == "keep" and not row.get("proof") and (deadline is None or time.monotonic() < deadline):
             try:
                 row = _report_facts(source, candidate, context, row)
             except Exception:  # noqa: BLE001 — facts are optional; the verdict stands
