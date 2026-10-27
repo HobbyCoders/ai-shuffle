@@ -340,8 +340,9 @@ async def test_inherited_permission_producer_paths(mock_db, tmp_path, producer):
                 from app.core.voice_bridge import VoiceBridge
                 from app.core.task_registry import task_registry
 
+                # A call nobody authenticated (#654: its turns are stamped unknown).
                 bridge = SimpleNamespace(session_id="voice-parent", _start_watcher=MagicMock(),
-                                         _ensure_approval_poller=MagicMock())
+                                         _ensure_approval_poller=MagicMock(), _caller=None)
                 with patch.object(task_registry, "get_task", return_value={"kind": "agent", "status": "running"}):
                     answer = await VoiceBridge._tool_message_agent(bridge, {"task_id": SID, "message": "follow up"})
                 assert answer["ok"]

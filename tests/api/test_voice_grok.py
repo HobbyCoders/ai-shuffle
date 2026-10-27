@@ -226,7 +226,7 @@ async def test_grok_repeated_request_prefixes_are_stored_and_delegated_once(
         "same-chat",
         "Live conversation context (only the latest new request needs action):\n"
         f"user: {request}\n",
-        spoken=request, command=f"voice:{call.call_key}:tool-1",
+        spoken=request, command=f"voice:{call.call_key}:tool-1", caller=None,
     )
 
 

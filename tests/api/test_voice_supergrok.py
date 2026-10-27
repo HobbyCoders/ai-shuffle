@@ -213,7 +213,7 @@ async def test_audio_route_runs_the_supergrok_stream_with_the_login(monkeypatch)
     created = []
 
     class FakeStream:
-        def __init__(self, ws, row, config, key, minutes, api_user_id=None):
+        def __init__(self, ws, row, config, key, minutes, api_user_id=None, caller=None):
             created.append((config["model"], key, api_user_id))
             self.run = AsyncMock()
 

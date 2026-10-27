@@ -282,7 +282,9 @@ async def _create_on_owner(session_id: str, request: Request, *, api_user_id: Op
         if not (reached or isinstance(exc, control.MaybeApplied)):
             await run_sync(database.delete_session, session_id)
             raise HTTPException(409, str(exc)) from exc
-        # It may exist there, so the copy stays: the owner's row replaces it
-        # when that syncs (#700). Deleting it could hide a chat the owner runs.
-        raise HTTPException(409, f"{exc} The conversation may already exist on that device; "
-                                 "it shows in the sidebar once it syncs.") from exc
+        # It may exist there, so the copy stays: deleting it could hide a chat
+        # the owner runs. But if the owner never got to create it, this copy
+        # never syncs and every send to it is refused (#706), so the message
+        # does not promise it will appear; it says how to clear it instead.
+        raise HTTPException(409, f"{exc} The conversation may or may not have been created on that device. "
+                                 "If it doesn't respond, delete it and start a new one.") from exc

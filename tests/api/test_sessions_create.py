@@ -244,7 +244,12 @@ class TestRunsOnAnotherWorker:
         response = client.post("/api/v1/sessions", json={"profile_id": "agent-a", "target_instance_id": self.PEER})
 
         assert response.status_code == 409
-        assert "may already exist on that device" in response.json()["detail"]
+        detail = response.json()["detail"]
+        assert "may or may not have been created on that device" in detail
+        # The copy may never sync (the owner may not have created it), so the
+        # message never promises it will, and says how to clear it (#706).
+        assert "sidebar" not in detail and "syncs" not in detail
+        assert "delete it and start a new one" in detail
         db.delete_session.assert_not_called()
 
     def test_a_refusal_after_a_lost_answer_removes_the_copy(self, client, db, owner):
