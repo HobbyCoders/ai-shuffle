@@ -592,7 +592,25 @@ describe('SystemMessage — agent compaction', () => {
 		const text = container.textContent ?? '';
 		expect(text).toContain('Compaction Failed');
 		expect(text).toContain('The agent did not compact the context. Reason: Not enough messages to compact.');
+		expect(text).toContain('Nothing was summarized and the conversation is unchanged; a message queued after it is still sent.');
 		expect(text).not.toContain('Context Compacted');
+	});
+
+	it('says a failed compaction summarized nothing when its reason has no full stop', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'compact_failed',
+					systemData: {
+						reason: 'Not compacted · Fluid could not compact the conversation (bridge timeout); it is left as it is',
+						requested_by: 'user'
+					}
+				})
+			}
+		});
+		const text = container.textContent ?? '';
+		expect(text).toContain('Compaction Failed');
+		expect(text).toContain('(bridge timeout); it is left as it is. Nothing was summarized');
 	});
 
 	it('shows a compaction with nothing left to reclaim as a no-op, not a failure', () => {
@@ -610,7 +628,7 @@ describe('SystemMessage — agent compaction', () => {
 		});
 		const text = container.textContent ?? '';
 		expect(text).toContain('Nothing More to Compact');
-		expect(text).toContain('left as it is');
+		expect(text).toContain('while keeping the current work as it is, so it was left unchanged');
 		expect(text).toContain('Nothing was summarized.');
 		expect(text).not.toContain('Compaction Failed');
 		expect(text).not.toContain('Context Compacted');

@@ -598,6 +598,20 @@ What the child CLI is given, and what it is not:
   result passes through unchanged. The settings `PreCompact` hook (and so a
   `PreCompact` subscriber on the HookBus) sees the line in
   `custom_instructions`.
+- With `claude_mod_compaction` on (the default), the mod's `session.compact`
+  hook posts the main conversation's rows and the trigger to
+  `POST /claude-mod/compact`, and Fluid compacts them mechanically against the
+  stored path (`fluid/engine/claude_mod_compaction.py`), sized by
+  `compaction_window`: no summarizer call. Fluid's own digest, epoch, note
+  and stand-in rows name the stored ranges they cover and fold again next
+  time. Claude Code's own rows (skill and command text, attachments, hook
+  context) stay verbatim from the newest user request on; older ones leave
+  context with their whole text stored as a `ContextArchived` event, which
+  `HistoryExpand` and `HistorySearch` read. Rows with blocks Fluid cannot
+  rebuild (images, `ToolSearch` results) are kept or left out whole, never
+  rebuilt. When nothing more can be reclaimed the route answers a skip: a
+  manual compaction is then left as it is (as on any bridge error), and only
+  an automatic one falls back to the CLI's summarizer.
 - A `tool_policy` that raises (or returns an awaitable that raises) denies the
   call.
 

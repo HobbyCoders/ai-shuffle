@@ -17,8 +17,9 @@ import re
 from dataclasses import dataclass
 
 from fluid.context.trim import image_source_path
-from fluid.messages import Image, Text, ToolResultBlock, ToolUseBlock
-from fluid.store.base import SessionNode, SessionStore
+from fluid.events.model import ContextArchived
+from fluid.messages import Image, Message, Text, ToolResultBlock, ToolUseBlock
+from fluid.store.base import SessionNode, SessionStore, iter_events_of_class
 
 # A ref is one node id or an inclusive range: "node_ab12" / "node_a..node_b".
 _REF_RE = re.compile(r"^(node_[0-9a-f]+)(?:\.\.(node_[0-9a-f]+))?$")
@@ -40,6 +41,36 @@ class HistoryRecall:
 
     async def load_path(self) -> list[SessionNode]:
         return await self.store.load_path(self.session_id)
+
+    async def archived(self) -> list[SessionNode]:
+        """Text a compaction took out of context that the path does not hold
+        (:class:`~fluid.events.model.ContextArchived`), one detached node per
+        entry, oldest first. Empty for a session that never archived any."""
+        nodes: list[SessionNode] = []
+        async for event in iter_events_of_class(
+            self.store, self.session_id, 0, (ContextArchived,),
+        ):
+            for entry in event.entries:
+                node_id, role, text = (entry.get(k) for k in ("node_id", "role", "text"))
+                if isinstance(node_id, str) and role in ("user", "assistant") and isinstance(text, str):
+                    nodes.append(SessionNode(node_id, None, Message(role, [Text(text)])))
+        return nodes
+
+
+async def recall_nodes(recall: HistoryRecall, ref: str | None = None) -> list[SessionNode]:
+    """The path a recall tool reads: the stored path, and archived text after
+    it. With ``ref``, archived text only when the ref is not on the path, so
+    an ordinary expand costs no extra read."""
+    nodes = await recall.load_path()
+    archived = getattr(recall, "archived", None)
+    if not callable(archived):
+        return nodes
+    if ref is not None:
+        parsed = parse_ref(ref)
+        ids = {n.node_id for n in nodes}
+        if parsed is None or (parsed[0] in ids and parsed[1] in ids):
+            return nodes
+    return nodes + await archived()
 
 
 def parse_ref(ref: str) -> tuple[str, str] | None:

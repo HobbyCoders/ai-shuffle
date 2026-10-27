@@ -102,6 +102,7 @@ from fluid.engine.delegated_proto import (
 )
 from fluid.events.bus import EventBus
 from fluid.events.model import (
+    ContextArchived,
     ContextCompaction,
     ContextCompacting,
     DelegatedDiagnostic,
@@ -461,7 +462,7 @@ def _find_bash_first_steer(config_dir: str, cli_session_id: str) -> dict[str, An
 # and on the host's card. Plain words: it is a no-op, not a failure.
 NOTHING_TO_COMPACT = (
     "Nothing more to compact: the context is already as small as Fluid's "
-    "compaction makes it without dropping recent work"
+    "compaction makes it while keeping the current work as it is"
 )
 
 # A typed ``/compact`` (with or without the CLI's custom summary instructions).
@@ -1678,12 +1679,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         meta = await self._ensure_session()
         nodes = await self.store.load_path(meta.session_id)
         started = time.monotonic()
+        archive: list[dict[str, str]] = []
         try:
             # Pure CPU over the whole path: off the event loop, so the turn's
             # stream and the bridge's other routes keep moving meanwhile.
             messages = await asyncio.to_thread(
                 compact_messages, body.get("messages"), nodes,
-                context_window=self.compaction_window, trigger=trigger,
+                context_window=self.compaction_window, trigger=trigger, archive=archive,
             )
         except NothingToCompact as exc:
             # The reason is a fixed phrase, never message content.
@@ -1699,8 +1701,22 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # a manual one as it is.
             logger.info("claude mod compaction refused (%s): %s", trigger, exc)
             raise
-        logger.info("claude mod compacted through Fluid (%s): %d -> %d messages, %.3fs, no summarizer",
-                    trigger, len(body["messages"]), len(messages), time.monotonic() - started)
+        if archive:
+            # Claude Code's own rows the answer leaves out are written first,
+            # so the refs the note cites resolve before the model reads them.
+            # A failed write refuses the compaction (manual: left as it is).
+            try:
+                await self._emit(ContextArchived(
+                    session_id=meta.session_id, turn_id=self._active_turn_id,
+                    entries=tuple(archive),
+                ))
+            except Exception as exc:
+                logger.warning("claude mod compaction: could not archive dropped rows: %s",
+                               type(exc).__name__)
+                raise ValueError("could not archive the rows it would drop") from exc
+        logger.info("claude mod compacted through Fluid (%s): %d -> %d messages, %d archived, "
+                    "%.3fs, no summarizer", trigger, len(body["messages"]), len(messages),
+                    len(archive), time.monotonic() - started)
         return {"messages": messages}
 
     async def _take_plan_usage(self, body: Any) -> None:

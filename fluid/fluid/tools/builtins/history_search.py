@@ -13,10 +13,12 @@ from typing import Any
 from fluid.context.recall import (
     DEFAULT_SEARCH_RESULTS,
     calling_node_ids,
+    recall_nodes,
     render_hits,
     search_path,
 )
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
+
 
 def describe(tools: frozenset[str] | None = None) -> str:
     """HistorySearch's description, specialized to the session's surface."""
@@ -67,7 +69,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     query = str(input.get("query", "")).strip()
     if not query:
         return ToolOutcome(text="empty query", is_error=True)
-    nodes = await recall.load_path()
+    nodes = await recall_nodes(recall)
     hits = search_path(
         nodes,
         query,
