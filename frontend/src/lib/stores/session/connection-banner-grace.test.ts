@@ -326,11 +326,17 @@ describe('createConnectionBannerGrace — only visible time counts', () => {
 
 	it('destroy() stops listening for visibility changes', () => {
 		const onShow = vi.fn();
+		const docRemove = vi.spyOn(document, 'removeEventListener');
+		const winRemove = vi.spyOn(window, 'removeEventListener');
 		const gate = createConnectionBannerGrace({ onShow, onHide: vi.fn() });
 
 		setHidden(true);
 		gate.setConnected(false);
 		gate.destroy();
+		expect(docRemove).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+		expect(winRemove).toHaveBeenCalledWith('pageshow', expect.any(Function));
+		docRemove.mockRestore();
+		winRemove.mockRestore();
 		setHidden(false);
 		vi.advanceTimersByTime(10_000);
 

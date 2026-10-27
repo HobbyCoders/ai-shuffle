@@ -555,9 +555,18 @@
 		animation: reconnect-pill-in 160ms ease-out;
 		transition: color 150ms ease-out, border-color 150ms ease-out;
 	}
+	/* Invisible hit area: keeps the pill visually compact while giving touch a
+	   44px-tall target (2rem pill + 6px above and below). */
+	.reconnect-pill { position: relative; }
+	.reconnect-pill::before {
+		content: '';
+		position: absolute;
+		inset: -6px -4px;
+	}
 	.reconnect-pill :global(svg) { flex-shrink: 0; }
 	.reconnect-pill :global(.reconnect-spin) { animation: reconnect-spin 1s linear infinite; }
-	/* The retry hint stays out of the way until hover/focus. */
+	/* The retry hint stays out of the way until hover/focus. Hover only applies
+	   on devices that really hover, so a tap on a phone doesn't leave it stuck open. */
 	.reconnect-pill-retry {
 		max-width: 0;
 		overflow: hidden;
@@ -565,15 +574,23 @@
 		color: var(--foreground);
 		transition: max-width 200ms ease-out, opacity 150ms ease-out;
 	}
-	.reconnect-pill:hover,
 	.reconnect-pill:focus-visible {
 		color: var(--foreground);
 		border-color: color-mix(in oklch, var(--foreground) 25%, var(--border));
 	}
-	.reconnect-pill:hover .reconnect-pill-retry,
 	.reconnect-pill:focus-visible .reconnect-pill-retry {
 		max-width: 6rem;
 		opacity: 1;
+	}
+	@media (hover: hover) {
+		.reconnect-pill:hover {
+			color: var(--foreground);
+			border-color: color-mix(in oklch, var(--foreground) 25%, var(--border));
+		}
+		.reconnect-pill:hover .reconnect-pill-retry {
+			max-width: 6rem;
+			opacity: 1;
+		}
 	}
 	.reconnect-pill:focus-visible {
 		outline: 2px solid var(--ring);
