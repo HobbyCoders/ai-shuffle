@@ -256,7 +256,7 @@ def model_routing(text: str) -> dict[str, frozenset[str]]:
 PREFERENCE_TOPICS: dict[str, dict[str, Any]] = {
     "ci_policy": {
         "cue_words": frozenset("ci suite suites runner runners prepush pre push pytest tests testing".split()),
-        "value_words": frozenset("github unraid gamingpc local locally machines paid larger nightly".split()),
+        "value_words": frozenset("github local locally machine machines worker workers hosted paid larger nightly".split()),
         "cues": 2, "values": 1,
     },
     "deploy": {

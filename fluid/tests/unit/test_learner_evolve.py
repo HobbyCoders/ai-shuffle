@@ -201,7 +201,7 @@ CORRECTION = ("from now on risky code goes to Opus, bounded backend work to Sol,
 
 async def test_a_correction_becomes_one_proposal_line_and_never_a_fact(tmp_path):
     store = SkillStore(tmp_path)
-    store.save_memory("The owner's main worker is the Unraid server.", protected=True)
+    store.save_memory("The owner's main worker is the home server.", protected=True)
     store.journal_context(session_id="s1")
     store.journal_append({"kind": "user", "text": CORRECTION})
     store.journal_append({"kind": "assistant", "text": "Understood."})
@@ -260,17 +260,17 @@ FRONTEND = ("Owner: Sol is poor at frontend work. Final frontend/UI implementati
             "agent; Sol stays fine for backend coding and review.")
 REVIEW_PROCESS = ("Owner rule: all PR code reviews use the pr-review skill: Haiku eligibility, "
                   "Sonnet reviewers, Opus for risky changes.")
-EVRIMA = ("The evrima-web Cloudflare Worker binds the D1 database as DB, serves static assets, and "
-          "keeps live server state in Durable Objects.")
-GAMINGPC = ("GamingPC stays on only until 12:30 AM ET Tuesday through Saturday; plan GamingPC work "
-            "to finish well before then.")
+WEBSITE = ("The website's Cloudflare Worker binds the D1 database as DB, serves static assets, "
+           "and keeps live server state in Durable Objects.")
+SCHEDULE = ("The desktop worker stays on only until midnight Tuesday through Saturday; plan "
+            "desktop work to finish well before then.")
 
 
 def routing_store(tmp_path) -> tuple[SkillStore, dict]:
     store = SkillStore(tmp_path)
     saved = {}
-    for name, text in (("frontend", FRONTEND), ("old", OLD_ROUTING), ("evrima", EVRIMA),
-                       ("gamingpc", GAMINGPC), ("new", NEW_ROUTING), ("review", REVIEW_PROCESS)):
+    for name, text in (("frontend", FRONTEND), ("old", OLD_ROUTING), ("website", WEBSITE),
+                       ("schedule", SCHEDULE), ("new", NEW_ROUTING), ("review", REVIEW_PROCESS)):
         saved[name] = store.save_memory(text, protected=True)
     return store, saved
 
@@ -279,7 +279,7 @@ def test_routing_reads_jobs_clause_by_clause():
     assert model_routing(OLD_ROUTING) == {"code": {"sol"}, "review": {"opus"}}
     assert model_routing(NEW_ROUTING)["review"] == {"sonnet", "opus"}
     assert "code" not in model_routing(REVIEW_PROCESS), "a code review is a review"
-    assert model_routing(EVRIMA) == model_routing(GAMINGPC) == {}
+    assert model_routing(WEBSITE) == model_routing(SCHEDULE) == {}
 
 
 def test_the_routing_contradiction_is_flagged_and_unrelated_facts_are_not(tmp_path):
@@ -290,12 +290,12 @@ def test_the_routing_contradiction_is_flagged_and_unrelated_facts_are_not(tmp_pa
     live = {m.id: m for m in store.memories()}
     assert {i: m.text for i, m in live.items()} == before, "nothing rewritten or archived"
     assert live[saved["old"].id].superseded_by and not live[saved["old"].id].supersession_confirmed
-    for name in ("evrima", "gamingpc", "frontend", "review", "new"):
+    for name in ("website", "schedule", "frontend", "review", "new"):
         assert not live[saved[name].id].superseded_by, name
     section = store.render_memory_section(None)
     assert "Recall the pair and ask the owner to resolve it" in section
     assert OLD_ROUTING not in section and NEW_ROUTING in section
-    assert EVRIMA in section and GAMINGPC in section
+    assert WEBSITE in section and SCHEDULE in section
     # Asked once: resolving the pair (here: the owner keeps both) does not
     # bring the same question back.
     with file_transaction(store._facts.lock):

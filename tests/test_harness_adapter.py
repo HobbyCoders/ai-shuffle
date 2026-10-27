@@ -5431,7 +5431,8 @@ def test_amend_native_task_spec_installs_provider_scoped_roster(monkeypatch):
 
     seen = {}
 
-    def _contract(profile_id, provider_id, additional_targets=(), *, workflow_guidance=False):
+    def _contract(profile_id, provider_id, additional_targets=(), *, workflow_guidance=False,
+                  session_id=None, cwd=None):
         seen.update(
             profile_id=profile_id,
             provider_id=provider_id,
@@ -5486,7 +5487,8 @@ def test_delegated_task_tool_shares_provider_scoped_subagent_schema(monkeypatch)
 
     seen = {}
 
-    def _contract(profile_id, provider_id, additional_targets=(), *, workflow_guidance=False):
+    def _contract(profile_id, provider_id, additional_targets=(), *, workflow_guidance=False,
+                  session_id=None, cwd=None):
         seen.update(
             profile_id=profile_id,
             provider_id=provider_id,
@@ -5526,7 +5528,8 @@ def test_amend_native_task_spec_scopes_native_claude_sessions(monkeypatch):
 
     seen = {}
 
-    def _contract(profile_id, provider_id, additional_targets=(), *, workflow_guidance=False):
+    def _contract(profile_id, provider_id, additional_targets=(), *, workflow_guidance=False,
+                  session_id=None, cwd=None):
         seen.update(
             profile_id=profile_id,
             provider_id=provider_id,
