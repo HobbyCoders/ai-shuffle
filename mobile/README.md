@@ -31,7 +31,8 @@ with Playwright (touch swipes in both layouts and both sheet states, native
 draft scrolling, the controls drawer, the context row geometry, 44px composer
 touch targets and 16px editor text, the shorter placeholder at 360px and
 below, a call from a fresh composer creating its session before the call
-starts, and the explanation when another device is picked as the runner). Needs
+starts, and a call with another device picked as the runner creating the
+conversation there). Needs
 `browser-mcp`'s `playwright-core` (`cd ../browser-mcp && npm ci`) and a
 Chromium binary.
 

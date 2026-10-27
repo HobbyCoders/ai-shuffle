@@ -857,7 +857,7 @@ class TestCreateVoiceSession:
         assert prepared[0][1] == "feature/voice"
         assert prepared[0][2]["create_new_branch"] is False
 
-    def test_v2_auto_branch_and_runner_are_forwarded(
+    def test_v2_auto_branch_is_forwarded(
         self, authenticated_client, mock_db, monkeypatch, tmp_path
     ):
         from app.api.sessions_helpers import WorktreeSessionResponse
@@ -886,7 +886,7 @@ class TestCreateVoiceSession:
             "project_v2_id": pv2["id"],
             "execution_mode": "worktree",
             "base_branch": "develop",
-            "target_instance_id": "runner-selected", "model": "sonnet",
+            "model": "sonnet",
         })
         assert resp.status_code == 200, resp.text
         assert resp.json()["session_id"] == "voice-auto"
@@ -894,11 +894,36 @@ class TestCreateVoiceSession:
         assert body.branch_name.startswith("voice/")
         assert body.create_new_branch is True
         assert body.base_branch == "develop"
-        assert body.target_instance_id == "runner-selected"
+        assert body.target_instance_id is None
         overrides = captured["kwargs"]["session_create_overrides"]
         assert overrides["mode"] == "voice"
         assert overrides["is_active"] is True
         assert overrides["voice_config"]["provider_id"] == "prov-openai"
+
+    @pytest.mark.parametrize("execution_mode", [None, "worktree"])
+    def test_another_runner_is_refused_and_nothing_is_written(
+        self, authenticated_client, mock_db, monkeypatch, execution_mode
+    ):
+        """#700: this route wrote a row owned by the target here and never
+        created the session on the target. A voice-lane session is born where
+        its call runs; another worker's chat takes a call through attach."""
+        import app.api.sessions_worktree as worktree_api
+
+        _enable_voice()
+        _make_provider()
+        _install_mock_transport(monkeypatch, _secret_handler())
+
+        async def _never(*_args, **_kwargs):
+            raise AssertionError("no branch session may be created for a remote target")
+
+        monkeypatch.setattr(worktree_api, "_create_v2_branch_session", _never)
+        body = {"target_instance_id": "runner-selected", "model": "sonnet"}
+        if execution_mode:
+            body["execution_mode"] = execution_mode
+        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json=body)
+        assert resp.status_code == 400, resp.text
+        assert "start the call from that conversation" in resp.json()["detail"]
+        assert db.get_sessions(limit=50) == []
 
     def test_command_mode_is_refused(self, authenticated_client, mock_db):
         """The wake-word "command" mode has no client left (the Android app

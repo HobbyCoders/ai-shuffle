@@ -19,6 +19,8 @@ The answer goes through ``permission_handler.respond`` (the same call a tap on
 the card makes) after the tap's authority checks are re-run for the call's
 caller. Requests the app keeps on screen (private access, anything carrying a
 secret) are never answered by voice; the voice says they need the screen.
+On a conversation another network worker runs, the answer is forwarded to
+that worker (``control.answer_permission``), as a tap there would be (#700).
 
 :func:`classify_spoken_answer` is the one decision function; it uses the shared
 ``app.core.owner_confirm.classify``, the same check typed answers get. When
@@ -189,9 +191,12 @@ class SpokenApprovals:
     """
 
     def __init__(self, session_id: str, *, api_user_id: Optional[str] = None,
-                 marker: Optional[Callable[[], Any]] = None) -> None:
+                 marker: Optional[Callable[[], Any]] = None, owner: Optional[str] = None) -> None:
         self.session_id = session_id
         self.api_user_id = api_user_id
+        # The network worker that runs the conversation when it is not this
+        # one (#700): its prompts are answered there, through ``control``.
+        self.owner = owner
         self._marker = marker or (lambda: None)
         self.current: Optional[Ask] = None
         self.queue: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
@@ -316,15 +321,27 @@ class SpokenApprovals:
             logger.info("Voice approval for %s refused (%s)", self.session_id, refusal)
             return (f"The spoken answer could not be recorded: {refusal} Tell the user to answer it "
                     f"on screen: {ask.summary}"), False
-        result = await permission_handler.respond(
-            request_id=ask.request_id, session_id=self.session_id, decision=decision,
-            remember=None, broadcast_func=None,
-        )
+        if self.owner:
+            from app.core import voice_remote
+            from app.network import control
+            try:
+                result = await voice_remote.answer_permission(self.owner, self.session_id, ask.request_id, decision)
+            except (control.RunnerUnreachable, control.ControlRefused) as exc:
+                logger.info("Voice approval for %s could not reach its owner (%s)", self.session_id, exc)
+                return (f"The spoken answer could not reach the worker that runs this conversation: {exc} "
+                        f"Tell the user to answer it on screen: {ask.summary}"), False
+        else:
+            result = await permission_handler.respond(
+                request_id=ask.request_id, session_id=self.session_id, decision=decision,
+                remember=None, broadcast_func=None,
+            )
         if not isinstance(result, dict) or result.get("error"):
             return f"The approval for {ask.summary} was already settled or has expired. Nothing more to do.", False
         logger.info("Voice approval %s for %s answered %s %s", ask.request_id, self.session_id, decision,
                     "as a retry of an action the caller approved" if retry else "by the caller's voice")
-        await self._record_confirm(ask, decision)
+        if not self.owner:
+            # The outcome row is the owner's to write; a mirror is read-only.
+            await self._record_confirm(ask, decision)
         if decision == "allow" and ask.retry is not None:
             self.approved[ask.retry] = time.monotonic()
         if retry:
@@ -378,10 +395,14 @@ class SpokenApprovals:
                 return "this call's API key may not answer requests in this conversation."
         try:
             from app.network import control
-            if control.owner_of(dict(row)):
-                return "this conversation runs on another device."
+            owner = control.owner_of(dict(row))
         except Exception:  # noqa: BLE001 - no network layer means it is ours
             logger.debug("Voice approval: owner lookup failed", exc_info=True)
+            owner = None
+        if owner != self.owner:
+            # The conversation moved since the call started: never answer a
+            # prompt on a worker this call was not set up to reach.
+            return "this conversation now runs on another device."
         request = next((r for r in permission_handler.get_pending_requests(self.session_id)
                         if r.get("request_id") == request_id), None)
         if request is not None:
