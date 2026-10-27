@@ -15,7 +15,7 @@ from websockets.exceptions import ConnectionClosed
 
 from app.core.voice_models import GROK_URL
 from app.core.voice_prompts import LIVE_INSTRUCTIONS
-from app.core.voice_stream import RECONNECT_ATTEMPT_S, VoiceStream, connect
+from app.core.voice_stream import RECONNECT_ATTEMPT_S, VoiceStream, connect, renew_subscription_login
 
 logger = logging.getLogger(__name__)
 
@@ -386,12 +386,9 @@ class SuperGrokVoiceStream(GrokVoiceStream):
     async def renew_after_401(self, token: str) -> str:
         """Renew through the provider's own 401 path, then ask the caller to retry."""
         from app.core import xai_token_refresh
-        try:
-            renewed = await xai_token_refresh.refresh_on_401_once(
-                self.config["provider_id"], stale_access_token=token)
-        except Exception:
-            logger.warning("SuperGrok voice: login renewal after 401 failed for session %s", self.session_id)
-            renewed = False
+        renewed = await renew_subscription_login(
+            xai_token_refresh.refresh_on_401_once, self.config["provider_id"], token,
+            label="SuperGrok", session_id=self.session_id)
         if renewed:
             return "The SuperGrok login was renewed. Start the call again."
         return "SuperGrok refused the login. Reconnect SuperGrok in Settings > Providers; there is no API-key fallback."

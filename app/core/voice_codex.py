@@ -7,16 +7,20 @@ import asyncio
 import json
 import time
 
-from app.core.voice_stream import VoiceStream
+from app.core.voice_stream import RENEW_LEAD_S, VoiceReconnectRefused, VoiceStream, renew_subscription_login
 from app.core.voice_codex_transport import CodexCallRefused, CodexPeer, CodexPeerClosed, codex_session
 from app.db.async_database import run_sync
 
 
 # No duration/expiry is specified by openai/codex 430a16799d90e296fb27b1e94f206023902b7e56:
 # realtime_websocket/protocol_frameless_bidi.rs accepts session.started/updated;
-# protocol_common.rs reads only id/instructions. Do not invent a scheduled limit.
-# Like Grok's near-hour rule, 50 minutes is a conservative minimum age for a
-# provider close to look like expiry, not a claimed ChatGPT session lifetime.
+# protocol_common.rs reads only id/instructions. In the absence of a reported
+# expiry, proactively renew around 50 minutes at a quiet moment (owner policy,
+# not a claimed ChatGPT session lifetime). The shared renewal window needs a
+# soft deadline RENEW_LEAD_S later than that target.
+CODEX_RENEW_S = 50 * 60
+# Reasonless/transport closes look like expiry only near that age. Explicit
+# "expired" closes instead use the shared minimum session age (60 seconds).
 CODEX_EXPIRY_CLOSE_S = 50 * 60
 
 
@@ -42,11 +46,14 @@ class CodexVoiceStream(VoiceStream):
             return None
         if reader not in done:
             if self.expires_at and not self.deaf.is_set():
-                return "renew"  # Only a reported expiry schedules a renewal.
+                return "renew"
         elif reader.cancelled():
             return None
-        elif reader.exception() is None and self.provider_close_reason in ("closed", "expired", "connection_lost"):
-            if time.monotonic() - self.session_started_at >= CODEX_EXPIRY_CLOSE_S:
+        elif reader.exception() is None:
+            if self.provider_close_reason == "expired" and self.is_renewal("expired"):
+                return "expired"
+            if self.provider_close_reason in ("closed", "connection_lost") and (
+                    time.monotonic() - self.session_started_at >= CODEX_EXPIRY_CLOSE_S):
                 return "expired"
         # Early closes, rejected events and arbitrary failures are not evidence
         # of expiry. Record a failure, but do not automatically retry them.
@@ -111,7 +118,12 @@ class CodexVoiceStream(VoiceStream):
             raise
         except CodexCallRefused as exc:
             if exc.status == 401:
-                raise ValueError(await self.renew_after_401(token)) from None
+                if await self.renew_after_401(token):
+                    raise ValueError("The ChatGPT login was renewed. Start the call again.") from None
+                raise VoiceReconnectRefused(
+                    "ChatGPT refused the login. Reconnect ChatGPT in Settings > Providers; there is no API-key fallback.") from None
+            if exc.status in (403, 429):
+                raise VoiceReconnectRefused(self.START_FAILED) from None
             raise ValueError(self.START_FAILED) from None
         except Exception:
             # HTTP/network exceptions may carry request headers. Never pass them
@@ -120,19 +132,16 @@ class CodexVoiceStream(VoiceStream):
         finally:
             self.api_key = ""
         self.session_started_at = time.monotonic()
+        if self.expires_at is None:
+            self.expires_at = time.time() + CODEX_RENEW_S + RENEW_LEAD_S
         if self.restoring:
             return  # History includes the resume note; never greet again.
         note = await self.greeting(history)
         if note:
             await self.send({"type": "session.instructions.append", "content": note})
 
-    async def renew_after_401(self, token):
+    async def renew_after_401(self, token) -> bool:
         from app.core import codex_token_refresh
-        try:
-            renewed = await codex_token_refresh.refresh_on_401_once(
-                self.config["provider_id"], stale_access_token=token)
-        except Exception:
-            renewed = False  # Never expose exceptions carrying subscription headers.
-        if renewed:
-            return "The ChatGPT login was renewed. Start the call again."
-        return "ChatGPT refused the login. Reconnect ChatGPT in Settings > Providers; there is no API-key fallback."
+        return await renew_subscription_login(
+            codex_token_refresh.refresh_on_401_once, self.config["provider_id"], token,
+            label="ChatGPT", session_id=self.session_id)

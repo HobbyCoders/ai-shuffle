@@ -187,7 +187,7 @@ class CodexPeer:
 
         @self.pc.on("connectionstatechange")
         async def connection_changed():
-            if self.pc.connectionState in ("failed", "closed", "disconnected") and not self.closed:
+            if self.pc.connectionState in ("failed", "closed") and not self.closed:
                 self.connection_ended()
 
         try:

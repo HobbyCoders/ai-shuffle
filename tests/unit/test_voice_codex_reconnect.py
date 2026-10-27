@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.core import voice_codex, voice_stream
+from app.core import voice_codex, voice_prompts, voice_stream
 from app.core.voice_codex_transport import CodexPeer, incoming_event
 from tests.unit.test_voice_codex import FakePeer
 from tests.unit.test_voice_stream_reconnect import FakeBrowser, FakeProgress, until
@@ -45,13 +45,14 @@ class FakeRTC(FakePeer):
 
 @pytest.fixture
 def codex_call(monkeypatch):
-    from app.core import http_client, turn_recorder, voice_bridge, voice_progress
+    from app.core import http_client, turn_recorder, voice_bridge, voice_greeting, voice_progress
     from app.core.provider import fluid_credentials
 
     monkeypatch.setattr("app.core.voice_dependencies.availability", lambda: (True, None))
     monkeypatch.setattr(voice_stream.database, "update_session", lambda *a, **kw: None)
     monkeypatch.setattr(voice_stream.database, "set_session_active", lambda *a, **kw: None)
     monkeypatch.setattr(voice_progress, "VoiceProgress", FakeProgress)
+    monkeypatch.setattr(voice_greeting, "caller_first_name", lambda *args: None)
     monkeypatch.setattr(voice_stream, "RECONNECT_DELAYS", (0, 0, 0))
     monkeypatch.setattr(voice_stream, "connect", AsyncMock(side_effect=AssertionError("no API-key socket")))
     h = SimpleNamespace(script=[], adapters=[], history=[], post_hook=None)
@@ -128,9 +129,12 @@ async def test_reported_expiry_renews_silently_with_produced_history_and_no_gree
     assert voice_stream.RESUME_NOTE in text
     assert h.record.await_count == 1  # Captions were stored before rebuilding the seed.
     assert second.sent == []  # No greeting or other instruction on the new peer.
+    assert all(note not in json.dumps(second.sent) for note in (
+        voice_prompts.GREETING_NEW_CALL, voice_prompts.GREETING_RETURNING_CALL))
     assert h.browser.events("status") == []
     assert first.close.await_count == 1 and h.call.reconnects == 1 and not h.call.failures
-    assert h.call.expires_at is None and not h.call.heard_this_session and not h.call.deaf.is_set()
+    assert h.call.expires_at > time.time() + voice_codex.CODEX_RENEW_S
+    assert not h.call.heard_this_session and not h.call.deaf.is_set()
     assert h.load.await_count == 2
     assert [c.kwargs["headers"]["Authorization"] for c in h.client.post.await_args_list] == [
         "Bearer fake-token-1", "Bearer fake-token-2"]
@@ -164,12 +168,12 @@ async def test_old_provider_end_is_renewed_without_failure(codex_call, monkeypat
     h.script += [first, second]
     run = asyncio.create_task(h.call.run())
     await until(lambda: h.browser.events("ready"))
-    assert h.call.expires_at is None  # No invented fixed-time renewal.
+    assert h.call.expires_at > time.time() + voice_codex.CODEX_RENEW_S
     h.call.session_started_at -= voice_codex.CODEX_EXPIRY_CLOSE_S
     if signal == "channel":
         first.end_remote()
     elif signal == "peer":
-        first.connectionState = "disconnected"
+        first.connectionState = "failed"
         await first.handlers["connectionstatechange"]()
     else:
         first.event({"type": "session.closed", "reason": "expired"})
@@ -182,7 +186,7 @@ async def test_old_provider_end_is_renewed_without_failure(codex_call, monkeypat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("signal", ["early-close", "old-error", "old-rejected-close", "deaf"])
+@pytest.mark.parametrize("signal", ["early-close", "old-error", "old-rejected-close"])
 async def test_failures_are_counted_but_never_start_an_automatic_retry(codex_call, signal):
     h = codex_call
     first = FakeRTC()
@@ -191,8 +195,6 @@ async def test_failures_are_counted_but_never_start_an_automatic_retry(codex_cal
     await until(lambda: h.browser.events("ready"))
     if signal == "early-close":
         first.end_remote()
-    elif signal == "deaf":
-        h.call.deaf.set()
     else:
         h.call.session_started_at -= voice_codex.CODEX_EXPIRY_CLOSE_S
         first.event({"type": "error", "error": {"message": "private-upstream-metadata"}}
@@ -298,7 +300,7 @@ async def test_failed_expiry_renewal_is_bounded(codex_call):
     await until(lambda: h.browser.events("ready"))
 
     async def refused():
-        return SimpleNamespace(status_code=403, text="private-upstream-metadata")
+        return SimpleNamespace(status_code=503, text="private-upstream-metadata")
 
     h.post_hook = refused
     h.call.session_started_at -= voice_codex.CODEX_EXPIRY_CLOSE_S
@@ -307,3 +309,137 @@ async def test_failed_expiry_renewal_is_bounded(codex_call):
     assert h.client.post.await_count == 1 + len(voice_stream.RECONNECT_DELAYS)
     assert all(adapter.closed for adapter in h.adapters)
     assert h.browser.events("error") == [{"type": "error", "message": voice_stream.DROPPED_MESSAGE}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("over_minimum", [False, True])
+async def test_explicit_expiry_uses_shared_minimum_age(codex_call, monkeypatch, over_minimum):
+    h = codex_call
+    monkeypatch.setattr(voice_stream, "MAX_RECONNECTS", 0)
+    first, second = FakeRTC(), FakeRTC()
+    h.script += [first, second]
+    run = asyncio.create_task(h.call.run())
+    await until(lambda: h.browser.events("ready"))
+    age = voice_stream.RENEW_MIN_AGE_S + (1 if over_minimum else -1)
+    h.call.session_started_at = time.monotonic() - age
+    first.event({"type": "session.closed", "reason": "expired"})
+    if over_minimum:
+        await until(lambda: len(h.adapters) == 2 and h.call.connected)
+        assert not h.call.failures and second.sent == []
+        await h.call.close()
+    await asyncio.wait_for(run, 3)
+    assert h.client.post.await_count == (2 if over_minimum else 1)
+    assert len(h.call.failures) == (0 if over_minimum else 1)
+
+
+@pytest.mark.asyncio
+async def test_no_reported_expiry_renews_proactively_at_a_quiet_moment(codex_call, monkeypatch):
+    h = codex_call
+    monkeypatch.setattr(voice_codex, "CODEX_RENEW_S", 0.4)
+    monkeypatch.setattr(voice_codex, "RENEW_LEAD_S", 1)
+    monkeypatch.setattr(voice_stream, "RENEW_LEAD_S", 1)
+    monkeypatch.setattr(voice_stream, "RENEW_MIN_AGE_S", 0)
+    monkeypatch.setattr(voice_stream, "RENEW_LAST_S", 0.1)
+    first, second = FakeRTC(), FakeRTC()
+    h.script += [first, second]
+    run = asyncio.create_task(h.call.run())
+    await until(lambda: h.browser.events("ready"))
+    h.call.settling = ["pending-handoff"]
+    await asyncio.sleep(0.6)
+    assert h.client.post.await_count == 1  # Due, but not a quiet moment yet.
+    monkeypatch.setattr(voice_codex, "CODEX_RENEW_S", 50 * 60)
+    h.call.settling = None
+    await until(lambda: len(h.adapters) == 2 and h.call.connected)
+    assert first.close.await_count == 1 and not h.call.failures
+    assert h.browser.events("status") == []
+    assert second.sent == []
+    assert all(note not in json.dumps(second.sent) for note in (
+        voice_prompts.GREETING_NEW_CALL, voice_prompts.GREETING_RETURNING_CALL))
+    await h.call.close()
+    await asyncio.wait_for(run, 3)
+
+
+@pytest.mark.asyncio
+async def test_temporary_webrtc_disconnect_does_not_end_an_old_session(codex_call):
+    h = codex_call
+    first = FakeRTC()
+    h.script += [first, FakeRTC()]
+    run = asyncio.create_task(h.call.run())
+    await until(lambda: h.browser.events("ready"))
+    h.call.session_started_at -= voice_codex.CODEX_EXPIRY_CLOSE_S
+    first.connectionState = "disconnected"
+    await first.handlers["connectionstatechange"]()
+    assert not h.adapters[0].ended
+    first.connectionState = "connected"
+    first.event({"type": "input_transcript.added", "item": {"text": "Still connected."}})
+    await until(lambda: h.call.pending["user"] == "Still connected.")
+    assert h.client.post.await_count == 1 and h.call.connected and not h.call.failures
+    await h.call.close()
+    await asyncio.wait_for(run, 3)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [403, 429, 401])
+async def test_definite_refusal_during_renewal_is_not_retried(codex_call, monkeypatch, status):
+    from app.core import codex_token_refresh
+    h = codex_call
+    refresh = AsyncMock(return_value=False)
+    monkeypatch.setattr(codex_token_refresh, "refresh_on_401_once", refresh)
+    first = FakeRTC()
+    h.script += [first, FakeRTC(), FakeRTC()]
+    run = asyncio.create_task(h.call.run())
+    await until(lambda: h.browser.events("ready"))
+
+    async def refused():
+        return SimpleNamespace(status_code=status, text="private-upstream-metadata")
+
+    h.post_hook = refused
+    h.call.session_started_at -= voice_codex.CODEX_EXPIRY_CLOSE_S
+    first.end_remote()
+    await asyncio.wait_for(run, 3)
+    assert h.client.post.await_count == 2 and h.load.await_count == 2
+    assert all(adapter.closed for adapter in h.adapters)
+    assert h.browser.events("error")
+    assert "private-upstream-metadata" not in str(h.browser.send_json.await_args_list)
+    if status == 401:
+        refresh.assert_awaited_once_with("sub", stale_access_token="fake-token-2")
+    else:
+        refresh.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_hangup_during_401_rotation_still_saves_the_new_token(codex_call, monkeypatch):
+    from app.core import codex_token_refresh
+    h = codex_call
+    entered, release, saved = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    state = {"refresh_token": "fake-old-refresh"}
+
+    async def rotate(*args, **kwargs):
+        entered.set()  # A rotating refresh request has returned its new token.
+        await release.wait()  # Its persistence must survive hangup.
+        state["refresh_token"] = "fake-new-refresh"
+        saved.set()
+        return True
+
+    monkeypatch.setattr(codex_token_refresh, "refresh_on_401_once", rotate)
+    first = FakeRTC()
+    h.script += [first, FakeRTC()]
+    run = asyncio.create_task(h.call.run())
+    await until(lambda: h.browser.events("ready"))
+
+    async def refused():
+        return SimpleNamespace(status_code=401, text="private-upstream-metadata")
+
+    h.post_hook = refused
+    h.call.session_started_at -= voice_codex.CODEX_EXPIRY_CLOSE_S
+    first.end_remote()
+    await asyncio.wait_for(entered.wait(), 3)
+    await voice_stream.stop(h.call.session_id)
+    await asyncio.wait_for(run, 3)
+    assert state["refresh_token"] == "fake-old-refresh"
+    assert voice_stream._login_renewals  # The detached rotation is still owned.
+    release.set()
+    await asyncio.wait_for(saved.wait(), 3)
+    assert state["refresh_token"] == "fake-new-refresh"
+    await until(lambda: not voice_stream._login_renewals)
+    assert h.browser.events("error") == []

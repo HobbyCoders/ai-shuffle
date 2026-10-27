@@ -409,6 +409,29 @@ class VoiceConnectionLost(Exception):
     """The provider connection dropped and every reconnect attempt failed."""
 
 
+class VoiceReconnectRefused(ValueError):
+    """A definite provider refusal: another reconnect attempt cannot fix it."""
+
+
+_login_renewals: set[asyncio.Task] = set()
+
+
+async def renew_subscription_login(refresh, provider_id, token, *, label, session_id) -> bool:
+    """Finish rotating and saving a login even if the voice attempt is cancelled."""
+    async def renew():
+        try:
+            return await refresh(provider_id, stale_access_token=token)
+        except Exception:
+            # Refresh exceptions can carry subscription headers; log no details.
+            logger.warning("%s voice: login renewal after 401 failed for session %s", label, session_id)
+            return False
+
+    task = asyncio.create_task(renew())
+    _login_renewals.add(task)  # Keep a strong reference after a cancelled waiter.
+    task.add_done_callback(_login_renewals.discard)
+    return await asyncio.shield(task)
+
+
 def describe_close(exc: BaseException | None) -> str:
     """Name a failure for the log, with the WebSocket close codes and reasons.
 
@@ -1351,7 +1374,9 @@ class VoiceStream:
                 try:
                     async with asyncio.timeout(RECONNECT_ATTEMPT_S):
                         await self.restore_session(history)
-                except Exception as exc:  # noqa: BLE001 - every failure is retried, bounded
+                except VoiceReconnectRefused:
+                    raise  # Do not hammer a provider that definitely refused the call.
+                except Exception as exc:  # noqa: BLE001 - transient failures are retried, bounded
                     self.last_drop = exc
                     logger.warning("Voice %s: reconnect attempt %d failed after %.1f s: %s", self.session_id,
                                    attempt, time.monotonic() - dropped_at, describe_close(exc))
