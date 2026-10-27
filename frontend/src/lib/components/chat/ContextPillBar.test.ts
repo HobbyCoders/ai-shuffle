@@ -562,13 +562,12 @@ describe('who may move a chat (session-move.ts, #645)', () => {
 		(isAdmin as unknown as { set(v: boolean): void }).set(true);
 	});
 
-	it.each([false, true])('names the worker read-only for a chat started with an API key (sheetMode=%s)', async (sheetMode) => {
+	it.each([false, true])('offers Move for a chat started by an API-key user (sheetMode=%s)', async (sheetMode) => {
 		session.store.set({ ...base, projectV2Id: 'pv2-project' });
 		appSessions.store.set([{ ...row, api_user_id: 'key-user' }]);
 		const view = render(ContextPillBar, { sheetMode });
-		expect(view.container.querySelector('.ctx-chip.runner')).toBeNull();
-		expect(view.queryByRole('button', { name: /^Runner:/ })).toBeNull();
-		expect(view.container.querySelector('.ctx-chip.readonly .ctx-chip-label')?.textContent).toBe('Local');
+		expect(view.getByRole('button', { name: 'Runner: Local' })).toBeTruthy();
+		expect(view.container.querySelector('.ctx-chip.runner')).not.toBeNull();
 	});
 
 	it.each([false, true])('names the worker read-only for a viewer who is not the owner (sheetMode=%s)', async (sheetMode) => {

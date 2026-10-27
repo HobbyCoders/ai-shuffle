@@ -10,12 +10,13 @@
  *   - it is saved (it has a durable id and a sessions-board row; a new chat
  *     picks its worker in the composer instead),
  *   - it is not a subagent's own chat (read and message only),
- *   - it was not started with an API key (`api_user_id`): those run under the
- *     key's restricted identity, which the owner's workers do not hand over,
  *   - the viewer is the owner. A paired device of another account member, or
  *     an API-key login, sees where the chat runs but cannot move it. Before
  *     the auth status has loaded the viewer is not known to be someone else,
  *     so the control stays; the move endpoint is still the authority.
+ *
+ * A chat an API-key user started moves like any other: the hand-off carries
+ * its `api_user_id` to the receiving worker (owner decision, 2026-10-27).
  */
 export interface SessionMoveInput {
 	sessionId: string | null | undefined;
@@ -35,6 +36,5 @@ export function viewerIsNonOwner(authenticated: boolean, isAdmin: boolean): bool
 export function canMoveSession(input: SessionMoveInput): boolean {
 	if (!input.sessionId || !input.row) return false;
 	if (input.isSubagent) return false;
-	if (input.row.api_user_id) return false;
 	return !viewerIsNonOwner(input.viewerAuthenticated, input.viewerIsAdmin);
 }

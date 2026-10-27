@@ -149,8 +149,15 @@ describe('Move to another worker on the phone (#645)', () => {
 		await waitFor(() => expect(panel.getAttribute('aria-label')).toBe('Move to another worker'));
 	});
 
+	it('offers Move for a chat started by an API-key user', async () => {
+		savedChat({ api_user_id: 'key-user' });
+		render(MobileComposerControlsSheet, { props: props() });
+		const setup = document.querySelector<HTMLElement>('.mcp .mcp-setup')!;
+		await waitFor(() => expect(setup.querySelector('.ctx-chip-sub')?.textContent).toBe('Move to another worker'));
+		expect(setup.querySelector('.ctx-chip.runner')).not.toBeNull();
+	});
+
 	it.each([
-		['a chat started with an API key', () => savedChat({ api_user_id: 'key-user' })],
 		['a viewer who is not the owner', () => { savedChat(); (isAdmin as any).set(false); }]
 	])('names the worker read-only for %s', async (_label, arrange) => {
 		arrange();

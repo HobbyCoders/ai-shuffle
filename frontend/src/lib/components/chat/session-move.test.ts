@@ -23,8 +23,8 @@ describe('canMoveSession', () => {
 		expect(canMoveSession({ ...saved, isSubagent: true })).toBe(false);
 	});
 
-	it('refuses a chat started with an API key', () => {
-		expect(canMoveSession({ ...saved, row: { api_user_id: 'key-user' } })).toBe(false);
+	it('allows a chat started by an API-key user (the move carries that user over)', () => {
+		expect(canMoveSession({ ...saved, row: { api_user_id: 'key-user' } })).toBe(true);
 	});
 
 	it('refuses a viewer who is not the owner', () => {
