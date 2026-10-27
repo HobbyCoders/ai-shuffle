@@ -152,7 +152,7 @@ Get a fresh client secret for an existing voice session. Without a body it refre
 
 **Auth:** Required. An API key can use it only on its own voice sessions (`403` otherwise).
 
-Returns `client_secret`, `expires_at`, `model` and `options` (the secret is empty for GPT Live). Returns `403` when voice mode is disabled and `409` once the call has reached `voice_max_call_minutes`.
+Returns `client_secret`, `expires_at`, `model` and `options` (the secret is empty for GPT Live). Returns `403` when voice mode is disabled and `409` once the call has reached `voice_max_call_minutes` (never when it is `0`).
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/voice/sessions/0f6c2d1e-7a4b-4c1d-9e2f-5b8a7c6d4e3f/secret \
