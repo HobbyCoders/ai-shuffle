@@ -13,8 +13,9 @@ the logic unit-tests without a loop.
 
 from __future__ import annotations
 
+import asyncio
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from fluid.context.trim import image_source_path
 from fluid.events.model import ContextArchived
@@ -34,10 +35,22 @@ _SEARCH_OUTPUT_CAP = 20_000
 
 @dataclass
 class HistoryRecall:
-    """Engine-injected handle giving recall tools store access."""
+    """Engine-injected handle giving recall tools store access.
+
+    The engine keeps one per session, so archived text is decoded once: each
+    later read asks the store only for ``ContextArchived`` events newer than
+    the last one it saw (#727), instead of decoding every archived entry on
+    every search.
+    """
 
     store: SessionStore
     session_id: str
+    _archived: list[SessionNode] = field(default_factory=list, init=False, repr=False)
+    _archived_keys: set[tuple[str, str]] = field(default_factory=set, init=False, repr=False)
+    _archived_ids: set[str] = field(default_factory=set, init=False, repr=False)
+    _aliases: dict[str, SessionNode] = field(default_factory=dict, init=False, repr=False)
+    _archived_seq: int = field(default=0, init=False, repr=False)
+    _archived_lock: asyncio.Lock | None = field(default=None, init=False, repr=False)
 
     async def load_path(self) -> list[SessionNode]:
         return await self.store.load_path(self.session_id)
@@ -45,16 +58,56 @@ class HistoryRecall:
     async def archived(self) -> list[SessionNode]:
         """Text a compaction took out of context that the path does not hold
         (:class:`~fluid.events.model.ContextArchived`), one detached node per
-        entry, oldest first. Empty for a session that never archived any."""
-        nodes: list[SessionNode] = []
-        async for event in iter_events_of_class(
-            self.store, self.session_id, 0, (ContextArchived,),
-        ):
-            for entry in event.entries:
-                node_id, role, text = (entry.get(k) for k in ("node_id", "role", "text"))
-                if isinstance(node_id, str) and role in ("user", "assistant") and isinstance(text, str):
-                    nodes.append(SessionNode(node_id, None, Message(role, [Text(text)])))
-        return nodes
+        entry, oldest first. Empty for a session that never archived any.
+
+        The same text archived twice (before archive ids were content-derived,
+        a compaction Claude Code never applied left it to be archived again)
+        is listed once, under its first id."""
+        if self._archived_lock is None:
+            self._archived_lock = asyncio.Lock()
+        async with self._archived_lock:
+            fresh: list[ContextArchived] = []
+            sequenced = True
+            async for event in iter_events_of_class(
+                self.store, self.session_id, self._archived_seq, (ContextArchived,),
+            ):
+                fresh.append(event)
+                sequenced = sequenced and event.seq > self._archived_seq
+            if not sequenced:
+                # A store whose events carry no sequence (tests, an in-memory
+                # store fed directly) cannot be read incrementally: start over.
+                self._archived, self._archived_keys, self._archived_ids = [], set(), set()
+                self._aliases = {}
+            for event in fresh:
+                self._add_archived(event)
+                if sequenced:
+                    self._archived_seq = max(self._archived_seq, event.seq)
+            return list(self._archived)
+
+    async def archived_ids(self) -> set[str]:
+        """Every id an archived entry is cited by."""
+        await self.archived()
+        return set(self._archived_ids)
+
+    def archived_alias(self, node_id: str) -> SessionNode | None:
+        """The entry a duplicate id (left out of :meth:`archived`) names, so a
+        note citing it still expands. Call after :meth:`archived`."""
+        return self._aliases.get(node_id)
+
+    def _add_archived(self, event: ContextArchived) -> None:
+        for entry in event.entries:
+            node_id, role, text = (entry.get(k) for k in ("node_id", "role", "text"))
+            if not (isinstance(node_id, str) and role in ("user", "assistant") and isinstance(text, str)):
+                continue
+            if node_id in self._archived_ids:
+                continue
+            self._archived_ids.add(node_id)
+            node = SessionNode(node_id, None, Message(role, [Text(text)]))
+            if (role, text) in self._archived_keys:
+                self._aliases[node_id] = node
+                continue
+            self._archived_keys.add((role, text))
+            self._archived.append(node)
 
 
 async def recall_nodes(recall: HistoryRecall, ref: str | None = None) -> list[SessionNode]:
@@ -65,12 +118,19 @@ async def recall_nodes(recall: HistoryRecall, ref: str | None = None) -> list[Se
     archived = getattr(recall, "archived", None)
     if not callable(archived):
         return nodes
+    parsed = None
     if ref is not None:
         parsed = parse_ref(ref)
         ids = {n.node_id for n in nodes}
         if parsed is None or (parsed[0] in ids and parsed[1] in ids):
             return nodes
-    return nodes + await archived()
+    extra = await archived()
+    alias = getattr(recall, "archived_alias", None)
+    if parsed is not None and parsed[0] == parsed[1] and callable(alias):
+        node = alias(parsed[0])
+        if node is not None:
+            extra = extra + [node]
+    return nodes + extra
 
 
 def parse_ref(ref: str) -> tuple[str, str] | None:

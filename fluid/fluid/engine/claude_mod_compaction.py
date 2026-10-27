@@ -18,8 +18,10 @@ no stored node is mutated, and no model is called.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -35,7 +37,7 @@ from fluid.context.compaction import (
 )
 from fluid.context.trim import block_chars
 from fluid.messages import Image, Message, Text, ToolResultBlock, ToolUseBlock
-from fluid.store.base import SessionNode, new_id
+from fluid.store.base import SessionNode
 
 COMPACT_PATH = "/claude-mod/compact"
 MAX_COMPACT_BODY_BYTES = 8 * 1024 * 1024
@@ -49,6 +51,11 @@ SPACER_TEXT = "Earlier context continues below."
 NOTE_HEADER = "[Fluid compaction note — "
 NOTE_EXCERPT_CHARS = 1_500
 _NOTE_LINE_CHARS = 200
+# Hex digits of an archived row's content-derived id (see ``archive_ref``).
+ARCHIVE_REF_HEX = 24
+# The largest portable checkpoint a compaction persists (JSON chars of its
+# rows); a bigger one is left out and a re-seed falls back to the history.
+CHECKPOINT_MAX_CHARS = 400_000
 # Used when the host does not know the model's window.
 DEFAULT_CONTEXT_WINDOW = 200_000
 # How far one compaction aims: the deep target of a known window, at most
@@ -443,6 +450,14 @@ def _archive_text(row: dict[str, Any]) -> str:
     return "\n".join(p for p in parts if p)
 
 
+def archive_ref(role: str, text: str) -> str:
+    """The ``node_…`` id an archived row is cited by: a hash of what it
+    showed, so the same row archived twice is one entry. Longer than a stored
+    node's id (``new_id``), so the two never collide."""
+    digest = hashlib.sha256(f"{role}\0{text}".encode("utf-8", "surrogatepass")).hexdigest()
+    return f"node_{digest[:ARCHIVE_REF_HEX]}"
+
+
 def _excerpt(row: dict[str, Any], ref: str | None) -> str | None:
     """One note line for a dropped row; None for a row with nothing visible
     (signed thinking alone, an image): it is counted, not quoted."""
@@ -466,17 +481,24 @@ def _note_row(
     """One bounded row for every dropped row not in the stored history,
     folding in the notes earlier compactions left.
 
-    With ``archive`` each dropped row's whole text goes there under a fresh
-    node id, and its note line cites that id: the caller persists the archive
-    before the answer is used, so ``HistoryExpand`` reads it back and
-    ``HistorySearch`` finds it. Without one, the note says plainly that its
-    excerpts are all that is left.
+    With ``archive`` each dropped row's whole text goes there under a node id
+    derived from its content (:func:`archive_ref`), and its note line cites
+    that id: the caller persists the archive before the answer is used, so
+    ``HistoryExpand`` reads it back and ``HistorySearch`` finds it. The same
+    row dropped again (a compaction Claude Code never applied, say, because
+    its wait ran out) gets the same id, so the caller archives it once.
+    Without one, the note says plainly that its excerpts are all that is left.
     """
     count = len(dropped)
-    refs = [new_id("node") if archive is not None else None for _ in dropped]
+    refs: list[str | None] = [None] * len(dropped)
     if archive is not None:
-        archive.extend({"node_id": ref, "role": row.get("role", "user"), "text": _archive_text(row)}
-                       for ref, row in zip(refs, dropped))
+        listed = {entry.get("node_id") for entry in archive}
+        for n, row in enumerate(dropped):
+            role, text = row.get("role", "user"), _archive_text(row)
+            refs[n] = ref = archive_ref(role, text)
+            if ref not in listed:
+                listed.add(ref)
+                archive.append({"node_id": ref, "role": role, "text": text})
     lines = [line for row, ref in zip(reversed(dropped), reversed(refs))
              if (line := _excerpt(row, ref)) is not None]
     for note in reversed(notes):
@@ -708,6 +730,7 @@ def compact_messages(
     rows: Any, nodes: list[SessionNode], *, config: CompactionConfig | None = None,
     context_window: int | None = None, trigger: str = "manual",
     archive: list[dict[str, str]] | None = None,
+    checkpoint: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Claude Code's rows, compacted mechanically against the stored path.
 
@@ -716,6 +739,9 @@ def compact_messages(
     newest earlier request that has any (:func:`_pinned_requests`); older
     ones leave through the compaction note, their whole text appended
     to ``archive`` (see :func:`_note_row`), which the caller must persist.
+
+    ``checkpoint``, when given, is filled with the portable form of the
+    compacted part (:func:`_checkpoint`), or left empty.
 
     Raises :class:`NothingToCompact` when the result would not be smaller
     (for ``trigger="auto"``: small enough to leave the threshold), and
@@ -897,6 +923,19 @@ def compact_messages(
 
     calls = {use["tool_use_id"] for row in rows for use in row["toolUses"]}
     out: list[dict[str, Any]] = []
+    # Per ``out`` row: the newest stored index it stands for (-1 for a row
+    # only Claude Code holds), and whether Fluid compacted it.
+    covers: list[int] = []
+    shrunk: list[bool] = []
+    newest_at: dict[int, int] = {}
+    for k, position in at.items():
+        newest_at[position] = max(k, newest_at.get(position, -1))
+
+    def mark(cover: int, compacted_rows: bool) -> None:
+        grown = len(out) - len(covers)
+        covers.extend([cover] * grown)
+        shrunk.extend([compacted_rows] * grown)
+
     dropped: list[dict[str, Any]] = []
     pending = list(unknown)
     emitted_units: set[int] = set()
@@ -912,6 +951,9 @@ def compact_messages(
         while pending and pending[0][0] <= last:  # inside a fold
             position, row = pending.pop(0)
             (out if kept(position) else dropped).append(row)
+        mark(-1, False)
+        span = unit_of.get(first, []) if first == last else []
+        cover = max((newest_at.get(p, -1) for p in (span or range(first, last + 1))), default=-1)
         if first == last and first in unit_of:
             positions = unit_of[first]
             head = positions[0]
@@ -920,6 +962,7 @@ def compact_messages(
             if first not in rebuilt:
                 out.extend(rows_of.get(head, []))  # the unit's own rows, once
                 emitted_units.add(head)
+                mark(cover, False)
             elif any(p in hard for p in positions):
                 # Never rebuilt: whole as Claude Code holds it, or (some of it
                 # folded) the rest named for recall.
@@ -929,18 +972,25 @@ def compact_messages(
                 else:
                     rest = [view[p].node_id for p in positions if p not in in_fold]
                     out.append(_stand_in("user", rest))
+                mark(cover, True)
             else:
                 out.append(_checked(_built(message, view[last].node_id), calls))
+                mark(cover, True)
         elif folded(first, last, message):
             out.append(_built(message, view[last].node_id))
+            mark(cover, True)
         elif compacted(first, last, message) and first in hard:
             out.extend(rows_of.get(first) or [_stand_in(view[first].message.role,
                                                         [view[first].node_id])])
+            mark(cover, True)
         elif compacted(first, last, message) or not rows_of.get(first):
             out.append(_checked(_built(message, view[last].node_id), calls))
+            mark(cover, compacted(first, last, message))
         else:
             out.extend(rows_of[first])
+            mark(cover, False)
     take(len(view))
+    mark(-1, False)
     note = _note_row(dropped, notes, archive)
     final = _alternate(([note] if note else []) + out)
     validate_rows(final, handles=False)
@@ -950,4 +1000,180 @@ def compact_messages(
     limit = before * (AUTO_MAX_RETAINED if trigger == "auto" else 1 - MANUAL_MIN_SAVING)
     if after > limit:
         raise NothingToCompact("no safe compaction saving")
+    if checkpoint is not None:
+        checkpoint.clear()
+        checkpoint.update(_checkpoint(out, covers, shrunk, note, nodes))
     return final
+
+
+def _checkpoint(
+    out: list[dict[str, Any]], covers: list[int], shrunk: list[bool],
+    note: dict[str, Any] | None, nodes: list[SessionNode],
+) -> dict[str, Any]:
+    """The compacted part of the answer, portable to another worker.
+
+    ``{"through": node_id, "rows": [...]}``: rows (no handles; only text and
+    tool blocks, as Fluid's own projection has them) that stand for the stored
+    path up to and including ``through``. A re-seed elsewhere replays these
+    rows and then the stored nodes after ``through`` instead of the whole
+    history (#685). The cut is the last compacted row, moved later until no
+    later row stands for an older stored node and no tool call is left open,
+    so nothing is replayed twice and every call keeps its result. Empty when
+    nothing was compacted, the rows would not validate, or they are larger
+    than ``CHECKPOINT_MAX_CHARS``.
+    """
+    compacted_at = [i for i, flag in enumerate(shrunk) if flag]
+    if not compacted_at:
+        return {}
+    cut = compacted_at[-1]
+    through = max(covers[: cut + 1], default=-1)
+    while True:
+        later = [i for i in range(cut + 1, len(out)) if 0 <= covers[i] <= through]
+        if later:
+            cut = later[-1]
+            through = max(covers[: cut + 1])
+            continue
+        open_calls: set[Any] = set()
+        for row in out[: cut + 1]:
+            open_calls |= _ids(row["toolUses"], "tool_use_id")
+            open_calls -= _ids(row.get("toolResults", []), "tool_use_id")
+        if not open_calls or cut + 1 >= len(out):
+            break
+        cut += 1
+        through = max(through, covers[cut])
+    if through < 0:
+        return {}
+    rows = [{k: v for k, v in row.items() if k != "handle"}
+            for row in _alternate(([note] if note else []) + out[: cut + 1])]
+    try:
+        validate_rows(rows, handles=False)
+    except ValueError:
+        return {}
+    if len(json.dumps(rows, ensure_ascii=False)) > CHECKPOINT_MAX_CHARS:
+        return {}
+    return {"through": nodes[through].node_id, "rows": rows}
+
+
+def _content_text(content: Any) -> str:
+    """A tool result's text as the mod's row projection has it."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(str(c.get("text", "")) for c in content
+                       if isinstance(c, dict) and c.get("type") == "text")
+    return ""
+
+
+def frame_row(frame: dict[str, Any]) -> dict[str, Any] | None:
+    """The row projection (:func:`project`) of a Claude Code ``user`` or
+    ``assistant`` stream frame; None for any other frame."""
+    role = frame.get("type")
+    message = frame.get("message")
+    if role not in ("user", "assistant") or not isinstance(message, dict):
+        return None
+    content = message.get("content")
+    blocks = [{"type": "text", "text": content}] if isinstance(content, str) else content
+    if not isinstance(blocks, list):
+        return None
+    row: dict[str, Any] = {"role": role, "text": "", "toolUses": []}
+    results: list[dict[str, Any]] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "text":
+            row["text"] += str(block.get("text", ""))
+        elif kind == "tool_use":
+            row["toolUses"].append({"tool_use_id": block.get("id", ""), "tool": block.get("name", ""),
+                                    "input": block.get("input") or {}})
+        elif kind == "tool_result":
+            results.append({"tool_use_id": block.get("tool_use_id", ""),
+                            "text": _content_text(block.get("content")),
+                            "isError": bool(block.get("is_error"))})
+    if results:
+        row["toolResults"] = results
+    return row
+
+
+class ReplayFilter:
+    """Tells Claude Code's replay of compacted rows from new activity (#679).
+
+    After a compaction Claude Code prints the conversation it now holds (the
+    rows Fluid answered with, its own kept rows) as ordinary ``user`` and
+    ``assistant`` frames with fresh uuids. Mapped like new frames, every old
+    call and result was stored again as a new node and counted again as tool
+    activity: one session held 3,923 tool uses for 1,265 distinct ids.
+
+    A main-conversation frame is a replay when its uuid is a stored frame's,
+    when every tool call (or result) it carries is one already recorded, or,
+    in the window after a compaction this leg answered, when it is one of the
+    rows of that answer. A tool id is unique in a conversation, so a frame
+    made only of recorded ids is never fresh execution. The window closes at
+    the next model call (``message_start``), a result, or any assistant frame
+    that is not part of the answer. Nothing is filtered until the leg has
+    answered a compaction in this process: before that Claude Code has
+    nothing to replay.
+    """
+
+    def __init__(self) -> None:
+        self.active = False
+        self._calls: set[str] = set()
+        self._results: set[str] = set()
+        self._uuids: set[str] = set()
+        self._expected: Counter[str] = Counter()
+
+    def seed(self, nodes: list[SessionNode]) -> None:
+        """Learn everything the stored path already holds; turns the filter on."""
+        for node in nodes:
+            self.note(node.message)
+        self.active = True
+
+    def note(self, message: Message) -> None:
+        """Record a message the leg stored (its ids are no longer new)."""
+        uuid = message.provider_meta.get("claude_uuid")
+        if isinstance(uuid, str) and uuid:
+            self._uuids.add(uuid)
+        for block in message.content:
+            if isinstance(block, ToolUseBlock) and block.id:
+                self._calls.add(block.id)
+            elif isinstance(block, ToolResultBlock) and block.tool_use_id:
+                self._results.add(block.tool_use_id)
+
+    def expect(self, rows: list[dict[str, Any]]) -> None:
+        """The rows a compaction answered with: Claude Code may print them next."""
+        self._expected = Counter(_signature(row) for row in rows)
+
+    def close(self) -> None:
+        self._expected.clear()
+
+    def is_replay(self, frame: dict[str, Any]) -> bool:
+        """Whether ``frame`` re-emits history rather than reporting new work.
+
+        Also closes the post-compaction window on a frame that ends it.
+        """
+        if not self.active or not isinstance(frame, dict):
+            return False
+        kind = frame.get("type")
+        if kind == "result" or (kind == "stream_event" and isinstance(frame.get("event"), dict)
+                                and frame["event"].get("type") == "message_start"):
+            self.close()
+            return False
+        if kind not in ("user", "assistant") or frame.get("parent_tool_use_id"):
+            return False
+        row = frame_row(frame)
+        if row is None:
+            return False
+        signature = _signature(row)
+        expected = self._expected.get(signature, 0) > 0
+        uuid = frame.get("uuid")
+        calls = [use["tool_use_id"] for use in row["toolUses"]]
+        results = [r["tool_use_id"] for r in row.get("toolResults", [])]
+        known_ids = bool(calls or results) and all(c in self._calls for c in calls) and all(
+            r in self._results for r in results)
+        if expected or known_ids or (isinstance(uuid, str) and uuid in self._uuids):
+            if expected:
+                self._expected[signature] -= 1
+            return True
+        if kind == "assistant":
+            self.close()  # new model output: the replay is over
+        return False

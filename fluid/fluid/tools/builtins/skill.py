@@ -10,12 +10,24 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
+from fluid._filelock import file_lock
 from fluid.context.instructions import Skill, discover_skills, parse_frontmatter, skill_search_roots
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
+
+
+# How long a load waits for another writer of the sidecar. A missed count is
+# acceptable telemetry loss; a turn blocked on a stuck lock holder is not.
+_USAGE_LOCK_WAIT_S = 5.0
+# Serializes writers inside this process before the cross-process lock: flock
+# on Linux is per open file description, so two threads each opening the
+# lock file would otherwise both "hold" it.
+_USAGE_THREAD_LOCK = threading.Lock()
 
 
 def _note_usage(skill_path: str) -> None:
@@ -24,21 +36,74 @@ def _note_usage(skill_path: str) -> None:
     Best-effort telemetry for curation and the user (`.usage.json` beside the
     global skills root) — kept out of SKILL.md frontmatter so user-authored
     files never accrue merge noise.
+
+    Loads are noted concurrently (the delegated leg starts one thread per
+    SKILL.md Read), so the read-modify-write holds a lock — a thread lock plus
+    an advisory file lock beside the sidecar for other processes — and the new
+    document replaces the old one atomically: a reader never sees a half
+    written file. A sidecar that does not parse is left as it is rather than
+    reset, so one bad write can never wipe every skill's counts.
     """
     try:
         root = Path.home() / ".fluid" / "skills"
         root.mkdir(parents=True, exist_ok=True)
         sidecar = root / ".usage.json"
-        try:
-            usage = json.loads(sidecar.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            usage = {}
-        entry = usage.setdefault(skill_path, {"loads": 0})
-        entry["loads"] = int(entry.get("loads", 0)) + 1
-        entry["last_used_at"] = time.time()
-        sidecar.write_text(json.dumps(usage, indent=2), encoding="utf-8")
+        with _USAGE_THREAD_LOCK, file_lock(
+            root / ".usage.json.lock", wait=_USAGE_LOCK_WAIT_S,
+        ) as held:
+            if not held:
+                return
+            try:
+                raw = sidecar.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                raw = ""
+            if raw.strip():
+                try:
+                    usage = json.loads(raw)
+                except ValueError:
+                    return
+                if not isinstance(usage, dict):
+                    return
+            else:
+                usage = {}
+            entry = usage.get(skill_path)
+            if not isinstance(entry, dict):
+                entry = usage[skill_path] = {"loads": 0}
+            try:
+                loads = int(entry.get("loads", 0))
+            except (TypeError, ValueError):
+                loads = 0
+            entry["loads"] = loads + 1
+            entry["last_used_at"] = time.time()
+            _replace_text(sidecar, json.dumps(usage, indent=2))
     except OSError:
         pass
+
+
+def _replace_text(path: Path, text: str) -> None:
+    """Write ``text`` to a sibling temp file, then ``os.replace`` it over
+    ``path``. Raises ``OSError``; the temp file is removed on failure."""
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}")
+    try:
+        with tmp.open("w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        for attempt in range(6):
+            try:
+                os.replace(tmp, path)
+                return
+            except OSError as exc:
+                # Windows readers/indexers can briefly deny an atomic rename.
+                if getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 5:
+                    raise
+                time.sleep(0.01 * (2 ** attempt))
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def note_skill_file_read(

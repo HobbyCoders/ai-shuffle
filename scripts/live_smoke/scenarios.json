@@ -866,6 +866,14 @@
           "past_bug": "New: the table Copy menu, terminal links, Send selection to chat and the Spotlight Settings group were checked only in a local fixture with a fake terminal stream, not against a real worker shell."
         },
         {
+          "id": "harness-basics.claude-journal-and-skill-loads",
+          "check": "A Claude Code chat feeds the memory journal and counts parallel skill loads without losing counts",
+          "kind": "owner",
+          "how": "On a candidate worker with FLUID_CONTINUAL on, note the line count of the owner's memory journal.jsonl and copy ~/.fluid/skills/.usage.json aside. Start a throwaway Claude Code chat on the cheapest Claude model and ask it, in one short turn, to Read two listed skills' SKILL.md files in parallel and then reply OK. After the turn, read only the new journal lines and compare .usage.json with the copy. Archive the chat.",
+          "pass_when": "journal.jsonl gained `user` and `assistant` lines tagged with the throwaway chat's session; .usage.json still parses, each of the two skills' `loads` rose by exactly one, and every other skill's count and `last_used_at` is unchanged. No new journal lines, a lost or reset count, or a sidecar that no longer parses is a fail.",
+          "past_bug": "#687: Claude Code chats never reached journal.jsonl. #691: parallel SKILL.md Reads raced on .usage.json and could lose an increment or reset every skill's counts."
+        },
+        {
           "id": "harness-basics.cli-subagent-owner-pass",
           "check": "CLI bundled calls cannot spend the main chat approval",
           "kind": "owner",

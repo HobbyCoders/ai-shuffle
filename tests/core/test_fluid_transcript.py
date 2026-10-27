@@ -1228,6 +1228,77 @@ def test_reseed_places_a_between_turn_compaction_by_its_time(mock_db, tmp_path):
     ]
 
 
+def _checkpoint(through="n5", **fields):
+    """A mechanical compaction's checkpoint: its rows stand for n1..through."""
+    rows = [
+        {"role": "user", "text": '[epoch n1..n2 — 1 older turns folded; HistoryExpand("n1..n2")]',
+         "toolUses": []},
+        {"role": "assistant", "text": "", "toolUses": [
+            {"tool_use_id": "t1", "tool": "Read", "input": {"file_path": "/x"}}]},
+        {"role": "user", "text": "", "toolUses": [], "toolResults": [
+            {"tool_use_id": "t1", "text": '[old tool result trimmed; HistoryExpand("n4")]',
+             "isError": False}]},
+        {"role": "assistant", "text": "after tool", "toolUses": []},
+    ]
+    return _evt("CompactionCheckpoint", node_id=None, through=through, rows=rows, **fields)
+
+
+def test_reseed_starts_from_a_mechanical_compaction_checkpoint(mock_db, tmp_path):
+    """Fluid's mechanical compaction writes no summary (#685): its checkpoint
+    rows, then the nodes after the node they cover, not the whole history."""
+    session_id = _seed()
+    _insert_events(session_id, [
+        _cli_compaction(node_id="n5", summary=""),
+        _checkpoint(ts=1004.5),
+    ])
+    lines = _reseeded_lines(session_id, tmp_path)
+    assert [(line["type"], line["message"]["content"]) for line in lines] == [
+        ("user", '[epoch n1..n2 — 1 older turns folded; HistoryExpand("n1..n2")]'),
+        ("assistant", [{"type": "tool_use", "id": "t1", "name": "Read",
+                        "input": {"file_path": "/x"}}]),
+        ("user", [{"type": "tool_result", "tool_use_id": "t1",
+                   "content": '[old tool result trimmed; HistoryExpand("n4")]',
+                   "is_error": False}]),
+        ("assistant", [{"type": "text", "text": "after tool"}]),
+        ("user", "second prompt"),
+        ("assistant", [{"type": "text", "text": "second reply"}]),
+    ]
+    # Flagged like a summary: the prompts before it are not in the file.
+    assert lines[0]["isCompactSummary"] is True
+    text = "".join(json.dumps(line) for line in lines)
+    assert "first prompt" not in text and "file body" not in text
+
+
+def test_a_newer_summary_wins_over_an_older_checkpoint_and_back(mock_db, tmp_path):
+    session_id = _seed()
+    _insert_events(session_id, [
+        _checkpoint(through="n2"),
+        _cli_compaction(node_id="n5", summary="NEW summary"),
+    ])
+    assert _reseeded_lines(session_id, tmp_path)[0]["message"]["content"] == "NEW summary"
+
+    later = _seed("ses_later")
+    _insert_events(later, [
+        _cli_compaction(node_id="n2", summary="OLD summary"),
+        _cli_compaction(node_id="n5", summary=""),
+        _checkpoint(through="n5"),
+    ])
+    lines = _reseeded_lines(later, tmp_path)
+    assert lines[0]["message"]["content"].startswith("[epoch n1..n2")
+    assert "OLD summary" not in "".join(json.dumps(line) for line in lines)
+
+
+def test_a_checkpoint_off_the_path_falls_back(mock_db, tmp_path):
+    """A rewind left the checkpoint's node behind: the summary before it (or
+    the whole path) applies instead."""
+    session_id = _seed()
+    _insert_events(session_id, [
+        _cli_compaction(node_id="n2", summary="OLD summary"),
+        _checkpoint(through="n-gone"),
+    ])
+    assert _reseeded_lines(session_id, tmp_path)[0]["message"]["content"] == "OLD summary"
+
+
 def test_a_transcript_starting_at_a_summary_is_not_complete(tmp_path):
     """A re-seeded transcript has no prompts before its summary, so it cannot
     prove which of the session's earlier prompts the CLI saw."""

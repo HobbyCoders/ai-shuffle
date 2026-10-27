@@ -651,11 +651,20 @@ What the child CLI is given, and what it is not:
   request that has any (host-started turns such as `[auto-resume]` do not
   count as requests); older ones leave
   context with their whole text stored as a `ContextArchived` event, which
-  `HistoryExpand` and `HistorySearch` read. Rows with blocks Fluid cannot
+  `HistoryExpand` and `HistorySearch` read. An archived row's ref is a hash of
+  its text, so a row dropped again after an answer the CLI never applied is
+  not archived twice, and the recall handle reads only archive events newer
+  than the last it saw. Rows with blocks Fluid cannot
   rebuild (images, `ToolSearch` results) are kept or left out whole, never
   rebuilt. When nothing more can be reclaimed the route answers a skip: a
   manual compaction is then left as it is (as on any bridge error), and only
-  an automatic one falls back to the CLI's summarizer.
+  an automatic one falls back to the CLI's summarizer. When the CLI reports
+  applying an answer, the compacted part is persisted as a
+  `CompactionCheckpoint` event (rows that stand for the stored path through
+  one node), which a re-seed on another worker starts from instead of the
+  whole history. After a compaction the CLI prints the conversation it now
+  holds as ordinary frames; the leg recognises them (recorded tool ids and
+  uuids, the rows it answered with) and stores none of them again.
 - A `tool_policy` that raises (or returns an awaitable that raises) denies the
   call.
 
