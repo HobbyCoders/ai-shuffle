@@ -12,6 +12,8 @@ import secrets
 import shutil
 import socket
 from pathlib import Path
+from time import monotonic
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -20,16 +22,35 @@ import websockets
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("RUN_BROWSER_WORKSPACE_INTEGRATION") != "1",
-    reason="explicit real browser integration run",
-)
-
 
 def _port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+async def _wait_for_target_closed(cdp_get, target_id, timeout=10):
+    deadline = monotonic() + timeout
+    while target_id in {tab["id"] for tab in await cdp_get("/json/list")}:
+        assert monotonic() < deadline, f"CDP target {target_id} is still listed after close"
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_target_close_waits_for_stale_cdp_listing():
+    cdp_get = AsyncMock(side_effect=[[{"id": "closing"}], [{"id": "other"}]])
+    await _wait_for_target_closed(cdp_get, "closing")
+    assert cdp_get.await_count == 2
+    cdp_get.assert_awaited_with("/json/list")
+
+
+@pytest.mark.asyncio
+async def test_target_close_fails_at_deadline(monkeypatch):
+    monkeypatch.setattr(f"{__name__}.monotonic", Mock(side_effect=[0, 10]))
+    cdp_get = AsyncMock(return_value=[{"id": "closing"}])
+    with pytest.raises(AssertionError, match="CDP target closing is still listed after close"):
+        await _wait_for_target_closed(cdp_get, "closing", timeout=10)
+    cdp_get.assert_awaited_once_with("/json/list")
 
 
 async def _ready(url):
@@ -140,6 +161,10 @@ async def _command(ws, state, op, args=None, ok=True):
     return reply
 
 
+@pytest.mark.skipif(
+    os.environ.get("RUN_BROWSER_WORKSPACE_INTEGRATION") != "1",
+    reason="explicit real browser integration run",
+)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("chrome_mode", ["external", "panel-demand", "direct-page-demand"])
 async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
@@ -378,7 +403,8 @@ auth.addEventListener('input', () => {
                 target = await native_chrome.create_page("about:blank")
                 assert target and target["id"]
                 await cdp_get("/json/close/" + target["id"])
-                assert target["id"] not in {tab["id"] for tab in await cdp_get("/json/list")}
+                # Chrome acknowledges close before the target leaves /json/list.
+                await _wait_for_target_closed(cdp_get, target["id"])
         else:
             chrome = await start_chrome()
         server = uvicorn.Server(
