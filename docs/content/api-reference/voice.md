@@ -113,7 +113,7 @@ JSON body. Every field is optional, but `model` is needed for GPT Live calls (`4
 | `execution_mode` | `local` or `worktree` |
 | `worktree_branch`, `base_branch` | With `worktree` mode, the branch to use; without `worktree_branch` a new `voice/...` branch is created from `base_branch` (default `main`). A project is required |
 | `worktree_id` | An existing worktree of the project (needs `project_id`) |
-| `target_instance_id` | Run on another connected device |
+| `target_instance_id` | Only this device. Any other device returns `400`: a voice session starts on the device that hosts the call. To call a chat another device runs, create the chat there ([POST /api/v1/sessions](/docs/api-reference/sessions#post-apiv1sessions) with `target_instance_id`) and start the call from it |
 | `session_mode` | Only `chat` is accepted (sent by the native apps); an empty string is the same as leaving it out. Any other string returns `400` |
 
 ```bash
@@ -134,13 +134,15 @@ curl -X POST http://localhost:8000/api/v1/voice/sessions \
 }
 ```
 
-`client_secret` and `expires_at` are only filled for an OpenAI Realtime model; for GPT Live they are empty. Other errors: `400` for an invalid `execution_mode` or `session_mode` or a provider that cannot fund voice calls, `404` for a worktree that is not in the project, `409` when no agents exist or the target device is unknown, offline or awaiting approval.
+`client_secret` and `expires_at` are only filled for an OpenAI Realtime model; for GPT Live they are empty. Other errors: `400` for an invalid `execution_mode` or `session_mode` or a provider that cannot fund voice calls, `404` for a worktree that is not in the project, `409` when no agents exist.
 
 ## Call control
 
 These endpoints act on a session created by [POST /api/v1/voice/sessions](#post-apiv1voicesessions). They return `404` when the session does not exist or is not a voice session.
 
 An API key can only use them on voice sessions it started, and only while the session is inside the key's project and agent restrictions, as described in [Own Sessions](/docs/api-reference/api-users#own-sessions). Any other voice session, including one the owner started, returns `403`, so a key cannot get a client secret for, end, change or read another caller's call. The owner can use them on every voice session. The audio WebSocket applies the same check and closes with `4403` (`4404` for a session that does not exist or is not a voice session).
+
+A call can attach to a chat another device runs. The call runs on this device; requests and spoken approvals go to the device that runs the chat, and nothing from the call is written into this device's copy of it. Attaching returns `409` when that device is offline or has left the network. A voice session (`mode` `voice`) another device owns returns `404` on these endpoints.
 
 On a Realtime call the voice agent gets the app configuration tools only when the owner attaches the call to one of the owner's sessions; a call attached with an API key, or on a session an API key started, never gets them.
 

@@ -194,12 +194,22 @@ def commentary_chunks(text: str):
     yield from split_bytes(text, MAX_NOTE_BYTES)
 
 
-async def delegate_to_selected_model(session_id: str, transcript: str, on_submitted=None) -> str:
-    from app.core import api_user_scope, turn_manager
+async def delegate_to_selected_model(session_id: str, transcript: str, on_submitted=None, *,
+                                     spoken: str | None = None) -> str:
+    """Hand one voice request to the conversation's chat agent.
+
+    ``spoken`` is the caller's own words when ``transcript`` is a context
+    block (the streamed transports); a conversation another worker runs
+    records those words as the request (``voice_remote``).
+    """
+    from app.core import api_user_scope, turn_manager, voice_remote
     from app.core.provider_agent import validate_provider_model
     from app.core.query_options import decode_provider_model
 
     row = await run_sync(database.get_session, session_id)
+    owner = voice_remote.owner_of(row)
+    if owner:
+        return await _delegate_to_owner(owner, row, transcript, on_submitted, spoken)
     selected = (row or {}).get("model")
     normal_conversation = row is not None and "mode" in row and row.get("mode") != "voice"
     if not selected and normal_conversation:
@@ -294,7 +304,37 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
     return await run_sync(_turn_reply, session_id, turn_id) or "The chat task finished without a spoken result."
 
 
-LIVE_URL = "wss://api.openai.com/v1/live/sessions"
+async def _delegate_to_owner(owner: str, row: dict, transcript: str, on_submitted, spoken: str | None) -> str:
+    """:func:`delegate_to_selected_model` for a conversation another worker runs.
+
+    The owner runs the request in the session's own model and mode, so no
+    model is picked or validated here. Its reply comes back through the
+    synced events (``VoiceProgress``); there is no local turn to wait on.
+    """
+    from app.core import voice_remote
+    from app.network import control
+
+    binding = row.get("voice_config") or {}
+    if isinstance(binding, str):
+        binding = json.loads(binding)
+    instructions = DELEGATION_INSTRUCTIONS
+    from app.core.voice_models import CODEX_MODEL, GROK_MODEL, SUPERGROK_MODEL
+    if binding.get("model") in (*LIVE_MODELS, GROK_MODEL, SUPERGROK_MODEL, CODEX_MODEL):
+        options = validate_options(binding["model"], binding.get("options") or {})
+        instructions = options["delegation_instructions"] or DELEGATION_INSTRUCTIONS
+    try:
+        turn_id = await voice_remote.submit(owner, row, transcript, instructions=instructions, spoken=spoken)
+    except (control.RunnerUnreachable, control.ControlRefused) as exc:
+        logger.warning("Voice: could not forward a request on %s to its owner: %s", row["id"], exc)
+        return voice_remote.unreachable_note(exc)
+    logger.info("Voice: forwarded a request on %s to its owner (turn %s)", row["id"], turn_id)
+    if on_submitted is not None and turn_id:
+        await on_submitted(turn_id)
+        return ""
+    return "The request was sent to the chat on the worker that runs it. Its reply shows in chat."
+
+
+LIVE_URL ="wss://api.openai.com/v1/live/sessions"
 # A dropped GPT Live connection is retried with backoff for about 20 seconds,
 # long enough for a phone to move between Wi-Fi and mobile data. No attempt
 # starts after RECONNECT_WINDOW_S; each attempt (connect plus session start)
@@ -422,6 +462,10 @@ class VoiceStream:
         self.last_deaf_restart = float("-inf")
         self.client_stats: dict = {}
         self.mic_warned = False
+        # The network worker that runs this conversation when it is not this
+        # one (#700): the call then writes nothing into the local mirror and
+        # forwards what the caller asks for (app.core.voice_remote).
+        self.remote_owner: str | None = None
 
     @property
     def is_live(self):
@@ -527,6 +571,8 @@ class VoiceStream:
             self.caption_ids["user"] += 1
             if new_reply:
                 self.caption_ids["assistant"] += 1
+            if self.remote_owner:
+                return  # A mirror is read-only; the owner records the request.
             await record_voice_exchange(self.session_id, user or None, assistant or None, model=self.config["model"],
                                         user_source="typed" if typed else "voice")
 
@@ -718,14 +764,18 @@ class VoiceStream:
             # Store the request before the chat turn starts, but not the reply
             # the voice is speaking right now: it is stored whole once spoken.
             await self.flush(keep_reply=True)
+            # The caller's own words: what an owning worker records (#700).
+            spoken = " ".join(e["text"].strip() for e in conversation
+                              if e["role"] == "user" and not is_noise(e["text"])).strip()
             if self.progress is not None:
                 async def submitted(turn_id):
                     await self.progress.submitted(turn_id, delegation_id)
-                result = await delegate_to_selected_model(self.session_id, context, on_submitted=submitted)
+                result = await delegate_to_selected_model(self.session_id, context, on_submitted=submitted,
+                                                          spoken=spoken)
                 if not result:
                     return  # Progress and final results arrive on the event stream.
             else:
-                result = await delegate_to_selected_model(self.session_id, context)
+                result = await delegate_to_selected_model(self.session_id, context, spoken=spoken)
             # Live appends have a 500-token ceiling. <=400 UTF-8 bytes is a
             # conservative bound even without the provider's tokenizer.
             for content in commentary_chunks(result or "The chat task returned no result."):
@@ -1255,7 +1305,8 @@ class VoiceStream:
                             # Approvals are asked aloud and answered by the caller's voice.
                             from app.core.voice_approval import SpokenApprovals
                             approvals = SpokenApprovals(self.session_id, api_user_id=self.api_user_id,
-                                                        marker=lambda: self.transcript_seq)
+                                                        marker=lambda: self.transcript_seq,
+                                                        owner=self.remote_owner)
                         self.progress = VoiceProgress(self.session_id, self.send, quiet=self.is_quiet,
                                                       approvals=approvals)
                         await self.progress.open()
@@ -1263,9 +1314,16 @@ class VoiceStream:
                 else:
                     await self.prime_fal()
                 self.connected = True
+                # The provider has answered its handshake by now. The health
+                # line's "provider events" only counts frames after this, so a
+                # call ended in its first seconds read as a provider that never
+                # answered (#700); say it here for every engine.
+                logger.info("Voice %s: %s connected%s; the call is ready", self.session_id, self.config["model"],
+                            f" (forwarding to {self.remote_owner})" if self.remote_owner else "")
                 if not self.config.get("conversation_surface"):
                     await run_sync(database.update_session, self.session_id, launched_model=self.config["model"])
-                await run_sync(database.set_session_active, self.session_id, True)
+                if not self.remote_owner:
+                    await run_sync(database.set_session_active, self.session_id, True)
                 await self.emit({"type": "ready", "model": self.config["model"], "sample_rate": 24000})
                 tasks = [asyncio.create_task(self.receive_browser()), asyncio.create_task(self.checkpoint()),
                          asyncio.create_task(self.health())]
@@ -1339,7 +1397,7 @@ class VoiceStream:
                 await self.flush()
                 if calls.get(self.session_id) is self:
                     calls.pop(self.session_id, None)
-                    if not self.config.get("conversation_surface"):
+                    if not self.config.get("conversation_surface") and not self.remote_owner:
                         await run_sync(database.set_session_active, self.session_id, False)
             finally:
                 self.finished.set()

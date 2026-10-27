@@ -857,7 +857,7 @@ class TestCreateVoiceSession:
         assert prepared[0][1] == "feature/voice"
         assert prepared[0][2]["create_new_branch"] is False
 
-    def test_v2_auto_branch_and_runner_are_forwarded(
+    def test_v2_auto_branch_is_forwarded(
         self, authenticated_client, mock_db, monkeypatch, tmp_path
     ):
         from app.api.sessions_helpers import WorktreeSessionResponse
@@ -886,7 +886,7 @@ class TestCreateVoiceSession:
             "project_v2_id": pv2["id"],
             "execution_mode": "worktree",
             "base_branch": "develop",
-            "target_instance_id": "runner-selected", "model": "sonnet",
+            "model": "sonnet",
         })
         assert resp.status_code == 200, resp.text
         assert resp.json()["session_id"] == "voice-auto"
@@ -894,11 +894,36 @@ class TestCreateVoiceSession:
         assert body.branch_name.startswith("voice/")
         assert body.create_new_branch is True
         assert body.base_branch == "develop"
-        assert body.target_instance_id == "runner-selected"
+        assert body.target_instance_id is None
         overrides = captured["kwargs"]["session_create_overrides"]
         assert overrides["mode"] == "voice"
         assert overrides["is_active"] is True
         assert overrides["voice_config"]["provider_id"] == "prov-openai"
+
+    @pytest.mark.parametrize("execution_mode", [None, "worktree"])
+    def test_another_runner_is_refused_and_nothing_is_written(
+        self, authenticated_client, mock_db, monkeypatch, execution_mode
+    ):
+        """#700: this route wrote a row owned by the target here and never
+        created the session on the target. A voice-lane session is born where
+        its call runs; another worker's chat takes a call through attach."""
+        import app.api.sessions_worktree as worktree_api
+
+        _enable_voice()
+        _make_provider()
+        _install_mock_transport(monkeypatch, _secret_handler())
+
+        async def _never(*_args, **_kwargs):
+            raise AssertionError("no branch session may be created for a remote target")
+
+        monkeypatch.setattr(worktree_api, "_create_v2_branch_session", _never)
+        body = {"target_instance_id": "runner-selected", "model": "sonnet"}
+        if execution_mode:
+            body["execution_mode"] = execution_mode
+        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json=body)
+        assert resp.status_code == 400, resp.text
+        assert "start the call from that conversation" in resp.json()["detail"]
+        assert db.get_sessions(limit=50) == []
 
     def test_command_mode_is_refused(self, authenticated_client, mock_db):
         """The wake-word "command" mode has no client left (the Android app
@@ -2166,6 +2191,77 @@ class TestConversationAttachment:
         assert attach_client.post("/api/v1/voice/sessions/chat/attach", json={}).json()["model"] == "gpt-live-1"
         saved = json.loads(database.get_session("chat")["voice_config"])
         assert (saved["voice"], saved["provider_id"]) == ("cedar", "prov-openai")
+
+    # -- #700: a conversation another network worker runs --------------------
+
+    PEER = "peer-device-gamingpc"
+
+    def _owned_by_peer(self, monkeypatch, *, online=True, status="active", session_id="peer-chat", mode="chat"):
+        from types import SimpleNamespace
+        from app.core import voice_remote
+        from app.db import database
+        from app.network import engine
+        database.create_session(session_id, "default", mode=mode, title="Peer chat")
+        monkeypatch.setattr(voice_remote, "owner_of", lambda row: self.PEER if (row or {}).get("id") == session_id else None)
+        member = SimpleNamespace(status=status)
+        monkeypatch.setattr(engine, "context", lambda: SimpleNamespace(member=lambda d: member if d == self.PEER else None,
+                                                                       device_id="this-device"))
+        real_install = database.get_install
+        monkeypatch.setattr(database, "get_install", lambda d: {
+            "id": self.PEER, "device_name": "GamingPC", "online": online, "approved": True,
+        } if d == self.PEER else real_install(d))
+        return session_id
+
+    def test_attach_on_a_conversation_another_worker_runs(self, attach_client, mock_db, monkeypatch):
+        """The call runs here with this worker's voice settings; the mirror's
+        replicated fields and transcript are not touched."""
+        from app.db import database, session_events
+        session_id = self._owned_by_peer(monkeypatch)
+        database.set_system_setting("voice_model", "gpt-live-1")
+        before = dict(database.get_session(session_id))
+
+        response = attach_client.post(f"/api/v1/voice/sessions/{session_id}/attach", json={})
+
+        assert response.status_code == 200, response.text
+        assert response.json()["model"] == "gpt-live-1"
+        after = dict(database.get_session(session_id))
+        for key in ("is_active", "model", "provider_id", "mode", "title", "launched_model"):
+            assert after.get(key) == before.get(key), key
+        # The call's own binding is local (not a replicated field), so it may live on the mirror.
+        assert json.loads(after["voice_config"])["conversation_surface"] is True
+        assert session_events.get_events(session_id, from_seq=0, limit=10) == []
+        # The rest of the call surface works on it too.
+        assert attach_client.get(f"/api/v1/voice/sessions/{session_id}/state").status_code == 200
+        assert attach_client.post(f"/api/v1/voice/sessions/{session_id}/hangup", json={}).status_code == 200
+
+    def test_attach_names_an_offline_owner(self, attach_client, mock_db, monkeypatch):
+        session_id = self._owned_by_peer(monkeypatch, online=False)
+
+        response = attach_client.post(f"/api/v1/voice/sessions/{session_id}/attach", json={})
+
+        assert response.status_code == 409
+        assert response.json()["detail"].startswith("GamingPC is offline")
+
+    def test_attach_refuses_an_owner_that_left_the_network(self, attach_client, mock_db, monkeypatch):
+        session_id = self._owned_by_peer(monkeypatch, status="removed")
+
+        response = attach_client.post(f"/api/v1/voice/sessions/{session_id}/attach", json={})
+
+        assert response.status_code == 409
+        assert "left this network" in response.json()["detail"]
+
+    def test_a_voice_lane_session_another_worker_owns_is_not_driven_here(self, attach_client, mock_db, monkeypatch):
+        session_id = self._owned_by_peer(monkeypatch, session_id="peer-voice", mode="voice")
+
+        assert attach_client.post(f"/api/v1/voice/sessions/{session_id}/attach", json={}).status_code == 404
+        assert attach_client.post(f"/api/v1/voice/sessions/{session_id}/secret", json={}).status_code == 404
+
+    def test_a_session_of_another_install_outside_a_network_stays_refused(self, attach_client, mock_db):
+        """No network owner and not this install: nothing forwards, so no call."""
+        from app.db import database
+        database.create_session("stray", "default", mode="chat", target_instance_id="some-other-install")
+
+        assert attach_client.post("/api/v1/voice/sessions/stray/attach", json={}).status_code == 404
 
     def test_secret_rebinds_only_when_a_call_is_starting(self, attach_client, mock_db):
         from app.db import database

@@ -764,6 +764,8 @@ async def _load_voice_session(
         config = json.loads(config)
     if not row or (row.get("mode") != "voice" and not config.get("conversation_surface")):
         raise HTTPException(status_code=404, detail="Voice session not found.")
+    if row.get("mode") == "voice":
+        await run_sync(_refuse_remote_voice_lane, row)
     if check_eligible and row.get("mode") != "voice":
         await run_sync(_check_attachable_conversation, row)
     return row
@@ -868,8 +870,18 @@ async def create_voice_session(
     from app.core.config import settings
 
     target_instance_id = (request.target_instance_id or "").strip() or None
-    if target_instance_id == settings.effective_instance_id:
-        target_instance_id = None
+    if target_instance_id and target_instance_id != settings.effective_instance_id:
+        # This route used to write a row owned by the target here and never
+        # create the session on the target, leaving a mirror nobody ran
+        # (#700). A voice-lane session is the call's own record, so it is
+        # born where the call runs. To talk to a chat another worker runs,
+        # create the conversation there (POST /sessions with
+        # target_instance_id) and attach a call to it.
+        raise HTTPException(
+            400,
+            "A voice session starts on the worker that hosts the call. To call a chat "
+            "another worker runs, start the call from that conversation.",
+        )
 
     voice_settings = await _require_voice_enabled()
 
@@ -959,7 +971,6 @@ async def create_voice_session(
             base_branch=(request.base_branch or "main").strip() or "main",
             profile_id=profile_id,
             create_new_branch=not bool(selected_branch),
-            target_instance_id=target_instance_id,
         )
         from app.core.mobile_tool_identity import request_principal
         created = await _create_v2_branch_session(
@@ -977,8 +988,6 @@ async def create_voice_session(
         if request.worktree_id:
             if not request.project_id:
                 raise HTTPException(400, "project_id is required with worktree_id.")
-            if target_instance_id:
-                raise HTTPException(400, "A legacy worktree cannot be moved to another runner.")
             worktree = await run_sync(database.get_worktree, request.worktree_id)
             repository = await run_sync(
                 database.get_git_repository_by_project, request.project_id
@@ -995,26 +1004,6 @@ async def create_voice_session(
             worktree_branch = None
             worktree_path = None
 
-        if target_instance_id:
-            if access and resolved_pv2_id:
-                from app.api.sessions_worktree import _preflight_remote_target
-
-                await _preflight_remote_target(target_instance_id, access["project_v2"])
-            else:
-                install = await run_sync(database.get_install, target_instance_id)
-                if not install:
-                    raise HTTPException(409, "Unknown device — pick another device.")
-                device = install.get("device_name") or target_instance_id
-                if not install.get("approved", True):
-                    raise HTTPException(
-                        409,
-                        f"{device} is waiting for admin approval. Approve and restart it first.",
-                    )
-                if not install.get("online"):
-                    raise HTTPException(
-                        409, f"{device} is offline. Bring it online or pick another device."
-                    )
-
         session_id = str(uuid.uuid4())
         await run_sync(
             database.create_session,
@@ -1026,7 +1015,6 @@ async def create_voice_session(
             worktree_id=request.worktree_id,
             worktree_branch=worktree_branch,
             worktree_path=worktree_path,
-            target_instance_id=target_instance_id,
             **session_create_overrides,
         )
         # A paired device keeps the call it started (#1877).
@@ -1051,17 +1039,53 @@ async def create_voice_session(
 # ============================================================================
 
 def _check_attachable_conversation(row):
+    """Refuse a call on a conversation that cannot take one (synchronous).
+
+    A conversation another network worker runs takes a call here too (#700):
+    the call runs on this worker with its voice login and forwards what the
+    caller asks for to the owner (``app.core.voice_remote``). The owner must
+    be an online member; a call it cannot hear from would only talk to itself.
+    """
     from app.core.config import settings
-    if (row.get("instance_id") != settings.effective_instance_id
+    from app.core import voice_remote
+    owner = voice_remote.owner_of(row)
+    if ((not owner and row.get("instance_id") != settings.effective_instance_id)
             or row.get("is_worker") or row.get("parent_session_id")
             or row.get("hidden")
             or row.get("status") == "archived"):
         raise HTTPException(404, "Conversation is not eligible for call attachment.")
+    if owner:
+        _check_reachable_owner(owner)
+        return  # The owner's turns are not mirrored here; it applies its own rules.
     from app.db import turns
     turn = turns.get_live_turn(row["id"]) or turns.get_latest_turn(row["id"]) or {}
     if ((turn.get("payload") or {}).get("_assistant_proactive") is not None
             or (turn.get("overrides") or {}).get("_assistant_proactive") is not None):
         raise HTTPException(403, "Background observation cannot acquire a voice surface.")
+
+
+def _refuse_remote_voice_lane(row) -> None:
+    """A legacy voice-lane session is its own call record, written by the
+    worker that hosts the call; one another worker owns is never driven from
+    here (#700). Conversations take remote calls; this lane does not."""
+    from app.core import voice_remote
+    if voice_remote.owner_of(row):
+        raise HTTPException(404, "This voice session runs on another worker.")
+
+
+def _check_reachable_owner(owner: str) -> None:
+    """409 unless ``owner`` is an active, online member of this network."""
+    from app.network import engine, membership
+    ctx = engine.context()
+    member = ctx.member(owner) if ctx is not None else None
+    if member is None or member.status != membership.STATUS_ACTIVE:
+        raise HTTPException(409, "The worker that runs this conversation left this network. "
+                                 "Fork the conversation to call it here.")
+    install = database.get_install(owner) or {}
+    name = install.get("device_name") or "The worker that runs this conversation"
+    if not install.get("online") or not install.get("approved", True):
+        raise HTTPException(409, f"{name} is offline, so a call could not reach its chat. "
+                                 "Bring it online and call again.")
 
 
 def _call_in_progress(session_id: str) -> bool:
@@ -1153,6 +1177,8 @@ async def prepare_voice_attachment(
     _check_voice_session_access(api_user, row)
     if row.get("mode") != "voice":
         await run_sync(_check_attachable_conversation, row)
+    else:
+        await run_sync(_refuse_remote_voice_lane, row)
     _reject_when_capped(session_id)
     if _call_in_progress(session_id) and _stored_binding(row):
         config = _stored_binding(row)
@@ -1572,6 +1598,9 @@ async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optio
             stream_cls = GrokVoiceStream if config["model"] == GROK_MODEL else voice_stream.VoiceStream
         call = stream_cls(websocket, row, config, key, settings["voice_max_call_minutes"],
                                         api_user_id=(api_user or {}).get("id"))
+        # A conversation another worker runs: the call forwards, never writes (#700).
+        from app.core import voice_remote
+        call.remote_owner = voice_remote.owner_of(row)
         # Reserve before accepting: there is no await between capacity check
         # and reservation, so concurrent handshakes cannot exceed the bound.
         voice_stream.calls[session_id] = call
