@@ -176,8 +176,12 @@ html:root[data-platform='mobile'] .context-pill-row {
 	display: none;
 }
 
-/* A 56px field with a 24px line; the 40px circles sit 8px off the bottom,
-   so they centre on the first line. */
+/* A 56px row: 8px of padding round a 40px band. The field is 40px tall too
+   (a 24px line plus 8px above and below), so the + circle, the first text
+   line and the right-hand circles share one centre, 8px from the card's top
+   and from the quick bar. The field's vertical padding must stay at
+   (40px - line) / 2: more lifts the text above the bottom-aligned circles and
+   leaves extra room above them. */
 html:root[data-platform='mobile'] .input-area {
 	min-height: 0;
 	align-items: flex-end;
@@ -189,7 +193,7 @@ html:root[data-platform='mobile'] .input-area {
 
 html:root[data-platform='mobile'] .input-area .textarea-wrapper {
 	align-self: stretch;
-	padding: 16px 4px 16px 4px;
+	padding: 8px 4px;
 }
 
 /* Attach and dictate: quiet 40px circles (muted fill). Listening, preparing
