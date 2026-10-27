@@ -37,7 +37,12 @@ def _emulator_tools_listed(monkeypatch):
 # WorkingRecord and watches add deferred schemas; source provenance updates
 # deferred DeployStatus docs (#495). Preserve both features through the merge.
 # Re-measure after merge; eager/loaded budgets and 1% allowance stay unchanged.
-MEASURED_FULL = 131_920
+# Memory that learns (Oct 2026): Remember's pref.<topic>/replaces rule and the
+# model rule's "or a saved owner routing memory" clause (Task, Swarm,
+# StartSession share it; tightened to +~110 chars over the old rule):
+# 133,069 -> 133,376 measured with scripts/measure_prompt_catalog.py. Eager,
+# delegated append and delegated loaded tools stay within their old budgets.
+MEASURED_FULL = 133_376
 MEASURED_EAGER = 52_573
 MEASURED_DELEGATED_APPEND = 14_716
 MEASURED_DELEGATED_LOADED_TOOLS = 7_258

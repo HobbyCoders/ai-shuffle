@@ -78,7 +78,9 @@ A subagent runs on the model set in its agent's **Models** section. If that is e
 
 You can ask for a specific model, for example "run the reviewer on a faster model". The agent then starts that subagent on the model you named.
 
-An agent cannot switch to a model on its own. If it wants a model you did not name, AI Shuffle asks you first, in every permission mode. A yes covers that model for the rest of the chat. Unknown model names are refused with a list of the models you can use, and nothing falls back to another model.
+You can also save standing model routing as a memory, for example "Remember: reviews on Sonnet, backend coding on GPT 6.1 Sol, never Fable". The agent sees these memories next to your subagent default and picks a model per job, and AI Shuffle accepts a model such a memory names without asking you again in each chat. Only memories saved at your request count, not facts an agent saved or learned on its own. A model named only as something to avoid ("never", "not", "instead of", "is poor at") does not count. Correcting or forgetting the memory takes effect at the next start. Each start's receipt names the memory that allowed it.
+
+An agent cannot switch to a model on its own. If it wants a model you did not name or save in a memory, AI Shuffle asks you first, in every permission mode. A yes covers that model for the rest of the chat. Unknown model names are refused with a list of the models you can use, and nothing falls back to another model.
 
 ## After a restart
 

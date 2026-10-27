@@ -1,54 +1,54 @@
 {
-  "description": "Fixed synthetic workflow requests; chars/4 estimates. Baseline b11dc613. Allowance: 32 characters per section; ordinary requests must remain exactly unchanged. Owner prefix catalog measured separately by --catalog.",
+  "description": "Fixed synthetic workflow requests; chars/4 estimates. Baseline b11dc613; system prompt +310 for standing-preference proposals. Allowance: 32 characters per section; ordinary requests must remain exactly unchanged. Owner prefix catalog measured separately by --catalog.",
   "baseline_characters": {
     "native_ordinary": {
-      "system": 8192,
+      "system": 8502,
       "request": 357
     },
     "native_repeated": {
-      "system": 8192,
+      "system": 8502,
       "request": 358
     },
     "code_ordinary": {
-      "system": 8192,
+      "system": 8502,
       "request": 392
     },
     "code_repeated": {
-      "system": 8192,
+      "system": 8502,
       "request": 393
     },
     "delegated_ordinary": {
-      "system": 8192,
+      "system": 8502,
       "request": 357
     },
     "delegated_repeated": {
-      "system": 8192,
+      "system": 8502,
       "request": 358
     }
   },
   "maximum_characters": {
     "native_ordinary": {
-      "system": 8224,
+      "system": 8534,
       "request": 389
     },
     "native_repeated": {
-      "system": 9160,
+      "system": 9470,
       "request": 677
     },
     "code_ordinary": {
-      "system": 8224,
+      "system": 8534,
       "request": 424
     },
     "code_repeated": {
-      "system": 9160,
+      "system": 9470,
       "request": 747
     },
     "delegated_ordinary": {
-      "system": 8224,
+      "system": 8534,
       "request": 389
     },
     "delegated_repeated": {
-      "system": 9160,
+      "system": 9470,
       "request": 677
     }
   }

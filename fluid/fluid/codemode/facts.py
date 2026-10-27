@@ -78,6 +78,34 @@ MAX_INFERENCE_CALLS_PER_DAY = 48
 HISTORY_TTL = 30 * 86400
 MAX_HISTORY = 2
 SCHEMA = 2
+# Standing preferences: a protected fact keyed ``pref.<topic>`` (for example
+# pref.subagent_models, pref.ci_policy, pref.deploy, pref.delegation) is the
+# one current value for that topic in its scope. The owner's corrections of
+# how agents work update it instead of piling up dated rows. The snapshot
+# renders them first, in this much of MAX_PROMPT_CHARS that the rest of the
+# pile cannot crowd out (unused room goes back to the other facts).
+PREF_KEY_PREFIX = "pref."
+STANDING_PREFERENCE_CHARS = 2500
+# Remember(replaces=[...]) names at most this many superseded facts per save.
+MAX_REPLACES = 16
+# Write-time overlap hint: a new save lists up to MAX_SIMILAR live in-scope
+# facts sharing at least SIMILAR_MIN_SHARED subject terms, which must also be
+# SIMILAR_MIN_RATIO of the smaller fact's terms. Tuned on a 261-fact owner
+# store: it links the subagent-routing rules to each other while unrelated
+# pairs (sampled at random) cross it under 1% of the time.
+MAX_SIMILAR = 3
+SIMILAR_MIN_SHARED = 5
+SIMILAR_MIN_RATIO = 0.25
+_ID_REF = re.compile(r"[A-Za-z0-9_.:-]{1,200}")
+# Words that join unrelated rules ("never", "one per") without naming a subject.
+_HINT_NOISE = frozenset(
+    "not never non one per own set all any only also each every always keep stay stays "
+    "must still same without".split())
+
+
+def is_standing_preference(entry):
+    """A protected ``pref.<topic>`` fact: the owner's standing preference."""
+    return bool(entry.get("protected")) and str(entry.get("key") or "").startswith(PREF_KEY_PREFIX)
 
 
 def fingerprint(text):
@@ -514,7 +542,7 @@ class FactStore:
 
     def save(self, text, memory_id=None, scope=None, provenance=None, *, protected=False,
              durable=None, key=None, expected_revision=None, source_session=None, restore=False,
-             per_worker=False, correction_project=None):
+             per_worker=False, correction_project=None, replaces=None, receipt=None):
         """Save one fact in a tier.
 
         ``protected`` is the explicit tier (the user asked). ``durable=True``
@@ -525,10 +553,26 @@ class FactStore:
         matched by key or text only against this worker's own copy, and
         replaces the shared copy older versions kept under the same key. A
         user-requested save of such a fact makes it shared again.
+
+        ``replaces`` names facts this save supersedes (see :meth:`_supersede`).
+        A refused target refuses the whole save, so nothing half-applies.
+        ``receipt``, when a dict, is filled with ``replaced`` and ``skipped``
+        (IDs and notes) and, for a new protected/durable fact, ``similar``:
+        live facts that look like the same subject (:meth:`_similar`).
         """
         text = validate_text(text)
         if key is not None and (not isinstance(key, str) or not re.fullmatch(r"[a-zA-Z0-9_.:-]{1,96}", key)):
             raise ValueError("Invalid memory key")
+        replaces = list(dict.fromkeys(replaces or ()))
+        if replaces:
+            if not (protected or durable):
+                raise ValueError("Only a Remember save can replace other facts")
+            if len(replaces) > MAX_REPLACES:
+                raise ValueError(f"replaces names at most {MAX_REPLACES} facts")
+            if not all(isinstance(r, str) and _ID_REF.fullmatch(r) for r in replaces):
+                raise ValueError("replaces must list memory IDs from Recall")
+        receipt = receipt if isinstance(receipt, dict) else {}
+        receipt.update(replaced=[], skipped=[], similar=[])
         fp = fingerprint(text)
         with file_transaction(self.lock):
             doc = self._prepare()
@@ -546,6 +590,11 @@ class FactStore:
                 scopes.discard(None)
                 candidates = [e for e in all_entries if e.get("key") == key
                               and e.get("scope", "global") in scopes and visible_on(e, local)]
+                # A slot's confirmed predecessors keep their key in the
+                # archive; the current value is the one to correct.
+                current = [e for e in candidates
+                           if not (e.get("superseded_by") and e.get("supersession_confirmed"))]
+                candidates = current or candidates
                 fresh = (expected_revision == 1
                          and not any(e.get("key") == key
                                      and (correction_project is None or e.get("scope", "global") in scopes)
@@ -583,8 +632,22 @@ class FactStore:
                             and ((key and e.get("key") == key) or fingerprint(e["text"]) == fp)), None)
             now = time.time()
             archived_old = bool(old) and any(e is old for e in doc["archived"])
+            if replaces:
+                new_scope = scope or (old.get("scope", "global") if old else "global")
+                new_worker = (None if protected else local if per_worker
+                              else old.get("worker") if old else None)
+                targets = self._replacement_targets(
+                    doc, replaces, text=text, protected=protected, scope=new_scope,
+                    worker=new_worker, self_id=old["id"] if old else None, receipt=receipt)
+            else:
+                targets = []
             if old and old.get("protected") and not protected:
                 if durable and not old.get("conflicted") and old["text"] == text:
+                    if targets:
+                        self._supersede(doc, old, targets)
+                        self._maintain(doc, keep=old["id"])
+                        receipt["replaced"] = self._replaced(old, targets)
+                        self._write(doc)
                     return self._entry(old)  # already saved at the user's request
                 if durable:
                     raise ValueError("This fact was saved at the user's request; an agent cannot "
@@ -614,6 +677,9 @@ class FactStore:
                         self._write(doc)
                     return self._entry(old)
                 if old.get("superseded_by"):
+                    if targets:
+                        raise ValueError(f"[{old['id']}] was itself replaced by "
+                                         f"[{old['superseded_by']}]; correct that fact instead")
                     return self._entry(old)  # an observation cannot revive a known stale value
                 # Saving the same fact again is a use: renew a durable fact's
                 # lifetime and bring an archived one back. No new revision.
@@ -630,11 +696,21 @@ class FactStore:
                     clock = dict(old.get("clock") or {old["origin"]: old.get("revision", 1)})
                     clock[doc["store_id"]] = clock.get(doc["store_id"], 0) + 1
                     old.update(clock=clock, revision=old.get("revision", 1) + 1)
+                if targets:
+                    self._supersede(doc, old, targets)
                 self._maintain(doc, keep=old["id"])
+                receipt["replaced"] = self._replaced(old, targets)
                 self._write(doc)
                 return self._entry(old)
             if old and old.get("protected") and expected_revision is None:
-                raise ValueError("Recall the existing fact and supply its revision before correcting it")
+                ref = f"[{old['id']} r{old.get('revision', 1)}]"
+                fix = f"pass memory_id={old['id']} expected_revision={old.get('revision', 1)}"
+                if key and old.get("key") == key:
+                    # One current value per slot: name it so one retry updates it.
+                    raise ValueError(f"{key} exists as {ref}; {fix} to update it, "
+                                     "folding in what still holds")
+                raise ValueError("Recall the existing fact and supply its revision before "
+                                 f"correcting it ({ref}; {fix})")
             if protected and not (old and old.get("protected")):
                 # A new user-saved fact (or one promoted from agent-saved)
                 # needs a free slot. Corrections of a user-saved fact do not.
@@ -719,8 +795,14 @@ class FactStore:
                         previous["supersession_confirmed"] = True
                         previous.pop("conflicted", None)
                         self._bump_metadata(doc, previous)
+            if targets:
+                self._supersede(doc, entry, targets)
             self._apply_supersessions(doc, [entry])
             self._maintain(doc, keep=entry["id"])
+            receipt["replaced"] = self._replaced(entry, targets)
+            if old is None and (protected or is_durable):
+                receipt["similar"] = self._similar(doc, entry, {e["id"] for e in targets},
+                                                   correction_project)
             self._write(doc)
             return self._entry(entry)
 
@@ -779,8 +861,112 @@ class FactStore:
                 changed.append(old["id"])
         return changed
 
-    def propose_supersession(self, old_id, new_id, *, old_revision, new_revision):
-        """Apply a learner/curator proposal only against its exact fact snapshot."""
+    @staticmethod
+    def _replacement_targets(doc, replaces, *, text, protected, scope, worker, self_id, receipt):
+        """Resolve Remember(replaces=[...]) before anything is written.
+
+        The rules mirror what :meth:`_repair_supersession_links` keeps, so a
+        link made here is not voided on the next maintenance pass: a
+        compatible scope (same scope, or a global save over a project fact),
+        the same worker, and an owner-saved target only for an owner-saved
+        replacement. Any refusal raises, so the whole save is refused.
+        """
+        from fluid.context.screening import screen_findings
+        if screen_findings(text):
+            raise ValueError("This text matches an injection pattern, so it cannot replace "
+                             "saved facts")
+        local = doc["store_id"]
+        records = doc["entries"] + doc["archived"]
+        targets = []
+        for ref in replaces:
+            old = next((e for e in records if e["id"] == ref or global_id(e) == ref), None)
+            if old is None or not visible_on(old, local):
+                raise ValueError(f"replaces names an unknown memory ID [{ref}]; "
+                                 "Recall it and retry")
+            if old["id"] == self_id:
+                raise ValueError("replaces cannot name the fact being saved")
+            if old.get("protected") and not protected:
+                raise ValueError(
+                    f"[{old['id']}] was saved at the user's request; replace it only when the "
+                    "user asked for the change (user_requested=true). Nothing was saved")
+            old_scope = old.get("scope", "global")
+            if old_scope != scope and not (scope == "global" and old_scope.startswith("project:")):
+                raise ValueError(f"[{old['id']}] is scoped to {old_scope}; a fact scoped to "
+                                 f"{scope} cannot replace it. Nothing was saved")
+            if old.get("worker") != worker:
+                raise ValueError(f"[{old['id']}] describes one worker's environment; correct it "
+                                 "with memory_id instead. Nothing was saved")
+            if old.get("superseded_by") and (old.get("supersession_confirmed")
+                                             or not old.get("protected")):
+                receipt["skipped"].append(f"[{old['id']}] was already replaced")
+                continue
+            targets.append(old)
+        return targets
+
+    def _supersede(self, doc, new, targets):
+        """Archive ``targets`` as confirmed predecessors of ``new``.
+
+        Not a delete: no tombstone or deletion barrier, text and history
+        stay, Recall finds them labelled superseded, and Forget of ``new``
+        brings them back (:meth:`_repair_supersession_links`). The retirement
+        bumps each clock, so replicas take the archived copy over their live one.
+        """
+        gid = global_id(new)
+        if new.get("superseded_by") in {global_id(t) for t in targets}:
+            new.pop("superseded_by", None)  # the new save is current; no cycle
+            new.pop("supersession_confirmed", None)
+        held = {id(e) for e in doc["entries"] + doc["archived"]}
+        for old in targets:
+            if id(old) not in held:
+                continue  # folded into this save as a conflicted alias
+            old.update(superseded_by=gid, supersession_confirmed=True)
+            old.pop("conflicted", None)  # the owner's answer resolves it
+            self._retire_entry(doc, old, "superseded")
+
+    @staticmethod
+    def _replaced(new, targets):
+        """IDs whose link to ``new`` survived maintenance (what the receipt claims)."""
+        gid = global_id(new)
+        return [t["id"] for t in targets if t.get("superseded_by") == gid]
+
+    @staticmethod
+    def _similar(doc, new, exclude, project):
+        """Up to MAX_SIMILAR live facts that look like the same subject as ``new``.
+
+        Only facts ``new`` could replace (same scope, or the session's project
+        under a global save) on this worker. A hint for the receipt; nothing
+        is changed.
+        """
+        from fluid.codemode.supersession import subject_terms
+
+        def terms(text):
+            return {w for w in subject_terms(text) if not w.isdigit() and w not in _HINT_NOISE}
+        mine = terms(new["text"])
+        scope = new.get("scope", "global")
+        local = doc["store_id"]
+        hits = []
+        for e in doc["entries"]:
+            if (e is new or e["id"] in exclude or e.get("superseded_by") or e.get("conflicted")
+                    or not visible_on(e, local)
+                    or not (e.get("scope", "global") == scope
+                            or (scope == "global" and project and e.get("scope") == project))):
+                continue
+            theirs = terms(e["text"])
+            shared = len(mine & theirs)
+            ratio = shared / max(1, min(len(mine), len(theirs)))
+            if shared >= SIMILAR_MIN_SHARED and ratio >= SIMILAR_MIN_RATIO:
+                hits.append((-shared, -ratio, e["id"], e))
+        return [{"id": e["id"], "revision": e.get("revision", 1), "text": e["text"]}
+                for *_, e in sorted(hits, key=lambda h: h[:3])[:MAX_SIMILAR]]
+
+    def propose_supersession(self, old_id, new_id, *, old_revision, new_revision,
+                             protected_conflict=False):
+        """Apply a learner/curator proposal only against its exact fact snapshot.
+
+        A user-kept (protected) old fact is refused unless
+        ``protected_conflict`` is set and the new fact is user-kept too: the
+        pair is then linked unconfirmed, both texts stay as they are, and the
+        snapshot asks the owner to resolve it (see preferences.py)."""
         from fluid.codemode.supersession import replacement_evidence
         from fluid.context.screening import screen_findings
         with file_transaction(self.lock):
@@ -791,7 +977,9 @@ class FactStore:
                 return False
             if old.get("revision", 1) != old_revision or new.get("revision", 1) != new_revision:
                 raise ValueError("Memory changed since the supersession proposal was read")
-            if (old.get("protected") or old.get("conflicted") or new.get("conflicted") or new.get("superseded_by")
+            if old.get("protected") and not (protected_conflict and new.get("protected")):
+                return False
+            if (old.get("conflicted") or new.get("conflicted") or new.get("superseded_by")
                     or screen_findings(new["text"]) or not replacement_evidence(old, new, proposed=True)):
                 return False
             old["superseded_by"] = global_id(new)

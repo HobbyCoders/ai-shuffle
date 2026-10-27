@@ -1683,13 +1683,14 @@ async def _dispatch_task_tool(
             target_label = _task_target_label(target, definition, ref)
             instead = model_override.label(baseline) if baseline else "its default"
             try:
-                source = await model_override.confirm(
+                accepted = await model_override.accept(
                     caller_session_id, str(caller_pid), model=choice.model, baseline=baseline,
                     action=(f"start {target_label} on {model_override.label(choice.model)} "
                             f"instead of {instead}"))
             except PermissionError as exc:
                 return {"ok": False, "error": str(exc), "reason": "model_not_requested"}
-            model_override_record = {"source": source, "instead_of": baseline}
+            model_override_record = {"source": accepted.source, "instead_of": baseline,
+                                     **accepted.record()}
             effective_provider_id = choice.provider_id
         requested_model = choice.model_id
     if requested_model and not effective_provider_id:

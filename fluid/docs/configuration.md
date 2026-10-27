@@ -336,6 +336,24 @@ pass reviews one section of the store, and the next pass starts where it left
 off. Synthesis can't spend the last two daily inference calls, so
 consolidation keeps a share of the budget.
 
+A standing preference is a user fact under a `pref.<topic>` key, such as
+`pref.subagent_models`, `pref.ci_policy`, `pref.deploy` or `pref.delegation`.
+Each topic holds one current value per scope. When the user changes how the
+agent should work, the agent updates that fact (`memory_id` plus
+`expected_revision`) rather than adding another dated rule. A new save under a
+taken key is refused with the existing ID and revision, so one retry updates
+it. `Remember` with `replaces: [ids]` archives the older facts on the same
+topic. It does not delete them: their text and history stay, `Recall` shows
+them as superseded, and forgetting the replacement brings them back. Only a
+user-requested save can replace a user fact, and only in a compatible scope
+(the same scope, or a global save over a project fact). A new user or agent
+save also lists up to three similar facts in its receipt, so the agent can
+fold them in with `replaces`. Nothing changes until it does.
+
+The `# Memory` snapshot lists standing preferences first, under their own
+heading, in a reserved 2,500-character share of its 8,000-character budget.
+Unused room goes back to other facts, and other facts can't crowd them out.
+
 Stores written before the tiers existed are migrated in place. An old
 protected entry stays a user fact if its key or text shows that it records the
 user (for example `profile.*` or `The user prefers…`). Any other old protected
