@@ -2,12 +2,15 @@
 import asyncio
 import base64
 import json
+import logging
 from unittest.mock import AsyncMock
 
 import pytest
 from app.core import voice_stream
-from app.core.voice_grok import GrokVoiceStream, grok_session
-from app.core.voice_models import GROK_MODEL, GROK_VOICES, LIVE_VOICES, transport_for
+from app.core.voice_grok import GrokVoiceStream, SuperGrokVoiceStream, grok_session
+from app.core.voice_models import (
+    GROK_MODEL, GROK_VOICES, LIVE_VOICES, SUPERGROK_MODEL, transport_for,
+)
 from app.core.voice_options import validate_options
 from app.db import database as db
 from tests.api.test_voice_api import _make_provider, _enable_voice, VOICE_SETTINGS, VOICE_ROOT
@@ -92,6 +95,202 @@ async def test_grok_wire_transcripts_and_same_chat_delegation(monkeypatch):
     call.websocket.send_json.assert_any_await({"type": "clear"})
     await call.send({"type": "session.input_audio.append", "audio": "AAA="})
     assert json.loads(call.upstream.sent[-1]) == {"type": "input_audio_buffer.append", "audio": "AAA="}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream_class,model", [
+    (GrokVoiceStream, GROK_MODEL), (SuperGrokVoiceStream, SUPERGROK_MODEL),
+])
+@pytest.mark.parametrize("completions,deltas", [
+    pytest.param(
+        [("a", "We need"), ("a", "We need to work"), ("a", "We need to work on this.")],
+        ["We need", " to work", " on this."], id="growing-prefixes",
+    ),
+    pytest.param(
+        [(None, "We need"), (None, "We need to work"), (None, "We need to work")],
+        ["We need", " to work"], id="cumulative-without-item-id",
+    ),
+    pytest.param(
+        [("a", "We need to work."), ("a", "We need to work.")],
+        ["We need to work."], id="exact-repeat",
+    ),
+    pytest.param(
+        [("a", "Like"), ("b", "We need"), ("a", "Like")],
+        ["Like", " We need"], id="distinct-items-and-late-repeat",
+    ),
+    pytest.param(
+        [("a", "Try"), ("b", "Try")], ["Try", " Try"], id="distinct-identical-items",
+    ),
+    pytest.param(
+        [("a", "Use red"), ("a", "Use tan"), ("a", "Use"), ("a", "Use red please")],
+        ["Use red", " please"], id="shorter-revision-keeps-emitted-prefix",
+    ),
+    pytest.param(
+        [("a", "I want red"), ("a", "I wanted red cars"), ("a", "I wanted red cars"),
+         ("a", "I wanted red cars today")],
+        ["I want red", " cars", " today"], id="longer-revision-retains-new-whole-words",
+    ),
+    pytest.param(
+        [("a", "We need to"), ("b", "We need to work"), ("c", "We need to work on this")],
+        ["We need to", " work", " on this"], id="cumulative-across-items",
+    ),
+    pytest.param(
+        [("a", "We need to do some work on the suggested response feature. Like"),
+         ("b", "We need to do some work on the suggested response feature. Like, "
+          "that's obviously not helpful.")],
+        ["We need to do some work on the suggested response feature. Like",
+         ", that's obviously not helpful."], id="cross-item-call-shape",
+    ),
+    pytest.param(
+        [("a", "Suggested replies"), ("b", "Suggested replies need work")],
+        ["Suggested replies", " need work"], id="cross-item-character-minimum",
+    ),
+    pytest.param(
+        [("a", "We need"), ("b", "We need to work")],
+        ["We need", " We need to work"], id="cross-item-below-minimum",
+    ),
+    pytest.param(
+        [("a", "yes"), ("b", "yes")], ["yes", " yes"], id="distinct-yes-items",
+    ),
+    pytest.param(
+        [("a", "go"), ("b", "gopher")], ["go", " gopher"], id="short-prefix-is-not-cumulative",
+    ),
+    pytest.param(
+        [("a", "Like "), ("b", "We need")], ["Like ", "We need"], id="existing-space",
+    ),
+    pytest.param(
+        [("a", "Like"), ("b", " We need")], ["Like", " We need"], id="incoming-space",
+    ),
+    pytest.param(
+        [(None, "Like"), (None, "We need")], ["Like", " We need"], id="unkeyed-utterances",
+    ),
+    pytest.param(
+        [("a", ""), ("a", None), ("b", "We need")], ["We need"], id="empty-completions",
+    ),
+])
+async def test_grok_input_completions_become_only_new_caption_text(
+    stream_class, model, completions, deltas,
+):
+    call = stream_class(AsyncMock(), {"id": "s"}, {"model": model, "voice": "eve"}, "secret", 5)
+    call.upstream = Upstream([json.dumps({
+        "type": "conversation.item.input_audio_transcription.completed", "transcript": text,
+        **({"item_id": item_id} if item_id is not None else {}),
+    }) for item_id, text in completions])
+    await call.receive_upstream()
+    assert call.pending["user"] == "".join(deltas)
+    assert "".join(entry["text"] for entry in call.transcript) == "".join(deltas)
+    captions = [args.args[0] for args in call.websocket.send_json.await_args_list]
+    assert [event["delta"] for event in captions if event["type"] == "caption"] == deltas
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream_class,model", [
+    (GrokVoiceStream, GROK_MODEL), (SuperGrokVoiceStream, SUPERGROK_MODEL),
+])
+@pytest.mark.parametrize("item_ids", [
+    ("speech-1",) * 4, (None,) * 4, ("a", "b", "c", "c"),
+], ids=["same-item", "unkeyed", "changing-items"])
+async def test_grok_repeated_request_prefixes_are_stored_and_delegated_once(
+    monkeypatch, stream_class, model, item_ids,
+):
+    from app.core import turn_recorder
+
+    chunks = ["We need to fix suggested replies. Like", ", respond as if", " the user wrote them."]
+    request = "".join(chunks)
+    prefixes = ["".join(chunks[:end]) for end in range(1, len(chunks) + 1)]
+    call = stream_class(
+        AsyncMock(), {"id": "same-chat"}, {"model": model, "voice": "eve"}, "secret", 5,
+    )
+    call.upstream = Upstream([json.dumps({
+        "type": "conversation.item.input_audio_transcription.completed", "transcript": text,
+        **({"item_id": item_id} if item_id is not None else {}),
+    }) for item_id, text in zip(item_ids, [*prefixes, request])] + [json.dumps({
+        "type": "response.function_call_arguments.done",
+        "name": "delegate_to_chat_agent", "call_id": "tool-1",
+    })])
+    call.settle_speech = AsyncMock()
+    store = AsyncMock()
+    delegate = AsyncMock(return_value="I will fix it.")
+    monkeypatch.setattr(turn_recorder, "record_voice_exchange", store)
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    await call.receive_upstream()
+    await call.delegation_task
+    store.assert_awaited_once_with(
+        "same-chat", request, None, model=model, user_source="voice",
+    )
+    delegate.assert_awaited_once_with(
+        "same-chat",
+        "Live conversation context (only the latest new request needs action):\n"
+        f"user: {request}\n",
+        spoken=request, command=f"voice:{call.call_key}:tool-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_grok_input_item_cache_evicts_least_recent_completion():
+    call = GrokVoiceStream(
+        AsyncMock(), {"id": "s"}, {"model": GROK_MODEL, "voice": "eve"}, "secret", 5,
+    )
+    call.upstream = Upstream([json.dumps({
+        "type": "conversation.item.input_audio_transcription.completed",
+        "item_id": f"item-{index}", "transcript": f"word{index}",
+    }) for index in range(65)])
+    await call.receive_upstream()
+    assert len(call.input_transcripts) == 64
+    assert "item-0" not in call.input_transcripts
+    call.upstream.events = [json.dumps({
+        "type": "conversation.item.input_audio_transcription.completed",
+        "item_id": f"item-{index}", "transcript": f"word{index}",
+    }) for index in (1, 65)]
+    await call.receive_upstream()
+    assert len(call.input_transcripts) == 64
+    assert "item-1" in call.input_transcripts  # A repeated item refreshes its recency.
+    assert "item-2" not in call.input_transcripts
+    assert "item-65" in call.input_transcripts
+
+
+@pytest.mark.asyncio
+async def test_grok_flush_retains_item_baselines_but_not_a_leading_separator(monkeypatch):
+    from app.core import turn_recorder
+
+    monkeypatch.setattr(turn_recorder, "record_voice_exchange", AsyncMock())
+    call = GrokVoiceStream(
+        AsyncMock(), {"id": "s"}, {"model": GROK_MODEL, "voice": "eve"}, "secret", 5,
+    )
+    call.upstream = Upstream([json.dumps({
+        "type": "conversation.item.input_audio_transcription.completed",
+        "item_id": "a", "transcript": "Like",
+    })])
+    await call.receive_upstream()
+    await call.flush()
+    assert call.pending["user"] == ""
+    call.upstream.events = [json.dumps({
+        "type": "conversation.item.input_audio_transcription.completed",
+        "item_id": item_id, "transcript": text,
+    }) for item_id, text in [("a", "Like"), ("b", "We need")]]
+    await call.receive_upstream()
+    assert call.pending["user"] == "We need"
+    assert call.input_transcripts["a"] == "Like"
+
+
+@pytest.mark.asyncio
+async def test_grok_completion_debug_logs_only_ids_and_lengths(caplog):
+    caplog.set_level(logging.DEBUG, logger="app.core.voice_grok")
+    call = GrokVoiceStream(
+        AsyncMock(), {"id": "s"}, {"model": GROK_MODEL, "voice": "eve"}, "secret", 5,
+    )
+    texts = ["I want red", "I wanted red cars"]
+    call.upstream = Upstream([json.dumps({
+        "type": "conversation.item.input_audio_transcription.completed",
+        "item_id": "speech", "previous_item_id": "preceding", "transcript": text,
+    }) for text in texts])
+    await call.receive_upstream()
+    assert "item_id='speech' previous_item_id='preceding'" in caplog.text
+    assert "Grok input revision item_id='speech'" in caplog.text
+    for text in texts:
+        assert f"chars={len(text)}" in caplog.text
+        assert text not in caplog.text
+    assert f"previous_chars={len(texts[0])}" in caplog.text
 
 
 @pytest.mark.asyncio
