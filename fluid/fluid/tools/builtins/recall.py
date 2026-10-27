@@ -89,6 +89,16 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     return await asyncio.to_thread(_lookup, query, limit, store, ctx.extra.get("memory_project"))
 
 
+def _local_ids(store: Any) -> dict[str, str]:
+    """Replica-stable global IDs to the IDs Recall and Remember use here."""
+    try:
+        from fluid.codemode.facts import global_id
+        return {global_id(vars(e)): e.id for e in (*store.memories(), *store.archived_memories())
+                if e.origin}
+    except Exception:  # noqa: BLE001 — a label falls back to the global ID
+        return {}
+
+
 def _lookup(query: str, limit: int, store: Any, project: str | None) -> ToolOutcome:
     from fluid.context.screening import screen_findings
     from fluid.codemode.relevance import recall_terms, recall_scorer
@@ -110,6 +120,7 @@ def _lookup(query: str, limit: int, store: Any, project: str | None) -> ToolOutc
         lines.append(f"- [{entry.id}] Unresolved conflict; revision: {entry.revision}; key: {entry.key or 'unspecified'}. "
                      "Ask the user for the current fact, then correct this ID and revision with Remember. Do not guess a value.")
     if memory_hits:
+        successor = _local_ids(store) if any(e.superseded_by for e, _ in memory_hits) else {}
         lines.append("Memories:")
         for entry, archived in memory_hits:
             findings = screen_findings(entry.text)
@@ -132,7 +143,8 @@ def _lookup(query: str, limit: int, store: Any, project: str | None) -> ToolOutc
             if entry.provenance == "tool":
                 tags.append("harvested from tool output, unconfirmed — confirm with Remember if still true")
             if entry.superseded_by:
-                tags.append(f"superseded by: {entry.superseded_by}; not current")
+                shown = successor.get(entry.superseded_by, entry.superseded_by)
+                tags.append(f"superseded by [{shown}]; not current")
             if archived:
                 tags.append("archived")
             if entry.scope != "global":

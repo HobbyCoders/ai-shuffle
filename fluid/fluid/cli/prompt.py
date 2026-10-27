@@ -886,7 +886,10 @@ def _instructions_section(p: PromptProfile) -> str | None:
         if remember:
             bullet += (
                 " Use Remember for durable facts and requested saves. "
-                "Only claim success after its saved receipt."
+                "Only claim success after its saved receipt. When the user "
+                "corrects how you work (models, delegation, review, deploy, "
+                "process), update the matching pref.<topic> fact with "
+                "replaces=[older rows on that topic] instead of adding a dated rule."
             )
         if recall:
             bullet += (
