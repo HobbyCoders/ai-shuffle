@@ -8,20 +8,73 @@ really be spawned from a unit test. Tests that need a Claude setup build one
 under their own tmp home and re-point HOME themselves; their ``monkeypatch``
 runs after this fixture, so it wins.
 
-A session guard also keeps the machine's real ``claude`` CLI off PATH (see
+The cached default skills root and its CLI aliases also point into that home.
+Session guards block writes to the real Fluid skills store before they reach
+disk and keep the machine's real ``claude`` CLI off PATH (see
 ``strip_real_claude_dirs``).
 """
 
 import os
 import shlex
 import subprocess
+import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
 # The fluid project root (fluid/tests/conftest.py sits one level below it).
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# Capture this before any fixture redirects HOME.
+_REAL_SKILLS_ROOT = Path.home() / ".fluid" / "skills"
+
+
+@contextmanager
+def guard_skills_writes(root):
+    """Fail before a filesystem mutation reaches the protected skills store."""
+    # Use the existing os.path helper, not Path(): shell tests mock os.name,
+    # which would otherwise select WindowsPath on a POSIX host (or vice versa).
+    root = os.path.realpath(root)
+    active = True
+
+    def guard(event, args):
+        if not active:
+            return
+        if event == "open":
+            if not args[2] & (os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC):
+                return
+            paths = args[:1]
+        elif event in {
+            "os.mkdir", "os.remove", "os.rmdir", "os.truncate", "os.chmod",
+            "os.chown", "os.utime",
+        }:
+            paths = args[:1]
+        elif event in {"os.rename", "os.link", "os.symlink"}:
+            paths = args[:2]
+        else:
+            return
+        for path in paths:
+            if isinstance(path, (str, bytes, os.PathLike)):
+                resolved = os.path.realpath(os.fsdecode(path))
+                if _is_inside(resolved, (root,)):
+                    # Failed is a BaseException: best-effort memory saves catch
+                    # Exception, which must not silently swallow this guard.
+                    pytest.fail(f"Blocked write to real Fluid skills store: {resolved}")
+
+    sys.addaudithook(guard)
+    try:
+        yield
+    finally:
+        # Audit hooks cannot be removed; leave this one inert after the run.
+        active = False
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _no_real_skills_writes():
+    with guard_skills_writes(_REAL_SKILLS_ROOT):
+        yield
+
 
 # ─── No real ``claude`` CLI in tests ────────────────────────────────────────
 # A test that forgets to point the delegated leg at a fake would otherwise run
@@ -86,10 +139,18 @@ def _no_real_claude_on_path():
 
 @pytest.fixture(autouse=True)
 def isolate_home(tmp_path_factory, monkeypatch):
+    from fluid.cli import evolve, replay
+    from fluid.codemode import skills
+
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    # HOME alone is too late: collection imports skills.py, which caches this
+    # path, and evolve/replay retain their own imported aliases. Give all three
+    # the same per-test root; later imports also see the patched source value.
+    for module in (skills, evolve, replay):
+        monkeypatch.setattr(module, "DEFAULT_SKILLS_ROOT", home / ".fluid" / "skills")
     return home
 
 
