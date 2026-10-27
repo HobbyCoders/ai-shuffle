@@ -116,7 +116,10 @@
 	const SCRUB_DWELL_MS = 300;
 	/** Band at each rail edge where a held finger scrolls the rail. */
 	const SCRUB_EDGE_PX = 28;
+	/** Fastest edge scroll, per 60 Hz frame (scaled by the real frame time so
+	 *  a 120 Hz phone scrolls at the same speed). */
 	const SCRUB_EDGE_MAX_STEP_PX = 12;
+	const FRAME_MS = 1000 / 60;
 
 	interface Scrub {
 		pointerId: number;
@@ -125,12 +128,16 @@
 		active: boolean;
 		/** Last index handed to onSelect during this gesture. */
 		selected: number | null;
+		/** Tick the finger landed on, whose click a scrub must swallow. */
+		startTick: number;
+		/** Timestamp of the previous edge-scroll frame (0: not scrolling). */
+		lastFrame: number;
 	}
 	let scrub: Scrub | null = null;
 	let scrubbing = $state(false);
 	let dwellTimer: ReturnType<typeof setTimeout> | undefined;
 	let edgeFrame = 0;
-	let suppressClickUntil = 0;
+	let suppressClick = { index: -1, until: 0 };
 
 	/** The tick nearest a viewport y, clamped to the rail's visible box. */
 	function indexAtY(clientY: number): number | null {
@@ -169,17 +176,23 @@
 
 	/** Held near (or past) an edge with more turns beyond it, the rail scrolls
 	 *  under the finger, faster the further out the finger is. */
-	function edgeScroll() {
+	function edgeScroll(now: number) {
 		edgeFrame = 0;
 		if (!scrub?.active || !rail) return;
 		const box = rail.getBoundingClientRect();
 		const intoTop = box.top + SCRUB_EDGE_PX - scrub.y;
 		const intoBottom = scrub.y - (box.bottom - SCRUB_EDGE_PX);
-		const step = (depth: number) => Math.ceil(Math.min(1, depth / (SCRUB_EDGE_PX * 2)) * SCRUB_EDGE_MAX_STEP_PX);
+		const frames = scrub.lastFrame ? Math.min(3, (now - scrub.lastFrame) / FRAME_MS) : 1;
+		const step = (depth: number) =>
+			Math.ceil(Math.min(1, depth / (SCRUB_EDGE_PX * 2)) * SCRUB_EDGE_MAX_STEP_PX * frames);
 		let delta = 0;
 		if (intoTop > 0 && rail.scrollTop > 0) delta = -step(intoTop);
 		else if (intoBottom > 0 && rail.scrollTop + rail.clientHeight < rail.scrollHeight) delta = step(intoBottom);
-		if (!delta) return;
+		if (!delta) {
+			scrub.lastFrame = 0;
+			return;
+		}
+		scrub.lastFrame = now;
 		rail.scrollTop += delta;
 		updateScrollEdges();
 		trackScrub();
@@ -187,6 +200,7 @@
 
 	function endScrub(commit: boolean) {
 		const active = scrub?.active ?? false;
+		const startTick = scrub?.startTick ?? -1;
 		clearTimeout(dwellTimer);
 		if (edgeFrame && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(edgeFrame);
 		edgeFrame = 0;
@@ -196,8 +210,8 @@
 		scrubbing = false;
 		hoveredIndex = null;
 		// The gesture's own click (if the browser still sends one) must not
-		// select the tick the finger started on.
-		suppressClickUntil = Date.now() + 400;
+		// select the tick the finger started on. Other ticks stay tappable.
+		suppressClick = { index: startTick, until: Date.now() + 400 };
 		// Like a tap, a scrub must not leave a focused tick lit as if current.
 		const focusedEl = document.activeElement;
 		if (focusedEl instanceof HTMLElement && nav?.contains(focusedEl)) focusedEl.blur();
@@ -206,7 +220,16 @@
 	function onRailPointerDown(event: PointerEvent) {
 		if (event.pointerType === 'mouse' || event.isPrimary === false) return;
 		endScrub(false);
-		scrub = { pointerId: event.pointerId, startY: event.clientY, y: event.clientY, active: false, selected: null };
+		const landed = event.target instanceof Element ? event.target.closest('.tick') : null;
+		scrub = {
+			pointerId: event.pointerId,
+			startY: event.clientY,
+			y: event.clientY,
+			active: false,
+			selected: null,
+			startTick: landed && rail ? Array.prototype.indexOf.call(rail.children, landed) : -1,
+			lastFrame: 0
+		};
 	}
 
 	function onRailPointerMove(event: PointerEvent) {
@@ -289,7 +312,7 @@
 				aria-current={index === resolvedIndex ? 'true' : undefined}
 				tabindex={index === (focusedTick ?? resolvedIndex) ? 0 : -1}
 				onclick={(event) => {
-					if (Date.now() < suppressClickUntil) return;
+					if (index === suppressClick.index && Date.now() < suppressClick.until) return;
 					onSelect(index);
 					// A tap focuses the tick, which would keep it lit as if it were
 					// the current turn after the reader scrolls on.

@@ -181,6 +181,11 @@ describe('TurnNavigator', () => {
 			expect(container.querySelector('.is-scrubbing')).toBeNull();
 			expect(container.querySelector('.is-hovered')).toBeNull();
 			expect(preview.classList.contains('is-visible')).toBe(false);
+
+			// A quick tap on another tick right after the scrub still selects it.
+			await fireEvent.click(ticks[3]);
+			expect(onSelect).toHaveBeenCalledTimes(2);
+			expect(onSelect).toHaveBeenLastCalledWith(3);
 		});
 
 		it('selects the tick under the finger when it lifts before resting', async () => {
