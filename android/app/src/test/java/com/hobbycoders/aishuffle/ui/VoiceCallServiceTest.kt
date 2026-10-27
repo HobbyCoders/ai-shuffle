@@ -27,7 +27,7 @@ class VoiceCallServiceTest {
     private val commands = mutableListOf<MobileUi.VoiceCallCommand>()
     private var visible = true
     private var microphone = true
-    private val keeper = VoiceCallKeeper(app, "worker-1", "HomeLab", { visible }, { microphone }) { commands += it }
+    private val keeper = VoiceCallKeeper(app, "worker-1", "Studio worker", { visible }, { microphone }) { commands += it }
     private val live = MobileUi.ShellMessage.VoiceCallState("live", false, 1_700_000_000_000, "Planning")
 
     private val services = mutableListOf<org.robolectric.android.controller.ServiceController<VoiceCallService>>()
@@ -121,7 +121,7 @@ class VoiceCallServiceTest {
     @Test fun anOlderPageGetsANotificationWithoutControls() {
         keeper.started(3)
         val notification = VoiceCallService.notification(app, VoiceCallService.call!!)
-        assertEquals("Voice call · HomeLab", notification.extras.getCharSequence(Notification.EXTRA_TITLE).toString())
+        assertEquals("Voice call · Studio worker", notification.extras.getCharSequence(Notification.EXTRA_TITLE).toString())
         assertEquals(emptyList<String>(), actions(notification))
     }
 
@@ -144,9 +144,9 @@ class VoiceCallServiceTest {
 
     @Test fun anotherOwnerCannotStopOrUpdateTheCall() {
         keeper.started(3)
-        val other = VoiceCallKeeper(app, "worker-2", "GamingPC", { true }, { true }) { }
+        val other = VoiceCallKeeper(app, "worker-2", "Desk worker", { true }, { true }) { }
         VoiceCallService.stop(app, other)
-        VoiceCallService.update(app, other, VoiceCallService.Call("worker-2", "GamingPC"))
+        VoiceCallService.update(app, other, VoiceCallService.Call("worker-2", "Desk worker"))
         assertEquals("worker-1", VoiceCallService.call!!.serverId)
     }
 
