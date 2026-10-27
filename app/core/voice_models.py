@@ -89,7 +89,7 @@ def model_details(model: str, options: dict | None = None) -> dict:
         runtime = [
             {"label": "Audio format", "value": "PCM16 · 24 kHz · mono"},
             {"label": "Reasoning and tools", "value": "Uses the model, effort and permissions selected in the chat composer"},
-            {"label": "Opening words", "value": options["opening"] or "Wait for caller"},
+            {"label": "Greeting", "value": "Picks up with a short hello (welcome back on a chat with history); never again after a reconnect"},
             {"label": "Turn detection", "value": "server_vad" if model in (GROK_MODEL, SUPERGROK_MODEL) else "Managed by GPT Live; no VAD override is sent"},
             {"label": "Microphone gate", "value": f"Audio quieter than {options['mic_threshold_db']:g} dBFS is sent as silence"},
         ]

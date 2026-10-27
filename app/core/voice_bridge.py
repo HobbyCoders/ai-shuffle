@@ -1107,7 +1107,15 @@ class VoiceBridge:
         # session.update so the greeting is spoken in the configured voice
         # with the configured instructions.
         if self._greet:
-            await self._inject(GREETING_PROMPT)
+            greeting = GREETING_PROMPT
+            if self._conversation_surface:
+                # A call on a chat greets the owner by first name when known.
+                from app.core import voice_greeting
+                from app.core.voice_prompts import CALLER_NAME_NOTE
+                name = await run_sync(voice_greeting.caller_first_name, self.session_id, self._api_user_id)
+                if name:
+                    greeting += "\n" + CALLER_NAME_NOTE + name
+            await self._inject(greeting)
 
         # Only a successful attach restores the durable working-set flag. A
         # finished call may be rejoined without creating a fresh session row.

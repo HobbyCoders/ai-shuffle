@@ -81,7 +81,7 @@ class TestChatGPTVoices:
     def test_codex_options_round_trip(self, authenticated_client, mock_db):
         c = authenticated_client
         c.put(VOICE_SETTINGS, json={"voice_model": CODEX_MODEL})
-        patch = {"opening": "Hi there", "instructions": "Be brief.", "delegation_instructions": "Use the chat.", "mic_threshold_db": -50}
+        patch = {"instructions": "Be brief.", "delegation_instructions": "Use the chat.", "mic_threshold_db": -50}
         response = c.put(VOICE_SETTINGS, json={"voice_options": patch, "voice_options_model": CODEX_MODEL})
         assert response.status_code == 200, response.text
         options = c.get(VOICE_SETTINGS).json()["voice_options"]
@@ -139,7 +139,7 @@ class TestProviderPinPersistence:
     @pytest.mark.parametrize("update", [
         {"voice_voice": "cedar"},
         {"voice_max_call_minutes": 30},
-        {"voice_options": {"opening": "Hello"}},
+        {"voice_options": {"instructions": "Hello"}},
         {"voice_model": LIVE_MODEL},
     ])
     @pytest.mark.parametrize("state", ["disabled", "needs_reauth"])
@@ -233,13 +233,13 @@ class TestLive11Gate:
         _models_answer(monkeypatch, 200)
         c = authenticated_client
         c.put(VOICE_SETTINGS, json={"voice_model": LIVE_11_MODEL})
-        c.put(VOICE_SETTINGS, json={"voice_options": {"opening": "Hello"}, "voice_options_model": LIVE_11_MODEL})
+        c.put(VOICE_SETTINGS, json={"voice_options": {"instructions": "Hello"}, "voice_options_model": LIVE_11_MODEL})
         voice_availability.clear_cache()
         _models_answer(monkeypatch, 404)
         body = c.get(VOICE_SETTINGS).json()
         assert body["voice_model"] == "gpt-live-1"
         # Options are shared, so the fallback keeps what was written.
-        assert body["voice_options"]["opening"] == "Hello"
+        assert body["voice_options"]["instructions"] == "Hello"
         assert database.get_system_setting("voice_model") == LIVE_11_MODEL
         from app.api.settings import get_voice_settings
         assert get_voice_settings()["voice_model"] == "gpt-live-1"

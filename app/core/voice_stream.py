@@ -163,11 +163,21 @@ def live_session_config(config: dict, history: list[dict]) -> dict:
 
 
 def live_opening_event(text: str) -> dict:
+    """Speak ``text`` first, word for word (the Settings voice sample)."""
+    return live_greeting_event(
+        "Greet immediately without waiting for the caller. Say these opening words in their written language, then pause and listen: " + text)
+
+
+def live_greeting_event(content: str) -> dict:
+    """An instruction append that makes GPT Live speak first.
+
+    Its acknowledgement triggers the "begin now" commentary (receive_upstream).
+    """
     import uuid
     return {
         "type": "session.instructions.append", "event_id": str(uuid.uuid4()),
         "delegation_id": None,
-        "content": "Greet immediately without waiting for the caller. Say these opening words in their written language, then pause and listen: " + text,
+        "content": content,
     }
 
 
@@ -1169,14 +1179,26 @@ class VoiceStream:
         self.heard_this_session = False
         self.unheard_voiced_s = 0.0
         self.deaf.clear()
-        if self.restoring:
-            return  # Never greet again after a reconnect.
-        if self.options["opening"] and not history and self.config.get("greet", True):
+        note = await self.greeting(history)
+        if note:
             # Provider rejection is surfaced by receive_upstream, not silently
-            # treated as spoken audio. Never greet again after conversation replay.
-            event = live_opening_event(self.options["opening"])
+            # treated as spoken audio.
+            event = live_greeting_event(note)
             self.opening_event_id = event["event_id"]
             await self.send(event)
+
+    async def greeting(self, history) -> str | None:
+        """The trigger to speak first on this provider session, or None.
+
+        A fresh call greets, a call into a conversation with history is
+        welcomed back, and a renewal or reconnect never greets again. A call a
+        native client opened (``greet`` False) waits for the caller.
+        """
+        if self.restoring or not self.config.get("greet", True):
+            return None
+        from app.core import voice_greeting
+        name = await run_sync(voice_greeting.caller_first_name, self.session_id, self.api_user_id)
+        return voice_greeting.greeting_note(name, returning=bool(history))
 
     async def live_history(self, resumed: bool = False) -> list[dict]:
         """The saved conversation as GPT Live start-up history.

@@ -66,6 +66,6 @@ class CodexVoiceStream(VoiceStream):
             raise ValueError("ChatGPT voice could not start. Check your ChatGPT login in Settings > Providers, then try again.") from None
         finally:
             self.api_key = ""
-        if self.options["opening"] and not history and self.config.get("greet", True):
-            await self.send({"type": "session.instructions.append", "content":
-                "Greet immediately, then listen: " + self.options["opening"]})
+        note = await self.greeting(history)
+        if note:
+            await self.send({"type": "session.instructions.append", "content": note})

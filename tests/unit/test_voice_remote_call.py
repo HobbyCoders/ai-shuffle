@@ -441,4 +441,4 @@ async def test_a_call_that_starts_mid_work_on_the_owner_hears_so(mirror, monkeyp
 
     await desk.open()
 
-    assert desk.pending["chat"][0] == "Chat work is already running. Do not start it again."
+    assert desk.pending["chat"][0] == "Work on an earlier request is already running. Do not start it again."

@@ -22,7 +22,7 @@ The **Dictation** settings on the same page, including the **Voice input hotkey*
 
 In any chat, press the round **Talk** button (a waveform) to the right of the message box, next to the microphone. Talk shows while the message box is empty; once you type or attach something it turns into **Send**, and clearing the box brings Talk back. In a new chat it reads **Talk to** the agent's name and creates the chat first.
 
-You can also choose **Voice** in the session mode switcher, then **Start a voice call**. To call again on an existing voice chat, use **Start a call on this voice session** in the composer. Each new call uses your current voice settings, so changing the engine or voice in Settings applies to the next call in any chat. A call that is already running keeps its engine and voice until you hang up.
+You can also choose **Voice** in the session mode switcher, then **Start a voice call**. To call again on an existing voice chat, use **Start a call on this voice session** in the composer. When you start a call, the voice picks up first with a short hello, using your first name when the app knows it (never a username). On a chat that already has history it welcomes you back instead, and it never greets again after a reconnect. Each new call uses your current voice settings, so changing the engine or voice in Settings applies to the next call in any chat. A call that is already running keeps its engine and voice until you hang up.
 
 During a call, the call dock shows whether it is connected and who is speaking, how long the call has run, and buttons to:
 

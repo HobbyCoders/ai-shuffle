@@ -14,19 +14,31 @@ from app.core import voice_stream
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("history,greet,opens", [([],True,True),([{"role":"user","content":"Earlier conversation"}],True,False),([],False,False)])
-async def test_live_startup_sends_opening_only_on_first_browser_call(history,greet,opens):
+@pytest.mark.parametrize("history,greet,restoring,expected", [
+    ([], True, False, "new"),
+    ([{"role": "user", "content": "Earlier conversation"}], True, False, "returning"),
+    ([], False, False, None),          # A native phone session waits for the caller.
+    ([{"role": "user", "content": "Earlier"}], True, True, None),  # Renewal: never again.
+])
+async def test_live_greets_a_fresh_call_welcomes_back_and_never_after_renewal(monkeypatch, history, greet, restoring, expected):
+    from app.core import voice_greeting
+    from app.core.voice_prompts import CALLER_NAME_NOTE, GREETING_NEW_CALL, GREETING_RETURNING_CALL
+
+    monkeypatch.setattr(voice_greeting, "caller_first_name", lambda session_id, api_user_id: "Sam")
     call=voice_stream.VoiceStream(AsyncMock(),{"id":"s1"},{"model":"gpt-live-1","voice":"marin","greet":greet,"options":{"opening":"Hello caller.","instructions":"Be concise."}},"secret",3600)
+    call.restoring = restoring
     call.upstream=AsyncMock()
     call.upstream.recv.return_value=json.dumps({"type":"session.started"})
     await call.start_live(history)
     sent=[json.loads(args.args[0]) for args in call.upstream.send.call_args_list]
     assert sent[0]["session"]["instructions"] == "Be concise."
-    assert len(sent) == (2 if opens else 1)
-    if opens:
-        assert sent[1]["type"] == "session.instructions.append"
-        assert sent[1]["delegation_id"] is None
-        assert sent[1]["content"].endswith("Hello caller.")
+    assert len(sent) == (2 if expected else 1)
+    if expected:
+        trigger = GREETING_NEW_CALL if expected == "new" else GREETING_RETURNING_CALL
+        assert sent[1]["type"] == "session.instructions.append" and sent[1]["delegation_id"] is None
+        # Prompt-owned text, never the retired user-set words.
+        assert sent[1]["content"] == trigger + "\n" + CALLER_NAME_NOTE + "Sam"
+        assert call.opening_event_id == sent[1]["event_id"]
 
 
 @pytest.mark.asyncio
@@ -461,7 +473,7 @@ def _unquoted(text):
 def test_default_call_prompts_never_frame_a_second_entity_or_leak_rules():
     """Phrases the voice said aloud, or that made it describe "the agent" as
     someone else, may appear only as quoted examples of what not to say."""
-    from app.core import voice_bridge, voice_progress
+    from app.core import voice_bridge, voice_progress, voice_prompts
     from app.core.voice_prompts import DELEGATION_INSTRUCTIONS, LIVE_INSTRUCTIONS
     leaked = ("silence is fine", "chat agent", "the agent", "work update", "audio surface",
               "read it to the caller", "policy:", "backend")
@@ -469,7 +481,7 @@ def test_default_call_prompts_never_frame_a_second_entity_or_leak_rules():
                  voice_bridge.CONVERSATION_WORK_RULES, voice_progress.RESULT_NOTE, voice_progress.MILESTONE_NOTE,
                  voice_progress.PROGRESS_NOTE, voice_progress.PARKED_NOTE, voice_progress.STEERED_NOTE,
                  voice_progress.REMOTE_STEERED_NOTE, voice_stream.NO_REQUEST_NOTE, voice_stream.MERGED_REQUEST_NOTE,
-                 voice_stream.APPROVAL_ANSWER_NOTE):
+                 voice_stream.APPROVAL_ANSWER_NOTE, voice_prompts.GREETING_NEW_CALL, voice_prompts.GREETING_RETURNING_CALL):
         plain = _unquoted(text)
         assert not [phrase for phrase in leaked if phrase in plain], text
     from app.core import voice_status

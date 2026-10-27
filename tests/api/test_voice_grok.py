@@ -386,7 +386,10 @@ async def test_grok_sends_work_update_once_without_adding_another_prefix():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("history,greet", [([], True), ([{"content": [{"text": "Earlier chat"}]}], True), ([], False)])
-async def test_grok_opening_is_additive_and_only_for_a_fresh_greeted_call(history, greet):
+async def test_grok_greets_with_the_prompt_owned_trigger(monkeypatch, history, greet):
+    from app.core import voice_greeting
+    from app.core.voice_prompts import GREETING_NEW_CALL, GREETING_RETURNING_CALL
+    monkeypatch.setattr(voice_greeting, "caller_first_name", lambda session_id, api_user_id: None)
     call = GrokVoiceStream(AsyncMock(), {"id": "s"}, {"model": GROK_MODEL, "voice": "ara", "greet": greet,
                           "options": {"instructions": "Keep my voice persona.", "opening": "Hello there."}}, "secret", 5)
     call.upstream = AsyncMock()
@@ -395,9 +398,11 @@ async def test_grok_opening_is_additive_and_only_for_a_fresh_greeted_call(histor
     sent = [json.loads(args.args[0]) for args in call.upstream.send.await_args_list]
     assert sent[0]["session"]["instructions"].startswith("Keep my voice persona.")
     requests = [e for e in sent if e["type"] == "response.create"]
-    assert requests == ([{"type": "response.create"}] if greet and not history else [])
+    assert requests == ([{"type": "response.create"}] if greet else [])
     if requests:
-        assert sent[-2]["item"]["content"] == [{"type": "input_text", "text": "Greet the caller: Hello there."}]
+        trigger = GREETING_RETURNING_CALL if history else GREETING_NEW_CALL
+        assert sent[-2]["item"]["content"] == [{"type": "input_text", "text": trigger}]
+    assert "Hello there." not in json.dumps(sent)
 
 @pytest.mark.asyncio
 async def test_grok_vad_reply_300ms_after_commit_cancels_fallback():

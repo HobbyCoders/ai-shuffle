@@ -29,7 +29,6 @@ class RealtimeOptions(PromptOptions):
 
 
 class LiveOptions(PromptOptions):
-    opening: str = Field(default="", max_length=2000)
     delegation_type: Literal["client", "responses"] = "client"
     delegation_model: str = Field(default="", max_length=500)
     delegation_effort: str = Field(default="", max_length=30)
@@ -41,13 +40,20 @@ class LiveOptions(PromptOptions):
 
 
 class GrokOptions(PromptOptions):
-    opening: str = Field(default="", max_length=2000)
     delegation_instructions: str = Field(default="", max_length=16000)
     mic_threshold_db: float = Field(default=-42.0, ge=-80, le=-20)
     turn_detection: Literal["server_vad"] = "server_vad"
 
 
+# Options that no longer exist. Saved settings and stored call bindings may
+# still carry them; they are dropped, never a validation error. ``opening``
+# (user-set greeting words) became part of the voice prompt's playbook.
+RETIRED_OPTIONS = ("opening",)
+
+
 def validate_options(model: str, value: dict) -> dict:
+    if isinstance(value, dict):
+        value = {k: v for k, v in value.items() if k not in RETIRED_OPTIONS}
     from app.core.voice_models import CODEX_MODEL, GROK_MODEL, LIVE_MODELS, PERSONAPLEX_MODEL, SUPERGROK_MODEL
 
     cls = (

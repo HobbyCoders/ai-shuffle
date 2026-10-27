@@ -1161,7 +1161,10 @@ async def _bind_new_call(
         "voice": voice_settings["voice_voice"],
         "provider_id": provider_row["id"],
         "options": voice_settings.get("voice_options", {}),
-        "greet": bool(previous.get("greet", False)),
+        # A call on a chat is started from the app's call button and picks up
+        # with a greeting; a voice session keeps what its creator chose (a
+        # native phone session waits for the caller).
+        "greet": True if row.get("mode") != "voice" else bool(previous.get("greet", False)),
         "conversation_surface": row.get("mode") != "voice",
     }
     return binding, provider_row, api_key
