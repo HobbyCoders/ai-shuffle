@@ -257,11 +257,15 @@ class TestPreviewVoiceAccess:
 
         async def run(self):
             seen.append((self.resumed, await self.greeting([{"role": "user", "content": []}])))
+            await self.websocket.send_json({"type": "test-done"})
 
         monkeypatch.setattr(voice_stream.VoiceStream, "run", run)
         query = "?resume=1" if resume else ""
-        with voice_auth_client.websocket_connect(f"ws://10.0.0.30:18090{VOICE_ROOT}/sessions/preview-voice/audio{query}"):
-            pass
+        with voice_auth_client.websocket_connect(
+            f"ws://10.0.0.30:18090{VOICE_ROOT}/sessions/preview-voice/audio{query}",
+        ) as websocket:
+            # Keep the socket open until greeting() has finished its thread-backed lookup.
+            assert websocket.receive_json() == {"type": "test-done"}
         assert seen == ([(True, None)] if resume else [(False, GREETING_RETURNING_CALL)])
 
     @pytest.mark.parametrize("resume", ["", "?resume=1"])
