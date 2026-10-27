@@ -22,7 +22,11 @@ MAX_MEMORY_SHARE_OF_LEGACY = 0.5
 MAX_COPIES_IN_A_REQUEST = 1.2
 # Measured 20-turn fixture; a 1% allowance permits minor wording changes, not
 # another snapshot. Regenerate with scripts/measure_memory_reminder.py.
-MEASURED_MEMORY_TOKENS = {"native": 43_539, "delegated": 42_537}
+# One style of memory (Oct 2026): the fixture's snapshot is now a when-line
+# index at the same ~2.1k-token size, and its header tells the model to Recall
+# a line by id (+71 chars, ~18 tokens per copy x 20 requests): native
+# 43,539 -> 43,629, delegated 42,537 -> 43,323.
+MEASURED_MEMORY_TOKENS = {"native": 43_629, "delegated": 43_323}
 
 
 @pytest.fixture(scope="module")

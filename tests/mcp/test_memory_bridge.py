@@ -102,7 +102,8 @@ async def test_remember_commits_the_fact_before_returning(monkeypatch, tmp_path)
     tools = _bridge_tools()
 
     result = await tools["Remember"].handler(
-        {"text": "the staging deploy runs from the blue box", "scope": "project"}
+        {"text": "the staging deploy runs from the blue box", "scope": "project",
+         "when": "When deploying to staging"}
     )
 
     assert not result.get("isError")
@@ -117,7 +118,8 @@ async def test_remember_commits_the_fact_before_returning(monkeypatch, tmp_path)
     assert not (tmp_path / "skills" / "journal.jsonl").exists()
 
     await tools["Remember"].handler(
-        {"text": "the user wants deploys on Fridays", "user_requested": True}
+        {"text": "the user wants deploys on Fridays", "user_requested": True,
+         "when": "When scheduling a deploy"}
     )
     pinned = [e for e in SkillStore(tmp_path / "skills").memories() if "Fridays" in e.text]
     assert pinned and pinned[0].protected
