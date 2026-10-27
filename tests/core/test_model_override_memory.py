@@ -66,6 +66,23 @@ def test_a_model_named_only_in_a_negated_clause_does_not_count(text, accepted, r
     assert not mo.memory_names(refused, text, CATALOG)
 
 
+@pytest.mark.parametrize("text, refused", [
+    ("NEVER use Opus, Sonnet or GPT 6.1 Sol", ("opus", "sonnet", SOL)),
+    ("Models to avoid: Opus, Sonnet", ("opus", "sonnet")),
+    ("Use Haiku instead of Opus, Sonnet or GPT 6.1 Sol", ("opus", "sonnet", SOL)),
+    ("Avoid Opus, Sonnet for code", ("opus", "sonnet")),
+])
+def test_a_negation_carries_through_the_rest_of_its_list(text, refused):
+    for model in refused:
+        assert not mo.memory_names(model, text, CATALOG), (model, text)
+
+
+def test_a_fresh_instruction_ends_the_negated_list():
+    text = "Never use Sonnet, use Opus for code"
+    assert mo.memory_names("opus", text, CATALOG)
+    assert not mo.memory_names("sonnet", text, CATALOG)
+
+
 def test_dots_and_colons_inside_a_model_name_do_not_split_it():
     assert mo.memory_names(SOL, "backend: gpt-6.1-sol", CATALOG)
     assert mo.memory_names(SOL, "backend on prov:chatgpt:gpt-6.1-sol.", CATALOG)

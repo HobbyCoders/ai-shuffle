@@ -610,13 +610,22 @@ def user_texts(session_id: str) -> List[str]:
 # What the owner saved
 # ---------------------------------------------------------------------------
 
-# Clause breaks: ; newline and dashes anywhere; . : , ! ? only before a space
-# or the end, so "GPT 6.1 Sol" and "prov:lane:astra" stay whole.
-_CLAUSE_BREAK = re.compile(r"[;\n—–]|[.:,!?](?=\s|$)")
-# A clause with one of these says what NOT to use: every model in it is left out.
+# Sentence breaks: ; newline and dashes anywhere; . ! ? only before a space or
+# the end, so "GPT 6.1 Sol" stays whole. Within a sentence, , and : (again only
+# before a space, so "prov:lane:astra" stays whole) separate list parts.
+_SENTENCE_BREAK = re.compile(r"[;\n—–]|[.!?](?=\s|$)")
+_PART_BREAK = re.compile(r"[,:](?=\s|$)")
+# A part with one of these says what NOT to use: every model in it is left out.
 _NEGATION = re.compile(
     r"\b(?:never|not|no|dont|don't|do\s+not|avoid|stop\s+using|\w+n't)\b"
     r"|\b(?:is|are|was|were)\s+(?:\w+\s+)?(?:poor|bad|crap)\b", re.I)
+# A negation carries into the following parts of its sentence ("NEVER use
+# Fable, Mythos or Grok"; "Models to avoid: Fable, Mythos") until a part names
+# a fresh instruction to use something. Only a verb ends it, so the rule errs
+# toward caution: an ambiguous start falls back to the owner's prompt.
+_AFFIRM = re.compile(
+    r"\b(?:use|uses|using|run|runs|route|routes|send|sends|prefer|prefers|pick|picks"
+    r"|default|defaults|go(?:es)?\s+to|switch\s+to|move\s+to)\b", re.I)
 # "Use Opus instead of Sol": the words after the cue are the rejected ones.
 _CONTRAST = re.compile(r"\b(?:instead\s+of|rather\s+than)\b", re.I)
 # The roster's block of saved routing (see routing_block).
@@ -630,19 +639,31 @@ _ROUTING_CACHE_LIMIT = 2048
 
 
 def affirmed_clauses(text: str) -> List[str]:
-    """The clauses of ``text`` that may name a model to use.
+    """The parts of ``text`` that may name a model to use.
 
-    Split on ``.``/``;``/``:``/``,``/dashes/newlines; a clause with a negation
-    (never, not, no, don't, do not, avoid, stop using, "X is poor|bad|crap")
-    is dropped, and "instead of"/"rather than" drops the words after it.
+    Sentences split on ``.``/``!``/``?``/``;``/dashes/newlines, then into parts
+    on ``,``/``:``. A part with a negation (never, not, no, don't, do not,
+    avoid, stop using, "X is poor|bad|crap") is dropped, and so is every later
+    part of that sentence until one says to use something (use, run, route,
+    send, prefer, pick, default, go to, switch to). "instead of"/"rather than"
+    drops the words after it, and the rest of the sentence's list.
     """
     clauses = []
-    for clause in _CLAUSE_BREAK.split(str(text or "").replace("’", "'")):
-        contrast = _CONTRAST.search(clause)
-        if contrast:
-            clause = clause[:contrast.start()]
-        if clause.strip() and not _NEGATION.search(clause):
-            clauses.append(clause)
+    for sentence in _SENTENCE_BREAK.split(str(text or "").replace("’", "'")):
+        negated = False
+        for part in _PART_BREAK.split(sentence):
+            if negated and _AFFIRM.search(part) and not _NEGATION.search(part):
+                negated = False
+            if negated:
+                continue
+            contrast = _CONTRAST.search(part)
+            if contrast:
+                part, negated = part[:contrast.start()], True
+            if _NEGATION.search(part):
+                negated = True
+                continue
+            if part.strip():
+                clauses.append(part)
     return clauses
 
 
