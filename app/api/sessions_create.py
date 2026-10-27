@@ -6,6 +6,12 @@ This is the same up-front create for a session that runs in the project's own
 checkout (or a projectless chat): the composer's call button uses it to make a
 normal conversation and then start a call on it. It never creates a voice-lane
 session (``mode='voice'``); the call attaches to the conversation afterwards.
+
+``target_instance_id`` is the composer's "Runs on" pick. The conversation is
+then created on that worker, which owns it and publishes it; this worker keeps
+the mirror, exactly as a typed first message to another worker does (the chat
+socket's create). A call attached to it runs here and forwards to the owner
+(#700, ``app.core.voice_remote``).
 """
 
 import logging
@@ -43,6 +49,8 @@ class CreateSessionRequest(BaseModel):
     # An existing legacy worktree row of this project to run in.
     worktree_id: Optional[str] = None
     overrides: Optional[QueryOverrides] = None
+    # The worker that runs the conversation ("Runs on"); None runs it here.
+    target_instance_id: Optional[str] = None
 
 
 class CreateSessionResponse(BaseModel):
@@ -55,12 +63,11 @@ async def create_empty_session(
     body: CreateSessionRequest,
     token: str = Depends(require_auth),
 ):
-    """Create an empty session on this install from the composer's picks.
+    """Create an empty session from the composer's picks.
 
     Mirrors the first-message create on the chat WebSocket (origin access,
-    agent check, model/effort/permission binding stamped at birth, lane) but
-    starts no turn. The session runs on this install: a call can only attach to
-    a conversation owned here, so there is no device pick.
+    agent check, model/effort/permission binding stamped at birth, lane, and
+    the device pick) but starts no turn.
     """
     raw_mode = (body.mode or "").strip().lower()
     if raw_mode == "voice":
@@ -114,6 +121,7 @@ async def create_empty_session(
         )
 
     overrides = body.overrides.model_dump(exclude_none=True) if body.overrides else {}
+    target = await _resolve_target(body.target_instance_id, project_v2_id, worktree_fields)
     session_id = str(uuid.uuid4())
 
     def _create() -> None:
@@ -141,19 +149,23 @@ async def create_empty_session(
                 context_window=window,
                 fast=overrides.get("fast"),
                 mode=mode,
+                target_instance_id=target,
                 _conn=txn,
                 **worktree_fields,
             )
             # A paired device keeps the chat it created (#1877).
             from app.core.mobile_tool_identity import record_creator
             record_creator(session_id, request, conn=txn)
-        if mode != "chat" and overrides.get("workspace_project_ids") is not None:
+        if not target and mode != "chat" and overrides.get("workspace_project_ids") is not None:
             persist_promptless_run_binding(
                 session_id,
                 {"workspace_project_ids": overrides["workspace_project_ids"]},
             )
 
     await run_sync(_create)
+    if target:
+        await _create_on_owner(session_id, request, api_user_id=api_user_id, profile_id=profile_id,
+                               project_v2_id=project_v2_id, overrides=overrides, mode=mode)
 
     # Bind the V2 project now when only the legacy id resolved it, as the
     # WebSocket create does. Best-effort: the send path self-heals it later.
@@ -169,3 +181,80 @@ async def create_empty_session(
 
     _broadcast_session_created(session_id)
     return CreateSessionResponse(session_id=session_id, mode=mode)
+
+
+async def _resolve_target(raw: Optional[str], project_v2_id: Optional[str],
+                          worktree_fields: dict) -> Optional[str]:
+    """The composer's "Runs on" pick, preflighted; None runs here.
+
+    Same refusals as a typed first message's pick (``_validate_target_install``
+    on the chat socket), before anything is created: unknown, unapproved or
+    offline worker, or a project that is not checked out there.
+    """
+    from app.core.config import settings
+
+    target = (raw or "").strip() or None
+    if not target or target == settings.effective_instance_id:
+        return None
+    try:
+        from app.network import runners
+        if target == runners.self_device_id():
+            return None
+    except Exception:  # noqa: BLE001 - no network layer: only this worker exists
+        pass
+    if worktree_fields:
+        raise HTTPException(400, "A legacy worktree cannot be moved to another runner.")
+    install = await run_sync(database.get_install, target)
+    if not install:
+        raise HTTPException(409, "Unknown device — pick another device.")
+    device = install.get("device_name") or target
+    if not install.get("approved", True):
+        raise HTTPException(409, f"{device} is waiting for admin approval. Approve and restart it first.")
+    if not install.get("online"):
+        raise HTTPException(409, f"{device} is offline. Bring it online or pick another device.")
+    if project_v2_id:
+        try:
+            from app.network import git as network_git
+            eligible = await network_git.eligible(target, project_v2_id)
+        except Exception:  # noqa: BLE001 - never strand a chat on an unknown owner
+            logger.warning("Device-pick preflight failed for project_v2 %s on %s",
+                           project_v2_id, target, exc_info=True)
+            raise HTTPException(409, "Couldn't reach the selected device. Bring it online and retry.")
+        if not eligible:
+            raise HTTPException(409, f"This project isn't checked out on {device} yet. Open the "
+                                     "project there once (or clone it), then try again.")
+    return target
+
+
+async def _create_on_owner(session_id: str, request: Request, *, api_user_id: Optional[str],
+                           profile_id: str, project_v2_id: Optional[str], overrides: dict,
+                           mode: str) -> None:
+    """Create the conversation on the worker that will run it.
+
+    This worker's row is the mirror (``create_session`` stamped the owner on
+    it). When the owner cannot take it, the mirror is removed again, so no
+    conversation is left that nobody runs.
+    """
+    from app.network import control
+
+    row = await run_sync(database.get_session, session_id) or {}
+    owner = control.owner_of(row)
+    if not owner:
+        await run_sync(database.delete_session, session_id)
+        raise HTTPException(409, "The selected device is not part of this worker network.")
+    from app.core.mobile_tool_identity import request_principal
+    principal = await run_sync(request_principal, request)
+    try:
+        await control.create_session(owner, {
+            "id": session_id, "profile_id": profile_id, "project_v2_id": project_v2_id,
+            "title": "", "api_user_id": api_user_id,
+            "model": overrides.get("model"), "effort": overrides.get("effort"),
+            "permission_mode": overrides.get("permission_mode"),
+            "context_window": row.get("context_window"),
+            "fast": overrides.get("fast"), "mode": mode,
+            # Who started it; the worker that runs it labels it (#1877).
+            "provenance_owner": (principal or {}).get("owner"),
+        }, None)
+    except (control.RunnerUnreachable, control.ControlRefused) as exc:
+        await run_sync(database.delete_session, session_id)
+        raise HTTPException(409, str(exc)) from exc

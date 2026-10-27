@@ -964,11 +964,13 @@ curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/fork \
 
 ### POST /api/v1/sessions
 
-Create a session without a first message, on this install. The composer's call button uses it: it creates the conversation from the current picks and then starts a call on it. Send the first message later over the chat WebSocket with the returned `session_id`.
+Create a session without a first message. The composer's call button uses it: it creates the conversation from the current picks and then starts a call on it. Send the first message later over the chat WebSocket with the returned `session_id`.
 
 **Auth:** Required
 
 All fields are optional. `project_id` or `project_v2_id` (not both) files the session under a project; with neither it is projectless. `mode` is `code` (default) or `chat`; `voice` is refused with 400. `worktree_id` runs the session in an existing worktree of `project_id`. `overrides` takes the same `model`, `effort`, `permission_mode`, `context_window`, `fast` and `workspace_project_ids` as a query and stores them as the session's run settings. Agent rules match `with-worktree` below.
+
+`target_instance_id` (a device `id` from `GET /api/v1/cluster/installs`) creates the session on that device, which then runs it, as a first message with a device pick does. This install keeps a read-only copy. A call on it still runs here: see [Calling a chat another worker runs](/docs/features/voice#calling-a-chat-another-worker-runs). It returns `409` when the device is unknown, offline, awaiting approval or does not have the project checked out, and when the device does not accept the session; nothing is left behind in that case. It cannot be combined with `worktree_id` (`400`).
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/sessions \
