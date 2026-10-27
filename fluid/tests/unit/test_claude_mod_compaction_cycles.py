@@ -310,3 +310,44 @@ async def test_the_bridge_compacts_a_long_chat_with_the_host_window():
         assert not loop._compact_noop
     finally:
         await loop.aclose()
+
+
+def test_a_long_running_chat_reaches_a_plateau():
+    """Forty grow-and-compact cycles: once the oldest fold's bounded parts
+    (the pinned requests, the note) are full, the retained size stops rising."""
+    chat = Chat(result_chars=2_000)
+    retained = []
+    for _ in range(40):
+        chat.grow(5)
+        chat.compact()
+        retained.append(chat.size())
+    # No ratchet: the second half never holds more than the first did.
+    assert max(retained[20:]) <= max(retained[:20])
+
+
+def test_a_long_first_compaction_folds_deep_history_at_once():
+    """A long chat compacted for the first time folds its old history into one
+    epoch directly instead of digesting it span by span (which re-renders the
+    whole path per span), and its oldest results stay recoverable."""
+    import time
+
+    chat = Chat(result_chars=1_000)
+    chat.grow(250)
+    started = time.monotonic()
+    chat.compact('auto')
+    assert time.monotonic() - started < 20
+    assert '\n'.join(r['text'] for r in chat.cli).count('[epoch ') == 1
+    assert recoverable(chat.stored, chat.cli, 'RESULT-t0-0-0 ' + 'x' * 1_000)
+
+
+def test_a_rebuilt_parallel_group_stays_stored_not_noted():
+    """A parallel group Fluid rebuilt as one call row and one result row
+    matches no single node next time, but every tool id it carries is stored:
+    it leaves the view with a recall ref, never through the note."""
+    chat = Chat()
+    for _ in range(4):
+        chat.grow(8)
+        chat.compact()
+    [note] = [r for r in chat.cli if 'Fluid compaction note' in r['text']]
+    assert '[calls:' not in note['text'] and 'tool result(s)' not in note['text']
+    assert recoverable(chat.stored, chat.cli, 'RESULT-t9-1-1 ' + 'x' * 5_000)

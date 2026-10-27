@@ -29,7 +29,9 @@ from fluid.context.compaction import (
     CompactionConfig,
     Compactor,
     Promotion,
+    is_turn_start,
 )
+from fluid.context.trim import block_chars
 from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
 from fluid.store.base import SessionNode
 
@@ -52,6 +54,9 @@ DEFAULT_CONTEXT_WINDOW = 200_000
 TARGET_CAP_TOKENS = 50_000
 # Guarded passes until the target or a fixed point; each pass runs every rung.
 MAX_ROUNDS = 8
+# History older than this many targets' worth of content before the recent
+# tail folds straight into one epoch (see ``_deep_history_end``).
+DEEP_FOLD_FACTOR = 4
 # An automatic compaction runs at Claude Code's threshold: one that keeps
 # more than this share of the conversation would leave it there, so Claude
 # Code's own summary runs instead. A manual one only has to save something.
@@ -389,23 +394,27 @@ def _is_spacer(row: dict[str, Any]) -> bool:
     return row.get("text") == SPACER_TEXT and not row.get("toolUses") and not row.get("toolResults")
 
 
-def _excerpt(row: dict[str, Any]) -> str:
+def _excerpt(row: dict[str, Any]) -> str | None:
+    """One note line for a dropped row; None for a row with nothing visible
+    (signed thinking alone, an image): it is counted, not quoted."""
     text = " ".join(row.get("text", "").split())
     tools = [use.get("tool", "") for use in row.get("toolUses", [])]
     if tools:
         text = f"{text} [calls: {', '.join(tools)}]".strip()
     if row.get("toolResults"):
         text = f"{text} [{len(row['toolResults'])} tool result(s)]".strip()
+    if not text:
+        return None
     if len(text) > _NOTE_LINE_CHARS:
         text = text[:_NOTE_LINE_CHARS] + "…"
-    return f"- {row.get('role')}: {text or '(no text)'}"
+    return f"- {row.get('role')}: {text}"
 
 
 def _note_row(dropped: list[dict[str, Any]], notes: list[str]) -> dict[str, Any] | None:
     """One bounded row for every dropped row not in the stored history,
     folding in the notes earlier compactions left."""
     count = len(dropped)
-    lines = [_excerpt(row) for row in reversed(dropped)]
+    lines = [line for row in reversed(dropped) if (line := _excerpt(row)) is not None]
     for note in reversed(notes):
         match = _NOTE_COUNT.match(note)
         count += int(match.group(1)) if match else 0
@@ -497,6 +506,57 @@ def _alternate(out: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return final
 
 
+def _tool_owners(nodes: list[SessionNode]) -> dict[str, int]:
+    """Stored index of each tool call (``id``) and result (``result:id``)."""
+    owners: dict[str, int] = {}
+    for i, node in enumerate(nodes):
+        for block in node.message.content:
+            if isinstance(block, ToolUseBlock):
+                owners.setdefault(block.id, i)
+            elif isinstance(block, ToolResultBlock):
+                owners.setdefault(f"result:{block.tool_use_id}", i)
+    return owners
+
+
+def _unit_members(
+    group: list[dict[str, Any]], owners: dict[str, int], nodes: list[SessionNode],
+) -> list[int] | None:
+    """The stored nodes, in stored order, that hold exactly a tool group's
+    calls and results; None unless every row is a tool row of one of them."""
+    members: set[int] = set()
+    for row in group:
+        keys = ([use.get("tool_use_id") for use in row["toolUses"]]
+                + [f"result:{r.get('tool_use_id')}" for r in row.get("toolResults", [])])
+        if not keys or any(key not in owners for key in keys):
+            return None
+        found = {owners[key] for key in keys}
+        if any(nodes[j].message.role != row["role"] for j in found):
+            return None
+        members |= found
+    ids = {use.get("tool_use_id") for row in group for use in row["toolUses"]}
+    for j in members:
+        for block in nodes[j].message.content:
+            if isinstance(block, (ToolUseBlock, ToolResultBlock)) and (
+                    block.id if isinstance(block, ToolUseBlock) else block.tool_use_id) not in ids:
+                return None  # the node also holds something outside the group
+    return sorted(members)
+
+
+def _deep_history_end(view: list[SessionNode], tail: int, keep_chars: int) -> int | None:
+    """Index of the last node of the history older than ``keep_chars`` of raw
+    content before the tail, ending where a turn starts; None when there is
+    none worth folding."""
+    used = 0
+    for i in range(tail - 1, 0, -1):
+        used += sum(block_chars(b) for b in view[i].message.content)
+        if used > keep_chars:
+            for j in range(i, 0, -1):
+                if is_turn_start(view[j]):
+                    return j - 1
+            return None
+    return None
+
+
 def compact_messages(
     rows: Any, nodes: list[SessionNode], *, config: CompactionConfig | None = None,
     context_window: int | None = None, trigger: str = "manual",
@@ -519,12 +579,27 @@ def compact_messages(
         if anchor is not None:
             parts[i] = None  # a stored message, whatever its text opens with
     # A tool group is in the stored view whole or not at all: a kept call
-    # or result must never lose its other half.
+    # or result must never lose its other half. A group some rows of which
+    # match no single node (a parallel group Fluid rebuilt as one call row and
+    # one result row, a result only Claude Code can show) is still stored when
+    # every tool id it carries is: it enters the view as a unit, kept as its
+    # own rows while untouched and rebuilt or folded from the stored nodes
+    # once it is old, so it keeps a recall ref.
+    owners = _tool_owners(nodes)
+    loose = []
     for start, end in _group_spans(rows):
         if any(anchor is None for anchor in anchors[start:end]):
             anchors[start:end] = [None] * (end - start)
+            loose.append((start, end))
+    taken = {k for a in anchors if a is not None for k in range(a.start, a.end + 1)}
+    units: dict[int, tuple[int, list[int]]] = {}  # first row -> (end row, stored indexes)
+    for start, end in loose:
+        members = _unit_members(rows[start:end], owners, nodes)
+        if members is not None and not taken & set(members):
+            units[start] = (end, members)
+            taken.update(members)
 
-    claimed = {k for a in anchors if a is not None for k in range(a.start, a.end + 1)}
+    claimed = taken
     view: list[SessionNode] = []
     at: dict[int, int] = {}  # stored index -> position in view
     rows_of: dict[int, list[dict[str, Any]]] = {}
@@ -532,6 +607,8 @@ def compact_messages(
     trims: list[tuple[str, str]] = []
     unknown: list[tuple[int, dict[str, Any]]] = []  # (view position it precedes, row)
     notes: list[str] = []
+    unit_of: dict[int, list[int]] = {}  # view position -> the unit's positions
+    skip_to = -1
 
     # Rows ahead of anything stored (an earlier Claude Code summary, say)
     # stand for the stored history before them: that history is the
@@ -548,7 +625,18 @@ def compact_messages(
                 view.append(nodes[k])
             seeds.append((0, len(view) - 1, EPOCH_STUB))
 
-    for row, anchor, fluid in zip(rows, anchors, parts):
+    for r, (row, anchor, fluid) in enumerate(zip(rows, anchors, parts)):
+        if r < skip_to:
+            continue
+        if r in units:
+            skip_to, members = units[r]
+            positions = list(range(len(view), len(view) + len(members)))
+            for k, position in zip(members, positions):
+                at[k] = position
+                view.append(nodes[k])
+                unit_of[position] = positions
+            rows_of[positions[0]] = rows[r:skip_to]
+            continue
         if anchor is not None:
             placed = next((at[k] for k in range(anchor.start, anchor.end + 1) if k in at), None)
             if placed is None:
@@ -597,6 +685,14 @@ def compact_messages(
     tail = len(view) if tail is None else tail
     ratio = config.deep_target_window_ratio or 0.15
     target = min(int(window * ratio), TARGET_CAP_TOKENS)
+    # History far older than the target would be digested span by span and
+    # then folded anyway; fold it at once (the per-span pass re-renders the
+    # whole path for every span, which a long first compaction cannot afford).
+    deep = _deep_history_end(view, min(tail, len(view)), target * 4 * DEEP_FOLD_FACTOR)
+    if deep is not None:
+        compactor.rehydrate([Promotion(tier=3, spans=(
+            (view[0].node_id, view[deep].node_id, EPOCH_STUB),))])
+        compactor._settle_replay(view)
     # Every guarded rung per pass, then the old folds merge into one: until
     # the target is met or a pass changes nothing.
     for _ in range(MAX_ROUNDS):
@@ -612,6 +708,11 @@ def compact_messages(
 
     def compacted(first: int, last: int, message: Message) -> bool:
         return first != last or (message is not view[first].message and first < tail)
+
+    # A unit stays its own rows only while none of its nodes is compacted.
+    touched = {k for first, last, m in segments if compacted(first, last, m)
+               for k in range(first, last + 1)}
+    rebuilt = {p for p, positions in unit_of.items() if touched & set(positions)}
 
     last_compacted = max((last for first, last, m in segments if compacted(first, last, m)),
                          default=-1)
@@ -630,7 +731,9 @@ def compact_messages(
         if pending and pending[0][0] <= last:  # inside a fold
             while pending and pending[0][0] <= last:
                 dropped.append(pending.pop(0)[1])
-        if compacted(first, last, message) or not rows_of.get(first):
+        if first == last and first in unit_of and first not in rebuilt:
+            out.extend(rows_of.get(first, []))  # the unit's own rows, once
+        elif compacted(first, last, message) or not rows_of.get(first) or first in rebuilt:
             row = _built(message, view[last].node_id)
             if any(use["tool_use_id"] not in calls for use in row["toolUses"]):
                 raise ValueError("cannot rebuild a call Claude Code does not have")
@@ -641,7 +744,9 @@ def compact_messages(
     note = _note_row(dropped, notes)
     final = _alternate(([note] if note else []) + out)
     validate_rows(final, handles=False)
-    before, after = len(json.dumps(rows)), len(json.dumps(final))
+    # Content only: a handle is how Claude Code names a row, not context.
+    before, after = (len(json.dumps([{k: v for k, v in r.items() if k != "handle"} for r in side]))
+                     for side in (rows, final))
     limit = before * (AUTO_MAX_RETAINED if trigger == "auto" else 1 - MANUAL_MIN_SAVING)
     if after > limit:
         raise NothingToCompact("no safe compaction saving")
