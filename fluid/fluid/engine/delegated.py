@@ -84,7 +84,7 @@ from fluid.engine.background import BackgroundLifecycleMixin
 from fluid.engine.base import EngineCaps, matches_tool_pattern
 from fluid.engine.claude_mod_usage import USAGE_PATH, PlanUsageReport, parse_plan_usage_report
 from fluid.engine.claude_mod_compaction import (
-    COMPACT_PATH, MAX_COMPACT_BODY_BYTES, NothingToCompact, compact_messages,
+    COMPACT_PATH, MAX_COMPACT_BODY_BYTES, NothingToCompact, ReplayFilter, compact_messages,
 )
 from fluid.context.recall import HistoryRecall
 from fluid.engine.delegated_proto import (
@@ -102,6 +102,7 @@ from fluid.engine.delegated_proto import (
 )
 from fluid.events.bus import EventBus
 from fluid.events.model import (
+    CompactionCheckpoint,
     ContextArchived,
     ContextCompaction,
     ContextCompacting,
@@ -472,6 +473,9 @@ _COMPACT_COMMAND = re.compile(r"^/compact(?:\s|$)")
 # the summary entry to its transcript next to the boundary, so the read is
 # retried briefly in case the stream frame beat the file write.
 COMPACTION_SUMMARY_ATTEMPTS = 10
+# How long after Fluid answers a compaction Claude Code's boundary may still
+# report applying that answer: the mod's own wait (60 s) and some margin.
+CHECKPOINT_APPLY_WINDOW_S = 180.0
 COMPACTION_SUMMARY_INTERVAL = 0.2
 COMPACTION_SUMMARY_MAX_CHARS = 200_000
 # Without a matching uuid, the transcript's last boundary counts as the one
@@ -984,6 +988,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # A manual compaction this turn that Fluid answered as a no-op:
         # nothing more could be reclaimed, so the conversation stays as it is.
         self._compact_noop = False
+        # Claude Code's replay of compacted rows, told from new work (#679).
+        self._replays = ReplayFilter()
+        # The portable form of the last compaction this leg answered, with
+        # when it answered; persisted when Claude Code reports applying it.
+        self._pending_checkpoint: tuple[float, dict[str, Any]] | None = None
 
         self._session: SessionMeta | None = None
         self._session_id = session_id
@@ -1680,12 +1689,18 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         nodes = await self.store.load_path(meta.session_id)
         started = time.monotonic()
         archive: list[dict[str, str]] = []
+        checkpoint: dict[str, Any] = {}
+        # A compaction answered or not, the stored path is what Claude Code
+        # may replay from now on: its ids are not new activity (#679).
+        self._replay_filter.seed(nodes)
+        self._pending_checkpoint = None
         try:
             # Pure CPU over the whole path: off the event loop, so the turn's
             # stream and the bridge's other routes keep moving meanwhile.
             messages = await asyncio.to_thread(
                 compact_messages, body.get("messages"), nodes,
                 context_window=self.compaction_window, trigger=trigger, archive=archive,
+                checkpoint=checkpoint,
             )
         except NothingToCompact as exc:
             # The reason is a fixed phrase, never message content.
@@ -1701,23 +1716,70 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # a manual one as it is.
             logger.info("claude mod compaction refused (%s): %s", trigger, exc)
             raise
+        fresh = archive
         if archive:
             # Claude Code's own rows the answer leaves out are written first,
             # so the refs the note cites resolve before the model reads them.
             # A failed write refuses the compaction (manual: left as it is).
+            # An entry already archived (its id is a hash of its text: an
+            # earlier answer Claude Code never applied, its wait having run
+            # out, dropped the same row) is not written again (#727).
             try:
-                await self._emit(ContextArchived(
-                    session_id=meta.session_id, turn_id=self._active_turn_id,
-                    entries=tuple(archive),
-                ))
+                recall = self.ctx.extra.get("history_recall")
+                known = await recall.archived_ids() if isinstance(recall, HistoryRecall) else set()
+                fresh = [entry for entry in archive if entry["node_id"] not in known]
+                if fresh:
+                    await self._emit(ContextArchived(
+                        session_id=meta.session_id, turn_id=self._active_turn_id,
+                        entries=tuple(fresh),
+                    ))
             except Exception as exc:
                 logger.warning("claude mod compaction: could not archive dropped rows: %s",
                                type(exc).__name__)
                 raise ValueError("could not archive the rows it would drop") from exc
-        logger.info("claude mod compacted through Fluid (%s): %d -> %d messages, %d archived, "
-                    "%.3fs, no summarizer", trigger, len(body["messages"]), len(messages),
-                    len(archive), time.monotonic() - started)
+        self._replay_filter.expect(messages)
+        if checkpoint:
+            self._pending_checkpoint = (time.monotonic(), checkpoint)
+        logger.info("claude mod compacted through Fluid (%s): %d -> %d messages, %d archived "
+                    "(%d new), %.3fs, no summarizer", trigger, len(body["messages"]),
+                    len(messages), len(archive), len(fresh), time.monotonic() - started)
         return {"messages": messages}
+
+    @property
+    def _replay_filter(self) -> ReplayFilter:
+        """This leg's :class:`ReplayFilter` (made on first use for a loop
+        built without ``__init__``)."""
+        found = self.__dict__.get("_replays")
+        if found is None:
+            found = self.__dict__["_replays"] = ReplayFilter()
+        return found
+
+    async def _emit_compaction_checkpoint(self, event: ContextCompaction) -> None:
+        """After Claude Code reports a compaction: persist the portable form
+        of the one this leg answered, if that is the one it applied (#685).
+
+        Claude Code's boundary follows the answer within its wait; a pending
+        checkpoint older than that belongs to an answer it never applied, and
+        a boundary that carries Claude Code's own summary came from its
+        summarizer. Either way nothing is written. Never raises.
+        """
+        pending, self._pending_checkpoint = getattr(self, "_pending_checkpoint", None), None
+        if pending is None or event.summary or self._session is None:
+            return
+        answered, checkpoint = pending
+        if time.monotonic() - answered > CHECKPOINT_APPLY_WINDOW_S:
+            return
+        try:
+            await self._emit(CompactionCheckpoint(
+                session_id=self._session.session_id, turn_id=event.turn_id,
+                node_id=event.node_id, through=checkpoint["through"],
+                rows=tuple(checkpoint["rows"]),
+            ))
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a re-seed aid never fails a turn
+            logger.warning("could not persist the compaction checkpoint; a re-seed on "
+                           "another worker would replay the whole conversation", exc_info=True)
 
     async def _take_plan_usage(self, body: Any) -> None:
         """The bridge's usage route: validate the mod's report, hand it on.
@@ -3042,6 +3104,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 continue  # non-JSON diagnostic line — skip
             if not isinstance(frame, dict):
                 continue  # valid JSON but not a frame (a stray number, a list)
+            if self._replay_filter.is_replay(frame):
+                # Claude Code printing the conversation a compaction left it
+                # with: history already stored, not new calls (#679).
+                continue
 
             if frame.get("type") == "result":
                 # A completed CLI result cannot admit an unrequested peer cycle,
@@ -3160,6 +3226,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     await self._emit_terminal_with_park(event)
                 else:
                     await self._emit(event)
+                if isinstance(event, ContextCompaction):
+                    await self._emit_compaction_checkpoint(event)
                 self._journal_event(event, mapper)
                 self._note_skill_read(event, mapper)
                 if isinstance(event, Usage) and not event.context_usage:
@@ -3180,6 +3248,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     node_id=mapped.node_id, parent_id=parent.node_id, message=mapped.message,
                 )
                 await self.store.append(sid, node)
+                self._replay_filter.note(mapped.message)
                 parent = node
                 if mapped.message.role == "assistant":
                     last_assistant = mapped.message
@@ -4161,9 +4230,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if self._session is None:
             return True  # nothing to attach it to; not reachable with a CLI running
         try:
-            await self._emit(await self._with_compaction_summary(compaction_from_boundary(
+            event = await self._with_compaction_summary(compaction_from_boundary(
                 frame, session_id=self._session.session_id, turn_id=self._active_turn_id,
-            ), frame, None))
+            ), frame, None)
+            await self._emit(event)
+            await self._emit_compaction_checkpoint(event)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — a notice never fails the next turn

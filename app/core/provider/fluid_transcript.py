@@ -1552,6 +1552,144 @@ def _entry_epoch(entry: Dict[str, Any]) -> Optional[float]:
         return None
 
 
+def _checkpoint_heads(session_id: str) -> List[Dict[str, Any]]:
+    """``{"seq", "through"}`` of each ``CompactionCheckpoint``, oldest first.
+
+    Only the node id is read here: a checkpoint's rows can be large, and only
+    the one a re-seed starts from is fetched whole (:func:`_event_at`).
+    """
+    from app.db.base import get_cursor, get_db
+    from app.db.compat import ph
+
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"SELECT seq, event ->> 'through' AS through FROM fluid_session_events "
+            f"WHERE session_id = {ph()} AND event ->> '_cls' = {ph()} ORDER BY seq",
+            (session_id, "CompactionCheckpoint"),
+        )
+        rows = cursor.fetchall()
+    return [
+        {"seq": dict(r).get("seq"), "through": dict(r).get("through")}
+        for r in rows
+        if isinstance(dict(r).get("through"), str) and dict(r).get("through")
+    ]
+
+
+def _event_at(session_id: str, seq: Any) -> Dict[str, Any]:
+    """The event stored at ``seq``; ``{}`` when there is none."""
+    from app.db.base import get_cursor, get_db
+    from app.db.compat import ph
+
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"SELECT event FROM fluid_session_events "
+            f"WHERE session_id = {ph()} AND seq = {ph()}",
+            (session_id, seq),
+        )
+        row = cursor.fetchone()
+    return _as_dict(dict(row).get("event")) if row is not None else {}
+
+
+def _checkpoint_entry(
+    row: Any, stamp: Any, sdk_session_id: str
+) -> Optional[Dict[str, Any]]:
+    """One checkpoint row (the mod's row projection) as a transcript entry."""
+    if not isinstance(row, dict) or row.get("role") not in ("user", "assistant"):
+        return None
+    role = row["role"]
+    blocks: List[Dict[str, Any]] = []
+    text = row.get("text")
+    if isinstance(text, str) and text:
+        blocks.append({"type": "text", "text": text})
+    if role == "assistant":
+        for use in row.get("toolUses") or []:
+            if isinstance(use, dict) and use.get("tool_use_id"):
+                blocks.append({
+                    "type": "tool_use", "id": use["tool_use_id"],
+                    "name": use.get("tool") or "", "input": use.get("input") or {},
+                })
+    else:
+        for result in row.get("toolResults") or []:
+            if isinstance(result, dict) and result.get("tool_use_id"):
+                blocks.append({
+                    "type": "tool_result", "tool_use_id": result["tool_use_id"],
+                    "content": str(result.get("text") or ""),
+                    "is_error": bool(result.get("isError")),
+                })
+    if not blocks:
+        return None
+    return {
+        "uuid": None,
+        "type": role,
+        "timestamp": stamp,
+        "sessionId": sdk_session_id,
+        "message": {"role": role, "content": blocks},
+    }
+
+
+def _after_checkpoint(
+    sdk_session_id: str,
+    head: Dict[str, Any],
+    entries: List[Dict[str, Any]],
+    index: Dict[Any, int],
+) -> Optional[List[Dict[str, Any]]]:
+    """``entries`` started from a mechanical compaction's checkpoint, or None
+    when it does not apply (its node is off the current path, or it cannot
+    be read)."""
+    through = head.get("through")
+    if through not in index:
+        return None
+    try:
+        event = _event_at(sdk_session_id, head.get("seq"))
+    except Exception:
+        logger.warning(
+            "fluid re-seed could not read %s's compaction checkpoint",
+            sdk_session_id, exc_info=True,
+        )
+        return None
+    if event.get("_cls") != "CompactionCheckpoint" or event.get("through") != through:
+        return None
+    cut = index[through] + 1
+    stamp = _iso(event.get("ts")) or entries[cut - 1].get("timestamp")
+    replayed = [
+        entry for row in event.get("rows") or []
+        if (entry := _checkpoint_entry(row, stamp, sdk_session_id)) is not None
+    ]
+    if not replayed or replayed[0]["type"] != "user":
+        return None
+    # The prompts before it are not in the file (see cli_transcript_prompt_tail).
+    replayed[0]["isCompactSummary"] = True
+    # A tool id the rows already carry is never replayed twice.
+    ids = {
+        block.get("id") or block.get("tool_use_id")
+        for entry in replayed for block in entry["message"]["content"]
+        if block.get("type") in ("tool_use", "tool_result")
+    }
+    rest: List[Dict[str, Any]] = []
+    for entry in entries[cut:]:
+        content = (entry.get("message") or {}).get("content")
+        if isinstance(content, list) and ids:
+            kept = [
+                block for block in content
+                if not (isinstance(block, dict)
+                        and (block.get("id") or block.get("tool_use_id")) in ids
+                        and block.get("type") in ("tool_use", "tool_result"))
+            ]
+            if not kept:
+                continue
+            if len(kept) != len(content):
+                entry = {**entry, "message": {**entry["message"], "content": kept}}
+        rest.append(entry)
+    logger.info(
+        "fluid re-seed: session %s starts from its Fluid compaction checkpoint "
+        "(%d rows, then %d of %d entries)",
+        sdk_session_id, len(replayed), len(rest), len(entries),
+    )
+    return [*replayed, *rest]
+
+
 def _after_cli_compaction(
     sdk_session_id: str, entries: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
@@ -1572,13 +1710,25 @@ def _after_cli_compaction(
     behind and is skipped; one recorded between turns (no node) is placed by
     its timestamp. Returns ``entries`` unchanged when no compaction applies.
     Never raises.
+
+    Fluid's mechanical compaction writes no summary; it persists a
+    ``CompactionCheckpoint`` instead (#685): rows that stand for the stored
+    path through one node. When that is the newest applicable compaction the
+    transcript becomes those rows (the first flagged like a summary, since
+    the prompts before it are not in the file) followed by the entries after
+    that node, so a worker move does not replay the whole conversation.
     """
     if not entries:
         return entries
     try:
-        if not _has_event_of_class(sdk_session_id, "ContextCompaction"):
+        summaries = _has_event_of_class(sdk_session_id, "ContextCompaction")
+        checkpoints = _checkpoint_heads(sdk_session_id)
+        if not summaries and not checkpoints:
             return entries
-        rows = _event_rows_of_class(sdk_session_id, ("ContextCompaction",))
+        rows = (
+            _event_rows_of_class(sdk_session_id, ("ContextCompaction",))
+            if summaries else []
+        )
     except Exception:
         logger.warning(
             "fluid re-seed could not read %s's compactions; replaying the "
@@ -1586,7 +1736,15 @@ def _after_cli_compaction(
         )
         return entries
     index = {entry.get("uuid"): i for i, entry in enumerate(entries)}
-    for row in reversed(rows):
+    candidates = sorted(
+        [*rows, *checkpoints], key=lambda row: row.get("seq") or 0,
+    )
+    for row in reversed(candidates):
+        if "through" in row:
+            replaced = _after_checkpoint(sdk_session_id, row, entries, index)
+            if replaced is not None:
+                return replaced
+            continue
         event = _as_dict(row.get("event"))
         if not str(event.get("reason") or "").startswith("cli_"):
             continue

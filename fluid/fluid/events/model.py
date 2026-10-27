@@ -647,6 +647,27 @@ class ContextArchived(Event):
     entries: tuple[dict[str, str], ...] = ()
 
 
+@dataclass(frozen=True, kw_only=True)
+class CompactionCheckpoint(Event):
+    """The portable form of a mechanical compaction Claude Code applied.
+
+    The delegated leg's mechanical compaction hands Claude Code a rebuilt
+    conversation (digests, epochs, a note, kept rows) that lives only in that
+    worker's CLI. Written right after the ``ContextCompaction`` the CLI
+    reports for it, so a re-seed on another worker can start from the same
+    compacted context instead of the whole stored history: ``rows`` (the mod's
+    row projection: ``role``, ``text``, ``toolUses``, optional
+    ``toolResults``; no handles) stand for the stored path up to and
+    including node ``through``, and the stored nodes after it follow. Every
+    stored message the rows leave out is still named by a ``HistoryExpand``
+    ref inside them. Never part of the stored path, never shown in a chat;
+    hosts that do not know it skip it.
+    """
+
+    through: str = ""
+    rows: tuple[dict[str, Any], ...] = ()
+
+
 # ``SubagentEvent.wake_disposition`` values. See the field's docstring.
 WAKE_AUTO = "auto"
 WAKE_SUPPRESSED = "suppressed"
@@ -786,7 +807,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
         SubagentEvent, HookEvent, AssistantTextSanitized,
         CacheMissAlert,
         ContinualUpdate, DelegatedSurface, DelegatedDiagnostic, SwarmUpdated,
-        ContextArchived,
+        ContextArchived, CompactionCheckpoint,
     )
 }
 

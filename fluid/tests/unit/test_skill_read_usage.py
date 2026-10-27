@@ -51,3 +51,41 @@ def test_other_files_and_scoped_out_skills_are_not_counted(isolate_home, tmp_pat
     # The same scope gates as the Skill tool: no "user" source, no global skill.
     assert note_skill_file_read(str(global_skill), str(proj), ("project",)) is None
     assert _usage(isolate_home) == {}
+
+
+def test_concurrent_loads_sum_exactly_and_never_reset(isolate_home, tmp_path) -> None:
+    """Many threads noting loads at once end with the exact sum (#691)."""
+    import threading
+
+    from fluid.tools.builtins.skill import _note_usage
+
+    sidecar = isolate_home / ".fluid" / "skills" / ".usage.json"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(json.dumps({"/keep/SKILL.md": {"loads": 7, "last_used_at": 1.0}}))
+    paths = [f"/s{i}/SKILL.md" for i in range(4)]
+    start = threading.Barrier(16)
+
+    def worker(n: int) -> None:
+        start.wait()
+        for _ in range(25):
+            _note_usage(paths[n % len(paths)])
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(16)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    usage = _usage(isolate_home)
+    assert {p: usage[p]["loads"] for p in paths} == {p: 100 for p in paths}
+    assert usage["/keep/SKILL.md"]["loads"] == 7
+    assert not [p for p in sidecar.parent.iterdir() if ".tmp-" in p.name]
+
+
+def test_an_unparsable_sidecar_is_kept_not_reset(isolate_home) -> None:
+    from fluid.tools.builtins.skill import _note_usage
+
+    sidecar = isolate_home / ".fluid" / "skills" / ".usage.json"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text('{"/a/SKILL.md": {"loads": 3}', encoding="utf-8")
+    _note_usage("/b/SKILL.md")
+    assert sidecar.read_text(encoding="utf-8") == '{"/a/SKILL.md": {"loads": 3}'
