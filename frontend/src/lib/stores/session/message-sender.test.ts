@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { createMessageSender, type MessageSenderDeps } from './message-sender';
+import { reloadBlockers } from '$lib/services/app-update';
 import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import { reopenWorktree } from '$lib/api/git';
@@ -194,6 +195,51 @@ describe('compact first send', () => {
 		expect(getState().queuedMessages).toEqual([]);
 		expect(getState().messages).toEqual([]);
 		expect(wsConn.send).not.toHaveBeenCalled();
+	});
+});
+
+describe('a send in flight holds off an update reload (#711)', () => {
+	// The guard lives here, not in a composer: nothing is mounted in this file,
+	// which is what a composer that unmounted mid-send leaves behind.
+	it('blocks a reload until the send settles', async () => {
+		const { deps } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+		let settle!: (value: unknown) => void;
+		apiMocks.post.mockImplementationOnce(() => new Promise((resolve) => { settle = resolve; }));
+		expect(reloadBlockers()).not.toContain('message-sending');
+		const sending = createMessageSender(deps).sendMessage('hold on', { compactFirst: true });
+		expect(reloadBlockers()).toContain('message-sending');
+		settle({ turn_id: 'c', queued_turn_id: 'q', session_id: 's1' });
+		expect(await sending).toBe(true);
+		expect(reloadBlockers()).not.toContain('message-sending');
+	});
+
+	it('a refused send releases the guard too', async () => {
+		const { deps } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+		apiMocks.post.mockRejectedValueOnce(new Error('No capable device online'));
+		const sending = createMessageSender(deps).sendMessage('refused', { compactFirst: true });
+		expect(reloadBlockers()).toContain('message-sending');
+		await expect(sending).rejects.toThrow('No capable device online');
+		expect(reloadBlockers()).not.toContain('message-sending');
+	});
+
+	it('counts overlapping sends until the last one settles', async () => {
+		const { deps } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+		const sender = createMessageSender(deps);
+		const settles: Array<(value: unknown) => void> = [];
+		apiMocks.post.mockImplementation(() => new Promise((resolve) => { settles.push(resolve); }));
+		try {
+			const first = sender.sendMessage('one', { compactFirst: true });
+			const second = sender.sendMessage('two', { compactFirst: true });
+			await vi.waitFor(() => expect(settles).toHaveLength(2));
+			settles[0]({ turn_id: 'c1', queued_turn_id: 'q1', session_id: 's1' });
+			await first;
+			expect(reloadBlockers()).toContain('message-sending');
+			settles[1]({ turn_id: 'c2', queued_turn_id: 'q2', session_id: 's1' });
+			await second;
+			expect(reloadBlockers()).not.toContain('message-sending');
+		} finally {
+			apiMocks.post.mockReset();
+		}
 	});
 });
 

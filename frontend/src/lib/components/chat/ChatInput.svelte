@@ -165,8 +165,6 @@
 	let inputValue = $state(initialComposerDraft);
 	let plainTextValue = $state(''); // Plain text without chip serialization, for autocomplete
 	let uploadedFiles = $state<FileUploadResponse[]>([]);
-	/** Sends whose request has not settled: the draft is already cleared. */
-	let sendsInFlight = 0;
 	const hasMessageContent = $derived(hasComposerDraft(inputValue) || uploadedFiles.length > 0);
 	let draftSaveTimeout: ReturnType<typeof setTimeout> | null = null;
 	// Flag to prevent onDestroy from overwriting draft after we've already cleared it.
@@ -313,12 +311,13 @@
 
 	// An update never reloads the page over what this composer holds outside
 	// its draft text (app-update.ts): attachments (an Android file chooser
-	// hides the page), an upload or dictation in progress, or a send whose
-	// draft is already cleared but whose request has not settled.
+	// hides the page) or an upload or dictation in progress. A send whose
+	// draft is already cleared is guarded by the message sender itself, so
+	// the guard outlives this composer (#711).
 	onMount(() => registerReloadBlocker(() => {
 		if (isUploading || uploadedFiles.length) return 'composer-attachments';
 		if (isRecording || isTranscribing) return 'composer-dictation';
-		return sendsInFlight > 0 ? 'composer-sending' : null;
+		return null;
 	}));
 	const availableSendState = $derived(sendButtonState({
 		hasContent: hasMessageContent,
@@ -1081,7 +1080,6 @@
 			editorRef?.blur();
 		};
 
-		sendsInFlight++;
 		try {
 			const sent = await activeSession.sendMessage(
 				finalPrompt,
@@ -1100,7 +1098,6 @@
 			console.error('[ChatInput] sendMessage threw', err);
 			restoreOnFailure();
 		} finally {
-			sendsInFlight--;
 			stopWatchingReason();
 		}
 	}

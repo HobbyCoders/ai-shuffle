@@ -55,13 +55,16 @@
 		if (previousClearKey !== clearSecretsKey) { previousClearKey = clearSecretsKey; clearSecret(); }
 	});
 	$effect(() => { if (unavailable) clearSecret(); });
-	// Compare values, not snapshot object identity: background refreshes must not
-	// erase a token the owner is still preparing to submit.
+	// A typed token belongs to one destination: this request in this session
+	// on this worker, sent to one service address or saved connection. It is
+	// cleared when that changes, never by the form's own choices (duration,
+	// saving, write access, header, scheme, certificate pinning; #673).
+	// Compare values, not snapshot object identity: background refreshes must
+	// not erase a token the owner is still preparing to submit.
 	const credentialContext = $derived(JSON.stringify([
-		sessionId, request.id, owner, provider, savedId, saved?.target, saved?.writable, saved?.fingerprint,
-		serviceUrl, authHeader, authScheme, pinCertificate, fingerprint, writable, minutes, saveConnection
+		sessionId, request.id, owner, provider, savedId, saved?.target, serviceUrl.trim()
 	]));
-	$effect(() => { void credentialContext; clearSecret(); });
+	$effect(() => { void credentialContext; untrack(clearSecret); });
 
 	function changeProvider() {
 		clearSecret();
@@ -172,7 +175,7 @@
 						{#if saved.fingerprint}<details class="pa-fingerprint"><summary>Certificate SHA-256 fingerprint</summary><code>{saved.fingerprint}</code></details>{/if}
 					{:else}
 						<label class="pa-field"><span>API key or token</span><input class="card-form-input" disabled={!secureContext} type="password" required minlength="8" autocomplete="new-password" spellcheck="false" bind:value={secret} /></label>
-						<p class="pa-hint">Kept only in this open form until you submit. Closing the panel, going back, or changing access settings clears it.</p>
+						<p class="pa-hint">Kept only in this open form until you submit. Closing the panel or going back clears it.</p>
 						<details class="auth-settings"><summary>Authentication and certificate settings</summary><div class="pa-reveal">
 							<div class="pa-grid"><label class="pa-field"><span>Credential header</span><input class="card-form-input" required maxlength="64" spellcheck="false" bind:value={authHeader} /></label><label class="pa-field"><span>Scheme</span><input class="card-form-input" maxlength="32" placeholder="None" spellcheck="false" bind:value={authScheme} /></label></div>
 							<p class="pa-hint">Default: Authorization with Bearer. For X-API-Key, change the header and leave Scheme empty. Do not paste a token into either setting.</p>

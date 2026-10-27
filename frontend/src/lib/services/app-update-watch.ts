@@ -64,42 +64,126 @@ function reloadPage(): void {
 }
 
 // ── Unsaved input anywhere on the page ──────────────────────────────────────
+//
+// A field's `defaultValue` is no guide: Svelte's `bind:value` sets the live
+// value only, so every bound field showing a saved value (a note title, a
+// project path, a filled search box) would look edited. Instead the page
+// remembers what each field held the moment the user first reached for it
+// (focus, a press, a key, or its label) and calls it unsaved while it holds
+// something else. A field nobody touched is clean whatever the app put in it.
 
-/** Input types that hold something the user typed. */
-const TYPED_INPUTS = new Set([
+/** Input types whose value the user changes. Buttons, hidden and file inputs are not. */
+const EDITABLE_INPUTS = new Set([
 	'', 'text', 'search', 'email', 'url', 'tel', 'password', 'number',
-	'date', 'datetime-local', 'month', 'time', 'week'
+	'date', 'datetime-local', 'month', 'time', 'week',
+	'checkbox', 'radio', 'range', 'color'
 ]);
 
+type Field = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+
+/** A value no field ever holds: the field changed before its start was seen. */
+const UNKNOWN_START = '\u0000unknown';
+
+/** Each touched field's value from before the user touched it. */
+let initialValues = new WeakMap<Field, string>();
 let lastEditable: HTMLElement | null = null;
+
+function isField(el: unknown): el is Field {
+	return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement;
+}
+
+function tracked(el: Field): boolean {
+	if (el.disabled) return false;
+	if (el instanceof HTMLInputElement) return EDITABLE_INPUTS.has(el.type) && !el.readOnly;
+	if (el instanceof HTMLTextAreaElement) return !el.readOnly;
+	return true;
+}
+
+/** What a field holds now, comparable with what it held before. */
+function fieldValue(el: Field): string {
+	if (el instanceof HTMLSelectElement) {
+		return Array.from(el.options).filter((o) => o.selected).map((o) => o.value).join('\n');
+	}
+	if (el instanceof HTMLInputElement && (el.type === 'checkbox' || el.type === 'radio')) {
+		return el.checked ? 'on' : 'off';
+	}
+	return el.value;
+}
+
+/** The other buttons of a radio's group: choosing one unchecks them. */
+function radioGroup(el: HTMLInputElement): HTMLInputElement[] {
+	if (!el.name) return [el];
+	const root = el.form ?? el.getRootNode();
+	if (!(root instanceof Document || root instanceof DocumentFragment || root instanceof HTMLFormElement)) return [el];
+	return Array.from(root.querySelectorAll<HTMLInputElement>('input[type="radio"]'))
+		.filter((r) => r.name === el.name && r.form === el.form);
+}
+
+/** Remember what `el` holds before the user changes it (first time only). */
+function rememberStart(el: Field): void {
+	if (!tracked(el)) return;
+	const fields = el instanceof HTMLInputElement && el.type === 'radio' ? radioGroup(el) : [el];
+	for (const field of fields) {
+		if (!initialValues.has(field)) initialValues.set(field, fieldValue(field));
+	}
+}
+
+/** The field an event is about to change: the target, or the control of a label pressed. */
+function fieldFor(target: EventTarget | null): Field | null {
+	if (isField(target)) return target;
+	if (target instanceof Element) {
+		const control = target.closest('label')?.control;
+		if (isField(control)) return control;
+	}
+	return null;
+}
 
 function onFocusIn(event: FocusEvent): void {
 	const target = event.target;
 	if (target instanceof HTMLElement && (target.isContentEditable || target.matches('input, textarea'))) {
 		lastEditable = target;
 	}
+	const field = fieldFor(target);
+	if (field) rememberStart(field);
 }
 
+/** A press or key can change a toggle that never takes focus (Safari, a label). */
+function onBeforeChange(event: Event): void {
+	const field = fieldFor(event.target);
+	if (field) rememberStart(field);
+}
+
+/** A change whose start nobody saw (autofill, a script's event): unknown, so unsaved. */
+function onChange(event: Event): void {
+	const field = fieldFor(event.target);
+	if (!field || !tracked(field) || initialValues.has(field)) return;
+	if (field instanceof HTMLInputElement && field.type === 'checkbox') {
+		initialValues.set(field, field.checked ? 'off' : 'on');
+	} else {
+		initialValues.set(field, UNKNOWN_START);
+	}
+}
+
+const PRE_CHANGE_EVENTS = ['pointerdown', 'mousedown', 'touchstart', 'keydown'] as const;
+
 /**
- * Why a reload would lose something typed into the page, or null.
+ * Why a reload would lose something entered into the page, or null.
  *
  * Every settings and editor form, approval feedback, a question's answer, a
- * provider key: a field whose value differs from the one it was rendered
- * with, a file input holding files, or the focused (or last focused)
- * rich-text editor holding text. A field filled in by the app counts too,
- * which errs toward the banner: a reload only ever waits for a hide.
+ * provider key: a field (text, select, checkbox, radio, range) the user
+ * changed from what it held when they first touched it, a file input
+ * holding files, or the focused (or last focused) rich-text editor holding
+ * text. A field changed back to its start is clean again.
  */
 export function unsavedFieldReason(doc: Document = document): string | null {
-	for (const el of doc.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input, textarea')) {
-		if (el.disabled || el.readOnly) continue;
-		if (el instanceof HTMLInputElement) {
-			if (el.type === 'file') {
-				if (el.files?.length) return 'file-input';
-				continue;
-			}
-			if (!TYPED_INPUTS.has(el.type)) continue;
+	for (const el of doc.querySelectorAll<Field>('input, textarea, select')) {
+		if (el instanceof HTMLInputElement && el.type === 'file') {
+			if (!el.disabled && el.files?.length) return 'file-input';
+			continue;
 		}
-		if (el.value !== el.defaultValue) return 'unsaved-field';
+		if (!tracked(el)) continue;
+		const start = initialValues.get(el);
+		if (start !== undefined && fieldValue(el) !== start) return 'unsaved-field';
 	}
 	for (const el of [doc.activeElement, lastEditable]) {
 		if (el instanceof HTMLElement && el.isConnected && el.isContentEditable && el.textContent?.trim()) {
@@ -168,7 +252,10 @@ export function installAppUpdateWatch(): () => void {
 		if (isChunkLoadError(event.reason)) void current.check('chunk');
 	};
 
-	document.addEventListener('focusin', onFocusIn);
+	document.addEventListener('focusin', onFocusIn, true);
+	for (const type of PRE_CHANGE_EVENTS) document.addEventListener(type, onBeforeChange, { capture: true, passive: true });
+	document.addEventListener('input', onChange, true);
+	document.addEventListener('change', onChange, true);
 	document.addEventListener('visibilitychange', onVisibility);
 	window.addEventListener('online', onOnline);
 	window.addEventListener('pageshow', onPageShow);
@@ -182,7 +269,11 @@ export function installAppUpdateWatch(): () => void {
 	return () => {
 		unblock();
 		lastEditable = null;
-		document.removeEventListener('focusin', onFocusIn);
+		initialValues = new WeakMap();
+		document.removeEventListener('focusin', onFocusIn, true);
+		for (const type of PRE_CHANGE_EVENTS) document.removeEventListener(type, onBeforeChange, true);
+		document.removeEventListener('input', onChange, true);
+		document.removeEventListener('change', onChange, true);
 		document.removeEventListener('visibilitychange', onVisibility);
 		window.removeEventListener('online', onOnline);
 		window.removeEventListener('pageshow', onPageShow);

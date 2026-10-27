@@ -25,6 +25,35 @@ import { selectedContextWindow } from './context-window';
 import { getDefaultModel, getServerDefaultModel } from '$lib/constants/models';
 import { composerPreferences } from '../composer-preferences';
 import { sendableComposerBinding } from './composer-binding';
+import { registerReloadBlocker } from '$lib/services/app-update';
+
+// ─── Sends in flight ─────────────────────────────────────────────────────────
+
+/**
+ * Sends whose request has not settled. The composer clears its draft as a
+ * send starts, so until the send settles a reload would lose the message (a
+ * refused send puts it back). Kept here, not in the composer, so the guard
+ * outlives a composer that unmounts mid-send (an account switch, the
+ * composer leaving view) and covers every caller (#711).
+ */
+let sendsInFlight = 0;
+
+/** Why a reload now would lose a message, or null. */
+export function pendingSendReason(): string | null {
+	return sendsInFlight > 0 ? 'message-sending' : null;
+}
+
+registerReloadBlocker(pendingSendReason);
+
+/** Run one send, counted as in flight until it settles either way. */
+export async function trackSend<T>(send: () => Promise<T>): Promise<T> {
+	sendsInFlight++;
+	try {
+		return await send();
+	} finally {
+		sendsInFlight--;
+	}
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -335,7 +364,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		}
 	}
 
-	return {
+	const sender = {
 		async sendMessage(prompt: string, options?: SendMessageOptions): Promise<boolean> {
 			prompt = prompt.trim();
 
@@ -1185,4 +1214,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			return null; // restore the draft only after a withdrawn verdict
 		},
 	};
+
+	// Every send, whichever caller started it, holds off an update reload
+	// until it settles (see trackSend).
+	const send = sender.sendMessage;
+	sender.sendMessage = (prompt: string, options?: SendMessageOptions) => trackSend(() => send(prompt, options));
+	return sender;
 }

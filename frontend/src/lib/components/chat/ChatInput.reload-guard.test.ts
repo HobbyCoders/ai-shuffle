@@ -1,7 +1,8 @@
 /**
- * #707 review: a send clears the draft before its request settles. Until it
- * does, an update must not reload the page (the message would be lost if the
- * send then failed and wanted to restore it).
+ * #707 review, #711: a send clears the draft before its request settles.
+ * Until it does, an update must not reload the page (the message would be
+ * lost if the send then failed and wanted to restore it), even after the
+ * composer that started it unmounted.
  */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
@@ -38,27 +39,35 @@ beforeEach(async () => {
 	await auth.checkAuth();
 });
 afterEach(() => {
+	vi.useRealTimers();
 	cleanup();
 	activeSession.setDraft('');
 	vi.restoreAllMocks();
 });
 
-it('a send in flight blocks the reload after its draft is cleared, and only until it settles', async () => {
-	let settle!: (sent: boolean) => void;
-	vi.spyOn(activeSession, 'sendMessage').mockImplementation(() => new Promise<boolean>((resolve) => { settle = resolve; }));
+it('a send in flight blocks the reload after its composer unmounts, and only until it settles', async () => {
+	// The real send path, held at its restore wait: the page still restores
+	// the session this send targets.
+	vi.useFakeTimers({ shouldAdvanceTime: true });
+	activeSession.current.isRestoringSession = true;
 	const view = render(ChatInput);
 	const editor = view.container.querySelector<HTMLElement>('.tiptap')!;
 	await waitFor(() => expect(editor.textContent).toBe('send me'));
-	expect(reloadBlockers()).not.toContain('composer-sending');
+	expect(reloadBlockers()).not.toContain('message-sending');
 
 	await fireEvent.submit(view.container.querySelector('form')!);
-	await waitFor(() => expect(activeSession.sendMessage).toHaveBeenCalledOnce());
 	// The draft is gone already; the request is not done.
-	expect(editor.textContent).toBe('');
-	expect(reloadBlockers()).toContain('composer-sending');
+	await waitFor(() => expect(editor.textContent).toBe(''));
+	expect(reloadBlockers()).toContain('message-sending');
 
-	settle(true);
-	await waitFor(() => expect(reloadBlockers()).not.toContain('composer-sending'));
+	// The composer leaves (an account switch, the view changing) mid-send.
 	cleanup();
-	expect(reloadBlockers()).toEqual([]);
+	expect(reloadBlockers()).toEqual(['message-sending']);
+
+	// The restore never settles: the send gives up and its message goes back
+	// to the session's draft, which keeps the page from here on.
+	await vi.advanceTimersByTimeAsync(5_000);
+	await waitFor(() => expect(reloadBlockers()).toEqual(['composer-draft']));
+	expect(activeSession.current.draft).toContain('send me');
+	activeSession.current.isRestoringSession = false;
 });

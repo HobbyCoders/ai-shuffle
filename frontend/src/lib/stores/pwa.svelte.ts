@@ -12,7 +12,7 @@ import { createSubscribers } from './store-utils';
 import { installPromptPreference } from './install-prompt-preference.svelte';
 import { sessionOwnerEpoch } from './session-owner';
 import { isDesktop } from '$lib/services/desktop';
-import { canReloadSilently } from '$lib/services/app-update';
+import { appUpdateMonitor } from '$lib/services/app-update-watch';
 
 interface PWAState {
 	isInstalled: boolean;
@@ -21,10 +21,9 @@ interface PWAState {
 	installPromptEvent: BeforeInstallPromptEvent | null;
 	serviceWorkerRegistration: ServiceWorkerRegistration | null;
 	/**
-	 * A newer build has activated but this tab is visible, so we deferred the
-	 * reload to avoid wiping in-progress UI (e.g. a chat composer draft). The
-	 * app surfaces a "refresh" toast; the reload also happens automatically the
-	 * next time the tab is hidden. See `handleSwUpdate` / `applyUpdate`.
+	 * A newer build has activated: this page is out of date. The app-update
+	 * monitor decides whether to reload or show its banner (see
+	 * `handleSwUpdate`).
 	 */
 	updateReady: boolean;
 }
@@ -59,16 +58,16 @@ function _update(fn: (s: PWAState) => PWAState) {
 //
 // A new service worker calls skipWaiting() on install, so it activates
 // immediately and fires `controllerchange` (some builds also postMessage
-// `SW_UPDATED`). Reloading a VISIBLE tab there is destructive — it wipes the
-// user's in-progress state (e.g. the chat composer draft, which is in-memory).
-// So we only reload silently when the tab is hidden; when it's visible we mark
-// `updateReady` (surfaced as a non-blocking "refresh" toast) and defer the
-// reload until the tab next becomes hidden (or the user clicks the toast).
+// `SW_UPDATED`). That only says the page is out of date. Whether and when to
+// reload is the app-update monitor's call (app-update-watch.ts), the same one
+// every client's version check uses: never over a live call, a draft or an
+// unsaved field, a silent reload only while hidden or just resumed, at most
+// one automatic reload per cooldown, and never again from the build a reload
+// came back on (#711). Otherwise it shows the one "App updated" banner and
+// reloads the next time the tab hides.
 
-// Guard so at most one reload ever fires, from whichever path wins.
+// Guard so the user-chosen reload fires at most once.
 let _refreshing = false;
-// Guard so we register the deferred-reload visibilitychange listener once.
-let _deferredReloadArmed = false;
 
 function _reloadNow() {
 	if (_refreshing) return;
@@ -76,34 +75,13 @@ function _reloadNow() {
 	window.location.reload();
 }
 
-function _onVisibleHiddenReload() {
-	// A live voice call or an unsent draft keeps the page: stay armed and try
-	// again the next time the tab hides (see registerReloadBlocker).
-	if (document.visibilityState === 'hidden' && canReloadSilently()) {
-		document.removeEventListener('visibilitychange', _onVisibleHiddenReload);
-		_reloadNow();
-	}
-}
-
 function handleSwUpdate() {
 	if (!browser) return;
-
-	// User isn't looking — a silent reload is fine and least surprising.
-	if (document.visibilityState === 'hidden' && canReloadSilently()) {
-		_reloadNow();
-		return;
-	}
-
-	// Tab is visible: do NOT reload out from under the user. Flag it (drives the
-	// refresh toast) and arm a one-time reload for when the tab next hides.
 	if (!_state.updateReady) {
 		_update((s) => ({ ...s, updateReady: true }));
 		_notifySubscribers();
 	}
-	if (!_deferredReloadArmed) {
-		_deferredReloadArmed = true;
-		document.addEventListener('visibilitychange', _onVisibleHiddenReload);
-	}
+	appUpdateMonitor()?.markStale();
 }
 
 function checkInstallState() {
@@ -150,8 +128,7 @@ async function registerServiceWorker() {
 
 		_update((s) => ({ ...s, serviceWorkerRegistration: registration }));
 
-		// Route both activation signals through the shared handler, which reloads
-		// silently only when the tab is hidden and otherwise defers (see above).
+		// Both activation signals hand the news to the app-update monitor (see above).
 		navigator.serviceWorker.addEventListener('controllerchange', handleSwUpdate);
 
 		navigator.serviceWorker.addEventListener('message', (event) => {
@@ -329,9 +306,8 @@ export const pwa = {
 	},
 
 	/**
-	 * Reload now to apply a pending update. Called from the "refresh" toast
-	 * action when a new build is ready but the tab is visible. Guarded so it
-	 * fires at most once even if the deferred visibility reload also races it.
+	 * Reload now to apply a pending update: the user asked for it. Guarded so
+	 * it fires at most once.
 	 */
 	applyUpdate() {
 		if (!browser) return;
