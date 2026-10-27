@@ -329,7 +329,7 @@ async def test_typed_producer_records_attachment_text_before_chat_handoff(monkey
     order = []
     async def record(session, user, assistant, **kwargs):
         order.append(("record", session, user, kwargs["model"]))
-    async def delegate(session, prompt):
+    async def delegate(session, prompt, **_kwargs):
         assert order and order[0][0] == "record"
         order.append(("delegate", session, prompt))
         return "Inspected."
