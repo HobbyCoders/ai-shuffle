@@ -1,6 +1,6 @@
 import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
-import { compactedRows, compactionBridge, mounted, postedRows } from '../hooks/mechanical.ts'
+import { COMPACT_TIMEOUT_MS, compactedRows, compactionAnswer, compactionBridge, mounted, postedRows } from '../hooks/mechanical.ts'
 
 const START = { cwd: '/work', surface: null, isInteractive: false }
 const ROWS = [
@@ -95,7 +95,7 @@ describe('mechanical compaction', () => {
     expect(await $.session.compact({ trigger: 'manual', messages: GROUP })).toEqual({ messages: kept })
     expect(calls.length).toBe(0)
     expect(body).not.toContain('"result"')
-    expect(JSON.parse(body)).toEqual({ v: 1, messages: kept })
+    expect(JSON.parse(body)).toEqual({ v: 1, trigger: 'manual', messages: kept })
   })
 
   test('the bridge is captured before the engine can compact during session.start', async ($, on) => {
@@ -137,7 +137,7 @@ describe('mechanical compaction', () => {
     const post = posted as { url: string; init: { body: string; headers: Record<string, string> } }
     expect(post.url).toBe('http://127.0.0.1:50123/claude-mod/compact')
     expect(post.init.headers.authorization).toBe('Bearer mod-token')
-    expect(JSON.parse(post.init.body)).toEqual({ v: 1, messages: ROWS })
+    expect(JSON.parse(post.init.body)).toEqual({ v: 1, trigger: 'auto', messages: ROWS })
   })
 
   for (const response of [
@@ -198,7 +198,7 @@ describe('mechanical compaction', () => {
     const event = { trigger: 'auto' as const, messages: ROWS }
     const pending = $.session.compact(event)
     await clock.settle()
-    await clock.advance(10_000)
+    await clock.advance(COMPACT_TIMEOUT_MS)
     expect(await pending).toEqual({ messages: ROWS })
     expect(calls).toEqual([event])
     expect(logs).toBe(1)
@@ -215,14 +215,70 @@ describe('mechanical compaction', () => {
     expect(calls.length).toBe(1)
   })
 
-  test('a transport failure logs once and calls the unchanged next event', async ($, on) => {
+  test('an automatic compaction falls back to the unchanged next event on a transport failure', async ($, on) => {
     const calls = engine(on)
     mock.env(on, ENV)
     mock.clock(on, { now: 0 })
     on('http.fetch', () => { throw new Error('connection refused') })
     await $.session.start(START)
-    const event = { trigger: 'manual' as const, instructions: 'Keep this', messages: ROWS }
+    const event = { trigger: 'auto' as const, instructions: 'Keep this', messages: ROWS }
     await $.session.compact(event)
     expect(calls).toEqual([event])
+  })
+
+  const NOTHING = { skip: 'Nothing more to compact: the context is already as small as it gets' }
+
+  test('a manual compaction Fluid cannot shrink is a no-op, never the summarizer', async ($, on) => {
+    let logs = 0
+    const calls = engine(on, () => { logs++ })
+    mock.env(on, ENV)
+    mock.clock(on, { now: 0 })
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(NOTHING) } }))
+    await $.session.start(START)
+    expect(await $.session.compact({ trigger: 'manual', messages: ROWS })).toEqual(NOTHING)
+    expect(calls.length).toBe(0)
+    expect(logs).toBe(0)
+  })
+
+  test('an automatic compaction Fluid cannot shrink falls back to Claude Code', async ($, on) => {
+    let logs = 0
+    const calls = engine(on, () => { logs++ })
+    mock.env(on, ENV)
+    mock.clock(on, { now: 0 })
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(NOTHING) } }))
+    await $.session.start(START)
+    const event = { trigger: 'auto' as const, messages: ROWS }
+    expect(await $.session.compact(event)).toEqual({ messages: ROWS })
+    expect(calls).toEqual([event])
+    expect(logs).toBe(1)
+  })
+
+  for (const [name, fetch] of [
+    ['a transport failure', () => { throw new Error('connection refused') }],
+    ['a refused request', () => ({ value: { status: 400, ok: false, headers: {}, text: '' } })],
+    ['an invalid answer', () => ({ value: { status: 200, ok: true, headers: {}, text: '{"messages":[]}' } })],
+    ['an invalid skip', () => ({ value: { status: 200, ok: true, headers: {}, text: '{"skip":""}' } })],
+  ] as const) {
+    test(`a manual compaction is left as it is on ${name}, never summarized`, async ($, on) => {
+      let logs = 0
+      const calls = engine(on, () => { logs++ })
+      mock.env(on, ENV)
+      mock.clock(on, { now: 0 })
+      on('http.fetch', fetch)
+      await $.session.start(START)
+      const answer = await $.session.compact({ trigger: 'manual', instructions: 'Keep this', messages: ROWS })
+      expect(calls.length).toBe(0)
+      expect(logs).toBe(1)
+      expect('skip' in answer && answer.skip.startsWith('Fluid could not compact the conversation (')).toBe(true)
+    })
+  }
+
+  test('the answer is rows that validate or a bounded skip', () => {
+    const rows = postedRows(ROWS)
+    expect(compactionAnswer({ messages: rows }, rows)).toEqual({ messages: rows })
+    expect(compactionAnswer(NOTHING, rows)).toEqual(NOTHING)
+    expect(() => compactionAnswer({ skip: 'x'.repeat(501) }, rows)).toThrow()
+    expect(() => compactionAnswer({ skip: 1 }, rows)).toThrow()
+    expect(() => compactionAnswer({ skip: 'both', messages: rows }, rows)).toThrow()
   })
 })

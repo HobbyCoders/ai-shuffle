@@ -629,6 +629,24 @@ class DelegatedDiagnostic(Event):
     data: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, kw_only=True)
+class ContextArchived(Event):
+    """Conversation text a compaction took out of the model's context that the
+    session's stored history does not hold, kept here so it stays recallable.
+
+    The delegated leg's mechanical compaction drops Claude Code's own rows
+    (skill bodies, command expansions, attachments, hook context, an earlier
+    Claude Code summary) once they are old; Fluid never stored them, so each
+    one is written here first. ``entries`` holds one ``{"node_id", "role",
+    "text"}`` per row: ``node_id`` is a fresh ``node_…`` id that the
+    compaction note cites, and ``HistoryExpand`` / ``HistorySearch`` read the
+    text back (:class:`fluid.context.recall.HistoryRecall`). Never part of the
+    stored path, never shown in a chat; hosts that do not know it skip it.
+    """
+
+    entries: tuple[dict[str, str], ...] = ()
+
+
 # ``SubagentEvent.wake_disposition`` values. See the field's docstring.
 WAKE_AUTO = "auto"
 WAKE_SUPPRESSED = "suppressed"
@@ -768,6 +786,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
         SubagentEvent, HookEvent, AssistantTextSanitized,
         CacheMissAlert,
         ContinualUpdate, DelegatedSurface, DelegatedDiagnostic, SwarmUpdated,
+        ContextArchived,
     )
 }
 

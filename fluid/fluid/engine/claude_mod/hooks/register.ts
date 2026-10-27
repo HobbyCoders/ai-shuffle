@@ -10,7 +10,7 @@
 import type { Register } from 'claude-code'
 import { withFluidNote } from './compact.ts'
 import { classify, enabled, lastUserRequest, refusal, replacementInput } from './file_guard.ts'
-import { compactedRows, compactionBridge, mounted, postedRows } from './mechanical.ts'
+import { COMPACT_TIMEOUT_MS, compactionAnswer, compactionBridge, mounted, postedRows } from './mechanical.ts'
 import { withDedicatedToolGuidance, withoutBashFirstSteer } from './steer.ts'
 import { POST_TIMEOUT_MS, type UsageBridge, bridgeFrom, shouldPost, usageReport } from './usage.ts'
 
@@ -55,9 +55,13 @@ export const register: Register = (on) => {
   })
 
   // Not mounted: the original note-only hook, unchanged. Mounted: the main
-  // conversation compacts through Fluid, or falls back with the original
-  // event. Precompute is skipped so it cannot spend a summarizer request ahead
-  // of the threshold. Subagents always pass through untouched.
+  // conversation compacts through Fluid. Only an automatic compaction at the
+  // context limit may fall back to Claude Code's summarizer (with the
+  // original event), so a chat can never overflow; a manual one (/compact,
+  // the app's Compact) never does: when Fluid has nothing more to reclaim or
+  // cannot be reached it is skipped, and the conversation stays as it is.
+  // Precompute is skipped so it cannot spend a summarizer request ahead of
+  // the threshold. Subagents always pass through untouched.
   on('session.compact', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
     // A sufficiently large --resume may compact before session.start itself.
@@ -83,6 +87,7 @@ export const register: Register = (on) => {
     }
     if (mechanical) {
       if (e.trigger === 'precompute') return { skip: 'Fluid compacts mechanically at the threshold' }
+      const fallback = e.trigger === 'auto'
       let reason = 'bridge unavailable'
       try {
         const target = compactionBridge(bridge)
@@ -94,20 +99,28 @@ export const register: Register = (on) => {
           $.http.fetch(target.url, {
             method: 'POST',
             headers: { 'content-type': 'application/json', authorization: `Bearer ${target.token}` },
-            body: JSON.stringify({ v: 1, messages: rows }),
+            body: JSON.stringify({ v: 1, trigger: e.trigger, messages: rows }),
             ...(target.socketPath ? { socketPath: target.socketPath } : {}),
           }),
-          $.clock.sleep(POST_TIMEOUT_MS).then(() => { reason = 'bridge timeout'; throw new Error('timeout') }),
+          $.clock.sleep(COMPACT_TIMEOUT_MS).then(() => { reason = 'bridge timeout'; throw new Error('timeout') }),
         ])
         if (!response.ok || response.status !== 200) {
           reason = `bridge HTTP ${response.status}`
           throw new Error('status')
         }
         reason = 'invalid bridge response'
-        return { messages: compactedRows(JSON.parse(response.text), rows) }
+        const answer = compactionAnswer(JSON.parse(response.text), rows)
+        if ('messages' in answer) return answer
+        // Nothing more to reclaim. Manual: an honest no-op. Automatic: the
+        // context is at its limit, so Claude Code summarizes instead.
+        if (!fallback) return answer
+        reason = 'nothing more to compact'
+        throw new Error('nothing')
       } catch {
-        try { await $.ui.log(`Fluid compaction fallback: ${reason}`, { to: 'debug' }) } catch { /* Best effort. */ }
-        return next(e)
+        try {
+          await $.ui.log(fallback ? `Fluid compaction fallback: ${reason}` : `Fluid compaction skipped: ${reason}`, { to: 'debug' })
+        } catch { /* Best effort. */ }
+        return fallback ? next(e) : { skip: `Fluid could not compact the conversation (${reason}); it is left as it is` }
       }
     }
     let instructions = e.instructions

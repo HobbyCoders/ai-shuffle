@@ -84,7 +84,7 @@ from fluid.engine.background import BackgroundLifecycleMixin
 from fluid.engine.base import EngineCaps, matches_tool_pattern
 from fluid.engine.claude_mod_usage import USAGE_PATH, PlanUsageReport, parse_plan_usage_report
 from fluid.engine.claude_mod_compaction import (
-    COMPACT_PATH, MAX_COMPACT_BODY_BYTES, compact_messages,
+    COMPACT_PATH, MAX_COMPACT_BODY_BYTES, NothingToCompact, compact_messages,
 )
 from fluid.context.recall import HistoryRecall
 from fluid.engine.delegated_proto import (
@@ -102,6 +102,7 @@ from fluid.engine.delegated_proto import (
 )
 from fluid.events.bus import EventBus
 from fluid.events.model import (
+    ContextArchived,
     ContextCompaction,
     ContextCompacting,
     DelegatedDiagnostic,
@@ -456,6 +457,14 @@ def _find_bash_first_steer(config_dir: str, cli_session_id: str) -> dict[str, An
     return bash_first_steer_in_transcript(path)
 
 
+# What a manual compaction Fluid could not shrink any further says, to the
+# mod (its skip reason, which Claude Code prints after "Not compacted · ")
+# and on the host's card. Plain words: it is a no-op, not a failure.
+NOTHING_TO_COMPACT = (
+    "Nothing more to compact: the context is already as small as Fluid's "
+    "compaction makes it while keeping the current work as it is"
+)
+
 # A typed ``/compact`` (with or without the CLI's custom summary instructions).
 _COMPACT_COMMAND = re.compile(r"^/compact(?:\s|$)")
 
@@ -746,6 +755,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         journal: Any | None = None,
         claude_mod: bool | None = None,
         claude_mod_compaction: bool = True,
+        compaction_window: int | None = None,
         plan_usage_sink: Callable[[PlanUsageReport], Awaitable[None]] | None = None,
         compact_context: Callable[[], Awaitable[str | None]] | None = None,
         fresh_context: Callable[[list[Any], tuple[int, int] | None], Awaitable[str | None]] | None = None,
@@ -966,6 +976,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # off) compacts on the CLI's own, the same as off.
         self.claude_mod_compaction = bool(claude_mod_compaction)
         self._compaction_route = False
+        # The model's context window when the host knows it: what Fluid's
+        # compaction sizes its target and its recency tail against.
+        self.compaction_window = (
+            compaction_window if compaction_window and compaction_window > 0 else None
+        )
+        # A manual compaction this turn that Fluid answered as a no-op:
+        # nothing more could be reclaimed, so the conversation stays as it is.
+        self._compact_noop = False
 
         self._session: SessionMeta | None = None
         self._session_id = session_id
@@ -1637,10 +1655,22 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         return env
 
     async def _compact_mod_messages(self, body: Any) -> dict[str, Any]:
+        """The bridge's compaction route: Claude Code's rows, compacted.
+
+        ``{"messages": [...]}`` when Fluid made them smaller. ``{"skip":
+        reason}`` when it could not (:class:`NothingToCompact`): the mod
+        leaves a manual compaction as it is (an honest no-op, never Claude
+        Code's summarizer) and lets an automatic one at the context limit
+        fall back to Claude Code. ``ValueError`` (a 400) for a request or
+        rows that do not validate.
+        """
         if (not self._compaction_route or not isinstance(body, dict)
                 or type(body.get("v")) is not int or body["v"] != 1
                 or body.get("agentId") is not None):
             raise ValueError("invalid compaction request")
+        trigger = body.get("trigger")
+        if trigger not in ("manual", "auto", "plugin"):
+            trigger = "auto"
         if self.registry is None or not all(
             self.registry.available(name) and self._bridge_tool_permitted(name)
             for name in ("HistoryExpand", "HistorySearch")
@@ -1649,16 +1679,44 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         meta = await self._ensure_session()
         nodes = await self.store.load_path(meta.session_id)
         started = time.monotonic()
+        archive: list[dict[str, str]] = []
         try:
-            messages = compact_messages(body.get("messages"), nodes)
+            # Pure CPU over the whole path: off the event loop, so the turn's
+            # stream and the bridge's other routes keep moving meanwhile.
+            messages = await asyncio.to_thread(
+                compact_messages, body.get("messages"), nodes,
+                context_window=self.compaction_window, trigger=trigger, archive=archive,
+            )
+        except NothingToCompact as exc:
+            # The reason is a fixed phrase, never message content.
+            if trigger == "auto":
+                logger.info("claude mod compaction fell back to the CLI summarizer: %s", exc)
+            else:
+                self._compact_noop = True
+                logger.info("claude mod compaction (%s): nothing more to compact; "
+                            "left as it is, no summarizer", trigger)
+            return {"skip": NOTHING_TO_COMPACT}
         except ValueError as exc:
-            # The bridge turns this into a 400 and the CLI summarizes instead.
-            # Said where a fallback can be seen: the reason is a fixed phrase
-            # from compact_messages, never message content.
-            logger.info("claude mod compaction fell back to the CLI summarizer: %s", exc)
+            # A 400: the mod falls back for an automatic compaction and leaves
+            # a manual one as it is.
+            logger.info("claude mod compaction refused (%s): %s", trigger, exc)
             raise
-        logger.info("claude mod compacted through Fluid: %d -> %d messages, %.3fs, no summarizer",
-                    len(body["messages"]), len(messages), time.monotonic() - started)
+        if archive:
+            # Claude Code's own rows the answer leaves out are written first,
+            # so the refs the note cites resolve before the model reads them.
+            # A failed write refuses the compaction (manual: left as it is).
+            try:
+                await self._emit(ContextArchived(
+                    session_id=meta.session_id, turn_id=self._active_turn_id,
+                    entries=tuple(archive),
+                ))
+            except Exception as exc:
+                logger.warning("claude mod compaction: could not archive dropped rows: %s",
+                               type(exc).__name__)
+                raise ValueError("could not archive the rows it would drop") from exc
+        logger.info("claude mod compacted through Fluid (%s): %d -> %d messages, %d archived, "
+                    "%.3fs, no summarizer", trigger, len(body["messages"]), len(messages),
+                    len(archive), time.monotonic() - started)
         return {"messages": messages}
 
     async def _take_plan_usage(self, body: Any) -> None:
@@ -2002,6 +2060,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             self._turn_compact_requested = _is_compact_command(content)
             self._turn_compactions = 0
             self._turn_compact_error = None
+            self._compact_noop = False
             mapper = await self._drive_turn(sid, turn_id, user_node, content)
         except asyncio.CancelledError:
             raise
@@ -4187,20 +4246,26 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         """
         if not self._turn_compact_requested or self._turn_compactions:
             return
-        reason = (
-            self._turn_compact_error
-            or mapper.result_text
-            or "Claude Code finished the /compact turn without reporting a compaction"
-        )
-        logger.warning("/compact did not compact the session: %s", reason)
+        if self._compact_noop:
+            # Fluid had nothing more to reclaim: an honest no-op, not a failure.
+            reason = NOTHING_TO_COMPACT
+            data: dict[str, Any] = {"nothing_to_compact": True}
+            logger.info("/compact left the session as it is: nothing more to compact")
+        else:
+            reason = (
+                self._turn_compact_error
+                or mapper.result_text
+                or "Claude Code finished the /compact turn without reporting a compaction"
+            )
+            data = {
+                "compact_error": self._turn_compact_error,
+                "result": mapper.result_text or None,
+            }
+            logger.warning("/compact did not compact the session: %s", reason)
         try:
             await self._emit(DelegatedDiagnostic(
                 session_id=sid, turn_id=turn_id, kind="compaction_failed",
-                message=reason,
-                data={
-                    "compact_error": self._turn_compact_error,
-                    "result": mapper.result_text or None,
-                },
+                message=reason, data=data,
             ))
         except asyncio.CancelledError:
             raise

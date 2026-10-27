@@ -291,15 +291,31 @@
 			}
 
 			case 'compact_failed': {
+				// Nothing left to reclaim is a no-op, not a failure: the chat is
+				// left as it is and nothing summarized it.
+				if (data.nothing_to_compact === true) {
+					return {
+						title: 'Nothing More to Compact',
+						content:
+							'The context is already as small as compaction can make it while keeping the current work as it is, so it was left unchanged. Nothing was summarized.',
+						badge: 'no change',
+						badgeColor: 'gray'
+					};
+				}
 				// A /compact the agent did not carry out. No "compacted" card
 				// is shown for it; this one says so, with the CLI's reason.
 				const reason = typeof data.reason === 'string' ? data.reason.trim() : '';
 				const who = data.requested_by === 'app'
 					? 'AI Shuffle asked the agent to compact the context, but it did not.'
 					: 'The agent did not compact the context.';
+				// Nothing was summarized either way; a message queued behind the
+				// compaction still goes, on the conversation as it was.
+				const after =
+					'Nothing was summarized and the conversation is unchanged; a message queued after it is still sent.';
+				const because = reason ? ` Reason: ${reason}${/[.!?]$/.test(reason) ? '' : '.'}` : '';
 				return {
 					title: 'Compaction Failed',
-					content: reason ? `${who} Reason: ${reason}` : who,
+					content: `${who}${because} ${after}`,
 					badge: 'not compacted',
 					badgeColor: 'red'
 				};

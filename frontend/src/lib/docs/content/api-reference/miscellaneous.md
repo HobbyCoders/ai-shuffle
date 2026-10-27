@@ -699,8 +699,11 @@ On by default. When enabled, a Claude Code chat's compaction keeps the recent
 work as it is, trims older tool results and digests older turns, with the
 originals still readable through `HistoryExpand`, instead of Claude Code
 replacing the conversation with a short summary. More of the conversation stays
-in context afterwards, so later turns send more tokens. It needs Claude Code
-2.1.287 or newer; an older CLI compacts on its own, as when this is off.
+in context afterwards, so later turns send more tokens. A compaction you ask
+for never uses Claude Code's summary; only an automatic one at the context
+limit falls back to it, when AI Shuffle cannot free enough space. It needs
+Claude Code 2.1.287 or newer; an older CLI compacts on its own, as when this is
+off.
 
 ### PUT /api/v1/settings/claude-compaction
 

@@ -2007,15 +2007,20 @@ async def compact_session(
 ):
     """Compact this chat's context now: a ``/compact`` turn from the owner.
 
-    Claude Code compacts with its own ``/compact``; a native chat runs the
+    A Claude Code chat with Fluid compaction on (the default) runs Fluid's
+    mechanical compaction only, never Claude Code's summarizer: when nothing
+    more can be reclaimed the turn is a no-op and the chat says "Nothing More
+    to Compact". With the setting off, or on a Claude Code without the mod,
+    Claude Code compacts with its own ``/compact``. A native chat runs the
     engine's own compaction (the ladder that runs near the limit). The chat
     shows "Context Compacted" only when it worked, else "Compaction failed"
     with the reason. With no follow-up, refused with 409 while a turn runs or
     waits; 409 for an archived chat, 400 for a chat that cannot compact (voice).
 
     Optional ``then_send`` is a normal WebSocket query payload. Both turns are
-    admitted atomically in order. The follow-up runs even if compaction fails,
-    on the original context; the compact turn retains its visible failure.
+    admitted atomically in order. The follow-up runs even if compaction fails
+    or had nothing to do, on the current context; the compact turn keeps its
+    visible card.
     """
     existing = await require_session(request, session_id)
     _refuse_archived(existing, "compact")
