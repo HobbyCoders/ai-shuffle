@@ -24,8 +24,10 @@ beforeEach(() => composerPreferences.set('modelEfforts', {}));
 afterEach(() => cleanup());
 import { effortRegistryFixture as payload } from '$lib/test-stubs/effort-registry';
 const renderDock = () => render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn() } });
-/** The Chat controls panel's effort bars (#1816), portaled to <body>. */
-const panelEfforts = () => document.querySelectorAll<HTMLButtonElement>('.mcp .bars .bar');
+/** The Chat controls panel's effort choices (#1816), portaled to <body>: one radio per level. */
+const panelEfforts = () => document.querySelectorAll<HTMLButtonElement>('.mcp [data-row="effort"] [role="radiogroup"][aria-label="Reasoning effort"] [role="radio"]');
+/** The value the panel's Reasoning effort row shows on its right. */
+const panelEffortValue = () => document.querySelector('.mcp [data-row="effort"] .mcp-val')?.textContent?.trim();
 const openPanel = () => fireEvent.click(screen.getByRole('button', { name: /^All chat controls/ }));
 afterEach(() => document.querySelectorAll('.mcp-portal').forEach((n) => n.remove()));
 
@@ -158,11 +160,11 @@ describe('ControlsDock dynamic effort', () => {
   activeSession.setModelOverride('opus'); await tick();
   expect(get(activeSession).effortLevelOverride).toBe('low');
   if (surface === 'desktop') expect(screen.getByRole('slider').getAttribute('aria-valuetext')).toBe('Low');
-  else expect(document.querySelector('.mcp .effort-tile .tile-value')?.textContent).toBe('Low');
+  else expect(panelEffortValue()).toBe('Low');
   activeSession.setModelOverride('prov:codex:gpt-5.6-sol'); await tick();
   expect(get(activeSession).effortLevelOverride).toBe('xhigh');
   if (surface === 'desktop') expect(screen.getByRole('slider').getAttribute('aria-valuetext')).toBe('XHigh');
-  else expect(document.querySelector('.mcp .effort-tile .tile-value')?.textContent).toBe('XHigh');
+  else expect(panelEffortValue()).toBe('XHigh');
   activeSession.setModelOverride('prov:or:seven'); await tick();
   expect(get(activeSession).effortLevelOverride).toBe('xhigh');
   activeSession.setModelOverride('prov:or:z-ai/glm-5.3-flash'); await tick();
@@ -190,7 +192,7 @@ describe('ControlsDock dynamic effort', () => {
    const label=['Low','Medium','High','Max'][index];
    expect(get(activeSession).effortLevelOverride).toBe(label.toLowerCase());
    if(surface==='desktop') expect(screen.getByRole('slider').getAttribute('aria-valuetext')).toBe(label);
-   else expect(document.querySelector('.mcp .effort-tile .tile-value')?.textContent).toBe(label);
+   else expect(panelEffortValue()).toBe(label);
   }
   expect(composerPreferences.effortForModel('prov:api:claude-opus-4-6-20260205[1m]')).toBe('low');
   expect(composerPreferences.effortForModel('opus')).toBe('max');
@@ -255,7 +257,7 @@ describe('ControlsDock dynamic effort', () => {
   // The phone keeps the unknown pin visible and offers no levels to pick.
   expect(screen.getByRole('button', { name: 'Reasoning effort: minimal' })).toBeTruthy();
   await openPanel();
-  expect(document.querySelector('.mcp .effort-tile .tile-value')?.textContent).toBe('minimal');
+  expect(panelEffortValue()).toBe('minimal');
   expect(panelEfforts()).toHaveLength(0);
   expect(get(activeSession).effortLevelOverride).toBe('minimal');
   activeSession.setModelOverride('prov:or:unsupported');
@@ -263,7 +265,7 @@ describe('ControlsDock dynamic effort', () => {
   expect(get(activeSession).effortLevelOverride).toBeNull();
   // Opening the panel closed the desktop popover that showed the long explanation.
   expect(screen.getByRole('button', { name: 'Reasoning effort: set by the model' })).toBeTruthy();
-  expect(document.querySelector('.mcp .effort-tile .tile-value')?.textContent).toBe('Set by the model');
+  expect(panelEffortValue()).toBe('Set by the model');
   expect(panelEfforts()).toHaveLength(0);
  });
 });

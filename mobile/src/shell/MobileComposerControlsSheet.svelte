@@ -950,7 +950,7 @@
 								</span>
 								<ChevronRight size={18} class="mcp-chev" aria-hidden="true" />
 							</button>
-							<div class="mcp-stack">
+							<div class="mcp-stack" data-row="effort">
 								<div class="mcp-rowhead">
 									<span class="mcp-ic" aria-hidden="true"><Lightbulb size={17} /></span>
 									<span class="mcp-lbl"><span>Reasoning effort</span>{#if effortLocked && effortExplanation && effortExplanation !== panelEffortValue}<small>{effortExplanation}</small>{/if}</span>
@@ -981,7 +981,7 @@
 						{#if accessShown}
 							<h3 class="mcp-glabel">Permissions</h3>
 							<div class="mcp-group">
-								<div class="mcp-stack">
+								<div class="mcp-stack" data-row="access">
 									<div class="mcp-rowhead">
 										<span class="mcp-ic" aria-hidden="true">{#if accessValue === BYPASS}<ShieldOff size={17} />{:else}<ShieldCheck size={17} />{/if}</span>
 										<span class="mcp-lbl"><span>Tool access</span></span>
