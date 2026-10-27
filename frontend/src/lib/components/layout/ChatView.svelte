@@ -1,8 +1,9 @@
 <script lang="ts">
 	import type { TerminalToggle } from '$lib/components/chat/composer-shell';
-	/** Chat surface for every session. A new session opens on the agent card
-	 * (#371 step 4) with the project optional below the composer; heroes share
-	 * one persistent editor. A live voice call adds compact controls alongside it. */
+	/** Chat surface for every session. A new session opens on the centred
+	 * agent and the "Runs on …" sentence (NewSessionHero) above the composer;
+	 * heroes share one persistent editor. A live voice call adds compact
+	 * controls alongside it. */
 	import { onDestroy, tick, untrack } from 'svelte';
 	import { finishJourneyAfterPaint } from '$lib/services/journey-timing';
 	import { activeSession, activeWsConnected, streamingSessions } from '$lib/stores/active-session';
@@ -29,8 +30,7 @@
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import QuestionTray from '$lib/components/chat/QuestionTray.svelte';
 	import PrivateAccessPrompt from '$lib/components/chat/PrivateAccessPrompt.svelte';
-	import AgentCard from './AgentCard.svelte';
-	import ProjectSlot from './ProjectSlot.svelte';
+	import NewSessionHero from './NewSessionHero.svelte';
 	import ChatUnavailableNotice from './ChatUnavailableNotice.svelte';
 	import { unavailableChat, clearUnavailableChat } from '$lib/stores/unavailable-chat';
 	import VoiceCallPanel from '$lib/components/voice/VoiceCallPanel.svelte';
@@ -136,9 +136,9 @@
 	// lands.
 	const showEmptyHero = $derived(isEmptyState && !voiceCallActive);
 	// A brand-new session (not a cleared one or the "could not open" notice)
-	// leads with the agent card; the project is an optional strip under the
-	// composer.
-	const showAgentCard = $derived(showEmptyHero && chatSurface === 'new' && !unavailable);
+	// leads with the agent and the "Runs on …" sentence, which stands in for
+	// the composer's chip row until the first message.
+	const showNewSessionHero = $derived(showEmptyHero && chatSurface === 'new' && !unavailable);
 
 	// Keep the editor mounted through call transitions so drafts and file chips survive.
 	const showComposer = true;
@@ -333,9 +333,9 @@
 						<p class="cleared-hint">Conversation cleared — send a message to start fresh.</p>
 					</div>
 				{:else}
-					<!-- New session: the agent leads; no hero copy, no project
-					     required. The project row sits under the composer. -->
-					<AgentCard />
+					<!-- New session: the agent leads, then one sentence saying
+					     where it runs. Each part of it opens its menu. -->
+					<NewSessionHero />
 				{/if}
 			</div>
 		</div>
@@ -428,13 +428,8 @@
 						<PrivateAccessPrompt sessionId={$activeSession.sessionId} />
 						<QuestionTray requests={$activeSession.pendingQuestions ?? []} working={$activeSession.isStreaming} connected={$activeWsConnected} onRespond={handleQuestionResponse} />
 					{/if}
-					<ChatInput compact={!showEmptyHero} agentCard={showAgentCard} {onBrowserToggle} {onBrowserPreload} {browserOpen} {terminal} />
+					<ChatInput compact={!showEmptyHero} newSession={showNewSessionHero} {onBrowserToggle} {onBrowserPreload} {browserOpen} {terminal} />
 				{/key}
-			{/if}
-			{#if showAgentCard && !archivedSessionId}
-				<div class="project-slot-wrap">
-					<ProjectSlot />
-				</div>
 			{/if}
 		</div>
 	{/if}
@@ -641,8 +636,11 @@
 	   the matching bottom flex space, so the hero + persistent input pair sits
 	   vertically centered — reproducing the old .empty-state justify-content:center
 	   grouping without wrapping the input in a state-specific ancestor (#665). */
+	/* The hero and the spacer under the composer split the free height
+	   equally (basis auto, not 0), and the hero's content sits at its
+	   bottom: the hero and the composer are centred together. */
 	.empty-hero {
-		flex: 1;
+		flex: 1 1 auto;
 		display: flex;
 		flex-direction: column;
 		align-items: center;
@@ -669,16 +667,7 @@
 	}
 
 	.empty-bottom-spacer {
-		flex: 1;
-	}
-
-	/* Same gutters as the composer box above it, so the add-project row and
-	   the project strip share the box's left edge. */
-	.project-slot-wrap {
-		position: relative;
-		z-index: 25;
-		padding: 0 1.5rem;
-		margin-top: -0.5rem;
+		flex: 1 1 auto;
 	}
 
 	/* Overlay the error so it doesn't shift the vertically-centered content. */

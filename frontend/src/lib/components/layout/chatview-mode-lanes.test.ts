@@ -35,19 +35,19 @@ const stripComments = (source: string) =>
 const codeOnly = stripComments(chatView);
 
 describe('ChatView — the new-session hero (#371 step 4)', () => {
-	it('opens a new session on the agent card, with no lane heroes', () => {
-		expect(codeOnly).toMatch(/<AgentCard\s*\/>/);
-		expect(codeOnly).not.toMatch(/ChatModeHero|surfaceMode/);
+	it('opens a new session on the centred agent and its sentence, with no lane heroes', () => {
+		expect(codeOnly).toMatch(/<NewSessionHero\s*\/>/);
+		expect(codeOnly).not.toMatch(/ChatModeHero|surfaceMode|AgentCard/);
 	});
 
-	it('puts the optional project under the composer, only on the new-session screen', () => {
-		expect(codeOnly).toMatch(/\{#if showAgentCard && !archivedSessionId\}\s*<div class="project-slot-wrap">\s*<ProjectSlot \/>/);
-		expect(codeOnly).toContain("const showAgentCard = $derived(showEmptyHero && chatSurface === 'new' && !unavailable)");
-		expect(codeOnly).toContain('agentCard={showAgentCard}');
+	it('has no project row under the composer: the hero sentence names the project', () => {
+		expect(codeOnly).not.toMatch(/ProjectSlot|project-slot-wrap/);
+		expect(codeOnly).toContain("const showNewSessionHero = $derived(showEmptyHero && chatSurface === 'new' && !unavailable)");
+		expect(codeOnly).toContain('newSession={showNewSessionHero}');
 	});
 
 	it('never offers a standalone new voice session', () => {
-		// Voice is a call on the current conversation (the card's Talk button).
+		// Voice is a call on the current conversation (the composer's Talk circle).
 		expect(codeOnly).not.toMatch(/VoiceModeHero|startNewVoiceSession/);
 	});
 
@@ -55,9 +55,9 @@ describe('ChatView — the new-session hero (#371 step 4)', () => {
 		expect(codeOnly).not.toMatch(/primaryAssistant|assistantState|home_session_id/);
 	});
 
-	it('keeps the cleared-session hero ahead of the agent card', () => {
+	it('keeps the cleared-session hero ahead of the new-session hero', () => {
 		const cleared = codeOnly.search(/\{(?:#if|:else if) isClearedSession\}/);
-		const card = codeOnly.indexOf('<AgentCard');
+		const card = codeOnly.indexOf('<NewSessionHero');
 		expect(cleared).toBeGreaterThan(-1);
 		expect(card).toBeGreaterThan(cleared);
 	});

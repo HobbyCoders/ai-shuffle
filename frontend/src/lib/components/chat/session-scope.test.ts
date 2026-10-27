@@ -1,6 +1,6 @@
 /**
  * #371 step 4: what a session shows follows one fact, whether it has a
- * project. These pin the rules the composer, the agent card and the attach
+ * project. These pin the rules the composer, the new-session hero and the attach
  * sheet all read from session-scope.ts.
  */
 import { describe, expect, it } from 'vitest';
@@ -12,10 +12,8 @@ import {
 	effectiveAccessMode,
 	noProjectPermission,
 	noProjectPillVisible,
-	runsOnVisible,
 	type AttachState
 } from './session-scope';
-import type { Install } from '$lib/api/installs';
 
 const values = (opts: { hasProject: boolean; autoSupported: boolean }) => accessModes(opts).map((m) => m.value);
 
@@ -64,42 +62,6 @@ describe('Access without a project', () => {
 		['plan', 'default'],
 	] as const)('starts a no-project session from a last pick of %s on %s', (last, expected) => {
 		expect(noProjectPermission(last)).toBe(expected);
-	});
-});
-
-describe('Runs on visibility', () => {
-	const self: Install = {
-		id: 'self', device_name: 'ExampleWorker', base_url: null, platform: 'linux', version: null,
-		capabilities: {}, last_seen: null, online: true, is_self: true
-	};
-
-	it('always shows on desktop, wherever the session runs', () => {
-		expect(runsOnVisible({ phone: false, runsOnId: null, connected: self })).toBe(true);
-		expect(runsOnVisible({ phone: false, runsOnId: 'self', connected: self })).toBe(true);
-		expect(runsOnVisible({ phone: false, runsOnId: 'peer', connected: self })).toBe(true);
-	});
-
-	it('hides on the phone when the session runs on the connected worker', () => {
-		expect(runsOnVisible({ phone: true, runsOnId: null, connected: self })).toBe(false);
-		expect(runsOnVisible({ phone: true, runsOnId: '', connected: self })).toBe(false);
-		expect(runsOnVisible({ phone: true, runsOnId: 'self', connected: self })).toBe(false);
-	});
-
-	it('matches a network worker picked by its instance id against its device-id row', () => {
-		// A network worker's row id is its device id; the runner pick stores the
-		// instance id. The same worker must still read as "here".
-		const networked: Install = {
-			...self, id: 'dev_example', device_id: 'dev_example', legacy_instance_id: 'inst-example'
-		};
-		expect(runsOnVisible({ phone: true, runsOnId: 'inst-example', connected: networked })).toBe(false);
-		expect(runsOnVisible({ phone: true, runsOnId: 'dev_example', connected: networked })).toBe(false);
-		expect(runsOnVisible({ phone: true, runsOnId: 'inst-workstation', connected: networked })).toBe(true);
-	});
-
-	it('shows on the phone only when it differs from the connected worker', () => {
-		expect(runsOnVisible({ phone: true, runsOnId: 'peer', connected: self })).toBe(true);
-		// The connected worker is not known yet: a picked peer still shows.
-		expect(runsOnVisible({ phone: true, runsOnId: 'peer', connected: null })).toBe(true);
 	});
 });
 

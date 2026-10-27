@@ -5,8 +5,23 @@
 	import { projects } from '$lib/stores/app-data.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
+	import { floatingMenu } from '$lib/components/ui/floating-menu';
 
-	let { projectName, sheetMode = false }: { projectName: string; sheetMode?: boolean } = $props();
+	interface Props {
+		projectName: string;
+		sheetMode?: boolean;
+		/**
+		 * `sentence`: the new-session hero's project word. The trigger reads as
+		 * a word ("ai-shuffle +1") and the same panel drops down centred under it.
+		 */
+		variant?: 'chip' | 'sentence';
+		/** Offered on the Main row: start without a project (new sessions only). */
+		onClear?: () => void;
+	}
+
+	let { projectName, sheetMode = false, variant = 'chip', onClear }: Props = $props();
+	const sentence = $derived(variant === 'sentence' && !sheetMode);
+	let panel = $state<HTMLDivElement>();
 	const dropdownId = $derived(sheetMode ? 'sheet-workspace-folders' as const : 'workspace-folders' as const);
 	const open = $derived($openHeaderDropdown === dropdownId);
 	const folderIds = $derived($activeSession.workspaceProjectIds ?? []);
@@ -75,7 +90,9 @@
 	function clickOutside(event: MouseEvent) {
 		// The Add button is replaced by the search view during this click. Its
 		// original event path still includes the popover after it leaves the DOM.
-		if (open && root && !event.composedPath().includes(root)) closeDropdown(dropdownId);
+		// A sentence panel floats to <body>, outside root.
+		const path = event.composedPath();
+		if (open && root && !path.includes(root) && !(panel && path.includes(panel))) closeDropdown(dropdownId);
 	}
 	function keydown(event: KeyboardEvent) {
 		if (event.key === 'Escape' && open) { event.preventDefault(); close(); }
@@ -85,7 +102,13 @@
 
 <svelte:window onclick={clickOutside} onkeydown={keydown} />
 
-<div class="workspace-selector" class:sheet-mode={sheetMode} bind:this={root}>
+<div class="workspace-selector" class:sheet-mode={sheetMode} class:sentence bind:this={root}>
+	{#if sentence}
+	<button type="button" class="sentence-tok" class:open bind:this={trigger}
+		aria-label="Workspace folders: {projectName}{folderIds.length ? ` and ${folderIds.length} more` : ''}"
+		aria-haspopup="dialog" aria-expanded={open} title="Workspace folders" onclick={toggle}
+	>{projectName}{#if folderIds.length}<span class="sentence-count">+{folderIds.length}</span>{/if}</button>
+	{:else}
 	<button type="button" class="ctx-chip repo-chip" class:open bind:this={trigger}
 		aria-label="Workspace folders: {projectName}" aria-haspopup="dialog" aria-expanded={open}
 		title="Workspace folders" onclick={toggle}>
@@ -94,14 +117,19 @@
 		{#if folderIds.length}<span class="folder-count">+{folderIds.length}</span>{/if}
 		<ChevronDown size={11} aria-hidden="true" />
 	</button>
+	{/if}
 	{#if open}
-		<div class="workspace-dropdown" role="dialog" aria-label="Workspace folders" aria-busy={saving}>
+		<div class="workspace-dropdown" class:floating={sentence} role="dialog" aria-label="Workspace folders" aria-busy={saving}
+			bind:this={panel} use:floatingMenu={{ anchor: trigger, align: 'center', enabled: sentence }}>
 			<div class="menu-heading">Workspace folders</div>
 			<div class="folder-list">
 				<div class="folder-row" title={mainProject?.path ?? projectName}>
 					<FolderClosed size={15} aria-hidden="true" />
 					<div class="folder-details"><span>{projectName}</span>{#if mainProject?.path}<small>{mainProject.path}</small>{/if}</div>
 					<span class="main-label">Main</span>
+					{#if onClear}
+						<button class="remove-folder" type="button" aria-label="Remove {projectName}: start without a project" title="Start without a project" disabled={saving} onclick={() => { closeDropdown(dropdownId); onClear(); }}><X size={14} /></button>
+					{/if}
 				</div>
 				{#each folderIds as id (id)}
 					{@const folder = $projects.find(p => p.id === id)}
@@ -137,6 +165,11 @@
 
 <style>
 	.workspace-selector { position: relative; min-width: 0; }
+	.workspace-selector.sentence { display: inline-flex; }
+	/* Floated to <body> by floatingMenu, which owns its position. */
+	.workspace-dropdown.floating { animation: ws-drop 140ms cubic-bezier(0.16, 1, 0.3, 1); }
+	@keyframes ws-drop { from { opacity: 0; transform: translateY(-4px) scale(0.98); } }
+	@media (prefers-reduced-motion: reduce) { .workspace-dropdown.floating { animation: none; } }
 	.repo-name { max-width: 140px; }
 	.folder-count { color: var(--muted-foreground); font-size: 0.6875rem; }
 	.workspace-dropdown { position: absolute; bottom: calc(100% + 6px); left: 0; width: 320px; max-width: calc(100vw - 32px); max-height: min(440px, 65dvh); overflow-y: auto; padding: 6px; background: var(--popover); border: 1px solid var(--border); border-radius: calc(var(--radius, 0.75rem) * 0.83); box-shadow: var(--shadow-l); z-index: 100; color: var(--foreground); }

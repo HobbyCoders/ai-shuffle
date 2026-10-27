@@ -44,7 +44,7 @@ it.each(['code', 'chat', 'voice'] as const)('the phone quick bar is the sole con
 	expect(get(activeSession).mode).toBe(mode);
 	expect(get(activeSession).sessionId).toBe('phone-context-fixture');
 	vi.mocked(getContextUsage).mockClear();
-	const { container } = render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn() } });
+	const { container } = render(ControlsDock, { props: {} });
 	await waitFor(() => expect(getContextUsage).toHaveBeenCalledTimes(1));
 	expect(container.querySelector('.controls-dock .usage-context-wrapper')).toBeNull();
 	expect(container.querySelectorAll('.usage-context-wrapper')).toHaveLength(1);
@@ -58,7 +58,7 @@ describe('ControlsDock mobile control order', () => {
 	// bar's Controls cell when it closes.
 	it('opens the Chat controls panel through the exported setter and returns focus to Controls', async () => {
 		const onSheetOpenChange = vi.fn();
-		const { component } = render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn(), onSheetOpenChange } });
+		const { component } = render(ControlsDock, { props: { onSheetOpenChange } });
 		const panel = document.querySelector<HTMLElement>('.mcp')!;
 		const controls = screen.getByRole('button', { name: /^All chat controls/ });
 		expect(panel.getAttribute('aria-hidden')).toBe('true');
@@ -76,7 +76,7 @@ describe('ControlsDock mobile control order', () => {
 
 	it('toggles the panel from Controls and closes it with Escape', async () => {
 		const onSheetOpenChange = vi.fn();
-		render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn(), onSheetOpenChange } });
+		render(ControlsDock, { props: { onSheetOpenChange } });
 		const controls = screen.getByRole('button', { name: /^All chat controls/ });
 		await fireEvent.click(controls);
 		expect(onSheetOpenChange).toHaveBeenLastCalledWith(true);
@@ -89,11 +89,9 @@ describe('ControlsDock mobile control order', () => {
 		expect(controls.getAttribute('aria-expanded')).toBe('false');
 	});
 
-	it('places chat settings first, then browser immediately before attach, with usage on the right', () => {
+	it('places chat settings first, then the browser, with usage on the right', () => {
 		const { container } = render(ControlsDock, {
 			props: {
-				isUploading: false,
-				onAttachClick: vi.fn(),
 				onBrowserToggle: vi.fn()
 			}
 		});
@@ -102,41 +100,32 @@ describe('ControlsDock mobile control order', () => {
 		const left = container.querySelector('.dock-left');
 		const mobile = container.querySelector('.mobile-controls');
 		const settings = left?.querySelector('.mobile-settings-trigger');
-		const attach = left?.querySelector('.attach-btn');
 		const contextUsage = container.querySelector('.qcell.usage .usage-context-wrapper');
 		// The phone quick bar owns the sole ring; the CSS-hidden dock owns none.
 		expect(mobile?.querySelector('.usage-context-wrapper')).toBeFalsy();
 		expect(container.querySelectorAll('.usage-context-wrapper')).toHaveLength(1);
+		// Attach is the composer's + circle, not a dock control.
+		expect(left?.querySelector('.attach-btn')).toBeNull();
 
 		const browser = screen.getByRole('button', { name: 'Toggle live browser view' });
-		expect(browser.nextElementSibling).toBe(attach);
 		expect(browser.classList.contains('dock-ico')).toBe(true);
 		expect(browser.classList.contains('desktop-only')).toBe(false);
 		expect(left?.contains(browser)).toBe(true);
 		expect(settings).toBeInstanceOf(Element);
-		expect(attach).toBeInstanceOf(Element);
 		expect(contextUsage).toBeInstanceOf(Element);
-		if (
-			!(settings instanceof Element) ||
-			!(attach instanceof Element) ||
-			!(contextUsage instanceof Element)
-		) {
-			return;
-		}
+		if (!(settings instanceof Element) || !(contextUsage instanceof Element)) return;
 		expect(settings.classList.contains('dock-ico')).toBe(true);
 		expect(settings.classList.contains('composer-mobile-only')).toBe(true);
 		expect(settings.classList.contains('mobile-only')).toBe(false);
-		expect(settings.compareDocumentPosition(attach) & Node.DOCUMENT_POSITION_FOLLOWING)
+		expect(settings.compareDocumentPosition(browser) & Node.DOCUMENT_POSITION_FOLLOWING)
 			.toBeTruthy();
-		expect(attach.compareDocumentPosition(contextUsage) & Node.DOCUMENT_POSITION_FOLLOWING)
+		expect(browser.compareDocumentPosition(contextUsage) & Node.DOCUMENT_POSITION_FOLLOWING)
 			.toBeTruthy();
 	});
 
 	it('marks the dock inert when ChatInput is guarding the expand tap', () => {
 		const { container } = render(ControlsDock, {
 			props: {
-				isUploading: false,
-				onAttachClick: vi.fn(),
 				inertToolbar: true
 			}
 		});

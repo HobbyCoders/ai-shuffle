@@ -20,8 +20,8 @@
 	interface Props {
 		sheetMode?: boolean;
 		/**
-		 * `card`: the new-session agent card's name (#371 step 4). The agent's
-		 * name in the display face with a chevron; the same menu opens below it.
+		 * `card`: the new-session hero's agent name. The agent's name in the
+		 * display face with a chevron; the same menu drops down centred under it.
 		 */
 		variant?: 'chip' | 'card';
 		/** Show the open menu inside this element (the phone sheet's Agent page). */
@@ -31,7 +31,7 @@
 	let { sheetMode = false, variant = 'chip', menuHost: menuHostEl = null }: Props = $props();
 
 	let profileDropdownRef = $state<HTMLDivElement | null>(null);
-	// The card's menu floats to <body> (floatingMenu): the agent card is its own
+	// The card's menu floats to <body> (floatingMenu): the hero is its own
 	// stacking context, so an in-place menu painted under the composer below it.
 	let cardNameRef = $state<HTMLButtonElement | null>(null);
 	let dropdownRef = $state<HTMLDivElement | null>(null);
@@ -157,7 +157,7 @@
 			role="menu"
 			aria-label="Agent selection"
 			bind:this={dropdownRef}
-			use:floatingMenu={{ anchor: cardNameRef, enabled: floating }}
+			use:floatingMenu={{ anchor: cardNameRef, align: 'center', enabled: floating }}
 			use:menuHost={menuHostEl}
 		>
 			<GroupedSelector
@@ -309,14 +309,13 @@
 	}
 
 	/* Scrollbar styling for dropdown */
-	/* ===== CARD VARIANT (new-session agent card) ===== */
+	/* ===== CARD VARIANT (new-session hero) ===== */
 	.card-name {
 		display: inline-flex;
 		align-items: center;
 		gap: 6px;
 		max-width: 100%;
-		margin-left: -6px;
-		padding: 0 6px;
+		padding: 0 8px;
 		border: none;
 		border-radius: calc(var(--radius, 10px) * 0.8);
 		background: transparent;

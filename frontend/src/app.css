@@ -972,6 +972,55 @@ button, a, .clickable {
 	height: 2.25rem;
 }
 
+/* ── New-session sentence words ──────────────────────────────────────────────
+   "Runs on <worker> in <project> on <branch> in <a worktree>." Each part is
+   a real button that opens the same menu its composer chip opens. It reads
+   as a word in the sentence: foreground, medium weight, a hairline under it,
+   and a muted fill on hover or while its menu is open. Shared by
+   RunsOnPicker, WorkspaceFolderSelector, WorkspaceSelector, BranchSelector,
+   ExecutionModeBar and NewSessionSentence. */
+.sentence-tok {
+	display: inline;
+	padding: 1px 6px;
+	margin: 0 1px;
+	border: 0;
+	border-radius: 6px;
+	background: transparent;
+	color: var(--foreground);
+	font: inherit;
+	font-weight: 500;
+	line-height: 1.6;
+	white-space: nowrap;
+	cursor: pointer;
+	box-shadow: inset 0 -1px 0 var(--border-strong);
+	-webkit-box-decoration-break: clone;
+	box-decoration-break: clone;
+	transition: background-color 0.12s ease, box-shadow 0.12s ease;
+}
+.sentence-tok:hover:not(:disabled),
+.sentence-tok.open,
+.sentence-tok[aria-expanded='true'] {
+	background: var(--muted);
+	box-shadow: inset 0 -1px 0 transparent;
+}
+.sentence-tok:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 1px;
+}
+.sentence-tok:disabled {
+	cursor: default;
+	color: var(--muted-foreground);
+}
+.sentence-tok .sentence-count {
+	margin-left: 4px;
+	color: var(--muted-foreground);
+	font-size: 0.75em;
+	font-weight: 500;
+}
+@media (prefers-reduced-motion: reduce) {
+	.sentence-tok { transition: none; }
+}
+
 /* ── Composer context chips ─────────────────────────────────────────────────
    The small filled chips that float above the chat composer (agent, runner,
    repository, branch, worktree). Shared by ProfileSelector, ExecutionModeBar,

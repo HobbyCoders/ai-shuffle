@@ -199,3 +199,53 @@ export function shouldShowEmptyStateBranchPill(input: EmptyStateBranchInput): bo
 	if (worktreeIntent !== 'local') return false;
 	return true;
 }
+
+/** The git-store fields the repository checks read. */
+export interface GitRepoSignal {
+	hydrated: boolean;
+	error?: string | null;
+	projectId?: string | null;
+	sessionId?: string | null;
+	worktreeId?: string | null;
+	status?: { is_git_repo?: boolean | null; enclosing_repository_root?: string | null } | null;
+}
+
+/** The composer fields the repository checks read. */
+export interface GitRepoSession {
+	project?: string | null;
+	projectV2Id?: string | null;
+	sessionId?: string | null;
+	worktreeId?: string | null;
+	worktreeBranch?: string | null;
+}
+
+/** Whether the git status loaded for this composer is its own (not a cache miss for another one). */
+function ownsGitStatus(git: GitRepoSignal, session: GitRepoSession): boolean {
+	return git.hydrated
+		&& (git.projectId === session.projectV2Id || git.projectId === session.project)
+		&& git.worktreeId === session.worktreeId
+		&& git.sessionId === session.sessionId;
+}
+
+/** True when a confirmed status says the folder is not its own git repository. */
+function confirmedNotRepo(git: GitRepoSignal): boolean {
+	return git.status?.is_git_repo === false || !!git.status?.enclosing_repository_root;
+}
+
+/**
+ * Whether a new session's project is a git repository, for the worktree
+ * controls (ExecutionModeBar). Optimistic: only a hydrated status that belongs
+ * to this composer and says "not a repository" turns them off.
+ */
+export function draftIsGitRepo(git: GitRepoSignal, session: GitRepoSession): boolean {
+	return !(ownsGitStatus(git, session) && confirmedNotRepo(git));
+}
+
+/**
+ * The same check for the branch controls (ContextPillBar): a session already
+ * bound to a worktree, or a git store in error, keeps them.
+ */
+export function composerIsGitRepo(git: GitRepoSignal, session: GitRepoSession): boolean {
+	return !(!session.worktreeId && !session.worktreeBranch && !git.error
+		&& ownsGitStatus(git, session) && confirmedNotRepo(git));
+}

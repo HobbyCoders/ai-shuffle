@@ -55,7 +55,8 @@ describe('no assistant mode anywhere', () => {
 	});
 
 	it('keeps the context chips and the browser toggle in every composer', () => {
-		expect(chatInput).toMatch(/\{#if !agentCard\}\s*<div class="context-pill-row"><ContextPillBar \/><\/div>\s*\{\/if\}/);
+		// A new session shows the hero sentence in their place until its first message.
+		expect(chatInput).toMatch(/\{#if !mobileViewport && !newSession\}\s*<div class="context-pill-row"><ContextPillBar \/><\/div>\s*\{\/if\}/);
 		expect(chatInput).toMatch(/<ControlsDock[\s\S]*?\{onBrowserToggle\}/);
 	});
 });

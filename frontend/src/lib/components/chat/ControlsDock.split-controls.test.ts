@@ -1,9 +1,8 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
-import { createRawSnippet, tick } from 'svelte';
+import { tick } from 'svelte';
 import { get } from 'svelte/store';
 import { activeSession } from '$lib/stores/active-session';
-import { auth } from '$lib/stores/auth.svelte';
 import { appMode, type SessionMode } from '$lib/stores/sessionMode.svelte';
 import ControlsDock from './ControlsDock.svelte';
 import { loadVoiceSettings, type VoiceSessionConfig } from '$lib/api/voice';
@@ -73,44 +72,13 @@ afterEach(() => {
 });
 afterAll(() => vi.unstubAllGlobals());
 
-it.each(['code', 'voice'] as const)('enables attach for an existing %s worker session without a local checkout', async mode => {
-	const status = vi.spyOn(api, 'get').mockResolvedValue({ authenticated: true, has_any_credential: true });
-	try {
-		await auth.checkAuth();
-		// A fresh compose has no voice lane; the existing session supplies it.
-		setLane('code');
-		activeSession.setProject('', 'pv2-worker');
-		const onAttachClick = vi.fn();
-		renderDock({ onAttachClick });
-		expect((screen.getByRole('button', { name: 'Attach file' }) as HTMLButtonElement).disabled).toBe(true);
-		await activeSession.switchSession('attach-worker');
-		activeSession.setProject('', 'pv2-worker');
-		activeSession.reconcileSessionMode([{ id: 'attach-worker', mode }]);
-		await tick();
-		const attach = screen.getByRole('button', { name: 'Attach file' }) as HTMLButtonElement;
-		expect(attach.disabled).toBe(false);
-		await fireEvent.click(attach);
-		expect(onAttachClick).toHaveBeenCalledOnce();
-	} finally {
-		status.mockResolvedValue({ authenticated: false, has_any_credential: false });
-		await auth.checkAuth();
-		status.mockRestore();
-	}
-});
-
 function renderDock(props: Record<string, unknown> = {}) {
 	return render(ControlsDock, {
 		props: {
-			isUploading: false,
-			onAttachClick: vi.fn(),
 			...props
 		}
 	});
 }
-
-const voiceActions = createRawSnippet(() => ({
-	render: () => `<span data-testid="voice-snippet">voice</span>`
-}));
 
 describe('ControlsDock split controls', () => {
  it.each(['gpt-realtime-2.1', 'fal-ai/personaplex/realtime'])('locks the model block for %s', async model => {
@@ -269,7 +237,7 @@ describe('ControlsDock split controls', () => {
 		await fireEvent.click(browser);
 		expect(onBrowserToggle).toHaveBeenCalledTimes(1);
 		expect(browser.getAttribute('aria-pressed')).toBe('false');
-		await rerender({ isUploading: false, onAttachClick: vi.fn(), onBrowserToggle, onBrowserPreload, browserOpen: true });
+		await rerender({ onBrowserToggle, onBrowserPreload, browserOpen: true });
 		expect(browser.getAttribute('aria-pressed')).toBe('true');
 		expect(browser.classList.contains('active')).toBe(true);
 	});
@@ -306,42 +274,36 @@ describe('ControlsDock split controls', () => {
 		expect(screen.getByRole('button', { name: /^permission mode:/i })).toBeTruthy();
 		expect(screen.getByRole('button', { name: /^model:/i })).toBeTruthy();
 		expect(screen.getByRole('button', { name: /^effort:/i })).toBeTruthy();
-		expect(screen.getByRole('button', { name: /attach file/i })).toBeTruthy();
 		expect(screen.queryByRole('button', { name: /more input options/i })).toBeNull();
 	});
 
-	it('orders the row permission · attach on the left, model · effort · ring on the right', () => {
-		const { container } = renderDock();
+	it('orders the row access · browser · terminal on the left, model · effort · ring on the right', () => {
+		const { container } = renderDock({ onBrowserToggle: vi.fn(),
+			terminal: { open: false, disabledReason: null, toggle: vi.fn(), preload: vi.fn() } });
 
 		const left = container.querySelector('.dock-left');
 		const right = container.querySelector('.dock-right');
 		const permission = screen.getByRole('button', { name: /^permission mode:/i });
-		const attach = screen.getByRole('button', { name: /attach file/i });
+		const browser = screen.getByRole('button', { name: 'Toggle live browser view' });
+		const terminal = screen.getByRole('button', { name: 'Toggle terminal' });
 		expect(left?.contains(permission)).toBe(true);
-		expect(left?.contains(attach)).toBe(true);
-		expect(permission.compareDocumentPosition(attach) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+		expect(permission.compareDocumentPosition(browser) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+		expect(browser.nextElementSibling).toBe(terminal);
 		expect(right?.contains(screen.getByRole('button', { name: /^model:/i }))).toBe(true);
 		expect(right?.contains(screen.getByRole('button', { name: /^effort:/i }))).toBe(true);
 		expect(right?.querySelector('.usage-context-wrapper')).toBeTruthy();
 		expect(left && right && (left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING))
 			.toBeTruthy();
-	});
-
-	it('places the Globe between voice actions and attach in the left cluster', () => {
-		const { container } = renderDock({ voiceActions, onBrowserToggle: vi.fn() });
-
-		const left = container.querySelector('.dock-left');
-		const voice = left?.querySelector('[data-testid="voice-snippet"]');
-		const attach = screen.getByRole('button', { name: /attach file/i });
-		expect(voice).toBeInstanceOf(Element);
-		expect(left?.contains(attach)).toBe(true);
-		if (!(voice instanceof Element)) return;
-		const browser = screen.getByRole('button', { name: 'Toggle live browser view' });
-		expect(voice.nextElementSibling).toBe(browser);
-		expect(browser.nextElementSibling).toBe(attach);
 		expect(browser.querySelector('svg.lucide-globe')).toBeTruthy();
 		expect(browser.querySelector('svg')?.getAttribute('width')).toBe('14');
-		expect(browser.querySelector('svg')?.getAttribute('stroke-width')).toBe('1.8');
+	});
+
+	it('leaves attach, dictate and the call to the composer circles', () => {
+		const { container } = renderDock({ onBrowserToggle: vi.fn() });
+		expect(screen.queryByRole('button', { name: /attach/i })).toBeNull();
+		expect(screen.queryByRole('button', { name: /voice input/i })).toBeNull();
+		expect(screen.queryByRole('button', { name: /start a call|talk to/i })).toBeNull();
+		expect(container.querySelector('.attach-btn, .voice-btn, .voice-call-btn, .call-circle')).toBeNull();
 	});
 
 	it('opens the compact effort popover from the effort tag', async () => {
@@ -429,9 +391,9 @@ describe('ControlsDock split controls', () => {
 		expect(screen.queryByRole('dialog', { name: /choose model/i })).toBeNull();
 	});
 
-	it('offers Ask, Accept Edits and Bypass without a project, and keeps attach', async () => {
+	it('offers Ask, Accept Edits and Bypass without a project', async () => {
 		setLane('chat');
-		const { container } = renderDock({ voiceActions });
+		const { container } = renderDock();
 
 		// #641: a session without a project is a normal session, so it offers
 		// the same modes as a project session (Auto needs a model with it).
@@ -443,27 +405,17 @@ describe('ControlsDock split controls', () => {
 		expect(items.some((t) => /bypass/i.test(t))).toBe(true);
 		expect(items.some((t) => /accept/i.test(t))).toBe(true);
 		await fireEvent.keyDown(window, { key: 'Escape' });
-		// Attach survives: chat uploads land in the workspace's shared
-		// chat-uploads dir, and the chat ceiling carries a Read scoped to it.
-		const attach = screen.getByRole('button', { name: /attach file/i });
-		expect(attach).toBeTruthy();
-		// Not captioned with the project advice — a projectless chat is the
-		// working state here, not a misconfiguration. This harness has no
-		// credential, so the caption names that reason instead.
-		expect(attach.getAttribute('title')).toBe('Connect a provider in Settings first');
 		// Everything else the chat composer keeps.
 		expect(screen.getByRole('button', { name: /^model:/i })).toBeTruthy();
 		expect(screen.getByRole('button', { name: /^effort:/i })).toBeTruthy();
-		expect(container.querySelector('[data-testid="voice-snippet"]')).toBeTruthy();
 		expect(container.querySelector('.usage-context-wrapper')).toBeTruthy();
 		expect(container.querySelector('.mobile-settings-trigger')).toBeTruthy();
 	});
 
-	it('keeps attach and tool access in the voice lane', async () => {
+	it('keeps tool access in the voice lane', async () => {
 		await openVoiceSession();
-		renderDock({ voiceActions });
+		renderDock();
 
-		expect(screen.getByRole('button', { name: /attach file/i })).toBeTruthy();
 		expect(screen.getByRole('button', { name: /^permission mode:/i })).toBeTruthy();
 	});
 

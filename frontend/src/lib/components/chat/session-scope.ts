@@ -13,8 +13,6 @@
  *   runs, and it puts the session back on Ask.
  */
 
-import type { Install } from '$lib/api/installs';
-import { matches } from '$lib/stores/worker-presence';
 
 export interface AccessMode {
 	value: 'default' | 'auto' | 'acceptEdits' | 'bypassPermissions';
@@ -58,27 +56,6 @@ export function noProjectPermission(mode: string | null | undefined): string | n
 	if (mode == null) return null;
 	const offered = ['default', 'auto', 'acceptEdits', 'bypassPermissions'];
 	return offered.includes(mode) ? mode : 'default';
-}
-
-/**
- * Whether the agent card shows its "Runs on" control.
- *
- * Desktop always shows it: it is where a new session's worker is picked. The
- * phone shows it only when the session would run on a worker other than the
- * one the phone is connected to (its top bar already names that one).
- */
-export function runsOnVisible(opts: {
-	phone: boolean;
-	/** Id the new session would run on (install, device or instance id); null/empty = this worker. */
-	runsOnId: string | null | undefined;
-	/** The install row of the worker this UI is connected to (null when unknown). */
-	connected: Install | null | undefined;
-}): boolean {
-	if (!opts.phone) return true;
-	if (!opts.runsOnId) return false;
-	// The row's `id` is the device id on a network worker while a pick may name
-	// its instance id, so match on every id the row carries.
-	return !opts.connected || !matches(opts.connected, opts.runsOnId);
 }
 
 export interface AttachState {

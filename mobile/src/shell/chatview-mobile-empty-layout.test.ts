@@ -1,5 +1,5 @@
 /**
- * The mobile empty-chat surface: scrolling hero, sticky composer and the
+ * The mobile empty-chat surface: centred scrolling hero, sticky composer and the
  * `data-panel-flow` fallback. These rules used to be scoped inside
  * ChatView.svelte; they are global rules in mobile.css now (the web build
  * carries none of them), so this pins the ChatView section of that sheet.
@@ -25,9 +25,9 @@ describe('ChatView — stable mobile empty layout', () => {
 	it('retains the action-applied panel-flow fallback', () => {
 		expect(body('.chat-view.is-empty .input-slot.empty-input-layout[data-panel-flow]')).toMatch(/position: static;/);
 	});
-	it('scrolls the empty surface with a nonshrinking top-aligned invitation', () => {
+	it('scrolls the empty surface with a nonshrinking invitation centred above the composer', () => {
 		expect(body('.chat-view.is-empty')).toMatch(/overflow-y: auto;/);
-		expect(body('.is-empty .empty-hero')).toMatch(/flex: 0 0 auto;[\s\S]*justify-content: flex-start;[\s\S]*padding-top: 1rem;/);
+		expect(body('.is-empty .empty-hero')).toMatch(/flex: 1 0 auto;[\s\S]*justify-content: center;[\s\S]*padding-top: 1rem;/);
 		expect(body('.is-empty .empty-bottom-spacer')).toMatch(/display: none;/);
 	});
 	it('keeps a sticky, unclipped composer with a normal-flow overflow fallback', () => {

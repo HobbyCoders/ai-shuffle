@@ -6,7 +6,8 @@
 	 * Centered hero with clickable workspace name dropdown.
 	 * Uses GroupedSelector for group-aware project selection.
 	 */
-	import { ChevronDown, FolderClosed, FolderPlus } from 'lucide-svelte';
+	import { ChevronDown, FolderClosed } from 'lucide-svelte';
+	import { floatingMenu } from '$lib/components/ui/floating-menu';
 	import { isMobileUi } from '$lib/stores/platform.svelte';
 	import { appData, clusterProjects, profiles, profilesLoaded, projects } from '$lib/stores/app-data.svelte';
 	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
@@ -23,16 +24,19 @@
 		selectedProjectV2Id?: string | null;
 		onSelectProject: (projectId: string, projectV2Id?: string | null) => void;
 		/**
-		 * `add`: the new-session screen's quiet "+ Add a project · Optional"
-		 * row (#371 step 4) instead of the "Let's build" hero. Same picker.
+		 * `sentence`: the new-session hero's "with no project" word. The same
+		 * picker drops down centred under it; picking one adds the project.
 		 */
-		variant?: 'hero' | 'add';
+		variant?: 'hero' | 'sentence';
 	}
 
 	let { selectedProject, selectedProjectV2Id = null, onSelectProject, variant = 'hero' }: Props = $props();
 
 	let showDropdown = $state(false);
-	let dropdownRef = $state<HTMLDivElement | null>(null);
+	let dropdownRef = $state<HTMLElement | null>(null);
+	/** The open list. The sentence variant floats it to <body>, outside dropdownRef. */
+	let listRef = $state<HTMLDivElement | null>(null);
+	let sentenceTrigger = $state<HTMLButtonElement | null>(null);
 	let groupedSelector = $state<ReturnType<typeof GroupedSelector> | null>(null);
 	const pickerId = $props.id();
 
@@ -126,7 +130,8 @@
 
 	// Close dropdown on outside click
 	function handleClickOutside(e: MouseEvent) {
-		if (dropdownRef && !dropdownRef.contains(e.target as Node)) {
+		const target = e.target as Node;
+		if (dropdownRef && !dropdownRef.contains(target) && !listRef?.contains(target)) {
 			showDropdown = false;
 		}
 	}
@@ -158,39 +163,43 @@
 
 <svelte:window onclick={handleClickOutside} onkeydown={closeOnEscape} />
 
-{#if variant === 'add'}
-<div class="add-project-row">
-	<div class="picker-container add-variant" bind:this={dropdownRef}>
-		<button
-			type="button"
-			class="add-project"
-			aria-expanded={showDropdown}
-			aria-controls={pickerId}
-			aria-describedby="{pickerId}-hint"
-			onclick={toggleDropdown}
+{#if variant === 'sentence'}
+<span class="picker-container sentence-variant" bind:this={dropdownRef}>
+	<button
+		bind:this={sentenceTrigger}
+		type="button"
+		class="sentence-tok"
+		aria-expanded={showDropdown}
+		aria-haspopup="dialog"
+		aria-controls={pickerId}
+		aria-label="No project. Add a project (optional: adds checkout, branch and git)"
+		title="Add a project (optional)"
+		onclick={toggleDropdown}
+	>no project</button>
+	{#if showDropdown}
+		<div
+			id={pickerId}
+			class="picker-dropdown sentence-menu"
+			bind:this={listRef}
+			use:mobilePopup
+			use:floatingMenu={{ anchor: sentenceTrigger, align: 'center', enabled: !isMobileUi() }}
 		>
-			<FolderPlus size={16} strokeWidth={1.7} class="add-project-icon" aria-hidden="true" />
-			<span>Add a project</span>
-		</button>
-		{#if showDropdown}
-			<div id={pickerId} class="picker-dropdown" use:mobilePopup>
-				<GroupedSelector
-					bind:this={groupedSelector}
-					items={pickerItems}
-					entityType="projects"
-					selectedId={selectedId}
-					onSelect={handleSelect}
-					label="Add a project"
-					addLabel="Add Project"
-					onAdd={openAddModal}
-					emptyMessage="No projects yet"
-					itemIcon={FolderClosed}
-				/>
-			</div>
-		{/if}
-	</div>
-	<span class="add-project-hint" id="{pickerId}-hint"><b>Optional</b> · adds checkout, branch and git</span>
-</div>
+			<GroupedSelector
+				bind:this={groupedSelector}
+				items={pickerItems}
+				entityType="projects"
+				selectedId={selectedId}
+				onSelect={handleSelect}
+				label="Add a project"
+				addLabel="Add Project"
+				onAdd={openAddModal}
+				emptyMessage="No projects yet"
+				itemIcon={FolderClosed}
+			/>
+			<p class="sentence-hint">Optional · adds checkout, branch and git</p>
+		</div>
+	{/if}
+</span>
 {:else}
 <div class="workspace-selector">
 	<!-- Logo / Icon -->
@@ -378,70 +387,31 @@
 		animation: none;
 	}
 
-	/* ===== "Add a project" row (variant="add") ===== */
-	.add-project-row {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		padding-left: 2px;
-		animation: add-row-in 420ms cubic-bezier(0.16, 1, 0.3, 1) 120ms both;
-	}
-	/* The button keeps its one-line label on narrow screens; the hint wraps. */
-	.add-variant {
-		flex: none;
-	}
-	.add-project {
-		display: inline-flex;
-		align-items: center;
-		gap: 7px;
-		height: 34px;
-		white-space: nowrap;
-		padding: 0 11px 0 9px;
-		border: 1px solid transparent;
-		border-radius: calc(var(--radius, 10px) * 0.9);
-		background: transparent;
-		color: var(--muted-foreground);
-		font: inherit;
-		font-size: 13px;
-		font-weight: 500;
-		cursor: pointer;
-		transition: color 150ms ease, background 150ms ease, border-color 150ms ease;
-	}
-	.add-project :global(.add-project-icon) {
-		color: var(--subtle-foreground);
-		transition: color 150ms ease, transform 250ms cubic-bezier(0.16, 1, 0.3, 1);
-	}
-	.add-project:hover,
-	.add-project[aria-expanded='true'] {
-		color: var(--foreground);
-		background: var(--hover-overlay);
-		border-color: var(--border);
-	}
-	.add-project:hover :global(.add-project-icon),
-	.add-project[aria-expanded='true'] :global(.add-project-icon) {
-		color: var(--primary);
-		transform: rotate(-6deg) scale(1.06);
-	}
-	.add-project:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-	.add-project-hint { min-width: 0; font-size: 12px; color: var(--subtle-foreground); }
-	.add-project-hint b { font-weight: 550; color: var(--muted-foreground); }
-	/* Below the composer: the list opens downward from the row's left edge. */
-	.add-variant .picker-dropdown {
-		left: 0;
+	/* ===== Hero sentence word (variant="sentence") ===== */
+	.sentence-variant { display: inline-flex; position: static; }
+	/* floatingMenu owns its position on desktop; mobilePopup on the phone. */
+	.picker-dropdown.sentence-menu {
 		transform: none;
-		animation-name: add-dropdown-in;
+		width: 300px;
+		max-width: calc(100vw - 24px);
+		background: var(--popover);
+		animation-name: sentence-dropdown-in;
 	}
-	@keyframes add-dropdown-in {
+	.sentence-hint {
+		margin: 4px 0 0;
+		padding: 6px 8px 2px;
+		border-top: 1px solid var(--border-subtle);
+		font-size: 11px;
+		color: var(--muted-foreground);
+	}
+	@keyframes sentence-dropdown-in {
 		from { opacity: 0; transform: translateY(-4px) scale(0.98); }
 		to { opacity: 1; transform: none; }
 	}
-	@keyframes add-row-in { from { opacity: 0; transform: translateY(6px); } }
 
 	@media (prefers-reduced-motion: reduce) {
 		.picker-dropdown {
 			animation: none;
 		}
-		.add-project-row { animation: none; }
-		.add-project, .add-project :global(.add-project-icon) { transition: none; }
 	}
 </style>
