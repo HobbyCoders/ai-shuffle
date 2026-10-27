@@ -241,6 +241,29 @@ class TestPreviewVoiceAccess:
         assert response.status_code == 200, response.text
         assert [s.call_id for s in sidebands] == ["rtc_owner"]
 
+    @pytest.mark.parametrize("resume", [False, True])
+    def test_a_reopened_audio_socket_carries_the_call_on_without_greeting(
+        self, voice_auth_client, mock_db, monkeypatch, resume,
+    ):
+        """A dropped audio socket reopens with ``resume=1``. Its history holds
+        this call's own talk, so it used to be "welcomed back" mid-call."""
+        from app.core import voice_greeting, voice_stream
+        from app.core.voice_prompts import GREETING_RETURNING_CALL
+        from app.db.sessions import set_session_voice_binding
+        set_session_voice_binding("preview-voice", {"model": "gpt-live-1", "voice": "marin",
+                                                    "provider_id": "prov-openai", "greet": True})
+        monkeypatch.setattr(voice_greeting, "caller_first_name", lambda session_id, api_user_id: None)
+        seen = []
+
+        async def run(self):
+            seen.append((self.resumed, await self.greeting([{"role": "user", "content": []}])))
+
+        monkeypatch.setattr(voice_stream.VoiceStream, "run", run)
+        query = "?resume=1" if resume else ""
+        with voice_auth_client.websocket_connect(f"ws://10.0.0.30:18090{VOICE_ROOT}/sessions/preview-voice/audio{query}"):
+            pass
+        assert seen == ([(True, None)] if resume else [(False, GREETING_RETURNING_CALL)])
+
     @pytest.mark.parametrize("resume", ["", "?resume=1"])
     def test_owner_without_preview_can_stream_audio(
         self, voice_auth_client, mock_db, fal_streams, resume,
@@ -2391,7 +2414,7 @@ class TestConversationAttachment:
         """It used to REPLACE the voice instructions with the profile prompt, so
         the call had no turn-taking or first-person contract at all."""
         from app.core import voice_bridge, voice_greeting
-        from app.core.voice_prompts import CALLER_NAME_NOTE
+        from app.core.voice_prompts import CALLER_NAME_NOTE, GREETING_NEW_CALL
         monkeypatch.setattr(voice_greeting, "owner_first_name", lambda: "Sam")
         from app.core.voice_prompts import LIVE_INSTRUCTIONS
         from app.db.sessions import set_session_voice_binding
@@ -2414,7 +2437,9 @@ class TestConversationAttachment:
         # It picks up with the greeting, naming the owner as data.
         greetings = [f["item"]["content"][0]["text"] for f in sidebands[0].sent
                      if f.get("type") == "conversation.item.create" and f["item"].get("type") == "message"]
-        assert greetings == [voice_bridge.GREETING_PROMPT + "\n" + CALLER_NAME_NOTE + "Sam"]
+        # The same prompt-owned trigger as the streamed engines, not the
+        # standalone agent's "ask what they would like to do".
+        assert greetings == [f"{voice_bridge.CALL_STARTED_PREFIX} {GREETING_NEW_CALL}\n{CALLER_NAME_NOTE}Sam"]
 
 
     def test_hangup_keeps_an_attached_conversation_active(self, attach_client, mock_db, sidebands):

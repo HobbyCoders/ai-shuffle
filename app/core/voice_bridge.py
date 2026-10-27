@@ -771,23 +771,15 @@ PAUSE_QUIET_SECONDS = 1.5
 # How an attached call works with running work, approvals and status. Shared by
 # every call on a chat (GPT Live, Grok, ChatGPT voice and the Realtime
 # sideband), through conversation_instructions.
+# Only what is particular to a call on a chat; the voice contract covers
+# results, approvals and status in general.
 CONVERSATION_WORK_RULES = (
-    "Background work keeps running during the call, and notes about it tell you "
-    "what is running, what finished and what needs a decision. "
-    "For questions like what are you working on or is it done yet, call check_work "
-    "when you have it, otherwise answer from the latest notes; never start new "
-    "work just to check status. "
-    "A finished background job gets one short natural sentence. "
-    "A result or milestone from the chat is your own work: tell it in the first "
-    "person, conversationally but completely, including any question, next step "
-    "or request at its end; do not shorten it to one line. "
-    "When a question waits on screen, ask it with its options, then say the user "
-    "can answer it on screen. "
-    "When an approval is needed, ask the user in one plain sentence and wait. "
-    "The app takes the yes or no from the user's own voice: never decide it "
-    "yourself, never submit the answer to chat, and never say it was approved or "
-    "declined until a note confirms it. If a decision needs the screen, say so in "
-    "one sentence; secrets are only ever entered on screen."
+    "This chat's background jobs keep running during the call, and notes tell you "
+    "what is running, what finished and what needs a decision. For questions like "
+    "what are you working on or is it done yet, call check_work when you have it: "
+    "it reads the app's task list right away and never starts work; otherwise "
+    "answer from the latest notes. A spoken yes or no to an approval is the app's "
+    "to take from the caller's voice, never an answer you submit to the chat."
 )
 
 # How a call speaks for the conversation it is attached to.
@@ -810,10 +802,11 @@ CONVERSATION_OVERLAY = (
 # voice contract (about as long) stays the larger, leading part.
 PROFILE_PROMPT_MAX_CHARS = 4000
 PROFILE_PROMPT_HEADER = (
-    "## The agent's working instructions\n"
-    "These are the working instructions of this chat's agent, whose voice you are. "
-    "Use them for persona, tone and who the user is. Ignore their formatting, "
-    "markdown, tool and process rules: you speak, and the chat does the work."
+    "## Your instructions in this chat (persona and tone only)\n"
+    "These are the instructions you work under in this chat. Take your persona, your "
+    "tone and what you know about the user from them. Ignore their formatting, "
+    "markdown, tool and process rules: on the call you talk, and the work happens "
+    "through your handoffs."
 )
 PROFILE_PROMPT_CUT_NOTE = "[The rest of these working instructions is left out of the call.]"
 
@@ -1100,21 +1093,21 @@ class VoiceBridge:
 
         # History replay, then the greeting: the recap is conversation context,
         # not instructions (see _send_context_seed_item).
-        await self._send_context_seed_item()
+        seeded = await self._send_context_seed_item()
 
         # A browser call opens with the agent saying hello, so the user is
         # never left wondering whether anyone is there. Rides AFTER the
         # session.update so the greeting is spoken in the configured voice
         # with the configured instructions.
         if self._greet:
-            greeting = GREETING_PROMPT
+            greeting = GREETING_PROMPT  # The legacy standalone voice agent.
             if self._conversation_surface:
-                # A call on a chat greets the owner by first name when known.
+                # A call on a chat picks up under the voice contract, as the
+                # streamed engines do: welcome back after a replay, and the
+                # owner's first name when they gave one.
                 from app.core import voice_greeting
-                from app.core.voice_prompts import CALLER_NAME_NOTE
                 name = await run_sync(voice_greeting.caller_first_name, self.session_id, self._api_user_id)
-                if name:
-                    greeting += "\n" + CALLER_NAME_NOTE + name
+                greeting = f"{CALL_STARTED_PREFIX} " + voice_greeting.greeting_note(name, returning=seeded)
             await self._inject(greeting)
 
         # Only a successful attach restores the durable working-set flag. A
@@ -1312,7 +1305,7 @@ class VoiceBridge:
             },
         })
 
-    async def _send_context_seed_item(self) -> None:
+    async def _send_context_seed_item(self) -> bool:
         """Replay the recent transcript as conversation HISTORY, not as policy.
 
         Appended to the ``instructions`` string, an unverified assistant line
@@ -1326,11 +1319,12 @@ class VoiceBridge:
         """
         seed = await run_sync(build_context_seed, self.session_id)
         if not seed:
-            return
+            return False
         await self._send_item(
             f"{CONTEXT_SEED_MARKER} {CONTEXT_SEED_PROVENANCE}\n\n{seed}",
             respond=False,
         )
+        return True
 
     async def _send(self, payload: Dict[str, Any]) -> None:
         if self._ws is None:

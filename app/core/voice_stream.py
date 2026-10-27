@@ -429,12 +429,15 @@ def describe_close(exc: BaseException | None) -> str:
 
 class VoiceStream:
     def __init__(self, websocket: WebSocket, row: dict, config: dict, api_key: str, max_minutes: int,
-                 api_user_id: str | None = None):
+                 api_user_id: str | None = None, resumed: bool = False):
         self.websocket = websocket
         self.session_id = row["id"]
         # The API key that opened the call (None for the owner): spoken
         # approvals re-check its access exactly as a tap on the card would.
         self.api_user_id = api_user_id
+        # The browser reopened a dropped audio socket (``resume=1``): this is
+        # the same call carrying on, so it never greets again.
+        self.resumed = resumed
         self.approval_lock = asyncio.Lock()
         self.approval_consumed: set[int] = set()
         self.approval_task: asyncio.Task | None = None
@@ -1191,10 +1194,11 @@ class VoiceStream:
         """The trigger to speak first on this provider session, or None.
 
         A fresh call greets, a call into a conversation with history is
-        welcomed back, and a renewal or reconnect never greets again. A call a
+        welcomed back, and a renewal, reconnect or reopened audio socket
+        (``resumed``) never greets again. A call a
         native client opened (``greet`` False) waits for the caller.
         """
-        if self.restoring or not self.config.get("greet", True):
+        if self.restoring or self.resumed or not self.config.get("greet", True):
             return None
         from app.core import voice_greeting
         name = await run_sync(voice_greeting.caller_first_name, self.session_id, self.api_user_id)
@@ -1416,7 +1420,7 @@ class VoiceStream:
                     return
                 self.upstream = upstream
                 if self.is_live:
-                    history = await self.live_history()
+                    history = await self.live_history(resumed=self.resumed)
                     if history:
                         self.transcript.append({"role": "history", "text": history[0]["content"][0]["text"], "offset_ms": 0})
                     if self.options.get("delegation_type", "client") != "responses" or self.config.get("conversation_surface"):

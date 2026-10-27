@@ -28,12 +28,19 @@ def test_a_name_is_one_bounded_word_so_it_cannot_carry_instructions():
     assert voice_greeting.greeting_note(None, returning=False) == GREETING_NEW_CALL
 
 
-def test_the_owner_name_comes_from_the_introduction(monkeypatch):
+def test_only_the_name_the_owner_typed_is_used(monkeypatch):
+    """The detected value is a username, and some pass the name shape."""
     from app.db import owner_state
     monkeypatch.setattr(owner_state, "get_account", lambda: {"introduction": {
-        "detected": {"preferred_name": "Quickkill0"}, "corrections": {"preferred_name": "Sam Rivers"}}})
+        "detected": {"preferred_name": "Quickkill"}, "corrections": {"preferred_name": "Sam Rivers"}}})
     assert voice_greeting.owner_first_name() == "Sam"
-    monkeypatch.setattr(owner_state, "get_account", lambda: {"introduction": {"detected": {"preferred_name": "Quickkill0"}}})
+    for detected in ("Quickkill", "Hobbycoders", "Quickkill0"):
+        monkeypatch.setattr(owner_state, "get_account", lambda d=detected: {"introduction": {"detected": {"preferred_name": d}}})
+        assert voice_greeting.owner_first_name() is None
+    # An introduction from before detection is what the owner typed.
+    monkeypatch.setattr(owner_state, "get_account", lambda: {"introduction": {"preferred_name": "Sam"}})
+    assert voice_greeting.owner_first_name() == "Sam"
+    monkeypatch.setattr(owner_state, "get_account", lambda: {"introduction": {"corrections": {"preferred_name": "sam_r"}}})
     assert voice_greeting.owner_first_name() is None
     monkeypatch.setattr(owner_state, "get_account", lambda: None)
     assert voice_greeting.owner_first_name() is None
@@ -54,6 +61,7 @@ def test_a_key_caller_is_never_greeted_by_the_owner_name(monkeypatch):
 def test_the_greeting_belongs_to_the_prompt_playbook():
     from app.core.voice_prompts import LIVE_INSTRUCTIONS
     assert "Picking up: when a note says the caller just picked up, you speak first" in LIVE_INSTRUCTIONS
+    assert "don't use a fixed opener and don't stack questions" in LIVE_INSTRUCTIONS
     assert "never guess a name" in LIVE_INSTRUCTIONS and "welcome them back in one sentence" in LIVE_INSTRUCTIONS
     assert "carry on without greeting again" in LIVE_INSTRUCTIONS
     assert "Wrapping up:" in LIVE_INSTRUCTIONS

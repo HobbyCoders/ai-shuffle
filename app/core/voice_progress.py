@@ -60,8 +60,8 @@ RESULT_NOTE = ("Your work on the request is done. Tell the caller in your own wo
                "question or next step. Your reply: ")
 MILESTONE_NOTE = ("You reached a milestone and are now waiting on background work (such as a review, CI or a "
                   "job) before you finish. Tell the caller in your own words, in the first person and "
-                  "completely, including any question or next step, then mention what you are waiting on. "
-                  "Your reply so far: ")
+                  "completely, including any question or next step, and what you are now waiting on, if "
+                  "the reply doesn't already say it. Your reply so far: ")
 PROGRESS_NOTE = "What you are doing now, in your own words (for when the caller asks): "
 PARKED_NOTE = "You are waiting for background work to finish before you reply."
 
@@ -288,8 +288,9 @@ class VoiceProgress:
         # transport takes a whole note at once (the Realtime sideband).
         self.append_bytes = append_bytes
         # The last reply the chat wrote (final or a milestone), as speech text,
-        # for status answers.
+        # for status answers, and whether it was a milestone before a park.
         self.last_result = ""
+        self.last_was_milestone = False
         # Transport callbacks: is this a natural pause, and the approval desk.
         self.quiet = quiet
         self.approvals = approvals
@@ -314,8 +315,11 @@ class VoiceProgress:
         Task state alone says "nothing is running" after a reply that ended on
         a question or a next step, which reads as if the work were finished.
         """
-        if not self.last_result or (status or {}).get("chat") == "working":
+        chat = (status or {}).get("chat")
+        if not self.last_result or chat == "working":
             return status_text
+        if self.last_was_milestone or chat == "waiting_on_background":
+            return status_text + " Your last update to the caller, sent before you began waiting on background work: " + self.last_result
         return status_text + " Your last reply to the caller, which may be waiting on their answer: " + self.last_result
 
     @property
@@ -472,30 +476,34 @@ class VoiceProgress:
             elif not text:
                 text = "The request ended with nothing new to say. This does not mean its background tasks finished."
             else:
-                self.last_result = text
+                self.last_result, self.last_was_milestone = text, False
                 text = RESULT_NOTE + text
             self.pending.pop("chat", None)
             self.note("turn:" + tid, text, did, urgent=spoken)
         elif kind == "turn.parked":
             self.turn_ends += 1
-            # Parking is not completion: keep the delegation binding for its wake.
             parked = [tid] if tid else list(self.active_turns)
             if tid:
                 self.active_turns.discard(tid)
             else:
                 self.active_turns.clear()  # record_parked is session-scoped.
+            # The handoff is answered here. The wake runs as a NEW queued turn
+            # (turn_scheduler._queued_unpark_turn) and the parked turn's own
+            # completion is not published, so a binding kept for later was
+            # never used: Grok's handoff call never got its output.
+            did = next((d for d in (self.delegations.pop(t_id, None) for t_id in parked) if d), None)
             # A reply written before parking (waiting on a reviewer, CI, a job)
             # is a milestone the caller hears now. Its text is reset, so the
-            # completion after the wake speaks only what is new.
+            # wake speaks only what is new.
             text = speech_text("\n\n".join(t for t in (self.text.pop(t_id, "").strip() for t_id in parked) if t))
             self.pending.pop("chat", None)
             if text:
-                self.last_result = text
-                self.note("park:" + (tid or "session"), MILESTONE_NOTE + text, urgent=True)
+                self.last_result, self.last_was_milestone = text, True
+                self.note("park:" + (tid or "session"), MILESTONE_NOTE + text, did, urgent=True)
             else:
                 # Plain state only: a "still listening" line invites the voice
                 # to repeat presence filler to the caller.
-                self.note("chat", PARKED_NOTE)
+                self.note("park:" + (tid or "session"), PARKED_NOTE, did)
         elif kind == "subagent.started":
             self.task(p.get("task_id"), p.get("description") or p.get("agent_name"), "running")
         elif kind == "subagent.completed":

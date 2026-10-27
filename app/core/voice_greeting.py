@@ -56,16 +56,19 @@ def spoken_first_name(value: object) -> str | None:
 
 
 def owner_first_name() -> str | None:
-    """The owner's first name from the About-you introduction. Synchronous.
+    """The first name the owner typed for themselves. Synchronous.
 
-    Only the stored introduction is read (detected name, or the owner's
-    correction), never the network; None when it is unknown or not a name.
+    Only the owner's own correction counts, never the detected value: that
+    is an account or admin username, and some ("Quickkill", "Hobbycoders")
+    look like names. The stored introduction is read, never the network;
+    None when no typed name is a person's first name.
     """
     try:
-        from app.core.owner_introduction import effective
+        from app.core.owner_introduction import split
         from app.db import owner_state
         account = owner_state.get_account() or {}
-        return spoken_first_name(effective(account.get("introduction")).get("preferred_name"))
+        _detected, corrections = split(account.get("introduction"))
+        return spoken_first_name(corrections.get("preferred_name"))
     except Exception:
         logger.debug("Voice greeting: owner name unavailable", exc_info=True)
         return None
