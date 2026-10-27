@@ -16,6 +16,7 @@ import re
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 from fluid.codemode.transactions import file_transaction
 
@@ -24,8 +25,11 @@ _log = logging.getLogger(__name__)
 # Three tiers:
 #
 # * explicit (``protected``): the user asked for it or corrected a fact. No
-#   TTL, never touched by the learner, never removed or archived by any
-#   automatic path. At MAX_EXPLICIT user-saved facts (live and archived
+#   TTL, its value (text, tier, always flag) never touched by the learner,
+#   never removed or archived by any automatic path. The one automatic
+#   write is metadata only: the when-line backfill may add a missing
+#   when-line (:meth:`FactStore.annotate`), which leaves the text, the
+#   revision and the clock as they are. At MAX_EXPLICIT user-saved facts (live and archived
 #   together) a new one is refused with a reason the agent can relay;
 #   nothing already saved is dropped to make room.
 # * durable (``durable``): an agent decided a fact was worth keeping
@@ -70,7 +74,9 @@ MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
 # agent load it) and its full text. The snapshot lists the when-lines of the
 # facts in scope as an index, in this many characters; the model Recalls a
 # fact by id for its full text. Sized so a ~200-fact project store shows most
-# of its index (a when-line plus its id label is ~120-180 characters).
+# of its index (a when-line plus its id label is ~120-180 characters). ALWAYS
+# memories have their own ALWAYS_CHARS on top of this; the identity lines
+# (profile.name and the like) and conflict/withheld notes are charged here.
 MAX_PROMPT_CHARS = 10_000
 # A memory's when-line: 1 to MAX_WHEN_CHARS characters. A fact saved without
 # one (older stores, the learner, harvests) is listed by a line derived from
@@ -84,6 +90,15 @@ DERIVED_WHEN_CHARS = 100
 # exceed it is refused with the list of current ones, so the agent asks the
 # owner which to drop. The snapshot enforces the same bound on render.
 ALWAYS_CHARS = 3000
+# ``when`` and ``always`` are metadata, not the fact's value: each carries
+# its own stamp (``when_at``/``always_at``: [hybrid timestamp, store id]) and
+# replicas merge each field by the newest stamp, independently of the text's
+# revision clock. A metadata edit therefore never bumps the revision, never
+# makes a concurrent text edit a conflict, and never loses another worker's
+# edit of the other field. A missing stamp (older stores and replicas) is
+# the oldest.
+METADATA_FIELDS = ("when", "always")
+_NO_STAMP = (0.0, "")
 INFERRED_TTL = 90 * 86400
 MAX_INFERENCE_CALLS_PER_DAY = 48
 HISTORY_TTL = 30 * 86400
@@ -109,7 +124,7 @@ _HINT_NOISE = frozenset(
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9(\"'`])")
 
 
-def derived_when(text):
+def derived_when(text: object) -> str:
     """A when-line for a fact saved without one: its first sentence, or
     that sentence's first clause when the sentence is too long, at most
     DERIVED_WHEN_CHARS. An ellipsis marks text left out. Render-time only,
@@ -125,13 +140,36 @@ def derived_when(text):
     return cut.rstrip(" ,;:-") + "…"
 
 
-def when_line(entry):
+def when_line(entry: "dict | Any") -> str:
     """The fact's written when-line, or one derived from its text."""
     get = entry.get if isinstance(entry, dict) else (lambda k: getattr(entry, k, None))
     return get("when") or derived_when(get("text"))
 
 
-def validate_when(when):
+def metadata_stamp(entry: dict, field: str) -> tuple[float, str]:
+    """``entry``'s stamp for metadata ``field`` (see METADATA_FIELDS), or the
+    oldest stamp when it has none or an unusable one."""
+    raw = entry.get(field + "_at")
+    if (isinstance(raw, (list, tuple)) and len(raw) == 2
+            and type(raw[0]) in (int, float) and math.isfinite(raw[0]) and raw[0] >= 0
+            and isinstance(raw[1], str) and re.fullmatch(r"[A-Za-z0-9_.-]{0,128}", raw[1])):
+        return (float(raw[0]), raw[1])
+    return _NO_STAMP
+
+
+def _set_metadata(entry: dict, field: str, value: object, store_id: str) -> None:
+    """Write one metadata field locally with a stamp newer than its current
+    one (a hybrid clock: wall time, or just past a skewed replica's stamp)."""
+    now = time.time()
+    prior = metadata_stamp(entry, field)[0]
+    entry[field + "_at"] = [now if now > prior else math.nextafter(prior, math.inf), store_id]
+    if value:
+        entry[field] = value
+    else:
+        entry.pop(field, None)
+
+
+def validate_when(when: object) -> str:
     """A written when-line, whitespace-normalized; raises ValueError."""
     from fluid.context.screening import looks_like_secret, screen_findings
     if not isinstance(when, str):
@@ -147,7 +185,7 @@ def validate_when(when):
     return when
 
 
-def always_applies(entry):
+def always_applies(entry: "dict | Any") -> bool:
     """An ALWAYS memory: owner-saved, flagged always, live and current."""
     get = entry.get if isinstance(entry, dict) else (lambda k: getattr(entry, k, None))
     return bool(get("always") and get("protected") and not get("superseded_by"))
@@ -735,22 +773,10 @@ class FactStore:
                     and old.get("protected", False) == protected
                     and (protected or bool(old.get("durable")) == is_durable)):
                 # Same value, new when-line or always flag: a metadata edit.
-                # A new revision (replicas must see it), not a new value, so
-                # updated_at and history stay as they are.
-                if protected and expected_revision is None:
-                    raise ValueError("Recall the existing fact and supply its revision before "
-                                     f"changing it ([{old['id']} r{old.get('revision', 1)}])")
-                if expected_revision is not None and old.get("revision", 1) != expected_revision:
-                    raise ValueError("Memory changed since it was read; recall it before retrying")
-                if when is not None:
-                    old["when"] = when
-                if always is not None:
-                    if always:
-                        self._check_always_budget(doc, old, exclude=())
-                        old["always"] = True
-                    else:
-                        old.pop("always", None)
-                self._bump_metadata(doc, old)
+                # Stamped per field (METADATA_FIELDS), not a new revision, so
+                # the revision, clock, updated_at and history stay as they are.
+                self._edit_metadata(doc, old, when, always, protected=protected,
+                                    expected_revision=expected_revision, exclude=())
                 self._maintain(doc, keep=old["id"])
                 self._write(doc)
                 return self._entry(old)
@@ -771,6 +797,12 @@ class FactStore:
                         raise ValueError(f"[{old['id']}] was itself replaced by "
                                          f"[{old['superseded_by']}]; correct that fact instead")
                     return self._entry(old)  # an observation cannot revive a known stale value
+                if self._metadata_differs(old, when, always):
+                    # Same text with replaces= and a new when-line or always
+                    # flag: the metadata edit applies too (guarded as above).
+                    self._edit_metadata(doc, old, when, always, protected=protected,
+                                        expected_revision=expected_revision,
+                                        exclude={e["id"] for e in targets})
                 # Saving the same fact again is a use: renew a durable fact's
                 # lifetime and bring an archived one back. No new revision.
                 if durable:
@@ -868,10 +900,10 @@ class FactStore:
                     entry["saved_by"] = "user"
                 else:
                     entry.pop("saved_by", None)
-            if when is not None:
-                entry["when"] = when
-            if always is not None:
-                entry["always"] = always
+            if when is not None and when != entry.get("when"):
+                _set_metadata(entry, "when", when, local)
+            if always is not None and always != bool(entry.get("always")):
+                _set_metadata(entry, "always", always, local)
             if not protected or not entry.get("always"):
                 entry.pop("always", None)  # only an owner-saved fact applies always
             elif (not old or not old.get("always") or not old.get("protected")
@@ -1036,6 +1068,46 @@ class FactStore:
         return ((when is not None and when != old.get("when"))
                 or (always is not None and always != bool(old.get("always"))))
 
+    def _edit_metadata(self, doc, old, when, always, *, protected, expected_revision, exclude):
+        """Apply a Remember save's new when-line/always flag to ``old`` in
+        place. An owner fact needs the revision Recall returned; the ALWAYS
+        budget is checked before anything changes. Stamps, never bumps."""
+        if protected and expected_revision is None:
+            raise ValueError("Recall the existing fact and supply its revision before "
+                             f"changing it ([{old['id']} r{old.get('revision', 1)}])")
+        if expected_revision is not None and old.get("revision", 1) != expected_revision:
+            raise ValueError("Memory changed since it was read; recall it before retrying")
+        if always and not bool(old.get("always")):
+            self._check_always_budget(doc, old, exclude=exclude)
+        if when is not None and when != old.get("when"):
+            _set_metadata(old, "when", when, doc["store_id"])
+        if always is not None and always != bool(old.get("always")):
+            _set_metadata(old, "always", always, doc["store_id"])
+
+    @staticmethod
+    def _merge_metadata(target, local, incoming, prefer):
+        """Settle each METADATA_FIELDS field of one fact's two copies on the
+        copy with the newer stamp, whichever side won the text clock.
+
+        Equal stamps (both missing: older stores and replicas) keep
+        ``prefer``'s value, the side whose clock dominates; with no such
+        side the larger value wins, so every replica settles the same way."""
+        for field in METADATA_FIELDS:
+            a, b = metadata_stamp(local, field), metadata_stamp(incoming, field)
+            if a != b:
+                source = local if a > b else incoming
+            elif prefer is not None:
+                source = prefer
+            else:
+                source = max((local, incoming), key=lambda e: str(e.get(field) or ""))
+            if source is target:
+                continue
+            for k in (field, field + "_at"):
+                if source.get(k) is not None and source.get(k) is not False:
+                    target[k] = source[k]
+                else:
+                    target.pop(k, None)
+
     @staticmethod
     def _check_always_budget(doc, entry, exclude):
         """Refuse an ALWAYS memory that would overflow ALWAYS_CHARS.
@@ -1099,15 +1171,23 @@ class FactStore:
         return [{"id": e["id"], "revision": e.get("revision", 1), "text": e["text"]}
                 for *_, e in sorted(hits, key=lambda h: h[:3])[:MAX_SIMILAR]]
 
-    def annotate(self, memory_id, *, when, expected_revision):
+    def annotate(self, memory_id: str, *, when: str, expected_revision: int,
+                 expected_when_at: list | None = None) -> Any:
         """Write the when-line of one fact, any tier, without touching its
-        text, tier, always flag or lifetime (a backfill or curator path).
+        text, tier, always flag, lifetime, revision or clock (the backfill
+        path). Returns the entry (a MemoryEntry).
 
-        Revision-guarded like a correction; bumps the clock so replicas take
-        it. Live or archived facts on this worker. Returns the entry."""
+        Two compare-and-set guards: ``expected_revision`` is the text the
+        line was written for (a concurrent correction refuses it), and
+        ``expected_when_at`` the when-line stamp that was read (None: the
+        fact had no when-line), so a when-line written meanwhile, here or
+        merged from a replica, is never overwritten. The new stamp carries
+        the line to replicas (see METADATA_FIELDS). Live or archived facts
+        on this worker."""
         if isinstance(when, str) and ("\n" in when or "\r" in when):
             raise ValueError("when must be one line")
         when = validate_when(when)
+        expected = metadata_stamp({"when_at": expected_when_at}, "when")
         with file_transaction(self.lock):
             doc = self._prepare()
             old = next((e for e in doc["entries"] + doc["archived"] if e["id"] == memory_id), None)
@@ -1115,9 +1195,11 @@ class FactStore:
                 raise ValueError("Unknown memory ID")
             if old.get("revision", 1) != expected_revision:
                 raise ValueError("Memory changed since it was read; recall it before retrying")
+            if (metadata_stamp(old, "when") != expected
+                    or (expected_when_at is None and old.get("when"))):
+                raise ValueError("The when-line changed since it was read; recall it before retrying")
             if old.get("when") != when:
-                old["when"] = when
-                self._bump_metadata(doc, old)
+                _set_metadata(old, "when", when, doc["store_id"])
                 self._write(doc)
             return self._entry(old)
 
@@ -1320,6 +1402,10 @@ class FactStore:
                     raise ValueError("Invalid memory always flag")
                 if not entry.get("always"):
                     entry.pop("always", None)
+                for field in METADATA_FIELDS:
+                    # An unusable stamp is the oldest one, not a refusal.
+                    if field + "_at" in entry and metadata_stamp(entry, field) == _NO_STAMP:
+                        entry.pop(field + "_at")
                 old = entries.get(entry["id"])
                 incoming_clock = entry.get("clock") or {entry["origin"]: entry.get("revision", 1)}
                 if not isinstance(incoming_clock, dict) or len(incoming_clock) > 64 or any(type(v) is not int or v < 0 for v in incoming_clock.values()):
@@ -1334,25 +1420,17 @@ class FactStore:
                 older = all(local_clock.get(k, 0) >= incoming_clock.get(k, 0) for k in actors)
                 if newer and not older:
                     entries[entry["id"]] = entry
+                    # The newer value keeps a metadata edit only the local
+                    # copy has (a backfill when-line, say).
+                    self._merge_metadata(entry, old, entry, prefer=entry)
                 elif (not newer and not older) or (newer and older and entry["text"] != old["text"]):
+                    # Metadata settles per field whatever happens to the value.
+                    self._merge_metadata(old, old, entry, prefer=None)
                     # Independent deterministic reconciliation is the same
                     # claim, not a concurrent edit to the fact's value.
                     claim = ("text", "scope", "key", "worker", "provenance", "protected", "durable", "superseded_by", "retired_reason")
-                    same_value = (all(old.get(k) == entry.get(k) for k in claim)
+                    same_claim = (all(old.get(k) == entry.get(k) for k in claim)
                                   and bool(old.get("retired_at")) == bool(entry.get("retired_at")))
-                    same_claim = same_value and all(old.get(k) == entry.get(k) for k in ("when", "always"))
-                    if same_value and not same_claim:
-                        # Concurrent when-line/always edits of one value are
-                        # metadata, not a conflict: every replica keeps the
-                        # same side (higher revision, then the larger when).
-                        winner = max((old, entry), key=lambda e: (
-                            e.get("revision", 1), str(e.get("when") or ""), bool(e.get("always"))))
-                        for k in ("when", "always"):
-                            if winner.get(k):
-                                old[k] = winner[k]
-                            else:
-                                old.pop(k, None)
-                        same_claim = True
                     if same_claim:
                         old["clock"] = {k: max(local_clock.get(k, 0), incoming_clock.get(k, 0)) for k in actors}
                         old["revision"] = max(old.get("revision", 1), entry.get("revision", 1))
@@ -1364,6 +1442,11 @@ class FactStore:
                     old["clock"] = {k: max(local_clock.get(k, 0), incoming_clock.get(k, 0)) for k in actors}
                     old["revision"] = max(old.get("revision", 1), entry.get("revision", 1))
                     old["alternatives"] = sorted(set(old.get("alternatives", []) + [old["text"], entry["text"]]))[:2]
+                else:
+                    # The local copy's clock dominates or equals the replica's
+                    # (a metadata-only edit leaves the clock as it is), so the
+                    # value stays; a newer when-line/always stamp still lands.
+                    self._merge_metadata(old, old, entry, prefer=None if newer else old)
             for key in tombstones:
                 # Delete wins over every replay. Restoring creates a new ID;
                 # a stale worker cannot resurrect the forgotten record.

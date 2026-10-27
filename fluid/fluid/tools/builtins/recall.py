@@ -95,21 +95,26 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             is_error=True,
         )
 
+    # One scope rule for ids and keywords: global facts plus this session's
+    # project (the loader always sets memory_project; None is unscoped).
+    project = ctx.extra.get("memory_project")
     if ids:
-        fetched = await asyncio.to_thread(_fetch, ids, store)
+        fetched = await asyncio.to_thread(_fetch, ids, store, project)
         if not query:
             return fetched
-        found = await asyncio.to_thread(_lookup, query, limit, store, ctx.extra.get("memory_project"))
+        found = await asyncio.to_thread(_lookup, query, limit, store, project)
         return ToolOutcome(text=fetched.text + "\n\n" + found.text,
                            is_error=fetched.is_error and found.is_error)
-    return await asyncio.to_thread(_lookup, query, limit, store, ctx.extra.get("memory_project"))
+    return await asyncio.to_thread(_lookup, query, limit, store, project)
 
 
-def _fetch(ids: list[str], store: Any) -> ToolOutcome:
-    """Exact fetch by id: full text and every label, one block per memory."""
+def _fetch(ids: list[str], store: Any, project: str | None = None) -> ToolOutcome:
+    """Exact fetch by id: full text and every label, one block per memory.
+    Another project's fact is reported like a missing id, so its text and
+    existence stay out of this session."""
     from fluid.context.screening import screen_findings
     try:
-        hits = store.memories_by_id(ids)
+        hits = store.memories_by_id(ids, project=project)
     except Exception as exc:  # noqa: BLE001
         return ToolOutcome(text=f"recall failed: {exc}", is_error=True)
     successor = _local_ids(store) if any(e.superseded_by for e, _ in hits) else {}
@@ -133,7 +138,8 @@ def _fetch(ids: list[str], store: Any) -> ToolOutcome:
                          f"[{entry.id}] revision {entry.revision} with Remember.")
     missing = [i for i in ids if i not in seen]
     if missing:
-        lines.append("No memory with id " + ", ".join(f"[{i}]" for i in missing)
+        where = " in this project" if project is not None else ""
+        lines.append("No memory with id " + ", ".join(f"[{i}]" for i in missing) + where
                      + " (it may have been forgotten); search by keyword instead.")
     return ToolOutcome(text="\n".join(lines), is_error=not hits)
 

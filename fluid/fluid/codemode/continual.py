@@ -758,6 +758,9 @@ class Synthesizer:
         # day, the whole budget).
         self.last_pass_failed = False
         self.last_pass_skipped = False
+        # True while the when-line backfill runs after a pass, so a close
+        # that times out then is charged to the backfill, not to synthesis.
+        self._in_backfill = False
         # When this synthesizer first found the synthesis lock held, and when
         # it last wrote that down (see run()).
         self._lock_busy_since: float | None = None
@@ -1023,13 +1026,21 @@ class Synthesizer:
         try:
             await asyncio.wait_for(self._drain_inner(), timeout=self._close_timeout)
         except TimeoutError:
-            self.last_error = (
-                f"synthesis on close exceeded {self._close_timeout:.0f}s and was abandoned"
-            )
-            # An abandoned pass leaves no cursor movement (the slice retries
-            # next session) — but it must leave a trace, or a slow pass is
-            # indistinguishable from one that never ran.
-            self._log_pass("synthesis", [], error=self.last_error)
+            if self._in_backfill:
+                # Synthesis finished; the when-line backfill after it did not.
+                # Its own backoff and row, never a failed synthesis pass.
+                self._in_backfill = False
+                from fluid.codemode.memory_backfill import note_failure
+                note_failure(self, "when-line backfill on close exceeded "
+                                   f"{self._close_timeout:.0f}s and was abandoned")
+            else:
+                self.last_error = (
+                    f"synthesis on close exceeded {self._close_timeout:.0f}s and was abandoned"
+                )
+                # An abandoned pass leaves no cursor movement (the slice
+                # retries next session) — but it must leave a trace, or a
+                # slow pass is indistinguishable from one that never ran.
+                self._log_pass("synthesis", [], error=self.last_error)
             if self._task is not None:
                 self._task.cancel()
                 self._task = None
@@ -1045,6 +1056,7 @@ class Synthesizer:
             await self._run_safe()
 
     async def _run_safe(self) -> list[str]:
+        self._in_backfill = False
         try:
             changed = await asyncio.wait_for(self.run(), timeout=self._pass_timeout)
         except TimeoutError:
@@ -1080,8 +1092,14 @@ class Synthesizer:
             except Exception as exc:  # consolidation is opportunistic, never fatal
                 self._consolidation_failed(f"{type(exc).__name__}: {exc}")
         if not (self.last_pass_failed or self.last_pass_skipped):
+            # Best-effort and self-contained: its failures (including its own
+            # timeout) go to the backfill's backoff, never last_pass_failed.
             from fluid.codemode.memory_backfill import run as backfill_when
+            # Left set if a close cancels it, so drain() can tell (a finally
+            # would clear it before drain sees the timeout).
+            self._in_backfill = True
             backfilled = await backfill_when(self)
+            self._in_backfill = False
             changed += ["memory-when:" + mid for mid in backfilled.lines]
         await self._notify(changed)
         return changed

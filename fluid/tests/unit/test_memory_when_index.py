@@ -102,8 +102,86 @@ def test_replication_carries_fields_and_settles_concurrent_when_edits(tmp_path):
     b._facts.merge(a._facts.export())
     [left], [right] = a.memories(), b.memories()
     assert not left.conflicted and not right.conflicted
-    assert left.when == right.when == "When deploying the website"  # deterministic pick
+    assert left.when == right.when == "When deploying the hub"  # the later edit's stamp
     assert left.text == right.text == DEPLOY
+    # A metadata edit is not a new value: the revision stays where it was.
+    assert left.revision == right.revision == 1
+
+
+def test_concurrent_owner_always_and_backfill_when_both_survive(tmp_path):
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    fact = a.save_memory(DEPLOY, protected=True)
+    b._facts.merge(a._facts.export())
+    # Worker A: the owner turns always on. Worker B: the backfill writes a
+    # when-line for the same revision. Neither knows of the other.
+    a.save_memory(DEPLOY, protected=True, memory_id=fact.id, expected_revision=1, always=True)
+    [copy] = b.memories()
+    b.annotate_memory(copy.id, when=DEPLOY_WHEN, expected_revision=1)
+    a._facts.merge(b._facts.export())
+    b._facts.merge(a._facts.export())
+    for store in (a, b):
+        [entry] = store.memories()
+        assert (entry.when, entry.always, entry.conflicted) == (DEPLOY_WHEN, True, False)
+        assert entry.revision == 1
+    # Idempotent: merging again changes nothing.
+    before = a._facts.snapshot()["entries"]
+    a._facts.merge(b._facts.export())
+    assert a._facts.snapshot()["entries"] == before
+
+
+def test_annotate_racing_a_text_edit_is_no_conflict_and_the_text_edit_wins(tmp_path):
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    fact = a.save_memory(DEPLOY, protected=True)
+    b._facts.merge(a._facts.export())
+    fixed = a.save_memory(DEPLOY + " Then announce it.", protected=True, memory_id=fact.id,
+                          expected_revision=1)
+    [copy] = b.memories()
+    b.annotate_memory(copy.id, when=DEPLOY_WHEN, expected_revision=1)
+    for _ in range(2):
+        a._facts.merge(b._facts.export())
+        b._facts.merge(a._facts.export())
+    for store in (a, b):
+        [entry] = store.memories()
+        assert not entry.conflicted
+        assert entry.text == fixed.text and entry.revision == fixed.revision
+        assert entry.when == DEPLOY_WHEN
+
+
+def test_owner_correction_after_a_backfill_annotate_still_succeeds(tmp_path):
+    store = SkillStore(tmp_path)
+    fact = store.save_memory(DEPLOY, protected=True)
+    read = store.memories()[0].revision  # the agent Recalls the fact
+    store.annotate_memory(fact.id, when=DEPLOY_WHEN, expected_revision=read)  # backfill
+    fixed = store.save_memory(DEPLOY + " Then announce it.", protected=True,
+                              memory_id=fact.id, expected_revision=read)
+    assert fixed.revision == read + 1 and fixed.when == DEPLOY_WHEN
+
+
+def test_metadata_stamps_from_an_old_replica_or_store_are_the_oldest(tmp_path):
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    fact = a.save_memory(DEPLOY, protected=True, when=DEPLOY_WHEN)
+    b._facts.merge(a._facts.export())
+    # An older replica of the same fact: no when-line, no stamp, no always.
+    snapshot = a._facts.export()
+    old = dict(snapshot["entries"][0])
+    for k in ("when", "when_at", "always", "always_at"):
+        old.pop(k, None)
+    snapshot["entries"] = [old]
+    b._facts.merge(snapshot)
+    assert b.memories()[0].when == DEPLOY_WHEN
+    # A garbled stamp is treated as missing rather than refusing the replica.
+    old["when"], old["when_at"] = "When something else", ["soon", 3]
+    b._facts.merge(snapshot)
+    assert b.memories()[0].when == DEPLOY_WHEN
+    # Two unstamped copies (written before stamps existed) at equal clocks
+    # settle on the same value on both sides.
+    c, d = SkillStore(tmp_path / "c"), SkillStore(tmp_path / "d")
+    c._facts.merge(snapshot | {"entries": [dict(old, when="When alpha", when_at=None)]})
+    d._facts.merge(snapshot | {"entries": [dict(old, when="When beta", when_at=None)]})
+    c._facts.merge(d._facts.export())
+    d._facts.merge(c._facts.export())
+    assert c.memories()[0].when == d.memories()[0].when == "When beta"
+    assert fact.id
 
 
 def test_replica_with_an_invalid_when_line_falls_back_instead_of_failing(tmp_path):
@@ -123,13 +201,46 @@ def test_metadata_write_path_keeps_value_and_recency(tmp_path):
     store = SkillStore(tmp_path)
     fact = store.save_memory(DEPLOY, protected=True)
     annotated = store.annotate_memory(fact.id, when=DEPLOY_WHEN, expected_revision=1)
-    assert annotated.when == DEPLOY_WHEN and annotated.revision == 2
+    assert annotated.when == DEPLOY_WHEN and annotated.revision == 1
     assert annotated.text == fact.text and annotated.updated_at == fact.updated_at
     assert annotated.protected and not annotated.always
+    raw = json.loads((tmp_path / "memories.json").read_text())["entries"][0]
+    assert raw["clock"] == {raw["origin"]: 1} and raw["when_at"][1] == raw["origin"]
+    # Compare-and-set on the field: a when-line written since the read wins.
     with pytest.raises(ValueError, match="changed since"):
         store.annotate_memory(fact.id, when="When x", expected_revision=1)
+    replaced = store.annotate_memory(fact.id, when="When x", expected_revision=1,
+                                     expected_when_at=raw["when_at"])
+    assert replaced.when == "When x"
+    with pytest.raises(ValueError, match="changed since"):
+        store.annotate_memory(fact.id, when="When y", expected_revision=2,
+                              expected_when_at=raw["when_at"])
     with pytest.raises(ValueError, match="characters"):
-        store.annotate_memory(fact.id, when="x" * (MAX_WHEN_CHARS + 1), expected_revision=2)
+        store.annotate_memory(fact.id, when="x" * (MAX_WHEN_CHARS + 1), expected_revision=1)
+
+
+def test_same_text_save_with_replaces_applies_a_new_when_and_always(tmp_path):
+    store = SkillStore(tmp_path)
+    keep = store.save_memory(DEPLOY, protected=True, when="When deploying")
+    older = store.save_memory("Deploy the site first.", protected=True, when="When deploying")
+    # The owner folds the older row into this one and gives it a new
+    # when-line and always: the same text, so no new revision.
+    with pytest.raises(ValueError, match="revision"):
+        store.save_memory(DEPLOY, protected=True, memory_id=keep.id, replaces=[older.id],
+                          when=DEPLOY_WHEN, always=True)
+    assert store.memories()[0].when == "When deploying"
+    saved = store.save_memory(DEPLOY, protected=True, memory_id=keep.id, replaces=[older.id],
+                              expected_revision=keep.revision, when=DEPLOY_WHEN, always=True)
+    assert (saved.when, saved.always, saved.revision) == (DEPLOY_WHEN, True, keep.revision)
+    [live] = [e for e in store.memories() if e.id == keep.id]
+    assert (live.when, live.always) == (DEPLOY_WHEN, True)
+    assert older.id in [e.id for e in store.archived_memories()]
+    # An agent's own fact needs no revision for the same edit.
+    mine = store.save_memory("Port 8080 serves the preview.", durable=True, when="When previewing")
+    dupe = store.save_memory("The preview runs on 8080.", durable=True, when="When previewing")
+    again = store.save_memory(mine.text, durable=True, replaces=[dupe.id],
+                              when="When opening the preview")
+    assert again.id == mine.id and again.when == "When opening the preview"
 
 
 # ─── Remember ──────────────────────────────────────────────────────────────
@@ -232,6 +343,31 @@ async def test_recall_ids_fetches_live_archived_superseded_and_global_ids(tmp_pa
     assert neither.is_error
 
 
+async def test_recall_ids_follow_the_session_project_scope(tmp_path):
+    store = SkillStore(tmp_path)
+    mine = store.save_memory(DEPLOY, protected=True, when=DEPLOY_WHEN, scope="project:one")
+    theirs = store.save_memory("Project two pins Node 20.", protected=True,
+                               when="When installing Node", scope="project:two")
+    shared = store.save_memory(ROUTING, protected=True, when=ROUTING_WHEN)
+    gone = store.save_memory("Project two used port 9000.", durable=True,
+                             when="When picking a port", scope="project:two")
+    store.retire_memory(gone.id, reason="test")
+    ids = [mine.id, theirs.id, shared.id, global_id(vars(theirs)), gone.id]
+    out = await recall({"ids": ids}, ctx(store, "project:one"))
+    assert DEPLOY in out.text and ROUTING in out.text
+    assert "Node 20" not in out.text and "port 9000" not in out.text
+    assert (f"No memory with id [{theirs.id}], [{global_id(vars(theirs))}], [{gone.id}] "
+            "in this project") in out.text
+    # Not a use either: the other project's fact was never returned.
+    assert next(e for e in store.memories() if e.id == theirs.id).uses == 0
+    # Only out-of-scope ids: an error, like an unknown id.
+    only = await recall({"ids": [theirs.id]}, ctx(store, "project:one"))
+    assert only.is_error and "Node 20" not in only.text
+    # The owning project and an unscoped call still find it.
+    assert "Node 20" in (await recall({"ids": [theirs.id]}, ctx(store, "project:two"))).text
+    assert "Node 20" in (await recall({"ids": [theirs.id]}, ctx(store))).text
+
+
 async def test_keyword_recall_scores_the_when_line(tmp_path):
     store = SkillStore(tmp_path)
     store.save_memory("Use the pr-review skill with Haiku eligibility checks.", protected=True,
@@ -278,6 +414,35 @@ def test_index_order_is_task_match_then_project_then_usefulness(tmp_path):
     assert plan["shown_ids"] == [task.id, local.id, used.id, newest.id]
 
 
+def test_identity_facts_are_always_listed_by_bounded_text_even_with_a_full_index(tmp_path):
+    from fluid.codemode.skills import IDENTITY_TEXT_CHARS
+    store = SkillStore(tmp_path)
+    for i in range(200):  # far more index than MAX_PROMPT_CHARS holds
+        note = store.save_memory(f"Build fact {i} about the release fixture pipeline.",
+                                 protected=True, when=f"When release fixture case {i} comes up")
+        store.note_memories_recalled([note.id] * 3)
+    name = store.save_memory("The user's name is Alex Example. " + "Detail " * 40,
+                             protected=True, key="profile.name", when="When addressing the user")
+    pronouns = store.save_memory("The user uses they/them pronouns.", protected=True,
+                                 key="profile.pronouns", when="When referring to the user")
+    plan = store.memory_snapshot_plan(task_query="release fixture pipeline")
+    assert plan["over_budget"] > 0
+    lines = plan["lines"]
+    assert lines[0].startswith(f"- [{name.id} r1; session] The user's name is Alex Example.")
+    assert lines[0].endswith("…") and len(lines[0].split("] ", 1)[1]) == IDENTITY_TEXT_CHARS
+    assert lines[1] == f"- [{pronouns.id} r1; session] {pronouns.text}"
+    assert {name.id, pronouns.id} <= set(plan["full_text_ids"])
+    # Charged against the shared budget, which the index still fills.
+    assert sum(len(line) + 1 for line in lines) <= facts.MAX_PROMPT_CHARS
+    assert plan["in_scope"] == 202 == len(plan["shown_ids"]) + plan["over_budget"]
+    # Rendered ahead of the index lines, under the index heading when there
+    # are ALWAYS memories.
+    store.save_memory(ROUTING, protected=True, when=ROUTING_WHEN, always=True)
+    section = store.render_memory_section(task_query="release fixture pipeline")
+    index_part = section.split(INDEX_HEADING + "\n", 1)[1]
+    assert index_part.startswith(f"- [{name.id} r1; session] The user's name is Alex")
+
+
 def test_index_overflow_becomes_one_count_line(tmp_path, monkeypatch):
     monkeypatch.setattr(facts, "MAX_PROMPT_CHARS", 200)
     store = SkillStore(tmp_path)
@@ -307,6 +472,9 @@ def test_always_overflow_on_render_falls_back_to_the_index(tmp_path):
     assert plan["always"] == 2 and sum(len(line) for line in full) < ALWAYS_CHARS + 100
     assert any("c" * 900 in line for line in full) and any(b.text in line for line in full)
     assert f"- [{a.id} r1; session] When alpha" in plan["lines"][plan["always"]:]
+    # The overflowed one is counted once, as an index line.
+    assert plan["in_scope"] == 3 and plan["shown_ids"].count(a.id) == 1
+    assert len(plan["eligible_lines"]) == 3 and a.id not in plan["full_text_ids"]
 
 
 def test_screening_withholds_bad_text_or_when_and_keeps_conflict_lines(tmp_path):

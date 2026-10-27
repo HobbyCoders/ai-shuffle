@@ -363,6 +363,10 @@ def _is_infra_verdict(error: object) -> bool:
 MAX_LIVE_SKILLS = 40
 MAX_MEMORIES = 40
 MAX_MEMORY_CHARS = 2000  # one memory: a fact or one rule with its exceptions, not an essay
+# An identity fact (profile.name and the like) is listed in every # Memory
+# snapshot by its text, cut to this many characters (the stored fact and its
+# Recall result stay whole).
+IDENTITY_TEXT_CHARS = 120
 
 # Sub-heading for ALWAYS memories (owner-saved, always=true) at the top of
 # # Memory, in full. Only they carry this authority; the index below keeps
@@ -1698,14 +1702,19 @@ class SkillStore:
         self.note_memories_recalled([e.id for e, archived in hits if not archived])
         return hits
 
-    def memories_by_id(self, ids: list[str]) -> list[tuple[MemoryEntry, bool]]:
+    def memories_by_id(self, ids: list[str], *,
+                       project: str | None = None) -> list[tuple[MemoryEntry, bool]]:
         """Exact fetch of facts by local or global id, live or archived, in the
-        order asked: ``[(entry, archived)]``; unknown ids are skipped. Live
-        hits count as uses (Recall)."""
+        order asked: ``[(entry, archived)]``; unknown ids are skipped. With a
+        ``project`` key only global facts and that project's are found, the
+        same scope rule as :meth:`search_memories`. Live hits count as uses
+        (Recall)."""
         from fluid.codemode.facts import global_id
         found: dict[str, tuple[MemoryEntry, bool]] = {}
         for archived, entries in ((False, self.memories()), (True, self.archived_memories())):
             for entry in entries:
+                if project is not None and entry.scope not in ("global", project):
+                    continue
                 found.setdefault(entry.id, (entry, archived))
                 if entry.origin:
                     found.setdefault(global_id(vars(entry)), (entry, archived))
@@ -1713,9 +1722,11 @@ class SkillStore:
         self.note_memories_recalled([e.id for e, archived in hits if not archived])
         return hits
 
-    def annotate_memory(self, memory_id: str, *, when: str, expected_revision: int) -> MemoryEntry:
+    def annotate_memory(self, memory_id: str, *, when: str, expected_revision: int,
+                        expected_when_at: list | None = None) -> MemoryEntry:
         """Metadata-only write of one fact's when-line (see FactStore.annotate)."""
-        return self._facts.annotate(memory_id, when=when, expected_revision=expected_revision)
+        return self._facts.annotate(memory_id, when=when, expected_revision=expected_revision,
+                                    expected_when_at=expected_when_at)
 
     def delete_memory(self, memory_id: str, *, explicit: bool = False,
                       expected_revision: int | None = None) -> bool:
@@ -1796,7 +1807,9 @@ class SkillStore:
         One style of memory: every fact has a when-line and its full text.
         ALWAYS memories in scope (owner-saved, always=true, within
         ``ALWAYS_CHARS``) render first and in full under
-        :data:`ALWAYS_HEADING`. Every other fact in scope is one index line,
+        :data:`ALWAYS_HEADING`. Identity facts (profile.name and the like)
+        are always listed by their text, cut to :data:`IDENTITY_TEXT_CHARS`,
+        ahead of the index. Every other fact in scope is one index line,
         ``- [id rN; source] <when-line>``, so the model knows a relevant
         memory exists and Recalls it by id for the text; what does not fit
         ``MAX_PROMPT_CHARS`` is counted on one "omitted for space" line.
@@ -1893,8 +1906,10 @@ class SkillStore:
         the memory health check measures it without building a prompt.
 
         Returns ``lines`` (rendered, in order: the first ``always`` of them
-        are ALWAYS memories in full, the rest index lines), ``shown_ids``,
-        ``omitted_ids`` (in scope but over budget) and the ``in_scope``,
+        are ALWAYS memories in full, then identity facts by their bounded
+        text, then index lines), ``shown_ids``, ``full_text_ids`` (the
+        ALWAYS and identity facts, whose text is shown), ``omitted_ids``
+        (in scope but over budget) and the ``in_scope``,
         ``over_budget``, ``out_of_scope``, ``held`` and ``other_checkout``
         counts, plus ``archived``: archived facts in scope that Recall finds
         (0 unless ``archived`` facts are passed).
@@ -1916,16 +1931,17 @@ class SkillStore:
         from fluid.codemode.relevance import query_terms, relevance
         terms = query_terms(task_query)
 
+        # Who the user is: listed in every snapshot by its text (bounded to
+        # IDENTITY_TEXT_CHARS), ahead of the index and charged against
+        # MAX_PROMPT_CHARS, so a full index never hides the user's name.
         identity_keys = {"profile.name", "profile.preferred_name", "profile.pronouns",
                          "profile.language", "profile.github_username"}
 
         def off_domain(entry: MemoryEntry) -> bool:
             # One coincidental word is not task relevance: a biography is not
             # useful to every coding task. A namespace is a hint, not a veto.
-            # Who the user is (name, pronouns, language) always applies.
+            # (Identity facts are not index lines; see identity_keys.)
             key = entry.key or ""
-            if key in identity_keys:
-                return False
             domain = set(re.findall(r"[^\W_]+", key.casefold())) - {"profile"}
             return (key.startswith(("profile.", "business."))
                     and not domain.intersection(terms)
@@ -1940,6 +1956,7 @@ class SkillStore:
                                     -usefulness(vars(e)), e.id))
         pinned: list[tuple[MemoryEntry, str]] = []   # conflict and withheld lines
         always: list[tuple[MemoryEntry, str]] = []
+        identity: list[tuple[MemoryEntry, str]] = []
         index: list[tuple[MemoryEntry, str]] = []
         for entry in entries:
             if project is not None and entry.scope not in ("global", project):
@@ -1989,28 +2006,39 @@ class SkillStore:
                 continue
             hint = (" (unconfirmed harvest; confirm with Remember if still true)"
                     if entry.provenance == "tool" else "")
+            if entry.key in identity_keys:
+                # Bound only the rendered identity, never the stored fact or
+                # Recall result. An ellipsis makes the omitted tail explicit.
+                text = entry.text
+                if len(text) > IDENTITY_TEXT_CHARS:
+                    text = text[:IDENTITY_TEXT_CHARS - 1].rstrip() + "…"
+                identity.append((entry, f"- {label} {text}{hint}"))
+                continue
             index.append((entry, f"- {label} {when_line(entry)}{hint}"))
+        identity.sort(key=lambda item: item[0].key != "profile.name")  # stable: rank order after
         # ALWAYS memories in full within their own budget; one that does not
-        # fit (a replica merged past it) is listed in the index instead.
+        # fit (a replica merged past it) is listed first in the index instead.
         always_room = ALWAYS_CHARS
         shown_always: list[tuple[MemoryEntry, str]] = []
+        overflow: list[tuple[MemoryEntry, str]] = []
         for entry, line in always:
             if len(entry.text) <= always_room:
                 always_room -= len(entry.text)
                 shown_always.append((entry, line))
             else:
                 label = f"[{entry.id} r{entry.revision}; {entry.provenance}]"
-                index.insert(0, (entry, f"- {label} {when_line(entry)}"))
-        remaining = MAX_PROMPT_CHARS - sum(len(line) + 1 for _, line in pinned)
+                overflow.append((entry, f"- {label} {when_line(entry)}"))
+        index = overflow + index
+        remaining = MAX_PROMPT_CHARS - sum(len(line) + 1 for _, line in pinned + identity)
         shown_index: list[tuple[MemoryEntry, str]] = []
         omitted: list[MemoryEntry] = []
         full = False
         for entry, line in index:
             # Biography (profile.*/business.* the session's task does not
             # touch) is not listed in a task's session; it is counted and
-            # Recall finds it. Without a task it is listed last. In rank order: once one line does not fit, the rest
-            # are counted, so a short low-ranked line never jumps a longer
-            # relevant one.
+            # Recall finds it. Without a task it is listed last. In rank
+            # order: once one line does not fit, the rest are counted, so a
+            # short low-ranked line never jumps a longer relevant one.
             if terms and off_domain(entry):
                 omitted.append(entry)
             elif not full and len(line) + 1 <= remaining:
@@ -2019,22 +2047,29 @@ class SkillStore:
             else:
                 full = True
                 omitted.append(entry)
-        # Conflict lines lead the index; withheld-entry notes close it.
-        shown = shown_always + [p for p in pinned if p[0].superseded_by] + shown_index + [
+        # Identity lines lead the index, then conflict lines; withheld-entry
+        # notes close it.
+        shown = shown_always + identity + [p for p in pinned if p[0].superseded_by] + shown_index + [
             p for p in pinned if not p[0].superseded_by]
         return {
             "lines": [line for _, line in shown],
             "shown_ids": [e.id for e, _ in shown],
+            # Facts whose text the snapshot itself shows (ALWAYS memories and
+            # identity lines). An index line names a fact without its text,
+            # so only these count as a use (memory_health).
+            "full_text_ids": [e.id for e, _ in shown_always + identity],
             "omitted_ids": [e.id for e in omitted],
             "always": len(shown_always),
-            "in_scope": len(pinned) + len(always) + len(index) + held + other_checkout,
+            # An overflowed ALWAYS memory is in ``index`` now; count it once.
+            "in_scope": (len(pinned) + len(shown_always) + len(identity) + len(index)
+                         + held + other_checkout),
             "over_budget": len(omitted),
             "out_of_scope": out_of_scope, "held": held, "other_checkout": other_checkout,
             "archived": in_archive,
             # Screened live facts only, as the snapshot renders them: callers
             # may retrieve omitted index lines, never withheld/conflicted/
             # foreign-checkout text via this field.
-            "eligible_lines": [line for _, line in shown_always + index],
+            "eligible_lines": [line for _, line in shown_always + identity + index],
         }
 
     # ─── consolidation bookkeeping (see Synthesizer.consolidate) ─────────
@@ -2253,6 +2288,31 @@ class SkillStore:
         meta = self._load_meta()
         meta["consolidation_retry_at"] = float(ts)
         self._save_meta(meta)
+
+    # The when-line backfill's own retry state (``meta.json["memory_backfill"]``:
+    # ``failures`` in a row, ``until`` and the last ``error`` type). Separate
+    # from the learner's per-model backoff and consolidation's retry, so a
+    # failing backfill never delays synthesis or curation.
+    def backfill_backoff(self) -> dict:
+        entry = self._load_meta().get("memory_backfill")
+        return dict(entry) if isinstance(entry, dict) else {}
+
+    def note_backfill_failure(self, error: str, *, now: float, base: float, cap: float) -> dict:
+        """One more failed backfill call: the wait doubles from ``base`` up to
+        ``cap``. Returns the stored entry."""
+        meta = self._load_meta()
+        prior = meta.get("memory_backfill") if isinstance(meta.get("memory_backfill"), dict) else {}
+        failures = int(prior.get("failures", 0)) + 1
+        entry = {"failures": failures, "until": now + min(cap, base * (2 ** min(failures - 1, 20))),
+                 "error": str(error)[:120]}
+        meta["memory_backfill"] = entry
+        self._save_meta(meta)
+        return entry
+
+    def clear_backfill_failures(self) -> None:
+        meta = self._load_meta()
+        if meta.pop("memory_backfill", None) is not None:
+            self._save_meta(meta)
 
     # ─── learner yield (see Synthesizer._track_yield) ─────────────────────
     #

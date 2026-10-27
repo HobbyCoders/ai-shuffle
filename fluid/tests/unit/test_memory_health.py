@@ -319,11 +319,20 @@ def test_unused_unconfirmed_harvest_is_archived_after_a_month(tmp_path, monkeypa
     assert [e.id for e, archived in store.search_memories("Old harvested") if archived] == [stale.id]
 
 
-def test_a_harvest_still_shown_in_the_snapshot_is_kept(tmp_path):
+def test_an_index_line_is_not_a_use_but_a_full_text_line_is(tmp_path):
     store = SkillStore(tmp_path)
-    shown = store.save_memory("pytest lives in /a.", provenance="tool", key="env.pytest")
-    age(store, {shown.id}, created=40 * DAY, updated=20 * DAY)
-    assert memory_health.repair(store) == []
+    listed = store.save_memory("pytest lives in /a.", provenance="tool", key="env.pytest")
+    who = store.save_memory("The user's preferred name is Sam.", provenance="tool",
+                            key="profile.preferred_name")
+    age(store, {listed.id, who.id}, created=40 * DAY, updated=20 * DAY)
+    plan = store.memory_snapshot_plan()
+    assert listed.id in plan["shown_ids"] and listed.id not in plan["full_text_ids"]
+    assert who.id in plan["full_text_ids"]
+    # Listed by its when-line only and never recalled: archived (Recall still
+    # finds it). The identity line shows its text, so it stays.
+    done = memory_health.repair(store)
+    assert [d["ids"] for d in done] == [[listed.id]]
+    assert [m.id for m in store.memories()] == [who.id]
 
 
 # ─── the scheduled run ─────────────────────────────────────────────────────

@@ -57,11 +57,11 @@ async def test_protected_metadata_ranking_and_replication_round_trip(tmp_path):
     result = await backfill.run(synth)
     after = row(store, owner.id)
     assert result.written == 2 and result.remaining == 0
-    assert {k: v for k, v in before.items() if k not in ("when", "revision", "clock")} == {
-        k: v for k, v in after.items() if k not in ("when", "revision", "clock")}
-    assert after["revision"] == before["revision"] + 1
-    sid = store._facts.snapshot()["store_id"]
-    assert after["clock"][sid] == before["clock"][sid] + 1
+    # Metadata only: the revision and clock stay, so a concurrent edit of
+    # the text elsewhere is not a conflict and a pending correction holds.
+    assert {k: v for k, v in before.items() if k not in ("when", "when_at")} == {
+        k: v for k, v in after.items() if k not in ("when", "when_at")}
+    assert after["when_at"][1] == store._facts.snapshot()["store_id"]
     assert after["protected"] and after["always"]
     rows = sorted(store._facts.snapshot()["entries"], key=usefulness)
     assert [e["id"] for e in rows] == rank_ids
@@ -146,7 +146,7 @@ async def test_shared_budget_and_reserved_synthesis_calls(tmp_path):
     assert not model.requests
 
 
-async def test_configured_budget_and_shared_backoff(tmp_path):
+async def test_configured_budget_shared_backoff_and_own_retry(tmp_path):
     store = SkillStore(tmp_path)
     fact(store, protected=True)
     model = Model()
@@ -159,19 +159,26 @@ async def test_configured_budget_and_shared_backoff(tmp_path):
     store.clear_learner_backoff("test-model")
     store.set_consolidation_retry_at(time.time() + 60)
     assert (await backfill.run(learner(store, model))).calls == 0
+    store.set_consolidation_retry_at(0)
+    store.note_backfill_failure("x", now=time.time(), base=60, cap=60)
+    assert (await backfill.run(learner(store, model))).calls == 0
     assert not model.requests
 
 
 @pytest.mark.parametrize("reply", ["not JSON", "```json\n{}\n```", "[]", '{"unknown": "When testing"}',
                                    '{"x": "When testing", "x": "When testing"}'])
-async def test_invalid_envelope_is_logged_and_shared_failure_backoff(tmp_path, reply):
+async def test_invalid_envelope_is_logged_on_the_backfills_own_backoff(tmp_path, reply):
     store = SkillStore(tmp_path)
     saved = fact(store, protected=True)
     model = Model(lambda _: reply)
-    result = await backfill.run(learner(store, model))
+    synth = learner(store, model)
+    result = await backfill.run(synth)
     assert result.skipped == 1 and result.written == 0
     assert row(store, saved.id).get("when") is None
-    assert store.learner_backoff("test-model")["until"] > time.time()
+    # Its own retry, never the learner's per-model backoff or pass outcome.
+    assert store.backfill_backoff()["until"] > time.time()
+    assert store.backfill_backoff()["failures"] == 1
+    assert store.learner_backoff("test-model") == {} and not synth.last_pass_failed
     log = (store.root / ".synthesis-log.jsonl").read_text()
     record = json.loads(log.splitlines()[-1])
     assert record["kind"] == "memory_backfill" and saved.text not in log
@@ -188,7 +195,7 @@ async def test_invalid_values_skip_individually(tmp_path):
     model = Model(lambda records: json.dumps(dict(zip([e["id"] for e in records], values))))
     result = await backfill.run(learner(store, model))
     assert result.written == 1 and result.skipped == 6 and result.remaining == 6
-    assert not store.learner_backoff("test-model")
+    assert not store.learner_backoff("test-model") and not store.backfill_backoff()
 
 
 async def test_revision_race_skipped_not_overwritten(tmp_path):
@@ -196,12 +203,73 @@ async def test_revision_race_skipped_not_overwritten(tmp_path):
     saved = fact(store, protected=True)
 
     def concurrent_edit(records):
+        # Another writer fills the same field at the same revision meanwhile.
         store.annotate_memory(saved.id, when="When selecting artifacts", expected_revision=1)
         return json.dumps({records[0]["id"]: "When planning a release"})
 
     result = await backfill.run(learner(store, Model(concurrent_edit)))
     assert result.written == 0 and result.skipped == 1
     assert row(store, saved.id)["when"] == "When selecting artifacts"
+    assert row(store, saved.id)["revision"] == 1
+
+
+def test_health_asks_for_attention_after_repeated_backfill_failures(tmp_path):
+    store = SkillStore(tmp_path)
+    fact(store, protected=True)
+    now = time.time()
+    for n in range(backfill.ATTENTION_FAILURES):
+        signal = next(s for s in memory_health.check(store)["signals"] if s["id"] == "when")
+        assert signal["state"] == "healthy"
+        store.note_backfill_failure("x", now=now, base=60, cap=60)
+    signal = next(s for s in memory_health.check(store)["signals"] if s["id"] == "when")
+    assert signal["state"] == "attention" and "backfill attempts failed" in signal["reason"]
+    store.clear_backfill_failures()
+    signal = next(s for s in memory_health.check(store)["signals"] if s["id"] == "when")
+    assert signal["state"] == "healthy"
+
+
+async def test_backfill_timeout_on_close_is_not_a_failed_synthesis_pass(tmp_path):
+    import asyncio
+    store = SkillStore(tmp_path)
+    fact(store, protected=True)
+    store.journal_append({"kind": "remember", "text": "Keep the release checklist for future work."})
+
+    class SlowBackfill(Model):
+        async def stream(self, request):
+            if request.system == backfill._SYSTEM:
+                await asyncio.sleep(30)
+            self.requests.append(request)
+            yield StreamChunk(kind="text_delta", payload={"text": "NO_CHANGES"})
+            yield StreamChunk(kind="message_stop", payload={"stop_reason": "end_turn"})
+
+    synth = learner(store, SlowBackfill(), min_new_entries=1, close_timeout=1.0)
+    await synth.drain()
+    rows = [json.loads(line) for line in
+            (store.root / ".synthesis-log.jsonl").read_text().splitlines()]
+    synthesis = [r for r in rows if r["kind"] == "synthesis"]
+    assert synthesis and not any(r.get("error") for r in synthesis)
+    assert rows[-1]["kind"] == "memory_backfill" and "on close" in rows[-1]["error"]
+    assert store.backfill_backoff()["failures"] == 1
+    assert store.learner_backoff("test-model") == {} and not synth.last_pass_failed
+    assert synth.last_error is None
+
+
+async def test_backfill_failure_after_synthesis_keeps_the_pass_successful(tmp_path):
+    store = SkillStore(tmp_path)
+    fact(store, protected=True)
+    store.journal_append({"kind": "remember", "text": "Keep the release checklist for future work."})
+
+    class BrokenBackfill(Model):
+        async def stream(self, request):
+            self.requests.append(request)
+            text = "not JSON" if request.system == backfill._SYSTEM else "NO_CHANGES"
+            yield StreamChunk(kind="text_delta", payload={"text": text})
+            yield StreamChunk(kind="message_stop", payload={"stop_reason": "end_turn"})
+
+    synth = learner(store, BrokenBackfill(), min_new_entries=1)
+    await synth._run_safe()
+    assert not synth.last_pass_failed and store.learner_backoff("test-model") == {}
+    assert store.backfill_backoff()["failures"] == 1
 
 
 def test_health_reports_missing_live_and_archived_then_clears(tmp_path):
