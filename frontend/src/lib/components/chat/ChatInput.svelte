@@ -579,21 +579,26 @@
 	// with it; once it needs a second line they move to the controls row's two
 	// ends and the text takes the full width (composer-wrap.ts).
 	let composerWrapped = $state(false);
+	let sendClusterRef = $state<HTMLDivElement | null>(null);
 	const wrapWatcher = createWrapWatcher({
 		getText: () => editorRef?.getText() ?? '',
 		getEditor: () => (editorRef?.getEditor()?.view.dom as HTMLElement | undefined) ?? null,
 		getIsland: () => islandRef,
+		getCircles: () => sendClusterRef,
 		isWrapped: () => composerWrapped,
 		setWrapped: (wrapped) => { composerWrapped = wrapped; }
 	});
+	// Re-measure after the text changes, and after the circles do (Stop
+	// arriving or leaving changes the room the text has on its line).
 	$effect(() => {
 		void inputValue;
+		void circles;
 		wrapWatcher.schedule();
 	});
 	$effect(() => {
 		const island = islandRef;
 		if (!island) return;
-		return wrapWatcher.observe(island);
+		return wrapWatcher.observe(island, sendClusterRef);
 	});
 	onDestroy(() => wrapWatcher.destroy());
 
@@ -1566,7 +1571,7 @@
 					     live, including with a draft; Send can queue that draft
 					     independently. StopButton confirms first when background
 					     agents are live. -->
-					<div class="send-cluster">
+					<div class="send-cluster" bind:this={sendClusterRef}>
 						{@render recorder()}
 						<PromptStashMenu
 							entries={$promptStash}
@@ -1840,8 +1845,8 @@
 	}
 
 	/* ===== THE CIRCLES =====
-	   Attach (left), then dictate · Talk or Send · Stop (right): 32px rounds,
-	   30px once they share the controls row. Attach and dictate are quiet
+	   Attach (left), then dictate · Talk or Send · Stop (right): 32px rounds
+	   in either layout. Attach and dictate are quiet
 	   (muted fill); Talk keeps the call button's accent tint; Send is the
 	   filled accent; Stop keeps its destructive tint. */
 	.composer-attach {
@@ -1957,20 +1962,8 @@
 		border-radius: 50%;
 	}
 
-	/* Sharing the controls row, the circles step down to 30px. */
-	:global(html[data-platform='desktop']) .chat-island.wrapped .composer-attach,
-	:global(html[data-platform='desktop']) .chat-island.wrapped .send-btn,
-	:global(html[data-platform='desktop']) .chat-island.wrapped .send-cluster :global(.stop-btn),
-	:global(html[data-platform='desktop']) .chat-island.wrapped .send-cluster :global(.call-circle) {
-		width: 30px;
-		height: 30px;
-	}
-	:global(html[data-platform='desktop']) .chat-island.wrapped .send-cluster :global(.voice-btn) {
-		height: 30px;
-	}
-	:global(html[data-platform='desktop']) .chat-island.wrapped .send-cluster :global(.voice-btn:not(.expanded):not(.preparing):not(.transcribing)) {
-		width: 30px;
-	}
+	/* The circles keep their 32px in the controls row too: the wrap
+	   measurement (composer-wrap.ts) compares their width across layouts. */
 
 	@keyframes fadeIn {
 		from { opacity: 0; }

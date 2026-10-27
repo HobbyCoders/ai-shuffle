@@ -109,7 +109,7 @@ const text = () => (screen.getByRole('group', { name: 'Where this session runs' 
 
 beforeEach(() => {
 	resetWorkerPresence();
-	m.listInstalls.mockResolvedValue({ installs: [install('self', 'Unraid', { is_self: true }), install('pc', 'GamingPC', { online: false })], self_instance_id: 'self' });
+	m.listInstalls.mockResolvedValue({ installs: [install('self', 'office-pc', { is_self: true }), install('pc', 'laptop', { online: false })], self_instance_id: 'self' });
 	stores.projects.set([{ id: 'p1', name: 'ai-shuffle', path: '/workspace/ai-shuffle' }]);
 	stores.github.set(true);
 	stores.git.set({ hydrated: false });
@@ -124,8 +124,8 @@ afterEach(() => {
 describe('NewSessionSentence', () => {
 	it('reads the whole sentence for a git project in a worktree, each part a button', async () => {
 		render(NewSessionSentence);
-		await waitFor(() => expect(text()).toBe('Runs on Unraid in ai-shuffle on a new branch from main in a worktree.'));
-		for (const name of [/^Runs on Unraid$/, /^Workspace folders: ai-shuffle$/, /^Worktree branch: a new branch from main$/, /Runs in a worktree/]) {
+		await waitFor(() => expect(text()).toBe('Runs on office-pc in ai-shuffle on a new branch from main in a worktree.'));
+		for (const name of [/^Runs on office-pc$/, /^Workspace folders: ai-shuffle$/, /^Worktree branch: a new branch from main$/, /Runs in a worktree/]) {
 			expect(screen.getByRole('button', { name })).toBeTruthy();
 		}
 		// The online dot is the worker menu's, never the sentence's.
@@ -143,7 +143,7 @@ describe('NewSessionSentence', () => {
 		const wt = await screen.findByRole('button', { name: /Runs in a worktree/ });
 		await fireEvent.click(wt);
 		expect(m.setWorktreeIntent).toHaveBeenCalledWith('local');
-		await waitFor(() => expect(text()).toBe('Runs on Unraid in ai-shuffle on main in the main checkout.'));
+		await waitFor(() => expect(text()).toBe('Runs on office-pc in ai-shuffle on main in the main checkout.'));
 	});
 
 	it('shows extra workspace folders as +N on the project word', async () => {
@@ -157,27 +157,45 @@ describe('NewSessionSentence', () => {
 		session({ worktreeIntent: 'local' });
 		stores.git.set({ hydrated: true, projectId: 'p1', sessionId: null, worktreeId: null, status: { is_git_repo: false } });
 		render(NewSessionSentence);
-		await waitFor(() => expect(text()).toBe('Runs on Unraid in ai-shuffle.'));
+		await waitFor(() => expect(text()).toBe('Runs on office-pc in ai-shuffle.'));
 	});
 
 	it('reads "with no project" without one, and that word opens the project picker', async () => {
 		session({ project: '', projectV2Id: null });
 		render(NewSessionSentence);
-		await waitFor(() => expect(text()).toBe('Runs on Unraid with no project.'));
+		await waitFor(() => expect(text()).toBe('Runs on office-pc with no project.'));
 		const none = screen.getByRole('button', { name: /^No project\. Add a project/ });
 		await fireEvent.click(none);
 		await tick();
 		expect(none.getAttribute('aria-expanded')).toBe('true');
 	});
 
+	it('closes the branch menu on Escape and puts focus back on the branch word', async () => {
+		render(NewSessionSentence);
+		const word = await screen.findByRole('button', { name: /^Worktree branch: a new branch from main$/ });
+		expect(word.getAttribute('aria-haspopup')).toBe('dialog');
+		await fireEvent.click(word);
+		const menu = await screen.findByRole('dialog', { name: 'Worktree branch' });
+		expect(word.getAttribute('aria-expanded')).toBe('true');
+		// It hangs from <body>, centred under the word.
+		expect(menu.parentElement).toBe(document.body);
+		(menu.querySelector('button') as HTMLButtonElement).focus();
+
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		await tick();
+		expect(screen.queryByRole('dialog', { name: 'Worktree branch' })).toBeNull();
+		expect(word.getAttribute('aria-expanded')).toBe('false');
+		expect(document.activeElement).toBe(word);
+	});
+
 	it('opens the worker list from the worker word, offline workers disabled', async () => {
 		render(NewSessionSentence);
-		await fireEvent.click(await screen.findByRole('button', { name: /^Runs on Unraid$/ }));
+		await fireEvent.click(await screen.findByRole('button', { name: /^Runs on office-pc$/ }));
 		await waitFor(() => expect(screen.getAllByRole('menuitemradio')).toHaveLength(2));
 		const rows = screen.getAllByRole('menuitemradio') as HTMLButtonElement[];
-		expect(rows[0].textContent).toContain('Unraid');
+		expect(rows[0].textContent).toContain('office-pc');
 		expect(rows[0].getAttribute('aria-checked')).toBe('true');
-		expect(rows[1].textContent).toContain('GamingPC');
+		expect(rows[1].textContent).toContain('laptop');
 		expect(rows[1].disabled || rows[1].getAttribute('aria-disabled') === 'true').toBe(true);
 		// The menu hangs from <body>, centred under the word.
 		expect(screen.getByRole('menu').parentElement).toBe(document.body);

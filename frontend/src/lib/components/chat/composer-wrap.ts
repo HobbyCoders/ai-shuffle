@@ -14,7 +14,11 @@
  * the text takes the full width and attach and the circles move to the two
  * ends of the controls row below. It is measured at the width the text has
  * in the single-line layout, whichever layout is showing, so the composer
- * never flips back and forth at the boundary.
+ * never flips back and forth at the boundary. While wrapped, that width is
+ * estimated from the last single-line measurement, moved by any change in the
+ * box's width and in the circles' width (Stop appearing, the mic widening
+ * while it listens). The circles keep one size in both layouts so the
+ * estimate stays exact.
  */
 
 export type ComposerCircle = 'talk' | 'send' | 'stop' | 'busy';
@@ -50,6 +54,25 @@ export function needsWrap(text: string, linesAtSingleWidth: number): boolean {
 	return linesAtSingleWidth > 1;
 }
 
+/** Widths taken in the single-line layout. */
+export interface SingleLineBase {
+	/** The text's own width. */
+	text: number;
+	/** The composer box's width. */
+	island: number;
+	/** The circles' width (dictate, Talk or Send, Stop). */
+	circles: number;
+}
+
+/**
+ * The width the text would have in the single-line layout now: the base
+ * measurement, wider by any growth of the box and narrower by any growth of
+ * the circles beside it.
+ */
+export function singleLineTextWidth(base: SingleLineBase, now: { island: number; circles: number }): number {
+	return base.text + (now.island - base.island) - (now.circles - base.circles);
+}
+
 const COPIED_STYLES = [
 	'fontFamily',
 	'fontSize',
@@ -68,21 +91,24 @@ export interface WrapWatcherOptions {
 	getEditor: () => HTMLElement | null;
 	/** The composer box; its width changes move the single-line width with it. */
 	getIsland: () => HTMLElement | null;
+	/** The circles right of the text; their width changes move it the other way. */
+	getCircles?: () => HTMLElement | null;
 	isWrapped: () => boolean;
 	setWrapped: (wrapped: boolean) => void;
+	/** Lines the text takes at a width. Defaults to a hidden copy of the editor's text. */
+	countLines?: (text: string, editor: HTMLElement, width: number) => number;
 }
 
 /**
  * Watches the composer and flips the wrapped layout. `schedule()` after the
- * text changes; `observe(island)` follows width changes. One measurement per
- * frame at most.
+ * text or the circles change; `observe(island, circles)` follows width
+ * changes. One measurement per frame at most.
  */
 export function createWrapWatcher(options: WrapWatcherOptions) {
 	let frame = 0;
 	let measurer: HTMLDivElement | null = null;
-	/** Text width in the single-line layout, and the box width it was taken at. */
-	let singleWidth = 0;
-	let islandWidthAtMeasure = 0;
+	/** The last single-line measurement; null until the first one. */
+	let base: SingleLineBase | null = null;
 
 	function contentWidth(el: HTMLElement): number {
 		const css = getComputedStyle(el);
@@ -120,19 +146,19 @@ export function createWrapWatcher(options: WrapWatcherOptions) {
 		const editor = options.getEditor();
 		const island = options.getIsland();
 		if (!editor || !island || !editor.isConnected) return;
-		const islandWidth = island.clientWidth;
+		const now = { island: island.clientWidth, circles: options.getCircles?.()?.offsetWidth ?? 0 };
 		const wrapped = options.isWrapped();
-		if (!wrapped) {
-			singleWidth = contentWidth(editor);
-			islandWidthAtMeasure = islandWidth;
-		} else if (islandWidthAtMeasure && islandWidth !== islandWidthAtMeasure) {
-			// The box was resized while wrapped: the single-line text width moves
-			// by the same amount.
-			singleWidth += islandWidth - islandWidthAtMeasure;
-			islandWidthAtMeasure = islandWidth;
+		let width: number;
+		if (!wrapped || !base) {
+			// Measured directly while the single-line layout shows.
+			width = contentWidth(editor);
+			if (!wrapped) base = { text: width, ...now };
+		} else {
+			width = singleLineTextWidth(base, now);
 		}
 		const text = options.getText();
-		const wrap = needsWrap(text, text.trim() ? lineCount(text.replace(/\s+$/, ''), editor, singleWidth) : 1);
+		const count = options.countLines ?? lineCount;
+		const wrap = needsWrap(text, text.trim() ? count(text.replace(/\s+$/, ''), editor, width) : 1);
 		if (wrap !== wrapped) options.setWrapped(wrap);
 	}
 
@@ -143,12 +169,13 @@ export function createWrapWatcher(options: WrapWatcherOptions) {
 
 	return {
 		schedule,
-		/** Re-measure when the box changes size. Returns the teardown. */
-		observe(island: HTMLElement): () => void {
+		/** Re-measure when the box or the circles change size. Returns the teardown. */
+		observe(island: HTMLElement, circles?: HTMLElement | null): () => void {
+			schedule();
 			if (typeof ResizeObserver === 'undefined') return () => {};
 			const observer = new ResizeObserver(schedule);
 			observer.observe(island);
-			schedule();
+			if (circles) observer.observe(circles);
 			return () => observer.disconnect();
 		},
 		destroy() {

@@ -8,6 +8,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { activeSession } from '$lib/stores/active-session';
+import { appMode } from '$lib/stores/sessionMode.svelte';
+import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from './attach-disable';
 import { auth } from '$lib/stores/auth.svelte';
 import { initialState, reduce } from '$lib/stores/session/v2/reducer';
 import '$lib/test-stubs/composer-dom';
@@ -110,6 +112,33 @@ describe('Talk turns into Send', () => {
 		render(VoiceCallButton, { props: { variant: 'circle', agentName: 'Overseer' } });
 		const talk = await screen.findByRole('button', { name: 'Talk to Overseer' });
 		expect(talk.classList.contains('call-circle')).toBe(true);
+	});
+});
+
+describe('the attach circle', () => {
+	afterEach(() => appMode.set('code'));
+
+	it.each(['code', 'voice'] as const)('enables attach for an existing %s worker session without a local checkout', async (mode) => {
+		appMode.set('code');
+		activeSession.newChat();
+		// A fresh compose for a project with no local checkout has nowhere to upload to.
+		activeSession.setProject('', 'pv2-worker');
+		render(ChatInput);
+		const attach = await screen.findByRole('button', { name: 'Attach files' }) as HTMLButtonElement;
+		await waitFor(() => expect(attach.disabled).toBe(true));
+		// The circle says why on hover.
+		expect(attach.getAttribute('title')).toBe(ATTACHMENTS_NEED_LOCAL_CHECKOUT);
+
+		// An existing worker session stages files in its own directory instead.
+		await activeSession.switchSession('attach-worker');
+		activeSession.setProject('', 'pv2-worker');
+		activeSession.reconcileSessionMode([{ id: 'attach-worker', mode }]);
+		await tick();
+		await waitFor(() => expect(attach.disabled).toBe(false));
+		expect(attach.getAttribute('title')).toBe('Attach files');
+		const pick = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(() => {});
+		await fireEvent.click(attach);
+		expect(pick).toHaveBeenCalledOnce();
 	});
 });
 

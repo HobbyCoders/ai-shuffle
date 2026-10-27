@@ -416,6 +416,16 @@
 		}
 	}
 
+	// Escape closes the branch menu. From the sentence word, focus goes back to
+	// the word so a keyboard user lands where they started (RunsOnPicker does
+	// the same).
+	function handleKeydown(e: KeyboardEvent) {
+		if (e.key !== 'Escape' || !showBranchDropdown) return;
+		e.preventDefault();
+		showBranchDropdown = false;
+		if (sentence) branchTriggerRef?.focus();
+	}
+
 	// --- New Branch modal ---
 
 	function openCreateModal() {
@@ -433,7 +443,7 @@
 	}
 </script>
 
-<svelte:window onclick={handleClickOutside} />
+<svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} />
 
 {#snippet branchMenu()}
 				{#if loading}
@@ -573,11 +583,13 @@
 			class:open={showBranchDropdown}
 			onclick={toggleDropdown}
 			aria-label="Worktree branch: {isAutoMode ? `a new branch from ${baseBranch}` : currentBranch}"
-			aria-haspopup="menu"
+			aria-haspopup="dialog"
 			aria-expanded={showBranchDropdown}
 			title={isAutoMode ? `A new branch from ${baseBranch}, named from your message.` : `Branch: ${currentBranch}`}
 		>{isAutoMode ? `a new branch from ${baseBranch}` : currentBranch}</button>{#if showBranchDropdown}<div
 				class="branch-dropdown sentence-menu"
+				role="dialog"
+				aria-label="Worktree branch"
 				bind:this={branchMenuRef}
 				use:floatingMenu={{ anchor: branchTriggerRef, align: 'center' }}
 			>{@render branchMenu()}</div>{/if}</span>

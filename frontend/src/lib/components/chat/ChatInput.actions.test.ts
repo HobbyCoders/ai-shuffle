@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 // Pin the actual composer markup without mocking its session/store graph.
 const source = readFileSync(resolve(process.cwd(), 'src/lib/components/chat/ChatInput.svelte'), 'utf8');
 // The circles right of the text: the send slot (Send, Talk or the spinner), then Stop.
-const circles = source.split('<div class="send-cluster">')[1].split('\n\t\t\t\t\t</div>')[0];
+const circles = source.split('<div class="send-cluster"')[1].split('\n\t\t\t\t\t</div>')[0];
 
 describe('streaming composer actions', () => {
 	it('routes existing remote-only attachments to session staging for picker and drop', () => {
