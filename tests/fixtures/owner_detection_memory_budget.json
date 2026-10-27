@@ -3,6 +3,7 @@
     "preferred_name": "Ada",
     "github_username": "ada-example"
   },
-  "snapshot_chars": 423,
+  "snapshot_chars": 494,
+  "snapshot_note": "Re-measured 423 -> 494 when the # Memory header gained the when-line index instruction (Recall by id for the full text, +71); the two identity facts render unchanged.",
   "allowance_chars": 16
 }

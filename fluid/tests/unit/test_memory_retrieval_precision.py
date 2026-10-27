@@ -20,9 +20,11 @@ def test_labeled_recall_lab_precision_and_scope_budget(tmp_path):
     for query, expected in [("UI theme colors", "theme"), ("native fluid harness", "harness"),
                             ("uv Python", "python"), ("staging pipeline", "deploy")]:
         assert [e.key for e, _ in store.search_memories(query)] == [expected]
-    # Baseline fixture: 689 chars; allow wording room, never a second copy.
+    # Baseline fixture: 689 chars; 760 once the header told the model to
+    # Recall index lines by id (#this change, +71). Wording room, never a
+    # second copy.
     section = store.render_memory_section()
-    assert len(section) <= 750
+    assert len(section) <= 800
     paragraphs = [line.partition("] ")[2] for line in section.splitlines() if line.startswith("- [")]
     assert len(paragraphs) == len(set(paragraphs))
 

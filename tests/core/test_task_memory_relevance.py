@@ -22,7 +22,7 @@ async def test_saved_preference_reaches_real_turn_without_explicit_recall(tmp_pa
     from app.core import fluid_memory
     store = SkillStore(tmp_path)
     target = store.save_memory("The user prefers vegetarian recipes without mushrooms.", protected=True)
-    for i in range(30):
+    for i in range(160):  # enough when-line index entries to overflow the base
         store.save_memory(f"Coding convention {i}: " + "Use consistent spacing. " * 14, protected=True)
     assert target.id in store.memory_snapshot_plan()["omitted_ids"]
     # A fresh store is opened at the real owner-routing boundary on every read.

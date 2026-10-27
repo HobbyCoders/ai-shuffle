@@ -336,11 +336,33 @@ pass reviews one section of the store, and the next pass starts where it left
 off. Synthesis can't spend the last two daily inference calls, so
 consolidation keeps a share of the budget.
 
-A standing preference is a user fact under a `pref.<topic>` key, such as
-`pref.subagent_models`, `pref.ci_policy`, `pref.deploy` or `pref.delegation`.
-Each topic holds one current value per scope. When the user changes how the
-agent should work, the agent updates that fact (`memory_id` plus
-`expected_revision`) rather than adding another dated rule. A new save under a
+Every memory has one style: its full text (up to 2,000 characters) and a
+`when` line of up to 140 characters that names the situation in which a future
+agent should load it, such as "When choosing a model for a subagent". It is not
+a summary. `Remember` requires `when` on a new save; a correction keeps the old
+line unless it passes a new one. Facts without one (older stores, learned facts)
+are listed by their first sentence instead. That line is derived when the
+snapshot is built and is never stored.
+
+The `# Memory` snapshot has two parts:
+
+- **ALWAYS memories.** These are user facts saved with `always: true` because
+  the user asked for the rule in every chat. They come first, in full, under a
+  heading that says they were saved at the owner's request. An agent can't set
+  `always` on its own. The ALWAYS memories one session can see (global plus
+  that project's) share 3,000 characters. A save past that is refused, and the
+  refusal lists the current ones by ID and `when` line, so the agent can ask
+  the user which to drop.
+- **The index.** Every other fact in scope gets one line, `- [id rN; source]
+  <when line>`, ordered by match with the task, then the current project, then
+  usefulness. The lines share 10,000 characters, and the rest are counted on
+  one line. The model fetches the full text with `Recall(ids=[...])` (live or
+  archived, by local or replica ID) before relying on a fact. Keyword `Recall`
+  also searches `when` lines.
+
+When the user changes how the agent should work, the agent recalls the memory
+on that topic and corrects it (`memory_id` plus `expected_revision`) rather than
+adding another dated rule. `key` is an optional stable slot. A new save under a
 taken key is refused with the existing ID and revision, so one retry updates
 it. `Remember` with `replaces: [ids]` archives the older facts on the same
 topic. It does not delete them: their text and history stay, `Recall` shows
@@ -349,10 +371,6 @@ user-requested save can replace a user fact, and only in a compatible scope
 (the same scope, or a global save over a project fact). A new user or agent
 save also lists up to three similar facts in its receipt, so the agent can
 fold them in with `replaces`. Nothing changes until it does.
-
-The `# Memory` snapshot lists standing preferences first, under their own
-heading, in a reserved 2,500-character share of its 8,000-character budget.
-Unused room goes back to other facts, and other facts can't crowd them out.
 
 Stores written before the tiers existed are migrated in place. An old
 protected entry stays a user fact if its key or text shows that it records the

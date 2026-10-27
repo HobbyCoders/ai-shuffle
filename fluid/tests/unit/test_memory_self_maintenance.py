@@ -108,8 +108,7 @@ async def test_consolidation_retires_only_facts_it_was_shown(tmp_path, monkeypat
 def test_snapshot_slice_prefers_recalled_facts_over_unconfirmed_harvests(tmp_path, monkeypatch):
     from fluid.codemode import facts
 
-    monkeypatch.setattr(facts, "MAX_PROMPT_CHARS", 200)
-    monkeypatch.setattr(facts, "RESERVED_INFERRED_CHARS", 200)
+    monkeypatch.setattr(facts, "MAX_PROMPT_CHARS", 125)
     store = SkillStore(tmp_path)
     harvest = store.save_memory("pytest is not importable from the worker Python.",
                                 provenance="tool", key="env.pytest")
@@ -118,7 +117,7 @@ def test_snapshot_slice_prefers_recalled_facts_over_unconfirmed_harvests(tmp_pat
     plan = store.memory_snapshot_plan("project:x")
     assert plan["shown_ids"] == [used.id] and plan["omitted_ids"] == [harvest.id]
     assert "1 saved fact omitted for space" in store.render_memory_section("project:x")
-    # A fact in the user's own words still comes first.
+    # A newer fact still ranks above an unconfirmed harvest nobody recalled.
     said = store.save_memory("User wants short answers.", provenance="user")
     plan = store.memory_snapshot_plan("project:x")
     assert said.id in plan["shown_ids"] and harvest.id in plan["omitted_ids"]
@@ -185,7 +184,7 @@ def test_failed_saves_are_counted_by_kind(tmp_path, monkeypatch):
 
     store = SkillStore(tmp_path)
     with pytest.raises(ValueError):
-        store.save_memory("x" * 600)
+        store.save_memory("x" * 2100)
     monkeypatch.setattr(facts, "MAX_DOCUMENT_BYTES", 10)
     with pytest.raises(ValueError):
         store.save_memory("A fact that no longer fits")
@@ -386,14 +385,16 @@ def test_merge_rejects_an_invalid_worker(tmp_path):
 def test_snapshot_budget_is_unchanged():
     from fluid.codemode import facts
 
-    assert facts.MAX_PROMPT_CHARS == 8000 and facts.RESERVED_INFERRED_CHARS == 3000
+    # The when-line index (10k) replaced the 8k full-text snapshot and its
+    # 3k reserved slice; ALWAYS memories get their own 3k of full text.
+    assert facts.MAX_PROMPT_CHARS == 10_000 and facts.ALWAYS_CHARS == 3000
+    assert facts.MAX_WHEN_CHARS == 140 and not hasattr(facts, "RESERVED_INFERRED_CHARS")
 
 
 def test_snapshot_note_counts_omitted_and_archived_facts_recall_finds(tmp_path, monkeypatch):
     from fluid.codemode import facts
 
     monkeypatch.setattr(facts, "MAX_PROMPT_CHARS", 300)
-    monkeypatch.setattr(facts, "RESERVED_INFERRED_CHARS", 0)
     a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
     for i in range(8):
         a.save_memory(f"Zephyr user rule number {i} for this project", scope="project:x", protected=True)

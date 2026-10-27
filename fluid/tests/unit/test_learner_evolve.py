@@ -212,10 +212,12 @@ async def test_a_correction_becomes_one_proposal_line_and_never_a_fact(tmp_path)
     assert len(store.memories()) == 1, "the learner may not save the owner's rule"
     assert "standing-preference proposal" in continual_mod._SYNTH_SYSTEM
     section = store.render_memory_section(None)
-    line = next(line for line in section.splitlines() if "pref.subagent_models" in line)
-    assert CORRECTION in line and "Confirm it with the owner" in line and "key=pref.subagent_models" in line
-    # The owner confirms; the agent saves it under the key; the question closes.
-    store.save_memory(CORRECTION, key="pref.subagent_models", protected=True)
+    line = next(line for line in section.splitlines() if "proposed, not saved; subagent_models" in line)
+    assert CORRECTION in line and "Confirm it with the owner" in line and "pref." not in line
+    # The owner confirms; the agent saves it as an ordinary memory (no key
+    # convention); the question closes because the saved rule is on its topic.
+    store.save_memory("Owner rule: " + CORRECTION + ".", protected=True,
+                      when="When choosing a model for a subagent")
     assert "proposed, not saved" not in store.render_memory_section(None)
 
 
@@ -294,8 +296,9 @@ def test_the_routing_contradiction_is_flagged_and_unrelated_facts_are_not(tmp_pa
         assert not live[saved[name].id].superseded_by, name
     section = store.render_memory_section(None)
     assert "Recall the pair and ask the owner to resolve it" in section
-    assert OLD_ROUTING not in section and NEW_ROUTING in section
-    assert WEBSITE in section and SCHEDULE in section
+    listed = {line[3:].split(" ", 1)[0] for line in section.splitlines() if line.startswith("- [")}
+    assert f"[{saved['old'].id} r2; conflict]" in section and saved["new"].id in listed
+    assert {saved["website"].id, saved["schedule"].id} <= listed
     # Asked once: resolving the pair (here: the owner keeps both) does not
     # bring the same question back.
     with file_transaction(store._facts.lock):

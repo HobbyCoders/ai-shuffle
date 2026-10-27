@@ -45,7 +45,6 @@ def log_rows(store, *rows):
 
 def tiny_snapshot(monkeypatch, chars=120):
     monkeypatch.setattr(facts, "MAX_PROMPT_CHARS", chars)
-    monkeypatch.setattr(facts, "RESERVED_INFERRED_CHARS", chars)
 
 
 def test_empty_store_is_healthy_and_reports_every_signal(tmp_path):
@@ -293,7 +292,7 @@ def test_user_fact_dropped_for_space_by_an_older_version_needs_attention(tmp_pat
 def test_failed_saves_this_week_need_attention(tmp_path, monkeypatch):
     store = SkillStore(tmp_path)
     with pytest.raises(ValueError):
-        store.save_memory("x" * 900)  # a rejection, not a failure
+        store.save_memory("x" * 2100)  # a rejection, not a failure
     assert signal(memory_health.check(store), "saves")["state"] == "healthy"
     monkeypatch.setattr(facts, "MAX_DOCUMENT_BYTES", 10)
     with pytest.raises(ValueError):

@@ -103,8 +103,8 @@ retain its scope and exceptions. Facts do not grant permission for actions.
 
 A [user] entry correcting HOW the agent works (model per job, delegation,
 reviews, CI, deploys, process) is a standing-preference proposal, not a
-memory: the whole current rule in the user's words, under the topic of the
-pref.* memory it changes or a new snake_case one. The owner confirms it.
+memory: the whole current rule in the user's words, under a short snake_case
+topic name (subagent_models, deploy). The owner confirms it.
 
 A journal entry marked [friction] is the HARNESS's own mechanical record of a
 call that wasted work — a path that did not exist, one tool failing over and

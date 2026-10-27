@@ -23,11 +23,20 @@ def hold(previous, plan):
 def setup_store(root):
     store = SkillStore(root)
     for i in range(40):
+        # A full-length when-line (140 chars), so four topics of matches
+        # overrun the 2k task slice and older ones are withdrawn.
+        when = (f"When topic{i // 4} habit{i // 4} detail{i} comes up in a task "
+                + "about the bounded preference workflow, its review steps, its release steps "
+                "and the checks that follow each one")[:140]
         store.save_memory(f"topic{i // 4} habit{i // 4}: detail{i}. " + "A bounded preference. " * 13,
-                          protected=True)
-    for i in range(30):
-        store.save_memory(f"profile filler {i}: " + "Explicit standing convention. " * 12,
-                          protected=True, key=f"profile.filler{i}")
+                          protected=True, when=when)
+    # Newer, unrelated conventions fill the when-line index (10k chars), so
+    # the topic facts are omitted from the base and reach a task only through
+    # the bounded task slice. Profile-keyed filler would be left out of the
+    # index as off-task biography and fill nothing.
+    for i in range(200):
+        store.save_memory(f"filler convention {i}: " + "Explicit standing convention. " * 12,
+                          protected=True, key=f"conventions.filler{i}")
     return SkillStore(root)
 
 

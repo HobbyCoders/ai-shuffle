@@ -647,7 +647,7 @@ def _saves_signal(store, now) -> dict:
 
 
 def _proposals_signal(store, live, now) -> dict:
-    """What the learner is waiting to ask the owner: proposed ``pref.*``
+    """What the learner is waiting to ask the owner: proposed rule
     updates and pairs of user-kept facts that disagree. Informational: the
     sessions ask, so this never raises attention."""
     from fluid.codemode.preferences import PreferenceProposals, open_conflicts
