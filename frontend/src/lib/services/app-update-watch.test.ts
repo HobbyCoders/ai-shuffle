@@ -2,15 +2,25 @@
  * The browser wiring of #707: the events that trigger a version check, the
  * one "App updated" banner and the reload.
  */
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const kit = vi.hoisted(() => ({ check: vi.fn(async () => true) }));
 vi.mock('$app/state', () => ({ updated: { current: false, check: kit.check } }));
 vi.mock('$lib/api/client', () => ({ api: { get: vi.fn(), post: vi.fn(() => Promise.resolve({})), delete: vi.fn() } }));
 vi.mock('$lib/stores/auth.svelte', () => ({ auth: { current: { status: { authenticated: true } } } }));
 
-import { installAppUpdateWatch } from './app-update-watch';
-import { APP_UPDATED_MESSAGE, APP_UPDATE_READY_MESSAGE, RESUME_GRACE_MS, registerReloadBlocker, reportServerReconnected } from './app-update';
+import { autoReloadAllowed, installAppUpdateWatch, unsavedFieldReason } from './app-update-watch';
+import {
+	APP_UPDATED_MESSAGE,
+	APP_UPDATE_READY_MESSAGE,
+	AUTO_RELOAD_COOLDOWN_MS,
+	CALL_LOAD_FAILED_MESSAGE,
+	RESUME_GRACE_MS,
+	registerReloadBlocker,
+	reloadBlockers,
+	reportServerReconnected
+} from './app-update';
+import { reportCallStartFailure } from './voiceCallOutcome';
 import { notifications, notify } from '$lib/stores/notifications';
 
 let visibility: DocumentVisibilityState = 'visible';
@@ -41,6 +51,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	teardown();
+	document.body.innerHTML = '';
 	vi.useRealTimers();
 	vi.unstubAllGlobals();
 });
@@ -119,4 +130,92 @@ it('stays quiet while the server runs this build', async () => {
 	await flush();
 	expect(reload).not.toHaveBeenCalled();
 	expect(banners()).toEqual([]);
+});
+
+it('the voice outcome banner takes the place of an update banner already showing', async () => {
+	reportServerReconnected();
+	await flush();
+	expect(banners()).toHaveLength(1);
+	reportCallStartFailure(new TypeError('Importing a module script failed.'), 'fresh');
+	await flush();
+	expect(banners()).toEqual([expect.objectContaining({ message: CALL_LOAD_FAILED_MESSAGE, session_id: 'fresh' })]);
+});
+
+describe('unsaved input anywhere on the page', () => {
+	it('a settings field typed into blocks the reload on resume and on hide', async () => {
+		document.body.innerHTML = '<form><label>Name <input name="agent-name" value="Ada"></label></form>';
+		const field = document.querySelector('input')!;
+		expect(unsavedFieldReason()).toBeNull();
+		field.value = 'Ada Lovelace';
+		expect(reloadBlockers()).toContain('unsaved-field');
+
+		setVisibility('hidden');
+		setVisibility('visible');
+		await flush();
+		setVisibility('hidden');
+		expect(reload).not.toHaveBeenCalled();
+		expect(banners()).toHaveLength(1);
+
+		// Saved (or reset): the next hide applies the update.
+		field.value = 'Ada';
+		setVisibility('visible');
+		setVisibility('hidden');
+		expect(reload).toHaveBeenCalledTimes(1);
+	});
+
+	it('counts a password field, a textarea and a field the app filled in; not buttons or toggles', () => {
+		document.body.innerHTML = '<input type="checkbox"><input type="submit" value="Go"><input type="password">';
+		document.querySelector<HTMLInputElement>('input[type=checkbox]')!.checked = true;
+		expect(unsavedFieldReason()).toBeNull();
+		document.querySelector<HTMLInputElement>('input[type=password]')!.value = 'sk-test';
+		expect(unsavedFieldReason()).toBe('unsaved-field');
+
+		document.body.innerHTML = '<textarea></textarea>';
+		document.querySelector('textarea')!.value = 'Approve, but skip the migration';
+		expect(unsavedFieldReason()).toBe('unsaved-field');
+
+		document.body.innerHTML = '<input disabled>';
+		document.querySelector('input')!.value = 'not editable';
+		expect(unsavedFieldReason()).toBeNull();
+	});
+
+	it('the focused or last focused rich-text editor with text blocks; an empty one does not', () => {
+		document.body.innerHTML = '<div contenteditable="true" tabindex="0"></div><button>x</button>';
+		const editor = document.querySelector<HTMLElement>('[contenteditable]')!;
+		// jsdom has no layout engine; make isContentEditable reflect the attribute.
+		Object.defineProperty(editor, 'isContentEditable', { configurable: true, get: () => true });
+		editor.focus();
+		expect(unsavedFieldReason()).toBeNull();
+		editor.textContent = 'Answer to the agent question';
+		expect(unsavedFieldReason()).toBe('unsaved-editor');
+		// Focus moved to a button (the file chooser, a tab switch): still counts.
+		document.querySelector('button')!.focus();
+		expect(unsavedFieldReason()).toBe('unsaved-editor');
+	});
+});
+
+describe('the automatic reload cap', () => {
+	const KEY = 'ai-shuffle-update-auto-reload';
+
+	it('allows one, then refuses another within the cooldown or from the same build', () => {
+		const now = 5_000_000;
+		expect(autoReloadAllowed(now)).toBe(true);
+		sessionStorage.setItem(KEY, JSON.stringify({ from: 'another-build', at: now - 1_000 }));
+		expect(autoReloadAllowed(now)).toBe(false);
+		sessionStorage.setItem(KEY, JSON.stringify({ from: 'another-build', at: now - AUTO_RELOAD_COOLDOWN_MS }));
+		expect(autoReloadAllowed(now)).toBe(true);
+		// This tab already left the build it runs now and came back on it.
+		sessionStorage.setItem(KEY, JSON.stringify({ from: 'test', at: now - 10 * AUTO_RELOAD_COOLDOWN_MS }));
+		expect(autoReloadAllowed(now)).toBe(false);
+	});
+
+	// Replicas behind one address answering A, B, A…: one reload, then the banner.
+	it('a page flapping between builds reloads once per cooldown', async () => {
+		sessionStorage.setItem(KEY, JSON.stringify({ from: 'another-build', at: Date.now() - 60_000 }));
+		setVisibility('hidden');
+		setVisibility('visible');
+		await flush();
+		expect(reload).not.toHaveBeenCalled();
+		expect(banners()).toHaveLength(1);
+	});
 });

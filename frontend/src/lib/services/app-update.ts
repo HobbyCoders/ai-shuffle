@@ -22,6 +22,13 @@
 /** What the outcome banner says when an update broke a feature mid-use. */
 export const APP_UPDATED_MESSAGE = 'This app was updated. Reload to continue.';
 
+/**
+ * What a call start says when its code would not load. Neutral: a dropped
+ * connection fails the same way as a missing chunk, and only the version
+ * check (the watcher's banner) can tell them apart. Reload fixes both.
+ */
+export const CALL_LOAD_FAILED_MESSAGE = "Couldn't load the call. Reload to continue.";
+
 /** What the banner says when a newer build was found before anything broke. */
 export const APP_UPDATE_READY_MESSAGE = 'App updated — reload to get the latest version.';
 
@@ -31,6 +38,15 @@ export const APP_UPDATE_READY_MESSAGE = 'App updated — reload to get the lates
  * costs them nothing. Covers the live-sync reconnect that follows a resume.
  */
 export const RESUME_GRACE_MS = 8_000;
+
+/**
+ * A reload that has not unloaded the page by now was cancelled (a
+ * beforeunload prompt the user answered "Stay"); the monitor works again.
+ */
+export const RELOAD_SETTLE_MS = 1_500;
+
+/** At most one automatic reload per tab in this window (flapping replicas). */
+export const AUTO_RELOAD_COOLDOWN_MS = 10 * 60_000;
 
 /** Checks closer together than this share one answer (focus and visibility fire together). */
 export const CHECK_MIN_INTERVAL_MS = 5_000;
@@ -101,7 +117,7 @@ const blockers = new Set<Blocker>();
  */
 export function registerReloadBlocker(blocker: Blocker): () => void {
 	blockers.add(blocker);
-	return () => blockers.delete(blocker);
+	return () => { blockers.delete(blocker); };
 }
 
 /** Every reason a reload now would lose something. */
@@ -168,6 +184,8 @@ export interface AppUpdateMonitorDeps {
 	/** Show (or upgrade) the single update banner; `broken` means a feature already failed. */
 	showBanner: (broken: boolean) => void;
 	now?: () => number;
+	/** Run `fn` after `ms` (a page that unloads never runs it). */
+	schedule?: (fn: () => void, ms: number) => void;
 }
 
 export type CheckReason = 'resume' | 'reconnect' | 'online' | 'chunk' | 'service-worker' | 'start';
@@ -178,6 +196,7 @@ export type CheckReason = 'resume' | 'reconnect' | 'online' | 'chunk' | 'service
  */
 export function createAppUpdateMonitor(deps: AppUpdateMonitorDeps) {
 	const now = deps.now ?? (() => Date.now());
+	const schedule = deps.schedule ?? ((fn: () => void, ms: number) => { setTimeout(fn, ms); });
 	let stale = false;
 	let broken = false;
 	let reloading = false;
@@ -189,14 +208,23 @@ export function createAppUpdateMonitor(deps: AppUpdateMonitorDeps) {
 		return visibleSince !== null && now() - visibleSince <= RESUME_GRACE_MS;
 	}
 
+	/**
+	 * Reload, and if the page is still here a moment later (the user kept it
+	 * at a beforeunload prompt), let checks, hides and the banner work again.
+	 */
+	function reload(): void {
+		reloading = true;
+		deps.reload();
+		schedule(() => { reloading = false; }, RELOAD_SETTLE_MS);
+	}
+
 	/** Apply the rules to a known-stale page. */
 	function act(): 'reload' | 'banner' | 'none' {
 		if (!stale || reloading) return 'none';
 		let decision = reloadDecision({ hidden: deps.isHidden(), resumed: justResumed(), blockers: deps.blockers() });
 		if (decision === 'reload' && deps.autoReloadAllowed && !deps.autoReloadAllowed()) decision = 'banner';
 		if (decision === 'reload') {
-			reloading = true;
-			deps.reload();
+			reload();
 		} else {
 			deps.showBanner(broken);
 		}
@@ -216,6 +244,9 @@ export function createAppUpdateMonitor(deps: AppUpdateMonitorDeps) {
 		inflight ??= deps.checkForNewBuild().catch(() => false).finally(() => { inflight = null; });
 		const updated = await inflight;
 		if (updated && !stale) stale = true;
+		// A chunk that failed while the server still runs this build was the
+		// network, not an update: the next skew is not "a feature broke".
+		if (!stale) broken = false;
 		if (stale) act();
 		return stale;
 	}
@@ -238,11 +269,9 @@ export function createAppUpdateMonitor(deps: AppUpdateMonitorDeps) {
 			stale = true;
 			act();
 		},
-		/** The banner's Reload. Always honoured: the user chose it. */
+		/** The banner's Reload. Always honoured: the user chose it, even after a cancelled one. */
 		reloadNow() {
-			if (reloading) return;
-			reloading = true;
-			deps.reload();
+			reload();
 		}
 	};
 }

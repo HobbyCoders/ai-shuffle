@@ -4,7 +4,9 @@
  * The page's lazily loaded voice audio stream module no longer exists on the
  * worker: the import 404s. Before, the call's error was the browser's raw
  * import message and, on a phone, nothing on screen at all. The start must
- * end in the call-outcome banner saying the app was updated, with a Reload.
+ * end in the call-outcome banner with a Reload. The wording stays neutral
+ * (a dropped connection fails the same way); the update watcher's version
+ * check is what says whether the app was updated.
  */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { get, writable } from 'svelte/store';
@@ -35,7 +37,7 @@ vi.mock('./voiceAudioStream', () => ({
 
 import { hangup, startCall, voiceCallState } from './voiceCall';
 import { watchCallOutcomes } from './voiceCallOutcome';
-import { APP_UPDATED_MESSAGE, canReloadSilently, setAppUpdateListener } from './app-update';
+import { CALL_LOAD_FAILED_MESSAGE, canReloadSilently, setAppUpdateListener } from './app-update';
 import { notifications, notify } from '$lib/stores/notifications';
 
 const track = { kind: 'audio', enabled: true, readyState: 'live', stop: vi.fn() };
@@ -60,10 +62,10 @@ afterEach(async () => {
 	vi.unstubAllGlobals();
 });
 
-it('ends a start whose voice module is gone with "app updated", not the raw import error', async () => {
+it('ends a start whose voice module is gone with "reload to continue", not the raw import error', async () => {
 	await startCall('fresh', { client_secret: 'unused', model: 'gpt-live-1-codex' });
 
-	expect(get(voiceCallState)).toMatchObject({ status: 'error', sessionId: 'fresh', error: APP_UPDATED_MESSAGE });
+	expect(get(voiceCallState)).toMatchObject({ status: 'error', sessionId: 'fresh', error: CALL_LOAD_FAILED_MESSAGE });
 	// The app-update watcher hears about it, so it can confirm the skew.
 	expect(chunkFailed).toHaveBeenCalledTimes(1);
 	// The microphone it had acquired is released.
@@ -77,7 +79,7 @@ it('puts it in the outcome banner with a Reload action', async () => {
 
 	await startCall('fresh', { client_secret: 'unused', model: 'gpt-live-1-codex' });
 
-	const banner = notifications.current.live.find((n) => n.message === APP_UPDATED_MESSAGE);
+	const banner = notifications.current.live.find((n) => n.message === CALL_LOAD_FAILED_MESSAGE);
 	expect(banner).toMatchObject({ surface: 'banner', severity: 'warning', session_id: 'fresh', action: { label: 'Reload' } });
 	unsubscribe();
 });

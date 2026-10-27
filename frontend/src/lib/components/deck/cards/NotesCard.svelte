@@ -29,6 +29,7 @@
 		type NoteAttachment
 	} from '$lib/api/client';
 	import { onMount, untrack } from 'svelte';
+	import { registerReloadBlocker } from '$lib/services/app-update';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { escapeHtml } from '$lib/utils/escape-html';
 
@@ -136,6 +137,9 @@
 		persistDraft();
 		if (editingNote) void loadAttachments(editingNote.id);
 	}
+
+	// An update never reloads the page over an unsaved or saving note (app-update.ts).
+	onMount(() => registerReloadBlocker(() => (hasUnsavedChanges || saving ? 'note-unsaved' : null)));
 
 	function protectDraft(event: BeforeUnloadEvent) {
 		if (!hasUnsavedChanges && !saving) return;

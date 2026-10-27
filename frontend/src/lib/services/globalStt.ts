@@ -19,6 +19,7 @@ import { loadVoiceSettings } from '$lib/api/voice';
 import { registerShortcut, type ShortcutRegistration } from './keyboard';
 import { hotkeyPreferences, type HotkeyConfig } from '$lib/stores/hotkeyPreferences.svelte';
 import { convertToWav } from '$lib/utils/audioConvert';
+import { registerReloadBlocker } from './app-update';
 import { playEarcon, primeEarcons, setEarconsEnabled } from '$lib/utils/earcon';
 import {
 	fetchSttCapability,
@@ -100,6 +101,13 @@ const initialState: GlobalSttState = {
 };
 
 export const globalSttState = writable<GlobalSttState>(initialState);
+
+// An update never reloads the page over a dictation that is still recording
+// or transcribing (app-update.ts); it keeps going in a background tab.
+registerReloadBlocker(() => {
+	const stt = get(globalSttState);
+	return stt.isRecording || stt.isTranscribing || stt.isPreparing ? 'dictation' : null;
+});
 
 const BAND_COUNT = 28;
 const emptyBands = () => new Array(BAND_COUNT).fill(0);

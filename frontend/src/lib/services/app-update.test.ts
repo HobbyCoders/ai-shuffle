@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
 	CHECK_MIN_INTERVAL_MS,
+	RELOAD_SETTLE_MS,
 	RESUME_GRACE_MS,
 	canReloadSilently,
 	createAppUpdateMonitor,
@@ -96,7 +97,9 @@ describe('the hub', () => {
 describe('createAppUpdateMonitor', () => {
 	function setup(opts: { newBuild?: boolean; hidden?: boolean; blockers?: string[] } = {}) {
 		const state = { newBuild: opts.newBuild ?? true, hidden: opts.hidden ?? false, blockers: opts.blockers ?? [], t: 100_000 };
+		const scheduled: Array<{ fn: () => void; ms: number }> = [];
 		const deps = {
+			schedule: (fn: () => void, ms: number) => { scheduled.push({ fn, ms }); },
 			checkForNewBuild: vi.fn(async () => state.newBuild),
 			isHidden: () => state.hidden,
 			blockers: () => state.blockers,
@@ -107,7 +110,7 @@ describe('createAppUpdateMonitor', () => {
 		const monitor = createAppUpdateMonitor(deps);
 		// Past the start-up grace: the user is "in the middle of using" the page.
 		state.t += RESUME_GRACE_MS + 1;
-		return { monitor, deps, state };
+		return { monitor, deps, state, scheduled };
 	}
 
 	it('does nothing while the server runs this build', async () => {
@@ -178,8 +181,41 @@ describe('createAppUpdateMonitor', () => {
 		const { monitor, deps } = setup({ blockers: ['composer-draft'] });
 		await monitor.check('reconnect');
 		monitor.reloadNow();
-		monitor.reloadNow();
 		expect(deps.reload).toHaveBeenCalledTimes(1);
+	});
+
+	// NotesCard's beforeunload prompt lets the user keep the page. Before, the
+	// monitor then ignored every check, hide and Reload for the page's life.
+	it('a reload the user cancelled leaves the monitor working', async () => {
+		const { monitor, deps, state, scheduled } = setup({ hidden: true });
+		await monitor.check('reconnect');
+		expect(deps.reload).toHaveBeenCalledTimes(1);
+		// Still here: the page did not unload.
+		monitor.hidden();
+		expect(deps.reload).toHaveBeenCalledTimes(1);
+		// Even mid-reload, the banner's Reload is never ignored.
+		monitor.reloadNow();
+		expect(deps.reload).toHaveBeenCalledTimes(2);
+
+		expect(scheduled.at(-1)!.ms).toBe(RELOAD_SETTLE_MS);
+		scheduled.forEach(({ fn }) => fn());
+		state.hidden = false;
+		state.t += CHECK_MIN_INTERVAL_MS + 1;
+		await monitor.check('online');
+		expect(deps.showBanner).toHaveBeenCalledWith(false);
+		state.hidden = true;
+		monitor.hidden();
+		expect(deps.reload).toHaveBeenCalledTimes(3);
+	});
+
+	it('a chunk failure that was the network, not an update, does not mark a later update as broken', async () => {
+		const { monitor, deps, state } = setup({ newBuild: false });
+		await monitor.check('chunk');
+		expect(deps.showBanner).not.toHaveBeenCalled();
+		state.newBuild = true;
+		state.t += CHECK_MIN_INTERVAL_MS + 1;
+		await monitor.check('reconnect');
+		expect(deps.showBanner).toHaveBeenLastCalledWith(false);
 	});
 
 	it('a failed lazy import marks the banner as "a feature broke"', async () => {

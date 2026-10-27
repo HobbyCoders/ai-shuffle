@@ -5,7 +5,7 @@ vi.mock('$lib/stores/auth.svelte', () => ({ auth: { current: { status: { authent
 import { api } from '$lib/api/client';
 import { notify, notifications } from '$lib/stores/notifications';
 import { createCallOutcomeReporter, reportCallStartFailure, watchCallOutcomes } from './voiceCallOutcome';
-import { APP_UPDATED_MESSAGE } from './app-update';
+import { APP_UPDATED_MESSAGE, CALL_LOAD_FAILED_MESSAGE } from './app-update';
 
 beforeEach(() => {
 	for (const n of notifications.current.live) notify.dismissLive(n.id);
@@ -99,13 +99,14 @@ it('a call-button failure shares the banner and the next call clears it', () => 
 
 // #707: the worker updated under the page and the call's code was gone. The
 // browser's import error is meaningless to the user; the way forward is a reload.
-it('a start that failed on a missing chunk says the app was updated, with a Reload', () => {
+it('a start whose code would not load says reload to continue, with a Reload', () => {
 	const reload = vi.fn();
 	vi.stubGlobal('location', { ...window.location, reload });
 	try {
 		reportCallStartFailure(new TypeError('Failed to fetch dynamically imported module: https://w.example/_app/immutable/chunks/Old.js'), 'fresh');
 		const [banner] = live();
-		expect(banner).toMatchObject({ severity: 'warning', message: APP_UPDATED_MESSAGE, session_id: 'fresh', action: { label: 'Reload' } });
+		// Neutral: a dropped connection fails the same way as a missing chunk.
+		expect(banner).toMatchObject({ severity: 'warning', message: CALL_LOAD_FAILED_MESSAGE, session_id: 'fresh', action: { label: 'Reload' } });
 		// Nothing for the inbox: after the reload the reason no longer applies.
 		expect(api.post).not.toHaveBeenCalled();
 		banner.action!.onClick();
