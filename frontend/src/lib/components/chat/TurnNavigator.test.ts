@@ -126,6 +126,105 @@ describe('TurnNavigator', () => {
 		expect(document.activeElement).toBe(clicked);
 	});
 
+	describe('touch scrub', () => {
+		const many = Array.from({ length: 6 }, (_, i) => ({ id: String(i), label: `Prompt ${i}`, title: `Prompt ${i}`, preview: `Body ${i}` }));
+		/** jsdom has no layout: a rail at viewport y 0..120 with 16px ticks from y 10. */
+		function layOut(container: HTMLElement) {
+			const rail = container.querySelector('.turn-rail') as HTMLElement;
+			rail.getBoundingClientRect = () => ({ top: 0, bottom: 120, left: 0, right: 26, width: 26, height: 120, x: 0, y: 0, toJSON() {} });
+			Array.from(rail.children).forEach((tick, index) => {
+				Object.defineProperty(tick, 'offsetTop', { value: 10 + index * 16 });
+				Object.defineProperty(tick, 'offsetHeight', { value: 16 });
+			});
+			return rail;
+		}
+		const centre = (index: number) => 10 + index * 16 + 8;
+
+		afterEach(() => vi.useRealTimers());
+
+		it('previews the tick under a sliding finger and selects it when the finger rests', async () => {
+			vi.useFakeTimers();
+			const onSelect = vi.fn();
+			const { container } = render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect } });
+			const rail = layOut(container);
+			const ticks = screen.getAllByRole('button');
+			const preview = container.querySelector('.preview') as HTMLElement;
+
+			await fireEvent.pointerDown(ticks[0], { pointerType: 'touch', isPrimary: true, pointerId: 7, clientY: centre(0) });
+			// Under the slop it is still a tap: nothing lights up.
+			await fireEvent.pointerMove(rail, { pointerType: 'touch', isPrimary: true, pointerId: 7, clientY: centre(0) + 2 });
+			expect(container.querySelector('.is-scrubbing')).toBeNull();
+
+			// Sliding past ticks lights each one like a hover, without navigating.
+			await fireEvent.pointerMove(rail, { pointerType: 'touch', isPrimary: true, pointerId: 7, clientY: centre(2) });
+			expect(container.querySelector('nav')?.classList.contains('is-scrubbing')).toBe(true);
+			expect(ticks[2].classList.contains('is-hovered')).toBe(true);
+			expect(preview.classList.contains('is-visible')).toBe(true);
+			expect(preview.classList.contains('is-above')).toBe(true);
+			expect(preview.textContent).toContain('Prompt 2');
+			vi.advanceTimersByTime(100);
+			await fireEvent.pointerMove(rail, { pointerType: 'touch', isPrimary: true, pointerId: 7, clientY: centre(4) });
+			expect(ticks[4].classList.contains('is-hovered')).toBe(true);
+			vi.advanceTimersByTime(200);
+			expect(onSelect).not.toHaveBeenCalled();
+
+			// Resting on a tick selects it while the finger is still down.
+			vi.advanceTimersByTime(150);
+			expect(onSelect).toHaveBeenCalledTimes(1);
+			expect(onSelect).toHaveBeenLastCalledWith(4);
+
+			// Lifting on the same tick does not select it again, and the gesture's
+			// trailing click on the first tick is ignored.
+			await fireEvent.pointerUp(rail, { pointerType: 'touch', isPrimary: true, pointerId: 7, clientY: centre(4) });
+			await fireEvent.click(ticks[0]);
+			expect(onSelect).toHaveBeenCalledTimes(1);
+			expect(container.querySelector('.is-scrubbing')).toBeNull();
+			expect(container.querySelector('.is-hovered')).toBeNull();
+			expect(preview.classList.contains('is-visible')).toBe(false);
+		});
+
+		it('selects the tick under the finger when it lifts before resting', async () => {
+			vi.useFakeTimers();
+			const onSelect = vi.fn();
+			const { container } = render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect } });
+			const rail = layOut(container);
+			const ticks = screen.getAllByRole('button');
+			await fireEvent.pointerDown(ticks[5], { pointerType: 'touch', isPrimary: true, pointerId: 3, clientY: centre(5) });
+			await fireEvent.pointerMove(rail, { pointerType: 'touch', isPrimary: true, pointerId: 3, clientY: centre(3) });
+			// Past the rail's top the finger reads as the first tick.
+			await fireEvent.pointerMove(rail, { pointerType: 'touch', isPrimary: true, pointerId: 3, clientY: -40 });
+			await fireEvent.pointerUp(rail, { pointerType: 'touch', isPrimary: true, pointerId: 3, clientY: -40 });
+			expect(onSelect).toHaveBeenCalledTimes(1);
+			expect(onSelect).toHaveBeenLastCalledWith(0);
+			vi.advanceTimersByTime(1000);
+			expect(onSelect).toHaveBeenCalledTimes(1);
+		});
+
+		it('selects nothing when the system cancels the touch', async () => {
+			vi.useFakeTimers();
+			const onSelect = vi.fn();
+			const { container } = render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect } });
+			const rail = layOut(container);
+			await fireEvent.pointerDown(screen.getAllByRole('button')[0], { pointerType: 'touch', isPrimary: true, pointerId: 1, clientY: centre(0) });
+			await fireEvent.pointerMove(rail, { pointerType: 'touch', isPrimary: true, pointerId: 1, clientY: centre(3) });
+			await fireEvent.pointerCancel(rail, { pointerType: 'touch', isPrimary: true, pointerId: 1 });
+			vi.advanceTimersByTime(1000);
+			expect(onSelect).not.toHaveBeenCalled();
+			expect(container.querySelector('.is-hovered')).toBeNull();
+		});
+
+		it('leaves a mouse drag to hover and click', async () => {
+			const onSelect = vi.fn();
+			const { container } = render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect } });
+			const rail = layOut(container);
+			await fireEvent.pointerDown(screen.getAllByRole('button')[0], { pointerType: 'mouse', isPrimary: true, pointerId: 1, clientY: centre(0) });
+			await fireEvent.pointerMove(rail, { pointerType: 'mouse', isPrimary: true, pointerId: 1, clientY: centre(3) });
+			await fireEvent.pointerUp(rail, { pointerType: 'mouse', isPrimary: true, pointerId: 1, clientY: centre(3) });
+			expect(container.querySelector('.is-scrubbing')).toBeNull();
+			expect(onSelect).not.toHaveBeenCalled();
+		});
+	});
+
 	it('scrolls only the rail to keep the current turn in view, without undoing browsing', async () => {
 		const many = Array.from({ length: 80 }, (_, i) => ({ id: String(i), label: `Prompt ${i}`, title: `Prompt ${i}`, preview: '' }));
 		const view = render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect: vi.fn() } });

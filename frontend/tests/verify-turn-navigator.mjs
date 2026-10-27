@@ -1,6 +1,6 @@
 // Real-browser check for the transcript turn rail (TurnNavigator) inside the
 // real ChatView, with short (10) and long (80/300) histories at desktop and phone
-// widths. One rail at every length: it must scroll by wheel/touch/keyboard,
+// widths. One rail at every length: it must scroll by wheel, touch scrub and keyboard,
 // keep the current turn and both ends reachable, and never clip a target.
 //
 // Run from frontend/ while the fixture is serving:
@@ -119,42 +119,64 @@ async function run(viewport, touch, turns) {
 	assert.ok(state.visible.includes(state.current), `${label}: current tick ${state.current} not in view`);
 	assert.equal(state.scrollable, turns > 30, `${label}: rail scrollability`);
 
-	// Wheel (desktop) or touch drag (phone) scrolls the rail to the first turn.
+	// Wheel (desktop) or a touch scrub held past the rail's top edge (phone)
+	// scrolls the rail to the first turn.
 	const rail = page.locator('.turn-rail');
 	const transcriptBefore = await transcriptTop(page);
+	const cdp = touch ? await context.newCDPSession(page) : null;
+	/** Raw touch events, the way a phone delivers a finger to Chrome. */
+	const finger = (type, x, y) =>
+		cdp.send('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x, y }] });
+	const previewState = () =>
+		page.evaluate(() => {
+			const preview = document.querySelector('.turn-nav .preview');
+			const box = preview.getBoundingClientRect();
+			const style = getComputedStyle(preview);
+			return {
+				visible: style.display !== 'none' && style.opacity === '1',
+				text: preview.textContent,
+				top: box.top,
+				bottom: box.bottom,
+				left: box.left,
+				right: box.right
+			};
+		});
 	if (turns > 30) {
 		if (touch) {
-			// A finger dragging down the rail (raw touch events; Chrome turns them
-			// into a scroll gesture the same way it does on a phone).
-			const cdp = await context.newCDPSession(page);
-			for (let drag = 0; drag < Math.ceil(turns / 16); drag++) {
-				if ((await railState(page)).scrollTop === 0) break;
-				// The composer settling can move the rail between gestures. A
-				// cached y can hit the transcript instead, invalidating this check.
-				const railBox = await rail.boundingBox();
-				assert.ok(railBox, `${label}: rail missing before touch drag`);
-				const x = Math.round(railBox.x + railBox.width / 2);
-				let y = Math.round(railBox.y + 40);
-				await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
-				for (let step = 0; step < 20; step++) {
-					y += 15;
-					await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y }] });
-					await page.waitForTimeout(16);
-				}
-				await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-				await page.waitForTimeout(300);
+			// The composer settling can move the rail between gestures. A cached
+			// y can hit the transcript instead, invalidating this check.
+			const railBox = await rail.boundingBox();
+			assert.ok(railBox, `${label}: rail missing before touch scrub`);
+			const x = Math.round(railBox.x + railBox.width / 2);
+			let y = Math.round(railBox.y + railBox.height / 2);
+			await finger('touchStart', x, y);
+			while (y > railBox.y - 20) {
+				y -= 12;
+				await finger('touchMove', x, y);
+				await page.waitForTimeout(16);
 			}
+			// Held there, the rail scrolls under the finger to its first tick.
+			await page.waitForFunction(() => document.querySelector('.turn-rail').scrollTop === 0, null, { timeout: 15000 });
+			await page.waitForTimeout(100);
+			const preview = await previewState();
+			assert.ok(preview.visible, `${label}: no preview while scrubbing`);
+			assert.match(preview.text, /Prompt 1:/, `${label}: scrub at the top edge does not preview the first turn`);
+			await page.screenshot({ path: join(shots, `${viewport.width}-${turns}-scrub-edge.png`) });
+			await finger('touchEnd');
+			await page.waitForTimeout(300);
 		} else {
 			const railBox = await rail.boundingBox();
 			assert.ok(railBox, `${label}: rail missing before wheel scroll`);
 			await page.mouse.move(railBox.x + railBox.width / 2, railBox.y + railBox.height / 2);
 			for (let i = 0; i < Math.ceil(turns / 4); i++) await page.mouse.wheel(0, -400);
 		}
-		await page.waitForTimeout(400);
+		// A scrub also navigates: let that (smooth, 80+ turn) jump land first.
+		await page.waitForTimeout(touch ? 1500 : 400);
 		state = await railState(page);
 		assert.equal(state.scrollTop, 0, `${label}: rail did not scroll to the top`);
 		assert.ok(state.visible.includes(0), `${label}: first tick not visible after scrolling`);
-		assert.equal(await transcriptTop(page), transcriptBefore, `${label}: rail scroll leaked into the transcript`);
+		if (touch) assert.equal(state.current, 0, `${label}: releasing the scrub did not select the first turn`);
+		else assert.equal(await transcriptTop(page), transcriptBefore, `${label}: rail scroll leaked into the transcript`);
 		await page.screenshot({ path: join(shots, `${viewport.width}-${turns}-scrolled-top.png`) });
 	}
 
@@ -229,6 +251,49 @@ async function run(viewport, touch, turns) {
 		}
 		await settle();
 		assert.equal((await railState(page)).current, middle, `${label}: highlight drifted after the jump landed`);
+	}
+
+	// Touch scrub: sliding a finger along the rail previews each tick like a
+	// mouse hover; resting on one moves the transcript there with the finger
+	// still down, and lifting leaves nothing lit.
+	if (touch) {
+		state = await railState(page);
+		const [from, to] = [state.visible[0], state.visible[Math.min(state.visible.length - 1, 4)]];
+		const centreOf = async (index) => {
+			const box = await tick(page, index + 1, turns).boundingBox();
+			return { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) };
+		};
+		const start = await centreOf(from);
+		const end = await centreOf(to);
+		const transcriptAtStart = await transcriptTop(page);
+		await finger('touchStart', start.x, start.y);
+		for (let step = 1; step <= 8; step++) {
+			await finger('touchMove', start.x, Math.round(start.y + ((end.y - start.y) * step) / 8));
+			await page.waitForTimeout(20);
+		}
+		// Mid-slide: the preview shows the tick under the finger, above it.
+		let preview = await previewState();
+		assert.ok(preview.visible, `${label}: no preview while scrubbing`);
+		assert.match(preview.text, new RegExp(`Prompt ${to + 1}:`), `${label}: preview is not the tick under the finger`);
+		assert.ok(preview.bottom <= end.y, `${label}: preview sits under the finger (${preview.bottom} > ${end.y})`);
+		assert.ok(preview.top >= 0 && preview.right <= viewport.width, `${label}: preview off-screen`);
+		await page.screenshot({ path: join(shots, `${viewport.width}-${turns}-scrub.png`) });
+		// Resting on it selects it while the finger is still down.
+		await page.waitForTimeout(700);
+		state = await railState(page);
+		assert.equal(state.current, to, `${label}: resting the finger did not select turn ${to}`);
+		assert.notEqual(await transcriptTop(page), transcriptAtStart, `${label}: transcript did not move to the rested turn`);
+		await finger('touchEnd');
+		await soon();
+		preview = await previewState();
+		assert.equal(preview.visible, false, `${label}: preview stayed after the finger lifted`);
+		const lit = await page.evaluate(() => {
+			const el = document.activeElement;
+			return !!el?.closest('.turn-rail') || !!document.querySelector('.turn-rail .is-hovered');
+		});
+		assert.equal(lit, false, `${label}: a tick stayed lit after the scrub`);
+		await settle();
+		assert.equal((await railState(page)).current, to, `${label}: highlight drifted after the scrub landed`);
 	}
 
 	// Reading the transcript upward in small steps moves the current turn and
