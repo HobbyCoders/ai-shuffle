@@ -24,7 +24,10 @@ async def test_save_receipt_means_immediate_durability_without_learner(tmp_path)
     assert store.journal_count() == 0
     fresh = SkillStore(tmp_path)
     assert fresh.memories()[0].protected
-    assert "[m1 r1; session] When testing memory" in fresh.render_memory_section()
+    # An identity fact (canonical key profile.name) is listed by its text in
+    # every snapshot, not by its when-line.
+    assert fresh.memories()[0].key == "profile.name"
+    assert "- [m1 r1; session] The user's name is AuditName." in fresh.render_memory_section()
     out = await recall.handler({"query": "name"}, ctx(fresh, session="new-session"))
     assert "AuditName" in out.text and "revision: 1" in out.text
 
