@@ -866,6 +866,15 @@
           "past_bug": "New: the table Copy menu, terminal links, Send selection to chat and the Spotlight Settings group were checked only in a local fixture with a fake terminal stream, not against a real worker shell."
         },
         {
+          "id": "harness-basics.claude-compaction-replay-and-move",
+          "check": "Fluid's compaction of a Claude Code chat records no old tool calls again and survives a worker move compacted",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "On candidate A, in a throwaway Claude Code chat on the cheapest Claude model, ask for about twenty small Bash calls (for example `echo step-N`) over a few turns, then press Compact now. Note the chat's tool-call count and the session's distinct ToolUse ids before and after, then send one more short message that runs one Bash call. Move the chat to candidate B (no local Claude Code transcript there) and send one short message asking what the last step was. Archive the chat.",
+          "pass_when": "After the compaction the session gains ToolUse events and stored tool calls only for the new Bash call (ToolUse events equal distinct ids, no old id recorded again) and the chat shows no repeated old calls. On B the re-seed log says it started from the Fluid compaction checkpoint, the first turn's prompt tokens are near the compacted size rather than the full history, and the reply names the last step. Old calls reappearing as new activity, or B replaying the whole conversation, is a fail.",
+          "past_bug": "#679: old tool calls were stored again after every mechanical compaction (3,923 ToolUse events for 1,265 ids). #685: a mechanical compaction left no portable checkpoint, so a move to another worker replayed the whole conversation."
+        },
+        {
           "id": "harness-basics.claude-journal-and-skill-loads",
           "check": "A Claude Code chat feeds the memory journal and counts parallel skill loads without losing counts",
           "kind": "owner",
