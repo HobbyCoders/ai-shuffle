@@ -488,7 +488,7 @@ CONTINUE = ("[auto-continue] Your previous turn was cut off at the context limit
             "compacted. Continue where you left off.")
 
 
-@pytest.mark.parametrize('newest', [None, RESUME, CONTINUE, '[hand-off] Moved from Unraid to GamingPC',
+@pytest.mark.parametrize('newest', [None, RESUME, CONTINUE, '[hand-off] Moved from worker-a to worker-b',
                                     '<task-notification>bg done</task-notification>', '/compact',
                                     'also update the changelog'])
 def test_claude_code_rows_of_the_newest_request_stay_verbatim(newest):
@@ -560,7 +560,7 @@ def test_host_started_turns_are_the_ones_the_app_sends():
     """The prefixes this module skips are the ones AI Shuffle writes."""
     from fluid.engine.claude_mod_compaction import HOST_TURN_PREFIXES
 
-    for text in (RESUME, CONTINUE, '[hand-off] Moved from Unraid to GamingPC'):
+    for text in (RESUME, CONTINUE, '[hand-off] Moved from worker-a to worker-b'):
         assert text.startswith(HOST_TURN_PREFIXES)
 
 
