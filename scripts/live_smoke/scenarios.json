@@ -874,6 +874,14 @@
           "past_bug": "#559: the bundled MCP bridge dropped the subagent caller identity."
         },
         {
+          "id": "harness-basics.composer-suggestion-user-voice",
+          "check": "Suggested next reply is written as the user, not the agent",
+          "kind": "browser",
+          "how": "On a disposable candidate worker with Suggest next response on, run three throwaway code chats whose final answers (1) diagnose a bug without fixing it, (2) end with an offer such as 'Want me to open a PR?', and (3) report finished work. Read the suggestion shown in the composer after each turn settles.",
+          "pass_when": "Each suggestion reads as the user talking to the agent (for example 'Okay, fix it.' or 'Yes, open the PR.'), never as the agent ('I'll fix that now.', 'Want me to...', a summary of the work). An empty composer is acceptable; an agent-voice suggestion is a failure.",
+          "past_bug": "Suggestions repeatedly came back in the agent's voice, offering to do the work instead of drafting the user's reply."
+        },
+        {
           "id": "harness-basics.db-pressure-queued-task-stop",
           "check": "A subagent Queued by database pressure shows Queued and stays stopped when stopped",
           "kind": "owner",

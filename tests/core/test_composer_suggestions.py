@@ -571,6 +571,32 @@ def test_prompt_allows_fix_requests_without_blanket_approval_ban():
     assert "permissions or approvals" not in prompt
 
 
+def test_prompt_frames_reply_in_user_voice() -> None:
+    prompt = cs._prompt("Found the bug in the parser. Want me to fix it?")
+    assert "ghost-writing the HUMAN USER's next chat message" in prompt
+    assert "You are not the assistant" in prompt
+    assert "'I'll fix that now.'" in prompt
+    assert prompt.rstrip().endswith("(user voice, one line):")
+
+
+@pytest.mark.parametrize("value", [
+    "I'll fix that now.", "I’ve updated the parser.", "Let me check the logs.",
+    "Want me to open a PR?", "Would you like me to add tests?", "Shall I proceed?",
+    "Here's a summary of the changes.", "Sure, I can do that.",
+])
+def test_assistant_voice_output_is_dropped(value: str) -> None:
+    assert cs._validation_reason(value) == "assistant_voice"
+    assert cs._validate(value) == ""
+
+
+@pytest.mark.parametrize("value", [
+    "Okay, fix it.", "Yes, go with option 2.", "Should I restart the app first?",
+    "I want the button on the left instead.", "Why did the test fail on Windows?",
+])
+def test_user_voice_output_is_kept(value: str) -> None:
+    assert cs._validate(value) == value
+
+
 def test_prompt_preserves_review_and_safety_boundaries():
     prompt = cs._prompt("The fix is ready. Deploy it and delete the old database.")
     assert "not a sent message or authorization to act" in prompt
