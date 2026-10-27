@@ -580,8 +580,10 @@ async def test_grok_session_is_renewed_before_the_hour_without_a_greeting(grok_c
     assert first.closed and not [e for e in first.sent if e["type"] == "session.close"]
     resumed = second.context()
     assert any(SEED in text and voice_stream.RESUME_NOTE in text for text in resumed)
-    assert not any(text.startswith("Greet the caller") for text in resumed)  # Never greets again.
-    assert not [e for e in second.sent if e["type"] == "response.create"]
+    # Never greets again, whatever the greeting's wording: the new session gets
+    # its settings and the replayed history only, and is never asked to speak.
+    assert [e["type"] for e in second.sent] == ["session.update", "conversation.item.create"]
+    assert len(resumed) == 1 and resumed[0].startswith("Prior conversation (context only): ")
     assert grok_call.attempts == [(voice_grok.GROK_URL, "Bearer xai-test")] * 2
     assert grok_call.browser.events("status") == []  # A planned renewal is silent.
     assert grok_call.call.reconnects == 1 and not grok_call.call.failures
