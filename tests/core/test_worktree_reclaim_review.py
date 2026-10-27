@@ -328,14 +328,14 @@ def test_restoration_sha_survives_archive_failure(mock_db, tmp_path, monkeypatch
     git(repo, "merge", "--ff-only", "feature")
     tip = git(path, "rev-parse", "HEAD")
     checkouts.upsert_checkout(project["id"], rc.settings.effective_instance_id, str(path), branch="feature")
-    delete = rc.git_service.delete_branch
+    delete = rc._delete_branch
     observed = []
 
     def check_before_delete(*args, **kwargs):
         observed.append(checkouts.get_checkout_by_path(str(path), project_id=project["id"])["head_sha"])
         return delete(*args, **kwargs)
 
-    monkeypatch.setattr(rc.git_service, "delete_branch", check_before_delete)
+    monkeypatch.setattr(rc, "_delete_branch", check_before_delete)
     monkeypatch.setattr(rc, "_archive", Mock(side_effect=RuntimeError("archive failed")))
     result = asyncio.run(rc.reclaim(project["id"], dry_run=False))
     assert result["reclaimed"] == 0 and result["items"][0]["error"] is True

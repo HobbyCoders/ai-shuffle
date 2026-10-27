@@ -2926,15 +2926,16 @@ def create_builtin_tools_server(
     @tool(
         "WorktreeReport",
         "List this worker's app-managed git worktrees per project with what "
-        "decides whether each can be removed: bound sessions (and whether one "
-        "is running), PR state, uncommitted changes, unpushed commits, merged "
-        "into the default branch. Read-only; it never deletes. Removal stays "
-        "with the app — never git worktree remove or rm -rf a worktree.",
+        "decides whether each can be removed: bound sessions, PR state, "
+        "uncommitted changes, unpushed commits, integration proof. cleanup is "
+        "the automatic cleanup's verdict. Read-only; it never deletes. Removal "
+        "stays with the app — never git worktree remove or rm -rf a worktree.",
         {
             "type": "object",
             "properties": {
                 "project": {"type": "string", "description": "Optional project name, id or path."},
                 "reclaimable_only": {"type": "boolean", "description": "List only removable worktrees."},
+                "include_retired": {"type": "boolean", "description": "Also list retired registrations."},
             },
             "additionalProperties": False,
         },
@@ -2945,7 +2946,8 @@ def create_builtin_tools_server(
         from app.core.worktree_report import report
         from app.db.async_database import run_sync
 
-        result = await run_sync(report, (args.get("project") or "").strip() or None)
+        result = await run_sync(report, (args.get("project") or "").strip() or None,
+                                include_retired=bool(args.get("include_retired")))
         if args.get("reclaimable_only"):
             for project in result["projects"]:
                 project["worktrees"] = [row for row in project["worktrees"] if row["reclaimable"]]

@@ -943,3 +943,131 @@ def test_mismatch_diagnosis_does_not_report_an_enclosing_repo_branch(repo):
     # The real wrong-branch case still names the folder's branch.
     git(parent, "switch", "-c", "elsewhere")
     assert "on branch 'elsewhere'" in project_resolver.describe_checkout_mismatch(row)
+
+
+@pytest.mark.parametrize("case", ["pushed", "local-head", "local-commit-then-pushed"])
+def test_reviewer_moved_head_is_reclaimed_at_finish_only_when_pushed(repo, worker_runtime, case):
+    """A reviewer worker that ran ``gh pr checkout`` / ``git checkout --detach``
+    leaves its own branch untouched: released at finish when HEAD and every
+    commit it visited are pushed."""
+    row, parent, base, _ = repo
+    published = git(base, "rev-parse", "refs/remotes/origin/parent-branch")
+    pushed = case == "pushed"
+
+    def review(path):
+        if case != "pushed":
+            git(path, "checkout", "--detach")
+            (path / "local.txt").write_text("review fixup never pushed")
+            git(path, "add", "local.txt")
+            git(path, "commit", "-m", "local only")
+        if case != "local-head":
+            git(path, "checkout", "--detach", published)
+
+    worker_runtime.work["reviewer"] = review
+    outcome = dispatch(worker="reviewer")
+    assert outcome.ok, outcome.error
+    path = Path(database.get_session("reviewer")["worktree_path"])
+    assert path.exists() is (not pushed)
+    assert bool(git(parent, "branch", "--list", "chore/task-reviewer")) is (not pushed)
+    if case == "local-head":
+        assert (path / "local.txt").read_text() == "review fixup never pushed"
+
+
+def test_abandoned_worker_checkout_is_archived_and_restored_on_resume(repo, worker_runtime, monkeypatch):
+    """Producing path: a worker leaves unmerged commits and uncommitted files,
+    then it and its parent go quiet for a week. The sweeper snapshots it under
+    refs/fluid-archive/ and removes it; resuming the worker brings it all back."""
+    import os
+    import time
+    from datetime import datetime, timezone
+
+    from app.core import worktree_reclaim
+    from app.db import turns
+    from app.db.base import get_db
+
+    row, parent, base, _ = repo
+
+    def leave_work(path):
+        commit_in(path, "finding.txt", "committed finding")
+        (path / "code.txt").write_text("edited, never committed\n")
+        (path / "scratch.txt").write_text("untracked notes\n")
+
+    worker_runtime.work["abandoned"] = leave_work
+    outcome = dispatch(worker="abandoned")
+    assert outcome.ok, outcome.error
+    path = Path(database.get_session("abandoned")["worktree_path"])
+    head = git(path, "rev-parse", "HEAD")
+    assert path.is_dir()  # held work: retained at finish
+    for sid in ("abandoned", "parent"):  # the provider is stubbed: record their finished turns
+        turns.record_adhoc_turn(sid, "test", outcome="completed")
+    week_ago = time.time() - 8 * 24 * 3600
+    old = datetime.fromtimestamp(week_ago, timezone.utc).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE sessions SET updated_at = %s, is_active = %s WHERE id IN (%s, %s)",
+                       (old, False, "abandoned", "parent"))
+        cursor.execute("UPDATE turns SET ended_at = %s WHERE session_id IN (%s, %s)", (old, "abandoned", "parent"))
+        cursor.execute("UPDATE checkouts SET created_at = %s", (old,))
+    os.utime(path, (week_ago, week_ago))
+
+    result = asyncio.run(worktree_reclaim.reclaim(row["project_v2_id"], dry_run=False))
+    item = next(i for i in result["items"] if Path(i["path"]) == path.resolve())
+    assert item["decision"] == "archive" and item["applied"], item["reason"]
+    snapshot = git(base, "rev-parse", "refs/fluid-archive/chore/task-abandoned")
+    assert not path.exists() and not git(base, "branch", "--list", "chore/task-abandoned")
+    assert git(base, "rev-parse", snapshot + "^") == head
+    record = checkouts.get_checkout(row["project_v2_id"], settings.effective_instance_id,
+                                    branch="chore/task-abandoned")
+    assert record["status"] == "archived" and record["head_sha"] == snapshot
+
+    assert worker_checkout.restore_reclaimed_worker_checkout("abandoned")
+    assert git(path, "rev-parse", "HEAD") == snapshot
+    assert (path / "scratch.txt").read_text() == "untracked notes\n"
+    assert (path / "code.txt").read_text() == "edited, never committed\n"
+    assert (path / "finding.txt").read_text() == "committed finding"
+    assert subprocess.run(["git", "-C", str(base), "rev-parse", "--verify", "--quiet",
+                           "refs/fluid-archive/chore/task-abandoned"], capture_output=True).returncode != 0
+
+
+def test_restore_fails_clearly_when_the_recorded_tip_is_gone(repo, worker_runtime, monkeypatch):
+    row, parent, base, _ = repo
+    outcome = dispatch(worker="lost")
+    assert outcome.ok, outcome.error
+    path = database.get_session("lost")["worktree_path"]
+    assert not Path(path).exists()
+    checkouts.set_head_sha_for_path(path, "f" * 40, project_id=row["project_v2_id"])
+    assert worker_checkout.restore_reclaimed_worker_checkout("lost") is False
+    assert not Path(path).exists()
+
+
+
+def test_resume_refuses_a_folder_left_by_a_stopped_archive(repo, worker_runtime):
+    row, parent, base, _ = repo
+    worker_runtime.work["stopped"] = lambda path: (path / "scratch.txt").write_text("unfinished\n")
+    outcome = dispatch(worker="stopped")
+    assert outcome.ok, outcome.error
+    path = Path(database.get_session("stopped")["worktree_path"])
+    assert path.is_dir()
+    git(base, "update-ref", "refs/fluid-archive/chore/task-stopped", git(path, "rev-parse", "HEAD"))
+    ok, note = worker_checkout.restore_worker_checkout("stopped")
+    assert ok is False
+    assert "removal stopped part-way" in note and "refs/fluid-archive/chore/task-stopped" in note
+    assert "branch chore/task-stopped-restored refs/fluid-archive/chore/task-stopped" in note
+    assert worker_checkout.restore_reclaimed_worker_checkout("stopped") is False
+
+
+def test_reviewer_finish_keeps_a_starting_commit_only_its_branch_holds(repo, worker_runtime, monkeypatch):
+    """The parent's unpublished tip is the worker's base; the parent then resets its branch."""
+    row, parent, base, parent_tip = repo
+    published = git(base, "rev-parse", "refs/remotes/origin/parent-branch")
+
+    def review(path):
+        git(parent, "reset", "--hard", published)  # the parent drops its unpublished commit
+        git(path, "checkout", "--detach", published)
+
+    worker_runtime.work["orphaned"] = review
+    outcome = dispatch(worker="orphaned")
+    assert outcome.ok, outcome.error
+    path = Path(database.get_session("orphaned")["worktree_path"])
+    assert path.exists()
+    assert git(base, "rev-parse", "chore/task-orphaned") == parent_tip

@@ -17,7 +17,7 @@ import os
 import re
 import subprocess
 import threading
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -279,12 +279,15 @@ def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allo
                           runtime_receipt(parent_path, path), base_note)
 
 
-def _reclaim(main_dir: str, project_id: str, path: Optional[str], branch: str, base_commit: str) -> bool:
+def _reclaim(main_dir: str, project_id: str, path: Optional[str], branch: str, base_commit: str,
+             head_commit: Optional[str] = None) -> bool:
     """Remove a worker checkout and branch only while they hold no work.
 
     Every step is conservative: ``git worktree remove`` without ``--force``
     refuses a dirty or untracked tree, and the ref delete is a compare-and-
     delete against ``base_commit``, so a commit made meanwhile survives.
+    ``head_commit`` is the checkout's expected HEAD when a reviewer moved it
+    onto a pushed commit (default: ``base_commit``).
     """
     from app.core.git_service import git_service
 
@@ -292,7 +295,7 @@ def _reclaim(main_dir: str, project_id: str, path: Optional[str], branch: str, b
         if path and os.path.isdir(path):
             head = git_service._run_git(path, ["rev-parse", "HEAD"], timeout=5)
             status = git_service._run_git(path, ["status", "--porcelain"], timeout=10)
-            if (head.returncode or head.stdout.strip() != base_commit
+            if (head.returncode or head.stdout.strip() != (head_commit or base_commit)
                     or status.returncode or status.stdout.strip()):
                 return False
             if not git_service.remove_worktree(main_dir, path, force=False):
@@ -356,7 +359,51 @@ def reclaim_untouched_worker_checkout(
     main_dir = _main_dir_for(path)
     if not main_dir:
         return False
+    head = git_service._run_git(path, ["rev-parse", "--verify", "HEAD^{commit}"], timeout=5)
+    head_commit = head.stdout.strip() if head.returncode == 0 else ""
+    if head_commit != base_commit:
+        # A reviewer moved HEAD (``git checkout --detach``, ``gh pr checkout``).
+        # Released only when that HEAD is pushed and nothing local is at stake.
+        if not _stranded_review_head(main_dir, path, branch, base_commit, head_commit):
+            return False
+        return _reclaim(main_dir, project_id, path, branch, base_commit, head_commit)
     return _reclaim(main_dir, project_id, path, branch, base_commit)
+
+
+def _stranded_review_head(main_dir: str, path: str, branch: str, base_commit: str, head_commit: str) -> bool:
+    """A worker checkout moved off its own untouched branch onto a pushed commit.
+
+    The own branch must still point at ``base_commit`` (the caller proved its
+    reflog has only its creation), the checkout must not be on that branch,
+    the tree must be clean with only disposable ignored files, HEAD must be
+    reachable from a remote-tracking ref, and so must every other commit the
+    checkout's HEAD visited (a commit made detached before checking out the
+    PR commit survives only in that reflog).
+    """
+    from app.core import worktree_reclaim
+    from app.core.git_service import git_service
+
+    if not _SHA.fullmatch(head_commit or "") or _current_branch(path) == branch:
+        return False
+    tip = git_service._run_git(main_dir, ["rev-parse", "--verify", f"refs/heads/{branch}"], timeout=5)
+    if tip.returncode or tip.stdout.strip() != base_commit:
+        return False
+    status = git_service._run_git(path, ["status", "--porcelain", "--untracked-files=all"], timeout=10)
+    if status.returncode or status.stdout.strip():
+        return False
+    if worktree_reclaim._ignored_reason(path) is not None:
+        return False
+    if not worktree_reclaim._on_remote(main_dir, head_commit):
+        return False
+    # Deleting the branch must not drop the only ref holding its starting
+    # commit (a parent's unpublished commit whose branch was deleted or reset,
+    # or an explicit base commit). Remote-tracking refs cover the default branch.
+    if not worktree_reclaim._held_elsewhere(main_dir, base_commit, branch, None):
+        logger.info("worker_checkout: kept %s: its starting commit %s is held only by its own branch",
+                    branch, base_commit[:12])
+        return False
+    # The starting commit, now known to be held elsewhere, is exempt.
+    return worktree_reclaim._unpublished_history(main_dir, path, None, exempt=(head_commit, base_commit)) == []
 
 
 def discard_unused_worker_checkout(checkout: WorkerCheckout) -> bool:
@@ -387,7 +434,15 @@ def restore_reclaimed_worker_checkout(worker_session_id: str) -> bool:
     at the same deterministic path, without shared runtime links. Returns True
     when nothing needed restoring or the checkout is back at its saved path.
     """
+    return restore_worker_checkout(worker_session_id)[0]
+
+
+def restore_worker_checkout(worker_session_id: str) -> Tuple[bool, Optional[str]]:
+    """:func:`restore_reclaimed_worker_checkout` with a note for the caller
+    when it cannot restore (for example an archive that stopped part-way)."""
     from app.core import checkout_manager, project_resolver
+    from app.core import worktree_reclaim
+    from app.core.git_service import git_service
     from app.db import database
 
     try:
@@ -395,21 +450,31 @@ def restore_reclaimed_worker_checkout(worker_session_id: str) -> bool:
         branch = row.get("branch") or ""
         path = row.get("worktree_path")
         if not is_worker_branch(branch, worker_session_id) or not path:
-            return True
-        if os.path.isdir(path):
-            return True
+            return True, None
         project = project_resolver.resolve_project_v2(dict(row))
+        base_path = _base_checkout_path(project["id"]) if project else None
+        if os.path.isdir(path):
+            ref = worktree_reclaim.ARCHIVE_REF_PREFIX + branch
+            archived = base_path and git_service._run_git(
+                base_path, ["rev-parse", "--verify", "--quiet", ref], timeout=5).returncode == 0
+            if archived:
+                # Automatic cleanup archived it but removal stopped part-way:
+                # the folder may be incomplete, so never resume inside it.
+                return False, ("its checkout was archived but removal stopped part-way, so the folder may be "
+                               f"incomplete; {worktree_reclaim.archive_note(base_path, branch)}. "
+                               "Dispatch a new Task instead")
+            return True, None
         if not project:
-            return False
+            return False, None
         with _project_lock(project["id"]):
             _recreate_branch_from_recorded_tip(project["id"], branch)
             restored = checkout_manager.ensure_checkout(
                 project, branch=branch, provision_runtime=False,
             )
-        return bool(restored) and os.path.realpath(restored) == os.path.realpath(path)
+        return bool(restored) and os.path.realpath(restored) == os.path.realpath(path), None
     except Exception:  # noqa: BLE001 — a refusal, reported by the caller
         logger.warning("worker_checkout: could not restore %s", worker_session_id, exc_info=True)
-        return False
+        return False, None
 
 
 def _recreate_branch_from_recorded_tip(project_id: str, branch: str) -> None:
@@ -420,16 +485,38 @@ def _recreate_branch_from_recorded_tip(project_id: str, branch: str) -> None:
     from app.core.git_service import git_service
     from app.db import checkouts
 
+    from app.core.worktree_reclaim import ARCHIVE_REF_PREFIX
+
     runner = settings.effective_instance_id
     row = checkouts.get_checkout(project_id, runner, branch=branch) or {}
-    base = checkouts.get_checkout(project_id, runner) or {}
     sha = str(row.get("head_sha") or "").strip()
-    base_path = checkout_manager._resolve_checkout_path(base["path"]) if base.get("path") else None
-    if not _SHA.fullmatch(sha) or not base_path or not os.path.isdir(base_path):
+    # The base row whose folder exists (a moved project leaves stale rows).
+    base_path = _base_checkout_path(project_id)
+    if not base_path:
+        base = checkouts.get_checkout(project_id, runner) or {}
+        base_path = checkout_manager._resolve_checkout_path(base["path"]) if base.get("path") else None
+    if not base_path or not os.path.isdir(base_path):
+        return
+    archive_ref = ARCHIVE_REF_PREFIX + branch
+    archived = git_service._run_git(base_path, ["rev-parse", "--verify", "--quiet", archive_ref + "^{commit}"],
+                                    timeout=5)
+    archived_sha = archived.stdout.strip() if archived.returncode == 0 else ""
+    if _SHA.fullmatch(archived_sha):
+        # Automatic cleanup archived this abandoned checkout: its snapshot
+        # (committed uncommitted work included) is the tip to restore.
+        sha = archived_sha
+    if not _SHA.fullmatch(sha):
         return
     exists = git_service._run_git(base_path, ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], timeout=5)
     if exists.returncode != 0:
-        git_service.create_branch(base_path, branch, start_point=sha)
+        if not git_service.create_branch(base_path, branch, start_point=sha):
+            # The checkout step may still find it (a pushed branch on origin).
+            logger.warning("worker_checkout: could not recreate %s at its recorded tip %s", branch, sha[:12])
+    if archived_sha:
+        tip = git_service._run_git(base_path, ["rev-parse", "--verify", f"refs/heads/{branch}"], timeout=5)
+        if tip.returncode == 0 and tip.stdout.strip() == archived_sha:
+            # The branch holds the snapshot again; drop the archive (compare-and-delete).
+            git_service._run_git(base_path, ["update-ref", "-d", archive_ref, archived_sha], timeout=5)
 
 
 # --- Workers that run on another worker -------------------------------------

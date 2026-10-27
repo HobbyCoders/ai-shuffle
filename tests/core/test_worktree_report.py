@@ -99,7 +99,7 @@ def test_report_unions_real_git_and_legacy_registry(mock_db, tmp_path, monkeypat
         return real_git(root, *args, **kwargs)
 
     monkeypatch.setattr(wr, "_git", tracked_git)
-    result = wr.report("p-report")
+    result = wr.report("p-report", include_retired=True)  # full rows: registry ids
     assert result["total"] == 1
     assert ((str(path), ("status", "--porcelain")) in probes) is (state == "valid")
     row = result["projects"][0]["worktrees"][0]
@@ -142,7 +142,7 @@ def test_report_canonical_registry_missing_running_and_unmerged_guards(mock_db, 
     shutil.rmtree(path)  # only the disposable fixture
     git(repo, "worktree", "prune")
     assert database.get_session("report-session")["branch"] is None
-    result = wr.report(project["id"])
+    result = wr.report(project["id"], include_retired=True)
     assert database.get_session("report-session")["branch"] is None  # no self-healing writes
     assert result["total"] == 1
     row = result["projects"][0]["worktrees"][0]
@@ -191,7 +191,7 @@ def test_invalid_project_root_never_discovers_parent_worktrees(mock_db, tmp_path
     if marker is not None:
         (root / ".git").write_text(marker)
 
-    result = wr.report("p-invalid-root")
+    result = wr.report("p-invalid-root", include_retired=True)
     assert result["total"] == 1  # no worktrees inherited from the enclosing repo
     project = result["projects"][0]
     assert project["error"] == "git worktree list failed"
@@ -221,12 +221,12 @@ def test_report_unions_canonical_and_legacy_metadata_and_keeps_branch_mismatch_u
     database.create_worktree("wt-union", repository["id"], "fix/union", str(path))
     checkout = checkouts.upsert_checkout(project["id"], settings.effective_instance_id,
                                          str(path), branch="fix/union")
-    row = wr.report(project["id"])["projects"][0]["worktrees"][0]
+    row = wr.report(project["id"], include_retired=True)["projects"][0]["worktrees"][0]
     assert row["state"] == "valid" and row["reclaimable"] is True
     assert set(row["registry_ids"]) == {"wt-union", checkout["id"]}
 
     git(path, "switch", "-q", "-c", "fix/reassigned")
-    result = wr.report("p-union")
+    result = wr.report("p-union", include_retired=True)
     assert result["total"] == 1 and len(result["projects"]) == 1
     row = result["projects"][0]["worktrees"][0]
     assert row["state"] == "branch_mismatch" and row["reclaimable"] is False

@@ -41,7 +41,10 @@ def repository(tmp_path, monkeypatch):
     monkeypatch.setattr(rc, "_stamp_head", Mock())
     monkeypatch.setattr(rc, "_invalidate", Mock())
     from app.api import git_operations
+    from app.core.github_service import github_service
     monkeypatch.setattr(git_operations, "_release_checkout_sessions", AsyncMock(return_value=True))
+    # No network: GitHub knows no commit of these disposable repositories.
+    monkeypatch.setattr(github_service, "list_commit_pulls", lambda *a, **k: [])
     return repo, source
 
 
@@ -141,7 +144,8 @@ def test_pr_head_must_match_and_open_always_wins(repository, monkeypatch, state,
     path = checkout(repository)
     commit(path)
     git(repo, "remote", "add", "origin", "https://github.com/example/disposable.git")
-    pr = SimpleNamespace(state=state, head_sha=git(path, "rev-parse", "HEAD") if exact else "0" * 40)
+    pr = SimpleNamespace(state=state, head_sha=git(path, "rev-parse", "HEAD") if exact else "0" * 40,
+                         base_branch="main")
     if state == "OPEN":
         git(repo, "merge", "--ff-only", "feature")  # integrated but still protected by the open PR
     monkeypatch.setattr(github_service, "list_pulls", lambda *a, **k: [pr])
@@ -385,7 +389,7 @@ def test_automatic_schedule_is_delayed_and_low_frequency(monkeypatch):
     monkeypatch.setattr(rc, "automatic_pass", one_pass)
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(rc.periodic_reclaim())
-    assert passes == [True] and delays == [60, 6 * 3600]
+    assert passes == [True] and delays == [60, 2 * 3600]
 
 
 def test_setting_defaults_on_and_supports_opt_out(monkeypatch):
