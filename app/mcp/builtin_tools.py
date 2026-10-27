@@ -2924,21 +2924,16 @@ def create_builtin_tools_server(
     @tool(
         "WorktreeReport",
         "List this worker's app-managed git worktrees per project with what "
-        "decides whether each can be removed: bound sessions (and whether one "
-        "is running), PR state, uncommitted changes, unpushed commits, whether "
-        "the branch is proven integrated (merged, squash-merged or every change "
-        "already in the default branch). Each row's cleanup field is the "
-        "automatic cleanup's own verdict: when it removes the worktree, or "
-        "exactly why it is kept. Retired history is folded into counts. "
-        "Read-only; it never deletes. Removal stays with the app — never git "
-        "worktree remove or rm -rf a worktree.",
+        "decides whether each can be removed: bound sessions, PR state, "
+        "uncommitted changes, unpushed commits, integration proof. cleanup is "
+        "the automatic cleanup's verdict. Read-only; it never deletes. Removal "
+        "stays with the app — never git worktree remove or rm -rf a worktree.",
         {
             "type": "object",
             "properties": {
                 "project": {"type": "string", "description": "Optional project name, id or path."},
                 "reclaimable_only": {"type": "boolean", "description": "List only removable worktrees."},
-                "include_retired": {"type": "boolean",
-                                    "description": "Also list archived/completed registrations (large)."},
+                "include_retired": {"type": "boolean", "description": "Also list retired registrations."},
             },
             "additionalProperties": False,
         },
