@@ -943,7 +943,9 @@ class WorktreeManager:
                 row = next((r for r in rows if r["id"] == worktree_id), None)
                 if not row or row["runner_id"] != settings.effective_instance_id or not row.get("branch"):
                     raise WorktreeError("Forget refused: not a local branch checkout of this project.")
-                base = next((r for r in rows if r["runner_id"] == row["runner_id"] and not r.get("branch")), None)
+                # A moved project leaves stale base rows; use the real one.
+                from app.core.worktree_report import choose_base_checkout
+                base = choose_base_checkout([r for r in rows if r["runner_id"] == row["runner_id"]])
                 if not base or not base.get("path"):
                     raise WorktreeError("Forget refused: project checkout metadata missing.")
                 main_dir = _resolve_checkout_path(base["path"])

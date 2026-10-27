@@ -134,6 +134,8 @@ class PullRequest:
     updated_at: str
     mergeable: Optional[bool] = None
     head_sha: Optional[str] = None
+    # Set by list_commit_pulls: the commit GitHub lists as part of this PR.
+    contains_commit: Optional[str] = None
 
 
 @dataclass
@@ -216,6 +218,7 @@ class GitHubService:
         args: List[str],
         timeout: int = None,
         stdin_data: Optional[str] = None,
+        quiet: bool = False,
     ) -> subprocess.CompletedProcess:
         """
         Run a gh CLI command.
@@ -224,6 +227,7 @@ class GitHubService:
             args: Command arguments (excluding 'gh')
             timeout: Optional timeout in seconds (defaults to self.timeout)
             stdin_data: Optional string to pass via stdin
+            quiet: Log a failure at debug level (the caller expects some)
 
         Returns:
             CompletedProcess with stdout, stderr, and returncode
@@ -255,7 +259,8 @@ class GitHubService:
             if result.returncode != 0:
                 # gh's error text is not expected to carry a credential, but
                 # it is free text from another program: redact before logging.
-                logger.warning("gh command failed: %s", redact_export_text(result.stderr or ""))
+                (logger.debug if quiet else logger.warning)(
+                    "gh command failed: %s", redact_export_text(result.stderr or ""))
 
             return result
         except subprocess.TimeoutExpired:
@@ -609,6 +614,39 @@ class GitHubService:
                 head_sha=pr_data.get('headRefOid'),
             ))
 
+        return pulls
+
+    def list_commit_pulls(self, repo: str, sha: str) -> List[PullRequest]:
+        """Pull requests GitHub associates with one commit.
+
+        GitHub returns the merged PR that introduced the commit (squash and
+        rebase merges included: the PR's own commits stay associated), or the
+        open PRs that contain it. ``[]`` when GitHub does not know the commit
+        (it was never pushed). Raises GitHubCliError when gh cannot answer.
+        """
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha or ""):
+            raise GitHubCliError("list_commit_pulls needs a full commit SHA")
+        # An unpushed commit answers 422: expected, so not a warning.
+        result = self._run_gh(["api", f"repos/{repo}/commits/{sha}/pulls"], quiet=True)
+        if result.returncode != 0:
+            if "No commit found" in (result.stderr or "") or "HTTP 422" in (result.stderr or ""):
+                return []
+            raise GitHubCliError(f"commit pull lookup failed for {repo}", stderr=result.stderr)
+        try:
+            data = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError as e:
+            raise GitHubCliError(f"commit pull lookup returned invalid JSON: {e}") from e
+        pulls = []
+        for pr in data if isinstance(data, list) else []:
+            head, base = pr.get('head') or {}, pr.get('base') or {}
+            state = 'MERGED' if pr.get('merged_at') else str(pr.get('state') or 'unknown').upper()
+            pulls.append(PullRequest(
+                number=pr.get('number', 0), title=pr.get('title', ''), body='',
+                state=state, head_branch=head.get('ref', ''), base_branch=base.get('ref', ''),
+                author=(pr.get('user') or {}).get('login', 'unknown'), url=pr.get('html_url', ''),
+                created_at=pr.get('created_at', ''), updated_at=pr.get('updated_at', ''),
+                head_sha=head.get('sha'), contains_commit=sha,
+            ))
         return pulls
 
     def list_inbox_pulls(self, repo: str, state: str = 'open', limit: int = 50) -> List[Dict[str, Any]]:

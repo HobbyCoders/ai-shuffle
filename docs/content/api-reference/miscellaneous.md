@@ -439,12 +439,37 @@ Worktrees give a session its own branch and folder. Create one with [`POST /api/
 Safe local checkout reclaim keeps uncommitted or unpushed work, protected or busy
 branches, processes inside the checkout, and recently active checkouts. Apply must
 match the previewed `{path, head_sha}` pairs and rechecks safety before removal.
-Ignored files also keep a checkout, except for the already-handled dependency
-folders (`node_modules`, `venv`, `.venv`) and known disposable caches:
-`.pytest_cache`, `__pycache__` and `.svelte-kit` directories, plus `*.pyc` files.
-Those caches alone do not block reclaim. Ignored `dist`, `.env*`, other outputs
-and unknown content still keep the checkout; unignored files still count as
-uncommitted work.
+A branch counts as integrated when it is contained in the default branch, when
+merging it changes nothing there (a squash merge), when every one of its commits'
+changes is already there (`git cherry`), or when GitHub shows a merged pull request
+at that commit or containing it. Ignored files also keep a checkout, except for the
+already-handled dependency folders (`node_modules`, `venv`, `.venv`), known tool
+caches (`.pytest_cache`, `__pycache__`, `.svelte-kit`, `.ruff_cache`, `.mypy_cache`,
+`.hypothesis`, `.turbo`, `.parcel-cache`, `.eslintcache`, `*.pyc`, `*.tsbuildinfo`)
+and a `build` or `dist` folder directly beside a `package.json`. Other ignored
+content (`uploads`, `mockups`, `.env*`, a `dist` folder with no `package.json`)
+keeps the checkout, and the reason names it, for example `holds ignored files:
+uploads/ (4 files)`. Unignored files still count as uncommitted work.
+
+The automatic pass (on by default; `WORKTREE_AUTO_RECLAIM_ENABLED=false` turns it
+off) runs every 2 hours over every local project, at most 50 checkouts and 2
+minutes per project, and applies a decision only after it has held for 24 hours.
+Besides integrated checkouts it also removes:
+
+- a worker checkout (`chore/task-*`) that a reviewer moved to another commit
+  (detached, or `gh pr checkout`), when its own branch has no commits, the tree is
+  clean and the commit it shows is pushed, integrated or part of a pull request;
+- local branches with no worktree that are proven integrated, or whose tip is a
+  pushed branch with a merged or closed pull request, and that no active session or
+  open pull request uses;
+- a worker checkout that still holds unintegrated work after the worker and its
+  parent session have been idle for 7 days, with no open pull request. Its work,
+  uncommitted files included, is first committed to a snapshot kept at
+  `refs/fluid-archive/<branch>`; resuming that worker restores it, and
+  `git branch <branch> refs/fluid-archive/<branch>` restores it by hand. Chat
+  checkouts and named branches are never archived.
+
+Every branch delete is a compare-and-delete against the tip that was checked.
 
 **Auth:** Required for every worktree endpoint.
 

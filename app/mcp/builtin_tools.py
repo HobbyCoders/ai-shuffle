@@ -2925,14 +2925,20 @@ def create_builtin_tools_server(
         "WorktreeReport",
         "List this worker's app-managed git worktrees per project with what "
         "decides whether each can be removed: bound sessions (and whether one "
-        "is running), PR state, uncommitted changes, unpushed commits, merged "
-        "into the default branch. Read-only; it never deletes. Removal stays "
-        "with the app — never git worktree remove or rm -rf a worktree.",
+        "is running), PR state, uncommitted changes, unpushed commits, whether "
+        "the branch is proven integrated (merged, squash-merged or every change "
+        "already in the default branch). Each row's cleanup field is the "
+        "automatic cleanup's own verdict: when it removes the worktree, or "
+        "exactly why it is kept. Retired history is folded into counts. "
+        "Read-only; it never deletes. Removal stays with the app — never git "
+        "worktree remove or rm -rf a worktree.",
         {
             "type": "object",
             "properties": {
                 "project": {"type": "string", "description": "Optional project name, id or path."},
                 "reclaimable_only": {"type": "boolean", "description": "List only removable worktrees."},
+                "include_retired": {"type": "boolean",
+                                    "description": "Also list archived/completed registrations (large)."},
             },
             "additionalProperties": False,
         },
@@ -2943,7 +2949,8 @@ def create_builtin_tools_server(
         from app.core.worktree_report import report
         from app.db.async_database import run_sync
 
-        result = await run_sync(report, (args.get("project") or "").strip() or None)
+        result = await run_sync(report, (args.get("project") or "").strip() or None,
+                                include_retired=bool(args.get("include_retired")))
         if args.get("reclaimable_only"):
             for project in result["projects"]:
                 project["worktrees"] = [row for row in project["worktrees"] if row["reclaimable"]]

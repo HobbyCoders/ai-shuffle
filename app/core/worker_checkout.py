@@ -279,12 +279,15 @@ def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allo
                           runtime_receipt(parent_path, path), base_note)
 
 
-def _reclaim(main_dir: str, project_id: str, path: Optional[str], branch: str, base_commit: str) -> bool:
+def _reclaim(main_dir: str, project_id: str, path: Optional[str], branch: str, base_commit: str,
+             head_commit: Optional[str] = None) -> bool:
     """Remove a worker checkout and branch only while they hold no work.
 
     Every step is conservative: ``git worktree remove`` without ``--force``
     refuses a dirty or untracked tree, and the ref delete is a compare-and-
     delete against ``base_commit``, so a commit made meanwhile survives.
+    ``head_commit`` is the checkout's expected HEAD when a reviewer moved it
+    onto a pushed commit (default: ``base_commit``).
     """
     from app.core.git_service import git_service
 
@@ -292,7 +295,7 @@ def _reclaim(main_dir: str, project_id: str, path: Optional[str], branch: str, b
         if path and os.path.isdir(path):
             head = git_service._run_git(path, ["rev-parse", "HEAD"], timeout=5)
             status = git_service._run_git(path, ["status", "--porcelain"], timeout=10)
-            if (head.returncode or head.stdout.strip() != base_commit
+            if (head.returncode or head.stdout.strip() != (head_commit or base_commit)
                     or status.returncode or status.stdout.strip()):
                 return False
             if not git_service.remove_worktree(main_dir, path, force=False):
@@ -356,7 +359,39 @@ def reclaim_untouched_worker_checkout(
     main_dir = _main_dir_for(path)
     if not main_dir:
         return False
+    head = git_service._run_git(path, ["rev-parse", "--verify", "HEAD^{commit}"], timeout=5)
+    head_commit = head.stdout.strip() if head.returncode == 0 else ""
+    if head_commit != base_commit:
+        # A reviewer moved HEAD (``git checkout --detach``, ``gh pr checkout``).
+        # Released only when that HEAD is pushed and nothing local is at stake.
+        if not _stranded_review_head(main_dir, path, branch, base_commit, head_commit):
+            return False
+        return _reclaim(main_dir, project_id, path, branch, base_commit, head_commit)
     return _reclaim(main_dir, project_id, path, branch, base_commit)
+
+
+def _stranded_review_head(main_dir: str, path: str, branch: str, base_commit: str, head_commit: str) -> bool:
+    """A worker checkout moved off its own untouched branch onto a pushed commit.
+
+    The own branch must still point at ``base_commit`` (the caller proved its
+    reflog has only its creation), the checkout must not be on that branch,
+    the tree must be clean with only disposable ignored files, and HEAD must be
+    reachable from a remote-tracking ref.
+    """
+    from app.core import worktree_reclaim
+    from app.core.git_service import git_service
+
+    if not _SHA.fullmatch(head_commit or "") or _current_branch(path) == branch:
+        return False
+    tip = git_service._run_git(main_dir, ["rev-parse", "--verify", f"refs/heads/{branch}"], timeout=5)
+    if tip.returncode or tip.stdout.strip() != base_commit:
+        return False
+    status = git_service._run_git(path, ["status", "--porcelain", "--untracked-files=all"], timeout=10)
+    if status.returncode or status.stdout.strip():
+        return False
+    if worktree_reclaim._ignored_reason(path) is not None:
+        return False
+    return worktree_reclaim._on_remote(main_dir, head_commit)
 
 
 def discard_unused_worker_checkout(checkout: WorkerCheckout) -> bool:
@@ -420,16 +455,38 @@ def _recreate_branch_from_recorded_tip(project_id: str, branch: str) -> None:
     from app.core.git_service import git_service
     from app.db import checkouts
 
+    from app.core.worktree_reclaim import ARCHIVE_REF_PREFIX
+
     runner = settings.effective_instance_id
     row = checkouts.get_checkout(project_id, runner, branch=branch) or {}
-    base = checkouts.get_checkout(project_id, runner) or {}
     sha = str(row.get("head_sha") or "").strip()
-    base_path = checkout_manager._resolve_checkout_path(base["path"]) if base.get("path") else None
-    if not _SHA.fullmatch(sha) or not base_path or not os.path.isdir(base_path):
+    # The base row whose folder exists (a moved project leaves stale rows).
+    base_path = _base_checkout_path(project_id)
+    if not base_path:
+        base = checkouts.get_checkout(project_id, runner) or {}
+        base_path = checkout_manager._resolve_checkout_path(base["path"]) if base.get("path") else None
+    if not base_path or not os.path.isdir(base_path):
+        return
+    archive_ref = ARCHIVE_REF_PREFIX + branch
+    archived = git_service._run_git(base_path, ["rev-parse", "--verify", "--quiet", archive_ref + "^{commit}"],
+                                    timeout=5)
+    archived_sha = archived.stdout.strip() if archived.returncode == 0 else ""
+    if _SHA.fullmatch(archived_sha):
+        # Automatic cleanup archived this abandoned checkout: its snapshot
+        # (committed uncommitted work included) is the tip to restore.
+        sha = archived_sha
+    if not _SHA.fullmatch(sha):
         return
     exists = git_service._run_git(base_path, ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], timeout=5)
     if exists.returncode != 0:
-        git_service.create_branch(base_path, branch, start_point=sha)
+        if not git_service.create_branch(base_path, branch, start_point=sha):
+            # The checkout step may still find it (a pushed branch on origin).
+            logger.warning("worker_checkout: could not recreate %s at its recorded tip %s", branch, sha[:12])
+    if archived_sha:
+        tip = git_service._run_git(base_path, ["rev-parse", "--verify", f"refs/heads/{branch}"], timeout=5)
+        if tip.returncode == 0 and tip.stdout.strip() == archived_sha:
+            # The branch holds the snapshot again; drop the archive (compare-and-delete).
+            git_service._run_git(base_path, ["update-ref", "-d", archive_ref, archived_sha], timeout=5)
 
 
 # --- Workers that run on another worker -------------------------------------

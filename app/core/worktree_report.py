@@ -56,9 +56,63 @@ def parse_worktree_list(porcelain: str) -> List[Dict[str, Any]]:
     return items
 
 
+def integration_proof(repo: str, default: str, head: Optional[str], pulls=(), *,
+                      label: str = "the default branch", local: bool = True) -> Optional[str]:
+    """How ``head`` is proven integrated into ``default``, or None when it is not.
+
+    The one proof the sweeper and the report share. Each step only reads Git:
+    (a) ancestry; (b) ``merge-tree --write-tree`` yields default's own tree
+    (a squash or rebase merge); (c) patch equivalence: ``git cherry`` lists no
+    commit whose change is missing from default (catches squash merges that
+    main later edited); (d) a merged PR whose head is exactly ``head``, or that
+    GitHub lists ``head`` as one of its commits (``pulls`` entries with
+    ``contains_commit``, from ``github_service.list_commit_pulls``).
+    Errors and unsupported Git versions are "not proven", never "proven".
+    """
+    if not head or not default:
+        return None
+    if not local:
+        return _pr_proof(head, pulls)
+    try:
+        probe = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", head, default],
+                               capture_output=True, timeout=15, env=scrub_child_env())
+        if probe.returncode == 0:
+            return f"contained in {label}"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    tree = _git(repo, "rev-parse", "--verify", default + "^{tree}")
+    merged = _git(repo, "merge-tree", "--write-tree", default, head, timeout=30)
+    if tree and merged and merged.strip() == tree.strip():
+        return f"squash-merged (merging it changes nothing in {label})"
+    cherry = _git(repo, "cherry", default, head, timeout=60)
+    lines = [line for line in (cherry or "").splitlines() if line.strip()]
+    if cherry is not None and lines and all(line.startswith("- ") for line in lines):
+        return f"every commit's change is already in {label}"
+    return _pr_proof(head, pulls)
+
+
+def _pr_proof(head: str, pulls) -> Optional[str]:
+    for pr in pulls or ():
+        if str(getattr(pr, "state", "")).lower() != "merged":
+            continue
+        number = getattr(pr, "number", None)
+        name = f"PR #{number}" if number else "a PR"
+        if getattr(pr, "head_sha", None) == head:
+            return f"{name} merged at this commit"
+        if getattr(pr, "contains_commit", None) == head:
+            return f"{name} merged with this commit in it"
+    return None
+
+
 def assess(item: Dict[str, Any], sessions: List[Dict[str, Any]], dirty: Optional[int],
-           ahead: Optional[int], merged_into_default: Optional[bool]) -> Dict[str, Any]:
-    """Pure: decide ``reclaimable`` and the reason for one worktree."""
+           ahead: Optional[int], merged_into_default, pushed: Optional[bool] = None) -> Dict[str, Any]:
+    """Pure: decide ``reclaimable`` and the reason for one worktree.
+
+    ``merged_into_default`` is the integration proof (a description, or True)
+    when the branch is proven integrated; such a branch is never described as
+    unmerged or as holding unpushed work. ``pushed`` is True when a
+    remote-tracking ref contains the commits ahead of the default branch.
+    """
     running = [s for s in sessions if s.get("running")]
     pr_states = {str(s.get("pr_state") or "").lower() for s in sessions if s.get("pr_state")}
     pr_done = bool(pr_states) and pr_states <= _DONE_PR_STATES
@@ -72,13 +126,18 @@ def assess(item: Dict[str, Any], sessions: List[Dict[str, Any]], dirty: Optional
     if not (pr_done or merged_into_default):
         reasons.append("PR still open" if "open" in pr_states else "branch not merged and no closed PR")
     if ahead and not pr_done and not merged_into_default:
-        reasons.append(f"{ahead} unpushed commit(s)")
+        reasons.append(f"{ahead} commit(s) not in the default branch, all pushed" if pushed
+                       else f"{ahead} unpushed commit(s)")
+    reason = "; ".join(reasons) if reasons else "safe to remove"
+    if merged_into_default and isinstance(merged_into_default, str):
+        reason += f" (integrated: {merged_into_default})"
     return {
         "path": item["path"], "branch": item.get("branch"), "prunable": item.get("prunable", False),
         "sessions": [{"id": s["id"], "title": s.get("title"), "running": bool(s.get("running")),
                       "pr_state": s.get("pr_state"), "pr_number": s.get("pr_number")} for s in sessions],
-        "dirty_files": dirty, "unpushed_commits": ahead, "merged_into_default": merged_into_default,
-        "reclaimable": not reasons, "reason": "safe to remove" if not reasons else "; ".join(reasons),
+        "dirty_files": dirty, "unpushed_commits": None if merged_into_default else ahead,
+        "merged_into_default": merged_into_default,
+        "reclaimable": not reasons, "reason": reason,
     }
 
 
@@ -143,8 +202,38 @@ def _is_checkout_root(path: str) -> bool:
     return bool(root and root.strip() and _path_key(root.strip()) == _path_key(path))
 
 
-def _project_repos() -> List[Dict[str, Any]]:
-    """Union of local legacy registries and canonical runner checkouts."""
+_RETIRED_CHECKOUT_STATUSES = {"archived", "removed", "deleted"}
+_RETIRED_WORKTREE_STATUSES = {"completed", "deleted"}
+
+
+def choose_base_checkout(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The base row (branch NULL) of one project on one runner that is real.
+
+    A moved project leaves several base rows behind, some pointing at folders
+    that no longer exist. Prefer a row whose folder exists and is a Git checkout
+    root, then an active row, then the one containing the most registered
+    branch checkouts, then the oldest (created_at, id): a deterministic choice.
+    """
+    bases = [c for c in rows if not c.get("branch") and c.get("path")]
+    if len(bases) < 2:
+        return bases[0] if bases else None
+    branch_paths = [Path(_absolute(c["path"])) for c in rows if c.get("branch") and c.get("path")]
+
+    def rank(row):
+        path = _absolute(row["path"])
+        contained = sum(1 for p in branch_paths if p.is_relative_to(path))
+        return (not _is_checkout_root(path), (row.get("status") or "active") != "active",
+                -contained, str(row.get("created_at") or ""), str(row.get("id") or ""))
+
+    return min(bases, key=rank)
+
+
+def _project_repos(*, active_only: bool = False) -> List[Dict[str, Any]]:
+    """Union of local legacy registries and canonical runner checkouts.
+
+    ``active_only`` leaves out retired history (archived checkout rows and
+    completed legacy worktrees), as the sweeper does.
+    """
     from app.core.config import settings
     from app.db import checkouts, database, projects_v2
 
@@ -163,13 +252,14 @@ def _project_repos() -> List[Dict[str, Any]]:
         entry["registered"].extend(
             {"path": _absolute(w["worktree_path"]), "branch": w["branch_name"], "registry_ids": [w["id"]]}
             for w in registered if w.get("worktree_path")
+            and not (active_only and w.get("status") in _RETIRED_WORKTREE_STATUSES)
         )
     for project in projects_v2.list_projects_v2():
         local = [c for c in checkouts.list_checkouts(project["id"])
                  if c["runner_id"] == settings.effective_instance_id and c.get("path")]
         if not local:
             continue
-        base = next((c for c in local if not c.get("branch")), local[0])
+        base = choose_base_checkout(local) or local[0]
         path = _absolute(base["path"])
         entry = repos.setdefault(_path_key(path), {
             "project": project.get("name") or project["id"], "project_id": project["id"],
@@ -179,15 +269,60 @@ def _project_repos() -> List[Dict[str, Any]]:
         entry["registered"].extend(
             {"path": _absolute(c["path"]), "branch": c["branch"], "registry_ids": [c["id"]]}
             for c in local if c.get("branch")
+            and not (active_only and c.get("status") in _RETIRED_CHECKOUT_STATUSES)
         )
     return list(repos.values())
 
 
-def report(project: Optional[str] = None) -> Dict[str, Any]:
-    """Blocking. Include registry-only paths; never inspect an enclosing repo as a worktree."""
+def _planner(project_sources, source):
+    """The sweeper's dry-run verdicts for this project, or an error string."""
+    from app.core import worktree_reclaim
+
+    local = project_sources.get(_path_key(source["path"]))
+    if local is None:
+        return {}, "automatic cleanup does not cover this project on this worker (no local Git base checkout)"
+    try:
+        return worktree_reclaim.plan_preview(local), None
+    except Exception as exc:  # noqa: BLE001 — reported, never fatal to the report
+        return {}, f"automatic cleanup cannot inspect this project: {exc}"
+
+
+def _compact(row: Dict[str, Any], verbose: bool) -> Dict[str, Any]:
+    """Drop empty and default fields: the default report must stay small.
+
+    ``dirty_files`` and ``unpushed_commits`` stay when unknown (None): that is
+    information, not an empty value.
+    """
+    if verbose:
+        return row
+    keep = {"path", "branch", "reclaimable", "reason", "cleanup"}
+    out = {k: v for k, v in row.items()
+           if k in keep or (k in ("dirty_files", "unpushed_commits") and v is None and row.get("state") != "missing")
+           or (k != "registry_ids" and v not in (None, False, [], "", 0) and not (k == "state" and v == "valid"))}
+    if out.get("sessions"):
+        out["sessions"] = [{k: v for k, v in s.items() if v not in (None, False, "")} for s in out["sessions"]]
+    return out
+
+
+def report(project: Optional[str] = None, *, include_retired: bool = False) -> Dict[str, Any]:
+    """Blocking. Include registry-only paths; never inspect an enclosing repo as a worktree.
+
+    Each row's ``cleanup`` is the automatic sweeper's own dry-run verdict
+    (``worktree_reclaim.plan_preview``): when it will be removed, or exactly
+    why it is kept. Retired history (archived/completed registrations) is left
+    out unless ``include_retired``; registrations whose folder and branch are
+    both gone are folded into ``history_folded``.
+    """
     sessions = _sessions_by_path()
     projects = []
-    for source in _project_repos():
+    project_sources: Dict[str, Any] = {}
+    try:
+        from app.core import worktree_reclaim
+
+        project_sources = {_path_key(s["path"]): s for s in worktree_reclaim._local_sources()}
+    except Exception:  # noqa: BLE001 — each project then reports the gap
+        logger.warning("WorktreeReport: automatic cleanup sources unavailable", exc_info=True)
+    for source in _project_repos(active_only=not include_retired):
         repo = {k: v for k, v in source.items() if k not in {"registered", "aliases"}}
         names = [repo["project"], repo["project_id"], repo["path"], *source.get("aliases", [])]
         if project and project.casefold() not in {str(n).casefold() for n in names}:
@@ -195,17 +330,21 @@ def report(project: Optional[str] = None) -> Dict[str, Any]:
         repo_valid = _is_checkout_root(repo["path"])
         listing = _git(repo["path"], "worktree", "list", "--porcelain") if repo_valid else None
         items = {_path_key(i["path"]): i for i in parse_worktree_list(listing or "")[1:]}
+        registered_keys = set()
         for registered in source.get("registered", []):
             key = _path_key(registered["path"])
+            registered_keys.add(key)
             item = items.setdefault(key, dict(registered))
             if registered.get("branch") and registered["branch"] != item.get("branch"):
                 item.setdefault("bound_branches", []).append(registered["branch"])
             item.setdefault("registry_ids", []).extend(
                 i for i in registered.get("registry_ids", []) if i not in item.get("registry_ids", [])
             )
+        planned, planner_error = _planner(project_sources, source) if repo_valid else ({}, None)
         default = ((_git(repo["path"], "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
                     if repo_valid else None) or "origin/main").strip()
         rows = []
+        folded = 0
         for key, item in items.items():
             path = item["path"]
             state, error, binding_warning = "valid", None, None
@@ -221,8 +360,8 @@ def report(project: Optional[str] = None) -> Dict[str, Any]:
                 if mismatches:
                     state = "branch_mismatch"
                     binding_warning = (
-                        f"Checkout is on {actual!r}, not the bound branch {', '.join(mismatches)!r}; "
-                        "counts describe the actual checkout. Session use and cleanup remain blocked."
+                        f"Checkout is on {actual or 'a detached HEAD'!s}, not the bound branch "
+                        f"{', '.join(mismatches)}; counts describe the actual checkout."
                     )
                     error = binding_warning
                 item["branch"] = actual
@@ -237,6 +376,16 @@ def report(project: Optional[str] = None) -> Dict[str, Any]:
                     else item.get("head") if state == "missing" else None)
             if not head and state == "missing" and item.get("branch") and repo_valid:
                 head = (_git(repo["path"], "rev-parse", "--verify", f"refs/heads/{item['branch']}") or "").strip()
+            row_sessions = sessions.get(key, [])
+            plan = planned.get(key)
+            if plan and plan.get("pr_states"):
+                # GitHub's answer from the sweeper's lookup beats a session's cached PR state.
+                row_sessions = [{**s, "pr_state": plan["pr_states"].get(s.get("pr_number"), s.get("pr_state"))}
+                                for s in row_sessions]
+            if (state == "missing" and repo_valid and not head and not row_sessions and not item.get("locked")
+                    and not include_retired):
+                folded += 1  # folder and branch both gone: history, not a worktree
+                continue
             comparison_repo = path if root_valid else repo["path"]
             can_compare = root_valid or (repo_valid and state == "missing")
             ahead_out = (_git(comparison_repo, "rev-list", "--count", f"{default}..{head}")
@@ -244,25 +393,58 @@ def report(project: Optional[str] = None) -> Dict[str, Any]:
             ahead = int(ahead_out.strip()) if ahead_out and ahead_out.strip().isdigit() else None
             merged = None
             if head and can_compare:
-                try:
-                    probe = subprocess.run(["git", "-C", comparison_repo, "merge-base", "--is-ancestor", head, default],
-                                           capture_output=True, timeout=15, env=scrub_child_env())
-                    merged = probe.returncode == 0 if probe.returncode in (0, 1) else None
-                except (OSError, subprocess.SubprocessError):
-                    pass
-            row = assess(item, sessions.get(key, []), dirty, ahead, merged)
+                # Reuse the sweeper's proof for this exact HEAD (it can also use
+                # an exact merged PR head); compute it only when the planner
+                # stopped before proving anything.
+                planned_proof = plan.get("proof") if plan and plan.get("head_sha") == head else None
+                merged = planned_proof or integration_proof(comparison_repo, default, head, label=default) or False
+            pushed = bool(ahead and not merged and _git(
+                comparison_repo, "for-each-ref", "--count=1", "--format=%(refname)", "--contains", head, "refs/remotes"))
+            row = assess(item, row_sessions, dirty, ahead, merged, pushed)
             row.update(state=state, registry_ids=item.get("registry_ids", []), binding_warning=binding_warning,
                        directory_preserved=state in {"invalid", "branch_mismatch"})
             if state in {"invalid", "branch_mismatch"}:
                 row["reclaimable"] = False
             if error:
                 row["reason"] = error if row["reason"] == "safe to remove" else error + "; " + row["reason"]
-            rows.append(row)
+            if plan:
+                row["cleanup"] = plan["cleanup"]
+            elif key not in registered_keys:
+                row["cleanup"] = "kept: not registered with the app; automatic cleanup never touches it"
+            else:
+                row["cleanup"] = "kept: " + (planner_error or "automatic cleanup could not inspect it")
+            rows.append(_compact(row, include_retired))
+        archived = _archived_summary(repo["path"]) if repo_valid else None
         projects.append({**repo, "worktrees": rows,
                          **({"error": "git worktree list failed"} if listing is None else {}),
-                         "reclaimable": sum(1 for row in rows if row["reclaimable"]), "total": len(rows)})
+                         **({"cleanup_error": planner_error} if planner_error else {}),
+                         **({"history_folded": folded} if folded else {}),
+                         **({"archived": archived} if archived else {}),
+                         "reclaimable": sum(1 for row in rows if row["reclaimable"]),
+                         "removed_automatically": sum(1 for row in rows if not row["cleanup"].startswith("kept")),
+                         "total": len(rows)})
     total = sum(p.get("total", 0) for p in projects)
     reclaimable = sum(p.get("reclaimable", 0) for p in projects)
+    automatic = sum(p.get("removed_automatically", 0) for p in projects)
+    folded = sum(p.get("history_folded", 0) for p in projects)
+    summary = (f"{total} worktrees: {automatic} will be removed by automatic cleanup; "
+               f"{reclaimable} hold nothing that would be lost")
+    if folded:
+        summary += f"; {folded} retired registrations (folder and branch both gone) folded into counts"
     return {"projects": projects, "total": total, "reclaimable": reclaimable,
-            "summary": f"{reclaimable} of {total} worktrees can be removed safely",
-            "note": "Report only. Remove worktrees through the app, never with git worktree remove or rm -rf."}
+            "removed_automatically": automatic, "summary": summary,
+            "note": "Report only. Automatic cleanup removes the rows whose cleanup says so; remove anything else "
+                    "through the app, never with git worktree remove or rm -rf."}
+
+
+def _archived_summary(repo: str) -> Optional[Dict[str, Any]]:
+    """Abandoned worker checkouts snapshotted by automatic cleanup: a count and how to restore one."""
+    from app.core import worktree_reclaim
+
+    names = worktree_reclaim.archived_refs(repo)
+    if not names:
+        return None
+    prefix = worktree_reclaim.ARCHIVE_REF_PREFIX
+    return {"count": len(names),
+            "list": f"git -C {repo} for-each-ref {prefix.rstrip('/')}",
+            "restore": f"git -C {repo} branch <branch> {prefix}<branch>"}
