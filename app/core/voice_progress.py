@@ -3,11 +3,16 @@
 Only public text and lifecycle facts cross this boundary. Tool output, reasoning
 and per-token notifications never become speech. No model is called to summarize.
 
-Routine progress (a request was received, interim chat text, parking, a task
-starting, a peer's report) goes to the voice model as quiet context
+Routine progress (a request was received, interim chat text, a task starting,
+a peer's report) goes to the voice model as quiet context
 (``session.thinking.append``) that it uses when the caller asks. Only outcomes
-the caller must hear (a result, a failure, a finished task, a request for
-approval) are sent for speech (``session.commentary.append``).
+the caller must hear (a result, a milestone the chat wrote before it parked on
+background work, a failure, a finished task, a request for approval) are sent
+for speech (``session.commentary.append``).
+
+The voice speaks as the one doing the work, so the notes frame the chat's own
+words for a first-person retelling; they are data for the voice model, never
+lines to read out word for word.
 
 Spoken notes wait for a natural pause: the transport supplies ``quiet`` and a
 finished job or an approval question is held until neither side is talking
@@ -38,15 +43,27 @@ PAUSE_MAX_WAIT = 30.0
 # so its outcome is read from the row. At most one check per interval while a
 # submitted row has not started.
 STEERED = "steered"
-STEERED_NOTE = ("The request reached the chat task that is already running; the chat agent sees it "
-                "at its next step and its result comes with that task. Do not report it as finished.")
+STEERED_NOTE = ("The request was added to the work already running and is picked up at its next step; "
+                "its result comes with that work. Do not report it as finished.")
 # A request forwarded to the worker that runs the chat and folded into the
 # turn that was already running there: that turn has ended, so its reply
 # (already read out) is the answer (#700).
-REMOTE_STEERED_NOTE = ("The request reached the chat task that was already running on the worker that "
-                       "runs this conversation, and that task has finished; its reply is the answer. "
+REMOTE_STEERED_NOTE = ("The request was added to the work that was already running on the worker that "
+                       "runs this conversation, and that work has finished; its reply is the answer. "
                        "Do not start the request again.")
 ROW_CHECK_INTERVAL = 5.0
+
+# How the chat's own words reach the voice. Each frames a first-person retelling:
+# the voice is the one the caller is talking to, so it tells the work as its own.
+RESULT_NOTE = ("Your work on the request is done. Tell the caller in your own words, in the first person "
+               "and completely: the outcome, what changed, anything they need to do, and end with any "
+               "question or next step. Your reply: ")
+MILESTONE_NOTE = ("You reached a milestone and are now waiting on background work (such as a review, CI or a "
+                  "job) before you finish. Tell the caller in your own words, in the first person and "
+                  "completely, including any question or next step, and what you are now waiting on, if "
+                  "the reply doesn't already say it. Your reply so far: ")
+PROGRESS_NOTE = "What you are doing now, in your own words (for when the caller asks): "
+PARKED_NOTE = "You are waiting for background work to finish before you reply."
 
 
 # A chat turn's final reply is read to the caller in full, up to this many
@@ -270,8 +287,10 @@ class VoiceProgress:
         # 500 tokens, so a long spoken note goes as several appends. None: the
         # transport takes a whole note at once (the Realtime sideband).
         self.append_bytes = append_bytes
-        # The chat agent's last final reply, as speech text, for status answers.
+        # The last reply the chat wrote (final or a milestone), as speech text,
+        # for status answers, and whether it was a milestone before a park.
         self.last_result = ""
+        self.last_was_milestone = False
         # Transport callbacks: is this a natural pause, and the approval desk.
         self.quiet = quiet
         self.approvals = approvals
@@ -291,14 +310,17 @@ class VoiceProgress:
         self.last_note = ""
 
     def with_last_reply(self, status_text: str, status: dict) -> str:
-        """A status answer, plus the chat agent's last reply while chat is idle.
+        """A status answer, plus the last reply the caller heard while chat is idle.
 
         Task state alone says "nothing is running" after a reply that ended on
         a question or a next step, which reads as if the work were finished.
         """
-        if not self.last_result or (status or {}).get("chat") == "working":
+        chat = (status or {}).get("chat")
+        if not self.last_result or chat == "working":
             return status_text
-        return status_text + " The chat agent's last reply, which may be waiting on the caller: " + self.last_result
+        if self.last_was_milestone or chat == "waiting_on_background":
+            return status_text + " Your last update to the caller, sent before you began waiting on background work: " + self.last_result
+        return status_text + " Your last reply to the caller, which may be waiting on their answer: " + self.last_result
 
     @property
     def active_count(self):
@@ -317,12 +339,12 @@ class VoiceProgress:
         if self.owner:
             from app.core import voice_remote
             if await run_sync(voice_remote.work_state, self.session_id, self.owner) in ("working", "permission", "question"):
-                self.note("chat", "Chat work is already running. Do not start it again.")
+                self.note("chat", "Work on an earlier request is already running. Do not start it again.")
         else:
             live = await run_sync(turns.get_live_turn, self.session_id)
             if live:
                 self.active_turns.add(live["id"])
-                self.note("chat", "Chat work is already running. Do not start it again.")
+                self.note("chat", "Work on an earlier request is already running. Do not start it again.")
         # A call that starts mid-work hears the whole picture at once, as quiet
         # context, instead of one task line every UPDATE_INTERVAL.
         from app.core import voice_status
@@ -376,7 +398,7 @@ class VoiceProgress:
         self.sent_at_end[turn_id] = self.turn_ends
         # Only requests that have not started need theirs (bounded on long calls).
         self.sent_at_end = {t: end for t, end in self.sent_at_end.items() if t in self.unstarted}
-        self.note("chat", "The chat agent has received the request and is working on it.")
+        self.note("chat", "The request is handed off and you are working on it.")
         await self.flush(force=True)
 
     def note(self, key, text, delegation_id=None, urgent=False):
@@ -413,7 +435,8 @@ class VoiceProgress:
                 self.tasks.pop(key)
         if value != prior:
             detail = excerpt(summary, 160)
-            self.note("task:" + task_id, f"Background task {title}: {status}. {detail}".strip(), urgent=status not in {"running", "pending"})
+            self.note("task:" + task_id, f"A background task you started, {title}, is {status}. {detail}".strip(),
+                      urgent=status not in {"running", "pending"})
 
     def consume(self, event):
         kind = event.get("event_type")
@@ -435,7 +458,7 @@ class VoiceProgress:
         elif kind == "tool.use":
             text = excerpt(self.text.pop(tid, ""))
             if text:
-                self.note("chat", "Chat progress: " + text)
+                self.note("chat", PROGRESS_NOTE + text)
         elif kind == "tool.result":
             self.text.pop(tid, None)
         elif kind in {"turn.completed", "turn.aborted"}:
@@ -449,24 +472,38 @@ class VoiceProgress:
             # A turn that ended with nothing to say is not news for the caller.
             spoken = kind == "turn.aborted" or bool(text)
             if kind == "turn.aborted":
-                text = "Chat work stopped or failed. Do not report success."
+                text = "Your work on the request stopped or failed. Do not report success."
             elif not text:
-                text = "The chat turn ended. This does not mean its background tasks finished."
+                text = "The request ended with nothing new to say. This does not mean its background tasks finished."
             else:
-                self.last_result = text
-                text = "Chat result, read it to the caller in full: " + text
+                self.last_result, self.last_was_milestone = text, False
+                text = RESULT_NOTE + text
             self.pending.pop("chat", None)
             self.note("turn:" + tid, text, did, urgent=spoken)
         elif kind == "turn.parked":
             self.turn_ends += 1
-            # Parking is not completion: keep the delegation binding for its wake.
+            parked = [tid] if tid else list(self.active_turns)
             if tid:
                 self.active_turns.discard(tid)
             else:
                 self.active_turns.clear()  # record_parked is session-scoped.
-            # Plain state only: a "still listening" line invites the voice to
-            # repeat presence filler to the caller.
-            self.note("chat", "Chat is waiting for background work to finish.")
+            # The handoff is answered here. The wake runs as a NEW queued turn
+            # (turn_scheduler._queued_unpark_turn) and the parked turn's own
+            # completion is not published, so a binding kept for later was
+            # never used: Grok's handoff call never got its output.
+            did = next((d for d in (self.delegations.pop(t_id, None) for t_id in parked) if d), None)
+            # A reply written before parking (waiting on a reviewer, CI, a job)
+            # is a milestone the caller hears now. Its text is reset, so the
+            # wake speaks only what is new.
+            text = speech_text("\n\n".join(t for t in (self.text.pop(t_id, "").strip() for t_id in parked) if t))
+            self.pending.pop("chat", None)
+            if text:
+                self.last_result, self.last_was_milestone = text, True
+                self.note("park:" + (tid or "session"), MILESTONE_NOTE + text, did, urgent=True)
+            else:
+                # Plain state only: a "still listening" line invites the voice
+                # to repeat presence filler to the caller.
+                self.note("park:" + (tid or "session"), PARKED_NOTE, did)
         elif kind == "subagent.started":
             self.task(p.get("task_id"), p.get("description") or p.get("agent_name"), "running")
         elif kind == "subagent.completed":
@@ -486,13 +523,13 @@ class VoiceProgress:
                 # Read the question itself: "check the chat" alone left the
                 # caller not knowing what was asked or that work had stopped.
                 self.note("interaction:" + str(p.get("interaction_id")),
-                          "The chat agent stopped to ask a question on screen, and its work waits for the answer. "
-                          "Read the question and the options to the caller, then say they answer it on screen. "
+                          "You stopped to ask the caller a question on screen, and the work waits for the answer. "
+                          "Ask the question and give its options, then say they can answer it on screen. "
                           "The question: " + question_note(p.get("request") or {}), urgent=True)
             elif self.approvals is not None:
-                self.note("interaction:" + str(p.get("interaction_id")), "The chat agent asked a question that is answered on screen. Tell the user in one sentence to check the chat.", urgent=True)
+                self.note("interaction:" + str(p.get("interaction_id")), "A question for the caller waits on screen. Tell them in one sentence to check the chat.", urgent=True)
             else:
-                self.note("interaction:" + str(p.get("interaction_id")), "The chat agent needs your " + ("approval" if p.get("kind") == "permission" else "answer") + ". Please check the request in chat.", urgent=True)
+                self.note("interaction:" + str(p.get("interaction_id")), "The work needs the caller's " + ("approval" if p.get("kind") == "permission" else "answer") + " on screen. Tell them in one sentence to check the request in chat.", urgent=True)
         elif kind in {"interaction.answered", "interaction.expired"}:
             self.pending.pop("interaction:" + str(p.get("interaction_id")), None)
             if self.approvals is not None and p.get("request_id"):

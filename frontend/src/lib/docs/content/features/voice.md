@@ -22,7 +22,7 @@ The **Dictation** settings on the same page, including the **Voice input hotkey*
 
 In any chat, press the round **Talk** button (a waveform) to the right of the message box, next to the microphone. Talk shows while the message box is empty; once you type or attach something it turns into **Send**, and clearing the box brings Talk back. In a new chat it reads **Talk to** the agent's name and creates the chat first.
 
-You can also choose **Voice** in the session mode switcher, then **Start a voice call**. To call again on an existing voice chat, use **Start a call on this voice session** in the composer. Each new call uses your current voice settings, so changing the engine or voice in Settings applies to the next call in any chat. A call that is already running keeps its engine and voice until you hang up.
+You can also choose **Voice** in the session mode switcher, then **Start a voice call**. To call again on an existing voice chat, use **Start a call on this voice session** in the composer. When you start a call, the voice picks up first with a short hello, using your first name when the app knows it (never a username). On a chat that already has history it welcomes you back instead, and it never greets again after a reconnect. Each new call uses your current voice settings, so changing the engine or voice in Settings applies to the next call in any chat. A call that is already running keeps its engine and voice until you hang up.
 
 During a call, the call dock shows whether it is connected and who is speaking, how long the call has run, and buttons to:
 
@@ -42,8 +42,11 @@ Hanging up ends the audio. Work already handed to the chat keeps running. Stop i
 
 Ask for something in plain words, for example "fix the failing test" or "summarize today's emails". The request goes to the voice chat itself, with its model, agent, tools and approval rules.
 
-- Results, failures and approval requests are spoken.
+- The voice talks as the one doing the work ("I'm running the tests"), not about a separate agent, and only claims what the chat has confirmed.
+- Results, failures and approval requests are spoken. When work finishes you hear what happened in plain words: the outcome, what changed, anything you need to do, and any question at the end. Code, tables, logs and links stay in the chat.
+- When the chat stops to wait on something, such as a review, CI or a background job, you hear what it has done so far and what it is waiting on. When it finishes, you hear only what is new.
 - Routine progress is not announced. Ask "how is it going?" whenever you want an update.
+- Edited **Call prompts** replace the defaults for those engines. Calls on a chat also include the start of the chat agent's own instructions, for its persona and tone.
 - What you and the assistant say is saved in the chat as text.
 
 ## Calling a chat while it works

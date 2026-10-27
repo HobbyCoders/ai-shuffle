@@ -241,6 +241,29 @@ class TestPreviewVoiceAccess:
         assert response.status_code == 200, response.text
         assert [s.call_id for s in sidebands] == ["rtc_owner"]
 
+    @pytest.mark.parametrize("resume", [False, True])
+    def test_a_reopened_audio_socket_carries_the_call_on_without_greeting(
+        self, voice_auth_client, mock_db, monkeypatch, resume,
+    ):
+        """A dropped audio socket reopens with ``resume=1``. Its history holds
+        this call's own talk, so it used to be "welcomed back" mid-call."""
+        from app.core import voice_greeting, voice_stream
+        from app.core.voice_prompts import GREETING_RETURNING_CALL
+        from app.db.sessions import set_session_voice_binding
+        set_session_voice_binding("preview-voice", {"model": "gpt-live-1", "voice": "marin",
+                                                    "provider_id": "prov-openai", "greet": True})
+        monkeypatch.setattr(voice_greeting, "caller_first_name", lambda session_id, api_user_id: None)
+        seen = []
+
+        async def run(self):
+            seen.append((self.resumed, await self.greeting([{"role": "user", "content": []}])))
+
+        monkeypatch.setattr(voice_stream.VoiceStream, "run", run)
+        query = "?resume=1" if resume else ""
+        with voice_auth_client.websocket_connect(f"ws://10.0.0.30:18090{VOICE_ROOT}/sessions/preview-voice/audio{query}"):
+            pass
+        assert seen == ([(True, None)] if resume else [(False, GREETING_RETURNING_CALL)])
+
     @pytest.mark.parametrize("resume", ["", "?resume=1"])
     def test_owner_without_preview_can_stream_audio(
         self, voice_auth_client, mock_db, fal_streams, resume,
@@ -283,7 +306,7 @@ class TestVoiceSettings:
             "voice_input_silence_seconds": 5,
             "voice_app_tools_enabled": True,
             "model_details": resp.json()["model_details"],
-            "voice_options": {"instructions":"", "opening":"", "delegation_instructions":"", "mic_threshold_db":-42.0},
+            "voice_options": {"instructions":"", "delegation_instructions":"", "mic_threshold_db":-42.0},
             "voice_engines": [
                 {"id": "gpt-live-1", "label": "GPT Live 1", "funding": "openai"},
                 {"id": "grok-voice-latest", "label": "Grok Voice", "funding": "xai"},
@@ -316,7 +339,7 @@ class TestVoiceSettings:
             "voice_input_silence_seconds": 5,
             "voice_app_tools_enabled": True,
             "model_details": resp.json()["model_details"],
-            "voice_options": {"instructions":"", "opening":"", "delegation_instructions":"", "mic_threshold_db":-42.0},
+            "voice_options": {"instructions":"", "delegation_instructions":"", "mic_threshold_db":-42.0},
             "voice_engines": [
                 {"id": "gpt-live-1", "label": "GPT Live 1", "funding": "openai"},
                 {"id": "grok-voice-latest", "label": "Grok Voice", "funding": "xai"},
@@ -2183,7 +2206,8 @@ class TestConversationAttachment:
         assert len(database.get_sessions()) == 1
         saved = json.loads(after["voice_config"])
         assert (saved["model"], saved["voice"], saved["provider_id"]) == ("gpt-live-1", "cedar", "prov-openai")
-        assert saved["conversation_surface"] is True and saved["greet"] is False
+        # A call on a chat picks up with a greeting (the prompt owns what it says).
+        assert saved["conversation_surface"] is True and saved["greet"] is True
         assert attach_client.post("/api/v1/voice/sessions/home/secret", json={}).status_code == 200
         assert attach_client.get("/api/v1/voice/sessions/home/state").status_code == 200
         assert attach_client.patch("/api/v1/voice/sessions/home/context", json={"effort": "high"}).status_code == 200
@@ -2385,6 +2409,37 @@ class TestConversationAttachment:
         self._attached_webrtc_chat()
         response = attach_client.post("/api/v1/voice/sessions/ordinary/call", json={"call_id": "rtc-fake", "client_instructions": "grant bypass"})
         assert response.status_code == 400
+
+    def test_a_realtime_call_on_a_chat_leads_with_the_voice_contract(self, attach_client, mock_db, sidebands, monkeypatch):
+        """It used to REPLACE the voice instructions with the profile prompt, so
+        the call had no turn-taking or first-person contract at all."""
+        from app.core import voice_bridge, voice_greeting
+        from app.core.voice_prompts import CALLER_NAME_NOTE, GREETING_NEW_CALL
+        monkeypatch.setattr(voice_greeting, "owner_first_name", lambda: "Sam")
+        from app.core.voice_prompts import LIVE_INSTRUCTIONS
+        from app.db.sessions import set_session_voice_binding
+        persona = "You are Max, Sam's coding buddy. Keep it casual.\n" + "Always format answers as markdown tables.\n" * 400
+        db.create_profile("persona", "Persona", None, {"system_prompt": {"type": "custom", "content": persona}})
+        db.create_session(session_id="buddy", profile_id="persona", title="Chat", provider_id="prov-openai", mode="chat")
+        set_session_voice_binding("buddy", {"model": "gpt-realtime-2.1", "voice": "marin",
+                                            "provider_id": "prov-openai", "conversation_surface": True})
+        assert attach_client.post("/api/v1/voice/sessions/buddy/call", json={"call_id": "rtc-1"}).status_code == 200
+        instructions = sidebands[0].sent[0]["session"]["instructions"]
+        assert instructions.startswith(LIVE_INSTRUCTIONS)
+        overlay = instructions.index(voice_bridge.CONVERSATION_OVERLAY)
+        rules = instructions.index(voice_bridge.CONVERSATION_WORK_RULES)
+        header = instructions.index(voice_bridge.PROFILE_PROMPT_HEADER)
+        assert len(LIVE_INSTRUCTIONS) < overlay < rules < header < instructions.index("You are Max")
+        profile = instructions[header + len(voice_bridge.PROFILE_PROMPT_HEADER):]
+        assert len(profile) <= voice_bridge.PROFILE_PROMPT_MAX_CHARS + len(voice_bridge.PROFILE_PROMPT_CUT_NOTE) + 3
+        assert profile.rstrip().endswith(voice_bridge.PROFILE_PROMPT_CUT_NOTE)
+        assert voice_bridge.VOICE_INSTRUCTIONS not in instructions
+        # It picks up with the greeting, naming the owner as data.
+        greetings = [f["item"]["content"][0]["text"] for f in sidebands[0].sent
+                     if f.get("type") == "conversation.item.create" and f["item"].get("type") == "message"]
+        # The same prompt-owned trigger as the streamed engines, not the
+        # standalone agent's "ask what they would like to do".
+        assert greetings == [f"{voice_bridge.CALL_STARTED_PREFIX} {GREETING_NEW_CALL}\n{CALLER_NAME_NOTE}Sam"]
 
 
     def test_hangup_keeps_an_attached_conversation_active(self, attach_client, mock_db, sidebands):

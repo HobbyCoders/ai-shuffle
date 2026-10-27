@@ -32,8 +32,8 @@ SUMMARY_MAX_CHARS = 160
 CHECK_WORK_TOOL = {
     "type": "function", "name": "check_work",
     "description": (
-        "Read what this conversation is doing right now: whether the chat agent "
-        "is working or waiting on background jobs, the running jobs by name, "
+        "Read what this conversation is doing right now: whether a request is "
+        "being worked on or waiting on background jobs, the running jobs by name, "
         "finished jobs with a report waiting, and decisions waiting for the "
         "user. Read-only and instant; it never starts work. Use it when the "
         "caller asks what you are working on, how it is going or whether "
@@ -151,12 +151,12 @@ def status_sentence(status: Dict[str, Any]) -> str:
     parts: List[str] = []
     chat = status.get("chat")
     if chat == "working":
-        parts.append("The chat agent is working on a request right now.")
+        parts.append("Working on a request right now.")
     elif chat == "waiting_on_background":
-        parts.append("The chat agent is waiting for background jobs to finish.")
+        parts.append("The work is waiting for background jobs to finish.")
     elif chat == "unknown":
         parts.append("The worker that runs this chat has not reported what it is doing yet, so this "
-                     "status may be incomplete. Check the chat on screen.")
+                     "status may be incomplete. The chat on screen has the latest.")
     queued = int(status.get("queued_requests") or 0)
     if queued:
         parts.append(_plural(queued, "more request is", "more requests are") + " queued after it.")

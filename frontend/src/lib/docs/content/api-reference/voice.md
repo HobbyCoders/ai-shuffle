@@ -64,7 +64,7 @@ JSON body, all optional:
 | `voice_input_model` | One of the ids in `voice_input_models` |
 | `voice_input_mode` | `auto` or `toggle` |
 | `voice_input_silence_seconds` | Integer from 1 to 60 |
-| `voice_options` | Object merged into the saved options: `instructions` (up to 16000 characters), `delegation_instructions` (up to 16000), `mic_threshold_db` (number from -80 to -20, default -42: microphone audio quieter than this many dBFS is sent as silence; -80 turns the gate off). Both Grok engines additionally accept `turn_detection: "server_vad"` only. Send `""` to reset a prompt. Other keys return `400` |
+| `voice_options` | Object merged into the saved options: `instructions` (up to 16000 characters), `delegation_instructions` (up to 16000), `mic_threshold_db` (number from -80 to -20, default -42: microphone audio quieter than this many dBFS is sent as silence; -80 turns the gate off). Both Grok engines additionally accept `turn_detection: "server_vad"` only. Send `""` to reset a prompt. The retired `opening` key is ignored: the greeting is part of the voice prompt. Other keys return `400` |
 | `voice_options_model` | Optional guard: the model your `voice_options` were written for. A mismatch returns `409` |
 | `voice_app_tools_enabled` | Accepted and ignored |
 

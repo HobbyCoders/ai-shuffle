@@ -89,11 +89,13 @@ def model_details(model: str, options: dict | None = None) -> dict:
         runtime = [
             {"label": "Audio format", "value": "PCM16 · 24 kHz · mono"},
             {"label": "Reasoning and tools", "value": "Uses the model, effort and permissions selected in the chat composer"},
-            {"label": "Opening words", "value": options["opening"] or "Wait for caller"},
+            {"label": "Greeting", "value": "Picks up with a short hello (welcome back on a chat with history); never again after a reconnect"},
             {"label": "Turn detection", "value": "server_vad" if model in (GROK_MODEL, SUPERGROK_MODEL) else "Managed by GPT Live; no VAD override is sent"},
             {"label": "Microphone gate", "value": f"Audio quieter than {options['mic_threshold_db']:g} dBFS is sent as silence"},
         ]
-        note = "Task requests run in the existing chat session with its selected agent instructions, conversation, tools and approval rules. The voice prompt controls direct replies and when to ask the chat agent for help."
+        note = ("Task requests run in the existing chat session with its selected agent instructions, conversation, tools and approval rules. "
+                "The voice conversation prompt leads every call; calls on a chat then add the call's work rules and the start of the chat agent's "
+                "own instructions, for persona and tone only. The chat agent prompt rides each spoken request's message.")
     elif model == PERSONAPLEX_MODEL:
         prompts = [{"label": "Voice agent", "text": options["instructions"] or PERSONAPLEX_INSTRUCTIONS}]
         runtime = [
@@ -110,6 +112,10 @@ def model_details(model: str, options: dict | None = None) -> dict:
         )
         prompts = [
             {"label": "Voice agent", "text": options["instructions"] or VOICE_INSTRUCTIONS},
+            # A call on a chat does not use the standalone voice agent prompt:
+            # it speaks under the shared call contract, fixed for this engine.
+            {"label": "Voice conversation prompt (calls on a chat)", "text": LIVE_INSTRUCTIONS},
+            {"label": "Chat agent prompt (calls on a chat)", "text": DELEGATION_INSTRUCTIONS},
             {"label": "App configuration tools (owner calls)", "text": APP_TOOLS_INSTRUCTIONS},
             {"label": "Browser call greeting", "text": GREETING_PROMPT},
             *[{"label": f"Phone mode appendix: {mode}", "text": text} for mode, text in DEFAULT_MODE_INSTRUCTIONS.items()],
@@ -122,7 +128,10 @@ def model_details(model: str, options: dict | None = None) -> dict:
             {"label": "Input noise reduction", "value": options["noise_reduction"].replace("_", " ")},
             *[{"label": f"Context retention · {key}", "value": str(value)} for key, value in TRUNCATION_CONFIG.items()],
         ]
-        note = "Calls append the available agent roster and any client-supplied device instructions. Phone appendices apply only in the named mode; app-tool instructions apply only when those tools are admitted. Conversation replay is context, not a system prompt."
+        note = ("Calls on a voice session append the available agent roster and any client-supplied device instructions. "
+                "Calls on a chat use the voice conversation prompt first, then the call's work rules and the start of the chat agent's own "
+                "instructions, for persona and tone only. Phone appendices apply only in the named mode; app-tool instructions apply "
+                "only when those tools are admitted. Conversation replay is context, not a system prompt.")
     available, unavailable_reason = True, None
     if model == CODEX_MODEL:
         from app.core.voice_dependencies import availability
