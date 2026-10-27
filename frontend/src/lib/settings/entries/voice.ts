@@ -104,7 +104,9 @@ export const entries: SettingEntry[] = [
 		category: 'voice',
 		section: 'Voice calls',
 		label: 'Max call length',
-		keywords: ['max call minutes', 'limit', 'duration'],
+		hint: '0 means no limit',
+		help: 'A call ends when it reaches this many minutes. Set 0 for no limit: the call lasts as long as you stay connected. This limits call length, not cost.',
+		keywords: ['max call minutes', 'limit', 'no limit', 'unlimited', 'duration'],
 		default: 240
 	},
 	{
@@ -116,15 +118,6 @@ export const entries: SettingEntry[] = [
 		help: 'Microphone audio quieter than this level is sent to the voice engine as silence, so room noise and breathing do not interrupt it. Lower it if the voice misses quiet speech; -80 dBFS turns the gate off.',
 		keywords: ['noise gate', 'mic threshold', 'dbfs', 'background noise', 'sensitivity'],
 		default: -42
-	},
-	{
-		id: 'voice.opening',
-		category: 'voice',
-		section: 'Voice calls',
-		label: 'Opening words',
-		hint: 'Blank waits for you',
-		keywords: ['greeting', 'first words'],
-		default: ''
 	},
 	{
 		id: 'voice.prompts',

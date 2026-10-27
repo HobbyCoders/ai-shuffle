@@ -37,7 +37,7 @@ const settings = (voice = 'marin', minutes = 60) => ({
 		{ id: 'fal-ai/whisper', name: 'Whisper (Large v3)', provider: 'fal-ai' },
 		{ id: 'openai/gpt-4o-mini-transcribe', name: 'GPT-4o mini Transcribe', provider: 'openai' }
 	],
-	voice_options: { opening: '', instructions: '', delegation_instructions: '' },
+	voice_options: { instructions: '', delegation_instructions: '' },
 	model_details: {
 		model: 'gpt-live-1',
 		transport: 'stream' as const,
@@ -241,22 +241,63 @@ describe('Voice page', () => {
 		expect(transport.put).toHaveBeenCalledExactlyOnceWith('/settings/voice', { voice_max_call_minutes: 120 });
 	});
 
+	it('saves 0 as no call limit and says so under the label', async () => {
+		await mountPage();
+		expect(screen.getByText('0 means no limit')).toBeTruthy();
+		await fireEvent.input(field('Max call length'), { target: { value: '0' } });
+		await fireEvent.blur(field('Max call length'));
+		expect(transport.put).toHaveBeenCalledExactlyOnceWith('/settings/voice', { voice_max_call_minutes: 0 });
+		expect(await screen.findByText('No limit')).toBeTruthy();
+		expect(field('Max call length').value).toBe('0');
+		expect(screen.queryByText('0 means no limit')).toBeNull();
+	});
+
+	it('rounds a small positive limit up to 1 minute, never to unlimited', async () => {
+		await mountPage();
+		await fireEvent.input(field('Max call length'), { target: { value: '0.4' } });
+		await fireEvent.blur(field('Max call length'));
+		expect(transport.put).toHaveBeenCalledExactlyOnceWith('/settings/voice', { voice_max_call_minutes: 1 });
+		await fireEvent.input(field('Max call length'), { target: { value: '12.6' } });
+		await fireEvent.blur(field('Max call length'));
+		expect(transport.put).toHaveBeenLastCalledWith('/settings/voice', { voice_max_call_minutes: 13 });
+	});
+
+	it('ignores a negative limit and keeps the current value', async () => {
+		await mountPage();
+		await fireEvent.input(field('Max call length'), { target: { value: '-5' } });
+		await fireEvent.blur(field('Max call length'));
+		expect(transport.put).not.toHaveBeenCalled();
+		expect(field('Max call length').value).toBe('60');
+		expect(screen.queryByText('No limit')).toBeNull();
+	});
+
+	it('shows a saved no-limit value and resets it to the 240 minute default', async () => {
+		server = settings('marin', 0);
+		await mountPage();
+		expect(field('Max call length').value).toBe('0');
+		expect(screen.getByText('No limit')).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: /Reset Max call length/ }));
+		expect(transport.put).toHaveBeenCalledExactlyOnceWith('/settings/voice', { voice_max_call_minutes: 240 });
+	});
+
 	it('turns voice calls off', async () => {
 		await mountPage();
 		await fireEvent.click(screen.getByRole('switch', { name: 'Voice calls' }));
 		expect(transport.put).toHaveBeenCalledExactlyOnceWith('/settings/voice', { voice_mode_enabled: false });
 	});
 
-	it('saves the opening words on their own', async () => {
+	it('has no opening words setting: the voice greets on its own', async () => {
 		await mountPage();
-		const opening = field('Opening words');
-		await fireEvent.focus(opening);
-		await fireEvent.input(opening, { target: { value: 'Hi there' } });
-		await fireEvent.blur(opening);
-		expect(transport.put).toHaveBeenCalledExactlyOnceWith('/settings/voice', {
-			voice_options: { opening: 'Hi there' },
-			voice_options_model: 'gpt-live-1'
-		});
+		expect(screen.queryByLabelText('Opening words')).toBeNull();
+		expect(screen.queryByText('Blank waits for you')).toBeNull();
+	});
+
+	it('renders without an opening words row when the server still sends a legacy opening', async () => {
+		server = { ...settings(), voice_options: { ...settings().voice_options, opening: 'Hello there' } } as Settings;
+		await mountPage();
+		expect(screen.queryByLabelText('Opening words')).toBeNull();
+		expect(screen.queryByDisplayValue('Hello there')).toBeNull();
+		expect(field('Max call length').value).toBe('60');
 	});
 
 	it('keeps the last good value and reports a rejected save', async () => {

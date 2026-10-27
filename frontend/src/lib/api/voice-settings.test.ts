@@ -131,3 +131,27 @@ describe('voice settings synchronization', () => {
  });
 
 });
+
+describe('max call length', () => {
+ it('reads 0 as no limit and positive minutes as minutes', async () => {
+  const { formatMaxCallMinutes, NO_CALL_LIMIT } = await import('./voice');
+  expect(NO_CALL_LIMIT).toBe(0);
+  expect(formatMaxCallMinutes(0)).toBe('No limit');
+  expect(formatMaxCallMinutes(1)).toBe('1 min');
+  expect(formatMaxCallMinutes(240)).toBe('240 min');
+ });
+
+ it('treats only an exact 0 as no limit when converting typed minutes', async () => {
+  const { maxCallMinutesFromInput } = await import('./voice');
+  expect(maxCallMinutesFromInput(0)).toBe(0);
+  expect(maxCallMinutesFromInput(0.4)).toBe(1);
+  expect(maxCallMinutesFromInput(1.5)).toBe(2);
+  expect(maxCallMinutesFromInput(90)).toBe(90);
+ });
+
+ it('keeps a saved 0 instead of treating it as unset', async () => {
+  const voice = await import('./voice');
+  transport.get.mockResolvedValueOnce(settings('marin', 0));
+  expect((await voice.loadVoiceSettings()).voice_max_call_minutes).toBe(0);
+ });
+});

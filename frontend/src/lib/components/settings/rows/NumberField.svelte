@@ -1,7 +1,8 @@
 <script lang="ts">
 	/**
 	 * NumberField: a number with its unit. Commits on blur or Enter, clamped to
-	 * [min, max]; an empty or invalid entry reverts to the current value.
+	 * [min, max]; an empty or invalid entry, or one `accept` rejects, reverts to
+	 * the current value.
 	 */
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import { controlAria, getRowContext } from './row-context';
@@ -15,9 +16,11 @@
 		unit?: string;
 		disabled?: boolean;
 		label?: string;
+		/** Checked before clamping; returning false reverts the entry instead of saving it. */
+		accept?: (value: number) => boolean;
 	}
 
-	let { value = $bindable(0), onchange, min, max, step = 1, unit, disabled = false, label }: Props = $props();
+	let { value = $bindable(0), onchange, min, max, step = 1, unit, disabled = false, label, accept }: Props = $props();
 
 	const access = getSettingsAccess();
 	const row = getRowContext();
@@ -29,6 +32,7 @@
 		editing = false;
 		const n = Number(draft);
 		if (draft.trim() === '' || !Number.isFinite(n)) return;
+		if (accept && !accept(n)) return;
 		let next = n;
 		if (min !== undefined) next = Math.max(min, next);
 		if (max !== undefined) next = Math.min(max, next);

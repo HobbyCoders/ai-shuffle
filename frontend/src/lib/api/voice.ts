@@ -46,6 +46,20 @@ const voiceModelLabels: Record<string, string> = {
 export { usesDelegation, usesAudioStream } from '$lib/constants/voice-engines';
 export const voiceModelLabel = (model: string): string => voiceModelLabels[model] ?? model;
 
+/** `voice_max_call_minutes` of 0 means a call has no length limit. */
+export const NO_CALL_LIMIT = 0;
+
+/**
+ * A typed max call length as whole minutes to save. Only an exact 0 means no
+ * limit; a positive fraction rounds to at least 1 so it never becomes unlimited.
+ * Negative entries are not valid: callers reject them before saving.
+ */
+export const maxCallMinutesFromInput = (n: number): number => (n > 0 ? Math.max(1, Math.round(n)) : NO_CALL_LIMIT);
+
+/** The max call length as people read it: "No limit" for 0, otherwise "90 min". */
+export const formatMaxCallMinutes = (minutes: number): string =>
+	minutes === NO_CALL_LIMIT ? 'No limit' : `${minutes} min`;
+
 export interface VoiceOptions {
  instructions?: string;
  transcription_model?: string;
@@ -59,7 +73,6 @@ export interface VoiceOptions {
  noise_reduction?: 'near_field' | 'far_field' | 'off';
  /** GPT Live: microphone level (dBFS) below which streamed input is sent as silence. */
  mic_threshold_db?: number;
- opening?: string;
  /** Read-only compatibility for already-pinned legacy calls. Not voice settings. */
  delegation_type?: 'client' | 'responses';
  delegation_model?: string;
@@ -106,6 +119,7 @@ export interface VoiceSettings {
 	voice_model: string;
 	voice_voice: string;
 	voice_provider_id: string | null;
+	/** Longest call in minutes; 0 means no limit (the call lasts while you are connected). */
 	voice_max_call_minutes: number;
 	voice_input_model?: string;
 	voice_input_mode?: 'auto' | 'toggle';
@@ -122,6 +136,7 @@ export interface VoiceSettingsUpdate {
 	voice_model?: string;
 	voice_voice?: string;
 	voice_provider_id?: string | null;
+	/** Whole minutes; 0 means no limit. */
 	voice_max_call_minutes?: number;
 	voice_input_model?: string;
 	voice_input_mode?: 'auto' | 'toggle';

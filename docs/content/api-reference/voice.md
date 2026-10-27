@@ -38,7 +38,7 @@ curl http://localhost:8000/api/v1/settings/voice \
   "voice_input_mode": "auto",
   "voice_input_silence_seconds": 5,
   "voice_app_tools_enabled": true,
-  "voice_options": { "instructions": "", "opening": "", "delegation_instructions": "", "mic_threshold_db": -42.0 },
+  "voice_options": { "instructions": "", "delegation_instructions": "", "mic_threshold_db": -42.0 },
   "model_details": { "model": "gpt-live-1", "voices": [{ "id": "marin", "label": "Marin" }] },
   "voice_engines": [{ "id": "gpt-live-1", "label": "GPT Live 1", "funding": "openai" }]
 }
@@ -64,7 +64,7 @@ JSON body, all optional:
 | `voice_input_model` | One of the ids in `voice_input_models` |
 | `voice_input_mode` | `auto` or `toggle` |
 | `voice_input_silence_seconds` | Integer from 1 to 60 |
-| `voice_options` | Object merged into the saved options: `instructions` (up to 16000 characters), `opening` (up to 2000), `delegation_instructions` (up to 16000), `mic_threshold_db` (number from -80 to -20, default -42: microphone audio quieter than this many dBFS is sent as silence; -80 turns the gate off). Both Grok engines additionally accept `turn_detection: "server_vad"` only. Send `""` to reset a prompt. Other keys return `400` |
+| `voice_options` | Object merged into the saved options: `instructions` (up to 16000 characters), `delegation_instructions` (up to 16000), `mic_threshold_db` (number from -80 to -20, default -42: microphone audio quieter than this many dBFS is sent as silence; -80 turns the gate off). Both Grok engines additionally accept `turn_detection: "server_vad"` only. Send `""` to reset a prompt. Other keys return `400` |
 | `voice_options_model` | Optional guard: the model your `voice_options` were written for. A mismatch returns `409` |
 | `voice_app_tools_enabled` | Accepted and ignored |
 
@@ -130,7 +130,7 @@ curl -X POST http://localhost:8000/api/v1/voice/sessions \
   "client_secret": "",
   "expires_at": null,
   "model": "gpt-live-1",
-  "options": { "instructions": "", "opening": "", "delegation_instructions": "" }
+  "options": { "instructions": "", "delegation_instructions": "" }
 }
 ```
 
@@ -152,7 +152,7 @@ Get a fresh client secret for an existing voice session. Without a body it refre
 
 **Auth:** Required. An API key can use it only on its own voice sessions (`403` otherwise).
 
-Returns `client_secret`, `expires_at`, `model` and `options` (the secret is empty for GPT Live). Returns `403` when voice mode is disabled and `409` once the call has reached `voice_max_call_minutes`.
+Returns `client_secret`, `expires_at`, `model` and `options` (the secret is empty for GPT Live). Returns `403` when voice mode is disabled and `409` once the call has reached `voice_max_call_minutes` (never when it is `0`).
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/voice/sessions/0f6c2d1e-7a4b-4c1d-9e2f-5b8a7c6d4e3f/secret \
