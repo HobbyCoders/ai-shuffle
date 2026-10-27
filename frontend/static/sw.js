@@ -133,6 +133,13 @@ async function handleRequest(request, url) {
     }
   }
 
+  // The build-version probe (SvelteKit's updated.check, which the app's
+  // update detection relies on) must see the build the server runs now,
+  // never a cached answer: network only, past the HTTP cache too.
+  if (url.pathname.endsWith('/_app/version.json')) {
+    return fetch(request, { cache: 'no-store' });
+  }
+
   // Static assets (JS, CSS, images) - cache first
   if (
     url.pathname.match(/\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot)$/) ||

@@ -20,6 +20,8 @@
  *     retry button in LazyPanel actually re-attempts the fetch.
  */
 
+import { reportChunkLoadFailure } from '$lib/services/app-update';
+
 /** Vite/Rollup dynamic-import shape for a Svelte component module. */
 export type ComponentModuleLoader<T> = () => Promise<{ default: T }>;
 
@@ -77,6 +79,10 @@ export function createLazyComponent<T>(
 				// able to re-attempt it.
 				error = err;
 				inflight = null;
+				// A missing chunk usually means the worker updated under this
+				// page; the app-update watcher checks and offers a reload, even
+				// for a bare panel or an idle prefetch that shows nothing.
+				reportChunkLoadFailure(err);
 				throw err;
 			}
 		);

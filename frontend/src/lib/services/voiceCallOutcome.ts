@@ -1,6 +1,8 @@
 import type { Readable } from 'svelte/store';
-import { notify } from '$lib/stores/notifications';
+import { get } from 'svelte/store';
+import { liveBanners, notify } from '$lib/stores/notifications';
 import type { VoiceCallStatus, VoiceCallStoreState } from './voiceCall';
+import { APP_UPDATED_MESSAGE, CALL_LOAD_FAILED_MESSAGE, reportChunkLoadFailure } from './app-update';
 
 type CallOutcome = Pick<VoiceCallStoreState, 'status' | 'sessionId' | 'error' | 'notice'>;
 
@@ -22,10 +24,17 @@ function clearOutcome(): void {
 
 function showOutcome(message: string, severity: 'error' | 'warning', sessionId: string | null): void {
 	clearOutcome();
+	// The call's code would not load: the only way forward is a reload, so
+	// the banner offers it. Category 'app-update' makes it the one reload
+	// banner on screen: the update watcher's own gives way to it.
+	const stale = message === CALL_LOAD_FAILED_MESSAGE || message === APP_UPDATED_MESSAGE;
+	if (stale) for (const banner of get(liveBanners)) if (banner.category === 'app-update') notify.dismissLive(banner.id);
 	outcomeBanner = notify.banner(message, {
-		severity,
-		persist: true,
+		severity: stale ? 'warning' : severity,
+		category: stale ? 'app-update' : undefined,
+		persist: !stale,
 		session_id: sessionId ?? undefined,
+		action: stale ? { label: 'Reload', onClick: () => window.location.reload() } : undefined,
 	});
 }
 
@@ -92,7 +101,10 @@ export function watchCallOutcomes(source: Readable<CallOutcome>): void {
  */
 export function reportCallStartFailure(error: unknown, sessionId: string | null): void {
 	const detail = (error as { detail?: unknown } | null)?.detail;
-	const message = typeof detail === 'string' && detail
+	// The call's code would not load (app-update.ts checks whether it was an update).
+	const message = reportChunkLoadFailure(error)
+		? CALL_LOAD_FAILED_MESSAGE
+		: typeof detail === 'string' && detail
 		? detail
 		: error instanceof Error && error.message
 			? error.message

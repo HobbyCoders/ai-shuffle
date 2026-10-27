@@ -39,6 +39,7 @@ import { get, writable } from 'svelte/store';
 import { attachVoiceCall, hangupVoiceCall, mintVoiceSecret, prepareConversationCall, getVoiceCallState, type VoiceOptions } from '$lib/api/voice';
 import { isLiveApiModel, usesAudioStream, usesDelegation } from '$lib/constants/voice-engines';
 import { createVoiceOutput } from './voiceVolume';
+import { CALL_LOAD_FAILED_MESSAGE, registerReloadBlocker, reportChunkLoadFailure } from './app-update';
 import type { VoiceAudioStream, VoiceStreamEndReason } from './voiceAudioStream';
 let audioStream: VoiceAudioStream | null = null;
 let audioAbort: AbortController | null = null;
@@ -981,8 +982,14 @@ export async function startCall(
 			await endForCap(sessionIdIn, capped);
 			return;
 		}
-		const message =
-			e instanceof Error && e.name ? micErrorOrMessage(e) : String(e ?? 'Unknown error');
+		// The call's code would not load (the voice audio stream module): a
+		// worker update under this page, or a dropped connection. Either way a
+		// reload fixes it, so say that, not the raw import error. The update
+		// watcher checks which it was.
+		const codeMissing = reportChunkLoadFailure(e);
+		const message = codeMissing
+			? CALL_LOAD_FAILED_MESSAGE
+			: e instanceof Error && e.name ? micErrorOrMessage(e) : String(e ?? 'Unknown error');
 		console.error('[voice] failed to start call:', e);
 		await teardown({ notifyBackend: false, status: 'error' });
 		patch({ sessionId: sessionIdIn, status: 'error', error: message });
@@ -1115,6 +1122,9 @@ export function isCallSurfaceActive(
 	if (!sessionId) return false;
 	return state.sessionId === sessionId && ACTIVE_CALL_STATUSES.includes(state.status);
 }
+
+// An update never reloads the page out from under a call (app-update.ts).
+registerReloadBlocker(() => (ACTIVE_CALL_STATUSES.includes(get(voiceCallState).status) ? 'voice-call' : null));
 
 
 /** Replacing a call is an explicit action, never a side effect of navigation. */

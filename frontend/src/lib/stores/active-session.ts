@@ -47,6 +47,7 @@ import { markBindingHydrated, markBindingPicked, type ComposerBindingFlags } fro
 import { createPermissionHandler } from './session/permission-handler';
 import { createDraftManager } from './session/draft-manager';
 import { hasComposerDraft } from './session/composer-suggestion';
+import { registerReloadBlocker } from '$lib/services/app-update';
 
 // Caches and helpers
 import { sessionEphemeralCache } from './session-cache';
@@ -1506,6 +1507,9 @@ export const activeSession = {
 // `$activeSessionMessages`, `$activeSession.isStreaming` with
 // `$activeSessionStreaming`, and a header/title/profile read with
 // `$activeSessionMeta`.
+
+// An update never reloads the page over what the user is typing (app-update.ts).
+registerReloadBlocker(() => (hasComposerDraft(_state.draft) ? 'composer-draft' : null));
 
 export const activeWsConnected = createDerived(() => _state.wsConnected);
 

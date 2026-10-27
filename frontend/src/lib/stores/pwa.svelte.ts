@@ -12,6 +12,7 @@ import { createSubscribers } from './store-utils';
 import { installPromptPreference } from './install-prompt-preference.svelte';
 import { sessionOwnerEpoch } from './session-owner';
 import { isDesktop } from '$lib/services/desktop';
+import { canReloadSilently } from '$lib/services/app-update';
 
 interface PWAState {
 	isInstalled: boolean;
@@ -76,7 +77,9 @@ function _reloadNow() {
 }
 
 function _onVisibleHiddenReload() {
-	if (document.visibilityState === 'hidden') {
+	// A live voice call or an unsent draft keeps the page: stay armed and try
+	// again the next time the tab hides (see registerReloadBlocker).
+	if (document.visibilityState === 'hidden' && canReloadSilently()) {
 		document.removeEventListener('visibilitychange', _onVisibleHiddenReload);
 		_reloadNow();
 	}
@@ -86,7 +89,7 @@ function handleSwUpdate() {
 	if (!browser) return;
 
 	// User isn't looking — a silent reload is fine and least surprising.
-	if (document.visibilityState === 'hidden') {
+	if (document.visibilityState === 'hidden' && canReloadSilently()) {
 		_reloadNow();
 		return;
 	}
