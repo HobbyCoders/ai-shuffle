@@ -33,7 +33,9 @@ _REAL_SKILLS_ROOT = Path.home() / ".fluid" / "skills"
 @contextmanager
 def guard_skills_writes(root):
     """Fail before a filesystem mutation reaches the protected skills store."""
-    root = Path(root).resolve()
+    # Use the existing os.path helper, not Path(): shell tests mock os.name,
+    # which would otherwise select WindowsPath on a POSIX host (or vice versa).
+    root = os.path.realpath(root)
     active = True
 
     def guard(event, args):
@@ -54,8 +56,8 @@ def guard_skills_writes(root):
             return
         for path in paths:
             if isinstance(path, (str, bytes, os.PathLike)):
-                resolved = Path(os.fsdecode(path)).resolve()
-                if resolved.is_relative_to(root):
+                resolved = os.path.realpath(os.fsdecode(path))
+                if _is_inside(resolved, (root,)):
                     # Failed is a BaseException: best-effort memory saves catch
                     # Exception, which must not silently swallow this guard.
                     pytest.fail(f"Blocked write to real Fluid skills store: {resolved}")

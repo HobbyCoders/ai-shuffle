@@ -85,3 +85,19 @@ def test_write_guard_is_not_swallowed_by_best_effort_saves(tmp_path):
             except Exception:
                 pass
     assert not (root / "memories.json").exists()
+
+
+def test_write_guard_tolerates_mocked_platform(tmp_path, monkeypatch):
+    root = tmp_path / "protected-skills"
+    root.mkdir()
+    allowed = tmp_path / "allowed"
+    with guard_skills_writes(root):
+        # Shell-resolution tests simulate Windows on POSIX (and vice versa).
+        # Restore the platform before pytest formats any failure traceback.
+        with monkeypatch.context() as mp:
+            mp.setattr(os, "name", "nt" if os.name == "posix" else "posix")
+            allowed.write_text("allowed", encoding="utf-8")
+            with pytest.raises(pytest.fail.Exception, match="real Fluid skills store"):
+                (root / "memories.json").write_text("junk", encoding="utf-8")
+    assert allowed.read_text(encoding="utf-8") == "allowed"
+    assert not (root / "memories.json").exists()
