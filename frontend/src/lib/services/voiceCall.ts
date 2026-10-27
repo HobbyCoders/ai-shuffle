@@ -1123,6 +1123,11 @@ export function isCallSurfaceActive(
 	return state.sessionId === sessionId && ACTIVE_CALL_STATUSES.includes(state.status);
 }
 
+/** A non-fatal advisory on the call that is up (e.g. the phone app's notifications are off). */
+export function showCallNotice(notice: string): void {
+	if (ACTIVE_CALL_STATUSES.includes(get(voiceCallState).status)) patch({ notice });
+}
+
 // An update never reloads the page out from under a call (app-update.ts).
 registerReloadBlocker(() => (ACTIVE_CALL_STATUSES.includes(get(voiceCallState).status) ? 'voice-call' : null));
 

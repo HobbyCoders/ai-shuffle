@@ -71,6 +71,26 @@ class MobileUiTest {
         assertNull(MobileUi.shellMessage("{\"type\":\"voice-call\"}"))
     }
 
+    @Test fun voiceCallStateIsParsedStrictlyAndTitlesAreBounded() {
+        assertTrue(MobileUi.CAPABILITIES.contains(MobileUi.VOICE_CALL_CONTROLS))
+        assertEquals(MobileUi.ShellMessage.VoiceCallState("live", true, 1700000000000, "Planning"),
+            MobileUi.shellMessage("{\"type\":\"voice-call-state\",\"status\":\"live\",\"muted\":true,\"since\":1700000000000,\"title\":\" Planning\\n\"}"))
+        assertEquals(MobileUi.ShellMessage.VoiceCallState("connecting", false, null, null),
+            MobileUi.shellMessage("{\"type\":\"voice-call-state\",\"status\":\"connecting\",\"muted\":false,\"since\":-1,\"title\":\"  \"}"))
+        val long = MobileUi.shellMessage("{\"type\":\"voice-call-state\",\"status\":\"live\",\"muted\":false,\"title\":\"" + "x".repeat(100) + "\"}")
+        assertEquals(MobileUi.MAX_CALL_TITLE, (long as MobileUi.ShellMessage.VoiceCallState).title!!.length)
+        for (raw in listOf("{\"type\":\"voice-call-state\",\"status\":\"ended\",\"muted\":false}",
+                "{\"type\":\"voice-call-state\",\"status\":\"live\"}",
+                "{\"type\":\"voice-call-state\",\"status\":\"live\",\"muted\":\"false\"}",
+                "{\"type\":\"voice-call-state\",\"muted\":true}")) assertNull(raw, MobileUi.shellMessage(raw))
+    }
+
+    @Test fun voiceCallCommandsDispatchAQuotedPageEvent() {
+        assertEquals("window.dispatchEvent(new CustomEvent('shufflevoicecall', { detail: { command: \"hangup\" } }))",
+            MobileUi.voiceCallEventScript(MobileUi.VoiceCallCommand.HANGUP))
+        assertTrue(MobileUi.voiceCallEventScript(MobileUi.VoiceCallCommand.NOTIFICATIONS_OFF).contains("\"notifications-off\""))
+    }
+
     @Test fun shellMessagesAreParsedStrictly() {
         assertEquals(MobileUi.ShellMessage.WorkerBar(true), MobileUi.shellMessage("{\"type\":\"worker-bar\",\"shown\":true}"))
         assertEquals(MobileUi.ShellMessage.WorkerBar(false), MobileUi.shellMessage("{\"type\":\"worker-bar\",\"shown\":false}"))

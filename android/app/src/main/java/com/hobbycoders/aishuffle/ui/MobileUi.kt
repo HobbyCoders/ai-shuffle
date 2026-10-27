@@ -26,7 +26,14 @@ object MobileUi {
      * newer worker UI can tell an older app apart and degrade.
      */
     const val BRIDGE_VERSION = 1
-    val CAPABILITIES = listOf("file-save", "file-chooser", "microphone", "device-tools", "voice-routing", WorkerSwitch.CAPABILITY)
+    val CAPABILITIES = listOf("file-save", "file-chooser", "microphone", "device-tools", "voice-routing", VOICE_CALL_CONTROLS, WorkerSwitch.CAPABILITY)
+
+    /**
+     * The page reports its call's state (`voice-call-state`) and answers the
+     * [voiceCallEventScript] commands, so a call keeps running behind the lock
+     * screen with an ongoing notification (VoiceCallService).
+     */
+    const val VOICE_CALL_CONTROLS = "voice-call-controls"
 
     /**
      * Web-message bridge the page uses to tell the shell about its own chrome
@@ -37,6 +44,12 @@ object MobileUi {
      *    shows its bar until told, so an older worker UI keeps it.
      *  - `{"type":"workers"}`: open the native Workers screen (pair, rename,
      *    remove), which the hidden bar's menu used to reach.
+     *  - `{"type":"voice-call","active":true|false}`: a call started or ended
+     *    (headset routing and the call's foreground service follow it).
+     *  - `{"type":"voice-call-state","status":"connecting"|"live"|"reconnecting",
+     *    "muted":true|false,"since":<epoch ms>,"title":"…"}`: the live call's
+     *    state for its notification ([VOICE_CALL_CONTROLS]). Ignored when no call
+     *    is active, so a late update never restarts an ended call.
      */
     const val SHELL_BRIDGE = "shuffleShell"
     private const val MAX_SHELL_MESSAGE = 256
@@ -44,6 +57,7 @@ object MobileUi {
     sealed class ShellMessage {
         data class WorkerBar(val shown: Boolean) : ShellMessage()
         data class VoiceCall(val active: Boolean) : ShellMessage()
+        data class VoiceCallState(val status: String, val muted: Boolean, val since: Long?, val title: String?) : ShellMessage()
         object OpenWorkers : ShellMessage()
     }
 
@@ -55,9 +69,29 @@ object MobileUi {
             "worker-bar" -> (json.opt("shown") as? Boolean)?.let { ShellMessage.WorkerBar(it) }
             "workers" -> ShellMessage.OpenWorkers
             "voice-call" -> (json.opt("active") as? Boolean)?.let { ShellMessage.VoiceCall(it) }
+            "voice-call-state" -> voiceCallState(json)
             else -> null
         }
     }
+
+    private val CALL_STATUSES = setOf("connecting", "live", "reconnecting")
+    const val MAX_CALL_TITLE = 60
+
+    private fun voiceCallState(json: JSONObject): ShellMessage.VoiceCallState? {
+        val status = json.opt("status") as? String ?: return null
+        val muted = json.opt("muted") as? Boolean ?: return null
+        if (status !in CALL_STATUSES) return null
+        val since = (json.opt("since") as? Number)?.toLong()?.takeIf { it > 0 }
+        val title = (json.opt("title") as? String)?.filterNot { it.isISOControl() }?.trim()?.take(MAX_CALL_TITLE)?.ifBlank { null }
+        return ShellMessage.VoiceCallState(status, muted, since, title)
+    }
+
+    /** What the call notification asks the page to do (`shufflevoicecall` event `detail.command`). */
+    enum class VoiceCallCommand(val wire: String) { MUTE("mute"), UNMUTE("unmute"), HANGUP("hangup"), NOTIFICATIONS_OFF("notifications-off") }
+
+    /** Dispatches one call command into the page; the page's own call code acts on it. */
+    fun voiceCallEventScript(command: VoiceCallCommand): String =
+        "window.dispatchEvent(new CustomEvent('shufflevoicecall', { detail: { command: ${JSONObject.quote(command.wire)} } }))"
 
     /** The document the chat WebView loads from a worker. */
     fun indexUrl(base: String): String = PairingInput.origin(base) + PATH
