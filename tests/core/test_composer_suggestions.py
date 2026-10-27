@@ -581,8 +581,12 @@ def test_prompt_frames_reply_in_user_voice() -> None:
 
 @pytest.mark.parametrize("value", [
     "I'll fix that now.", "I’ve updated the parser.", "Let me check the logs.",
-    "Want me to open a PR?", "Would you like me to add tests?", "Shall I proceed?",
+    "Want me to open a PR?", "Would you like me to add tests?",
     "Here's a summary of the changes.", "Sure, I can do that.",
+    "I can do that now.", "I'm going to run the tests.", "I have updated the file.",
+    "On it.", "Okay, I will fix it.", "Alright, I'll open the PR.",
+    "No problem, I'll handle it.", "Understood, I'll proceed.",
+    "If you'd like, I can add tests.", "Certainly! I will do it.",
 ])
 def test_assistant_voice_output_is_dropped(value: str) -> None:
     assert cs._validation_reason(value) == "assistant_voice"
@@ -592,6 +596,12 @@ def test_assistant_voice_output_is_dropped(value: str) -> None:
 @pytest.mark.parametrize("value", [
     "Okay, fix it.", "Yes, go with option 2.", "Should I restart the app first?",
     "I want the button on the left instead.", "Why did the test fail on Windows?",
+    "Let me know when it's done.", "Let me know what the logs say.",
+    "Sure, if CI is green.", "Sure, it looks fine.", "Sure! It works now.",
+    "Got it, is that the only failing test?", "Shall I restart it?",
+    "Do you want me to restart the server?", "You're right, go with option 2.",
+    "I have a question about the parser.", "I'd like the tests first.",
+    "Here it fails on Windows too.",
 ])
 def test_user_voice_output_is_kept(value: str) -> None:
     assert cs._validate(value) == value

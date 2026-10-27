@@ -10,6 +10,7 @@ import asyncio
 from collections import OrderedDict
 import json
 import logging
+import re
 from uuid import uuid4
 
 from app.db.base import get_db
@@ -190,19 +191,32 @@ async def _broadcast(session_id: str, turn_id: str, text: str | None) -> None:
 # Openers that only make sense in the assistant's mouth: offering to act,
 # reporting its own work, or announcing its next step. A suggestion that starts
 # this way is the agent talking, not the user, so it is dropped rather than
-# shown. Kept narrow: "I want...", "I'm not sure..." and "Should I..." are
-# ordinary things a user says.
-_ASSISTANT_VOICE_OPENERS = (
-    "i'll ", "i will ", "i've ", "i'd be happy",
-    "let me ", "want me to", "do you want me", "would you like me", "shall i ",
-    "sure, i", "sure! i", "okay, i'll", "ok, i'll", "got it, i", "great question",
-    "here's ", "here is ", "you're right", "you are right",
+# shown. Kept narrow on purpose: "I want...", "Should I...", "Shall I...",
+# "Let me know...", "Sure, it looks fine" and "You're right, ..." are ordinary
+# things a user says, so they pass.
+_ASSISTANT_VOICE = re.compile(
+    r"^(?:(?:sure|okay|ok|alright|all right|got it|understood|no problem|"
+    r"absolutely|certainly|of course|great|on it)[,.!]?\s+)?"
+    r"(?:"
+    # "I'll ...", "Okay, I will ...", "Sure, I can ...", "I'm going to ..."
+    r"i(?:'ll|'ve| will| can| am going to|'m going to|'d be happy)\b"
+    # "I have updated ..." (but not "I have a question")
+    r"|i have (?:now |already |just )?\w+ed\b"
+    # "If you'd like, I can ..."
+    r"|if you(?:'d| would) like,? i\b"
+    r"|let me (?!know\b)\w"
+    r"|want me to\b"
+    r"|would you like me\b"
+    r"|here(?:'s| is) (?:a |the |what )"
+    r"|great question\b"
+    r"|on it\b"
+    r")"
 )
 
 
 def _assistant_voice(text: str) -> bool:
     normalized = text.strip().lower().replace("’", "'")
-    return normalized.startswith(_ASSISTANT_VOICE_OPENERS)
+    return _ASSISTANT_VOICE.match(normalized) is not None
 
 
 def _prompt(answer: str) -> str:
@@ -215,9 +229,11 @@ def _prompt(answer: str) -> str:
         "or a follow-up question, in the user's own voice. You are not the "
         "assistant: do not continue, summarize or restate its answer, do not "
         "offer to do work, and do not describe work as if you did it. Good "
-        "replies: 'Okay, fix it.', 'Yes, go with option 2.', 'Why did the test "
-        "fail on Windows?'. Wrong (assistant voice): 'I'll fix that now.', "
-        "'Want me to open a PR?', 'Here's a summary of the changes.'. If the "
+        "replies look like: 'Yes, add the regression test.', 'Go with the "
+        "second option.', 'What caused the timeout?'. Wrong (assistant voice): "
+        "'I'll fix that now.', 'Want me to add a test?', 'Here's a summary of "
+        "the changes.'. Fit the reply to this answer; do not copy these "
+        "examples. If the "
         "assistant asked a question or offered choices, answer it as the user "
         "would. Return only that reply as plain text, one line, at most 240 "
         "characters. This is an optional draft for the user to review, not a "
