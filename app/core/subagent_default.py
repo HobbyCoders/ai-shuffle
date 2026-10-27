@@ -218,7 +218,8 @@ def missing_default_error(agent_label: str, why: Optional[str] = None) -> str:
         + " Do not retry this agent until they have."
     )
     return text + (
-        " If the user named a model for this task, pass it as model; that is "
+        " If the user named a model for this task, or a saved owner model-routing "
+        "memory names one for this kind of work, pass it as model; that is "
         "checked and used for this task only."
     )
 

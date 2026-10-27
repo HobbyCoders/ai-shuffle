@@ -7878,6 +7878,8 @@ def _native_task_contract(options: SessionOptions) -> Any:
             provider_id,
             file_subagent_targets(discovered_registry, options.model),
             workflow_guidance=bool((options.extra or {}).get("automatic_workflows")),
+            session_id=(options.extra or {}).get("app_session_id"),
+            cwd=options.cwd,
         )
     except Exception:  # noqa: BLE001 — must never break session connect
         logger.warning(

@@ -704,8 +704,10 @@ async def _confirm_start_model(sender_id, data, placement):
     title = str(data.get("title") or "").strip()[:80] or "new chat"
     action = (f"start the chat “{title}” on {model_override.label(plan['model'])} instead of "
               f"{model_override.label(plan['baseline']) if plan['baseline'] else 'your model'}")
-    plan["source"] = await model_override.confirm(
+    accepted = await model_override.accept(
         sender_id, plan["profile_id"], model=plan["model"], baseline=plan["baseline"], action=action)
+    plan["source"] = accepted.source
+    plan.update(accepted.record())
     return plan
 
 
@@ -721,8 +723,10 @@ def _start_overrides(overrides, plan, mapped):
 
 def _override_record(plan):
     """What the chat and the receipt record about a switched model."""
-    return {"model": plan["model"], "provider_id": plan["provider_id"],
-            "source": plan.get("source"), "instead_of": plan.get("baseline")}
+    record = {"model": plan["model"], "provider_id": plan["provider_id"],
+              "source": plan.get("source"), "instead_of": plan.get("baseline")}
+    record.update({key: plan[key] for key in ("memory_id", "accepted") if plan.get(key)})
+    return record
 
 
 def _remote_session_id(command_id):
@@ -940,7 +944,8 @@ def accept_remote_start(body, from_device):
     if choice is not None:
         payload["model_override"] = {
             "model": model, "provider_id": provider_id,
-            "source": choice.get("source") if choice.get("source") in ("named_by_user", "approved_by_owner") else None,
+            "source": choice.get("source") if choice.get("source") in (
+                "named_by_user", "remembered_by_owner", "approved_by_owner") else None,
             "instead_of": choice.get("instead_of") if isinstance(choice.get("instead_of"), str) else None}
     if report_back:
         # The owner's assistant asked: report back to its worker when done.
@@ -1634,7 +1639,8 @@ def _model_receipt(row, plan, *, model=None, provider_id=None):
     provider_id = provider_id if row is None else (row or {}).get("provider_id")
     out = {"model": model, "provider": {"id": provider_id, "name": model_override.provider_label(provider_id)}}
     if plan:
-        out["model_override"] = {"source": plan.get("source"), "instead_of": plan.get("baseline")}
+        out["model_override"] = {"source": plan.get("source"), "instead_of": plan.get("baseline"),
+                                 **{key: plan[key] for key in ("memory_id", "accepted") if plan.get(key)}}
     return out
 
 

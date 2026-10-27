@@ -52,7 +52,8 @@ _START_DESCRIPTION = (
     "Create and queue an independent, visible top-level chat for relevant work, "
     "not a Task child. Supply a self-contained peer brief: no transcript is copied. "
     "Inherits your agent, provider/model, permission mode, project and workspace; pass model "
-    "only when the user named a model for that chat. "
+    "only when the user named a model for that chat or a saved owner model-routing memory "
+    "directs that work to it. "
     "When you are on a Git branch, the host gives it its own worktree and branch, forked from "
     "your committed HEAD (uncommitted changes are not copied); it never works in your checkout "
     "and cannot switch your branch. In a project's main checkout it shares that checkout: "
@@ -78,9 +79,13 @@ _START_DESCRIPTION = (
 # Shared by StartSession, Task and Swarm: the host enforces it, so the text
 # says so rather than asking the model to police itself.
 MODEL_OVERRIDE_RULE = (
-    "Only for when the user named a model for this work; otherwise omit. The host checks that the user asked "
-    "in this chat or asks the owner to approve a switch; refusal starts nothing. "
-    "Pass the model exactly as the user named it: enabled model IDs and display names match "
+    "Only for when the user named a model for this work in this chat, or a saved owner "
+    "model-routing memory (listed under the Task roster's subagent default) directs this kind "
+    "of work to it; otherwise omit. The host checks that the user asked "
+    "in this chat or in a saved owner memory, or asks the owner to approve a switch; refusal "
+    "starts nothing. Never fabricate a model id; after a refusal never substitute or retry "
+    "another model nobody named. "
+    "Pass the model exactly as the user or memory named it: enabled model IDs and display names match "
     "ignoring case, spaces and dashes. "
     "Unknown/unavailable names start nothing and return bounded real choices; ambiguous "
     "names need an exact model id. Claude names (opus) and prov:<providerId>:<modelId> work; "

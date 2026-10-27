@@ -1261,7 +1261,9 @@ def test_startsession_spec_takes_a_string_and_states_the_rule(chats):
     assert "See Task.model for host validation and provider rules" in swarm_description
     assert "under the same rule as Task's model" in swarm_description
     for description in descriptions:
-        assert "Pass the model exactly as the user named it" in description
+        assert "Pass the model exactly as the user or memory named it" in description
+        assert "saved owner model-routing memory" in description
+        assert "Never fabricate a model id" in description
         assert "model IDs and display names" in description
         assert "case, spaces and dashes" in description
         assert "start nothing" in description and "ambiguous" in description

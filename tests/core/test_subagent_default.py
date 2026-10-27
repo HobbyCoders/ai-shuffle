@@ -177,7 +177,7 @@ async def test_no_default_refuses_and_asks_the_owner_never_the_session_model(lan
 async def test_no_default_refusal_points_at_a_user_named_model(lane):
     _, _, _ = lane
     refused = await _task({"agent": "plain"})
-    assert "If the user named a model for this task, pass it as model" in refused["error"]
+    assert "If the user named a model for this task, or a saved owner model-routing" in refused["error"]
 
 
 # ---------------------------------------------------------------------------
