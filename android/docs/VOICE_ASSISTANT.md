@@ -9,7 +9,9 @@ The prompts and settings live on the server under Settings → Voice.
 What the shell contributes (`ui/ChatActivity.kt`):
 
 - the `RECORD_AUDIO` permission and the WebView microphone grant, scoped to the
-  worker's `/mobile/` page, the current document and a focused, authorized chat;
+  worker's `/mobile/` page, the current document and a focused, authorized chat
+  (the one exception: a call kept alive in the background may reopen its own
+  microphone off screen, see below);
 - headset routing while the page has a call (`ui/VoiceAudioRouting.kt`);
 - keeping a call alive with the phone locked or in another app: a foreground
   service of type `microphone` (`ui/VoiceCallService.kt`, driven by

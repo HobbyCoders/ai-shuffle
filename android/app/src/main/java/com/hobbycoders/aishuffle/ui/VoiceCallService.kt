@@ -76,9 +76,11 @@ class VoiceCallService : Service() {
             }
             // Promoting again also refreshes the notification for a new owner.
             else -> if (promote(current)) owner?.onServiceForeground() else {
-                // Not in the foreground, so nothing keeps the call alive: say so and stop.
+                // Not in the foreground, so nothing keeps the call alive: say so and stop,
+                // also when this instance was running for an earlier owner (no ownerless
+                // notification is left behind).
                 release(notify = true)
-                if (!running) stopSelf()
+                stopSelf()
             }
         }
         return START_NOT_STICKY
@@ -105,7 +107,10 @@ class VoiceCallService : Service() {
     override fun onDestroy() {
         running = false
         // A stop the owner did not ask for (task removed, Android). Owner-requested stops
-        // and the hang-up fallback have already released it.
+        // and the hang-up fallback have already released it. An instance cannot be
+        // destroyed with the current session still unpromoted: its start command is
+        // handled first (promote or release), and only stopService, which releases
+        // first, can stop it sooner.
         if (owner != null && servedSession == session) release(notify = true)
         servedSession = -1
         super.onDestroy()

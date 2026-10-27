@@ -266,6 +266,37 @@ class VoiceCallServiceTest {
             CallNotificationAsk(app.getSharedPreferences("old", 0), sdk = 32).next(true, true, false, false, false))
     }
 
+    // Follow-up 1: a call ending while its service is still starting lets chat pause again.
+    @Test fun endingACallWhileItsServiceStartsReportsItIsNoLongerKeptAlive() {
+        keeper.started(3)
+        assertTrue(keeper.starting)
+        keeper.ended()
+        assertFalse(keeper.keepsRunningInBackground())
+        assertEquals(listOf(false), kept)
+        assertEquals(VoiceCallService::class.java.name, shadowOf(app).nextStoppedService.component!!.className)
+        assertNull(VoiceCallService.call)
+    }
+
+    // Follow-up 2: a refused promotion on an instance already running for another
+    // chat stops it, so no foreground notification is left without an owner.
+    @Test fun aRefusedPromotionOnARunningServiceStopsIt() {
+        keeper.started(3)
+        val service = run(VoiceCallService.ACTION_SHOW)
+        assertTrue(VoiceCallService.running)
+        val otherKept = mutableListOf<Boolean>()
+        val other = VoiceCallKeeper(app, "worker-2", "Desk worker", { true }, { true }, send = { }, keptAliveChanged = { otherKept += it })
+        VoiceCallService.goForeground = { _, _ -> throw SecurityException("microphone service refused") }
+        other.started(1)
+        assertTrue(other.starting)
+        assertEquals("the previous chat is told it lost the service", listOf(true, false), kept)
+        services[0].startCommand(0, 2)
+        assertTrue(shadowOf(service).isStoppedBySelf)
+        assertNull(VoiceCallService.call)
+        assertFalse(other.starting); assertFalse(other.keptAlive)
+        assertEquals(listOf(false), otherKept)
+        other.ended()
+    }
+
     // Review 4: off screen, only the kept-alive call's own page may reopen the microphone.
     @Test fun theBackgroundMicrophoneEndsWithTheCall() {
         keeper.started(3)
