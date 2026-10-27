@@ -38,7 +38,20 @@ class VoiceCallService : Service() {
     data class Call(val serverId: String, val workerName: String, val title: String? = null,
                     val status: String? = null, val muted: Boolean? = null, val since: Long? = null)
 
-    interface Owner { fun onCommand(command: MobileUi.VoiceCallCommand) }
+    interface Owner {
+        fun onCommand(command: MobileUi.VoiceCallCommand)
+        /** The service is in the foreground: the call now survives the lock screen. */
+        fun onServiceForeground()
+        /**
+         * The service could not go foreground or stopped without the owner asking
+         * (hang-up fallback, task removed, Android stopped it, another chat took over).
+         * The call is no longer kept alive.
+         */
+        fun onServiceStopped()
+    }
+
+    /** The [start] this instance went foreground for; a later call is not this one's to release. */
+    private var servedSession = -1
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -62,16 +75,20 @@ class VoiceCallService : Service() {
                 handler.postDelayed(hangupFallback, HANGUP_FALLBACK_MS)
             }
             // Promoting again also refreshes the notification for a new owner.
-            else -> if (!promote(current) && !running) stopSelf()
+            else -> if (promote(current)) owner?.onServiceForeground() else {
+                // Not in the foreground, so nothing keeps the call alive: say so and stop.
+                release(notify = true)
+                if (!running) stopSelf()
+            }
         }
         return START_NOT_STICKY
     }
 
     private fun promote(current: Call): Boolean = try {
         ensureChannel(this)
-        ServiceCompat.startForeground(this, NOTIFICATION_ID, notification(this, current),
-            if (Build.VERSION.SDK_INT >= 30) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0)
+        goForeground(this, notification(this, current))
         running = true
+        servedSession = session
         true
     } catch (error: Exception) {
         // Android refused the microphone service (permission revoked, app not visible).
@@ -87,7 +104,10 @@ class VoiceCallService : Service() {
 
     override fun onDestroy() {
         running = false
-        handler.removeCallbacks(hangupFallback)
+        // A stop the owner did not ask for (task removed, Android). Owner-requested stops
+        // and the hang-up fallback have already released it.
+        if (owner != null && servedSession == session) release(notify = true)
+        servedSession = -1
         super.onDestroy()
     }
 
@@ -108,17 +128,41 @@ class VoiceCallService : Service() {
         @VisibleForTesting internal var running = false
             private set
         private var appContext: Context? = null
-        private val hangupFallback = Runnable { appContext?.let { context -> owner?.let { stop(context, it) } } }
+        /** Counts [start] calls, so a destroyed instance can tell its call from a newer one. */
+        private var session = 0
+        private val hangupFallback = Runnable {
+            val context = appContext ?: return@Runnable
+            release(notify = true)
+            context.stopService(Intent(context, VoiceCallService::class.java))
+        }
 
-        /** Starts the service for [owner]'s call. False when Android refuses (chat not on screen). */
+        /** How the service goes foreground; tests replace it to simulate Android refusing. */
+        @VisibleForTesting internal var goForeground: (Service, Notification) -> Unit = { service, notification ->
+            ServiceCompat.startForeground(service, NOTIFICATION_ID, notification,
+                if (Build.VERSION.SDK_INT >= 30) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0)
+        }
+
+        /** Forgets the call and its owner (no Activity is held after this); [notify] tells the owner. */
+        private fun release(notify: Boolean) {
+            handler.removeCallbacks(hangupFallback)
+            val previous = owner
+            call = null; owner = null; appContext = null
+            if (notify) previous?.onServiceStopped()
+        }
+
+        /**
+         * Asks Android for the service for [owner]'s call. False when Android refuses
+         * (chat not on screen). The call is kept alive only once [Owner.onServiceForeground] arrives.
+         */
         fun start(context: Context, current: Call, owner: Owner): Boolean {
-            call = current; this.owner = owner; appContext = context.applicationContext
+            if (this.owner !== owner) release(notify = true)
+            call = current; this.owner = owner; appContext = context.applicationContext; session++
             return try {
                 ContextCompat.startForegroundService(context, Intent(context, VoiceCallService::class.java).setAction(ACTION_SHOW))
                 true
             } catch (error: Exception) {
                 Log.w(TAG, "Could not start the voice call service", error)
-                call = null; this.owner = null
+                release(notify = false)
                 false
             }
         }
@@ -138,8 +182,7 @@ class VoiceCallService : Service() {
         /** Stops the service, if [owner] still owns the call. */
         fun stop(context: Context, owner: Owner) {
             if (owner !== this.owner) return
-            handler.removeCallbacks(hangupFallback)
-            call = null; this.owner = null
+            release(notify = false)
             context.stopService(Intent(context, VoiceCallService::class.java))
         }
 

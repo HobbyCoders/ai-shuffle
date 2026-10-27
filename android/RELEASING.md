@@ -192,10 +192,15 @@ Other App content declarations this app needs:
   the Console declaration and demonstration video showing disclosure, consent,
   service enablement, an approved read/action and denial. No compliant
   disclosure/video or policy approval has been established by this review.
-- **Foreground service:** the existing draft says voice declares none;
-  reconcile with the signed release manifest. Cross-app Accessibility polling
-  can operate while another allowed app is foreground, not only while Shuffle
-  is focused.
+- **Foreground service:** the app declares one, `ui/VoiceCallService`, type
+  `microphone` (`FOREGROUND_SERVICE_MICROPHONE`), which keeps a voice call the
+  user started running with the phone locked or in another app, with an ongoing
+  call notification (Mute, Hang up). Play Console's foreground service
+  declaration must list the microphone type with that use and a demonstration
+  video: start a call, lock the phone or switch apps, show the notification and
+  hang up from it. Reconcile with the signed release manifest. Cross-app
+  Accessibility polling can operate while another allowed app is foreground,
+  not only while Shuffle is focused.
 - **Camera:** verify QR-pairing and other enabled camera paths in the release.
 - **Privacy policy URL:** `https://hobbycoders.com/privacy`; reconcile voice,
   uploads, transcript persistence, provider processing and retained deletion
