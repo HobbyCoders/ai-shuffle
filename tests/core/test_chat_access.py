@@ -359,6 +359,27 @@ async def test_wrong_host_key_or_password_never_creates_grant(broker, ssh_target
     assert not broker.grants and not commands
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key_case", ["malformed", "wrong-passphrase"])
+async def test_initial_grant_key_import_failure_is_specific_and_sanitized(broker, ssh_target, key_case, caplog):
+    spec, commands, _ = ssh_target
+    private_key = "PRIVATE-INPUT-CANARY not a key"
+    if key_case == "wrong-passphrase":
+        key = asyncssh.generate_private_key("ssh-ed25519")
+        private_key = key.export_private_key("openssh", passphrase="test-key-passphrase").decode()
+    bad = GrantInput.model_validate({**spec.model_dump(), "password": "",
+                                    "private_key": private_key, "passphrase": "wrong-passphrase-canary"})
+    error_type = asyncssh.KeyImportError if key_case == "malformed" else asyncssh.KeyEncryptionError
+    with pytest.raises(error_type) as err:
+        await broker.create("chat", bad)
+    assert chat_access.grant_failure(err.value) == (
+        400, "The private key could not be read. Check the key and its passphrase.")
+    # Even an exception containing private input is translated to fixed wording.
+    assert chat_access.grant_failure(asyncssh.KeyImportError(private_key)) == chat_access.grant_failure(err.value)
+    assert private_key not in caplog.text and "wrong-passphrase-canary" not in caplog.text
+    assert not broker.grants and not commands
+
+
 @pytest_asyncio.fixture
 async def multi_key_target():
     """A server with ED25519 and RSA keys: a client without known_hosts negotiates RSA first."""

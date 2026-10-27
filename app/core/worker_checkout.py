@@ -329,6 +329,7 @@ def reclaim_untouched_worker_checkout(
     with commits past its recorded base or uncommitted changes is retained for
     review. Returns True when it was removed.
     """
+    from app.core import worktree_reclaim
     from app.core.git_service import git_service
     from app.db import database
 
@@ -358,6 +359,12 @@ def reclaim_untouched_worker_checkout(
     base_commit = entries[0]
     main_dir = _main_dir_for(path)
     if not main_dir:
+        return False
+    # Untouched does not mean disposable: the parent may have dropped its
+    # unpublished tip while the worker ran, leaving this branch its only ref.
+    if not worktree_reclaim._held_elsewhere(main_dir, base_commit, branch, None):
+        logger.info("worker_checkout: kept %s: its starting commit %s is held only by its own branch",
+                    branch, base_commit[:12])
         return False
     head = git_service._run_git(path, ["rev-parse", "--verify", "HEAD^{commit}"], timeout=5)
     head_commit = head.stdout.strip() if head.returncode == 0 else ""
@@ -458,10 +465,12 @@ def restore_worker_checkout(worker_session_id: str) -> Tuple[bool, Optional[str]
             archived = base_path and git_service._run_git(
                 base_path, ["rev-parse", "--verify", "--quiet", ref], timeout=5).returncode == 0
             if archived:
-                # Automatic cleanup archived it but removal stopped part-way:
-                # the folder may be incomplete, so never resume inside it.
-                return False, ("its checkout was archived but removal stopped part-way, so the folder may be "
-                               f"incomplete; {worktree_reclaim.archive_note(base_path, branch)}. "
+                # A stopped removal OR a restore onto an existing branch can
+                # leave both. Keep the snapshot and don't assume this folder
+                # contains all of it or is complete enough to resume inside.
+                return False, ("its checkout folder coexists with an archived snapshot: cleanup may have stopped "
+                               "part-way, or a restore retained the snapshot. The folder may not contain all "
+                               f"the saved work; {worktree_reclaim.archive_note(base_path, branch)}. "
                                "Dispatch a new Task instead")
             return True, None
         if not project:

@@ -1690,11 +1690,12 @@ class HarnessAdapter(ProviderAdapter):
         await self.reconcile_user_questions()
         self._mark_turn_floor()
         await self._refresh_task_roster()
-        if not self._is_delegated and self._options is not None and prompt.startswith("/"):
-            from app.core.slash_commands import expand_native_command
+        if self._options is not None and prompt.startswith("/"):
+            from app.core.slash_commands import expand_delegated_command, expand_native_command
 
+            expand_command = expand_delegated_command if self._is_delegated else expand_native_command
             prompt = await asyncio.to_thread(
-                expand_native_command, self._options.cwd or ".", prompt,
+                expand_command, self._options.cwd or ".", prompt,
                 setting_sources=_fluid_setting_sources(self._options),
             )
         # Everything that changes between turns rides HERE, at the tail of the
@@ -1707,7 +1708,7 @@ class HarnessAdapter(ProviderAdapter):
         # older than this turn. The memory snapshot rides only when the model
         # does not already hold it (see _memory_turn_note).
         source = self._take_turn_source()
-        # Claude Code takes any slash command as typed; a native session takes
+        # Claude Code takes its own slash commands as typed; a native session takes
         # only a bare "/compact", which its engine runs as a compaction.
         command = (
             _is_cli_command(prompt) if self._is_delegated

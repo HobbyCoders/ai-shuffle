@@ -537,6 +537,8 @@ def grant_failure(exc: BaseException) -> tuple[int, str]:
         return 409, str(exc)
     if isinstance(exc, AccessDenied):
         return 400, str(exc)
+    if isinstance(exc, (asyncssh.KeyImportError, asyncssh.KeyEncryptionError)):
+        return 400, "The private key could not be read. Check the key and its passphrase."
     if isinstance(exc, asyncssh.PermissionDenied):
         return 400, "SSH sign-in was rejected. Check the username and password or private key."
     if isinstance(exc, asyncssh.HostKeyNotVerifiable):

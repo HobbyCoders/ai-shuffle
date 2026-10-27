@@ -18,6 +18,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from app.core.slash_commands import (
     SlashCommand,
     parse_frontmatter,
@@ -892,3 +894,109 @@ class TestGetAllCommandsIncludesSkills:
             assert skill_cmd is not None
             assert skill_cmd["type"] == "skill"
             assert skill_cmd["display"] == "/my-skill"
+
+
+@pytest.fixture
+def authored_command(tmp_path, monkeypatch):
+    """Produce a real draft and approve it through the same service as the UI."""
+    from app.core.plugin_service import PluginService
+    from fluid.context.plugin_authoring import save_authored_plugin
+
+    home = tmp_path / "home"
+    home.mkdir()
+    cwd = tmp_path / "project"
+    (cwd / ".git").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    for module in ("app.core.plugin_service", "app.core.plugin_models", "app.core.connector_packages"):
+        monkeypatch.setattr(f"{module}._get_fluid_dir", lambda: home / ".fluid")
+    monkeypatch.setattr("app.core.plugin_models._get_claude_dir", lambda: home / ".claude")
+    svc = PluginService()
+    saved = save_authored_plugin({
+        "name": "notes-helper", "version": "0.1.0", "description": "Draft notes",
+        "commands": [{"name": "draft", "body": "Draft $1 for $2. All: $ARGUMENTS. "
+                      "Root: ${CLAUDE_PLUGIN_ROOT}. Data: ${CLAUDE_PLUGIN_DATA}"}],
+    }, home=svc.PLUGINS_DIR)
+    return svc, saved, cwd
+
+
+@pytest.mark.parametrize("state", ["pending", "approved", "disabled", "edited"])
+def test_delegated_authored_commands_require_enablement_and_current_approval(authored_command, state):
+    import json
+    from app.core.slash_commands import expand_delegated_command, expand_native_command
+
+    svc, saved, cwd = authored_command
+    if state != "pending":
+        assert svc.enable_plugin(saved.id, content_hash=saved.content_hash)
+    # Merely enabling an unreviewed draft must not bypass its approval hash.
+    svc.SETTINGS_FILE.write_text(json.dumps({"enabledPlugins": {saved.id: state != "disabled"}}), encoding="utf-8")
+    if state == "edited":
+        command_file = saved.path / "commands" / "draft.md"
+        command_file.write_text(command_file.read_text(encoding="utf-8") + "\nChanged after review", encoding="utf-8")
+    prompt = '/notes-helper:draft "two words" release'
+    for kind in ("delegated", "native"):
+        entries = get_all_commands(str(cwd), provider_kind=kind)
+        found = next((cmd for cmd in entries if cmd["name"] == "notes-helper:draft"), None)
+        assert (found is not None) == (state == "approved")
+        if found:
+            assert found["type"] == "plugin" and found["display"] == "/notes-helper:draft"
+    expanded = expand_delegated_command(str(cwd), prompt)
+    if state == "approved":
+        assert expanded == expand_native_command(str(cwd), prompt)
+        assert 'Draft two words for release. All: "two words" release.' in expanded
+        assert str(saved.path) in expanded
+        assert "${CLAUDE_PLUGIN_" not in expanded
+    else:
+        assert expanded == prompt
+
+
+@pytest.mark.parametrize("sources", [[], ["project"], ["user"], ["user", "project", "local"]])
+def test_delegated_authored_command_obeys_profile_sources(authored_command, sources):
+    from app.core.slash_commands import expand_delegated_command
+
+    svc, saved, cwd = authored_command
+    assert svc.enable_plugin(saved.id, content_hash=saved.content_hash)
+    prompt = "/notes-helper:draft owner release"
+    found = get_command_by_name(str(cwd), "notes-helper:draft", setting_sources=sources)
+    assert (found is not None) == ("user" in sources)
+    assert (expand_delegated_command(str(cwd), prompt, setting_sources=sources) != prompt) == ("user" in sources)
+
+
+@pytest.mark.asyncio
+async def test_delegated_adapter_expands_authored_but_keeps_claude_commands(authored_command, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from app.core.provider.harness_adapter import HarnessAdapter
+    from app.core.provider.types import SessionOptions
+    from app.core.slash_commands import expand_delegated_command
+    from fluid.events.ops import UserTurn
+
+    svc, saved, cwd = authored_command
+    assert svc.enable_plugin(saved.id, content_hash=saved.content_hash)
+    adapter = HarnessAdapter()
+    adapter._engine = SimpleNamespace(submit=AsyncMock())
+    adapter._is_delegated = True
+    adapter._options = SessionOptions(model="sonnet", cwd=str(cwd))
+    monkeypatch.setattr(adapter, "reconcile_user_questions", AsyncMock())
+    monkeypatch.setattr(adapter, "_refresh_task_roster", AsyncMock())
+    monkeypatch.setattr(adapter, "_turn_context_note", lambda query="": "turn-context-canary")
+    prompt = '/notes-helper:draft "two words" release'
+    await adapter.send_query(prompt)
+    op = adapter._engine.submit.await_args.args[0]
+    assert isinstance(op, UserTurn)
+    assert op.content == expand_delegated_command(str(cwd), prompt) + "\n\nturn-context-canary"
+    for cli_command in ("/compact keep my focus", "/context", "/unknown command"):
+        await adapter.send_query(cli_command)
+        assert adapter._engine.submit.await_args.args[0].content == cli_command
+
+    # Discovery and execution have the same precedence: a Claude-owned
+    # command of the same name is still sent to the CLI, never app-expanded.
+    import json
+    claude_home = Path.home() / ".claude"
+    command_dir = claude_home / "plugins" / "cache" / "market" / "notes-helper" / "1.0.0" / "commands"
+    command_dir.mkdir(parents=True)
+    (command_dir / "draft.md").write_text("Claude-owned body", encoding="utf-8")
+    (claude_home / "settings.json").write_text(
+        json.dumps({"enabledPlugins": {"notes-helper@market": True}}), encoding="utf-8")
+    assert get_command_by_name(str(cwd), "notes-helper:draft").content == "Claude-owned body"
+    await adapter.send_query(prompt)
+    assert adapter._engine.submit.await_args.args[0].content == prompt

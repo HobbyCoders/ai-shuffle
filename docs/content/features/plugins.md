@@ -49,6 +49,7 @@ Ask an agent for a plugin, for example "make me a plugin that reads my Cloudflar
 - Open it, check each skill, command, agent and MCP server it adds, then choose **Approve and enable**.
 - If the plugin changes later, it stops loading until you review it again.
 - Plugins an agent writes cannot contain hooks or saved secrets.
+- Once approved and enabled, their slash commands appear in both Claude-model and API-model chats. AI Shuffle expands the command's body and arguments before sending it; Claude's own commands still run through Claude Code.
 
 ## Plugins that use outside services
 

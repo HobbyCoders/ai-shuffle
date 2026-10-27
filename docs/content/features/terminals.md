@@ -106,10 +106,11 @@ never includes what you type or what the shell prints.
 
 ## Pasting
 
-Pasting puts the text at the prompt **without running it**. Press Enter when you are ready.
+At a shell prompt, pasting puts the text there **without running it**. Press Enter when you are ready.
 
 - A paste with several lines asks first. In sh, paste one line at a time.
-- If a command is still running, wait until the prompt is back before pasting.
+- You can paste a single line into a running program, including a password prompt or a REPL. Pasting strips trailing newlines; press Enter yourself to submit the input.
+- Multi-line pastes into a running program are refused, even if it advertises bracketed paste. This prevents extra lines from being submitted unexpectedly.
 
 ## Watch an agent's background command
 

@@ -1215,10 +1215,11 @@ class TerminalRegistry:
             raise TerminalError("terminal_exited", "This terminal has exited. Restart it to type again.", 409)
         await terminal.wait_ready()
         terminal.refresh_busy()
-        if terminal.busy:
-            raise TerminalError("terminal_busy",
-                                "A command is running in this terminal. Paste when it's back at the prompt.", 409)
-        data, mode = paste_bytes(text, terminal.holds_bracketed_paste(), terminal.shell)
+        # Foreground programs may be waiting for input (including hidden
+        # password prompts). Let them receive a single cleaned line, but do
+        # not trust their bracketed-paste mode to hold multiple lines unrun.
+        bracketed = not terminal.busy and terminal.holds_bracketed_paste()
+        data, mode = paste_bytes(text, bracketed, terminal.shell)
         if data:
             await terminal.write(data)
         return mode
