@@ -456,6 +456,21 @@ async def test_duration_cap_closes_the_sideband(mock_db, fake_sockets, monkeypat
     assert bridge.stop_reason == "duration_cap"
 
 
+async def test_zero_minutes_means_the_call_has_no_limit(mock_db, fake_sockets, registry, monkeypatch):
+    _mk_session()
+    monkeypatch.setattr(vb, "SECONDS_PER_MINUTE", 0.01)
+    bridge = await registry.attach(SID, CALL, api_key=KEY, model=MODEL, max_call_minutes=0)
+    assert bridge._deadline_task is None
+    assert bridge.remaining_seconds() is None
+    await bridge._duration_cap()  # Returns at once; it never caps an unlimited call.
+    await asyncio.sleep(0.05)
+    assert bridge.active and fake_sockets[0].closed is False
+    assert registry.capped_minutes(SID) is None
+    state = registry.state(SID)
+    assert (state["max_call_minutes"], state["remaining_seconds"]) == (0, None)
+    await registry.detach(SID)
+
+
 async def test_stop_cancels_the_duration_timer(mock_db, fake_sockets):
     _mk_session()
     bridge = await _bridge(fake_sockets, max_call_minutes=60)
@@ -473,6 +488,7 @@ async def test_registry_attach_and_state(mock_db, fake_sockets, registry):
     assert registry.state(SID) == {
         "active": False, "connected": False, "started_at": None, "model": None,
         "usage": {}, "estimated_cost_usd": None, "active_tasks": 0,
+        "max_call_minutes": None, "remaining_seconds": None,
     }
 
     bridge = await registry.attach(
@@ -1003,6 +1019,8 @@ async def test_watcher_window_follows_the_call_cap_but_is_bounded(mock_db, fake_
     bridge = await _bridge(fake_sockets, max_call_minutes=5)
     assert bridge._watch_timeout() == 5 * vb.SECONDS_PER_MINUTE
     bridge.max_call_minutes = 10_000
+    assert bridge._watch_timeout() == vb.WATCHER_MAX_SECONDS
+    bridge.max_call_minutes = 0  # No call limit: the hard ceiling, never zero.
     assert bridge._watch_timeout() == vb.WATCHER_MAX_SECONDS
     await bridge.stop()
 

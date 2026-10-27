@@ -918,9 +918,10 @@ def offered_voice_engines(pinned_provider_id: Optional[str]) -> list[dict]:
         for engine in ENGINES
         if not engine.get("gated") or (engine["id"] == LIVE_11_MODEL and _live_11_available(pinned_provider_id))
     ]
-# Total wall-clock budget for one call. OpenAI's own 60-minute session cap is
-# bridged by reconnect; this is the separate "don't leave a call running
-# all week" ceiling.
+# Total wall-clock budget for one call. Provider session limits (OpenAI's
+# 60-minute session, GPT Live and Grok expiry) are bridged by renewing the
+# provider session; this is the separate "don't leave a call running all week"
+# ceiling. 0 means no limit: the call lasts while the caller stays connected.
 DEFAULT_VOICE_MAX_CALL_MINUTES = 240
 
 VOICE_MODE_ENABLED_KEY = "voice_mode_enabled"
@@ -1008,7 +1009,7 @@ def get_voice_settings() -> dict:
         max_minutes = int(raw_minutes) if raw_minutes else DEFAULT_VOICE_MAX_CALL_MINUTES
     except (TypeError, ValueError):
         max_minutes = DEFAULT_VOICE_MAX_CALL_MINUTES
-    if max_minutes <= 0:
+    if max_minutes < 0:
         max_minutes = DEFAULT_VOICE_MAX_CALL_MINUTES
 
     from app.core.voice_input_settings import get_voice_input_model
@@ -1090,7 +1091,7 @@ async def update_voice_settings(
     """Update voice-mode settings. Only the supplied keys are written.
 
     Validation: ``voice_model`` must be in the allowlist, ``voice_max_call_minutes``
-    must be positive, and a non-empty ``voice_provider_id`` must name a provider
+    must be 0 (no limit) or positive, and a non-empty ``voice_provider_id`` must name a provider
     row that is eligible to fund voice calls, or the configured fal.ai voice
     provider. Provider, model, and voice must form a valid combination.
 
@@ -1133,8 +1134,9 @@ async def update_voice_settings(
                 raise HTTPException(400, f"voice_voice must be one of {list(voices_for(model))}")
             voice = _default_voice_for(model)
         minutes = request.voice_max_call_minutes if "voice_max_call_minutes" in supplied else current["voice_max_call_minutes"]
-        if minutes is None or minutes <= 0:
-            raise HTTPException(400, "voice_max_call_minutes must be a positive integer")
+        if minutes is None or minutes < 0:
+            raise HTTPException(
+                400, "voice_max_call_minutes must be 0 (no limit) or a positive integer")
 
         options = get_voice_options(model)
         if "voice_options" in supplied:

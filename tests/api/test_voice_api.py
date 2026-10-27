@@ -396,9 +396,9 @@ class TestVoiceSettings:
         assert resp.status_code == 200, resp.text
         assert resp.json()["voice_voice"] == voice
 
-    def test_max_minutes_must_be_positive(self, authenticated_client, mock_db):
-        assert authenticated_client.put(VOICE_SETTINGS, json={"voice_max_call_minutes": 0}).status_code == 400
+    def test_max_minutes_must_be_zero_or_positive(self, authenticated_client, mock_db):
         assert authenticated_client.put(VOICE_SETTINGS, json={"voice_max_call_minutes": -5}).status_code == 400
+        assert authenticated_client.put(VOICE_SETTINGS, json={"voice_max_call_minutes": 0}).status_code == 200
 
     def test_provider_must_be_eligible(self, authenticated_client, mock_db):
         # Unknown id.
@@ -1513,6 +1513,7 @@ class TestVoiceState:
         assert resp.json() == {
             "active": False, "connected": False, "started_at": None, "model": None,
             "usage": {}, "estimated_cost_usd": None, "active_tasks": 0,
+            "max_call_minutes": None, "remaining_seconds": None,
         }
 
     def test_state_while_attached(self, authenticated_client, mock_db, sidebands):
@@ -1530,6 +1531,8 @@ class TestVoiceState:
         assert body["connected"] is True
         assert body["model"] == "gpt-realtime-2.1-mini"
         assert isinstance(body["started_at"], float)
+        assert body["max_call_minutes"] == 240
+        assert 0 < body["remaining_seconds"] <= 240 * 60
 
         authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
         after = authenticated_client.get(
@@ -1538,7 +1541,30 @@ class TestVoiceState:
         assert after == {
             "active": False, "connected": False, "started_at": None, "model": None,
             "usage": {}, "estimated_cost_usd": None, "active_tasks": 0,
+            "max_call_minutes": None, "remaining_seconds": None,
         }
+
+    def test_state_of_a_call_with_no_limit(self, authenticated_client, mock_db, sidebands):
+        from app.core import voice_bridge
+
+        _enable_voice(voice_model="gpt-realtime-2.1-mini", voice_max_call_minutes="0")
+        _make_provider()
+        _mk_voice_session()
+        resp = authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_1"}
+        )
+        assert resp.status_code == 200, resp.text
+        bridge = voice_bridge.registry.get(SESSION_ID)
+        assert bridge._deadline_task is None  # No cap timer for an unlimited call.
+        body = authenticated_client.get(f"{VOICE_ROOT}/sessions/{SESSION_ID}/state").json()
+        assert (body["max_call_minutes"], body["remaining_seconds"]) == (0, None)
+        # The FE's silent re-handshake still re-attaches, and is never refused.
+        resp = authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_2"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert voice_bridge.registry.capped_minutes(SESSION_ID) is None
+        authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
 
     def test_state_for_a_chat_session_returns_404(self, authenticated_client, mock_db):
         _mk_voice_session("chat-sess", mode="chat")

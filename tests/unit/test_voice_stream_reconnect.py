@@ -412,3 +412,91 @@ async def test_a_provider_that_stops_hearing_the_caller_is_replaced(harness, mon
     assert not harness.call.deaf.is_set() and len(harness.attempts) == 2
     await harness.call.close()
     await asyncio.wait_for(run, 3)
+
+
+@pytest.mark.asyncio
+async def test_zero_minutes_runs_the_call_without_a_time_budget(harness, monkeypatch):
+    call = voice_stream.VoiceStream(harness.browser, {"id": "s1"}, {"model": "gpt-live-1", "voice": "marin"},
+                                    "sk-test", 0)
+    voice_stream.calls["s1"] = call
+    budgets = []
+    real_timeout = asyncio.timeout
+    monkeypatch.setattr(voice_stream.asyncio, "timeout", lambda delay: budgets.append(delay) or real_timeout(delay))
+    harness.script += [FakeProvider()]
+    run = asyncio.create_task(call.run())
+    await until(lambda: harness.browser.events("ready"))
+
+    assert call.max_seconds is None and budgets[0] is None  # run() opens no call budget.
+    state = voice_stream.state("s1")
+    assert (state["max_call_minutes"], state["remaining_seconds"]) == (0, None)
+    await call.close()
+    await asyncio.wait_for(run, 3)
+    assert harness.browser.events("error") == []
+
+
+def test_state_reports_the_time_left_on_a_limited_call(harness):
+    state = voice_stream.state("s1")
+    assert state["max_call_minutes"] == 60
+    assert 3590 < state["remaining_seconds"] <= 3600
+
+
+@pytest.mark.asyncio
+async def test_renewals_and_expiries_never_count_toward_the_reconnect_limit(harness, monkeypatch):
+    """An unlimited call renews its provider session every hour, all day."""
+    monkeypatch.setattr(voice_stream, "MAX_RECONNECTS", 1)
+    monkeypatch.setattr(voice_stream, "RENEW_MIN_AGE_S", 0)
+    providers = [FakeProvider([json.dumps({"type": "session.closed", "reason": "expired"})]) for _ in range(4)]
+    last = FakeProvider()
+    harness.script += [*providers, last]
+    run = asyncio.create_task(harness.call.run())
+    await until(lambda: last.started() and harness.call.connected)
+
+    assert harness.call.reconnects == 4 and not harness.call.failures
+    assert harness.browser.events("error") == []
+    await harness.call.close()
+    await asyncio.wait_for(run, 3)
+
+
+@pytest.mark.asyncio
+async def test_failures_are_limited_within_the_budget_window_only(harness, monkeypatch):
+    monkeypatch.setattr(voice_stream, "MAX_RECONNECTS", 1)
+    first, second, third = FakeProvider(), FakeProvider(), FakeProvider()
+    harness.script += [first, second, third]
+    run = asyncio.create_task(harness.call.run())
+    await until(lambda: harness.browser.events("ready"))
+    first.drop()
+    await until(lambda: second.started() and harness.call.connected)
+    # A drop an hour later is a fresh budget, so it is restored too.
+    harness.call.failures[0] -= voice_stream.RECONNECT_BUDGET_S + 1
+    second.drop()
+    await until(lambda: third.started() and harness.call.connected)
+    # Two failures within the hour exceed the limit and end the call.
+    third.drop()
+    await asyncio.wait_for(run, 3)
+    assert harness.browser.events("error") == [{"type": "error", "message": voice_stream.DROPPED_MESSAGE}]
+
+
+@pytest.mark.asyncio
+async def test_an_expiry_right_after_start_counts_as_a_failure(harness, monkeypatch):
+    monkeypatch.setattr(voice_stream, "MAX_RECONNECTS", 1)
+    closing = [FakeProvider([json.dumps({"type": "session.closed", "reason": "expired"})]) for _ in range(3)]
+    harness.script += closing
+    run = asyncio.create_task(harness.call.run())
+    await asyncio.wait_for(run, 3)  # A provider that keeps closing at once cannot loop.
+    assert len(harness.attempts) == 2
+    assert harness.browser.events("error") == [{"type": "error", "message": voice_stream.DROPPED_MESSAGE}]
+
+
+@pytest.mark.asyncio
+async def test_renewal_moves_old_handoffs_out_of_the_per_session_bound(harness):
+    first, second = FakeProvider(), FakeProvider()
+    harness.script += [first, second]
+    run = asyncio.create_task(harness.call.run())
+    await until(lambda: harness.browser.events("ready"))
+    harness.call.delegations |= {f"d-{n}" for n in range(150)} | {"typed-1"}
+    first.drop()
+    await until(lambda: second.started() and harness.call.connected)
+    assert harness.call.delegations == {"typed-1"}  # Typed ids still dedupe a resent draft.
+    assert "d-7" in harness.call.stale_delegations
+    await harness.call.close()
+    await asyncio.wait_for(run, 3)

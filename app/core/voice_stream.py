@@ -358,9 +358,13 @@ LIVE_URL ="wss://api.openai.com/v1/live/sessions"
 RECONNECT_DELAYS = (0.5, 1.0, 2.0, 4.0, 4.0, 4.0, 4.0)
 RECONNECT_WINDOW_S = 20
 RECONNECT_ATTEMPT_S = 10
-# Upper bound on restored connections in one call, so a provider that keeps
-# dropping cannot hold a call in a reconnect loop.
+# Upper bound on connections restored after a failure within
+# RECONNECT_BUDGET_S, so a provider that keeps dropping cannot hold a call in a
+# reconnect loop. Planned renewals, and a provider closing a session that had
+# lived at least RENEW_MIN_AGE_S because it expired, are not failures and never
+# count, so a call with no length limit can run for as long as the caller stays.
 MAX_RECONNECTS = 12
+RECONNECT_BUDGET_S = 3600
 # Renew a Live session this long before the expires_at it reports, at a quiet
 # moment if one comes, and no later than RENEW_LAST_S before expiry.
 RENEW_LEAD_S = 120
@@ -415,7 +419,8 @@ class VoiceStream:
         self.config = config
         self.options = effective_options(config)
         self.api_key = api_key
-        self.max_seconds = max_minutes * 60
+        # The call-length limit; None when voice_max_call_minutes is 0 (no limit).
+        self.max_seconds = max_minutes * 60 if max_minutes and max_minutes > 0 else None
         self.started_at = time.time()
         self.connected = False
         self.closed = False
@@ -426,6 +431,10 @@ class VoiceStream:
         self.closed_event = asyncio.Event()
         self.restoring = False
         self.reconnects = 0
+        # When recent failure reconnects happened (monotonic), for MAX_RECONNECTS.
+        self.failures: deque[float] = deque()
+        # When the current provider session started (monotonic).
+        self.session_started_at = time.monotonic()
         self.held: deque[dict] = deque()
         self.stale_delegations: set[str] = set()
         self.expires_at: float | None = None
@@ -492,6 +501,11 @@ class VoiceStream:
     @property
     def upstream_url(self):
         return LIVE_URL if self.is_live else "wss://fal.run/fal-ai/personaplex/realtime"
+
+    # How the provider is named in the reconnect log lines.
+    provider_label = "GPT Live"
+    # Sent to a provider session that is being replaced on purpose.
+    close_event: dict | None = {"type": "session.close"}
 
     async def send(self, event: dict):
         if self.closed:
@@ -1121,6 +1135,7 @@ class VoiceStream:
         self.expires_at = float(expires_at) if isinstance(expires_at, (int, float)) and not isinstance(expires_at, bool) else None
         logger.info("Voice %s: GPT Live session started (expires in %s s)", self.session_id,
                     int(self.expires_at - time.time()) if self.expires_at else "unknown")
+        self.session_started_at = time.monotonic()
         # A new provider session has heard nothing yet.
         self.heard_this_session = False
         self.unheard_voiced_s = 0.0
@@ -1154,8 +1169,12 @@ class VoiceStream:
             return
         await asyncio.sleep(max(RENEW_MIN_AGE_S, expires_at - RENEW_LEAD_S - time.time()))
         # Prefer a pause in the conversation over cutting off a sentence.
-        while time.time() < expires_at - RENEW_LAST_S and time.monotonic() - self.last_caption_at < RENEW_QUIET_S:
+        while time.time() < expires_at - RENEW_LAST_S and not self.quiet_for_renewal():
             await asyncio.sleep(0.25)
+
+    def quiet_for_renewal(self) -> bool:
+        """Whether nobody is speaking, so the provider session can be swapped."""
+        return time.monotonic() - self.last_caption_at >= RENEW_QUIET_S
 
     def reconnect_reason(self, reader: asyncio.Task, done: set) -> str | None:
         """Why the provider connection should be restored, or None to end the call."""
@@ -1184,15 +1203,20 @@ class VoiceStream:
     async def discard_upstream(self, old, graceful: bool):
         try:
             async with asyncio.timeout(3):
-                if graceful:
-                    await old.send(json.dumps({"type": "session.close"}))
+                if graceful and self.close_event:
+                    await old.send(json.dumps(self.close_event))
                 await old.close()
         except Exception:  # The old session is being replaced either way.
             logger.debug("Voice %s: closing the replaced provider socket failed", self.session_id, exc_info=True)
 
+    async def connect_provider(self):
+        """Open a new provider socket for a renewal or reconnect, on the call's funding."""
+        return await connect(self.upstream_url,
+                             additional_headers={"Authorization": "Bearer " + self.api_key},
+                             open_timeout=RECONNECT_ATTEMPT_S, max_size=2_000_000)
+
     async def restore_session(self, history: list[dict]):
-        upstream = await connect(LIVE_URL, additional_headers={"Authorization": "Bearer " + self.api_key},
-                                 open_timeout=RECONNECT_ATTEMPT_S, max_size=2_000_000)
+        upstream = await self.connect_provider()
         if self.closed:
             await upstream.close()
             return
@@ -1204,8 +1228,26 @@ class VoiceStream:
             await self.discard_upstream(upstream, graceful=False)
             raise
 
+    def is_renewal(self, reason: str) -> bool:
+        """A planned renewal, or a provider ending a session that ran its course.
+
+        A session the provider closes as expired soon after it started is
+        treated as a failure, so a provider that keeps closing cannot loop.
+        """
+        if reason == "renew":
+            return True
+        return reason == "expired" and time.monotonic() - self.session_started_at >= RENEW_MIN_AGE_S
+
+    def count_failure(self) -> int:
+        """Record a failure reconnect; return how many fell within RECONNECT_BUDGET_S."""
+        now = time.monotonic()
+        self.failures.append(now)
+        while now - self.failures[0] > RECONNECT_BUDGET_S:
+            self.failures.popleft()
+        return len(self.failures)
+
     async def reconnect(self, reason: str, reader: asyncio.Task | None = None) -> None:
-        """Replace the GPT Live session and carry the call on.
+        """Replace the provider session and carry the call on.
 
         Raises VoiceConnectionLost when every attempt fails. Returns early,
         without a new session, when the call is hung up meanwhile.
@@ -1214,16 +1256,20 @@ class VoiceStream:
         self.connected = False
         self.restoring = True
         self.reconnects += 1
+        failures = 0 if self.is_renewal(reason) else self.count_failure()
         # Delegations of the old session do not exist in the new one; their
-        # results are delivered as plain commentary instead.
+        # results are delivered as plain commentary instead. Only the new
+        # session's handoffs count toward the per-session delegation bound.
         self.stale_delegations |= self.delegations
+        self.delegations = {key for key in self.delegations if key.startswith("typed-")}
         detail = ""
         if reader is not None and reader.done() and not reader.cancelled() and reader.exception() is not None:
             detail = f" ({describe_close(reader.exception())})"
         elif reason in PROVIDER_CLOSE_RECONNECT:
             detail = f" (provider session.closed, reason {reason})"
-        logger.warning("Voice %s: GPT Live connection %s after %d s%s; reconnecting (%d this call)",
-                       self.session_id, reason, int(time.time() - self.started_at), detail, self.reconnects)
+        logger.warning("Voice %s: %s connection %s after %d s%s; reconnecting (%d this call)",
+                       self.session_id, self.provider_label, reason,
+                       int(time.time() - self.started_at), detail, self.reconnects)
         self.provider_close_reason = None
         self.expires_at = None
         # A planned renewal is usually seamless; the caller only sees a
@@ -1235,8 +1281,8 @@ class VoiceStream:
         try:
             if old is not None:
                 await self.discard_upstream(old, graceful=reason == "renew")
-            if self.reconnects > MAX_RECONNECTS:
-                raise VoiceConnectionLost(f"Too many reconnects in one call ({MAX_RECONNECTS}).")
+            if failures > MAX_RECONNECTS:
+                raise VoiceConnectionLost(f"Too many reconnects within an hour ({MAX_RECONNECTS}).")
             await self.flush()  # The rebuilt history includes everything said so far.
             history = await self.live_history(resumed=True)
             for attempt, delay in enumerate(RECONNECT_DELAYS, 1):
@@ -1259,8 +1305,9 @@ class VoiceStream:
                     return
                 self.restoring = False
                 self.connected = True
-                logger.info("Voice %s: GPT Live connection restored on attempt %d after %.1f s", self.session_id,
-                            attempt, time.monotonic() - dropped_at)
+                logger.info("Voice %s: %s connection restored on attempt %d after %.1f s",
+                            self.session_id, self.provider_label, attempt,
+                            time.monotonic() - dropped_at)
                 if announced:
                     await self.tell_browser("live")
                 await self.send_held()
@@ -1461,5 +1508,14 @@ def state(session_id: str) -> dict | None:
     call = calls.get(session_id)
     if not call:
         return None
+    if call.progress is not None:
+        active_tasks = call.progress.active_count
+    else:
+        active_tasks = int(bool(call.delegation_task and not call.delegation_task.done()))
+    # No limit (voice_max_call_minutes 0): max_call_minutes 0, remaining_seconds None.
+    remaining = None
+    if call.max_seconds is not None:
+        remaining = max(call.max_seconds - (time.time() - call.started_at), 0.0)
     return {"active": not call.closed, "connected": call.connected, "started_at": call.started_at,
-            "model": call.config["model"], "active_tasks": call.progress.active_count if call.progress is not None else int(bool(call.delegation_task and not call.delegation_task.done()))}
+            "model": call.config["model"], "active_tasks": active_tasks,
+            "max_call_minutes": (call.max_seconds or 0) // 60, "remaining_seconds": remaining}

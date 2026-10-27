@@ -484,8 +484,9 @@ BACKEND_NOTE_PREFIXES: Tuple[str, ...] = (
 INJECTED_REPORT_MAX_CHARS = 1200
 
 # Hard ceiling on how long a completion watcher waits for its worker, whatever
-# the call-duration setting says. A worker outliving this just stops being
-# announced — it keeps running and stays readable via check_agent.
+# the call-duration setting says (it is also the wait when the call has no
+# limit). A worker outliving this just stops being announced — it keeps running
+# and stays readable via check_agent.
 WATCHER_MAX_SECONDS = 3600.0
 
 # Teardown reason stamped on a worker the user stopped by voice.
@@ -963,6 +964,8 @@ class VoiceBridge:
             "usage": dict(self.usage),
             "estimated_cost_usd": estimate_cost_usd(self.model, self.usage),
             "active_tasks": _active_task_count(self.session_id),
+            "max_call_minutes": self.call_limit_minutes(),
+            "remaining_seconds": self.remaining_seconds(),
         }
 
     async def start(self) -> None:
@@ -1007,9 +1010,13 @@ class VoiceBridge:
         self._reader_task = asyncio.create_task(
             self._read_loop(), name=f"voice-sideband-{self.session_id}"
         )
-        self._deadline_task = asyncio.create_task(
-            self._duration_cap(), name=f"voice-deadline-{self.session_id}"
-        )
+        # A call with no length limit (``voice_max_call_minutes`` 0) never
+        # gets a deadline; the FE's re-handshake keeps renewing OpenAI's own
+        # 60-minute session for as long as the caller stays.
+        if self.call_limit_minutes():
+            self._deadline_task = asyncio.create_task(
+                self._duration_cap(), name=f"voice-deadline-{self.session_id}"
+            )
 
         # The spoken approval poller is the ONLY surface a caller has: the FE
         # suppresses the GUI permission modal for the whole call. It starts with
@@ -1139,19 +1146,30 @@ class VoiceBridge:
             self.session_id, self.call_id, reason,
         )
 
-    def remaining_seconds(self) -> float:
+    def call_limit_minutes(self) -> int:
+        """The call-length limit in minutes; 0 means the call has no limit."""
+        return max(int(self.max_call_minutes or 0), 0)
+
+    def remaining_seconds(self) -> Optional[float]:
         """Seconds left on the call cap, measured from the CALL's epoch.
 
-        Reconnecting mid-call re-attaches a new bridge to the same epoch, so the
-        deadline keeps counting down instead of starting over.
+        ``None`` when the call has no limit. Reconnecting mid-call re-attaches a
+        new bridge to the same epoch, so the deadline keeps counting down
+        instead of starting over.
         """
-        window = max(int(self.max_call_minutes or 0), 0) * SECONDS_PER_MINUTE
-        return window - (time.time() - self.call_started_at)
+        limit = self.call_limit_minutes()
+        if not limit:
+            return None
+        window = limit * SECONDS_PER_MINUTE
+        return max(window - (time.time() - self.call_started_at), 0.0)
 
     async def _duration_cap(self) -> None:
         """Close the call once it exceeds ``voice_max_call_minutes``."""
+        remaining = self.remaining_seconds()
+        if remaining is None:
+            return  # No limit: nothing to enforce.
         try:
-            await asyncio.sleep(max(self.remaining_seconds(), 0.0))
+            await asyncio.sleep(remaining)
         except asyncio.CancelledError:
             raise
         logger.warning(
@@ -2189,8 +2207,10 @@ class VoiceBridge:
 
     def _watch_timeout(self) -> float:
         """How long a watcher waits for its worker before giving up."""
-        window = max(int(self.max_call_minutes or 0), 1) * SECONDS_PER_MINUTE
-        return min(float(window), WATCHER_MAX_SECONDS)
+        limit = self.call_limit_minutes()
+        if not limit:
+            return WATCHER_MAX_SECONDS  # No call limit: the hard ceiling applies.
+        return min(float(limit * SECONDS_PER_MINUTE), WATCHER_MAX_SECONDS)
 
     def _start_watcher(self, worker_session_id: str, label: Optional[str]) -> None:
         task = asyncio.create_task(
@@ -2966,6 +2986,7 @@ class VoiceCallRegistry:
                 "started_at": None, "model": None,
                 "usage": {}, "estimated_cost_usd": None,
                 "active_tasks": _active_task_count(session_id),
+                "max_call_minutes": None, "remaining_seconds": None,
             }
         return bridge.state()
 

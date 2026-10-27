@@ -323,6 +323,10 @@ class VoiceStateResponse(BaseModel):
     survives the FE's reconnect), and ``estimated_cost_usd`` prices them from a
     static per-model table — an ESTIMATE, not billing: cached-input discounts
     are ignored and an unpriced model yields ``null``.
+
+    ``max_call_minutes`` is the live call's length limit (0 = no limit) and
+    ``remaining_seconds`` the time left on it, ``null`` when the call has no
+    limit; both are ``null`` with no live call.
     """
     active: bool
     connected: bool
@@ -331,6 +335,8 @@ class VoiceStateResponse(BaseModel):
     usage: Dict[str, int] = Field(default_factory=dict)
     estimated_cost_usd: Optional[float] = None
     active_tasks: int = 0
+    max_call_minutes: Optional[int] = None
+    remaining_seconds: Optional[float] = None
 
 
 # ============================================================================

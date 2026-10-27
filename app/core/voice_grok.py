@@ -8,16 +8,24 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections import OrderedDict
+
+from websockets.exceptions import ConnectionClosed
 
 from app.core.voice_models import GROK_URL
 from app.core.voice_prompts import LIVE_INSTRUCTIONS
-from app.core.voice_stream import VoiceStream, connect
+from app.core.voice_stream import RECONNECT_ATTEMPT_S, VoiceStream, connect
 
 logger = logging.getLogger(__name__)
 
 SPEECH_COMMIT_GRACE_S = 1.0
 INPUT_TRANSCRIPT_ITEM_LIMIT = 64
+# xAI reports no session expiry. Its realtime sessions last at most one hour
+# (fal's xAI realtime proxy: "session_timeout=3600 matches xAI's 1-hour
+# maximum"), so each session is renewed in the background before that, at a
+# quiet moment, with the conversation replayed into the new one.
+GROK_SESSION_S = 3600
 
 HANDOFF_TOOL = {
     "type": "function", "name": "delegate_to_chat_agent",
@@ -42,6 +50,9 @@ class GrokVoiceStream(VoiceStream):
     # Shown to the caller; the subscription engine names its own funding.
     SESSION_REJECTED = "xAI rejected the voice session settings. Check API model access."
     EVENT_REJECTED = "xAI rejected a voice event. Check your API key and voice model access."
+
+    provider_label = "Grok"
+    close_event = None  # xAI has no session.close event; the socket close ends it.
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -71,6 +82,12 @@ class GrokVoiceStream(VoiceStream):
     def is_quiet(self):
         return not self.speech_active and super().is_quiet()
 
+    def quiet_for_renewal(self):
+        # Never swap sessions while the caller talks, a reply plays, or a
+        # queued work note is about to be spoken.
+        return (not self.speech_active and not self.response_active and not self.speech_pending
+                and super().quiet_for_renewal())
+
     async def request_speech(self):
         self.speech_pending = True
         if not self.response_active and not self.speech_active:
@@ -88,14 +105,34 @@ class GrokVoiceStream(VoiceStream):
         return GROK_URL
 
     def reconnect_reason(self, reader, done):
-        # Do not replay GPT Live's session.start/resumption protocol at xAI.
-        return None
+        """Renew before the hour is up; restore a dropped or provider-ended session.
+
+        xAI sends no session.closed event: a clean close while the call is
+        live is the provider ending its session, so it is renewed like an
+        expiry. Rejected events still end the call (they raise).
+        """
+        reason = super().reconnect_reason(reader, done)
+        if reason is None and not self.closed and reader in done and not reader.cancelled() \
+                and reader.exception() is None:
+            return "expired"
+        return reason
 
     async def wire(self, event):
         if self.upstream is not None and not self.closed:
             await self.upstream.send(json.dumps(event))
 
     async def send(self, event):
+        if self.closed:
+            return
+        if self.upstream is None or self.restoring:
+            self.hold(event)  # Work notes wait for the renewed session; audio is dropped.
+            return
+        try:
+            await self.send_now(event)
+        except ConnectionClosed:
+            self.hold(event)  # The reader sees the same closure and renews the session.
+
+    async def send_now(self, event):
         kind = event["type"]
         if kind == "session.input_audio.append":
             await self.wire({"type": "input_audio_buffer.append", "audio": event["audio"]})
@@ -121,7 +158,11 @@ class GrokVoiceStream(VoiceStream):
                 await self.request_speech()
 
     async def start_live(self, history):
+        # A renewed session starts with no tool calls, response or speech of its own.
+        await self.cancel_speech_resume()
         self.pending_tools = set()
+        self.response_active = self.speech_active = self.speech_pending = False
+        self.input_transcripts.clear()  # Item ids belong to one provider session.
         session = grok_session(self.config, self.options)
         if self.config.get("conversation_surface"):
             from app.core.voice_bridge import conversation_instructions
@@ -137,6 +178,8 @@ class GrokVoiceStream(VoiceStream):
                     raise ValueError(self.SESSION_REJECTED)
                 if event.get("type") == "session.updated":
                     break
+        self.session_started_at = time.monotonic()
+        self.expires_at = time.time() + GROK_SESSION_S
         for item in history:
             # History is context, not new user requests to execute.
             text = "\n".join(part.get("text", "") for part in item.get("content", []))
@@ -269,8 +312,9 @@ class SuperGrokVoiceStream(GrokVoiceStream):
     Same xAI socket, protocol, transcripts and same-chat delegation as the
     API-key engine; only the bearer differs. The route loads the login's access
     token server-side (never an xAI API key) and it is dropped once the socket
-    opens. No automatic retry or reconnect, and upstream errors are reduced to
-    fixed messages so no header or token can reach logs or the browser.
+    opens. Renewals and reconnects read the login's current access token fresh
+    (never an API key), and upstream errors are reduced to fixed messages so no
+    header or token can reach logs or the browser.
     """
     SESSION_REJECTED = "SuperGrok voice rejected the session. Access may be unavailable for this subscription."
     EVENT_REJECTED = "SuperGrok voice rejected a voice event. Access may be unavailable for this subscription."
@@ -295,6 +339,33 @@ class SuperGrokVoiceStream(GrokVoiceStream):
         if status == 401:
             raise ValueError(await self.renew_after_401(token))
         raise ValueError(f"SuperGrok voice refused the connection (HTTP {status}). Access may be unavailable for this subscription.")
+
+    async def connect_provider(self):
+        """A new socket for a renewal or reconnect, on the login's current token."""
+        from websockets.exceptions import InvalidStatus
+        from app.core.provider.fluid_credentials import (
+            ProviderCredentialError, _load_grok_access_token,
+        )
+
+        try:
+            token = await _load_grok_access_token(self.config["provider_id"])
+        except ProviderCredentialError:
+            raise ValueError(
+                "SuperGrok login is unavailable. Reconnect it in Settings > Providers.") from None
+        try:
+            return await connect(GROK_URL, additional_headers={"Authorization": "Bearer " + token},
+                                 open_timeout=RECONNECT_ATTEMPT_S, max_size=2_000_000)
+        except asyncio.CancelledError:
+            raise
+        except InvalidStatus as exc:
+            status = exc.response.status_code
+        except Exception:
+            status = None
+        if status == 401:
+            # Renew the login now; the next attempt reads the rotated token.
+            await self.renew_after_401(token)
+        detail = f" (HTTP {status})." if status else "."
+        raise ValueError("SuperGrok voice could not reconnect" + detail)
 
     async def renew_after_401(self, token: str) -> str:
         """Renew through the provider's own 401 path, then ask the caller to retry."""
