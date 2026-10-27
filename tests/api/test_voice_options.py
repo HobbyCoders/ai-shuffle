@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 from app.core import voice_bridge
 from app.db import database as db
 from app.core.voice_options import realtime_session_options
-from app.core.voice_stream import live_session_config, live_opening_event
+from app.core.voice_stream import live_session_config
 from app.core.voice_models import session_config, model_details
 from tests.api.test_voice_api import (
     VOICE_ROOT,
@@ -27,7 +27,7 @@ def test_producing_path_pins_live_prompts_and_restores_defaults(authenticated_cl
     c = authenticated_client
     _make_provider()
     _enable_voice()
-    saved = save(c, instructions="Speak clearly.", delegation_instructions="Keep tasks short.", opening="Hello there.")
+    saved = save(c, instructions="Speak clearly.", delegation_instructions="Keep tasks short.")
     assert c.get(VOICE_SETTINGS).json() == saved
     r = c.post(f"{VOICE_ROOT}/sessions", json={"model":"sonnet", "effort":"high"})
     assert r.status_code == 200, r.text
@@ -36,7 +36,7 @@ def test_producing_path_pins_live_prompts_and_restores_defaults(authenticated_cl
     assert binding["options"] == saved["voice_options"]
     assert live_session_config(binding, [])["instructions"] == "Speak clearly."
     assert live_session_config(binding, [])["delegation"] == {"type":"client"}
-    restored = save(c, instructions="", delegation_instructions="", opening="")
+    restored = save(c, instructions="", delegation_instructions="")
     prompts = restored["model_details"]["prompts"]
     assert prompts[0]["text"] == prompts[0]["default_text"] == LIVE_INSTRUCTIONS
     assert prompts[1]["text"] == prompts[1]["default_text"] == DELEGATION_INSTRUCTIONS
@@ -65,7 +65,6 @@ def test_legacy_realtime_vad_remains_mutually_exclusive():
         {"idle_timeout_ms": 30001},
         {"transcription_model": "gpt-live-1"},
         {"turn_detection": "manual"},
-        {"opening": 42},
         {"instructions": None},
         {"mic_threshold_db": -10},
         {"mic_threshold_db": -81},
@@ -118,7 +117,6 @@ def test_live_defaults_and_prompts_drive_new_session(authenticated_client, mock_
     _enable_voice(voice_model="gpt-live-1")
     saved = save(
         c,
-        opening="Hello there.",
         instructions="Be concise.",
         delegation_instructions="Return short results.",
     )
@@ -133,12 +131,26 @@ def test_live_defaults_and_prompts_drive_new_session(authenticated_client, mock_
         model_details("gpt-live-1", config["options"])["prompts"][1]["text"]
         == "Return short results."
     )
-    event = live_opening_event(config["options"]["opening"])
-    assert (
-        event["type"] == "session.instructions.append"
-        and event["delegation_id"] is None
-    )
-    assert event["content"].endswith("Hello there.")
+    assert "opening" not in config["options"]
+
+
+def test_a_retired_opening_is_dropped_from_old_settings_and_bindings(authenticated_client, mock_db):
+    """The user-set greeting moved into the voice prompt. Saved settings and
+    call bindings that still carry it load as before, keeping their prompts."""
+    from app.core.voice_options import effective_options, validate_options
+    c = authenticated_client
+    _make_provider()
+    _enable_voice(voice_model="gpt-live-1")
+    db.set_system_setting("voice_options:gpt-live-1", json.dumps({"opening": "Old hello", "instructions": "Keep mine."}))
+    body = c.get(VOICE_SETTINGS).json()
+    assert body["voice_options"]["instructions"] == "Keep mine." and "opening" not in body["voice_options"]
+    assert all(row["label"] != "Opening words" for row in body["model_details"]["runtime_settings"])
+    # An old client still sending it is not refused.
+    assert c.put(VOICE_SETTINGS, json={"voice_options": {"opening": "Hi"}}).status_code == 200
+    for model in ("gpt-live-1", "grok-voice-latest", "gpt-live-1-codex", "gpt-realtime-2.1"):
+        assert "opening" not in validate_options(model, {"opening": "Old hello"})
+    binding = {"model": "grok-voice-latest", "voice": "eve", "options": {"opening": "Old hello", "instructions": "Mine."}}
+    assert effective_options(binding)["instructions"] == "Mine."
 
 
 @pytest.mark.parametrize("options", [{"delegation_type":"responses"}, {"delegation_model":"sonnet"}, {"delegation_effort":"high"}])

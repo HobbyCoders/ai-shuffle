@@ -122,9 +122,9 @@ class CodexVoiceStream(VoiceStream):
         self.session_started_at = time.monotonic()
         if self.restoring:
             return  # History includes the resume note; never greet again.
-        if self.options["opening"] and not history and self.config.get("greet", True):
-            await self.send({"type": "session.instructions.append", "content":
-                "Greet immediately, then listen: " + self.options["opening"]})
+        note = await self.greeting(history)
+        if note:
+            await self.send({"type": "session.instructions.append", "content": note})
 
     async def renew_after_401(self, token):
         from app.core import codex_token_refresh

@@ -204,11 +204,11 @@ class GrokVoiceStream(VoiceStream):
                     "type": "message", "role": "system",
                     "content": [{"type": "input_text", "text": "Prior conversation (context only): " + text}],
                 }})
-        opening = self.options["opening"]
-        if opening and not history and self.config.get("greet", True):
+        note = await self.greeting(history)
+        if note:
             await self.wire({"type": "conversation.item.create", "item": {
                 "type": "message", "role": "system",
-                "content": [{"type": "input_text", "text": "Greet the caller: " + opening}],
+                "content": [{"type": "input_text", "text": note}],
             }})
             await self.request_speech()
 

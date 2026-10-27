@@ -57,10 +57,10 @@ _BACKCHANNEL_WORDS = frozenset({
 _NOISE_WORDS = frozenset({"uh", "um", "umm", "hm", "hmm", "mm", "mmm", "mhm", "ah", "oh", "er", "erm", "huh"})
 
 
-NO_REQUEST_NOTE = ("No words were heard for that handoff, so nothing was sent to the chat agent. "
+NO_REQUEST_NOTE = ("No words were heard for that handoff, so nothing was handed off. "
                    "Do not report work. If the user did ask for something, ask them to repeat it.")
 APPROVAL_ANSWER_NOTE = ("The caller's words were taken as their answer to the waiting approval question, "
-                        "so nothing was sent to the chat agent. The app will report the decision. If they "
+                        "so nothing was handed off. The app will report the decision. If they "
                         "asked for something else, ask them to repeat it once the approval is settled.")
 # A spoken approval answer is heard once the caller has been quiet this long
 # (or as soon as the voice starts replying, which means GPT Live heard the end
@@ -70,7 +70,7 @@ APPROVAL_SETTLE_S = 1.5
 # longer when the caller spoke last and the voice has not answered yet.
 PAUSE_QUIET_S = 1.5
 PAUSE_AFTER_CALLER_S = 3.0
-MERGED_REQUEST_NOTE = ("This handoff was combined with the request already sent to the chat agent "
+MERGED_REQUEST_NOTE = ("This handoff was combined with the request already handed off "
                        "while the user was still speaking; its result will follow.")
 # Call health (#1824). The browser is told how long ago the last microphone
 # frame arrived every HEALTH_PUSH_S; one INFO line per HEALTH_LOG_S records the
@@ -163,11 +163,21 @@ def live_session_config(config: dict, history: list[dict]) -> dict:
 
 
 def live_opening_event(text: str) -> dict:
+    """Speak ``text`` first, word for word (the Settings voice sample)."""
+    return live_greeting_event(
+        "Greet immediately without waiting for the caller. Say these opening words in their written language, then pause and listen: " + text)
+
+
+def live_greeting_event(content: str) -> dict:
+    """An instruction append that makes GPT Live speak first.
+
+    Its acknowledgement triggers the "begin now" commentary (receive_upstream).
+    """
     import uuid
     return {
         "type": "session.instructions.append", "event_id": str(uuid.uuid4()),
         "delegation_id": None,
-        "content": "Greet immediately without waiting for the caller. Say these opening words in their written language, then pause and listen: " + text,
+        "content": content,
     }
 
 
@@ -419,12 +429,15 @@ def describe_close(exc: BaseException | None) -> str:
 
 class VoiceStream:
     def __init__(self, websocket: WebSocket, row: dict, config: dict, api_key: str, max_minutes: int,
-                 api_user_id: str | None = None):
+                 api_user_id: str | None = None, resumed: bool = False):
         self.websocket = websocket
         self.session_id = row["id"]
         # The API key that opened the call (None for the owner): spoken
         # approvals re-check its access exactly as a tap on the card would.
         self.api_user_id = api_user_id
+        # The browser reopened a dropped audio socket (``resume=1``): this is
+        # the same call carrying on, so it never greets again.
+        self.resumed = resumed
         self.approval_lock = asyncio.Lock()
         self.approval_consumed: set[int] = set()
         self.approval_task: asyncio.Task | None = None
@@ -953,7 +966,7 @@ class VoiceStream:
                         self.settling.append(did)
                     elif len(_workers) >= 8:
                         await self.send({"type": "session.commentary.append", "delegation_id": did,
-                                         "content": "The backend is busy with another task. Ask the user to repeat this new request after it finishes."})
+                                         "content": "Too much work is already running to take this request. Ask the user to repeat it once the current work finishes."})
                     else:
                         self.settling = [did]
                         self.delegation_task = asyncio.create_task(self.dispatch_when_settled())
@@ -1169,14 +1182,27 @@ class VoiceStream:
         self.heard_this_session = False
         self.unheard_voiced_s = 0.0
         self.deaf.clear()
-        if self.restoring:
-            return  # Never greet again after a reconnect.
-        if self.options["opening"] and not history and self.config.get("greet", True):
+        note = await self.greeting(history)
+        if note:
             # Provider rejection is surfaced by receive_upstream, not silently
-            # treated as spoken audio. Never greet again after conversation replay.
-            event = live_opening_event(self.options["opening"])
+            # treated as spoken audio.
+            event = live_greeting_event(note)
             self.opening_event_id = event["event_id"]
             await self.send(event)
+
+    async def greeting(self, history) -> str | None:
+        """The trigger to speak first on this provider session, or None.
+
+        A fresh call greets, a call into a conversation with history is
+        welcomed back, and a renewal, reconnect or reopened audio socket
+        (``resumed``) never greets again. A call a
+        native client opened (``greet`` False) waits for the caller.
+        """
+        if self.restoring or self.resumed or not self.config.get("greet", True):
+            return None
+        from app.core import voice_greeting
+        name = await run_sync(voice_greeting.caller_first_name, self.session_id, self.api_user_id)
+        return voice_greeting.greeting_note(name, returning=bool(history))
 
     async def live_history(self, resumed: bool = False) -> list[dict]:
         """The saved conversation as GPT Live start-up history.
@@ -1394,7 +1420,7 @@ class VoiceStream:
                     return
                 self.upstream = upstream
                 if self.is_live:
-                    history = await self.live_history()
+                    history = await self.live_history(resumed=self.resumed)
                     if history:
                         self.transcript.append({"role": "history", "text": history[0]["content"][0]["text"], "offset_ms": 0})
                     if self.options.get("delegation_type", "client") != "responses" or self.config.get("conversation_surface"):

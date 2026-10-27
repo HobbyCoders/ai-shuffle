@@ -292,7 +292,7 @@ async def test_finished_job_waits_for_a_pause_instead_of_interrupting(monkeypatc
     clock[0] += 1
     await progress.flush(force=True)
     final = send.call_args.args[0]
-    assert final["type"] == "session.commentary.append" and "Resize icons: completed" in final["content"]
+    assert final["type"] == "session.commentary.append" and "Resize icons, is completed" in final["content"]
 
 
 @pytest.mark.asyncio
@@ -434,7 +434,7 @@ async def test_live_status_question_is_answered_from_task_state_without_a_chat_t
     delegate.assert_not_awaited()
     (sent,) = [c.args[0] for c in call.send.await_args_list]
     assert sent["type"] == "session.commentary.append" and sent["delegation_id"] == "d1"
-    assert "Fix login" in sent["content"] and "working on a request" in sent["content"]
+    assert "Fix login" in sent["content"] and "Working on a request" in sent["content"]
 
 
 @pytest.mark.asyncio
