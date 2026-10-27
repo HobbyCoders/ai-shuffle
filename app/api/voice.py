@@ -1626,7 +1626,9 @@ async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optio
         else:
             stream_cls = GrokVoiceStream if config["model"] == GROK_MODEL else voice_stream.VoiceStream
         call = stream_cls(websocket, row, config, key, settings["voice_max_call_minutes"],
-                          api_user_id=(api_user or {}).get("id"), resumed=resume == "1")
+                                        api_user_id=(api_user or {}).get("id"))
+        # A reopened socket is the same call carrying on: it never greets again.
+        call.resumed = resume == "1"
         # A conversation another worker runs: the call forwards, never writes (#700).
         from app.core import voice_remote
         call.remote_owner = voice_remote.owner_of(row)
