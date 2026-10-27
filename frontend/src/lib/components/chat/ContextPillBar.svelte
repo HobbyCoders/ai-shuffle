@@ -14,7 +14,8 @@
 	 * Active chat: the same row, now describing the session's context. The
 	 * agent chip stays a selector and the branch chip stays the checkout
 	 * selector where it was available before; the runner chip opens the
-	 * "Move this session" menu for both local and remote owners. A degraded
+	 * "Move this session" menu for both local and remote owners, where
+	 * session-move.ts allows a move (else it names the worker read-only). A degraded
 	 * session (queued work, no runner online) shows a read-only warning chip.
 	 *
 	 * `sheetMode` renders the same selectors as stacked rows inside the mobile
@@ -37,7 +38,8 @@
 	import { beginHandoffPendingRead, handoffPending, recordHandoffPending } from '$lib/stores/handoff-pending';
 	import { activeSession } from '$lib/stores/active-session';
 	import { clusterProjects, projects, sessions, appData } from '$lib/stores/app-data.svelte';
-	import { githubAuthenticated } from '$lib/stores/auth.svelte';
+	import { githubAuthenticated, isAuthenticated, isAdmin } from '$lib/stores/auth.svelte';
+	import { canMoveSession } from './session-move';
 	import { git, gitStatus } from '$lib/stores/git.svelte';
 	import { subagentChats } from '$lib/stores/subagent-chats';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
@@ -67,6 +69,9 @@
 	}
 
 	let { sheetMode = false, menuHosts }: Props = $props();
+	/** The phone row's "Move to another worker" caption, read as the chip's description. */
+	const uid = $props.id();
+	const moveHintId = `${uid}-move-hint`;
 
 	const projectName = $derived(
 		$projects.find((p) => p.id === $activeSession.project)?.name ??
@@ -107,6 +112,19 @@
 	// A subagent's own chat (Task/Swarm child) is read and message only: its
 	// branch and runner show read-only, with no checkout or move controls.
 	const isSubagentChat = $derived(!!$activeSession.sessionId && $subagentChats.has($activeSession.sessionId));
+
+	// The runner chip opens the Move menu only where moving is allowed
+	// (session-move.ts: saved, not a subagent's, not an API-key chat, owner
+	// viewing). Elsewhere it names the worker read-only.
+	const movable = $derived(
+		canMoveSession({
+			sessionId: $activeSession.sessionId,
+			row: sessionRow,
+			isSubagent: isSubagentChat,
+			viewerAuthenticated: $isAuthenticated,
+			viewerIsAdmin: $isAdmin
+		})
+	);
 
 	// Interactive branch chip in an active chat. Remote / degraded sessions show
 	// read-only context instead.
@@ -269,7 +287,7 @@
 		const fromRow = typeof sessionRow?.device_online === 'boolean' ? sessionRow.device_online : null;
 		return { name: name || 'Another worker', online: live ?? fromRow };
 	});
-	const showsReadOnlyRunner = $derived(!isEmptyState && !badge?.degraded && (!sessionRow || isSubagentChat));
+	const showsReadOnlyRunner = $derived(!isEmptyState && !badge?.degraded && !movable);
 
 	// Keep presence fresh while it is on screen: the open move menu, or a
 	// read-only chip for a remote owner.
@@ -528,7 +546,7 @@
 				<MonitorOff size={12} strokeWidth={1.6} aria-hidden="true" />
 				<span class="ctx-chip-label">Read-only — no runner online</span>
 			</span>
-		{:else if sessionRow && !isSubagentChat}
+		{:else if movable}
 			<div class="runner-badge-wrap" bind:this={runnerMenuRef}>
 				<button
 					type="button"
@@ -542,6 +560,7 @@
 					aria-label={runnerBusy
 						? runnerBusy.label
 						: `Runner: ${badge?.runner?.deviceName ?? 'Local'}${badge?.runner && !badge.runner.online ? ' (offline)' : ''}`}
+					aria-describedby={sheetMode && !runnerBusy && !runnerDone ? moveHintId : undefined}
 					aria-busy={runnerBusy ? 'true' : undefined}
 					disabled={runnerLocked}
 					aria-haspopup="menu"
@@ -562,6 +581,11 @@
 						{/if}
 						<WorkerStatusDot online={!badge?.runner || badge.runner.online} />
 						<span class="ctx-chip-label">{badge?.runner?.deviceName ?? 'Local'}</span>
+						{#if sheetMode}
+							<!-- The phone's Chat controls draw this row as "Runs on"; the
+							     caption says the row is where a chat moves (#645). -->
+							<span class="ctx-chip-sub" id={moveHintId}>Move to another worker</span>
+						{/if}
 					{/if}
 				</button>
 				{#if canCancelQueued}
