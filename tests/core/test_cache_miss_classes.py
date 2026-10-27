@@ -186,14 +186,28 @@ def test_first_request_and_unknown_reasons():
     assert cmc.classify_cache_miss({"reason": "something_new"}) == cmc.HARNESS_MUTATION
 
 
-def test_the_ttl_boundary_and_a_missing_interval():
+@pytest.mark.parametrize("ttl", [300, 600, 1800, 3600, None])
+def test_the_route_ttl_boundary_and_a_missing_interval(ttl):
     miss = {"reason": "prefix_unchanged"}
-    assert cmc.classify_cache_miss(miss, request_interval_seconds=300) == cmc.PROVIDER_FALLBACK
-    assert cmc.classify_cache_miss(miss, request_interval_seconds=301) == cmc.IDLE_PAST_TTL
-    assert cmc.classify_cache_miss(miss) == cmc.PROVIDER_FALLBACK
-    assert cmc.classify_cache_miss(
-        miss, request_interval_seconds=120, ttl_seconds=60
-    ) == cmc.IDLE_PAST_TTL
+    boundary = ttl if ttl is not None else 36_000
+    assert cmc.classify_cache_miss(miss, request_interval_seconds=boundary,
+                                  ttl_seconds=ttl) == cmc.PROVIDER_FALLBACK
+    expected = cmc.IDLE_PAST_TTL if ttl is not None else cmc.PROVIDER_FALLBACK
+    assert cmc.classify_cache_miss(miss, request_interval_seconds=boundary + 1,
+                                  ttl_seconds=ttl) == expected
+    assert cmc.classify_cache_miss(miss, ttl_seconds=ttl) == cmc.PROVIDER_FALLBACK
+    usage = {"cache_miss": miss, "request_interval_seconds": boundary + 1}
+    assert cmc.usage_miss_class(usage, ttl_seconds=ttl) == expected
+
+
+@pytest.mark.parametrize("ttl,expected", [(None, cmc.PROVIDER_FALLBACK),
+                                          (1800, cmc.PROVIDER_FALLBACK), (300, cmc.IDLE_PAST_TTL)])
+def test_adapter_fallback_preserves_engine_route_policy(ttl, expected):
+    adapter = HarnessAdapter()
+    usage = {"cache_miss": {"reason": "prefix_unchanged"},
+             "request_interval_seconds": 1000, "cache_ttl_seconds": ttl}
+    adapter._record_cache_miss(usage)
+    assert usage["cache_miss_class"] == expected
 
 
 def test_calls_that_are_not_misses_have_no_class():

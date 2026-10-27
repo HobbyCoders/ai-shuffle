@@ -500,6 +500,7 @@ Whether a message sent now would read a large context with a cold provider cache
   "last_call_at": 1791172200.0,
   "idle_seconds": 5400.0,
   "cache_ttl_seconds": 3600.0,
+  "cache_write_ttl": "1h",
   "threshold_tokens": 150000,
   "cold": true,
   "large": true,
@@ -507,7 +508,19 @@ Whether a message sent now would read a large context with a cold provider cache
 }
 ```
 
-`cold` is `true` when the last model call is older than `cache_ttl_seconds`: 3600 seconds for Claude Code, which keeps its cache entries for an hour, and 300 seconds for the other providers. `large` is `true` from `threshold_tokens` (150,000) up. `warn` is both. `context_tokens` is the last context reading, or the size of the last prompt when there is none.
+`cold` is `true` when the last real main model call is older than the route's `cache_ttl_seconds`. Zero-prompt snapshots and auxiliary calls do not refresh that time. Lifetimes are idle heuristics, not promises of a hit:
+
+| Route | Idle gap |
+| --- | --- |
+| Claude Code subscription | 3600 seconds; 300 when the last real main call wrote only 5-minute entries (credits/API-key mode) |
+| Native Anthropic API | 300 seconds |
+| ChatGPT subscription / Codex backend | `null`: idle time alone never marks it cold |
+| OpenAI Responses API | 1800 seconds |
+| xAI API / SuperGrok | 300 seconds (heuristic) |
+| OpenRouter | Upstream TTL capped at 600 seconds: `openai/` 600, `anthropic/` and other slugs 300 |
+| Legs without a cache | `null` |
+
+`cache_write_ttl` is `"1h"` or `"5m"` for delegated estimates, otherwise `null`; no request TTL options are changed. `large` is `true` from `threshold_tokens` (at least 150,000) up. `warn` is both `cold` and `large`. `context_tokens` is the last context reading, or the size of the last real prompt when there is none.
 
 ### GET /api/v1/sessions/{session_id}/limit-resume
 

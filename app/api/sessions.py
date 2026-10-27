@@ -2059,9 +2059,9 @@ async def get_session_cache_state(
     """Whether a message sent now re-reads a large context with a cold cache.
 
     ``warn`` is true when the context is at least ``threshold_tokens`` and the
-    last provider call is older than ``cache_ttl_seconds`` for the chat's leg
-    (Claude Code 3600 s, native legs 300 s). The composer asks before such a
-    send and offers to compact first.
+    last real main call is older than the route's ``cache_ttl_seconds``.
+    None means no idle expiry (or no cache). ``cache_write_ttl`` reports the
+    delegated write rate (1h or 5m). The composer offers to compact first.
     """
     existing = await require_session(request, session_id)
     from app.core import send_cost

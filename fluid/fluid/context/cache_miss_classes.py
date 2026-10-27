@@ -48,6 +48,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Optional
 
+# Legacy records without route metadata retain the old fallback; engines supply
+# the route policy, including None for no idle expiry.
+from fluid.context.cache_ttl import DEFAULT_COLD_GAP_SECONDS as DEFAULT_CACHE_TTL_SECONDS
+
 APPEND_GROWTH = "append_growth"
 PLANNED_REBUILD = "planned_rebuild"
 HARNESS_UPGRADE = "harness_upgrade"
@@ -69,10 +73,6 @@ MISS_CLASSES = (
 #: Classes that count against the unexpected-miss SLO.
 UNEXPECTED_CLASSES = frozenset({HARNESS_MUTATION})
 
-#: Default prompt-cache lifetime. Anthropic's default TTL is five minutes and
-#: OpenAI keeps an idle prefix for five to ten, so a longer gap is idle expiry.
-DEFAULT_CACHE_TTL_SECONDS = 300.0
-
 #: How many calls after the one that carried a compaction rewrite still count
 #: as its follow-on. The call carrying the rewrite is call 0 and is already
 #: ``planned_rebuild``; calls 1 to 5 after it are the window.
@@ -91,7 +91,7 @@ def classify_cache_miss(
     diagnosis: Mapping[str, Any],
     *,
     request_interval_seconds: Optional[float] = None,
-    ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS,
+    ttl_seconds: float | None = DEFAULT_CACHE_TTL_SECONDS,
     calls_since_rewrite: Optional[int] = None,
 ) -> str:
     """The class of one probe diagnosis (a ``Usage.raw["cache_miss"]`` dict).
@@ -143,7 +143,7 @@ def classify_cache_miss(
 
 
 def usage_miss_class(
-    usage: Mapping[str, Any], *, ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS
+    usage: Mapping[str, Any], *, ttl_seconds: float | None = DEFAULT_CACHE_TTL_SECONDS
 ) -> Optional[str]:
     """The miss class of one model call's usage record, or None for no miss.
 
@@ -175,8 +175,8 @@ def usage_miss_class(
     return None
 
 
-def _past_ttl(interval: Optional[float], ttl_seconds: float) -> bool:
-    return interval is not None and interval > ttl_seconds
+def _past_ttl(interval: Optional[float], ttl_seconds: float | None) -> bool:
+    return ttl_seconds is not None and interval is not None and interval > ttl_seconds
 
 
 def _within_followon(calls: Optional[int]) -> bool:

@@ -74,10 +74,10 @@ from fluid.codemode.session import (
 )
 from fluid.context.cache_miss_classes import (
     COMPACTION_FOLLOWON_CALLS,
-    DEFAULT_CACHE_TTL_SECONDS,
     PROVIDER_FALLBACK,
     usage_miss_class,
 )
+from fluid.context.cache_ttl import DEFAULT_COLD_GAP_SECONDS, resolve_cache_ttl
 from fluid.context.cache_plan import plan_cache
 from fluid.context.cache_probe import (
     CacheProbeConfig,
@@ -663,10 +663,13 @@ def _upstream_suffix(native_stop_reason: str | None) -> str:
     return f" (upstream: {native_stop_reason})"
 
 
-def _stamp_miss_class(out: dict[str, Any]) -> None:
-    """Put the call's cache-miss class on its Usage fields, when it has one."""
+def _stamp_miss_class(
+    out: dict[str, Any], *, ttl_seconds: float | None = DEFAULT_COLD_GAP_SECONDS,
+) -> None:
+    """Put the route's idle policy and cache-miss class on the Usage fields."""
+    out["cache_ttl_seconds"] = ttl_seconds
     try:
-        miss_class = usage_miss_class(out)
+        miss_class = usage_miss_class(out, ttl_seconds=ttl_seconds)
     except Exception:  # noqa: BLE001 — instrumentation is never fatal
         log.debug("cache-miss classification failed", exc_info=True)
         return
@@ -2174,6 +2177,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 ratio = min(1.0, max(0.0, price.cached_input / price.input))
             unparked: set[str] = getattr(self, "_unpark_turn_starts", set())
             return CacheSignal(
+                ttl_seconds=self._cache_ttl_seconds(),
                 gap_s=gap,
                 static_changed=static_changed,
                 resumed=resumed or (turn_start is not None and turn_start in unparked),
@@ -3611,6 +3615,13 @@ class NativeLoop(BackgroundLifecycleMixin):
         if calls is not None:
             out["calls_since_rewrite"] = calls
 
+    def _cache_ttl_seconds(self) -> float | None:
+        """Resolve from the actual client endpoint, never from a model-name guess."""
+        return resolve_cache_ttl(
+            str(getattr(self.provider, "name", "")),
+            base_url=getattr(self.provider, "_base_url", None), model=self.model,
+        )
+
     def _fold_reuse_floor(
         self, out: dict[str, Any], usage: dict[str, Any],
         cache_read: int, prompt_tokens: int | None,
@@ -3619,7 +3630,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         if not prompt_tokens or usage.get("input_tokens_estimated"):
             return
         interval = out.get("request_interval_seconds")
-        if isinstance(interval, float) and interval > DEFAULT_CACHE_TTL_SECONDS:
+        ttl = self._cache_ttl_seconds()
+        if ttl is not None and isinstance(interval, (int, float)) and interval > ttl:
             return
         provider = str(getattr(self.provider, "name", ""))
         previous = self._reuse_floor.get(provider)
@@ -4861,7 +4873,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Consumed either way: these rungs belong to the request just sent, and
         # must not be blamed for the miss after next.
         self._history_rewrites = []
-        out: dict[str, Any] = {"compaction_decision": dict(self._compactor.last_decision)}
+        out: dict[str, Any] = {
+            "compaction_decision": dict(self._compactor.last_decision),
+            "cache_ttl_seconds": self._cache_ttl_seconds(),
+        }
         try:
             # Provider-reported cache reads next to the verdict, every call,
             # so partial and full misses are told apart in the event log.
@@ -4947,12 +4962,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._prev_prompt_tokens = prompt_tokens
         if diagnosis is None:
             self._unexplained_misses = 0
-            _stamp_miss_class(out)
+            _stamp_miss_class(out, ttl_seconds=self._cache_ttl_seconds())
             return out
         if sticky_dropped and diagnosis.get("reason") == "request_settings_changed":
             diagnosis["sticky_key_dropped"] = True
         out["cache_miss"] = diagnosis
-        _stamp_miss_class(out)
+        _stamp_miss_class(out, ttl_seconds=self._cache_ttl_seconds())
         if not is_unexplained_miss(diagnosis):
             self._unexplained_misses = 0
             log.debug(

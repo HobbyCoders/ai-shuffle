@@ -5,8 +5,9 @@
  * (`GET /sessions/{id}/cache-state` says `warn`), the next message makes the
  * provider read the whole conversation again at full price. The composer says
  * so in plain words and offers "Compact first" beside "Send anyway". Thresholds
- * live on the backend (app/core/send_cost.py): 150k tokens, and a cache
- * lifetime of an hour for Claude Code and five minutes for the other providers.
+ * live on the backend (app/core/send_cost.py): at least 150k tokens and a
+ * per-route idle policy. ChatGPT subscriptions have no idle expiry; Claude Code
+ * normally gets one hour, or five minutes when the last real call used credits.
  *
  * "Send anyway" is remembered per chat, with the context size it was given
  * for, until the context changes materially (`materiallyChanged`).
@@ -36,13 +37,15 @@ export function idleInWords(seconds: number): string {
 export function coldSendText(state: CacheState): string | null {
 	if (!state.warn || !state.context_tokens) return null;
 	const idle = state.idle_seconds ? ` after ${idleInWords(state.idle_seconds)} idle` : '';
-	const intro = `This chat holds about ${tokensInWords(state.context_tokens)} and its cache has expired${idle}. `;
+	const intro = `This chat holds about ${tokensInWords(state.context_tokens)} and its cache has likely expired${idle}. `;
 	const cost = state.cost_comparison;
 	if (!cost) return intro + 'Sending now re-reads all of it. Cost comparison unavailable: model pricing is missing. Compact first to reduce context, or Send anyway.';
 	const usd = (value: number) => `$${value.toFixed(2)}`;
 	const summary = cost.summary_tokens
 		? ` and an assumed ${tokensInWords(cost.summary_tokens).replace(' tokens', '-token')} summary` : '';
-	const cacheWrite = state.leg === 'delegated' ? ' Includes 1-hour cache writes; no cache hits assumed.' : ' No cache hits assumed.';
+	const cacheWrite = state.leg === 'delegated' && state.cache_write_ttl
+		? ` Includes ${state.cache_write_ttl === '5m' ? '5-minute' : '1-hour'} cache writes; no cache hits assumed.`
+		: ' No cache hits assumed.';
 	const recommendation = cost.recommendation === 'compact'
 		? 'Recommendation: Compact first for the lower estimated total.'
 		: 'Recommendation: Send anyway for this one call; compacting may save on later calls.';

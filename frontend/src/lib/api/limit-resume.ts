@@ -96,7 +96,9 @@ export interface CacheState {
 	context_tokens: number | null;
 	last_call_at: number | null;
 	idle_seconds: number | null;
+	/** null means no idle expiry (or no cache for this leg). */
 	cache_ttl_seconds: number | null;
+	cache_write_ttl: '1h' | '5m' | null;
 	threshold_tokens: number;
 	cold: boolean;
 	large: boolean;

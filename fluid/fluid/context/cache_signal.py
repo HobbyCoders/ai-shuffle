@@ -33,10 +33,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
-# A gap longer than this between two requests means the provider has most
-# likely dropped the prefix (OpenAI's in-memory retention and Anthropic's
-# default TTL are both about five minutes).
-COLD_GAP_SECONDS = 300.0
+from fluid.context.cache_ttl import DEFAULT_COLD_GAP_SECONDS
 # Cached input price as a fraction of the full input price when pricing does
 # not say (0.1 for the gpt rows and for Anthropic cache reads).
 DEFAULT_CACHE_PRICE_RATIO = 0.1
@@ -65,6 +62,7 @@ ZONE_WINDOW = "window"
 class CacheSignal:
     """What the engine knows about the provider cache before one call.
 
+    ``ttl_seconds`` is the engine's route policy, or None for no idle expiry.
     ``gap_s`` is the time since the previous request of this session, seeded
     from persisted usage on a new engine, or None when unknown.
     ``static_changed`` says the system prompt or tool list about to be sent
@@ -78,6 +76,7 @@ class CacheSignal:
     price over the full input price for the model.
     """
 
+    ttl_seconds: float | None = DEFAULT_COLD_GAP_SECONDS
     gap_s: float | None = None
     static_changed: bool = False
     resumed: bool = False
@@ -91,9 +90,11 @@ class CacheSignal:
         earlier miss does not count: a miss writes the prefix it missed."""
         if self.static_changed:
             return "static_changed"
+        if self.ttl_seconds is None:
+            return ""
         if self.gap_s is None:
             return "resumed" if self.resumed else ""
-        if self.gap_s > COLD_GAP_SECONDS:
+        if self.gap_s > self.ttl_seconds:
             return "gap"
         return ""
 
@@ -103,6 +104,7 @@ class CacheSignal:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "ttl_seconds": self.ttl_seconds,
             "gap_s": None if self.gap_s is None else round(self.gap_s, 3),
             "static_changed": self.static_changed,
             "resumed": self.resumed,

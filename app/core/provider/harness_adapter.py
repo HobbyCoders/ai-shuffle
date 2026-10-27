@@ -3778,10 +3778,14 @@ class HarnessAdapter(ProviderAdapter):
         An engine that stamps the class itself (``Usage.raw``) is trusted.
         """
         try:
-            from app.core.provider.cache_miss_classes import MISS_CLASSES, usage_miss_class
+            from app.core.provider.cache_miss_classes import (
+                DEFAULT_CACHE_TTL_SECONDS, MISS_CLASSES, usage_miss_class,
+            )
 
             stamped = usage.get("cache_miss_class")
-            miss_class = stamped if stamped in MISS_CLASSES else usage_miss_class(usage)
+            miss_class = stamped if stamped in MISS_CLASSES else usage_miss_class(
+                usage, ttl_seconds=usage.get("cache_ttl_seconds", DEFAULT_CACHE_TTL_SECONDS),
+            )
             self._last_cache_miss_class = miss_class
             if miss_class is None:
                 return
