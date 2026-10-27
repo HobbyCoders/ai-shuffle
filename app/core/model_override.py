@@ -50,8 +50,9 @@ runs only when the user asked for it, checked here by the host:
    project, and clean under the injection screen. Names match exactly as
    in 1. A name only in a negated clause ("NEVER use any Fable model",
    "..., not GPT 6.1 Sol", "Sol is poor at frontend") does not count
-   (:func:`affirmed_clauses`). Nothing is saved for this path: a corrected,
-   superseded or forgotten memory stops authorizing at the next start. The
+   (:func:`affirmed_clauses`); a negation also covers the rest of its list
+   ("NEVER use Fable, Mythos or Grok") until a part starts with "use ...".
+   Nothing is saved for this path: a corrected, superseded or forgotten memory stops authorizing at the next start. The
    start's receipt and log name the memory ("model gpt-6.1-sol accepted:
    owner memory m260"). The Task roster lists these memories under the
    subagent default (:func:`routing_block`) so the agent can pick per job.
@@ -621,11 +622,12 @@ _NEGATION = re.compile(
     r"|\b(?:is|are|was|were)\s+(?:\w+\s+)?(?:poor|bad|crap)\b", re.I)
 # A negation carries into the following parts of its sentence ("NEVER use
 # Fable, Mythos or Grok"; "Models to avoid: Fable, Mythos") until a part names
-# a fresh instruction to use something. Only a verb ends it, so the rule errs
+# a fresh instruction to use something: a part that starts with an imperative
+# ("use Opus ..."). Only that ends it, not "anything using Grok", so the rule errs
 # toward caution: an ambiguous start falls back to the owner's prompt.
 _AFFIRM = re.compile(
-    r"\b(?:use|uses|using|run|runs|route|routes|send|sends|prefer|prefers|pick|picks"
-    r"|default|defaults|go(?:es)?\s+to|switch\s+to|move\s+to)\b", re.I)
+    r"^\s*(?:(?:and|or|but|then)\s+)?(?:use|run|route|send|prefer|pick|default"
+    r"|go\s+to|switch\s+to|move\s+to)\b", re.I)
 # "Use Opus instead of Sol": the words after the cue are the rejected ones.
 _CONTRAST = re.compile(r"\b(?:instead\s+of|rather\s+than)\b", re.I)
 # The roster's block of saved routing (see routing_block).
@@ -644,8 +646,8 @@ def affirmed_clauses(text: str) -> List[str]:
     Sentences split on ``.``/``!``/``?``/``;``/dashes/newlines, then into parts
     on ``,``/``:``. A part with a negation (never, not, no, don't, do not,
     avoid, stop using, "X is poor|bad|crap") is dropped, and so is every later
-    part of that sentence until one says to use something (use, run, route,
-    send, prefer, pick, default, go to, switch to). "instead of"/"rather than"
+    part of that sentence until one starts with an instruction to use something
+    (use, run, route, send, prefer, pick, default, go to, switch to, move to). "instead of"/"rather than"
     drops the words after it, and the rest of the sentence's list.
     """
     clauses = []

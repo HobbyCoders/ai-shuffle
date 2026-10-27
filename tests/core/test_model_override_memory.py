@@ -71,6 +71,7 @@ def test_a_model_named_only_in_a_negated_clause_does_not_count(text, accepted, r
     ("Models to avoid: Opus, Sonnet", ("opus", "sonnet")),
     ("Use Haiku instead of Opus, Sonnet or GPT 6.1 Sol", ("opus", "sonnet", SOL)),
     ("Avoid Opus, Sonnet for code", ("opus", "sonnet")),
+    ("Never use Haiku, or anything using Opus", ("opus",)),
 ])
 def test_a_negation_carries_through_the_rest_of_its_list(text, refused):
     for model in refused:
