@@ -66,7 +66,6 @@ export interface VoiceOptions {
  noise_reduction?: 'near_field' | 'far_field' | 'off';
  /** GPT Live: microphone level (dBFS) below which streamed input is sent as silence. */
  mic_threshold_db?: number;
- opening?: string;
  /** Read-only compatibility for already-pinned legacy calls. Not voice settings. */
  delegation_type?: 'client' | 'responses';
  delegation_model?: string;

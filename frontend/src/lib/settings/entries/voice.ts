@@ -120,15 +120,6 @@ export const entries: SettingEntry[] = [
 		default: -42
 	},
 	{
-		id: 'voice.opening',
-		category: 'voice',
-		section: 'Voice calls',
-		label: 'Opening words',
-		hint: 'Blank waits for you',
-		keywords: ['greeting', 'first words'],
-		default: ''
-	},
-	{
 		id: 'voice.prompts',
 		category: 'voice',
 		section: 'Voice calls',

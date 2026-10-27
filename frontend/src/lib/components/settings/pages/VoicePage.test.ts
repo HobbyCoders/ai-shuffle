@@ -37,7 +37,7 @@ const settings = (voice = 'marin', minutes = 60) => ({
 		{ id: 'fal-ai/whisper', name: 'Whisper (Large v3)', provider: 'fal-ai' },
 		{ id: 'openai/gpt-4o-mini-transcribe', name: 'GPT-4o mini Transcribe', provider: 'openai' }
 	],
-	voice_options: { opening: '', instructions: '', delegation_instructions: '' },
+	voice_options: { instructions: '', delegation_instructions: '' },
 	model_details: {
 		model: 'gpt-live-1',
 		transport: 'stream' as const,
@@ -277,16 +277,10 @@ describe('Voice page', () => {
 		expect(transport.put).toHaveBeenCalledExactlyOnceWith('/settings/voice', { voice_mode_enabled: false });
 	});
 
-	it('saves the opening words on their own', async () => {
+	it('has no opening words setting: the voice greets on its own', async () => {
 		await mountPage();
-		const opening = field('Opening words');
-		await fireEvent.focus(opening);
-		await fireEvent.input(opening, { target: { value: 'Hi there' } });
-		await fireEvent.blur(opening);
-		expect(transport.put).toHaveBeenCalledExactlyOnceWith('/settings/voice', {
-			voice_options: { opening: 'Hi there' },
-			voice_options_model: 'gpt-live-1'
-		});
+		expect(screen.queryByLabelText('Opening words')).toBeNull();
+		expect(screen.queryByText('Blank waits for you')).toBeNull();
 	});
 
 	it('keeps the last good value and reports a rejected save', async () => {

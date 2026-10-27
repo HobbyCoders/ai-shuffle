@@ -59,7 +59,7 @@ beforeEach(() => {
 		voice_input_mode: 'auto',
 		voice_input_silence_seconds: 5,
 		voice_input_models: [{ id: 'fal-ai/whisper', name: 'Whisper (Large v3)', provider: 'fal-ai' }],
-		voice_options: { opening: '', instructions: '', delegation_instructions: '' },
+		voice_options: { instructions: '', delegation_instructions: '' },
 		model_details: {
 			model: 'gpt-live-1',
 			transport: 'stream',

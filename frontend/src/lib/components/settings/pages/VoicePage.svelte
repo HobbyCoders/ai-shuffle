@@ -27,7 +27,6 @@
 	import Segmented from '../rows/Segmented.svelte';
 	import SelectField from '../rows/SelectField.svelte';
 	import NumberField from '../rows/NumberField.svelte';
-	import TextField from '../rows/TextField.svelte';
 	import LinkValue from '../rows/LinkValue.svelte';
 	import ValueText from '../rows/ValueText.svelte';
 	import HotkeyField from '../rows/HotkeyField.svelte';
@@ -169,11 +168,6 @@
 
 	function defaultOf<T>(id: string): T {
 		return getEntry(id)?.default as T;
-	}
-
-	function saveOpening(value: string) {
-		if (!s) return;
-		void voice.save({ voice_options: { opening: value }, voice_options_model: s.voice_model });
 	}
 </script>
 
@@ -384,15 +378,6 @@
 			{:else}
 				<ValueText value={s ? 'Not available' : unavailable} />
 			{/if}
-		</SettingRow>
-		<SettingRow id="voice.opening" dim={!callsOn} value={s?.voice_options?.opening ?? ''} onReset={() => saveOpening('')}>
-			<TextField
-				value={s?.voice_options?.opening ?? ''}
-				placeholder="Wait for me to speak"
-				maxlength={2000}
-				disabled={locked || !s?.voice_options}
-				onchange={saveOpening}
-			/>
 		</SettingRow>
 		<SettingRow id="voice.prompts" dim={!callsOn} expanded={promptsOpen && details && s?.voice_options ? promptsEditor : undefined}>
 			{#if details && s?.voice_options}
