@@ -212,3 +212,233 @@ def test_the_request_prompt_is_the_callers_words_when_there_are_any():
     assert request_prompt("Fix it.", "Live conversation context:\nuser: Fix it.\n") == "Fix it."
     assert request_prompt("", "Fix the failing test") == "Fix the failing test"
     assert request_prompt(None, "  Fix the failing test ") == "Fix the failing test"
+
+
+# -- review fixes: repeats, lost answers, status and steered turns ----------
+
+
+@pytest.mark.asyncio
+async def test_a_forwarded_request_carries_a_stable_command_id(mirror):
+    call = streamed_call()
+    call.upstream = Upstream()
+    call.progress = SimpleNamespace(submitted=AsyncMock())
+    await call.caption("user", "Make the rail icons bigger.")
+
+    await call.run_delegation("delegation-1")
+    await call.run_delegation("delegation-1")  # A repeat of the same handoff.
+
+    ids = [body["command_id"] for _, _, body in mirror.sent]
+    assert ids == [f"voice:{call.call_key}:delegation-1"] * 2  # The owner dedupes the repeat.
+
+
+@pytest.mark.asyncio
+async def test_a_lost_answer_says_it_may_have_reached_the_chat(mirror, monkeypatch):
+    async def lost(*_args, **_kwargs):
+        raise control.MaybeApplied("GamingPC did not answer in time.")
+
+    monkeypatch.setattr(control, "call", lost)
+    call = streamed_call()
+    call.upstream = Upstream()
+    call.progress = SimpleNamespace(submitted=AsyncMock())
+    await call.caption("user", "Run the tests.")
+
+    await call.run_delegation("delegation-1")
+
+    call.progress.submitted.assert_not_awaited()
+    spoken = call.upstream.sent[0]["content"]
+    assert "may already be in the chat" in spoken and "check the chat before asking again" in spoken
+    assert "nothing was sent" not in spoken
+    assert_mirror_untouched(mirror)
+
+
+def sideband(monkeypatch):
+    monkeypatch.setattr(voice_bridge, "_record_session_usage", lambda *a, **k: None)
+    bridge = voice_bridge.VoiceBridge(SESSION, "rtc_1", api_key="k", model="gpt-realtime-2",
+                                      max_call_minutes=30, conversation_surface=True)
+    bridge._remote_owner = PEER
+    bridge._send = AsyncMock()
+    return bridge
+
+
+def tool_output(bridge):
+    return json.loads(bridge._send.await_args_list[0].args[0]["item"]["output"])
+
+
+@pytest.mark.asyncio
+async def test_a_sideband_request_carries_the_tool_call_as_its_command_id(mirror, monkeypatch):
+    bridge = sideband(monkeypatch)
+
+    await bridge._service_call("call-7", "submit_to_chat", json.dumps({"request": "Fix the test"}))
+
+    assert mirror.sent[0][2]["command_id"] == "voice:rtc_1:call-7"
+
+
+@pytest.mark.asyncio
+async def test_an_owner_answer_without_a_turn_id_is_still_a_success(mirror, monkeypatch):
+    async def no_turn(device_id, action, body=None, **_kwargs):
+        mirror.sent.append((device_id, action, body))
+        return {"session_id": body["session_id"]}
+
+    monkeypatch.setattr(control, "call", no_turn)
+    bridge = sideband(monkeypatch)
+
+    await bridge._service_call("call-1", "submit_to_chat", json.dumps({"request": "Fix the test"}))
+
+    output = tool_output(bridge)
+    assert output["ok"] is True and output["error"] is None and output["turn_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_sideband_lost_answer_is_not_reported_as_unsent(mirror, monkeypatch):
+    async def lost(*_args, **_kwargs):
+        raise control.MaybeApplied("no answer")
+
+    monkeypatch.setattr(control, "call", lost)
+    bridge = sideband(monkeypatch)
+
+    await bridge._service_call("call-1", "submit_to_chat", json.dumps({"request": "Fix the test"}))
+
+    output = tool_output(bridge)
+    assert output["ok"] is False and "may already be in the chat" in output["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_spoken_answer_with_a_lost_reply_says_check_the_screen(mirror, monkeypatch):
+    from app.core.voice_approval import SpokenApprovals
+
+    async def lost(*_args, **_kwargs):
+        raise control.MaybeApplied("no answer")
+
+    monkeypatch.setattr(control, "call", lost)
+    desk = SpokenApprovals(SESSION, owner=PEER)
+    desk.offer({"request_id": "req-1", "tool_name": "Bash"})
+    desk.delivered("req-1")
+
+    outcome = await desk.hear("Yes.")
+
+    assert "may already be recorded" in outcome.text and "on screen" in outcome.text
+    assert "could not reach" not in outcome.text
+
+
+@pytest.mark.asyncio
+async def test_the_sideband_resolves_the_owner_when_it_starts(mirror, monkeypatch):
+    """VoiceBridge.start reads the owner before opening the sideband."""
+    class Opened(Exception):
+        pass
+
+    async def refuse(*_args, **_kwargs):
+        raise Opened
+
+    monkeypatch.setattr(voice_bridge, "_open_sideband", refuse)
+    bridge = voice_bridge.VoiceBridge(SESSION, "rtc_1", api_key="k", model="gpt-realtime-2",
+                                      max_call_minutes=30, conversation_surface=True)
+    with pytest.raises(Opened):
+        await bridge.start()
+    assert bridge._remote_owner == PEER
+
+
+def publish_runtime(state, owner=PEER):
+    from app.db.base import get_db
+    with get_db() as conn:
+        conn.cursor().execute(
+            "INSERT INTO network_session_runtime (session_id, owner_device_id, state) VALUES (%s, %s, %s) "
+            "ON CONFLICT (session_id) DO UPDATE SET owner_device_id = EXCLUDED.owner_device_id, state = EXCLUDED.state",
+            (SESSION, owner, state))
+
+
+@pytest.mark.parametrize("state, chat", [
+    ("working", "working"), ("permission", "working"), ("parked", "waiting_on_background"),
+    ("idle", "idle"), (None, "unknown"),
+])
+def test_status_of_a_chat_another_worker_runs_comes_from_its_runtime(mirror, state, chat):
+    from app.core import voice_status
+    if state:
+        publish_runtime(state)
+
+    status = voice_status.work_status(SESSION)
+
+    assert status["chat"] == chat and status["runs_elsewhere"] is True
+    if chat == "unknown":
+        assert "has not reported" in voice_status.status_sentence(status)
+
+
+def test_a_runtime_summary_from_another_owner_says_nothing(mirror):
+    from app.core import voice_status
+    publish_runtime("working", owner="an-earlier-owner")
+
+    assert voice_status.work_status(SESSION)["chat"] == "unknown"
+
+
+def progress(owner=PEER):
+    from app.core.voice_progress import VoiceProgress
+    sent = []
+
+    async def send(event):
+        sent.append(event)
+
+    return VoiceProgress(SESSION, send, owner=owner), sent
+
+
+def event(event_type, turn_id, **payload):
+    return {"event_type": event_type, "turn_id": turn_id, "payload": payload}
+
+
+@pytest.mark.asyncio
+async def test_a_request_the_owner_steered_into_its_running_turn_is_settled(mirror):
+    from app.core.voice_progress import REMOTE_STEERED_NOTE
+    publish_runtime("working")
+    desk, _ = progress()
+    await desk.submitted("owner-turn-1", "delegation-1")
+    # The owner's running turn takes the request in and ends; ours never starts.
+    desk.consume(event("assistant.text_delta", "running-turn", text="Bigger icons are in."))
+    desk.consume(event("turn.completed", "running-turn"))
+    await desk.check_unstarted(now=100)
+    assert "owner-turn-1" in desk.active_turns  # The owner still reports work.
+
+    publish_runtime("idle")
+    await desk.check_unstarted(now=200)
+
+    assert "owner-turn-1" not in desk.active_turns and not desk.unstarted
+    assert desk.pending["steer:owner-turn-1"] == (REMOTE_STEERED_NOTE, "delegation-1", False)
+
+
+@pytest.mark.asyncio
+async def test_a_request_queued_behind_the_running_turn_is_not_settled_early(mirror):
+    publish_runtime("working")
+    desk, _ = progress()
+    await desk.submitted("owner-turn-1", "delegation-1")
+    desk.consume(event("turn.completed", "running-turn"))
+    desk.consume(event("turn.started", "owner-turn-1"))  # Ours starts next.
+    publish_runtime("idle")  # Even a stale idle cannot settle a started turn.
+
+    await desk.check_unstarted(now=100)
+
+    assert "owner-turn-1" in desk.active_turns and "steer:owner-turn-1" not in desk.pending
+    desk.consume(event("message.assistant", "owner-turn-1", content="Done.", kind="text"))
+    desk.consume(event("turn.completed", "owner-turn-1"))
+    assert "owner-turn-1" not in desk.active_turns
+    assert desk.pending["turn:owner-turn-1"][0].endswith("Done.")
+
+
+@pytest.mark.asyncio
+async def test_a_request_sent_while_the_owner_was_idle_is_not_settled_before_a_turn_ends(mirror):
+    publish_runtime("idle")  # The summary from before the request.
+    desk, _ = progress()
+    await desk.submitted("owner-turn-1", "delegation-1")
+
+    await desk.check_unstarted(now=100)
+
+    assert desk.unstarted == {"owner-turn-1"}
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_starts_mid_work_on_the_owner_hears_so(mirror, monkeypatch):
+    from app.core import event_gateway
+    publish_runtime("working")
+    monkeypatch.setattr(event_gateway, "get_gateway", lambda: SimpleNamespace(subscribe=lambda sid: None,
+                                                                                unsubscribe=lambda *a: None))
+    desk, _ = progress()
+
+    await desk.open()
+
+    assert desk.pending["chat"][0] == "Chat work is already running. Do not start it again."

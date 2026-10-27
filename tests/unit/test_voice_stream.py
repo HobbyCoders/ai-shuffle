@@ -74,7 +74,7 @@ async def test_live_delegation_is_correlated_and_uses_accumulated_user_context(m
     await call.delegation_task
     call.flush.assert_awaited_once()
     delegate.assert_awaited_once_with("s1", "Live conversation context (only the latest new request needs action):\nuser: What is six times seven?\n",
-                                      spoken="What is six times seven?")
+                                      spoken="What is six times seven?", command=f"voice:{call.call_key}:{did}")
     assert json.loads(call.upstream.sent[0]) == {
         "type": "session.commentary.append", "delegation_id": did, "content": "The answer is forty-two.",
     }

@@ -326,6 +326,13 @@ class SpokenApprovals:
             from app.network import control
             try:
                 result = await voice_remote.answer_permission(self.owner, self.session_id, ask.request_id, decision)
+            except control.MaybeApplied as exc:
+                # It may have been recorded there. The request is keyed by its
+                # id, so an answer on screen can never decide it twice.
+                logger.info("Voice approval for %s may have reached its owner (%s)", self.session_id, exc)
+                return (f"The spoken answer reached the worker that runs this conversation, but no reply came "
+                        f"back, so it may already be recorded. Tell the user to check the request on screen "
+                        f"and answer it there if it is still waiting: {ask.summary}"), False
             except (control.RunnerUnreachable, control.ControlRefused) as exc:
                 logger.info("Voice approval for %s could not reach its owner (%s)", self.session_id, exc)
                 return (f"The spoken answer could not reach the worker that runs this conversation: {exc} "

@@ -12,6 +12,10 @@ delegation) answers a pure status question from it instead of handing the
 question to the chat agent.
 
 Labels are short public titles. Tool input, output and ids never appear.
+
+A conversation another network worker runs is a mirror here: its turns are
+never copied, so its chat state comes from the owner's replicated runtime
+summary instead (``voice_remote.work_state``, #700).
 """
 from __future__ import annotations
 
@@ -61,18 +65,31 @@ def work_status(session_id: str) -> Dict[str, Any]:
         "chat": "idle", "queued_requests": 0, "running": [],
         "finished_waiting": [], "approvals_waiting": 0, "on_screen_waiting": 0,
     }
+    owner = None
     try:
-        from app.db import turns
-        live = turns.get_live_turn(session_id)
-        if live:
-            status["chat"] = "working"
-        else:
-            latest = turns.get_latest_turn(session_id) or {}
-            if latest.get("state") == "parked":
-                status["chat"] = "waiting_on_background"
-        status["queued_requests"] = len(turns.get_queued_turns(session_id))
-    except Exception:  # noqa: BLE001 - a partial answer beats none
-        logger.debug("Voice status: turn read failed for %s", session_id, exc_info=True)
+        from app.core import voice_remote
+        owner = voice_remote.owner_of_session(session_id)
+        if owner:
+            state = voice_remote.work_state(session_id, owner)
+            status["runs_elsewhere"] = True
+            status["chat"] = ("unknown" if state is None else
+                              "working" if state in ("working", "permission", "question") else
+                              "waiting_on_background" if state == "parked" else "idle")
+    except Exception:  # noqa: BLE001
+        logger.debug("Voice status: owner read failed for %s", session_id, exc_info=True)
+    if not owner:  # A mirror has none of the owner's turns.
+        try:
+            from app.db import turns
+            live = turns.get_live_turn(session_id)
+            if live:
+                status["chat"] = "working"
+            else:
+                latest = turns.get_latest_turn(session_id) or {}
+                if latest.get("state") == "parked":
+                    status["chat"] = "waiting_on_background"
+            status["queued_requests"] = len(turns.get_queued_turns(session_id))
+        except Exception:  # noqa: BLE001 - a partial answer beats none
+            logger.debug("Voice status: turn read failed for %s", session_id, exc_info=True)
 
     running: Dict[str, Dict[str, Any]] = {}
     finished: List[Dict[str, Any]] = []
@@ -137,6 +154,9 @@ def status_sentence(status: Dict[str, Any]) -> str:
         parts.append("The chat agent is working on a request right now.")
     elif chat == "waiting_on_background":
         parts.append("The chat agent is waiting for background jobs to finish.")
+    elif chat == "unknown":
+        parts.append("The worker that runs this chat has not reported what it is doing yet, so this "
+                     "status may be incomplete. Check the chat on screen.")
     queued = int(status.get("queued_requests") or 0)
     if queued:
         parts.append(_plural(queued, "more request is", "more requests are") + " queued after it.")

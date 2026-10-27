@@ -40,6 +40,12 @@ PAUSE_MAX_WAIT = 30.0
 STEERED = "steered"
 STEERED_NOTE = ("The request reached the chat task that is already running; the chat agent sees it "
                 "at its next step and its result comes with that task. Do not report it as finished.")
+# A request forwarded to the worker that runs the chat and folded into the
+# turn that was already running there: that turn has ended, so its reply
+# (already read out) is the answer (#700).
+REMOTE_STEERED_NOTE = ("The request reached the chat task that was already running on the worker that "
+                       "runs this conversation, and that task has finished; its reply is the answer. "
+                       "Do not start the request again.")
 ROW_CHECK_INTERVAL = 5.0
 
 
@@ -249,8 +255,16 @@ def question_note(request: dict, limit: int = 900) -> str:
 
 
 class VoiceProgress:
-    def __init__(self, session_id, send, *, quiet=None, approvals=None, append_bytes: int | None = MAX_NOTE_BYTES):
+    def __init__(self, session_id, send, *, quiet=None, approvals=None, append_bytes: int | None = MAX_NOTE_BYTES,
+                 owner: str | None = None):
         self.session_id = session_id
+        # The network worker that runs the conversation when it is not this
+        # one (#700). Its turns never reach this worker's turns table; only
+        # its events and runtime summary do.
+        self.owner = owner
+        # Turn endings seen so far, and the count when each request was sent.
+        self.turn_ends = 0
+        self.sent_at_end = {}
         self.send = send
         # The largest piece one append may carry. GPT Live caps an append at
         # 500 tokens, so a long spoken note goes as several appends. None: the
@@ -300,10 +314,15 @@ class VoiceProgress:
         rows = await run_sync(background_tasks.list_session_nonterminal_background_tasks, self.session_id)
         for row in rows:
             self.task(row["task_id"], row.get("title"), row["status"])
-        live = await run_sync(turns.get_live_turn, self.session_id)
-        if live:
-            self.active_turns.add(live["id"])
-            self.note("chat", "Chat work is already running. Do not start it again.")
+        if self.owner:
+            from app.core import voice_remote
+            if await run_sync(voice_remote.work_state, self.session_id, self.owner) in ("working", "permission", "question"):
+                self.note("chat", "Chat work is already running. Do not start it again.")
+        else:
+            live = await run_sync(turns.get_live_turn, self.session_id)
+            if live:
+                self.active_turns.add(live["id"])
+                self.note("chat", "Chat work is already running. Do not start it again.")
         # A call that starts mid-work hears the whole picture at once, as quiet
         # context, instead of one task line every UPDATE_INTERVAL.
         from app.core import voice_status
@@ -354,6 +373,7 @@ class VoiceProgress:
         self.delegations[turn_id] = delegation_id
         self.active_turns.add(turn_id)
         self.unstarted.add(turn_id)
+        self.sent_at_end[turn_id] = self.turn_ends
         self.note("chat", "The chat agent has received the request and is working on it.")
         await self.flush(force=True)
 
@@ -417,6 +437,7 @@ class VoiceProgress:
         elif kind == "tool.result":
             self.text.pop(tid, None)
         elif kind in {"turn.completed", "turn.aborted"}:
+            self.turn_ends += 1
             self.active_turns.discard(tid)
             self.unstarted.discard(tid)
             # The whole public reply, not its first paragraph: the question or
@@ -435,6 +456,7 @@ class VoiceProgress:
             self.pending.pop("chat", None)
             self.note("turn:" + tid, text, did, urgent=spoken)
         elif kind == "turn.parked":
+            self.turn_ends += 1
             # Parking is not completion: keep the delegation binding for its wake.
             if tid:
                 self.active_turns.discard(tid)
@@ -491,6 +513,9 @@ class VoiceProgress:
         if not self.unstarted or now - self.last_row_check < ROW_CHECK_INTERVAL:
             return
         self.last_row_check = now
+        if self.owner:
+            await self._check_unstarted_remote()
+            return
         for turn_id in list(self.unstarted):
             row = await run_sync(turns.get_turn, turn_id)
             if row is None or row.get("state") == "queued":
@@ -501,6 +526,28 @@ class VoiceProgress:
             if row.get("stop_reason") == STEERED:
                 self.active_turns.discard(turn_id)
                 self.note("steer:" + turn_id, STEERED_NOTE, self.delegations.pop(turn_id, None))
+
+    async def _check_unstarted_remote(self):
+        """:meth:`check_unstarted` for a chat another worker runs.
+
+        Its turn rows never reach this worker. A forwarded request the owner
+        steered into its running turn publishes no events of its own, so it
+        is settled once a turn has ended since it was sent and the owner
+        reports no work left: a request still queued there keeps the owner
+        "working" and starts with its own ``turn.started``.
+        """
+        from app.core import voice_remote
+        waiting = [t for t in self.unstarted if self.turn_ends > self.sent_at_end.get(t, self.turn_ends)]
+        if not waiting:
+            return
+        state = await run_sync(voice_remote.work_state, self.session_id, self.owner)
+        if state not in ("idle", "parked"):
+            return
+        for turn_id in waiting:
+            self.unstarted.discard(turn_id)
+            self.active_turns.discard(turn_id)
+            self.sent_at_end.pop(turn_id, None)
+            self.note("steer:" + turn_id, REMOTE_STEERED_NOTE, self.delegations.pop(turn_id, None))
 
     def held_for_pause(self, now=None):
         """Spoken notes are waiting and this is not a natural pause yet."""

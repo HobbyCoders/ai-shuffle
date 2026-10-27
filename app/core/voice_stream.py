@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from collections import deque
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -195,12 +196,17 @@ def commentary_chunks(text: str):
 
 
 async def delegate_to_selected_model(session_id: str, transcript: str, on_submitted=None, *,
-                                     spoken: str | None = None) -> str:
+                                     spoken: str | None = None, command: str | None = None) -> str:
     """Hand one voice request to the conversation's chat agent.
 
     ``spoken`` is the caller's own words when ``transcript`` is a context
     block (the streamed transports); a conversation another worker runs
-    records those words as the request (``voice_remote``).
+    records those words as the request (``voice_remote``). ``command`` is
+    the forwarded request's ``command_id`` there, so a repeat is deduped.
+
+    Returns "" when the request went through (with ``on_submitted``), else
+    the note the voice should hear; a non-empty answer is an error to the
+    sideband's ``submit_to_chat``.
     """
     from app.core import api_user_scope, turn_manager, voice_remote
     from app.core.provider_agent import validate_provider_model
@@ -209,7 +215,7 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
     row = await run_sync(database.get_session, session_id)
     owner = voice_remote.owner_of(row)
     if owner:
-        return await _delegate_to_owner(owner, row, transcript, on_submitted, spoken)
+        return await _delegate_to_owner(owner, row, transcript, on_submitted, spoken, command)
     selected = (row or {}).get("model")
     normal_conversation = row is not None and "mode" in row and row.get("mode") != "voice"
     if not selected and normal_conversation:
@@ -304,7 +310,8 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
     return await run_sync(_turn_reply, session_id, turn_id) or "The chat task finished without a spoken result."
 
 
-async def _delegate_to_owner(owner: str, row: dict, transcript: str, on_submitted, spoken: str | None) -> str:
+async def _delegate_to_owner(owner: str, row: dict, transcript: str, on_submitted, spoken: str | None,
+                             command: str | None = None) -> str:
     """:func:`delegate_to_selected_model` for a conversation another worker runs.
 
     The owner runs the request in the session's own model and mode, so no
@@ -323,15 +330,24 @@ async def _delegate_to_owner(owner: str, row: dict, transcript: str, on_submitte
         options = validate_options(binding["model"], binding.get("options") or {})
         instructions = options["delegation_instructions"] or DELEGATION_INSTRUCTIONS
     try:
-        turn_id = await voice_remote.submit(owner, row, transcript, instructions=instructions, spoken=spoken)
+        turn_id = await voice_remote.submit(owner, row, transcript, instructions=instructions, spoken=spoken,
+                                            command=command)
+    except control.MaybeApplied as exc:
+        # Reached the owner with no answer: it may be queued there. Saying
+        # "nothing was sent" would invite the caller to ask again (#700).
+        logger.warning("Voice: a forwarded request on %s may have reached its owner: %s", row["id"], exc)
+        return voice_remote.maybe_applied_note(exc)
     except (control.RunnerUnreachable, control.ControlRefused) as exc:
         logger.warning("Voice: could not forward a request on %s to its owner: %s", row["id"], exc)
         return voice_remote.unreachable_note(exc)
     logger.info("Voice: forwarded a request on %s to its owner (turn %s)", row["id"], turn_id)
-    if on_submitted is not None and turn_id:
+    if on_submitted is None:
+        return voice_remote.SENT_NOTE
+    if turn_id:
         await on_submitted(turn_id)
-        return ""
-    return "The request was sent to the chat on the worker that runs it. Its reply shows in chat."
+    # An owner that answered without a turn id still took the request: it is
+    # a success, with nothing to follow (its reply shows in the synced events).
+    return ""
 
 
 LIVE_URL ="wss://api.openai.com/v1/live/sessions"
@@ -466,6 +482,8 @@ class VoiceStream:
         # one (#700): the call then writes nothing into the local mirror and
         # forwards what the caller asks for (app.core.voice_remote).
         self.remote_owner: str | None = None
+        # One id per call for the forwarded requests' command ids.
+        self.call_key = uuid.uuid4().hex[:12]
 
     @property
     def is_live(self):
@@ -767,15 +785,17 @@ class VoiceStream:
             # The caller's own words: what an owning worker records (#700).
             spoken = " ".join(e["text"].strip() for e in conversation
                               if e["role"] == "user" and not is_noise(e["text"])).strip()
+            from app.core.voice_remote import command_id
+            command = command_id(self.call_key, delegation_id)
             if self.progress is not None:
                 async def submitted(turn_id):
                     await self.progress.submitted(turn_id, delegation_id)
                 result = await delegate_to_selected_model(self.session_id, context, on_submitted=submitted,
-                                                          spoken=spoken)
+                                                          spoken=spoken, command=command)
                 if not result:
                     return  # Progress and final results arrive on the event stream.
             else:
-                result = await delegate_to_selected_model(self.session_id, context, spoken=spoken)
+                result = await delegate_to_selected_model(self.session_id, context, spoken=spoken, command=command)
             # Live appends have a 500-token ceiling. <=400 UTF-8 bytes is a
             # conservative bound even without the provider's tokenizer.
             for content in commentary_chunks(result or "The chat task returned no result."):
@@ -1308,7 +1328,7 @@ class VoiceStream:
                                                         marker=lambda: self.transcript_seq,
                                                         owner=self.remote_owner)
                         self.progress = VoiceProgress(self.session_id, self.send, quiet=self.is_quiet,
-                                                      approvals=approvals)
+                                                      approvals=approvals, owner=self.remote_owner)
                         await self.progress.open()
                     await self.start_live(history)
                 else:

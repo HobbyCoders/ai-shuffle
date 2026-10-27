@@ -1028,7 +1028,7 @@ class VoiceBridge:
             # long chat result must not become several spoken responses.
             self._conversation_progress = VoiceProgress(
                 self.session_id, self._progress_note, quiet=self._is_quiet, approvals=approvals,
-                append_bytes=None,
+                append_bytes=None, owner=self._remote_owner,
             )
             await self._conversation_progress.open()
             self._conversation_progress_task = asyncio.create_task(self._conversation_progress.run())
@@ -1650,7 +1650,10 @@ class VoiceBridge:
                         submitted_ids.append(turn_id)
                         if self._conversation_progress:
                             await self._conversation_progress.submitted(turn_id, call_id)
-                    error = await delegate_to_selected_model(self.session_id, request_text, on_submitted=submitted)
+                    from app.core.voice_remote import command_id
+                    # One id per tool call of this call: a repeat on the owner is deduped.
+                    error = await delegate_to_selected_model(self.session_id, request_text, on_submitted=submitted,
+                                                             command=command_id(self.call_id, call_id))
                     result = {"ok": not bool(error), "turn_id": submitted_ids[0] if submitted_ids else None,
                               "session_id": self.session_id, "status": "queued", "error": error or None}
             elif name == "dispatch_agent":
@@ -2931,6 +2934,11 @@ class VoiceCallRegistry:
         self._capped[session_id] = (time.time(), int(max_call_minutes or 0))
         self._epochs.pop(session_id, None)
         try:
+            from app.core import voice_remote
+            if voice_remote.owner_of_session(session_id):
+                # A mirror's active flag is shared sidebar state the call never
+                # set; ending the call here must not move the owner's chat (#700).
+                return
             _set_session_inactive(session_id)
         except Exception:  # noqa: BLE001 — bookkeeping never blocks the cap
             logger.debug(
