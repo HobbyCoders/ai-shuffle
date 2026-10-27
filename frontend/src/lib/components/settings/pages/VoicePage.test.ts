@@ -252,14 +252,23 @@ describe('Voice page', () => {
 		expect(screen.queryByText('0 means no limit')).toBeNull();
 	});
 
-	it('rounds a fractional limit and never saves a negative one', async () => {
+	it('rounds a small positive limit up to 1 minute, never to unlimited', async () => {
 		await mountPage();
-		await fireEvent.input(field('Max call length'), { target: { value: '-5' } });
+		await fireEvent.input(field('Max call length'), { target: { value: '0.4' } });
 		await fireEvent.blur(field('Max call length'));
-		expect(transport.put).toHaveBeenLastCalledWith('/settings/voice', { voice_max_call_minutes: 0 });
+		expect(transport.put).toHaveBeenCalledExactlyOnceWith('/settings/voice', { voice_max_call_minutes: 1 });
 		await fireEvent.input(field('Max call length'), { target: { value: '12.6' } });
 		await fireEvent.blur(field('Max call length'));
 		expect(transport.put).toHaveBeenLastCalledWith('/settings/voice', { voice_max_call_minutes: 13 });
+	});
+
+	it('ignores a negative limit and keeps the current value', async () => {
+		await mountPage();
+		await fireEvent.input(field('Max call length'), { target: { value: '-5' } });
+		await fireEvent.blur(field('Max call length'));
+		expect(transport.put).not.toHaveBeenCalled();
+		expect(field('Max call length').value).toBe('60');
+		expect(screen.queryByText('No limit')).toBeNull();
 	});
 
 	it('shows a saved no-limit value and resets it to the 240 minute default', async () => {
@@ -281,6 +290,14 @@ describe('Voice page', () => {
 		await mountPage();
 		expect(screen.queryByLabelText('Opening words')).toBeNull();
 		expect(screen.queryByText('Blank waits for you')).toBeNull();
+	});
+
+	it('renders without an opening words row when the server still sends a legacy opening', async () => {
+		server = { ...settings(), voice_options: { ...settings().voice_options, opening: 'Hello there' } } as Settings;
+		await mountPage();
+		expect(screen.queryByLabelText('Opening words')).toBeNull();
+		expect(screen.queryByDisplayValue('Hello there')).toBeNull();
+		expect(field('Max call length').value).toBe('60');
 	});
 
 	it('keeps the last good value and reports a rejected save', async () => {

@@ -11,7 +11,7 @@ Voice mode adds a spoken conversation to a chat. You talk, the assistant answers
 ## Set up
 
 1. **Add an API key** under **Settings → Providers**: OpenAI for GPT Live, or xAI for Grok Voice. To use a ChatGPT subscription instead, connect your ChatGPT login under **Settings → Providers** and choose **GPT-Live-1.1 · ChatGPT subscription** as the voice engine in **Settings → Voice** (`voice_model: "gpt-live-1-codex"` in the API). It uses your ChatGPT subscription login; it doesn't fall back to an API key. It stays off until you select it, offers the 25 ChatGPT voices (Cove by default), and has no voice samples or automatic provider retry. When your OpenAI API key can use GPT-Live-1.1, it also appears in the engine list as **GPT-Live-1.1**. See the [Voice API](/docs/api-reference/voice). To use a SuperGrok subscription instead of an xAI API key, connect your SuperGrok login under **Settings → Providers** and choose **Grok voice (SuperGrok subscription)**; it never falls back to an xAI API key.
-2. **Turn on Voice calls** under **Settings → Voice**. Choose **GPT Live 1**, **Grok Voice** or **Grok voice (SuperGrok subscription)**, then a voice (the play button plays a sample; the SuperGrok engine has no samples), set **Max call length**, and change the **Call prompts** if you like. Both Grok engines default to **Eve**, use server voice activity detection, and delegate work to the same chat agent. Calls keep the engine, provider, voice and prompts they started with.
+2. **Turn on Voice calls** under **Settings → Voice**. Choose **GPT Live 1**, **Grok Voice** or **Grok voice (SuperGrok subscription)**, then a voice (the play button plays a sample; the SuperGrok engine has no samples), set **Max call length** (0 means no limit: the call lasts as long as you stay connected), and change the **Call prompts** if you like. Both Grok engines default to **Eve**, use server voice activity detection, and delegate work to the same chat agent. Calls keep the engine, provider, voice and prompts they started with.
 3. In the voice chat's composer, **choose the model** that does the work, with its effort and permission mode.
 
 GPT Live includes the nine additional API voices Nuri, Juni, Flitz, Brise, Sillage, Nira, Harema, Shida and Noeul (documentation checked 2026-10-18). GPT Live 1.1 is coming soon to the API; no undocumented model ID is offered. Prompt-to-voice/custom voice creation is not implemented here.
@@ -75,7 +75,7 @@ Grok calls end on a dropped connection; start the call again to rejoin. For GPT 
 
 - Call audio and voice samples are billed to your selected engine’s OpenAI or xAI API account. API keys stay on the server; the browser streams PCM audio through the app, not directly to xAI.
 - Work handed to the chat is billed to that chat model's own provider.
-- **Max call length** limits the length of a call, not its cost. Check your provider's usage page for real charges.
+- **Max call length** limits the length of a call, not its cost. With 0 there is no limit, so a call left connected keeps billing until you hang up. Check your provider's usage page for real charges.
 
 ## Older voice chats
 

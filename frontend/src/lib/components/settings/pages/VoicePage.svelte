@@ -34,7 +34,7 @@
 	import ExpandToggle from '../rows/ExpandToggle.svelte';
 	import CallPromptsEditor from './editors/CallPromptsEditor.svelte';
 	import { CODEX_VOICE_MODEL, SUPERGROK_VOICE_MODEL } from '$lib/constants/voice-engines';
-	import { NO_CALL_LIMIT, voiceModelLabel } from '$lib/api/voice';
+	import { maxCallMinutesFromInput, NO_CALL_LIMIT, voiceModelLabel } from '$lib/api/voice';
 	import { VoicePreview, VoiceState } from './voice-state.svelte';
 	import { voiceVolume, setVoiceVolume, MAX_VOICE_VOLUME } from '$lib/services/voiceVolume';
 	import './editors/editors.css';
@@ -357,7 +357,8 @@
 				min={NO_CALL_LIMIT}
 				unit="min"
 				disabled={locked}
-				onchange={(n) => voice.save({ voice_max_call_minutes: Math.max(NO_CALL_LIMIT, Math.round(n)) })}
+				accept={(n) => n >= 0}
+				onchange={(n) => voice.save({ voice_max_call_minutes: maxCallMinutesFromInput(n) })}
 			/>
 		</SettingRow>
 		<SettingRow

@@ -49,6 +49,13 @@ export const voiceModelLabel = (model: string): string => voiceModelLabels[model
 /** `voice_max_call_minutes` of 0 means a call has no length limit. */
 export const NO_CALL_LIMIT = 0;
 
+/**
+ * A typed max call length as whole minutes to save. Only an exact 0 means no
+ * limit; a positive fraction rounds to at least 1 so it never becomes unlimited.
+ * Negative entries are not valid: callers reject them before saving.
+ */
+export const maxCallMinutesFromInput = (n: number): number => (n > 0 ? Math.max(1, Math.round(n)) : NO_CALL_LIMIT);
+
 /** The max call length as people read it: "No limit" for 0, otherwise "90 min". */
 export const formatMaxCallMinutes = (minutes: number): string =>
 	minutes === NO_CALL_LIMIT ? 'No limit' : `${minutes} min`;

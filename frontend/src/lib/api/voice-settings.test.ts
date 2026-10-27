@@ -141,6 +141,14 @@ describe('max call length', () => {
   expect(formatMaxCallMinutes(240)).toBe('240 min');
  });
 
+ it('treats only an exact 0 as no limit when converting typed minutes', async () => {
+  const { maxCallMinutesFromInput } = await import('./voice');
+  expect(maxCallMinutesFromInput(0)).toBe(0);
+  expect(maxCallMinutesFromInput(0.4)).toBe(1);
+  expect(maxCallMinutesFromInput(1.5)).toBe(2);
+  expect(maxCallMinutesFromInput(90)).toBe(90);
+ });
+
  it('keeps a saved 0 instead of treating it as unset', async () => {
   const voice = await import('./voice');
   transport.get.mockResolvedValueOnce(settings('marin', 0));
