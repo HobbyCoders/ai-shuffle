@@ -26,7 +26,6 @@ object MobileUi {
      * newer worker UI can tell an older app apart and degrade.
      */
     const val BRIDGE_VERSION = 1
-    val CAPABILITIES = listOf("file-save", "file-chooser", "microphone", "device-tools", "voice-routing", VOICE_CALL_CONTROLS, WorkerSwitch.CAPABILITY)
 
     /**
      * The page reports its call's state (`voice-call-state`) and answers the
@@ -34,6 +33,7 @@ object MobileUi {
      * screen with an ongoing notification (VoiceCallService).
      */
     const val VOICE_CALL_CONTROLS = "voice-call-controls"
+    val CAPABILITIES = listOf("file-save", "file-chooser", "microphone", "device-tools", "voice-routing", VOICE_CALL_CONTROLS, WorkerSwitch.CAPABILITY)
 
     /**
      * Web-message bridge the page uses to tell the shell about its own chrome
