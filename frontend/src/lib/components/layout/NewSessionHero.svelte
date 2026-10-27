@@ -5,7 +5,7 @@
 	 *
 	 *   (avatar)
 	 *   Overseer ⌄                    ← the agent menu (ProfileSelector `card`)
-	 *   Runs on Unraid in ai-shuffle on a new branch from main in a worktree.
+	 *   Runs on Workstation in my-app on a new branch from main in a worktree.
 	 *
 	 * Every part of the sentence opens the menu its composer chip opens
 	 * (NewSessionSentence). The composer below carries no chip row while this
