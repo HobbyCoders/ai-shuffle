@@ -5,10 +5,12 @@ import { resolve } from 'node:path';
 // The composer's buttons take their corners from the theme (one shared
 // --composer-btn-radius), so a square theme never shows round buttons inside
 // a square message box. Pinned at the source: no mount needed to read CSS.
+// The phone composer's copy of the rule is pinned in
+// mobile/src/shell/composer-button-radius.test.ts (this folder may not name
+// the phone's platform selector).
 const read = (path: string) => readFileSync(resolve(process.cwd(), path), 'utf8');
 const chatInput = read('src/lib/components/chat/ChatInput.svelte');
 const callButton = read('src/lib/components/chat/VoiceCallButton.svelte');
-const mobileCss = read('../mobile/src/mobile.css');
 
 const style = chatInput.slice(chatInput.indexOf('<style>'));
 /** Declarations of the first rule whose selector starts with `selector {`. */
@@ -41,16 +43,4 @@ describe('composer button corners follow the theme radius', () => {
 		expect(rule(callButton, '\t.call-circle')).not.toContain('border-radius: 50%');
 	});
 
-	it('scales the same rule to the phone composer and its 40px buttons', () => {
-		const MOBILE = "html:root[data-platform='mobile']";
-		expect(rule(mobileCss, `${MOBILE} .chat-island`)).toMatch(
-			/--composer-btn-radius:\s*min\(calc\(var\(--radius, 10px\) \* 2\.5\), 20px\);/
-		);
-		const phone = mobileCss.slice(
-			mobileCss.indexOf(`${MOBILE} .chat-island {`),
-			mobileCss.indexOf(`${MOBILE} .chat-island.wrapped .input-area`)
-		);
-		expect(phone).not.toContain('border-radius: 50%');
-		expect(phone.match(/border-radius: var\(--composer-btn-radius\)/g)).toHaveLength(3);
-	});
 });
