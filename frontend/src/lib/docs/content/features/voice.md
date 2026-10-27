@@ -69,13 +69,17 @@ If breathing or room noise keeps starting a turn, raise the microphone threshold
 
 ## Dropped connections
 
-Grok calls end on a dropped connection; start the call again to rejoin. For GPT Live, if the connection drops, for example when your phone moves from Wi-Fi to mobile data, the call shows **reconnecting** and picks up where it left off. Anything said while it shows **reconnecting** is not heard. If it cannot reconnect, the call ends with a message, and you can start it again.
+For GPT Live and both Grok engines, if the connection drops, for example when your phone moves from Wi-Fi to mobile data, the call shows **reconnecting** and picks up where it left off. Anything said while it shows **reconnecting** is not heard. If it cannot reconnect, the call ends with a message, and you can start it again. ChatGPT voice and PersonaPlex calls end on a dropped connection; start the call again to rejoin.
+
+## Long calls
+
+Providers end their own voice sessions after a while (OpenAI and xAI after an hour). For OpenAI Realtime, GPT Live and both Grok engines the app opens a fresh provider session in the background before that, at a pause in the conversation, and carries the conversation over without greeting you again, so the call doesn't drop. Work updates that arrive during the swap are held and spoken afterwards. ChatGPT voice and PersonaPlex calls are not renewed and end when the provider ends its session. Even with no length limit, a call ends when your device has sent nothing for two minutes (for example, the app was closed or the phone lost its network), so a forgotten call does not keep running.
 
 ## Costs
 
 - Call audio and voice samples are billed to your selected engine’s OpenAI or xAI API account. API keys stay on the server; the browser streams PCM audio through the app, not directly to xAI.
 - Work handed to the chat is billed to that chat model's own provider.
-- **Max call length** limits the length of a call, not its cost. Check your provider's usage page for real charges.
+- **Max call length** limits the length of a call, not its cost. Set it to 0 (**No limit**) to keep a call going for as long as you stay connected. Check your provider's usage page for real charges.
 
 ## Older voice chats
 

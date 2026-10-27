@@ -418,7 +418,7 @@ def test_voice_outside_the_models_list_is_400(c, voice):
     ({"voice_model": "gpt-live-1.1"}, 400, "GPT-Live-1.1 isn't available for this OpenAI API key yet."),
     ({"voice_provider_id": "prov-1"}, 400,
      "Choose a provider for the selected voice engine; ChatGPT and SuperGrok voice need their connected subscription login."),
-    ({"voice_max_call_minutes": 0}, 400, "voice_max_call_minutes must be a positive integer"),
+    ({"voice_max_call_minutes": -1}, 400, "voice_max_call_minutes must be 0 (no limit) or a positive integer"),
     ({"voice_input_model": "fal-ai/unknown"}, 400, "Choose a supported voice transcription model."),
     ({"voice_options": {"instructions": "x"}, "voice_options_model": "gpt-realtime"}, 409,
      "The selected voice model changed. Reload settings before saving."),
@@ -446,6 +446,15 @@ def test_voice_saved_values_that_are_invalid_fall_back_to_defaults(c):
     assert body["voice_options"] == c.put(VOICE, json={}).json()["voice_options"]
     database.set_system_setting("voice_max_call_minutes", "-5")
     assert c.get(VOICE).json()["voice_max_call_minutes"] == 240
+
+
+def test_voice_max_call_minutes_zero_means_no_limit_and_round_trips(c):
+    r = c.put(VOICE, json={"voice_max_call_minutes": 0})
+    assert r.status_code == 200, r.text
+    assert r.json()["voice_max_call_minutes"] == 0
+    assert database.get_system_setting("voice_max_call_minutes") == "0"
+    assert c.get(VOICE).json()["voice_max_call_minutes"] == 0  # Not turned back into the default.
+    assert c.put(VOICE, json={"voice_max_call_minutes": 45}).json()["voice_max_call_minutes"] == 45
 
 
 def test_voice_settings_are_owner_only_to_change(client, api_user):
