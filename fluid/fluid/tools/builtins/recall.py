@@ -24,6 +24,7 @@ from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 _DEFAULT_LIMIT = 3
 _MAX_LIMIT = 10
+_MAX_IDS = 10
 
 
 def describe(tools: frozenset[str] | None = None) -> str:
@@ -37,13 +38,12 @@ def describe(tools: frozenset[str] | None = None) -> str:
         else ""
     )
     return (
-        "Search your long-term memory: every fact your continual learner "
-        "has kept (including archived entries and other projects' entries "
-        "that the # Memory list above does not show) plus the saved-skill "
-        "index. Use it when the task touches something you may have learned "
-        "before — a preference, a convention, a port, a past correction — "
-        "and the # Memory list does not answer it. Returns the top matches "
-        "per category with their source." + session_route
+        "Search your long-term memory: every saved fact (archived ones too) "
+        "plus the saved-skill index. Use ids=[...] for the full text of a "
+        "# Memory line before relying on it, and keywords when the task "
+        "touches something you may have learned before — a preference, a "
+        "convention, a port, a past correction. Returns the top matches per "
+        "category with their source." + session_route
     )
 
 
@@ -61,8 +61,11 @@ SPEC = ToolSpec(
                 "type": "integer",
                 "description": "Maximum matches per category (default 3, max 10).",
             },
+            "ids": {
+                "type": "array", "items": {"type": "string"},
+                "description": "Ids for full text.",
+            },
         },
-        "required": ["query"],
     },
     risk="safe",
     # Loader-wired store handle; absent (no continual store) the engine drops
@@ -73,8 +76,14 @@ SPEC = ToolSpec(
 
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     query = str(input.get("query") or "").strip()
-    if not query:
-        return ToolOutcome(text="query is required", is_error=True)
+    ids = input.get("ids")
+    if ids is not None and (not isinstance(ids, list) or not all(isinstance(i, str) for i in ids)):
+        return ToolOutcome(text="ids must be a list of memory ids", is_error=True)
+    ids = list(dict.fromkeys(i.strip() for i in ids or () if i.strip()))
+    if len(ids) > _MAX_IDS:
+        return ToolOutcome(text=f"ids takes at most {_MAX_IDS} memory ids", is_error=True)
+    if not query and not ids:
+        return ToolOutcome(text="query or ids is required", is_error=True)
     try:
         limit = min(_MAX_LIMIT, max(1, int(input.get("limit") or _DEFAULT_LIMIT)))
     except (TypeError, ValueError):
@@ -86,7 +95,76 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             is_error=True,
         )
 
-    return await asyncio.to_thread(_lookup, query, limit, store, ctx.extra.get("memory_project"))
+    # One scope rule for ids and keywords: global facts plus this session's
+    # project (the loader always sets memory_project; None is unscoped).
+    project = ctx.extra.get("memory_project")
+    if ids:
+        fetched = await asyncio.to_thread(_fetch, ids, store, project)
+        if not query:
+            return fetched
+        found = await asyncio.to_thread(_lookup, query, limit, store, project)
+        return ToolOutcome(text=fetched.text + "\n\n" + found.text,
+                           is_error=fetched.is_error and found.is_error)
+    return await asyncio.to_thread(_lookup, query, limit, store, project)
+
+
+def _fetch(ids: list[str], store: Any, project: str | None = None) -> ToolOutcome:
+    """Exact fetch by id: full text and every label, one block per memory.
+    Another project's fact is reported like a missing id, so its text and
+    existence stay out of this session."""
+    from fluid.context.screening import screen_findings
+    try:
+        hits = store.memories_by_id(ids, project=project)
+    except Exception as exc:  # noqa: BLE001
+        return ToolOutcome(text=f"recall failed: {exc}", is_error=True)
+    successor = _local_ids(store) if any(e.superseded_by for e, _ in hits) else {}
+    lines: list[str] = []
+    seen: set[str] = set()
+    for entry, archived in hits:
+        seen.update({entry.id, f"{entry.origin}:{entry.id.split(':')[-1]}"})
+        findings = screen_findings(entry.text) + screen_findings(entry.when or "")
+        if findings:
+            lines.append(f"- [{entry.id}] [withheld — suspected injection pattern(s): "
+                         f"{', '.join(dict.fromkeys(findings))}]")
+            continue
+        tags = _tags(entry, archived, successor)
+        if entry.when:
+            tags.insert(1, f"when: {entry.when}")
+        if entry.always:
+            tags.append("always applies")
+        lines.append(f"- [{entry.id}] {entry.text}  ({', '.join(tags)})")
+        if entry.conflicted:
+            lines.append(f"  Unresolved conflict; ask the user for the current fact, then correct "
+                         f"[{entry.id}] revision {entry.revision} with Remember.")
+    missing = [i for i in ids if i not in seen]
+    if missing:
+        where = " in this project" if project is not None else ""
+        lines.append("No memory with id " + ", ".join(f"[{i}]" for i in missing) + where
+                     + " (it may have been forgotten); search by keyword instead.")
+    return ToolOutcome(text="\n".join(lines), is_error=not hits)
+
+
+def _tags(entry: Any, archived: bool, successor: dict[str, str]) -> list[str]:
+    tags = [f"revision: {entry.revision}", f"source: {entry.provenance}"]
+    if entry.key:
+        tags.append(f"key: {entry.key}")
+    if entry.protected:
+        tags.append("explicit save")
+    elif entry.durable:
+        tags.append("agent-saved")
+    if entry.updated_at:
+        # A date lets the caller notice a fact a newer one superseded.
+        tags.append("updated: " + time.strftime("%Y-%m-%d", time.gmtime(entry.updated_at)))
+    if entry.provenance == "tool":
+        tags.append("harvested from tool output, unconfirmed — confirm with Remember if still true")
+    if entry.superseded_by:
+        shown = successor.get(entry.superseded_by, entry.superseded_by)
+        tags.append(f"superseded by [{shown}]; not current")
+    if archived:
+        tags.append("archived")
+    if entry.scope != "global":
+        tags.append(f"scope: {entry.scope}")
+    return tags
 
 
 def _local_ids(store: Any) -> dict[str, str]:
@@ -130,25 +208,12 @@ def _lookup(query: str, limit: int, store: Any, project: str | None) -> ToolOutc
                     f"pattern(s): {', '.join(findings)}]"
                 )
                 continue
-            tags = [f"revision: {entry.revision}", f"source: {entry.provenance}"]
-            if entry.key:
-                tags.append(f"key: {entry.key}")
-            if entry.protected:
-                tags.append("explicit save")
-            elif entry.durable:
-                tags.append("agent-saved")
-            if entry.updated_at:
-                # A date lets the caller notice a fact a newer one superseded.
-                tags.append("updated: " + time.strftime("%Y-%m-%d", time.gmtime(entry.updated_at)))
-            if entry.provenance == "tool":
-                tags.append("harvested from tool output, unconfirmed — confirm with Remember if still true")
-            if entry.superseded_by:
-                shown = successor.get(entry.superseded_by, entry.superseded_by)
-                tags.append(f"superseded by [{shown}]; not current")
-            if archived:
-                tags.append("archived")
-            if entry.scope != "global":
-                tags.append(f"scope: {entry.scope}")
+            findings = screen_findings(entry.when or "")
+            tags = _tags(entry, archived, successor)
+            if entry.when and not findings:
+                tags.insert(1, f"when: {entry.when}")
+            if entry.always:
+                tags.append("always applies")
             suffix = f"  ({', '.join(tags)})" if tags else ""
             lines.append(f"- [{entry.id}] {entry.text}{suffix}")
 

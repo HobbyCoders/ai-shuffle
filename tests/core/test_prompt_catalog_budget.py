@@ -42,6 +42,10 @@ def _emulator_tools_listed(monkeypatch):
 # StartSession share it; tightened to +~110 chars over the old rule):
 # 133,069 -> 133,376 measured with scripts/measure_prompt_catalog.py. Eager,
 # delegated append and delegated loaded tools stay within their old budgets.
+# One style of memory (Oct 2026): Remember gains when/always and Recall ids;
+# the pref.<topic> wording went and overlapping Remember sentences merged, so
+# Remember stays flat (2,100 -> 2,102), Recall 820 -> 832, eager +14
+# (53,073 -> 53,087) with no budget change; delegated append 14,820 -> 14,825.
 MEASURED_FULL = 133_376
 MEASURED_EAGER = 52_573
 MEASURED_DELEGATED_APPEND = 14_716

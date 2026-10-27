@@ -2,7 +2,8 @@
 import json
 from pathlib import Path
 from fluid.codemode.skills import SkillStore
-from fluid.codemode.facts import MAX_PROMPT_CHARS, RESERVED_INFERRED_CHARS
+from fluid.codemode.facts import MAX_PROMPT_CHARS
+from fluid.codemode.skills import MAX_MEMORIES
 
 
 def seeded(tmp_path):
@@ -23,8 +24,10 @@ def test_coding_snapshot_prefers_correction_not_profile_flood(tmp_path):
     plan = store.memory_snapshot_plan("project:fixture", task_query="memory backend delegated approval")
     shown = set(plan["shown_ids"])
     assert labels["relevant"] <= shown
-    assert not labels["off_task"] & shown
     assert labels["identity"] <= shown
+    # Off-task biography is counted, not listed, in a task's session.
+    assert not labels["off_task"] & shown
+    assert set(plan["omitted_ids"]) >= labels["off_task"]
     assert before == {(e.id, e.text) for e in store.memories()}
     assert sum(len(line) + 1 for line in plan["lines"]) <= MAX_PROMPT_CHARS
 
@@ -44,7 +47,6 @@ def test_fixture_size_and_duplicate_paragraph_allowance(tmp_path):
 def test_profile_key_cannot_demote_a_matching_coding_preference(tmp_path, monkeypatch):
     import fluid.codemode.facts as facts
     monkeypatch.setattr(facts, "MAX_PROMPT_CHARS", 220)
-    monkeypatch.setattr(facts, "RESERVED_INFERRED_CHARS", 0)
     store = SkillStore(tmp_path)
     coding = store.save_memory("Prefer pytest fixtures for backend tests.", key="profile.coding_style", protected=True)
     career = store.save_memory("Career biography: looking for a new job. " * 3, key="profile.career", protected=True)
@@ -58,7 +60,6 @@ def test_profile_key_cannot_demote_a_matching_coding_preference(tmp_path, monkey
 def test_business_key_can_match_task_through_text(tmp_path, monkeypatch):
     import fluid.codemode.facts as facts
     monkeypatch.setattr(facts, "MAX_PROMPT_CHARS", 180)
-    monkeypatch.setattr(facts, "RESERVED_INFERRED_CHARS", 0)
     store = SkillStore(tmp_path)
     relevant = store.save_memory("Invoices require billing currency validation.", key="business.policy", protected=True)
     for i in range(6):
@@ -103,8 +104,10 @@ def test_relevant_inference_flood_cannot_take_explicit_capacity(tmp_path):
                           scope="project:fixture")
     plan = store.memory_snapshot_plan("project:fixture", task_query="memory backend delegated approval")
     protected = {e.id for e in store.memories() if e.protected}
-    inferred_chars = sum(len(line) + 1 for mid, line in zip(plan["shown_ids"], plan["lines"]) if mid not in protected)
-    assert inferred_chars <= RESERVED_INFERRED_CHARS
+    # The index has no reserved slices: the inferred tier's own cap
+    # (MAX_MEMORIES live facts) and short index lines bound a flood.
+    inferred = [line for mid, line in zip(plan["shown_ids"], plan["lines"]) if mid not in protected]
+    assert len(inferred) <= MAX_MEMORIES and all(len(line) <= 160 for line in inferred)
     assert labels["relevant"] <= set(plan["shown_ids"])
     foreign = store.save_memory("Memory backend delegated approval belongs to another project.",
                                 scope="project:foreign", protected=True)

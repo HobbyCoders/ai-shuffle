@@ -16,6 +16,7 @@ import re
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 from fluid.codemode.transactions import file_transaction
 
@@ -24,8 +25,11 @@ _log = logging.getLogger(__name__)
 # Three tiers:
 #
 # * explicit (``protected``): the user asked for it or corrected a fact. No
-#   TTL, never touched by the learner, never removed or archived by any
-#   automatic path. At MAX_EXPLICIT user-saved facts (live and archived
+#   TTL, its value (text, tier, always flag) never touched by the learner,
+#   never removed or archived by any automatic path. The one automatic
+#   write is metadata only: the when-line backfill may add a missing
+#   when-line (:meth:`FactStore.annotate`), which leaves the text, the
+#   revision and the clock as they are. At MAX_EXPLICIT user-saved facts (live and archived
 #   together) a new one is refused with a reason the agent can relay;
 #   nothing already saved is dropped to make room.
 # * durable (``durable``): an agent decided a fact was worth keeping
@@ -65,27 +69,41 @@ _BRANCH_REF = re.compile(
 MAX_TOMBSTONES = 256
 BLOOM_BYTES = 16 * 1024
 MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
-MAX_PROMPT_CHARS = 8000
-# Part of MAX_PROMPT_CHARS that unprotected facts (learner output, env.*
-# harvests) claim before protected facts fill the rest. Without it a store of
-# protected Remember facts alone hides every learned and harvested fact. Sized
-# on the desktop store: its 6 in-scope unprotected facts render at about 2.2k
-# chars (median line 306 chars, plus the 80-char "harvested" hint on the
-# tool-sourced ones), which 2,000 did not cover.
-RESERVED_INFERRED_CHARS = 3000
+# The # Memory snapshot (see SkillStore.memory_snapshot_plan) is one style of
+# memory: every fact has a WHEN line (the situation that should make a future
+# agent load it) and its full text. The snapshot lists the when-lines of the
+# facts in scope as an index, in this many characters; the model Recalls a
+# fact by id for its full text. Sized so a ~200-fact project store shows most
+# of its index (a when-line plus its id label is ~120-180 characters). ALWAYS
+# memories have their own ALWAYS_CHARS on top of this; the identity lines
+# (profile.name and the like) and conflict/withheld notes are charged here.
+MAX_PROMPT_CHARS = 10_000
+# A memory's when-line: 1 to MAX_WHEN_CHARS characters. A fact saved without
+# one (older stores, the learner, harvests) is listed by a line derived from
+# its text at render time (:func:`derived_when`), at most DERIVED_WHEN_CHARS;
+# the derivation is never stored as if it had been written.
+MAX_WHEN_CHARS = 140
+DERIVED_WHEN_CHARS = 100
+# ALWAYS memories (saved at the owner's request with always=true) render in
+# full every time, above the index. Those visible in one project (global plus
+# that project's) share this many characters of text; a save that would
+# exceed it is refused with the list of current ones, so the agent asks the
+# owner which to drop. The snapshot enforces the same bound on render.
+ALWAYS_CHARS = 3000
+# ``when`` and ``always`` are metadata, not the fact's value: each carries
+# its own stamp (``when_at``/``always_at``: [hybrid timestamp, store id]) and
+# replicas merge each field by the newest stamp, independently of the text's
+# revision clock. A metadata edit therefore never bumps the revision, never
+# makes a concurrent text edit a conflict, and never loses another worker's
+# edit of the other field. A missing stamp (older stores and replicas) is
+# the oldest.
+METADATA_FIELDS = ("when", "always")
+_NO_STAMP = (0.0, "")
 INFERRED_TTL = 90 * 86400
 MAX_INFERENCE_CALLS_PER_DAY = 48
 HISTORY_TTL = 30 * 86400
 MAX_HISTORY = 2
 SCHEMA = 2
-# Standing preferences: a protected fact keyed ``pref.<topic>`` (for example
-# pref.subagent_models, pref.ci_policy, pref.deploy, pref.delegation) is the
-# one current value for that topic in its scope. The owner's corrections of
-# how agents work update it instead of piling up dated rows. The snapshot
-# renders them first, in this much of MAX_PROMPT_CHARS that the rest of the
-# pile cannot crowd out (unused room goes back to the other facts).
-PREF_KEY_PREFIX = "pref."
-STANDING_PREFERENCE_CHARS = 2500
 # Remember(replaces=[...]) names at most this many superseded facts per save.
 MAX_REPLACES = 16
 # Write-time overlap hint: a new save lists up to MAX_SIMILAR live in-scope
@@ -103,9 +121,95 @@ _HINT_NOISE = frozenset(
     "must still same without".split())
 
 
-def is_standing_preference(entry):
-    """A protected ``pref.<topic>`` fact: the owner's standing preference."""
-    return bool(entry.get("protected")) and str(entry.get("key") or "").startswith(PREF_KEY_PREFIX)
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9(\"'`])")
+
+
+def derived_when(text: object) -> str:
+    """A when-line for a fact saved without one: its first sentence, or
+    that sentence's first clause when the sentence is too long, at most
+    DERIVED_WHEN_CHARS. An ellipsis marks text left out. Render-time only,
+    never stored."""
+    text = " ".join(str(text or "").split())
+    first = _SENTENCE_END.split(text, 1)[0]
+    if len(first) > DERIVED_WHEN_CHARS:
+        first = re.split(r";\s+", first, maxsplit=1)[0].rstrip(" ,:")
+    if len(first) <= DERIVED_WHEN_CHARS:
+        return first + (" …" if len(first) < len(text) else "")
+    cut = first[:DERIVED_WHEN_CHARS - 1]
+    cut = cut.rsplit(" ", 1)[0] if " " in cut[DERIVED_WHEN_CHARS // 2:] else cut
+    return cut.rstrip(" ,;:-") + "…"
+
+
+def when_basis(text: str | None) -> str:
+    """Which text a backfill when-line was written for (see annotate)."""
+    return fingerprint(text or "")[:16]
+
+
+def written_when(entry: dict) -> str | None:
+    """``entry``'s written when-line, or None when it has none or the line
+    is a backfill line written for text the fact no longer has (a correction
+    replaced it, here or on a replica). Such a fact is listed by a derived
+    line and the backfill writes it a new one."""
+    when = entry.get("when")
+    basis = entry.get("when_basis")
+    if when and basis is not None and basis != when_basis(entry.get("text")):
+        return None
+    return when or None
+
+
+def when_line(entry: "dict | Any") -> str:
+    """The fact's written when-line, or one derived from its text."""
+    if isinstance(entry, dict):
+        return written_when(entry) or derived_when(entry.get("text"))
+    return getattr(entry, "when", None) or derived_when(getattr(entry, "text", None))
+
+
+def metadata_stamp(entry: dict, field: str) -> tuple[float, str]:
+    """``entry``'s stamp for metadata ``field`` (see METADATA_FIELDS), or the
+    oldest stamp when it has none or an unusable one."""
+    raw = entry.get(field + "_at")
+    if (isinstance(raw, (list, tuple)) and len(raw) == 2
+            and type(raw[0]) in (int, float) and math.isfinite(raw[0]) and raw[0] >= 0
+            and isinstance(raw[1], str) and re.fullmatch(r"[A-Za-z0-9_.-]{0,128}", raw[1])):
+        return (float(raw[0]), raw[1])
+    return _NO_STAMP
+
+
+def _set_metadata(entry: dict, field: str, value: object, store_id: str) -> None:
+    """Write one metadata field locally with a stamp newer than its current
+    one (a hybrid clock: wall time, or just past a skewed replica's stamp)."""
+    now = time.time()
+    prior = metadata_stamp(entry, field)[0]
+    entry[field + "_at"] = [now if now > prior else math.nextafter(prior, math.inf), store_id]
+    if field == "when":
+        # An explicit (owner or Remember) line; annotate() marks its own.
+        entry.pop("when_basis", None)
+    if value:
+        entry[field] = value
+    else:
+        entry.pop(field, None)
+
+
+def validate_when(when: object) -> str:
+    """A written when-line, whitespace-normalized; raises ValueError."""
+    from fluid.context.screening import looks_like_secret, screen_findings
+    if not isinstance(when, str):
+        raise ValueError("when must be a string")
+    when = " ".join(when.split())
+    if not when or len(when) > MAX_WHEN_CHARS:
+        raise ValueError(f"when must contain 1–{MAX_WHEN_CHARS} characters: the situation "
+                         "in which a future agent should load this memory")
+    if looks_like_secret(when):
+        raise ValueError("when contains a credential")
+    if screen_findings(when):
+        raise ValueError("when matches an injection pattern")
+    return when
+
+
+def always_applies(entry: "dict | Any") -> bool:
+    """An ALWAYS memory: owner-saved, flagged always, live and current."""
+    get = entry.get if isinstance(entry, dict) else (lambda k: getattr(entry, k, None))
+    return bool(get("always") and get("protected") and not get("superseded_by"))
 
 
 def fingerprint(text):
@@ -288,6 +392,7 @@ class FactStore:
                 return
             activity = max(float(e.get("updated_at") or 0), float(e.get("last_recalled_at") or 0))
             e.update(protected=False, durable=True, saved_by="agent")
+            e.pop("always", None)  # only an owner-saved fact applies always
             grace = VOLATILE_GRACE if volatile(e.get("text")) else MIGRATION_GRACE
             e["expires_at"] = max(activity + lifetime(e), now + grace)
         elif "durable" in e and not isinstance(e["durable"], bool):
@@ -542,7 +647,8 @@ class FactStore:
 
     def save(self, text, memory_id=None, scope=None, provenance=None, *, protected=False,
              durable=None, key=None, expected_revision=None, source_session=None, restore=False,
-             per_worker=False, correction_project=None, replaces=None, receipt=None):
+             per_worker=False, correction_project=None, replaces=None, receipt=None,
+             when=None, always=None, require_when=False):
         """Save one fact in a tier.
 
         ``protected`` is the explicit tier (the user asked). ``durable=True``
@@ -559,8 +665,22 @@ class FactStore:
         ``receipt``, when a dict, is filled with ``replaced`` and ``skipped``
         (IDs and notes) and, for a new protected/durable fact, ``similar``:
         live facts that look like the same subject (:meth:`_similar`).
+
+        ``when`` is the fact's when-line (:func:`validate_when`); a correction
+        keeps the existing one unless a new one is given, and
+        ``require_when`` (the Remember tool) refuses a new fact without one.
+        ``always`` (None keeps the current flag) marks an ALWAYS memory; only
+        a protected save may set it, and the in-scope ALWAYS_CHARS budget
+        refuses one that would overflow it (:meth:`_check_always_budget`).
         """
         text = validate_text(text)
+        if when is not None:
+            when = validate_when(when)
+        if always is not None and type(always) is not bool:
+            raise ValueError("always must be true or false")
+        if always and not protected:
+            raise ValueError("always is only for a memory the user asked to apply in every "
+                             "chat (user_requested=true); nothing was saved")
         if key is not None and (not isinstance(key, str) or not re.fullmatch(r"[a-zA-Z0-9_.:-]{1,96}", key)):
             raise ValueError("Invalid memory key")
         replaces = list(dict.fromkeys(replaces or ()))
@@ -642,7 +762,8 @@ class FactStore:
             else:
                 targets = []
             if old and old.get("protected") and not protected:
-                if durable and not old.get("conflicted") and old["text"] == text:
+                if (durable and not old.get("conflicted") and old["text"] == text
+                        and not self._metadata_differs(old, when, always)):
                     if targets:
                         self._supersede(doc, old, targets)
                         self._maintain(doc, keep=old["id"])
@@ -662,8 +783,24 @@ class FactStore:
                             and (old.get("superseded_by") or any(
                                 e.get("superseded_by") == global_id(old)
                                 and not e.get("supersession_confirmed") for e in all_entries)))
+            if old is None and require_when and when is None:
+                raise ValueError("when is required for a new memory: the situation in which a "
+                                 "future agent should load it (for example 'When choosing a "
+                                 "model for a subagent'), not a summary; nothing was saved")
             # The learner and harvests never downgrade an agent's durable fact.
             is_durable = not protected and bool(durable or (old and old.get("durable")))
+            if (old and not resolves and not old.get("conflicted") and old["text"] == text
+                    and not targets and self._metadata_differs(old, when, always)
+                    and old.get("protected", False) == protected
+                    and (protected or bool(old.get("durable")) == is_durable)):
+                # Same value, new when-line or always flag: a metadata edit.
+                # Stamped per field (METADATA_FIELDS), not a new revision, so
+                # the revision, clock, updated_at and history stay as they are.
+                self._edit_metadata(doc, old, when, always, protected=protected,
+                                    expected_revision=expected_revision, exclude=())
+                self._maintain(doc, keep=old["id"])
+                self._write(doc)
+                return self._entry(old)
             if (old and not resolves and not old.get("conflicted") and old["text"] == text
                     and old.get("protected", False) == protected and bool(old.get("durable")) == is_durable):
                 if not (protected or durable):
@@ -681,6 +818,12 @@ class FactStore:
                         raise ValueError(f"[{old['id']}] was itself replaced by "
                                          f"[{old['superseded_by']}]; correct that fact instead")
                     return self._entry(old)  # an observation cannot revive a known stale value
+                if self._metadata_differs(old, when, always):
+                    # Same text with replaces= and a new when-line or always
+                    # flag: the metadata edit applies too (guarded as above).
+                    self._edit_metadata(doc, old, when, always, protected=protected,
+                                        expected_revision=expected_revision,
+                                        exclude={e["id"] for e in targets})
                 # Saving the same fact again is a use: renew a durable fact's
                 # lifetime and bring an archived one back. No new revision.
                 if durable:
@@ -724,7 +867,10 @@ class FactStore:
                 doc["next_id"] += 1
             history = list(entry.get("history", []))
             if old and old["text"] != text:
-                history.append({"text": old["text"], "at": now, "revision": old.get("revision", 1)})
+                previous = {"text": old["text"], "at": now, "revision": old.get("revision", 1)}
+                if old.get("when"):
+                    previous["when"] = old["when"]
+                history.append(previous)
             clock = dict(entry.get("clock") or {entry["origin"]: entry["revision"]})
             slot = key or entry.get("key")
             if old and old.get("conflicted") and protected and slot:
@@ -775,6 +921,17 @@ class FactStore:
                     entry["saved_by"] = "user"
                 else:
                     entry.pop("saved_by", None)
+            if when is not None and (when != entry.get("when") or entry.get("when_basis")):
+                # Supplying a line makes it explicit, even one worded like the
+                # backfill's (see written_when).
+                _set_metadata(entry, "when", when, local)
+            if always is not None and always != bool(entry.get("always")):
+                _set_metadata(entry, "always", always, local)
+            if not protected or not entry.get("always"):
+                entry.pop("always", None)  # only an owner-saved fact applies always
+            elif (not old or not old.get("always") or not old.get("protected")
+                  or old["text"] != text or old.get("scope", "global") != entry["scope"]):
+                self._check_always_budget(doc, entry, exclude={e["id"] for e in targets})
             present = any(e["id"] == entry["id"] for e in doc["entries"])
             doc["entries"] = [entry if e["id"] == entry["id"] else e for e in doc["entries"]]
             if not present:
@@ -810,7 +967,9 @@ class FactStore:
     def _entry(entry):
         from fluid.codemode.skills import MemoryEntry
         allowed = {f.name for f in fields(MemoryEntry)}
-        return MemoryEntry(**{k: v for k, v in entry.items() if k in allowed})
+        data = {k: v for k, v in entry.items() if k in allowed}
+        data["when"] = written_when(entry)
+        return MemoryEntry(**data)
 
     @staticmethod
     def _write_time(doc: dict, now: float) -> float:
@@ -930,6 +1089,95 @@ class FactStore:
         return [t["id"] for t in targets if t.get("superseded_by") == gid]
 
     @staticmethod
+    def _metadata_differs(old, when, always):
+        # Against the line the fact is listed by: re-sending the line an agent
+        # was shown is no change, and a stale backfill line counts as none.
+        return ((when is not None and when != written_when(old))
+                or (always is not None and always != bool(old.get("always"))))
+
+    def _edit_metadata(self, doc, old, when, always, *, protected, expected_revision, exclude):
+        """Apply a Remember save's new when-line/always flag to ``old`` in
+        place. An owner fact needs the revision Recall returned; the ALWAYS
+        budget is checked before anything changes. Stamps, never bumps."""
+        if protected and expected_revision is None:
+            raise ValueError("Recall the existing fact and supply its revision before "
+                             f"changing it ([{old['id']} r{old.get('revision', 1)}])")
+        if expected_revision is not None and old.get("revision", 1) != expected_revision:
+            raise ValueError("Memory changed since it was read; recall it before retrying")
+        if always and not bool(old.get("always")):
+            self._check_always_budget(doc, old, exclude=exclude)
+        if when is not None and (when != old.get("when") or old.get("when_basis")):
+            _set_metadata(old, "when", when, doc["store_id"])
+        if always is not None and always != bool(old.get("always")):
+            _set_metadata(old, "always", always, doc["store_id"])
+
+    @staticmethod
+    def _merge_metadata(target, local, incoming, prefer):
+        """Settle each METADATA_FIELDS field of one fact's two copies on the
+        copy with the newer stamp, whichever side won the text clock.
+
+        An explicit when-line (an owner or Remember edit) outranks a
+        backfill one whatever their stamps: a replica that had not seen a
+        correction yet may backfill the old text after the owner wrote the
+        new line. Equal ranks and stamps (both missing: older stores and
+        replicas) keep ``prefer``'s value, the side whose clock dominates;
+        with no such side the larger value wins, so every replica settles
+        the same way."""
+        def rank(entry, field):
+            stamp = metadata_stamp(entry, field)
+            explicit = field == "when" and stamp != _NO_STAMP and entry.get("when_basis") is None
+            return (1 if explicit else 0, stamp)
+
+        for field in METADATA_FIELDS:
+            a, b = rank(local, field), rank(incoming, field)
+            if a != b:
+                source = local if a > b else incoming
+            elif prefer is not None:
+                source = prefer
+            else:
+                source = max((local, incoming), key=lambda e: str(e.get(field) or ""))
+            if source is target:
+                continue
+            for k in (field, field + "_at") + (("when_basis",) if field == "when" else ()):
+                if source.get(k) is not None and source.get(k) is not False:
+                    target[k] = source[k]
+                else:
+                    target.pop(k, None)
+
+    @staticmethod
+    def _check_always_budget(doc, entry, exclude):
+        """Refuse an ALWAYS memory that would overflow ALWAYS_CHARS.
+
+        The budget is per session view: global plus one project's facts. A
+        project fact counts against its own project; a global one against
+        the fullest project. The message lists the ALWAYS memories it shares
+        the budget with (id and when-line, never text) so the agent can ask
+        the owner which to drop.
+        """
+        local = doc["store_id"]
+        others = [e for e in doc["entries"]
+                  if always_applies(e) and e["id"] != entry["id"] and e["id"] not in exclude
+                  and visible_on(e, local)]
+        scope = entry.get("scope", "global")
+
+        def view(project):
+            return [e for e in others if e.get("scope", "global") in ("global", project)]
+        if scope == "global":
+            projects = {e.get("scope") for e in others} - {"global"}
+            shared = max((view(p) for p in projects), key=lambda v: sum(len(e["text"]) for e in v),
+                         default=view("global"))
+        else:
+            shared = view(scope)
+        total = sum(len(e["text"]) for e in shared) + len(entry["text"])
+        if total <= ALWAYS_CHARS:
+            return
+        listed = "; ".join(f"[{e['id']}] {when_line(e)}" for e in shared) or "none"
+        raise ValueError(
+            f"ALWAYS memories in this scope share {ALWAYS_CHARS} characters and this one would "
+            f"bring them to {total}; nothing was saved. Ask the owner which to drop or shorten "
+            f"(save it again with always=false), then retry. Current ALWAYS memories: {listed}")
+
+    @staticmethod
     def _similar(doc, new, exclude, project):
         """Up to MAX_SIMILAR live facts that look like the same subject as ``new``.
 
@@ -958,6 +1206,42 @@ class FactStore:
                 hits.append((-shared, -ratio, e["id"], e))
         return [{"id": e["id"], "revision": e.get("revision", 1), "text": e["text"]}
                 for *_, e in sorted(hits, key=lambda h: h[:3])[:MAX_SIMILAR]]
+
+    def annotate(self, memory_id: str, *, when: str, expected_revision: int,
+                 expected_when_at: list | None = None) -> Any:
+        """Write the when-line of one fact, any tier, without touching its
+        text, tier, always flag, lifetime, revision or clock (the backfill
+        path). Returns the entry (a MemoryEntry).
+
+        Two compare-and-set guards: ``expected_revision`` is the text the
+        line was written for (a concurrent correction refuses it), and
+        ``expected_when_at`` the when-line stamp that was read (None: the
+        fact had no when-line), so a when-line written meanwhile, here or
+        merged from a replica, is never overwritten. The new stamp carries
+        the line to replicas (see METADATA_FIELDS). Live or archived facts
+        on this worker."""
+        if isinstance(when, str) and ("\n" in when or "\r" in when):
+            raise ValueError("when must be one line")
+        when = validate_when(when)
+        expected = metadata_stamp({"when_at": expected_when_at}, "when")
+        with file_transaction(self.lock):
+            doc = self._prepare()
+            old = next((e for e in doc["entries"] + doc["archived"] if e["id"] == memory_id), None)
+            if old is None or not visible_on(old, doc["store_id"]):
+                raise ValueError("Unknown memory ID")
+            if old.get("revision", 1) != expected_revision:
+                raise ValueError("Memory changed since it was read; recall it before retrying")
+            if (metadata_stamp(old, "when") != expected
+                    or (expected_when_at is None and written_when(old))):
+                raise ValueError("The when-line changed since it was read; recall it before retrying")
+            basis = when_basis(old["text"])
+            if old.get("when") != when or old.get("when_basis") != basis:
+                _set_metadata(old, "when", when, doc["store_id"])
+                # Marks the line as the backfill's, written for this text: an
+                # explicit line outranks it and a later correction retires it.
+                old["when_basis"] = basis
+                self._write(doc)
+            return self._entry(old)
 
     def propose_supersession(self, old_id, new_id, *, old_revision, new_revision,
                              protected_conflict=False):
@@ -1147,6 +1431,28 @@ class FactStore:
                 if entry.get("worker") is not None and not (
                         isinstance(entry["worker"], str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", entry["worker"])):
                     raise ValueError("Invalid memory worker")
+                if entry.get("when") is not None:
+                    try:
+                        entry["when"] = validate_when(entry["when"])
+                    except ValueError:
+                        # An unusable when-line is not worth refusing the
+                        # replica for: the fact is listed by its text instead.
+                        entry.pop("when", None)
+                if type(entry.get("always", False)) is not bool:
+                    raise ValueError("Invalid memory always flag")
+                if not entry.get("always"):
+                    entry.pop("always", None)
+                basis = entry.get("when_basis")
+                if basis is not None and not (isinstance(basis, str)
+                                              and re.fullmatch(r"[0-9a-f]{16}", basis)):
+                    # An unreadable backfill mark: drop the line, not the
+                    # replica, so it can never pass as an explicit one.
+                    for k in ("when", "when_at", "when_basis"):
+                        entry.pop(k, None)
+                for field in METADATA_FIELDS:
+                    # An unusable stamp is the oldest one, not a refusal.
+                    if field + "_at" in entry and metadata_stamp(entry, field) == _NO_STAMP:
+                        entry.pop(field + "_at")
                 old = entries.get(entry["id"])
                 incoming_clock = entry.get("clock") or {entry["origin"]: entry.get("revision", 1)}
                 if not isinstance(incoming_clock, dict) or len(incoming_clock) > 64 or any(type(v) is not int or v < 0 for v in incoming_clock.values()):
@@ -1161,7 +1467,12 @@ class FactStore:
                 older = all(local_clock.get(k, 0) >= incoming_clock.get(k, 0) for k in actors)
                 if newer and not older:
                     entries[entry["id"]] = entry
+                    # The newer value keeps a metadata edit only the local
+                    # copy has (a backfill when-line, say).
+                    self._merge_metadata(entry, old, entry, prefer=entry)
                 elif (not newer and not older) or (newer and older and entry["text"] != old["text"]):
+                    # Metadata settles per field whatever happens to the value.
+                    self._merge_metadata(old, old, entry, prefer=None)
                     # Independent deterministic reconciliation is the same
                     # claim, not a concurrent edit to the fact's value.
                     claim = ("text", "scope", "key", "worker", "provenance", "protected", "durable", "superseded_by", "retired_reason")
@@ -1178,6 +1489,11 @@ class FactStore:
                     old["clock"] = {k: max(local_clock.get(k, 0), incoming_clock.get(k, 0)) for k in actors}
                     old["revision"] = max(old.get("revision", 1), entry.get("revision", 1))
                     old["alternatives"] = sorted(set(old.get("alternatives", []) + [old["text"], entry["text"]]))[:2]
+                else:
+                    # The local copy's clock dominates or equals the replica's
+                    # (a metadata-only edit leaves the clock as it is), so the
+                    # value stays; a newer when-line/always stamp still lands.
+                    self._merge_metadata(old, old, entry, prefer=None if newer else old)
             for key in tombstones:
                 # Delete wins over every replay. Restoring creates a new ID;
                 # a stale worker cannot resurrect the forgotten record.

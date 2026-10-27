@@ -53,7 +53,9 @@ DROPPED_SHARE = 0.1
 LOSS_SAMPLE_EVERY = 3 * 3600.0
 LOSS_SAMPLES_KEPT = 64
 # Usage: share of settled facts (older than USAGE_GRACE) never recalled and
-# not in any current snapshot.
+# whose text no current snapshot shows. An index line names a fact by its
+# when-line without its text, so being listed there is not a use; only an
+# ALWAYS memory or an identity line (``full_text_ids``) or a Recall is.
 USAGE_GRACE = 7 * DAY
 USAGE_MIN_FACTS = 20
 UNUSED_SHARE = 0.5
@@ -102,6 +104,7 @@ LABELS = {
     "protected": "Your saved facts",
     "saves": "Saving",
     "proposals": "Questions for you",
+    "when": "Memory when-lines",
 }
 
 _WORD = re.compile(r"[a-z0-9]{4,}")
@@ -256,9 +259,12 @@ def repair(store, *, now: float | None = None) -> list[dict]:
         done.append({"kind": "duplicates", "count": len(merged), "at": now, "ids": merged})
     doc = store._facts.snapshot()
     live = [e for e in _local(doc) if not e.get("conflicted")]
+    # Only a fact whose text a snapshot shows is in use without a Recall; an
+    # index-only line (its when-line) is not, so an unconfirmed harvest
+    # nobody recalled is archived even while the index lists it.
     shown = set()
     for plan in _snapshot_plans(store, live).values():
-        shown.update(plan["shown_ids"])
+        shown.update(plan["full_text_ids"])
     stale = []
     for e in live:
         if (e.get("provenance") == "tool" and not e.get("protected") and not e.get("durable")
@@ -312,6 +318,7 @@ def check(store, *, now: float | None = None, learning_enabled: bool = True,
     signals.append(protected_signal)
     signals.append(_saves_signal(store, now))
     signals.append(_proposals_signal(store, live, now))
+    signals.append(_when_signal(store, live + _local(doc, "archived")))
     attention = [s for s in signals if s["state"] == "attention"]
     return {
         "state": "attention" if attention else "healthy",
@@ -494,10 +501,30 @@ def _learner_outcome(store, now, coverage) -> dict:
     return _signal("learner", False, "The learner is running." + budget_note, **detail)
 
 
+def _when_signal(store, entries: list[dict]) -> dict:
+    """Facts without a written when-line (listed by a derived one), and
+    whether the backfill that writes them keeps failing."""
+    from fluid.codemode.memory_backfill import ATTENTION_FAILURES
+    from fluid.codemode.facts import written_when
+    no_when = sum(1 for e in entries if not written_when(e))
+    try:
+        failures = int(store.backfill_backoff().get("failures") or 0)
+    except Exception:  # noqa: BLE001 — unreadable meta: report the count only
+        failures = 0
+    if no_when and failures >= ATTENTION_FAILURES:
+        return _signal("when", True,
+                       f"{no_when} memories have no when-line and the last {failures} "
+                       "backfill attempts failed.", missing=no_when, backfill_failures=failures)
+    reason = (f"{no_when} memories still have no when-line" if no_when
+              else "All memories have a when-line.")
+    return _signal("when", False, reason, missing=no_when, backfill_failures=failures)
+
+
 def _usage_signal(live, plans, now) -> dict:
+    # Recalled, or shown in full (see USAGE_GRACE): an index line is not a use.
     shown = set()
     for plan in plans.values():
-        shown.update(plan["shown_ids"])
+        shown.update(plan["full_text_ids"])
     settled = [e for e in live if now - float(e.get("created_at") or now) >= USAGE_GRACE]
     unused = [e for e in settled if not int(e.get("uses") or 0) and e["id"] not in shown]
     detail = {"settled": len(settled), "never_used": len(unused)}
@@ -505,7 +532,7 @@ def _usage_signal(live, plans, now) -> dict:
         return _signal("usage", False, "Too few settled facts to judge.", **detail)
     if len(unused) / len(settled) >= UNUSED_SHARE:
         return _signal("usage", True,
-                       f"{len(unused)} of {len(settled)} facts were never recalled or shown.", **detail)
+                       f"{len(unused)} of {len(settled)} facts were never recalled or shown in full.", **detail)
     return _signal("usage", False, f"{len(settled) - len(unused)} of {len(settled)} facts are in use.", **detail)
 
 
@@ -647,7 +674,7 @@ def _saves_signal(store, now) -> dict:
 
 
 def _proposals_signal(store, live, now) -> dict:
-    """What the learner is waiting to ask the owner: proposed ``pref.*``
+    """What the learner is waiting to ask the owner: proposed rule
     updates and pairs of user-kept facts that disagree. Informational: the
     sessions ask, so this never raises attention."""
     from fluid.codemode.preferences import PreferenceProposals, open_conflicts

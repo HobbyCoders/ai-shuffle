@@ -7,14 +7,16 @@ raise the question, both bounded so they cannot nag:
 
 * :class:`PreferenceProposals`: when a synthesis pass sees the user correct
   HOW the agent works (model choice, delegation, reviews, CI, deploys,
-  process) it proposes the whole current rule for a ``pref.<topic>`` fact.
-  The proposal is queued in ``pref-proposals.jsonl`` beside the store, never
+  process) it proposes the whole current rule under a short snake_case
+  topic name. The proposal is queued in ``pref-proposals.jsonl`` beside the store, never
   saved as a fact, and the next sessions' ``# Memory`` snapshot shows it as
   one line asking the agent to confirm it with the owner. At most
   :data:`MAX_OPEN_PREFERENCE_PROPOSALS` are open, one per topic (a newer
   wording replaces the older), and each expires after
   :data:`PREFERENCE_PROPOSAL_TTL`. A proposal closes itself once a user-kept
-  fact keyed ``pref.<topic>`` is saved after it. The guidance queue
+  memory on the same topic is saved after it: one keyed by the topic name,
+  or one sharing the proposal's subject terms (:func:`same_topic`). No key
+  convention is needed. The guidance queue
   (``pending-proposals.jsonl``) is not reused: ``fluid evolve`` replays
   everything in it through the guidance gate.
 
@@ -39,7 +41,13 @@ PREFERENCE_PROPOSALS_FILE = "pref-proposals.jsonl"
 CONFLICT_CURATION_FILE = "conflict-curation.json"
 MAX_OPEN_PREFERENCE_PROPOSALS = 3
 PREFERENCE_PROPOSAL_TTL = 14 * 86400.0
-PREFERENCE_KEY_PREFIX = "pref."
+# Topics older versions wrote as ``pref.<topic>`` keys are still read.
+_LEGACY_KEY_PREFIX = "pref."
+# A user-kept memory saved after a proposal answers it when it shares at
+# least this many subject terms with the proposal, and they are at least
+# this share of the smaller side's terms.
+PROPOSAL_ANSWER_MIN_SHARED = 3
+PROPOSAL_ANSWER_MIN_RATIO = 0.5
 MAX_OPEN_CONFLICTS = 3
 # Pairs already proposed, remembered so a resolved question is not asked
 # again (newest kept).
@@ -50,11 +58,12 @@ _WORD_RE = re.compile(r"[a-z0-9]+")
 
 
 def normalize_topic(raw: Any) -> str | None:
-    """``subagent_models`` from ``subagent_models``, ``pref.subagent_models``
-    or ``Subagent-Models``; None when it is not a short snake_case name."""
+    """``subagent_models`` from ``subagent_models``, a legacy
+    ``pref.subagent_models`` or ``Subagent-Models``; None when it is not a
+    short snake_case name."""
     topic = str(raw or "").strip().casefold()
-    if topic.startswith(PREFERENCE_KEY_PREFIX):
-        topic = topic[len(PREFERENCE_KEY_PREFIX):]
+    if topic.startswith(_LEGACY_KEY_PREFIX):
+        topic = topic[len(_LEGACY_KEY_PREFIX):]
     topic = re.sub(r"[\s\-.]+", "_", topic)
     return topic if _TOPIC_RE.fullmatch(topic) else None
 
@@ -68,8 +77,21 @@ def _scope_visible(scope: str, project: str | None) -> bool:
     return project is None or scope in ("global", project)
 
 
+def same_topic(topic: str, text: str, key: str | None, terms: set[str]) -> bool:
+    """Whether a saved memory (``key``, subject ``terms``) is on the topic of
+    a proposal (``topic``, ``text``): keyed by the topic name (or a legacy
+    ``pref.`` key), or sharing enough subject terms (:func:`_salient`)."""
+    name = normalize_topic(topic)
+    if key and normalize_topic(key.rsplit(".", 1)[-1] if key.startswith(_LEGACY_KEY_PREFIX) else key) == name:
+        return True
+    mine = _salient(text)
+    shared = len(mine & terms)
+    return (shared >= PROPOSAL_ANSWER_MIN_SHARED
+            and shared >= PROPOSAL_ANSWER_MIN_RATIO * max(1, min(len(mine), len(terms))))
+
+
 class PreferenceProposals:
-    """The bounded queue of proposed ``pref.<topic>`` updates for one store."""
+    """The bounded queue of proposed rule updates for one store."""
 
     def __init__(self, store: Any) -> None:
         self._store = store
@@ -94,9 +116,9 @@ class PreferenceProposals:
                 records.append(record)
         return records
 
-    def _saved_preferences(self, entries: list[Any] | None) -> list[tuple[str, str, float, str]]:
-        """``(key, scope, updated_at, fingerprint)`` of live user-kept
-        ``pref.*`` facts (dicts or MemoryEntry objects)."""
+    def _saved_preferences(self, entries: list[Any] | None) -> list[tuple[str, str, float, str, set[str]]]:
+        """``(key, scope, updated_at, fingerprint, subject terms)`` of live
+        user-kept facts (dicts or MemoryEntry objects)."""
         if entries is None:
             try:
                 entries = self._store.memories()
@@ -105,22 +127,22 @@ class PreferenceProposals:
         out = []
         for entry in entries:
             get = entry.get if isinstance(entry, dict) else (lambda k, e=entry: getattr(e, k, None))
-            key = str(get("key") or "")
-            if get("protected") and key.startswith(PREFERENCE_KEY_PREFIX):
-                out.append((key, str(get("scope") or "global"),
+            if get("protected") and not get("superseded_by"):
+                text = str(get("text") or "")
+                out.append((str(get("key") or ""), str(get("scope") or "global"),
                             float(get("updated_at") or get("created_at") or 0.0),
-                            _fingerprint(str(get("text") or ""))))
+                            _fingerprint(text), _salient(text)))
         return out
 
     def _is_open(self, record: dict, saved, now: float) -> bool:
         if now - float(record["ts"]) >= PREFERENCE_PROPOSAL_TTL:
             return False
-        key = PREFERENCE_KEY_PREFIX + normalize_topic(record["topic"])
         scope = record.get("scope") or "global"
-        # Answered: the owner's confirmation (or correction) was saved under
-        # the topic's key after the proposal was made.
-        return not any(k == key and (s == scope or s == "global") and at >= float(record["ts"])
-                       for k, s, at, _ in saved)
+        # Answered: the owner's confirmation (or correction) of the topic was
+        # saved after the proposal was made.
+        return not any((s == scope or s == "global") and at >= float(record["ts"])
+                       and same_topic(record["topic"], record["text"], k, terms)
+                       for k, s, at, _, terms in saved)
 
     def open(self, project: str | None = None, *, entries: list[Any] | None = None,
              now: float | None = None) -> list[dict]:
@@ -134,11 +156,11 @@ class PreferenceProposals:
     # ─── writing ────────────────────────────────────────────────────────
     def propose(self, topic: Any, text: str, *, scope: str = "global",
                 sessions: list[str] | tuple[str, ...] = (), now: float | None = None) -> str:
-        """Queue a proposed rule for ``pref.<topic>``.
+        """Queue a proposed rule for ``topic``.
 
         Returns ``proposed`` (queued, or replaced the topic's older wording),
         ``duplicate`` (the same wording is already open), ``saved`` (a
-        user-kept fact under that key already says it) or ``full`` (the
+        user-kept fact in scope already says it word for word) or ``full`` (the
         queue holds MAX_OPEN_PREFERENCE_PROPOSALS other topics). Raises
         ValueError for a malformed topic, an empty or oversized text, a
         credential or an injection pattern."""
@@ -154,13 +176,12 @@ class PreferenceProposals:
             raise ValueError("preference proposal matches an injection pattern")
         scope = scope or "global"
         now = time.time() if now is None else now
-        key = PREFERENCE_KEY_PREFIX + name
         fingerprint = _fingerprint(body)
         with journal_lock(self._lock, wait=1.0) as held:
             if not held:
                 raise ValueError("preference proposals are busy; the next pass retries")
             saved = self._saved_preferences(None)
-            if any(k == key and s in (scope, "global") and fp == fingerprint for k, s, _, fp in saved):
+            if any(s in (scope, "global") and fp == fingerprint for _, s, _, fp, _ in saved):
                 return "saved"
             records = [r for r in self._read() if self._is_open(r, saved, now)]
             same = [r for r in records if normalize_topic(r["topic"]) == name
@@ -201,11 +222,12 @@ def preference_proposal_lines(store: Any, project: str | None = None, *,
         return []
     lines = []
     for record in records[:MAX_OPEN_PREFERENCE_PROPOSALS]:
-        key = PREFERENCE_KEY_PREFIX + normalize_topic(record["topic"])
+        topic = normalize_topic(record["topic"])
         lines.append(
-            f"- [{key}; proposed, not saved] {record['text']} (The learner read this in the "
-            f"owner's recent corrections. Confirm it with the owner, then save it with Remember "
-            f"key={key}; if the owner's current message already says it, save it without asking.)"
+            f"- [proposed, not saved; {topic}] {record['text']} (The learner read this in the "
+            f"owner's recent corrections. Confirm it with the owner, then save it with Remember, "
+            f"correcting the memory on this topic (replaces=[older rows]); if the owner's current "
+            f"message already says it, save it without asking.)"
         )
     return lines
 
@@ -310,7 +332,7 @@ def protected_conflicts(entries: list[dict], *, skip: set[str] | frozenset[str] 
     Model-free and conservative. Both facts are user-kept, live, unlinked,
     in the same scope and on the same worker, and neither is marked as an
     exception or a guess (supersession's own screens). Then the two carry
-    the same ``pref.*`` key and say different things, or route a job both
+    the same key and say different things, or route a job both
     name to different models (:func:`model_routing`), or are on one
     :data:`PREFERENCE_TOPICS` topic, name different value words for it and
     share at least two other subject words. Each fact appears in at most one
@@ -338,8 +360,7 @@ def protected_conflicts(entries: list[dict], *, skip: set[str] | frozenset[str] 
                 continue
             if fingerprint(old["text"]) == fingerprint(new["text"]):
                 continue  # a restatement, the duplicate check's business
-            same_key = (str(old.get("key") or "").startswith(PREFERENCE_KEY_PREFIX)
-                        and old.get("key") == new.get("key"))
+            same_key = bool(old.get("key")) and old.get("key") == new.get("key")
             reason = ""
             strength = 0
             # The newer routing must restate every job the older one routes:

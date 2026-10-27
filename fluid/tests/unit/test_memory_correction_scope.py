@@ -29,7 +29,7 @@ async def test_id_correction_preserves_scope_after_reopen_and_replication(tmp_pa
 async def test_new_fact_defaults_and_explicit_correction_moves(tmp_path, scope, expected):
     store = SkillStore(tmp_path)
     ctx = ToolCtx(extra={"memory_store": store, "memory_project": "project:one"})
-    data = {"text": "Fixture runner is alpha.", "user_requested": True}
+    data = {"when": "When testing memory", "text": "Fixture runner is alpha.", "user_requested": True}
     if scope is not None:
         data["scope"] = scope
     assert not (await handler(data, ctx)).is_error
@@ -55,7 +55,7 @@ async def test_scope_inheritance_does_not_bypass_protection_or_revision(tmp_path
 async def test_explicit_null_scope_is_not_an_input_schema_escape(tmp_path):
     store = SkillStore(tmp_path)
     ctx = ToolCtx(extra={"memory_store": store})
-    result = await handler({"text": "Fixture runner is alpha.", "scope": None}, ctx)
+    result = await handler({"when": "When testing memory", "text": "Fixture runner is alpha.", "scope": None}, ctx)
     assert result.is_error
 
 
@@ -112,7 +112,7 @@ async def test_key_correction_resolves_only_visible_unambiguous_slot(tmp_path, s
     replica = SkillStore(tmp_path / "replica")
     replica._facts.merge(store._facts.export())
     ctx = ToolCtx(extra={"memory_store": replica, "memory_project": "project:one"})
-    data = {"text": "Fixture corrected runner.", "key": "fixture.runner",
+    data = {"when": "When testing memory", "text": "Fixture corrected runner.", "key": "fixture.runner",
             "expected_revision": 1, "user_requested": True}
     if scope is not None:
         data["scope"] = scope
@@ -143,7 +143,7 @@ async def test_fresh_key_with_initial_revision_preserves_new_save_contract(tmp_p
         remote.save_memory("Other project fixture command.", key="fixture.fresh", scope="project:two", per_worker=per_worker)
         store._facts.merge(remote._facts.export())
     ctx = ToolCtx(extra={"memory_store": store, "memory_project": "project:one"})
-    data = {"text": "Fixture genuinely new convention.", "key": "fixture.fresh", "expected_revision": revision}
+    data = {"when": "When testing memory", "text": "Fixture genuinely new convention.", "key": "fixture.fresh", "expected_revision": revision}
     if scope is not None:
         data["scope"] = scope
     result = await handler(data, ctx)
@@ -159,7 +159,7 @@ async def test_initial_revision_does_not_replace_in_scope_invisible_worker_slot(
     remote.save_memory("Remote worker fixture.", key="fixture.worker", scope="project:one", per_worker=True)
     local = SkillStore(tmp_path / "local")
     local._facts.merge(remote._facts.export())
-    data = {"text": "Local fixture.", "key": "fixture.worker", "expected_revision": 1}
+    data = {"when": "When testing memory", "text": "Local fixture.", "key": "fixture.worker", "expected_revision": 1}
     if scope is not None:
         data["scope"] = scope
     ctx = ToolCtx(extra={"memory_store": local, "memory_project": "project:one"})
@@ -170,7 +170,7 @@ async def test_initial_revision_without_project_context_keeps_conservative_looku
     store = SkillStore(tmp_path)
     store.save_memory("Other project fixture.", key="fixture.runner", scope="project:two")
     ctx = ToolCtx(extra={"memory_store": store})
-    out = await handler({"text": "Unknown project fixture.", "key": "fixture.runner",
+    out = await handler({"when": "When testing memory", "text": "Unknown project fixture.", "key": "fixture.runner",
                          "scope": "global", "expected_revision": 1}, ctx)
     assert out.is_error
     assert len(store.memories()) == 1
@@ -180,7 +180,7 @@ async def test_key_correction_stale_protected_forgotten_and_new_default(tmp_path
     store = SkillStore(tmp_path)
     first = store.save_memory("Fixture runner alpha.", key="fixture.runner", scope="project:one", protected=True)
     ctx = ToolCtx(extra={"memory_store": store, "memory_project": "project:one"})
-    data = {"text": "Fixture runner beta.", "key": "fixture.runner", "expected_revision": 99,
+    data = {"when": "When testing memory", "text": "Fixture runner beta.", "key": "fixture.runner", "expected_revision": 99,
             "user_requested": True}
     assert (await handler(data, ctx)).is_error
     data.update(expected_revision=first.revision, user_requested=False)
@@ -189,6 +189,6 @@ async def test_key_correction_stale_protected_forgotten_and_new_default(tmp_path
     data["user_requested"] = True
     assert (await handler(data, ctx)).is_error
     assert not store.memories()
-    assert not (await handler({"text": "Fixture new convention.", "key": "fixture.new"}, ctx)).is_error
+    assert not (await handler({"when": "When testing memory", "text": "Fixture new convention.", "key": "fixture.new"}, ctx)).is_error
     assert store.memories()[0].scope == "global"
 

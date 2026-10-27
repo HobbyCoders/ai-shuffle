@@ -19,12 +19,15 @@ def ctx(store, project="project:one", session="source-one"):
 @pytest.mark.asyncio
 async def test_save_receipt_means_immediate_durability_without_learner(tmp_path):
     store = SkillStore(tmp_path)
-    out = await remember.handler({"text": "The user's name is AuditName.", "user_requested": True}, ctx(store))
+    out = await remember.handler({"when": "When testing memory", "text": "The user's name is AuditName.", "user_requested": True}, ctx(store))
     assert not out.is_error and "Saved" in out.text
     assert store.journal_count() == 0
     fresh = SkillStore(tmp_path)
     assert fresh.memories()[0].protected
-    assert "AuditName" in fresh.render_memory_section()
+    # An identity fact (canonical key profile.name) is listed by its text in
+    # every snapshot, not by its when-line.
+    assert fresh.memories()[0].key == "profile.name"
+    assert "- [m1 r1; session] The user's name is AuditName." in fresh.render_memory_section()
     out = await recall.handler({"query": "name"}, ctx(fresh, session="new-session"))
     assert "AuditName" in out.text and "revision: 1" in out.text
 
@@ -33,9 +36,9 @@ async def test_save_receipt_means_immediate_durability_without_learner(tmp_path)
 async def test_correct_forget_and_restore_through_tools(tmp_path):
     store = SkillStore(tmp_path)
     c = ctx(store)
-    await remember.handler({"text": "The user's name is Before.", "user_requested": True}, c)
+    await remember.handler({"when": "When testing memory", "text": "The user's name is Before.", "user_requested": True}, c)
     old = store.memories()[0]
-    bad = await remember.handler({"text": "The user's name is After.", "user_requested": True}, c)
+    bad = await remember.handler({"when": "When testing memory", "text": "The user's name is After.", "user_requested": True}, c)
     assert bad.is_error and "revision" in bad.text
     out = await remember.handler({"text": "The user's name is After.", "memory_id": old.id, "user_requested": True,
                                    "expected_revision": old.revision}, c)
@@ -49,9 +52,9 @@ async def test_correct_forget_and_restore_through_tools(tmp_path):
     assert not store.search_memories("After")
     raw = (tmp_path / "memories.json").read_text()
     assert "Before" not in raw and "After" not in raw
-    denied = await remember.handler({"text": "The user's name is After."}, c)
+    denied = await remember.handler({"when": "When testing memory", "text": "The user's name is After."}, c)
     assert denied.is_error
-    restored = await remember.handler({"text": "The user's name is After.", "restore": True}, c)
+    restored = await remember.handler({"when": "When testing memory", "text": "The user's name is After.", "restore": True}, c)
     assert not restored.is_error
     assert store.memories()[0].id != current.id
 
@@ -60,9 +63,9 @@ async def test_correct_forget_and_restore_through_tools(tmp_path):
 async def test_remember_tier_follows_user_requested(tmp_path):
     store = SkillStore(tmp_path)
     c = ctx(store)
-    own = await remember.handler({"text": "Vite moves to the next free port when busy."}, c)
+    own = await remember.handler({"when": "When testing memory", "text": "Vite moves to the next free port when busy."}, c)
     assert not own.is_error and "agent-saved" in own.text
-    asked = await remember.handler({"text": "The user prefers dark mode.", "user_requested": True}, c)
+    asked = await remember.handler({"when": "When testing memory", "text": "The user prefers dark mode.", "user_requested": True}, c)
     assert not asked.is_error and "kept until the user changes it" in asked.text
     tiers = {e.text: (e.protected, e.durable) for e in store.memories()}
     assert tiers == {"Vite moves to the next free port when busy.": (False, True),
@@ -80,12 +83,12 @@ async def test_new_fact_saves_even_when_a_revision_is_supplied(tmp_path):
     # fact; the guard used to refuse it as "Memory changed since it was read".
     store = SkillStore(tmp_path)
     c = ctx(store)
-    out = await remember.handler({"text": "Prefers short answers.", "key": "profile.response_style",
+    out = await remember.handler({"when": "When testing memory", "text": "Prefers short answers.", "key": "profile.response_style",
                                    "scope": "global", "memory_id": "", "expected_revision": 1}, c)
     assert not out.is_error and "Saved" in out.text
     saved = store.memories()[0]
     assert saved.key == "profile.response_style" and saved.revision == 1
-    stale = await remember.handler({"text": "Prefers long answers.", "key": "profile.response_style",
+    stale = await remember.handler({"when": "When testing memory", "text": "Prefers long answers.", "key": "profile.response_style",
                                      "memory_id": saved.id, "expected_revision": 7}, c)
     assert stale.is_error and "changed since it was read" in stale.text
 
@@ -128,8 +131,10 @@ def test_protected_fact_survives_inference_flood_and_prompt_has_budget(tmp_path)
 def test_inferred_and_harvested_facts_survive_protected_flood(tmp_path):
     # The desktop store: ~28 KB of protected Remember facts filled the whole
     # 8,000-char snapshot, so no learner fact or env.* harvest ever rendered.
+    # The index ranks by task, project scope and usefulness, not by tier, so
+    # newer project facts are listed ahead of an older protected flood.
     store = SkillStore(tmp_path)
-    for i in range(60):
+    for i in range(120):
         store.save_memory(f"Explicit project note {i} " + "x" * 280, protected=True, scope="project:x")
     store.save_memory("Prefers short answers that lead with the outcome.", provenance="user")
     store.save_memory("pytest is importable from /usr/local/bin/python.",
@@ -137,10 +142,9 @@ def test_inferred_and_harvested_facts_survive_protected_flood(tmp_path):
     store.save_memory("The dashboard keeps its filter in localStorage key dash.filter.",
                       provenance="session", scope="project:x")
     out = store.render_memory_section("project:x")
-    assert "Prefers short answers" in out
     assert "pytest is importable" in out
     assert "dash.filter" in out
-    assert "Explicit project note 59" in out  # protected still fills the rest
+    assert "Explicit project note 119" in out  # protected still fills the rest
     assert "scoped to other projects" not in out  # budget drops are not scope drops
     assert "omitted for space" in out
     body = out.split("\n\n")[1]  # the fact lines, between header and footers
@@ -156,8 +160,10 @@ def test_six_live_shaped_unprotected_facts_all_render_under_a_protected_flood(tm
     scope = "project:pv2-5ed440e85cf268c371bfd3db"
     for i in range(92):
         store.save_memory(f"Explicit project note {i} " + "x" * 280, protected=True, scope=scope)
+    for i in range(92, 140):  # the index fits ~4x more lines than full text did
+        store.save_memory(f"Explicit project note {i} " + "x" * 280, protected=True, scope=scope)
     unprotected = [
-        ("user", None, "global"),
+        ("user", None, scope),
         ("tool", "env.pytest", scope),
         ("tool", "env.node_modules", scope),
         ("tool", "env.browser_host", scope),
@@ -179,7 +185,7 @@ def test_six_live_shaped_unprotected_facts_all_render_under_a_protected_flood(tm
 def test_a_fact_larger_than_the_budget_is_not_reported_as_no_facts(tmp_path, monkeypatch):
     # A fact line longer than the whole budget used to produce "(no saved
     # facts yet)" next to "1 saved fact omitted for space".
-    monkeypatch.setattr(facts, "MAX_PROMPT_CHARS", 200)
+    monkeypatch.setattr(facts, "MAX_PROMPT_CHARS", 40)
     store = SkillStore(tmp_path)
     store.save_memory("Long note " + "z" * 300, protected=True)
     out = store.render_memory_section()
@@ -191,12 +197,12 @@ def test_a_fact_larger_than_the_budget_is_not_reported_as_no_facts(tmp_path, mon
 def test_memory_footer_counts_scope_and_space_drops_separately(tmp_path):
     store = SkillStore(tmp_path)
     store.save_memory("A fact about another project.", protected=True, scope="project:other")
-    for i in range(60):
+    for i in range(120):
         store.save_memory(f"Explicit project note {i} " + "x" * 280, protected=True, scope="project:x")
     out = store.render_memory_section("project:x")
     rendered = sum(1 for line in out.splitlines() if line.startswith("- ["))
-    dropped = 60 - rendered
-    assert 0 < dropped < 60
+    dropped = 120 - rendered
+    assert 0 < dropped < 120
     assert "(1 entry scoped to other projects not shown.)" in out
     assert f"({dropped} saved facts omitted for space; Recall finds them by keyword.)" in out
     # Without a project nothing is out of scope; the drops are all for space.
@@ -437,7 +443,7 @@ async def test_failed_commit_never_returns_saved_receipt(tmp_path, monkeypatch):
     def fail(*args):
         raise OSError("simulated disk failure")
     monkeypatch.setattr(skills, "atomic_write_text", fail)
-    out = await remember.handler({"text": "New value"}, ctx(store))
+    out = await remember.handler({"when": "When testing memory", "text": "New value"}, ctx(store))
     assert out.is_error and "Not saved" in out.text
     assert len(store.memories()) == 1
 
@@ -458,7 +464,7 @@ async def test_curator_cannot_delete_protected_or_insert_unknown(tmp_path):
         async def stream(self, request):
             yield StreamChunk(kind="text_delta", payload={"text": '<delete-memory id="m1"/><memory id="m999">New</memory>'})
     store = SkillStore(tmp_path)
-    await remember.handler({"text": "The user's name is StillHere.", "user_requested": True}, ctx(store))
+    await remember.handler({"when": "When testing memory", "text": "The user's name is StillHere.", "user_requested": True}, ctx(store))
     await Synthesizer(Provider(), "test", store).consolidate()
     assert len(store.memories()) == 1
     assert "StillHere" in store.memories()[0].text
@@ -487,7 +493,7 @@ async def test_daily_learning_budget_does_not_block_explicit_save(tmp_path, monk
     store = SkillStore(tmp_path)
     assert store._facts.claim_inference_call()
     assert not store._facts.claim_inference_call()
-    out = await remember.handler({"text": "Still saved without a learner"}, ctx(store))
+    out = await remember.handler({"when": "When testing memory", "text": "Still saved without a learner"}, ctx(store))
     assert not out.is_error and len(store.memories()) == 1
 
 
@@ -495,7 +501,7 @@ async def test_daily_learning_budget_does_not_block_explicit_save(tmp_path, monk
 async def test_forget_invalidates_inflight_inference_and_purges_raw_evidence(tmp_path):
     from fluid.providers.base import StreamChunk
     store = SkillStore(tmp_path)
-    await remember.handler({"text": "Sensitive synthetic phrase"}, ctx(store))
+    await remember.handler({"when": "When testing memory", "text": "Sensitive synthetic phrase"}, ctx(store))
     entry = store.memories()[0]
     store.journal_append({"kind": "user", "text": "Sensitive synthetic phrase"})
     (tmp_path / ".synthesis-log.jsonl").write_text('{"output_head":"Sensitive synthetic phrase"}\n')

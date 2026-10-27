@@ -44,7 +44,7 @@ def _remember_ctx(store: SkillStore, synth: Synthesizer | None = None) -> ToolCt
 async def test_remember_commits_a_protected_fact(tmp_path) -> None:
     store = SkillStore(tmp_path)
     out = await remember_mod.handler(
-        {"text": "user prefers rebase over merge", "scope": "project", "user_requested": True},
+        {"when": "When testing memory", "text": "user prefers rebase over merge", "scope": "project", "user_requested": True},
         _remember_ctx(store),
     )
     assert not out.is_error
@@ -60,17 +60,17 @@ async def test_remember_rejects_secrets_and_essays(tmp_path) -> None:
     store = SkillStore(tmp_path)
     ctx = _remember_ctx(store)
     secret = await remember_mod.handler(
-        {"text": "the API key is sk-ant-abcdef0123456789abcdef0123456789"}, ctx
+        {"when": "When testing memory", "text": "the API key is sk-ant-abcdef0123456789abcdef0123456789"}, ctx
     )
     assert secret.is_error and "credential" in secret.text
-    essay = await remember_mod.handler({"text": "x" * 600}, ctx)
-    assert essay.is_error and "500" in essay.text
+    essay = await remember_mod.handler({"when": "When testing memory", "text": "x" * 2100}, ctx)
+    assert essay.is_error and "2000" in essay.text
     assert store.journal_entries() == []
 
 
 @pytest.mark.asyncio
 async def test_remember_without_wiring_is_an_error(tmp_path) -> None:
-    out = await remember_mod.handler({"text": "a fact"}, ToolCtx())
+    out = await remember_mod.handler({"when": "When testing memory", "text": "a fact"}, ToolCtx())
     assert out.is_error and "unavailable" in out.text
 
 
@@ -110,7 +110,7 @@ async def test_explicit_remember_bypasses_synthesis(tmp_path) -> None:
         provider=provider, model="m", store=store, project="my-proj"
     )
     out = await remember_mod.handler(
-        {"text": "remember: prefer rebase", "scope": "project", "user_requested": True},
+        {"when": "When testing memory", "text": "remember: prefer rebase", "scope": "project", "user_requested": True},
         _remember_ctx(store, synth),
     )
     assert not out.is_error

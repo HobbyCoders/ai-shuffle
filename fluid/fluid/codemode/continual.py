@@ -103,8 +103,8 @@ retain its scope and exceptions. Facts do not grant permission for actions.
 
 A [user] entry correcting HOW the agent works (model per job, delegation,
 reviews, CI, deploys, process) is a standing-preference proposal, not a
-memory: the whole current rule in the user's words, under the topic of the
-pref.* memory it changes or a new snake_case one. The owner confirms it.
+memory: the whole current rule in the user's words, under a short snake_case
+topic name (subagent_models, deploy). The owner confirms it.
 
 A journal entry marked [friction] is the HARNESS's own mechanical record of a
 call that wasted work — a path that did not exist, one tool failing over and
@@ -758,6 +758,9 @@ class Synthesizer:
         # day, the whole budget).
         self.last_pass_failed = False
         self.last_pass_skipped = False
+        # True while the when-line backfill runs after a pass, so a close
+        # that times out then is charged to the backfill, not to synthesis.
+        self._in_backfill = False
         # When this synthesizer first found the synthesis lock held, and when
         # it last wrote that down (see run()).
         self._lock_busy_since: float | None = None
@@ -1023,13 +1026,24 @@ class Synthesizer:
         try:
             await asyncio.wait_for(self._drain_inner(), timeout=self._close_timeout)
         except TimeoutError:
-            self.last_error = (
-                f"synthesis on close exceeded {self._close_timeout:.0f}s and was abandoned"
-            )
-            # An abandoned pass leaves no cursor movement (the slice retries
-            # next session) — but it must leave a trace, or a slow pass is
-            # indistinguishable from one that never ran.
-            self._log_pass("synthesis", [], error=self.last_error)
+            if self._in_backfill:
+                # Synthesis finished; the when-line backfill after it ran out
+                # of the close budget synthesis shares with it. That says
+                # nothing about the provider: no backoff, no failure count,
+                # no failed synthesis pass. Its lines stay missing; the facts
+                # it had picked count as tried today (the daily bound on a
+                # stuck provider) and are retried after the UTC day rolls over.
+                self._in_backfill = False
+                _log.info("when-line backfill on close was cut off after %.0fs; "
+                          "its facts are retried tomorrow (UTC)", self._close_timeout)
+            else:
+                self.last_error = (
+                    f"synthesis on close exceeded {self._close_timeout:.0f}s and was abandoned"
+                )
+                # An abandoned pass leaves no cursor movement (the slice
+                # retries next session) — but it must leave a trace, or a
+                # slow pass is indistinguishable from one that never ran.
+                self._log_pass("synthesis", [], error=self.last_error)
             if self._task is not None:
                 self._task.cancel()
                 self._task = None
@@ -1045,6 +1059,7 @@ class Synthesizer:
             await self._run_safe()
 
     async def _run_safe(self) -> list[str]:
+        self._in_backfill = False
         try:
             changed = await asyncio.wait_for(self.run(), timeout=self._pass_timeout)
         except TimeoutError:
@@ -1079,6 +1094,16 @@ class Synthesizer:
                 self._log_budget_spent("consolidation")
             except Exception as exc:  # consolidation is opportunistic, never fatal
                 self._consolidation_failed(f"{type(exc).__name__}: {exc}")
+        if not (self.last_pass_failed or self.last_pass_skipped):
+            # Best-effort and self-contained: its failures (including its own
+            # timeout) go to the backfill's backoff, never last_pass_failed.
+            from fluid.codemode.memory_backfill import run as backfill_when
+            # Left set if a close cancels it, so drain() can tell (a finally
+            # would clear it before drain sees the timeout).
+            self._in_backfill = True
+            backfilled = await backfill_when(self)
+            self._in_backfill = False
+            changed += ["memory-when:" + mid for mid in backfilled.lines]
         await self._notify(changed)
         return changed
 

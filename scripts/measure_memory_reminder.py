@@ -85,11 +85,16 @@ def _memory_store(root: Path):
         if len(section) >= MEMORY_TARGET_CHARS or "omitted for space" in section:
             break
         i += 1
+        # Owner-kept facts with full-length when-lines: the snapshot is an
+        # index of when-lines, and the learned tier's 40-fact cap would stop
+        # it short of the audited size (the loop would never end).
         store.save_memory(
             f"Fixture fact {i}: the build host keeps service {i} on port {8000 + i}; "
             f"run its checks with the project's interpreter and keep its data under "
             f"/srv/fixture/{i} (owner note, kept for later sessions).",
-            provenance="user",
+            provenance="user", protected=True,
+            when=(f"When working on fixture service {i} on port {8000 + i}, its checks, "
+                  f"its interpreter or the data it keeps under /srv/fixture")[:140],
         )
     return store
 

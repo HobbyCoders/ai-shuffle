@@ -229,7 +229,7 @@ async def test_explicit_remember_persists_while_shared_inference_budget_is_spent
     store = SkillStore(tmp_path)
     set_budget(store, day=int(time.time() // 86400), calls=continual.MAX_INFERENCE_CALLS_PER_DAY,
                last_at=time.time())
-    result = await handler({"text": "The fixture owner prefers reproducible test reports.", "user_requested": True},
+    result = await handler({"when": "When testing memory", "text": "The fixture owner prefers reproducible test reports.", "user_requested": True},
                            ToolCtx(extra={"memory_store": store}))
     assert not result.is_error
     assert store.memories()[0].protected

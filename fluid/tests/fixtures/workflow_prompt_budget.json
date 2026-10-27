@@ -2,27 +2,27 @@
   "description": "Fixed synthetic workflow requests; chars/4 estimates. Baseline b11dc613; system prompt +310 for standing-preference proposals. Allowance: 32 characters per section; ordinary requests must remain exactly unchanged. Owner prefix catalog measured separately by --catalog.",
   "baseline_characters": {
     "native_ordinary": {
-      "system": 8502,
+      "system": 8492,
       "request": 357
     },
     "native_repeated": {
-      "system": 8502,
+      "system": 8492,
       "request": 358
     },
     "code_ordinary": {
-      "system": 8502,
+      "system": 8492,
       "request": 392
     },
     "code_repeated": {
-      "system": 8502,
+      "system": 8492,
       "request": 393
     },
     "delegated_ordinary": {
-      "system": 8502,
+      "system": 8492,
       "request": 357
     },
     "delegated_repeated": {
-      "system": 8502,
+      "system": 8492,
       "request": 358
     }
   },
@@ -51,5 +51,6 @@
       "system": 9470,
       "request": 677
     }
-  }
+  },
+  "baseline_note": "system 8502 -> 8492: the synthesizer's standing-preference rule names a snake_case topic instead of a pref.* memory (one style of memory)."
 }

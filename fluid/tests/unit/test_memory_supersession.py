@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
+from fluid.codemode.facts import derived_when
 from fluid.codemode.skills import SkillStore
 from fluid.codemode.facts import global_id
 from fluid.codemode.continual import Synthesizer
@@ -11,6 +12,9 @@ from fluid.tools.registry import ToolCtx
 
 OLD = "Backend/general subagent work runs on GPT Astra (gpt-6-astra); Opus handles frontend work."
 NEW = "Code work by subagents runs on GPT 6.1 Sol, replacing gpt-6-astra. Code review and frontend work use Opus."
+# The snapshot index lists a fact without a written when-line by its first
+# sentence (fluid.codemode.facts.derived_when); OLD is one sentence long.
+NEW_LINE = derived_when(NEW)
 
 
 def pair(store, protected=True):
@@ -31,7 +35,7 @@ async def test_different_keys_scopes_keep_only_current_value_and_recall_pair(tmp
     assert (old_now in live) == protected
     assert (old_now in archive) != protected
     section = reopened.render_memory_section("project:fixture")
-    assert OLD not in section and NEW in section
+    assert OLD not in section and NEW_LINE in section
     assert "unresolved conflict" not in section
     assert old.id not in {line.split()[1].strip("[") for line in reopened.memory_snapshot_plan("project:fixture")["eligible_lines"]}
     result = await recall({"query": "subagent", "limit": 10}, ToolCtx(extra={"recall_store": reopened, "memory_project": "project:fixture"}))
@@ -84,7 +88,7 @@ def test_replication_keeps_link_archive_and_conflict_across_stale_replay(tmp_pat
     b._facts.merge(a._facts.export())
     b._facts.merge(stale)
     assert OLD not in b.render_memory_section("project:fixture")
-    assert NEW in b.render_memory_section("project:fixture")
+    assert NEW_LINE in b.render_memory_section("project:fixture")
     assert "unresolved conflict" not in b.render_memory_section("project:fixture")
     # Explicit revision-safe confirmation of the replacement resolves marker,
     # while retaining the predecessor text/link on every replica.
@@ -159,7 +163,7 @@ def test_lineage_expires_and_replacement_preserves_bounded_identity(tmp_path, mo
         patch.setattr(facts.time, "time", lambda: new.updated_at + facts.ARCHIVE_RETENTION * 3)
         store.reap()
         assert old.id not in {e.id for e in store.archived_memories()}
-        assert NEW in store.render_memory_section("project:fixture")
+        assert NEW_LINE in store.render_memory_section("project:fixture")
     explicit = SkillStore(tmp_path / "explicit")
     pair(explicit)
     identity = explicit.save_memory("The fixture owner's preferred name is Taylor.",
@@ -170,7 +174,7 @@ def test_lineage_expires_and_replacement_preserves_bounded_identity(tmp_path, mo
     # Budget relevance reserves identity basics, not unlimited profile.*
     # precedence. Unrelated biography filler must not outrank a correction.
     assert identity.text in section
-    assert section.index(NEW) < section.index("Generic unrelated protected fact")
+    assert section.index(NEW_LINE) < section.index("Generic unrelated protected fact")
     assert "unresolved conflict" not in section and OLD not in section
 
 

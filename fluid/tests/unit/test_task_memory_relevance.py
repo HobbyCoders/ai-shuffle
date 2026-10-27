@@ -12,7 +12,7 @@ def populated(root):
         "The user prefers vegetarian recipes without mushrooms.",
         protected=True, key="preferences.recipes",
     )
-    for i in range(30):
+    for i in range(160):  # enough index lines to overflow the snapshot
         store.save_memory(f"Project convention {i}: " + "Use consistent spacing. " * 14,
                           protected=True, scope="project:one")
     return target
