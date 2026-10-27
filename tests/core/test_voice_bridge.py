@@ -471,6 +471,28 @@ async def test_zero_minutes_means_the_call_has_no_limit(mock_db, fake_sockets, r
     await registry.detach(SID)
 
 
+async def test_a_sideband_left_closed_ends_the_call_unless_replaced(
+    mock_db, fake_sockets, registry, monkeypatch
+):
+    """With no length limit, a browser that vanished must not leave the call up."""
+    _mk_session()
+    monkeypatch.setattr(vb, "SIDEBAND_ABANDONED_SECONDS", 0.1)
+    # Replaced in time: the FE re-handshake keeps the call.
+    first = await registry.attach(SID, "call-1", api_key=KEY, model=MODEL, max_call_minutes=0)
+    fake_sockets[0].eof()  # OpenAI ended the old peer's call.
+    await asyncio.sleep(0.02)
+    second = await registry.attach(SID, "call-2", api_key=KEY, model=MODEL, max_call_minutes=0)
+    await asyncio.sleep(0.2)
+    assert first.stop_reason == "replaced" and second.active
+    assert registry.get(SID) is second
+
+    # Not replaced: the call ends and the next one starts fresh.
+    fake_sockets[1].eof()
+    await asyncio.sleep(0.3)
+    assert second.active is False and second.stop_reason == "abandoned"
+    assert registry.get(SID) is None and registry.call_started_at(SID) is None
+
+
 async def test_stop_cancels_the_duration_timer(mock_db, fake_sockets):
     _mk_session()
     bridge = await _bridge(fake_sockets, max_call_minutes=60)

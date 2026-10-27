@@ -488,15 +488,95 @@ async def test_an_expiry_right_after_start_counts_as_a_failure(harness, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_renewal_moves_old_handoffs_out_of_the_per_session_bound(harness):
+async def test_renewal_moves_old_handoffs_out_of_the_per_session_bound(harness, monkeypatch):
+    monkeypatch.setattr(voice_stream, "MAX_STALE_DELEGATIONS", 100)
     first, second = FakeProvider(), FakeProvider()
     harness.script += [first, second]
     run = asyncio.create_task(harness.call.run())
     await until(lambda: harness.browser.events("ready"))
-    harness.call.delegations |= {f"d-{n}" for n in range(150)} | {"typed-1"}
+    harness.call.delegations |= {f"d-{n}" for n in range(150)}
     first.drop()
     await until(lambda: second.started() and harness.call.connected)
-    assert harness.call.delegations == {"typed-1"}  # Typed ids still dedupe a resent draft.
-    assert "d-7" in harness.call.stale_delegations
+    assert harness.call.delegations == set()
+    # Old handoff ids are kept for their late results, but bounded.
+    assert len(harness.call.stale_delegations) == 100
     await harness.call.close()
     await asyncio.wait_for(run, 3)
+
+
+class SlowToStop(FakeProvider):
+    """A provider socket whose reader takes a moment to stop when cancelled."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.stopping = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def _frames(self):
+        try:
+            async for item in super()._frames():
+                yield item
+        finally:
+            self.stopping.set()
+            await self.release.wait()
+
+
+@pytest.mark.asyncio
+async def test_note_sent_while_a_renewal_closes_the_old_session_waits_for_the_new_one(harness, monkeypatch):
+    monkeypatch.setattr(voice_stream, "RENEW_MIN_AGE_S", 0)
+    monkeypatch.setattr(voice_stream, "RENEW_LEAD_S", 1.9)
+    monkeypatch.setattr(voice_stream, "RENEW_LAST_S", 0.5)
+    first, second = SlowToStop(expires_in=2), FakeProvider()
+    harness.script += [first, second]
+    run = asyncio.create_task(harness.call.run())
+    await asyncio.wait_for(first.stopping.wait(), 3)  # Renewal chosen; old reader still stopping.
+
+    assert harness.call.restoring
+    await harness.call.send({"type": "session.commentary.append", "delegation_id": None, "content": "Chat result."})
+    assert not [e for e in first.sent if e.get("content") == "Chat result."]
+    first.release.set()
+    await until(lambda: any(e.get("content") == "Chat result." for e in second.sent))
+    await harness.call.close()
+    await asyncio.wait_for(run, 3)
+
+
+@pytest.mark.asyncio
+async def test_typed_messages_are_deduped_apart_from_the_handoff_bound(harness, monkeypatch):
+    from tests.unit.test_voice_stream import Upstream
+    call = harness.call
+    call.flush = AsyncMock()
+    call.upstream = Upstream([])
+    delegate = AsyncMock(return_value="Done.")
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    for n in range(250):  # More than the 200 handoffs one provider session allows.
+        await call.receive_text(json.dumps({"type": "input_text", "id": f"t-{n}", "text": f"Task {n}"}))
+        await call.delegation_task
+    assert harness.browser.events("text.rejected") == []
+    assert delegate.await_count == 250
+    assert call.delegations == set() and len(call.typed_ids) == voice_stream.MAX_TYPED_IDS
+    # A recent draft sent again is acknowledged without a second dispatch.
+    await call.receive_text(json.dumps({"type": "input_text", "id": "t-249", "text": "Task 249"}))
+    assert delegate.await_count == 250
+
+
+@pytest.mark.asyncio
+async def test_a_browser_that_goes_silent_ends_the_call(harness, monkeypatch, caplog):
+    """No WebSocket pings run, so a vanished phone is noticed by its silence."""
+    caplog.set_level("INFO", logger="app.core.voice_stream")
+    monkeypatch.setattr(voice_stream, "BROWSER_SILENT_END_S", 0.4)
+    monkeypatch.setattr(voice_stream, "HEALTH_PUSH_S", 0.05)
+    provider = FakeProvider()
+    harness.script += [provider]
+    run = asyncio.create_task(harness.call.run())
+    await until(lambda: harness.browser.events("ready"))
+    for _ in range(4):  # client_stats (sent even while muted) keep the call up.
+        await asyncio.sleep(0.2)
+        await harness.browser.inbox.put({"type": "websocket.receive",
+                                         "text": json.dumps({"type": "client_stats", "stats": {}})})
+    assert not run.done()
+    await asyncio.wait_for(run, 3)  # Then nothing arrives at all.
+
+    assert harness.call.closed and provider.closed and "s1" not in voice_stream.calls
+    assert harness.call.browser_close.startswith("no data for")
+    assert "the browser has sent nothing for" in caplog.text
+    assert harness.browser.events("error") == []

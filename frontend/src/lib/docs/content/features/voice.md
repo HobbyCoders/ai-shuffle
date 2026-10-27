@@ -73,7 +73,7 @@ For GPT Live and both Grok engines, if the connection drops, for example when yo
 
 ## Long calls
 
-Providers end their own voice sessions after a while (OpenAI and xAI after an hour). For OpenAI Realtime, GPT Live and both Grok engines the app opens a fresh provider session in the background before that, at a pause in the conversation, and carries the conversation over without greeting you again, so the call doesn't drop. Work updates that arrive during the swap are held and spoken afterwards. ChatGPT voice and PersonaPlex calls are not renewed and end when the provider ends its session.
+Providers end their own voice sessions after a while (OpenAI and xAI after an hour). For OpenAI Realtime, GPT Live and both Grok engines the app opens a fresh provider session in the background before that, at a pause in the conversation, and carries the conversation over without greeting you again, so the call doesn't drop. Work updates that arrive during the swap are held and spoken afterwards. ChatGPT voice and PersonaPlex calls are not renewed and end when the provider ends its session. Even with no length limit, a call ends when your device has sent nothing for two minutes (for example, the app was closed or the phone lost its network), so a forgotten call does not keep running.
 
 ## Costs
 

@@ -76,6 +76,15 @@ MERGED_REQUEST_NOTE = ("This handoff was combined with the request already sent 
 # frame arrived every HEALTH_PUSH_S; one INFO line per HEALTH_LOG_S records the
 # call's audio figures so a report can be diagnosed from the log alone.
 HEALTH_PUSH_S = 2.0
+# A call ends once its browser has sent nothing for this long. The server runs
+# without WebSocket pings, so a phone that loses its network or a killed app
+# can leave the socket looking open for many minutes, and a call with no length
+# limit would keep its provider session (and its renewals) going. While the
+# call is up the browser sends microphone audio every 20 ms, and client_stats
+# every 5 s even when muted (a hidden tab may slow timers to about once a
+# minute). A browser that loses its connection gives up and reopens the socket
+# with resume=1 within about 30 s, so two minutes of silence means it is gone.
+BROWSER_SILENT_END_S = 120.0
 HEALTH_LOG_S = 30.0
 # No microphone frame for this long while the browser says it is unmuted is
 # logged as a warning (the browser shows its own state after a few seconds).
@@ -374,6 +383,10 @@ RENEW_MIN_AGE_S = 60
 # Delegation results and progress notes sent while the connection is being
 # restored wait for the new session. Microphone audio is never held.
 MAX_HELD_EVENTS = 64
+# Handoff ids of replaced provider sessions, and typed-message ids, kept for
+# dedupe. Both are bounded so a call with no length limit cannot grow them.
+MAX_STALE_DELEGATIONS = 400
+MAX_TYPED_IDS = 64
 PROVIDER_CLOSE_RECONNECT = frozenset({"expired", "connection_lost"})
 RESUME_NOTE = ("The voice connection was renewed in the middle of this call. Continue the "
                "conversation from where it left off. Do not greet the caller again.")
@@ -436,7 +449,9 @@ class VoiceStream:
         # When the current provider session started (monotonic).
         self.session_started_at = time.monotonic()
         self.held: deque[dict] = deque()
-        self.stale_delegations: set[str] = set()
+        # Ordered (oldest first) so the oldest ids are dropped past the bound.
+        self.stale_delegations: dict[str, None] = {}
+        self.typed_ids: dict[str, None] = {}
         self.expires_at: float | None = None
         self.provider_close_reason: str | None = None
         self.last_drop: BaseException | None = None
@@ -487,6 +502,8 @@ class VoiceStream:
         self.last_deaf_restart = float("-inf")
         self.client_stats: dict = {}
         self.mic_warned = False
+        # When the browser last sent anything (monotonic), for BROWSER_SILENT_END_S.
+        self.last_browser_at = time.monotonic()
         # The network worker that runs this conversation when it is not this
         # one (#700): the call then writes nothing into the local mirror and
         # forwards what the caller asks for (app.core.voice_remote).
@@ -992,8 +1009,8 @@ class VoiceStream:
             await reject("This voice engine does not support text or attachments. End the call to send your draft in chat.")
             return
         key = "typed-" + identity
-        if key not in self.delegations:
-            if len(_workers) >= 8 or len(self.delegations) >= 200:
+        if key not in self.typed_ids:
+            if len(_workers) >= 8:
                 await reject("The voice backend is busy. Keep your draft and try again shortly.")
                 return
             # Typed requests reuse the existing same-session delegation
@@ -1004,7 +1021,11 @@ class VoiceStream:
             await self.flush()  # Durable admission before acknowledging/dispatching.
             entries = [e for e in self.transcript if e.get("seq", 0) > self.delegated_seq]
             self.delegated_seq = self.transcript_seq
-            self.delegations.add(key)
+            # A resent draft is accepted once; typed ids stay out of the
+            # provider session's handoff count.
+            self.typed_ids[key] = None
+            while len(self.typed_ids) > MAX_TYPED_IDS:
+                del self.typed_ids[next(iter(self.typed_ids))]
             self.delegation_task = asyncio.create_task(self.run_delegation(None, entries))
             _workers.add(self.delegation_task)
             self.delegation_task.add_done_callback(_workers.discard)
@@ -1016,6 +1037,7 @@ class VoiceStream:
         audio_started = time.monotonic()
         while True:
             message = await self.websocket.receive()
+            self.last_browser_at = time.monotonic()
             if message["type"] == "websocket.disconnect":
                 reason = message.get("reason")
                 self.browser_close = f"code {message.get('code')}" + (f", reason {reason!r}" if reason else "")
@@ -1101,6 +1123,13 @@ class VoiceStream:
         while True:
             await asyncio.sleep(HEALTH_PUSH_S)
             now = time.monotonic()
+            silent = now - self.last_browser_at
+            if silent >= BROWSER_SILENT_END_S:
+                # Returning ends the call like a browser close (run()).
+                logger.warning("Voice %s: the browser has sent nothing for %d s; ending the call",
+                               self.session_id, int(silent))
+                self.browser_close = f"no data for {int(silent)} s"
+                return
             mic_age = None if self.last_mic_at is None else now - self.last_mic_at
             try:
                 await self.emit({"type": "health",
@@ -1260,8 +1289,11 @@ class VoiceStream:
         # Delegations of the old session do not exist in the new one; their
         # results are delivered as plain commentary instead. Only the new
         # session's handoffs count toward the per-session delegation bound.
-        self.stale_delegations |= self.delegations
-        self.delegations = {key for key in self.delegations if key.startswith("typed-")}
+        for did in self.delegations:
+            self.stale_delegations[did] = None
+        while len(self.stale_delegations) > MAX_STALE_DELEGATIONS:
+            del self.stale_delegations[next(iter(self.stale_delegations))]
+        self.delegations = set()
         detail = ""
         if reader is not None and reader.done() and not reader.cancelled() and reader.exception() is not None:
             detail = f" ({describe_close(reader.exception())})"
@@ -1405,11 +1437,15 @@ class VoiceStream:
                         # A session that stopped hearing the caller is replaced (#1824).
                         provider.append(asyncio.create_task(self.deaf.wait()))
                     done, _ = await asyncio.wait(tasks + provider, return_when=asyncio.FIRST_COMPLETED)
+                    reason = None if done & set(tasks) else self.reconnect_reason(reader, done)
+                    if reason:
+                        # Hold work notes from now on: one sent to the old
+                        # session while it is being closed would be lost.
+                        self.restoring = True
                     for task in provider:
                         if task not in done:
                             task.cancel()
                     await asyncio.gather(*provider, return_exceptions=True)
-                    reason = None if done & set(tasks) else self.reconnect_reason(reader, done)
                     if reason:
                         restore = asyncio.create_task(self.reconnect(reason, reader))
                         provider = [restore]

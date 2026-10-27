@@ -553,6 +553,14 @@ MODEL_PRICES_PER_MTOK: Dict[str, Dict[str, float]] = {
 # start a fresh clock without the user hanging up first.
 CAP_GRACE_SECONDS = 300.0
 
+# How long a bridge whose sideband closed waits to be replaced before the call
+# is treated as over. OpenAI ends its side when the browser's peer goes away
+# (and at its 60-minute session wall), and the FE re-handshakes onto a new
+# call_id within seconds, so a bridge left unreplaced this long belongs to a
+# browser that is gone. Without it a call with no length limit would keep its
+# approval poller and active flag forever.
+SIDEBAND_ABANDONED_SECONDS = 600.0
+
 
 # ============================================================================
 # Sideband transport
@@ -819,6 +827,7 @@ class VoiceBridge:
         usage_totals: Optional[Dict[str, int]] = None,
         persisted_usage: Optional[Dict[str, int]] = None,
         on_duration_cap: Optional[Callable[[], None]] = None,
+        on_abandoned: Optional[Callable[["VoiceBridge"], Any]] = None,
         client_tools: Optional[List[Dict[str, Any]]] = None,
         client_instructions: Optional[str] = None,
         instructions_override: Optional[str] = None,
@@ -870,6 +879,7 @@ class VoiceBridge:
             persisted_usage if persisted_usage is not None else {}
         )
         self._on_duration_cap = on_duration_cap
+        self._on_abandoned = on_abandoned
 
         self.started_at: Optional[float] = None
         self.ended_at: Optional[float] = None
@@ -1307,11 +1317,27 @@ class VoiceBridge:
             )
         finally:
             # Reconnect is FE-driven with a fresh call_id: all we
-            # do here is stop claiming to be connected.
+            # do here is stop claiming to be connected, and end the call if
+            # no re-attach replaces this bridge in time.
             self.connected = False
             logger.info(
                 "Voice: sideband stream closed for session %s", self.session_id,
             )
+            if not self._stopped and self._on_abandoned is not None:
+                task = asyncio.create_task(
+                    self._end_if_abandoned(), name=f"voice-abandoned-{self.session_id}",
+                )
+                self._call_tasks.add(task)
+                task.add_done_callback(self._call_tasks.discard)
+
+    async def _end_if_abandoned(self) -> None:
+        await asyncio.sleep(SIDEBAND_ABANDONED_SECONDS)
+        if self.active and not self.connected and self._on_abandoned is not None:
+            logger.warning(
+                "Voice: session %s had no sideband for %d s and was not re-attached; "
+                "ending the call", self.session_id, int(SIDEBAND_ABANDONED_SECONDS),
+            )
+            await self._on_abandoned(self)
 
     def _is_quiet(self) -> bool:
         """A natural pause: nobody is talking, so a held note may be spoken."""
@@ -3048,6 +3074,7 @@ class VoiceCallRegistry:
                 on_duration_cap=lambda: self.mark_capped(
                     session_id, max_call_minutes,
                 ),
+                on_abandoned=lambda gone: self.end_abandoned(session_id, gone),
                 client_tools=client_tools,
                 client_instructions=client_instructions,
                 instructions_override=instructions_override,
@@ -3064,6 +3091,15 @@ class VoiceCallRegistry:
             self._epochs[session_id] = epoch
             self._bridges[session_id] = bridge
             return bridge
+
+    async def end_abandoned(self, session_id: str, bridge: VoiceBridge) -> None:
+        """End a call whose browser is gone, unless a re-attach replaced it."""
+        async with self._lock:
+            if self._bridges.get(session_id) is not bridge:
+                return
+            self._bridges.pop(session_id, None)
+            self._epochs.pop(session_id, None)
+        await bridge.stop(reason="abandoned")
 
     async def detach(self, session_id: str) -> bool:
         """Stop and drop the session's bridge. ``False`` when there was none.

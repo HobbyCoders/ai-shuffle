@@ -26,6 +26,14 @@ INPUT_TRANSCRIPT_ITEM_LIMIT = 64
 # maximum"), so each session is renewed in the background before that, at a
 # quiet moment, with the conversation replayed into the new one.
 GROK_SESSION_S = 3600
+# A clean close by xAI is the session running out only when it is near the
+# hour; an earlier one counts as a failure toward the reconnect limit, so a
+# provider that keeps closing cannot replay (and bill) the history forever.
+GROK_EXPIRY_CLOSE_S = 50 * 60
+
+
+class UpstreamGone(Exception):
+    """The provider socket was being replaced while an event was sent."""
 
 HANDOFF_TOOL = {
     "type": "function", "name": "delegate_to_chat_agent",
@@ -77,7 +85,10 @@ class GrokVoiceStream(VoiceStream):
         # Let server VAD start its reply to committed input before falling back.
         await asyncio.sleep(SPEECH_COMMIT_GRACE_S)
         if self.speech_pending and not self.response_active and not self.speech_active:
-            await self.request_speech()
+            try:
+                await self.request_speech()
+            except (ConnectionClosed, UpstreamGone):
+                self.response_active = False  # The session is being replaced.
 
     def is_quiet(self):
         return not self.speech_active and super().is_quiet()
@@ -114,12 +125,17 @@ class GrokVoiceStream(VoiceStream):
         reason = super().reconnect_reason(reader, done)
         if reason is None and not self.closed and reader in done and not reader.cancelled() \
                 and reader.exception() is None:
-            return "expired"
+            aged = time.monotonic() - self.session_started_at >= GROK_EXPIRY_CLOSE_S
+            return "expired" if aged else "closed"
         return reason
 
     async def wire(self, event):
-        if self.upstream is not None and not self.closed:
-            await self.upstream.send(json.dumps(event))
+        if self.closed:
+            return
+        upstream = self.upstream
+        if upstream is None:
+            raise UpstreamGone()  # send() holds the event for the next session.
+        await upstream.send(json.dumps(event))
 
     async def send(self, event):
         if self.closed:
@@ -129,7 +145,7 @@ class GrokVoiceStream(VoiceStream):
             return
         try:
             await self.send_now(event)
-        except ConnectionClosed:
+        except (ConnectionClosed, UpstreamGone):
             self.hold(event)  # The reader sees the same closure and renews the session.
 
     async def send_now(self, event):

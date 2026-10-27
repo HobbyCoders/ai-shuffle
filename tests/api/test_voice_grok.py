@@ -636,12 +636,12 @@ async def test_grok_work_note_sent_during_a_renewal_reaches_the_new_session(grok
 
 @pytest.mark.asyncio
 async def test_grok_provider_closing_an_old_session_is_renewed_not_counted(grok_call, monkeypatch):
-    monkeypatch.setattr(voice_stream, "RENEW_MIN_AGE_S", 0)
     monkeypatch.setattr(voice_stream, "MAX_RECONNECTS", 0)
     first, second = FakeXai(), FakeXai()
     grok_call.script += [first, second]
     run = asyncio.create_task(grok_call.call.run())
     await until(lambda: grok_call.browser.events("ready"))
+    grok_call.call.session_started_at -= voice_grok.GROK_EXPIRY_CLOSE_S  # Near the hour.
     first.end()
     await until(lambda: second.started() and grok_call.call.connected)
     assert not grok_call.call.failures
@@ -671,3 +671,72 @@ async def test_grok_new_session_forgets_the_old_sessions_transcript_items():
     # The renewed session's own item-1 is captioned whole, not as a revision.
     delta = call.input_transcript_delta({"item_id": "item-1", "transcript": "Change it"})
     assert delta == "Change it"
+
+
+@pytest.mark.asyncio
+async def test_grok_clean_close_well_before_the_hour_counts_as_a_failure(grok_call, monkeypatch):
+    """A provider that keeps closing cleanly cannot replay (and bill) history forever."""
+    monkeypatch.setattr(voice_stream, "MAX_RECONNECTS", 1)
+    sessions = [FakeXai() for _ in range(3)]
+    grok_call.script += sessions
+    run = asyncio.create_task(grok_call.call.run())
+    for session in sessions[:2]:
+        await until(lambda: session.started() and grok_call.call.connected)
+        # Past the minute RENEW_MIN_AGE_S would allow, but nowhere near the hour.
+        grok_call.call.session_started_at -= 70
+        session.end()
+    await asyncio.wait_for(run, 3)
+    assert len(grok_call.attempts) == 2 and sessions[2].sent == []
+    assert grok_call.browser.events("error") == [{"type": "error", "message": voice_stream.DROPPED_MESSAGE}]
+
+
+@pytest.mark.asyncio
+async def test_grok_result_of_a_handoff_pending_across_a_renewal_is_plain_context(grok_call, monkeypatch):
+    gate = asyncio.Event()
+
+    async def delegate(*args, **kwargs):
+        await gate.wait()
+        return "The build is green."
+
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    grok_call.call.settle_speech = AsyncMock()
+    first = FakeXai([json.dumps(e) for e in [
+        {"type": "conversation.item.input_audio_transcription.completed", "item_id": "i-1",
+         "transcript": "Check the build please."},
+        {"type": "response.function_call_arguments.done", "name": "delegate_to_chat_agent", "call_id": "tool-1"},
+    ]])
+    second = FakeXai()
+    grok_call.script += [first, second]
+    run = asyncio.create_task(grok_call.call.run())
+    await until(lambda: "tool-1" in grok_call.call.pending_tools and grok_call.call.delegation_task)
+    first.drop()
+    await until(lambda: second.started() and grok_call.call.connected)
+    gate.set()
+    await until(lambda: any("The build is green." in text for text in second.context()))
+
+    items = [e["item"] for e in second.sent if e["type"] == "conversation.item.create"]
+    assert not [i for i in items if i["type"] == "function_call_output"]  # tool-1 is unknown here.
+    assert {"type": "response.create"} in second.sent
+    await grok_call.call.close()
+    await asyncio.wait_for(run, 3)
+
+
+@pytest.mark.asyncio
+async def test_grok_hang_up_during_a_renewal_opens_no_new_session(grok_call):
+    first, late = FakeXai(), FakeXai()
+    entered = asyncio.Event()
+
+    async def hanging_connect():
+        entered.set()
+        await asyncio.sleep(30)
+        return late
+
+    grok_call.script += [first, hanging_connect]
+    run = asyncio.create_task(grok_call.call.run())
+    await until(lambda: grok_call.browser.events("ready"))
+    first.drop()
+    await asyncio.wait_for(entered.wait(), 3)
+    await voice_stream.stop("g1")  # The hang-up endpoint's path.
+    await asyncio.wait_for(run, 3)
+    assert late.sent == [] and grok_call.browser.events("error") == []
+    assert grok_call.call.closed and "g1" not in voice_stream.calls
