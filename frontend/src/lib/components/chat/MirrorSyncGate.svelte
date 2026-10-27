@@ -115,13 +115,15 @@
 {/if}
 
 <style>
-	.mirror-sync { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 2rem 1.25rem; text-align: center; color: var(--muted-foreground); }
+	.mirror-sync { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: calc(2rem + var(--chat-status-offset, 0px)) 1.25rem 2rem; text-align: center; color: var(--muted-foreground); }
 	.mirror-sync strong { color: var(--foreground); font-size: 1rem; }
 	.mirror-sync p { margin: 0; max-width: 42ch; font-size: 0.875rem; }
-	/* Positioned against ChatView's .chat-column; spans the column top; empty when current. */
+	/* Positioned against ChatView's .chat-column; spans the column top; empty when current.
+	   ChatView sets --chat-status-offset while its reconnect pill holds this spot. */
 	.mirror-status-slot {
 		position: absolute;
-		top: 0.5rem;
+		top: calc(0.5rem + var(--chat-status-offset, 0px));
+		transition: top 160ms ease-out;
 		left: 0.75rem;
 		right: 0.75rem;
 		z-index: 5;
@@ -157,5 +159,6 @@
 	}
 	@media (prefers-reduced-motion: reduce) {
 		.mirror-pill, .mirror-pill :global(.mirror-spin) { animation: none; }
+		.mirror-status-slot { transition: none; }
 	}
 </style>

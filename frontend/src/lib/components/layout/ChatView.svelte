@@ -16,6 +16,7 @@
 	import { notify } from '$lib/stores/notifications';
 	import { platform } from '$lib/stores/platform.svelte';
 	import { createConnectionBannerGrace } from '$lib/stores/session/connection-banner-grace';
+	import { connectionNoticeTier, RECONNECT_BANNER_ESCALATE_MS } from './connection-notice';
 	import Banner from '$lib/components/Banner.svelte';
 	import NotificationSlot from '$lib/components/NotificationSlot.svelte';
 	import { DOCK_ORDER } from '$lib/stores/notification-dock.svelte';
@@ -35,7 +36,7 @@
 	import VoiceCallPanel from '$lib/components/voice/VoiceCallPanel.svelte';
 	import { voiceCallState, isCallSurfaceActive } from '$lib/services/voiceCall';
 	import { watchCallOutcomes } from '$lib/services/voiceCallOutcome';
-	import { RotateCcw } from 'lucide-svelte';
+	import { RotateCcw, LoaderCircle } from 'lucide-svelte';
 	import { classifyChatSurface } from './chat-empty-state';
 	import { pendingDeepLink, deepLinkLoading } from '$lib/stores/pending-deep-link';
 	// The phone shell docks prompts above its composer; the web build has none.
@@ -253,28 +254,52 @@
 		activeSession.reconnect();
 	}
 
-	// Give the "connection lost" banner a 3s grace period so a transient WS
-	// blip (e.g. switching tabs/panels and back) doesn't flash it. The gate
-	// lives for the component's lifetime (not recreated per-effect-run, or
-	// its in-flight timer/shown state would be lost on every dependency
-	// change) — `setConnected` is called reactively below, and `destroy()`
-	// runs once on actual unmount via onDestroy so no timer can leak or fire
-	// after the component is gone.
-	let showConnectionBanner = $state(false);
-	const connectionBannerGrace = createConnectionBannerGrace({
-		onShow: () => { showConnectionBanner = true; },
-		onHide: () => { showConnectionBanner = false; }
+	// Connection-lost notice, tiered so a phone resume stays quiet:
+	//  - under 3s of VISIBLE disconnect: nothing (the resume reconnect is
+	//    usually still handshaking);
+	//  - after that: a small floating "Reconnecting…" pill over the transcript;
+	//  - escalated to the warning banner with a Reconnect button only when the
+	//    client has given up (wsReconnectRequired) or the disconnect has lasted
+	//    RECONNECT_BANNER_ESCALATE_MS of visible time.
+	// Both gates count visible time only (connection-banner-grace.ts), so time
+	// in the background never counts toward either, and everything hides the
+	// moment the socket is back. The gates live for the component's lifetime
+	// (not per-effect-run, or their timer/shown state would be lost on every
+	// dependency change); destroy() runs once on unmount.
+	let reconnectNoticeDue = $state(false);
+	let reconnectBannerDue = $state(false);
+	const reconnectNoticeGrace = createConnectionBannerGrace({
+		onShow: () => { reconnectNoticeDue = true; },
+		onHide: () => { reconnectNoticeDue = false; }
 	});
-	onDestroy(() => connectionBannerGrace.destroy());
+	const reconnectBannerGrace = createConnectionBannerGrace({
+		onShow: () => { reconnectBannerDue = true; },
+		onHide: () => { reconnectBannerDue = false; },
+		graceMs: RECONNECT_BANNER_ESCALATE_MS
+	});
+	onDestroy(() => {
+		reconnectNoticeGrace.destroy();
+		reconnectBannerGrace.destroy();
+	});
 
 	$effect(() => {
-		// Only track the WS state as "disconnected" while the banner is
-		// actually eligible to show (an active session). Otherwise treat it as
-		// connected so the grace timer never arms for a session that wouldn't
-		// show the banner anyway.
-		const eligible = Boolean($activeSession.sessionId);
-		connectionBannerGrace.setConnected(!eligible || $activeWsConnected);
+		// Only an active session can show the notice; otherwise report
+		// "connected" so no timer arms for a notice that would never render.
+		const connected = !$activeSession.sessionId || $activeWsConnected;
+		reconnectNoticeGrace.setConnected(connected);
+		reconnectBannerGrace.setConnected(connected);
 	});
+
+	const connectionNotice = $derived(connectionNoticeTier({
+		noticeDue: reconnectNoticeDue,
+		bannerDue: reconnectBannerDue,
+		reconnectRequired: $activeSession.wsReconnectRequired
+	}));
+	// The mirror sync pill floats in the same spot; it moves below this one.
+	let reconnectPillHeight = $state(0);
+	const statusOffset = $derived(
+		connectionNotice === 'pill' && reconnectPillHeight ? `${reconnectPillHeight + 6}px` : undefined
+	);
 </script>
 
 <div class="chat-view" bind:clientHeight={surfaceHeight} style:--chat-surface-height={surfaceHeight ? `${surfaceHeight}px` : undefined} class:transitioning-from-empty={transitioningFromEmpty} class:is-empty={showEmptyHero}>
@@ -317,14 +342,11 @@
 	{:else}
 		<!-- Active chat: message column. The input lives in the shared .input-slot
 		     below, not here — see the #665 note above. -->
-		<div class="chat-column">
+		<div class="chat-column" style:--chat-status-offset={statusOffset}>
 			<div class="message-area-wrapper">
-				{#if showConnectionBanner}
-					<!-- Live connection lost. The client auto-reconnects with backoff,
-					     but surface it so the user knows why messages may lag — and
-					     give them a manual retry that skips the backoff wait. The
-					     banner itself is gated behind a 3s grace period (see
-					     connectionBannerGrace above) so transient blips don't flash it. -->
+				{#if connectionNotice === 'banner'}
+					<!-- Escalated: the client gave up, or the disconnect has lasted a
+					     long visible time. Offer the manual retry that skips backoff. -->
 					<NotificationSlot order={DOCK_ORDER.connection}>
 						<Banner
 							severity="warning"
@@ -336,6 +358,24 @@
 						/>
 					</NotificationSlot>
 				{/if}
+				<!-- Short drop: a quiet pill that floats over the transcript so
+				     nothing shifts. The live region stays mounted so screen readers
+				     announce it; tapping the pill retries now. -->
+				<div class="reconnect-status-slot" role="status" aria-live="polite">
+					{#if connectionNotice === 'pill'}
+						<button
+							type="button"
+							class="reconnect-pill"
+							title="Retry now"
+							onclick={handleReconnect}
+							bind:offsetHeight={reconnectPillHeight}
+						>
+							<LoaderCircle size={14} aria-hidden="true" class="reconnect-spin" />
+							<span>Reconnecting…</span>
+							<span class="reconnect-pill-retry">Retry now</span>
+						</button>
+					{/if}
+				</div>
 				<!-- No call surface here any more (VM18): the call controls live in the
 				     composer slot below, so the transcript column looks the same during
 				     a call as it does outside one. -->
@@ -479,6 +519,74 @@
 		min-height: 0;
 		display: flex;
 		flex-direction: column;
+	}
+
+	/* Floats over the top of the chat column (positioned against .chat-column)
+	   in the mirror sync pill's visual language; empty while connected. */
+	.reconnect-status-slot {
+		position: absolute;
+		top: 0.5rem;
+		left: 0.75rem;
+		right: 0.75rem;
+		z-index: 6;
+		display: flex;
+		justify-content: center;
+		pointer-events: none;
+	}
+
+	.reconnect-pill {
+		pointer-events: auto;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.5rem;
+		max-width: 100%;
+		min-height: 2rem;
+		padding: 0.375rem 0.75rem;
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		background: var(--popover);
+		color: var(--muted-foreground);
+		box-shadow: var(--shadow-m);
+		font: inherit;
+		font-size: 0.8125rem;
+		line-height: 1.3;
+		white-space: nowrap;
+		cursor: pointer;
+		animation: reconnect-pill-in 160ms ease-out;
+		transition: color 150ms ease-out, border-color 150ms ease-out;
+	}
+	.reconnect-pill :global(svg) { flex-shrink: 0; }
+	.reconnect-pill :global(.reconnect-spin) { animation: reconnect-spin 1s linear infinite; }
+	/* The retry hint stays out of the way until hover/focus. */
+	.reconnect-pill-retry {
+		max-width: 0;
+		overflow: hidden;
+		opacity: 0;
+		color: var(--foreground);
+		transition: max-width 200ms ease-out, opacity 150ms ease-out;
+	}
+	.reconnect-pill:hover,
+	.reconnect-pill:focus-visible {
+		color: var(--foreground);
+		border-color: color-mix(in oklch, var(--foreground) 25%, var(--border));
+	}
+	.reconnect-pill:hover .reconnect-pill-retry,
+	.reconnect-pill:focus-visible .reconnect-pill-retry {
+		max-width: 6rem;
+		opacity: 1;
+	}
+	.reconnect-pill:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+	.reconnect-pill:active { transform: scale(0.97); }
+	@keyframes reconnect-spin { to { transform: rotate(360deg); } }
+	@keyframes reconnect-pill-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+	@media (prefers-reduced-motion: reduce) {
+		.reconnect-pill,
+		.reconnect-pill :global(.reconnect-spin),
+		.reconnect-pill-retry { animation: none; transition: none; }
+		.reconnect-pill:active { transform: none; }
 	}
 
 	/* The input slot is always rendered (see #665). It never shrinks in either
