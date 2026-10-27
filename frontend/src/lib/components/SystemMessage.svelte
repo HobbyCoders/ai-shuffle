@@ -297,7 +297,7 @@
 					return {
 						title: 'Nothing More to Compact',
 						content:
-							'The context is already as small as compaction can make it without dropping recent work, so it was left as it is. Nothing was summarized.',
+							'The context is already as small as compaction can make it while keeping the current work as it is, so it was left unchanged. Nothing was summarized.',
 						badge: 'no change',
 						badgeColor: 'gray'
 					};
@@ -308,9 +308,14 @@
 				const who = data.requested_by === 'app'
 					? 'AI Shuffle asked the agent to compact the context, but it did not.'
 					: 'The agent did not compact the context.';
+				// Nothing was summarized either way; a message queued behind the
+				// compaction still goes, on the conversation as it was.
+				const after =
+					'Nothing was summarized and the conversation is unchanged; a message queued after it is still sent.';
+				const because = reason ? ` Reason: ${reason}${/[.!?]$/.test(reason) ? '' : '.'}` : '';
 				return {
 					title: 'Compaction Failed',
-					content: reason ? `${who} Reason: ${reason}` : who,
+					content: `${who}${because} ${after}`,
 					badge: 'not compacted',
 					badgeColor: 'red'
 				};

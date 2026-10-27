@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fluid.context.recall import DEFAULT_EXPAND_CHARS, expand_ref
+from fluid.context.recall import DEFAULT_EXPAND_CHARS, expand_ref, recall_nodes
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 SPEC = ToolSpec(
@@ -62,7 +62,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     ref = str(input.get("ref", "")).strip()
     if not ref:
         return ToolOutcome(text="empty ref", is_error=True)
-    nodes = await recall.load_path()
+    nodes = await recall_nodes(recall, ref)
     text, is_error = expand_ref(
         nodes,
         ref,

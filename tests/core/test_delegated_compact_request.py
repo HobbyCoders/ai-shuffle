@@ -33,7 +33,7 @@ FAKE_CLI = textwrap.dedent(
     r'''
     import json, os, sys, time
 
-    MODE = os.environ["COMPACT_MODE"]  # "ok", "refuse" or "noop"
+    MODE = os.environ["COMPACT_MODE"]  # "ok", "refuse", "noop" or "fluid"
     RECORD = os.environ["COMPACT_RECORD"]
     SID = "cli-compact-req"
     CONTEXT = int(os.environ.get("COMPACT_CONTEXT") or 0)  # Messages tokens, 0: no breakdown
@@ -50,6 +50,52 @@ FAKE_CLI = textwrap.dedent(
         return {"type": "result", "subtype": "success", "is_error": False,
                 "num_turns": 1, "session_id": SID, "total_cost_usd": 0.0,
                 "usage": usage(), "result": text}
+
+    def not_compacted(reason):
+        # What Claude Code 2.1.311 prints when a session.compact hook skips:
+        # the status pair, a synthetic assistant line, then a successful
+        # result with no model call, the same line as its text.
+        line = "Not compacted \u00b7 " + reason
+        emit({"type": "system", "subtype": "status", "status": "compacting", "session_id": SID})
+        emit({"type": "system", "subtype": "status", "status": None, "session_id": SID})
+        emit({"type": "assistant", "session_id": SID, "message": {
+            "id": "msg_synthetic", "model": "<synthetic>", "role": "assistant",
+            "content": [{"type": "text", "text": line}], "usage": usage(),
+            "stop_reason": "stop_sequence"}})
+        out = result(line)
+        out["num_turns"] = 0
+        emit(out)
+
+    # Real-shaped rows the mod would post: a turn, a thinking-only assistant
+    # row (its text is empty), Claude Code's own skill text in the newest
+    # turn, and a long paste.
+    ROWS = [
+        {"role": "user", "text": "hello", "toolUses": [], "handle": "h1"},
+        {"role": "assistant", "text": "", "toolUses": [], "handle": "h2"},
+        {"role": "assistant", "text": "ANSWER", "toolUses": [], "handle": "h3"},
+        {"role": "user", "text": "SPEC " + "s" * 30000, "toolUses": [], "handle": "h4"},
+        {"role": "user", "text": "SKILL-BODY: never push to main", "toolUses": [], "handle": "h5"},
+        {"role": "assistant", "text": "ok", "toolUses": [], "handle": "h6"},
+    ]
+
+    def ask_fluid():
+        """The mod's session.compact hook, as far as the bridge sees it."""
+        import http.client, socket
+        url = os.environ.get("FLUID_CLAUDE_MOD_COMPACT_URL")
+        if not url:
+            return None
+        body = json.dumps({"v": 1, "trigger": "manual", "messages": ROWS})
+        headers = {"Authorization": "Bearer " + os.environ["FLUID_CLAUDE_MOD_TOKEN"],
+                   "Content-Type": "application/json"}
+        sock_path = os.environ.get("FLUID_CLAUDE_MOD_SOCKET")
+        host = url.split("/")[2]
+        conn = http.client.HTTPConnection(host, timeout=30)
+        if sock_path:
+            conn.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            conn.sock.connect(sock_path)
+        conn.request("POST", "/" + url.split("/", 3)[3], body, headers)
+        answer = conn.getresponse()
+        return answer.status, json.loads(answer.read() or b"null")
 
     def prompt_text(msg):
         content = msg.get("message", {}).get("content")
@@ -101,7 +147,16 @@ FAKE_CLI = textwrap.dedent(
                 continue
             if MODE == "noop":
                 # The mod skipped a manual compaction Fluid could not shrink.
-                emit(result("Not compacted \u00b7 Nothing more to compact"))
+                not_compacted("Nothing more to compact")
+                continue
+            if MODE == "fluid":
+                answered = ask_fluid()
+                with open(RECORD, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"bridge": answered}) + "\n")
+                if answered and answered[0] == 200 and "skip" in (answered[1] or {}):
+                    not_compacted(answered[1]["skip"])
+                else:
+                    emit(result("unexpected bridge answer"))
                 continue
             emit({"type": "system", "subtype": "status", "status": "compacting",
                   "session_id": SID})
@@ -291,24 +346,41 @@ async def test_a_refused_compact_shows_as_failed_with_the_reason(monkeypatch, tm
 
 @pytest.mark.asyncio
 async def test_a_compact_with_nothing_left_to_reclaim_is_a_no_op_not_a_failure(monkeypatch, tmp_path):
-    """A manual compaction Fluid could not shrink never ran Claude Code's
-    summarizer: the chat says nothing more could be compacted, plainly, with
-    no "Compaction Failed" alarm and no compacted card."""
-    from fluid.engine.delegated import NOTHING_TO_COMPACT, DelegatedLoop
+    """End to end through the real bridge route: the CLI posts its rows,
+    Fluid finds nothing it can reclaim and answers a skip, the CLI prints its
+    "Not compacted" line (as Claude Code 2.1.311 does) and the chat shows the
+    plain no-op card. No summarizer, no compacted card, no reply bubble."""
+    from fluid.engine.delegated import NOTHING_TO_COMPACT
+    from app.core.provider.events import AssistantMessage
 
-    original = DelegatedLoop._report_skipped_compaction
+    adapter = await _adapter(monkeypatch, tmp_path, "fluid")
+    try:
+        await _turn(adapter, "hello")
+        messages = await _turn(adapter, "/compact")
+    finally:
+        await adapter.disconnect()
+    bridge = [r for r in _recorded(tmp_path) if isinstance(r, dict)]
+    assert bridge == [{"bridge": [200, {"skip": NOTHING_TO_COMPACT}]}]
+    assert _system(messages, "compact_boundary") == []
+    assert _system(messages, "compact_failed") == [{
+        "reason": NOTHING_TO_COMPACT, "nothing_to_compact": True, "requested_by": "user",
+    }]
+    # Claude Code's synthetic "Not compacted" line is not a reply.
+    assert not [m for m in messages if isinstance(m, AssistantMessage)
+                and "Not compacted" in json.dumps(getattr(m, "content", ""), default=str)]
 
-    async def bridge_said_noop(self, sid, turn_id, mapper):
-        self._compact_noop = True  # what the compaction route records
-        await original(self, sid, turn_id, mapper)
 
-    monkeypatch.setattr(DelegatedLoop, "_report_skipped_compaction", bridge_said_noop)
+@pytest.mark.asyncio
+async def test_a_cli_skip_without_fluid_shows_the_failure_card_without_a_reply(monkeypatch, tmp_path):
     adapter = await _adapter(monkeypatch, tmp_path, "noop")
     try:
         messages = await _turn(adapter, "/compact")
     finally:
         await adapter.disconnect()
-    assert _system(messages, "compact_boundary") == []
-    assert _system(messages, "compact_failed") == [{
-        "reason": NOTHING_TO_COMPACT, "nothing_to_compact": True, "requested_by": "user",
-    }]
+    from app.core.provider.events import AssistantMessage
+
+    [card] = _system(messages, "compact_failed")
+    assert card["reason"] == "Not compacted \u00b7 Nothing more to compact"
+    assert "nothing_to_compact" not in card
+    assert not [m for m in messages if isinstance(m, AssistantMessage)
+                and "Not compacted" in json.dumps(getattr(m, "content", ""), default=str)]

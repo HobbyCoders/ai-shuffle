@@ -500,6 +500,10 @@ class Mapped:
 # ─── Stateful mapper ─────────────────────────────────────────────────────────
 
 
+# How Claude Code opens the line it prints for a compaction it skipped.
+_NOT_COMPACTED = "Not compacted \u00b7 "
+
+
 class StreamJsonMapper:
     def __init__(
         self,
@@ -884,6 +888,14 @@ class StreamJsonMapper:
         if not msg:
             return Mapped()  # no message body: nothing to show or store
         blocks = msg.get("content", []) or []
+        if msg.get("model") == "<synthetic>" and blocks and all(
+            isinstance(b, dict) and b.get("type") == "text"
+            and str(b.get("text", "")).startswith(_NOT_COMPACTED) for b in blocks
+        ):
+            # Claude Code's own line for a compaction it skipped (the mod's
+            # no-op, a refusing hook). Not a reply: the turn's result carries
+            # the same text, and the host shows it as the compaction card.
+            return Mapped()
         events: list[Event] = []
         content: list[Any] = []
 

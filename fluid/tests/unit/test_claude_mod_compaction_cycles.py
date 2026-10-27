@@ -28,7 +28,7 @@ from fluid.engine.claude_mod_compaction import (
 )
 from fluid.engine.delegated import NOTHING_TO_COMPACT, DelegatedLoop
 from fluid.engine.delegated_proto import StreamJsonMapper
-from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
+from fluid.messages import Image, Message, Text, Thinking, ToolResultBlock, ToolUseBlock
 from fluid.store.base import MemoryStore, SessionNode
 from fluid.tools.builtins import register_builtins
 from fluid.tools.registry import ToolRegistry
@@ -351,3 +351,186 @@ def test_a_rebuilt_parallel_group_stays_stored_not_noted():
     [note] = [r for r in chat.cli if 'Fluid compaction note' in r['text']]
     assert '[calls:' not in note['text'] and 'tool result(s)' not in note['text']
     assert recoverable(chat.stored, chat.cli, 'RESULT-t9-1-1 ' + 'x' * 5_000)
+
+
+# ── Review fixes: nothing a compaction evicts may become unreachable ─────────
+
+
+def _held_or_named(chat: Chat, rows: list[dict]) -> list[int]:
+    """Stored indexes neither held (a row equal to the node's projection, or
+    its tool ids in a row) nor inside a range a row names (a HistoryExpand
+    ref, a digest or epoch header)."""
+    from fluid.engine.claude_mod_compaction import _signature
+
+    index = {n.node_id: i for i, n in enumerate(chat.stored)}
+    named: set[int] = set()
+    for row in rows:
+        refs = re.findall(r'HistoryExpand\("([^"]+)"', row['text'])
+        refs += [m.group(1) + ('..' + m.group(2) if m.group(2) else '') for m in
+                 re.finditer(r'\[(?:compacted turn|epoch) (\S+?)(?:\.\.(\S+?))? ', row['text'])]
+        for ref in refs:
+            parsed = parse_ref(ref)
+            if parsed and parsed[0] in index and parsed[1] in index:
+                assert not expand_ref(chat.stored, ref, max_chars=10**7)[1], ref
+                named.update(range(index[parsed[0]], index[parsed[1]] + 1))
+    held = {_signature(r) for r in rows}
+    ids = ({u['tool_use_id'] for r in rows for u in r['toolUses']}
+           | {x['tool_use_id'] for r in rows for x in r.get('toolResults', [])})
+    lost = []
+    for k, node in enumerate(chat.stored):
+        if k in named or _signature(project(node.message)) in held:
+            continue
+        tools = [b.id for b in node.message.content if isinstance(b, ToolUseBlock)] + [
+            b.tool_use_id for b in node.message.content if isinstance(b, ToolResultBlock)]
+        if tools and all(t in ids for t in tools):
+            continue
+        lost.append(k)
+    return lost
+
+
+def test_a_long_paste_survives_repeated_compaction():
+    """A request over the stub size renders as a stub naming its node. The
+    stub must never be merged into Fluid's note or digest row, or the next
+    compaction cannot tell it apart and the request falls out of context."""
+    chat = Chat()
+    chat.cli.append({'role': 'user', 'toolUses': [], 'handle': 'att-0',
+                     'text': '<system-reminder>ctx</system-reminder>'})
+    chat.cli.append({'role': 'assistant', 'toolUses': [], 'handle': 'att-1', 'text': 'ok'})
+    chat.cli.append(chat._add(Message('user', [Text('SPEC-PASTE ' + 's' * 30_000)])))
+    chat.cli.append(chat._add(Message('assistant', [Text('Understood.')])))
+    paste = chat.stored[0].node_id
+    chat.grow(10)
+    for _ in range(3):
+        chat.compact()
+        assert any(paste in r['text'] for r in chat.cli)
+        assert not _held_or_named(chat, chat.cli)
+        chat.grow(4)
+    assert recoverable(chat.stored, chat.cli, 'SPEC-PASTE ' + 's' * 30_000)
+
+
+def _fuzz_grow(chat: Chat, rng, turns: int) -> None:
+    for _ in range(turns):
+        t = chat.turn
+        chat.turn += 1
+        if rng.random() < 0.3:
+            chat.cli.append({'role': 'user', 'toolUses': [], 'handle': f'att{next(chat._ids)}',
+                             'text': f'<system-reminder>att {t} ' + 'a' * rng.randint(50, 3000)
+                                     + '</system-reminder>'})
+        size = 30_000 if rng.random() < 0.1 else 60
+        chat.cli.append(chat._add(Message('user', [Text(f'Request {t}: ' + 'r' * size)])))
+        for g in range(rng.randint(0, 5)):
+            ids = [f't{t}-{g}-{k}' for k in range(rng.randint(1, 3))]
+            think = rng.random() < 0.5
+            calls = [chat._add(Message('assistant', ([Thinking('hmm')] if think and k == 0 else [])
+                                       + [ToolUseBlock(i, 'Read', {'p': i})]))
+                     for k, i in enumerate(ids)]
+            results = []
+            for i in ids:
+                blocks = [Text(f'RES-{i} ' + 'x' * rng.choice([50, 2000, 9000]))]
+                if rng.random() < 0.1:
+                    blocks.append(Image(media_type='image/png', data='AAAA'))
+                results.append(chat._add(Message('user', [ToolResultBlock(
+                    i, blocks, is_error=rng.random() < 0.1)])))
+            chat.cli += (calls + results if rng.random() < 0.5
+                         else [r for pair in zip(calls, results) for r in pair])
+        chat.cli.append(chat._add(Message('assistant', [Text(f'Done {t} ' + 'y' * rng.randint(10, 800))])))
+
+
+@pytest.mark.parametrize('seed', range(30))
+def test_fuzz_no_stored_message_is_ever_lost(seed):
+    """Random chats (parallel groups both ways, thinking, images, errors,
+    long pastes, Claude Code attachments, respawns, both triggers and
+    windows), 12 compactions each: every answer is one the mod accepts, and
+    every stored message is still held or named by a ref that reads back."""
+    import random
+
+    rng = random.Random(seed)
+    chat = Chat()
+    for _ in range(12):
+        _fuzz_grow(chat, rng, rng.randint(2, 10))
+        if rng.random() < 0.15:
+            chat.respawn()
+        try:
+            chat.compact(rng.choice(['manual', 'auto']), window=rng.choice([200_000, 1_000_000]))
+        except NothingToCompact:
+            continue
+        assert not _held_or_named(chat, chat.cli)
+
+
+def test_claude_code_rows_of_the_newest_request_stay_verbatim():
+    """A skill body (Claude Code's own text, never stored) is the work in
+    hand: it stays verbatim however much of the newest turn compacts."""
+    chat = Chat()
+    chat.grow(6)
+    chat.cli.append(chat._add(Message('user', [Text('/deploy-skill run the deploy')])))
+    skill = {'role': 'user', 'handle': 'skillbody', 'toolUses': [],
+             'text': 'SKILL-BODY: step 1 never push to main; ' + 'S' * 3000}
+    chat.cli.append(skill)
+    for g in range(12):
+        tid = f'z{g}'
+        chat.cli.append(chat._add(Message('assistant', [ToolUseBlock(tid, 'Bash', {'command': f'{g}'})])))
+        chat.cli.append(chat._add(Message('user', [ToolResultBlock(tid, [Text(f'OUT-{g} ' + 'o' * 3000)])])))
+    for trigger in ('manual', 'auto'):
+        rows = [dict(r) for r in chat.cli]
+        out = compact_messages(rows, chat.stored, trigger=trigger)
+        assert skill in out
+        assert not any('SKILL-BODY' in r['text'] for r in out if 'Fluid compaction note' in r['text'])
+
+
+async def test_older_claude_code_rows_are_archived_and_read_back_whole():
+    """Claude Code's own rows older than the newest request leave context,
+    but their whole text is archived with the session first: the note cites
+    a ref that HistoryExpand reads back, and HistorySearch finds it."""
+    from fluid.context.recall import HistoryRecall
+    from fluid.events.model import ContextArchived
+    from fluid.store.base import iter_events_of_class
+    from fluid.tools.builtins.history_expand import handler as expand
+    from fluid.tools.builtins.history_search import handler as search
+    from fluid.tools.registry import ToolCtx
+
+    chat = Chat()
+    chat.grow(30)
+    loop, sid = await _loop_with(chat)
+    try:
+        status, body = await _request(loop._socket_path, {'v': 1, 'trigger': 'manual', 'messages': chat.cli},
+                                      loop._mod_token)
+        assert status == 200
+        [note] = [r for r in body['messages'] if 'Fluid compaction note' in r['text']]
+        assert 'were archived with the session' in note['text']
+        ref = re.search(r'HistoryExpand\("(node_[0-9a-f]+)"\)', note['text']).group(1)
+        archived = [e async for e in iter_events_of_class(loop.store, sid, 0, (ContextArchived,))]
+        entries = {e['node_id']: e for event in archived for e in event.entries}
+        assert ref in entries and entries[ref]['text'].startswith('<system-reminder>attachment')
+        ctx = ToolCtx(extra={'history_recall': HistoryRecall(loop.store, sid)})
+        read = await expand({'ref': ref}, ctx)
+        assert not read.is_error and 'a' * 800 in read.text
+        found = await search({'query': 'attachment', 'max_results': 50}, ctx)
+        assert ref in found.text
+    finally:
+        await loop.aclose()
+
+
+def test_rows_only_claude_code_can_show_are_never_rebuilt():
+    """A ToolSearch result (Claude Code shows its tool_reference blocks, the
+    store their text) and a result with an image are kept whole or left out
+    whole with refs: never rebuilt without the blocks Fluid cannot write."""
+    chat = Chat()
+    chat.cli.append(chat._add(Message('user', [Text('Request: find the deploy tool')])))
+    use = chat._add(Message('assistant', [ToolUseBlock('ts-1', 'ToolSearch', {'query': 'select:Deploy'})]))
+    found = chat._add(Message('user', [ToolResultBlock('ts-1', [Text('Deploy ' + 'd' * 3000)])]))
+    shot = chat._add(Message('assistant', [ToolUseBlock('img-1', 'Read', {'file_path': 'a.png'})]))
+    seen = chat._add(Message('user', [ToolResultBlock('img-1', [Text('[image: a.png] ' + 'i' * 3000),
+                                                                Image(media_type='image/png', data='AAAA')])]))
+    found['toolResults'][0]['text'] = ''  # what Claude Code lists for tool_reference blocks
+    chat.cli += [use, found, shot, seen]
+    chat.cli.append(chat._add(Message('assistant', [Text('Found it.')])))
+    ids = {'ts-1', 'img-1'}
+    for _ in range(4):
+        chat.grow(8)
+        out = chat.compact()
+        for row in out:
+            for result in row.get('toolResults', []):
+                if result['tool_use_id'] in ids:
+                    assert 'handle' in row  # Claude Code's own row, never a rebuilt one
+        assert not _held_or_named(chat, out)
+    assert recoverable(chat.stored, chat.cli, 'Deploy ' + 'd' * 3000)

@@ -30,10 +30,12 @@ from fluid.context.compaction import (
     Compactor,
     Promotion,
     is_turn_start,
+    is_wake_text,
+    strip_system_reminders,
 )
 from fluid.context.trim import block_chars
-from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
-from fluid.store.base import SessionNode
+from fluid.messages import Image, Message, Text, ToolResultBlock, ToolUseBlock
+from fluid.store.base import SessionNode, new_id
 
 COMPACT_PATH = "/claude-mod/compact"
 MAX_COMPACT_BODY_BYTES = 8 * 1024 * 1024
@@ -62,6 +64,19 @@ DEEP_FOLD_FACTOR = 4
 # Code's own summary runs instead. A manual one only has to save something.
 AUTO_MAX_RETAINED = 0.75
 MANUAL_MIN_SAVING = 0.02
+
+# A row Fluid builds for stored content it will not rebuild (a call Claude
+# Code holds with blocks Fluid cannot reproduce, a message with nothing it
+# can show): it names the nodes, and the next compaction folds them.
+STAND_IN_HEADER = "[earlier content not shown here"
+_REF = re.compile(r'HistoryExpand\("(node_[0-9a-f]+(?:\.\.node_[0-9a-f]+)?)"')
+# How Fluid's own placeholders for a tool result open: a result Claude Code
+# shows differently from the stored one, and not like this, carries blocks
+# only Claude Code can show (a tool_reference, an image).
+_PLACEHOLDER_OPENINGS = ("[old tool result trimmed", "[large tool result", "[image consumed",
+                         "[image attachment consumed")
+# Tools whose results carry blocks only Claude Code holds.
+_OPAQUE_RESULT_TOOLS = frozenset({"ToolSearch"})
 
 _DIGEST_HEADER = re.compile(r"\[compacted turn (\S+?)(?:\.\.(\S+?))? — mechanical digest")
 _EPOCH_HEADER = re.compile(r"\[epoch (\S+?)\.\.(\S+?) — \d+ older turns folded")
@@ -351,17 +366,23 @@ def _mapped_nodes(
 def _fluid_parts(
     row: dict[str, Any], index: dict[str, int],
 ) -> tuple[list[tuple[int, int, str]], str | None] | None:
-    """What a row Fluid built stands for: the stored ranges of its digests and
-    epochs, and its compaction note; None for any other row.
+    """What a row Fluid built stands for: the stored ranges it covers, and its
+    compaction note; None for any other row.
 
-    A Fluid row is a user text row that opens with a digest, epoch or note
-    header; built rows merged into one are separated by a blank line, so a
-    header counts at the start or after one. Each named node must be on this
-    path, in order, and the ranges must not overlap.
+    A Fluid row opens with a digest, epoch or note header (a user text row)
+    or with the stand-in header (either role). Rows Fluid merged are joined by
+    a blank line, so a header counts at the start or after one. Every
+    ``HistoryExpand`` ref the row carries outside those ranges is claimed too
+    (a stand-in's nodes, or anything an older build merged in), so no stored
+    message a Fluid row names can fall out of the view.
     """
     text = row.get("text")
-    if (row.get("role") != "user" or row.get("toolUses") or row.get("toolResults")
-            or not isinstance(text, str)):
+    if row.get("toolUses") or row.get("toolResults") or not isinstance(text, str):
+        return None
+    stand_in = text.startswith(STAND_IN_HEADER)
+    if not stand_in and (row.get("role") != "user" or not (
+            text.startswith(NOTE_HEADER) or _DIGEST_HEADER.match(text)
+            or _EPOCH_HEADER.match(text))):
         return None
     ranges: list[tuple[int, int, str]] = []
     note: str | None = None
@@ -379,22 +400,50 @@ def _fluid_parts(
             match = _EPOCH_HEADER.match(text, pos)
             kind = EPOCH_STUB
         if match is None:
-            if pos == 0:
-                return None
             continue
         lo = index.get(match.group(1))
         hi = index.get(match.group(2) or match.group(1))
         if lo is None or hi is None or hi < lo or (ranges and lo <= ranges[-1][1]):
             continue
         ranges.append((lo, hi, kind))
+    inside = {k for lo, hi, _ in ranges for k in range(lo, hi + 1)}
+    for ref in _REF.findall(text):
+        first, _, last = ref.partition("..")
+        lo, hi = index.get(first), index.get(last or first)
+        if lo is None or hi is None or hi < lo or any(k in inside for k in range(lo, hi + 1)):
+            continue
+        ranges.append((lo, hi, SPAN_DIGEST))
+        inside.update(range(lo, hi + 1))
+    ranges.sort()
     return ranges, note
+
+
+def _is_fluid_text(row: dict[str, Any]) -> bool:
+    """A digest, epoch or note row Fluid built (never a stored message)."""
+    text = row.get("text", "")
+    return (row.get("role") == "user" and "handle" not in row and not row.get("toolUses")
+            and not row.get("toolResults")
+            and (text.startswith(NOTE_HEADER) or bool(_DIGEST_HEADER.match(text))
+                 or bool(_EPOCH_HEADER.match(text))))
 
 
 def _is_spacer(row: dict[str, Any]) -> bool:
     return row.get("text") == SPACER_TEXT and not row.get("toolUses") and not row.get("toolResults")
 
 
-def _excerpt(row: dict[str, Any]) -> str | None:
+def _archive_text(row: dict[str, Any]) -> str:
+    """Everything a dropped row showed the model, as plain text."""
+    parts = [row.get("text", "")]
+    for use in row.get("toolUses", []):
+        parts.append(f"[tool call {use.get('tool', '')} {use.get('tool_use_id', '')}: "
+                     f"{json.dumps(use.get('input', {}), ensure_ascii=False)}]")
+    for result in row.get("toolResults", []):
+        status = "error" if result.get("isError") else "result"
+        parts.append(f"[tool {status} {result.get('tool_use_id', '')}]: {result.get('text', '')}")
+    return "\n".join(p for p in parts if p)
+
+
+def _excerpt(row: dict[str, Any], ref: str | None) -> str | None:
     """One note line for a dropped row; None for a row with nothing visible
     (signed thinking alone, an image): it is counted, not quoted."""
     text = " ".join(row.get("text", "").split())
@@ -407,14 +456,29 @@ def _excerpt(row: dict[str, Any]) -> str | None:
         return None
     if len(text) > _NOTE_LINE_CHARS:
         text = text[:_NOTE_LINE_CHARS] + "…"
-    return f"- {row.get('role')}: {text}"
+    where = f' HistoryExpand("{ref}")' if ref else ""
+    return f"- {row.get('role')}{where}: {text}"
 
 
-def _note_row(dropped: list[dict[str, Any]], notes: list[str]) -> dict[str, Any] | None:
+def _note_row(
+    dropped: list[dict[str, Any]], notes: list[str], archive: list[dict[str, str]] | None,
+) -> dict[str, Any] | None:
     """One bounded row for every dropped row not in the stored history,
-    folding in the notes earlier compactions left."""
+    folding in the notes earlier compactions left.
+
+    With ``archive`` each dropped row's whole text goes there under a fresh
+    node id, and its note line cites that id: the caller persists the archive
+    before the answer is used, so ``HistoryExpand`` reads it back and
+    ``HistorySearch`` finds it. Without one, the note says plainly that its
+    excerpts are all that is left.
+    """
     count = len(dropped)
-    lines = [line for row in reversed(dropped) if (line := _excerpt(row)) is not None]
+    refs = [new_id("node") if archive is not None else None for _ in dropped]
+    if archive is not None:
+        archive.extend({"node_id": ref, "role": row.get("role", "user"), "text": _archive_text(row)}
+                       for ref, row in zip(refs, dropped))
+    lines = [line for row, ref in zip(reversed(dropped), reversed(refs))
+             if (line := _excerpt(row, ref)) is not None]
     for note in reversed(notes):
         match = _NOTE_COUNT.match(note)
         count += int(match.group(1)) if match else 0
@@ -428,11 +492,16 @@ def _note_row(dropped: list[dict[str, Any]], notes: list[str]) -> dict[str, Any]
             break
         kept.append(line)
         used += len(line) + 1
+    where = (
+        "were archived with the session: HistoryExpand a ref below reads one whole, "
+        "HistorySearch finds any of them"
+        if archive is not None else
+        "were dropped and are not recoverable: the excerpts below are all that is left of them"
+    )
     header = (
-        f"{NOTE_HEADER}{count} older rows of Claude Code's own context (reminders, "
-        "attachments or an earlier Claude Code summary) are not in this session's stored "
-        "history and were dropped. The conversation itself stays searchable with "
-        "HistorySearch. Newest first:]"
+        f"{NOTE_HEADER}{count} older rows of Claude Code's own context (reminders, attachments, "
+        f"skill or command text, or an earlier Claude Code summary) were not in this session's "
+        f"stored history; they {where}. Newest first:]"
     )
     return {"role": "user", "text": "\n".join([header, *kept]), "toolUses": []}
 
@@ -459,18 +528,32 @@ def _built(message: Message, node_id: str) -> dict[str, Any]:
     says where its original is."""
     row = project(message)
     if not row["text"] and not row["toolUses"] and not row.get("toolResults"):
-        row["text"] = f'[earlier content not shown here; HistoryExpand("{node_id}") re-reads it]'
+        row["text"] = f'{STAND_IN_HEADER}; HistoryExpand("{node_id}") re-reads it]'
     return row
+
+
+def _checked(row: dict[str, Any], calls: set[Any]) -> dict[str, Any]:
+    if any(use["tool_use_id"] not in calls for use in row["toolUses"]):
+        raise ValueError("cannot rebuild a call Claude Code does not have")
+    return row
+
+
+def _stand_in(role: str, node_ids: list[str]) -> dict[str, Any]:
+    """Stored messages left out whole rather than rebuilt, named for recall."""
+    refs = ", ".join(f'HistoryExpand("{node_id}")' for node_id in node_ids)
+    return {"role": role, "text": f"{STAND_IN_HEADER} (tool calls and results only Claude Code "
+                                  f"could show whole); {refs} re-reads them]", "toolUses": []}
 
 
 def _alternate(out: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Roles alternate outside an open tool group, as the mod demands.
 
-    Two built rows of one role merge: text with text, a parallel group's
-    calls with calls and its results with results, so a rebuilt group is one
-    call message and one result message with every id, input and error bit.
-    A kept row (it has a handle) is never rebuilt: it continues an open
-    group as the engine's own row, or gets a separator row.
+    Two built rows of one role merge: a parallel group's calls with calls and
+    its results with results, so a rebuilt group is one call message and one
+    result message with every id, input and error bit, and Fluid's digest,
+    epoch and note rows with each other. Any other text is never merged into
+    another row (the next compaction must still recognise each stored
+    message): it gets a separator row, as a kept row (it has a handle) does.
     """
     final: list[dict[str, Any]] = []
     pending: set[Any] = set()
@@ -478,7 +561,7 @@ def _alternate(out: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if final and final[-1]["role"] == row["role"]:
             left = final[-1]
             built = "handle" not in left and "handle" not in row
-            text_only = all(not r["toolUses"] and not r.get("toolResults") for r in (left, row))
+            text_only = _is_fluid_text(left) and _is_fluid_text(row)
             calls = left["toolUses"] and row["toolUses"]
             results = (left.get("toolResults") and row.get("toolResults")
                        and not left["toolUses"] and not row["toolUses"])
@@ -557,11 +640,44 @@ def _deep_history_end(view: list[SessionNode], tail: int, keep_chars: int) -> in
     return None
 
 
+def _opaque_nodes(nodes: list[SessionNode], owners: dict[str, int]) -> set[int]:
+    """Stored nodes whose rows carry blocks Fluid cannot rebuild: an image, or
+    the result of a tool whose result only Claude Code holds whole (a
+    ToolSearch result's tool_reference blocks load the deferred tools later
+    calls use). Such a row is kept whole or left out whole, never rebuilt."""
+    names = {block.id: block.name for node in nodes for block in node.message.content
+             if isinstance(block, ToolUseBlock)}
+    opaque: set[int] = set()
+    for i, node in enumerate(nodes):
+        for block in node.message.content:
+            if isinstance(block, Image) or (isinstance(block, ToolResultBlock) and (
+                    names.get(block.tool_use_id) in _OPAQUE_RESULT_TOOLS
+                    or any(isinstance(inner, Image) for inner in block.content or ()))):
+                opaque.add(i)
+    return opaque
+
+
+def _newest_request(view: list[SessionNode]) -> int:
+    """View position of the newest turn a person started (not a wake)."""
+    for p in range(len(view) - 1, -1, -1):
+        node = view[p]
+        if is_turn_start(node) and not is_wake_text(strip_system_reminders(
+                "".join(b.text for b in node.message.content if isinstance(b, Text)))):
+            return p
+    return len(view)
+
+
 def compact_messages(
     rows: Any, nodes: list[SessionNode], *, config: CompactionConfig | None = None,
     context_window: int | None = None, trigger: str = "manual",
+    archive: list[dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Claude Code's rows, compacted mechanically against the stored path.
+
+    Rows only Claude Code holds (skill and command text, attachments, hook
+    context) stay verbatim from the newest request a person made onward;
+    older ones leave through the compaction note, their whole text appended
+    to ``archive`` (see :func:`_note_row`), which the caller must persist.
 
     Raises :class:`NothingToCompact` when the result would not be smaller
     (for ``trigger="auto"``: small enough to leave the threshold), and
@@ -586,6 +702,7 @@ def compact_messages(
     # own rows while untouched and rebuilt or folded from the stored nodes
     # once it is old, so it keeps a recall ref.
     owners = _tool_owners(nodes)
+    opaque = _opaque_nodes(nodes, owners)
     loose = []
     for start, end in _group_spans(rows):
         if any(anchor is None for anchor in anchors[start:end]):
@@ -651,9 +768,15 @@ def compact_messages(
                           if isinstance(b, ToolResultBlock)}
                 for result in row.get("toolResults", []):
                     block = stored.get(result["tool_use_id"])
-                    if block is not None and not block.is_error and result["text"] != "".join(
+                    if block is None or result["text"] == "".join(
                             c.text for c in block.content if isinstance(c, Text)):
-                        trims.append((anchor.node.node_id, block.tool_use_id))
+                        continue
+                    if result["text"].startswith(_PLACEHOLDER_OPENINGS) and not block.is_error:
+                        trims.append((anchor.node.node_id, block.tool_use_id))  # Fluid's trim
+                    else:
+                        # Claude Code shows it differently (a tool_reference):
+                        # its row is the only whole copy.
+                        opaque.update(range(anchor.start, anchor.end + 1))
         elif fluid is not None:
             ranges, note = fluid
             if note is not None:
@@ -709,6 +832,16 @@ def compact_messages(
     def compacted(first: int, last: int, message: Message) -> bool:
         return first != last or (message is not view[first].message and first < tail)
 
+    def folded(first: int, last: int, message: Message) -> bool:
+        """A digest, epoch or summary stands in the nodes' place (not a
+        rebuild of one node with some blocks changed)."""
+        return first != last or (message is not view[first].message
+                                 and _is_fluid_text(project(message)))
+
+    stored_at = {position: k for k, position in at.items()}
+    hard = {p for p in range(len(view)) if stored_at.get(p) in opaque}
+    in_fold = {k for first, last, m in segments if folded(first, last, m)
+               for k in range(first, last + 1)}
     # A unit stays its own rows only while none of its nodes is compacted.
     touched = {k for first, last, m in segments if compacted(first, last, m)
                for k in range(first, last + 1)}
@@ -716,32 +849,56 @@ def compact_messages(
 
     last_compacted = max((last for first, last, m in segments if compacted(first, last, m)),
                          default=-1)
+    # Claude Code's own rows from the newest request on are the work in hand
+    # (a skill being followed, a command's expansion): never dropped.
+    pinned_from = _newest_request(view)
     calls = {use["tool_use_id"] for row in rows for use in row["toolUses"]}
     out: list[dict[str, Any]] = []
     dropped: list[dict[str, Any]] = []
     pending = list(unknown)
+    emitted_units: set[int] = set()
 
     def take(upto: int) -> None:
         while pending and pending[0][0] <= upto:
             position, row = pending.pop(0)
-            (dropped if position <= last_compacted else out).append(row)
+            old = position <= last_compacted and position < pinned_from
+            (dropped if old else out).append(row)
 
     for first, last, message in segments:
         take(first)
-        if pending and pending[0][0] <= last:  # inside a fold
-            while pending and pending[0][0] <= last:
-                dropped.append(pending.pop(0)[1])
-        if first == last and first in unit_of and first not in rebuilt:
-            out.extend(rows_of.get(first, []))  # the unit's own rows, once
-        elif compacted(first, last, message) or not rows_of.get(first) or first in rebuilt:
-            row = _built(message, view[last].node_id)
-            if any(use["tool_use_id"] not in calls for use in row["toolUses"]):
-                raise ValueError("cannot rebuild a call Claude Code does not have")
-            out.append(row)
+        while pending and pending[0][0] <= last:  # inside a fold
+            position, row = pending.pop(0)
+            (out if position >= pinned_from else dropped).append(row)
+        if first == last and first in unit_of:
+            positions = unit_of[first]
+            head = positions[0]
+            if head in emitted_units:
+                continue
+            if first not in rebuilt:
+                out.extend(rows_of.get(head, []))  # the unit's own rows, once
+                emitted_units.add(head)
+            elif any(p in hard for p in positions):
+                # Never rebuilt: whole as Claude Code holds it, or (some of it
+                # folded) the rest named for recall.
+                emitted_units.add(head)
+                if not in_fold & set(positions):
+                    out.extend(rows_of.get(head, []))
+                else:
+                    rest = [view[p].node_id for p in positions if p not in in_fold]
+                    out.append(_stand_in("user", rest))
+            else:
+                out.append(_checked(_built(message, view[last].node_id), calls))
+        elif folded(first, last, message):
+            out.append(_built(message, view[last].node_id))
+        elif compacted(first, last, message) and first in hard:
+            out.extend(rows_of.get(first) or [_stand_in(view[first].message.role,
+                                                        [view[first].node_id])])
+        elif compacted(first, last, message) or not rows_of.get(first):
+            out.append(_checked(_built(message, view[last].node_id), calls))
         else:
             out.extend(rows_of[first])
     take(len(view))
-    note = _note_row(dropped, notes)
+    note = _note_row(dropped, notes, archive)
     final = _alternate(([note] if note else []) + out)
     validate_rows(final, handles=False)
     # Content only: a handle is how Claude Code names a row, not context.
