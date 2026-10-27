@@ -131,6 +131,19 @@ describe('call button on the new-session composer (#1616)', () => {
   expect(mocks.startSessionWithoutPrompt).toHaveBeenCalledTimes(1);
   expect(mocks.startCallForSession).not.toHaveBeenCalled();
  });
+ it('shows a start the call controller refused on the page', async () => {
+  mocks.startSessionWithoutPrompt.mockResolvedValue('created');
+  mocks.startCallForSession.mockRejectedValueOnce(new Error('End the current voice call before starting another.'));
+  const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+  active.set(fresh); render(VoiceCallButton);
+  const button = await freshButton() as HTMLButtonElement;
+  await fireEvent.click(button);
+  await vi.waitFor(() => expect(mocks.banner).toHaveBeenCalledWith(
+   'End the current voice call before starting another.',
+   expect.objectContaining({ severity: 'error', persist: true, session_id: 'created' })));
+  await vi.waitFor(() => expect(button.disabled).toBe(false));
+  logged.mockRestore();
+ });
  it('creates nothing when the user keeps the call already running', async () => {
   mocks.confirmCallReplacement.mockResolvedValue(false);
   active.set(fresh); render(VoiceCallButton);
