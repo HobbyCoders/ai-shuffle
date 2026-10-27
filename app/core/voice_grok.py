@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import OrderedDict
 
 from app.core.voice_models import GROK_URL
 from app.core.voice_prompts import LIVE_INSTRUCTIONS
@@ -16,6 +17,7 @@ from app.core.voice_stream import VoiceStream, connect
 logger = logging.getLogger(__name__)
 
 SPEECH_COMMIT_GRACE_S = 1.0
+INPUT_TRANSCRIPT_ITEM_LIMIT = 64
 
 HANDOFF_TOOL = {
     "type": "function", "name": "delegate_to_chat_agent",
@@ -48,7 +50,7 @@ class GrokVoiceStream(VoiceStream):
         self.speech_active = False
         self.speech_pending = False
         self.speech_resume_task = None
-        self.input_transcripts: dict[str | None, str] = {}
+        self.input_transcripts: OrderedDict[str | None, str] = OrderedDict()
 
     async def cancel_speech_resume(self):
         if self.speech_resume_task is not None:
@@ -154,22 +156,52 @@ class GrokVoiceStream(VoiceStream):
     def input_transcript_delta(self, event):
         """xAI completions carry whole transcripts, not caption deltas."""
         text = event.get("transcript") or ""
-        if not text:
-            return ""
         item_id = event.get("item_id")
         previous = self.input_transcripts.get(item_id, "")
-        if previous and not text.startswith(previous):
-            if item_id is not None:
-                # Captions are append-only. Keep the emitted version rather
-                # than append a correction as another copy of the request.
-                return ""
-            # Without an item ID, unrelated text is the next utterance.
+        logger.debug(
+            "Grok input completion item_id=%r previous_item_id=%r chars=%d previous_chars=%d",
+            item_id, event.get("previous_item_id"), len(text), len(previous),
+        )
+        if not text:
+            return ""
+        if item_id in self.input_transcripts:
+            self.input_transcripts.move_to_end(item_id)
+        # The schema supplies IDs. Identical unkeyed utterances are treated
+        # as repeats; unrelated unkeyed text starts another utterance.
+        if item_id is None and not text.startswith(previous):
             previous = ""
-        delta = text[len(previous):]
+        pending = self.pending["user"]
+        if not previous:
+            accumulated = pending.strip()
+            if (len(accumulated) >= 15 or len(accumulated.split()) >= 3) and (
+                len(text) > len(accumulated) and text.startswith(accumulated)
+            ):
+                # Some completions repeat the pending request under a new ID.
+                previous = accumulated
+        diverged = bool(previous) and not text.startswith(previous)
+        start = len(previous)
+        if diverged:
+            logger.debug(
+                "Grok input revision item_id=%r chars=%d previous_chars=%d",
+                item_id, len(text), len(previous),
+            )
+            if len(text) <= start:
+                return ""
+            # Captions cannot retract corrections. Retain whole new words
+            # after the previous snapshot's length, not a partial word.
+            while (
+                start < len(text) and not text[start - 1].isspace() and not text[start].isspace()
+            ):
+                start += 1
+        delta = text[start:]
         if delta:
-            if not previous and self.input_transcripts:
-                delta = " " + delta
+            if (not previous or diverged) and pending and not pending[-1].isspace():
+                if not delta[:1].isspace():
+                    delta = " " + delta
             self.input_transcripts[item_id] = text
+            self.input_transcripts.move_to_end(item_id)
+            if len(self.input_transcripts) > INPUT_TRANSCRIPT_ITEM_LIMIT:
+                self.input_transcripts.popitem(last=False)
         return delta
 
     async def upstream_frames(self):

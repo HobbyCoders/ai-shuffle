@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import json
+import logging
 from unittest.mock import AsyncMock
 
 import pytest
@@ -121,8 +122,44 @@ async def test_grok_wire_transcripts_and_same_chat_delegation(monkeypatch):
         [("a", "Try"), ("b", "Try")], ["Try", " Try"], id="distinct-identical-items",
     ),
     pytest.param(
-        [("a", "Use red"), ("a", "Use blue"), ("a", "Use blue now"), ("a", "Use red please")],
-        ["Use red", " please"], id="revision-keeps-emitted-prefix",
+        [("a", "Use red"), ("a", "Use tan"), ("a", "Use"), ("a", "Use red please")],
+        ["Use red", " please"], id="shorter-revision-keeps-emitted-prefix",
+    ),
+    pytest.param(
+        [("a", "I want red"), ("a", "I wanted red cars"), ("a", "I wanted red cars"),
+         ("a", "I wanted red cars today")],
+        ["I want red", " cars", " today"], id="longer-revision-retains-new-whole-words",
+    ),
+    pytest.param(
+        [("a", "We need to"), ("b", "We need to work"), ("c", "We need to work on this")],
+        ["We need to", " work", " on this"], id="cumulative-across-items",
+    ),
+    pytest.param(
+        [("a", "We need to do some work on the suggested response feature. Like"),
+         ("b", "We need to do some work on the suggested response feature. Like, "
+          "that's obviously not helpful.")],
+        ["We need to do some work on the suggested response feature. Like",
+         ", that's obviously not helpful."], id="cross-item-call-shape",
+    ),
+    pytest.param(
+        [("a", "Suggested replies"), ("b", "Suggested replies need work")],
+        ["Suggested replies", " need work"], id="cross-item-character-minimum",
+    ),
+    pytest.param(
+        [("a", "We need"), ("b", "We need to work")],
+        ["We need", " We need to work"], id="cross-item-below-minimum",
+    ),
+    pytest.param(
+        [("a", "yes"), ("b", "yes")], ["yes", " yes"], id="distinct-yes-items",
+    ),
+    pytest.param(
+        [("a", "go"), ("b", "gopher")], ["go", " gopher"], id="short-prefix-is-not-cumulative",
+    ),
+    pytest.param(
+        [("a", "Like "), ("b", "We need")], ["Like ", "We need"], id="existing-space",
+    ),
+    pytest.param(
+        [("a", "Like"), ("b", " We need")], ["Like", " We need"], id="incoming-space",
     ),
     pytest.param(
         [(None, "Like"), (None, "We need")], ["Like", " We need"], id="unkeyed-utterances",
@@ -150,9 +187,11 @@ async def test_grok_input_completions_become_only_new_caption_text(
 @pytest.mark.parametrize("stream_class,model", [
     (GrokVoiceStream, GROK_MODEL), (SuperGrokVoiceStream, SUPERGROK_MODEL),
 ])
-@pytest.mark.parametrize("item_id", ["speech-1", None])
+@pytest.mark.parametrize("item_ids", [
+    ("speech-1",) * 4, (None,) * 4, ("a", "b", "c", "c"),
+], ids=["same-item", "unkeyed", "changing-items"])
 async def test_grok_repeated_request_prefixes_are_stored_and_delegated_once(
-    monkeypatch, stream_class, model, item_id,
+    monkeypatch, stream_class, model, item_ids,
 ):
     from app.core import turn_recorder
 
@@ -165,7 +204,7 @@ async def test_grok_repeated_request_prefixes_are_stored_and_delegated_once(
     call.upstream = Upstream([json.dumps({
         "type": "conversation.item.input_audio_transcription.completed", "transcript": text,
         **({"item_id": item_id} if item_id is not None else {}),
-    }) for text in [*prefixes, request]] + [json.dumps({
+    }) for item_id, text in zip(item_ids, [*prefixes, request])] + [json.dumps({
         "type": "response.function_call_arguments.done",
         "name": "delegate_to_chat_agent", "call_id": "tool-1",
     })])
@@ -185,6 +224,73 @@ async def test_grok_repeated_request_prefixes_are_stored_and_delegated_once(
         f"user: {request}\n",
         spoken=request, command=f"voice:{call.call_key}:tool-1",
     )
+
+
+@pytest.mark.asyncio
+async def test_grok_input_item_cache_evicts_least_recent_completion():
+    call = GrokVoiceStream(
+        AsyncMock(), {"id": "s"}, {"model": GROK_MODEL, "voice": "eve"}, "secret", 5,
+    )
+    call.upstream = Upstream([json.dumps({
+        "type": "conversation.item.input_audio_transcription.completed",
+        "item_id": f"item-{index}", "transcript": f"word{index}",
+    }) for index in range(65)])
+    await call.receive_upstream()
+    assert len(call.input_transcripts) == 64
+    assert "item-0" not in call.input_transcripts
+    call.upstream.events = [json.dumps({
+        "type": "conversation.item.input_audio_transcription.completed",
+        "item_id": f"item-{index}", "transcript": f"word{index}",
+    }) for index in (1, 65)]
+    await call.receive_upstream()
+    assert len(call.input_transcripts) == 64
+    assert "item-1" in call.input_transcripts  # A repeated item refreshes its recency.
+    assert "item-2" not in call.input_transcripts
+    assert "item-65" in call.input_transcripts
+
+
+@pytest.mark.asyncio
+async def test_grok_flush_retains_item_baselines_but_not_a_leading_separator(monkeypatch):
+    from app.core import turn_recorder
+
+    monkeypatch.setattr(turn_recorder, "record_voice_exchange", AsyncMock())
+    call = GrokVoiceStream(
+        AsyncMock(), {"id": "s"}, {"model": GROK_MODEL, "voice": "eve"}, "secret", 5,
+    )
+    call.upstream = Upstream([json.dumps({
+        "type": "conversation.item.input_audio_transcription.completed",
+        "item_id": "a", "transcript": "Like",
+    })])
+    await call.receive_upstream()
+    await call.flush()
+    assert call.pending["user"] == ""
+    call.upstream.events = [json.dumps({
+        "type": "conversation.item.input_audio_transcription.completed",
+        "item_id": item_id, "transcript": text,
+    }) for item_id, text in [("a", "Like"), ("b", "We need")]]
+    await call.receive_upstream()
+    assert call.pending["user"] == "We need"
+    assert call.input_transcripts["a"] == "Like"
+
+
+@pytest.mark.asyncio
+async def test_grok_completion_debug_logs_only_ids_and_lengths(caplog):
+    caplog.set_level(logging.DEBUG, logger="app.core.voice_grok")
+    call = GrokVoiceStream(
+        AsyncMock(), {"id": "s"}, {"model": GROK_MODEL, "voice": "eve"}, "secret", 5,
+    )
+    texts = ["I want red", "I wanted red cars"]
+    call.upstream = Upstream([json.dumps({
+        "type": "conversation.item.input_audio_transcription.completed",
+        "item_id": "speech", "previous_item_id": "preceding", "transcript": text,
+    }) for text in texts])
+    await call.receive_upstream()
+    assert "item_id='speech' previous_item_id='preceding'" in caplog.text
+    assert "Grok input revision item_id='speech'" in caplog.text
+    for text in texts:
+        assert f"chars={len(text)}" in caplog.text
+        assert text not in caplog.text
+    assert f"previous_chars={len(texts[0])}" in caplog.text
 
 
 @pytest.mark.asyncio
