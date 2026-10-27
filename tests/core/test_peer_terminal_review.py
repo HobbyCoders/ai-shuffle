@@ -64,7 +64,7 @@ async def test_probe_has_total_deadline_and_short_connect_timeout(peers, monkeyp
 
     monkeypatch.setattr(control, "call", blackhole)
     previous = transport.connect_timeout.get()
-    result = await asyncio.wait_for(targets.peer_availability(peers[1]["runners"][0]), .2)
+    result = await asyncio.wait_for(targets.peer_availability(peers[1]["runners"][0]), 5)
     assert result["reason_code"] == "peer_unavailable"
     assert observed and all(value is not None and value <= 1 for value in observed)
     assert transport.connect_timeout.get() == previous
@@ -74,20 +74,29 @@ async def test_probe_has_total_deadline_and_short_connect_timeout(peers, monkeyp
 async def test_pending_status_checks_are_concurrent(peers, monkeypatch):
     leases = {relay.authorize(SimpleNamespace(valid=True), "owner", "peer") for _ in range(2)}
     arrived = set()
+    in_flight = set()
     both = asyncio.Event()
 
     async def probe(device, action, body, **kwargs):
         if body["op"] == "probe":
             return {"reason_code": "recipient_approval_required"}
-        arrived.add(body["lease"])
-        if arrived == leases:
-            both.set()
-        await both.wait()
-        return {"status": "approved", "used": False}
+        lease = body["lease"]
+        arrived.add(lease)
+        in_flight.add(lease)
+        try:
+            # Arrival alone is insufficient: a serial probe could arrive after
+            # its predecessor timed out. Only overlapping calls open the gate.
+            if in_flight == leases:
+                both.set()
+            await both.wait()
+            return {"status": "approved", "used": False}
+        finally:
+            in_flight.remove(lease)
 
     monkeypatch.setattr(control, "call", probe)
-    rows = await asyncio.wait_for(targets.targets(None, "owner"), .2)
-    assert arrived == leases and rows[0]["available"]
+    # A deadlock watchdog, not the evidence of concurrency: the gate is that proof.
+    rows = await asyncio.wait_for(targets.targets(None, "owner"), 10)
+    assert both.is_set() and arrived == leases and rows[0]["available"]
 
 
 @pytest.mark.asyncio

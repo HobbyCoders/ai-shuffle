@@ -93,8 +93,8 @@ class CrossAppOverlayTest {
         }
         return done to result
     }
-    private fun result(request: Pair<CountDownLatch, AtomicReference<JSONObject>>): JSONObject {
-        assertTrue("Cross-app request did not finish", request.first.await(7, TimeUnit.SECONDS))
+    private fun result(request: Pair<CountDownLatch, AtomicReference<JSONObject>>, timeoutSeconds: Long = 7): JSONObject {
+        assertTrue("Cross-app request did not finish", request.first.await(timeoutSeconds, TimeUnit.SECONDS))
         return requireNotNull(request.second.get())
     }
     @Test fun overlayPreservesTargetAndAuthorizesOnlyOneFreshAction() {
@@ -152,13 +152,15 @@ class CrossAppOverlayTest {
                 val denied = request("read_screen", JSONObject()); localPress(automation, "Deny")
                 assertEquals("denied", result(denied).getString("status"))
                 val expiryTrace = AtomicReference<JSONObject>()
-                val expiring = request("read_screen", JSONObject(), 2_000, expiryTrace)
+                // The normal 20 s TTL outlives the 8 s presentation wait, even on
+                // a loaded emulator. Still leave consent unanswered until expiry.
+                val expiring = request("read_screen", JSONObject(), trace = expiryTrace)
                 awaitCondition("Expiring cross-app consent was never presented") {
                     automation.windows.filter { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY }
                         .any { it.root?.findAccessibilityNodeInfosByText("Allow once")?.any { node -> node.isVisibleToUser && node.isClickable } == true }
                 }
                 assertEquals(1L, expiring.first.count)
-                assertEquals("denied", result(expiring).getString("status"))
+                assertEquals("denied", result(expiring, timeoutSeconds = 25).getString("status"))
                 // Use the executor's actual deadline/completion, not the later
                 // assertion time (diagnostic collection must not hide early denial).
                 val completion = requireNotNull(expiryTrace.get())
