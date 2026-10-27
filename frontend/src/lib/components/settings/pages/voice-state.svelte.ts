@@ -9,7 +9,9 @@
  * - A refresh never lands under a save in flight, and an older read never
  *   overwrites a newer one (`#request` generations).
  * - Every write is a partial PUT (`saveVoiceSettings`); the response is the
- *   settled object. A failed write keeps the last good settings.
+ *   settled object. A failed write keeps the last good settings, re-reads
+ *   them, and its error stays on the page through that re-read (#719) until
+ *   the next save.
  * - An editor that outlived an account change refuses to write: the owner
  *   epoch is captured when the page mounts.
  * - Free-text fields hold their own draft while focused (NumberField,
@@ -58,6 +60,8 @@ export class VoiceState {
 	readonly #owner = sessionOwnerEpoch();
 	#alive = true;
 	#request = 0;
+	/** The last save's failure; a refresh shows it instead of clearing it. */
+	#saveError = '';
 
 	/** False once the page unmounted or the signed-in account changed. */
 	current(): boolean {
@@ -77,7 +81,7 @@ export class VoiceState {
 			if (this.current() && generation === this.#request && !this.saving) {
 				this.settings = value;
 				this.status = 'ok';
-				this.error = '';
+				this.error = this.#saveError;
 			}
 		} catch (err) {
 			if (!this.current() || generation !== this.#request) return;
@@ -104,7 +108,7 @@ export class VoiceState {
 		if (!this.current()) return false;
 		++this.#request;
 		this.saving = true;
-		this.error = '';
+		this.error = this.#saveError = '';
 		try {
 			const updated = await saveVoiceSettings(patch);
 			if (!this.current()) return false;
@@ -113,7 +117,7 @@ export class VoiceState {
 			return true;
 		} catch (err) {
 			if (this.current()) {
-				this.error = message(err, 'Could not save voice settings.');
+				this.error = this.#saveError = message(err, 'Could not save voice settings.');
 			}
 			return false;
 		} finally {

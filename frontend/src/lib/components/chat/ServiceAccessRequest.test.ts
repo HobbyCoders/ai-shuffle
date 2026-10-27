@@ -218,13 +218,72 @@ describe('guided private service access', () => {
 		expect(screen.getByRole('alert').textContent).toMatch(/HTTPS connection/);
 	});
 
-	it('clears token and consent on access changes, back navigation, ownership change, and unmount', async () => {
-		const { rerender, unmount } = mount(); await review(); await approve();
+	// #673: the form's own choices used to wipe the token the owner had just pasted.
+	it('keeps the token while every setting in the card changes, and grants without pasting again', async () => {
+		let received: any;
+		m.post.mockImplementation(async (_: string, body: unknown) => { received = structuredClone(body); });
+		mount(); await fireEvent.change(field('Service'), { target: { value: 'custom' } });
+		await fireEvent.input(field('Service address'), { target: { value: 'https://home.example/api' } });
+		await review(); await approve();
+		const grant = () => screen.getByRole('button', { name: 'Grant access' }) as HTMLButtonElement;
+		expect(grant().disabled).toBe(false);
+
 		await fireEvent.change(field('Access for'), { target: { value: '15' } });
-		expect(field('API key or token').value).toBe('');
-		await approve(); await rerender({ owner: 'Other PC' }); expect(field('API key or token').value).toBe('');
+		await fireEvent.click(screen.getByRole('checkbox', { name: /Save this connection/ }));
+		await fireEvent.click(screen.getByRole('checkbox', { name: /Allow changes/ }));
+		await fireEvent.click(screen.getByText('Authentication and certificate settings'));
+		await fireEvent.input(field('Credential header'), { target: { value: 'X-API-Key' } });
+		await fireEvent.input(field('Scheme'), { target: { value: '' } });
+		await fireEvent.click(screen.getByRole('checkbox', { name: /Trust a specific certificate/ }));
+		await fireEvent.input(field('Certificate SHA-256 fingerprint'), { target: { value: 'AB'.repeat(32) } });
+		await fireEvent.input(field('Resource name'), { target: { value: 'Home API' } });
+		await tick();
+
+		expect(field('API key or token').value).toBe(token);
+		expect((screen.getByRole('checkbox', { name: /I approve access/ }) as HTMLInputElement).checked).toBe(true);
+		expect(grant().disabled).toBe(false);
+		await fireEvent.click(grant());
+		await waitFor(() => expect(received).toBeTruthy());
+		expect(received).toMatchObject({ minutes: 15, save_connection: true });
+		expect(received.connection).toMatchObject({
+			url: 'https://home.example/api', label: 'Home API', auth_header: 'X-API-Key', auth_scheme: '',
+			writable: true, fingerprint: 'AB'.repeat(32), secret: token, minutes: 15
+		});
+	});
+
+	it('clears token and consent on a new destination, back navigation, ownership change, and unmount', async () => {
+		const { rerender, unmount, request } = mount(); await review(); await approve();
+		await rerender({ owner: 'Other PC' }); expect(field('API key or token').value).toBe('');
+		expect((screen.getByRole('checkbox', { name: /I approve access/ }) as HTMLInputElement).checked).toBe(false);
+		await approve(); await rerender({ sessionId: 'another session' }); expect(field('API key or token').value).toBe('');
+		await approve(); await rerender({ request: { ...request, id: 'r/2' } }); expect(field('API key or token').value).toBe('');
 		await approve(); await fireEvent.click(screen.getByRole('button', { name: /Back/ }));
 		await fireEvent.click(screen.getByRole('button', { name: 'I have a token' })); expect(field('API key or token').value).toBe('');
 		await approve(); unmount(); await tick(); mount(); await review(); expect(field('API key or token').value).toBe('');
+	});
+
+	it('a token never carries over to another service address or a saved connection', async () => {
+		mount({ savedConnections: [{ id: 'cf', kind: 'service', label: 'Cloudflare account', target: url, fingerprint: '', writable: false }] });
+		await fireEvent.change(field('Service'), { target: { value: 'custom' } });
+		await fireEvent.input(field('Service address'), { target: { value: 'https://home.example/api' } });
+		await review(); await approve();
+		await fireEvent.click(screen.getByRole('button', { name: /Back/ }));
+		await fireEvent.click(screen.getByRole('button', { name: /Back/ }));
+		await fireEvent.input(field('Service address'), { target: { value: 'https://other.example/api' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Continue to setup' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'I have a token' }));
+		expect(field('API key or token').value).toBe('');
+		expect((screen.getByRole('button', { name: 'Grant access' }) as HTMLButtonElement).disabled).toBe(true);
+
+		await approve();
+		await fireEvent.click(screen.getByRole('button', { name: /Back/ }));
+		await fireEvent.click(screen.getByRole('button', { name: /Back/ }));
+		await fireEvent.change(field('Connection'), { target: { value: 'cf' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Continue to review' }));
+		expect(screen.queryByLabelText('API key or token')).toBeNull();
+		await fireEvent.click(screen.getByRole('checkbox', { name: /I approve access/ }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
+		await waitFor(() => expect(m.post).toHaveBeenCalledOnce());
+		expect(m.post.mock.calls[0][1]).toEqual({ connection: null, saved_id: 'cf', minutes: 60, save_connection: false });
 	});
 });

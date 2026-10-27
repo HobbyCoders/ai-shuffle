@@ -77,6 +77,46 @@ describe('VoiceState sync', () => {
 		expect(state.error).toBe('Nope');
 	});
 
+	// #719: the follow-up refresh used to clear the error before anyone saw it.
+	it("keeps a failed save's error through the follow-up refresh, with the server's value", async () => {
+		const state = new VoiceState();
+		voiceApi.load.mockResolvedValueOnce(settings('marin'));
+		await state.refresh();
+		voiceApi.save.mockRejectedValue({ detail: 'Voice "nova" is not available' });
+		const reread = deferred<unknown>();
+		voiceApi.load.mockReturnValueOnce(reread.promise);
+		expect(await state.save({ voice_voice: 'nova' })).toBe(false);
+		expect(voiceApi.load).toHaveBeenCalledTimes(2);
+		reread.resolve(settings('marin'));
+		await vi.waitFor(() => expect(state.saving).toBe(false));
+		await reread.promise;
+		await Promise.resolve();
+		expect((state.settings as { voice_voice: string } | null)?.voice_voice).toBe('marin');
+		expect(state.status).toBe('ok');
+		expect(state.error).toBe('Voice "nova" is not available');
+
+		// A later refresh (another tab changed a setting) still shows it…
+		voiceApi.load.mockResolvedValueOnce(settings('marin'));
+		await state.refresh();
+		expect(state.error).toBe('Voice "nova" is not available');
+
+		// …until the next save, which succeeds.
+		voiceApi.save.mockResolvedValueOnce(settings('cedar'));
+		voiceApi.load.mockResolvedValue(settings('cedar'));
+		expect(await state.save({ voice_voice: 'cedar' })).toBe(true);
+		await state.refresh();
+		expect(state.error).toBe('');
+	});
+
+	it('a failed save with no detail falls back to a plain message that survives the refresh', async () => {
+		const state = new VoiceState();
+		voiceApi.save.mockRejectedValue(new Error(''));
+		voiceApi.load.mockResolvedValue(settings('marin'));
+		expect(await state.save({ voice_voice: 'cedar' })).toBe(false);
+		await state.refresh();
+		expect(state.error).toBe('Could not save voice settings.');
+	});
+
 	it('lists only providers that can fund GPT Live calls', async () => {
 		const state = new VoiceState();
 		transport.get.mockResolvedValue([
