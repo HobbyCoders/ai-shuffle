@@ -31,6 +31,7 @@ beforeEach(() => {
 	Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility });
 	vi.stubGlobal('location', { ...window.location, reload });
 	reload.mockClear();
+	sessionStorage.clear();
 	kit.check.mockClear().mockResolvedValue(true);
 	for (const n of notifications.current.live) notify.dismissLive(n.id);
 	teardown = installAppUpdateWatch();
@@ -51,6 +52,21 @@ it('the phone app coming back to the foreground on an old build reloads', async 
 	expect(kit.check).toHaveBeenCalledTimes(1);
 	expect(reload).toHaveBeenCalledTimes(1);
 	expect(banners()).toEqual([]);
+});
+
+it('a reload that came back on the same build offers the banner instead of looping', async () => {
+	setVisibility('hidden');
+	setVisibility('visible');
+	await flush();
+	expect(reload).toHaveBeenCalledTimes(1);
+	// The "reloaded" page (same module state here) still runs the old build.
+	teardown();
+	teardown = installAppUpdateWatch();
+	setVisibility('hidden');
+	setVisibility('visible');
+	await flush();
+	expect(reload).toHaveBeenCalledTimes(1);
+	expect(banners()).toHaveLength(1);
 });
 
 it('a reconnect while the user is on the page offers one neutral banner, then reloads on hide', async () => {

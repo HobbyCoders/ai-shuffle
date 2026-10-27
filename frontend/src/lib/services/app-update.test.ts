@@ -204,6 +204,17 @@ describe('createAppUpdateMonitor', () => {
 		expect(deps.showBanner).not.toHaveBeenCalled();
 	});
 
+	it('does not reload in a loop when a reload came back on the same build', async () => {
+		const { deps } = setup();
+		const guarded = createAppUpdateMonitor({ ...deps, autoReloadAllowed: () => false });
+		await guarded.visible();
+		expect(deps.reload).not.toHaveBeenCalled();
+		expect(deps.showBanner).toHaveBeenCalledWith(false);
+		// The user can still choose to reload.
+		guarded.reloadNow();
+		expect(deps.reload).toHaveBeenCalledTimes(1);
+	});
+
 	it('takes the service worker at its word', () => {
 		const { monitor, deps } = setup({ newBuild: false });
 		monitor.markStale();

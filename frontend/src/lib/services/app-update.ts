@@ -159,6 +159,12 @@ export interface AppUpdateMonitorDeps {
 	isHidden: () => boolean;
 	blockers: () => readonly string[];
 	reload: () => void;
+	/**
+	 * False when an automatic reload already ran from this very build and the
+	 * page still came back on it (a worker whose version file does not match
+	 * its pages): offer the banner instead of reloading in a loop.
+	 */
+	autoReloadAllowed?: () => boolean;
 	/** Show (or upgrade) the single update banner; `broken` means a feature already failed. */
 	showBanner: (broken: boolean) => void;
 	now?: () => number;
@@ -186,7 +192,8 @@ export function createAppUpdateMonitor(deps: AppUpdateMonitorDeps) {
 	/** Apply the rules to a known-stale page. */
 	function act(): 'reload' | 'banner' | 'none' {
 		if (!stale || reloading) return 'none';
-		const decision = reloadDecision({ hidden: deps.isHidden(), resumed: justResumed(), blockers: deps.blockers() });
+		let decision = reloadDecision({ hidden: deps.isHidden(), resumed: justResumed(), blockers: deps.blockers() });
+		if (decision === 'reload' && deps.autoReloadAllowed && !deps.autoReloadAllowed()) decision = 'banner';
 		if (decision === 'reload') {
 			reloading = true;
 			deps.reload();

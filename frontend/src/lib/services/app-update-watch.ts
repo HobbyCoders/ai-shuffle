@@ -14,6 +14,7 @@
  *  - live sync reconnects after a gap (a worker update restarts the server),
  *  - a lazy import fails (`vite:preloadError`, or a caller's report).
  */
+import { version } from '$app/environment';
 import { updated } from '$app/state';
 import { get } from 'svelte/store';
 import { liveBanners, notify } from '$lib/stores/notifications';
@@ -26,6 +27,18 @@ import {
 	setAppUpdateListener,
 	type AppUpdateMonitor
 } from './app-update';
+
+/** The build an automatic reload last left from (this tab only). */
+const RELOADED_FROM_KEY = 'ai-shuffle-update-reloaded-from';
+
+function readReloadedFrom(): string | null {
+	try { return sessionStorage.getItem(RELOADED_FROM_KEY); } catch { return null; }
+}
+
+function reloadPage(): void {
+	try { sessionStorage.setItem(RELOADED_FROM_KEY, version); } catch { /* storage off: no loop guard */ }
+	window.location.reload();
+}
 
 let monitor: AppUpdateMonitor | null = null;
 let bannerId: string | null = null;
@@ -59,7 +72,9 @@ export function installAppUpdateWatch(): () => void {
 		checkForNewBuild: () => updated.check(),
 		isHidden: () => document.visibilityState === 'hidden',
 		blockers: reloadBlockers,
-		reload: () => window.location.reload(),
+		reload: reloadPage,
+		// A reload that came back on the same build would only repeat itself.
+		autoReloadAllowed: () => readReloadedFrom() !== version,
 		showBanner
 	});
 	monitor = current;
