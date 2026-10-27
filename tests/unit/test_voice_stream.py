@@ -73,7 +73,8 @@ async def test_live_delegation_is_correlated_and_uses_accumulated_user_context(m
     await call.receive_upstream()
     await call.delegation_task
     call.flush.assert_awaited_once()
-    delegate.assert_awaited_once_with("s1", "Live conversation context (only the latest new request needs action):\nuser: What is six times seven?\n")
+    delegate.assert_awaited_once_with("s1", "Live conversation context (only the latest new request needs action):\nuser: What is six times seven?\n",
+                                      spoken="What is six times seven?", command=f"voice:{call.call_key}:{did}")
     assert json.loads(call.upstream.sent[0]) == {
         "type": "session.commentary.append", "delegation_id": did, "content": "The answer is forty-two.",
     }
@@ -328,7 +329,7 @@ async def test_typed_producer_records_attachment_text_before_chat_handoff(monkey
     order = []
     async def record(session, user, assistant, **kwargs):
         order.append(("record", session, user, kwargs["model"]))
-    async def delegate(session, prompt):
+    async def delegate(session, prompt, **_kwargs):
         assert order and order[0][0] == "record"
         order.append(("delegate", session, prompt))
         return "Inspected."

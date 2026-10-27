@@ -7,9 +7,19 @@ import '../src/app.css';
 // conversation, then starts a call on it. Every request is answered here; the
 // microphone is always denied, so a call stops before any audio or realtime
 // connection. `?fail=1` makes the session create fail; `?device=worker` picks
-// another install as the runner.
+// another install as the runner. `?remote=online|offline` opens an existing
+// conversation another worker (Office PC) runs, with that worker online or
+// offline (#700).
 const params = new URLSearchParams(location.search);
 const CREATED = 'fixture-call-session';
+const REMOTE = 'fixture-remote-chat';
+const remote = params.get('remote');
+const remoteRow = {
+	id: REMOTE, title: 'Rail icon sizes', status: 'active', mode: 'chat', profile_id: 'fixture-agent',
+	is_remote: true, controllable: remote !== 'offline', device_name: 'Office PC', device_online: remote !== 'offline',
+	remote_runtime_state: remote === 'offline' ? 'offline' : 'idle', instance_id: 'office-pc', owner_device_id: 'office-pc',
+	created_at: '2026-10-26T23:00:00Z', updated_at: '2026-10-26T23:10:00Z',
+};
 const calls: { method: string; path: string; body: unknown }[] = [];
 (window as unknown as { fixtureCalls: typeof calls }).fixtureCalls = calls;
 window.fetch = async (input, init) => {
@@ -23,6 +33,11 @@ window.fetch = async (input, init) => {
 	else if (path.includes('computer-use')) body = { available: false, enabled: false, active: false, reason: 'no-display' };
 	else if (path.includes('commands')) body = { commands: [] };
 	else if (path.includes('models')) body = { models: [] };
+	else if (path === '/api/v1/sessions/cursor') body = { items: remote ? [remoteRow] : [], has_more: false, next_cursor: null, next_cursor_id: null };
+	else if (remote && path === `/api/v1/sessions/${REMOTE}`) body = remoteRow;
+	else if (method === 'POST' && path === `/api/v1/voice/sessions/${REMOTE}/attach`) {
+		body = { session_id: REMOTE, client_secret: '', model: 'gpt-live-1' };
+	}
 	else if (method === 'POST' && path === '/api/v1/sessions') {
 		if (params.has('fail')) { status = 400; body = { detail: 'That agent no longer exists — pick another one.' }; }
 		else body = { session_id: CREATED, mode: 'code' };
@@ -48,8 +63,9 @@ Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: {
 localStorage.clear();
 sessionStorage.clear();
 
-const [{ activeSession }, { auth }, { voiceCallState }, { default: Fixture }] = await Promise.all([
+const [{ activeSession }, { appData }, { auth }, { voiceCallState }, { default: Fixture }] = await Promise.all([
 	import('../src/lib/stores/active-session'),
+	import('../src/lib/stores/app-data.svelte'),
 	import('../src/lib/stores/auth.svelte'),
 	import('../src/lib/services/voiceCall'),
 	import('./FreshCallFixture.svelte'),
@@ -58,6 +74,10 @@ await auth.checkAuth();
 activeSession.newChat();
 activeSession.setProfile('fixture-agent');
 if (params.get('device') === 'worker') activeSession.setDeviceIntent({ id: 'worker-1', name: 'Studio PC' });
+if (remote) {
+	await appData.loadSessions();
+	activeSession.switchSession(REMOTE, null, null, remoteRow.title);
+}
 Object.assign(window, {
 	fixtureSession: () => {
 		let state: { sessionId: string | null; error: string | null } = { sessionId: null, error: null };

@@ -165,6 +165,147 @@ def test_worktree_from_another_project_is_refused(client, db):
     db.create_session.assert_not_called()
 
 
+class TestRunsOnAnotherWorker:
+    """#700: the composer's "Runs on" pick creates the conversation on that
+    worker, as a typed first message does, so a call can attach to it."""
+
+    PEER = "peer-device-1"
+
+    @pytest.fixture
+    def owner(self, db):
+        from unittest.mock import AsyncMock
+        from app.network import control
+        db.get_install.return_value = {"id": self.PEER, "device_name": "Office PC", "online": True, "approved": True}
+        db.get_session.side_effect = lambda sid: {"id": sid, "instance_id": self.PEER, "context_window": None}
+        with patch.object(control, "owner_of", return_value=self.PEER) as owner_of, \
+                patch.object(control, "create_session", new=AsyncMock(return_value={"session_id": "x"})) as create:
+            yield {"owner_of": owner_of, "create": create}
+
+    def test_creates_the_mirror_here_and_the_session_on_the_owner(self, client, db, owner):
+        response = client.post("/api/v1/sessions", json={
+            "profile_id": "agent-a", "mode": "chat", "target_instance_id": self.PEER,
+            "overrides": {"model": "sonnet", "permission_mode": "default"},
+        })
+
+        assert response.status_code == 200, response.text
+        session_id = response.json()["session_id"]
+        kwargs = _created(db)
+        assert kwargs["target_instance_id"] == self.PEER
+        owner["create"].assert_awaited_once()
+        device, session, turn = owner["create"].await_args.args
+        assert device == self.PEER and turn is None
+        assert session["id"] == session_id
+        assert (session["profile_id"], session["mode"], session["model"], session["permission_mode"]) == (
+            "agent-a", "chat", "sonnet", "default")
+        # The owner runs its own binding; nothing is stamped here for it.
+        db.set_session_run_binding.assert_not_called()
+        db.delete_session.assert_not_called()
+
+    @pytest.mark.parametrize("install, detail", [
+        (None, "Unknown device"),
+        ({"id": "peer-device-1", "device_name": "Office PC", "online": False}, "Office PC is offline"),
+        ({"id": "peer-device-1", "device_name": "Office PC", "online": True, "approved": False}, "waiting for admin approval"),
+    ])
+    def test_a_runner_that_cannot_take_it_is_refused_before_anything_is_created(
+            self, client, db, owner, install, detail):
+        db.get_install.return_value = install
+        response = client.post("/api/v1/sessions", json={"profile_id": "agent-a", "target_instance_id": self.PEER})
+
+        assert response.status_code == 409
+        assert detail in response.json()["detail"]
+        db.create_session.assert_not_called()
+        owner["create"].assert_not_awaited()
+
+    def test_an_owner_that_refuses_leaves_no_mirror_behind(self, client, db, owner):
+        from app.network import control
+        owner["create"].side_effect = control.RunnerUnreachable("Couldn't reach Office PC from Home Server.")
+        response = client.post("/api/v1/sessions", json={"profile_id": "agent-a", "target_instance_id": self.PEER})
+
+        assert response.status_code == 409
+        assert "Couldn't reach Office PC" in response.json()["detail"]
+        db.delete_session.assert_called_once_with(_created(db)["session_id"])
+
+    def test_a_lost_answer_is_asked_once_more_and_keeps_the_copy(self, client, db, owner):
+        """The owner's create returns an existing session, so asking again is safe."""
+        from app.network import control
+        owner["create"].side_effect = [control.MaybeApplied("no answer"), {"session_id": "x"}]
+        response = client.post("/api/v1/sessions", json={"profile_id": "agent-a", "target_instance_id": self.PEER})
+
+        assert response.status_code == 200, response.text
+        assert owner["create"].await_count == 2
+        first, second = (c.args[1] for c in owner["create"].await_args_list)
+        assert first == second
+        db.delete_session.assert_not_called()
+
+    @pytest.mark.parametrize("second", ["MaybeApplied", "RunnerUnreachable"])
+    def test_still_no_answer_keeps_the_copy_the_owner_may_have(self, client, db, owner, second):
+        from app.network import control
+        owner["create"].side_effect = [control.MaybeApplied("no answer"), getattr(control, second)("still nothing")]
+        response = client.post("/api/v1/sessions", json={"profile_id": "agent-a", "target_instance_id": self.PEER})
+
+        assert response.status_code == 409
+        assert "may already exist on that device" in response.json()["detail"]
+        db.delete_session.assert_not_called()
+
+    def test_a_refusal_after_a_lost_answer_removes_the_copy(self, client, db, owner):
+        from app.network import control
+        owner["create"].side_effect = [control.MaybeApplied("no answer"), control.ControlRefused("Unknown profile")]
+        response = client.post("/api/v1/sessions", json={"profile_id": "agent-a", "target_instance_id": self.PEER})
+
+        assert response.status_code == 409
+        db.delete_session.assert_called_once_with(_created(db)["session_id"])
+
+    def test_a_runner_outside_the_network_leaves_no_copy(self, client, db, owner):
+        owner["owner_of"].return_value = None
+        response = client.post("/api/v1/sessions", json={"profile_id": "agent-a", "target_instance_id": self.PEER})
+
+        assert response.status_code == 409
+        assert "not part of this worker network" in response.json()["detail"]
+        db.delete_session.assert_called_once_with(_created(db)["session_id"])
+        owner["create"].assert_not_awaited()
+
+    def test_a_preview_cookie_cannot_start_a_chat_on_another_worker(self, client, db, owner, monkeypatch):
+        """Mirrors the chat socket (#641): that worker cannot see the preview principal."""
+        from types import SimpleNamespace
+        from app.core import preview_access
+        monkeypatch.setattr(preview_access, "grant", lambda request: SimpleNamespace(session_id="preview"))
+        response = client.post("/api/v1/sessions", json={"profile_id": "agent-a", "target_instance_id": self.PEER})
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == create_api.PREVIEW_ELSEWHERE
+        db.create_session.assert_not_called()
+        owner["create"].assert_not_awaited()
+
+    def test_a_preview_cookie_still_creates_a_chat_here(self, client, db, monkeypatch):
+        from types import SimpleNamespace
+        from app.core import preview_access
+        monkeypatch.setattr(preview_access, "grant", lambda request: SimpleNamespace(session_id="preview"))
+        response = client.post("/api/v1/sessions", json={"profile_id": "agent-a"})
+
+        assert response.status_code == 200
+        assert _created(db)["target_instance_id"] is None
+
+    def test_this_worker_as_the_target_runs_here(self, client, db):
+        from app.core.config import settings
+        response = client.post("/api/v1/sessions", json={
+            "profile_id": "agent-a", "target_instance_id": settings.effective_instance_id})
+
+        assert response.status_code == 200
+        assert _created(db)["target_instance_id"] is None
+
+    def test_a_legacy_worktree_cannot_move(self, client, db, owner):
+        access = {"legacy": {"id": "proj-1", "settings": {}}, "project_v2": {"id": "pv2-1"}, "origin": "git:x"}
+        db.get_worktree.return_value = {"id": "wt-1", "repository_id": "repo-1", "branch": "feat/x", "path": "/w/x"}
+        db.get_git_repository_by_project.return_value = {"id": "repo-1"}
+        with patch.object(create_api, "require_origin_access", return_value=access):
+            response = client.post("/api/v1/sessions", json={
+                "project_id": "proj-1", "profile_id": "agent-a", "worktree_id": "wt-1",
+                "target_instance_id": self.PEER})
+
+        assert response.status_code == 400
+        db.create_session.assert_not_called()
+
+
 class TestPromptlessRunBinding:
     """A promptless with-worktree create stores the composer's picks the way
     the first turn would have; a create with a prompt leaves that to the turn."""

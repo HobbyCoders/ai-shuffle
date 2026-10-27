@@ -38,13 +38,32 @@ describe('call action on a conversation', () => {
  });
  it.each([
   ['archived', { status: 'archived' }],
-  ['remote', { is_remote: true }],
   ['subagent', { parent_session_id: 'parent' }],
  ])('stays hidden on a %s conversation', async (_label, row) => {
   rows.set([{ id: 'home', status: 'active' }]); render(VoiceCallButton);
   await callButton();
   rows.set([{ id: 'home', status: 'active', ...row }]);
   await vi.waitFor(() => expect(screen.queryByRole('button')).toBeNull());
+ });
+});
+describe('a conversation another worker runs (#700)', () => {
+ it('takes a call that runs here and forwards to that worker', async () => {
+  rows.set([{ id: 'home', status: 'active', is_remote: true, controllable: true, device_name: 'Office PC' }]);
+  render(VoiceCallButton);
+  const button = await callButton() as HTMLButtonElement;
+  expect(button.disabled).toBe(false);
+  expect(button.title).toBe('Start a call in this conversation');
+  await fireEvent.click(button);
+  expect(mocks.startCallForSession).toHaveBeenCalledWith('home', { attach: true });
+ });
+ it('names the offline worker instead of calling into nothing', async () => {
+  rows.set([{ id: 'home', status: 'active', is_remote: true, controllable: false, device_name: 'Office PC' }]);
+  render(VoiceCallButton);
+  const button = await callButton() as HTMLButtonElement;
+  expect(button.disabled).toBe(true);
+  expect(button.title).toMatch(/Office PC is offline/);
+  await fireEvent.click(button);
+  expect(mocks.startCallForSession).not.toHaveBeenCalled();
  });
 });
 describe('every conversation takes a call at any time', () => {
@@ -165,8 +184,16 @@ describe('call button on the new-session composer (#1616)', () => {
   finish('created');
   await vi.waitFor(() => expect(mocks.startCallForSession).toHaveBeenCalledTimes(1));
  });
+ it('creates the conversation on the picked runner, then calls it (#700)', async () => {
+  mocks.startSessionWithoutPrompt.mockResolvedValue('created');
+  active.set({ ...fresh, deviceIntent: { id: 'worker-1', name: 'Studio PC' } }); render(VoiceCallButton);
+  const button = await freshButton() as HTMLButtonElement;
+  expect(button.disabled).toBe(false);
+  expect(button.title).toBe('Start a call in a new conversation');
+  await fireEvent.click(button);
+  await vi.waitFor(() => expect(mocks.startCallForSession).toHaveBeenCalledWith('created', { attach: true }));
+ });
  it.each([
-  ['another device is picked as the runner', { deviceIntent: { id: 'worker-1', name: 'Studio PC' } }, /Switch the runner to Local.*Studio PC/],
   ['a first message is already creating the session', { isStreaming: true }, /once this session is created/],
   ['a worktree is being set up', { isCreatingWorktree: true }, /once this session is created/],
  ])('is disabled with a reason when %s', async (_label, state, reason) => {
@@ -178,7 +205,7 @@ describe('call button on the new-session composer (#1616)', () => {
   expect(mocks.startSessionWithoutPrompt).not.toHaveBeenCalled();
  });
  it('explains a blocked press on touch screens', async () => {
-  touchScreen(); active.set({ ...fresh, deviceIntent: { id: 'worker-1', name: 'Studio PC' } }); render(VoiceCallButton);
+  touchScreen(); active.set({ ...fresh, isCreatingWorktree: true }); render(VoiceCallButton);
   const button = await freshButton() as HTMLButtonElement;
   await vi.waitFor(() => expect(button.disabled).toBe(false));
   await fireEvent.click(button);

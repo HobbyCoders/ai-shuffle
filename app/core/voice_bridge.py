@@ -941,6 +941,10 @@ class VoiceBridge:
         # Whether to open the call with a greeting (browser calls only — a
         # native phone session must stay silent until the user speaks).
         self._greet = bool(greet)
+        # The network worker that runs this conversation when it is not this
+        # one (#700), read in start(). The call then writes nothing into the
+        # local mirror and forwards requests and approvals to it.
+        self._remote_owner: Optional[str] = None
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -967,6 +971,8 @@ class VoiceBridge:
         Raises whatever the transport raises — the caller turns a failed connect
         into a 502 rather than registering a dead bridge.
         """
+        from app.core import voice_remote
+        self._remote_owner = await run_sync(voice_remote.owner_of_session, self.session_id)
         self._ws = await _open_sideband(
             self.call_id, self._api_key, self._client_secret,
         )
@@ -1016,12 +1022,13 @@ class VoiceBridge:
             from app.core.voice_approval import SpokenApprovals
             from app.core.voice_progress import VoiceProgress
             approvals = SpokenApprovals(self.session_id, api_user_id=self._api_user_id,
-                                        marker=lambda: self._audio_count)
+                                        marker=lambda: self._audio_count,
+                                        owner=self._remote_owner)
             # append_bytes=None: each note is one conversation item here, so a
             # long chat result must not become several spoken responses.
             self._conversation_progress = VoiceProgress(
                 self.session_id, self._progress_note, quiet=self._is_quiet, approvals=approvals,
-                append_bytes=None,
+                append_bytes=None, owner=self._remote_owner,
             )
             await self._conversation_progress.open()
             self._conversation_progress_task = asyncio.create_task(self._conversation_progress.run())
@@ -1044,7 +1051,7 @@ class VoiceBridge:
 
         # Only a successful attach restores the durable working-set flag. A
         # finished call may be rejoined without creating a fresh session row.
-        if not self._stopped:
+        if not self._stopped and not self._remote_owner:
             row = await run_sync(database.set_session_active, self.session_id, True)
             if row:
                 try:
@@ -1472,7 +1479,8 @@ class VoiceBridge:
 
     async def _write_usage(self, deltas: Dict[str, int], *, model_calls: int) -> None:
         """Add ``deltas`` to the session's cumulative counters. Never raises."""
-        if not deltas:
+        if not deltas or self._remote_owner:
+            # A mirror's counters are the owner's; this worker bills nothing into them.
             return
         try:
             await run_sync(
@@ -1530,6 +1538,10 @@ class VoiceBridge:
         self._pending_notes = []
         self._pending_assistant = []
         if not user_text and not assistant_text and not note_text:
+            return
+        if self._remote_owner:
+            # A mirror is read-only: the owner records what the caller asked
+            # for when submit_to_chat forwards it (#700).
             return
 
         # A voice session never runs a real (turns-table) turn in V1, so writing
@@ -1638,7 +1650,10 @@ class VoiceBridge:
                         submitted_ids.append(turn_id)
                         if self._conversation_progress:
                             await self._conversation_progress.submitted(turn_id, call_id)
-                    error = await delegate_to_selected_model(self.session_id, request_text, on_submitted=submitted)
+                    from app.core.voice_remote import command_id
+                    # One id per tool call of this call: a repeat on the owner is deduped.
+                    error = await delegate_to_selected_model(self.session_id, request_text, on_submitted=submitted,
+                                                             command=command_id(self.call_id, call_id))
                     result = {"ok": not bool(error), "turn_id": submitted_ids[0] if submitted_ids else None,
                               "session_id": self.session_id, "status": "queued", "error": error or None}
             elif name == "dispatch_agent":
@@ -1684,6 +1699,8 @@ class VoiceBridge:
         answerable after the fact. Arguments are redacted first (see
         :func:`_redact_tool_input`).
         """
+        if self._remote_owner:
+            return  # A mirror is read-only; the owner records the forwarded request.
         from app.core import turn_recorder
 
         declared = _declared_tool_schema(name) is not None
@@ -2917,6 +2934,11 @@ class VoiceCallRegistry:
         self._capped[session_id] = (time.time(), int(max_call_minutes or 0))
         self._epochs.pop(session_id, None)
         try:
+            from app.core import voice_remote
+            if voice_remote.owner_of_session(session_id):
+                # A mirror's active flag is shared sidebar state the call never
+                # set; ending the call here must not move the owner's chat (#700).
+                return
             _set_session_inactive(session_id)
         except Exception:  # noqa: BLE001 — bookkeeping never blocks the cap
             logger.debug(

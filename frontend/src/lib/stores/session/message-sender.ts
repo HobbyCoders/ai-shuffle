@@ -273,11 +273,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			update(s => ({ ...s, error: 'This session is still being created — try again in a moment.' }));
 			return null;
 		}
-		if (_state.deviceIntent) {
-			update(s => ({ ...s, error: `Calls run on this device. Switch the runner to Local to call, or send a message to start on ${_state.deviceIntent!.name}.` }));
-			return null;
-		}
-
+		// A "Runs on" pick creates the conversation on that worker; the call
+		// itself runs here and forwards to it (#700).
 		const creationGen = internal.worktreeCreationGeneration;
 		const adopt = (sessionId: string, extra: Partial<ActiveSessionState> = {}): string | null => {
 			if (creationGen !== internal.worktreeCreationGeneration) return null;
@@ -326,8 +323,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				mode: _state.mode,
 				worktree_id: _state.worktreeIntent === 'worktree' ? _state.worktreeId || undefined : undefined,
 				overrides: buildOverrides(),
+				target_instance_id: _state.deviceIntent?.id || undefined,
 			});
-			return adopt(response.session_id);
+			// The pick is spent once the row carries the ownership (see sendMessage).
+			return adopt(response.session_id, _state.deviceIntent ? { deviceIntent: null } : {});
 		} catch (error) {
 			if (creationGen !== internal.worktreeCreationGeneration) return null;
 			const err = error as { detail?: string; message?: string };
