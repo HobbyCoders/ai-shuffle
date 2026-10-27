@@ -104,7 +104,9 @@ export const entries: SettingEntry[] = [
 		category: 'voice',
 		section: 'Voice calls',
 		label: 'Max call length',
-		keywords: ['max call minutes', 'limit', 'duration'],
+		hint: '0 means no limit',
+		help: 'A call ends when it reaches this many minutes. Set 0 for no limit: the call lasts as long as you stay connected. This limits call length, not cost.',
+		keywords: ['max call minutes', 'limit', 'no limit', 'unlimited', 'duration'],
 		default: 240
 	},
 	{

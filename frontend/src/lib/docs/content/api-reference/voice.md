@@ -60,7 +60,7 @@ JSON body, all optional:
 | `voice_model` | `"gpt-live-1"`, `"gpt-live-1.1"` (only when listed in `voice_engines`), `"grok-voice-latest"` or `"grok-voice-supergrok"` (Grok Voice on a connected SuperGrok login); defaults to API-key GPT Live. `"gpt-live-1-codex"` selects ChatGPT voice on your ChatGPT subscription login (opt-in; no API-key fallback) |
 | `voice_voice` | One of the ids in `model_details.voices`. When you switch engines without sending a voice, a voice the new engine lacks becomes its default (`marin` for GPT Live, `eve` for Grok, `cove` for ChatGPT voice) |
 | `voice_provider_id` | An enabled provider for the selected engine: an API key for GPT Live and Grok Voice, a connected SuperGrok login for `grok-voice-supergrok`, or a connected ChatGPT login for ChatGPT voice (`gpt-live-1-codex`). Subscription calls are owner/paired-device only. `null` selects automatically by name within that engine; it never substitutes a subscription for an API key. Switching engines without sending a provider drops a pin the new engine can't use |
-| `voice_max_call_minutes` | Positive integer. A call is cut off at this length (default 240) |
+| `voice_max_call_minutes` | Whole minutes, 0 or more. A call is cut off at this length (default 240). `0` means no limit: the call lasts as long as the caller is connected |
 | `voice_input_model` | One of the ids in `voice_input_models` |
 | `voice_input_mode` | `auto` or `toggle` |
 | `voice_input_silence_seconds` | Integer from 1 to 60 |
@@ -152,7 +152,7 @@ Get a fresh client secret for an existing voice session. Without a body it refre
 
 **Auth:** Required. An API key can use it only on its own voice sessions (`403` otherwise).
 
-Returns `client_secret`, `expires_at`, `model` and `options` (the secret is empty for GPT Live). Returns `403` when voice mode is disabled and `409` once the call has reached `voice_max_call_minutes`.
+Returns `client_secret`, `expires_at`, `model` and `options` (the secret is empty for GPT Live). Returns `403` when voice mode is disabled and `409` once the call has reached `voice_max_call_minutes` (never when it is `0`).
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/voice/sessions/0f6c2d1e-7a4b-4c1d-9e2f-5b8a7c6d4e3f/secret \

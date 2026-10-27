@@ -10,7 +10,7 @@
 	import ValueText from '../rows/ValueText.svelte';
 	import LinkValue from '../rows/LinkValue.svelte';
 	import { getModelsState, VOICE_CALL_MODEL } from './tasks.svelte';
-	import { voiceModelLabel } from '$lib/api/voice';
+	import { formatMaxCallMinutes, voiceModelLabel } from '$lib/api/voice';
 	import { VOICE_CALL_ICON } from './icons';
 
 	const { voice } = getModelsState();
@@ -21,7 +21,7 @@
 		{ label: 'Voice', value: voice.callVoiceLabel || null },
 		{
 			label: 'Longest call',
-			value: voice.settings?.voice_max_call_minutes ? `${voice.settings.voice_max_call_minutes} min` : null
+			value: voice.settings ? formatMaxCallMinutes(voice.settings.voice_max_call_minutes) : null
 		}
 	]);
 </script>

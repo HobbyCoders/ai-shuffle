@@ -241,6 +241,36 @@ describe('Voice page', () => {
 		expect(transport.put).toHaveBeenCalledExactlyOnceWith('/settings/voice', { voice_max_call_minutes: 120 });
 	});
 
+	it('saves 0 as no call limit and says so under the label', async () => {
+		await mountPage();
+		expect(screen.getByText('0 means no limit')).toBeTruthy();
+		await fireEvent.input(field('Max call length'), { target: { value: '0' } });
+		await fireEvent.blur(field('Max call length'));
+		expect(transport.put).toHaveBeenCalledExactlyOnceWith('/settings/voice', { voice_max_call_minutes: 0 });
+		expect(await screen.findByText('No limit: lasts while connected')).toBeTruthy();
+		expect(field('Max call length').value).toBe('0');
+		expect(screen.queryByText('0 means no limit')).toBeNull();
+	});
+
+	it('rounds a fractional limit and never saves a negative one', async () => {
+		await mountPage();
+		await fireEvent.input(field('Max call length'), { target: { value: '-5' } });
+		await fireEvent.blur(field('Max call length'));
+		expect(transport.put).toHaveBeenLastCalledWith('/settings/voice', { voice_max_call_minutes: 0 });
+		await fireEvent.input(field('Max call length'), { target: { value: '12.6' } });
+		await fireEvent.blur(field('Max call length'));
+		expect(transport.put).toHaveBeenLastCalledWith('/settings/voice', { voice_max_call_minutes: 13 });
+	});
+
+	it('shows a saved no-limit value and resets it to the 240 minute default', async () => {
+		server = settings('marin', 0);
+		await mountPage();
+		expect(field('Max call length').value).toBe('0');
+		expect(screen.getByText('No limit: lasts while connected')).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: /Reset Max call length/ }));
+		expect(transport.put).toHaveBeenCalledExactlyOnceWith('/settings/voice', { voice_max_call_minutes: 240 });
+	});
+
 	it('turns voice calls off', async () => {
 		await mountPage();
 		await fireEvent.click(screen.getByRole('switch', { name: 'Voice calls' }));

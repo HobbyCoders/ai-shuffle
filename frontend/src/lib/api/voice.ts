@@ -46,6 +46,13 @@ const voiceModelLabels: Record<string, string> = {
 export { usesDelegation, usesAudioStream } from '$lib/constants/voice-engines';
 export const voiceModelLabel = (model: string): string => voiceModelLabels[model] ?? model;
 
+/** `voice_max_call_minutes` of 0 means a call has no length limit. */
+export const NO_CALL_LIMIT = 0;
+
+/** The max call length as people read it: "No limit" for 0, otherwise "90 min". */
+export const formatMaxCallMinutes = (minutes: number): string =>
+	minutes === NO_CALL_LIMIT ? 'No limit' : `${minutes} min`;
+
 export interface VoiceOptions {
  instructions?: string;
  transcription_model?: string;
@@ -106,6 +113,7 @@ export interface VoiceSettings {
 	voice_model: string;
 	voice_voice: string;
 	voice_provider_id: string | null;
+	/** Longest call in minutes; 0 means no limit (the call lasts while you are connected). */
 	voice_max_call_minutes: number;
 	voice_input_model?: string;
 	voice_input_mode?: 'auto' | 'toggle';
@@ -122,6 +130,7 @@ export interface VoiceSettingsUpdate {
 	voice_model?: string;
 	voice_voice?: string;
 	voice_provider_id?: string | null;
+	/** Whole minutes; 0 means no limit. */
 	voice_max_call_minutes?: number;
 	voice_input_model?: string;
 	voice_input_mode?: 'auto' | 'toggle';

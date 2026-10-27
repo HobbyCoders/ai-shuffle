@@ -35,7 +35,7 @@
 	import ExpandToggle from '../rows/ExpandToggle.svelte';
 	import CallPromptsEditor from './editors/CallPromptsEditor.svelte';
 	import { CODEX_VOICE_MODEL, SUPERGROK_VOICE_MODEL } from '$lib/constants/voice-engines';
-	import { voiceModelLabel } from '$lib/api/voice';
+	import { NO_CALL_LIMIT, voiceModelLabel } from '$lib/api/voice';
 	import { VoicePreview, VoiceState } from './voice-state.svelte';
 	import { voiceVolume, setVoiceVolume, MAX_VOICE_VOLUME } from '$lib/services/voiceVolume';
 	import './editors/editors.css';
@@ -355,14 +355,15 @@
 			id="voice.maxCall"
 			dim={!callsOn}
 			value={s?.voice_max_call_minutes}
+			hint={s?.voice_max_call_minutes === NO_CALL_LIMIT ? 'No limit: lasts while connected' : undefined}
 			onReset={() => voice.save({ voice_max_call_minutes: defaultOf<number>('voice.maxCall') })}
 		>
 			<NumberField
-				value={s?.voice_max_call_minutes ?? 240}
-				min={1}
+				value={s?.voice_max_call_minutes ?? defaultOf<number>('voice.maxCall')}
+				min={NO_CALL_LIMIT}
 				unit="min"
 				disabled={locked}
-				onchange={(n) => voice.save({ voice_max_call_minutes: Math.max(1, Math.round(n)) })}
+				onchange={(n) => voice.save({ voice_max_call_minutes: Math.max(NO_CALL_LIMIT, Math.round(n)) })}
 			/>
 		</SettingRow>
 		<SettingRow
