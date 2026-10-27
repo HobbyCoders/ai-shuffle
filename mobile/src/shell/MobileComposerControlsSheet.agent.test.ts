@@ -26,7 +26,7 @@ vi.mock('$lib/stores/app-data.svelte', () => ({
 	]),
 	appData: { loadSessions: vi.fn() }
 }));
-vi.mock('$lib/stores/auth.svelte', () => ({ githubAuthenticated: writable(false) }));
+vi.mock('$lib/stores/auth.svelte', () => ({ githubAuthenticated: writable(false), isAuthenticated: writable(true), isAdmin: writable(true) }));
 vi.mock('$lib/stores/git.svelte', () => ({
 	gitStatus: writable(null),
 	git: writable({ projectId: null, sessionId: 'chat-1', worktreeId: null, hydrated: true, status: null })
@@ -80,7 +80,11 @@ describe('Agent in Chat controls', () => {
 		await fireEvent.click(within(menu).getByText('Reviewer').closest('button')!);
 		expect(setProfile).toHaveBeenCalledExactlyOnceWith('reviewer');
 		await waitFor(() => expect(panel.getAttribute('aria-label')).toBe('Chat controls'));
-		expect(agentPage.querySelector('[role="menu"]')).toBeNull();
+		// The menu closed; an inert copy keeps the page from going blank as it
+		// slides out (#705), then goes.
+		expect(agentPage.querySelector('[role="menu"]:not([data-mcp-ghost])')).toBeNull();
+		expect(agentPage.querySelector<HTMLElement>('[role="menu"][data-mcp-ghost]')?.inert).toBe(true);
+		await waitFor(() => expect(agentPage.querySelector('[role="menu"]')).toBeNull());
 	});
 
 	it('Back closes the hosted menu and returns to the list', async () => {

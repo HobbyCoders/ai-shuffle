@@ -31,7 +31,7 @@ vi.mock('$lib/stores/app-data.svelte', () => {
 		appData: { loadSessions: vi.fn() }
 	};
 });
-vi.mock('$lib/stores/auth.svelte', () => ({ githubAuthenticated: writable(false) }));
+vi.mock('$lib/stores/auth.svelte', () => ({ githubAuthenticated: writable(false), isAuthenticated: writable(true), isAdmin: writable(true) }));
 vi.mock('$lib/stores/git.svelte', () => ({
 	gitStatus: writable({ current_branch: 'main', is_git_repo: true }),
 	git: writable({ projectId: 'project', sessionId: 'saved-session', worktreeId: null, hydrated: true, status: { is_git_repo: true } })
@@ -552,6 +552,47 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		session.store.set({ ...base, worktreeBranch: 'fix/bug', worktreeDeleted: true });
 		const { container } = render(ContextPillBar, { sheetMode });
 		expect(container.querySelector('.wt-indicator .checked')).not.toBeNull();
+	});
+});
+
+describe('who may move a chat (session-move.ts, #645)', () => {
+	const row = { id: base.sessionId, project_v2_id: 'pv2-project', instance_id: 'local', is_remote: false, controllable: true };
+	afterEach(async () => {
+		const { isAdmin } = await import('$lib/stores/auth.svelte');
+		(isAdmin as unknown as { set(v: boolean): void }).set(true);
+	});
+
+	it.each([false, true])('names the worker read-only for a chat started with an API key (sheetMode=%s)', async (sheetMode) => {
+		session.store.set({ ...base, projectV2Id: 'pv2-project' });
+		appSessions.store.set([{ ...row, api_user_id: 'key-user' }]);
+		const view = render(ContextPillBar, { sheetMode });
+		expect(view.container.querySelector('.ctx-chip.runner')).toBeNull();
+		expect(view.queryByRole('button', { name: /^Runner:/ })).toBeNull();
+		expect(view.container.querySelector('.ctx-chip.readonly .ctx-chip-label')?.textContent).toBe('Local');
+	});
+
+	it.each([false, true])('names the worker read-only for a viewer who is not the owner (sheetMode=%s)', async (sheetMode) => {
+		const { isAdmin } = await import('$lib/stores/auth.svelte');
+		(isAdmin as unknown as { set(v: boolean): void }).set(false);
+		session.store.set({ ...base, projectV2Id: 'pv2-project' });
+		appSessions.store.set([row]);
+		const view = render(ContextPillBar, { sheetMode });
+		expect(view.container.querySelector('.ctx-chip.runner')).toBeNull();
+		expect(view.queryByRole('button', { name: /^Runner:/ })).toBeNull();
+	});
+
+	it('captions the phone row as the Move action, and the desktop chip not', () => {
+		session.store.set({ ...base, projectV2Id: 'pv2-project' });
+		appSessions.store.set([row]);
+		const phone = render(ContextPillBar, { sheetMode: true });
+		const chip = phone.getByRole('button', { name: 'Runner: Local' });
+		expect(chip.getAttribute('aria-describedby')).toBe(chip.querySelector('.ctx-chip-sub')?.id);
+		expect(chip.querySelector('.ctx-chip-sub')?.textContent).toBe('Move to another worker');
+		cleanup();
+		const desktop = render(ContextPillBar, { sheetMode: false });
+		const desktopChip = desktop.getByRole('button', { name: 'Runner: Local' });
+		expect(desktopChip.querySelector('.ctx-chip-sub')).toBeNull();
+		expect(desktopChip.hasAttribute('aria-describedby')).toBe(false);
 	});
 });
 

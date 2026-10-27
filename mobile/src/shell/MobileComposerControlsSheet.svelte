@@ -31,7 +31,9 @@
 	 *   Context/usage   the shared ContextUsageBar details, inline;
 	 *   Agent, Runs on  the shared selectors' own menus, hosted on the page
 	 *                   (menuHost), so the busy rule for moving a chat stays
-	 *                   the desktop's; picking closes the menu and slides back;
+	 *                   the desktop's; picking closes the menu and slides back.
+	 *                   A saved chat that may move (session-move.ts) titles
+	 *                   its page "Move to another worker" (#645);
 	 *   Running tasks   RunningTasksList as a page;
 	 *   Export chat     ChatExportActions as a page with a pinned button.
 	 * There is no visible close button; a visually hidden one stays for
@@ -80,10 +82,12 @@
 		awayEnabled = false, awayAvailable = false, awayBusy = false, onToggleAway,
 		onUsageOpenChange, callAction, browserOpen = false, onBrowserToggle, onBrowserPreload, terminal
 	}: Props = $props();
+	const uid = $props.id();
+	const effortDefaultNoteId = `${uid}-effort-default`;
 
 	type Picker = 'effort' | 'access';
 	type Page = 'main' | 'model' | 'usage' | 'agent' | 'runner' | 'tasks' | 'export';
-	const PAGE_TITLE: Record<Page, string> = {
+	const PAGE_TITLES: Record<Page, string> = {
 		main: 'Chat controls',
 		model: 'Model',
 		usage: 'Context and usage',
@@ -92,6 +96,14 @@
 		tasks: 'Running tasks',
 		export: 'Export chat'
 	};
+	/**
+	 * A saved chat's "Runs on" row opens the shared Move menu (#645): its page
+	 * says so. A new chat's row picks where the chat will run.
+	 */
+	const PAGE_TITLE = $derived<Record<Page, string>>({
+		...PAGE_TITLES,
+		runner: $activeSession.sessionId ? 'Move to another worker' : PAGE_TITLES.runner
+	});
 	/** How long a page takes to slide; content stays mounted until it is off screen. */
 	const PAGE_SLIDE_MS = 320;
 
@@ -317,6 +329,7 @@
 	function goTo(target: Page, from: HTMLElement | null = null) {
 		clearTimeout(leaveTimer);
 		leaving = null;
+		clearGhosts();
 		if (from) opener = from;
 		setPage(target);
 		direct = false;
@@ -340,7 +353,11 @@
 		setPage('main');
 		direct = false;
 		clearTimeout(leaveTimer);
-		leaveTimer = setTimeout(() => { if (leaving === from) leaving = null; }, PAGE_SLIDE_MS);
+		leaveTimer = setTimeout(() => {
+			if (leaving !== from) return;
+			leaving = null;
+			clearGhosts();
+		}, PAGE_SLIDE_MS);
 		const row = opener;
 		opener = null;
 		void tick().then(() => (row?.isConnected ? row : panelRef)?.focus({ preventScroll: true }));
@@ -353,20 +370,48 @@
 	}
 
 	/**
-	 * Close a selector menu hosted on the Agent or "Runs on" page. The shared
-	 * selectors close their menus on an outside click; the store-driven ones
-	 * close directly, and a click on the page body reaches the rest.
+	 * Close the selector menus hosted on the Agent and "Runs on" pages. Each
+	 * one's open state is a shared dropdown id: the agent menu, the saved
+	 * chat's Move menu and the new chat's runner picker.
 	 */
 	function dismissHostedMenus() {
-		if (!agentHost?.childElementCount && !runnerHost?.childElementCount) return;
 		closeDropdown('sheet-profile');
 		closeDropdown('runner');
-		document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		closeDropdown('sheet-mode-runner');
+	}
+
+	/** The hosted menu, not a copy kept on screen while its page slides out. */
+	function hostedMenuCount(host: HTMLElement | null): number {
+		if (!host) return 0;
+		let n = 0;
+		for (const child of host.children) if (!(child as HTMLElement).dataset.mcpGhost) n++;
+		return n;
+	}
+
+	/**
+	 * A hosted menu leaves the DOM as soon as it closes (a pick, Back, closing
+	 * the panel), while its page still has a slide to run. Put the removed node
+	 * back as an inert copy until the page is off screen, so the page does not
+	 * go blank mid-move. The shared selector has already let go of it.
+	 */
+	function keepGhost(host: HTMLElement, removed: Node) {
+		if (!(removed instanceof HTMLElement) || removed.dataset.mcpGhost) return;
+		const hostPage: Page = host === agentHost ? 'agent' : 'runner';
+		const sliding = leaving === hostPage || ((closingPanel || !open) && pageName === hostPage);
+		if (!sliding) return;
+		removed.dataset.mcpGhost = 'true';
+		removed.inert = true;
+		removed.setAttribute('aria-hidden', 'true');
+		host.appendChild(removed);
+	}
+
+	function clearGhosts() {
+		for (const host of [agentHost, runnerHost]) host?.querySelectorAll(':scope > [data-mcp-ghost]').forEach((n) => n.remove());
 	}
 
 	/** A hosted menu opened (its row was tapped) or closed (a pick, Escape). */
 	function syncHostedPage() {
-		const hosted: Page | null = runnerHost?.childElementCount ? 'runner' : agentHost?.childElementCount ? 'agent' : null;
+		const hosted: Page | null = hostedMenuCount(runnerHost) ? 'runner' : hostedMenuCount(agentHost) ? 'agent' : null;
 		if (hosted && pageName !== hosted) {
 			const row = panelRef?.querySelector<HTMLElement>(
 				hosted === 'agent' ? '.mcp-setup .context-selector-btn' : '.mcp-setup .ctx-chip.runner, .mcp-setup .mode-trigger'
@@ -380,7 +425,13 @@
 	$effect(() => {
 		const hosts = [agentHost, runnerHost].filter((h): h is HTMLElement => !!h);
 		if (!hosts.length || typeof MutationObserver === 'undefined') return;
-		const observer = new MutationObserver(() => syncHostedPage());
+		const observer = new MutationObserver((records) => {
+			// Sync first: a menu that closed on a pick starts its page's slide here.
+			syncHostedPage();
+			for (const record of records) {
+				for (const node of record.removedNodes) keepGhost(record.target as HTMLElement, node);
+			}
+		});
 		for (const host of hosts) observer.observe(host, { childList: true });
 		return () => observer.disconnect();
 	});
@@ -405,6 +456,7 @@
 			clearTimeout(renderTimer);
 			if (isOpen) {
 				closingPanel = false;
+				clearGhosts();
 				rendered = true;
 				picker = null;
 				void focusPanel();
@@ -423,6 +475,7 @@
 				dismissHostedMenus();
 				renderTimer = setTimeout(() => {
 					rendered = false;
+					clearGhosts();
 					setPage('main');
 					leaving = null;
 					direct = false;
@@ -957,10 +1010,13 @@
 									<span class="mcp-val">{panelEffortValue}</span>
 								</div>
 								{#if !effortLocked}
+									<!-- The outlined segment is the model's default, said for screen readers too. -->
+									<span id={effortDefaultNoteId} hidden>Model default</span>
 									<div class="mcp-seg accent" role="radiogroup" aria-label="Reasoning effort" style:--n={effortOptions.length}>
 										{#each effortOptions as option (option.value)}
 											<button type="button" role="radio" aria-checked={option.value === effortValue}
 												class:auto={!effortValue && option.value === effortDefaultValue}
+												aria-describedby={!effortValue && option.value === effortDefaultValue ? effortDefaultNoteId : undefined}
 												title={option.description} onclick={() => pickPanelEffort(option.value)}>{option.label}</button>
 										{/each}
 									</div>
@@ -1075,7 +1131,7 @@
 				</div>
 			</section>
 
-			<section class="mcp-page" data-page="runner" class:active={pageName === 'runner'} inert={pageName !== 'runner'} aria-label="Runs on">
+			<section class="mcp-page" data-page="runner" class:active={pageName === 'runner'} inert={pageName !== 'runner'} aria-label={PAGE_TITLE.runner}>
 				<div class="mcp-scroll">
 					<div class="mcp-host runner-host" bind:this={runnerHost}></div>
 				</div>
@@ -1177,7 +1233,7 @@
 		font-size: 11px;
 		font-weight: 700;
 	}
-	.qcell:focus-visible, .seg:focus-visible, .bar:focus-visible, .tile:focus-visible, .act:focus-visible, .mcp-icon-btn:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.qcell:focus-visible, .seg:focus-visible, .act:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 
 	/* The usage cell hosts the shared ring button, stretched over the cell. */
 	.qcell.usage { cursor: default; padding: 0; }
@@ -1719,6 +1775,32 @@
 	.mcp-setup :global(.sheet-mode .ctx-chip.degraded) { color: var(--warning); }
 	.mcp-setup :global(.sheet-mode .ctx-chip.degraded .ctx-chip-label) { color: var(--warning); }
 	.mcp-setup :global(.sheet-mode .runner-badge-wrap > .ctx-chip.runner) { flex: 1 1 0; width: auto; }
+	/* A chat that can move: "Runs on" over a "Move to another worker" caption,
+	   like the other two-line rows, with the worker and chevron on the right. */
+	.mcp-setup :global(.sheet-mode .ctx-chip.runner:has(.ctx-chip-sub)) {
+		display: grid;
+		grid-template-columns: 30px minmax(0, 1fr) auto auto auto;
+		grid-template-rows: auto auto;
+		column-gap: 12px;
+		row-gap: 1px;
+		align-items: center;
+	}
+	.mcp-setup :global(.sheet-mode .ctx-chip.runner:has(.ctx-chip-sub) > svg:first-of-type) { grid-area: 1 / 1 / 3 / 2; }
+	.mcp-setup :global(.sheet-mode .ctx-chip.runner:has(.ctx-chip-sub)::before) { grid-area: 1 / 2; align-self: end; }
+	.mcp-setup :global(.sheet-mode .ctx-chip.runner .ctx-chip-sub) {
+		grid-area: 2 / 2;
+		align-self: start;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: 12.5px;
+		line-height: 1.3;
+		color: var(--muted-foreground);
+	}
+	.mcp-setup :global(.sheet-mode .ctx-chip.runner:has(.ctx-chip-sub) > .worker-status-dot) { grid-area: 1 / 3 / 3 / 4; margin-right: -6px; }
+	.mcp-setup :global(.sheet-mode .ctx-chip.runner:has(.ctx-chip-sub) > .ctx-chip-label) { grid-area: 1 / 4 / 3 / 5; max-width: 40vw; }
+	.mcp-setup :global(.sheet-mode .ctx-chip.runner:has(.ctx-chip-sub)::after) { grid-area: 1 / 5 / 3 / 6; margin: 0 3px 0 -4px; }
 	.mcp-setup :global(.sheet-mode .queued-cancel) { width: 44px; height: 44px; margin: 0 8px 0 0; border-radius: 50%; }
 	/* A selector that still opens in place (project, branch) drops below its row. */
 	.mcp-setup :global(.sheet-mode :is(.branch-dropdown, .selector-dropdown, .wf-menu)) { margin: 0 10px 10px; }
@@ -1833,7 +1915,7 @@
 
 	@media (prefers-reduced-motion: reduce) {
 		.qpick, .qcell.usage :global(.usage-popover) { animation: none; }
-		.mcp, .mcp.shown, .mcp-scrim, .qcell, .qbar-grip, .usage-grip span, .bar-fill, .tile, .qcell.usage :global(.usage-popover),
+		.mcp, .mcp.shown, .mcp-scrim, .qcell, .qbar-grip, .usage-grip span, .qcell.usage :global(.usage-popover),
 		.mcp-grab, .mcp-back, .mcp-page, .mcp-page:not(.active):not(.under),
 		.mcp-row, .mcp-sw, .mcp-sw::after, .mcp-seg button, .act, .mcp-ring .ring-progress { transition: none; }
 		.mcp-chip.run i { animation: none; }

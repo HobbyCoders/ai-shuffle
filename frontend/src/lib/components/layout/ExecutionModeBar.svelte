@@ -33,8 +33,9 @@
 	const LOCAL_ROW_ID = '__local__';
 	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch } from '$lib/stores/git.svelte';
 	import { ChevronDown, Server, GitBranch, Monitor, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
-	import { untrack, type Snippet } from 'svelte';
+	import { onDestroy, untrack, type Snippet } from 'svelte';
 	import { menuHost } from '$lib/components/ui/menu-host';
+	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import { floatingMenu } from '$lib/components/ui/floating-menu';
 	import { draftIsGitRepo } from '$lib/components/chat/contextPills';
 
@@ -92,7 +93,17 @@
 	let dropdownRef = $state<HTMLElement | null>(null);
 	// Separate dropdown for the execution-mode picker (coexists with the branch
 	// dropdown above; its own container ref so outside-click closes it independently).
-	let showModeDropdown = $state(false);
+	// Its open state is a shared dropdown id, so a host (the phone's Chat
+	// controls page) can close it with closeDropdown. The sheet's copy has its
+	// own id: the new-chat sentence's copy stays mounted beside it.
+	const modeDropdownId = $derived(sheetMode ? 'sheet-mode-runner' as const : 'mode-runner' as const);
+	const showModeDropdown = $derived($openHeaderDropdown === modeDropdownId);
+	function setModeDropdown(open: boolean) {
+		if (open) openDropdown(modeDropdownId);
+		else closeDropdown(modeDropdownId);
+	}
+	// A shared id outlives this bar: never leave it open behind an unmount.
+	onDestroy(() => closeDropdown(modeDropdownId));
 	let modeDropdownRef = $state<HTMLDivElement | null>(null);
 	/** The open runner menu; it may sit in a host page outside modeDropdownRef. */
 	let modeMenuRef = $state<HTMLDivElement | null>(null);
@@ -226,17 +237,18 @@
 	const worktreeOn = $derived($activeSession.worktreeIntent === 'worktree');
 
 	function toggleModeDropdown() {
-		showModeDropdown = !showModeDropdown;
+		const open = !showModeDropdown;
+		setModeDropdown(open);
 		// Refresh on every open so the online flags are current when the Cloud
 		// section is expanded (the list is small and the call is cheap).
-		if (showModeDropdown) loadInstalls();
+		if (open) loadInstalls();
 	}
 
 	function selectBaseMode() {
 		// Local is the base mode; picking it drops any runner choice so the
 		// session is created on (and owned by) this install.
 		activeSession.setDeviceIntent(null);
-		showModeDropdown = false;
+		setModeDropdown(false);
 	}
 
 	function toggleWorktree() {
@@ -352,7 +364,7 @@
 	function selectDevice(install: Install) {
 		if (isBlocked(install, worktreeOn, eligibility)) return;
 		activeSession.setDeviceIntent({ id: install.id, name: install.device_name });
-		showModeDropdown = false;
+		setModeDropdown(false);
 	}
 
 	function selectWorktree(wt: Worktree) {
@@ -412,7 +424,7 @@
 			showBranchDropdown = false;
 		}
 		if (showModeDropdown && modeDropdownRef && !modeDropdownRef.contains(e.target as Node) && !modeMenuRef?.contains(e.target as Node)) {
-			showModeDropdown = false;
+			setModeDropdown(false);
 		}
 	}
 

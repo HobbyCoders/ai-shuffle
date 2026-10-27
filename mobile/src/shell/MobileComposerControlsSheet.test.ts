@@ -581,6 +581,49 @@ describe('Chat controls panel', () => {
 		expect(onOpenChange).not.toHaveBeenCalledWith(false);
 	});
 
+	it('announces the outlined model-default effort segment (#705)', () => {
+		render(MobileComposerControlsSheet, { props: props({ open: true, effortValue: null, effortDefaultValue: 'high' }) });
+		const effort = within(panel()).getByRole('radiogroup', { name: 'Reasoning effort' });
+		expect(within(effort).getByRole('radio', { name: 'High', description: 'Model default' })).toBeTruthy();
+		expect(within(effort).getByRole('radio', { name: 'Low' }).hasAttribute('aria-describedby')).toBe(false);
+	});
+
+	it('pops the page\'s own history entry when the on-screen Back leaves it (#705)', async () => {
+		page.state = { mobileControls: true };
+		render(MobileComposerControlsSheet, { props: props({ open: true }) });
+		await fireEvent.click(within(panel()).getByRole('button', { name: /^Context and usage/ }));
+		// The page pushed its entry (the stubbed router only records it here).
+		page.state = { mobileControls: true, mobileControlsPage: 'usage' };
+		await tick();
+		const back = vi.spyOn(history, 'back').mockImplementation(() => {});
+		const go = vi.spyOn(history, 'go').mockImplementation(() => {});
+		await fireEvent.click(within(panel()).getByRole('button', { name: 'Back to chat controls' }));
+		expect(panel().getAttribute('aria-label')).toBe('Chat controls');
+		// One pop, for the page: the panel's own entry stays for Android Back.
+		expect(back).toHaveBeenCalledOnce();
+		expect(go).not.toHaveBeenCalled();
+	});
+
+	it('pops both entries when the panel closes from a page, and one from the list (#705)', async () => {
+		page.state = { mobileControls: true };
+		const { rerender } = render(MobileComposerControlsSheet, { props: props({ open: true }) });
+		await fireEvent.click(within(panel()).getByRole('button', { name: /^Context and usage/ }));
+		page.state = { mobileControls: true, mobileControlsPage: 'usage' };
+		await tick();
+		const back = vi.spyOn(history, 'back').mockImplementation(() => {});
+		const go = vi.spyOn(history, 'go').mockImplementation(() => {});
+		await rerender(props({ open: false }));
+		expect(go).toHaveBeenCalledExactlyOnceWith(-2);
+		expect(back).not.toHaveBeenCalled();
+
+		// Reopened and closed from the list: only the panel's entry to pop.
+		go.mockClear();
+		page.state = { mobileControls: true };
+		await rerender(props({ open: true }));
+		await rerender(props({ open: false }));
+		expect(go).toHaveBeenCalledExactlyOnceWith(-1);
+	});
+
 	it('opens Export as a page with its button pinned under the choices', async () => {
 		Object.assign(activeSession.current, { sessionId: 'chat-1', messages: [{ role: 'user', content: 'hi' }] });
 		activeSession.setDraft('');
