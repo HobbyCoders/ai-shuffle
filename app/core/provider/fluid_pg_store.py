@@ -1426,31 +1426,33 @@ def _recent_sync(
 def _resolve_recall_sync(cur, session_id: str):
     """(recall id, messages, sessions row, remote?) for either id, or None.
 
-    The store id answers first (fluid node path, else Claude transcript); an
-    app id resolves to its store id, or — for a session another worker runs —
-    to its mirrored events.
+    Ownership wins over local store rows: a moved chat leaves its old store
+    id on the source, but its current transcript is the same event mirror the
+    web UI reads. Resolve both app and store ids before choosing the source.
+    Unlinked store ids still read their local transcript as before.
     """
+    cur.execute(
+        "SELECT id, sdk_session_id, owner_device_id, title FROM sessions "
+        "WHERE id = %s OR sdk_session_id = %s "
+        "ORDER BY CASE WHEN id = %s THEN 0 ELSE 1 END LIMIT 1",
+        (session_id, session_id, session_id),
+    )
+    row = cur.fetchone()
+    row = dict(row) if row else None
+    me = _my_device_id()
+    owner = (row or {}).get("owner_device_id")
+    if me and owner and owner != me:
+        return row["id"], _event_recall_rows(cur, row["id"]), row, True
     for arm in (_fluid_recall_rows, _sse_recall_rows):
         messages = arm(cur, session_id)
         if messages is not None:
-            return session_id, messages, None, False
-    cur.execute("SELECT id, sdk_session_id, owner_device_id, title FROM sessions WHERE id = %s",
-                (session_id,))
-    row = cur.fetchone()
-    if row is None:
-        return None
-    row = dict(row)
-    if row.get("sdk_session_id"):
+            return session_id, messages, row, False
+    if row and row.get("sdk_session_id"):
         for arm in (_fluid_recall_rows, _sse_recall_rows):
             messages = arm(cur, row["sdk_session_id"])
             if messages is not None:
                 return row["sdk_session_id"], messages, row, False
-        return None
-    me = _my_device_id()
-    owner = row.get("owner_device_id")
-    if not me or not owner or owner == me:
-        return None
-    return row["id"], _event_recall_rows(cur, row["id"]), row, True
+    return None
 
 
 def _slice_sync(

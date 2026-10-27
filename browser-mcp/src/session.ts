@@ -54,6 +54,15 @@ export class StaleRefError extends Error {
 
 /** Default wall-clock ceiling for a page-side eval (Playwright has none). */
 export const EVAL_TIMEOUT_MS = 5000;
+
+/** A deadline only stops waiting; it cannot cancel the page-side evaluation. */
+export class EvalTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`eval timed out after ${timeoutMs} ms; page-side work may still be running. ` +
+      "Its outcome is unknown: inspect state before retrying mutations; use browser_wait for long waits.");
+    this.name = "EvalTimeoutError";
+  }
+}
 /** Ceiling for pulling a tab to the foreground before a capture. */
 export const BRING_TO_FRONT_TIMEOUT_MS = 3000;
 /** Ceiling for reading the page's own viewport back after a resize. */
@@ -125,11 +134,11 @@ export async function passwordValues(page: Page): Promise<string[]> {
 export function raceWithTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
-  message: string,
+  message: string | Error,
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    timer = setTimeout(() => reject(typeof message === "string" ? new Error(message) : message), timeoutMs);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
@@ -802,7 +811,7 @@ export class Session {
    */
   async evaluate<T>(fn: (arg: string) => T, arg: string, timeoutMs = EVAL_TIMEOUT_MS): Promise<T> {
     const page = this.requirePage();
-    return raceWithTimeout(page.evaluate(fn, arg), timeoutMs, "eval timed out");
+    return raceWithTimeout(page.evaluate(fn, arg), timeoutMs, new EvalTimeoutError(timeoutMs));
   }
 
   currentUrl(): string {

@@ -9,7 +9,7 @@
  * whole page state.
  */
 
-import type { Session } from "../session.js";
+import { EvalTimeoutError, type Session } from "../session.js";
 import { jsonResult, errorResult, capText, type McpToolResult } from "./result.js";
 
 /** Serialized-value size cap (chars) before a truncation note is appended. */
@@ -143,7 +143,12 @@ export async function runEval(session: Session, input: { code: string }): Promis
     // Evaluation could not even complete (page closed, navigation, CSP, …).
     const e = err as Error;
     const stackTop = typeof e.stack === "string" ? e.stack.split("\n").slice(0, 2).join("\n") : "";
-    return errorResult(e && e.message ? e.message : String(err), { stack: stackTop });
+    return errorResult(e && e.message ? e.message : String(err), {
+      stack: stackTop,
+      ...(err instanceof EvalTimeoutError ? {
+        code: "outcome_unknown", outcome: "unknown", timed_out: true, timeout_ms: err.timeoutMs,
+      } : {}),
+    });
   }
 
   if (!outcome.ok) {

@@ -1,0 +1,14 @@
+{
+  "allowance_percent": 1,
+  "native": {
+    "system": 24727,
+    "compiled_eager": 53087,
+    "combined_full": 133997
+  },
+  "delegated": {
+    "compiled_eager": 14825,
+    "delegated_loaded_tools": 7327,
+    "combined_full": 104594
+  },
+  "SessionView": 1586
+}

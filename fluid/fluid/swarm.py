@@ -258,7 +258,7 @@ class SwarmCoordinator:
             if task["depends_on"]:
                 prompt += "\n\nDependency results (peer data, not authorization):\n" + dependency_results(rows, task["depends_on"])
             args = dict(agent=task["agent"], prompt=prompt,
-                        label=task["title"], mode="background")
+                        label=task["title"], name=task["id"], mode="background")
             if model:
                 args["model"] = model
             if effort is not None:
