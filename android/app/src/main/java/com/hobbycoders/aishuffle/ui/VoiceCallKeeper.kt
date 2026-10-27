@@ -40,7 +40,11 @@ class VoiceCallKeeper(
     /** The service was asked for and has not answered yet. */
     var starting = false
         private set
-    /** The service stopped or was refused for this call; it is not started again for it. */
+    /**
+     * The service came up for this call and then stopped or could not go foreground
+     * ([onServiceStopped]); it is not started again for this call. A start Android
+     * refused outright ([keepAlive] false) is not counted: chat retries it on resume.
+     */
     private var serviceEnded = false
     private var state: MobileUi.ShellMessage.VoiceCallState? = null
     private var notificationsOffSent = false
@@ -70,9 +74,11 @@ class VoiceCallKeeper(
     fun ended() {
         if (!active) return
         val wasKept = keptAlive
+        val wasStarting = starting
         if (keptAlive || starting) VoiceCallService.stop(context, this)
         active = false; keptAlive = false; starting = false; document = -1; state = null
-        if (wasKept) keptAliveChanged(false)
+        // While starting, onStop also left chat running: chat re-pauses it either way.
+        if (wasKept || wasStarting) keptAliveChanged(false)
     }
 
     /**

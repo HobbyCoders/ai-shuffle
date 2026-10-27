@@ -477,9 +477,11 @@ class ChatActivity : NativeScreen() {
         if (::voiceCall.isInitialized) voiceCall.ended()
     }
     /**
-     * Android 13+: ask once, on the first call that is kept alive and after its
-     * microphone grant (two permission dialogs cannot share the screen). If the
-     * notification cannot show, the call still runs; the page says so.
+     * Android 13+: ask once, on a call that is kept alive, only while chat is on
+     * screen and after its microphone grant (two permission dialogs cannot share
+     * the screen); retried on resume until shown. It counts as asked only once the
+     * dialog was launched (CallNotificationAsk). If the notification cannot show,
+     * the call still runs; the page says so.
      */
     private fun askForCallNotifications() {
         val next = callNotifications.next(voiceCall.keptAlive,
