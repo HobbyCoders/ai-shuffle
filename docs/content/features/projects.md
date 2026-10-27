@@ -39,6 +39,8 @@ A chat can work on its own branch in its own copy of the project (a Git worktree
 
 The composer remembers worktrees on or off separately for each project, including across devices. A project without a saved choice starts with worktrees off. Chats without a project and folders that are not Git repositories always use the main folder. Existing chats keep their own checkout.
 
+A new chat says where it will run in one sentence under the agent's name, for example "Runs on office-pc in my-app on a new branch from main in a worktree." Each underlined part opens its picker: the worker, the project (and any extra folders), the branch, and the worktree, which switches between **a worktree** and **the main checkout**. Without a project the sentence reads "with no project", and that part adds one. After the first message these choices move to the row of chips above the message box.
+
 Choose the branch in the new chat's branch picker, or pick **New branch…**. Branch and base-branch choices stay with that project while you switch projects. The choice applies to that one chat; after it is created, the next new chat starts on **Auto** again.
 
 When upgrading, an old global worktree **On** is remembered only for the last selected project recorded on this device. An old branch choice stays with the project already recorded in that choice. Other projects still start **Off**; existing chats keep their own checkout.

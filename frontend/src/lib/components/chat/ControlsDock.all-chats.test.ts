@@ -5,7 +5,6 @@
  */
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, waitFor } from '@testing-library/svelte';
-import { createRawSnippet } from 'svelte';
 import { activeSession } from '$lib/stores/active-session';
 import { appMode } from '$lib/stores/sessionMode.svelte';
 import ControlsDock from './ControlsDock.svelte';
@@ -22,8 +21,6 @@ vi.mock('$lib/api/client', async (importOriginal) => {
 	return { ...actual, getUsageLimits: vi.fn().mockResolvedValue({ available: false, buckets: {}, provider_buckets: {} }) };
 });
 
-const voiceActions = createRawSnippet(() => ({ render: () => `<span data-testid="voice-snippet">voice</span>` }));
-
 beforeEach(async () => {
 	appMode.set('code');
 	activeSession.newChat();
@@ -36,7 +33,7 @@ afterAll(() => vi.unstubAllGlobals());
 
 function renderDock() {
 	return render(ControlsDock, {
-		props: { isUploading: false, onAttachClick: vi.fn(), voiceActions, onBrowserToggle: vi.fn() }
+		props: { onBrowserToggle: vi.fn() }
 	});
 }
 
@@ -44,11 +41,9 @@ describe('ControlsDock in every chat', () => {
 	it('keeps every control', async () => {
 		renderDock();
 		await waitFor(() => expect(screen.getByRole('button', { name: /^Model:/ })).toBeTruthy());
-		expect(screen.getByTestId('voice-snippet')).toBeTruthy();
 		expect(screen.getByRole('button', { name: /^Permission mode:/ })).toBeTruthy();
 		expect(screen.getByRole('button', { name: /^Effort:/ })).toBeTruthy();
 		expect(screen.getAllByRole('button', { name: /^Context and usage/ }).length).toBeGreaterThan(0);
 		expect(screen.getByRole('button', { name: 'Toggle live browser view' })).toBeTruthy();
-		expect(screen.getByRole('button', { name: 'Attach file' })).toBeTruthy();
 	});
 });

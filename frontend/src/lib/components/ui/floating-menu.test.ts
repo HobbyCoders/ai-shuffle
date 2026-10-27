@@ -20,6 +20,11 @@ describe('computeFloatingPosition', () => {
 		expect(pos.left).toBe(1120 - 240);
 	});
 
+	it('centres under the anchor', () => {
+		const pos = computeFloatingPosition(rect(100, 1000), { width: 240, height: 200 }, view, { align: 'center' });
+		expect(pos.left).toBe(1000 + (120 - 240) / 2);
+	});
+
 	it('flips above when the space below is short and above is roomier', () => {
 		const pos = computeFloatingPosition(rect(700, 200), { width: 280, height: 400 }, view);
 		expect(pos.placement).toBe('top');

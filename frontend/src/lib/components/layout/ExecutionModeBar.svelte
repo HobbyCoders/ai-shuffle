@@ -35,6 +35,8 @@
 	import { ChevronDown, Server, GitBranch, Monitor, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
 	import { untrack, type Snippet } from 'svelte';
 	import { menuHost } from '$lib/components/ui/menu-host';
+	import { floatingMenu } from '$lib/components/ui/floating-menu';
+	import { draftIsGitRepo } from '$lib/components/chat/contextPills';
 
 	function keepInViewport(node: HTMLElement) {
 		const reposition = () => {
@@ -63,17 +65,31 @@
 		 * so the row reads runner · repo · branch · worktree in DOM order.
 		 */
 		between?: Snippet;
-		/** The new-session agent card owns "Runs on" (#371 step 4); hide the runner chip here. */
-		hideRunner?: boolean;
+		/**
+		 * `sentence`: the new-session hero's "… on <branch> in <a worktree>"
+		 * words instead of chips. The branch word opens the same branch menu,
+		 * dropped down centred under it; the worktree word toggles the worktree.
+		 * The runner is never shown (the hero names it first).
+		 */
+		variant?: 'chips' | 'sentence';
+		/**
+		 * Sentence variant: rendered right after its last word (the full stop),
+		 * so the dialogs mounted after the sentence leave no gap before it.
+		 */
+		after?: Snippet;
 		/** Show the open runner menu inside this element (the phone sheet's "Runs on" page). */
 		runnerMenuHost?: HTMLElement | null;
 	}
 
-	let { sheetMode = false, between, hideRunner = false, runnerMenuHost = null }: Props = $props();
+	let { sheetMode = false, between, after, runnerMenuHost = null, variant = 'chips' }: Props = $props();
+	const sentence = $derived(variant === 'sentence' && !sheetMode);
+	let branchTriggerRef = $state<HTMLButtonElement | null>(null);
+	/** The open branch menu; the sentence variant floats it to <body>, outside dropdownRef. */
+	let branchMenuRef = $state<HTMLDivElement | null>(null);
 
 	// --- UI state ---
 	let showBranchDropdown = $state(false);
-	let dropdownRef = $state<HTMLDivElement | null>(null);
+	let dropdownRef = $state<HTMLElement | null>(null);
 	// Separate dropdown for the execution-mode picker (coexists with the branch
 	// dropdown above; its own container ref so outside-click closes it independently).
 	let showModeDropdown = $state(false);
@@ -117,11 +133,7 @@
 	// the brief load window status is null and we optimistically show everything).
 	// A cache miss retains the previous checkout's status while loading. Only
 	// use hydrated data belonging to this composer to constrain its intent.
-	const isGitRepo = $derived(!($git.hydrated
-		&& ($git.projectId === $activeSession.projectV2Id || $git.projectId === $activeSession.project)
-		&& $git.worktreeId === $activeSession.worktreeId
-		&& $git.sessionId === $activeSession.sessionId
-		&& ($git.status?.is_git_repo === false || !!$git.status?.enclosing_repository_root)));
+	const isGitRepo = $derived(draftIsGitRepo($git, $activeSession));
 
 	$effect(() => {
 		// Non-git drafts run Local, but this is not a new account-wide preference.
@@ -396,7 +408,7 @@
 
 	// Close either dropdown on outside click (each guarded to only act when open)
 	function handleClickOutside(e: MouseEvent) {
-		if (showBranchDropdown && dropdownRef && !dropdownRef.contains(e.target as Node)) {
+		if (showBranchDropdown && dropdownRef && !dropdownRef.contains(e.target as Node) && !branchMenuRef?.contains(e.target as Node)) {
 			showBranchDropdown = false;
 		}
 		if (showModeDropdown && modeDropdownRef && !modeDropdownRef.contains(e.target as Node) && !modeMenuRef?.contains(e.target as Node)) {
@@ -423,13 +435,169 @@
 
 <svelte:window onclick={handleClickOutside} />
 
+{#snippet branchMenu()}
+				{#if loading}
+					<div class="branch-loading">
+						<Loader2 size={14} class="animate-spin" />
+						<span>Loading...</span>
+					</div>
+				{:else}
+					<!-- Auto mode option -->
+					<button
+						type="button"
+						class="branch-item auto-item"
+						class:active={isAutoMode}
+						onclick={() => { activeSession.setWorktreeBranch(''); activeSession.setWorktreeMode('new'); activeSession.clearWorktreeSelection(); showBranchDropdown = false; }}
+					>
+						<GitFork size={13} strokeWidth={1.5} />
+						<span class="branch-item-name">Auto</span>
+						<span class="auto-hint">from message</span>
+					</button>
+					<div class="branch-divider"></div>
+
+					{#if isAutoMode}
+						<div class="branch-section-label">Base branch</div>
+						{#each baseBranchOptions as branch}
+							<button
+								type="button"
+								class="branch-item"
+								class:active={(branch.remote ? branch.name.replace(/^[^\/]+\//, '') : branch.name) === baseBranch}
+								onclick={() => selectBaseBranch(branch)}
+							>
+								<GitBranch size={13} strokeWidth={1.5} />
+								<span class="branch-item-name">{branch.remote ? branch.name.replace(/^[^\/]+\//, '') : branch.name}</span>
+								<span class="branch-location-badge" class:remote={branch.remote}>
+									{branch.remote ? 'remote' : 'local'}
+								</span>
+							</button>
+						{/each}
+						{#if baseBranchOptions.length === 0}
+							<p class="branch-empty">No branches available</p>
+						{/if}
+						<div class="branch-divider"></div>
+					{/if}
+
+					<!-- Active Worktrees -->
+					{#if filteredWorktrees.length > 0}
+						<div class="branch-section-label">Worktrees</div>
+						{#each filteredWorktrees as wt (wt.id)}
+							<button
+								type="button"
+								class="branch-item"
+								class:active={$activeSession.worktreeId === wt.id}
+								onclick={() => selectWorktree(wt)}
+							>
+								<GitBranch size={13} strokeWidth={1.5} />
+								<span class="branch-item-name">{wt.branch_name}</span>
+								{#if wt.status_error}
+									<span class="broken-badge" title={`Git status unavailable: ${wt.status_error}`}>!</span>
+								{:else if wt.git_status && !wt.git_status.is_clean}
+									<span class="dirty-badge">M</span>
+								{/if}
+							</button>
+						{/each}
+					{/if}
+
+					{#if staleWorktrees.length > 0}
+						<div class="branch-divider"></div>
+						<div class="branch-section-label">Needs cleanup / binding review</div>
+						{#each staleWorktrees as wt (wt.id)}
+							<div class="stale-worktree">
+								<button type="button" class="branch-item" disabled>
+									<GitBranch size={13} strokeWidth={1.5} />
+									<span class="branch-item-name">{wt.branch_name}</span>
+									<span class="broken-badge">{wt.binding_warning ? 'Branch changed' : wt.exists === false ? 'Missing / invalid' : 'Status unavailable'}</span>
+								</button>
+								{#if wt.binding_warning && wt.git_status}
+									<p class="stale-detail">On {wt.git_status.current_branch ?? 'detached HEAD'} · {wt.git_status.modified_count + wt.git_status.staged_count + wt.git_status.untracked_count} changed</p>
+								{/if}
+								<p class="stale-detail">{wt.binding_warning || wt.status_error || 'Directory missing; needs cleanup. Existing files are preserved.'}</p>
+								{#if !$git.workerTarget && !wt.binding_warning && (wt.exists === false || wt.status_error?.includes('not its own Git working tree'))}
+									{#if forgetConfirm === wt.id}
+										<p class="stale-detail">Forget this registration? This deletes Git's administrative files for this worktree and removes its entry in AI Shuffle. Checkout files, branches and chat history are kept.</p>
+										<button type="button" class="branch-item" disabled={forgetting !== null} onclick={() => forgetWorktree(wt)}>{forgetting === wt.id ? 'Forgetting…' : 'Confirm forget'}</button>
+										<button type="button" class="branch-item" use:focusOnMount disabled={forgetting !== null} onclick={(event) => { event.stopPropagation(); forgetConfirm = null; forgetError = null; }}>Cancel</button>
+										{#if forgetError}<p class="stale-detail" role="alert">{forgetError}</p>{/if}
+									{:else}
+										<button type="button" class="branch-item" disabled={forgetting !== null} onclick={(event) => { event.stopPropagation(); forgetConfirm = wt.id; forgetError = null; }} aria-label={`Forget ${wt.branch_name}`}>Forget</button>
+									{/if}
+								{/if}
+							</div>
+						{/each}
+					{/if}
+
+					<!-- Available Branches -->
+					{#if filteredBranches.length > 0}
+						{#if filteredWorktrees.length > 0}
+							<div class="branch-divider"></div>
+						{/if}
+						<div class="branch-section-label">Branches</div>
+						{#each filteredBranches as branch}
+							<button
+								type="button"
+								class="branch-item"
+								onclick={() => selectBranch(branch)}
+							>
+								<GitBranch size={13} strokeWidth={1.5} />
+								<span class="branch-item-name">{branch.remote ? branch.name.replace(/^[^\/]+\//, '') : branch.name}</span>
+								<span class="branch-location-badge" class:remote={branch.remote}>
+									{branch.remote ? 'remote' : 'local'}
+								</span>
+							</button>
+						{/each}
+					{/if}
+
+					<!-- Empty state -->
+					{#if filteredWorktrees.length === 0 && staleWorktrees.length === 0 && filteredBranches.length === 0}
+						<p class="branch-empty">No branches available</p>
+					{/if}
+
+					<div class="branch-divider"></div>
+					<button type="button" class="branch-item create-branch-item" onclick={openCreateModal}>
+						<Plus size={13} strokeWidth={1.5} />
+						<span class="branch-item-name">New branch...</span>
+					</button>
+				{/if}
+{/snippet}
+
+{#if sentence}
+<!-- Hero sentence: "… on <branch> in <a worktree>". The parent supplies
+     "in <project>" (and, in local mode, "on <checkout branch>") as `between`. -->
+<span class="execution-mode-sentence">
+	{@render between?.()}
+	{#if $activeSession.worktreeIntent === 'worktree'}
+		on <span class="branch-selector sentence-part" bind:this={dropdownRef}><button
+			bind:this={branchTriggerRef}
+			type="button"
+			class="sentence-tok"
+			class:open={showBranchDropdown}
+			onclick={toggleDropdown}
+			aria-label="Worktree branch: {isAutoMode ? `a new branch from ${baseBranch}` : currentBranch}"
+			aria-haspopup="menu"
+			aria-expanded={showBranchDropdown}
+			title={isAutoMode ? `A new branch from ${baseBranch}, named from your message.` : `Branch: ${currentBranch}`}
+		>{isAutoMode ? `a new branch from ${baseBranch}` : currentBranch}</button>{#if showBranchDropdown}<div
+				class="branch-dropdown sentence-menu"
+				bind:this={branchMenuRef}
+				use:floatingMenu={{ anchor: branchTriggerRef, align: 'center' }}
+			>{@render branchMenu()}</div>{/if}</span>
+	{/if}
+	{#if isGitRepo}
+		in <button
+			type="button"
+			class="sentence-tok"
+			aria-pressed={worktreeOn}
+			onclick={toggleWorktree}
+			aria-label={worktreeOn ? 'Runs in a worktree. Switch to the main checkout' : 'Runs in the main checkout. Switch to a worktree'}
+			title={worktreeOn ? 'Runs in an isolated git worktree. Click for the main checkout.' : 'Runs in the main checkout. Click for an isolated git worktree.'}
+		>{worktreeOn ? 'a worktree' : 'the main checkout'}</button>{/if}{@render after?.()}</span>
+{:else}
 <div class="execution-mode-bar" class:sheet-mode={sheetMode}>
 	<div class="mode-bar-row">
 		<!-- Runner chip: this device or another worker. Opens an upward menu
 		     listing every worker as a radio row (WorkerMenuList, shared with the
 		     active session's runner menu). The worktree modifier is its own
 		     checkbox chip further along the row. -->
-		{#if !hideRunner}
 		<div class="mode-selector" bind:this={modeDropdownRef}>
 			<button
 				type="button"
@@ -473,8 +641,6 @@
 			{/if}
 		</div>
 
-		{/if}
-
 		<!-- Repository chip and, in local mode, the checkout branch chip — owned
 		     by the parent row so they can sit between the runner and the worktree
 		     chips. -->
@@ -504,128 +670,7 @@
 
 			{#if showBranchDropdown}
 				<div class="branch-dropdown">
-					{#if loading}
-						<div class="branch-loading">
-							<Loader2 size={14} class="animate-spin" />
-							<span>Loading...</span>
-						</div>
-					{:else}
-						<!-- Auto mode option -->
-						<button
-							type="button"
-							class="branch-item auto-item"
-							class:active={isAutoMode}
-							onclick={() => { activeSession.setWorktreeBranch(''); activeSession.setWorktreeMode('new'); activeSession.clearWorktreeSelection(); showBranchDropdown = false; }}
-						>
-							<GitFork size={13} strokeWidth={1.5} />
-							<span class="branch-item-name">Auto</span>
-							<span class="auto-hint">from message</span>
-						</button>
-						<div class="branch-divider"></div>
-
-						{#if isAutoMode}
-							<div class="branch-section-label">Base branch</div>
-							{#each baseBranchOptions as branch}
-								<button
-									type="button"
-									class="branch-item"
-									class:active={(branch.remote ? branch.name.replace(/^[^\/]+\//, '') : branch.name) === baseBranch}
-									onclick={() => selectBaseBranch(branch)}
-								>
-									<GitBranch size={13} strokeWidth={1.5} />
-									<span class="branch-item-name">{branch.remote ? branch.name.replace(/^[^\/]+\//, '') : branch.name}</span>
-									<span class="branch-location-badge" class:remote={branch.remote}>
-										{branch.remote ? 'remote' : 'local'}
-									</span>
-								</button>
-							{/each}
-							{#if baseBranchOptions.length === 0}
-								<p class="branch-empty">No branches available</p>
-							{/if}
-							<div class="branch-divider"></div>
-						{/if}
-
-						<!-- Active Worktrees -->
-						{#if filteredWorktrees.length > 0}
-							<div class="branch-section-label">Worktrees</div>
-							{#each filteredWorktrees as wt (wt.id)}
-								<button
-									type="button"
-									class="branch-item"
-									class:active={$activeSession.worktreeId === wt.id}
-									onclick={() => selectWorktree(wt)}
-								>
-									<GitBranch size={13} strokeWidth={1.5} />
-									<span class="branch-item-name">{wt.branch_name}</span>
-									{#if wt.status_error}
-										<span class="broken-badge" title={`Git status unavailable: ${wt.status_error}`}>!</span>
-									{:else if wt.git_status && !wt.git_status.is_clean}
-										<span class="dirty-badge">M</span>
-									{/if}
-								</button>
-							{/each}
-						{/if}
-
-						{#if staleWorktrees.length > 0}
-							<div class="branch-divider"></div>
-							<div class="branch-section-label">Needs cleanup / binding review</div>
-							{#each staleWorktrees as wt (wt.id)}
-								<div class="stale-worktree">
-									<button type="button" class="branch-item" disabled>
-										<GitBranch size={13} strokeWidth={1.5} />
-										<span class="branch-item-name">{wt.branch_name}</span>
-										<span class="broken-badge">{wt.binding_warning ? 'Branch changed' : wt.exists === false ? 'Missing / invalid' : 'Status unavailable'}</span>
-									</button>
-									{#if wt.binding_warning && wt.git_status}
-										<p class="stale-detail">On {wt.git_status.current_branch ?? 'detached HEAD'} · {wt.git_status.modified_count + wt.git_status.staged_count + wt.git_status.untracked_count} changed</p>
-									{/if}
-									<p class="stale-detail">{wt.binding_warning || wt.status_error || 'Directory missing; needs cleanup. Existing files are preserved.'}</p>
-									{#if !$git.workerTarget && !wt.binding_warning && (wt.exists === false || wt.status_error?.includes('not its own Git working tree'))}
-										{#if forgetConfirm === wt.id}
-											<p class="stale-detail">Forget this registration? This deletes Git's administrative files for this worktree and removes its entry in AI Shuffle. Checkout files, branches and chat history are kept.</p>
-											<button type="button" class="branch-item" disabled={forgetting !== null} onclick={() => forgetWorktree(wt)}>{forgetting === wt.id ? 'Forgetting…' : 'Confirm forget'}</button>
-											<button type="button" class="branch-item" use:focusOnMount disabled={forgetting !== null} onclick={(event) => { event.stopPropagation(); forgetConfirm = null; forgetError = null; }}>Cancel</button>
-											{#if forgetError}<p class="stale-detail" role="alert">{forgetError}</p>{/if}
-										{:else}
-											<button type="button" class="branch-item" disabled={forgetting !== null} onclick={(event) => { event.stopPropagation(); forgetConfirm = wt.id; forgetError = null; }} aria-label={`Forget ${wt.branch_name}`}>Forget</button>
-										{/if}
-									{/if}
-								</div>
-							{/each}
-						{/if}
-
-						<!-- Available Branches -->
-						{#if filteredBranches.length > 0}
-							{#if filteredWorktrees.length > 0}
-								<div class="branch-divider"></div>
-							{/if}
-							<div class="branch-section-label">Branches</div>
-							{#each filteredBranches as branch}
-								<button
-									type="button"
-									class="branch-item"
-									onclick={() => selectBranch(branch)}
-								>
-									<GitBranch size={13} strokeWidth={1.5} />
-									<span class="branch-item-name">{branch.remote ? branch.name.replace(/^[^\/]+\//, '') : branch.name}</span>
-									<span class="branch-location-badge" class:remote={branch.remote}>
-										{branch.remote ? 'remote' : 'local'}
-									</span>
-								</button>
-							{/each}
-						{/if}
-
-						<!-- Empty state -->
-						{#if filteredWorktrees.length === 0 && staleWorktrees.length === 0 && filteredBranches.length === 0}
-							<p class="branch-empty">No branches available</p>
-						{/if}
-
-						<div class="branch-divider"></div>
-						<button type="button" class="branch-item create-branch-item" onclick={openCreateModal}>
-							<Plus size={13} strokeWidth={1.5} />
-							<span class="branch-item-name">New branch...</span>
-						</button>
-					{/if}
+					{@render branchMenu()}
 				</div>
 			{/if}
 		</div>
@@ -653,6 +698,7 @@
 		</div>
 	{/if}
 </div>
+{/if}
 
 <CreateBranchModal
 	open={showCreateModal}
@@ -678,6 +724,21 @@
 		min-width: 0;
 		max-width: 100%;
 		overflow: visible;
+	}
+
+	/* Hero sentence: the words flow inline with the parent's sentence. */
+	.execution-mode-sentence { display: inline; }
+	/* inline-flex: one unbreakable word, and the markup's own whitespace
+	   inside it never shows as a gap before the full stop. */
+	.sentence-part { display: inline-flex; position: static; }
+	/* floatingMenu owns its position; it drops down from the word. */
+	.branch-dropdown.sentence-menu {
+		background: var(--popover);
+		animation-name: branchDropdownDown;
+	}
+	@keyframes branchDropdownDown {
+		from { opacity: 0; transform: translateY(-4px); }
+		to { opacity: 1; transform: translateY(0); }
 	}
 
 	.execution-mode-bar.sheet-mode {

@@ -16,16 +16,22 @@
 		/** Why `disabled` is set (upload, recording, transcription), shown as the tooltip. */
 		disabledReason?: string | null;
 		/**
-		 * `card`: the new-session agent card's "Talk to <agent>" button (#371
-		 * step 4): a round orb in the agent's colour with words beside it. Same
-		 * gate and the same call path as the dock's icon.
+		 * `circle`: the composer's Talk circle beside Send (the waveform in the
+		 * accent on a light accent tint). It holds the send slot while there is
+		 * nothing to send. Same gate and the same call path as the icon.
 		 */
-		variant?: 'icon' | 'card';
-		/** The agent's name, for the card label. */
+		variant?: 'icon' | 'circle';
+		/** The agent's name: a new session's button reads "Talk to <agent>". */
 		agentName?: string | null;
+		/**
+		 * Out: whether the button shows at all (voice on, a surface that takes
+		 * calls, no call already running here). The composer shows Send in its
+		 * place when it does not.
+		 */
+		available?: boolean;
 	}
 
-	let { disabled = false, disabledReason = null, variant = 'icon', agentName = null }: Props = $props();
+	let { disabled = false, disabledReason = null, variant = 'icon', agentName = null, available = $bindable(false) }: Props = $props();
 
 	let voiceEnabled = $state(false);
 	let startingVoice = $state(false);
@@ -47,8 +53,14 @@
 			?? callBusyReason($activeSession, sessionRow)
 			?? (disabled ? (disabledReason || 'Unavailable right now') : null)
 	);
-	const label = $derived(freshComposer ? 'Start a call in a new conversation' : 'Start a call in this conversation');
-	const cardLabel = $derived(`Talk to ${agentName?.trim() || 'your agent'}`);
+	const label = $derived(
+		freshComposer
+			? (agentName?.trim() ? `Talk to ${agentName.trim()}` : 'Start a call in a new conversation')
+			: 'Start a call in this conversation'
+	);
+	$effect(() => {
+		available = show;
+	});
 	// On a touch screen the tooltip never shows, so the blocked button stays
 	// tappable (aria-disabled) and a tap says why.
 	let touch = $state(false);
@@ -88,20 +100,20 @@
 	}
 </script>
 
-{#if show && variant === 'card'}
+{#if show && variant === 'circle'}
 	<button
 		type="button"
-		class="call-card"
+		class="call-circle"
 		class:starting={startingVoice}
 		class:blocked={!!blockedReason}
 		onclick={startVoiceCall}
 		disabled={(!!blockedReason && !touch) || startingVoice}
 		aria-disabled={blockedReason ? 'true' : undefined}
-		aria-label={cardLabel}
-		title={blockedReason ?? `${cardLabel}: ${label.toLowerCase()}`}
+		aria-busy={startingVoice || undefined}
+		aria-label={label}
+		title={blockedReason ?? label}
 	>
-		<span class="call-card-label">{cardLabel}</span>
-		<span class="call-orb" aria-hidden="true"><AudioLines size={18} strokeWidth={1.8} /></span>
+		<AudioLines size={17} strokeWidth={1.9} aria-hidden="true" />
 	</button>
 {:else if show}
 	<button
@@ -157,53 +169,34 @@
 
 	.voice-call-btn:focus-visible { outline:2px solid var(--ring); outline-offset:3px; }
 
-	/* Card variant: words + a round orb tinted by the agent card's --agent
-	   (an avatar colour token, falling back to the primary accent). */
-	.call-card {
-		--orb: var(--agent, var(--primary));
-		display: inline-flex;
-		align-items: center;
-		gap: 10px;
-		height: 48px;
-		padding: 0 2px 0 14px;
-		border: none;
-		border-radius: 999px;
-		background: transparent;
-		color: var(--muted-foreground);
-		font: inherit;
-		font-size: 13px;
-		font-weight: 550;
-		white-space: nowrap;
-		cursor: pointer;
-		transition: color 150ms cubic-bezier(0.4, 0, 0.2, 1);
-	}
-	.call-orb {
-		width: 44px;
-		height: 44px;
-		border-radius: 50%;
+	/* Circle variant: today's call button made round for the composer's
+	   circle row: the waveform in the accent on a light accent tint. */
+	.call-circle {
 		display: grid;
 		place-items: center;
-		color: var(--orb);
-		background: color-mix(in oklab, var(--orb) 14%, var(--card));
-		border: 1px solid color-mix(in oklab, var(--orb) 45%, var(--border));
-		box-shadow: 0 0 0 4px color-mix(in oklch, var(--orb) 7%, transparent);
-		transition: background 200ms ease, transform 200ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 200ms ease;
+		flex: none;
+		width: 32px;
+		height: 32px;
+		padding: 0;
+		border: none;
+		border-radius: 50%;
+		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 22%, transparent);
+		color: var(--primary);
+		cursor: pointer;
+		transition: background-color 150ms ease, transform 100ms ease;
 	}
-	.call-card:hover:not(:disabled):not(.blocked) { color: var(--foreground); }
-	.call-card:hover:not(:disabled):not(.blocked) .call-orb {
-		background: color-mix(in oklab, var(--orb) 24%, var(--card));
-		box-shadow: 0 0 0 6px color-mix(in oklch, var(--orb) 10%, transparent);
-		transform: scale(1.04);
+	.call-circle:hover:not(:disabled):not(.blocked) {
+		background: color-mix(in oklch, var(--primary) 17%, transparent);
 	}
-	.call-card:active:not(:disabled):not(.blocked) .call-orb { transform: scale(0.96); }
-	.call-card:focus-visible { outline: none; }
-	.call-card:focus-visible .call-orb { outline: 2px solid var(--ring); outline-offset: 3px; }
-	.call-card:disabled, .call-card.blocked { cursor: not-allowed; }
-	.call-card:disabled .call-orb, .call-card.blocked .call-orb { opacity: 0.4; box-shadow: none; }
-	.call-card.starting .call-orb :global(svg) { animation: voice-call-pulse 1s ease-in-out infinite; }
+	.call-circle:active:not(:disabled):not(.blocked) { transform: scale(0.94); }
+	.call-circle:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.call-circle:disabled, .call-circle.blocked { opacity: 0.4; cursor: not-allowed; }
+	.call-circle.starting { cursor: progress; }
+	.call-circle.starting :global(svg) { animation: voice-call-pulse 1s ease-in-out infinite; }
 	@media (prefers-reduced-motion: reduce) {
-		.call-card, .call-orb { transition: none; }
-		.call-card.starting .call-orb :global(svg) { animation: none; }
+		.call-circle { transition: none; }
+		.call-circle.starting :global(svg) { animation: none; }
 	}
 	@media (hover:none) { .voice-call-btn { min-width:44px; min-height:44px; } }
 	@media (prefers-reduced-motion:reduce) { .voice-call-btn { transition:none; } .voice-call-btn.starting :global(svg) { animation:none; } }

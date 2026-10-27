@@ -20,7 +20,9 @@ The **Dictation** settings on the same page, including the **Voice input hotkey*
 
 ## Start a call
 
-Choose **Voice** in the session mode switcher, then **Start a voice call**. To call again on an existing voice chat, use **Start a call on this voice session** in the composer. Each new call uses your current voice settings, so changing the engine or voice in Settings applies to the next call in any chat. A call that is already running keeps its engine and voice until you hang up.
+In any chat, press the round **Talk** button (a waveform) to the right of the message box, next to the microphone. Talk shows while the message box is empty; once you type or attach something it turns into **Send**, and clearing the box brings Talk back. In a new chat it reads **Talk to** the agent's name and creates the chat first.
+
+You can also choose **Voice** in the session mode switcher, then **Start a voice call**. To call again on an existing voice chat, use **Start a call on this voice session** in the composer. Each new call uses your current voice settings, so changing the engine or voice in Settings applies to the next call in any chat. A call that is already running keeps its engine and voice until you hang up.
 
 During a call, the call dock shows whether it is connected and who is speaking, how long the call has run, and buttons to:
 
@@ -55,7 +57,7 @@ You can call any of your chats at any time, even while its agent is busy. A call
 
 ## Calling a chat another worker runs
 
-You can call a chat that runs on another of your workers, or pick another worker in **Runs on** on the new-session screen and press the call button. The call runs on the worker you are connected to, with that worker's voice settings and voice login. What you ask for goes to the chat on the worker that runs it, as a typed message would, and that worker records it. Replies, finished jobs and approval questions reach the call as that worker's chat updates arrive.
+You can call a chat that runs on another of your workers, or pick another worker in the "Runs on" sentence of a new chat and press **Talk**. The call runs on the worker you are connected to, with that worker's voice settings and voice login. What you ask for goes to the chat on the worker that runs it, as a typed message would, and that worker records it. Replies, finished jobs and approval questions reach the call as that worker's chat updates arrive.
 
 - The spoken back-and-forth is not saved in that chat. Only your requests and the agent's replies are.
 - Spoken yes and no answers are sent to the worker that runs the chat.

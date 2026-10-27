@@ -67,7 +67,7 @@ afterAll(() => vi.unstubAllGlobals());
 
 function renderComposer() {
 	render(ProfileSelector);
-	render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn() } });
+	render(ControlsDock, { props: {} });
 }
 
 async function openEffort() {

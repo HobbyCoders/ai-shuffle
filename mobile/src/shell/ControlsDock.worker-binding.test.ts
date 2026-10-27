@@ -65,7 +65,7 @@ afterEach(() => {
 afterAll(() => vi.unstubAllGlobals());
 
 async function openControls() {
-	const view = render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn() } });
+	const view = render(ControlsDock, { props: {} });
 	view.component.setMobileSheetOpen(true);
 	await tick();
 	return view;

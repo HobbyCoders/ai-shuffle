@@ -17,6 +17,7 @@
 	import { git, gitStatus, branches as branchStore, gitMode } from '$lib/stores/git.svelte';
 	import { checkoutBranchWithToast } from '$lib/stores/gitCheckoutAction';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
+	import { floatingMenu } from '$lib/components/ui/floating-menu';
 
 	interface Props {
 		/** Project name shown before the branch (combined pill). */
@@ -25,9 +26,18 @@
 		onClickNewBranch?: () => void;
 		/** Use a stacked, full-width row and inline menu inside the mobile sheet. */
 		sheetMode?: boolean;
+		/**
+		 * `sentence`: the new-session hero's branch word ("on main"). The same
+		 * menu drops down centred under it.
+		 */
+		variant?: 'chip' | 'sentence';
 	}
 
-	let { projectName = null, onClickNewBranch, sheetMode = false }: Props = $props();
+	let { projectName = null, onClickNewBranch, sheetMode = false, variant = 'chip' }: Props = $props();
+	const sentence = $derived(variant === 'sentence' && !sheetMode);
+	let sentenceTrigger = $state<HTMLButtonElement | null>(null);
+	/** The open menu; the sentence variant floats it to <body>, outside dropdownRef. */
+	let menuRef = $state<HTMLDivElement | null>(null);
 
 	// Worktree mode locks the branch to the session's worktree branch.
 	const isWorktreeMode = $derived(!!($activeSession.worktreeId || $activeSession.worktreeBranch) || $gitMode === 'worktree');
@@ -129,7 +139,8 @@
 	}
 
 	function handleClickOutside(e: MouseEvent) {
-		if (showDropdown && dropdownRef && !dropdownRef.contains(e.target as Node)) {
+		const target = e.target as Node;
+		if (showDropdown && dropdownRef && !dropdownRef.contains(target) && !menuRef?.contains(target)) {
 			closeBranchDropdown();
 		}
 	}
@@ -143,7 +154,21 @@
 
 <svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} />
 
-<div class="branch-selector" class:sheet-mode={sheetMode} bind:this={dropdownRef}>
+<div class="branch-selector" class:sheet-mode={sheetMode} class:sentence bind:this={dropdownRef}>
+	{#if sentence}
+	<button
+		bind:this={sentenceTrigger}
+		type="button"
+		class="sentence-tok"
+		class:open={showDropdown}
+		onclick={toggleDropdown}
+		disabled={branchLocked}
+		aria-label={displayBranch ? `Branch: ${displayBranch}` : 'Select branch'}
+		aria-haspopup="menu"
+		aria-expanded={showDropdown}
+		title={isStreaming ? 'Branch locked during streaming' : currentBranch ? `Branch: ${currentBranch}` : 'Select branch'}
+	>{displayBranch ?? 'the current branch'}</button>
+	{:else}
 	<button
 		type="button"
 		class="ctx-chip pill branch-btn"
@@ -179,9 +204,11 @@
 			<ChevronDown size={11} strokeWidth={1.6} />
 		{/if}
 	</button>
+	{/if}
 
 	{#if showDropdown}
-		<div class="branch-dropdown" role="menu" aria-label="Branch selection">
+		<div class="branch-dropdown" class:floating={sentence} role="menu" aria-label="Branch selection"
+			bind:this={menuRef} use:floatingMenu={{ anchor: sentenceTrigger, align: 'center', enabled: sentence }}>
 			{#if showSearch}
 				<div class="dropdown-search">
 					<input
@@ -265,6 +292,8 @@
 		min-width: 0;
 		flex-shrink: 1;
 	}
+
+	.branch-selector.sentence { display: inline-flex; }
 
 	.branch-selector.sheet-mode {
 		position: relative;

@@ -4,9 +4,10 @@
 	 * (mockup: docs/design/composer-split-chips.mockup.html).
 	 *
 	 * Desktop, left to right:
-	 *   permission mode as plain text (opens the tool-access menu) · the dictate
-	 *   mic and voice-call buttons ChatInput passes in as the `voiceActions`
-	 *   snippet · "+" attach.
+	 *   permission mode as plain text (opens the tool-access menu) · the live
+	 *   browser toggle · the terminal toggle (when this viewer can open one).
+	 *   Attach, dictate and Talk/Send are ChatInput's circles beside the text
+	 *   (or at this row's two ends once the text wraps).
 	 * Right, left to right:
 	 *   model name as plain text (opens the model picker) · effort as a filled
 	 *   tag (opens the compact effort popover) · the context-usage ring.
@@ -21,11 +22,9 @@
 	 * Only one dock popover is open at a time; the ring's own popover closes
 	 * itself on any outside click, so the two never stack.
 	 *
-	 * Mobile puts the settings trigger first on the left (same icon button as
-	 * mic / call / attach), then those actions, and the usage ring on the right.
-	 * The configuration matrix lives in MobileComposerControlsSheet. The send
-	 * button is not here on any viewport: it sits at the top-right of the box,
-	 * inside ChatInput's input area.
+	 * The phone shell hides this row and shows its quick bar instead
+	 * (MobileComposerControlsSheet). The send button is not here on any
+	 * viewport: it is ChatInput's.
 	 *
 	 * Computer use is a GLOBAL toggle (Settings > Security), not a composer
 	 * control: the dock neither shows a toggle nor polls status. Halting it for a
@@ -38,8 +37,6 @@
 	import { notify } from '$lib/stores/notifications';
 	import { getVoiceSessionConfig, loadVoiceSettings, usesDelegation, voiceModelLabel, type VoiceOptions } from '$lib/api/voice';
 	import { watchResources } from '$lib/services/watch-resources';
-	import { anyCredential } from '$lib/stores/auth.svelte';
-	import { NO_CREDENTIAL_REASON, projectRulesLane } from './submit-guards';
 	import ContextUsageBar from './ContextUsageBar.svelte';
 	import EffortPopoverCard from './EffortPopoverCard.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
@@ -47,7 +44,7 @@
 	import { resolveEffortModel, resolveModelEffort, reconcileModelEffort } from '$lib/constants/model-effort';
 	// The controls sheet is the mobile app's; the web build registers none.
 	import { composerShell } from './composer-shell';
-	import { Globe, Plus, SlidersHorizontal, Lock, SquareTerminal } from 'lucide-svelte';
+	import { Globe, SlidersHorizontal, Lock, SquareTerminal } from 'lucide-svelte';
 	import type { TerminalToggle } from './composer-shell';
 	import {
 		getModelLabel,
@@ -67,16 +64,11 @@
 		BUCKET_STALE_MS
 	} from '$lib/stores/rate-limit';
 	import { usageTargetInstance } from '$lib/stores/usage-target';
-	import { attachmentBlockReason } from './attach-disable';
 	import { awayMode } from '$lib/stores/away-mode.svelte';
 	import { sessions } from '$lib/stores/app-data.svelte';
 	import { accessModes, effectiveAccessMode } from './session-scope';
 
 	interface Props {
-		isUploading: boolean;
-		onAttachClick: () => void;
-		/** The dictate mic and voice-call buttons, rendered left of attach. */
-		voiceActions?: Snippet;
 		onBrowserToggle?: () => void;
 		onBrowserPreload?: () => void;
 		browserOpen?: boolean;
@@ -90,7 +82,7 @@
 		callAction?: Snippet;
 	}
 
-	let { isUploading, onAttachClick, voiceActions, callAction, onSheetOpenChange, inertToolbar = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal }: Props = $props();
+	let { callAction, onSheetOpenChange, inertToolbar = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal }: Props = $props();
 
 	// ── Desktop popovers ──────────────────────────────────────────────
 	// Three anchored popovers, one open at a time: the permission menu, the
@@ -195,19 +187,6 @@
 	const permissionPending = $derived(!!$activeSession.sessionId && !!$activeSession.bindingUnhydrated?.permission);
 	const fastPending = $derived(!!$activeSession.sessionId && !!$activeSession.bindingUnhydrated?.fast);
 	const permissionValue = $derived(permissionPending ? null : effectiveAccessMode($activeSession.permissionModeOverride, accessContext));
-	const projectLane = $derived(projectRulesLane($activeSession.mode));
-	// Attach survives into the chat lane. Its uploads skip the project endpoint
-	// for a shared workspace directory, and the chat ceiling carries a `Read`
-	// scoped to that directory, so an attached file is genuinely readable there.
-	// Voice is the one lane with no upload path — the call surface has no
-	// composer to attach into.
-	const showAttach = true;
-
-	const attachDisabled = $derived(
-		!$anyCredential || isUploading || !!attachmentBlockReason(
-			$activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId
-		)
-	);
 
 	// ── Model override ──────────────────────────────────────────────
 	// Live model-switch options — the FULL provider-grouped library (PA13), built
@@ -477,7 +456,7 @@
 	inert={inertToolbar}
 	style:--dock-pop-max={popoverRoom != null ? `${popoverRoom}px` : undefined}
 >
-	<!-- Left group: permission · voice · attach -->
+	<!-- Left group: access mode · browser · terminal -->
 	<div class="dock-group dock-left">
 		<button
 			type="button"
@@ -561,8 +540,6 @@
 				{/if}
 			</div>
 
-		<!-- Dictate / voice call, supplied by ChatInput — left of attach. -->
-		{@render voiceActions?.()}
 
 		{#if onBrowserToggle}
 			<button
@@ -597,40 +574,6 @@
 			</button>
 		{/if}
 
-		<!-- Attach stays in the primary action cluster on every viewport, in the
-		     code and chat lanes both. A code-lane upload lands in the project's
-		     or worktree's uploads dir; a chat-lane one lands in the workspace's
-		     shared chat-uploads dir. Either way it reaches the model as an @path
-		     it has to Read — which is exactly why the chat tool ceiling carries a
-		     Read pinned to that directory. Voice has no composer upload path. -->
-		{#if showAttach}
-		<button
-			type="button"
-			onclick={onAttachClick}
-			disabled={attachDisabled}
-			class="dock-ico attach-btn"
-			aria-label="Attach file"
-			title={!$anyCredential
-				? NO_CREDENTIAL_REASON
-				: isUploading
-				? 'Uploading...'
-				: (attachmentBlockReason(
-						$activeSession.project,
-						$activeSession.projectV2Id,
-						projectLane,
-						$activeSession.sessionId
-					) ?? 'Attach file')}
-		>
-			{#if isUploading}
-				<svg class="w-[14px] h-[14px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-					<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-				</svg>
-			{:else}
-				<Plus size={14} strokeWidth={1.8} aria-hidden="true" />
-			{/if}
-		</button>
-		{/if}
 
 	</div>
 
@@ -901,19 +844,6 @@
 	.dock-ico:disabled {
 		opacity: 0.35;
 		cursor: not-allowed;
-	}
-
-	/* Only the idle mic shares the row's 24px footprint; active dictation
-	   needs the wider waveform defined by VoiceRecorder. */
-	.dock-left :global(.voice-btn:not(.expanded)),
-	.dock-left :global(.voice-call-btn) {
-		width: 24px;
-		height: 24px;
-		border-radius: 5px;
-	}
-
-	.dock-left :global(.voice-btn-wrapper) {
-		border-radius: 5px;
 	}
 
 	/* ===== EFFORT TAG (mockup `.tag`) ===== */

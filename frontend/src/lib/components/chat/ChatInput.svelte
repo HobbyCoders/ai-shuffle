@@ -5,17 +5,20 @@
 	 *
 	 * Two stacked parts, top to bottom:
 	 *   1. ContextPillBar — the loose row of context chips (agent / runner /
-	 *      repository / branch / worktree) floating ABOVE the box with a gap, in
-	 *      both the new-chat and active states. Code lane only; see the markup.
-	 *   2. The box — a flat hairline rectangle holding the Tiptap editor with
-	 *      the @/slash autocomplete panels, the return-glyph send cluster on its
-	 *      right (send · send-while-streaming · Stop · creating-worktree
-	 *      spinner), and the ControlsDock's bare-text controls row. The dictate
-	 *      and voice-call buttons are passed to the dock as its `voiceActions`
-	 *      snippet so they stay bound to this component's recording state.
+	 *      repository / branch / worktree) floating ABOVE the box with a gap.
+	 *      A new session has none: the hero's "Runs on …" sentence stands in
+	 *      for it until the first message (`newSession`).
+	 *   2. The box — a flat hairline rectangle. Its first row is the attach
+	 *      circle, the Tiptap editor (with the @/slash autocomplete panels) and
+	 *      the circles on the right: dictate, then one slot that shows Talk
+	 *      while there is nothing to send and Send once there is (a spinner
+	 *      while a worktree is created), then Stop while work runs. Below it is the
+	 *      ControlsDock's bare-text controls row. Once the text wraps, the text
+	 *      takes the full width and attach and the circles move to the two ends
+	 *      of the controls row (composer-wrap.ts).
 	 *
-	 * Delegates voice recording to VoiceRecorder, controls to ControlsDock, and
-	 * drag-and-drop to the inline overlay.
+	 * Delegates voice recording to VoiceRecorder, calls to VoiceCallButton,
+	 * controls to ControlsDock, and drag-and-drop to the inline overlay.
 	 */
 	import { tick, onDestroy, onMount } from 'svelte';
 	import { get } from 'svelte/store';
@@ -62,7 +65,8 @@
 	import StopButton from './StopButton.svelte';
 	import ControlsDock from './ControlsDock.svelte';
 	import ContextPillBar from './ContextPillBar.svelte';
-	import { CornerDownLeft, Plus } from 'lucide-svelte';
+	import { ArrowUp, Plus } from 'lucide-svelte';
+	import { composerCircles, createWrapWatcher } from './composer-wrap';
 	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery, extractFileChips } from './tiptap/serialization';
 
 	interface Command {
@@ -82,15 +86,15 @@
 		browserOpen?: boolean;
 		terminal?: TerminalToggle;
 		/**
-		 * The new-session screen leads with the agent card (#371 step 4): it
-		 * carries the agent, "Runs on" and the call, and the project strip
-		 * sits below the box. The chip row above the box and the dock's call
-		 * button would repeat them, so they step aside.
+		 * The new-session screen: the hero above names the agent and says
+		 * where the session runs ("Runs on … in … on … in …"), so the chip row
+		 * above the box would repeat it and steps aside. The placeholder
+		 * addresses the agent by name.
 		 */
-		agentCard?: boolean;
+		newSession?: boolean;
 	}
 
-	let { compact = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal, agentCard = false }: Props = $props();
+	let { compact = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal, newSession = false }: Props = $props();
 	// ChatView remounts the editor when its account changes. Teardown and
 	// already queued callbacks must not write the previous account's text.
 	const ownerEpoch = sessionOwnerEpoch();
@@ -134,11 +138,11 @@
 		const row = $sessions.find((session) => session.id === $activeSession.sessionId);
 		return handoffPlaceholder(pendingHandoff($activeSession.messages, row ? { deviceId: row.owner_device_id, deviceName: row.device_name } : null, $activeSession.sessionId, $activeSession.sessionId ? $handoffPending[$activeSession.sessionId] : null));
 	});
-	// The new-session screen addresses the agent on its card by name.
+	// The new-session screen addresses the agent by name.
 	const agentName = $derived($profiles.find(profile => profile.id === $activeSession.profile)?.name?.trim() || null);
 	const composerPlaceholder = $derived(
 		moveWait ??
-			(agentCard && agentName ? `What should ${agentName} do?`
+			(newSession && agentName ? `What should ${agentName} do?`
 				: composerMode !== 'chat' ? 'Describe a task or ask a question' : 'Ask anything')
 	);
 
@@ -552,9 +556,46 @@
 	}
 
 	let fileInputRef = $state<HTMLInputElement | null>(null);
-	// The phone shell's plus button sits left of the editor. A blocked attach
-	// stays tappable there so the tap can say why (triggerFileUpload).
-	const phoneAttachDisabled = $derived(!$anyCredential || isUploading);
+	// The attach circle left of the editor. Why it cannot attach right now, if
+	// it cannot: shown as its tooltip on desktop. On the phone a blocked attach
+	// stays tappable so the tap can say why (triggerFileUpload).
+	const attachBlock = $derived(attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId));
+	const attachDisabled = $derived(!$anyCredential || isUploading || (!platform.isMobile && !!attachBlock));
+	const attachTitle = $derived(!$anyCredential ? NO_CREDENTIAL_REASON : isUploading ? 'Uploading…' : (attachBlock ?? 'Attach files'));
+
+	// Talk turns into Send: the slot right of dictate shows the Talk circle
+	// while there is nothing to send and a call can start here, and Send once
+	// there is. Stop follows it while work runs (composer-wrap.ts).
+	let callAvailable = $state(false);
+	const circles = $derived(composerCircles({
+		callAvailable,
+		hasContent: hasMessageContent,
+		working: stoppableWork,
+		busy: $activeSession.isCreatingWorktree || heldForCatalog
+	}));
+	const showTalk = $derived(circles.includes('talk'));
+
+	// Wrap: while the text fits on one line, attach and the circles sit inline
+	// with it; once it needs a second line they move to the controls row's two
+	// ends and the text takes the full width (composer-wrap.ts).
+	let composerWrapped = $state(false);
+	const wrapWatcher = createWrapWatcher({
+		getText: () => editorRef?.getText() ?? '',
+		getEditor: () => (editorRef?.getEditor()?.view.dom as HTMLElement | undefined) ?? null,
+		getIsland: () => islandRef,
+		isWrapped: () => composerWrapped,
+		setWrapped: (wrapped) => { composerWrapped = wrapped; }
+	});
+	$effect(() => {
+		void inputValue;
+		wrapWatcher.schedule();
+	});
+	$effect(() => {
+		const island = islandRef;
+		if (!island) return;
+		return wrapWatcher.observe(island);
+	});
+	onDestroy(() => wrapWatcher.destroy());
 
 	// Voice recording state (bindable from VoiceRecorder) is declared with
 	// isUploading above, since the send button's state reads all three.
@@ -1426,26 +1467,25 @@
 			onpointerdown={handleComposerPointerDown}
 		>
 			<!-- Context chips: agent · runner · repository · branch · worktree.
-			     A loose row floating ABOVE the box with a visible gap, in both the
-			     new-chat and active states (ContextPillBar decides which chips are
-			     selectors and which are read-only). Mobile hides this row; the
-			     mobile sheet's Chat-setup section carries the same selectors.
+			     A loose row floating ABOVE the box with a visible gap once a
+			     session is under way (ContextPillBar decides which chips are
+			     selectors and which are read-only).
 
-			     Chat still requires an agent. ContextPillBar keeps its selector
-			     visible while hiding the repository and execution controls. -->
-			<!-- The phone shell carries these selectors in its controls panel; a
-			     second, hidden copy would share their dropdown state. -->
-			{#if !mobileViewport}
-			{#if !agentCard}
-				<!-- The new-session screen's agent card and project strip carry
-				     project, branch and runner instead. -->
+			     The phone shell carries these selectors in its controls panel; a
+			     second, hidden copy would share their dropdown state. A new
+			     session shows none: the hero's "Runs on …" sentence above the
+			     box says the same, and opens the same menus. -->
+			{#if !mobileViewport && !newSession}
 				<div class="context-pill-row"><ContextPillBar /></div>
 			{/if}
-			{/if}
 
-			<!-- The box: a flat hairline rectangle holding the editor, the send
-			     cluster on the right, and the bare-text controls row. -->
-			<div class="chat-island" bind:this={islandRef}>
+			<!-- The box: a flat hairline rectangle holding the attach circle, the
+			     editor and the circles on the right, then the bare-text controls
+			     row. `wrapped`: the text needs a second line, so it takes the full
+			     width and attach and the circles sit at the controls row's ends.
+			     The move is layout only (CSS grid), never a remount: a dictation
+			     or a starting call in those circles carries straight on. -->
+			<div class="chat-island" class:wrapped={composerWrapped} bind:this={islandRef}>
 				<!-- The editor. The whole area forwards pointer events to the Tiptap
 				     editor so the padding around the text line is clickable too — an
 				     empty composer reads as one target. The autocomplete panels
@@ -1454,17 +1494,18 @@
 				<!-- svelte-ignore a11y_click_events_have_key_events -->
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
 				<div class="input-area" onclick={handleEditorAreaClick}>
-					{#if mobileViewport}
-						<!-- Phone shell: attach is a plus left of the editor. -->
-						<button type="button" class="composer-attach" onclick={triggerFileUpload} disabled={phoneAttachDisabled}
-							aria-label={isUploading ? 'Uploading' : 'Attach file'} title={!$anyCredential ? NO_CREDENTIAL_REASON : 'Attach file'}>
-							{#if isUploading}
-								<svg class="composer-attach-spin" width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke-width="2" stroke-dasharray="40" stroke-dashoffset="12" /></svg>
-							{:else}
-								<Plus size={22} strokeWidth={2} aria-hidden="true" />
-							{/if}
-						</button>
-					{/if}
+					<!-- Attach: a circle left of the text (bottom-left once it wraps).
+					     A code-lane upload lands in the project's or worktree's
+					     uploads dir; a chat-lane one in the workspace's shared
+					     chat-uploads dir. -->
+					<button type="button" class="composer-attach" onclick={triggerFileUpload} disabled={attachDisabled}
+						aria-label={isUploading ? 'Uploading' : 'Attach files'} title={attachTitle}>
+						{#if isUploading}
+							<svg class="composer-attach-spin" width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke-width="2" stroke-dasharray="40" stroke-dashoffset="12" /></svg>
+						{:else}
+							<Plus size={18} strokeWidth={2} aria-hidden="true" />
+						{/if}
+					</button>
 					<!-- Textarea with autocomplete -->
 					<div class="textarea-wrapper">
 						<CommandAutocomplete
@@ -1519,14 +1560,14 @@
 						/>
 					</div>
 
-					<!-- Stop must remain reachable whenever session work is live,
-					     including with a draft. Send can queue that draft independently.
-					     StopButton confirms first when background agents are live. -->
+					<!-- The circles: dictate, then the send slot, then Stop. Talk holds
+					     the slot while there is nothing to send; Send takes it once
+					     there is. Stop must remain reachable whenever session work is
+					     live, including with a draft; Send can queue that draft
+					     independently. StopButton confirms first when background
+					     agents are live. -->
 					<div class="send-cluster">
-						{#if mobileViewport}
-							<!-- Phone shell: dictate sits beside send, with or without a draft. -->
-							{@render recorder()}
-						{/if}
+						{@render recorder()}
 						<PromptStashMenu
 							entries={$promptStash}
 							open={stashOpen}
@@ -1534,7 +1575,7 @@
 							onRestore={restoreStashed}
 							onDelete={deleteStashed}
 						/>
-						{#if $activeSession.isCreatingWorktree || heldForCatalog}
+						{#if circles.includes('busy')}
 							<!-- Creating worktree, or a send held for the project catalog - show spinner -->
 							{#if heldForCatalog}<span class="sr-only" role="status">Loading projects…</span>{/if}
 							<button type="button" class="send-btn creating-worktree" disabled title={heldForCatalog ? 'Loading projects…' : 'Creating worktree...'} aria-label={heldForCatalog ? 'Loading projects…' : 'Creating worktree'}>
@@ -1542,45 +1583,41 @@
 									<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
 								</svg>
 							</button>
-						{:else if stoppableWork}
-							{#if hasMessageContent}
-								<button type="submit" class="send-btn" disabled={sendState.disabled} title={sendState.disabled ? sendState.title : 'Send — Enter'} aria-label="Send">
-									<CornerDownLeft size={13} strokeWidth={2.2} aria-hidden="true" />
-								</button>
-							{/if}
-							<StopButton
-								activeTasks={$activeSession.activeTasks}
-								onStop={() => { composerSuggestion.invalidate(); activeSession.stopGeneration(); }}
-							/>
-						{:else}
+						{:else if circles.includes('send')}
 							<button
 								type="submit"
 								class="send-btn"
 								disabled={sendState.disabled}
-								title={sendState.title}
+								title={stoppableWork && !sendState.disabled ? 'Send — Enter' : sendState.title}
 								aria-label="Send"
 							>
-								<CornerDownLeft size={13} strokeWidth={2.2} aria-hidden="true" />
+								<ArrowUp size={16} strokeWidth={2.4} aria-hidden="true" />
 							</button>
+						{/if}
+						<!-- Always mounted (hidden when it does not hold the slot), so
+						     voice availability is read once and a starting call is
+						     never torn down by a keystroke. -->
+						<span class="talk-slot" hidden={!showTalk}>{@render talk()}</span>
+						{#if circles.includes('stop')}
+							<StopButton
+								activeTasks={$activeSession.activeTasks}
+								onStop={() => { composerSuggestion.invalidate(); activeSession.stopGeneration(); }}
+							/>
 						{/if}
 					</div>
 				</div>
 
-				<!-- Controls row. ControlsDock owns permission mode, attach, model,
-				     effort and the context ring; the dictate and voice-call buttons
-				     are handed to it as a snippet so they stay bound to this
-				     component's recording state and render inside the form. -->
+				<!-- Controls row. ControlsDock owns access mode, the browser and
+				     terminal toggles, model, effort and the context ring. The phone
+				     shell's controls panel also offers a call. -->
 				<ControlsDock
 					bind:this={controlsDockRef}
 					{onBrowserToggle}
 					{onBrowserPreload}
 					{browserOpen}
 					{terminal}
-					{isUploading}
 					inertToolbar={toolbarPointerBlocked}
-					onAttachClick={triggerFileUpload}
-					voiceActions={mobileViewport ? undefined : voiceActions}
-					callAction={mobileViewport && !agentCard ? caller : undefined}
+					callAction={mobileViewport && !newSession ? caller : undefined}
 					onSheetOpenChange={(open) => {
 						mobileControlsOpen = open;
 						if (open) keepMobileComposerExpanded();
@@ -1592,8 +1629,8 @@
 	</div>
 </div>
 
-<!-- The dictate mic and voice-call buttons. The desktop dock shows both in its
-     row; the phone shell puts the mic beside send and the call in its controls. -->
+<!-- The dictate mic, the Talk circle in the send slot, and the call button
+     the phone shell's controls panel shows. -->
 {#snippet recorder()}
 	<!-- Voice Input (delegated to VoiceRecorder component) -->
 	<VoiceRecorder
@@ -1613,21 +1650,25 @@
 	/>
 {/snippet}
 
-{#snippet caller()}
-	<!-- Voice call (VM19): starts a call on this conversation. On a
-	     fresh composer it creates the conversation from the
-	     composer's picks first (#1616); it shows disabled with the
-	     reason while the session is working or parked. -->
+{#snippet talk()}
+	<!-- Talk (VM19): starts a call on this conversation. On a fresh
+	     composer it creates the conversation from the composer's picks
+	     first (#1616) and reads "Talk to <agent>". It shows disabled with
+	     the reason while it cannot start. -->
 	<VoiceCallButton
+		variant="circle"
+		agentName={newSession ? agentName : null}
+		bind:available={callAvailable}
 		disabled={isUploading || isRecording || isTranscribing}
 		disabledReason={isUploading ? 'Uploading files...' : isRecording ? 'Recording...' : isTranscribing ? 'Transcribing...' : null}
 	/>
 {/snippet}
 
-{#snippet voiceActions()}
-	{@render recorder()}
-	<!-- The new-session agent card carries the call as "Talk to <agent>". -->
-	{#if !agentCard}{@render caller()}{/if}
+{#snippet caller()}
+	<VoiceCallButton
+		disabled={isUploading || isRecording || isTranscribing}
+		disabledReason={isUploading ? 'Uploading files...' : isRecording ? 'Recording...' : isTranscribing ? 'Transcribing...' : null}
+	/>
 {/snippet}
 
 <style>
@@ -1726,7 +1767,7 @@
 
 	/* Desktop: give the empty editor a taller hit area. The caret and
 	   placeholder stay vertically centred in that box (TiptapEditor) so they
-	   line up with the send button. Don't stretch ProseMirror itself — that
+	   line up with the circles. Don't stretch ProseMirror itself — that
 	   parked the caret at the top while the placeholder sat in the middle. */
 	:global(html[data-platform='desktop']) .textarea-wrapper :global(.tiptap-editor) {
 		min-height: 3.4em;
@@ -1740,31 +1781,145 @@
 		background: transparent;
 	}
 
-	/* ===== SEND CLUSTER (mockup `.send`) =====
-	   Right side of the editor row, vertically centred in that row. A flex
-	   sibling of the editor rather than an absolutely positioned overlay, so
-	   the text never runs under it and the mobile collapsed row keeps it at
-	   the end of the single input line. */
+	/* ===== DESKTOP LAYOUT: one grid, two arrangements =====
+	   Single line:   [+] [ text .............. ] [mic][talk|send][stop]
+	                  [ access · browser · terminal      model · effort · ring ]
+	   Wrapped:       [ text ............................................... ]
+	                  [+] [ access · browser · terminal   model · effort · ring ] [circles]
+	   The editor row's box steps aside (display: contents) so attach, the
+	   text and the circles are grid items of the box itself and can share
+	   the controls row once the text wraps. Moving them is layout only. */
+	:global(html[data-platform='desktop']) .chat-island {
+		display: grid;
+		grid-template-columns: auto minmax(0, 1fr) auto;
+		align-items: center;
+	}
+	:global(html[data-platform='desktop']) .input-area {
+		display: contents;
+	}
+	:global(html[data-platform='desktop']) .composer-attach {
+		grid-row: 1;
+		grid-column: 1;
+		margin: 12px 0 4px 12px;
+	}
+	:global(html[data-platform='desktop']) .textarea-wrapper {
+		grid-row: 1;
+		grid-column: 2;
+		z-index: 20;
+		padding: 12px 10px 4px;
+	}
+	:global(html[data-platform='desktop']) .send-cluster {
+		grid-row: 1;
+		grid-column: 3;
+		position: relative;
+		z-index: 20;
+		margin: 12px 12px 4px 0;
+	}
+	:global(html[data-platform='desktop']) .chat-island > :global(.controls-dock) {
+		grid-row: 2;
+		grid-column: 1 / -1;
+		align-self: stretch;
+	}
+	/* Wrapped: the text takes the whole first row; attach and the circles sit
+	   at the controls row's two ends, centred on it. */
+	:global(html[data-platform='desktop']) .chat-island.wrapped .textarea-wrapper {
+		grid-column: 1 / -1;
+		padding: 14px 16px 4px;
+	}
+	:global(html[data-platform='desktop']) .chat-island.wrapped .composer-attach {
+		grid-row: 2;
+		margin: 4px 0 8px 10px;
+	}
+	:global(html[data-platform='desktop']) .chat-island.wrapped .send-cluster {
+		grid-row: 2;
+		margin: 4px 10px 8px 0;
+	}
+	:global(html[data-platform='desktop']) .chat-island.wrapped > :global(.controls-dock) {
+		grid-column: 2;
+		padding: 4px 8px 8px;
+	}
+
+	/* ===== THE CIRCLES =====
+	   Attach (left), then dictate · Talk or Send · Stop (right): 32px rounds,
+	   30px once they share the controls row. Attach and dictate are quiet
+	   (muted fill); Talk keeps the call button's accent tint; Send is the
+	   filled accent; Stop keeps its destructive tint. */
+	.composer-attach {
+		display: grid;
+		place-items: center;
+		flex: none;
+		width: 32px;
+		height: 32px;
+		padding: 0;
+		border: 0;
+		border-radius: 50%;
+		background: var(--muted);
+		color: var(--muted-foreground);
+		cursor: pointer;
+		transition: background-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
+	}
+	.composer-attach:hover:not(:disabled) {
+		background: color-mix(in oklch, var(--muted) 80%, var(--foreground));
+		color: var(--foreground);
+	}
+	.composer-attach:active:not(:disabled) { transform: scale(0.94); }
+	.composer-attach:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.composer-attach:disabled { opacity: 0.45; cursor: not-allowed; }
+	.composer-attach-spin { animation: composer-attach-spin 0.9s linear infinite; }
+	@keyframes composer-attach-spin { to { transform: rotate(360deg); } }
+
+	/* ===== SEND CLUSTER =====
+	   Right of the text (or at the controls row's right end once it wraps). */
 	.send-cluster {
 		display: flex;
 		align-items: center;
 		align-self: center;
-		gap: 4px;
+		gap: 6px;
 		flex-shrink: 0;
+	}
+
+	/* Only one of Talk and Send shows; the hidden one stays mounted. */
+	.talk-slot { display: contents; }
+	.talk-slot[hidden] { display: none; }
+
+	/* Dictate: a quiet circle at rest. Listening, preparing and transcribing
+	   keep VoiceRecorder's own widths and tints. */
+	.input-area .send-cluster :global(.voice-btn) {
+		height: 32px;
+	}
+	.send-cluster :global(.voice-btn-wrapper:not(.expanded)) {
+		border-radius: 50%;
+	}
+	.send-cluster :global(.voice-btn:not(.expanded):not(.preparing):not(.transcribing)) {
+		width: 32px;
+		border-radius: 50%;
+	}
+	.send-cluster :global(.voice-btn:not(.recording):not(.preparing):not(.transcribing)) {
+		background: var(--muted);
+		color: var(--muted-foreground);
+	}
+	.send-cluster :global(.voice-btn:not(.recording):not(.preparing):not(.transcribing):hover:not(:disabled)) {
+		background: color-mix(in oklch, var(--muted) 80%, var(--foreground));
+		color: var(--foreground);
+	}
+	.send-cluster :global(.voice-btn:focus-visible) {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.send-btn {
 		display: grid;
 		place-items: center;
-		width: 24px;
-		height: 24px;
+		flex: none;
+		width: 32px;
+		height: 32px;
 		padding: 0;
 		background: var(--primary);
 		border: none;
-		border-radius: 6px;
+		border-radius: 50%;
 		color: var(--primary-foreground);
 		cursor: pointer;
-		transition: background-color 0.12s ease, color 0.12s ease, filter 0.12s ease;
+		transition: background-color 0.15s ease, color 0.15s ease, filter 0.12s ease, transform 0.1s ease;
 	}
 
 	.send-btn:hover:not(:disabled) {
@@ -1773,14 +1928,15 @@
 
 	.send-btn:active:not(:disabled) {
 		filter: brightness(0.96);
+		transform: scale(0.94);
 	}
 
 	.send-btn:focus-visible {
-		outline: 1px solid var(--primary);
+		outline: 2px solid var(--ring);
 		outline-offset: 2px;
 	}
 
-	/* Nothing to send yet: the quiet return glyph the mockup shows at rest. */
+	/* Nothing to send yet: a quiet circle. */
 	.send-btn:disabled {
 		background: var(--muted);
 		color: var(--subtle-foreground);
@@ -1796,9 +1952,24 @@
 	}
 
 	.send-cluster :global(.stop-btn) {
-		width: 24px;
-		height: 24px;
-		border-radius: 6px;
+		width: 32px;
+		height: 32px;
+		border-radius: 50%;
+	}
+
+	/* Sharing the controls row, the circles step down to 30px. */
+	:global(html[data-platform='desktop']) .chat-island.wrapped .composer-attach,
+	:global(html[data-platform='desktop']) .chat-island.wrapped .send-btn,
+	:global(html[data-platform='desktop']) .chat-island.wrapped .send-cluster :global(.stop-btn),
+	:global(html[data-platform='desktop']) .chat-island.wrapped .send-cluster :global(.call-circle) {
+		width: 30px;
+		height: 30px;
+	}
+	:global(html[data-platform='desktop']) .chat-island.wrapped .send-cluster :global(.voice-btn) {
+		height: 30px;
+	}
+	:global(html[data-platform='desktop']) .chat-island.wrapped .send-cluster :global(.voice-btn:not(.expanded):not(.preparing):not(.transcribing)) {
+		width: 30px;
 	}
 
 	@keyframes fadeIn {
@@ -1807,8 +1978,11 @@
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.chat-island {
+		.chat-island,
+		.composer-attach,
+		.send-btn {
 			transition: none;
 		}
+		.composer-attach-spin { animation: none; }
 	}
 </style>

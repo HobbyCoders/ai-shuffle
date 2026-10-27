@@ -26,12 +26,12 @@
  * menu as inside: test `menu.contains(target)` as well as the trigger's root.
  */
 
-export type FloatingAlign = 'start' | 'end';
+export type FloatingAlign = 'start' | 'center' | 'end';
 
 export interface FloatingMenuOptions {
 	/** The trigger (or its wrapper) the menu hangs from. */
 	anchor: HTMLElement | null | undefined;
-	/** Which anchor edge the menu lines up with. Default `start` (left). */
+	/** Which anchor edge the menu lines up with (`center`: centred under it). Default `start` (left). */
 	align?: FloatingAlign;
 	/** Gap between anchor and menu, px. Default 6. */
 	gap?: number;
@@ -77,7 +77,11 @@ export function computeFloatingPosition(
 	const top = placement === 'bottom' ? anchor.bottom + gap : anchor.top - gap - height;
 
 	const width = Math.min(size.width, Math.max(0, view.width - margin * 2));
-	const preferred = align === 'end' ? anchor.right - width : anchor.left;
+	const preferred = align === 'end'
+		? anchor.right - width
+		: align === 'center'
+			? anchor.left + (anchor.right - anchor.left - width) / 2
+			: anchor.left;
 	const left = Math.max(margin, Math.min(preferred, view.width - margin - width));
 
 	return { top, left, maxHeight: space, placement };

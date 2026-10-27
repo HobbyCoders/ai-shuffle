@@ -1,6 +1,9 @@
 <script lang="ts">
 	/**
-	 * RunsOnPicker — the agent card's "Runs on" control (#371 step 4).
+	 * RunsOnPicker — the worker word in the new-session sentence ("Runs on
+	 * <worker> in …", NewSessionSentence). The trigger is the worker's name as
+	 * a plain underlined word (no online dot: presence shows in the menu rows),
+	 * and the menu drops down centred under it.
 	 *
 	 * Where a NEW session runs: this worker (the default) or another approved
 	 * worker. It is the same choice and the same rows as the runner chip
@@ -8,23 +11,21 @@
 	 * first send carries as `target_instance_id`. A session without a project
 	 * can run on any online worker; with a project, workers that cannot run it
 	 * are greyed with the reason (the cluster git-state eligibility map, fail
-	 * open). The card owns this choice, so the project strip hides its own
-	 * runner chip.
+	 * open).
 	 */
 	import { tick, untrack } from 'svelte';
-	import { ChevronDown, Monitor, Server } from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { getClusterGitState, type Install } from '$lib/api/installs';
 	import { workerInstalls, refreshWorkerPresence, watchWorkerPresence, presenceOf } from '$lib/stores/worker-presence';
 	import { peerRunners, checkoutEligibility, isBlocked, runnerTitle } from './execution-mode-eligibility';
 	import { workerRowNote } from '$lib/components/chat/runner-badge-menu';
-	import WorkerStatusDot from '$lib/components/ui/WorkerStatusDot.svelte';
 	import WorkerMenuList, { type WorkerMenuRow } from '$lib/components/ui/WorkerMenuList.svelte';
 	import { floatingMenu } from '$lib/components/ui/floating-menu';
 
 	const LOCAL_ROW_ID = '__local__';
 
 	let open = $state(false);
+	let triggerRef = $state<HTMLButtonElement | null>(null);
 	let wrapRef = $state<HTMLDivElement | null>(null);
 	let loading = $state(false);
 	let failed = $state(false);
@@ -114,7 +115,7 @@
 
 	function closeMenu(focusTrigger: boolean) {
 		open = false;
-		if (focusTrigger) wrapRef?.querySelector<HTMLButtonElement>('.runs-on')?.focus();
+		if (focusTrigger) triggerRef?.focus();
 	}
 
 	/** Arrow keys and Home/End move between rows; Tab leaves and closes. */
@@ -178,29 +179,19 @@
 
 <div class="runs-on-wrap" bind:this={wrapRef}>
 	<button
+		bind:this={triggerRef}
 		type="button"
-		class="runs-on"
+		class="sentence-tok"
 		class:open
-		class:peer={!!intent}
 		onclick={toggle}
 		aria-haspopup="menu"
 		aria-expanded={open}
 		aria-label="Runs on {label}{online === false ? ' (offline)' : ''}"
 		title={intent ? `This session will run on ${intent.name}` : 'This session will run on this worker'}
-	>
-		<span class="runs-on-lbl">Runs on</span>
-		{#if intent}
-			<Server size={13} strokeWidth={1.7} aria-hidden="true" />
-		{:else}
-			<Monitor size={13} strokeWidth={1.7} aria-hidden="true" />
-		{/if}
-		{#if online !== null}<WorkerStatusDot {online} />{/if}
-		<b class="runs-on-name">{label}</b>
-		<ChevronDown size={12} strokeWidth={1.8} class="runs-on-chev" aria-hidden="true" />
-	</button>
+	>{label}</button>
 	{#if open}
-		<!-- Floats to <body>: the agent card is its own stacking context, so an
-		     in-place menu painted under the composer below the card. -->
+		<!-- Floats to <body>: the hero is its own stacking context, so an
+		     in-place menu painted under the composer below it. -->
 		<div
 			class="runs-on-menu"
 			role="menu"
@@ -208,7 +199,7 @@
 			aria-label="Where this session runs"
 			bind:this={menuRef}
 			onkeydown={onMenuKeydown}
-			use:floatingMenu={{ anchor: wrapRef, align: 'end' }}
+			use:floatingMenu={{ anchor: triggerRef, align: 'center' }}
 		>
 			<WorkerMenuList
 				items={rows}
@@ -224,40 +215,15 @@
 </div>
 
 <style>
-	.runs-on-wrap { position: relative; min-width: 0; }
-	.runs-on {
-		display: inline-flex;
-		align-items: center;
-		gap: 7px;
-		height: 32px;
-		max-width: 100%;
-		padding: 0 10px;
-		border: 1px solid transparent;
-		border-radius: calc(var(--radius, 10px) * 0.8);
-		background: var(--muted);
-		color: var(--muted-foreground);
-		font: inherit;
-		font-size: 12.5px;
-		font-weight: 500;
-		white-space: nowrap;
-		cursor: pointer;
-		transition: background 150ms cubic-bezier(0.4, 0, 0.2, 1), color 150ms cubic-bezier(0.4, 0, 0.2, 1);
-	}
-	.runs-on:hover, .runs-on.open { background: color-mix(in oklch, var(--muted) 82%, var(--foreground)); color: var(--foreground); }
-	.runs-on:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-	.runs-on.peer { background: color-mix(in oklab, var(--primary) 12%, var(--muted)); color: var(--primary); }
-	.runs-on-lbl { color: var(--subtle-foreground); }
-	.runs-on.peer .runs-on-lbl { color: inherit; opacity: 0.8; }
-	.runs-on-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--foreground); font-weight: 550; }
-	.runs-on.peer .runs-on-name { color: inherit; }
-	.runs-on :global(.runs-on-chev) { color: var(--subtle-foreground); transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1); }
-	.runs-on.open :global(.runs-on-chev) { transform: rotate(180deg); }
+	/* One inline word in the sentence; the look is `.sentence-tok` (app.css). */
+	/* inline-flex: the markup's own whitespace never shows beside the word. */
+	.runs-on-wrap { display: inline-flex; }
 	.runs-on-menu:focus { outline: none; }
 	/* Position, z-index and the viewport cap come from floatingMenu. */
 	.runs-on-menu {
-		min-width: 240px;
+		min-width: 220px;
 		max-width: min(320px, calc(100vw - 24px));
-		padding: 4px;
+		padding: 6px;
 		background: var(--popover);
 		border: 1px solid var(--border);
 		border-radius: calc(var(--radius, 10px) * 0.83);
@@ -268,7 +234,6 @@
 	@keyframes runs-on-in { from { opacity: 0; transform: translateY(-4px) scale(0.98); } }
 	@keyframes runs-on-in-up { from { opacity: 0; transform: translateY(4px) scale(0.98); } }
 	@media (prefers-reduced-motion: reduce) {
-		.runs-on, .runs-on :global(.runs-on-chev) { transition: none; }
 		.runs-on-menu { animation: none; }
 	}
 </style>

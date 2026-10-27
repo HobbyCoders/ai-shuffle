@@ -10,7 +10,7 @@ A terminal is a real command line (bash or sh) on your worker. It opens in the f
 
 ## Open a terminal
 
-- **On a computer:** click the terminal button under the message box. The Terminal panel opens on the right. Drag its edge to resize it.
+- **On a computer:** click the terminal button in the row of controls at the bottom of the message box. The Terminal panel opens on the right. Drag its edge to resize it.
 - **On a phone:** open the composer controls and tap **Terminal** under More actions. It fills the screen and adds the keys your keyboard lacks, such as Ctrl, Esc, Tab and the arrows.
 - **From an agent's reply:** shell code blocks show **Open terminal** and **Open and paste**. See [Commands from a reply](#commands-from-a-reply).
 - **From Files:** choose **Open terminal here** for the current folder on this worker.

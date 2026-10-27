@@ -22,7 +22,8 @@ describe('voice composer parity', () => {
 		expect(dock).toContain("$activeSession.mode !== 'chat'");
 		// Access shows in every lane (#371 step 4); only its options follow the project.
 		expect(dock).toMatch(/\n\tshowCodeControls\n/);
-		expect(dock).toContain('const showAttach = true;');
+		// Attach is the composer's own circle in every lane, left of the text.
+		expect(source('components/chat/ChatInput.svelte')).toContain('class="composer-attach"');
 	});
 	it('restores failed sends only to the originating draft', () => {
 		const input = source('components/chat/ChatInput.svelte');

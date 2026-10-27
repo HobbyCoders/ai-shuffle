@@ -37,7 +37,7 @@ async function openSession(mode: 'code' | 'chat' | 'voice') {
 	expect(get(activeSession).mode).toBe(mode);
 }
 function mount() {
-	return render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn() } });
+	return render(ControlsDock, { props: {} });
 }
 
 describe('ControlsDock single responsive context producer', () => {

@@ -1,5 +1,5 @@
 /**
- * #371 step 4: the agent card's "Runs on" menu. Keyboard users get the menu
+ * The new-session sentence's worker menu ("Runs on <worker>"). Keyboard users get the menu
  * pattern: focus lands on the picked row when it opens, the arrow keys and
  * Home/End move between rows, only the focused row is in the Tab order, and
  * Escape returns to the trigger.
@@ -95,7 +95,7 @@ describe('RunsOnPicker keyboard', () => {
 		expect(document.activeElement).toBe(trigger);
 	});
 
-	it('floats the menu to <body> so the agent card cannot trap it under the composer', async () => {
+	it('floats the menu to <body>, centred under the word, so the hero cannot trap it under the composer', async () => {
 		const trigger = await openMenu();
 		const menu = screen.getByRole('menu');
 		expect(menu.parentElement).toBe(document.body);

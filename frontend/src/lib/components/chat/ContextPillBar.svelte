@@ -28,7 +28,7 @@
 	import ExecutionModeBar from '$lib/components/layout/ExecutionModeBar.svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
-	import { computeContextBadge, shouldShowBranchPill, shouldShowEmptyStateBranchPill } from './contextPills';
+	import { composerIsGitRepo, computeContextBadge, shouldShowBranchPill, shouldShowEmptyStateBranchPill } from './contextPills';
 	import { gitStateQuery, runnerBadgeMenuItems } from './runner-badge-menu';
 	import type { RunnerBadgeMenuItem } from './runner-badge-menu';
 	import WorkerStatusDot from '$lib/components/ui/WorkerStatusDot.svelte';
@@ -60,18 +60,13 @@
 		/** Render the selectors as stacked, full-width controls inside the mobile sheet. */
 		sheetMode?: boolean;
 		/**
-		 * The new-session project strip (#371 step 4): project, branch and
-		 * worktree only. The agent card above owns the agent and "Runs on".
-		 */
-		strip?: boolean;
-		/**
 		 * The phone sheet's pages: the Agent and "Runs on" menus open inside
 		 * these elements instead of under their rows (see menuHost).
 		 */
 		menuHosts?: { agent?: HTMLElement | null; runner?: HTMLElement | null };
 	}
 
-	let { sheetMode = false, strip = false, menuHosts }: Props = $props();
+	let { sheetMode = false, menuHosts }: Props = $props();
 
 	const projectName = $derived(
 		$projects.find((p) => p.id === $activeSession.project)?.name ??
@@ -104,11 +99,7 @@
 
 	// Only use a confirmed status for this composer; cache-miss placeholders
 	// can still describe the project the user just left.
-	const isGitRepo = $derived(!(!$activeSession.worktreeId && !$activeSession.worktreeBranch && !$git.error && $git.hydrated
-		&& ($git.projectId === $activeSession.projectV2Id || $git.projectId === $activeSession.project)
-		&& $git.sessionId === $activeSession.sessionId
-		&& $git.worktreeId === $activeSession.worktreeId
-		&& ($git.status?.is_git_repo === false || !!$git.status?.enclosing_repository_root)));
+	const isGitRepo = $derived(composerIsGitRepo($git, $activeSession));
 	const isWorktreeSession = $derived(!!($activeSession.worktreeId || $activeSession.worktreeBranch));
 	// Auto naming starts before the session has a worktree ID or branch.
 	const isWorktreeSelected = $derived(isWorktreeSession || $activeSession.isCreatingWorktree);
@@ -506,20 +497,16 @@
 	{/if}
 {/snippet}
 
-<div class="context-pill-bar" class:sheet-mode={sheetMode} class:strip role="toolbar" aria-label={strip ? 'Project' : 'Session context'}>
-	{#if !strip}
+<div class="context-pill-bar" class:sheet-mode={sheetMode} role="toolbar" aria-label="Session context">
 	<ProfileSelector {sheetMode} menuHost={menuHosts?.agent} />
-	{/if}
 	<!-- A no-project chat has no repository or execution controls, but a saved
 	     one still shows its runner so it can move to another worker (#639). -->
-	{#if $activeSession.mode !== 'chat' || (!isEmptyState && !strip)}
-	{#if !strip}
+	{#if $activeSession.mode !== 'chat' || !isEmptyState}
 	<span class="ctx-sep" aria-hidden="true"></span>
-	{/if}
 
 	{#if isEmptyState}
 		{#if $activeSession.project || $activeSession.projectV2Id}
-			<ExecutionModeBar {sheetMode} hideRunner={strip} runnerMenuHost={menuHosts?.runner}>
+			<ExecutionModeBar {sheetMode} runnerMenuHost={menuHosts?.runner}>
 				{#snippet between()}
 					{@render repoChip()}
 					{#if showEmptyStateBranch}

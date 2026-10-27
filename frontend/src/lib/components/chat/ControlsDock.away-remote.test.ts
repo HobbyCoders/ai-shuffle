@@ -72,7 +72,7 @@ afterAll(() => vi.unstubAllGlobals());
 async function openRemote(id: string) {
 	await activeSession.switchSession(id);
 	await waitFor(() => expect(get(activeSession).sessionId).toBe(id));
-	render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn() } });
+	render(ControlsDock, { props: {} });
 }
 
 const permission = () => screen.getByRole('button', { name: /^Permission mode:/ });

@@ -85,7 +85,7 @@ async function settle() {
 
 describe('ControlsDock usage refresh at turn end', () => {
 	it('re-reads the cached rows (no forced refresh) when a turn ends with the popover open', async () => {
-		const view = render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn() } });
+		const view = render(ControlsDock, { props: {} });
 		await settle();
 		await fireEvent.click(view.container.querySelector('.usage-indicator')!);
 		await settle();
@@ -100,7 +100,7 @@ describe('ControlsDock usage refresh at turn end', () => {
 	});
 
 	it('does not fetch at turn end while the popover is closed', async () => {
-		render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn() } });
+		render(ControlsDock, { props: {} });
 		await settle();
 		const before = vi.mocked(getUsageLimits).mock.calls.length;
 		streaming.set(true);
