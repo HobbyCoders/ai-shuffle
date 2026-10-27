@@ -158,7 +158,7 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
  const fail = (reason: VoiceStreamEndReason, message: string) => { endReason ??= reason; error ??= message; };
  let micMuted = false, micGeneration = 0;
  // Call health (#1824): what the browser captured, sent and played.
- const stats = { captured: 0, sent: 0, upload_dropped: 0, received: 0, underruns: 0, playback_dropped_ms: 0, depth_ms: 0, max_depth_ms: 0, target_ms: 0, stall_ms: 0, mic_recoveries: 0, device_changes: 0 };
+ const stats = { captured: 0, sent: 0, upload_dropped: 0, received: 0, underruns: 0, playback_dropped_ms: 0, depth_ms: 0, max_depth_ms: 0, target_ms: 0, max_lead_ms: 0, stall_ms: 0, mic_recoveries: 0, device_changes: 0 };
  let lastCaptureAt = performance.now(), graceUntil = lastCaptureAt + MIC_SILENT_MS;
  let serverMicAgeMs: number | null = null, serverHealthAt = 0;
  let reconnecting = false, micOk = true, micRetryAt = 0, lastTick = performance.now();
@@ -215,6 +215,8 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
    } else if (message.type === 'stats') {
     stats.underruns = message.underruns; stats.playback_dropped_ms = message.droppedMs;
     stats.depth_ms = message.depthMs; stats.max_depth_ms = Math.max(stats.max_depth_ms, message.maxDepthMs); stats.target_ms = message.targetMs;
+    // How far a reply arrived ahead of real time: a burst the player keeps (#731).
+    stats.max_lead_ms = Math.max(stats.max_lead_ms, message.maxLeadMs ?? 0);
    }
   };
   socket = new WebSocket(wsUrl(`/api/v1/voice/sessions/${encodeURIComponent(sessionId)}/audio`, { resume: resume ? '1' : null }));
@@ -389,7 +391,7 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
      track: track?.readyState ?? 'none', capture_age_ms: Math.round(performance.now() - lastCaptureAt),
     } }));
    } catch { /* the close handler reports a dead socket */ }
-   stats.stall_ms = 0; stats.max_depth_ms = 0;
+   stats.stall_ms = 0; stats.max_depth_ms = 0; stats.max_lead_ms = 0;
   }, CLIENT_STATS_MS);
   navigator.mediaDevices?.addEventListener?.('devicechange', onDeviceChange);
   window.addEventListener('voiceaudiochange', onDeviceChange);

@@ -487,12 +487,12 @@ describe('microphone watchdog', () => {
   expect(sockets[0].send).not.toHaveBeenCalled(); // An older server would reject the report.
   sockets[0].onmessage({ data: JSON.stringify({ type: 'health', mic_age_ms: 50, mic_frames: 1 }) });
   speak();
-  playback().port.onmessage({ data: { type: 'stats', underruns: 2, droppedMs: 0, depthMs: 140, maxDepthMs: 300, targetMs: 200 } });
+  playback().port.onmessage({ data: { type: 'stats', underruns: 2, droppedMs: 0, depthMs: 140, maxDepthMs: 300, targetMs: 200, maxLeadMs: 21500 } });
   await vi.advanceTimersByTimeAsync(CLIENT_STATS_MS);
   const reports = sockets[0].send.mock.calls.map(([m]: any[]) => m).filter((m: unknown) => typeof m === 'string').map((m: string) => JSON.parse(m));
   expect(reports).toHaveLength(1);
   expect(reports[0]).toMatchObject({ type: 'client_stats', stats: {
-   captured: 1, sent: 1, underruns: 2, depth_ms: 140, max_depth_ms: 300, target_ms: 200, muted: false, context: 'running', rate: 48000, track: 'live',
+   captured: 1, sent: 1, underruns: 2, depth_ms: 140, max_depth_ms: 300, target_ms: 200, max_lead_ms: 21500, muted: false, context: 'running', rate: 48000, track: 'live',
   } });
   await stream.close();
  });

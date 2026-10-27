@@ -22,6 +22,27 @@ function player(rate = 48000) {
  return { node, push, render, messages };
 }
 const frame = (value: number, ms = 100) => new Int16Array(24 * ms).fill(value);
+/** `count` frames of `ms` each carrying one continuous ramp (never 0), and the ramp itself. */
+function ramp(count: number, ms: number) {
+ const all = Int16Array.from({ length: count * 24 * ms }, (_, n) => 1 + (n % 32000));
+ return { all, frames: Array.from({ length: count }, (_, k) => all.subarray(k * 24 * ms, (k + 1) * 24 * ms).slice()) };
+}
+/**
+ * Deliver `frames` at `arrivals` (ms) while the device plays in 10 ms steps.
+ * Returns every output sample and, per 10 ms step, whether it played speech
+ * and whether the player said it was speaking at the end of that step.
+ */
+function deliver(p: ReturnType<typeof player>, frames: Int16Array[], arrivals: number[], totalMs: number) {
+ const out: number[] = [], steps: { sound: boolean; speaking: boolean }[] = [];
+ let k = 0;
+ for (let t = 0; t < totalMs; t += 10) {
+  while (k < frames.length && arrivals[k] <= t) p.push(frames[k++]);
+  const chunk = p.render(10);
+  for (const v of chunk) out.push(v);
+  steps.push({ sound: chunk.some(v => v !== 0), speaking: !!p.messages('speaking').at(-1)?.active });
+ }
+ return { out, steps };
+}
 
 describe('voice playback worklet', () => {
  it('drops queued speech on provider barge-in and accepts the next reply', () => {
@@ -85,5 +106,70 @@ describe('voice playback worklet', () => {
   expect(frames.at(-1)).toBe(100);
   expect(frames.length).toBeGreaterThanOrEqual(45);
   expect(p.messages('stats').at(-1).droppedMs).toBeGreaterThan(0);
+ });
+
+ // A provider that sends speech faster than real time (#731): a 27 s reply in
+ // 5 s, Grok's observed 37 frames of ~0.73 s over 19 s, and sentences sent in
+ // quick clumps with pauses between them.
+ const bursts = {
+  '27 s in 5 s': { count: 270, ms: 100, at: (k: number) => k * 5000 / 270 },
+  'Grok pacing': { count: 37, ms: 730, at: (k: number) => k * 19000 / 37 },
+  'sentence clumps': { count: 300, ms: 100, at: (k: number) => Math.floor(k / 60) * 2500 + (k % 60) * 400 / 60 },
+ };
+ it.each(Object.entries(bursts).flatMap(([name, b]) => [24000, 48000].map(rate => [name, rate, b] as const)))(
+  'plays a burst (%s) in full and in order on a %i Hz device', (_name, rate, b) => {
+   const p = player(rate);
+   const { all, frames } = ramp(b.count, b.ms);
+   const seconds = all.length / 24000;
+   const { out, steps } = deliver(p, frames, frames.map((_, k) => b.at(k)), (seconds + 2) * 1000);
+   const first = out.findIndex(v => v !== 0), last = out.findLastIndex(v => v !== 0);
+   const run = out.slice(first, last + 1);
+   // One run with no gap, no speed-up and nothing dropped.
+   expect(run.length).toBe(all.length * rate / 24000);
+   expect(run.every(v => v !== 0)).toBe(true);
+   // Every sample, in order (at 48 kHz the in-between outputs are interpolated).
+   const played = run.filter((_, i) => i % (rate / 24000) === 0).map(v => Math.round(v * 32768));
+   expect(played.findIndex((v, i) => v !== all[i])).toBe(-1);
+   expect(p.node.droppedMs).toBe(0);
+   expect(p.messages('stats').every((m: any) => m.droppedMs === 0)).toBe(true);
+   expect(Math.max(...p.messages('stats').map((m: any) => m.maxLeadMs))).toBeGreaterThan(1000);
+   // Speaking from the first sample to the last, then off once.
+   expect(steps.filter(s => s.sound).every(s => s.speaking)).toBe(true);
+   expect(p.messages('speaking')).toEqual([{ type: 'speaking', active: true }, { type: 'speaking', active: false }]);
+  });
+
+ it('still cuts the late clump released after a stall in the middle of a reply', () => {
+  const p = player();
+  for (let i = 1; i <= 20; i++) { p.push(frame(i * 100)); p.render(100); } // 2 s in real time
+  p.render(8000); // the main thread stalls for 8 s; the player runs dry
+  for (let i = 21; i <= 120; i++) p.push(frame(i * 100)); // 10 s of speech released at once
+  const values = p.render(6000).map(v => Math.round(v * 32768)).filter(v => v > 0 && v % 100 === 0);
+  const frames = [...new Set(values)].map(v => v / 100);
+  expect(frames).toEqual(Array.from({ length: frames.length }, (_, i) => frames[0] + i));
+  expect(frames[0]).toBeGreaterThan(21);
+  expect(frames.at(-1)).toBe(120);
+  expect(p.node.droppedMs).toBeGreaterThan(5000);
+ });
+
+ it('caps a runaway stream at its ring instead of growing without bound', () => {
+  const p = player(24000);
+  // 120 s of speech at eight times real time.
+  for (let t = 0; t < 15000; t += 100) { p.push(frame(1000, 800)); p.render(100); }
+  const stats = p.messages('stats');
+  expect(Math.max(...stats.map((m: any) => m.maxDepthMs))).toBeLessThanOrEqual(88000);
+  expect(p.node.droppedMs).toBeGreaterThan(0);
+  expect(p.render(1000).every(v => v !== 0)).toBe(true); // still playing what it kept
+ });
+
+ it('empties a long buffered burst at once on barge-in', () => {
+  const p = player();
+  const { frames } = ramp(270, 100);
+  deliver(p, frames, frames.map((_, k) => k * 5000 / 270), 5000);
+  expect(p.node.depth()).toBeGreaterThan(20 * 24000);
+  p.node.port.onmessage({ data: { type: 'clear' } });
+  expect(p.node.depth()).toBe(0);
+  expect(p.render(500).every(v => v === 0)).toBe(true);
+  expect(p.messages('speaking').at(-1)).toEqual({ type: 'speaking', active: false });
+  expect(p.node.droppedMs).toBe(0);
  });
 });
