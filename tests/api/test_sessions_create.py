@@ -225,6 +225,66 @@ class TestRunsOnAnotherWorker:
         assert "Couldn't reach GamingPC" in response.json()["detail"]
         db.delete_session.assert_called_once_with(_created(db)["session_id"])
 
+    def test_a_lost_answer_is_asked_once_more_and_keeps_the_copy(self, client, db, owner):
+        """The owner's create returns an existing session, so asking again is safe."""
+        from app.network import control
+        owner["create"].side_effect = [control.MaybeApplied("no answer"), {"session_id": "x"}]
+        response = client.post("/api/v1/sessions", json={"profile_id": "agent-a", "target_instance_id": self.PEER})
+
+        assert response.status_code == 200, response.text
+        assert owner["create"].await_count == 2
+        first, second = (c.args[1] for c in owner["create"].await_args_list)
+        assert first == second
+        db.delete_session.assert_not_called()
+
+    @pytest.mark.parametrize("second", ["MaybeApplied", "RunnerUnreachable"])
+    def test_still_no_answer_keeps_the_copy_the_owner_may_have(self, client, db, owner, second):
+        from app.network import control
+        owner["create"].side_effect = [control.MaybeApplied("no answer"), getattr(control, second)("still nothing")]
+        response = client.post("/api/v1/sessions", json={"profile_id": "agent-a", "target_instance_id": self.PEER})
+
+        assert response.status_code == 409
+        assert "may already exist on that device" in response.json()["detail"]
+        db.delete_session.assert_not_called()
+
+    def test_a_refusal_after_a_lost_answer_removes_the_copy(self, client, db, owner):
+        from app.network import control
+        owner["create"].side_effect = [control.MaybeApplied("no answer"), control.ControlRefused("Unknown profile")]
+        response = client.post("/api/v1/sessions", json={"profile_id": "agent-a", "target_instance_id": self.PEER})
+
+        assert response.status_code == 409
+        db.delete_session.assert_called_once_with(_created(db)["session_id"])
+
+    def test_a_runner_outside_the_network_leaves_no_copy(self, client, db, owner):
+        owner["owner_of"].return_value = None
+        response = client.post("/api/v1/sessions", json={"profile_id": "agent-a", "target_instance_id": self.PEER})
+
+        assert response.status_code == 409
+        assert "not part of this worker network" in response.json()["detail"]
+        db.delete_session.assert_called_once_with(_created(db)["session_id"])
+        owner["create"].assert_not_awaited()
+
+    def test_a_preview_cookie_cannot_start_a_chat_on_another_worker(self, client, db, owner, monkeypatch):
+        """Mirrors the chat socket (#641): that worker cannot see the preview principal."""
+        from types import SimpleNamespace
+        from app.core import preview_access
+        monkeypatch.setattr(preview_access, "grant", lambda request: SimpleNamespace(session_id="preview"))
+        response = client.post("/api/v1/sessions", json={"profile_id": "agent-a", "target_instance_id": self.PEER})
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == create_api.PREVIEW_ELSEWHERE
+        db.create_session.assert_not_called()
+        owner["create"].assert_not_awaited()
+
+    def test_a_preview_cookie_still_creates_a_chat_here(self, client, db, monkeypatch):
+        from types import SimpleNamespace
+        from app.core import preview_access
+        monkeypatch.setattr(preview_access, "grant", lambda request: SimpleNamespace(session_id="preview"))
+        response = client.post("/api/v1/sessions", json={"profile_id": "agent-a"})
+
+        assert response.status_code == 200
+        assert _created(db)["target_instance_id"] is None
+
     def test_this_worker_as_the_target_runs_here(self, client, db):
         from app.core.config import settings
         response = client.post("/api/v1/sessions", json={

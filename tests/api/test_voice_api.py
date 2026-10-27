@@ -2256,6 +2256,53 @@ class TestConversationAttachment:
         assert attach_client.post(f"/api/v1/voice/sessions/{session_id}/attach", json={}).status_code == 404
         assert attach_client.post(f"/api/v1/voice/sessions/{session_id}/secret", json={}).status_code == 404
 
+    def test_a_preview_cookie_cannot_call_a_chat_another_worker_runs(self, attach_client, mock_db, monkeypatch):
+        """Mirrors the chat socket (#641): that worker cannot see the preview principal."""
+        from types import SimpleNamespace
+        from app.core import preview_access
+        session_id = self._owned_by_peer(monkeypatch)
+        monkeypatch.setattr(preview_access, "grant", lambda request: SimpleNamespace(session_id="preview"))
+
+        response = attach_client.post(f"/api/v1/voice/sessions/{session_id}/attach", json={})
+
+        assert response.status_code == 403
+        assert "preview link" in response.json()["detail"]
+
+    def test_a_preview_cookie_still_calls_a_chat_run_here(self, attach_client, mock_db, monkeypatch):
+        from types import SimpleNamespace
+        from app.core import preview_access
+        from app.db import database
+        database.create_session("here", "default", mode="chat")
+        monkeypatch.setattr(preview_access, "grant", lambda request: SimpleNamespace(session_id="preview"))
+
+        assert attach_client.post("/api/v1/voice/sessions/here/attach", json={}).status_code == 200
+
+    def test_the_audio_socket_marks_a_streamed_call_as_forwarding(self, attach_client, mock_db, monkeypatch):
+        """voice.py wires the owner onto the stream it builds, so the call
+        forwards instead of writing (the producing path, not a hand-set flag)."""
+        from unittest.mock import AsyncMock
+        from app.api import ws_auth
+        from app.core import voice_stream
+        from app.db import database
+        session_id = self._owned_by_peer(monkeypatch)
+        database.set_system_setting("voice_model", "gpt-live-1")
+        assert attach_client.post(f"/api/v1/voice/sessions/{session_id}/attach", json={}).status_code == 200
+        seen = []
+
+        class _Stream:
+            def __init__(self, websocket, row, config, key, max_minutes, **_identity):
+                self.remote_owner = None
+
+            async def run(self):
+                seen.append(self.remote_owner)
+
+        monkeypatch.setattr(voice_stream, "VoiceStream", _Stream)
+        monkeypatch.setattr(ws_auth, "authenticate_websocket", AsyncMock(return_value=(True, None)))
+        with attach_client.websocket_connect(f"/api/v1/voice/sessions/{session_id}/audio"):
+            pass
+
+        assert seen == [self.PEER]
+
     def test_a_session_of_another_install_outside_a_network_stays_refused(self, attach_client, mock_db):
         """No network owner and not this install: nothing forwards, so no call."""
         from app.db import database

@@ -1064,6 +1064,14 @@ def _check_attachable_conversation(row):
         raise HTTPException(403, "Background observation cannot acquire a voice surface.")
 
 
+def _refuse_preview_elsewhere(request, row) -> None:
+    """A preview cookie never drives a chat another worker runs: that worker
+    cannot see its principal (#641), as a typed send from it is refused."""
+    from app.core import preview_access, voice_remote
+    if voice_remote.owner_of(row) and preview_access.grant(request) is not None:
+        raise HTTPException(403, "The preview link can't call a chat another worker runs.")
+
+
 def _refuse_remote_voice_lane(row) -> None:
     """A legacy voice-lane session is its own call record, written by the
     worker that hosts the call; one another worker owns is never driven from
@@ -1177,6 +1185,7 @@ async def prepare_voice_attachment(
     _check_voice_session_access(api_user, row)
     if row.get("mode") != "voice":
         await run_sync(_check_attachable_conversation, row)
+        await run_sync(_refuse_preview_elsewhere, http_request, row)
     else:
         await run_sync(_refuse_remote_voice_lane, row)
     _reject_when_capped(session_id)

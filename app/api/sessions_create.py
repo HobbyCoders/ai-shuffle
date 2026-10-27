@@ -36,6 +36,9 @@ from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
+# The chat socket's refusal for the same case (``_may_send_elsewhere``).
+PREVIEW_ELSEWHERE = "The preview link can't start a chat another worker runs."
+
 
 class CreateSessionRequest(BaseModel):
     """The new-session composer's selections, without a first message."""
@@ -121,7 +124,7 @@ async def create_empty_session(
         )
 
     overrides = body.overrides.model_dump(exclude_none=True) if body.overrides else {}
-    target = await _resolve_target(body.target_instance_id, project_v2_id, worktree_fields)
+    target = await _resolve_target(body.target_instance_id, project_v2_id, worktree_fields, request)
     session_id = str(uuid.uuid4())
 
     def _create() -> None:
@@ -184,12 +187,14 @@ async def create_empty_session(
 
 
 async def _resolve_target(raw: Optional[str], project_v2_id: Optional[str],
-                          worktree_fields: dict) -> Optional[str]:
+                          worktree_fields: dict, request: Request) -> Optional[str]:
     """The composer's "Runs on" pick, preflighted; None runs here.
 
-    Same refusals as a typed first message's pick (``_validate_target_install``
-    on the chat socket), before anything is created: unknown, unapproved or
-    offline worker, or a project that is not checked out there.
+    Same refusals as a typed first message's pick (``_may_send_elsewhere``
+    and ``_validate_target_install`` on the chat socket), before anything is
+    created: a preview cookie (the other worker cannot see its principal,
+    #641), an unknown, unapproved or offline worker, or a project that is not
+    checked out there.
     """
     from app.core.config import settings
 
@@ -202,6 +207,9 @@ async def _resolve_target(raw: Optional[str], project_v2_id: Optional[str],
             return None
     except Exception:  # noqa: BLE001 - no network layer: only this worker exists
         pass
+    from app.core import preview_access
+    if preview_access.grant(request) is not None:
+        raise HTTPException(403, PREVIEW_ELSEWHERE)
     if worktree_fields:
         raise HTTPException(400, "A legacy worktree cannot be moved to another runner.")
     install = await run_sync(database.get_install, target)
@@ -232,8 +240,11 @@ async def _create_on_owner(session_id: str, request: Request, *, api_user_id: Op
     """Create the conversation on the worker that will run it.
 
     This worker's row is the mirror (``create_session`` stamped the owner on
-    it). When the owner cannot take it, the mirror is removed again, so no
-    conversation is left that nobody runs.
+    it). When the owner refuses it or was never reached, the mirror is
+    removed again, so no conversation is left that nobody runs. When the
+    owner was reached but no answer came back it may have created it, so the
+    create is asked once more (the owner's create is idempotent) and, still
+    unanswered, the mirror stays.
     """
     from app.network import control
 
@@ -244,17 +255,34 @@ async def _create_on_owner(session_id: str, request: Request, *, api_user_id: Op
         raise HTTPException(409, "The selected device is not part of this worker network.")
     from app.core.mobile_tool_identity import request_principal
     principal = await run_sync(request_principal, request)
+    session = {
+        "id": session_id, "profile_id": profile_id, "project_v2_id": project_v2_id,
+        "title": "", "api_user_id": api_user_id,
+        "model": overrides.get("model"), "effort": overrides.get("effort"),
+        "permission_mode": overrides.get("permission_mode"),
+        "context_window": row.get("context_window"),
+        "fast": overrides.get("fast"), "mode": mode,
+        # Who started it; the worker that runs it labels it (#1877).
+        "provenance_owner": (principal or {}).get("owner"),
+    }
+    reached = False  # Whether an attempt may have created it there.
     try:
-        await control.create_session(owner, {
-            "id": session_id, "profile_id": profile_id, "project_v2_id": project_v2_id,
-            "title": "", "api_user_id": api_user_id,
-            "model": overrides.get("model"), "effort": overrides.get("effort"),
-            "permission_mode": overrides.get("permission_mode"),
-            "context_window": row.get("context_window"),
-            "fast": overrides.get("fast"), "mode": mode,
-            # Who started it; the worker that runs it labels it (#1877).
-            "provenance_owner": (principal or {}).get("owner"),
-        }, None)
-    except (control.RunnerUnreachable, control.ControlRefused) as exc:
+        try:
+            await control.create_session(owner, session, None)
+        except control.MaybeApplied:
+            # The owner may have created it with the answer lost. Its create
+            # returns an existing session, so asking once more is safe.
+            reached = True
+            logger.info("Session %s: no answer from its owner; asking once more", session_id)
+            await control.create_session(owner, session, None)
+    except control.ControlRefused as exc:
         await run_sync(database.delete_session, session_id)
         raise HTTPException(409, str(exc)) from exc
+    except control.RunnerUnreachable as exc:
+        if not (reached or isinstance(exc, control.MaybeApplied)):
+            await run_sync(database.delete_session, session_id)
+            raise HTTPException(409, str(exc)) from exc
+        # It may exist there, so the copy stays: the owner's row replaces it
+        # when that syncs (#700). Deleting it could hide a chat the owner runs.
+        raise HTTPException(409, f"{exc} The conversation may already exist on that device; "
+                                 "it shows in the sidebar once it syncs.") from exc
