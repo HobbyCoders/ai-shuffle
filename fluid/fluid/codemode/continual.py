@@ -1027,12 +1027,14 @@ class Synthesizer:
             await asyncio.wait_for(self._drain_inner(), timeout=self._close_timeout)
         except TimeoutError:
             if self._in_backfill:
-                # Synthesis finished; the when-line backfill after it did not.
-                # Its own backoff and row, never a failed synthesis pass.
+                # Synthesis finished; the when-line backfill after it ran out
+                # of the close budget synthesis shares with it. That says
+                # nothing about the provider: no backoff, no failure count,
+                # no failed synthesis pass. Its lines stay missing and the
+                # next session's backfill picks them up.
                 self._in_backfill = False
-                from fluid.codemode.memory_backfill import note_failure
-                note_failure(self, "when-line backfill on close exceeded "
-                                   f"{self._close_timeout:.0f}s and was abandoned")
+                _log.info("when-line backfill on close was cut off after %.0fs; "
+                          "it resumes next session", self._close_timeout)
             else:
                 self.last_error = (
                     f"synthesis on close exceeded {self._close_timeout:.0f}s and was abandoned"

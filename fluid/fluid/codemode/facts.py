@@ -140,10 +140,28 @@ def derived_when(text: object) -> str:
     return cut.rstrip(" ,;:-") + "…"
 
 
+def when_basis(text: str | None) -> str:
+    """Which text a backfill when-line was written for (see annotate)."""
+    return fingerprint(text or "")[:16]
+
+
+def written_when(entry: dict) -> str | None:
+    """``entry``'s written when-line, or None when it has none or the line
+    is a backfill line written for text the fact no longer has (a correction
+    replaced it, here or on a replica). Such a fact is listed by a derived
+    line and the backfill writes it a new one."""
+    when = entry.get("when")
+    basis = entry.get("when_basis")
+    if when and basis is not None and basis != when_basis(entry.get("text")):
+        return None
+    return when or None
+
+
 def when_line(entry: "dict | Any") -> str:
     """The fact's written when-line, or one derived from its text."""
-    get = entry.get if isinstance(entry, dict) else (lambda k: getattr(entry, k, None))
-    return get("when") or derived_when(get("text"))
+    if isinstance(entry, dict):
+        return written_when(entry) or derived_when(entry.get("text"))
+    return getattr(entry, "when", None) or derived_when(getattr(entry, "text", None))
 
 
 def metadata_stamp(entry: dict, field: str) -> tuple[float, str]:
@@ -163,6 +181,9 @@ def _set_metadata(entry: dict, field: str, value: object, store_id: str) -> None
     now = time.time()
     prior = metadata_stamp(entry, field)[0]
     entry[field + "_at"] = [now if now > prior else math.nextafter(prior, math.inf), store_id]
+    if field == "when":
+        # An explicit (owner or Remember) line; annotate() marks its own.
+        entry.pop("when_basis", None)
     if value:
         entry[field] = value
     else:
@@ -900,7 +921,9 @@ class FactStore:
                     entry["saved_by"] = "user"
                 else:
                     entry.pop("saved_by", None)
-            if when is not None and when != entry.get("when"):
+            if when is not None and (when != entry.get("when") or entry.get("when_basis")):
+                # Supplying a line makes it explicit, even one worded like the
+                # backfill's (see written_when).
                 _set_metadata(entry, "when", when, local)
             if always is not None and always != bool(entry.get("always")):
                 _set_metadata(entry, "always", always, local)
@@ -944,7 +967,9 @@ class FactStore:
     def _entry(entry):
         from fluid.codemode.skills import MemoryEntry
         allowed = {f.name for f in fields(MemoryEntry)}
-        return MemoryEntry(**{k: v for k, v in entry.items() if k in allowed})
+        data = {k: v for k, v in entry.items() if k in allowed}
+        data["when"] = written_when(entry)
+        return MemoryEntry(**data)
 
     @staticmethod
     def _write_time(doc: dict, now: float) -> float:
@@ -1065,7 +1090,7 @@ class FactStore:
 
     @staticmethod
     def _metadata_differs(old, when, always):
-        return ((when is not None and when != old.get("when"))
+        return ((when is not None and (when != old.get("when") or old.get("when_basis")))
                 or (always is not None and always != bool(old.get("always"))))
 
     def _edit_metadata(self, doc, old, when, always, *, protected, expected_revision, exclude):
@@ -1079,7 +1104,7 @@ class FactStore:
             raise ValueError("Memory changed since it was read; recall it before retrying")
         if always and not bool(old.get("always")):
             self._check_always_budget(doc, old, exclude=exclude)
-        if when is not None and when != old.get("when"):
+        if when is not None and (when != old.get("when") or old.get("when_basis")):
             _set_metadata(old, "when", when, doc["store_id"])
         if always is not None and always != bool(old.get("always")):
             _set_metadata(old, "always", always, doc["store_id"])
@@ -1089,11 +1114,20 @@ class FactStore:
         """Settle each METADATA_FIELDS field of one fact's two copies on the
         copy with the newer stamp, whichever side won the text clock.
 
-        Equal stamps (both missing: older stores and replicas) keep
-        ``prefer``'s value, the side whose clock dominates; with no such
-        side the larger value wins, so every replica settles the same way."""
+        An explicit when-line (an owner or Remember edit) outranks a
+        backfill one whatever their stamps: a replica that had not seen a
+        correction yet may backfill the old text after the owner wrote the
+        new line. Equal ranks and stamps (both missing: older stores and
+        replicas) keep ``prefer``'s value, the side whose clock dominates;
+        with no such side the larger value wins, so every replica settles
+        the same way."""
+        def rank(entry, field):
+            stamp = metadata_stamp(entry, field)
+            explicit = field == "when" and stamp != _NO_STAMP and entry.get("when_basis") is None
+            return (1 if explicit else 0, stamp)
+
         for field in METADATA_FIELDS:
-            a, b = metadata_stamp(local, field), metadata_stamp(incoming, field)
+            a, b = rank(local, field), rank(incoming, field)
             if a != b:
                 source = local if a > b else incoming
             elif prefer is not None:
@@ -1102,7 +1136,7 @@ class FactStore:
                 source = max((local, incoming), key=lambda e: str(e.get(field) or ""))
             if source is target:
                 continue
-            for k in (field, field + "_at"):
+            for k in (field, field + "_at") + (("when_basis",) if field == "when" else ()):
                 if source.get(k) is not None and source.get(k) is not False:
                     target[k] = source[k]
                 else:
@@ -1198,8 +1232,12 @@ class FactStore:
             if (metadata_stamp(old, "when") != expected
                     or (expected_when_at is None and old.get("when"))):
                 raise ValueError("The when-line changed since it was read; recall it before retrying")
-            if old.get("when") != when:
+            basis = when_basis(old["text"])
+            if old.get("when") != when or old.get("when_basis") != basis:
                 _set_metadata(old, "when", when, doc["store_id"])
+                # Marks the line as the backfill's, written for this text: an
+                # explicit line outranks it and a later correction retires it.
+                old["when_basis"] = basis
                 self._write(doc)
             return self._entry(old)
 
@@ -1402,6 +1440,13 @@ class FactStore:
                     raise ValueError("Invalid memory always flag")
                 if not entry.get("always"):
                     entry.pop("always", None)
+                basis = entry.get("when_basis")
+                if basis is not None and not (isinstance(basis, str)
+                                              and re.fullmatch(r"[0-9a-f]{16}", basis)):
+                    # An unreadable backfill mark: drop the line, not the
+                    # replica, so it can never pass as an explicit one.
+                    for k in ("when", "when_at", "when_basis"):
+                        entry.pop(k, None)
                 for field in METADATA_FIELDS:
                     # An unusable stamp is the oldest one, not a refusal.
                     if field + "_at" in entry and metadata_stamp(entry, field) == _NO_STAMP:

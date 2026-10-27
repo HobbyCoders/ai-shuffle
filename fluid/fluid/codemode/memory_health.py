@@ -505,7 +505,8 @@ def _when_signal(store, entries: list[dict]) -> dict:
     """Facts without a written when-line (listed by a derived one), and
     whether the backfill that writes them keeps failing."""
     from fluid.codemode.memory_backfill import ATTENTION_FAILURES
-    no_when = sum(1 for e in entries if not e.get("when"))
+    from fluid.codemode.facts import written_when
+    no_when = sum(1 for e in entries if not written_when(e))
     try:
         failures = int(store.backfill_backoff().get("failures") or 0)
     except Exception:  # noqa: BLE001 — unreadable meta: report the count only

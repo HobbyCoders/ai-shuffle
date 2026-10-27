@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from fluid.codemode.facts import usefulness, validate_when, visible_on
+from fluid.codemode.facts import usefulness, validate_when, visible_on, written_when
 from fluid.codemode.skills import SkillStore, atomic_write_text, load_json_document, journal_lock
 
 _log = logging.getLogger(__name__)
@@ -60,7 +60,7 @@ def missing(store: SkillStore) -> list[dict]:
     doc = store._facts.snapshot()
     return [e for bucket in ("entries", "archived")
             for e in sorted(doc[bucket], key=lambda e: (-usefulness(e), e["id"]))
-            if not e.get("when") and visible_on(e, doc["store_id"])]
+            if not written_when(e) and visible_on(e, doc["store_id"])]
 
 
 def _strict_object(pairs):

@@ -7,7 +7,7 @@ import time
 import pytest
 
 from fluid.codemode import memory_backfill as backfill
-from fluid.codemode import memory_health
+from fluid.codemode import facts, memory_health
 from fluid.codemode.continual import Synthesizer
 from fluid.codemode.facts import MAX_INFERENCE_CALLS_PER_DAY, usefulness
 from fluid.codemode.skills import SkillStore
@@ -59,9 +59,11 @@ async def test_protected_metadata_ranking_and_replication_round_trip(tmp_path):
     assert result.written == 2 and result.remaining == 0
     # Metadata only: the revision and clock stay, so a concurrent edit of
     # the text elsewhere is not a conflict and a pending correction holds.
-    assert {k: v for k, v in before.items() if k not in ("when", "when_at")} == {
-        k: v for k, v in after.items() if k not in ("when", "when_at")}
+    metadata = ("when", "when_at", "when_basis")
+    assert {k: v for k, v in before.items() if k not in metadata} == {
+        k: v for k, v in after.items() if k not in metadata}
     assert after["when_at"][1] == store._facts.snapshot()["store_id"]
+    assert after["when_basis"] == facts.when_basis(after["text"])  # marked as the backfill's
     assert after["protected"] and after["always"]
     rows = sorted(store._facts.snapshot()["entries"], key=usefulness)
     assert [e["id"] for e in rows] == rank_ids
@@ -248,10 +250,14 @@ async def test_backfill_timeout_on_close_is_not_a_failed_synthesis_pass(tmp_path
             (store.root / ".synthesis-log.jsonl").read_text().splitlines()]
     synthesis = [r for r in rows if r["kind"] == "synthesis"]
     assert synthesis and not any(r.get("error") for r in synthesis)
-    assert rows[-1]["kind"] == "memory_backfill" and "on close" in rows[-1]["error"]
-    assert store.backfill_backoff()["failures"] == 1
+    # Running out of the close budget synthesis shares says nothing about
+    # the provider: no backfill failure or backoff, and the lines stay
+    # missing for the next session's backfill.
+    assert not any(r.get("error") for r in rows if r["kind"] == "memory_backfill")
+    assert not store.backfill_backoff().get("failures")
     assert store.learner_backoff("test-model") == {} and not synth.last_pass_failed
     assert synth.last_error is None
+    assert backfill.missing(store)
 
 
 async def test_backfill_failure_after_synthesis_keeps_the_pass_successful(tmp_path):

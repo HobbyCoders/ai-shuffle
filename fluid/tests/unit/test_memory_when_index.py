@@ -15,6 +15,7 @@ import pytest
 from fluid.codemode import facts
 from fluid.codemode.facts import (
     ALWAYS_CHARS, DERIVED_WHEN_CHARS, MAX_WHEN_CHARS, derived_when, global_id, when_line)
+from fluid.codemode.memory_backfill import missing
 from fluid.codemode.preferences import PreferenceProposals, preference_proposal_lines
 from fluid.codemode.skills import ALWAYS_HEADING, INDEX_HEADING, MAX_MEMORY_CHARS, SkillStore
 from fluid.tools.builtins.recall import handler as recall
@@ -144,7 +145,10 @@ def test_annotate_racing_a_text_edit_is_no_conflict_and_the_text_edit_wins(tmp_p
         [entry] = store.memories()
         assert not entry.conflicted
         assert entry.text == fixed.text and entry.revision == fixed.revision
-        assert entry.when == DEPLOY_WHEN
+        # B's line was written for the old text: listed by a derived line
+        # and picked up by the backfill again, never pinned to the new text.
+        assert entry.when is None
+        assert [e["id"] for e in missing(store)] == [entry.id]
 
 
 def test_owner_correction_after_a_backfill_annotate_still_succeeds(tmp_path):
@@ -154,7 +158,55 @@ def test_owner_correction_after_a_backfill_annotate_still_succeeds(tmp_path):
     store.annotate_memory(fact.id, when=DEPLOY_WHEN, expected_revision=read)  # backfill
     fixed = store.save_memory(DEPLOY + " Then announce it.", protected=True,
                               memory_id=fact.id, expected_revision=read)
-    assert fixed.revision == read + 1 and fixed.when == DEPLOY_WHEN
+    # The backfill line described the old text, so the corrected fact is
+    # listed by a derived line until the backfill writes a new one.
+    assert fixed.revision == read + 1 and fixed.when is None
+    assert [e["id"] for e in missing(store)] == [fact.id]
+    # A line written with the correction is explicit and stays.
+    kept = store.save_memory(DEPLOY + " Then tell the team.", protected=True, memory_id=fact.id,
+                             expected_revision=fixed.revision, when=DEPLOY_WHEN)
+    assert kept.when == DEPLOY_WHEN and missing(store) == []
+
+
+def test_an_owner_when_line_beats_a_later_backfill_line_from_an_unsynced_replica(tmp_path):
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    fact = a.save_memory(DEPLOY, protected=True)
+    b._facts.merge(a._facts.export())
+    # Worker A: the owner corrects the fact with a new when-line. Worker B has
+    # not synced and backfills the OLD text afterwards (a newer stamp).
+    fixed = a.save_memory(DEPLOY + " Then announce it.", protected=True, memory_id=fact.id,
+                          expected_revision=1, when="When releasing anything")
+    [copy] = b.memories()
+    b.annotate_memory(copy.id, when=DEPLOY_WHEN, expected_revision=1)
+    for _ in range(2):
+        a._facts.merge(b._facts.export())
+        b._facts.merge(a._facts.export())
+    for store in (a, b):
+        [entry] = store.memories()
+        assert (entry.text, entry.when, entry.conflicted) == (
+            fixed.text, "When releasing anything", False)
+    # The same holds without the text change: explicit outranks automatic.
+    c, d = SkillStore(tmp_path / "c"), SkillStore(tmp_path / "d")
+    other = c.save_memory(ROUTING, protected=True)
+    d._facts.merge(c._facts.export())
+    c.save_memory(ROUTING, protected=True, memory_id=other.id, expected_revision=1,
+                  when=ROUTING_WHEN)
+    d.annotate_memory(d.memories()[0].id, when="When something else", expected_revision=1)
+    c._facts.merge(d._facts.export())
+    d._facts.merge(c._facts.export())
+    assert c.memories()[0].when == d.memories()[0].when == ROUTING_WHEN
+
+
+def test_a_garbled_backfill_mark_drops_the_line_rather_than_trusting_it(tmp_path):
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    fact = a.save_memory(DEPLOY, protected=True)
+    a.annotate_memory(fact.id, when=DEPLOY_WHEN, expected_revision=1)
+    snapshot = a._facts.export()
+    snapshot["entries"][0]["when_basis"] = "not-a-basis"
+    b._facts.merge(snapshot)
+    [entry] = b.memories()
+    assert entry.when is None and [e["id"] for e in missing(b)] == [entry.id]
+    assert entry.id.endswith(":" + fact.id)
 
 
 def test_metadata_stamps_from_an_old_replica_or_store_are_the_oldest(tmp_path):
@@ -475,6 +527,27 @@ def test_always_overflow_on_render_falls_back_to_the_index(tmp_path):
     # The overflowed one is counted once, as an index line.
     assert plan["in_scope"] == 3 and plan["shown_ids"].count(a.id) == 1
     assert len(plan["eligible_lines"]) == 3 and a.id not in plan["full_text_ids"]
+
+
+def test_an_always_identity_fact_past_the_budget_keeps_its_text_line(tmp_path):
+    store = SkillStore(tmp_path)
+    store.save_memory("a" * 1600, protected=True, when="When alpha", always=True)
+    store.save_memory("b" * 1300, protected=True, when="When beta", always=True)
+    other = SkillStore(tmp_path / "other")
+    name = other.save_memory("The user's name is Pat " + "x" * 200, protected=True,
+                             key="profile.name", when="When addressing the user", always=True)
+    store._facts.merge(other._facts.export())
+    plan = store.memory_snapshot_plan()
+    rendered = "\n".join(plan["lines"])
+    if name.id not in plan["full_text_ids"]:
+        # Over the ALWAYS budget: still listed by its bounded text, not the
+        # when-line, and only once.
+        assert "The user's name is Pat" in rendered and "When addressing the user" not in rendered
+        assert plan["shown_ids"].count(name.id) == 1
+        line = next(l for l in plan["lines"] if f"[{name.id} " in l)
+        assert line.endswith("…") and len(line) < 200
+    else:
+        assert "The user's name is Pat" in rendered
 
 
 def test_screening_withholds_bad_text_or_when_and_keeps_conflict_lines(tmp_path):

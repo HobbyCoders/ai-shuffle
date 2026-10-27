@@ -2027,7 +2027,15 @@ class SkillStore:
                 shown_always.append((entry, line))
             else:
                 label = f"[{entry.id} r{entry.revision}; {entry.provenance}]"
+                if entry.key in identity_keys:
+                    # Identity keeps its bounded text line even here.
+                    text = entry.text
+                    if len(text) > IDENTITY_TEXT_CHARS:
+                        text = text[:IDENTITY_TEXT_CHARS - 1].rstrip() + "…"
+                    identity.append((entry, f"- {label} {text}"))
+                    continue
                 overflow.append((entry, f"- {label} {when_line(entry)}"))
+        identity.sort(key=lambda item: item[0].key != "profile.name")
         index = overflow + index
         remaining = MAX_PROMPT_CHARS - sum(len(line) + 1 for _, line in pinned + identity)
         shown_index: list[tuple[MemoryEntry, str]] = []
