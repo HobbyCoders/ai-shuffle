@@ -215,6 +215,23 @@ def _unpublished_history(repo, path, default, exempt=()):
     return None if left is None else left.split()
 
 
+def _held_elsewhere(repo, sha, own_branch, default):
+    """Whether a commit survives deleting ``own_branch``: another local or
+    remote-tracking ref contains it, or ``default`` does. None if unreadable."""
+    if default:
+        probe = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", sha, default],
+                               capture_output=True, timeout=15, env=scrub_child_env())
+        if probe.returncode == 0:
+            return True
+        if probe.returncode != 1:
+            return None
+    listing = wr._git(repo, "for-each-ref", "--format=%(refname)", "--contains", sha, "refs/heads", "refs/remotes")
+    if listing is None:
+        return None
+    own = f"refs/heads/{own_branch}"
+    return any(ref != own and not ref.endswith("/HEAD") for ref in listing.split())
+
+
 def _untouched_branch(repo, branch):
     """The tip of a worker branch nobody committed to (its reflog holds only its creation)."""
     head = _branch_head(repo, branch)
@@ -241,6 +258,11 @@ def _stranded_reviewer(repo, path, branch, context, pulls=None):
     head = (wr._git(path, "rev-parse", "--verify", "HEAD^{commit}") or "").strip()
     if not branch_sha or not head:
         return None
+    # Deleting the worker's branch must not drop the only ref holding its
+    # starting commit (a parent's unpublished commit whose branch went away).
+    if not _held_elsewhere(repo, branch_sha, branch, context["default_sha"]):
+        return {"blocked": f"its starting commit {branch_sha[:12]} is held only by its own branch "
+                           f"{branch}; deleting it would lose that commit"}
     if head == branch_sha:
         how = "HEAD is still the worker's starting commit"
     elif _on_remote(repo, head):
@@ -328,15 +350,27 @@ def _abandon_blocker(context, branch, sessions):
     return None
 
 
+def _session_folder(context, cwd):
+    """A session folder resolved once per context: resolving every session's
+    folder again for every checkout cost seconds per report."""
+    cache = context.setdefault("_session_folders", {})
+    folder = cache.get(cwd)
+    if folder is None:
+        folder = cache[cwd] = os.path.normcase(wr._absolute(cwd))
+    return folder
+
+
 def _bound_sessions(context, registered, branch):
-    target = Path(registered["path"]).resolve()
+    target = os.path.normcase(str(Path(registered["path"]).resolve()))
+    inside = target.rstrip(os.sep) + os.sep
     branches = {b for b in (branch, registered.get("branch")) if b}
     ids = set(registered["registry_ids"])
     bound = []
     for session in context["sessions"]:
         logical = {b for b in (session.get("branch"), session.get("worktree_branch")) if b}
         cwd = session.get("worktree_path")
-        by_path = bool(cwd and Path(wr._absolute(cwd)).is_relative_to(target))
+        folder = _session_folder(context, cwd) if cwd else None
+        by_path = bool(folder and (folder == target or folder.startswith(inside)))
         unknown_active = (session.get("is_active") or session.get("running")) and not logical and not cwd
         if logical & branches or session.get("worktree_id") in ids or by_path or unknown_active:
             bound.append(session)
@@ -346,6 +380,9 @@ def _bound_sessions(context, registered, branch):
 #: Report-only cache of GitHub answers: (kind, repository, key) -> (time, answer).
 #: The sweeper never reads it; removal decisions always use a fresh lookup.
 REPORT_CACHE_SECONDS = 600
+#: A report's GitHub lookups give up quickly, so one slow call cannot carry a
+#: report past the tool-call limit.
+REPORT_GH_TIMEOUT = 8
 _report_cache = {}
 _report_cache_lock = threading.Lock()
 
@@ -371,8 +408,10 @@ def _pulls(context, branch):
     from app.core.github_service import github_service
 
     if branch and context["github_repo"]:
+        extra = {"timeout": REPORT_GH_TIMEOUT} if context.get("report_cache") else {}
         return _cached(context, ("branch", context["github_repo"], branch),
-                       lambda: github_service.list_pulls(context["github_repo"], state="all", head=branch, limit=100))
+                       lambda: github_service.list_pulls(context["github_repo"], state="all", head=branch, limit=100,
+                                                         **extra))
     return []
 
 
@@ -398,8 +437,9 @@ def _commit_pulls(context, sha):
     from app.core.github_service import github_service
 
     if sha and context["github_repo"]:
+        extra = {"timeout": REPORT_GH_TIMEOUT} if context.get("report_cache") else {}
         return _cached(context, ("commit", context["github_repo"], sha),
-                       lambda: github_service.list_commit_pulls(context["github_repo"], sha))
+                       lambda: github_service.list_commit_pulls(context["github_repo"], sha, **extra))
     return []
 
 
@@ -560,6 +600,12 @@ def _plan(source, registered, context, *, pulls=None):
     if item and item.get("locked"):
         return keep("worktree locked")
     missing = not target.exists()
+    archived_branch = registered.get("branch")
+    if (not missing and archived_branch
+            and wr._git(repo, "rev-parse", "--verify", "--quiet", ARCHIVE_REF_PREFIX + archived_branch) is not None):
+        # An archive pass stopped part-way (or a restore left the ref): never
+        # touch the folder or overwrite that snapshot.
+        return keep(f"archived earlier but the folder remains; {archive_note(repo, archived_branch)}")
     reviewer = None
     dirty = 0
     nested = []
@@ -571,6 +617,9 @@ def _plan(source, registered, context, *, pulls=None):
             # A reviewer moved a worker checkout onto a PR commit. Its own
             # branch is untouched and HEAD exists elsewhere: nothing local-only.
             reviewer = _stranded_reviewer(repo, path, registered.get("branch"), context, pulls)
+            if reviewer and reviewer.get("blocked"):
+                return keep(f"checkout is on {actual or 'a detached HEAD'}, not its registered branch "
+                            f"{registered.get('branch')}; {reviewer['blocked']}")
             if not reviewer:
                 reason = (f"checkout is on {actual or 'a detached HEAD'}, not its registered branch "
                           f"{registered.get('branch') or '(none)'}")
@@ -825,11 +874,11 @@ def _archive_checkout(repo, row, before_remove=None):
     path, branch, head = row["path"], row["branch"], row["head_sha"]
     ref = ARCHIVE_REF_PREFIX + branch
     snapshot = _snapshot(path, head, branch)
-    created = git_service._run_git(repo, ["update-ref", ref, snapshot, ""], timeout=10)
-    if created.returncode != 0:
+    created = git_service._run_git(repo, ["update-ref", ref, snapshot, ""], timeout=10).returncode == 0
+    if not created:
         existing = (wr._git(repo, "rev-parse", "--verify", "--quiet", ref) or "").strip()
         if existing != snapshot:
-            raise ValueError(f"{ref} already holds another snapshot; checkout kept")
+            raise ArchiveKept(f"{archive_note(repo, branch)}; checkout kept")
     try:
         # Verify the stored snapshot is a commit on HEAD that holds exactly
         # what the checkout holds right now, immediately before removal.
@@ -843,12 +892,25 @@ def _archive_checkout(repo, row, before_remove=None):
         if before_remove:
             before_remove(snapshot)
     except BaseException:
-        git_service._run_git(repo, ["update-ref", "-d", ref, snapshot], timeout=10)
+        # Roll back only a ref this call created; never a snapshot an earlier pass left.
+        if created:
+            git_service._run_git(repo, ["update-ref", "-d", ref, snapshot], timeout=10)
         raise
     # From here on the archive ref stays, even if removal fails part-way.
     if not git_service.remove_worktree(repo, path, True):
-        raise ValueError(f"archived checkout removal failed; its snapshot stays at {ref}")
+        raise ArchiveKept(f"archived checkout removal stopped part-way; {archive_note(repo, branch)}")
     return snapshot
+
+
+class ArchiveKept(ValueError):
+    """An archive step stopped; the message says where the snapshot is."""
+
+
+def archive_note(repo, branch):
+    """Where an archived checkout's snapshot is and how to restore it."""
+    ref = ARCHIVE_REF_PREFIX + branch
+    return (f"a snapshot of its work is at {ref}; restore it with "
+            f"`git -C {repo} branch {branch}-restored {ref}`")
 
 
 def _apply(source, registered, preview, *, automatic=False, pulls):
@@ -990,6 +1052,9 @@ async def reclaim(project_id, *, dry_run=True, limit=MAX_ITEMS, offset=0, observ
                                                           automatic=observations is not None, pulls=pulls)
                         else:
                             row = {**row, "decision": "keep", "reason": "checkout users are busy or could not be released"}
+            except ArchiveKept as exc:
+                logger.warning("Checkout reclaim: %s: %s", candidate["path"], exc)
+                row = {**row, "decision": "keep", "reason": str(exc), "error": True}
             except Exception:
                 logger.warning("Checkout reclaim item failed", exc_info=True)
                 row = {**row, "decision": "keep", "reason": "safety check or reclaim failed; refresh preview before retry", "error": True}
@@ -1019,7 +1084,11 @@ async def reclaim(project_id, *, dry_run=True, limit=MAX_ITEMS, offset=0, observ
 
 #: Worker (chore/task-*, legacy task/*), chat (chore/chat-*) and
 #: ``gh pr checkout -b`` style names (pr702, pr702b, pr-702).
-APP_BRANCH_PATTERN = re.compile(r"(?:chore/task-|task/|chore/chat-)[^/].*|pr\d+[a-z]?|pr-\d+")
+#: Legacy ``task/`` only with a session-id (UUID) name; ``task/foo`` is hand-made.
+APP_BRANCH_PATTERN = re.compile(
+    r"chore/task-[A-Za-z0-9_-]+|chore/chat-[A-Za-z0-9_-]+"
+    r"|task/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    r"|pr\d+[a-z]?|pr-\d+")
 
 
 def _app_branch(name):

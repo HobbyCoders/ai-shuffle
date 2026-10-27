@@ -554,6 +554,7 @@ class GitHubService:
         state: str = 'open',
         limit: int = 30,
         head: Optional[str] = None,
+        timeout: Optional[int] = None,
     ) -> List[PullRequest]:
         """
         List pull requests for a repository.
@@ -563,6 +564,7 @@ class GitHubService:
             state: PR state filter - 'open', 'closed', 'merged', 'all'
             limit: Maximum number of PRs to return
             head: Optional head-branch filter (``gh pr list --head``)
+            timeout: Optional gh timeout in seconds (default: the service's)
 
         Returns:
             List of PullRequest objects. An empty list means "this repository
@@ -583,7 +585,7 @@ class GitHubService:
             ]
             if head:
                 cmd.extend(['--head', head])
-            result = self._run_gh(cmd)
+            result = self._run_gh(cmd, timeout=timeout)
         except Exception as e:
             raise GitHubCliError(f"gh pr list failed: {e}") from e
 
@@ -616,7 +618,7 @@ class GitHubService:
 
         return pulls
 
-    def list_commit_pulls(self, repo: str, sha: str) -> List[PullRequest]:
+    def list_commit_pulls(self, repo: str, sha: str, timeout: Optional[int] = None) -> List[PullRequest]:
         """Pull requests GitHub associates with one commit.
 
         GitHub returns the merged PR that introduced the commit (squash and
@@ -627,7 +629,7 @@ class GitHubService:
         if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha or ""):
             raise GitHubCliError("list_commit_pulls needs a full commit SHA")
         # An unpushed commit answers 422: expected, so not a warning.
-        result = self._run_gh(["api", f"repos/{repo}/commits/{sha}/pulls"], quiet=True)
+        result = self._run_gh(["api", f"repos/{repo}/commits/{sha}/pulls"], timeout=timeout, quiet=True)
         if result.returncode != 0:
             if "No commit found" in (result.stderr or "") or "HTTP 422" in (result.stderr or ""):
                 return []

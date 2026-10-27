@@ -459,10 +459,11 @@ Besides integrated checkouts it also removes:
 
 - a worker checkout (`chore/task-*`) that a reviewer moved to another commit
   (detached, or `gh pr checkout`), when its own branch has no commits, the tree is
-  clean, the commit it shows is pushed, integrated or part of a pull request, and
-  every other commit it visited is pushed;
+  clean, the commit it shows is pushed, integrated or part of a pull request,
+  every other commit it visited is pushed, and its starting commit is still held by
+  another branch or the default branch;
 - local branches with no worktree that the app or `gh pr checkout` named
-  (`chore/task-*`, `task/*`, `chore/chat-*`, `pr702`, `pr702b`, `pr-702`) and that
+  (`chore/task-*`, `task/<session id>`, `chore/chat-*`, `pr702`, `pr702b`, `pr-702`) and that
   are proven integrated, or whose tip is pushed and is the exact head of a merged
   or closed pull request, and that no active session or open pull request uses.
   Branches you name yourself are never touched;
@@ -473,7 +474,8 @@ Besides integrated checkouts it also removes:
   `git branch <branch> refs/fluid-archive/<branch>` restores it by hand. Chat
   checkouts, named branches and checkouts holding a nested Git repository are never
   archived, and once removal of an archived checkout has started its snapshot ref
-  is never deleted.
+  is never deleted. If that removal stops part-way, the checkout is kept and its
+  reason (and a resumed worker) gives the snapshot ref and the restore command.
 
 Every branch delete is a compare-and-delete against the tip that was checked.
 

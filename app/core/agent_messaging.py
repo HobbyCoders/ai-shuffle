@@ -442,9 +442,10 @@ async def resume_unavailable(target, row):
         return "the provider rejected this work on policy grounds; ask the user, do not replay it"
     # An untouched dedicated checkout is reclaimed when its worker finishes;
     # the resumed turn reuses that saved cwd, so bring it back first.
-    from app.core.worker_checkout import restore_reclaimed_worker_checkout
-    if not await asyncio.to_thread(restore_reclaimed_worker_checkout, target):
-        return "its dedicated checkout could not be restored; dispatch a new Task instead"
+    from app.core.worker_checkout import restore_worker_checkout
+    restored, note = await asyncio.to_thread(restore_worker_checkout, target)
+    if not restored:
+        return note or "its dedicated checkout could not be restored; dispatch a new Task instead"
     return None
 
 

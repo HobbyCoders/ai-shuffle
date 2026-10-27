@@ -17,7 +17,7 @@ import os
 import re
 import subprocess
 import threading
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -395,8 +395,14 @@ def _stranded_review_head(main_dir: str, path: str, branch: str, base_commit: st
         return False
     if not worktree_reclaim._on_remote(main_dir, head_commit):
         return False
-    # The worker's own starting commit is exempt: untouched-worker reclaim
-    # already releases it, and the caller's branch still holds it.
+    # Deleting the branch must not drop the only ref holding its starting
+    # commit (a parent's unpublished commit whose branch was deleted or reset,
+    # or an explicit base commit). Remote-tracking refs cover the default branch.
+    if not worktree_reclaim._held_elsewhere(main_dir, base_commit, branch, None):
+        logger.info("worker_checkout: kept %s: its starting commit %s is held only by its own branch",
+                    branch, base_commit[:12])
+        return False
+    # The starting commit, now known to be held elsewhere, is exempt.
     return worktree_reclaim._unpublished_history(main_dir, path, None, exempt=(head_commit, base_commit)) == []
 
 
@@ -428,7 +434,15 @@ def restore_reclaimed_worker_checkout(worker_session_id: str) -> bool:
     at the same deterministic path, without shared runtime links. Returns True
     when nothing needed restoring or the checkout is back at its saved path.
     """
+    return restore_worker_checkout(worker_session_id)[0]
+
+
+def restore_worker_checkout(worker_session_id: str) -> Tuple[bool, Optional[str]]:
+    """:func:`restore_reclaimed_worker_checkout` with a note for the caller
+    when it cannot restore (for example an archive that stopped part-way)."""
     from app.core import checkout_manager, project_resolver
+    from app.core import worktree_reclaim
+    from app.core.git_service import git_service
     from app.db import database
 
     try:
@@ -436,21 +450,31 @@ def restore_reclaimed_worker_checkout(worker_session_id: str) -> bool:
         branch = row.get("branch") or ""
         path = row.get("worktree_path")
         if not is_worker_branch(branch, worker_session_id) or not path:
-            return True
-        if os.path.isdir(path):
-            return True
+            return True, None
         project = project_resolver.resolve_project_v2(dict(row))
+        base_path = _base_checkout_path(project["id"]) if project else None
+        if os.path.isdir(path):
+            ref = worktree_reclaim.ARCHIVE_REF_PREFIX + branch
+            archived = base_path and git_service._run_git(
+                base_path, ["rev-parse", "--verify", "--quiet", ref], timeout=5).returncode == 0
+            if archived:
+                # Automatic cleanup archived it but removal stopped part-way:
+                # the folder may be incomplete, so never resume inside it.
+                return False, ("its checkout was archived but removal stopped part-way, so the folder may be "
+                               f"incomplete; {worktree_reclaim.archive_note(base_path, branch)}. "
+                               "Dispatch a new Task instead")
+            return True, None
         if not project:
-            return False
+            return False, None
         with _project_lock(project["id"]):
             _recreate_branch_from_recorded_tip(project["id"], branch)
             restored = checkout_manager.ensure_checkout(
                 project, branch=branch, provision_runtime=False,
             )
-        return bool(restored) and os.path.realpath(restored) == os.path.realpath(path)
+        return bool(restored) and os.path.realpath(restored) == os.path.realpath(path), None
     except Exception:  # noqa: BLE001 — a refusal, reported by the caller
         logger.warning("worker_checkout: could not restore %s", worker_session_id, exc_info=True)
-        return False
+        return False, None
 
 
 def _recreate_branch_from_recorded_tip(project_id: str, branch: str) -> None:

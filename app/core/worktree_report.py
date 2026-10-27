@@ -287,8 +287,11 @@ def _project_repos(*, active_only: bool = False) -> List[Dict[str, Any]]:
     return list(repos.values())
 
 
-#: The whole report, planner included, stops inspecting rows after this long.
-REPORT_SECONDS = 25
+#: Hang guard: the whole report, planner included, stops inspecting rows after
+#: this long, well inside the 75-second tool-call limit (a row already in
+#: flight finishes; its GitHub calls time out after a few seconds). Each
+#: project gets a fair share of what is left, so one cannot starve the rest.
+REPORT_SECONDS = 55
 
 
 def _planner(project_sources, source, deadline=None):
@@ -340,11 +343,15 @@ def report(project: Optional[str] = None, *, include_retired: bool = False) -> D
         project_sources = {_path_key(s["path"]): s for s in worktree_reclaim._local_sources()}
     except Exception:  # noqa: BLE001 — each project then reports the gap
         logger.warning("WorktreeReport: automatic cleanup sources unavailable", exc_info=True)
+    selected = []
     for source in _project_repos(active_only=not include_retired):
+        names = [source["project"], source["project_id"], source["path"], *source.get("aliases", [])]
+        if not project or project.casefold() in {str(n).casefold() for n in names}:
+            selected.append(source)
+    for position, source in enumerate(selected):
         repo = {k: v for k, v in source.items() if k not in {"registered", "aliases"}}
-        names = [repo["project"], repo["project_id"], repo["path"], *source.get("aliases", [])]
-        if project and project.casefold() not in {str(n).casefold() for n in names}:
-            continue
+        # A fair share of the remaining budget for this project.
+        project_deadline = time.monotonic() + max(0.0, deadline - time.monotonic()) / (len(selected) - position)
         repo_valid = _is_checkout_root(repo["path"])
         listing = _git(repo["path"], "worktree", "list", "--porcelain") if repo_valid else None
         items = {_path_key(i["path"]): i for i in parse_worktree_list(listing or "")[1:]}
@@ -358,7 +365,7 @@ def report(project: Optional[str] = None, *, include_retired: bool = False) -> D
             item.setdefault("registry_ids", []).extend(
                 i for i in registered.get("registry_ids", []) if i not in item.get("registry_ids", [])
             )
-        planned, planner_error = _planner(project_sources, source, deadline) if repo_valid else ({}, None)
+        planned, planner_error = _planner(project_sources, source, project_deadline) if repo_valid else ({}, None)
         default = ((_git(repo["path"], "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
                     if repo_valid else None) or "origin/main").strip()
         rows = []
@@ -366,7 +373,7 @@ def report(project: Optional[str] = None, *, include_retired: bool = False) -> D
         for key, item in items.items():
             path = item["path"]
             plan = planned.get(key)
-            if time.monotonic() >= deadline or (plan and plan.get("not_checked")):
+            if time.monotonic() >= project_deadline or (plan and plan.get("not_checked")):
                 rows.append({"path": path, "branch": item.get("branch"), "reclaimable": False,
                              "reason": "not checked (time limit); run the report again",
                              "cleanup": "kept: not checked (time limit); run the report again"})

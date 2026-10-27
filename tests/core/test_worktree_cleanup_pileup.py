@@ -291,10 +291,12 @@ def test_orphan_branches_go_only_when_proven(repository):
     assert sorted(listed) == ["chore/task-in-use", "chore/task-wip", "experiment", "fix/old-pr", "main"]
 
 
-@pytest.mark.parametrize("name,app_made", [("chore/task-1", True), ("task/1", True), ("chore/chat-ab12", True),
+@pytest.mark.parametrize("name,app_made", [("chore/task-1", True), ("chore/chat-ab12", True),
+                                           ("task/0b9f2c1e-1234-4abc-8def-0123456789ab", True),
                                            ("pr702", True), ("pr702b", True), ("pr-702", True),
                                            ("experiment", False), ("main2", False), ("pr702/x", False),
-                                           ("fix/pr702", False), ("chore/task-", False), ("prx", False)])
+                                           ("fix/pr702", False), ("chore/task-", False), ("prx", False),
+                                           ("task/foo", False), ("task/1", False), ("chore/task-a/b", False)])
 def test_branch_sweep_only_considers_app_and_gh_names(repository, name, app_made):
     repo, _ = repository
     git(repo, "branch", name)  # at main: integrated either way
@@ -756,9 +758,11 @@ def test_report_cache_serves_repeat_lookups_and_the_sweeper_never_uses_it(monkey
     from app.core.github_service import github_service
 
     rc._report_cache.clear()
-    calls = []
-    monkeypatch.setattr(github_service, "list_commit_pulls", lambda repo, sha: calls.append(sha) or [])
-    monkeypatch.setattr(github_service, "list_pulls", lambda *a, **k: calls.append(k.get("head")) or [])
+    calls, timeouts = [], []
+    monkeypatch.setattr(github_service, "list_commit_pulls",
+                        lambda repo, sha, **k: timeouts.append(k.get("timeout")) or calls.append(sha) or [])
+    monkeypatch.setattr(github_service, "list_pulls",
+                        lambda *a, **k: timeouts.append(k.get("timeout")) or calls.append(k.get("head")) or [])
     report_context = {"github_repo": "example/repo", "report_cache": True}
     sweeper_context = {"github_repo": "example/repo"}
     for _ in range(3):
@@ -768,6 +772,8 @@ def test_report_cache_serves_repeat_lookups_and_the_sweeper_never_uses_it(monkey
     rc._commit_pulls(sweeper_context, "a" * 40)
     rc._pulls(sweeper_context, "chore/task-x")
     assert len(calls) == 4
+    # The report's lookups give up quickly; the sweeper keeps the service default.
+    assert timeouts == [rc.REPORT_GH_TIMEOUT, rc.REPORT_GH_TIMEOUT, None, None]
     now = time.monotonic()
     monkeypatch.setattr(rc.time, "monotonic", lambda: now + rc.REPORT_CACHE_SECONDS + 1)
     rc._commit_pulls(report_context, "a" * 40)
@@ -788,3 +794,86 @@ def test_report_stops_at_its_deadline(repository, monkeypatch):
     worktrees = result["projects"][0]["worktrees"]
     assert len(worktrees) == 2
     assert all(w["reason"].startswith("not checked (time limit)") and w["reclaimable"] is False for w in worktrees)
+
+
+
+def test_reviewer_checkout_whose_starting_commit_only_its_branch_holds_is_kept(repository):
+    """Reviewer probe (b): a parent's unpublished commit was the worker's base,
+    then the parent deleted its branch. Deleting the worker branch would lose it."""
+    repo, source = repository
+    parent_tip = content_commit(repo, "parent.txt", "parent's unpublished work\n")
+    git(repo, "branch", "parent-feat", parent_tip)
+    path = repo / ".fluid" / "worktrees" / "chore" / "task-rv"
+    git(repo, "worktree", "add", "-q", "-b", "chore/task-rv", str(path), parent_tip)
+    source["registered"].append({"path": str(path), "branch": "chore/task-rv", "registry_ids": ["ck-rv"]})
+    git(path, "checkout", "-q", "--detach", pushed_commit(repo))
+    age_directory(path)
+    assert reclaim()["items"][0]["decision"] == "remove"  # while the parent's branch still holds it
+    git(repo, "branch", "-D", "parent-feat")  # the parent later deletes its branch
+    row = reclaim()["items"][0]
+    assert row["decision"] == "keep"
+    assert f"its starting commit {parent_tip[:12]} is held only by its own branch chore/task-rv" in row["reason"]
+    assert reclaim(dry_run=False)["reclaimed"] == 0
+    assert git(repo, "rev-parse", "chore/task-rv") == parent_tip
+
+
+def test_failed_archive_never_deletes_a_snapshot_an_earlier_pass_left(repository, monkeypatch):
+    repo, path, head = abandoned(repository, monkeypatch)
+    snapshot = rc._snapshot(path, head, "chore/task-w2")
+    git(repo, "update-ref", "refs/fluid-archive/chore/task-w2", snapshot)  # left by an earlier pass
+    calls = []
+    real = rc.git_service._run_git
+    monkeypatch.setattr(rc.git_service, "_run_git",
+                        lambda cwd, args, **k: calls.append(args) or real(cwd, args, **k))
+    monkeypatch.setattr(rc, "_worktree_tree", lambda *a: "0" * 40)  # verification fails
+    row = {"path": str(path), "branch": "chore/task-w2", "head_sha": head}
+    monkeypatch.setattr(rc, "_snapshot", lambda *a: snapshot)
+    with pytest.raises(ValueError, match="snapshot verification failed"):
+        rc._archive_checkout(str(repo), row)
+    assert not [args for args in calls if args[:2] == ["update-ref", "-d"]]
+    assert git(repo, "rev-parse", "refs/fluid-archive/chore/task-w2") == snapshot
+
+
+def test_surviving_folder_of_a_stopped_archive_names_the_snapshot(repository, monkeypatch):
+    repo, path, _ = abandoned(repository, monkeypatch)
+    monkeypatch.setattr(rc.git_service, "remove_worktree", lambda main, target, force=False: False)
+    row = reclaim(dry_run=False)["items"][0]
+    ref = "refs/fluid-archive/chore/task-w2"
+    restore = f"git -C {repo} branch chore/task-w2-restored {ref}"
+    assert row["reason"].startswith("archived checkout removal stopped part-way")
+    assert ref in row["reason"] and restore in row["reason"]
+    again = reclaim()["items"][0]
+    assert again["decision"] == "keep" and again["reason"].startswith("archived earlier but the folder remains")
+    assert restore in again["reason"]
+
+
+
+def test_each_project_gets_a_fair_share_of_the_report_budget(repository, tmp_path, monkeypatch):
+    from tests.git_repo_helpers import init_repo
+
+    repo, first = repository
+    checkout(repository, "one")
+    other = init_repo(tmp_path / "second")
+    second = {"project_id": "q", "project": "second", "path": str(other), "aliases": ["q"], "registered": []}
+    path = other / ".fluid" / "worktrees" / "two"
+    git(other, "worktree", "add", "-q", "-b", "two", str(path))
+    second["registered"].append({"path": str(path), "branch": "two", "registry_ids": ["ck-two"]})
+    monkeypatch.setattr(rc, "_local_sources", lambda: [first, second])
+    monkeypatch.setattr(wr, "_project_repos", lambda **k: [first, second])
+    deadlines = []
+    real = rc.plan_preview
+
+    def slow_first(source, deadline=None):
+        deadlines.append(deadline - time.monotonic())
+        result = real(source, deadline)
+        if source is first:
+            time.sleep(0.3)  # the first project uses most of its share
+        return result
+
+    monkeypatch.setattr(rc, "plan_preview", slow_first)
+    monkeypatch.setattr(wr, "REPORT_SECONDS", 2)
+    result = wr.report()
+    assert len(deadlines) == 2
+    assert deadlines[0] <= 1.05  # half of the budget, not all of it
+    assert deadlines[1] > 0.5  # the second project still has time
+    assert not any(w["cleanup"].startswith("kept: not checked") for p in result["projects"] for w in p["worktrees"])

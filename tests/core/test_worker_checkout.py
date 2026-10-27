@@ -1038,3 +1038,36 @@ def test_restore_fails_clearly_when_the_recorded_tip_is_gone(repo, worker_runtim
     checkouts.set_head_sha_for_path(path, "f" * 40, project_id=row["project_v2_id"])
     assert worker_checkout.restore_reclaimed_worker_checkout("lost") is False
     assert not Path(path).exists()
+
+
+
+def test_resume_refuses_a_folder_left_by_a_stopped_archive(repo, worker_runtime):
+    row, parent, base, _ = repo
+    worker_runtime.work["stopped"] = lambda path: (path / "scratch.txt").write_text("unfinished\n")
+    outcome = dispatch(worker="stopped")
+    assert outcome.ok, outcome.error
+    path = Path(database.get_session("stopped")["worktree_path"])
+    assert path.is_dir()
+    git(base, "update-ref", "refs/fluid-archive/chore/task-stopped", git(path, "rev-parse", "HEAD"))
+    ok, note = worker_checkout.restore_worker_checkout("stopped")
+    assert ok is False
+    assert "removal stopped part-way" in note and "refs/fluid-archive/chore/task-stopped" in note
+    assert "branch chore/task-stopped-restored refs/fluid-archive/chore/task-stopped" in note
+    assert worker_checkout.restore_reclaimed_worker_checkout("stopped") is False
+
+
+def test_reviewer_finish_keeps_a_starting_commit_only_its_branch_holds(repo, worker_runtime, monkeypatch):
+    """The parent's unpublished tip is the worker's base; the parent then resets its branch."""
+    row, parent, base, parent_tip = repo
+    published = git(base, "rev-parse", "refs/remotes/origin/parent-branch")
+
+    def review(path):
+        git(parent, "reset", "--hard", published)  # the parent drops its unpublished commit
+        git(path, "checkout", "--detach", published)
+
+    worker_runtime.work["orphaned"] = review
+    outcome = dispatch(worker="orphaned")
+    assert outcome.ok, outcome.error
+    path = Path(database.get_session("orphaned")["worktree_path"])
+    assert path.exists()
+    assert git(base, "rev-parse", "chore/task-orphaned") == parent_tip
