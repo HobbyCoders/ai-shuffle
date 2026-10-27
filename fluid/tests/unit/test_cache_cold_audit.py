@@ -74,3 +74,18 @@ def test_cli_prints_the_field_check(tmp_path, capsys):
     assert "(current rule): 0/0" in out
     assert audit.main([str(tmp_path), "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["sessions"] == 1
+
+
+def test_audit_uses_recorded_route_policy_including_no_idle_expiry(tmp_path):
+    rows = []
+    for seq, ttl in enumerate((None, 1800, 300), 1):
+        row = _usage(seq, reason="cold_commit", cold_reason="gap", gap=1000)
+        row["event"]["raw"]["compaction_decision"]["cache_signal"]["ttl_seconds"] = ttl
+        rows.append(row)
+    data = list(audit.decisions(_write(tmp_path, rows)))
+    assert [row["current"] for row in data] == ["", "", "gap"]
+    assert [audit.short_gap(row) for row in data] == [True, True, False]
+    summary = audit.summarize(data)
+    assert {g["gap"] for g in summary["table"]} == {"no idle expiry", "<=1800s", ">300s"}
+    assert summary["recorded"] == {"cold_commits": 3, "short_gap": 2}
+    assert summary["current_rule"] == {"cold_commits": 1, "short_gap": 0}

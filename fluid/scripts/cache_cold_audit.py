@@ -11,7 +11,7 @@ committed and the cache hit rate of the calls that did not rewrite anything,
 which says whether the provider cache really was warm.
 
 The last lines are the field check for short-gap cold pricing: the share of
-cold-priced batches whose gap was known and at most ``COLD_GAP_SECONDS``,
+cold-priced batches whose gap was known and within the route's idle policy,
 leaving out real system prompt or tool changes, as recorded and as the
 current rule would price the same signals.
 
@@ -33,10 +33,11 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fluid.context.cache_signal import (
-    COLD_GAP_SECONDS,
     MISS_HIT_RATE,
     CacheSignal,
 )
+
+from fluid.context.cache_ttl import DEFAULT_COLD_GAP_SECONDS
 
 # Decision reasons that commit a batch, and those that commit it because
 # the cache was priced cold.
@@ -69,7 +70,10 @@ def decisions(path: Path) -> Iterator[dict[str, Any]]:
             if not isinstance(signal, dict):
                 continue
             gap = signal.get("gap_s")
+            # Old exports have no route metadata: retain the legacy 5m fallback.
+            ttl = signal.get("ttl_seconds", raw.get("cache_ttl_seconds", DEFAULT_COLD_GAP_SECONDS))
             current = CacheSignal(
+                ttl_seconds=ttl,
                 gap_s=None if gap is None else float(gap),
                 static_changed=bool(signal.get("static_changed")),
                 resumed=bool(signal.get("resumed")),
@@ -80,6 +84,7 @@ def decisions(path: Path) -> Iterator[dict[str, Any]]:
                 "recorded": decision.get("cold_reason") or "",
                 "current": current,
                 "gap_s": gap,
+                "ttl_seconds": ttl,
                 "static_changed": bool(signal.get("static_changed")),
                 "reason": decision.get("reason") or "",
                 "hit_rate": (int(event.get("cache_read_tokens") or 0) / prompt
@@ -87,22 +92,25 @@ def decisions(path: Path) -> Iterator[dict[str, Any]]:
             }
 
 
-def band(gap: float | None) -> str:
+def band(gap: float | None, ttl: float | None = DEFAULT_COLD_GAP_SECONDS) -> str:
+    if ttl is None:
+        return "no idle expiry"
     if gap is None:
         return "unknown"
-    return f"<={COLD_GAP_SECONDS:g}s" if gap <= COLD_GAP_SECONDS else f">{COLD_GAP_SECONDS:g}s"
+    return f"<={ttl:g}s" if gap <= ttl else f">{ttl:g}s"
 
 
 def short_gap(row: dict[str, Any]) -> bool:
     """A known gap within the cache lifetime and no static change."""
-    return (row["gap_s"] is not None and row["gap_s"] <= COLD_GAP_SECONDS
+    ttl = row.get("ttl_seconds", DEFAULT_COLD_GAP_SECONDS)
+    return (row["gap_s"] is not None and (ttl is None or row["gap_s"] <= ttl)
             and not row["static_changed"])
 
 
 def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for row in rows:
-        key = (row["recorded"] or "warm", row["current"] or "warm", band(row["gap_s"]))
+        key = (row["recorded"] or "warm", row["current"] or "warm", band(row["gap_s"], row.get("ttl_seconds", DEFAULT_COLD_GAP_SECONDS)))
         groups.setdefault(key, []).append(row)
     table = []
     for key, members in sorted(groups.items(), key=lambda kv: -len(kv[1])):
@@ -157,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
               f"{g['cold_commits']:>12} {hit:>8} {warm:>10}")
     for label, key in (("recorded", "recorded"), ("current rule", "current_rule")):
         part = summary[key]
-        print(f"cold-priced batches with a known gap <= {COLD_GAP_SECONDS:g}s "
+        print(f"cold-priced batches with a known gap within the route's idle policy "
               f"({label}): {_share(part['short_gap'], part['cold_commits'])}")
     return 0
 

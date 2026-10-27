@@ -17,6 +17,7 @@ function state(over: Partial<CacheState> = {}): CacheState {
 		last_call_at: 1,
 		idle_seconds: 5400,
 		cache_ttl_seconds: 3600,
+		cache_write_ttl: '1h',
 		threshold_tokens: 150_000,
 		cold: true,
 		large: true,
@@ -72,6 +73,23 @@ describe('the words', () => {
 			: 'Recommendation: Compact first for the lower estimated total');
 	});
 
+	it('describes five-minute writes when the last real call used credits', () => {
+		const text = coldSendText(state({ cache_write_ttl: '5m', cache_ttl_seconds: 300, cost_comparison: {
+			model: 'claude-sonnet-5', cold_resume_usd: 1.02, compaction_usd: 1.08,
+			continued_usd: 0.22, compact_continue_usd: 1.3,
+			compacted_context_tokens: 80_000, reply_tokens: 2_000, summary_tokens: 8_000,
+			recommendation: 'send'
+		} }))!;
+		expect(text).toContain('cache has likely expired');
+		expect(text).toContain('Includes 5-minute cache writes; no cache hits assumed.');
+		expect(text).not.toContain('1-hour');
+	});
+
+	it('never warns on an idle-only Codex chat', () => {
+		expect(coldSendText(state({ leg: 'openai_responses', cache_ttl_seconds: null,
+			cache_write_ttl: null, idle_seconds: 36_000, cold: false, warn: false }))).toBeNull();
+	});
+
 	it('does not invent a model call or a cache-write charge for native compaction', () => {
 		const text = coldSendText(state({ leg: 'openrouter', cost_comparison: {
 			model: 'fixture', cold_resume_usd: 0.84, compaction_usd: 0,
@@ -90,7 +108,7 @@ describe('the words', () => {
 		expect(idleInWords(5400)).toBe('1.5 h');
 		expect(idleInWords(600)).toBe('10 min');
 		expect(coldSendText(state())).toBe(
-			'This chat holds about 412k tokens and its cache has expired after 1.5 h idle. ' +
+			'This chat holds about 412k tokens and its cache has likely expired after 1.5 h idle. ' +
 				'Sending now re-reads all of it. Cost comparison unavailable: model pricing is missing. Compact first to reduce context, or Send anyway.'
 		);
 		expect(coldSendText(state({ warn: false }))).toBeNull();

@@ -41,13 +41,21 @@ def _boom(*_a, **_k):
 # ─── _cache_probe_fields ─────────────────────────────────────────────────────
 
 
-def test_no_fingerprint_reports_only_the_decision_and_consumes_rewrites() -> None:
+@pytest.mark.parametrize("name,url,ttl", [
+    ("anthropic", "https://api.anthropic.com/v1/messages", 300),
+    ("openai_responses", "https://api.openai.com/v1/responses", 1800),
+    ("openai_responses", "https://chatgpt.com/backend-api/codex/responses", None),
+])
+def test_no_fingerprint_keeps_route_policy_and_consumes_rewrites(name, url, ttl) -> None:
     loop = _loop()
+    loop.provider.name = name
+    loop.provider._base_url = url
     loop._history_rewrites = [{"rung": "trim"}]
 
     out = loop._cache_probe_fields({"input_tokens": 10, "cache_read_input_tokens": 5})
 
-    assert set(out) == {"compaction_decision", "cache_read_report"}
+    assert set(out) == {"compaction_decision", "cache_read_report", "cache_ttl_seconds"}
+    assert out["cache_ttl_seconds"] == ttl
     assert "prefix_hashes" not in out
     assert loop._history_rewrites == []
     assert loop._prev_prefix_fingerprint is None

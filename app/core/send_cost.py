@@ -1,23 +1,8 @@
-"""Whether the next message into a chat re-reads a large context cold (#1831).
+"""Whether the next send re-reads a large context cold.
 
-A provider bills a prompt it still holds in its prompt cache at a fraction of
-the input price; once the cache has expired the whole conversation is read
-again at full price (Claude Code also writes it back to the cache). Measured
-on this app's own usage records (2026-10-04):
-
-* Claude Code (the delegated leg) writes 1-hour cache entries
-  (``ephemeral_1h_input_tokens``). 98% of the prompt came from cache for gaps
-  up to an hour and 7% past it: the first call after 81 minutes idle re-wrote
-  448k tokens, and after 9.5 hours 535k, where the first call after an
-  automatic compaction wrote 78k.
-* The native legs follow fluid's own cold-cache gap of five minutes
-  (``fluid.context.cache_signal.COLD_GAP_SECONDS``). On the ChatGPT
-  subscription 43% of large prompts came from cache within a minute, 25% at
-  one to five minutes and 7% past an hour, so a cold send costs there too.
-
-:func:`cache_state` answers for one chat: its leg, context size, the time of
-its last provider call, the cache lifetime for that leg and whether a send now
-would be a large cold read (``warn``).
+The shared Fluid route policy models idle expiry, not a guarantee of cache hits.
+The composer warns only for a large context whose route has likely gone cold.
+No provider cache-write options are changed here.
 """
 
 from __future__ import annotations
@@ -25,17 +10,14 @@ from __future__ import annotations
 import math
 import time
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
+
+from fluid.context.cache_ttl import (
+    delegated_cache_write_ttl, resolve_cache_ttl,
+)
 
 #: A context at least this large is worth a warning when its cache is cold.
 LARGE_CONTEXT_TOKENS = 150_000
-#: Cache lifetime per leg: Claude Code's 1-hour entries, fluid's 5-minute gap.
-CACHE_TTL_SECONDS: Dict[str, float] = {
-    "delegated": 3600.0,
-    "anthropic": 300.0,
-    "openai_responses": 300.0,
-    "openrouter": 300.0,
-}
 
 
 def _epoch(value: Any) -> Optional[float]:
@@ -51,25 +33,80 @@ def _epoch(value: Any) -> Optional[float]:
     return None
 
 
-def _last_call(session_id: str) -> Optional[Dict[str, Any]]:
-    """The session's newest recorded model call (``turn.usage``). Sync (DB)."""
-    from app.db.base import get_db, parse_jsonb
+# Keep filtering and projection in PostgreSQL: turn snapshots can contain large
+# diagnostic payloads, but the send path needs at most two small usage records.
+_PROMPT_SQL = " + ".join(
+    f"CASE WHEN jsonb_typeof(payload->'usage'->'{key}') = 'number' "
+    f"THEN (payload->'usage'->>'{key}')::numeric ELSE 0 END"
+    for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+)
+_REAL_CALL_SQL = (
+    "session_id=%s AND event_type='turn.usage' "
+    "AND COALESCE(payload->'usage'->>'auxiliary_source', '') = '' "
+    + "".join(
+        f"AND COALESCE(CAST(payload->'usage'->>'{key}' AS TEXT), 'false') NOT IN ('true', '1') "
+        for key in ("usage_estimated", "input_tokens_estimated", "output_tokens_estimated")
+    )
+    + f"AND ({_PROMPT_SQL}) > 0 "
+)
+_TOKEN_FIELDS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens")
+_WRITE_FIELDS = ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
+_USAGE_SQL = ", ".join(
+    f"CASE WHEN jsonb_typeof({path}->'{key}') = 'number' "
+    f"THEN ({path}->>'{key}')::numeric ELSE NULL END AS {key}"
+    for path, fields in (("payload->'usage'", _TOKEN_FIELDS),
+                         ("payload->'usage'->'cache_creation'", _WRITE_FIELDS))
+    for key in fields
+)
+
+
+def _projected_usage(row: Any) -> Dict[str, Any]:
+    usage: Dict[str, Any] = {key: int(row[key]) for key in _TOKEN_FIELDS if row[key] is not None}
+    writes = {key: int(row[key]) for key in _WRITE_FIELDS if row[key] is not None}
+    if writes:
+        usage["cache_creation"] = writes
+    return usage
+
+
+def _last_call(session_id: str, *, include_cache_write: bool = False) -> Optional[Dict[str, Any]]:
+    """Newest real main call; optionally retain the last cache-writing evidence.
+
+    Each query returns at most one projected row, never a page of whole payloads.
+    Only delegated read-only calls need the second lookup, on the same connection.
+    """
+    from app.db.base import get_db
 
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT created_at, payload FROM session_events WHERE session_id=%s "
-            "AND event_type='turn.usage' "
-            "AND COALESCE(payload->'usage'->>'auxiliary_source', '') = '' "
-            "ORDER BY seq DESC LIMIT 1",
+            f"SELECT seq, created_at, {_USAGE_SQL} FROM session_events WHERE "
+            + _REAL_CALL_SQL + "ORDER BY seq DESC LIMIT 1",
             (session_id,),
         )
         row = cursor.fetchone()
-    if row is None:
-        return None
-    payload = parse_jsonb(row["payload"])
-    usage = (payload or {}).get("usage") if isinstance(payload, dict) else None
-    return {"at": _epoch(row["created_at"]), "usage": usage if isinstance(usage, dict) else {}}
+        if row is None:
+            return None
+        usage = _projected_usage(row)
+        result = {"at": _epoch(row["created_at"]), "usage": usage}
+        if include_cache_write:
+            write_usage = usage
+            if not usage.get("cache_creation_input_tokens"):
+                cursor.execute(
+                    f"SELECT {_USAGE_SQL} FROM session_events WHERE "
+                    + _REAL_CALL_SQL + "AND seq <= %s "
+                    "AND CASE WHEN jsonb_typeof(payload->'usage'->'cache_creation_input_tokens') "
+                    "= 'number' THEN (payload->'usage'->>'cache_creation_input_tokens')::numeric "
+                    "ELSE 0 END > 0 ORDER BY seq DESC LIMIT 1",
+                    (session_id, row["seq"]),
+                )
+                written = cursor.fetchone()
+                write_usage = _projected_usage(written) if written else None
+            result["cache_write_usage"] = write_usage
+        return result
+
+
+def _cache_write_usage(last: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    return (last or {}).get("cache_write_usage", (last or {}).get("usage"))
 
 
 def _prompt_tokens(usage: Dict[str, Any]) -> int:
@@ -83,7 +120,8 @@ def _prompt_tokens(usage: Dict[str, Any]) -> int:
 
 def assess(
     *, leg: Optional[str], context_tokens: Optional[int], last_call_at: Optional[float],
-    now: float, projected_after_compact_tokens: Optional[int] = None,
+    now: float, cache_ttl_seconds: Optional[float],
+    projected_after_compact_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     """The verdict for one chat from its leg, size and last call. Pure.
 
@@ -95,7 +133,7 @@ def assess(
     if leg != "delegated" and projected_after_compact_tokens is not None:
         # ceil(projection / .75): preserves the existing >=25% savings gate.
         threshold = max(threshold, (projected_after_compact_tokens * 4 + 2) // 3)
-    ttl = CACHE_TTL_SECONDS.get(leg or "")
+    ttl = cache_ttl_seconds
     idle = (now - last_call_at) if last_call_at is not None else None
     cold = ttl is not None and idle is not None and idle > ttl
     large = context_tokens is not None and context_tokens >= threshold
@@ -122,13 +160,14 @@ DEFAULT_REPLY_TOKENS = 4_000
 def compare_costs(
     *, model: str, leg: Optional[str], context_tokens: int,
     compacted_context_tokens: int, reply_tokens: int, summary_tokens: int,
-    resolver: Any = None,
+    resolver: Any = None, cache_write_ttl: Literal["1h", "5m"] = "1h",
 ) -> Optional[Dict[str, Any]]:
     """Price one resumed call, with and without compaction, from the same budget.
 
     Neither path assumes a cache hit: a rewritten prompt cannot reuse the old
-    cached history. Delegated calls also pay the CLI's observed 1-hour cache
-    write rate. Native checkpoints also pay for a summary side call.
+    cached history. Delegated calls also pay the most recent real main cache
+    write's rate (1h by default, 5m on credits/API key). Native checkpoints also pay for
+    a summary side call.
     Unknown input/output rates must stay unknown, not become a free option.
     """
     from fluid.providers.pricing import estimate_cost, resolve_price
@@ -141,7 +180,7 @@ def compare_costs(
         usage: Dict[str, Any] = {"output_tokens": output}
         if leg == "delegated":
             usage.update(cache_creation_input_tokens=prompt,
-                         cache_creation={"ephemeral_1h_input_tokens": prompt})
+                         cache_creation={f"ephemeral_{cache_write_ttl}_input_tokens": prompt})
         else:
             usage["input_tokens"] = prompt
         total = estimate_cost(model, usage, resolver=resolver)
@@ -197,6 +236,7 @@ def _comparison(
     return compare_costs(
         model=model, leg=leg, context_tokens=tokens, compacted_context_tokens=retained,
         reply_tokens=reply, summary_tokens=SUMMARY_OUTPUT_TOKENS, resolver=resolver,
+        cache_write_ttl=delegated_cache_write_ttl(_cache_write_usage(last)),
     )
 
 
@@ -214,11 +254,22 @@ def _native_projection(leg: Optional[str], snapshot: Dict[str, Any]) -> Optional
 def cache_state(session: Dict[str, Any], *, now: Optional[float] = None) -> Dict[str, Any]:
     """Whether a send into ``session`` now re-reads a large context cold. Sync."""
     from app.core.limit_resume import session_leg
+    from app.core.query_options import decode_provider_model
+    from app.core.provider.harness_adapter import _lookup_provider_row
     from app.db import database
 
     session_id = session["id"]
     leg = session_leg(session)
-    last = _last_call(session_id)
+    last = _last_call(session_id, include_cache_write=True) if leg == "delegated" else _last_call(session_id)
+    raw_model = session.get("model") or session.get("launched_model")
+    decoded = decode_provider_model(raw_model) if raw_model else None
+    model = decoded[1] if decoded else raw_model
+    provider_id = decoded[0] if decoded else session.get("provider_id")
+    row = (_lookup_provider_row(provider_id) or {}) if provider_id else {}
+    ttl = resolve_cache_ttl(
+        leg, provider_type=row.get("provider_type"), auth_mode=row.get("auth_mode"),
+        base_url=row.get("base_url"), model=model, last_usage=_cache_write_usage(last),
+    ) if leg in ("delegated", "anthropic", "openai_responses", "openrouter") else None
     context_tokens: Optional[int] = None
     data: Dict[str, Any] = {}
     snapshot: Dict[str, Any] = {}
@@ -241,22 +292,19 @@ def cache_state(session: Dict[str, Any], *, now: Optional[float] = None) -> Dict
             or last_call_at is None or captured_at < last_call_at):
         projection = None
     if projection is not None:
-        from app.core.query_options import decode_provider_model
-
-        raw_model = session.get("model") or session.get("launched_model")
-        decoded = decode_provider_model(raw_model) if raw_model else None
-        model = decoded[1] if decoded else raw_model
         if model and data.get("model") and model != data["model"]:
             projection = None  # Changing models invalidates the old projection.
     state = assess(
         leg=leg, context_tokens=context_tokens, last_call_at=last_call_at,
-        now=time.time() if now is None else now,
+        now=time.time() if now is None else now, cache_ttl_seconds=ttl,
         projected_after_compact_tokens=projection,
     )
     if leg != "delegated" and projection is None:
         # Preserve the existing fixed-threshold warning and estimate fallback
         # when the floor is unknown. Never price using an out-of-date projection.
         data = {**data, "compaction": None}
+    state["cache_write_ttl"] = delegated_cache_write_ttl(_cache_write_usage(last)) \
+        if leg == "delegated" else None
     state["cost_comparison"] = None
     if state["warn"] and context_tokens is not None:
         try:

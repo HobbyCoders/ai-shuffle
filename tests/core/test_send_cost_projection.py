@@ -17,7 +17,7 @@ def setup_state(monkeypatch, *, leg="openai_responses", tokens=200_000,
         "compaction": {"projectedAfterCompactTokens": projection},
     }}
     monkeypatch.setattr(limit_resume, "session_leg", lambda s: leg)
-    monkeypatch.setattr(send_cost, "_last_call", lambda sid: {"at": 1, "usage": {}})
+    monkeypatch.setattr(send_cost, "_last_call", lambda sid, **kwargs: {"at": 1, "usage": {}})
     monkeypatch.setattr(harness_adapter, "_catalog_pricing_resolver",
                         lambda options: lambda model: {"input": 2, "output": 10})
     monkeypatch.setattr(database, "get_session_context_usage_snapshot", lambda sid: snapshot)
@@ -70,7 +70,7 @@ def test_new_call_invalidates_previously_current_projection(monkeypatch):
     fresh = send_cost.cache_state({"id": "fixture"}, now=10_000)
     assert fresh["warn"] and fresh["threshold_tokens"] == 225_440
     assert fresh["cost_comparison"]["compacted_context_tokens"] == 169_080
-    monkeypatch.setattr(send_cost, "_last_call", lambda sid: {"at": 3, "usage": {}})
+    monkeypatch.setattr(send_cost, "_last_call", lambda sid, **kwargs: {"at": 3, "usage": {}})
     stale = send_cost.cache_state({"id": "fixture"}, now=10_000)
     assert stale["warn"] and stale["threshold_tokens"] == 150_000
     assert stale["cost_comparison"]["compacted_context_tokens"] == 102_062
@@ -90,7 +90,7 @@ def test_missing_snapshot_preserves_fixed_threshold_warning(monkeypatch):
 
     setup_state(monkeypatch)
     monkeypatch.setattr(database, "get_session_context_usage_snapshot", lambda sid: None)
-    monkeypatch.setattr(send_cost, "_last_call", lambda sid: {
+    monkeypatch.setattr(send_cost, "_last_call", lambda sid, **kwargs: {
         "at": 1, "usage": {"input_tokens": 510_310}})
     state = send_cost.cache_state({"id": "fixture"}, now=10_000)
     assert state["context_tokens"] == 510_310
@@ -142,7 +142,7 @@ def test_real_projector_with_irreducible_overhead(
     from app.core.provider import harness_adapter
 
     monkeypatch.setattr(limit_resume, "session_leg", lambda s: "openai_responses")
-    monkeypatch.setattr(send_cost, "_last_call", lambda sid: {"at": 1, "usage": {}})
+    monkeypatch.setattr(send_cost, "_last_call", lambda sid, **kwargs: {"at": 1, "usage": {}})
     monkeypatch.setattr(harness_adapter, "_catalog_pricing_resolver",
                         lambda options: lambda model: {"input": 2, "output": 10})
     database.create_session("projection-fixture", "default", model="fixture")
