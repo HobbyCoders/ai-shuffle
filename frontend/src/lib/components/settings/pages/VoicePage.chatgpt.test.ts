@@ -76,7 +76,7 @@ beforeEach(() => {
 		voice_input_mode: 'auto',
 		voice_input_silence_seconds: 5,
 		voice_input_models: [{ id: 'fal-ai/whisper', name: 'Whisper (Large v3)', provider: 'fal-ai' }],
-		voice_options: { opening: '', instructions: '', delegation_instructions: '', mic_threshold_db: -42 },
+		voice_options: { instructions: '', delegation_instructions: '', mic_threshold_db: -42 },
 		model_details: {
 			model: 'gpt-live-1',
 			transport: 'stream',
@@ -229,16 +229,10 @@ describe('GPT-Live-1.1 · ChatGPT subscription', () => {
 		await waitFor(() => expect(voice.value).toBe('juniper'));
 	});
 
-	it('saves opening words and the microphone gate for this engine', async () => {
+	it('saves the microphone gate for this engine and offers no opening words', async () => {
 		serve({ voice_model: CODEX });
 		await mountPage();
-		const opening = screen.getByRole('textbox', { name: 'Opening words' }) as HTMLInputElement;
-		await fireEvent.focus(opening);
-		await fireEvent.input(opening, { target: { value: 'Hey' } });
-		await fireEvent.blur(opening);
-		await waitFor(() =>
-			expect(transport.put).toHaveBeenCalledWith('/settings/voice', { voice_options: { opening: 'Hey' }, voice_options_model: CODEX })
-		);
+		expect(screen.queryByRole('textbox', { name: 'Opening words' })).toBeNull();
 		const gate = screen.getByRole('spinbutton', { name: 'Microphone gate' }) as HTMLInputElement;
 		expect(gate.value).toBe('-42');
 		await fireEvent.input(gate, { target: { value: '-55' } });

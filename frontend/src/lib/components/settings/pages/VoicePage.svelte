@@ -27,7 +27,6 @@
 	import Segmented from '../rows/Segmented.svelte';
 	import SelectField from '../rows/SelectField.svelte';
 	import NumberField from '../rows/NumberField.svelte';
-	import TextField from '../rows/TextField.svelte';
 	import LinkValue from '../rows/LinkValue.svelte';
 	import ValueText from '../rows/ValueText.svelte';
 	import HotkeyField from '../rows/HotkeyField.svelte';
@@ -35,7 +34,7 @@
 	import ExpandToggle from '../rows/ExpandToggle.svelte';
 	import CallPromptsEditor from './editors/CallPromptsEditor.svelte';
 	import { CODEX_VOICE_MODEL, SUPERGROK_VOICE_MODEL } from '$lib/constants/voice-engines';
-	import { voiceModelLabel } from '$lib/api/voice';
+	import { maxCallMinutesFromInput, NO_CALL_LIMIT, voiceModelLabel } from '$lib/api/voice';
 	import { VoicePreview, VoiceState } from './voice-state.svelte';
 	import { voiceVolume, setVoiceVolume, MAX_VOICE_VOLUME } from '$lib/services/voiceVolume';
 	import './editors/editors.css';
@@ -169,11 +168,6 @@
 
 	function defaultOf<T>(id: string): T {
 		return getEntry(id)?.default as T;
-	}
-
-	function saveOpening(value: string) {
-		if (!s) return;
-		void voice.save({ voice_options: { opening: value }, voice_options_model: s.voice_model });
 	}
 </script>
 
@@ -355,14 +349,16 @@
 			id="voice.maxCall"
 			dim={!callsOn}
 			value={s?.voice_max_call_minutes}
+			hint={s?.voice_max_call_minutes === NO_CALL_LIMIT ? 'No limit' : undefined}
 			onReset={() => voice.save({ voice_max_call_minutes: defaultOf<number>('voice.maxCall') })}
 		>
 			<NumberField
-				value={s?.voice_max_call_minutes ?? 240}
-				min={1}
+				value={s?.voice_max_call_minutes ?? defaultOf<number>('voice.maxCall')}
+				min={NO_CALL_LIMIT}
 				unit="min"
 				disabled={locked}
-				onchange={(n) => voice.save({ voice_max_call_minutes: Math.max(1, Math.round(n)) })}
+				accept={(n) => n >= 0}
+				onchange={(n) => voice.save({ voice_max_call_minutes: maxCallMinutesFromInput(n) })}
 			/>
 		</SettingRow>
 		<SettingRow
@@ -383,15 +379,6 @@
 			{:else}
 				<ValueText value={s ? 'Not available' : unavailable} />
 			{/if}
-		</SettingRow>
-		<SettingRow id="voice.opening" dim={!callsOn} value={s?.voice_options?.opening ?? ''} onReset={() => saveOpening('')}>
-			<TextField
-				value={s?.voice_options?.opening ?? ''}
-				placeholder="Wait for me to speak"
-				maxlength={2000}
-				disabled={locked || !s?.voice_options}
-				onchange={saveOpening}
-			/>
 		</SettingRow>
 		<SettingRow id="voice.prompts" dim={!callsOn} expanded={promptsOpen && details && s?.voice_options ? promptsEditor : undefined}>
 			{#if details && s?.voice_options}

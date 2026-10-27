@@ -280,6 +280,14 @@ describe('ModelsCollection', () => {
 		await waitFor(() => expect(within(detail).getByText('240 min')).toBeTruthy());
 		expect(within(detail).queryByRole('combobox')).toBeNull();
 	});
+
+	it('shows No limit for a voice call length of 0, never 0 min', async () => {
+		mocks.loadVoice.mockResolvedValue({ ...voiceSettings, voice_max_call_minutes: 0 });
+		await open('Voice calls');
+		const detail = screen.getByRole('region', { name: 'Details' });
+		await waitFor(() => expect(within(detail).getByText('No limit')).toBeTruthy());
+		expect(within(detail).queryByText('0 min')).toBeNull();
+	});
 });
 
 describe('CatalogDetail, fal.ai models', () => {
