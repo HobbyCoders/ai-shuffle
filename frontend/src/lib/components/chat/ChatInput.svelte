@@ -1761,6 +1761,15 @@
 	   VISIBLE: every popover in the composer opens out of these bounds, and
 	   clipping them would make them unreachable. */
 	.chat-island {
+		/* The composer's round buttons follow the theme's corners, capped at
+		   half the 32px button (a full circle). Themes write --radius in rem
+		   for a 16px rem: the rule is twice that radius, so 0 is square,
+		   0.25-0.375rem is a rounded square and 0.5rem and up is a circle.
+		   This shell's root font is 14px (0.5rem = 7px), hence 16/7 rather
+		   than 2: 0.5rem lands exactly on the 16px circle. Every button, focus
+		   ring and recording glow in the composer reads this one value; the
+		   phone shell (16px root, 40px buttons) sets its own. */
+		--composer-btn-radius: min(calc(var(--radius, 10px) * 16 / 7), 16px);
 		position: relative;
 		display: flex;
 		flex-direction: column;
@@ -1860,8 +1869,9 @@
 	}
 
 	/* ===== THE CIRCLES =====
-	   Attach (left), then dictate · Talk or Send · Stop (right): 32px rounds
-	   in either layout. Attach and dictate are quiet
+	   Attach (left), then dictate · Talk or Send · Stop (right): 32px buttons
+	   in either layout, cornered by --composer-btn-radius (a circle on most
+	   themes, a square on sharp ones). Attach and dictate are quiet
 	   (muted fill); Talk keeps the call button's accent tint; Send is the
 	   filled accent; Stop keeps its destructive tint. */
 	.composer-attach {
@@ -1872,7 +1882,7 @@
 		height: 32px;
 		padding: 0;
 		border: 0;
-		border-radius: 50%;
+		border-radius: var(--composer-btn-radius);
 		background: var(--muted);
 		color: var(--muted-foreground);
 		cursor: pointer;
@@ -1907,12 +1917,16 @@
 	.input-area .send-cluster :global(.voice-btn) {
 		height: 32px;
 	}
-	.send-cluster :global(.voice-btn-wrapper:not(.expanded)) {
-		border-radius: 50%;
+	/* Every dictate state takes the composer corners, so the recording pill
+	   and its glow stay square on a square theme. The 16px cap still makes
+	   the widened states a full pill on rounder themes. The selectors out-rank
+	   VoiceRecorder's own expanded (999px) rules. */
+	.chat-island .input-area .send-cluster :global(.voice-btn-wrapper),
+	.chat-island .input-area .send-cluster :global(.voice-btn-wrapper .voice-btn) {
+		border-radius: var(--composer-btn-radius);
 	}
 	.send-cluster :global(.voice-btn:not(.expanded):not(.preparing):not(.transcribing)) {
 		width: 32px;
-		border-radius: 50%;
 	}
 	.send-cluster :global(.voice-btn:not(.recording):not(.preparing):not(.transcribing)) {
 		background: var(--muted);
@@ -1936,7 +1950,7 @@
 		padding: 0;
 		background: var(--primary);
 		border: none;
-		border-radius: 50%;
+		border-radius: var(--composer-btn-radius);
 		color: var(--primary-foreground);
 		cursor: pointer;
 		transition: background-color 0.15s ease, color 0.15s ease, filter 0.12s ease, transform 0.1s ease;
@@ -1971,10 +1985,11 @@
 		cursor: wait;
 	}
 
-	.send-cluster :global(.stop-btn) {
+	/* Out-ranks StopButton's own corner rule. */
+	.input-area .send-cluster :global(.stop-btn) {
 		width: 32px;
 		height: 32px;
-		border-radius: 50%;
+		border-radius: var(--composer-btn-radius);
 	}
 
 	/* The circles keep their 32px in the controls row too: the wrap

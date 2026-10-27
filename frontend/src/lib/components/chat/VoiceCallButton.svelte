@@ -169,8 +169,10 @@
 
 	.voice-call-btn:focus-visible { outline:2px solid var(--ring); outline-offset:3px; }
 
-	/* Circle variant: today's call button made round for the composer's
-	   circle row: the waveform in the accent on a light accent tint. */
+	/* Circle variant: the call button in the composer's button row: the
+	   waveform in the accent on a light accent tint. Its corners follow the
+	   composer's (--composer-btn-radius, set by ChatInput), so it is square
+	   on a square theme and round on the rest. */
 	.call-circle {
 		display: grid;
 		place-items: center;
@@ -179,7 +181,7 @@
 		height: 32px;
 		padding: 0;
 		border: none;
-		border-radius: 50%;
+		border-radius: var(--composer-btn-radius, 50%);
 		background: color-mix(in oklch, var(--primary) 10%, transparent);
 		box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 22%, transparent);
 		color: var(--primary);
