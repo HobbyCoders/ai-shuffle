@@ -239,6 +239,8 @@ true only when the app showing the page offers `name`:
 | `microphone` | yes | yes | `getUserMedia` audio for the page's own voice mode |
 | `device-tools` | yes | no | phone tools the worker can call on this device |
 | `worker-switch` | yes | no | the app connects to another paired worker when the page navigates to `/mobile/?connect=<origin>` |
+| `voice-routing` | yes | no | the app follows headset routes while the page reports a call (`voice-call` over `shuffleShell`) |
+| `voice-call-controls` | yes | no | the app keeps a call running with the phone locked, with an ongoing notification; the page reports `voice-call-state` and answers its Mute/Hang up as a `shufflevoicecall` window event |
 
 Both are false on the web UI and in app builds from before the descriptor.
 Those builds bundle their own UI, so they never show a worker page anyway.
