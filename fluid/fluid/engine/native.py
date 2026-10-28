@@ -2956,10 +2956,11 @@ class NativeLoop(BackgroundLifecycleMixin):
             overhead = self._context_overhead_tokens()
             measured = await self._measured_window_prompt(sid, nodes)
             estimate = self._compactor.estimate_view_tokens(nodes, overhead)
-            if measured and estimate > 0:
+            if measured and estimate > 0 and self._measured_is_current(sid):
                 scale = min(1.0, max(0.6, measured / estimate))
-                if self._measured_is_current(sid):
-                    measured_now = measured
+                measured_now = measured
+            # A rewrite invalidates the old ratio too: an estimated card must
+            # keep both sizes in chars/4 units, not stale measured units.
             try:
                 promotions = self._compactor.compact_now(
                     nodes, overhead_tokens=overhead,

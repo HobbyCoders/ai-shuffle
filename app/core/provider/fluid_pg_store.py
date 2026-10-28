@@ -769,8 +769,29 @@ def _candidate_sessions(
     return [dict(r) for r in cur.fetchall()]
 
 
+def _local_search_filter(where: str, me: Optional[str]) -> tuple[str, List[Any], str]:
+    """Exclude moved store copies only once their event mirror exists.
+
+    Materialize ownership once per arm, not an ever-growing Python id list
+    repeated for each term. The single-column anti-join can hash both app and
+    store ids, and runs before the candidate/row limits in either search path.
+    """
+    if not me:
+        return "", [], where
+    ctes = (
+        "mirrored_sessions AS MATERIALIZED (SELECT s.id, s.sdk_session_id FROM sessions s "
+        f"WHERE {_remote_sql('s.')} "
+        "AND EXISTS (SELECT 1 FROM session_events e WHERE e.session_id = s.id)), "
+        "mirrored_ids AS MATERIALIZED (SELECT id AS mirrored_id FROM mirrored_sessions "
+        "UNION SELECT sdk_session_id FROM mirrored_sessions WHERE sdk_session_id IS NOT NULL), "
+    )
+    return ctes, [me], (
+        f"{where} AND NOT EXISTS (SELECT 1 FROM mirrored_ids WHERE mirrored_id = session_id)"
+    )
+
+
 def _top_rows(cur, table: str, column: str, ts: str, where: str, where_params: List[Any],
-              select: str, patterns: List[str]) -> List[Dict[str, Any]]:
+              select: str, patterns: List[str], me: Optional[str] = None) -> List[Dict[str, Any]]:
     """The strongest ``_SEARCH_ROWS_PER_SESSION`` rows of each of the arm's
     best ``_SEARCH_PREFILTER_SESSIONS`` sessions. Score the stored search text
     first, then fetch JSON only for the capped rows. Break session ties by
@@ -782,6 +803,7 @@ def _top_rows(cur, table: str, column: str, ts: str, where: str, where_params: L
     # Keep only row keys in the materialized CTE, never transcript bytes.
     from app.db.history_indexing import search_table
     search_source = search_table(cur, table)
+    ctes, cte_params, where = _local_search_filter(where, me)
     key = "node_id" if table == "fluid_session_nodes" else "id"
     matches = " UNION ALL ".join(
         f"SELECT session_id, {key}, {ts} AS t, 1 AS h FROM {search_source} "
@@ -795,7 +817,7 @@ def _top_rows(cur, table: str, column: str, ts: str, where: str, where_params: L
     params = [p for pattern in patterns for p in [*where_params, pattern]]
     selected = ", ".join(f"d.{name.strip()}" for name in select.split(","))
     cur.execute(
-        f"WITH m AS ({matches}), "
+        f"WITH {ctes}m AS ({matches}), "
         "s AS (SELECT session_id, MAX(h) AS best, MAX(t) AS last FROM m "
         f"GROUP BY session_id ORDER BY best DESC, last DESC, session_id LIMIT {_SEARCH_PREFILTER_SESSIONS}), "
         "r AS (SELECT m.*, ROW_NUMBER() OVER (PARTITION BY m.session_id "
@@ -803,7 +825,7 @@ def _top_rows(cur, table: str, column: str, ts: str, where: str, where_params: L
         f"SELECT {selected} FROM r JOIN {table} d ON d.session_id = r.session_id "
         f"AND d.{key} = r.{key} WHERE rn <= {_SEARCH_ROWS_PER_SESSION} "
         f"ORDER BY r.session_id, r.h DESC, r.t DESC, r.{key}",
-        params,
+        cte_params + params,
     )
     return [dict(r) for r in cur.fetchall()]
 
@@ -889,10 +911,12 @@ def _recall_matches(source: str, where: str, where_params: List[Any],
 
 def _indexed_top_rows(cur, source: str, table: str, key: str, where: str,
                       where_params: List[Any], select: str,
-                      patterns: List[str], fetch_sessions: int) -> List[Dict[str, Any]]:
+                      patterns: List[str], fetch_sessions: int,
+                      me: Optional[str] = None) -> List[Dict[str, Any]]:
     """``_top_rows`` over the projection: same session cap, row cap and
     deterministic tie-breaks, then the JSON of just the capped rows."""
     from app.db.history_indexing import search_table
+    ctes, cte_params, where = _local_search_filter(where, me)
     matches, params = _recall_matches(source, where, where_params, patterns,
                                      search_table(cur, "session_recall_text"))
     # The row's own key order breaks exact ties, as the legacy query did.
@@ -900,7 +924,7 @@ def _indexed_top_rows(cur, source: str, table: str, key: str, where: str,
     join_key = "d.id = r.row_key::bigint" if key == "id" else f"d.{key} = r.row_key"
     selected = ", ".join(f"d.{name.strip()}" for name in select.split(","))
     cur.execute(
-        f"WITH m AS ({matches}), "
+        f"WITH {ctes}m AS ({matches}), "
         "s AS (SELECT session_id, MAX(h) AS best, MAX(t) AS last FROM m "
         f"GROUP BY session_id ORDER BY best DESC, last DESC, session_id LIMIT {_SEARCH_PREFILTER_SESSIONS}), "
         "r AS (SELECT m.*, ROW_NUMBER() OVER (PARTITION BY m.session_id "
@@ -911,7 +935,7 @@ def _indexed_top_rows(cur, source: str, table: str, key: str, where: str,
         f"JOIN {table} d ON d.session_id = r.session_id AND {join_key} "
         f"WHERE rn <= {_SEARCH_ROWS_PER_SESSION} "
         f"ORDER BY r.session_id, r.h DESC, r.t DESC, {order_key.replace('m.', 'r.')}",
-        params,
+        cte_params + params,
     )
     return [dict(r) for r in cur.fetchall()]
 
@@ -1062,20 +1086,11 @@ def _search_sync(
             )
         excluded = _exclusion_ids(cur, exclude_session_id)
         not_excluded = f"session_id NOT IN ({_in(excluded)})" if excluded else "TRUE"
-        # A moved chat may retain both app-id and store-id transcripts here.
-        # Exclude those stale copies before either local arm's ranking/caps;
-        # its current owner's mirror is searched separately under the app id.
-        local_excluded = list(excluded)
-        if me:
-            cur.execute(
-                f"SELECT id, sdk_session_id, owner_device_id FROM sessions WHERE {_remote_sql()}", (me,)
-            )
-            local_excluded += [sid for row in cur.fetchall() if _uses_mirror(row, me)
-                               for sid in (row["id"], row["sdk_session_id"]) if sid]
-        local_where = f"session_id NOT IN ({_in(local_excluded)})" if local_excluded else "TRUE"
+        # Each local arm anti-joins moved chats with an existing event mirror
+        # before ranking/caps. Until any events arrive, keep the local fallback.
         likes = [_like_pattern(t) for t in terms]
         scope = _scope_ids(cur, api_user_id, reader) if indexed else None
-        indexed_where, indexed_params = local_where, list(local_excluded)
+        indexed_where, indexed_params = not_excluded, list(excluded)
         if scope is not None:
             indexed_where += " AND session_id = ANY(%s)"
             indexed_params.append(scope)
@@ -1084,11 +1099,11 @@ def _search_sync(
         if indexed:
             native = _indexed_top_rows(cur, session_recall.NATIVE, "fluid_session_nodes", "node_id",
                                        indexed_where, indexed_params, "session_id, ts, message", likes,
-                                       fetch_sessions)
+                                       fetch_sessions, me)
         else:
             native = _top_rows(
                 cur, "fluid_session_nodes", "recall_text" if cached else "message::text", "ts",
-                local_where, local_excluded, "session_id, ts, message", patterns,
+                not_excluded, excluded, "session_id, ts, message", patterns, me,
             )
         for row in native:
             message = _as_dict(row["message"])
@@ -1102,12 +1117,12 @@ def _search_sync(
         if indexed:
             delegated = _indexed_top_rows(cur, session_recall.ENTRY, "session_store_entries", "id",
                                           indexed_where, indexed_params, "session_id, created_at, entry", likes,
-                                          fetch_sessions)
+                                          fetch_sessions, me)
         else:
             delegated = _top_rows(
                 cur, "session_store_entries", "recall_text" if cached else "entry::text", "created_at",
-                f"subpath IS NULL AND {local_where}", local_excluded,
-                "session_id, created_at, entry", patterns,
+                f"subpath IS NULL AND {not_excluded}", excluded,
+                "session_id, created_at, entry", patterns, me,
             )
         for row in delegated:
             entry = _as_dict(row["entry"])
