@@ -157,6 +157,32 @@ export const STREAM_RECONNECT_WINDOW_MS = 30_000;
 export const STREAM_ATTEMPT_TIMEOUT_MS = 10_000;
 /** Upper bound on restored audio connections in one call. */
 export const STREAM_MAX_RESTORES = 5;
+/**
+ * A call that dropped while the device was offline waits this long for the
+ * network to come back before its reconnect attempts start (#741); then it ends.
+ */
+export const STREAM_OFFLINE_WAIT_MS = 120_000;
+
+/**
+ * Resolves true once the browser is online (at once when it already is), or
+ * false when `timeoutMs` passes first. `cancelled` stops the wait early.
+ */
+function networkBack(timeoutMs: number, cancelled: () => boolean): Promise<boolean> {
+	if (typeof navigator === 'undefined' || navigator.onLine !== false) return Promise.resolve(true);
+	console.info('[voice] offline; waiting for the network before reconnecting');
+	return new Promise(resolve => {
+		const finish = (back: boolean) => {
+			clearTimeout(timer); clearInterval(poll);
+			window.removeEventListener('online', onOnline);
+			resolve(back);
+		};
+		const onOnline = () => finish(true);
+		const timer = setTimeout(() => finish(false), timeoutMs);
+		// A hang-up meanwhile ends the wait; the caller sees the new generation.
+		const poll = setInterval(() => { if (cancelled()) finish(true); }, 1000);
+		window.addEventListener('online', onOnline);
+	});
+}
 export const STREAM_DROPPED_MESSAGE =
 	'The connection to the voice server dropped and could not be restored. Your conversation is saved; start the call again to keep talking.';
 
@@ -208,6 +234,8 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let responseInProgress = false;
 let typedResponsePending = false;
 
+/** A streamed call is reopening its audio socket; reconcile must not end it meanwhile. */
+let streamRestoring = false;
 /** Bumped on every start/hangup so a stale async continuation can bail out. */
 let generation = 0;
 
@@ -886,11 +914,14 @@ export async function startCall(
 				reacquireMic,
 				closed: (message, reason) => {
 					if (myGeneration !== generation) return;
-					// Only the socket to this server dropped; the server ends the
-					// call explicitly (an error or ended message) otherwise.
+					// Only the socket to this server dropped, or the server ended
+					// the call because this page went quiet (a locked phone that
+					// suspended it, #741). The server ends the call explicitly
+					// otherwise (an error or ended message, a plain close).
 					// GPT Live resumes from the saved conversation; PersonaPlex
 					// would start over, so its call ends as before.
-					if (reason === 'connection-dropped' && isLiveApiModel(cred.model)) void restoreStream();
+					const recoverable = reason === 'connection-dropped' || reason === 'client-inactive';
+					if (recoverable && isLiveApiModel(cred.model)) void restoreStream(reason);
 					else endStream(message, reason);
 				},
 			}, signal, cred.options?.mic_threshold_db, resume);
@@ -914,18 +945,32 @@ export async function startCall(
 			// any leftover connection and seeds the new provider session with
 			// the saved conversation; chat work started by the call carries on.
 			let restores = 0;
-			const restoreStream = async () => {
+			const restoreStream = async (reason: VoiceStreamEndReason) => {
 				if (++restores > STREAM_MAX_RESTORES) {
-					endStream(STREAM_DROPPED_MESSAGE, 'connection-dropped');
+					endStream(STREAM_DROPPED_MESSAGE, reason);
 					return;
 				}
 				const dropped = audioStream;
 				audioStream = null;
+				streamRestoring = true;
+				try {
+					await reopenStream(dropped, reason);
+				} finally {
+					if (myGeneration === generation) streamRestoring = false;
+				}
+			};
+			const reopenStream = async (dropped: VoiceAudioStream | null, reason: VoiceStreamEndReason) => {
 				patch({ status: 'reconnecting', agentSpeaking: false, micProblem: false });
-				console.info('[voice] audio connection dropped; reconnecting');
+				console.info(`[voice] audio connection ended (${reason}); reconnecting`);
 				// The dropped stream's microphone audio is discarded with it; the
 				// new socket starts with live audio, never a replayed backlog.
 				await dropped?.close();
+				// Offline: wait, bounded, for the network before trying (#741).
+				if (!(await networkBack(STREAM_OFFLINE_WAIT_MS, () => myGeneration !== generation))) {
+					if (myGeneration === generation) endStream(STREAM_DROPPED_MESSAGE, reason);
+					return;
+				}
+				if (myGeneration !== generation) return;
 				const droppedAt = Date.now();
 				for (let attempt = 1; ; attempt++) {
 					const delay = STREAM_RECONNECT_BACKOFF_MS[Math.min(attempt, STREAM_RECONNECT_BACKOFF_MS.length) - 1];
@@ -946,7 +991,7 @@ export async function startCall(
 						console.warn('[voice] audio reconnect attempt', attempt, 'failed:', e);
 					}
 				}
-				endStream(STREAM_DROPPED_MESSAGE, 'connection-dropped');
+				endStream(STREAM_DROPPED_MESSAGE, reason);
 			};
 			const stream = await open(false, abort.signal);
 			if (myGeneration !== generation) { await stream.close(); return; }
@@ -1064,6 +1109,7 @@ async function teardown(opts: {
 	reason?: VoiceEndReason;
 }): Promise<void> {
 	generation++;
+	streamRestoring = false;
 	micHandover = Promise.resolve();
 	pendingMicStream?.getTracks().forEach(t => t.stop()); pendingMicStream = null;
 	removeDeviceListeners?.(); removeDeviceListeners = null;
@@ -1192,6 +1238,9 @@ export async function reconcileVoiceCall(): Promise<void> {
 	try {
 		const remote = await getVoiceCallState(owner);
 		if (epoch !== generation || get(voiceCallState).sessionId !== owner) return;
+		// A streamed call reopening its socket has no server call until the new
+		// one connects; that is the recovery, not an ended call (#741).
+		if (streamRestoring) return;
 		if (remote && !remote.active) {
 			await teardown({ notifyBackend: false, status: 'ended', reason: 'server-ended' });
 			patch({ sessionId: owner, notice: 'This voice call has ended.' });

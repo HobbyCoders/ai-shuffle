@@ -11,10 +11,15 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.util.Log
 import androidx.annotation.VisibleForTesting
 import androidx.core.app.NotificationCompat
@@ -32,6 +37,10 @@ import com.hobbycoders.aishuffle.R
  *
  * Notification buttons come back here and go to the [Owner] (the chat that owns
  * the call), which hands them to its page. Main thread only.
+ *
+ * In the foreground it also holds [CallLocks] for the call (#741): a locked
+ * phone could otherwise sleep its CPU and Wi-Fi between audio buffers, so the
+ * page stopped sending and playing until the screen came on again.
  */
 class VoiceCallService : Service() {
     /** What the notification shows. [muted] is null when the page cannot take commands (an older worker UI). */
@@ -52,6 +61,11 @@ class VoiceCallService : Service() {
 
     /** The [start] this instance went foreground for; a later call is not this one's to release. */
     private var servedSession = -1
+    /** Held while this instance keeps a call in the foreground; released when it stops. */
+    private var locks: CallLocks? = null
+
+    private fun holdLocks() { if (locks == null) locks = CallLocks(this).also { it.acquire() } }
+    private fun dropLocks() { locks?.release(); locks = null }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -75,10 +89,11 @@ class VoiceCallService : Service() {
                 handler.postDelayed(hangupFallback, HANGUP_FALLBACK_MS)
             }
             // Promoting again also refreshes the notification for a new owner.
-            else -> if (promote(current)) owner?.onServiceForeground() else {
+            else -> if (promote(current)) { holdLocks(); owner?.onServiceForeground() } else {
                 // Not in the foreground, so nothing keeps the call alive: say so and stop,
                 // also when this instance was running for an earlier owner (no ownerless
                 // notification is left behind).
+                dropLocks()
                 release(notify = true)
                 stopSelf()
             }
@@ -106,6 +121,7 @@ class VoiceCallService : Service() {
 
     override fun onDestroy() {
         running = false
+        dropLocks()
         // A stop the owner did not ask for (task removed, Android). Owner-requested stops
         // and the hang-up fallback have already released it. An instance cannot be
         // destroyed with the current session still unpromoted: its start command is
@@ -256,4 +272,52 @@ class VoiceCallService : Service() {
         private fun command(context: Context, action: String) = PendingIntent.getService(context, action.hashCode(),
             Intent(context, VoiceCallService::class.java).setAction(action), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     }
+}
+
+/**
+ * What a call kept in the foreground holds so it keeps running with the screen
+ * off (#741): a partial wake lock (the CPU does not sleep between audio
+ * buffers, also while the caller is muted and nothing is captured), a Wi-Fi
+ * lock (no power-save gaps on the call's socket) and voice-call audio focus.
+ * Each is best effort; release drops whatever was taken. Main thread only.
+ */
+internal class CallLocks(context: Context) {
+    private val wake: PowerManager.WakeLock? = runCatching {
+        context.getSystemService(PowerManager::class.java)
+            ?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AIShuffle:voice-call")?.apply { setReferenceCounted(false) }
+    }.getOrNull()
+    @Suppress("DEPRECATION") // HIGH_PERF is the mode that applies with the screen off.
+    private val wifi: WifiManager.WifiLock? = runCatching {
+        (context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager)
+            ?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "AIShuffle:voice-call")?.apply { setReferenceCounted(false) }
+    }.getOrNull()
+    private val audio: AudioManager? = context.getSystemService(AudioManager::class.java)
+    private val focus: AudioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+        .setAudioAttributes(AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+        // The page keeps the call going through a focus change; it only says who has the speaker.
+        .setOnAudioFocusChangeListener { }
+        .build()
+    private var focused = false
+
+    // Released when the call's service stops (onDestroy), however the call ends.
+    @SuppressLint("WakelockTimeout")
+    fun acquire() {
+        runCatching { if (wake?.isHeld == false) wake.acquire() }.onFailure { Log.w(TAG, "Could not hold the CPU for the call", it) }
+        runCatching { if (wifi?.isHeld == false) wifi.acquire() }.onFailure { Log.w(TAG, "Could not hold Wi-Fi for the call", it) }
+        runCatching { focused = audio?.requestAudioFocus(focus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED }
+            .onFailure { Log.w(TAG, "Could not take audio focus for the call", it) }
+    }
+
+    fun release() {
+        runCatching { if (wake?.isHeld == true) wake.release() }
+        runCatching { if (wifi?.isHeld == true) wifi.release() }
+        if (focused) runCatching { audio?.abandonAudioFocusRequest(focus) }
+        focused = false
+    }
+
+    @VisibleForTesting internal fun wifiHeld() = wifi?.isHeld == true
+
+    private companion object { const val TAG = "VoiceCallService" }
 }
