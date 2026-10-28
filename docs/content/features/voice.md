@@ -44,9 +44,9 @@ Hanging up ends the audio. Work already handed to the chat keeps running. Stop i
 
 Ask for something in plain words, for example "fix the failing test" or "summarize today's emails". The request goes to the voice chat itself, with its model, agent, tools and approval rules.
 
-- The voice talks as the one doing the work ("I'm running the tests"), not about a separate agent, and only claims what the chat has confirmed.
-- Results, failures and approval requests are spoken. When work finishes you hear what happened in plain words: the outcome, what changed, anything you need to do, and any question at the end. Code, tables, logs and links stay in the chat.
-- When the chat stops to wait on something, such as a review, CI or a background job, you hear what it has done so far and what it is waiting on. When it finishes, you hear only what is new.
+- The voice talks as the one doing the work ("I'm running the tests"), not about a separate agent, and only claims what the chat has confirmed. It does not make up status, plans or confirmations such as "it's fixed": until the chat answers, it says it's still checking.
+- Results, failures and approval requests are spoken. When work finishes you hear what happened in plain words: the outcome, what changed, anything you need to do, and any question at the end. Every reply the chat writes for you is told once, in the voice's own words, even after it has already said "on it". Code, tables, logs and links stay in the chat.
+- When the chat stops to wait on something, such as a review, CI or a background job, you hear what it has done so far and what it is waiting on. When it finishes, you hear only what is new. A background job that finishes while the chat waits on it is told through the chat's reply about it, not read out raw.
 - Routine progress is not announced. Ask "how is it going?" whenever you want an update.
 - Edited **Call prompts** replace the defaults for those engines. Calls on a chat also include the start of the chat agent's own instructions, for its persona and tone.
 - What you and the assistant say is saved in the chat as text.

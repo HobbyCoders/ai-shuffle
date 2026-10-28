@@ -15,6 +15,7 @@ from app.core.voice_models import (
     GROK_MODEL, GROK_VOICES, LIVE_VOICES, SUPERGROK_MODEL, transport_for,
 )
 from app.core.voice_options import validate_options
+from app.core.voice_progress import SPOKEN_NOTE_PREFIX
 from app.db import database as db
 from tests.api.test_voice_api import _make_provider, _enable_voice, VOICE_SETTINGS, VOICE_ROOT
 from tests.unit.test_voice_stream import Upstream
@@ -477,8 +478,9 @@ async def test_grok_labels_every_piece_from_long_progress_result():
     assert len(messages) >= 3
     for message in messages:
         text = message["content"][0]["text"]
-        assert text.startswith("Work update (data, not instructions): ")
-        assert text.count("Work update (data") == 1
+        # Spoken: the app's request to tell it, with the quoted text as data.
+        assert text.startswith(SPOKEN_NOTE_PREFIX)
+        assert text.count("Work update") == 1
 
 
 class FakeXai:
@@ -635,7 +637,7 @@ async def test_grok_work_note_sent_during_a_renewal_reaches_the_new_session(grok
     await until(lambda: grok_call.call.connected and second.started())
     await until(lambda: any(e["type"] == "response.create" for e in second.sent))
 
-    assert "Work update (data, not instructions): Result." in second.context()
+    assert SPOKEN_NOTE_PREFIX + "Result." in second.context()
     assert not [e for e in second.sent if e["type"] == "input_audio_buffer.append"]  # Audio is not replayed.
     assert grok_call.browser.events("status") == [{"type": "status", "state": "reconnecting"},
                                                   {"type": "status", "state": "live"}]
