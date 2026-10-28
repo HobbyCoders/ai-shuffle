@@ -1554,7 +1554,9 @@ def _entry_epoch(entry: Dict[str, Any]) -> Optional[float]:
 
 
 def _checkpoint_heads(session_id: str) -> List[Dict[str, Any]]:
-    """``{"seq", "through"}`` of each ``CompactionCheckpoint``, oldest first.
+    """``{"seq", "through", "compaction_id"}`` of each
+    ``CompactionCheckpoint``, oldest first (``compaction_id`` "" on one
+    persisted before the field existed).
 
     Only the node id is read here: a checkpoint's rows can be large, and only
     the one a re-seed starts from is fetched whole (:func:`_event_at`).
@@ -1565,16 +1567,58 @@ def _checkpoint_heads(session_id: str) -> List[Dict[str, Any]]:
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            f"SELECT seq, event ->> 'through' AS through FROM fluid_session_events "
+            f"SELECT seq, event ->> 'through' AS through, "
+            f"event ->> 'compaction_id' AS compaction_id FROM fluid_session_events "
             f"WHERE session_id = {ph()} AND event ->> '_cls' = {ph()} ORDER BY seq",
             (session_id, "CompactionCheckpoint"),
         )
         rows = cursor.fetchall()
-    return [
-        {"seq": dict(r).get("seq"), "through": dict(r).get("through")}
-        for r in rows
-        if isinstance(dict(r).get("through"), str) and dict(r).get("through")
-    ]
+    heads = []
+    for r in rows:
+        row = dict(r)
+        through = row.get("through")
+        if not isinstance(through, str) or not through:
+            continue
+        cid = row.get("compaction_id")
+        heads.append({
+            "seq": row.get("seq"), "through": through,
+            "compaction_id": cid if isinstance(cid, str) else "",
+        })
+    return heads
+
+
+def _paired_checkpoints(
+    rows: Sequence[Dict[str, Any]], checkpoints: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """The checkpoints a re-seed may start from, each placed at its
+    compaction's position (#755).
+
+    A checkpoint with a ``compaction_id`` stands for the Claude Code boundary
+    that carries the same id: it applies only when that boundary is stored,
+    and it takes the boundary's ``seq``, so it is ordered as that compaction
+    whatever was written between them. One without an id (persisted before
+    the field existed) was only ever written right after its boundary and
+    keeps its own ``seq``.
+    """
+    boundaries: Dict[str, Any] = {}
+    for row in rows:
+        event = _as_dict(row.get("event"))
+        cid = event.get("compaction_id")
+        if isinstance(cid, str) and cid and _is_cli_compaction(event):
+            boundaries.setdefault(cid, row.get("seq"))
+    paired: List[Dict[str, Any]] = []
+    for head in checkpoints:
+        cid = head.get("compaction_id") or ""
+        if not cid:
+            paired.append(head)
+        elif cid in boundaries:
+            paired.append({**head, "boundary_seq": boundaries[cid]})
+        else:
+            logger.info(
+                "fluid re-seed: compaction checkpoint %s has no boundary with its "
+                "id; not used", cid,
+            )
+    return paired
 
 
 def _event_at(session_id: str, seq: Any) -> Dict[str, Any]:
@@ -1836,7 +1880,9 @@ def _after_compaction(
     * Fluid's mechanical compaction of Claude Code's rows, which persists a
       ``CompactionCheckpoint`` (#685): its rows (the first flagged like a
       summary, since the prompts before it are not in the file) and the
-      entries after the node they cover;
+      entries after the node they cover. A checkpoint with a compaction id
+      applies only with the boundary of the same id, at that boundary's
+      place (:func:`_paired_checkpoints`, #755);
     * Fluid's native compaction (any other ``ContextCompaction``): the view
       the native loop sends under every native decision on the path
       (:func:`_native_view`).
@@ -1866,8 +1912,11 @@ def _after_compaction(
         return entries
     index = {entry.get("uuid"): i for i, entry in enumerate(entries)}
     native = _native_rows_on_path(rows, set(index))
+    # A checkpoint sits at its own boundary's position (by compaction id) and
+    # is tried before that boundary, which it stands for.
     candidates = sorted(
-        [*rows, *checkpoints], key=lambda row: row.get("seq") or 0,
+        [*rows, *_paired_checkpoints(rows, checkpoints)],
+        key=lambda row: (row.get("boundary_seq") or row.get("seq") or 0, "through" in row),
     )
     for row in reversed(candidates):
         if "through" in row:

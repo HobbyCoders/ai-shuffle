@@ -76,8 +76,8 @@ import signal
 import socket
 import tempfile
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import replace
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from fluid.engine.background import BackgroundLifecycleMixin
@@ -87,6 +87,9 @@ from fluid.engine.claude_mod_compaction import (
     COMPACT_PATH, MAX_COMPACT_BODY_BYTES, NothingToCompact, ReplayFilter, compact_messages,
 )
 from fluid.context.recall import HistoryRecall
+from fluid.engine.compact_restore import (
+    DELIVERED, RestorationSection, as_sections, pack_sections,
+)
 from fluid.engine.delegated_proto import (
     FORCED_CHILD_ENV,
     ControlReply,
@@ -227,10 +230,9 @@ _COMPACT_HOOK_EVENTS = ("SessionStart",)
 
 # The host's note put back after a CLI compaction (``compact_context``): how
 # long the provider may take, well inside the CLI's hook callback budget, and
-# how many characters it may add (cut with ``_COMPACT_CONTEXT_CUT``).
+# how many characters its sections may add together (``compact_restore``).
 COMPACT_CONTEXT_TIMEOUT = 5.0
 COMPACT_CONTEXT_MAX_CHARS = 24_000
-_COMPACT_CONTEXT_CUT = "\n[note cut: it was longer than {limit} characters]"
 # Callback ids name their event, so an answer never depends on registration
 # order surviving a respawn.
 _HOOK_CALLBACK_PREFIX = "fluid_"
@@ -473,15 +475,79 @@ _COMPACT_COMMAND = re.compile(r"^/compact(?:\s|$)")
 # the summary entry to its transcript next to the boundary, so the read is
 # retried briefly in case the stream frame beat the file write.
 COMPACTION_SUMMARY_ATTEMPTS = 10
-# How long after Fluid answers a compaction Claude Code's boundary may still
-# report applying that answer: the mod's own wait (60 s) and some margin.
-CHECKPOINT_APPLY_WINDOW_S = 180.0
 COMPACTION_SUMMARY_INTERVAL = 0.2
 COMPACTION_SUMMARY_MAX_CHARS = 200_000
 # Without a matching uuid, the transcript's last boundary counts as the one
 # just reported only when it is this recent (seconds); an older one is an
 # earlier compaction whose summary must not be taken for the new one.
 _COMPACTION_SUMMARY_MAX_AGE = 600.0
+
+# A compaction Fluid answered through the mod's bridge is a transaction with a
+# stable id (``cmp_…``), carried by the answer, the ``ContextCompaction`` for
+# the boundary that applied it and the ``CompactionCheckpoint`` written for it
+# (#755). Claude Code's boundary names the conversation it compacted: its
+# ``logical_parent_uuid`` is the uuid of the last message before the
+# compaction (CLI 2.1.312), and the rows the mod posts carry those uuids as
+# their handles. So a boundary is matched to the answer whose posted rows
+# end with (or else hold) it, whatever the timing: two compactions close
+# together, or a boundary read long after the answer, still pair up. An answer
+# the boundary does not name was not applied and gets no checkpoint. A CLI
+# whose boundary has no ``logical_parent_uuid`` falls back to the newest open
+# answer, as before.
+# Answers kept open for a boundary at most; older ones were never applied.
+MAX_OPEN_COMPACTIONS = 8
+# The mod's own wait for an answer (``COMPACT_TIMEOUT_MS`` in
+# claude_mod/hooks/mechanical.ts). An answer Fluid only had ready after it
+# reached a mod that had already given up: it opens no transaction.
+MOD_COMPACT_WAIT_S = 60.0
+
+
+# The variable a host pins Claude Code's auto-compact window with; the CLI's
+# first context-usage report is checked against it (#754).
+AUTO_COMPACT_WINDOW_ENV = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+
+
+def _positive_int(value: Any) -> int | None:
+    """``value`` as a positive int (an int or a digit string), else None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if not value.isdigit():
+            return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+@dataclass
+class _CompactionTxn:
+    """One compaction Fluid answered through the bridge, until its boundary."""
+
+    compaction_id: str
+    handles: tuple[str, ...]
+    rows: list[dict[str, Any]]
+    checkpoint: dict[str, Any] | None
+
+    def names(self, parent: str) -> int:
+        """2 when ``parent`` is the last row this answer compacted, 1 when it
+        is one of its rows, else 0."""
+        if self.handles and self.handles[-1] == parent:
+            return 2
+        return 1 if parent in self.handles else 0
+
+
+def _posted_handles(rows: Any) -> tuple[str, ...]:
+    """The handles (Claude Code message uuids) of the rows the mod posted, in
+    order: the conversation a boundary's ``logical_parent_uuid`` points into."""
+    if not isinstance(rows, list):
+        return ()
+    return tuple(
+        handle for row in rows if isinstance(row, dict)
+        and isinstance(handle := row.get("handle"), str) and handle
+    )
 
 
 def _entry_epoch(entry: dict[str, Any]) -> float | None:
@@ -761,7 +827,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         claude_mod_compaction: bool = True,
         compaction_window: int | None = None,
         plan_usage_sink: Callable[[PlanUsageReport], Awaitable[None]] | None = None,
-        compact_context: Callable[[], Awaitable[str | None]] | None = None,
+        compact_context: Callable[
+            [], Awaitable[str | Sequence[RestorationSection] | None]
+        ] | None = None,
         fresh_context: Callable[[list[Any], tuple[int, int] | None], Awaitable[str | None]] | None = None,
         bridge_deferred: Callable[[str], bool] | None = None,
     ) -> None:
@@ -993,9 +1061,19 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._turn_emergency_compaction = False
         # Claude Code's replay of compacted rows, told from new work (#679).
         self._replays = ReplayFilter()
-        # The portable form of the last compaction this leg answered, with
-        # when it answered; persisted when Claude Code reports applying it.
-        self._pending_checkpoint: tuple[float, dict[str, Any]] | None = None
+        # Compactions this leg answered through the bridge whose boundary has
+        # not been read yet, oldest first (see ``_CompactionTxn``), and the
+        # ones a boundary applied whose checkpoint is still to be written,
+        # by transaction id.
+        self._compaction_txns: list[_CompactionTxn] = []
+        self._applied_txns: dict[str, _CompactionTxn] = {}
+        # What the last SessionStart(compact) put back (#755), for audits.
+        self.last_restoration: dict[str, Any] | None = None
+        # The effective window check runs once per CLI process, on its first
+        # context-usage report (#754); each mismatch is reported once.
+        self._window_check_due = False
+        self._window_pinned: int | None = None
+        self._window_mismatches: set[tuple[int, int]] = set()
 
         self._session: SessionMeta | None = None
         self._session_id = session_id
@@ -1692,6 +1770,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             for name in ("HistoryExpand", "HistorySearch")
         ):
             raise ValueError("history recovery tools unavailable")
+        received = time.monotonic()
         meta = await self._ensure_session()
         nodes = await self.store.load_path(meta.session_id)
         started = time.monotonic()
@@ -1701,7 +1780,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # A compaction answered or not, the stored path is what Claude Code
         # may replay from now on: its ids are not new activity (#679).
         self._replay_filter.seed(nodes)
-        self._pending_checkpoint = None
+        compaction_id = new_id("cmp")
         try:
             # Pure CPU over the whole path: off the event loop, so the turn's
             # stream and the bridge's other routes keep moving meanwhile.
@@ -1750,20 +1829,32 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                                type(exc).__name__)
                 raise ValueError("could not archive the rows it would drop") from exc
         self._replay_filter.expect(messages)
-        if checkpoint.get("through"):
-            self._pending_checkpoint = (time.monotonic(), checkpoint)
-        elif checkpoint.get("skipped"):
-            logger.warning("claude mod compaction: no portable checkpoint (%s); a re-seed "
+        if checkpoint.get("skipped"):
+            logger.warning("claude mod compaction %s: no portable checkpoint (%s); a re-seed "
                            "on another worker starts from the stored path, compacted to "
-                           "fit its window", checkpoint["skipped"])
+                           "fit its window", compaction_id, checkpoint["skipped"])
         if report and not report.get("met"):
             logger.warning("claude mod compaction (%s) kept ~%d tokens, over its %d target; "
                            "what is left: %s", trigger, report.get("after_tokens", 0),
                            report.get("target_tokens", 0), report.get("contributors"))
-        logger.info("claude mod compacted through Fluid (%s): %d -> %d messages, %d archived "
-                    "(%d new), %.3fs, no summarizer", trigger, len(body["messages"]),
-                    len(messages), len(archive), len(fresh), time.monotonic() - started)
-        return {"messages": messages}
+        if time.monotonic() - received > MOD_COMPACT_WAIT_S:
+            # The mod stopped waiting before this answer was ready: it fell
+            # back or skipped, so no boundary will ever apply this answer.
+            logger.warning("claude mod compaction %s (%s) answered after the mod's %.0fs "
+                           "wait; it cannot be applied and gets no checkpoint",
+                           compaction_id, trigger, MOD_COMPACT_WAIT_S)
+        else:
+            self._open_compaction(_CompactionTxn(
+                compaction_id=compaction_id,
+                handles=_posted_handles(body["messages"]),
+                rows=messages,
+                checkpoint=checkpoint if checkpoint.get("through") else None,
+            ))
+        logger.info("claude mod compacted through Fluid (%s, %s): %d -> %d messages, %d "
+                    "archived (%d new), %.3fs, no summarizer", trigger, compaction_id,
+                    len(body["messages"]), len(messages), len(archive), len(fresh),
+                    time.monotonic() - started)
+        return {"messages": messages, "compaction_id": compaction_id}
 
     @property
     def _replay_filter(self) -> ReplayFilter:
@@ -1774,26 +1865,90 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             found = self.__dict__["_replays"] = ReplayFilter()
         return found
 
+    @property
+    def _open_txns(self) -> list[_CompactionTxn]:
+        """Answered compactions awaiting their boundary (made on first use for
+        a loop built without ``__init__``)."""
+        return self.__dict__.setdefault("_compaction_txns", [])
+
+    @property
+    def _applied(self) -> dict[str, _CompactionTxn]:
+        """Applied compactions whose checkpoint is still to be written."""
+        return self.__dict__.setdefault("_applied_txns", {})
+
+    def _open_compaction(self, txn: _CompactionTxn) -> None:
+        """Keep ``txn`` until a boundary applies it; the oldest go first."""
+        txns = self._open_txns
+        txns.append(txn)
+        del txns[:-MAX_OPEN_COMPACTIONS]
+
+    def _bind_compaction(self, frame: dict[str, Any], summary: str) -> str:
+        """The transaction id of the compaction this main ``compact_boundary``
+        reports; a fresh one for a compaction Fluid did not answer.
+
+        A boundary with Claude Code's own summary came from its summarizer,
+        never from a Fluid answer; the answers it names leave the open list
+        unapplied. Otherwise the boundary's
+        ``logical_parent_uuid`` names the answer it applied (see
+        ``_CompactionTxn``): the newest answer whose last row it is (a retry
+        of the same compaction supersedes an earlier answer), else the oldest
+        answer that holds it (a kept row can reappear in a later answer).
+        A CLI that sends no ``logical_parent_uuid`` takes the newest open
+        answer. The applied answer and every older one leave the open list:
+        compactions in one CLI run one at a time, so an older answer can
+        never apply later.
+        """
+        txns = self._open_txns
+        parent = frame.get("logical_parent_uuid")
+        if not isinstance(parent, str):
+            parent = ""
+        named: int | None = None
+        if txns and parent:
+            last = [i for i, txn in enumerate(txns) if txn.names(parent) == 2]
+            held = [i for i, txn in enumerate(txns) if txn.names(parent) == 1]
+            named = last[-1] if last else held[0] if held else None
+        if summary:
+            if named is not None:
+                # The summarizer stood in for the compaction these answers
+                # were for (the mod fell back): none of them will apply.
+                logger.info("compaction %s was summarized by Claude Code instead; "
+                            "its Fluid answer was not applied", txns[named].compaction_id)
+                del txns[: named + 1]
+            return new_id("cmp")
+        chosen = named if parent else (len(txns) - 1 if txns else None)
+        if chosen is None:
+            if txns:
+                logger.info("a compaction boundary names none of the %d open Fluid answers; "
+                            "it is not theirs and gets no checkpoint", len(txns))
+            return new_id("cmp")
+        txn = txns[chosen]
+        del txns[: chosen + 1]
+        # The rows Claude Code may print next are this answer's (#679).
+        self._replay_filter.expect(txn.rows)
+        if txn.checkpoint is not None:
+            applied = self._applied
+            applied[txn.compaction_id] = txn
+            for stale in list(applied)[:-MAX_OPEN_COMPACTIONS]:
+                applied.pop(stale, None)
+        return txn.compaction_id
+
     async def _emit_compaction_checkpoint(self, event: ContextCompaction) -> None:
         """After Claude Code reports a compaction: persist the portable form
-        of the one this leg answered, if that is the one it applied (#685).
+        of the answer it applied (#685), under the same transaction id.
 
-        Claude Code's boundary follows the answer within its wait; a pending
-        checkpoint older than that belongs to an answer it never applied, and
-        a boundary that carries Claude Code's own summary came from its
-        summarizer. Either way nothing is written. Never raises.
+        Only a boundary bound to one of this leg's answers
+        (:meth:`_bind_compaction`) has one; a boundary from Claude Code's
+        summarizer, or one naming no open answer, writes nothing. Never raises.
         """
-        pending, self._pending_checkpoint = getattr(self, "_pending_checkpoint", None), None
-        if pending is None or event.summary or self._session is None:
+        txn = self._applied.pop(event.compaction_id, None) if event.compaction_id else None
+        if txn is None or txn.checkpoint is None or self._session is None:
             return
-        answered, checkpoint = pending
-        if time.monotonic() - answered > CHECKPOINT_APPLY_WINDOW_S:
-            return
+        checkpoint = txn.checkpoint
         try:
             await self._emit(CompactionCheckpoint(
                 session_id=self._session.session_id, turn_id=event.turn_id,
                 node_id=event.node_id, through=checkpoint["through"],
-                rows=tuple(checkpoint["rows"]),
+                rows=tuple(checkpoint["rows"]), compaction_id=txn.compaction_id,
             ))
         except asyncio.CancelledError:
             raise
@@ -1925,6 +2080,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # Only this spawn's own bridge may announce the compaction route.
         child_env.pop(CLAUDE_MOD_COMPACT_URL_ENV, None)
         child_env.update(self._claude_mod_env())
+        # The window this spawn pins, checked against the CLI's own first
+        # context-usage report (#754).
+        self._window_pinned = _positive_int(child_env.get(AUTO_COMPACT_WINDOW_ENV))
+        self._window_check_due = True
         from fluid.tools import agent_runner
 
         argv, cwd, child_env = agent_runner.wrap(argv, self.cwd, child_env)
@@ -4272,17 +4431,20 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     async def _with_compaction_summary(
         self, event: ContextCompaction, frame: dict[str, Any], node_id: str | None,
     ) -> ContextCompaction:
-        """``event`` with the CLI's summary and the node it compacted after.
+        """``event`` with the CLI's summary, the node it compacted after and
+        its compaction id.
 
         ``node_id`` is the last node of the turn when the boundary arrived (None
         between turns). Both are what a re-seed on another worker needs to
-        rebuild the compacted context (see ``ContextCompaction.summary``).
+        rebuild the compacted context (see ``ContextCompaction.summary``). The
+        id is the applied bridge answer's (:meth:`_bind_compaction`), so the
+        checkpoint written next pairs with this event by id.
         Never raises: a summary that cannot be read leaves the field empty.
         """
         summary = await self._read_compaction_summary(frame)
         return replace(
             event, node_id=node_id if node_id is not None else event.node_id,
-            summary=summary,
+            summary=summary, compaction_id=self._bind_compaction(frame, summary),
         )
 
     async def _read_compaction_summary(self, frame: dict[str, Any]) -> str:
@@ -4370,16 +4532,24 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             logger.debug("could not publish the compaction failure", exc_info=True)
 
     async def _compact_context_note(self) -> str | None:
-        """The host's note for after a compaction, capped, or None.
+        """The host's note for after a compaction, bounded, or None.
 
         The provider gets ``COMPACT_CONTEXT_TIMEOUT``; one that fails, overruns
-        or returns nothing is logged and skipped, never failing the hook.
+        or returns nothing is logged and skipped, never failing the hook. Its
+        sections are packed by priority into ``COMPACT_CONTEXT_MAX_CHARS``
+        (:func:`fluid.engine.compact_restore.pack_sections`; a plain string is
+        one cuttable section). Each section delivered whole calls its
+        ``on_delivered``; the context counts as restored only when every
+        section went out whole. Otherwise the next turn's tail puts it back
+        (``fresh_context``), as after a compaction with no put-back at all.
+        What went out is logged, kept in ``last_restoration`` and recorded as
+        a ``compaction_restoration`` diagnostic (#755).
         """
         provider = self.compact_context
         if provider is None:
             return None
         try:
-            text = await asyncio.wait_for(provider(), COMPACT_CONTEXT_TIMEOUT)
+            note = await asyncio.wait_for(provider(), COMPACT_CONTEXT_TIMEOUT)
         except asyncio.CancelledError:
             raise
         except TimeoutError:
@@ -4391,15 +4561,60 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         except Exception:  # noqa: BLE001 — a reminder never fails a hook
             logger.warning("the compaction note failed; skipped", exc_info=True)
             return None
-        if not isinstance(text, str) or not text.strip():
+        sections = as_sections(note)
+        text, receipts = pack_sections(sections, COMPACT_CONTEXT_MAX_CHARS)
+        if not receipts:
             return None
-        text = text.strip()
-        if len(text) > COMPACT_CONTEXT_MAX_CHARS:
-            cut = _COMPACT_CONTEXT_CUT.format(limit=COMPACT_CONTEXT_MAX_CHARS)
-            text = text[:COMPACT_CONTEXT_MAX_CHARS - len(cut)].rstrip() + cut
-        self._compaction_context_restored = True
-        self._context_restore_pending = False
-        return text
+        complete = all(r.status == DELIVERED for r in receipts)
+        by_name = {s.name: s for s in sections}
+        for receipt in receipts:
+            callback = by_name[receipt.name].on_delivered
+            if receipt.status != DELIVERED or callback is None:
+                continue
+            try:
+                callback()
+            except Exception:  # noqa: BLE001 — a host's bookkeeping never fails a hook
+                logger.warning("the %s section's delivery callback failed", receipt.name,
+                               exc_info=True)
+        txns = self._open_txns
+        record = {
+            "compaction_id": txns[-1].compaction_id if txns else "",
+            "complete": complete,
+            "sections": [r.to_dict() for r in receipts],
+        }
+        self.last_restoration = record
+        summary = ", ".join(f"{r.name}={r.status}" for r in receipts)
+        if complete:
+            logger.info("put back after the compaction (%d chars): %s", len(text), summary)
+        else:
+            logger.warning("put back after the compaction only in part (%d chars, %d "
+                           "limit): %s; the next turn puts the rest back", len(text),
+                           COMPACT_CONTEXT_MAX_CHARS, summary)
+        await self._record_restoration(record)
+        if complete:
+            self._compaction_context_restored = True
+            self._context_restore_pending = False
+        else:
+            # Never credit a cut or partial note: the boundary leaves the
+            # put-back pending for the next turn's tail.
+            self._compaction_context_restored = False
+        return text or None
+
+    async def _record_restoration(self, record: dict[str, Any]) -> None:
+        """Persist what a SessionStart(compact) put back, for audits. Never raises."""
+        if self._session is None:
+            return
+        try:
+            await self._emit(DelegatedDiagnostic(
+                session_id=self._session.session_id, turn_id=self._active_turn_id,
+                kind="compaction_restoration",
+                message="complete" if record["complete"] else "partial",
+                data=record,
+            ))
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — the log line already said it
+            logger.debug("could not record the compaction restoration", exc_info=True)
 
     def _ledger_context(self) -> str | None:
         """The session ledger in the native loop's reminder form, or None.
@@ -4711,6 +4926,86 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             self._snapshot_call_index.pop(request_id, None)
             logger.debug("context-usage snapshot request failed", exc_info=True)
 
+    async def _check_effective_window(
+        self, sid: str, turn_id: str | None, usage: Any,
+    ) -> None:
+        """Compare the CLI's effective context window with the host's, once
+        per CLI process, on its first context-usage report that names one
+        (#754).
+
+        The host pins the window through ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``
+        (and its companions), but Claude Code applies the ``env`` block of the
+        user's own ``settings.json`` over its process environment, so a value
+        there silently wins inside the child. The report's ``maxTokens`` is
+        the window the CLI really compacts against (``autocompactSource``
+        says what decided it, CLI 2.1.312). The expected window is the pinned
+        one, or with no pin the one Fluid's compactor sizes against.
+
+        A mismatch is logged and published once per (expected, effective)
+        pair as a ``context_window_mismatch`` diagnostic; a host shows it on
+        the session. The turn is not refused: the only effect is when the CLI
+        compacts, and a context-limit stop is already recovered by the
+        compact-and-continue lifecycle. When the CLI's window is the smaller
+        one, Fluid's compactor sizes against it from then on, so its answer
+        still fits under the CLI's threshold. Never raises.
+        """
+        if not self.__dict__.get("_window_check_due") or not isinstance(usage, dict):
+            return
+        effective = _positive_int(usage.get("maxTokens"))
+        if effective is None:
+            return  # a report with no window: the next one is checked
+        self._window_check_due = False
+        pinned = self.__dict__.get("_window_pinned")
+        expected = pinned or self.compaction_window
+        if not expected:
+            return
+        if self.compaction_window and effective < self.compaction_window:
+            logger.info("claude CLI compacts at a %d-token window; Fluid's compaction "
+                        "now sizes against it instead of %d", effective, self.compaction_window)
+            self.compaction_window = effective
+        if effective == expected:
+            logger.debug("claude CLI effective context window %d is the host's", effective)
+            return
+        mismatches = self.__dict__.setdefault("_window_mismatches", set())
+        if (expected, effective) in mismatches:
+            return
+        mismatches.add((expected, effective))
+        source = usage.get("autocompactSource")
+        source = source if isinstance(source, str) and source else None
+        cli_version = getattr(self, "_surface_cli_version", None) or self.cli_version
+        if pinned:
+            message = (
+                f"Claude Code is using a {effective:,}-token context window, not the "
+                f"{expected:,} tokens this chat is set to. A Claude Code setting overrides "
+                f"it ({source or 'unknown source'}), for example CLAUDE_CODE_AUTO_COMPACT_WINDOW "
+                "in the env block of ~/.claude/settings.json. Compaction now follows the "
+                f"smaller window, {min(effective, expected):,} tokens."
+            )
+        else:
+            message = (
+                f"Claude Code is using a {effective:,}-token context window; AI Shuffle "
+                f"assumed {expected:,} tokens for this model."
+            )
+        logger.warning(
+            "claude CLI %s effective context window %d differs from the host's %d "
+            "(pinned=%s, source=%s)", cli_version or "unknown", effective, expected,
+            bool(pinned), source,
+        )
+        raw = _positive_int(usage.get("rawMaxTokens"))
+        try:
+            await self._emit(DelegatedDiagnostic(
+                session_id=sid, turn_id=turn_id, kind="context_window_mismatch",
+                message=message,
+                data={
+                    "expected": expected, "effective": effective, "pinned": bool(pinned),
+                    "source": source, "raw_max_tokens": raw, "cli_version": cli_version,
+                },
+            ))
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — the log line already said it
+            logger.debug("could not publish the context window mismatch", exc_info=True)
+
     async def _emit_usage_snapshot(
         self, sid: str, turn_id: str, reply: ControlReply, *,
         mapper: StreamJsonMapper | None = None,
@@ -4732,6 +5027,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if node_id is None:
             return False
         if reply.ok and reply.payload is not None:
+            await self._check_effective_window(sid, turn_id, reply.payload)
             snapshot = Usage(
                 session_id=sid, node_id=node_id, turn_id=turn_id,
                 context_usage=reply.payload,

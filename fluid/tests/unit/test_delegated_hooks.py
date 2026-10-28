@@ -624,6 +624,80 @@ async def test_the_note_is_capped(tmp_path) -> None:
     assert output["hookSpecificOutput"]["additionalContext"] == "y" * COMPACT_CONTEXT_MAX_CHARS
 
 
+def _restorations(loop: DelegatedLoop) -> list:
+    from fluid.events.model import DelegatedDiagnostic
+
+    return [e for e in loop.bus.log(loop.session_id)
+            if isinstance(e, DelegatedDiagnostic) and e.kind == "compaction_restoration"]
+
+
+def _boundary(loop: DelegatedLoop) -> None:
+    loop._take_main_boundary({"type": "system", "subtype": "compact_boundary"})
+
+
+async def test_a_cut_note_is_not_credited_as_restored(tmp_path) -> None:
+    """#755: a note cut at the cap went out only in part; the boundary leaves
+    the put-back pending for the next turn instead of crediting it."""
+    from fluid.engine.delegated import COMPACT_CONTEXT_MAX_CHARS
+
+    loop, written = await _loop(
+        tmp_path, hooks=HookBus(),
+        compact_context=_note_provider("x" * (COMPACT_CONTEXT_MAX_CHARS + 1)),
+    )
+    await _fire_main_compact(loop, written)
+    _boundary(loop)
+    assert loop._context_restore_pending is True
+    [record] = _restorations(loop)
+    assert record.data["complete"] is False
+    assert record.data["sections"] == [{
+        "name": "note", "status": "cut", "chars": COMPACT_CONTEXT_MAX_CHARS,
+        "original_chars": COMPACT_CONTEXT_MAX_CHARS + 1,
+    }]
+    # A whole note is credited: nothing is left pending.
+    loop.compact_context = _note_provider()
+    await _fire_main_compact(loop, written)
+    _boundary(loop)
+    assert loop._context_restore_pending is False
+    assert _restorations(loop)[-1].data["complete"] is True
+
+
+async def test_sections_go_back_by_priority_and_only_whole_ones_are_credited(tmp_path) -> None:
+    """The host's sections claim the bounded note by priority, keep their
+    order in it, and only a section that went out whole calls back."""
+    from fluid.engine.compact_restore import RestorationSection
+    from fluid.engine.delegated import COMPACT_CONTEXT_MAX_CHARS
+
+    delivered: list[str] = []
+    big = "m" * COMPACT_CONTEXT_MAX_CHARS
+
+    def section(name: str, text: str, priority: int, **kw: Any) -> RestorationSection:
+        return RestorationSection(name=name, text=text, priority=priority,
+                                  on_delivered=lambda: delivered.append(name), **kw)
+
+    async def provide() -> list:
+        return [
+            section("environment", "today is 2026-10-28", 0),
+            section("memory", big, 3, cuttable=True),
+            section("working_record", "record " * 50, 4, cuttable=True),
+            section("away", "owner is away", 1),
+        ]
+
+    loop, written = await _loop(tmp_path, hooks=HookBus(), compact_context=provide)
+    output = await _fire_main_compact(loop, written)
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert len(context) <= COMPACT_CONTEXT_MAX_CHARS
+    assert context.startswith("today is 2026-10-28\n\nmmm")
+    assert context.endswith("owner is away")
+    assert "[memory cut:" in context and "record" not in context
+    assert delivered == ["environment", "away"]
+    statuses = {s["name"]: s["status"] for s in _restorations(loop)[-1].data["sections"]}
+    assert statuses == {"environment": "delivered", "memory": "cut",
+                        "working_record": "omitted", "away": "delivered"}
+    assert loop.last_restoration["complete"] is False
+    _boundary(loop)
+    assert loop._context_restore_pending is True
+
+
 async def test_a_note_alone_registers_session_start(tmp_path) -> None:
     """With neither a HookBus nor a deny policy, a note provider still has
     the CLI ask the loop at SessionStart, and the answer needs no bus."""

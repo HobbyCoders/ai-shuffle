@@ -162,3 +162,34 @@ async def test_late_sessionstart_credit_is_cleared_when_next_compaction_starts(m
         assert loop._context_restore_pending
     finally:
         await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_a_memory_snapshot_cut_from_the_put_back_is_not_credited(monkeypatch, tmp_path):
+    """#755: the put-back after a compaction is bounded sections. The memory
+    snapshot counts as held only when its section went out whole; a cut one
+    is sent again with the next message instead of being credited."""
+    memory = {"section": _section(*FACTS)}
+    adapter, loop = await _make(monkeypatch, tmp_path, "delegated", memory)
+    compacting = {"type": "system", "subtype": "status", "status": "compacting"}
+    done = {"type": "system", "subtype": "status", "status": None, "compact_result": "success"}
+    try:
+        loop._track_main_compaction(compacting)
+        await loop._cli_session_start({"source": "compact"})
+        assert adapter._memory_put_back is not None
+        assert adapter._memory_put_back[0] == memory["section"]
+        assert loop._compaction_context_restored
+        loop._track_main_compaction(done)
+
+        adapter._memory_put_back = None
+        memory["section"] = _section(*FACTS, "- [m98 r1; user] " + "long fact " * 4_000)
+        loop._track_main_compaction(compacting)
+        result = await loop._cli_session_start({"source": "compact"})
+        context = result["hookSpecificOutput"]["additionalContext"]
+        assert "[memory cut:" in context and "Today's date" in context
+        assert adapter._memory_put_back is None
+        assert not loop._compaction_context_restored
+        statuses = {s["name"]: s["status"] for s in loop.last_restoration["sections"]}
+        assert statuses["memory"] == "cut" and statuses["environment"] == "delivered"
+    finally:
+        await adapter.disconnect()

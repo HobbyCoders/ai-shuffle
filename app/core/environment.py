@@ -9,11 +9,12 @@ import json
 import logging
 import os
 import platform
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from fluid.tools.child_env import scrub_child_env
 
@@ -449,7 +450,58 @@ def inject_claude_code_auth(
 # profile/provider defaults.
 
 
-def apply_context_window_override(env: Dict[str, str], context_window: int) -> None:
+# The doubled local blocking limit (``CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE`` =
+# 2 x the window), by Claude Code version. The CLI refuses a request before
+# sending it ("Prompt is too long") once its LOCAL token estimate reaches the
+# blocking limit, and that same guard stops the reactive compaction request
+# that could rescue the turn. What each version does:
+#
+# * up to the 2.1.2xx line (PR 752/759, 2026-07): the estimate is ~3 chars a
+#   token, against ~4 for prose in o200k, so a prompt that really fits a
+#   provider's window is overestimated by about a third and blocked;
+# * 2.1.312 (read from the bundle, 2026-10): the limit is the model window
+#   less min(max output, a cap), on an estimate that uses the model's
+#   bytes-per-token. A model id the CLI does not recognise (every provider-
+#   routed or pinned window) gets the default ratio and a window that is our
+#   pin, so the overestimate and the block remain.
+#
+# No CLI is known that sizes the guard on the provider's own count, so every
+# version gets the lift. When one does, set ``BLOCKING_LIMIT_LIFT_UNTIL`` to
+# that version: CLIs at or above it (when the app knows the installed
+# version) get no override and keep their own guard. An unknown version keeps
+# the lift, the behaviour every CLI to date needs.
+BLOCKING_LIMIT_LIFT_UNTIL: Optional[str] = None
+BLOCKING_LIMIT_LIFT_VERIFIED_THROUGH = "2.1.312"
+_CLI_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+
+
+def _cli_version_key(text: Optional[str]) -> Optional[Tuple[int, int, int]]:
+    match = _CLI_VERSION_RE.search(text or "")
+    return tuple(int(part) for part in match.groups()) if match else None  # type: ignore[return-value]
+
+
+def blocking_limit_lift_needed(cli_version: Optional[str] = None) -> bool:
+    """Whether this Claude Code CLI needs the doubled blocking limit (see
+    ``BLOCKING_LIMIT_LIFT_UNTIL``). ``cli_version`` defaults to the version
+    the app last probed; an unknown version needs it."""
+    until = _cli_version_key(BLOCKING_LIMIT_LIFT_UNTIL)
+    if until is None:
+        return True
+    if cli_version is None:
+        try:
+            from app.core import claude_cli_status
+
+            cached = claude_cli_status.peek()
+            cli_version = cached.cli_version if cached is not None else None
+        except Exception:  # noqa: BLE001 — unknown keeps the lift
+            cli_version = None
+    have = _cli_version_key(cli_version)
+    return have is None or have < until
+
+
+def apply_context_window_override(
+    env: Dict[str, str], context_window: int, *, cli_version: Optional[str] = None,
+) -> None:
     """Pin a user-selected input window onto a spawn environment in place."""
     window = int(context_window)
     if window <= 0:
@@ -459,7 +511,8 @@ def apply_context_window_override(env: Dict[str, str], context_window: int) -> N
     env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = "0" if window > 200_000 else "1"
     env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(window)
     env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
-    env["CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE"] = str(window * 2)
+    if blocking_limit_lift_needed(cli_version):
+        env["CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE"] = str(window * 2)
 
 
 def is_provider_servable(provider: Optional[ModelProviderRow]) -> bool:
@@ -660,7 +713,9 @@ def apply_provider_env(
     # silently clobbers these pins INSIDE the child — the spawn overlay can be
     # correct and the session still dies with "Prompt is too long". If a
     # provider session compacts/errors near 200k despite a larger
-    # context_window, check that file first.
+    # context_window, check that file first. The delegated leg now checks the
+    # window the CLI reports after it starts and puts a "context window
+    # mismatch" note on the session when a setting overrode the pin (#754).
     context_window = resolve_provider_context_window(provider, model)
     if context_window:
         # A window is known for THIS model — that value is AUTHORITATIVE for
@@ -699,8 +754,12 @@ def apply_provider_env(
         # overflow the UPSTREAM already rejects cleanly, so it adds
         # nothing here — it only misfires.
         # Autocompaction thresholds are unaffected (they key off
-        # CLAUDE_CODE_AUTO_COMPACT_WINDOW above).
-        env.setdefault("CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE", str(cw * 2))
+        # CLAUDE_CODE_AUTO_COMPACT_WINDOW above). Only for the CLI versions
+        # that still guard on a local estimate (``BLOCKING_LIMIT_LIFT_UNTIL``).
+        # The delegated leg reads the window the CLI really uses from its
+        # first context-usage report and reports a mismatch (#754).
+        if blocking_limit_lift_needed():
+            env.setdefault("CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE", str(cw * 2))
     # No window known for this model (no per-model value, no preset, NULL row
     # column) → set NOTHING and leave every window var to the CLI's own
     # defaults. Forcing ``DISABLE_1M=1`` here would clamp a claude-* id on an

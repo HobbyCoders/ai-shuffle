@@ -161,6 +161,40 @@ class TestApplyProviderEnv:
         env = apply_provider_env({}, "op", "openai/gpt-5.6")
         assert env["CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE"] == "544000"
 
+    def test_blocking_limit_override_is_kept_only_for_cli_versions_that_need_it(
+        self, mock_db, monkeypatch,
+    ):
+        """#754: the lift is documented by CLI version. Every CLI to date
+        (verified through 2.1.312) needs it; once one no longer does, the
+        version named in BLOCKING_LIMIT_LIFT_UNTIL and newer get none, and an
+        unknown version keeps it."""
+        from app.core import claude_cli_status, environment
+        from app.core.environment import apply_context_window_override, blocking_limit_lift_needed
+        from app.db import database as db
+
+        assert environment.BLOCKING_LIMIT_LIFT_UNTIL is None
+        assert blocking_limit_lift_needed("2.1.312 (Claude Code)")
+        monkeypatch.setattr(environment, "BLOCKING_LIMIT_LIFT_UNTIL", "2.1.400")
+        assert blocking_limit_lift_needed("2.1.399 (Claude Code)")
+        assert not blocking_limit_lift_needed("2.1.400 (Claude Code)")
+        assert not blocking_limit_lift_needed("2.2.0")
+        assert blocking_limit_lift_needed("not a version")
+        monkeypatch.setattr(claude_cli_status, "peek", lambda: None)
+        assert blocking_limit_lift_needed()
+
+        status = claude_cli_status.ClaudeCliStatus(installed=True, cli_version="2.1.401")
+        monkeypatch.setattr(claude_cli_status, "peek", lambda: status)
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=272000)
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert "CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE" not in env
+        assert env[AUTO_COMPACT_KEY] == "272000"
+        pinned: dict = {}
+        apply_context_window_override(pinned, 400_000)
+        assert "CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE" not in pinned
+        apply_context_window_override(pinned, 400_000, cli_version="2.1.312")
+        assert pinned["CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE"] == "800000"
+
     def test_blocking_limit_override_absent_when_context_window_null(self, mock_db):
         """No true window known → leave the CLI's own blocking behavior alone."""
         from app.db import database as db

@@ -440,6 +440,13 @@ class ContextCompaction(Event):
     # Epoch intent budget frozen against the chosen session window. None on
     # legacy events; replay must not resize old folds when the limit changes.
     intent_pin_tokens: int | None = None
+    # The delegated leg only: the compaction's stable transaction id. When
+    # Fluid answered the compaction through the Claude mod's bridge, it is the
+    # id that answer carried, and the ``CompactionCheckpoint`` written for it
+    # repeats it, so a re-seed pairs the two by id, never by time (#755).
+    # Any other CLI compaction gets an id of its own. "" on native events and
+    # on every event persisted before the field existed.
+    compaction_id: str = ""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -640,6 +647,18 @@ class DelegatedDiagnostic(Event):
       "do your work through Bash" steer although the loop turned it off.
       ``data`` carries ``cli_version``, ``variant`` (the CLI's
       ``bashFirstSteer`` value), ``resumed`` and ``cli_session_id``.
+    * ``"compaction_failed"``: a ``/compact`` turn ended without a
+      compaction; ``message`` says why.
+    * ``"compaction_restoration"``: what the SessionStart(compact) hook put
+      back after a compaction. ``data`` carries ``compaction_id`` (the open
+      bridge answer's, "" when none), ``complete`` and ``sections``: one
+      ``{"name", "status", "chars", "original_chars"}`` per section, status
+      ``delivered``, ``cut`` or ``omitted`` (#755).
+    * ``"context_window_mismatch"``: the CLI's first context-usage report
+      names an effective window other than the one the host pinned (or, with
+      no pin, the one Fluid's compactor sizes against). ``data`` carries
+      ``expected``, ``effective``, ``pinned``, ``source`` (the CLI's
+      ``autocompactSource``), ``raw_max_tokens`` and ``cli_version`` (#754).
 
     Stored with the session for audits; hosts that do not know it skip it.
     Never terminal, never part of the model conversation.
@@ -683,10 +702,16 @@ class CompactionCheckpoint(Event):
     stored message the rows leave out is still named by a ``HistoryExpand``
     ref inside them. Never part of the stored path, never shown in a chat;
     hosts that do not know it skip it.
+
+    ``compaction_id`` is the transaction id of the bridge answer these rows
+    came from, the same one the ``ContextCompaction`` for that compaction
+    carries: a re-seed uses a checkpoint only with its own boundary. ""
+    on checkpoints persisted before the field existed (paired by order).
     """
 
     through: str = ""
     rows: tuple[dict[str, Any], ...] = ()
+    compaction_id: str = ""
 
 
 # ``SubagentEvent.wake_disposition`` values. See the field's docstring.
