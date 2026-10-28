@@ -395,7 +395,6 @@ def test_the_turns_the_app_starts_are_not_requests_to_fluid_compaction():
 
     from app.core.compact_continue import AUTO_CONTINUE_PROMPT
     from app.core.limit_resume import RESUME_PROMPT
-    from app.core.wakeup_service import WATCHDOG_NUDGE_PROMPT
 
-    for prompt in (RESUME_PROMPT, AUTO_CONTINUE_PROMPT, WATCHDOG_NUDGE_PROMPT, "[hand-off] Moved"):
+    for prompt in (RESUME_PROMPT, AUTO_CONTINUE_PROMPT, "[hand-off] Moved"):
         assert prompt.startswith(HOST_TURN_PREFIXES), prompt[:30]

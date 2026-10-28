@@ -150,6 +150,7 @@ from fluid.context.peer import PROMPT_BLOCK as PEER_MESSAGE_BLOCK
 from fluid.engine.native import NativeLoop
 from fluid.engine.delegated import ClaudeCliMissingError, DelegatedLoop
 from fluid.hooks.bus import HookBus
+from fluid.events.model import NEEDS_COMPACTION
 from fluid.events.ops import (
     AgentMessage,
     BackgroundTaskFinished,
@@ -351,6 +352,9 @@ class HarnessAdapter(ProviderAdapter):
         # Fluid turn source for the next send_query/send_resume; see
         # set_turn_source. Reset to "user" after each submit.
         self._next_turn_source: str = "user"
+        # The next submit is the host's emergency compaction at the context
+        # limit (set_emergency_compaction). Reset after each submit.
+        self._next_emergency_compaction = False
         # Only observed model output acknowledges an Away transition. Merely
         # rendering a note, accepting a submit or compacting must not consume it.
         self._pending_away_note: str | None = None
@@ -1769,6 +1773,7 @@ class HarnessAdapter(ProviderAdapter):
             await self._engine.submit(UserTurn(
                 content=cast(Any, content), source=source,
                 context_pin=self._memory_context_pin(content),
+                emergency_compaction=self._take_emergency_compaction(),
             ))
         except BaseException:
             self._memory_initial_task = task_before
@@ -1797,6 +1802,20 @@ class HarnessAdapter(ProviderAdapter):
     def _take_turn_source(self) -> str:
         source, self._next_turn_source = self._next_turn_source, "user"
         return source
+
+    def set_emergency_compaction(self, emergency: bool) -> None:
+        """Mark the next submit as the host's emergency compaction.
+
+        A ``/compact`` the scheduler sends for a turn the context limit cut
+        off, after Fluid's own compaction reclaimed nothing: Claude Code's
+        summarizer may then stand in (owner rule: the summarizer is only
+        for an automatic compaction at the limit). Next submit only.
+        """
+        self._next_emergency_compaction = bool(emergency)
+
+    def _take_emergency_compaction(self) -> bool:
+        flag, self._next_emergency_compaction = self._next_emergency_compaction, False
+        return flag
 
     @staticmethod
     def _session_runs_as_owner(session_id: str) -> bool:
@@ -2969,12 +2988,16 @@ class HarnessAdapter(ProviderAdapter):
         from app.core.provider import fluid_transcript
 
         cwd = os.path.abspath(options.cwd) if options.cwd else os.getcwd()
+        # The window the CLI is pinned to: a transcript over what it compacts
+        # at is compacted before it is written (fluid_transcript._fit_window).
+        window = await asyncio.to_thread(_delegated_context_window, options)
         result = await asyncio.to_thread(
             fluid_transcript.reseed_delegated_cli_session,
             fluid_session_id,
             cwd,
             fluid_transcript.cli_projects_root(options.env),
             force=True,
+            context_window=window,
         )
         if result.status != "reseeded" or not result.cli_session_id:
             logger.warning(
@@ -4437,7 +4460,11 @@ class HarnessAdapter(ProviderAdapter):
             ]
 
         if cls == "TurnComplete":
-            if event.stop_reason.startswith("safety_limit:"):
+            if getattr(event, "outcome", None) == NEEDS_COMPACTION:
+                # The engine says the work stopped for a compaction; the
+                # scheduler reads this from the durable terminal payload.
+                terminal_reason = NEEDS_COMPACTION
+            elif event.stop_reason.startswith("safety_limit:"):
                 terminal_reason = "safety_limit"
             elif event.stop_reason == "max_calls":
                 terminal_reason = "max_turns"
@@ -4546,6 +4573,11 @@ class HarnessAdapter(ProviderAdapter):
                     usage=self._stamp_usage_estimated(usage),
                     uuid=self._uuid(event),
                     api_error_status=status,
+                    # A stop at the context limit: compact, then continue.
+                    terminal_reason=(
+                        NEEDS_COMPACTION
+                        if getattr(event, "outcome", None) == NEEDS_COMPACTION else None
+                    ),
                 )
             ]
 
@@ -4646,6 +4678,10 @@ class HarnessAdapter(ProviderAdapter):
         if trigger == "manual" and self._compact_requested_by == "app":
             # The CLI reports any /compact as manual; this one the app sent.
             metadata["requested_by"] = "app"
+        if from_cli and getattr(event, "summary", ""):
+            # Claude Code's summarizer wrote this one (Fluid's own compaction
+            # carries no CLI summary): the record of which mechanism ran.
+            metadata["summarizer"] = True
         data: Dict[str, Any] = {"compact_metadata": metadata}
         seq = getattr(event, "seq", -1)
         sid = getattr(event, "session_id", None)

@@ -317,21 +317,26 @@ def _wake_row(meta: Dict[str, Any], session_id="s1"):
             "reason": json.dumps(base), "source": lr.LIMIT_RESUME_SOURCE}
 
 
-async def test_fire_compacts_then_continues_in_queue_order(monkeypatch):
+async def test_fire_compacts_then_continues_as_one_admission(monkeypatch):
     env = _Env(monkeypatch)
     monkeypatch.setattr(lr, "still_blocked_until", lambda *a, **k: None)
-    submit = AsyncMock(side_effect=["turn-compact", "turn-resume"])
+    submit = AsyncMock(return_value="turn-resume")
     with patch("app.core.turn_manager.submit_async", submit), \
             patch("app.core.wakeup_service._session_api_user_id", lambda sid: None):
         turn_id = await lr.fire(_wake_row({}))
     assert turn_id == "turn-resume"
-    prompts = [c.kwargs["prompt"] for c in submit.await_args_list]
-    assert prompts == [lr.COMPACT_PROMPT, lr.RESUME_PROMPT]
-    assert all(c.args[1] == "wakeup" for c in submit.await_args_list)
-    assert all(c.kwargs["overrides"] == {"model": "opus"} for c in submit.await_args_list)
-    # Both turns are marked as the resume, so the usage-limit hold lets them
-    # through and a limit they hit is not resumed again.
-    assert all(lr.PAYLOAD_KEY in c.kwargs["payload"] for c in submit.await_args_list)
+    # ONE submit: the Compact-first pair admits the compaction and the resume
+    # together, idempotent on the wake's id (the DB side is covered in
+    # tests/core/test_compact_then_continue.py).
+    [call] = submit.await_args_list
+    assert call.args[1] == "wakeup"
+    assert call.kwargs["prompt"] == lr.RESUME_PROMPT
+    assert call.kwargs["overrides"] == {"model": "opus"}
+    assert call.kwargs["payload"]["compact_first"] is True
+    assert call.kwargs["command_id"] == f"{lr.RESUME_COMMAND_PREFIX}wake-x"
+    # Marked as the resume, so the usage-limit hold lets it through and a
+    # limit it hits is not resumed again.
+    assert lr.PAYLOAD_KEY in call.kwargs["payload"]
     assert [s for _, s, _ in env.recorded] == ["resumed"]
     assert env.recorded[0][2]["compacted_first"] is True
 

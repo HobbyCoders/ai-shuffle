@@ -30,6 +30,17 @@ logger = logging.getLogger(__name__)
 FAL_MODELS_API = "https://api.fal.ai/v1/models"
 DEFAULT_SCHEMA_TTL = 24 * 3600  # schemas change rarely; cache for a day
 
+# fal's documented ImageSize presets (not arbitrary model resolution labels):
+# https://fal.ai/learn/tools/how-to-use-gpt-image-2
+_IMAGE_SIZE_PRESETS = {
+    "square_hd": (1024, 1024),
+    "square": (512, 512),
+    "portrait_4_3": (768, 1024),
+    "portrait_16_9": (576, 1024),
+    "landscape_4_3": (1024, 768),
+    "landscape_16_9": (1024, 576),
+}
+
 # Candidate names for the model's primary text/prompt input, in priority order.
 _PRIMARY_TEXT_FIELDS = (
     "prompt",
@@ -166,9 +177,11 @@ class ModelSchema:
     def pricing_quantity(self, unit: str, options: dict, prompt: str | None = None):
         """Conservative billable units from this model's declared parameters.
 
-        No resolution-name tables or token estimates: missing dimensions,
-        duration units or text lengths leave the price unknown. Whole billing
-        units round up so a fractional block cannot under-reserve the cap.
+        fal's documented ImageSize presets have fixed pixel dimensions. For an
+        unresolved size, only a fully understood enum can bound the largest
+        allowed output; arbitrary resolution labels and tokens are not guessed.
+        Missing duration units or text lengths leave the price unknown. Whole
+        billing units round up so a fractional block cannot under-reserve the cap.
         """
         from decimal import Decimal, ROUND_CEILING
         import re
@@ -189,20 +202,29 @@ class ModelSchema:
         count = number(options[count_fields[0]]) if count_fields else Decimal(1)
         if count != count.to_integral_value() or count > 100:
             raise ValueError("Invalid output count.")
-        unit = unit.strip().lower()
+        unit = re.sub(r"\s+", " ", unit.strip().casefold())
+        if unit.startswith("per "):
+            unit = unit[4:]
+        unit = {"requests": "request", "inferences": "inference", "images": "image",
+                "videos": "video", "audios": "audio", "meshes": "mesh",
+                "generations": "generation", "characters": "character",
+                "seconds": "second", "minutes": "minute", "megapixels": "megapixel"}.get(unit, unit)
         if unit in ("request", "inference"):
             return Decimal(1), Decimal(1)
         if unit in ("image", "video", "audio", "mesh", "3d", "generation"):
             return Decimal(1), count
-        if unit in ("character", "characters", "1k chars", "1000 characters"):
+        if unit in ("character", "characters", "1k chars", "1000 characters", "1000 utf-8 bytes"):
             if prompt is None or not prompt:
                 raise ValueError("Text length is needed for pricing.")
-            divisor = 1000 if unit in ("1k chars", "1000 characters") else 1
-            quantity = (Decimal(len(prompt)) / divisor).to_integral_value(rounding=ROUND_CEILING)
+            divisor = 1 if unit == "character" else 1000
+            length = len(prompt.encode("utf-8")) if unit == "1000 utf-8 bytes" else len(prompt)
+            quantity = (Decimal(length) / divisor).to_integral_value(rounding=ROUND_CEILING)
             return quantity, count
-        if unit in ("second", "seconds", "minute", "minutes"):
+        duration_unit = re.fullmatch(r"(?:(\d+) )?(seconds?|minutes?)", unit)
+        if duration_unit:
+            block_seconds = number(duration_unit[1] or 1) * (60 if duration_unit[2].startswith("minute") else 1)
             durations = []
-            for name in ("duration", "duration_seconds", "duration_sec", "duration_minutes", "seconds"):
+            for name in ("duration", "duration_seconds", "duration_sec", "duration_minutes", "seconds", "music_duration"):
                 if name not in fields or name not in options:
                     continue
                 field = fields[name]
@@ -225,14 +247,22 @@ class ModelSchema:
                 durations.append(number(match[1]) * (60 if in_minutes else 1))
             if len(durations) != 1:
                 raise ValueError("No unambiguous declared duration in seconds.")
-            quantity = durations[0] / (60 if unit.startswith("minute") else 1)
+            quantity = durations[0] / block_seconds
             return quantity.to_integral_value(rounding=ROUND_CEILING), count
         if unit in ("megapixel", "megapixels"):
             dimensions = options.get("image_size") if "image_size" in fields else None
+            if isinstance(dimensions, str) and dimensions in _IMAGE_SIZE_PRESETS:
+                width, height = _IMAGE_SIZE_PRESETS[dimensions]
+                dimensions = {"width": width, "height": height}
             if dimensions is None and {"width", "height"} <= fields.keys():
                 dimensions = options
+            if not isinstance(dimensions, dict) and "image_size" in fields:
+                allowed = fields["image_size"].enum
+                if allowed and all(isinstance(size, str) and size in _IMAGE_SIZE_PRESETS for size in allowed):
+                    width, height = max((_IMAGE_SIZE_PRESETS[size] for size in allowed), key=lambda size: size[0] * size[1])
+                    dimensions = {"width": width, "height": height}
             if not isinstance(dimensions, dict) or any(type(dimensions.get(k)) is not int for k in ("width", "height")):
-                raise ValueError("Explicit declared pixel dimensions are required.")
+                raise ValueError("Declared pixel dimensions or a bounded ImageSize preset are required.")
             quantity = number(dimensions["width"]) * number(dimensions["height"]) / 1_000_000
             return quantity.to_integral_value(rounding=ROUND_CEILING), count
         raise ValueError("Unsupported declared pricing unit.")

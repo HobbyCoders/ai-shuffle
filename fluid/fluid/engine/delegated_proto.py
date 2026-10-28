@@ -155,6 +155,41 @@ def stop_reason_from_subtype(subtype: str | None) -> str:
     return subtype
 
 
+# The CLI's own ``result.terminal_reason`` values for a turn that stopped
+# because the conversation no longer fits. Claude Code's query loop maps exactly
+# these (plus ``rapid_refill_breaker``) to ``{kind: "stop", cause:
+# "context_limit"}`` (checked in the 2.1.312 bundle). ``blocking_limit``: the
+# next request would cross the blocking limit and the in-loop autocompact did
+# not bring it under; ``prompt_too_long``: the provider refused the request as
+# too long. ``rapid_refill_breaker`` is left out on purpose: it is the CLI
+# stopping a compaction that refills at once, so compacting and continuing
+# would restart the very loop it broke.
+CONTEXT_LIMIT_TERMINAL_REASONS = frozenset({"blocking_limit", "prompt_too_long"})
+
+
+def context_outcome(frame: dict[str, Any]) -> str | None:
+    """``NEEDS_COMPACTION`` when a ``result`` frame says the turn stopped
+    because its context must be compacted, else ``None``. Pure.
+
+    The CLI's ``terminal_reason`` (the query loop's exit reason, present on
+    every result from CLIs that report it, ``completed`` for a normal end) is
+    the evidence. Only a result WITHOUT that field — a CLI too old to report
+    it — falls back to the older signature: a successful result whose last
+    model step was ``tool_use``. Those CLIs ended the loop there when the next
+    request would cross the autocompact threshold and deferred the compaction
+    to the next query; nothing else ends a successful loop on a tool_use.
+    """
+    from fluid.events.model import NEEDS_COMPACTION
+
+    if "terminal_reason" in frame:
+        reason = frame.get("terminal_reason")
+        return NEEDS_COMPACTION if reason in CONTEXT_LIMIT_TERMINAL_REASONS else None
+    if (frame.get("subtype", "success") == "success" and not frame.get("is_error")
+            and frame.get("stop_reason") == "tool_use"):
+        return NEEDS_COMPACTION
+    return None
+
+
 def result_error_message(frame: dict[str, Any]) -> str:
     """What a failed ``result`` frame says went wrong, for the ErrorEvent."""
     subtype = str(frame.get("subtype") or "error")
@@ -558,6 +593,9 @@ class StreamJsonMapper:
         # and its short explanation; None when it gave neither.
         self.failed_status: int | None = None
         self.failed_provider_message: str | None = None
+        # ``NEEDS_COMPACTION`` when the failed result was the CLI stopping at
+        # the context limit (see :func:`context_outcome`).
+        self.failed_outcome: str | None = None
         # The result frame's own text: for a turn that ran a local command
         # (``/compact``) it is the command's output, the only place a refusal
         # such as "Not enough messages to compact." shows up.
@@ -1153,6 +1191,7 @@ class StreamJsonMapper:
                 status = 401
             self.failed_status = status
             self.failed_provider_message = result_provider_message(frame)
+            self.failed_outcome = context_outcome(frame)
             return Mapped(events=events, is_result=True, error=result_error_message(frame))
         turn_usage["bash_file_ops"] = self.tool_mix.bash_file_ops
         turn_usage["dedicated_file_ops"] = self.tool_mix.dedicated_file_ops
@@ -1163,6 +1202,7 @@ class StreamJsonMapper:
             num_model_calls=int(num_turns),
             usage=turn_usage,
             cost_usd=cost,
+            outcome=context_outcome(frame),
         ))
         return Mapped(events=events, is_result=True)
 

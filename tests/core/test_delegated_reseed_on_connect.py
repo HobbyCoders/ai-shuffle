@@ -185,7 +185,10 @@ async def test_native_history_is_written_for_the_cli_and_resumed(mock_db, monkey
 
     handle = captured["cli_session_id"]
     assert handle and handle != SID
-    assert len(calls) == 1 and calls[0][1] == {"force": True}
+    # Sized against the window the CLI is pinned to (the guard in _fit_window).
+    assert len(calls) == 1 and calls[0][1] == {
+        "force": True, "context_window": ha._delegated_context_window(options),
+    }
     assert calls[0][0][0] == SID
     assert fluid_transcript.get_cli_session_id(SID) == handle
 
@@ -237,7 +240,7 @@ async def test_a_handle_whose_transcript_is_not_on_this_worker_is_reseeded(monke
 
     captured = await _connect(monkeypatch, store, _options(tmp_path))
     assert captured["cli_session_id"] == "new-uuid"
-    assert calls[0][1] == {"force": True}
+    assert calls[0][1]["force"] is True and calls[0][1]["context_window"] > 0
     # Written under the root the CLI will read (CLAUDE_CONFIG_DIR in its env).
     assert Path(calls[0][0][2]) == _projects(tmp_path)
     assert (await store.get_session(SID)).cli_session_id == "new-uuid"

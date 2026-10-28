@@ -478,6 +478,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			worktreeBranch: '',
 			selectedWorktreeBranch: null,
 			worktreeMode: 'new',
+			worktreeBaseBranch: 'main',
 			worktreeCreateNewBranch: false,
 			worktreeDeleted: false,
 		};
@@ -1080,9 +1081,15 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		// A new session starts without a project (#371 step 4): the project is
 		// optional and added on the new-session screen, which switches the
-		// compose to a project session. Only a kept draft that was typed for a
-		// project reopens with it.
-		const mode: SessionMode = savedDraft && (savedDraft.project || savedDraft.projectV2Id) ? 'code' : 'chat';
+		// compose to a project session. A kept draft typed for a project reopens
+		// with it. So does a compose left unsent to open another chat, typed or
+		// not: coming back, its project, branch and worktree are still the
+		// owner's picks, like its worker. A first send spends that slot, and New
+		// session pressed on the new-session screen itself starts fresh.
+		const comingBack = leavingSessionId !== null;
+		const keptPlace = newChatEphemeral && (savedDraft || comingBack)
+			&& (newChatEphemeral.project || newChatEphemeral.projectV2Id) ? newChatEphemeral : null;
+		const mode: SessionMode = keptPlace ? 'code' : 'chat';
 
 		// Single update: reset everything (including draft from ephemeral cache)
 		update(s => ({
@@ -1170,21 +1177,24 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			sessionLockedBy: undefined,
 		}));
 
-		// Typed text and its execution context are one draft. New account-wide
-		// defaults must not reroute a restored draft into a different checkout.
+		// Where the kept compose runs: project, worktree and branch. New
+		// account-wide defaults must not reroute it into a different checkout.
+		if (keptPlace) update(s => ({...s,
+			project:keptPlace.project, projectV2Id:keptPlace.projectV2Id,
+			// Git status still describes the chat being left: an unknown project
+			// keeps its explicit worktree pick; only a known non-repo drops it.
+			worktreeIntent:projectRejectsWorktrees(keptPlace.project, keptPlace.projectV2Id) ? 'local' : keptPlace.worktreeIntent, worktreeId:keptPlace.worktreeId,
+			worktreeBranch:keptPlace.worktreeBranch, worktreeBaseBranch:keptPlace.worktreeBaseBranch,
+			selectedWorktreeBranch:keptPlace.selectedWorktreeBranch, worktreeMode:keptPlace.worktreeMode,
+			worktreeCreateNewBranch:keptPlace.worktreeCreateNewBranch ?? false,
+		}));
+		// Typed text and its run binding are one draft with that place.
 		if (savedDraft) update(s => ({...s,
 			profile:savedDraft.profile ?? s.profile,
 			modelOverride:savedDraft.modelOverride, effortLevelOverride:savedDraft.effortLevelOverride,
 			permissionModeOverride:mode === 'chat' ? noProjectPermission(normalizePermissionMode(savedDraft.permissionModeOverride)) : normalizePermissionMode(savedDraft.permissionModeOverride),
 			fastMode:savedDraft.fastMode ?? false,
 			contextWindowChoice:savedDraft.contextWindowChoice ?? DEFAULT_CONTEXT_WINDOW_CHOICE,
-			...(mode === 'chat' ? {} : {
-				project:savedDraft.project, projectV2Id:savedDraft.projectV2Id,
-				worktreeIntent:projectSupportsWorktrees(savedDraft.project, savedDraft.projectV2Id) ? savedDraft.worktreeIntent : 'local', worktreeId:savedDraft.worktreeId,
-				worktreeBranch:savedDraft.worktreeBranch, worktreeBaseBranch:savedDraft.worktreeBaseBranch,
-				selectedWorktreeBranch:savedDraft.selectedWorktreeBranch, worktreeMode:savedDraft.worktreeMode,
-				worktreeCreateNewBranch:savedDraft.worktreeCreateNewBranch ?? false,
-			}),
 		}));
 		const afterState = getState();
 		// newChat complete

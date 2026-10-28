@@ -23,6 +23,7 @@
 	import { tick, onDestroy, onMount } from 'svelte';
 	import { get } from 'svelte/store';
 	import { activeSession } from '$lib/stores/active-session';
+	import { subagentChats } from '$lib/stores/subagent-chats';
 	import { registerReloadBlocker } from '$lib/services/app-update';
 	import { pendingHandoff, handoffPlaceholder } from './pending-handoff';
 	import { handoffPending } from '$lib/stores/handoff-pending';
@@ -106,8 +107,13 @@
 	// once one is open, and only falls back to the sidepanel's pick on a fresh
 	// compose screen.
 	const composerMode = $derived($activeSession.mode);
-	// Which lane's project rules apply.
-	const projectLane = $derived(projectRulesLane(composerMode));
+	// Which lane's project rules apply. A subagent's chat without a project
+	// follows its no-project parent's chat lane (see projectRulesLane).
+	const projectlessSubagent = $derived(
+		!!$activeSession.sessionId && $subagentChats.has($activeSession.sessionId)
+			&& !$activeSession.project && !$activeSession.projectV2Id
+	);
+	const projectLane = $derived(projectRulesLane(composerMode, projectlessSubagent));
 	// Remote runtime summaries are display/control truth, not transcript streaming
 	// state. A parked turn can also retain background work that Stop must reach.
 	const stoppableWork = $derived(hasStoppableWork(

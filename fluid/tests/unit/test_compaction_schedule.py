@@ -484,6 +484,82 @@ async def test_resumed_engine_seeds_p_cold_from_persisted_usage(tmp_path, monkey
     await fresh.aclose()
 
 
+async def test_a_measurement_is_current_until_a_rewrite_follows_it(tmp_path) -> None:
+    """Window protection may let a measurement raise the estimate only when it
+    was taken of the view as decided now. Live and resumed engines agree."""
+    from fluid.store.base import persist_event
+
+    loop, events = await _run_engine(tmp_path, hit=0.0)
+    sid = loop.session_id
+    # The last call ran after the last compaction of the turn.
+    assert loop._measured_is_current(sid)
+    loop._compactor.trimmer.mark_trimmed({("some-node", "some-call")})
+    assert not loop._measured_is_current(sid)
+    await loop.aclose()
+
+    def resumed() -> NativeLoop:
+        return NativeLoop(provider=_UsageProvider(0, 0.0), store=JsonlStore(tmp_path),
+                          model="m", session_id=sid, context_window=100_000,
+                          compaction=CompactionConfig(trigger_tokens=1_000))
+
+    fresh = resumed()
+    nodes = await fresh.store.load_path(sid)
+    await fresh._rehydrate_compaction(sid)
+    assert await fresh._measured_window_prompt(sid, nodes) is not None
+    assert fresh._measured_is_current(sid)
+    await fresh.aclose()
+
+    # A compaction persisted after the last measured call makes it stale.
+    last = max(e.seq for e in events)
+    await persist_event(JsonlStore(tmp_path), ContextCompaction(
+        session_id=sid, seq=last + 1, tier=1, reason="trigger",
+        trimmed=[["some-node", "some-call"]],
+    ))
+    stale = resumed()
+    await stale._rehydrate_compaction(sid)
+    await stale._measured_window_prompt(sid, nodes)
+    assert not stale._measured_is_current(sid)
+    await stale.aclose()
+
+
+async def test_compaction_rehydration_retries_and_is_never_lost(tmp_path, monkeypatch) -> None:
+    """One failed read of the persisted decisions must not leave the engine
+    without them for its whole life."""
+    import fluid.engine.native as native_mod
+    from fluid.store.base import persist_event
+
+    store = JsonlStore(tmp_path)
+    sid = (await store.create_session()).session_id
+    await persist_event(store, ContextCompaction(
+        session_id=sid, seq=1, tier=1, reason="trigger", trimmed=[["n1", "c1"]],
+    ))
+    real = native_mod.iter_events_of_class
+    failures = {"left": 0}
+
+    def flaky(*args, **kwargs):
+        if failures["left"]:
+            failures["left"] -= 1
+            raise OSError("store unavailable")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(native_mod, "iter_events_of_class", flaky)
+    monkeypatch.setattr(native_mod, "_REHYDRATE_BACKOFF_S", 0.0)
+    loop = NativeLoop(provider=_UsageProvider(0, 0.0), store=store, model="m", session_id=sid)
+    try:
+        # Every attempt of this resume fails: nothing is marked done.
+        failures["left"] = native_mod._REHYDRATE_ATTEMPTS
+        await loop._rehydrate_compaction(sid)
+        assert not loop._compaction_rehydrated
+        assert ("n1", "c1") not in loop._compactor.trimmer._trimmed
+        # The next resume retries; a transient failure is absorbed.
+        failures["left"] = 1
+        await loop._rehydrate_compaction(sid)
+        assert loop._compaction_rehydrated
+        assert ("n1", "c1") in loop._compactor.trimmer._trimmed
+    finally:
+        await loop.aclose()
+
+
 @pytest.mark.parametrize("gap,reason", [(20, ""), (300, ""), (400, "gap")])
 def test_resumed_cache_signal_uses_known_gap(gap, reason) -> None:
     signal = CacheSignal(resumed=True, gap_s=gap)

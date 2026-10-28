@@ -162,6 +162,25 @@ describe('projectRulesLane', () => {
 		expect(projectRulesLane(undefined)).toBe('code');
 		expect(evaluateSubmitGuards({ ...home, mode: projectRulesLane('code') })).not.toBeNull();
 	});
+
+	// Regression: a subagent started from the owner's no-project chat is stored
+	// with no mode (the parent runs as code since #644) and no project. Read as
+	// code, every message to it was refused with "Select a project first."
+	it('lets the owner message and attach to a subagent that has no project', () => {
+		const lane = projectRulesLane(undefined, true);
+		expect(lane).toBe('chat');
+		expect(evaluateSubmitGuards({ ...home, mode: lane })).toBeNull();
+		expect(attachmentBlockReason(null, null, lane, 'worker-session')).toBeNull();
+		// A stored code mode (a pre-#644 worker row) follows the same rule.
+		expect(evaluateSubmitGuards({ ...home, mode: projectRulesLane('code', true) })).toBeNull();
+	});
+
+	it('keeps the project rule for other chats and the voice lane for subagents', () => {
+		expect(projectRulesLane(undefined, false)).toBe('code');
+		expect(evaluateSubmitGuards({ ...home, mode: projectRulesLane(undefined, false) })!.notice?.message)
+			.toBe('Select a project first.');
+		expect(projectRulesLane('voice', true)).toBe('voice');
+	});
 });
 
 describe('gateBlocksComposer', () => {

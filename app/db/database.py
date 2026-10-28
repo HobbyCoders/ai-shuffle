@@ -1521,7 +1521,7 @@ def _run_column_migrations(cursor: Any) -> None:
         cursor.execute("ALTER TABLE usage_poll_state ADD COLUMN lease_token TEXT")
 
     # pending_wakeups (v68). Durable per-session wakeups (#598): ScheduleWakeup
-    # and the idle-at-edge watchdog persist their pending wake here so an app
+    # and the other wake producers persist their pending wake here so an app
     # restart rehydrates and re-arms them instead of dropping the bare in-process
     # asyncio timer. ``fire_at`` is a unix epoch (DOUBLE PRECISION) so the
     # rehydrate math is timezone/shim-agnostic. Idempotent so upgrades from any

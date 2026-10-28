@@ -36,6 +36,12 @@ class UserTurn(Op):
     # fluid.events.model.TURN_SOURCES; hosts that schedule their own wakes set
     # it so the event log can tell a user's prompt from a wake.
     source: str = "user"
+    # The host's emergency compaction at the context limit (a ``/compact`` it
+    # sends after Fluid's own compaction reclaimed nothing for a turn the
+    # context limit cut off). The delegated leg then lets Claude Code's
+    # summarizer stand in when Fluid has nothing more, as it does for an
+    # automatic compaction. Never set for a compaction a person asked for.
+    emergency_compaction: bool = False
 
 
 @dataclass(kw_only=True)

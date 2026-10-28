@@ -10,7 +10,7 @@ vi.mock('./voiceAudioStream', () => ({
 		return streamed;
 	}),
 }));
-import { startCall, startCallForSession, hangup, voiceCallState, sendVoiceText, reconcileVoiceCall, confirmCallReplacement, toggleMic, STREAM_DROPPED_MESSAGE, STREAM_RECONNECT_BACKOFF_MS, STREAM_RECONNECT_WINDOW_MS, STREAM_ATTEMPT_TIMEOUT_MS } from './voiceCall';
+import { startCall, startCallForSession, hangup, showCallNotice, voiceCallState, sendVoiceText, reconcileVoiceCall, confirmCallReplacement, toggleMic, STREAM_DROPPED_MESSAGE, STREAM_RECONNECT_BACKOFF_MS, STREAM_RECONNECT_WINDOW_MS, STREAM_ATTEMPT_TIMEOUT_MS } from './voiceCall';
 
 let channel: EventTarget & { send: ReturnType<typeof vi.fn>; readyState: string; close: ReturnType<typeof vi.fn> };
 let track: { enabled: boolean; stop: ReturnType<typeof vi.fn> };
@@ -65,6 +65,13 @@ describe('voice owner lifecycle', () => {
    await hangup();
    expect(postMessage).toHaveBeenLastCalledWith(JSON.stringify({ type: 'voice-call', active: false }));
   } finally { delete nativeWindow.shuffleShell; delete window.__SHUFFLE_MOBILE__; }
+ });
+ it('shows the phone app\'s notices only on a call that is up', async () => {
+  showCallNotice('Notifications are off');
+  expect(get(voiceCallState).notice).toBeNull();
+  await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+  showCallNotice('Notifications are off');
+  expect(get(voiceCallState).notice).toBe('Notifications are off');
  });
  it('uses the live streaming owner for attachments and gates microphone mute on that transport', async () => {
   await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });

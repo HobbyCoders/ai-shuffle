@@ -452,3 +452,62 @@ async def test_no_checkpoint_for_an_answer_claude_code_did_not_apply(monkeypatch
         assert not [e for e in emitted if isinstance(e, CompactionCheckpoint)]
     finally:
         await loop.aclose()
+
+
+# ─ the target bounds the whole answer (pinned Claude Code rows included) ─
+
+def _chat_with_newest_attachment(chars: int, hooks: int = 0) -> Chat:
+    chat = Chat()
+    chat.grow(9)
+    chat.cli.append({'role': 'user', 'toolUses': [], 'handle': 'big-attachment',
+                     'text': '<system-reminder>ATTACHMENT ' + 'z' * chars + '</system-reminder>'})
+    chat.add(Message('user', [Text('Request 9: use the attached file.')]))
+    for h in range(hooks):
+        tid = f'hook-{h}'
+        chat.add(Message('assistant', [ToolUseBlock(tid, 'Bash', {'command': f'h {h}'})]))
+        chat.add(Message('user', [ToolResultBlock(tid, [Text(f'H-{h}')])]))
+        chat.cli.append({'role': 'user', 'toolUses': [], 'handle': f'hookctx{h}',
+                         'text': f'<system-reminder>HOOK CONTEXT {h} ' + 'h' * 20_000 + '</system-reminder>'})
+    chat.add(Message('assistant', [Text('Working on it.')]))
+    return chat
+
+
+def _tokens(rows: list[dict]) -> int:
+    return len(json.dumps([{k: v for k, v in r.items() if k != 'handle'} for r in rows],
+                          ensure_ascii=False)) // 4
+
+
+def test_a_huge_pinned_attachment_leaves_through_the_archived_note():
+    chat = _chat_with_newest_attachment(800_000)
+    archive: list[dict] = []
+    report: dict = {}
+    out = compact_messages(chat.cli, chat.stored, context_window=400_000, trigger='manual',
+                           archive=archive, report=report)
+    text = json.dumps(out)
+    assert 'z' * 1_000 not in text
+    [entry] = [e for e in archive if 'ATTACHMENT' in e['text']]
+    assert entry['node_id'] in text  # the note cites its archive ref
+    assert report['met'] and report['after_tokens'] <= report['target_tokens'] == 50_000
+    assert _tokens(out) <= 50_000 + 1_000  # the bounded note on top
+
+
+def test_superseded_hook_context_leaves_first_and_a_miss_is_reported():
+    chat = _chat_with_newest_attachment(2_000, hooks=12)
+    archive: list[dict] = []
+    report: dict = {}
+    out = compact_messages(chat.cli, chat.stored, context_window=400_000, trigger='manual',
+                           archive=archive, report=report)
+    text = json.dumps(out)
+    # The newest request's opening attachment stays; older hook context goes
+    # (the note keeps a short excerpt and the archive ref).
+    assert 'ATTACHMENT ' + 'z' * 1_000 in text
+    assert 'HOOK CONTEXT 0 ' + 'h' * 500 not in text
+    assert any('HOOK CONTEXT 0 ' in e['text'] for e in archive)
+    assert report['after_tokens'] <= report['target_tokens'] or report.get('contributors')
+
+    # A target nothing can reach is reported with what is left, not hidden.
+    tight: dict = {}
+    compact_messages(chat.cli, chat.stored, context_window=4_000, trigger='manual',
+                     archive=[], report=tight)
+    assert not tight['met'] and set(tight['contributors']) == {
+        'claude_code_rows', 'stored_kept', 'fluid_built'}

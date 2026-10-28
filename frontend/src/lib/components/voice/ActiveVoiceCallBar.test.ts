@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { writable } from 'svelte/store';
 import { tick } from 'svelte';
 const stores = vi.hoisted(() => ({ active: null as any, layout: null as any, sessions: null as any, call: null as any }));
-const controls = vi.hoisted(() => ({ toggleMic: vi.fn(), toggleAgent: vi.fn(), hangup: vi.fn(), reconcileVoiceCall: vi.fn() }));
+const controls = vi.hoisted(() => ({ toggleMic: vi.fn(), toggleAgent: vi.fn(), hangup: vi.fn(), reconcileVoiceCall: vi.fn(), showCallNotice: vi.fn() }));
 const desk = vi.hoisted(() => ({ bridge: { voiceCall: undefined as any } }));
 vi.mock('$lib/stores/active-session', () => ({ activeSession: stores.active }));
 vi.mock('$lib/stores/layout.svelte', () => ({ layout: stores.layout }));
@@ -73,6 +73,43 @@ describe('global voice call bar', () => {
 		stores.call.set({ sessionId: 'owner', status: 'live', micMuted: true, agentMuted: false, micProblem: true });
 		await tick();
 		expect(screen.queryByText('Microphone not reaching the call')).toBeNull();
+	});
+	it('mirrors the call into the Android call notification and acts on its buttons', async () => {
+		const postMessage = vi.fn();
+		const win = window as unknown as { shuffleShell?: unknown };
+		window.__SHUFFLE_MOBILE__ = { apiOrigin: 'https://worker.test', token: 'test', native: { platform: 'android', bridge: 1, capabilities: ['voice-call-controls'] } };
+		win.shuffleShell = { postMessage };
+		const press = (command: string) => window.dispatchEvent(new CustomEvent('shufflevoicecall', { detail: { command } }));
+		try {
+			stores.call.set({ sessionId: 'owner', status: 'live', micMuted: false, agentMuted: false, startedAt: 1700000000000 });
+			render(ActiveVoiceCallBar, { onReturn: vi.fn() });
+			await tick();
+			expect(postMessage).toHaveBeenLastCalledWith(JSON.stringify({ type: 'voice-call-state', status: 'live', muted: false, since: 1700000000000, title: 'Fix voice tools' }));
+			press('unmute');
+			expect(controls.toggleMic).not.toHaveBeenCalled();
+			press('mute');
+			expect(controls.toggleMic).toHaveBeenCalledTimes(1);
+			stores.call.set({ sessionId: 'owner', status: 'live', micMuted: true, agentMuted: false, startedAt: 1700000000000 });
+			await tick();
+			expect(JSON.parse(postMessage.mock.lastCall![0]).muted).toBe(true);
+			press('unmute');
+			expect(controls.toggleMic).toHaveBeenCalledTimes(2);
+			press('notifications-off');
+			expect(controls.showCallNotice).toHaveBeenCalledWith(expect.stringContaining('Notifications are off'));
+			press('hangup');
+			expect(controls.hangup).toHaveBeenCalledTimes(1);
+			const sent = postMessage.mock.calls.length;
+			stores.call.set({ sessionId: 'owner', status: 'ended', micMuted: false, agentMuted: false });
+			await tick();
+			press('hangup');
+			expect(controls.hangup).toHaveBeenCalledTimes(1);
+			expect(postMessage).toHaveBeenCalledTimes(sent);
+		} finally { delete win.shuffleShell; delete window.__SHUFFLE_MOBILE__; }
+	});
+	it('reports nothing and ignores call events on the website', async () => {
+		render(ActiveVoiceCallBar, { onReturn: vi.fn() });
+		window.dispatchEvent(new CustomEvent('shufflevoicecall', { detail: { command: 'hangup' } }));
+		expect(controls.hangup).not.toHaveBeenCalled();
 	});
 	it('reconciles on visibility return without starting another call', async () => {
 		render(ActiveVoiceCallBar, { onReturn: vi.fn() });

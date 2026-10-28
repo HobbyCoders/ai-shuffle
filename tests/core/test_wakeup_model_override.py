@@ -4,8 +4,6 @@ A ScheduleWakeup wake used to fire on the profile's DEFAULT model even when the
 scheduling turn ran with a per-query model override — re-priming the prompt cache
 on the wrong model. The scheduling turn's effective model is now persisted on the
 wakeup row and replayed as the wake TURN's ``overrides={"model": ...}``.
-
-Idle-watchdog wakes (``source="idle_watchdog"``) stay model-less by design.
 """
 
 from tests.conftest import async_twin
@@ -26,24 +24,12 @@ def _existing_wake_profile(mock_db):
 
 
 @pytest.fixture(autouse=True)
-def _reset_watchdog_state():
+def _reset_wakeup_timers():
     from app.core import wakeup_service
-    wakeup_service._watchdog_cooldown.clear()
     yield
-    wakeup_service._watchdog_cooldown.clear()
     for task in list(wakeup_service._timers.values()):
         task.cancel()
     wakeup_service._timers.clear()
-
-
-def _usage(total, max_tokens=200_000):
-    """A raw SDK context-usage payload with an explicit ~92% autocompact edge."""
-    return {
-        "totalTokens": total,
-        "maxTokens": max_tokens,
-        "isAutoCompactEnabled": True,
-        "autoCompactThreshold": int(max_tokens * 0.92),
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -146,41 +132,13 @@ async def test_fire_without_model_passes_no_overrides(mock_db, monkeypatch):
                       instance_id=settings.effective_instance_id,
                       profile_id="pr", project_id="pj")
     row = {"id": "w2", "session_id": "s2", "prompt": "p2", "profile_id": "pr",
-           "project_id": "pj", "source": "idle_watchdog", "model": None}
+           "project_id": "pj", "source": "schedule_wakeup", "model": None}
 
     await wakeup_service._fire(row)
 
     assert len(calls) == 1
     assert calls[0]["source"] == "wakeup"
     assert calls[0]["overrides"] is None
-
-
-# ---------------------------------------------------------------------------
-# the watchdog stays model-less
-# ---------------------------------------------------------------------------
-
-async def test_watchdog_arms_model_less_row(mock_db, monkeypatch):
-    from app.core import wakeup_service
-    from app.db import database
-    from app.db import wakeups as wdb
-
-    sid = "wd-model-less"
-    database.create_session(session_id=sid, profile_id="default")
-    database.set_session_context_usage(session_id=sid, data=_usage(190_000))
-
-    # let the real schedule() run (so a real row lands) but never fire a query
-    monkeypatch.setattr(wakeup_service, "_arm", lambda row, delay: None)
-
-    nudged = await wakeup_service.scan_once()
-
-    assert nudged == [sid]
-    rows = [
-        r for r in wdb.get_pending_wakeups(settings.effective_instance_id)
-        if r["session_id"] == sid
-    ]
-    assert len(rows) == 1
-    assert rows[0]["source"] == "idle_watchdog"
-    assert rows[0]["model"] is None
 
 
 # ---------------------------------------------------------------------------

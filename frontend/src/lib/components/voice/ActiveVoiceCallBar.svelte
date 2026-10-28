@@ -12,6 +12,8 @@
 	 * In the desktop app it can also pop out into its own always-on-top window
 	 * (desktop/src/main/call-popout.ts). This page keeps the call and the audio:
 	 * the window only mirrors the state below and sends button presses back.
+	 * The Android app's ongoing call notification does the same
+	 * (voiceCallNative.ts): it keeps the call alive behind the lock screen.
 	 */
 	import { onMount, tick } from 'svelte';
 	import { Mic, MicOff, PhoneOff, Volume2, VolumeX, ArrowUpRight, GripVertical, PictureInPicture2, Undo2 } from 'lucide-svelte';
@@ -20,7 +22,8 @@
 	import { sessions } from '$lib/stores/app-data.svelte';
 	import NotificationSlot from '$lib/components/NotificationSlot.svelte';
 	import { DOCK_ORDER } from '$lib/stores/notification-dock.svelte';
-	import { voiceCallState, isCallSurfaceActive, toggleMic, toggleAgent, hangup, reconcileVoiceCall, MIC_PROBLEM_LABEL } from '$lib/services/voiceCall';
+	import { voiceCallState, isCallSurfaceActive, toggleMic, toggleAgent, hangup, reconcileVoiceCall, showCallNotice, MIC_PROBLEM_LABEL } from '$lib/services/voiceCall';
+	import { nativeCallControls, NOTIFICATIONS_OFF_NOTICE } from '$lib/services/voiceCallNative';
 	import { loadCallBarPosition, saveCallBarPosition, toFraction, type CallBarPosition } from '$lib/services/voiceCallBarPosition';
 	import { desktop, type DesktopCallState } from '$lib/services/desktop';
 
@@ -34,6 +37,7 @@
 	const title = $derived(owner?.title || 'Voice session');
 
 	const popout = desktop?.voiceCall ?? null;
+	const nativeCall = nativeCallControls();
 	let poppedOut = $state(false);
 	const visible = $derived(active && away && !poppedOut);
 
@@ -138,7 +142,20 @@
 		popout.update(snapshot());
 	});
 
+	// The phone app's call notification follows the call (title, mute, elapsed time).
+	$effect(() => {
+		nativeCall?.report(active ? { status: call.status, micMuted: !!call.micMuted, startedAt: call.startedAt ?? null } : null, owner?.title);
+	});
+
 	onMount(() => {
+		const offNative = nativeCall?.onCommand((command) => {
+			const current = $voiceCallState;
+			if (!isCallSurfaceActive(current, current.sessionId)) return;
+			if (command === 'mute' && !current.micMuted) toggleMic();
+			else if (command === 'unmute' && current.micMuted) toggleMic();
+			else if (command === 'hangup') void hangup();
+			else if (command === 'notifications-off') showCallNotice(NOTIFICATIONS_OFF_NOTICE);
+		});
 		const reconcile = () => {
 			if (document.visibilityState === 'visible') void reconcileVoiceCall();
 		};
@@ -158,6 +175,7 @@
 			endDrag();
 			offCommand?.();
 			offClosed?.();
+			offNative?.();
 			// Nothing here would answer the pop-out's buttons any more.
 			if (poppedOut) popout?.close();
 		};

@@ -239,6 +239,8 @@ true only when the app showing the page offers `name`:
 | `microphone` | yes | yes | `getUserMedia` audio for the page's own voice mode |
 | `device-tools` | yes | no | phone tools the worker can call on this device |
 | `worker-switch` | yes | no | the app connects to another paired worker when the page navigates to `/mobile/?connect=<origin>` |
+| `voice-routing` | yes | no | the app follows headset routes while the page reports a call (`voice-call` over `shuffleShell`) |
+| `voice-call-controls` | yes | no | the app keeps a call running with the phone locked, with an ongoing notification; the page reports `voice-call-state` and answers its Mute/Hang up as a `shufflevoicecall` window event |
 
 Both are false on the web UI and in app builds from before the descriptor.
 Those builds bundle their own UI, so they never show a worker page anyway.
@@ -282,6 +284,12 @@ says so over the `shuffleShell` web-message bridge, which is scoped like
   bar, `false` when it goes. The app hides or restores its bar.
 - `{"type":"workers"}` from the sheet's "Pair, rename or remove workers"
   button, which opens the app's Workers screen.
+- `{"type":"voice-call","active":…}` and `{"type":"voice-call-state",…}`
+  from the voice call (`frontend/src/lib/services/voiceCall.ts` and
+  `voiceCallNative.ts`): the app follows headset routes and keeps the call
+  running with the phone locked, with an ongoing notification whose Mute and
+  Hang up buttons come back as a `shufflevoicecall` window event. Details in
+  `android/docs/native-chat-capabilities.md`.
 
 A worker UI from before the page drew its own worker switcher sends nothing, so the app keeps
 its own bar there. The app also restores its bar when the page fails to load

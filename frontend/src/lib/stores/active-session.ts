@@ -938,6 +938,20 @@ function accessForCompose(mode: SessionMode, current: string | null): string | n
 	return remembered && current === noProjectPermission(remembered) ? remembered : current;
 }
 
+/**
+ * The checkout of a compose newChat kept (left unsent for another chat): its
+ * project, worktree and Auto base stay as picked. Only a remembered branch it
+ * did not hold comes back over Auto: one a create was spending when the owner
+ * left, which that create then failed to spend.
+ */
+function keptComposeCheckout() {
+	const project = {project:_state.project, projectV2Id:_state.projectV2Id};
+	if (_state.worktreeIntent !== 'worktree') return {};
+	const remembered = composerCheckoutDefaults(true, {projectId:project.project, projectV2Id:project.projectV2Id}, project);
+	return remembered.worktreeBranch || remembered.selectedWorktreeBranch
+		? {...remembered, worktreeIntent:_state.worktreeIntent} : {};
+}
+
 export const activeSession = {
 	get current() { return _state; },
 
@@ -967,7 +981,10 @@ export const activeSession = {
 		setSkipRestore(true);
 		bumpInitGeneration();
 		const restoredDraft = switcher.newChat();
-		if (!restoredDraft) activeSession.applyComposerDefaults();
+		// A new session only opens with a project when it kept the place of
+		// the compose left unsent: the run binding follows the account
+		// defaults, but its project, branch and worktree stay as picked.
+		if (!restoredDraft) activeSession.applyComposerDefaults({ keepCheckout: _state.mode !== 'chat' });
 	},
 
 	// ── Messaging (delegated to message-sender) ─────────────────────
@@ -1384,7 +1401,7 @@ export const activeSession = {
 	},
 
 	/** Remote defaults may update an idle composer, never an existing session or typed draft. */
-	applyComposerDefaults() {
+	applyComposerDefaults({ keepCheckout = false }: { keepCheckout?: boolean } = {}) {
 		if (_state.sessionId || hasComposerDraft(_state.draft) || _state.worktreeBranch || composerBusy()) return;
 		const picks = composerPreferences.current;
 		const code = _state.mode !== 'chat';
@@ -1392,12 +1409,13 @@ export const activeSession = {
 			profile:picks.profile, modelOverride:picks.model, effortLevelOverride:composerPreferences.effortForModel(picks.model) ?? s.effortLevelOverride,
 			permissionModeOverride:code ? normalizePermissionMode(picks.permissionMode) : noProjectPermission(normalizePermissionMode(picks.permissionMode)), fastMode:fastModeForModel(picks.model, picks.fastMode === '1'),
 			contextWindowChoice:getPersistedContextWindowChoice(),
-			...composerCheckoutDefaults(code),
+			...(keepCheckout ? keptComposeCheckout() : composerCheckoutDefaults(code)),
 		}));
 		// A remembered project applied before the catalog is in is a placeholder
 		// (#1636): remember exactly what it set so the catalog can finish it.
+		// A kept checkout was picked from a resolved catalog; nothing to finish.
 		const remembered = !!(picks.project.projectId || picks.project.projectV2Id);
-		_checkoutBeforeCatalog = code && remembered && !appData.projectCatalogLoaded ? checkoutSnapshot() : null;
+		_checkoutBeforeCatalog = code && !keepCheckout && remembered && !appData.projectCatalogLoaded ? checkoutSnapshot() : null;
 	},
 
 	/**

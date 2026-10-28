@@ -1,7 +1,7 @@
 """A SendMessage continuation still reports when a wakeup turn parks beside it (#123).
 
 The sequence that stranded four workers: a continuation parks on a Monitor; a
-synthetic wakeup turn (the idle-at-edge watchdog's ``/compact``, or the
+synthetic wakeup turn (once the idle-at-edge watchdog's ``/compact``; now the
 agent's own ScheduleWakeup) starts while it is parked, carries no
 ``agent_message_reply_to`` and parks too; the Monitor's unpark wake resumes
 that newest parked turn; the turn-start self-heal settles the continuation
@@ -249,28 +249,14 @@ async def test_displaced_failure_never_drops_kept_parent_report(env, monkeypatch
     assert "displaced continuation" in caplog.text
 
 
-@pytest.mark.parametrize("wakeup", ["idle_watchdog", "schedule_wakeup"])
-async def test_continuation_reports_after_a_wakeup_parks_beside_it(env, wakeup):
+@pytest.mark.parametrize("prompt", ["/compact", "Check on CI."])
+async def test_continuation_reports_after_a_wakeup_parks_beside_it(env, prompt):
     continuation = await _parked_continuation(env)
 
-    if wakeup == "idle_watchdog":
-        # Layer 1: a parked session is not idle, so the watchdog never picks it.
-        from app.core.config import settings
-        from app.db import wakeups as wakeups_db
-        from app.db.database import get_db
-
-        with get_db() as conn:
-            conn.cursor().execute(
-                "UPDATE sessions SET instance_id=%s, context_usage_json=%s WHERE id=%s",
-                (settings.effective_instance_id, '{"used": 9}', WORKER),
-            )
-        assert WORKER not in {
-            c["id"] for c in wakeups_db.idle_edge_candidates(settings.effective_instance_id)
-        }
-    # The wake fires anyway (a nudge armed before the park, or the agent's own
-    # ScheduleWakeup): a new turn with no parent link that parks on the same
-    # still-running Monitor.
-    prompt = "/compact" if wakeup == "idle_watchdog" else "Check on CI."
+    # A wake fires anyway (the agent's own ScheduleWakeup, or a usage-reset
+    # resume's compaction): a new turn with no parent link that parks on the
+    # same still-running Monitor. (The retired idle watchdog used to be one;
+    # compact-then-continue never starts a turn beside a parked one.)
     nudge = turns.enqueue_turn(WORKER, "wakeup", prompt=prompt, profile_id="default")
     assert "agent_message_reply_to" not in nudge["payload"]
     await _run(env.reg, nudge, _text("Compacted."), expect="parked")

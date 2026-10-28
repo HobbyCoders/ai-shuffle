@@ -71,17 +71,51 @@ def test_expand_offset_windows_large_content() -> None:
     assert "continue with offset" not in tail  # nothing left to page
 
 
+def test_an_expansion_at_the_maximum_survives_native_intake() -> None:
+    """The whole result fits max_chars, so a 50k expansion is not stubbed by
+    the 50k tool-result intake and paging still reaches every character."""
+    from fluid.context.recall import MAX_EXPAND_CHARS
+
+    body = "".join(f"{i:07d}" for i in range(20_000))  # 140k distinct chars
+    nodes = [_node("node_aa22", "user", [Text(body)])]
+    seen, offset = "", 0
+    while True:
+        text, is_error = expand_ref(nodes, "node_aa22", offset=offset, max_chars=MAX_EXPAND_CHARS)
+        assert not is_error and len(text) <= MAX_EXPAND_CHARS
+        assert len(text) <= CompactionConfig().tool_result_stub_chars
+        header, _, window = text.partition("\n")
+        seen += window
+        if "continue with offset=" not in header:
+            break
+        offset = int(header.rsplit("offset=", 1)[1].rstrip("]"))
+    assert seen == "user (node_aa22): " + body
+
+
 # ─── search_path ─────────────────────────────────────────────────────────────
 
 
-def test_expand_leaves_out_reminders_appended_to_user_text() -> None:
+def test_a_range_collapses_reminders_and_points_at_the_node() -> None:
     reminder = "<system-reminder>\n" + "deferred tool catalog entry\n" * 200 + "</system-reminder>"
-    nodes = [_node("node_ee55", "user", [Text("use sol workers, not opus" + reminder)])]
-    text, is_error = expand_ref(nodes, "node_ee55")
+    nodes = [_node("node_ee55", "user", [Text("use sol workers, not opus" + reminder)]),
+             _node("node_ee56", "assistant", [Text("ok")])]
+    text, is_error = expand_ref(nodes, "node_ee55..node_ee56")
     assert not is_error
     assert "use sol workers, not opus" in text
     assert "deferred tool catalog" not in text
-    assert f"[{len(reminder)} chars of <system-reminder> harness text omitted]" in text
+    assert (f'[{len(reminder)} chars of <system-reminder> text collapsed; '
+            f'HistoryExpand("node_ee55") shows them]') in text
+
+
+def test_reminder_content_stays_recoverable_by_both_tools() -> None:
+    """Nothing marks which reminder is regenerable plumbing and which holds
+    the only copy of something (a completion receipt, hook context), so the
+    node's own ref shows it whole and search finds it."""
+    receipt = "<system-reminder>Task bg-7 finished: UNIQUE_COMPLETION_RECEIPT</system-reminder>"
+    nodes = [_node("node_ab12", "user", [Text("Continue task." + receipt)])]
+    text, _ = expand_ref(nodes, "node_ab12")
+    assert receipt in text
+    [hit] = search_path(nodes, "UNIQUE_COMPLETION_RECEIPT")
+    assert hit.node_id == "node_ab12"
 
 
 def test_expand_keeps_a_reminder_only_wake_verbatim() -> None:

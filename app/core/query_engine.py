@@ -1357,6 +1357,9 @@ async def stream_query(
         set_turn_source = getattr(state.adapter, "set_turn_source", None)
         if callable(set_turn_source):
             set_turn_source(getattr(options, "aih_turn_source", None))
+        set_emergency = getattr(state.adapter, "set_emergency_compaction", None)
+        if callable(set_emergency):
+            set_emergency(bool(getattr(options, "aih_emergency_compaction", False)))
         await state.adapter.send_query(prompt)
 
         async for message in state.adapter.receive_events():
@@ -2795,6 +2798,9 @@ async def _stream_to_websocket_impl(
         set_turn_source = getattr(state.adapter, "set_turn_source", None)
         if callable(set_turn_source):
             set_turn_source(getattr(options, "aih_turn_source", None))
+        set_emergency = getattr(state.adapter, "set_emergency_compaction", None)
+        if callable(set_emergency):
+            set_emergency(bool(getattr(options, "aih_emergency_compaction", False)))
         # Serialize with the owner's live setter, and reconcile after every
         # setup await (checkout, option build, model switch and connect). The
         # read and comparison have no intervening await; a failed setter goes

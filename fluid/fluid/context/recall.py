@@ -163,14 +163,18 @@ def _image_note(count: int, caption: str) -> str:
     )
 
 
-def _user_text_for_recall(text: str) -> str:
-    """User text with its <system-reminder> blocks left out.
+def _user_text_for_recall(text: str, node_id: str) -> str:
+    """User text for a range expansion: <system-reminder> blocks collapsed to
+    a marker that names the single-node ref which shows them.
 
-    Reminders appended to a user turn are harness plumbing (tool catalogs,
-    ledger recitations) that the harness re-injects on fresh turns; one
-    expanded request once came back carrying 6k chars of them. A text that is
-    nothing but reminders stays verbatim, because a wake that fluid delivers
-    as a single reminder block holds the only copy of its task reports.
+    Reminders appended to a user turn are mostly harness plumbing (tool
+    catalogs, ledger recitations) the harness re-injects on fresh turns; one
+    expanded range once came back carrying 6k chars of them. But a reminder
+    can also hold the only copy of something (hook context, an attachment, a
+    task's completion receipt), and nothing marks which, so nothing is
+    dropped: ``HistoryExpand`` of the node alone returns it whole and
+    ``HistorySearch`` indexes it. A text that is nothing but reminders stays
+    verbatim here too.
     """
     removed = sum(len(m.group(0)) for m in _REMINDER_RE.finditer(text))
     if not removed:
@@ -178,18 +182,26 @@ def _user_text_for_recall(text: str) -> str:
     kept = _REMINDER_RE.sub("", text).strip()
     if not kept:
         return text
-    return f"{kept} [{removed} chars of <system-reminder> harness text omitted]"
+    return (f'{kept} [{removed} chars of <system-reminder> text collapsed; '
+            f'HistoryExpand("{node_id}") shows them]')
 
 
-def _render_node(node: SessionNode) -> str:
-    """Verbatim plain-text rendering of one stored node."""
+def _render_node(node: SessionNode, *, reminders: bool = True) -> str:
+    """Verbatim plain-text rendering of one stored node.
+
+    ``reminders=False`` (range expansions) collapses <system-reminder>
+    blocks in user text to a marker naming this node's ref
+    (:func:`_user_text_for_recall`); a single-node expansion and the search
+    index keep them.
+    """
     lines: list[str] = []
     role = node.message.role
     loose_images = 0
     for block in node.message.content:
         if isinstance(block, Text):
             text = (
-                _user_text_for_recall(block.text) if role == "user" else block.text
+                _user_text_for_recall(block.text, node.node_id)
+                if role == "user" and not reminders else block.text
             )
             lines.append(f"{role} ({node.node_id}): {text}")
         elif isinstance(block, ToolUseBlock):
@@ -260,18 +272,34 @@ def expand_ref(
     i, j = index[start], index[end]
     if j < i:
         i, j = j, i
-    text = "\n".join(_render_node(n) for n in nodes[i : j + 1])
+    # One node is shown whole; a range collapses reminders (each marker names
+    # the node ref that shows them).
+    whole = i == j
+    text = "\n".join(_render_node(n, reminders=whole) for n in nodes[i : j + 1])
     max_chars = min(max(1, max_chars), MAX_EXPAND_CHARS)
     offset = max(0, offset)
-    window = text[offset : offset + max_chars]
-    header = f"[history {ref} — {len(text)} chars total"
-    if offset or len(text) > offset + max_chars:
-        shown_end = min(len(text), offset + max_chars)
-        header += f"; showing {offset}..{shown_end}"
-        if shown_end < len(text):
-            header += f'; continue with offset={shown_end}'
-    header += "]"
-    return f"{header}\n{window}", False
+
+    def header_for(size: int) -> str:
+        header = f"[history {ref} — {len(text)} chars total"
+        if offset or len(text) > offset + size:
+            shown_end = min(len(text), offset + size)
+            header += f"; showing {offset}..{shown_end}"
+            if shown_end < len(text):
+                header += f'; continue with offset={shown_end}'
+        return header + "]"
+
+    # The whole result (header, newline, window) stays within max_chars: at
+    # the documented maximum a header on top pushed it past the 50k intake
+    # stub, and the model got a preview of the text it asked to read.
+    size = max_chars
+    for _ in range(3):  # the header's digits settle in a pass or two
+        header = header_for(size)
+        fitted = max(1, max_chars - len(header) - 1)
+        if fitted == size:
+            break
+        size = fitted
+    header = header_for(size)
+    return f"{header}\n{text[offset : offset + size]}", False
 
 
 @dataclass(frozen=True, kw_only=True)

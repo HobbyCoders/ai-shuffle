@@ -61,7 +61,9 @@ import java.io.ByteArrayInputStream
  * replaces the native worker-name bar. The paired session is handed to the
  * page as a Bearer token through a document-start script, never as a cookie.
  * Voice calls are the page's own (the same as the website); the shell grants
- * the microphone and follows headset routes while the page has a call.
+ * the microphone and follows headset routes while the page has a call, and
+ * keeps the call running behind the lock screen with an ongoing notification
+ * (VoiceCallKeeper, VoiceCallService).
  */
 class ChatActivity : NativeScreen() {
     private lateinit var server: Server
@@ -94,6 +96,14 @@ class ChatActivity : NativeScreen() {
     private var nativeBar: View? = null
     private var shellBridgeInstalled = false
     private var voiceRouting: VoiceAudioRouting? = null
+    private lateinit var voiceCall: VoiceCallKeeper
+    private lateinit var callNotifications: CallNotificationAsk
+    private var notificationDialogOpen = false
+    private val notificationPermission = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) {
+        notificationDialogOpen = false
+        // Posted before the grant, the call's notification stayed hidden: post it again.
+        if (VoiceCallService.notificationsShown(this)) voiceCall.refresh() else voiceCall.notificationsOff()
+    }
     /** Whether the loaded page said it draws its own "Connected to" bar. False until told. */
     @androidx.annotation.VisibleForTesting internal var pageRendersWorkerBar = false
         private set
@@ -130,6 +140,12 @@ class ChatActivity : NativeScreen() {
         sessionOwner = ChatSessionOwner(this, server)
         if (!authorized()) { finish(); return }
         ServerStore.get(this).markUsed(server.id)
+        voiceCall = VoiceCallKeeper(this, server.id, server.name,
+            visible = { lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED) },
+            microphoneAllowed = { ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED },
+            send = { command -> if (voiceCall.document == document && validDocument()) web.evaluateJavascript(MobileUi.voiceCallEventScript(command), null) },
+            keptAliveChanged = ::callKeptAliveChanged)
+        callNotifications = CallNotificationAsk(getSharedPreferences(CallNotificationAsk.PREFS, MODE_PRIVATE))
         web = WebView(this)
         // getSettings starts Chromium synchronously. On a cold WebView 151,
         // registering a document-start script before this throws
@@ -164,9 +180,16 @@ class ChatActivity : NativeScreen() {
                 catch (_: Exception) { fileChooserOpen = false; fileCallback = null; callback.onReceiveValue(null); true }
             }
             override fun onPermissionRequest(request: PermissionRequest) {
-                if (!validMicrophone(request) || microphoneDialogOpen || !microphoneForeground()) { request.deny(); return }
+                // Off screen, only the page that owns a call the service keeps in the
+                // foreground may reopen its microphone (a headset change, a silent track),
+                // and only with Android's permission already granted: no dialog is shown.
+                val backgroundCall = voiceCall.allowsBackgroundMicrophone(document)
+                if (!validMicrophone(request) || microphoneDialogOpen || !(microphoneForeground() || backgroundCall)) { request.deny(); return }
                 if (ContextCompat.checkSelfPermission(this@ChatActivity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
                     request.grant(arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+                    microphoneGranted()
+                } else if (!microphoneForeground()) {
+                    request.deny()
                 } else {
                     microphone?.deny()
                     microphone = request
@@ -388,7 +411,13 @@ class ChatActivity : NativeScreen() {
                             if (validDocument()) web.evaluateJavascript("window.dispatchEvent(new Event('voiceaudiochange'))", null)
                         }
                         voiceRouting?.start()
-                    } else voiceRouting?.stop()
+                        voiceCall.started(document)
+                        callKeptAlive()
+                    } else endVoiceCall()
+                }
+                is MobileUi.ShellMessage.VoiceCallState -> {
+                    voiceCall.update(document, parsed)
+                    if (parsed.status == "live") askForCallNotifications()
                 }
                 null -> Unit
             }
@@ -411,13 +440,69 @@ class ChatActivity : NativeScreen() {
             request.deny(); microphone = null; microphoneReady = false
         } else if (microphoneReady && microphoneForeground()) {
             microphone = null; microphoneReady = false
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
                 request.grant(arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
-            else request.deny()
+                microphoneGranted()
+            } else request.deny()
+        }
+    }
+    /** The page has its microphone: a call waiting for it can now be kept alive. */
+    private fun microphoneGranted() {
+        if (!voiceCall.active) return
+        callKeptAlive()
+        askForCallNotifications()
+    }
+    /** Asks for the call's service while chat is on screen ([callKeptAliveChanged] follows). */
+    private fun callKeptAlive() { voiceCall.keepAlive() }
+    private var rendererPriority: Pair<Int, Boolean>? = null
+    /**
+     * The service went foreground: the renderer keeps its priority off screen. Or it
+     * no longer keeps the call alive: restore the renderer, and if chat is already
+     * off screen pause it as onStop would have.
+     */
+    private fun callKeptAliveChanged(kept: Boolean) {
+        if (!::web.isInitialized || isDestroyed) return
+        if (kept) {
+            if (rendererPriority == null) rendererPriority = web.rendererRequestedPriority to web.rendererPriorityWaivedWhenNotVisible
+            web.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+            askForCallNotifications()
+            return
+        }
+        rendererPriority?.let { (priority, waived) -> web.setRendererPriorityPolicy(priority, waived) }
+        rendererPriority = null
+        if (!lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) web.onPause()
+    }
+    private fun endVoiceCall() {
+        voiceRouting?.stop()
+        if (::voiceCall.isInitialized) voiceCall.ended()
+    }
+    /**
+     * Android 13+: ask once, on a call that is kept alive, only while chat is on
+     * screen and after its microphone grant (two permission dialogs cannot share
+     * the screen); retried on resume until shown. It counts as asked only once the
+     * dialog was launched (CallNotificationAsk). If the notification cannot show,
+     * the call still runs; the page says so.
+     */
+    private fun askForCallNotifications() {
+        val next = callNotifications.next(voiceCall.keptAlive,
+            visible = lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED),
+            dialogOpen = notificationDialogOpen || microphoneDialogOpen,
+            shown = VoiceCallService.notificationsShown(this),
+            granted = android.os.Build.VERSION.SDK_INT < 33 ||
+                ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)
+        when (next) {
+            CallNotificationAsk.Next.NOTHING -> Unit
+            CallNotificationAsk.Next.TELL_PAGE -> voiceCall.notificationsOff()
+            CallNotificationAsk.Next.ASK -> {
+                notificationDialogOpen = true
+                runCatching { notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS) }
+                    .onSuccess { callNotifications.launched() }
+                    .onFailure { notificationDialogOpen = false }
+            }
         }
     }
     private fun cancelPagePermissions() {
-        voiceRouting?.stop()
+        endVoiceCall()
         microphone?.deny(); microphone = null; microphoneReady = false
         fileCallback?.onReceiveValue(null); fileCallback = null
     }
@@ -427,10 +512,15 @@ class ChatActivity : NativeScreen() {
     }
     override fun onStop() {
         if (::downloads.isInitialized) downloads.background()
+        // A call kept alive (VoiceCallService) keeps its page running: audio, socket
+        // and timers. Without one, chat pauses as before. A pending microphone request
+        // is never the call's own reopen (that is granted at once, see onPermissionRequest),
+        // so it is denied as before.
+        val callRunning = ::voiceCall.isInitialized && voiceCall.keepsRunningInBackground()
         // The Android permission UI can stop this activity. Keep its request until
         // the result, then recheck both the document generation and account.
         if (!microphoneDialogOpen) { microphone?.deny(); microphone = null; microphoneReady = false }
-        if (::web.isInitialized) { DeviceToolsRuntime.detach(this); web.onPause() }
+        if (::web.isInitialized) { DeviceToolsRuntime.detach(this); if (!callRunning) web.onPause() }
         sessionAttempt++
         WebSessionBootstrap.cancel(sharedAttempt)
         sessionJob?.cancel()
@@ -442,7 +532,7 @@ class ChatActivity : NativeScreen() {
         if (::web.isInitialized) {
             if (!authorized()) finish()
             else {
-                web.onResume(); web.post { completeMicrophonePermission() }
+                web.onResume(); web.post { completeMicrophonePermission(); callKeptAlive(); askForCallNotifications() }
                 DeviceToolsRuntime.attach(this, server)
                 web.post { if (needsSession && !isFinishing && authorized()) startSession() }
             }
@@ -552,7 +642,7 @@ class ChatActivity : NativeScreen() {
         }
     }
     override fun onDestroy() {
-        voiceRouting?.stop()
+        endVoiceCall()
         workerDocumentAllowed = false
         workerAssets.cancel()
         if (::fileNotice.isInitialized) { fileNotice.clear(); savedNotice.clear() }

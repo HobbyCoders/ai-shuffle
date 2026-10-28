@@ -30,8 +30,9 @@ def create_schema(cursor: Any) -> None:
     cursor.execute("""CREATE TABLE IF NOT EXISTS owner_working_acknowledgements (
         item_id TEXT PRIMARY KEY, owner_key TEXT NOT NULL,
         acknowledged_at TIMESTAMP WITH TIME ZONE NOT NULL)""")
-    # A local admission receipt, not shared owner state. Source session ownership
-    # already serializes hand-off. Fresh context is never a fork of the old SDK id.
+    # Receipts of the retired automatic coordinator hand-off. Nothing writes
+    # new rows; existing rows stay, and spending_limits still reads a
+    # successor's inherited job time from them.
     cursor.execute("""CREATE TABLE IF NOT EXISTS coordinator_handoffs (
         source_session_id TEXT PRIMARY KEY, successor_session_id TEXT NOT NULL,
         turn_id TEXT NOT NULL, prior_work_ms BIGINT NOT NULL DEFAULT 0,

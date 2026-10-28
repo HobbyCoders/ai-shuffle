@@ -16,6 +16,10 @@ A project is a folder on your worker, usually a code repository. Chats started i
 4. Give it a display name and a project ID (lowercase letters, numbers and hyphens).
 5. Choose **Add Project**.
 
+You can also ask an agent to add a project in an owner conversation with app configuration tools enabled. `listProjects` lists projects on the current worker. `createProject` takes a `name` and optional `id`, `path` and `description`. Without a path it creates a folder in the workspace; a supplied path attaches that folder, creating it if needed. Docker paths must stay in the workspace. These tools do not clone Git URLs.
+
+Creation follows the same approval rules as other app configuration writes: Ask prompts before it runs. An existing project with the same name or resolved folder path on this worker is refused rather than added twice.
+
 ## Files
 
 Browse, upload, download, rename and delete a project's files from the file browser. See [File Management](/docs/features/file-management).
