@@ -17,10 +17,20 @@ describe('streaming composer actions', () => {
 		const dock = readFileSync(resolve(process.cwd(), 'src/lib/components/chat/ControlsDock.svelte'), 'utf8');
 		expect(dock).not.toContain('isRemoteOnlyCompose');
 		expect(dock).not.toContain('attachmentBlockReason');
-		expect(source).toContain('projectRulesLane(composerMode)');
+		expect(source).toContain('projectRulesLane(composerMode, projectlessSubagent)');
 		const sender = readFileSync(resolve(process.cwd(), 'src/lib/stores/session/message-sender.ts'), 'utf8');
 		expect(sender).toContain('upload_paths: (!remoteOnly || !!_state.sessionId)');
 	});
+	it('lets the owner message a subagent that has no project', () => {
+		// A worker started from the owner's no-project chat is stored with no
+		// mode (read as code) and no project. Its chat must follow the chat
+		// lane's project rules, or every send says "Select a project first."
+		expect(source).toMatch(/const projectlessSubagent = \$derived\(\s*!!\$activeSession\.sessionId && \$subagentChats\.has\(\$activeSession\.sessionId\)\s*&& !\$activeSession\.project && !\$activeSession\.projectV2Id\s*\);/);
+		// The send guard and the attachment gates all read that one lane.
+		expect(source).toContain('mode: projectLane');
+		expect(source).not.toMatch(/projectRulesLane\(composerMode\)/);
+	});
+
 	it('counts serialized file references and legacy uploads as sendable content', () => {
 		expect(source).toContain('const hasMessageContent = $derived(hasComposerDraft(inputValue) || uploadedFiles.length > 0)');
 		expect(source).toContain('hasPrompt: !!finalPrompt.trim() || uploadedFiles.length > 0');
