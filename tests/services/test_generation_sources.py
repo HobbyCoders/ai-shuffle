@@ -75,7 +75,7 @@ async def test_verified_api_table_drives_catalog_settings_pricing_and_submission
 async def test_api_images_unverified_never_reads_credentials_or_opens_transport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.core import native_generation_settings as native
+    from app.core import native_generation_settings as native, native_image_verification as verification
     from app.core.provider import api_images
     from app.db import database
 
@@ -84,13 +84,15 @@ async def test_api_images_unverified_never_reads_credentials_or_opens_transport(
 
     monkeypatch.setattr(database, "get_model_provider", forbidden)
     monkeypatch.setattr(api_images, "http_client", forbidden)
+    unverified = native.NativeImageSettings(model="unverified", size="auto", quality="auto", format="png")
+    # With the reviewed records, an unrecorded combination is refused before
+    # any credential read; with no record, the provider is not verified at all.
     for source in ("openai", "xai"):
-        items, warning = await api_images.generate(
-            "api", source, "tree",
-            native.NativeImageSettings(
-                model="unverified", size="auto", quality="auto", format="png",
-            ),
-        )
+        items, warning = await api_images.generate("api", source, "tree", unverified)
+        assert items == [] and warning and "No retry" in warning
+    monkeypatch.setattr(verification, "VERIFIED_API_IMAGES", {})
+    for source in ("openai", "xai"):
+        items, warning = await api_images.generate("api", source, "tree", unverified)
         assert items == [] and "not yet verified" in warning
 
 PRICE = {"currency": "USD", "unit": "item", "amount": "0.05", "total": "0.05", "status": "estimated"}
@@ -127,7 +129,8 @@ def backend(monkeypatch):
     return source
 
 
-async def test_catalog_does_not_serialize_credentials_and_uses_verified_table(backend):
+async def test_catalog_does_not_serialize_credentials_and_uses_verified_table(backend, monkeypatch):
+    from app.core import native_image_verification as verification
     entries = await backend.local_catalog("image")
     assert {e.source for e in entries} == {"fal", "chatgpt", "supergrok", "openai", "xai"}
     assert "never-return-this" not in repr([e.view() for e in entries])
@@ -137,9 +140,15 @@ async def test_catalog_does_not_serialize_credentials_and_uses_verified_table(ba
     # Plan images have no per-item charge: a known zero, never an unknown price.
     assert chatgpt.price == INCLUDED_PRICE
     assert next(e for e in entries if e.source == "supergrok").price == INCLUDED_PRICE
-    assert all(e.price == UNKNOWN_PRICE for e in entries if e.source in ("openai", "xai"))
+    # Reviewed API records: the exact model, priced for the longest prompt.
+    for name in ("openai", "xai"):
+        api = next(e for e in entries if e.source == name)
+        record = verification.verified(name)
+        assert api.verified and api.available and api.model == record.model
+        assert api.price == record.price()
+    monkeypatch.setattr(verification, "VERIFIED_API_IMAGES", {})
     api = (await backend.local_catalog("image", source="api-a"))[0]
-    assert not api.available and not api.verified
+    assert not api.available and not api.verified and api.price == UNKNOWN_PRICE
 
 
 async def test_fal_declared_options_reach_price_and_execution_identically(backend, monkeypatch, tmp_path):
