@@ -2969,12 +2969,16 @@ class HarnessAdapter(ProviderAdapter):
         from app.core.provider import fluid_transcript
 
         cwd = os.path.abspath(options.cwd) if options.cwd else os.getcwd()
+        # The window the CLI is pinned to: a transcript over what it compacts
+        # at is compacted before it is written (fluid_transcript._fit_window).
+        window = await asyncio.to_thread(_delegated_context_window, options)
         result = await asyncio.to_thread(
             fluid_transcript.reseed_delegated_cli_session,
             fluid_session_id,
             cwd,
             fluid_transcript.cli_projects_root(options.env),
             force=True,
+            context_window=window,
         )
         if result.status != "reseeded" or not result.cli_session_id:
             logger.warning(

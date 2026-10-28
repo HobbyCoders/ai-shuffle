@@ -1255,7 +1255,7 @@ def build_cli_transcript_entries(
         }
         if role == "user" and entry.get("isCompactSummary"):
             # The summary of an earlier CLI compaction, flagged the way the
-            # CLI flags its own (see :func:`_after_cli_compaction`).
+            # CLI flags its own (see :func:`_after_compaction`).
             line["isCompactSummary"] = True
         if role == "user":
             line["message"] = {"role": "user", "content": content}
@@ -1415,7 +1415,7 @@ def cli_transcript_prompt_tail(
     longer than ``tail_bytes``, so earlier prompts were not read, and when it
     holds a compaction summary: a transcript re-seeded from a compacted
     context starts at that summary, so the prompts before it are not in the
-    file at all (:func:`_after_cli_compaction`).
+    file at all (:func:`_after_compaction`).
     """
     with open(path, "rb") as handle:
         handle.seek(0, os.SEEK_END)
@@ -1690,33 +1690,161 @@ def _after_checkpoint(
     return [*replayed, *rest]
 
 
-def _after_cli_compaction(
-    sdk_session_id: str, entries: List[Dict[str, Any]]
+def _is_cli_compaction(event: Dict[str, Any]) -> bool:
+    """A boundary the Claude Code CLI reported (``cli_*``), not one Fluid's
+    own native ladder decided."""
+    return str(event.get("reason") or "").startswith("cli_")
+
+
+def _session_nodes(path: Sequence[Dict[str, Any]]) -> List[Any]:
+    """Node rows (:func:`load_fluid_path`) as fluid ``SessionNode`` objects."""
+    from fluid.messages import Message
+    from fluid.store.base import SessionNode
+
+    return [
+        SessionNode(
+            node_id=row.get("node_id"),
+            parent_id=row.get("parent_id"),
+            message=Message.from_dict(_as_dict(row.get("message"))),
+            ts=float(row.get("ts") or 0.0),
+        )
+        for row in path
+    ]
+
+
+def _native_rows_on_path(
+    rows: Sequence[Dict[str, Any]], on_path: set
 ) -> List[Dict[str, Any]]:
-    """``entries`` as the Claude Code CLI last held them: from its latest
-    compaction on, when the session has one.
+    """The event rows of native ``ContextCompaction`` decisions that belong
+    to the current path, in ``seq`` order.
+
+    A decision anchored to a node a rewind left behind was made on that
+    branch and is skipped, like a summary or checkpoint off the path. An
+    older event with no anchor applies when every node it names is on the
+    path.
+    """
+    kept: List[Dict[str, Any]] = []
+    for row in rows:
+        event = _as_dict(row.get("event"))
+        if _is_cli_compaction(event):
+            continue
+        anchor = event.get("node_id")
+        if anchor:
+            if anchor not in on_path:
+                continue
+        elif not _compaction_node_ids(event) <= on_path:
+            continue
+        kept.append(row)
+    return kept
+
+
+def _native_view(
+    sdk_session_id: str,
+    entries: List[Dict[str, Any]],
+    nodes: Sequence[Any],
+    events: Sequence[Dict[str, Any]],
+) -> Optional[List[Dict[str, Any]]]:
+    """``entries`` as the native loop sends them under its persisted
+    compaction decisions; None when they change nothing (or fluid's compactor
+    is unavailable).
+
+    The native loop rebuilds its view on resume by replaying every
+    ``ContextCompaction`` into a :class:`~fluid.context.compaction.Compactor`
+    (``NativeLoop._rehydrate_compaction``); this replays the same decisions
+    under the same config, so a Claude Code CLI re-seeded after a native
+    compaction starts from the context the native model last saw, not the
+    whole stored history. Digests, epochs and trimmed results all name their
+    stored nodes, so ``HistoryExpand`` / ``HistorySearch`` still reach
+    everything they stand for. A message the view leaves unchanged keeps its
+    own entry (with its images).
+    """
+    if not events or len(nodes) != len(entries):
+        return None
+    try:
+        from fluid.context.compaction import Compactor, Promotion
+
+        from app.core.provider.harness_adapter import _compaction_config
+    except ImportError:
+        logger.warning("fluid re-seed: fluid's compactor is not importable")
+        return None
+    compactor = Compactor(config=_compaction_config())
+    compactor.rehydrate(
+        Promotion(
+            tier=int(event.get("tier") or 1),
+            reason=str(event.get("reason") or "trigger"),
+            trimmed=tuple(
+                (str(pair[0]), str(pair[1])) for pair in event.get("trimmed") or []
+                if isinstance(pair, (list, tuple)) and len(pair) == 2
+            ),
+            spans=tuple(
+                (str(span[0]), str(span[1]), str(span[2]))
+                for span in event.get("spans") or []
+                if isinstance(span, (list, tuple)) and len(span) == 3
+            ),
+            # Written before the field existed: rendered as version 1.
+            render_version=int(event.get("render_version") or 1),
+            summary_text=str(event.get("summary") or ""),
+            path_end=event.get("node_id"),
+            intent_pin_tokens=event.get("intent_pin_tokens"),
+        )
+        for event in events
+    )
+    out: List[Dict[str, Any]] = []
+    changed = False
+    for first, last, message in compactor.view_segments(list(nodes)):
+        if first == last and message is nodes[first].message:
+            out.append(entries[first])
+            continue
+        changed = True
+        out.append(_node_to_entry({
+            "node_id": None, "parent_id": None, "ts": nodes[last].ts,
+            "message": message.to_dict(),
+        }, sdk_session_id))
+    if not changed or not out:
+        return None
+    if out[0] is not entries[0] and out[0].get("type") == "user":
+        # The prompts the opening fold stands for are not in the file (see
+        # cli_transcript_prompt_tail).
+        out[0] = {**out[0], "isCompactSummary": True}
+    logger.info(
+        "fluid re-seed: session %s starts from its native Fluid compaction "
+        "(%d decisions; %d messages for %d stored)",
+        sdk_session_id, len(events), len(out), len(entries),
+    )
+    return out
+
+
+def _after_compaction(
+    sdk_session_id: str,
+    entries: List[Dict[str, Any]],
+    nodes: Optional[Sequence[Any]] = None,
+) -> List[Dict[str, Any]]:
+    """``entries`` from the session's newest applicable compaction on,
+    whichever provider made it.
 
     fluid's node tree keeps the whole conversation; a compaction is only an
     event. Re-seeding a CLI from the tree alone handed it back everything a
-    ``/compact`` (or the CLI's own compaction) had folded away, which is how a
-    session that moved to another worker came back at full size (#1820). The
-    delegated leg's ``ContextCompaction`` carries the CLI's summary and the
-    node it compacted after, so the transcript becomes that summary (flagged
-    ``isCompactSummary``, as the CLI flags its own) followed by the entries
-    after that node.
+    compaction had folded away, which is how a session that moved to another
+    worker, or switched to Claude Code after a native compaction, came back
+    at full size (#1820). Three kinds of compaction apply, newest first:
 
-    The newest compaction with a summary whose node is on the current path
-    wins. One whose node is off the path belongs to a branch a rewind left
-    behind and is skipped; one recorded between turns (no node) is placed by
-    its timestamp. Returns ``entries`` unchanged when no compaction applies.
-    Never raises.
+    * the CLI's own summary (a ``cli_*`` ``ContextCompaction`` with its
+      summary and the node it compacted after): that summary (flagged
+      ``isCompactSummary``, as the CLI flags its own) and the entries after
+      that node. One recorded between turns (no node) is placed by its time;
+    * Fluid's mechanical compaction of Claude Code's rows, which persists a
+      ``CompactionCheckpoint`` (#685): its rows (the first flagged like a
+      summary, since the prompts before it are not in the file) and the
+      entries after the node they cover;
+    * Fluid's native compaction (any other ``ContextCompaction``): the view
+      the native loop sends under every native decision on the path
+      (:func:`_native_view`).
 
-    Fluid's mechanical compaction writes no summary; it persists a
-    ``CompactionCheckpoint`` instead (#685): rows that stand for the stored
-    path through one node. When that is the newest applicable compaction the
-    transcript becomes those rows (the first flagged like a summary, since
-    the prompts before it are not in the file) followed by the entries after
-    that node, so a worker move does not replay the whole conversation.
+    A compaction whose node is off the current path belongs to a branch a
+    rewind left behind and is skipped. ``nodes`` are the path's
+    ``SessionNode`` objects, index-aligned with ``entries``; they are loaded
+    when needed and not given. Returns ``entries`` unchanged when no
+    compaction applies. Never raises.
     """
     if not entries:
         return entries
@@ -1736,6 +1864,7 @@ def _after_cli_compaction(
         )
         return entries
     index = {entry.get("uuid"): i for i, entry in enumerate(entries)}
+    native = _native_rows_on_path(rows, set(index))
     candidates = sorted(
         [*rows, *checkpoints], key=lambda row: row.get("seq") or 0,
     )
@@ -1746,7 +1875,27 @@ def _after_cli_compaction(
                 return replaced
             continue
         event = _as_dict(row.get("event"))
-        if not str(event.get("reason") or "").startswith("cli_"):
+        if not _is_cli_compaction(event):
+            if not any(kept is row for kept in native):
+                continue  # a rewound-away branch's decision
+            try:
+                if nodes is None:
+                    nodes = _session_nodes(load_fluid_path(sdk_session_id))
+                # Every native decision up to this one: the native loop
+                # replays them all, and never reads a CLI compaction.
+                upto = [
+                    _as_dict(kept.get("event")) for kept in native
+                    if (kept.get("seq") or 0) <= (row.get("seq") or 0)
+                ]
+                viewed = _native_view(sdk_session_id, entries, nodes, upto)
+            except Exception:
+                logger.warning(
+                    "fluid re-seed could not render %s's native compaction; "
+                    "trying older compactions", sdk_session_id, exc_info=True,
+                )
+                viewed = None
+            if viewed is not None:
+                return viewed
             continue
         summary = event.get("summary")
         if not isinstance(summary, str) or not summary.strip():
@@ -1788,12 +1937,245 @@ def _after_cli_compaction(
     return entries
 
 
+#: The window a re-seed is sized against when the host cannot name one
+#: (``fluid.engine.claude_mod_compaction.DEFAULT_CONTEXT_WINDOW``).
+RESEED_DEFAULT_WINDOW = 200_000
+#: Claude Code compacts at its window less an output reserve (at most this)
+#: and a fixed buffer (this).
+_CLI_OUTPUT_RESERVE_TOKENS = 20_000
+_CLI_AUTOCOMPACT_BUFFER_TOKENS = 13_000
+#: Characters per token a re-seed estimate assumes: Claude Code's own local
+#: estimator's rate (see ``environment.apply_provider_env``), denser than
+#: Fluid's chars/4, so a transcript is never judged smaller than the CLI's
+#: count of it.
+_RESEED_CHARS_PER_TOKEN = 3
+
+
+def reseed_compaction_threshold(context_window: int) -> int:
+    """Tokens past which a re-seeded transcript is compacted before it is
+    written: where Claude Code itself compacts under
+    ``CLAUDE_CODE_AUTO_COMPACT_WINDOW=context_window``, never under half the
+    window."""
+    window = max(int(context_window), 1)
+    reserve = min(_CLI_OUTPUT_RESERVE_TOKENS, window // 4)
+    return max(window // 2, window - reserve - _CLI_AUTOCOMPACT_BUFFER_TOKENS)
+
+
+def _estimated_tokens(entries: Sequence[Dict[str, Any]]) -> int:
+    """A conservative token estimate of what the entries hand the CLI."""
+    chars = sum(
+        len(json.dumps((entry.get("message") or {}).get("content"), ensure_ascii=False))
+        for entry in entries
+    )
+    return chars // _RESEED_CHARS_PER_TOKEN
+
+
+def delegated_window_for(sdk_session_id: str) -> int:
+    """The Claude Code window the app session bound to this fluid session
+    runs at (``HarnessAdapter``'s ``_delegated_context_window``), for a
+    re-seed whose caller has no connect options (rewind, fork)."""
+    try:
+        from types import SimpleNamespace
+
+        from app.db.base import get_cursor, get_db
+        from app.db.compat import ph
+
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            cursor.execute(
+                f"SELECT model, provider_id, context_window FROM sessions "
+                f"WHERE sdk_session_id = {ph()} LIMIT 1",
+                (sdk_session_id,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return RESEED_DEFAULT_WINDOW
+        row = dict(row)
+        from app.core.provider.harness_adapter import _delegated_context_window
+
+        return int(_delegated_context_window(SimpleNamespace(
+            model=row.get("model"),
+            extra={"context_window": row.get("context_window"),
+                   "provider_id": row.get("provider_id")},
+        )) or RESEED_DEFAULT_WINDOW)
+    except Exception:
+        logger.warning(
+            "fluid re-seed could not resolve %s's Claude Code window; sizing "
+            "against %d", sdk_session_id, RESEED_DEFAULT_WINDOW, exc_info=True,
+        )
+        return RESEED_DEFAULT_WINDOW
+
+
+def _entry_row(entry: Dict[str, Any], paired: set) -> Optional[Dict[str, Any]]:
+    """One transcript entry in the Claude mod's row projection
+    (``claude_mod_compaction.project``): its text, its paired tool calls and
+    results. None for an entry with none of them (thinking or an image
+    alone), which a re-seed drops anyway."""
+    message = entry.get("message") or {}
+    role = message.get("role")
+    if role not in _RESEEDABLE_TYPES:
+        return None
+    content = message.get("content")
+    if isinstance(content, str):
+        content = [{"type": "text", "text": content}]
+    if not isinstance(content, list):
+        return None
+    row: Dict[str, Any] = {"role": role, "text": "", "toolUses": []}
+    texts: List[str] = []
+    results: List[Dict[str, Any]] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "text":
+            texts.append(block.get("text") or "")
+        elif kind == "tool_use" and role == "assistant" and block.get("id") in paired:
+            row["toolUses"].append({
+                "tool_use_id": block["id"], "tool": block.get("name") or "",
+                "input": block.get("input") if isinstance(block.get("input"), dict) else {},
+            })
+        elif kind == "tool_result" and role == "user" and block.get("tool_use_id") in paired:
+            inner = block.get("content")
+            text = inner if isinstance(inner, str) else "".join(
+                str(part.get("text") or "") for part in inner or []
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+            results.append({"tool_use_id": block["tool_use_id"], "text": text,
+                            "isError": bool(block.get("is_error"))})
+    row["text"] = "".join(texts)
+    if results:
+        row["toolResults"] = results
+    if not row["text"] and not row["toolUses"] and not results:
+        return None
+    return row
+
+
+def _append_archive(sdk_session_id: str, archive: Sequence[Dict[str, str]]) -> None:
+    """Persist the rows a re-seed's compaction took out of context that the
+    stored path does not hold (``ContextArchived``), so the note's refs
+    resolve through ``HistoryExpand`` / ``HistorySearch``. Raises on failure.
+
+    The event takes the next ``seq``. A re-seed runs before the connect's
+    engine seeds its bus from the stored maximum (rewind evicts the pooled
+    client first; a fork's session is new), so nothing else numbers events
+    for this session meanwhile; a collision anyway retries on the next seq.
+    """
+    from psycopg2.extras import Json
+
+    from fluid.events.model import ContextArchived, event_to_dict
+
+    from app.core.pg_session_store import _scrub_pg_illegal
+    from app.db.base import get_cursor, get_db
+    from app.db.compat import ph
+
+    payload = event_to_dict(ContextArchived(
+        session_id=sdk_session_id, entries=tuple(dict(e) for e in archive),
+        ts=time.time(),
+    ))
+    payload["entries"] = [dict(e) for e in archive]
+    for _ in range(5):
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            cursor.execute(
+                f"SELECT seq FROM fluid_session_events WHERE session_id = {ph()} "
+                f"ORDER BY seq DESC LIMIT 1",
+                (sdk_session_id,),
+            )
+            row = cursor.fetchone()
+            payload["seq"] = (int(dict(row)["seq"]) if row else 0) + 1
+            cursor.execute(
+                f"INSERT INTO fluid_session_events (session_id, seq, event) "
+                f"VALUES ({ph()}, {ph()}, {ph()}) "
+                f"ON CONFLICT (session_id, seq) DO NOTHING",
+                (sdk_session_id, payload["seq"], Json(_scrub_pg_illegal(payload))),
+            )
+            if cursor.rowcount:
+                return
+    raise RuntimeError("no free event seq for the re-seed archive")
+
+
+def _fit_window(
+    sdk_session_id: str,
+    entries: List[Dict[str, Any]],
+    nodes: Optional[Sequence[Any]],
+    context_window: int,
+) -> List[Dict[str, Any]]:
+    """``entries``, compacted mechanically when they would hand Claude Code
+    more than it compacts at (:func:`reseed_compaction_threshold`).
+
+    Why here and not at the CLI's first compaction: a re-seeded transcript
+    carries no usage (every assistant entry reports 0 tokens), so Claude Code
+    cannot see its size until the first request has already sent all of it,
+    and that request can be larger than the window. So the guard runs on
+    every re-seed (provider switch, worker move, fork, rewind).
+
+    It is the same compaction Claude Code's own threshold would get through
+    the mod (``claude_mod_compaction.compact_messages``), run against the
+    stored path: digests and epochs name their stored nodes, and rows the
+    path does not hold (a CLI summary, a checkpoint's own rows) leave
+    through the compaction note after being archived, so everything trimmed
+    stays recoverable through ``HistoryExpand`` / ``HistorySearch``. No model
+    is called. Returns ``entries`` unchanged when they fit, when nothing can
+    be reclaimed, or on any failure (logged), and never raises.
+    """
+    threshold = reseed_compaction_threshold(context_window)
+    before = _estimated_tokens(entries)
+    if before <= threshold:
+        return entries
+    try:
+        from fluid.engine.claude_mod_compaction import compact_messages
+
+        if nodes is None:
+            nodes = _session_nodes(load_fluid_path(sdk_session_id))
+        paired = _paired_tool_ids(entries)
+        rows: List[Dict[str, Any]] = []
+        origin: Dict[int, Dict[str, Any]] = {}
+        for position, entry in enumerate(entries):
+            row = _entry_row(entry, paired)
+            if row is None:
+                continue
+            row["handle"] = f"reseed-{position}"
+            origin[id(row)] = entry
+            rows.append(row)
+        archive: List[Dict[str, str]] = []
+        compacted = compact_messages(
+            rows, list(nodes), context_window=context_window, trigger="manual",
+            archive=archive,
+        )
+        if archive:
+            _append_archive(sdk_session_id, archive)
+    except Exception as exc:  # NothingToCompact is a ValueError
+        logger.warning(
+            "fluid re-seed: session %s is ~%d tokens, over the %d-token "
+            "threshold of a %d window, and could not be compacted (%s: %s); "
+            "writing it whole", sdk_session_id, before, threshold,
+            context_window, type(exc).__name__, exc,
+        )
+        return entries
+    stamp = entries[-1].get("timestamp")
+    out: List[Dict[str, Any]] = []
+    for row in compacted:
+        entry = origin.get(id(row)) or _checkpoint_entry(row, stamp, sdk_session_id)
+        if entry is not None:
+            out.append(entry)
+    if out and out[0] is not entries[0] and out[0].get("type") == "user":
+        out[0] = {**out[0], "isCompactSummary": True}
+    logger.info(
+        "fluid re-seed: session %s compacted from ~%d to ~%d tokens for a %d "
+        "window (threshold %d; %d rows archived), no summarizer",
+        sdk_session_id, before, _estimated_tokens(out), context_window,
+        threshold, len(archive),
+    )
+    return out
+
+
 def reseed_delegated_cli_session(
     sdk_session_id: str,
     working_dir: str,
     projects_dir: Optional[Path] = None,
     *,
     force: bool = False,
+    context_window: Optional[int] = None,
 ) -> ReseedResult:
     """Re-seed the delegated CLI from fluid's (already rewound) context.
 
@@ -1807,6 +2189,12 @@ def reseed_delegated_cli_session(
     connect uses it too (``HarnessAdapter._resolve_cli_session_id``), when the
     session ran on another provider, its transcript is not on this worker, or
     turns ran elsewhere since the CLI last saw it.
+
+    The transcript starts from the newest applicable compaction, whichever
+    provider made it (:func:`_after_compaction`), and is compacted further
+    when it would still exceed what Claude Code compacts at in
+    ``context_window`` (:func:`_fit_window`; resolved from the bound app
+    session when not given).
 
     Never raises: a failed re-seed is a degraded rewind (the store is still
     correct, only the CLI's own history is stale), and the caller reports that
@@ -1830,9 +2218,18 @@ def reseed_delegated_cli_session(
         return ReseedResult(status="skipped")
 
     try:
-        entries = _after_cli_compaction(
-            sdk_session_id, fluid_transcript_entries(sdk_session_id)
-        )
+        path = load_fluid_path(sdk_session_id)
+        entries = [_node_to_entry(node, sdk_session_id) for node in path]
+        try:
+            nodes: Optional[List[Any]] = _session_nodes(path)
+        except ImportError:  # no compactor to render or fit with either
+            nodes = None
+        entries = _after_compaction(sdk_session_id, entries, nodes)
+        if entries:
+            entries = _fit_window(
+                sdk_session_id, entries, nodes,
+                context_window or delegated_window_for(sdk_session_id),
+            )
         new_cli_session_id = str(_uuid.uuid4())
         lines = build_cli_transcript_entries(
             entries, new_cli_session_id, working_dir
@@ -2047,7 +2444,8 @@ def fork_fluid_session(
     # failed rewind re-seed).
     if working_dir and source_had_cli:
         reseed = reseed_delegated_cli_session(
-            new_id, working_dir, projects_dir, force=True
+            new_id, working_dir, projects_dir, force=True,
+            context_window=delegated_window_for(source_sdk_session_id),
         )
         if reseed.status == "failed":
             logger.warning(
