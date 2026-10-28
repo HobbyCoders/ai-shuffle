@@ -591,10 +591,11 @@ def _roots_for(cur, session_ids: List[str]) -> Dict[str, str]:
 # ─── Sessions another worker runs ────────────────────────────────────────────
 #
 # A chat another worker of the owner's network runs is mirrored here as a
-# ``sessions`` row plus its ``session_events``. ``sdk_session_id`` is local-only
-# (never mirrored), so the mirror has none and no transcript-store row exists
-# on this worker: its recall reads the events, under its app id. Chats this
-# worker runs are never read this way — their store rows answer.
+# ``sessions`` row plus its ``session_events``. Ownership chooses the transcript
+# for listing, search and recall: a different owner on an enrolled worker reads
+# the event mirror under the app id, even when a moved chat retains its old
+# local ``sdk_session_id`` and store rows. Local and unowned chats still read
+# their store rows; unlinked store ids also keep their local recall.
 
 _EVENT_TEXT_TYPES = ("message.user", "message.assistant", "assistant.text_delta")
 _EVENT_VIEW_TYPES = _EVENT_TEXT_TYPES + ("tool.use", "tool.result")
@@ -620,12 +621,15 @@ def _worker_name(device_id: Optional[str]) -> str:
     return name[:_WORKER_ID_CHARS] if name == device_id else name
 
 
+def _uses_mirror(row: Optional[Dict[str, Any]], me: Optional[str]) -> bool:
+    """Ownership, not a leftover local store id, decides the recall source."""
+    owner = (row or {}).get("owner_device_id")
+    return bool(me and owner and owner != me)
+
+
 def _remote_sql(alias: str = "") -> str:
-    """WHERE fragment for a sessions row another worker runs (one ``%s``: me)."""
-    return (
-        f"{alias}sdk_session_id IS NULL AND {alias}owner_device_id IS NOT NULL "
-        f"AND {alias}owner_device_id <> %s"
-    )
+    """SQL prefilter for ``_uses_mirror`` (one ``%s``: the enrolled worker)."""
+    return f"NULLIF({alias}owner_device_id, '') IS NOT NULL AND {alias}owner_device_id <> %s"
 
 
 def _in(values: List[str]) -> str:
@@ -1058,9 +1062,20 @@ def _search_sync(
             )
         excluded = _exclusion_ids(cur, exclude_session_id)
         not_excluded = f"session_id NOT IN ({_in(excluded)})" if excluded else "TRUE"
+        # A moved chat may retain both app-id and store-id transcripts here.
+        # Exclude those stale copies before either local arm's ranking/caps;
+        # its current owner's mirror is searched separately under the app id.
+        local_excluded = list(excluded)
+        if me:
+            cur.execute(
+                f"SELECT id, sdk_session_id, owner_device_id FROM sessions WHERE {_remote_sql()}", (me,)
+            )
+            local_excluded += [sid for row in cur.fetchall() if _uses_mirror(row, me)
+                               for sid in (row["id"], row["sdk_session_id"]) if sid]
+        local_where = f"session_id NOT IN ({_in(local_excluded)})" if local_excluded else "TRUE"
         likes = [_like_pattern(t) for t in terms]
         scope = _scope_ids(cur, api_user_id, reader) if indexed else None
-        indexed_where, indexed_params = not_excluded, list(excluded)
+        indexed_where, indexed_params = local_where, list(local_excluded)
         if scope is not None:
             indexed_where += " AND session_id = ANY(%s)"
             indexed_params.append(scope)
@@ -1073,7 +1088,7 @@ def _search_sync(
         else:
             native = _top_rows(
                 cur, "fluid_session_nodes", "recall_text" if cached else "message::text", "ts",
-                not_excluded, excluded, "session_id, ts, message", patterns,
+                local_where, local_excluded, "session_id, ts, message", patterns,
             )
         for row in native:
             message = _as_dict(row["message"])
@@ -1091,7 +1106,7 @@ def _search_sync(
         else:
             delegated = _top_rows(
                 cur, "session_store_entries", "recall_text" if cached else "entry::text", "created_at",
-                f"subpath IS NULL AND {not_excluded}", excluded,
+                f"subpath IS NULL AND {local_where}", local_excluded,
                 "session_id, created_at, entry", patterns,
             )
         for row in delegated:
@@ -1405,7 +1420,7 @@ def _recent_sync(
         roots = _roots_for(cur, [r["sdk_session_id"] for r in rows if r["sdk_session_id"]])
         out: List[SessionSummary] = []
         for row in rows:
-            remote = not row["sdk_session_id"]
+            remote = _uses_mirror(row, me)
             store_id = row["id"] if remote else row["sdk_session_id"]
             preview, count = (
                 _event_preview_sync(cur, store_id) if remote
@@ -1439,9 +1454,7 @@ def _resolve_recall_sync(cur, session_id: str):
     )
     row = cur.fetchone()
     row = dict(row) if row else None
-    me = _my_device_id()
-    owner = (row or {}).get("owner_device_id")
-    if me and owner and owner != me:
+    if _uses_mirror(row, _my_device_id()):
         return row["id"], _event_recall_rows(cur, row["id"]), row, True
     for arm in (_fluid_recall_rows, _sse_recall_rows):
         messages = arm(cur, session_id)
