@@ -36,6 +36,26 @@ billing them twice. Compaction still uses Fluid's history boundaries (a manual
 `/compact` is its own turn). Handoff still refuses live background work; normal
 transcript export and event replay retain the shared turn identity.
 
+## Turns cut off at the context limit
+
+When a Claude Code turn stops because its conversation no longer fits, the
+turn's `turn.completed` carries `terminal_reason: "needs_compaction"` (Claude
+Code reported `blocking_limit` or `prompt_too_long`). If nothing you sent is
+queued, AI Shuffle then queues two turns together: a `/compact` (Fluid's own
+compaction) and one continuation that asks the agent to pick up where it left
+off. The continuation is labelled `[auto-continue]` and starts only after the
+compaction worked. A failed compaction is retried up to three times; if it
+still fails, or there was nothing more to compact, the continuation is dropped
+and the chat says the work paused. A message you send meanwhile replaces the
+continuation, and Stop cancels both turns. A continuation that is cut off again
+gets its own compaction and continuation, up to 20 in a row without a message
+from you. Native chats compact before every model request and never need this.
+Turn it off with `AUTO_CONTINUE_ON_COMPACT=false`.
+
+A usage-limit resume that compacts first queues its `/compact` and the resume
+the same way, as one admission, so nothing can land between them and a
+retried resume does not queue them twice.
+
 ## One-Shot Query
 
 ### POST /api/v1/query

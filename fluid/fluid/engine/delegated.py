@@ -2260,6 +2260,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # host handles it like the same status from any provider.
                 status=mapper.failed_status,
                 provider_message=mapper.failed_provider_message,
+                # The CLI stopped at the context limit: the host compacts and
+                # continues the work instead of leaving it cut off.
+                outcome=mapper.failed_outcome,
             ))
             return mapper
         return mapper

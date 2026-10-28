@@ -710,18 +710,6 @@ def start_background_tasks() -> List[asyncio.Task]:
     tasks.append(asyncio.create_task(session_handoff.on_boot()))
     tasks.append(asyncio.create_task(handoff.history_recovery_loop()))
 
-    # Idle-at-edge watchdog: periodic sweep that nudges sessions sitting
-    # idle above the context-window edge so the CLI runs its deferred compaction
-    # instead of parking forever. Flag-gated (IDLE_WATCHDOG_ENABLED).
-    if settings.idle_watchdog_enabled:
-        tasks.append(asyncio.create_task(wakeup_service.watchdog_loop()))
-        logger.info(
-            "Idle-at-edge watchdog started "
-            f"(every {int(settings.idle_watchdog_interval_seconds)}s, "
-            f">= {settings.idle_watchdog_context_fraction * 100:.0f}% context)"
-        )
-    else:
-        logger.info("Idle-at-edge watchdog disabled (IDLE_WATCHDOG_ENABLED=false)")
 
     # Reports owed by Task children other workers started here: delivered
     # at boot and retried until their parent acknowledges them.

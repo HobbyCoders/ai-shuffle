@@ -379,6 +379,18 @@ CWD_FAILURE_KEY = "working_directory_failure"
 # request); it must not turn a platform message into permission to retry.
 CWD_OWNER_SOURCES = frozenset({"user", "queue", "resume", "api", "worktree"})
 
+# Compact-first pairs the app admits on its own: compact-then-continue after a
+# context-limit stop (``auto_continue``) and the usage-reset resume (``wakeup``).
+AUTOMATIC_PAIR_SOURCES = frozenset({"auto_continue", "wakeup"})
+
+# Payload key linking both rows of a compact-then-continue pair to the turn
+# the context limit cut off (``app.core.compact_continue.PAYLOAD_KEY``).
+COMPACTION_CONTINUATION_KEY = "compaction_continuation"
+
+# The usage-reset resume's marker (``app.core.limit_resume.PAYLOAD_KEY``): kept
+# on its compact row too, so the hold on automatic turns lets both rows run.
+LIMIT_RESUME_KEY = "limit_resumed"
+
 # A scoped terminal-task Stop lives on its targeted turn. The session-row lock
 # serializes it with admission/claim, including an owner's newer message.
 TASK_STOP_KEY = "terminal_task_stop"
@@ -579,6 +591,9 @@ def enqueue_turn(
         # Compact first is one admission: no claimant (or concurrent send) can
         # observe a compact without its follow-up. Both rows survive failure of
         # the compact; ordinary settlement drains the follow-up on any outcome.
+        # The automatic pairs (compact-then-continue, usage-reset resume) use
+        # the same admission; their follow-up is the app's, not a message the
+        # owner typed, so it is never written as one.
         payload = dict(payload or {})
         if payload.pop("compact_first", False):
             compact = enqueue_turn(
@@ -586,11 +601,13 @@ def enqueue_turn(
                 project_id=project_id, worktree_id=worktree_id, overrides=overrides,
                 explicit_permission=explicit_permission,
                 payload={k: v for k, v in payload.items()
-                         if k in ("api_user_id", "user_id", "forwarded_by_device")},
+                         if k in ("api_user_id", "user_id", "forwarded_by_device",
+                                  COMPACTION_CONTINUATION_KEY, LIMIT_RESUME_KEY)},
                 instance_id=instance_id, _conn=conn,
             )
             payload["compact_before_turn_id"] = compact["id"]
-            payload["deferred_user_record"] = True
+            if source not in AUTOMATIC_PAIR_SOURCES:
+                payload["deferred_user_record"] = True
         # All producers reach this boundary, including scheduler retries/unpark
         # and atomic AskUser answers that bypass turn_manager. Snapshot the
         # acknowledged pin and the stored folders, not an older turn's copy.
@@ -1115,6 +1132,15 @@ def settle_turn(
     return result
 
 
+def _owner_compact_follow_up(row: Optional[Dict[str, Any]]) -> bool:
+    """A compact-first follow-up carrying words the owner sent (not the app's
+    own continuation or resume prompt, which must never read as Not sent)."""
+    payload = (row or {}).get("payload") or {}
+    return bool(payload.get("compact_before_turn_id")) and (
+        (row or {}).get("source") not in AUTOMATIC_PAIR_SOURCES
+    )
+
+
 def remove_queued_turn(
     turn_id: str, stop_reason: str = "removed_from_queue", *, preserve_compact_first: bool = False,
 ) -> Optional[Dict[str, Any]]:
@@ -1147,6 +1173,7 @@ def remove_queued_turn(
             (stop_reason, turn_id),
         )
         row = _row(cursor.fetchone())
+        preserve_compact_first = preserve_compact_first and _owner_compact_follow_up(row)
         if (row and preserve_compact_first
                 and (row.get("payload") or {}).get("compact_before_turn_id")):
             from app.db import sessions, session_events
@@ -1164,6 +1191,55 @@ def remove_queued_turn(
     if row and preserve_compact_first and (row.get("payload") or {}).get("compact_before_turn_id"):
         session_events.notify_session_write(row["session_id"], "session_events")
     return row
+
+
+def retry_pair_compaction(continuation_id: str, attempt: int) -> Optional[Dict[str, Any]]:
+    """Queue compaction attempt ``attempt`` in front of a queued continuation.
+
+    One transaction under the session admission lock: the new ``/compact`` is
+    placed before every queued row and the continuation is re-pointed at it,
+    so no claimant sees the continuation without the compaction it waits for.
+    Idempotent per attempt (``command_id`` ``<continuation command>-compact-<n>``):
+    a repeated call returns the row the first one made. ``None`` when the
+    continuation has left the queue.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM turns WHERE id=%s", (continuation_id,))
+        row = _row(cursor.fetchone())
+        if row is None:
+            return None
+        session_id = row["session_id"]
+        cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+        cursor.execute("SELECT * FROM turns WHERE id=%s AND state='queued'", (continuation_id,))
+        row = _row(cursor.fetchone())
+        if row is None:
+            return None
+        command_id = f"{row.get('command_id') or continuation_id}-compact-{int(attempt)}"
+        existing = get_turn_by_command(session_id, command_id, _conn=conn)
+        if existing is not None:
+            return existing
+        payload = dict(row["payload"])
+        link = {**(payload.get(COMPACTION_CONTINUATION_KEY) or {}), "attempt": int(attempt)}
+        compact = enqueue_turn(
+            session_id, row["source"], prompt="/compact", profile_id=row.get("profile_id"),
+            project_id=row.get("project_id"), worktree_id=row.get("worktree_id"),
+            overrides=row.get("overrides") or None,
+            payload={**{k: v for k, v in payload.items()
+                        if k in ("api_user_id", "user_id", "forwarded_by_device")},
+                     COMPACTION_CONTINUATION_KEY: link},
+            command_id=command_id, parent_turn_id=row.get("parent_turn_id"),
+            instance_id=row.get("instance_id"), at_front=True, _conn=conn,
+        )
+        if not compact.get("id"):
+            return None  # Stop or a filesystem breaker refused the admission
+        payload["compact_before_turn_id"] = compact["id"]
+        payload[COMPACTION_CONTINUATION_KEY] = link
+        cursor.execute(
+            "UPDATE turns SET payload=%s WHERE id=%s AND state='queued'",
+            (json.dumps(payload), continuation_id),
+        )
+        return compact
 
 
 def absorb_queued_turn(turn_id: str) -> bool:

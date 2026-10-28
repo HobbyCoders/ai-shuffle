@@ -117,6 +117,15 @@ class TurnComplete(Event):
     num_model_calls: int
     usage: dict[str, Any] = field(default_factory=dict)
     cost_usd: float | None = None
+    # Why the work stopped, when that is not "the model finished":
+    # :data:`NEEDS_COMPACTION` means the turn ended because its context must be
+    # compacted before the unfinished work can go on. ``None`` otherwise.
+    outcome: str | None = None
+
+
+#: ``TurnComplete.outcome`` / ``ErrorEvent.outcome``: the turn stopped because
+#: the conversation no longer fits; compacting it lets the work continue.
+NEEDS_COMPACTION = "needs_compaction"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -168,6 +177,9 @@ class ErrorEvent(Event):
     # response body with HTML stripped), at most ~300 characters. ``message``
     # may carry the raw body; this is what a person should read.
     provider_message: str | None = None
+    # Set when the error ended the turn because its context no longer fits
+    # (:data:`NEEDS_COMPACTION`): compacting, then continuing, recovers it.
+    outcome: str | None = None
 
 
 # ─── Streaming content ───────────────────────────────────────────────────────

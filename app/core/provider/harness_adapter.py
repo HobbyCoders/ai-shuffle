@@ -150,6 +150,7 @@ from fluid.context.peer import PROMPT_BLOCK as PEER_MESSAGE_BLOCK
 from fluid.engine.native import NativeLoop
 from fluid.engine.delegated import ClaudeCliMissingError, DelegatedLoop
 from fluid.hooks.bus import HookBus
+from fluid.events.model import NEEDS_COMPACTION
 from fluid.events.ops import (
     AgentMessage,
     BackgroundTaskFinished,
@@ -4437,7 +4438,11 @@ class HarnessAdapter(ProviderAdapter):
             ]
 
         if cls == "TurnComplete":
-            if event.stop_reason.startswith("safety_limit:"):
+            if getattr(event, "outcome", None) == NEEDS_COMPACTION:
+                # The engine says the work stopped for a compaction; the
+                # scheduler reads this from the durable terminal payload.
+                terminal_reason = NEEDS_COMPACTION
+            elif event.stop_reason.startswith("safety_limit:"):
                 terminal_reason = "safety_limit"
             elif event.stop_reason == "max_calls":
                 terminal_reason = "max_turns"
@@ -4546,6 +4551,11 @@ class HarnessAdapter(ProviderAdapter):
                     usage=self._stamp_usage_estimated(usage),
                     uuid=self._uuid(event),
                     api_error_status=status,
+                    # A stop at the context limit: compact, then continue.
+                    terminal_reason=(
+                        NEEDS_COMPACTION
+                        if getattr(event, "outcome", None) == NEEDS_COMPACTION else None
+                    ),
                 )
             ]
 

@@ -2,15 +2,15 @@
 (v2 core, Phase 2 A5).
 
 Plan §5 coverage: policy ORDER (failover before queue drain before
-auto-continue), the queue drain firing on EVERY settle outcome
+compact-then-continue), the queue drain firing on EVERY settle outcome
 (completed/parked/aborted/error — the old F4 preserve-on-stop rule is retired),
-failover cap + no message re-append, the durable #557 auto-continue
-derivation, unpark prompt synthesis, and the shutdown kick guard.
+failover cap + no message re-append, the compact-then-continue admission,
+unpark prompt synthesis, and the shutdown kick guard.
 
 The turns/session_events tables are exercised for real (pg_shim SQLite).
 Collaborators are patched at the CONSUMER module bindings the scheduler
 resolves lazily at call time (``session_runtime.execute``,
-``account_failover.attempt_failover``, ``compact_continue`` predicates,
+``account_failover.attempt_failover``,
 ``query_engine._read_task_output_file``) — the lazy-import-mock-freeze rule.
 """
 
@@ -65,10 +65,14 @@ def _terminal_event(
     stop_reason="end_turn",
     api_error_status=None,
     api_error_message=None,
+    terminal_reason=None,
 ):
     """Seed the settled turn's terminal turn.completed event — what the A5
-    recorder amendment writes (stop_reason + optional api_error_*)."""
+    recorder amendment writes (stop_reason + optional api_error_* and the
+    engine's terminal_reason)."""
     payload = {"stop_reason": stop_reason, "usage": {}}
+    if terminal_reason is not None:
+        payload["terminal_reason"] = terminal_reason
     if api_error_status is not None:
         payload["api_error_status"] = api_error_status
     if api_error_message is not None:
@@ -99,6 +103,7 @@ def _settled_turn(
     stop_reason="end_turn",
     api_error_status=None,
     terminal_event=True,
+    terminal_reason=None,
     **enqueue_kw,
 ):
     """Enqueue → start → settle one turn, seeding its terminal event."""
@@ -109,6 +114,7 @@ def _settled_turn(
         _terminal_event(
             session_id, turn["id"],
             stop_reason=stop_reason, api_error_status=api_error_status,
+            terminal_reason=terminal_reason,
         )
     return turn
 
@@ -699,38 +705,44 @@ async def test_non_429_completion_never_calls_failover(mock_db):
 
 
 # ---------------------------------------------------------------------------
-# (3) AUTO-CONTINUE — boundary cut + durable #557 derivation
+# (3) COMPACT, THEN CONTINUE — the engine's needs_compaction outcome
+# (the lifecycle itself: tests/core/test_compact_then_continue.py)
 # ---------------------------------------------------------------------------
 
-def _patch_over_threshold(stack, over=True, tokens=150_000):
-    return stack.enter_context(patch(
-        "app.core.compact_continue.context_over_threshold",
-        new=AsyncMock(return_value=(over, tokens)),
-    ))
+_CUT = {"terminal_reason": "needs_compaction"}
+
+
+def _pair(session_id):
+    """``(compact, continuation)`` — the two queued rows of the pair."""
+    compact, cont = _by_source(session_id, "auto_continue")
+    assert compact["prompt"] == "/compact"
+    assert cont["payload"]["compact_before_turn_id"] == compact["id"]
+    return compact, cont
 
 
 async def test_auto_continue_on_boundary_cut(mock_db):
     settled = _settled_turn(
-        "a1", prompt="long task", stop_reason="tool_use",
+        "a1", prompt="long task", **_CUT,
         profile_id="p1", payload={"api_user_id": "u1"},
         overrides={"model": "prov:prov-1:m1"},
     )
 
     with ExitStack() as stack:
         execute = stack.enter_context(_patch_execute())
-        _patch_over_threshold(stack)
         await turn_scheduler.on_turn_settled("a1", settled["id"], "completed")
         await _drain_kicks()
 
-    (cont,) = _by_source("a1", "auto_continue")
+    compact, cont = _pair("a1")
     assert cont["prompt"] == AUTO_CONTINUE_PROMPT
     assert cont["parent_turn_id"] == settled["id"]
     assert cont["profile_id"] == "p1"
     assert cont["payload"]["api_user_id"] == "u1"
+    assert compact["payload"]["api_user_id"] == "u1"
     # The continuation runs under the settled turn's own per-turn settings.
     assert cont["overrides"] == {"model": "prov:prov-1:m1"}
+    # The compaction runs first.
     execute.assert_awaited_once()
-    assert execute.await_args.args[0]["id"] == cont["id"]
+    assert execute.await_args.args[0]["id"] == compact["id"]
 
 
 async def test_auto_continue_snapshots_the_acknowledged_context_pin(mock_db):
@@ -740,16 +752,15 @@ async def test_auto_continue_snapshots_the_acknowledged_context_pin(mock_db):
     database.create_profile("pin-role", "Pin role", None, {"model": "fable"})
     database.create_session("pinned-continue", "pin-role", model="fable")
     settled = _settled_turn(
-        "pinned-continue", stop_reason="tool_use",
+        "pinned-continue", **_CUT,
         overrides={"model": "fable", "context_window": 1_000_000},
     )
     await apply_run_settings("pinned-continue", RunSettingsUpdate(context_window=200_000))
     with ExitStack() as stack:
         stack.enter_context(_patch_execute())
-        _patch_over_threshold(stack)
         await turn_scheduler.on_turn_settled("pinned-continue", settled["id"], "completed")
         await _drain_kicks()
-    (continuation,) = _by_source("pinned-continue", "auto_continue")
+    _compact, continuation = _pair("pinned-continue")
     assert continuation["overrides"]["context_window"] == 200_000
 
 
@@ -844,18 +855,17 @@ async def test_failover_row_after_folder_removal_runs_with_stored_folders(mock_d
 
 async def test_auto_continue_after_folder_removal_runs_with_stored_folders(mock_db):
     profile = _chat_with_two_folders("f-cont")
-    settled = _settled_turn("f-cont", profile_id=profile, stop_reason="tool_use",
+    settled = _settled_turn("f-cont", profile_id=profile, **_CUT,
                             overrides={"model": "fable", "workspace_project_ids": _BOTH})
     _owner_removes_api_folder("f-cont")
     with ExitStack() as stack:
         execute = stack.enter_context(_patch_execute())
-        _patch_over_threshold(stack)
         await turn_scheduler.on_turn_settled("f-cont", settled["id"], "completed")
         await _drain_kicks()
-    (cont,) = _by_source("f-cont", "auto_continue")
+    compact, cont = _pair("f-cont")
     assert cont["overrides"]["workspace_project_ids"] == ["docs"]
     execute.assert_awaited_once()
-    assert _folders_it_runs_with(cont) == ["docs"]
+    assert _folders_it_runs_with(compact) == ["docs"]
 
 
 async def test_peer_message_queued_before_folder_removal_starts_with_stored_folders(mock_db):
@@ -917,11 +927,12 @@ def test_owner_named_folder_sources_match_the_binding_sources():
     assert turns_db.OWNER_NAMED_FOLDER_SOURCES == frozenset(turn_manager._BINDING_SOURCES)
 
 
-async def test_auto_continue_skipped_below_threshold(mock_db):
+async def test_auto_continue_only_on_the_engine_outcome(mock_db):
+    # A tool_use stop reason alone is no longer evidence: only the engine's
+    # explicit needs_compaction outcome compacts and continues.
     settled = _settled_turn("a2", stop_reason="tool_use")
 
     with ExitStack() as stack:
-        _patch_over_threshold(stack, over=False, tokens=100)
         stack.enter_context(_patch_execute())
         await turn_scheduler.on_turn_settled("a2", settled["id"], "completed")
         await _drain_kicks()
@@ -930,58 +941,16 @@ async def test_auto_continue_skipped_below_threshold(mock_db):
 
 
 async def test_auto_continue_skipped_when_queue_nonempty(mock_db):
-    # A queued turn resumes work on its own — drain wins, no nudge.
-    settled = _settled_turn("a3", stop_reason="tool_use")
+    # A queued turn resumes work on its own — drain wins, no pair.
+    settled = _settled_turn("a3", **_CUT)
     turns_db.enqueue_turn("a3", "queue", prompt="already queued")
 
     with ExitStack() as stack:
         stack.enter_context(_patch_execute())
-        _patch_over_threshold(stack)
         await turn_scheduler.on_turn_settled("a3", settled["id"], "completed")
         await _drain_kicks()
 
     assert _by_source("a3", "auto_continue") == []
-
-
-async def test_557_settled_auto_continue_turn_never_chains(mock_db):
-    # The continuation itself cut at the boundary again → never re-nudge.
-    settled = _settled_turn("a4", source="auto_continue", stop_reason="tool_use")
-
-    with ExitStack() as stack:
-        stack.enter_context(_patch_execute())
-        _patch_over_threshold(stack)
-        await turn_scheduler.on_turn_settled("a4", settled["id"], "completed")
-        await _drain_kicks()
-
-    assert _by_source("a4", "auto_continue") == []
-
-
-async def test_557_durable_latch_and_rearm_on_user_turn(mock_db):
-    # History: user → auto_continue → (settling now) unpark, all with no user
-    # message since the nudge → latched, derived purely from the turns table.
-    _settled_turn("a5", source="user", prompt="start")
-    _settled_turn("a5", source="auto_continue", prompt=AUTO_CONTINUE_PROMPT)
-    wake = _settled_turn("a5", source="unpark", prompt="<task-notification/>",
-                         stop_reason="tool_use")
-
-    with ExitStack() as stack:
-        stack.enter_context(_patch_execute())
-        _patch_over_threshold(stack)
-        await turn_scheduler.on_turn_settled("a5", wake["id"], "completed")
-        await _drain_kicks()
-    assert _by_source("a5", "auto_continue") == []  # still latched
-
-    # A genuine user turn settles → the latch re-arms automatically.
-    user2 = _settled_turn("a5", source="user", prompt="go on",
-                          stop_reason="tool_use")
-    with ExitStack() as stack:
-        stack.enter_context(_patch_execute())
-        _patch_over_threshold(stack)
-        await turn_scheduler.on_turn_settled("a5", user2["id"], "completed")
-        await _drain_kicks()
-
-    (cont,) = _by_source("a5", "auto_continue")
-    assert cont["parent_turn_id"] == user2["id"]
 
 
 # ---------------------------------------------------------------------------

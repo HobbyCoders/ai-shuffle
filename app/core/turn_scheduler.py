@@ -20,13 +20,14 @@ is the record"). Four policies, evaluated in this order on every settlement:
    ``parked`` settlement the queued turn runs CONCURRENTLY with the session's
    still-running background work (park releases the run lease and the live-turn
    slot). A user stop settles ``aborted`` and drains too.
-3. **AUTO-CONTINUE** — a settled-``completed`` turn cut at the CLI's
-   lazy-compaction boundary (``stop_reason == "tool_use"`` + live context over
-   the autocompact threshold) enqueues ONE ``source=auto_continue``
-   continuation. The one-shot latch is a durable derivation: skip if the
-   settled turn itself — or the most recent settled non-user turn since the
-   last ``source in (user, queue)`` turn — was ``auto_continue``. Reset-on-user-
-   message is automatic (the next user/queue turn settles closer in history).
+3. **COMPACT, THEN CONTINUE** — a settled turn whose terminal payload carries
+   the engine's ``needs_compaction`` outcome (the CLI stopped at the context
+   limit) gets ONE atomic, idempotent pair: a Fluid ``/compact`` and the
+   continuation behind it, both ``source=auto_continue`` and keyed on the cut
+   turn. The kick gates the continuation on what the compaction did (run,
+   retry the compaction, or drop it with a note), and a message the owner
+   queued always wins. One pair per cut turn, so a continuation cut again
+   starts a new generation. See :mod:`app.core.compact_continue`.
 4. **PARK/UNPARK** — a parked settlement is left alone; the wake arrives via
    a background task's terminal notification (:func:`on_task_terminal`),
    which synthesizes ONE consolidated ``<task-notification>`` prompt, enqueues
@@ -36,10 +37,10 @@ is the record"). Four policies, evaluated in this order on every settlement:
    it lands at the next cell boundary rather than waiting out a turn that may
    run for another hour. See the "Mid-turn delivery" section below.
 
-The FAILOVER and AUTO-CONTINUE derivations share ONE read of the settled
-turn's terminal ``turn.completed`` payload from ``session_events``
-(``api_error_status`` for failover, ``stop_reason`` for the boundary cut) —
-done once per settlement and fed to both policies.
+The FAILOVER and COMPACT-THEN-CONTINUE derivations share ONE read of the
+settled turn's terminal ``turn.completed`` payload from ``session_events``
+(``api_error_status`` for failover, ``terminal_reason`` for the context-limit
+outcome) — done once per settlement and fed to both policies.
 
 **Kick** — the single "try to start this session's next queued turn" primitive
 (registered as :mod:`app.core.turn_manager`'s kick seam): peek the front
@@ -77,12 +78,6 @@ _CONTEXT_PAYLOAD_KEYS = (
     "orchestration_remote_origin", "_assistant_proactive",
 )
 
-# Turn sources authored by a human (directly or via the send-queue). Used by
-# the durable auto-continue latch derivation: any of these settling re-arms
-# auto-continue; everything else (auto_continue/failover/unpark/automation/…)
-# is server-originated.
-_USER_SOURCES = ("user", "queue")
-
 # Live references to in-flight kick tasks so they are not garbage-collected
 # mid-flight (asyncio keeps only weak refs to tasks).
 _kick_tasks: Set[asyncio.Task] = set()
@@ -117,7 +112,7 @@ def _turn_terminal_payload(session_id: str, turn_id: str) -> Dict[str, Any]:
 
     This single read feeds BOTH the failover derivation (``api_error_status``,
     which the recorder copies from the pump's ``done`` metadata) and the
-    auto-continue boundary derivation (``stop_reason``).
+    compact-then-continue derivation (``terminal_reason``).
     """
     with get_db() as conn:
         cursor = conn.cursor()
@@ -134,31 +129,68 @@ def _turn_terminal_payload(session_id: str, turn_id: str) -> Dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _auto_continued_since_last_user(session_id: str) -> bool:
-    """Auto-continue one-shot latch, derived durably from the ``turns`` table.
-
-    Walk the session's settled turns newest-first: an ``auto_continue`` turn
-    seen before any ``user``/``queue`` turn means this session has already been
-    nudged since the last genuine user message — never chain nudges. A
-    user/queue turn re-arms (returns ``False``) automatically; no in-memory
-    latch, no reset call.
-    """
+def _compaction_result(session_id: str, compact_turn_id: str) -> str:
+    """What a settled ``/compact`` turn did, read from the event log:
+    ``"compacted"`` (a compaction boundary was recorded for it),
+    ``"nothing"`` (Fluid had nothing more to reclaim — an honest no-op), or
+    ``"failed"`` (anything else: an error, a refusal, an aborted turn)."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT source FROM turns "
-            "WHERE session_id=%s AND state IN ('completed','aborted','parked') "
-            "ORDER BY ended_at DESC, position DESC, created_at DESC, id DESC",
-            (session_id,),
+            "SELECT event_type, payload FROM session_events "
+            "WHERE session_id=%s AND turn_id=%s "
+            "AND event_type IN ('system.compaction_boundary', 'system.note') "
+            "ORDER BY seq",
+            (session_id, compact_turn_id),
         )
         rows = cursor.fetchall()
+    nothing = False
     for row in rows:
-        source = row["source"]
-        if source in _USER_SOURCES:
-            return False
-        if source == "auto_continue":
-            return True
-    return False
+        if row["event_type"] == "system.compaction_boundary":
+            return "compacted"
+        payload = parse_jsonb(row["payload"])
+        payload = payload if isinstance(payload, dict) else {}
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        if payload.get("subtype") == "compact_failed" and data.get("nothing_to_compact"):
+            nothing = True
+    return "nothing" if nothing else "failed"
+
+
+def _owner_turn_queued(session_id: str, behind: Dict[str, Any]) -> bool:
+    """Whether something the owner sent is queued in ``behind``'s session."""
+    return any(
+        turn.get("id") != behind.get("id") and turn.get("source") in turns_db.CWD_OWNER_SOURCES
+        for turn in turns_db.get_queued_turns(session_id)
+    )
+
+
+def _continuation_verdict(session_id: str, row: Dict[str, Any]) -> str:
+    """Whether a queued compact-then-continue continuation may start now.
+
+    A durable derivation over the ``turns`` table and the event log, so a
+    restart anywhere in the pair's life decides exactly as before:
+
+    * ``"wait"`` — its compaction has not settled yet;
+    * ``"owner"`` — the owner queued a message: it resumes the work instead;
+    * ``"run"`` — the compaction compacted the context;
+    * ``"retry"`` — the compaction failed and attempts remain;
+    * ``"nothing"`` / ``"failed"`` — nothing to reclaim, or out of attempts.
+    """
+    from app.core import compact_continue
+
+    payload = row.get("payload") or {}
+    compact = turns_db.get_turn(payload.get("compact_before_turn_id") or "")
+    if compact is not None and compact.get("state") not in ("completed", "aborted"):
+        return "wait"
+    if _owner_turn_queued(session_id, row):
+        return "owner"
+    result = _compaction_result(session_id, compact["id"]) if compact else "failed"
+    if result == "compacted":
+        return "run"
+    if result == "nothing":
+        return "nothing"
+    attempt = int((payload.get(compact_continue.PAYLOAD_KEY) or {}).get("attempt") or 1)
+    return "retry" if attempt < compact_continue.MAX_COMPACTION_ATTEMPTS else "failed"
 
 
 def _latest_context_turn(session_id: str) -> Optional[Dict[str, Any]]:
@@ -383,6 +415,13 @@ def _kick_at_reset(session_id: str, until: float) -> None:
     _hold_rekicks[session_id] = loop.call_later(delay, _fire)
 
 
+def _is_compaction_continuation(row: Dict[str, Any]) -> bool:
+    """The continuation row of a compact-then-continue pair (not its compact)."""
+    payload = row.get("payload") or {}
+    return bool(payload.get(turns_db.COMPACTION_CONTINUATION_KEY)
+                and payload.get("compact_before_turn_id"))
+
+
 async def _kick_impl(session_id: str) -> None:
     """Peek the front queued turn and execute it. Ownership is DB-raced inside
     ``execute`` (run lease + guarded ``start_turn``) — a lost race returns
@@ -394,6 +433,8 @@ async def _kick_impl(session_id: str) -> None:
     try:
         row = await asyncio.to_thread(turns_db.pop_ready, session_id)
         if row is None or task_registry.stop_invalidated(session_id, generation):
+            return
+        if _is_compaction_continuation(row) and not await _gate_continuation(session_id, row):
             return
         if await asyncio.to_thread(turns_db.get_cwd_failure, session_id):
             return  # don't claim a run lease for a durable blocked queue
@@ -410,7 +451,7 @@ async def _kick_impl(session_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# on_turn_settled — policies (1) failover, (2) queue drain, (3) auto-continue
+# on_turn_settled — policies (1) failover, (2) queue drain, (3) compact-continue
 # ---------------------------------------------------------------------------
 
 async def on_turn_settled(session_id: str, turn_id: str, outcome: str) -> None:
@@ -456,9 +497,9 @@ async def _on_turn_settled_impl(session_id: str, turn_id: str, outcome: str) -> 
             await on_child_settled(session_id)
         return  # no retry or queue drain while the directory is missing
     # ONE terminal-payload read feeds both the failover (api_error_status) and
-    # auto-continue (stop_reason) derivations. Both are naturally inert on a
-    # non-completed settlement — a parked/aborted turn has no terminal
-    # ``turn.completed`` payload to trip them.
+    # compact-then-continue (terminal_reason) derivations. A parked or stopped
+    # turn has no terminal ``turn.completed`` payload to trip them; a turn the
+    # CLI failed at the context limit does (is_error, needs_compaction).
     terminal = await asyncio.to_thread(_turn_terminal_payload, session_id, turn_id)
 
     # (1) FAILOVER — surfaces the rate-limited state only; account rotation is
@@ -485,8 +526,8 @@ async def _on_turn_settled_impl(session_id: str, turn_id: str, outcome: str) -> 
     if await on_session_rest(session_id, settled, terminal, outcome):
         return
 
-    # (3) AUTO-CONTINUE — only when nothing is queued (a queued turn
-    # resumes work on its own).
+    # (3) COMPACT, THEN CONTINUE — only when nothing is queued (a queued
+    # message from the owner resumes the work on its own).
     if await _maybe_auto_continue(session_id, settled, terminal):
         return
 
@@ -758,43 +799,59 @@ async def _maybe_auto_continue(
     settled: Dict[str, Any],
     terminal: Dict[str, Any],
 ) -> bool:
-    """Policy (3): compact-boundary cut → enqueue ONE ``source=auto_continue``
-    continuation. Returns True when one was enqueued."""
+    """Policy (3): a turn the engine reports as ``needs_compaction`` gets ONE
+    compact-then-continue pair (see :mod:`app.core.compact_continue`).
+
+    Runs only when nothing is queued (the drain above returned first), so a
+    message the owner already queued resumes the work instead. The pair is one
+    atomic, idempotent admission keyed on the cut turn: a repeated settlement
+    returns the pair it already made. Returns True when the pair exists.
+    """
     from app.core import compact_continue
     from app.core.task_registry import task_registry
 
+    generation = task_registry.stop_generation(session_id)
     if task_registry.is_user_stopped(session_id):
-        # Belt and braces for the Stop latch: a user stop settles the turn
-        # ``aborted`` so the terminal payload never qualifies here, but a
-        # turn that completed in the instant Stop landed must not respawn
-        # the session either.
-        return False
-
-    if settled.get("source") == "auto_continue":
-        # The continuation itself cut at the boundary again: compaction already
-        # ran at its start, so a second cut is something else — never chain
-        # nudges, just log it.
-        if compact_continue.is_abnormal_boundary_stop(terminal):
-            logger.warning(
-                "turn_scheduler: auto-continue turn %s for %s cut at the "
-                "boundary AGAIN — not re-nudging",
-                settled.get("id"), session_id,
-            )
+        # A user stop settles the turn ``aborted`` without the outcome, but a
+        # turn that completed in the instant Stop landed must not respawn the
+        # session either.
         return False
     if not compact_continue.auto_continue_enabled():
         return False
-    if not compact_continue.is_abnormal_boundary_stop(terminal):
+    if not compact_continue.needs_compaction(terminal):
         return False
-    if await asyncio.to_thread(_auto_continued_since_last_user, session_id):
-        return False
-    over, pre_tokens = await compact_continue.context_over_threshold(session_id)
-    if not over:
+    if settled.get("state") == "parked":
+        # Parked work continues through its unpark wake. A second turn started
+        # beside a parked SendMessage continuation is what cost a worker its
+        # parent (#123), so a pair is never admitted beside one.
         return False
 
+    link = (settled.get("payload") or {}).get(compact_continue.PAYLOAD_KEY) or {}
+    # The cut turn is the continuation of an earlier generation when it carries
+    # the link; an owner's turn starts again at 1.
+    number = int(link.get("generation") or 0) + 1
+    if number > compact_continue.MAX_GENERATIONS:
+        logger.warning(
+            "turn_scheduler: %s hit the context limit %d times in a row without "
+            "a message from the owner — not compacting and continuing again",
+            session_id, compact_continue.MAX_GENERATIONS,
+        )
+        await _announce_paused_continuation(
+            session_id, "it reached the context limit too many times in a row",
+        )
+        return False
+
+    payload = {
+        **_context_payload(settled),
+        "compact_first": True,
+        compact_continue.PAYLOAD_KEY: {
+            "interrupted_turn_id": settled.get("id"), "generation": number, "attempt": 1,
+        },
+    }
     turn = await asyncio.to_thread(
         _enqueue,
         session_id,
-        "auto_continue",
+        compact_continue.SOURCE,
         prompt=compact_continue.AUTO_CONTINUE_PROMPT,
         profile_id=settled.get("profile_id"),
         project_id=settled.get("project_id"),
@@ -802,16 +859,87 @@ async def _maybe_auto_continue(
         # Continue under the settled turn's own per-turn settings (same rule as
         # the failover retry and the unpark wake).
         overrides=settled.get("overrides") or None,
-        payload=_context_payload(settled) or None,
+        payload=payload,
+        command_id=f"{compact_continue.COMMAND_PREFIX}{settled.get('id')}",
         parent_turn_id=settled.get("id"),
     )
+    if not turn.get("id"):
+        return False  # Stop or a filesystem breaker refused the admission
+    if task_registry.stop_invalidated(session_id, generation):
+        # Stop can race the admission itself; retire only our own rows.
+        await asyncio.to_thread(_retire_pair, turn)
+        return False
     logger.info(
-        "turn_scheduler: compact-boundary auto-continue for %s — turn %s "
-        "(pre_tokens=%s)",
-        session_id, turn["id"], pre_tokens,
+        "turn_scheduler: %s stopped at the context limit (turn %s) — compaction "
+        "%s then continuation %s (generation %d)",
+        session_id, settled.get("id"),
+        (turn.get("payload") or {}).get("compact_before_turn_id"), turn["id"], number,
     )
     kick(session_id)
     return True
+
+
+def _retire_pair(continuation: Dict[str, Any]) -> None:
+    """Abort both still-queued rows of a compact-then-continue pair."""
+    compact_id = (continuation.get("payload") or {}).get("compact_before_turn_id")
+    for turn_id in (compact_id, continuation.get("id")):
+        if turn_id:
+            turns_db.remove_queued_turn(turn_id, "stopped")
+
+
+async def _announce_paused_continuation(session_id: str, reason: str) -> None:
+    """Say on the session that the cut-off work did not resume by itself."""
+    from app.core import wakeup_service
+
+    await wakeup_service.announce_note(
+        session_id,
+        "The work stopped at the context limit and could not continue "
+        f"automatically ({reason}). Send a message to pick it back up.",
+        reason=reason, source="auto_continue",
+    )
+
+
+async def _gate_continuation(session_id: str, row: Dict[str, Any]) -> bool:
+    """Decide a front-of-queue compact-then-continue continuation. True when
+    it may start; otherwise it was dropped, retried or left waiting (and any
+    successor is kicked)."""
+    from app.core import compact_continue
+
+    verdict = await asyncio.to_thread(_continuation_verdict, session_id, row)
+    if verdict == "run":
+        return True
+    if verdict == "wait":
+        return False
+    if verdict == "retry":
+        attempt = int((row["payload"].get(compact_continue.PAYLOAD_KEY) or {}).get("attempt") or 1) + 1
+        compact = await asyncio.to_thread(turns_db.retry_pair_compaction, row["id"], attempt)
+        logger.warning(
+            "turn_scheduler: compaction before continuation %s of %s failed — "
+            "attempt %d is turn %s",
+            row["id"], session_id, attempt, (compact or {}).get("id"),
+        )
+        if compact is not None:
+            kick(session_id)
+            return False
+        # Refused (Stop, a missing working directory) or already gone: never
+        # leave the continuation at the front with nothing to wait for.
+        verdict = "failed"
+    reason = {
+        "owner": "superseded_by_owner",
+        "nothing": "nothing_to_compact",
+    }.get(verdict, "compaction_failed")
+    removed = await asyncio.to_thread(turns_db.remove_queued_turn, row["id"], reason)
+    logger.info(
+        "turn_scheduler: continuation %s of %s not started (%s)", row["id"], session_id, reason,
+    )
+    if removed is not None and verdict != "owner":
+        # A message from the owner already resumes the work; otherwise say why
+        # nothing did.
+        await _announce_paused_continuation(session_id, {
+            "nothing": "compacting reclaimed nothing more",
+        }.get(verdict, "the context could not be compacted"))
+    kick(session_id)
+    return False
 
 
 # Sources that re-run another turn: the retry reports the source of the turn

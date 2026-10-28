@@ -353,7 +353,7 @@
   },
   "AUTO_CONTINUE_ON_COMPACT": {
     "kind": "internal",
-    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Automatically compact and continue after context exhaustion",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Compact and continue a turn cut off at the context limit",
     "target_pr": 2,
     "base_settings": true
   },
@@ -1437,36 +1437,6 @@
   "IDENTITY_SERVER_THUMBPRINT": {
     "kind": "infra",
     "reason": "identity server thumbprint input to the selected Claude cloud credential/endpoint chain",
-    "base_settings": true
-  },
-  "IDLE_WATCHDOG_CONTEXT_FRACTION": {
-    "kind": "internal",
-    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Context fraction that arms an idle compaction nudge",
-    "target_pr": 2,
-    "base_settings": true
-  },
-  "IDLE_WATCHDOG_COOLDOWN_SECONDS": {
-    "kind": "internal",
-    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Minimum interval between context nudges for the same session",
-    "target_pr": 2,
-    "base_settings": true
-  },
-  "IDLE_WATCHDOG_ENABLED": {
-    "kind": "internal",
-    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Nudge idle sessions near their context edge to compact",
-    "target_pr": 2,
-    "base_settings": true
-  },
-  "IDLE_WATCHDOG_INTERVAL_SECONDS": {
-    "kind": "internal",
-    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Scan cadence / idle grace for automatic context nudges",
-    "target_pr": 2,
-    "base_settings": true
-  },
-  "IDLE_WATCHDOG_MAX_IDLE_SECONDS": {
-    "kind": "internal",
-    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Do not nudge old inactive chats beyond this age",
-    "target_pr": 2,
     "base_settings": true
   },
   "IMAGE_ASPECT_RATIO": {

@@ -972,8 +972,8 @@ def create_postgres_schema(cursor: Any) -> None:
 
     # 36e. Pending wakeups. Durable per-session wakeups so an app
     #      restart rehydrates and re-arms them instead of dropping the bare
-    #      in-process asyncio timer. ScheduleWakeup and the idle-at-edge watchdog
-    #      both persist here; ``fire_at`` is a unix epoch (DOUBLE PRECISION) so
+    #      in-process asyncio timer. ScheduleWakeup and the other wake producers
+    #      persist here; ``fire_at`` is a unix epoch (DOUBLE PRECISION) so
     #      the rehydrate math is timezone/shim-agnostic.
     #      ``model`` is the scheduling turn's effective model, replayed as
     #      the wake query's model override so a wake never fires on the profile

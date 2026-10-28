@@ -1,13 +1,9 @@
 """Durable per-session wakeups (#598).
 
-A wakeup is a pending "re-fire this prompt at ``fire_at``" record. Two producers
-persist here so an app restart rehydrates and re-arms them instead of dropping
-the bare in-process ``asyncio.sleep`` timer the old ScheduleWakeup used:
-
-* ``ScheduleWakeup`` (the builtin MCP tool) — an agent-armed heartbeat/continue;
-* the idle-at-edge watchdog — a synthetic nudge for a session that sits idle
-  above the context-window edge (belt-and-braces backstop for the lazy-compaction
-  stall).
+A wakeup is a pending "re-fire this prompt at ``fire_at``" record. Producers
+(``ScheduleWakeup``, the usage-limit resume, hand-off resumes, held peer
+messages) persist here so an app restart rehydrates and re-arms them instead of
+dropping a bare in-process ``asyncio.sleep`` timer.
 
 ``fire_at`` is stored as a unix epoch (seconds, DOUBLE PRECISION) rather than a
 TIMESTAMPTZ so the rehydrate "remaining delay" math is timezone- and
@@ -21,7 +17,6 @@ double-firing.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from app.db.base import get_db, get_cursor, rows_to_list
@@ -326,77 +321,3 @@ def session_has_pending(session_id: str, source: Optional[str] = None) -> bool:
             )
         return cursor.fetchone() is not None
 
-
-def idle_edge_candidates(
-    instance_id: str,
-    status: str = "active",
-    max_idle_seconds: Optional[float] = None,
-) -> List[Dict[str, Any]]:
-    """Sessions eligible for an idle-at-edge watchdog check on this install.
-
-    Structural filters only (the cheap, DB-expressible ones); the caller applies
-    the context-fraction gate on ``context_usage_json`` and its in-memory
-    cooldown. A candidate is a session that:
-
-    * belongs to this install (``instance_id``);
-    * is ``status='active'`` (not streaming/parked/archived — i.e. no live turn);
-    * was last touched within ``max_idle_seconds`` (when given);
-    * has a persisted context-usage snapshot (``context_usage_json`` present);
-    * has NO in-flight turn (no ``turns`` row in a live state);
-    * is NOT a parked SendMessage continuation (a ``parked`` turn carrying
-      ``agent_message_reply_to``): a nudge there runs as a separate turn that
-      the unpark wake later resumes in place of the continuation, which is how
-      a continued worker lost its parent (#123). Other parked sessions (a
-      coordinator waiting on sub-agents) stay candidates, so long-lived ones
-      still compact before the edge; and
-    * has NO pending wakeup already armed (so the watchdog never piles a second
-      nudge on top of one it — or ScheduleWakeup — already scheduled).
-
-    The recency gate matters: ``status='active'`` is sticky, so without it every
-    session ever left near the edge stayed a candidate forever and got nudged
-    again after each app restart — real turns, real money, on conversations
-    nobody had touched in weeks. ``sessions.updated_at`` is written as an
-    ISO-8601 UTC string by the session writers, so the bound cutoff is compared
-    as a same-shape value under both Postgres and the SQLite shim.
-    """
-    _ph = ph()
-    live_states = ("queued", "running", "interrupting", "draining")
-    placeholders = ", ".join([_ph] * len(live_states))
-    recency_sql = ""
-    recency_params: tuple = ()
-    if max_idle_seconds is not None and float(max_idle_seconds) > 0:
-        cutoff = datetime.now(timezone.utc) - timedelta(
-            seconds=float(max_idle_seconds)
-        )
-        recency_sql = f"AND s.updated_at >= {_ph}"
-        recency_params = (cutoff.isoformat(),)
-    with get_db() as conn:
-        cursor = get_cursor(conn)
-        cursor.execute(
-            f"""
-            SELECT id, profile_id, project_id, context_usage_json
-            FROM sessions s
-            WHERE s.instance_id = {_ph}
-              AND s.status = {_ph}
-              {recency_sql}
-              AND s.context_usage_json IS NOT NULL
-              AND NOT EXISTS (
-                  SELECT 1 FROM turns t
-                  WHERE t.session_id = s.id
-                    AND t.state IN ({placeholders})
-              )
-              AND NOT EXISTS (
-                  SELECT 1 FROM turns c
-                  WHERE c.session_id = s.id
-                    AND c.state = 'parked'
-                    AND c.payload ->> 'agent_message_reply_to' IS NOT NULL
-              )
-              AND NOT EXISTS (
-                  SELECT 1 FROM pending_wakeups w
-                  WHERE w.session_id = s.id
-              )
-            """,
-            (instance_id, status, *recency_params, *live_states),
-        )
-        rows = cursor.fetchall() or []
-    return rows_to_list(list(rows))

@@ -13,8 +13,6 @@ import traceback
 import weakref
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from app.core import error_log_handler as elh
 
 
@@ -76,17 +74,3 @@ def test_client_disconnect_is_not_logged_with_a_traceback(caplog):
     assert not any(r.exc_info for r in caplog.records)
 
 
-@pytest.mark.asyncio
-async def test_wakeup_scan_reads_usage_off_the_loop(monkeypatch):
-    from app.core import compact_continue
-
-    loop_thread = threading.current_thread()
-    seen = []
-
-    def fake_usage(session_id):
-        seen.append(threading.current_thread())
-        return None
-
-    monkeypatch.setattr(compact_continue, "_persisted_usage", fake_usage)
-    await compact_continue.context_over_threshold("s1")
-    assert seen and all(t is not loop_thread for t in seen)
