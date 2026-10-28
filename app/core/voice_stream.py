@@ -536,6 +536,7 @@ class VoiceStream:
         # The pending caller text was typed into the call, not spoken.
         self.pending_typed = False
         self.last_caption_role = None
+        self.last_assistant_caption_ids: tuple[str | None, str | None] = (None, None)
         self.progress = None
         self.transcript_seq = 0
         self.delegated_seq = 0
@@ -791,9 +792,11 @@ class VoiceStream:
         for content in commentary_chunks(text, self.append_bytes):
             await self.send({"type": "session.commentary.append", "delegation_id": delegation_id, "content": content})
 
-    async def caption(self, role: str, delta: str, offset: int = 0, *, start_ms: float | None = None):
+    async def caption(self, role: str, delta: str, offset: int = 0, *, start_ms: float | None = None,
+                      response_id: str | None = None, item_id: str | None = None):
         """One transcript fragment. ``start_ms`` is where it starts on the
-        provider session's timeline (GPT Live), None when unknown."""
+        provider session's timeline (GPT Live), None when unknown. Provider
+        response/item ids distinguish new assistant utterances from word pieces."""
         if not delta:
             return
         if role == "assistant" and self.last_caption_role == "user" and self.approval_waiting():
@@ -818,10 +821,19 @@ class VoiceStream:
                     delta = " " + delta
             elif not await self._store_before(start_ms):
                 await self.flush()
+        new_utterance = False
+        if role == "assistant":
+            ids = (response_id, item_id)
+            new_utterance = any(previous is not None and current is not None and previous != current
+                                for previous, current in zip(self.last_assistant_caption_ids, ids))
+            self.last_assistant_caption_ids = ids
         pending = self.pending[role]
-        if pending and not pending[-1].isspace() and _SENTENCE_END.search(pending) and delta[:1].isupper():
-            # A new utterance after a finished sentence ("…site." + "I've…")
-            # arrives without a leading space; keep the words apart (#1798).
+        if pending and not pending[-1].isspace() and not delta[:1].isspace() and (
+            new_utterance or (_SENTENCE_END.search(pending) and delta[:1].isupper())
+        ):
+            # Provider response/item boundaries need a separator even without
+            # sentence punctuation or an initial capital (#746). Keep the
+            # existing sentence-based fallback too (#1798).
             delta = " " + delta
         if role == "user":
             # GPT Live heard the caller, so the microphone path works (#1824).
@@ -1001,7 +1013,8 @@ class VoiceStream:
                     role = "user" if kind == "session.input_transcript.delta" else "assistant"
                     start = event.get("start_ms")
                     await self.caption(role, event.get("delta") or "", event.get("end_ms") or 0,
-                                       start_ms=start if isinstance(start, (int, float)) and not isinstance(start, bool) else None)
+                                       start_ms=start if isinstance(start, (int, float)) and not isinstance(start, bool) else None,
+                                       response_id=event.get("response_id"), item_id=event.get("item_id"))
                 elif kind == "session.instructions.appended" and self.opening_event_id and event.get("client_event_id") == self.opening_event_id:
                     self.opening_event_id = None
                     await self.send({"type": "session.commentary.append", "delegation_id": None,
