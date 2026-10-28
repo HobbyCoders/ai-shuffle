@@ -136,7 +136,15 @@ export function sendButtonState(s: SendButtonInput): { disabled: boolean; title:
 /**
  * The lane whose project rules a composer follows: the session's own mode,
  * with a row that predates modes read as a code session.
+ *
+ * `projectlessSubagent`: the open chat is a subagent's own (a Task or Swarm
+ * child) and has no project. Since the owner's no-project chat runs as a code
+ * session (#644), its workers are stored with no mode, which reads as code
+ * here. There is no project to pick in a subagent's chat, so it follows its
+ * no-project parent's chat-lane rules: sending and attaching must not ask for
+ * a project, or the owner cannot message the subagent at all.
  */
-export function projectRulesLane(mode: SessionMode | undefined): SessionMode {
+export function projectRulesLane(mode: SessionMode | undefined, projectlessSubagent = false): SessionMode {
+	if (projectlessSubagent && mode !== 'voice') return 'chat';
 	return mode ?? 'code';
 }
