@@ -481,9 +481,17 @@ async def _on_turn_settled_impl(session_id: str, turn_id: str, outcome: str) -> 
         kick(session_id)
         return
 
-    from app.core.coordinator_handoff import on_session_rest
-    if await on_session_rest(session_id, settled, terminal, outcome):
-        return
+    # A finished owner turn adds its result to the owner working record. Not
+    # a boundary cut (stop_reason tool_use): that turn's work is not done,
+    # and auto-continue below resumes it after compaction. A long owner chat
+    # is never replaced by a new one; compaction owns its context limit.
+    if outcome == "completed" and terminal.get("stop_reason") != "tool_use":
+        from app.core import working_record
+        try:
+            await asyncio.to_thread(working_record.record_completion, session_id, settled, outcome)
+        except Exception:  # noqa: BLE001 — the record never blocks settlement
+            logger.warning("turn_scheduler: working-record completion failed for %s",
+                           session_id, exc_info=True)
 
     # (3) AUTO-CONTINUE — only when nothing is queued (a queued turn
     # resumes work on its own).

@@ -442,7 +442,8 @@ def _job_over_time(session_id, minutes, now, *, coordination=False):
         session = row_to_dict(cursor.fetchone())
         if not session or not (coordination or _created_by_assistant(cursor, session)):
             return False
-        # The successor has its own display clock, but not a fresh job budget.
+        # A successor of the retired coordinator hand-off (existing rows only)
+        # has its own display clock, but not a fresh job budget.
         cursor.execute("SELECT prior_work_ms FROM coordinator_handoffs WHERE successor_session_id=%s", (session_id,))
         receipt = row_to_dict(cursor.fetchone())
         inherited = int(receipt["prior_work_ms"]) / 60000.0 if receipt else 0

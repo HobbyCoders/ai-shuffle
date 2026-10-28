@@ -1,10 +1,13 @@
-"""Working-record producing paths and coordinator replacement, issue #371 step 2."""
+"""Working-record producing paths, issue #371 step 2.
+
+A long owner chat is never replaced by a new one: the automatic coordinator
+hand-off is retired, and compaction owns the context limit."""
 import json
 
 import pytest
 from fluid.tools.registry import ToolCtx
 
-from app.core import coordinator_handoff, turn_scheduler, working_record
+from app.core import turn_scheduler, working_record
 from app.core import session_orchestration as orch
 from app.db import database, sessions, turns
 from app.db import working_record as store
@@ -169,66 +172,52 @@ def test_summary_budget_unicode_flood_and_fair_categories(owner):
     assert '"kind": "pending"' in text
 
 
-async def test_automatic_handoff_uses_real_usage_producer_and_new_session(owner, monkeypatch):
+def _sessions_count():
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS n FROM sessions")
+        sessions_n = cur.fetchone()["n"]
+        cur.execute("SELECT COUNT(*) AS n FROM coordinator_handoffs")
+        return sessions_n, cur.fetchone()["n"]
+
+
+@pytest.mark.parametrize("stop_reason", ["end_turn", "tool_use"])
+async def test_full_coordinator_is_not_handed_off_but_still_records(owner, monkeypatch, stop_reason):
+    """A no-project owner chat past 80% after a completed turn stays the same
+    chat (compaction owns its limit); its result still enters the working
+    record, except for a turn cut at the compaction boundary."""
+    from app.db import session_events
     kicked = []
     monkeypatch.setattr(turn_scheduler, "kick", kicked.append)
-    store.add("decision", "Use the staged rollout.", owner["id"])
-    sessions.set_session_run_binding(owner["id"], effort="high", permission_mode="default")
-    from types import SimpleNamespace
-    from unittest.mock import AsyncMock
-
-    from app.core import session_pool
-    usage = AsyncMock(return_value={"totalTokens": 80000, "maxTokens": 100000})
-    pool = SimpleNamespace(peek=lambda sid: SimpleNamespace(is_connected=True, adapter=SimpleNamespace(get_context_usage=usage)))
-    monkeypatch.setattr(session_pool, "get_session_pool", lambda: pool)
+    sessions.set_session_context_usage(owner["id"], {"totalTokens": 95000, "maxTokens": 100000})
+    before = _sessions_count()
     turn = turns.enqueue_turn(owner["id"], "user", prompt="Coordinate the release", profile_id="agent")
     run(owner["id"], turn["id"], "Build passed; waiting for review.")
+    session_events.append_events(owner["id"], [{"type": "turn.completed", "turn_id": turn["id"],
+        "payload": {"stop_reason": stop_reason}}])
     await turn_scheduler.on_turn_settled(owner["id"], turn["id"], "completed")
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM coordinator_handoffs WHERE source_session_id=%s", (owner["id"],))
-        receipt = dict(cur.fetchone())
-    successor = sessions.get_session(receipt["successor_session_id"])
-    assert not sessions.get_session(owner["id"])["is_active"]
-    assert successor["is_active"] and successor["mode"] == "chat"
-    assert successor["effort"] == "high" and successor["permission_mode"] == "default"
-    assert not successor.get("sdk_session_id") and not successor.get("context_usage_json")
-    assert successor["id"] in kicked
-    usage.assert_awaited_once()
-    wake = turns.get_turn(receipt["turn_id"])
-    assert wake["state"] == "queued" and "Coordinate the release" in wake["prompt"]
-    text = working_record.summary(successor["id"])
-    assert "staged rollout" in text and "Build passed" in text
-    await turn_scheduler.on_turn_settled(owner["id"], turn["id"], "completed")
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) AS n FROM coordinator_handoffs")
-        assert cur.fetchone()["n"] == 1
+    assert _sessions_count() == before == (before[0], 0)
+    assert sessions.get_session(owner["id"])["is_active"]
+    reports = [i for i in store.items() if i["kind"] == "report" and i["source_session_id"] == owner["id"]]
+    if stop_reason == "end_turn":
+        assert len(reports) == 1 and "Build passed" in reports[0]["content"]
+    else:
+        assert reports == []
 
 
-@pytest.mark.parametrize("guard", ["under", "unknown", "queued", "parked", "stopped", "project", "settled", "question"])
-async def test_handoff_guards(owner, guard):
-    sessions.set_session_context_usage(owner["id"], {"totalTokens": 79999 if guard == "under" else 90000,
-                                                              "maxTokens": 100000})
-    if guard == "unknown":
-        sessions.set_session_context_usage(owner["id"], {})
-    if guard in ("queued", "parked"):
-        turn = turns.enqueue_turn(owner["id"], "user", prompt="New work", profile_id="agent")
-        if guard == "parked":
-            turns.start_turn(turn["id"])
-            turns.park_turn(turn["id"])
-    if guard == "stopped":
-        from app.core.task_registry import task_registry
-        task_registry.mark_user_stopped(owner["id"])
-    if guard == "settled":
-        sessions.set_session_active(owner["id"], False)
-    if guard == "project":
-        database.create_project("project", "Project", None, "/tmp/example")
-        sessions.set_session_project(owner["id"], "project")
-    if guard == "question":
-        from app.db.interactions import create_interaction
-        create_interaction(owner["id"], "question", {}, None)
-    assert coordinator_handoff._admit(owner["id"], {}, {}) is None
+async def test_full_started_coordinator_reports_to_its_starter(owner):
+    """A StartSession chat past 80% reports its finished work to the chat
+    that started it (report_settled_start), and is not replaced."""
+    result = await orch.make_handler(lambda: owner["id"])("start", {
+        "title": "Coordinate review", "prompt": "Coordinate a review", "request_id": "nested"}, ToolCtx())
+    assert not result.is_error, result.text
+    child = json.loads(result.text)
+    sessions.set_session_context_usage(child["session_id"], {"totalTokens": 85000, "maxTokens": 100000})
+    before = _sessions_count()
+    run(child["session_id"], child["turn_id"], "Review completed without blockers.")
+    await turn_scheduler.on_turn_settled(child["session_id"], child["turn_id"], "completed")
+    assert _sessions_count() == before
+    assert "Review completed without blockers" in wakes(owner["id"])[0]["prompt"]
 
 
 def test_migration_idempotent_and_sync_registry(owner):
@@ -294,65 +283,19 @@ async def test_genuine_or_richer_task_report_replaces_provisional_without_reopen
     assert not store.items()
 
 
-def test_handoff_keeps_cumulative_job_budget_but_resets_display_clock(owner):
+def test_legacy_handoff_receipt_still_carries_job_budget(owner):
+    """Receipts the retired hand-off wrote stay readable: a successor keeps
+    the job time its predecessors used."""
     from datetime import UTC, datetime
 
     from app.core.spending_limits import _job_over_time
     sid = owner["id"]
-    for used_minutes in (50, 9):
-        with get_db() as conn:
-            conn.cursor().execute("UPDATE sessions SET work_ms=%s, work_started_at=NULL WHERE id=%s",
-                                  (used_minutes * 60000, sid))
-        sessions.set_session_context_usage(sid, {"totalTokens": 90000, "maxTokens": 100000})
-        turn = turns.enqueue_turn(sid, "user", prompt="Coordinate", profile_id="agent")
-        run(sid, turn["id"], "Continuing")
-        successor = coordinator_handoff._admit(sid, turns.get_turn(turn["id"]), {"stop_reason": "tool_use"})
-        assert successor is not None
-        sid = successor["id"]
-        assert int(sessions.get_session(sid).get("work_ms") or 0) == 0
-        with get_db() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT turn_id FROM coordinator_handoffs WHERE successor_session_id=%s", (sid,))
-            wake_id = cur.fetchone()["turn_id"]
-        run(sid, wake_id, "Fresh context")
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE sessions SET work_ms=%s, work_started_at=NULL WHERE id=%s", (60000, sid))
+        cur.execute("INSERT INTO coordinator_handoffs "
+                    "(source_session_id,successor_session_id,turn_id,created_at,prior_work_ms) "
+                    "VALUES (%s,%s,%s,%s,%s)",
+                    ("previous", sid, "turn", datetime.now(UTC).isoformat(), 58 * 60000))
     assert not _job_over_time(sid, 60, datetime.now(UTC), coordination=True)
     assert _job_over_time(sid, 59, datetime.now(UTC), coordination=True)
-    with get_db() as conn:
-        conn.cursor().execute("UPDATE sessions SET work_ms=%s WHERE id=%s", (60000, sid))
-    assert _job_over_time(sid, 60, datetime.now(UTC), coordination=True)
-
-
-async def test_initial_successor_wake_cannot_chain_handoffs(owner):
-    sessions.set_session_context_usage(owner["id"], {"totalTokens": 90000, "maxTokens": 100000})
-    assert not await coordinator_handoff.on_session_rest(owner["id"],
-        {"payload": {"coordinator_predecessor": "previous"}}, {}, "completed")
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM coordinator_handoffs")
-        assert cur.fetchone() is None
-
-
-async def test_unfinished_started_coordinator_handoff_preserves_report_routing(owner):
-    from app.db import session_events
-    result = await orch.make_handler(lambda: owner["id"])("start", {
-        "title": "Coordinate review", "prompt": "Coordinate a review", "request_id": "nested"}, ToolCtx())
-    assert not result.is_error, result.text
-    child = json.loads(result.text)
-    sessions.set_session_context_usage(child["session_id"], {"totalTokens": 85000, "maxTokens": 100000})
-    run(child["session_id"], child["turn_id"], "Still coordinating the review.")
-    session_events.append_events(child["session_id"], [{"type": "turn.completed", "turn_id": child["turn_id"],
-        "payload": {"stop_reason": "tool_use"}}])
-    await turn_scheduler.on_turn_settled(child["session_id"], child["turn_id"], "completed")
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM coordinator_handoffs WHERE source_session_id=%s", (child["session_id"],))
-        receipt = dict(cur.fetchone())
-    assert wakes(owner["id"]) == []  # Not a false 'work completed' report.
-    assert orch.started_by_owner(receipt["successor_session_id"]) == owner["id"]
-    wake = turns.get_turn(receipt["turn_id"])
-    original = turns.get_turn(child["turn_id"])
-    assert wake["payload"]["orchestration_root"] == original["payload"]["orchestration_root"]
-    run(receipt["successor_session_id"], receipt["turn_id"], "Review completed without blockers.")
-    await turn_scheduler.on_turn_settled(receipt["successor_session_id"], receipt["turn_id"], "completed")
-    assert "Review completed without blockers" in wakes(owner["id"])[0]["prompt"]
-
