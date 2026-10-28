@@ -43,6 +43,27 @@ CHOOSE_MESSAGE = ("The user sees these options as a choice card and can remember
                   "Do not list them again or pick for them; wait for their reply.")
 
 
+# Tools whose every call passes this module's admission: a stored or job
+# choice for unattended runs, a known price, the confirmation threshold and
+# the daily cap. Unattended runs never put these to a person (nobody is there
+# to answer, so the prompt would hang the run): admission decides.
+ADMISSION_GATED_TOOLS = frozenset({
+    *(f"mcp__ai-tools__{name}" for name in (
+        "generateImage", "generateVideo", "generateAudio", "textTo3D", "runFalModel", "searchModels")),
+    "GenerateNativeImage", "GenerateNativeVideo",
+})
+
+
+def admission_gates_unattended(tool_name, context) -> bool:
+    """Whether this call needs no person's prompt: an unattended run's guarded
+    generation tool. ``context`` must be the run's own ``RunContext``;
+    anything else (no generation tools, an unknown caller) keeps the prompt."""
+    from app.core.background_permissions import canonical
+
+    return (isinstance(context, RunContext) and context.unattended
+            and canonical(tool_name) in ADMISSION_GATED_TOOLS)
+
+
 @dataclass(frozen=True)
 class RunContext:
     session_id: str | None = None
