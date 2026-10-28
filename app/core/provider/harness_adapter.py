@@ -185,6 +185,11 @@ if TYPE_CHECKING:  # pragma: no cover — annotation-only; the DB import below i
 logger = logging.getLogger(__name__)
 
 _ENGINE_CLOSE_GRACE_SECONDS = 5.0
+# The bound of each small section a delegated leg puts back after a Claude
+# Code compaction (date and branch, Away mode, scratch); they are a few
+# hundred characters, so the bound only stops a broken one crowding out the
+# rest of the note (see ``_compact_note``).
+_RESTORE_SMALL_SECTION_CHARS = 4_000
 
 # Fluid sessions this process already re-seeded because their CLI transcript
 # carried the bash-first steer (``_cli_reseed_reason``). Never re-seeded for
@@ -2286,34 +2291,59 @@ class HarnessAdapter(ProviderAdapter):
                 self._memory_folded_start = self._memory_compacting_seq
             self._memory_compacting_seq = None
 
-    async def _compact_context_note(self) -> Optional[str]:
-        """The turn's note, rendered fresh, for the delegated loop to put back
-        after a Claude Code compaction. Remembers the snapshot it carried
-        (with the event head) so the next message need not repeat it."""
+    async def _compact_context_note(self) -> List[Any]:
+        """The turn's note, rendered fresh, as the sections the delegated loop
+        puts back after a Claude Code compaction (#755).
+
+        The memory section remembers the snapshot it carried (with the event
+        head) so the next message need not repeat it, but only once the loop
+        reports that section delivered whole: a snapshot that was cut or left
+        out is sent again with the next message."""
         head = self._event_head()
         self._memory_put_back_section = None
-        note = await asyncio.to_thread(self._compact_note)
+        sections = await asyncio.to_thread(self._compact_note)
         section = self._memory_put_back_section
-        if note and section:
-            self._memory_put_back = (section, head)
-        return note
+        if not section:
+            return sections
 
-    def _compact_note(self) -> Optional[str]:
-        """:meth:`_turn_context_note`, always with today's date and the branch.
+        def credit() -> None:
+            self._memory_put_back = (section, head)
+
+        return [replace(s, on_delivered=credit) if s.name == "memory" else s for s in sections]
+
+    def _compact_note(self) -> List[Any]:
+        """:meth:`_turn_context_note` as restoration sections, always with
+        today's date and the branch.
 
         The turn note carries them only where nothing else does (see
         :meth:`_env_note`). A compaction drops whatever the conversation said
         about them, so the put-back note always names both (#1794: after
         /compact the agent ran git to answer "what branch").
+
+        The note keeps its order (environment, memory, working record, Away,
+        scratch). Within the loop's bound the small, behaviour-setting
+        sections claim room first and are never cut; memory and the working
+        record may be cut to fit, which the loop records and does not credit.
         """
+        from fluid.engine.compact_restore import RestorationSection
+
         env = self._env_note() or self._checkout_env_note()
         section = self._memory_section()
         self._memory_put_back_section = section
         memory = f"<system-reminder>\n{section}\n</system-reminder>" if section else None
         # A compaction may fold the record away: put the current one back.
-        blocks = [env, memory, self._working_record_block(), self._away_note(), self._scratch_note()]
-        present = [block for block in blocks if block]
-        return "\n\n".join(present) if present else None
+        parts = [
+            ("environment", env, 0, _RESTORE_SMALL_SECTION_CHARS, False),
+            ("memory", memory, 3, None, True),
+            ("working_record", self._working_record_block(), 4, None, True),
+            ("away", self._away_note(), 1, _RESTORE_SMALL_SECTION_CHARS, False),
+            ("scratch", self._scratch_note(), 2, _RESTORE_SMALL_SECTION_CHARS, False),
+        ]
+        return [
+            RestorationSection(name=name, text=text, priority=priority,
+                               max_chars=bound, cuttable=cuttable)
+            for name, text, priority, bound, cuttable in parts if text
+        ]
 
     def _scratch_note(self) -> str:
         from fluid.state import scratch_prompt
@@ -4305,8 +4335,19 @@ class HarnessAdapter(ProviderAdapter):
             return []
 
         if cls == "DelegatedDiagnostic":
-            if getattr(event, "kind", "") != "compaction_failed":
-                # Audit-only findings (the bash-first steer): not conversation.
+            kind = getattr(event, "kind", "")
+            data = getattr(event, "data", None) or {}
+            if kind == "context_window_mismatch" and data.get("pinned"):
+                # A Claude Code setting overrides the window this chat pinned
+                # (#754): say so on the session, once per mismatch.
+                return [SystemMessage(subtype="context_window_mismatch", data={
+                    "content": getattr(event, "message", "") or "",
+                    **{key: data.get(key) for key in (
+                        "expected", "effective", "source", "cli_version")},
+                })]
+            if kind != "compaction_failed":
+                # Audit-only findings (the bash-first steer, what a compaction
+                # put back, an unpinned window difference): not conversation.
                 return []
             # A /compact that Claude Code did not carry out: say so, with its
             # reason, instead of leaving the owner to assume it worked.

@@ -183,7 +183,7 @@ async def test_delegated_record_change_neither_respawns_nor_changes_the_prompt(m
         assert not (await _run_turn(adapter, "turn 2")).is_error
         assert adapter.engine.append_system_prompt == append
         # A compaction put-back always carries the current record.
-        assert "Collect performance numbers." in (adapter._compact_note() or "")
+        assert "Collect performance numbers." in "\n\n".join(s.text for s in adapter._compact_note())
     finally:
         await adapter.disconnect()
     assert len(_ArgvLoop.argvs) == 1, "a record change must not respawn the CLI"

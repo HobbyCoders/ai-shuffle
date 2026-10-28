@@ -883,6 +883,15 @@
           "past_bug": "#687: Claude Code chats never reached journal.jsonl. #691: parallel SKILL.md Reads raced on .usage.json and could lose an increment or reset every skill's counts."
         },
         {
+          "id": "harness-basics.claude-window-mismatch-and-restore",
+          "check": "A Claude Code chat reports a window a user setting overrode, and records what each compaction put back",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "On a disposable candidate worker, put CLAUDE_CODE_AUTO_COMPACT_WINDOW=150000 in the env block of the candidate's own ~/.claude/settings.json (never the installed app's). Start a throwaway Claude Code chat on the cheapest Claude model with a 200K context choice and send one short message. Then remove the setting, start a second throwaway chat, run about twenty small Bash calls, press Compact now twice in a row, and read the session's CompactionCheckpoint, ContextCompaction and compaction_restoration events. Move that chat to a second candidate and send one short message. Restore the settings file and archive both chats.",
+          "pass_when": "The first chat shows one Context Window Mismatch note naming 150,000 and 200,000 tokens, and later compactions in it target the smaller window; nothing is refused. In the second chat each Fluid compaction's ContextCompaction and CompactionCheckpoint carry the same cmp_ id, two compactions give two different ids, and the move's re-seed log says it started from the Fluid compaction checkpoint. Each compaction_restoration lists environment, memory and the other sections with delivered status and complete true. A missing note, a checkpoint with another compaction's id, or a re-seed that replays the whole history is a fail.",
+          "past_bug": "#754: a CLAUDE_CODE_AUTO_COMPACT_WINDOW in the user's settings.json silently overrode the app's pin. #755: the put-back note was cut at 24k yet credited as complete, and checkpoints were paired with compactions by a time window."
+        },
+        {
           "id": "harness-basics.cli-subagent-owner-pass",
           "check": "CLI bundled calls cannot spend the main chat approval",
           "kind": "owner",

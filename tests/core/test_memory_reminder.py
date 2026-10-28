@@ -401,7 +401,7 @@ async def test_compaction_note_still_carries_the_full_snapshot(monkeypatch):
     memory = {"section": _section(*FACTS)}
     adapter, _ = await _adapter(monkeypatch, memory)
     await _turn(adapter)
-    assert mr.wrap(memory["section"]) in (adapter._compact_note() or "")
+    assert mr.wrap(memory["section"]) in "\n\n".join(s.text for s in adapter._compact_note())
 
 
 @pytest.mark.asyncio

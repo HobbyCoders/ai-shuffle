@@ -434,22 +434,126 @@ async def test_the_checkpoint_is_written_when_claude_code_applies_the_answer():
         await loop.aclose()
 
 
-async def test_no_checkpoint_for_an_answer_claude_code_did_not_apply(monkeypatch):
-    """An answer older than the mod's wait was not what the boundary
-    applied (it fell back, or a later compaction ran), so nothing is written."""
+def _boundary(parent: str | None) -> dict:
+    """A main ``compact_boundary`` as CLI 2.1.312 prints it: it names the last
+    message before the compaction (``logical_parent_uuid``)."""
+    return {**BOUNDARY, **({'logical_parent_uuid': parent} if parent else {})}
+
+
+def _pairs(emitted: list) -> list[tuple[str, str]]:
+    return [(type(e).__name__, e.compaction_id) for e in emitted
+            if isinstance(e, (ContextCompaction, CompactionCheckpoint))]
+
+
+async def test_no_checkpoint_for_an_answer_claude_code_did_not_apply():
+    """A boundary that names another conversation was not this answer's (it
+    fell back, or another compaction ran), so nothing is written."""
+    chat = Chat()
+    chat.grow(24)
+    loop, sid = await _loop_with(chat)
+    try:
+        status, body = await _request(loop, {'v': 1, 'trigger': 'manual', 'messages': chat.cli})
+        assert status == 200
+        emitted = await _read(loop, sid, [COMPACTING, _boundary('not-a-posted-row')])
+        [event] = [e for e in emitted if isinstance(e, ContextCompaction)]
+        assert event.compaction_id.startswith('cmp_') and event.compaction_id != body['compaction_id']
+        assert not [e for e in emitted if isinstance(e, CompactionCheckpoint)]
+    finally:
+        await loop.aclose()
+
+
+# ─── #755: one transaction id from the answer to the checkpoint ──────────────
+
+
+async def test_the_answer_its_boundary_and_its_checkpoint_carry_one_id():
+    """Paired by the boundary's parent, never by when it arrived."""
+    from fluid.engine import delegated
+
+    assert not hasattr(delegated, 'CHECKPOINT_APPLY_WINDOW_S')
+    chat = Chat()
+    chat.grow(24)
+    loop, sid = await _loop_with(chat)
+    try:
+        status, body = await _request(loop, {'v': 1, 'trigger': 'auto', 'messages': chat.cli})
+        assert status == 200 and body['compaction_id'].startswith('cmp_')
+        emitted = await _read(loop, sid, [COMPACTING, _boundary(chat.cli[-1]['handle'])])
+        cid = body['compaction_id']
+        assert _pairs(emitted) == [('ContextCompaction', cid), ('CompactionCheckpoint', cid)]
+        stored = [e async for e in iter_events_of_class(loop.store, sid, 0, (CompactionCheckpoint,))]
+        assert [e.compaction_id for e in stored] == [cid]
+    finally:
+        await loop.aclose()
+
+
+async def test_two_compactions_answered_before_either_boundary_pair_by_id():
+    """Between turns nobody reads stdout, so both answers can come before
+    either boundary is read. Each boundary still gets its own checkpoint."""
+    chat = Chat()
+    chat.grow(18)
+    loop, sid = await _loop_with(chat)
+    try:
+        _, first = await _request(loop, {'v': 1, 'trigger': 'auto', 'messages': list(chat.cli)})
+        first_parent = chat.cli[-1]['handle']
+        chat.grow(12, start=18)
+        meta = await loop._ensure_session()
+        stored = {n.node_id for n in await loop.store.load_path(meta.session_id)}
+        for node in chat.stored:
+            if node.node_id not in stored:
+                await loop.store.append(meta.session_id, node)
+        _, second = await _request(loop, {'v': 1, 'trigger': 'auto', 'messages': list(chat.cli)})
+        assert first['compaction_id'] != second['compaction_id']
+        emitted = await _read(loop, sid, [
+            COMPACTING, _boundary(first_parent), COMPACTING, _boundary(chat.cli[-1]['handle']),
+        ])
+        assert _pairs(emitted) == [
+            ('ContextCompaction', first['compaction_id']),
+            ('CompactionCheckpoint', first['compaction_id']),
+            ('ContextCompaction', second['compaction_id']),
+            ('CompactionCheckpoint', second['compaction_id']),
+        ]
+    finally:
+        await loop.aclose()
+
+
+async def test_a_summarizer_boundary_or_a_late_answer_gets_no_checkpoint(monkeypatch):
     from fluid.engine import delegated
 
     chat = Chat()
     chat.grow(24)
     loop, sid = await _loop_with(chat)
     try:
-        status, _ = await _request(loop, {'v': 1, 'trigger': 'manual', 'messages': chat.cli})
-        assert status == 200
-        answered, checkpoint = loop._pending_checkpoint
-        loop._pending_checkpoint = (answered - delegated.CHECKPOINT_APPLY_WINDOW_S - 1, checkpoint)
+        # Claude Code's summarizer wrote this boundary: not Fluid's answer.
+        await _request(loop, {'v': 1, 'trigger': 'auto', 'messages': chat.cli})
+
+        async def summary(_frame: dict) -> str:
+            return 'Claude Code summary'
+
+        monkeypatch.setattr(loop, '_read_compaction_summary', summary)
+        emitted = await _read(loop, sid, [COMPACTING, _boundary(chat.cli[-1]['handle'])])
+        assert [name for name, _ in _pairs(emitted)] == ['ContextCompaction']
+        # An answer ready only after the mod stopped waiting opens nothing.
+        monkeypatch.setattr(delegated, 'MOD_COMPACT_WAIT_S', -1.0)
+        monkeypatch.setattr(loop, '_read_compaction_summary', lambda _f: asyncio.sleep(0, ''))
+        await _request(loop, {'v': 1, 'trigger': 'auto', 'messages': chat.cli})
+        assert loop._open_txns == []
+        emitted = await _read(loop, sid, [COMPACTING, _boundary(chat.cli[-1]['handle'])])
+        assert [name for name, _ in _pairs(emitted)] == ['ContextCompaction']
+    finally:
+        await loop.aclose()
+
+
+async def test_a_boundary_without_a_parent_takes_the_newest_answer():
+    """An older CLI names no parent: the newest open answer, as before."""
+    chat = Chat()
+    chat.grow(24)
+    loop, sid = await _loop_with(chat)
+    try:
+        await _request(loop, {'v': 1, 'trigger': 'auto', 'messages': chat.cli})
+        _, newest = await _request(loop, {'v': 1, 'trigger': 'auto', 'messages': chat.cli})
         emitted = await _read(loop, sid, [COMPACTING, BOUNDARY])
-        assert [type(e) for e in emitted if isinstance(e, ContextCompaction)] == [ContextCompaction]
-        assert not [e for e in emitted if isinstance(e, CompactionCheckpoint)]
+        cid = newest['compaction_id']
+        assert _pairs(emitted) == [('ContextCompaction', cid), ('CompactionCheckpoint', cid)]
+        assert loop._open_txns == []
     finally:
         await loop.aclose()
 
