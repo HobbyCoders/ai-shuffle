@@ -171,6 +171,11 @@ def snapshot(session_id: str, *, offset: int = 0, limit: int = LIST_DEFAULT,
             result["sessions"].append(entry)
         if len(result["sessions"]) < len(live):
             result["sessions_omitted"] = len(live) - len(result["sessions"])
+            result["note"] += (
+                " Live sessions omitted by the preview budget: use ListSessions(scope='all', state='all') "
+                "and follow its next_offset to find them. If session sharing is off, list on the owning worker. "
+                "WorkingRecord next_offset pages items only."
+            )
     for row in rows[:limit]:
         candidate = [*result["items"], _preview(row)]
         if result["items"] and len(dumps({**result, "items": candidate, "next_offset": offset + len(candidate)})

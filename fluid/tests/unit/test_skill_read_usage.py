@@ -6,8 +6,12 @@ so ``note_skill_file_read`` stands in for the Skill tool's own usage stamp.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from pathlib import Path
+
+import pytest
 
 from fluid.tools.builtins.skill import note_skill_file_read
 
@@ -51,6 +55,28 @@ def test_other_files_and_scoped_out_skills_are_not_counted(isolate_home, tmp_pat
     # The same scope gates as the Skill tool: no "user" source, no global skill.
     assert note_skill_file_read(str(global_skill), str(proj), ("project",)) is None
     assert _usage(isolate_home) == {}
+
+
+@pytest.mark.asyncio
+async def test_skill_tool_notes_usage_off_the_event_loop(isolate_home, tmp_path, monkeypatch) -> None:
+    from fluid.tools.builtins import skill
+    from fluid.tools.registry import ToolCtx
+
+    path = _skill(isolate_home / ".fluid" / "skills", "deploy")
+    loop_thread = threading.get_ident()
+    usage_threads = []
+    note_usage = skill._note_usage
+
+    def record_usage(skill_path):
+        usage_threads.append(threading.get_ident())
+        note_usage(skill_path)
+
+    monkeypatch.setattr(skill, "_note_usage", record_usage)
+    result = await asyncio.wait_for(skill.handler({"name": "deploy"}, ToolCtx(cwd=str(tmp_path))), 2)
+
+    assert not result.is_error and "Body." in result.text
+    assert _usage(isolate_home)[str(path)]["loads"] == 1
+    assert len(usage_threads) == 1 and usage_threads[0] != loop_thread
 
 
 def test_concurrent_loads_sum_exactly_and_never_reset(isolate_home, tmp_path) -> None:
