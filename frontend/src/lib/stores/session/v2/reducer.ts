@@ -549,14 +549,13 @@ function foldDroppedAttempt(state: V2SessionState): {
 	if (!state.messages.some(dropped)) return { state, superseded: null };
 	const text: string[] = [];
 	const tools: string[] = [];
-	const kept = state.messages.filter((m) => {
-		if (!dropped(m)) return true;
+	for (const m of state.messages) {
+		if (!dropped(m)) continue;
 		if (m.type === 'tool_use') tools.push(m.toolName || 'tool');
 		else if (m.type !== 'thinking' && m.content?.trim()) text.push(m.content.trim());
-		return false;
-	});
+	}
 	return {
-		state: { ...closeOpen(state), messages: kept },
+		state: withoutMessages(closeOpen(state), dropped),
 		superseded: { text: text.join('\n\n'), tools },
 	};
 }
@@ -752,6 +751,32 @@ function appendMessage(state: V2SessionState, msg: ChatMessage, seq: number): V2
 		next.mayHaveRunningSubagents = true;
 	}
 	return next;
+}
+
+/**
+ * Take messages out of the transcript, and their origin seqs with them.
+ *
+ * `messageOriginSeq` must hold only rows still in `messages`: `message.user`
+ * reads "more rows than origins" as "an optimistic send is waiting". An origin
+ * left behind by a removed row hid the next send from its reconcile, so the
+ * server's copy rendered as a second bubble (#747).
+ */
+function withoutMessages(state: V2SessionState, drop: (m: ChatMessage) => boolean): V2SessionState {
+	const messages: ChatMessage[] = [];
+	let messageOriginSeq = state.messageOriginSeq;
+	for (const m of state.messages) {
+		if (!drop(m)) {
+			messages.push(m);
+			continue;
+		}
+		if (!messageOriginSeq.has(m.id)) continue;
+		if (messageOriginSeq === state.messageOriginSeq) {
+			messageOriginSeq = ownedOrigins.has(messageOriginSeq) ? messageOriginSeq : own(new Map(messageOriginSeq));
+		}
+		messageOriginSeq.delete(m.id);
+	}
+	if (messages.length === state.messages.length) return state;
+	return { ...state, messages: own(messages), messageOriginSeq };
 }
 
 /** Record an origin seq once — the earliest (creation) seq wins on replay. */
@@ -2001,17 +2026,12 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			const absorbedCard = launchToolUseId
 				? next.messages.find((m) => m.type === 'subagent' && m.toolId === launchToolUseId)
 				: undefined;
-			next = {
-				...next,
-				messages: next.messages.filter(
-					(m) =>
-						!(
-							m.type === 'tool_use' &&
-							!isSwarmTool(m.toolName ?? '') &&
-							(m.toolId === taskId || (launchToolUseId && m.toolId === launchToolUseId))
-						) && !(absorbedCard && m.id === absorbedCard.id)
-				),
-			};
+			next = withoutMessages(next, (m) =>
+				(m.type === 'tool_use' &&
+					!isSwarmTool(m.toolName ?? '') &&
+					(m.toolId === taskId || (!!launchToolUseId && m.toolId === launchToolUseId))) ||
+				(!!absorbedCard && m.id === absorbedCard.id)
+			);
 			// The absorbed card no longer exists, so a following turn.parked could
 			// never revive it — drop its id from the speculative-settle record.
 			if (absorbedCard && next.speculativelySettledCardIds.includes(absorbedCard.id)) {
@@ -2332,8 +2352,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 		case 'system.note': {
 			if (str(event.subtype) === 'unsent_restored') {
 				const id = str(obj(event.data)?.message_id);
-				return { ...state, messages: own(state.messages.filter(m =>
-					!(m.metadata?.not_sent && m.metadata?.not_sent_id === id))) };
+				return withoutMessages(state, (m) => !!(m.metadata?.not_sent && m.metadata?.not_sent_id === id));
 			}
 			if (str(event.subtype) === 'session_settled') {
 				const cutoff = typeof event.through_seq === 'number' ? event.through_seq : seq;

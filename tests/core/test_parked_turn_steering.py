@@ -306,3 +306,55 @@ async def test_rest_existing_completed_session_returns_new_parked_attempt(mock_d
         )
     assert result["response"] == "NEW PARKED ANSWER"
     assert result["metadata"].tokens_out == 7
+
+
+@pytest.mark.asyncio
+async def test_a_send_to_a_parked_chat_is_recorded_and_delivered_once(mock_db):
+    """#747. A message sent while the chat is parked on background work goes
+    through the ordinary send path and resumes the parked turn. The user's row
+    is written once, the event log carries one ``message.user`` (the parked
+    turn's id, the send's own command id, so the client reconciles its echo),
+    and the model gets the text once."""
+    from tests.api.test_chat_ws_v2_turns import _make_handler, _make_session, _Patches
+
+    sid = _make_session("park-send-once")
+    first_id, send_id = "client-" + "a" * 32, "client-" + "b" * 32
+    create_recorder = turn_recorder.TurnRecorder.create_for_run
+    prompts = []
+
+    async def pump(**kwargs):
+        prompts.append(kwargs["prompt"])
+        yield {"type": "stream_delta", "delta_type": "text", "content": "on it"}
+        yield {"type": "done", "metadata": {}}
+
+    async def send(prompt, client_id):
+        with _Patches():
+            await _make_handler().handle_query({
+                "prompt": prompt, "session_id": sid, "profile": "default",
+                "project": None, "client_message_id": client_id,
+            })
+        [row] = turns.get_queued_turns(sid)
+        return row
+
+    with _runtime_env(pump=pump, bg_work=[{"id": "monitor"}]), patch.object(
+        turn_recorder.TurnRecorder, "create_for_run", new=create_recorder,
+    ), patch.object(session_runtime, "record_parked", new=turn_recorder.record_parked):
+        first = await send("watch the deploy", first_id)
+        assert await session_runtime.SessionRuntime(first).execute() == "parked"
+        row = await send("and tell me when it is done", send_id)
+        resumed = session_runtime.SessionRuntime(row)
+        assert await resumed.execute() == "parked"
+
+    assert resumed.turn_id == first["id"]
+    assert turns.get_turn(row["id"])["stop_reason"] == "steered"
+    assert turns.get_queued_turns(sid) == []
+    assert prompts == ["watch the deploy", "and tell me when it is done"]
+    stored = mock_db.execute(
+        "SELECT content FROM session_messages WHERE session_id=? AND role='user'", (sid,),
+    ).fetchall()
+    assert [r["content"] for r in stored] == ["watch the deploy", "and tell me when it is done"]
+    users = [e for e in session_events.get_events(sid) if e["event_type"] == "message.user"]
+    assert [(e["payload"]["content"], e["turn_id"], e["command_id"]) for e in users] == [
+        ("watch the deploy", first["id"], first_id),
+        ("and tell me when it is done", first["id"], send_id),
+    ]

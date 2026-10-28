@@ -18,6 +18,7 @@ import {
 	type WireEvent,
 } from './reducer';
 import type { ChatMessage, Task } from '../../types';
+import { buildTranscriptModel } from '../../../utils/work-log';
 
 // ─── Event builders ─────────────────────────────────────────────────────────
 
@@ -639,6 +640,89 @@ describe('steer sharing the live turn command_id (#2016)', () => {
 	it('replay: the same log renders the steer once', () => {
 		const s = fold([...history(), steerEvent()]);
 		expect(userRows(s.messages)).toEqual([opener, steer]);
+	});
+});
+
+// #747: a send to a chat parked on a subagent rendered twice. The subagent card
+// absorbs its launch tool block, and the block's origin seq stayed behind. The
+// optimistic send then balanced the count, so `message.user` skipped the
+// reconcile and appended a second copy (both stamped with the parked turn, so
+// both read "mid-turn").
+describe('a send to a chat parked on background work (#747)', () => {
+	const TURN = 'turn-parked';
+	const opener = 'run the long job';
+	const send = 'and tell me when it is done';
+	const parkedOnSubagent = (): WireEvent[] => [
+		ev('turn.started', { id: 'ts', turn_id: TURN, command_id: 'client-first' }),
+		ev('message.user', { id: 'srv-opener', turn_id: TURN, command_id: 'client-first', content: opener }),
+		ev('tool.use', { id: 'tu-evt', turn_id: TURN, tool_use_id: 'call-launch', name: 'Task', input: {} }),
+		ev('subagent.started', { id: 'sa-evt', turn_id: TURN, task_id: 'call-launch', description: 'job' }),
+		ev('assistant.text_delta', { id: 'txt', turn_id: TURN, text: 'started it' }),
+		ev('turn.parked', { id: 'tp', turn_id: TURN }),
+	];
+	const resumedSend = (): WireEvent =>
+		ev('message.user', { id: 'srv-send', turn_id: TURN, command_id: 'client-send', content: send });
+	const userRows = (messages: ChatMessage[]) =>
+		messages.filter((m) => m.role === 'user').map((m) => m.content);
+
+	it('the absorbed launch block leaves no origin behind', () => {
+		const s = fold(parkedOnSubagent());
+		expect(s.messages.some((m) => m.type === 'tool_use')).toBe(false);
+		expect(s.messages.length).toBe(s.messageOriginSeq.size);
+	});
+
+	it('live: the optimistic send reconciles with the resumed turn message once', () => {
+		let s = fold(parkedOnSubagent());
+		// message-sender's echo for a parked send: the parked turn's id and the
+		// send's own command id, seeded into the reducer before the next event.
+		s = {
+			...s,
+			messages: [...s.messages, {
+				id: 'user-local', role: 'user', content: send, commandId: 'client-send', turnId: TURN,
+			}],
+		};
+		s = reduce(s, resumedSend());
+		expect(userRows(s.messages)).toEqual([opener, send]);
+		expect(s.messages.find((m) => m.content === send)?.id).toBe('user-local');
+		expect(s.messages.length).toBe(s.messageOriginSeq.size);
+	});
+
+	it('replay: the same log renders the send once', () => {
+		expect(userRows(fold([...parkedOnSubagent(), resumedSend()]).messages)).toEqual([opener, send]);
+	});
+
+	const midTurnContents = (messages: ChatMessage[]) => {
+		const ids = buildTranscriptModel(messages, { isStreaming: false, groupingEnabled: true }).midTurnUserIds;
+		return messages.filter((m) => m.id && ids.has(m.id)).map((m) => m.content);
+	};
+
+	it('the kept copy reads "mid-turn" because it joined the parked turn', () => {
+		let s = fold(parkedOnSubagent());
+		s = {
+			...s,
+			messages: [...s.messages, {
+				id: 'user-local', role: 'user', content: send, commandId: 'client-send', turnId: TURN,
+			}],
+		};
+		s = reduce(s, resumedSend());
+		expect(midTurnContents(s.messages)).toEqual([send]);
+	});
+
+	it('a steer into a live turn still renders once, labelled "mid-turn"', () => {
+		// A busy chat's send waits as a pending bubble, not a transcript row; the
+		// steer receipt records it with the live turn's id.
+		const s = fold([
+			ev('turn.started', { turn_id: 'turn-live', command_id: 'client-first' }),
+			ev('message.user', { turn_id: 'turn-live', command_id: 'client-first', content: opener }),
+			ev('tool.use', { turn_id: 'turn-live', tool_use_id: 'call-launch', name: 'Task', input: {} }),
+			ev('subagent.started', { turn_id: 'turn-live', task_id: 'call-launch', description: 'job' }),
+			ev('message.user', {
+				turn_id: 'turn-live', command_id: 'client-steer', queued_turn_id: 'turn-queued',
+				content: send, checkpoint_backed: false,
+			}),
+		]);
+		expect(userRows(s.messages)).toEqual([opener, send]);
+		expect(midTurnContents(s.messages)).toEqual([send]);
 	});
 });
 
