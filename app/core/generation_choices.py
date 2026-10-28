@@ -33,7 +33,8 @@ _LEGACY_OPTIONS = {
     "image": {"aspect_ratio": "image_aspect_ratio", "resolution": "image_resolution"},
     "video": {"aspect_ratio": "video_aspect_ratio", "duration": "video_duration", "resolution": "video_resolution"},
 }
-ORIGINS = ("card", "settings", "migrated")
+# "conversation": saved through the generationPreferences tool in a chat.
+ORIGINS = ("card", "settings", "migrated", "conversation")
 _MAX_ID = 512
 _MAX_OPTIONS_BYTES = 8192
 

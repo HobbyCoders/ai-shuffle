@@ -542,6 +542,30 @@
       "intro": "Single-worker checks of the turn loop.",
       "rows": [
         {
+          "id": "generation-379.chat-lane-claude-tools",
+          "check": "A chat-lane Claude session can call its permitted generation tools",
+          "kind": "owner",
+          "how": "On the candidate revision, open a disposable chat-lane session on a Claude model (a projectless chat whose turns keep the chat ceiling, for example one started by a non-owner caller) whose agent has image generation on. Ask it to list the generation tools it can call, then ask generateImage for an image without naming a source and stop at the choice card or the skip. Archive the session.",
+          "pass_when": "generateImage, searchModels and the chat lane's memory tools are callable without ToolSearch, and the call reaches the choice card (or its documented refusal). Nothing is submitted.",
+          "past_bug": "#778: the chat lane bans the CLI's ToolSearch while the bridge listed those tools deferred, so they could never be loaded."
+        },
+        {
+          "id": "generation-379.claude-cli-choice-card",
+          "check": "The generation choice card renders in a Claude CLI chat",
+          "kind": "browser",
+          "how": "In a disposable owner chat on a Claude model (delegated CLI leg) on the candidate revision, with fal and at least one plan image account available, ask generateImage for an image without naming a source or model. Open Advanced on a fal option and change one field to trigger a re-quote. Do not press Use this. Repeat at a phone width, then archive the chat.",
+          "pass_when": "The chat shows the choice card with every listed source, its price and its Advanced fields, not a persisted-output placeholder. The tool result the CLI shows is under 50,000 characters. Nothing is submitted, reserved or charged.",
+          "past_bug": "#775: the choose result passed the CLI's 50,000-character limit and became a persisted-output stub, so no card appeared."
+        },
+        {
+          "id": "generation-379.claude-cli-next-turn-pick",
+          "check": "A pick remembered or forgotten in a Claude CLI chat applies on its next turn",
+          "kind": "owner",
+          "how": "In a disposable owner chat on a Claude model (delegated CLI leg) on the candidate revision, with image generation and app-config tools on and an Included image account (ChatGPT or SuperGrok plan) available, ask generateImage for an image without naming a source: expect the choice card. Acknowledge remembering that Included account through generationPreferences, then on the next turn ask for another image without naming a source. Then acknowledge forgetting it and on the next turn ask once more. Restore the owner's original picks and archive the chat. No API-key or fal generation.",
+          "pass_when": "The turn after remember runs the remembered Included choice without asking (remembered result line shown). The turn after forget offers the choice card again and submits nothing. Neither turn reuses a pick the conversation changed, and no paid source is charged.",
+          "past_bug": "#773: the delegated CLI kept the choices read at session start, so a forgotten pick could still run and be charged."
+        },
+        {
           "id": "generation-379.job-choice-editor",
           "check": "Automation editor pins, clears and reads back generation job choices",
           "kind": "browser",
@@ -550,12 +574,28 @@
           "past_bug": "#543: production read job choices but the automation editor had no UI for them."
         },
         {
+          "id": "generation-379.pooled-wakeup-turn",
+          "check": "A wake-up turn on a live interactive Claude chat runs generation as unattended",
+          "kind": "owner",
+          "how": "In a disposable owner chat on a Claude model (delegated CLI leg) in Ask mode, with image generation on, remember a priced fal image choice above $0.10 through the Settings card (no submission). Ask generateImage for an image without naming a source and stop at the confirmation without approving. In the same chat, have the agent schedule a wake-up a minute out whose prompt calls generateImage again without naming a source and reuses the receipt it saw. Keep the chat open so the same CLI process serves the wake-up. Restore the owner's picks and archive the chat.",
+          "pass_when": "The typed turn asks for confirmation. The wake-up turn shows no permission prompt and returns skipped/needs_confirmation with no receipt, reservation, submission or charge, even when it passes the earlier receipt. The next typed turn still offers the confirmation.",
+          "past_bug": "#776 review: a pooled Claude CLI client kept the tool server's interactive context into a wake-up turn while the permission callback treated the turn as unattended."
+        },
+        {
           "id": "generation-379.save-warning",
           "check": "Saved generation picks show the fresh price or the unattended-skip warning",
           "kind": "browser",
           "how": "On a disposable candidate worker (fixture accounts, no paid generation), remember a priced choice and an unpriced fal model in Settings, Default models, and pin each to a throwaway paused automation in its editor's detail view. Make one quote fail (stop the holding worker or provider) and save again. In a throwaway chat, pick an unpriced option on a generateImage choice card and approve nothing. Repeat at a phone width. Delete only the throwaway automation and archive the chat.",
           "pass_when": "A priced save shows the server's fresh price. Unpriced, unavailable and timed-out saves keep the pick, say unattended runs will skip it (unpriced and unavailable named apart), and keep the card or job picker open; a collapsed chat card still says so. Saving sends no extra quote and makes no provider submission, reservation or charge.",
           "past_bug": "#542: the UI ignored the save response, so an unpriced pick looked saved and runnable until unattended runs skipped it."
+        },
+        {
+          "id": "generation-379.unattended-ask-mode",
+          "check": "An unattended automation in Ask mode reaches the generation skip instead of a permission prompt",
+          "kind": "owner",
+          "how": "On a disposable candidate worker, create a throwaway automation whose agent uses Ask mode, with image generation on, no remembered image choice and no job choice, and a prompt that calls generateImage without naming a source. Trigger it once (enable it first; a disabled one is refused). Then pin a job choice to a priced fal option above $0.10 and trigger once more. Inspect both run sessions and the run records. Delete only the throwaway automation and its sessions. No submission is expected.",
+          "pass_when": "Neither run shows a permission prompt or times out. The first records skipped/no_stored_choice and the second skipped/needs_confirmation, with no confirmation token, reservation, submission or charge.",
+          "past_bug": "#776: the automation stopped at a permission prompt for generateImage nobody could answer and timed out before the unattended skip."
         },
         {
           "id": "harness-basics.1",

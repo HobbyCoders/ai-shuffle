@@ -689,7 +689,6 @@ class HarnessAdapter(ProviderAdapter):
             delegated_blocked = _delegated_disallowed(options)
             _install_bridge_tool_filter(options)
             from app.core.usage_limits import claude_mod_usage_sink
-            from app.core.provider.fluid_tool_bridge import delegated_bridge_deferred
             from app.core import claude_compaction
 
             # Settings > Providers > Claude > Sessions, read on the executing
@@ -819,8 +818,8 @@ class HarnessAdapter(ProviderAdapter):
                 fresh_context=self._fresh_memory_note,
                 # Bridged tools outside DELEGATED_LOADED_TOOLS reach the CLI
                 # deferred behind its ToolSearch; AI_SHUFFLE_PERF_BRIDGE_DEFER=0
-                # defers none.
-                bridge_deferred=delegated_bridge_deferred(),
+                # defers none, and neither does the chat lane (no ToolSearch).
+                bridge_deferred=_delegated_bridge_deferral(options),
             )
             # Only an owner chat's "not run yet" placeholder and a person's no
             # carry the owner's waiting message on a deny; a deny from Stop,
@@ -6295,6 +6294,22 @@ def _codemode_kernel_config() -> KernelConfig:
     """
     from app.core.config import settings
     return KernelConfig(os_sandbox=settings.code_mode_os_sandbox)
+
+
+def _delegated_bridge_deferral(options: SessionOptions):
+    """Which bridged tools the CLI keeps behind its ToolSearch, or None.
+
+    The chat lane bans the CLI's ToolSearch (``_delegated_disallowed``), so a
+    deferred tool there is listed by name and can never be loaded: its
+    permitted generation, memory and private-access tools all vanished. Chat
+    serves only its small surface, so nothing is deferred there, as on the
+    native leg's chat (``register_recorded_sdk_servers(defer_servers=None)``).
+    """
+    from app.core.provider.fluid_tool_bridge import delegated_bridge_deferred
+
+    if _session_mode(options) == "chat":
+        return None
+    return delegated_bridge_deferred()
 
 
 def _session_mode(options: SessionOptions) -> str:

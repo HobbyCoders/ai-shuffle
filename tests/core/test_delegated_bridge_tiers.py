@@ -112,7 +112,7 @@ async def _bridge(tmp_path, *, lane="code"):
         disallowed_tools=ha._delegated_disallowed(options),
         permission_grants=ha._delegated_permission_grants(options),
         claude_cmd=["claude"],
-        bridge_deferred=delegated_bridge_deferred(),
+        bridge_deferred=ha._delegated_bridge_deferral(options),
     )
     try:
         listed = await _answer(
@@ -208,6 +208,20 @@ async def test_chat_lane_keeps_the_attachment_reader_loaded(tmp_path):
     _options, _registry, tools = await _bridge(tmp_path, lane="chat")
     reader = next(t for t in tools if t["name"] == DELEGATED_READ)
     assert not _is_deferred(reader)
+
+
+@pytest.mark.asyncio
+async def test_chat_lane_defers_nothing_because_it_has_no_toolsearch(tmp_path):
+    # The chat lane bans the CLI's ToolSearch, so a deferred tool there is a
+    # name the model can never load: its generation tools were unreachable.
+    options, _registry, tools = await _bridge(tmp_path, lane="chat")
+    assert "ToolSearch" in ha._delegated_disallowed(options)
+    assert ha._delegated_bridge_deferral(options) is None
+    assert tools and not any(_is_deferred(t) for t in tools)
+    assert "mcp__ai-tools__generateImage" in {t["name"] for t in tools}
+    # The code lane keeps its tiers.
+    code = SessionOptions(model="opus", cwd=str(tmp_path), permission_mode="default")
+    assert ha._delegated_bridge_deferral(code) is not None
 
 
 @pytest.mark.parametrize("flag", ["0", "false", "OFF", "no"])

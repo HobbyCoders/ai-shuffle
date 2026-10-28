@@ -771,6 +771,7 @@ def _generation_context(
     ai_tools_config: dict[str, Any], session_row: dict[str, Any] | None,
     api_user_id: str | None, *, session_id: str | None,
     unattended: bool, chat_mode: bool = False, native_generation: bool = False,
+    turn_source: str | None = None,
 ) -> "RunContext":
     from app.core.generation_resolver import RunContext
 
@@ -780,11 +781,16 @@ def _generation_context(
     if native_generation:
         choice_config["image_generation"] = True
     choices = _generation_choices(choice_config, session_row, api_user_id)
+    # Each generation call re-reads the store through the same identity, so a
+    # pick saved or forgotten in an earlier turn applies (with_current_choices).
+    session_row = dict(session_row) if session_row else None
     return RunContext(session_id=session_id, unattended=unattended,
                       owner=bool(session_row) and not api_user_id, api_user_id=api_user_id,
                       chat_mode=chat_mode, remembered_choices=choices["remembered"],
                       last_choices=choices["last"], job_choices=choices.get("job"),
-                      choices_unreadable=bool(choices.get("unreadable")))
+                      choices_unreadable=bool(choices.get("unreadable")),
+                      choices_loader=lambda: _generation_choices(choice_config, session_row, api_user_id),
+                      turn_source=turn_source if isinstance(turn_source, str) else None)
 
 
 #: A turn whose bound provider row was deleted. Plain words, no raw id.
@@ -1690,6 +1696,7 @@ def build_options_from_profile(
     generation_context = _generation_context(
         ai_tools_server_config, session_row, api_user_id, session_id=session_id,
         unattended=not _is_interactive_run(overrides, session_row),
+        turn_source=(overrides or {}).get("turn_source"),
         chat_mode=session_mode == "chat",
         native_generation=any(
             tool_permitted(name, access.allowed, access.disallowed)

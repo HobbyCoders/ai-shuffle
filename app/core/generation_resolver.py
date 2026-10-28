@@ -9,9 +9,10 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
-from dataclasses import dataclass, field
+from collections import OrderedDict
+from dataclasses import dataclass, field, replace
 from decimal import Decimal, InvalidOperation
-from typing import Protocol
+from typing import Callable, Protocol
 
 KINDS = ("image", "video", "audio", "3d")
 # Owner-tunable ceiling for an unconfirmed item OR batch; never round floats here.
@@ -43,6 +44,39 @@ CHOOSE_MESSAGE = ("The user sees these options as a choice card and can remember
                   "Do not list them again or pick for them; wait for their reply.")
 
 
+# Generation tools whose every call passes this module's admission: a stored
+# or job choice for unattended runs, a known price, the confirmation threshold
+# and the daily cap. searchModels is listed with them although it never
+# generates: it is read-only discovery (catalog and prices) and spends nothing.
+ADMISSION_GATED_TOOLS = frozenset({
+    *(f"mcp__ai-tools__{name}" for name in (
+        "generateImage", "generateVideo", "generateAudio", "textTo3D", "runFalModel")),
+    "GenerateNativeImage", "GenerateNativeVideo",
+})
+READ_ONLY_GENERATION_TOOLS = frozenset({"mcp__ai-tools__searchModels"})
+# Turn sources nobody is present for. Only these skip the permission prompt for
+# the tools above: voice, connector, background-worker and unknown turns keep
+# Ask mode's prompt, because a person may be there to answer it.
+NO_PERSON_TURN_SOURCES = frozenset({"automation", "wakeup"})
+
+
+def admission_gates_unattended(tool_name, context, *, session_id=None) -> bool:
+    """Whether this call needs no person's prompt: a guarded generation tool in
+    an automation or wake-up turn.
+
+    ``context`` must be the current turn's own ``RunContext``
+    (:func:`turn_context`), the one the generation tools run under too, and
+    belong to ``session_id``. Anything else (no generation tools, an unknown
+    caller, another session's turn) keeps the prompt.
+    """
+    from app.core.background_permissions import canonical
+
+    return (isinstance(context, RunContext) and context.unattended
+            and context.turn_source in NO_PERSON_TURN_SOURCES
+            and bool(context.session_id) and context.session_id == session_id
+            and canonical(tool_name) in (ADMISSION_GATED_TOOLS | READ_ONLY_GENERATION_TOOLS))
+
+
 @dataclass(frozen=True)
 class RunContext:
     session_id: str | None = None
@@ -62,12 +96,80 @@ class RunContext:
     # or identity failure). Nothing saved is known, so nothing runs unasked:
     # an unattended run skips, an interactive one asks with the choice card.
     choices_unreadable: bool = False
+    # Re-reads the per-kind choices above from the account's store; the host
+    # binds it (app.core.query_options). A tool server outlives one turn (the
+    # Claude CLI keeps it for the whole session), so a pick remembered or
+    # forgotten in conversation must reach the next call, never a snapshot.
+    choices_loader: Callable[[], dict] | None = field(default=None, compare=False, repr=False)
+    # The turn's source (user, automation, wakeup, voice, ...), host-supplied.
+    turn_source: str | None = None
 
     def remembered_for(self, kind):
         return self.remembered_choice or (self.remembered_choices or {}).get(kind)
 
     def last_for(self, kind):
         return self.last_choice or (self.last_choices or {}).get(kind)
+
+
+# The run context of each session's current turn, stamped when the turn claims
+# its pooled client (``bind_turn_context``). A pooled Claude CLI client keeps
+# the tool servers built at connect, so their own context can belong to an
+# earlier turn: an interactive connect reused by a wake-up, or the reverse.
+# The permission callback and every generation call read this one entry, so
+# they always agree on unattended, owner, API user, chat lane and choices.
+_TURN_CONTEXTS: "OrderedDict[str, RunContext]" = OrderedDict()
+_TURN_CONTEXT_LIMIT = 4096
+
+
+def bind_turn_context(options) -> None:
+    """Record ``options``' run context as its session's current turn."""
+    context = getattr(options, "aih_generation_context", None)
+    if not isinstance(context, RunContext) or not context.session_id:
+        return
+    _TURN_CONTEXTS[context.session_id] = context
+    _TURN_CONTEXTS.move_to_end(context.session_id)
+    while len(_TURN_CONTEXTS) > _TURN_CONTEXT_LIMIT:
+        _TURN_CONTEXTS.popitem(last=False)
+
+
+def turn_context(session_id) -> RunContext | None:
+    """The current turn's run context for ``session_id``, if one was bound."""
+    return _TURN_CONTEXTS.get(session_id) if session_id else None
+
+
+async def with_current_choices(context: RunContext) -> RunContext:
+    """``context`` with the account's saved choices as they are now.
+
+    A failed read (the loader or its thread raising) is ``unreadable``:
+    unattended runs skip, interactive ones ask. So a pick forgotten
+    mid-session is never used or charged afterwards.
+    """
+    if context.choices_loader is None:
+        return context
+    from app.db.async_database import run_sync
+
+    try:
+        choices = await run_sync(context.choices_loader)
+        return replace(context, remembered_choices=choices.get("remembered") or {},
+                       last_choices=choices.get("last") or {}, job_choices=choices.get("job"),
+                       choices_unreadable=bool(choices.get("unreadable")))
+    except Exception:  # noqa: BLE001 - never treat a failed read as "nothing saved"
+        return replace(context, remembered_choices={}, last_choices={}, job_choices=None,
+                       choices_unreadable=True)
+
+
+def same_backend_identity(a: RunContext, b: RunContext) -> bool:
+    """Whether a source backend built for ``a`` may serve ``b`` (same session,
+    principal, chat lane and attendance)."""
+    return all(getattr(a, key) == getattr(b, key)
+               for key in ("session_id", "owner", "api_user_id", "chat_mode", "unattended"))
+
+
+async def current_context(context: RunContext) -> RunContext:
+    """The context a generation call runs under: its session's current turn
+    (the one the permission callback reads), else the context the tool server
+    was built with, with the saved choices re-read either way."""
+    return await with_current_choices(turn_context(context.session_id) or context)
 
 
 @dataclass
@@ -334,7 +436,9 @@ class Resolver:
             if expensive:
                 token = args.get("confirmation_token")
                 approved = False
-                if args.get("confirmed") is True and isinstance(token, str):
+                # Nobody approves in an unattended run, so a receipt issued to an
+                # earlier interactive turn of this session is never spent here.
+                if args.get("confirmed") is True and isinstance(token, str) and not context.unattended:
                     approved = (await self.confirmations.consume(token, fingerprint) if self.confirmations
                                 else self._confirmations.pop(token, None) == fingerprint)
                 if not approved and context.unattended:

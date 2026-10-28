@@ -47,7 +47,12 @@ submitted, including unattended calls.
   account's remembered choice for that kind (see below) without asking, in
   interactive and unattended runs alike. With none, an interactive run returns
   `choose` and the chat shows a choice card; an unattended run is skipped and
-  reported, never guessed.
+  reported, never guessed. In an automation or scheduled wake-up turn these
+  tools, `searchModels` and the native aliases never wait on a permission
+  prompt, since nobody is there to answer one: the guard decides, and a saved
+  Deny rule still applies. Voice, connector and other turns keep Ask mode's
+  prompt. The prompt decision and the guard read the same per-turn context,
+  also when a chat's tool server outlives the turn it was built for.
 - **Saved Settings defaults.** A fal.ai model explicitly saved for image,
   video, audio or 3D generation in the previous Default models page is copied
   into the account's remembered choices once, with its saved options, before
@@ -158,7 +163,9 @@ even with `confirm: true`. Discovery callers default to read-only.
 An optional `job_id` targets an existing automation instead of the remembered pick.
 A job choice must pin account, worker and model. Read/remember/forget use the same
 store as the HTTP APIs and the production run context; favourites remain separate.
-Writes take effect in subsequent turns, not the current turn's already-bound context.
+Every generation call re-reads the stored choices, so a write takes effect on the
+next call, including later turns of a Claude session whose tool server lives as long
+as the session.
 Saving is not a quote, availability verification, generation or spend approval.
 Every execution still validates the stored choice, current price, confirmation and
 cap. API-user sessions do not get owner app-config tools; their existing scoped
@@ -190,8 +197,13 @@ With no source/model or remembered/job choice, the tool returns `choose`.
 It offers up to four options, preferring different accounts. It returns fewer
 when fewer exist; it does not invent accounts to reach a minimum of two.
 `Same as last time` comes first when supplied by the caller and still present.
-Each option includes the complete options and schema; `quick_settings` contains
-at most four defaults. IDs below are placeholders, not selectable models.
+Each option includes the complete options and the schema's `fields` the card draws
+(never the full JSON `input_schema`); `quick_settings` contains at most four
+defaults. The whole result stays under 40,000 characters, below the Claude CLI's
+50,000-character limit for showing a tool result inline: when longer, the fields
+are compacted as for `searchModels`, then options are dropped from the end with
+`truncated: true`. Saving and running re-read the full schema. IDs below are
+placeholders, not selectable models.
 
 ```json
 {
@@ -243,7 +255,8 @@ preferences:
 
 - `generation.choice.<kind>` (`image`, `video`, `audio`, `3d`): the remembered
   pick, `{source, account, worker, model, options, origin}`. `origin` is
-  `card`, `settings` or `migrated`.
+  `card`, `settings`, `migrated` or `conversation` (saved through
+  `generationPreferences`).
 - `generation.lastChoice.<kind>`: the latest pick from a card, offered first as
   "Same as last time" but never run without asking.
 - `generation.choicesMigrated`: set once the saved Settings defaults were
@@ -290,7 +303,8 @@ to the session, prompt, kind, account, worker, model, options and quote. It
 survives rebuilding the tool server on the next turn. Changing any bound value
 requires a new confirmation. A bare `confirmed: true` does not authorize spend.
 An unattended run cannot approve its own spend: above the threshold it returns
-`status: "skipped"`, `reason: "needs_confirmation"`, with no receipt or retry.
+`status: "skipped"`, `reason: "needs_confirmation"`, with no receipt or retry,
+and it never accepts a receipt issued to an earlier interactive turn.
 
 Every result has a `price` object. USD amounts are decimal strings, not floats.
 `estimated` is not an invoice. `unknown` has null amounts, never zero. An unknown
