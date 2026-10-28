@@ -1301,6 +1301,11 @@ async def stream_query(
         )
         pool.put(session_id, state)
 
+    # This turn's generation context, read by the permission callback AND by
+    # the (possibly reused) client's generation tools (generation_resolver).
+    from app.core.generation_resolver import bind_turn_context
+    bind_turn_context(options)
+
     # Mark as streaming
     state.is_streaming = True
     state.streaming_started_at = datetime.now(timezone.utc)
@@ -2016,7 +2021,6 @@ async def _stream_to_websocket_impl(
                     # a single turn, so a stale mode here would let the callback
                     # enforce the wrong lane's ceiling on a reused subprocess.
                     "session_mode": session_mode, "owner_coordinator": owner_coordinator,
-                    "generation_context": getattr(options, "aih_generation_context", None),
                     "profile_id": profile_id,
                     "config": config,
                     "session_id": session_id,
@@ -2097,8 +2101,6 @@ async def _stream_to_websocket_impl(
             # because the chat ceiling has a path half the lists cannot express
             # and the reuse path re-stamps it every turn.
             "session_mode": session_mode, "owner_coordinator": owner_coordinator,
-            # This turn's generation run context: whether nobody can answer.
-            "generation_context": getattr(options, "aih_generation_context", None),
             "profile_id": profile_id,
             "config": config,
             "session_id": session_id,
@@ -2496,16 +2498,17 @@ async def _stream_to_websocket_impl(
                     # All other computer-use actions: access is gated by request_access.
                     return PermissionResultAllow()
 
-                # A guarded generation tool in an unattended run (automation,
-                # wake-up, worker, voice): nobody can answer a prompt, so it
-                # would hang the run until its timeout. The tool's admission is
-                # the gate instead: no stored choice skips, an unknown price
-                # skips, a quote above the threshold never confirms itself and
-                # the daily cap applies (app.core.generation_resolver). A saved
-                # Deny rule still wins short of Bypass.
-                from app.core.generation_resolver import admission_gates_unattended
+                # A guarded generation tool in an automation or wake-up turn:
+                # nobody can answer a prompt, so it would hang the run until
+                # its timeout. The tool's admission is the gate instead, read
+                # from the SAME per-turn context the tool runs under: no stored
+                # choice skips, an unknown price skips, a quote above the
+                # threshold never confirms itself and the daily cap applies
+                # (app.core.generation_resolver). A saved Deny still wins short
+                # of Bypass; voice, connector and other turns keep the prompt.
+                from app.core.generation_resolver import admission_gates_unattended, turn_context
 
-                if admission_gates_unattended(tool_name, refs.get("generation_context")):
+                if admission_gates_unattended(tool_name, turn_context(_sid), session_id=_sid):
                     if _perm_mode != "bypassPermissions":
                         rule = await asyncio.to_thread(
                             permission_handler.saved_rule, _sid, _profile_id, tool_name, tool_input,
@@ -2663,6 +2666,11 @@ async def _stream_to_websocket_impl(
             cli_stderr_lines=cli_stderr_lines,
         )
         pool.put(session_id, state)
+
+    # This turn's generation context, read by the permission callback AND by
+    # the (possibly reused) client's generation tools (generation_resolver).
+    from app.core.generation_resolver import bind_turn_context
+    bind_turn_context(options)
 
     # Mark as streaming (both reuse and create paths)
     state.is_streaming = True

@@ -7,7 +7,7 @@ from typing import Any
 
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
-from app.core.generation_resolver import Resolver, RunContext, result, with_current_choices
+from app.core.generation_resolver import Resolver, RunContext, current_context, result, same_backend_identity
 from app.services.generation_sources import Sources
 
 
@@ -69,8 +69,11 @@ def make_alias(
             else:
                 # These grants historically authorize native media, not fal.
                 # Keep that scope while sharing every resolver admission rule.
-                output = await resolver.generate(kind, request, await with_current_choices(context),
-                                                 exclude_sources=("fal",))
+                # The session's current turn, as the permission callback reads it.
+                current = await current_context(context)
+                call_resolver = (resolver if same_backend_identity(current, context)
+                                 else Resolver(Sources(None, current)))
+                output = await call_resolver.generate(kind, request, current, exclude_sources=("fal",))
         return ToolOutcome(
             text=json.dumps(output), result_fields=output,
             is_error=output["status"] in ("refused", "failed"),

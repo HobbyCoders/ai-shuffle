@@ -47,9 +47,12 @@ submitted, including unattended calls.
   account's remembered choice for that kind (see below) without asking, in
   interactive and unattended runs alike. With none, an interactive run returns
   `choose` and the chat shows a choice card; an unattended run is skipped and
-  reported, never guessed. In an unattended run these tools, `searchModels` and
-  the native aliases never wait on a permission prompt, since nobody is there to
-  answer one: the guard decides, and a saved Deny rule still applies.
+  reported, never guessed. In an automation or scheduled wake-up turn these
+  tools, `searchModels` and the native aliases never wait on a permission
+  prompt, since nobody is there to answer one: the guard decides, and a saved
+  Deny rule still applies. Voice, connector and other turns keep Ask mode's
+  prompt. The prompt decision and the guard read the same per-turn context,
+  also when a chat's tool server outlives the turn it was built for.
 - **Saved Settings defaults.** A fal.ai model explicitly saved for image,
   video, audio or 3D generation in the previous Default models page is copied
   into the account's remembered choices once, with its saved options, before
@@ -300,7 +303,8 @@ to the session, prompt, kind, account, worker, model, options and quote. It
 survives rebuilding the tool server on the next turn. Changing any bound value
 requires a new confirmation. A bare `confirmed: true` does not authorize spend.
 An unattended run cannot approve its own spend: above the threshold it returns
-`status: "skipped"`, `reason: "needs_confirmation"`, with no receipt or retry.
+`status: "skipped"`, `reason: "needs_confirmation"`, with no receipt or retry,
+and it never accepts a receipt issued to an earlier interactive turn.
 
 Every result has a `price` object. USD amounts are decimal strings, not floats.
 `estimated` is not an invoice. `unknown` has null amounts, never zero. An unknown
