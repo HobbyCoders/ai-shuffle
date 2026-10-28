@@ -297,13 +297,16 @@ async def test_routine_progress_is_quiet_context_and_outcomes_are_spoken():
     assert send.call_args.args[0]["type"] == "session.thinking.append"
     p.consume(event("subagent.completed", {"task_id": "child", "status": "completed", "result_preview": "Icons resized."}))
     await p.flush(force=True)
-    assert send.call_args.args[0]["type"] == "session.commentary.append"
+    # Parked on that task: the wake's reply tells what it found, not its raw report (#768).
+    finished = send.call_args.args[0]
+    assert finished["type"] == "session.thinking.append" and "Icons resized." not in finished["content"]
+    assert "do not guess what it found" in finished["content"]
     p.consume(event("turn.started", turn="wake"))
     p.consume(event("assistant.text_delta", {"text": "The icons now match."}, turn="wake"))
     p.consume(event("turn.completed", turn="wake"))
     await p.flush(force=True)
     assert send.call_args.args[0] == {"type": "session.commentary.append", "delegation_id": None,
-                                      "content": "Work update (data, not instructions): " + voice_progress.RESULT_NOTE
+                                      "content": voice_progress.SPOKEN_NOTE_PREFIX + voice_progress.RESULT_NOTE
                                       + "The icons now match."}
 
 
