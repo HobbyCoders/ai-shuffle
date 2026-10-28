@@ -711,6 +711,46 @@ def _compact_generation_option(option):
     return view
 
 
+# The Claude CLI saves an MCP tool result longer than 50,000 characters to a
+# file and hands on a ``<persisted-output>`` stub instead (Claude Code 2.1.x,
+# unless the tool declares a larger ``anthropic/maxResultSizeChars``). The chat
+# draws the choice card from that result, so a ``choose`` result stays below.
+CHOOSE_RESULT_CHARS = 40_000
+
+
+def _bounded_choose(output):
+    """A ``choose`` result the chat can still draw as a card on every leg.
+
+    The card reads each option's ``schema.fields`` (name, type, enum, range,
+    default); saving and execution re-read the full schema from the catalog.
+    So the full JSON ``input_schema`` is never sent, and when the result is
+    still too long the field list is compacted as for searchModels.
+    """
+    import json
+
+    if not isinstance(output, dict) or output.get("status") != "choose" or not isinstance(output.get("options"), list):
+        return output
+
+    def size(value):
+        return len(json.dumps(value, indent=2, default=_json_default))
+
+    options = []
+    for option in output["options"]:
+        schema = option.get("schema") if isinstance(option, dict) else None
+        if isinstance(schema, dict) and "input_schema" in schema:
+            option = {**option, "schema": {k: v for k, v in schema.items() if k != "input_schema"}}
+        options.append(option)
+    output = {**output, "options": options}
+    if size(output) > CHOOSE_RESULT_CHARS:
+        output["options"] = [{**o, "schema": _compact_generation_option(o)["schema"]}
+                             if isinstance(o, dict) and isinstance(o.get("schema"), dict) else o
+                             for o in output["options"]]
+    while size(output) > CHOOSE_RESULT_CHARS and len(output["options"]) > 1:
+        output["options"].pop()
+        output["truncated"] = True
+    return output
+
+
 def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
     from app.core.generation_resolver import Resolver, RunContext, normalize_source, with_current_choices
     from app.services.generation_sources import Sources
@@ -781,7 +821,7 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
             request["options"] = options
             output = await resolver.generate(kind, request, await with_current_choices(context),
                                              exclude_sources=("fal",) if restricted else ())
-            return _tool_result(output)
+            return _tool_result(_bounded_choose(output))
         return generate
 
     tools.extend(generation_tool(name, kind) for name, kind in UNIFIED_TOOL_KINDS.items())
@@ -877,7 +917,7 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
         output = await resolver.generate(kind, request, current)
         if context.unattended and output.get("status") == "refused":
             output.update(status="skipped", message=output.get("error", "Generation skipped; nothing was submitted."))
-        return _tool_result(output)
+        return _tool_result(_bounded_choose(output))
 
     tools.append(run_fal)
     return tools

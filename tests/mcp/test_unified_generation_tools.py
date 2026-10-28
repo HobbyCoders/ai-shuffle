@@ -630,3 +630,49 @@ async def test_unreadable_choices_never_open_the_unguarded_fal_path(monkeypatch,
     worker.call.assert_not_awaited()  # main's fal handler never submitted anything
 
 
+
+
+# ---- The choice card reaches the chat on the Claude CLI leg too ----
+
+def _fal_schema(fields, description_chars):
+    listed = [{"name": f"field_{i}", "type": "string", "required": False, "is_file": False,
+               "is_primary_text": False, "enum": ["a", "b"], "default": "a",
+               "title": f"Field {i}", "description": "d" * description_chars} for i in range(fields)]
+    listed.append({"name": "prompt", "type": "string", "required": True, "is_file": False, "is_primary_text": True})
+    return {"fields": listed, "primary_text_field": "prompt",
+            "input_schema": {"type": "object", "properties": {f["name"]: {"type": "string", "description": "s" * 4000}
+                                                              for f in listed}}}
+
+
+async def test_large_choose_result_stays_under_the_cli_persisted_output_limit(monkeypatch):
+    from app.services import generation_sources
+    # Real fal schemas: four accounts, each with long field descriptions and a
+    # full JSON input schema. Unbounded, this is several hundred KB.
+    entries = [candidate(account=f"account-{i}", schema=_fal_schema(40, 3000)) for i in range(4)]
+    backend = FakeBackend(entries)
+    monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: backend)
+    tools = {t.name: t for t in sdk._create_unified_tools(None, INTERACTIVE)}
+    text = (await tools["generateImage"].handler({"prompt": "tree"}))["content"][0]["text"]
+    # Claude Code replaces an MCP result over 50,000 characters with a stub.
+    assert len(text) <= sdk.CHOOSE_RESULT_CHARS < 50_000
+    output = json.loads(text)
+    assert output["status"] == "choose" and len(output["options"]) >= 2
+    for option in output["options"]:
+        # What the card draws: source/account/worker/model, price and fields.
+        assert {"source", "account", "worker", "model", "price"} <= option.keys()
+        fields = option["schema"]["fields"]
+        assert fields and {"name", "type", "enum", "default"} <= fields[0].keys()
+        assert "input_schema" not in option["schema"]
+    assert backend.calls == []
+
+
+async def test_small_choose_result_keeps_its_card_fields_and_drops_only_the_json_schema(monkeypatch):
+    from app.services import generation_sources
+    schema = _fal_schema(3, 40)
+    backend = FakeBackend([candidate(schema=schema), candidate(account="account-b", schema=schema)])
+    monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: backend)
+    tools = {t.name: t for t in sdk._create_unified_tools(None, INTERACTIVE)}
+    output = payload(await tools["generateImage"].handler({"prompt": "tree"}))
+    assert output["status"] == "choose" and "truncated" not in output
+    assert [o["schema"] for o in output["options"]] == [
+        {k: v for k, v in schema.items() if k != "input_schema"}] * 2
