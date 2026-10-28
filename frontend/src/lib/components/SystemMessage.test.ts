@@ -66,7 +66,17 @@ describe('SystemMessage — compact_boundary', () => {
 			'Context compacted automatically: 169.4k → 70k of 200k'],
 		// No overhead known: the summary-only count says so.
 		[{ pre_tokens: 169_400, post_tokens: 19_600, post_tokens_basis: 'history', context_window: 200_000 },
-			'Context compacted automatically: 169.4k → 19.6k of 200k (after: conversation only)']
+			'Context compacted automatically: 169.4k → 19.6k of 200k (after: conversation only)'],
+		// #753: a native card with a provider measurement reads it; "after"
+		// is scaled from it, since that view has not been measured yet.
+		[{ pre_tokens: 249_000, post_tokens: 124_500, context_window: 400_000, token_basis: 'measured' },
+			'Context compacted automatically: 249k → ~124.5k of 400k'],
+		// No measurement: chars/4 figures, said to be estimates.
+		[{ pre_tokens: 438_000, post_tokens: 219_000, context_window: 400_000, token_basis: 'estimate' },
+			'Context compacted automatically: ~438k → ~219k of 400k (estimated)'],
+		[{ pre_tokens: 438_000, token_basis: 'estimate' },
+			'Context compacted automatically: ~438k before (estimated)'],
+		[{ context_window: 400_000, token_basis: 'estimate' }, 'Context compacted automatically: Window: 400k']
 	])('renders known sizes once: %j', (metadata, expected) => {
 		render(SystemMessage, { message: makeMessage({ systemSubtype: 'compact_boundary',
 			systemData: { compact_metadata: { trigger: 'auto', ...metadata } } }) });

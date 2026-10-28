@@ -2946,6 +2946,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         promotions: list[Promotion] = []
         failure: str | None = None
         scale = 1.0
+        measured_now = 0  # a current measurement of the view before compacting
         interrupted = False
         if not self._compactor.active:
             failure = "compaction is turned off for this session"
@@ -2957,6 +2958,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             estimate = self._compactor.estimate_view_tokens(nodes, overhead)
             if measured and estimate > 0:
                 scale = min(1.0, max(0.6, measured / estimate))
+                if self._measured_is_current(sid):
+                    measured_now = measured
             try:
                 promotions = self._compactor.compact_now(
                     nodes, overhead_tokens=overhead,
@@ -3003,6 +3006,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 reclaimed_chars=sum(p.reclaimed_chars for p in promotions),
                 before_tokens=int(promotions[0].before_tokens * scale),
                 after_tokens=int(promotions[-1].after_tokens * scale),
+                batch_measured_tokens=measured_now,
                 decision_reason="manual",
                 render_version=self._compactor.render_version,
             ))
@@ -3569,6 +3573,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         rewrite_tail_tokens_est: int | None = None,
         batch_final: bool = True,
         batch_before_tokens: int = 0,
+        batch_measured_tokens: int = 0,
         node_id: str | None = None,
     ) -> None:
         await self._emit(ContextCompaction(
@@ -3582,6 +3587,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             before_tokens=promo.before_tokens, after_tokens=promo.after_tokens,
             batch_final=batch_final, context_window=self.context_window or 0,
             batch_before_tokens=batch_before_tokens,
+            batch_measured_tokens=batch_measured_tokens,
             decision_reason=promo.decision_reason,
             first_changed_message=promo.first_changed_message,
             token_basis=promo.token_basis,
@@ -3855,6 +3861,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                     schedule=schedule_fields, rewrite_tail_tokens_est=tail,
                     batch_final=index == len(promotions) - 1,
                     batch_before_tokens=promotions[0].before_tokens,
+                    # Taken before this batch, so it measured the view the
+                    # batch started from only while it was still current.
+                    batch_measured_tokens=(
+                        measured_prompt if measured_current and measured_prompt else 0
+                    ),
                 )
             if refusal is not None:
                 # Nothing left that compaction may cut: say so, never send a

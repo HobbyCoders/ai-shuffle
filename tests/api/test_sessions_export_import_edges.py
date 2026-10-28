@@ -123,7 +123,9 @@ async def test_recorded_native_compaction_in_all_exports_and_transcript_pages(cl
             assert set(card["systemData"]) == {"compact_metadata"}
             assert set(card["systemData"]["compact_metadata"]) == {
                 "trigger", "pre_tokens", "post_tokens", "context_window",
-                "requested_by", "context_post_tokens"}
+                "requested_by", "context_post_tokens", "token_basis"}
+            # #753: a native card says whether its sizes were measured.
+            assert card["systemData"]["compact_metadata"]["token_basis"] == "estimate"
             assert card["content"] == ""
         raw = client.get(f"/api/v1/sessions/{sid}/export", headers=AUTH,
                          params={"format": "jsonl", "share_safe": share_safe})
@@ -133,6 +135,7 @@ async def test_recorded_native_compaction_in_all_exports_and_transcript_pages(cl
                         params={"format": "markdown", "share_safe": share_safe})
         assert md.status_code == 200
         assert "Context Compacted" in md.text
+        assert "tokens (estimated)" in md.text
         assert all("summary-must-not-appear" not in response.text for response in (r, raw, md))
         detail = client.get(f"/api/v1/sessions/{sid}", headers=AUTH)
         assert detail.status_code == 200, detail.text

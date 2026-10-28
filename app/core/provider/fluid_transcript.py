@@ -564,6 +564,7 @@ def _splice_compaction_cards(
         safe = {k: metadata[k] for k in (
             "trigger", "pre_tokens", "post_tokens", "context_window",
             "requested_by", "context_post_tokens", "post_tokens_basis",
+            "token_basis",
         ) if k in metadata}
         stamp = _iso(data.get("compaction_event_ts")) or str(row["created_at"])
         card = {
