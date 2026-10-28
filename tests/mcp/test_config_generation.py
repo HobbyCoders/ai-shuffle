@@ -86,6 +86,9 @@ async def test_conversational_writer_binds_production_context_and_forget() -> No
     result = await call({"action": "remember", "kind": "image", "choice": PICK, "confirm": True})
     assert result["success"] is True
     assert result["choice"]["options"] == PICK["options"]
+    # Saved by the conversational tool, not from the choice card.
+    assert result["choice"]["origin"] == "conversation"
+    assert choices.load(OWNER, run_migration=False)["remembered"]["image"]["origin"] == "conversation"
     assert context().remembered_for("image")["model"] == PICK["model"]
     assert (await call({"action": "get", "kind": "image"}))["choices"]["image"] == result["choice"]
     assert choices.load(("api_user", "other"))["remembered"] == {}
@@ -219,3 +222,95 @@ async def test_saved_pick_still_needs_daily_cap_admission(monkeypatch: pytest.Mo
     assert output["reason"] == "daily_cap"
     backend.reserve.assert_awaited_once()
     backend.execute.assert_not_awaited()
+
+
+def session_context(*, unattended: bool) -> Any:
+    return query_options._generation_context(
+        {"image_generation": True}, {"id": "session"}, None,
+        session_id="session", unattended=unattended,
+    )
+
+
+@pytest.mark.parametrize("unattended", [False, True])
+@pytest.mark.asyncio
+async def test_pick_saved_then_forgotten_applies_to_the_next_turn_of_the_same_session(
+    monkeypatch: pytest.MonkeyPatch, unattended: bool
+) -> None:
+    from app.mcp import ai_tools_sdk as sdk
+    from app.services import generation_sources
+    from tests.core.test_generation_resolver import FakeBackend, candidate
+
+    saved = candidate(account=PICK["account"], model=PICK["model"])
+    backend = FakeBackend([candidate(), saved])
+    monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: backend)
+    # ONE tool server for the whole session, bound before any pick existed:
+    # the Claude CLI keeps its MCP servers across turns.
+    tools = {t.name: t for t in sdk._create_unified_tools(None, session_context(unattended=unattended))}
+
+    async def next_turn() -> dict:
+        response = await tools["generateImage"].handler({"prompt": "a tree"})
+        return json.loads(response["content"][0]["text"])
+
+    first = await next_turn()
+    assert first["status"] == ("skipped" if unattended else "choose")
+
+    assert (await call({"action": "remember", "kind": "image", "choice": PICK, "confirm": True}))["success"]
+    used = await next_turn()
+    assert used["status"] == "completed" and used["remembered"] is True
+    assert used["choice"]["model"] == PICK["model"]
+    assert ("execute", PICK["account"]) in backend.calls
+
+    assert (await call({"action": "forget", "kind": "image", "confirm": True}))["success"]
+    backend.calls.clear()
+    after = await next_turn()
+    # The forgotten pick is never used or charged again.
+    if unattended:
+        assert after["status"] == "skipped" and after["reason"] == "no_stored_choice"
+    else:
+        assert after["status"] == "choose"
+    assert not any(call[0] in ("reserve", "execute") for call in backend.calls)
+
+
+@pytest.mark.asyncio
+async def test_unreadable_choices_on_a_later_turn_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.mcp import ai_tools_sdk as sdk
+    from app.services import generation_sources
+    from tests.core.test_generation_resolver import FakeBackend, candidate
+
+    await call({"action": "remember", "kind": "image", "choice": PICK, "confirm": True})
+    backend = FakeBackend([candidate(account=PICK["account"], model=PICK["model"])])
+    monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: backend)
+    tools = {t.name: t for t in sdk._create_unified_tools(None, session_context(unattended=True))}
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("store offline")
+
+    # The pick was readable when the session began, not on this turn.
+    monkeypatch.setattr(choices, "load", fail)
+    output = json.loads((await tools["generateImage"].handler({"prompt": "a tree"}))["content"][0]["text"])
+    assert output["status"] == "skipped" and output["reason"] == "choices_unreadable"
+    assert backend.calls == []
+
+
+@pytest.mark.asyncio
+async def test_native_alias_reads_the_current_pick_each_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fluid.tools.registry import ToolCtx
+
+    from app.core.provider import native_generation_aliases as aliases
+    from tests.core.test_generation_resolver import FakeBackend, candidate
+
+    plan = {"source": "chatgpt", "account": "plan-a", "worker": "worker-a",
+            "model": "default", "options": {}}
+    backend = FakeBackend([candidate(source="chatgpt", account="plan-a", model="default"),
+                           candidate(source="chatgpt", account="plan-b", model="default")])
+    monkeypatch.setattr(aliases, "Sources", lambda *args, **kw: backend)
+    _, handler = aliases.make_alias("image", session_context(unattended=False))
+
+    async def next_turn() -> dict:
+        return json.loads((await handler({"prompt": "a tree"}, ToolCtx())).text)
+
+    assert (await next_turn())["status"] == "choose"
+    assert (await call({"action": "remember", "kind": "image", "choice": plan, "confirm": True}))["success"]
+    assert (await next_turn())["choice"]["account"] == "plan-a"
+    assert (await call({"action": "forget", "kind": "image", "confirm": True}))["success"]
+    assert (await next_turn())["status"] == "choose"

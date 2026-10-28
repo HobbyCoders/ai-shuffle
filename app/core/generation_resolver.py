@@ -9,9 +9,9 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal, InvalidOperation
-from typing import Protocol
+from typing import Callable, Protocol
 
 KINDS = ("image", "video", "audio", "3d")
 # Owner-tunable ceiling for an unconfirmed item OR batch; never round floats here.
@@ -62,12 +62,34 @@ class RunContext:
     # or identity failure). Nothing saved is known, so nothing runs unasked:
     # an unattended run skips, an interactive one asks with the choice card.
     choices_unreadable: bool = False
+    # Re-reads the per-kind choices above from the account's store; the host
+    # binds it (app.core.query_options). A tool server outlives one turn (the
+    # Claude CLI keeps it for the whole session), so a pick remembered or
+    # forgotten in conversation must reach the next call, never a snapshot.
+    choices_loader: Callable[[], dict] | None = field(default=None, compare=False, repr=False)
 
     def remembered_for(self, kind):
         return self.remembered_choice or (self.remembered_choices or {}).get(kind)
 
     def last_for(self, kind):
         return self.last_choice or (self.last_choices or {}).get(kind)
+
+
+async def with_current_choices(context: RunContext) -> RunContext:
+    """``context`` with the account's saved choices as they are now.
+
+    Called once per generation call. The loader never raises (a failed read
+    is ``unreadable``: unattended runs skip, interactive ones ask), so a pick
+    forgotten mid-session is never used or charged afterwards.
+    """
+    if context.choices_loader is None:
+        return context
+    from app.db.async_database import run_sync
+
+    choices = await run_sync(context.choices_loader)
+    return replace(context, remembered_choices=choices.get("remembered") or {},
+                   last_choices=choices.get("last") or {}, job_choices=choices.get("job"),
+                   choices_unreadable=bool(choices.get("unreadable")))
 
 
 @dataclass

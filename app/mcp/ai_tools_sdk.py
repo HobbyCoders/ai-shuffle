@@ -712,7 +712,7 @@ def _compact_generation_option(option):
 
 
 def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
-    from app.core.generation_resolver import Resolver, RunContext, normalize_source
+    from app.core.generation_resolver import Resolver, RunContext, normalize_source, with_current_choices
     from app.services.generation_sources import Sources
 
     context = context or RunContext()
@@ -779,7 +779,8 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
                         return _tool_result(result("refused", error="Conflicting top-level and declared model options."))
                     options[key] = request.pop(key)
             request["options"] = options
-            output = await resolver.generate(kind, request, context, exclude_sources=("fal",) if restricted else ())
+            output = await resolver.generate(kind, request, await with_current_choices(context),
+                                             exclude_sources=("fal",) if restricted else ())
             return _tool_result(output)
         return generate
 
@@ -870,9 +871,10 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
                                        reason="invalid_request", error=message, message=message))
         request = {"prompt": prompt, "source": "fal", "model": endpoint, "options": values,
                    "confirmed": args.get("confirmed"), "confirmation_token": args.get("confirmation_token")}
-        if fal_local and not context.unattended and not (context.job_choice or context.remembered_for(kind)):
+        current = await with_current_choices(context)
+        if fal_local and not current.unattended and not (current.job_choice or current.remembered_for(kind)):
             request["worker"] = backend.local_worker()
-        output = await resolver.generate(kind, request, context)
+        output = await resolver.generate(kind, request, current)
         if context.unattended and output.get("status") == "refused":
             output.update(status="skipped", message=output.get("error", "Generation skipped; nothing was submitted."))
         return _tool_result(output)
