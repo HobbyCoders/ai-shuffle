@@ -2,7 +2,7 @@
 class VoicePcm extends AudioWorkletProcessor {
  constructor() {
   super(); this.data = new Int16Array(1920); this.n = 0; this.phase = 0; this.sum = 0; this.count = 0;
-  this.muted = false; this.generation = 0;
+  this.muted = false; this.generation = 0; this.idle = 0;
   this.port.onmessage = event => {
    if (event.data?.type !== 'mute') return;
    this.muted = event.data.muted; this.generation = event.data.generation;
@@ -12,7 +12,14 @@ class VoicePcm extends AudioWorkletProcessor {
  }
  process(inputs) {
   const input = inputs[0]?.[0];
-  if (!input || this.muted) return true;
+  if (this.muted) {
+   // No audio while muted, but a tick about once a second on the audio clock
+   // keeps the page reporting to the server when its timers are throttled (#741).
+   this.idle += input?.length || 128;
+   if (this.idle >= sampleRate) { this.idle = 0; this.port.postMessage({ tick: true }); }
+   return true;
+  }
+  if (!input) return true;
   for (const sample of input) {
    this.sum += sample; this.count++; this.phase += 24000;
    if (this.phase >= sampleRate) {

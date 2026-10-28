@@ -10,7 +10,7 @@ vi.mock('./voiceAudioStream', () => ({
 		return streamed;
 	}),
 }));
-import { startCall, startCallForSession, hangup, showCallNotice, voiceCallState, sendVoiceText, reconcileVoiceCall, confirmCallReplacement, toggleMic, STREAM_DROPPED_MESSAGE, STREAM_RECONNECT_BACKOFF_MS, STREAM_RECONNECT_WINDOW_MS, STREAM_ATTEMPT_TIMEOUT_MS } from './voiceCall';
+import { startCall, startCallForSession, hangup, showCallNotice, voiceCallState, sendVoiceText, reconcileVoiceCall, confirmCallReplacement, toggleMic, STREAM_DROPPED_MESSAGE, STREAM_RECONNECT_BACKOFF_MS, STREAM_RECONNECT_WINDOW_MS, STREAM_ATTEMPT_TIMEOUT_MS, STREAM_MAX_RESTORES, STREAM_OFFLINE_WAIT_MS } from './voiceCall';
 
 let channel: EventTarget & { send: ReturnType<typeof vi.fn>; readyState: string; close: ReturnType<typeof vi.fn> };
 let track: { enabled: boolean; stop: ReturnType<typeof vi.fn> };
@@ -328,6 +328,100 @@ describe('voice owner lifecycle', () => {
 		expect(get(voiceCallState)).toMatchObject({ status: 'error', endReason: 'provider-error' });
 		expect(vi.mocked(openVoiceAudioStream)).toHaveBeenCalledTimes(1);
 		expect(api.hangupVoiceCall).toHaveBeenCalledWith('owner', 'provider-error');
+	});
+	// #741: a locked phone's page went quiet, the server ended the call, and a
+	// plain close used to look like a hangup, so the call never came back.
+	it('reopens the same call after the server ended it for inactivity', async () => {
+		vi.spyOn(console, 'info').mockImplementation(() => {});
+		await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+		const { openVoiceAudioStream } = await import('./voiceAudioStream');
+		toggleMic();
+		streamHandlers.current!.closed('The voice server ended the call after it stopped hearing from this device.', 'client-inactive');
+		expect(get(voiceCallState).status).toBe('reconnecting');
+		await vi.waitFor(() => expect(get(voiceCallState).status).toBe('live'));
+		expect(vi.mocked(openVoiceAudioStream).mock.calls[1][5]).toBe(true); // resume=1, same session
+		expect(streamed.muteInput).toHaveBeenLastCalledWith(true);
+		expect(api.hangupVoiceCall).not.toHaveBeenCalled();
+	});
+	it('does not let a visibility reconcile end a call that is reopening', async () => {
+		vi.spyOn(console, 'info').mockImplementation(() => {});
+		await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+		const { openVoiceAudioStream } = await import('./voiceAudioStream');
+		let connect!: () => void;
+		vi.mocked(openVoiceAudioStream).mockImplementationOnce(() => new Promise(resolve => { connect = () => resolve(streamed); }));
+		streamHandlers.current!.closed('The voice server ended the call after it stopped hearing from this device.', 'client-inactive');
+		await vi.waitFor(() => expect(vi.mocked(openVoiceAudioStream)).toHaveBeenCalledTimes(2));
+		api.getVoiceCallState.mockResolvedValue({ active: false }); // The server's call is gone until the new one connects.
+		await reconcileVoiceCall();
+		expect(get(voiceCallState).status).toBe('reconnecting');
+		connect();
+		await vi.waitFor(() => expect(get(voiceCallState).status).toBe('live'));
+		// Once restored, a reconcile acts again.
+		await reconcileVoiceCall();
+		expect(get(voiceCallState)).toMatchObject({ status: 'ended', endReason: 'server-ended' });
+	});
+	it('waits for the network before reopening, and ends clearly when it never returns', async () => {
+		vi.spyOn(console, 'info').mockImplementation(() => {});
+		const online = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+		await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+		const { openVoiceAudioStream } = await import('./voiceAudioStream');
+		vi.useFakeTimers();
+		try {
+			streamHandlers.current!.closed('The voice connection dropped.', 'client-inactive');
+			await vi.advanceTimersByTimeAsync(STREAM_OFFLINE_WAIT_MS - 1000);
+			expect(vi.mocked(openVoiceAudioStream)).toHaveBeenCalledTimes(1); // No attempt while offline.
+			expect(get(voiceCallState).status).toBe('reconnecting');
+			await vi.advanceTimersByTimeAsync(2000);
+		} finally {
+			vi.useRealTimers();
+			online.mockRestore();
+		}
+		await vi.waitFor(() => expect(get(voiceCallState)).toMatchObject({ status: 'error', endReason: 'client-inactive', error: STREAM_DROPPED_MESSAGE }));
+		expect(vi.mocked(openVoiceAudioStream)).toHaveBeenCalledTimes(1);
+		// The call state (and with it the phone's notification) clears: nothing is up.
+		expect(api.hangupVoiceCall).toHaveBeenCalledWith('owner', 'client-inactive');
+	});
+	it('reopens as soon as the network returns', async () => {
+		vi.spyOn(console, 'info').mockImplementation(() => {});
+		const online = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+		try {
+			await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+			const { openVoiceAudioStream } = await import('./voiceAudioStream');
+			streamHandlers.current!.closed('The voice connection dropped.', 'connection-dropped');
+			await new Promise(resolve => setTimeout(resolve, STREAM_RECONNECT_BACKOFF_MS[0] + 50));
+			expect(vi.mocked(openVoiceAudioStream)).toHaveBeenCalledTimes(1);
+			online.mockReturnValue(true);
+			window.dispatchEvent(new Event('online'));
+			await vi.waitFor(() => expect(get(voiceCallState).status).toBe('live'));
+			expect(vi.mocked(openVoiceAudioStream)).toHaveBeenCalledTimes(2);
+		} finally { online.mockRestore(); }
+	});
+	it('bounds how many times one call is reopened', async () => {
+		vi.spyOn(console, 'info').mockImplementation(() => {});
+		await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+		for (let n = 0; n < STREAM_MAX_RESTORES; n++) {
+			streamHandlers.current!.closed('The voice connection dropped.', 'client-inactive');
+			await vi.waitFor(() => expect(get(voiceCallState).status).toBe('live'));
+		}
+		streamHandlers.current!.closed('The voice connection dropped.', 'client-inactive');
+		await vi.waitFor(() => expect(get(voiceCallState)).toMatchObject({ status: 'error', endReason: 'client-inactive' }));
+		expect(api.hangupVoiceCall).toHaveBeenCalledWith('owner', 'client-inactive');
+	});
+	it('ends a PersonaPlex call the server ended for inactivity, which cannot resume', async () => {
+		vi.spyOn(console, 'info').mockImplementation(() => {});
+		await startCall('owner', { client_secret: 'test', model: 'fal-ai/personaplex/realtime' });
+		const { openVoiceAudioStream } = await import('./voiceAudioStream');
+		streamHandlers.current!.closed('The voice server ended the call after it stopped hearing from this device.', 'client-inactive');
+		await vi.waitFor(() => expect(get(voiceCallState)).toMatchObject({ status: 'error', endReason: 'client-inactive' }));
+		expect(vi.mocked(openVoiceAudioStream)).toHaveBeenCalledTimes(1);
+	});
+	it('keeps a plain server close terminal', async () => {
+		vi.spyOn(console, 'info').mockImplementation(() => {});
+		await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+		const { openVoiceAudioStream } = await import('./voiceAudioStream');
+		streamHandlers.current!.closed('The voice server ended the call.', 'server-closed');
+		await vi.waitFor(() => expect(get(voiceCallState)).toMatchObject({ status: 'ended', endReason: 'server-closed' }));
+		expect(vi.mocked(openVoiceAudioStream)).toHaveBeenCalledTimes(1);
 	});
 	it('labels the End button hangup as the user ending the call', async () => {
 		vi.spyOn(console, 'info').mockImplementation(() => {});

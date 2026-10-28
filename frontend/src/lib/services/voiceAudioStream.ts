@@ -33,7 +33,15 @@ export type VoiceStreamEndReason =
  | 'provider-error'
  | 'server-closed'
  | 'connection-dropped'
+ /** The server ended the call because it heard nothing from this page (#741); recoverable. */
+ | 'client-inactive'
  | 'invalid-response';
+/**
+ * The audio socket's close code when the server ends a call whose page sent
+ * nothing for two minutes (app/core/voice_stream.py BROWSER_SILENT_CLOSE_CODE).
+ * Unlike a plain 1000 it is not a hangup: the page may reopen the call.
+ */
+export const CLIENT_INACTIVE_CLOSE_CODE = 4100;
 /** Unsent microphone audio (bytes) beyond which new frames are dropped. 4 s at 24 kHz. */
 export const MAX_UPLOAD_BUFFER = 192000;
 /** Default microphone gate (dBFS); matches the server's `mic_threshold_db` default. */
@@ -46,6 +54,14 @@ export const DEFAULT_MIC_THRESHOLD_DB = -42;
 export const MIC_SILENT_MS = 4000;
 /** How often the browser's call figures are sent to the server's health log. */
 export const CLIENT_STATS_MS = 5000;
+/**
+ * The server pushes health every 2 s. Nothing from it for this long on a socket
+ * that still looks open means the connection is dead (a network that dropped
+ * without a close): the call reopens it instead of waiting minutes for TCP.
+ */
+export const SERVER_SILENT_MS = 20000;
+/** After a stall, freeze or network change the server gets this long to be heard from again. */
+const SERVER_RESUME_GRACE_MS = 5000;
 const WATCH_MS = 1000;
 /** A watchdog tick this late means the main thread stalled; its readings are stale. */
 const STALL_SKIP_MS = 500;
@@ -164,6 +180,30 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
  let reconnecting = false, micOk = true, micRetryAt = 0, lastTick = performance.now();
  let watchTimer: ReturnType<typeof setInterval> | null = null, statsTimer: ReturnType<typeof setInterval> | null = null;
  let refreshMic: (() => void) | null = null;
+ // Page lifecycle (#741): sent with the call figures, and at once on each
+ // change, so the server's log tells a hidden/frozen page from an offline one.
+ const lifecycle = { last_event: 'start', freezes: 0, offlines: 0, hidden_ms: 0 };
+ let lastEventAt = performance.now(), hiddenSince: number | null = null;
+ let serverHeardAt = performance.now(), serverGraceUntil = 0, lastStatsAt = 0;
+ let sendStats: ((event?: string) => void) | null = null;
+ const pageEvent = (name: string) => {
+  if (stopped) return;
+  const now = performance.now();
+  lifecycle.last_event = name; lastEventAt = now;
+  if (name === 'freeze') lifecycle.freezes++;
+  if (name === 'offline') lifecycle.offlines++;
+  const hidden = document.visibilityState === 'hidden';
+  if (hidden && hiddenSince === null) hiddenSince = now;
+  if (!hidden && hiddenSince !== null) { lifecycle.hidden_ms += now - hiddenSince; hiddenSince = null; }
+  // A thawed page or a returning network gives the server time to be heard.
+  if (name !== 'freeze' && name !== 'offline' && name !== 'hidden') serverGraceUntil = now + SERVER_RESUME_GRACE_MS;
+  sendStats?.(name);
+ };
+ const onVisibility = () => pageEvent(document.visibilityState === 'visible' ? 'visible' : 'hidden');
+ const onFreeze = () => pageEvent('freeze');
+ const onResumed = () => pageEvent('resume');
+ const onOnline = () => pageEvent('online');
+ const onOffline = () => pageEvent('offline');
  const onDeviceChange = () => { stats.device_changes++; refreshMic?.(); };
  // Unlock / BFCache restoration must revive the existing audio graph, not
  // replace the document or socket. Ignore stale watchdog readings until fresh
@@ -191,6 +231,11 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
   window.removeEventListener('voiceaudiochange', onDeviceChange);
   document.removeEventListener('visibilitychange', onPageResume);
   window.removeEventListener('pageshow', onPageResume);
+  document.removeEventListener('visibilitychange', onVisibility);
+  document.removeEventListener('freeze', onFreeze);
+  document.removeEventListener('resume', onResumed);
+  window.removeEventListener('online', onOnline);
+  window.removeEventListener('offline', onOffline);
   signal.removeEventListener('abort', abort);
   socket?.close(); worklet?.disconnect(); player?.disconnect(); source?.disconnect();
   output.close();
@@ -230,6 +275,7 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
    const settle = () => { clearTimeout(timer); signal.removeEventListener('abort', cancel); };
    ws.onmessage = event => {
     if (stopped) return;
+    serverHeardAt = performance.now();
     if (event.data instanceof ArrayBuffer) {
      if (!ready || event.data.byteLength % 2) return;
      // Handed to the audio thread as is: no per-sample work on this thread.
@@ -273,7 +319,9 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
     settlePending();
     if (!ready) reject(new Error(error || event.reason || 'The voice provider rejected the connection.'));
     else if (!stopped) {
-     if (event.code !== 1000) fail('connection-dropped', 'The voice connection dropped.');
+     // The server's inactivity end is recoverable, unlike its plain hangup (#741).
+     if (event.code === CLIENT_INACTIVE_CLOSE_CODE) fail('client-inactive', 'The voice server ended the call after it stopped hearing from this device.');
+     else if (event.code !== 1000) fail('connection-dropped', 'The voice connection dropped.');
      else fail('server-closed', 'The voice server ended the call.');
      handlers.closed(error, endReason ?? 'server-closed');
     }
@@ -290,6 +338,13 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
    try { handlers.level?.(level, heard); } catch (handlerError) { console.warn('[voice] ignoring a failed voice event handler:', handlerError); }
   };
   capture.port.onmessage = event => {
+   // A muted microphone sends no audio. The worklet still ticks on the audio
+   // clock, so a muted call keeps reporting even when the page's own timers
+   // are throttled in the background (#741).
+   if (event.data?.tick) {
+    if (micMuted && performance.now() - lastStatsAt >= CLIENT_STATS_MS) sendStats?.();
+    return;
+   }
    // Dropping frames here is independent of MediaStreamTrack.enabled. Epochs
    // reject queued pre-mute frames even after a quick mute/unmute.
    if (socket?.readyState !== WebSocket.OPEN || stopped || micMuted || event.data.generation !== micGeneration) return;
@@ -365,6 +420,18 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
    const late = now - lastTick - WATCH_MS;
    lastTick = now;
    stats.stall_ms = Math.max(stats.stall_ms, Math.round(Math.max(0, late)));
+   if (late > STALL_SKIP_MS) serverGraceUntil = now + SERVER_RESUME_GRACE_MS;
+   // A socket that looks open while the server has gone quiet is dead (#741):
+   // only a server that sends health reports is judged.
+   if (!stopped && serverHealthAt && socket?.readyState === WebSocket.OPEN && now >= serverGraceUntil
+       && now - serverHeardAt >= SERVER_SILENT_MS) {
+    console.warn('[voice] the voice server has not answered for', Math.round(now - serverHeardAt), 'ms; reconnecting');
+    if (watchTimer) clearInterval(watchTimer);
+    watchTimer = null;
+    fail('connection-dropped', 'The voice server stopped answering.');
+    ws.close(4000, 'server not answering');
+    return;
+   }
    // After a stall, queued frames have not been handled yet; during a grace
    // period or a provider reconnect nothing is known. Keep the last reading.
    if (stopped || late > STALL_SKIP_MS || now < graceUntil || reconnecting) return;
@@ -380,23 +447,36 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
    }
    if (problem) recover(problem, now);
   }, WATCH_MS);
-  statsTimer = setInterval(() => {
+  sendStats = (event?: string) => {
    // Only a server that sends health reports accepts these; an older one
    // would reject the frame and end the call.
    if (stopped || socket?.readyState !== WebSocket.OPEN || !serverHealthAt) return;
    const track = mic.getAudioTracks?.()[0];
+   const now = performance.now();
    try {
     socket.send(JSON.stringify({ type: 'client_stats', stats: {
      ...stats, muted: micMuted, mic_ok: micOk, context: context.state, rate: context.sampleRate,
-     track: track?.readyState ?? 'none', capture_age_ms: Math.round(performance.now() - lastCaptureAt),
+     track: track?.readyState ?? 'none', capture_age_ms: Math.round(now - lastCaptureAt),
+     visibility: document.visibilityState === 'hidden' ? 'hidden' : 'visible',
+     online: navigator.onLine !== false, ...lifecycle,
+     hidden_ms: Math.round(lifecycle.hidden_ms + (hiddenSince === null ? 0 : now - hiddenSince)),
+     last_event_age_ms: Math.round(now - lastEventAt), ...(event ? { event } : {}),
     } }));
    } catch { /* the close handler reports a dead socket */ }
+   lastStatsAt = now;
    stats.stall_ms = 0; stats.max_depth_ms = 0; stats.max_lead_ms = 0;
-  }, CLIENT_STATS_MS);
+  };
+  statsTimer = setInterval(() => sendStats?.(), CLIENT_STATS_MS);
   navigator.mediaDevices?.addEventListener?.('devicechange', onDeviceChange);
   window.addEventListener('voiceaudiochange', onDeviceChange);
   document.addEventListener('visibilitychange', onPageResume);
   window.addEventListener('pageshow', onPageResume);
+  if (document.visibilityState === 'hidden') hiddenSince = performance.now();
+  document.addEventListener('visibilitychange', onVisibility);
+  document.addEventListener('freeze', onFreeze);
+  document.addEventListener('resume', onResumed);
+  window.addEventListener('online', onOnline);
+  window.addEventListener('offline', onOffline);
   return {
    close,
    muteOutput: muted => { output.mute(muted); },

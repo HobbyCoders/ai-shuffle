@@ -297,6 +297,51 @@ class VoiceCallServiceTest {
         other.ended()
     }
 
+    // #741: a locked phone stopped sending and playing call audio. The call's service
+    // holds the CPU, Wi-Fi and voice audio focus while it is foreground, and only then.
+    private fun audio() = shadowOf(app.getSystemService(android.media.AudioManager::class.java))
+
+    @Test fun aKeptAliveCallHoldsTheCpuWifiAndAudioFocusUntilItsServiceStops() {
+        keeper.started(3)
+        run(VoiceCallService.ACTION_SHOW)
+        val wake = org.robolectric.shadows.ShadowPowerManager.getLatestWakeLock()
+        assertNotNull("a wake lock is held for the call", wake)
+        assertTrue(wake!!.isHeld)
+        val focus = audio().lastAudioFocusRequest
+        assertNotNull("voice-call audio focus is taken", focus)
+        assertEquals(android.media.AudioManager.AUDIOFOCUS_GAIN, focus.durationHint)
+        assertEquals(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION, focus.audioFocusRequest.audioAttributes.usage)
+
+        keeper.ended()
+        assertTrue("held until the service itself stops", wake.isHeld)
+        services.removeAt(0).destroy()
+        assertFalse("hang-up releases the CPU", wake.isHeld)
+        assertNotNull("and the audio focus", audio().lastAbandonedAudioFocusRequest2)
+        assertFalse(VoiceCallService.running)
+    }
+
+    @Test fun aRefusedPromotionHoldsNothing() {
+        VoiceCallService.goForeground = { _, _ -> throw SecurityException("microphone service refused") }
+        keeper.started(3)
+        run(VoiceCallService.ACTION_SHOW)
+        val wake = org.robolectric.shadows.ShadowPowerManager.getLatestWakeLock()
+        assertTrue("no wake lock is held for a call that is not kept alive", wake == null || !wake.isHeld)
+        assertNull(audio().lastAudioFocusRequest)
+    }
+
+    @Test fun theLocksAreTakenOnceAndReleasedTogether() {
+        val locks = CallLocks(app)
+        locks.acquire(); locks.acquire()
+        val wake = org.robolectric.shadows.ShadowPowerManager.getLatestWakeLock()!!
+        assertTrue(wake.isHeld)
+        assertTrue("Wi-Fi stays out of power save for the call", locks.wifiHeld())
+        locks.release()
+        assertFalse(wake.isHeld)
+        assertFalse(locks.wifiHeld())
+        locks.release() // A second release (destroy after a refused promotion) is harmless.
+        assertFalse(wake.isHeld)
+    }
+
     // Review 4: off screen, only the kept-alive call's own page may reopen the microphone.
     @Test fun theBackgroundMicrophoneEndsWithTheCall() {
         keeper.started(3)
