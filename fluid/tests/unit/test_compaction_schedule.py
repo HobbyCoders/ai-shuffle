@@ -522,6 +522,44 @@ async def test_a_measurement_is_current_until_a_rewrite_follows_it(tmp_path) -> 
     await stale.aclose()
 
 
+async def test_compaction_rehydration_retries_and_is_never_lost(tmp_path, monkeypatch) -> None:
+    """One failed read of the persisted decisions must not leave the engine
+    without them for its whole life."""
+    import fluid.engine.native as native_mod
+    from fluid.store.base import persist_event
+
+    store = JsonlStore(tmp_path)
+    sid = (await store.create_session()).session_id
+    await persist_event(store, ContextCompaction(
+        session_id=sid, seq=1, tier=1, reason="trigger", trimmed=[["n1", "c1"]],
+    ))
+    real = native_mod.iter_events_of_class
+    failures = {"left": 0}
+
+    def flaky(*args, **kwargs):
+        if failures["left"]:
+            failures["left"] -= 1
+            raise OSError("store unavailable")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(native_mod, "iter_events_of_class", flaky)
+    monkeypatch.setattr(native_mod, "_REHYDRATE_BACKOFF_S", 0.0)
+    loop = NativeLoop(provider=_UsageProvider(0, 0.0), store=store, model="m", session_id=sid)
+    try:
+        # Every attempt of this resume fails: nothing is marked done.
+        failures["left"] = native_mod._REHYDRATE_ATTEMPTS
+        await loop._rehydrate_compaction(sid)
+        assert not loop._compaction_rehydrated
+        assert ("n1", "c1") not in loop._compactor.trimmer._trimmed
+        # The next resume retries; a transient failure is absorbed.
+        failures["left"] = 1
+        await loop._rehydrate_compaction(sid)
+        assert loop._compaction_rehydrated
+        assert ("n1", "c1") in loop._compactor.trimmer._trimmed
+    finally:
+        await loop.aclose()
+
+
 @pytest.mark.parametrize("gap,reason", [(20, ""), (300, ""), (400, "gap")])
 def test_resumed_cache_signal_uses_known_gap(gap, reason) -> None:
     signal = CacheSignal(resumed=True, gap_s=gap)

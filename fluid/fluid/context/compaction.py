@@ -2978,7 +2978,8 @@ class Compactor:
         the same way, so a host can tell whether a measurement it took is of
         the view as now decided or of one a later rewrite replaced."""
         return hash((
-            frozenset(self.trimmer._trimmed), frozenset(self.trimmer._image_consumed),
+            frozenset(self.trimmer._trimmed), frozenset(self.trimmer._trim_versions.items()),
+            frozenset(self.trimmer._image_consumed),
             frozenset(self._digested.items()), frozenset(self._summaries),
         ))
 

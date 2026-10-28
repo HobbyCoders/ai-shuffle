@@ -101,6 +101,10 @@ from fluid.context.compaction import (
 # persisted events with no compaction after it: current under the decisions
 # the engine rehydrates, whose state token is only known once they are.
 _REHYDRATED_CURRENT = object()
+# Reads of a session's persisted compaction decisions per resume, and the
+# pause between them (seconds, times the attempt number).
+_REHYDRATE_ATTEMPTS = 3
+_REHYDRATE_BACKOFF_S = 0.2
 from fluid.context.assistant import sanitize_assistant_history
 from fluid.context.compiler import CompiledPrompt
 from fluid.context.recall import HistoryRecall
@@ -3406,15 +3410,36 @@ class NativeLoop(BackgroundLifecycleMixin):
         Digest rendering is deterministic, so re-applying the persisted
         decisions makes the resumed view byte-identical to the pre-restart one
         — the cache survives the restart too.
+
+        Marked done only once the read succeeds. A failed read is retried a
+        few times here and again at the next turn; until it succeeds the
+        compactor holds no persisted decisions, so it sizes and compacts the
+        whole path afresh (safe for the window, a cache rewrite), and says so.
         """
         if self._compaction_rehydrated:
             return
-        self._compaction_rehydrated = True
-        try:
-            events = [event async for event in iter_events_of_class(
-                self.store, sid, 0, (ContextCompaction,))]
-        except Exception:  # a store that cannot replay just re-compacts later
+        events: list[Any] | None = None
+        for attempt in range(_REHYDRATE_ATTEMPTS):
+            try:
+                events = [event async for event in iter_events_of_class(
+                    self.store, sid, 0, (ContextCompaction,))]
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — retried, then reported
+                log.warning(
+                    "could not read session %s's compaction decisions (attempt %d/%d): %s",
+                    sid, attempt + 1, _REHYDRATE_ATTEMPTS, type(exc).__name__,
+                )
+                if attempt + 1 < _REHYDRATE_ATTEMPTS:
+                    await asyncio.sleep(_REHYDRATE_BACKOFF_S * (attempt + 1))
+        if events is None:
+            log.error(
+                "session %s's compaction decisions are unreadable; this call "
+                "compacts the whole path afresh and the next turn retries", sid,
+            )
             return
+        self._compaction_rehydrated = True
         self._compactor.rehydrate(
             Promotion(
                 tier=e.tier,
