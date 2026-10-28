@@ -316,7 +316,7 @@ class VoiceCallServiceTest {
         assertTrue("held until the service itself stops", wake.isHeld)
         services.removeAt(0).destroy()
         assertFalse("hang-up releases the CPU", wake.isHeld)
-        assertNotNull("and the audio focus", audio().lastAbandonedAudioFocusRequest2)
+        assertNotNull("and the audio focus", audio().lastAbandonedAudioFocusRequest)
         assertFalse(VoiceCallService.running)
     }
 
