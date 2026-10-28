@@ -14,9 +14,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.parametrize("refills", [1, 100])
-@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("failure, warning", [(False, False), (True, False), (True, True)])
 def test_pytest_reports_late_basetemp_writer(
-    tmp_path: Path, refills: int, failure: bool,
+    tmp_path: Path, refills: int, failure: bool, warning: bool,
 ) -> None:
     """A real child refills the directory after rmtree's scan, before rmdir."""
     import json
@@ -25,7 +25,7 @@ def test_pytest_reports_late_basetemp_writer(
     suite = tmp_path / "test_late_writer.py"
     record = tmp_path / "late-writes.json"
     suite.write_text(
-        "import json, os, pathlib, subprocess, sys, pytest\n"
+        "import json, os, pathlib, subprocess, sys, warnings, pytest\n"
         "def test_payload(tmp_path_factory: pytest.TempPathFactory) -> None:\n"
         "    base = tmp_path_factory.getbasetemp()\n"
         "    original = os.rmdir\n"
@@ -44,12 +44,20 @@ def test_pytest_reports_late_basetemp_writer(
         "            record.write_text(json.dumps([str(base.parent), writes]))\n"
         "        return original(path, *args, **kwargs)\n"
         "    os.rmdir = rmdir\n"
-        f"    assert {not failure!r}\n"
+        f"    if {warning!r}:\n"
+        "        warnings.warn('unrelated pytest deprecation', pytest.PytestDeprecationWarning)\n"
+        # If the warning is incorrectly ignored, this case passes in the child
+        # and fails the parent's required failure/exit-code assertions.
+        f"    assert {not failure or warning!r}\n"
     )
+    # pytest 9.2 applies -W to pytest_configure hooks too. Ignore only
+    # pytest-asyncio's unrelated loop-scope default warning; keep -W error.
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "-p", "scripts.ci.test_scratch",
          str(suite), "--rootdir", str(tmp_path), "--confcutdir", str(tmp_path),
-         "-q", "-o", "addopts=", "-W", "error"],
+         "-q", "-o", "addopts=", "-W", "error",
+         "-W", 'ignore:The configuration option "asyncio_default_fixture_loop_scope" is unset.'
+         ":pytest.PytestDeprecationWarning"],
         cwd=ROOT, env={**os.environ, "PYTHONPATH": str(ROOT)},
         capture_output=True, text=True, timeout=60,
     )
@@ -58,6 +66,8 @@ def test_pytest_reports_late_basetemp_writer(
     owner = Path(owner)
     try:
         assert ("1 failed" if failure else "1 passed") in output
+        if warning:
+            assert "PytestDeprecationWarning: unrelated pytest deprecation" in output
         assert "WARNING: pytest scratch refilled during cleanup" in output
         assert str(owner) in output
         if refills == 1:
