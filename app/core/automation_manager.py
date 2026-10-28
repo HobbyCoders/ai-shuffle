@@ -112,6 +112,14 @@ class _ShutdownBeforeTurn(Exception):
     turn nobody watches (it would run unattended on the next boot)."""
 
 
+#: Why a manual trigger of a disabled automation is refused (HTTP 409, tools).
+DISABLED_TRIGGER_MESSAGE = "Automation is disabled — enable it before triggering"
+
+
+class AutomationDisabledError(RuntimeError):
+    """A manual trigger of a disabled automation: refused, never a silent no-op."""
+
+
 class AutomationManager:
     """Central hub for automation scheduling, execution, and output delivery."""
 
@@ -604,10 +612,19 @@ class AutomationManager:
         return {"automation_id": automation_id, "status": "triggered"}
 
     async def trigger_manual(self, automation_id: str) -> Optional[Dict]:
-        """Manual trigger from the UI."""
+        """Manual trigger from the UI, the RemoteTrigger tool or triggerAutomation.
+
+        ``None`` when the automation does not exist. A disabled one raises
+        :class:`AutomationDisabledError`: ``_execute`` never runs a disabled
+        automation, so a "triggered" answer would report a run that never
+        starts. Refusing (not enabling it, not running it anyway) is the HTTP
+        API's 409: disabling is the owner's off switch for every trigger.
+        """
         automation = await run_sync(database.get_automation, automation_id)
         if not automation:
             return None
+        if not automation.get("is_enabled"):
+            raise AutomationDisabledError(DISABLED_TRIGGER_MESSAGE)
 
         trigger_data = {"trigger": "manual", "fired_at": datetime.now(timezone.utc).isoformat()}
         self._create_tracked_task(self._execute(automation_id, trigger_data), name=f"auto-manual-{automation_id}")

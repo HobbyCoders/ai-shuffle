@@ -644,8 +644,11 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
             return _error(f"Automation not found: {args['automation_id']}")
 
         try:
-            from app.core.automation_manager import automation_manager
-            result = await automation_manager.trigger_manual(args["automation_id"])
+            from app.core.automation_manager import AutomationDisabledError, automation_manager
+            try:
+                result = await automation_manager.trigger_manual(args["automation_id"])
+            except AutomationDisabledError as disabled:
+                return _error(f"{disabled}. Nothing was run.")
             return _tool_result({
                 "success": True,
                 "automation_id": args["automation_id"],

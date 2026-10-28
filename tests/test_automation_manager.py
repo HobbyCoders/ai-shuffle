@@ -129,6 +129,7 @@ class TestTriggerManual:
             trigger_config={},
             prompt="test",
             profile_id="default",
+            enabled=True,
         )
 
         # Patch _execute to avoid real execution
@@ -137,6 +138,39 @@ class TestTriggerManual:
             assert result is not None
             assert result["automation_id"] == "auto-man"
             assert result["status"] == "triggered"
+
+    @pytest.mark.asyncio
+    async def test_manual_trigger_of_a_disabled_automation_is_refused(self, manager, mock_db):
+        # _execute never runs a disabled automation, so "triggered" would be a
+        # run that never starts. Every manual entry point refuses instead.
+        import json
+
+        from app.core.automation_manager import AutomationDisabledError, DISABLED_TRIGGER_MESSAGE
+        from app.db import database
+        from app.mcp.config_automations import _create_automation_tools
+        from tests.api.test_api_user_scope_regressions import _builtins
+
+        database.create_automation(
+            automation_id="auto-off", name="Off", trigger_type="webhook", trigger_config={},
+            prompt="test", profile_id="default",
+        )
+        assert not database.get_automation("auto-off")["is_enabled"]
+        with patch.object(manager, "_execute", new_callable=AsyncMock) as execute, \
+                patch("app.core.automation_manager.automation_manager", manager):
+            with pytest.raises(AutomationDisabledError, match="enable it before triggering"):
+                await manager.trigger_manual("auto-off")
+            remote = await _builtins("owner-sess", is_admin=True)["RemoteTrigger"].handler(
+                {"automation_id": "auto-off"})
+            config_tool = next(t for t in _create_automation_tools(True, None) if t.name == "triggerAutomation")
+            configured = await config_tool.handler({"automation_id": "auto-off"})
+            await asyncio.sleep(0)
+            execute.assert_not_called()
+        for response in (remote, configured):
+            body = json.loads(response["content"][0]["text"])
+            assert body["success"] is False
+            text = body["error"]
+            assert DISABLED_TRIGGER_MESSAGE in text and "Nothing was run" in text
+            assert "triggered" not in text
 
 
 # =============================================================================
