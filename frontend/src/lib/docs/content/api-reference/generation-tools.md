@@ -328,13 +328,16 @@ they never authorize another submission. Lower costs do not release the
 conservative reservation. A provider-reported cost is not a verified invoice.
 
 fal rates come from the account's pricing API. The shared model-schema service
-resolves item/request/generation counts, seconds or minutes with declared
-duration units, characters or 1K-character blocks with known input length, and
-megapixels with explicit declared dimensions. Fractional billing units round
-up. A catalog-only character price has unknown total until text is supplied.
-Unsupported units, missing dimensions or ambiguous duration/count parameters
-refuse submission rather than guess. Conditional pricing formulas are not
-inferred from resolution names.
+normalizes capitalization, plurals and `per` unit labels. It resolves
+item/request/generation counts, seconds or minutes with declared duration units,
+characters or 1K-character blocks with known input length, and megapixels with
+explicit dimensions or fal's documented `image_size` presets. An unresolved size
+can use the largest allowed preset only when every enum option has known
+dimensions. Fractional billing units round up for each output. A catalog-only
+character price has unknown total until text is supplied. Unsupported units
+(including tokens and compute time), unbounded dimensions or ambiguous
+duration/count parameters refuse submission rather than guess. Conditional
+pricing formulas are not inferred from arbitrary resolution names.
 
 OpenAI/xAI API media routes remain unavailable: this base's Default models
 schema endpoint is fal-only, and its native API capability table declares no

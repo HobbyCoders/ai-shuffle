@@ -30,6 +30,17 @@ logger = logging.getLogger(__name__)
 FAL_MODELS_API = "https://api.fal.ai/v1/models"
 DEFAULT_SCHEMA_TTL = 24 * 3600  # schemas change rarely; cache for a day
 
+# fal's documented ImageSize presets (not arbitrary model resolution labels):
+# https://fal.ai/learn/tools/how-to-use-gpt-image-2
+_IMAGE_SIZE_PRESETS = {
+    "square_hd": (1024, 1024),
+    "square": (512, 512),
+    "portrait_4_3": (768, 1024),
+    "portrait_16_9": (576, 1024),
+    "landscape_4_3": (1024, 768),
+    "landscape_16_9": (1024, 576),
+}
+
 # Candidate names for the model's primary text/prompt input, in priority order.
 _PRIMARY_TEXT_FIELDS = (
     "prompt",
@@ -166,9 +177,11 @@ class ModelSchema:
     def pricing_quantity(self, unit: str, options: dict, prompt: str | None = None):
         """Conservative billable units from this model's declared parameters.
 
-        No resolution-name tables or token estimates: missing dimensions,
-        duration units or text lengths leave the price unknown. Whole billing
-        units round up so a fractional block cannot under-reserve the cap.
+        fal's documented ImageSize presets have fixed pixel dimensions. For an
+        unresolved size, only a fully understood enum can bound the largest
+        allowed output; arbitrary resolution labels and tokens are not guessed.
+        Missing duration units or text lengths leave the price unknown. Whole
+        billing units round up so a fractional block cannot under-reserve the cap.
         """
         from decimal import Decimal, ROUND_CEILING
         import re
@@ -189,7 +202,13 @@ class ModelSchema:
         count = number(options[count_fields[0]]) if count_fields else Decimal(1)
         if count != count.to_integral_value() or count > 100:
             raise ValueError("Invalid output count.")
-        unit = unit.strip().lower()
+        unit = re.sub(r"\s+", " ", unit.strip().casefold())
+        if unit.startswith("per "):
+            unit = unit[4:]
+        unit = {"requests": "request", "inferences": "inference", "images": "image",
+                "videos": "video", "audios": "audio", "meshes": "mesh",
+                "generations": "generation", "characters": "character",
+                "seconds": "second", "minutes": "minute", "megapixels": "megapixel"}.get(unit, unit)
         if unit in ("request", "inference"):
             return Decimal(1), Decimal(1)
         if unit in ("image", "video", "audio", "mesh", "3d", "generation"):
@@ -229,10 +248,18 @@ class ModelSchema:
             return quantity.to_integral_value(rounding=ROUND_CEILING), count
         if unit in ("megapixel", "megapixels"):
             dimensions = options.get("image_size") if "image_size" in fields else None
+            if isinstance(dimensions, str) and dimensions in _IMAGE_SIZE_PRESETS:
+                width, height = _IMAGE_SIZE_PRESETS[dimensions]
+                dimensions = {"width": width, "height": height}
             if dimensions is None and {"width", "height"} <= fields.keys():
                 dimensions = options
+            if not isinstance(dimensions, dict) and "image_size" in fields:
+                allowed = fields["image_size"].enum
+                if allowed and all(isinstance(size, str) and size in _IMAGE_SIZE_PRESETS for size in allowed):
+                    width, height = max((_IMAGE_SIZE_PRESETS[size] for size in allowed), key=lambda size: size[0] * size[1])
+                    dimensions = {"width": width, "height": height}
             if not isinstance(dimensions, dict) or any(type(dimensions.get(k)) is not int for k in ("width", "height")):
-                raise ValueError("Explicit declared pixel dimensions are required.")
+                raise ValueError("Declared pixel dimensions or a bounded ImageSize preset are required.")
             quantity = number(dimensions["width"]) * number(dimensions["height"]) / 1_000_000
             return quantity.to_integral_value(rounding=ROUND_CEILING), count
         raise ValueError("Unsupported declared pricing unit.")
