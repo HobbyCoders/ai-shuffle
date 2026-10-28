@@ -81,8 +81,16 @@ export const register: Register = (on) => {
           await $.env.set('FLUID_CLAUDE_MOD_COMPACT_URL', undefined)
         }
       } catch {
-        try { await $.ui.log('Fluid compaction fallback: bridge initialization error', { to: 'debug' }) } catch { /* Best effort. */ }
-        return next(e)
+        // Initialization stays unset, so the next compaction tries again.
+        // Only an automatic compaction at the limit may fall back to Claude
+        // Code's summarizer; a manual one never does (see above).
+        const fallback = e.trigger === 'auto'
+        try {
+          await $.ui.log(fallback ? 'Fluid compaction fallback: bridge initialization error'
+            : 'Fluid compaction skipped: bridge initialization error', { to: 'debug' })
+        } catch { /* Best effort. */ }
+        return fallback ? next(e)
+          : { skip: 'Fluid could not compact the conversation (bridge initialization error); it is left as it is' }
       }
     }
     if (mechanical) {

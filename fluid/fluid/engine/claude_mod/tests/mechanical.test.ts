@@ -273,6 +273,20 @@ describe('mechanical compaction', () => {
     })
   }
 
+  test('a bridge that fails to initialize never summarizes a manual compaction', async ($, on) => {
+    let logs = 0
+    const calls = engine(on, () => { logs++ })
+    on('env.get', () => { throw new Error('environment unavailable') })
+    // Before session.start: the bridge is initialized lazily, and fails.
+    const manual = await $.session.compact({ trigger: 'manual', messages: ROWS })
+    expect(calls.length).toBe(0)
+    expect('skip' in manual && manual.skip.startsWith('Fluid could not compact the conversation (')).toBe(true)
+    // At the limit Claude Code may still summarize, so the chat cannot overflow.
+    await $.session.compact({ trigger: 'auto', messages: ROWS })
+    expect(calls.length).toBe(1)
+    expect(logs).toBe(2)
+  })
+
   test('the answer is rows that validate or a bounded skip', () => {
     const rows = postedRows(ROWS)
     expect(compactionAnswer({ messages: rows }, rows)).toEqual({ messages: rows })

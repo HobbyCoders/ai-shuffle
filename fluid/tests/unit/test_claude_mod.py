@@ -124,6 +124,23 @@ def test_the_summarizer_line_is_fixed_text_and_calls_nothing() -> None:
   })"""
 
 
+def test_a_manual_compaction_never_falls_back_to_the_summarizer() -> None:
+    """Every path out of the mounted branch that can reach Claude Code's
+    summarizer (``next(e)``) is gated on an automatic trigger, including a
+    failure while the bridge is lazily initialized."""
+    register = (Path(CLAUDE_MOD_SOURCE) / "hooks" / "register.ts").read_text(encoding="utf-8")
+    block = register[register.index("on('session.compact'"):]
+    mounted = block[:block.index("    let instructions = e.instructions")]
+    init = mounted[mounted.index("if (!bridgeInitialized)"):mounted.index("if (mechanical)")]
+    catch = init[init.index("} catch {"):]
+    assert "return next(e)" not in catch
+    assert "fallback ? next(e)" in catch and "const fallback = e.trigger === 'auto'" in catch
+    # Outside the subagent pass-through, every next(e) in the mounted part is
+    # behind the automatic-only fallback.
+    calls = re.findall(r"[^\n]*next\(e\)[^\n]*", mounted)
+    assert calls and all("agentId" in c or "fallback ? next(e)" in c for c in calls), calls
+
+
 # ─── The gate and the argv ───────────────────────────────────────────────────
 
 
