@@ -389,6 +389,15 @@ class ContextCompaction(Event):
     # escalation sizes each rung on its own, so a later rung's
     # ``before_tokens`` is only what the previous rung left. 0 when unknown.
     batch_before_tokens: int = 0
+    # The provider's measurement of the prompt the batch started from, in real
+    # tokens: the last billed prompt carried forward (only what was appended
+    # since is estimated), taken on this model with no compaction rewrite
+    # since. ``before_tokens`` and friends are chars/4 units, which can read
+    # far above the window; a host shows this instead and scales "after" by
+    # the same measured/estimated ratio. 0 when no such measurement exists: a
+    # fresh path, a model switch, a rewrite since the measured call, a
+    # provider-overflow retry, and every older event.
+    batch_measured_tokens: int = 0
     # The delegated leg only: the summary the claude CLI wrote for this
     # compaction, read back from its transcript. Its ``node_id`` follows the
     # same boundary convention (``None`` between turns). The CLI's

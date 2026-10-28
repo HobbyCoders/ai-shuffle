@@ -4660,6 +4660,21 @@ class HarnessAdapter(ProviderAdapter):
             value = getattr(event, attr, 0)
             if isinstance(value, int) and value > 0:
                 metadata[key] = value
+        if not from_cli and ("pre_tokens" in metadata or "post_tokens" in metadata):
+            # Native sizes are chars/4 estimates, which can read above the
+            # window (#753). Where the provider measured the view the batch
+            # started from, show that, and "after" scaled by the same
+            # measured/estimated ratio so both read in one unit; otherwise say
+            # the figures are estimates.
+            measured = getattr(event, "batch_measured_tokens", 0)
+            estimated = metadata.get("pre_tokens")
+            if isinstance(measured, int) and measured > 0 and estimated:
+                metadata["pre_tokens"] = measured
+                if "post_tokens" in metadata:
+                    metadata["post_tokens"] = max(1, round(metadata["post_tokens"] * measured / estimated))
+                metadata["token_basis"] = "measured"
+            else:
+                metadata["token_basis"] = "estimate"
         if from_cli and "post_tokens" in metadata:
             # The CLI's pre_tokens is the whole prompt (the meter's basis), its
             # post_tokens the summary alone. ``context_post_tokens`` is what the

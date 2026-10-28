@@ -223,9 +223,11 @@ def _render_markdown(session: dict, messages: list, share_safe: bool = False) ->
 
         if role == "system" and msg.get("systemSubtype") == "compact_boundary":
             meta = (msg.get("systemData") or {}).get("compact_metadata") or {}
+            # A native card without a provider measurement holds chars/4 sizes.
+            estimated = " (estimated)" if meta.get("token_basis") == "estimate" else ""
             md_lines.append(
                 f"*Context Compacted ({meta.get('trigger', 'unknown')}): "
-                f"{meta.get('pre_tokens', '?')} → {meta.get('post_tokens', '?')} tokens; "
+                f"{meta.get('pre_tokens', '?')} → {meta.get('post_tokens', '?')} tokens{estimated}; "
                 f"window {meta.get('context_window', '?')}.*"
             )
             md_lines.append("")

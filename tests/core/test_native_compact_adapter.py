@@ -57,6 +57,8 @@ async def test_native_compact_shows_the_compacted_card(mock_db, monkeypatch):
         meta = card.data["compact_metadata"]
         assert meta["trigger"] == "manual"
         assert meta["pre_tokens"] > meta["post_tokens"] > 0
+        # #753: the last call measured this view, so the card reads that.
+        assert meta["token_basis"] == "measured"
         assert not _cards(events, "compact_failed")
         # "Compacting context..." came first, as a manual compaction the user asked for.
         [status] = _cards(events, "compaction_status")
@@ -233,6 +235,8 @@ async def test_multi_promotion_batch_records_one_card(mock_db, monkeypatch):
         assert card.data["compact_metadata"] == {
             "trigger": "auto", "pre_tokens": promotions[0].before_tokens,
             "post_tokens": promotions[-1].after_tokens, "context_window": 100_000,
+            # Rows written straight to the store: no call measured them.
+            "token_basis": "estimate",
         }
     finally:
         await adapter.disconnect()
@@ -324,4 +328,93 @@ async def test_overflow_escalation_batch_card_spans_the_whole_batch(mock_db):
     assert row["payload"]["data"]["compact_metadata"] == {
         "trigger": "auto", "pre_tokens": escalations[0].before_tokens,
         "post_tokens": escalations[-1].after_tokens, "context_window": 20_000,
+        # The provider rejected the prompt, so nothing measured it.
+        "token_basis": "estimate",
     }
+
+
+def _native_card(**fields):
+    from fluid.events import ContextCompaction
+
+    adapter = HarnessAdapter()
+    [card] = adapter._translate(ContextCompaction(
+        session_id="s", tier=2, reason="trigger", trimmed=[["n1", "t1"]], **fields))
+    return card.data["compact_metadata"]
+
+
+def test_native_card_reports_the_measured_size_not_the_estimate():
+    """#753: chars/4 read 438k on a 400k window; the provider measured the
+    same prompt at 249k. The card shows the measurement, and its "after"
+    in the same units."""
+    metadata = _native_card(
+        before_tokens=300_000, batch_before_tokens=438_000, after_tokens=219_000,
+        context_window=400_000, batch_measured_tokens=249_000)
+    assert metadata["pre_tokens"] == 249_000 <= metadata["context_window"]
+    # The estimate halved, so the measured-unit "after" is half of 249k.
+    assert metadata["post_tokens"] == 124_500
+    assert metadata["token_basis"] == "measured"
+
+
+def test_native_card_without_a_measurement_is_marked_as_an_estimate():
+    metadata = _native_card(
+        before_tokens=438_000, after_tokens=219_000, context_window=400_000)
+    assert metadata == {"trigger": "auto", "pre_tokens": 438_000, "post_tokens": 219_000,
+                        "context_window": 400_000, "token_basis": "estimate"}
+
+
+def test_cli_card_keeps_its_own_counts():
+    from fluid.events import ContextCompaction
+
+    [card] = HarnessAdapter()._translate(ContextCompaction(
+        session_id="s", tier=3, reason="cli_auto_compact",
+        before_tokens=169_000, after_tokens=19_600, batch_measured_tokens=1))
+    metadata = card.data["compact_metadata"]
+    assert metadata["pre_tokens"] == 169_000 and metadata["post_tokens"] == 19_600
+    assert "token_basis" not in metadata
+
+
+@pytest.mark.asyncio
+async def test_native_engine_card_is_sized_on_the_measured_prompt(monkeypatch):
+    """Real NativeLoop turns billed far below the chars/4 estimate: the card
+    the engine produces reads the measurement the window decision used."""
+    from fluid.context.compaction import CompactionConfig
+    from fluid.events import ContextCompaction
+
+    chunks = [StreamChunk("message_start", {"usage": {"input_tokens": 100}}), *_REPLY[1:]]
+    loop = NativeLoop(provider=FakeProvider(chunks), store=MemoryStore(), model="fake",
+        compaction=CompactionConfig(trigger_tokens=500, trigger_window_ratio=0,
+                                   keep_recent_turns=1))
+    measured: list = []
+    original = loop._measured_window_prompt
+
+    async def recording(sid, nodes):
+        value = await original(sid, nodes)
+        measured.append(value)
+        return value
+
+    monkeypatch.setattr(loop, "_measured_window_prompt", recording)
+    adapter = HarnessAdapter()
+    adapter._engine = loop
+    adapter._options = SessionOptions(model="fake")
+    adapter._connected = True
+    monkeypatch.setattr(adapter, "_turn_context_note", lambda query="": "")
+    try:
+        await loop._ensure_session()
+        cards = []
+        for i in range(6):
+            await adapter.send_query(f"turn {i} " + "words " * 200)
+            cards += _cards(await _collect(adapter), "compact_boundary")
+        assert cards, "no native compaction ran"
+        finals = [e for e in await loop.store.events_since(loop.session_id, -1)
+                  if isinstance(e, ContextCompaction) and e.batch_final]
+        assert len(finals) == len(cards)
+        for event, card in zip(finals, cards):
+            metadata = card.data["compact_metadata"]
+            assert event.batch_measured_tokens in measured
+            assert metadata["token_basis"] == "measured"
+            assert metadata["pre_tokens"] == event.batch_measured_tokens
+            # Far below the estimate the compactor sized its batch on.
+            assert metadata["pre_tokens"] < (event.batch_before_tokens or event.before_tokens)
+            assert metadata["pre_tokens"] > metadata["post_tokens"] > 0
+    finally:
+        await adapter.disconnect()
