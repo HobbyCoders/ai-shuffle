@@ -523,17 +523,35 @@ What the child CLI is given, and what it is not:
 - After the CLI compacts the main conversation (automatically, also in the
   middle of a turn, or on `/compact`), its `SessionStart` hook with source
   `compact` puts the session ledger back and then, when the host passes a
-  `compact_context` (an async callable returning text or `None`, as AI Shuffle
-  does with its per-turn memory, Away mode, date and branch note), that text.
-  A mid-turn compaction folds the user message that carried the note into the
-  summary, so without this the model works without it until the next user
-  message. The provider gets 5 seconds and its text is capped at 24,000
-  characters; one that fails, overruns or returns nothing is logged and
-  skipped, and the hook answers as before. The CLI fires the same hook for a
+  `compact_context` (an async callable returning a list of
+  `fluid.engine.compact_restore.RestorationSection`, text, or `None`, as AI
+  Shuffle does with its per-turn memory, working record, Away mode, scratch,
+  date and branch note), that note. A mid-turn compaction folds the user
+  message that carried the note into the summary, so without this the model
+  works without it until the next user message. The provider gets 5 seconds;
+  one that fails, overruns or returns nothing is logged and skipped, and the
+  hook answers as before. Its sections share a 24,000-character bound: each
+  has its own optional bound, they claim room in `priority` order and keep
+  their given order in the note, and a section that does not fit whole is
+  cut (only when marked `cuttable`, and only if at least 1,000 characters of
+  it fit) or left out. Plain text is one cuttable section. Each section's
+  outcome (`delivered`, `cut`, `omitted`) is logged, kept in the loop's
+  `last_restoration` and stored as a `compaction_restoration`
+  `DelegatedDiagnostic`; a section's `on_delivered` runs only when it went out
+  whole, and a note that was cut or left something out is not credited, so
+  the next turn puts the context back as after no put-back at all. The CLI fires the same hook for a
   subagent's compaction, with nothing in the payload to say so (2.1.289); the
   loop tells the main thread's apart by the `system/status` `compacting` frame
   the CLI writes first, and a subagent gets the ledger but not the note. No
   mod is needed.
+- After each CLI start, the first context-usage report that names a window
+  (`maxTokens`, with `autocompactSource`) is compared with the window the
+  spawn pinned through `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, or with no pin with
+  `compaction_window`. A user's own `~/.claude/settings.json` env block can
+  override the pin inside the CLI. A difference is logged and stored once per
+  pair as a `context_window_mismatch` `DelegatedDiagnostic` (AI Shuffle shows
+  a pinned one on the session); the turn is not refused. When the CLI's
+  window is the smaller one, `compaction_window` follows it from then on.
 - The CLI's `compact_boundary` frame becomes a `ContextCompaction` event
   (reason `cli_auto_compact`, `cli_manual_compact` or `cli_compact`, with its
   token counts) only for the main conversation, told apart by the same
@@ -658,11 +676,20 @@ What the child CLI is given, and what it is not:
   rebuild (images, `ToolSearch` results) are kept or left out whole, never
   rebuilt. When nothing more can be reclaimed the route answers a skip: a
   manual compaction is then left as it is (as on any bridge error), and only
-  an automatic one falls back to the CLI's summarizer. When the CLI reports
-  applying an answer, the compacted part is persisted as a
-  `CompactionCheckpoint` event (rows that stand for the stored path through
-  one node), which a re-seed on another worker starts from instead of the
-  whole history. After a compaction the CLI prints the conversation it now
+  an automatic one falls back to the CLI's summarizer. Each answer with rows
+  carries a transaction id (`compaction_id`, `cmp_…`). The CLI's boundary
+  names the last message before the compaction (`logical_parent_uuid`, CLI
+  2.1.312), and the posted rows carry those message uuids as handles, so the
+  boundary is matched to the answer that ended with (or else held) that
+  message, however late it is read or however close two compactions were; a
+  CLI that names no parent takes the newest open answer. The matched
+  `ContextCompaction` and the `CompactionCheckpoint` written for it (rows that
+  stand for the stored path through one node) carry the same id, and a
+  re-seed on another worker starts from a checkpoint only together with the
+  boundary of its id, at that boundary's place (checkpoints stored without an
+  id keep their own place). A boundary with Claude Code's own summary, one
+  that names no open answer, and an answer only ready after the mod's 60 s
+  wait get no checkpoint. After a compaction the CLI prints the conversation it now
   holds as ordinary frames; the leg recognises them (recorded tool ids and
   uuids, the rows it answered with) and stores none of them again.
 - A `tool_policy` that raises (or returns an awaitable that raises) denies the

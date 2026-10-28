@@ -167,6 +167,6 @@ def test_scratch_prompt_is_absolute_session_scoped_and_survives_compaction(state
         monkeypatch.setattr(adapter, name, lambda: None)
     designated = scratch_dir(_ctx(state_fixture))
     assert str(designated) in adapter._turn_context_note()
-    assert str(designated) in adapter._compact_note()
+    assert str(designated) in "\n\n".join(s.text for s in adapter._compact_note())
     assert not designated.exists()
     assert not (state_fixture / ".fluid").exists()

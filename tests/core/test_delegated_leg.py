@@ -301,6 +301,15 @@ async def test_delegated_leg_sizes_fluid_compaction_by_the_models_window(monkeyp
     assert _KwargsLoop.captured["compaction_window"] == expected
 
 
+async def _packed(loop) -> str:
+    """The note the loop puts back for ``compact_context``'s sections."""
+    from fluid.engine.compact_restore import pack_sections
+    from fluid.engine.delegated import COMPACT_CONTEXT_MAX_CHARS
+
+    note, _ = pack_sections(await loop.compact_context(), COMPACT_CONTEXT_MAX_CHARS)
+    return note
+
+
 @pytest.mark.asyncio
 async def test_delegated_leg_puts_the_turn_note_back_after_a_compaction(monkeypatch, tmp_path):
     """The loop's ``compact_context`` renders the same note every user
@@ -317,12 +326,17 @@ async def test_delegated_leg_puts_the_turn_note_back_after_a_compaction(monkeypa
     try:
         loop = adapter._engine
         assert isinstance(loop, DelegatedLoop)
-        note = await loop.compact_context()
+        sections = await loop.compact_context()
+        # Bounded, prioritized sections (#755); below the bound the note the
+        # loop puts back is the turn note, in its order.
+        assert [s.name for s in sections][:1] == ["environment"]
+        assert {"environment", "away"} <= {s.name for s in sections}
+        note = await _packed(loop)
         assert note == adapter._turn_context_note()
         assert "Today's date" in note and "feature-note" in note and "AWAY MODE" in note
         # Rendered on every call: Away mode turned off mid-turn is not put back.
         away["text"] = None
-        assert "AWAY MODE" not in await loop.compact_context()
+        assert "AWAY MODE" not in await _packed(loop)
 
         away["text"] = "<system-reminder>\nAWAY MODE: still away\n</system-reminder>"
         loop._track_main_compaction({"type": "system", "subtype": "status", "status": "compacting"})
@@ -344,7 +358,7 @@ async def test_compaction_note_carries_date_and_branch_for_a_preset_profile(monk
     await adapter.connect(_preset_options(repo))
     try:
         assert adapter._env_note() is None
-        note = await adapter._engine.compact_context()
+        note = await _packed(adapter._engine)
         assert "Today's date: " in note and "Current branch: feature-x" in note
     finally:
         await adapter.disconnect()
@@ -715,3 +729,33 @@ def test_a_native_promotion_has_a_durable_card(reason):
     ))
     assert card.subtype == "compact_boundary"
     assert card.data == {"compact_metadata": {"trigger": "auto"}}
+
+
+def test_a_pinned_window_mismatch_is_shown_on_the_session():
+    """#754: a Claude Code setting overrode the window this chat pinned. The
+    loop's diagnostic becomes a card; an unpinned difference and the
+    restoration record stay audit-only."""
+    from fluid.events.model import DelegatedDiagnostic
+
+    adapter = ha.HarnessAdapter()
+
+    def diagnostic(kind, **data):
+        return DelegatedDiagnostic(session_id="s", turn_id="t", kind=kind,
+                                   message="Claude Code is using a 200,000-token window",
+                                   data=data)
+
+    [card] = adapter._translate(diagnostic(
+        "context_window_mismatch", expected=400_000, effective=200_000, pinned=True,
+        source="env", cli_version="2.1.312", raw_max_tokens=200_000,
+    ))
+    assert card.subtype == "context_window_mismatch"
+    assert card.data == {
+        "content": "Claude Code is using a 200,000-token window",
+        "expected": 400_000, "effective": 200_000, "source": "env", "cli_version": "2.1.312",
+    }
+    assert adapter._translate(diagnostic(
+        "context_window_mismatch", expected=1_000_000, effective=200_000, pinned=False,
+    )) == []
+    assert adapter._translate(diagnostic(
+        "compaction_restoration", complete=False, sections=[],
+    )) == []

@@ -1288,6 +1288,31 @@ def test_a_newer_summary_wins_over_an_older_checkpoint_and_back(mock_db, tmp_pat
     assert "OLD summary" not in "".join(json.dumps(line) for line in lines)
 
 
+def test_a_checkpoint_pairs_with_its_boundary_by_compaction_id(mock_db, tmp_path):
+    """#755: a checkpoint with a compaction id stands at its own boundary's
+    place, whatever was written between them, and applies only with it."""
+    # The checkpoint was written before a summary event, but its boundary
+    # (same id) is the newest compaction: the checkpoint wins.
+    session_id = _seed()
+    _insert_events(session_id, [
+        _checkpoint(through="n5", compaction_id="cmp_a"),
+        _cli_compaction(node_id="n2", summary="OLDER summary"),
+        _cli_compaction(node_id="n5", summary="", compaction_id="cmp_a"),
+    ])
+    lines = _reseeded_lines(session_id, tmp_path)
+    assert lines[0]["message"]["content"].startswith("[epoch n1..n2")
+
+    # No boundary carries its id: Claude Code never applied it, so the
+    # summary before it stands.
+    unapplied = _seed("ses_unapplied")
+    _insert_events(unapplied, [
+        _cli_compaction(node_id="n2", summary="OLD summary"),
+        _cli_compaction(node_id="n5", summary="", compaction_id="cmp_other"),
+        _checkpoint(through="n5", compaction_id="cmp_b"),
+    ])
+    assert _reseeded_lines(unapplied, tmp_path)[0]["message"]["content"] == "OLD summary"
+
+
 def test_a_checkpoint_off_the_path_falls_back(mock_db, tmp_path):
     """A rewind left the checkpoint's node behind: the summary before it (or
     the whole path) applies instead."""

@@ -78,7 +78,7 @@ def _create_generation_tools(is_admin: bool, *, writable: bool = False) -> list[
                 if job_id:
                     choice = choices.save_job(identity, job_id, kind, value)
                 else:
-                    choice = choices.save(identity, kind, value, remember=True)
+                    choice = choices.save(identity, kind, value, remember=True, origin="conversation")
                 return {
                     "kind": kind,
                     "choice": choice,

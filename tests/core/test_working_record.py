@@ -113,8 +113,9 @@ async def test_validation_and_list_pagination(owner):
     assert 50 < len(full["items"]) < 100 and full["next_offset"] == len(full["items"])
 
 
-async def test_omitted_live_sessions_are_counted_and_retrievable(owner):
-    for index in range(60):
+@pytest.mark.parametrize("count", [60, 110])
+async def test_omitted_live_sessions_are_counted_and_retrievable(owner, count):
+    for index in range(count):
         chat(f"live-{index}")
     live = working_record.live_sessions(exclude=owner["id"])
     page = await invoke(owner["id"], action="list")
@@ -123,6 +124,9 @@ async def test_omitted_live_sessions_are_counted_and_retrievable(owner):
     assert omitted and page["sessions_omitted"] == len(omitted)
     assert "ListSessions(scope='all', state='all')" in page["note"]
     assert "next_offset" in page["note"] and "owning worker" in page["note"]
+    assert "at most the 100 most recently updated candidates" in page["note"]
+    assert "sessions_omitted counts only sampled sessions" in page["note"]
+    assert len(live) == min(count, 100)
     assert len(working_record.dumps(page["sessions"]).encode("utf-8")) <= working_record.SESSIONS_BYTES
     assert len(working_record.dumps(page).encode("utf-8")) <= working_record.LIST_BYTES
 
@@ -132,7 +136,8 @@ async def test_omitted_live_sessions_are_counted_and_retrievable(owner):
         listing = orch.list_sessions(owner["id"], {"scope": "all", "state": "all", "offset": offset})
         found.update(row["id"] for row in listing["sessions"])
         offset = listing["next_offset"]
-    assert omitted <= found
+    # The help also reaches sessions beyond the sample, which the count omits.
+    assert {f"live-{index}" for index in range(count)} - shown <= found
 
 
 def test_read_actions_are_safe_and_writes_are_not():

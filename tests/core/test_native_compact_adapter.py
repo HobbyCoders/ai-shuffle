@@ -22,8 +22,8 @@ _REPLY = [
 ]
 
 
-async def _adapter(monkeypatch):
-    loop = NativeLoop(provider=FakeProvider(_REPLY), store=MemoryStore(), model="fake")
+async def _adapter(monkeypatch, **loop_kwargs):
+    loop = NativeLoop(provider=FakeProvider(_REPLY), store=MemoryStore(), model="fake", **loop_kwargs)
     adapter = HarnessAdapter()
     adapter._engine = loop
     adapter._options = SessionOptions(model="fake")
@@ -92,6 +92,49 @@ async def test_native_compact_shows_the_compacted_card(mock_db, monkeypatch):
         after = [r for r in session_events.get_events("native-manual-compact")
                  if r["event_type"] == "system.compaction_boundary"]
         assert after == before
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_repeated_manual_compaction_uses_unscaled_estimates_after_a_rewrite(monkeypatch):
+    """The first real compaction makes the last provider measurement stale."""
+    from fluid.context.compaction import CompactionConfig
+    from fluid.events import ContextCompaction
+
+    adapter, loop = await _adapter(monkeypatch, compaction=CompactionConfig(
+        trigger_tokens=10_000_000, keep_recent_turns=1, recency_tail_tokens=0))
+    try:
+        for i in range(6):
+            await adapter.send_query(f"turn {i} " + "words " * 200)
+            await _collect(adapter)
+        sid = loop.session_id
+        assert await loop._measured_window_prompt(sid, await loop._context_path(sid))
+        assert loop._measured_is_current(sid)
+        await adapter.send_query("/compact")
+        [first] = _cards(await _collect(adapter), "compact_boundary")
+        assert first.data["compact_metadata"]["token_basis"] == "measured"
+        assert not loop._measured_is_current(sid)
+        nodes = await loop._context_path(sid)
+        measured = await loop._measured_window_prompt(sid, nodes)
+        assert measured and loop._summary_scale(nodes, measured) < 1
+
+        await adapter.send_query("/compact")
+        [second] = _cards(await _collect(adapter), "compact_boundary")
+        events = await loop.store.events_since(sid, -1)
+        summaries = [e for e in events if isinstance(e, ContextCompaction) and e.reason == "manual_compact"]
+        assert len(summaries) == 2
+        summary = summaries[-1]
+        promotions = [e for e in events if isinstance(e, ContextCompaction)
+                      and e.turn_id == summary.turn_id and e.reason != "manual_compact"]
+        assert promotions
+        assert second.data["compact_metadata"] == {
+            "trigger": "manual", "pre_tokens": promotions[0].before_tokens,
+            "post_tokens": promotions[-1].after_tokens, "token_basis": "estimate",
+        }
+        assert summary.batch_measured_tokens == 0
+        assert summary.before_tokens == promotions[0].before_tokens
+        assert summary.after_tokens == promotions[-1].after_tokens
     finally:
         await adapter.disconnect()
 

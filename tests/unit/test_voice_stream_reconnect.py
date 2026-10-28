@@ -72,11 +72,13 @@ class FakeBrowser:
         self.inbox: asyncio.Queue = asyncio.Queue()
         self.send_json = AsyncMock()
         self.send_bytes = AsyncMock()
+        self.close_args = None
 
     async def receive(self):
         return await self.inbox.get()
 
-    async def close(self):
+    async def close(self, code=1000, reason=None):
+        self.close_args = (code, reason)
         self.inbox.put_nowait({"type": "websocket.disconnect"})
 
     def events(self, kind):
@@ -577,6 +579,75 @@ async def test_a_browser_that_goes_silent_ends_the_call(harness, monkeypatch, ca
     await asyncio.wait_for(run, 3)  # Then nothing arrives at all.
 
     assert harness.call.closed and provider.closed and "s1" not in voice_stream.calls
-    assert harness.call.browser_close.startswith("no data for")
+    assert harness.call.inactive_for is not None and harness.call.browser_close is None
     assert "the browser has sent nothing for" in caplog.text
+    # The server ended it, not the browser (#741): the old line blamed a browser close.
+    assert "the server ended the call after" in caplog.text
+    assert "the browser closed the audio connection" not in caplog.text
+    # A recoverable close the browser can reopen with resume=1, never a plain 1000.
+    assert harness.browser.close_args == (4100, "client-inactive")
     assert harness.browser.events("error") == []
+
+
+@pytest.mark.asyncio
+async def test_intentional_ends_keep_the_plain_terminal_close(harness):
+    """A hangup (stop) is final: only the inactivity end invites a reconnect (#741)."""
+    harness.script += [FakeProvider()]
+    run = asyncio.create_task(harness.call.run())
+    await until(lambda: harness.browser.events("ready"))
+    assert await voice_stream.stop("s1")
+    await asyncio.wait_for(run, 3)
+    assert harness.browser.close_args == (1000, None)
+    assert harness.call.inactive_for is None
+
+
+@pytest.mark.asyncio
+async def test_call_cap_end_stays_terminal(harness, monkeypatch):
+    from app.core import voice_bridge
+    monkeypatch.setattr(voice_bridge.registry, "mark_capped", lambda *a: None)
+    harness.call.max_seconds = 0.3
+    harness.script += [FakeProvider()]
+    await asyncio.wait_for(harness.call.run(), 3)
+    assert harness.browser.events("error")[-1]["message"].startswith("This call reached its time limit")
+    assert harness.browser.close_args == (1000, None)
+
+
+@pytest.mark.asyncio
+async def test_page_lifecycle_reports_say_why_the_browser_went_quiet(harness, monkeypatch, caplog):
+    """The log tells a hidden/frozen page apart from a device that went offline (#741)."""
+    caplog.set_level("INFO", logger="app.core.voice_stream")
+    monkeypatch.setattr(voice_stream, "BROWSER_SILENT_END_S", 0.5)
+    monkeypatch.setattr(voice_stream, "HEALTH_PUSH_S", 0.05)
+    harness.script += [FakeProvider()]
+    run = asyncio.create_task(harness.call.run())
+    await until(lambda: harness.browser.events("ready"))
+    stats = {"muted": True, "visibility": "hidden", "online": True, "event": "freeze", "last_event": "freeze",
+             "last_event_age_ms": 0, "freezes": 1, "offlines": 0}
+    await harness.browser.inbox.put({"type": "websocket.receive", "text": json.dumps({"type": "client_stats", "stats": stats})})
+    await asyncio.wait_for(run, 3)
+
+    text = caplog.text
+    assert "browser page event freeze after" in text
+    assert "page visibility=hidden online=True last_event=freeze" in text
+    # The inactivity warning carries the last page state it heard.
+    warning = next(r.getMessage() for r in caplog.records if "has sent nothing" in r.getMessage())
+    assert "close 4100 client-inactive" in warning and "visibility=hidden" in warning and "freezes=1" in warning
+
+
+@pytest.mark.asyncio
+async def test_a_long_gap_is_logged_even_without_a_page_event(harness, monkeypatch, caplog):
+    caplog.set_level("INFO", logger="app.core.voice_stream")
+    monkeypatch.setattr(voice_stream, "BROWSER_GAP_LOG_S", 0.2)
+    harness.script += [FakeProvider()]
+    run = asyncio.create_task(harness.call.run())
+    await until(lambda: harness.browser.events("ready"))
+    quick = {"type": "websocket.receive", "text": json.dumps({"type": "client_stats", "stats": {"online": False}})}
+    await harness.browser.inbox.put(quick)
+    await until(lambda: harness.call.client_stats)
+    assert "browser page report" not in caplog.text  # No gap yet: nothing logged.
+    await asyncio.sleep(0.3)
+    await harness.browser.inbox.put(quick)
+    await until(lambda: "browser page report after" in caplog.text)
+    assert "page online=False" in caplog.text
+    await harness.call.close()
+    await asyncio.wait_for(run, 3)

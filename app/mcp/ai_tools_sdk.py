@@ -711,14 +711,68 @@ def _compact_generation_option(option):
     return view
 
 
+# The Claude CLI saves an MCP tool result longer than 50,000 characters to a
+# file and hands on a ``<persisted-output>`` stub instead (Claude Code 2.1.x,
+# unless the tool declares a larger ``anthropic/maxResultSizeChars``). The chat
+# draws the choice card from that result, so a ``choose`` result stays below.
+CHOOSE_RESULT_CHARS = 40_000
+
+
+def _bounded_choose(output):
+    """A ``choose`` result the chat can still draw as a card on every leg.
+
+    The card reads each option's ``schema.fields`` (name, type, enum, range,
+    default); saving and execution re-read the full schema from the catalog.
+    So the full JSON ``input_schema`` is never sent, and when the result is
+    still too long the field list is compacted as for searchModels.
+    """
+    import json
+
+    if not isinstance(output, dict) or output.get("status") != "choose" or not isinstance(output.get("options"), list):
+        return output
+
+    def size(value):
+        return len(json.dumps(value, indent=2, default=_json_default))
+
+    options = []
+    for option in output["options"]:
+        schema = option.get("schema") if isinstance(option, dict) else None
+        if isinstance(schema, dict) and "input_schema" in schema:
+            option = {**option, "schema": {k: v for k, v in schema.items() if k != "input_schema"}}
+        options.append(option)
+    output = {**output, "options": options}
+    if size(output) > CHOOSE_RESULT_CHARS:
+        output["options"] = [{**o, "schema": _compact_generation_option(o)["schema"]}
+                             if isinstance(o, dict) and isinstance(o.get("schema"), dict) else o
+                             for o in output["options"]]
+    while size(output) > CHOOSE_RESULT_CHARS and len(output["options"]) > 1:
+        output["options"].pop()
+        output["truncated"] = True
+    return output
+
+
 def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
-    from app.core.generation_resolver import Resolver, RunContext, normalize_source
+    from app.core.generation_resolver import (
+        Resolver, RunContext, current_context, normalize_source, same_backend_identity,
+    )
     from app.services.generation_sources import Sources
 
     context = context or RunContext()
-    lanes = {} if context.chat_mode else dict(lanes or {})
+    # Only runFalModel's local fal lane is used, and never on the chat lane
+    # (decided per call, from the current turn).
+    all_lanes = dict(lanes or {})
     backend = Sources(worker, context)
     resolver = Resolver(backend)
+
+    async def for_this_call():
+        # A pooled client keeps this server across turns: run each call under
+        # its session's CURRENT turn (unattended, owner, API user, chat lane
+        # and fresh choices), the context the permission callback reads too.
+        current = await current_context(context)
+        if same_backend_identity(current, context):
+            return current, resolver
+        return current, Resolver(Sources(worker, current))
+
     tools = []
     properties = {
         "prompt": {"type": "string"},
@@ -746,9 +800,6 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
                 and normalize_source(request.get("source")) in (None, "chatgpt")):
             return sub.refusal(request["model"], configured_image)
         return None
-
-    def lane_for(name):
-        return None if name in UNIFIED_TOOL_KINDS else lanes.get(name)
 
     def generation_tool(name, kind):
         legacy = {"video": {"duration": {"type": "integer"}, "aspect_ratio": {"type": "string"}},
@@ -779,8 +830,10 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
                         return _tool_result(result("refused", error="Conflicting top-level and declared model options."))
                     options[key] = request.pop(key)
             request["options"] = options
-            output = await resolver.generate(kind, request, context, exclude_sources=("fal",) if restricted else ())
-            return _tool_result(output)
+            current, call_resolver = await for_this_call()
+            output = await call_resolver.generate(kind, request, current,
+                                                  exclude_sources=("fal",) if restricted else ())
+            return _tool_result(_bounded_choose(output))
         return generate
 
     tools.extend(generation_tool(name, kind) for name, kind in UNIFIED_TOOL_KINDS.items())
@@ -842,8 +895,6 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
 
     tools.append(search_models)
 
-    fal_local = bool(lane_for("runFalModel"))
-
     @tool("runFalModel", "Run a fal model by endpoint ID through price, confirmation and daily-cap checks. Unknown prices never run; unattended calls need a stored choice or skip and report. A declared text prompt is required. Prefer the kind's tool; get IDs/schema via searchModels.", {
         "type": "object", "properties": {
             "endpoint_id": {"type": "string"}, "input": {"type": "object"},
@@ -870,12 +921,14 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
                                        reason="invalid_request", error=message, message=message))
         request = {"prompt": prompt, "source": "fal", "model": endpoint, "options": values,
                    "confirmed": args.get("confirmed"), "confirmation_token": args.get("confirmation_token")}
-        if fal_local and not context.unattended and not (context.job_choice or context.remembered_for(kind)):
+        current, call_resolver = await for_this_call()
+        local_lane = bool(all_lanes.get("runFalModel")) and not current.chat_mode
+        if local_lane and not current.unattended and not (current.job_choice or current.remembered_for(kind)):
             request["worker"] = backend.local_worker()
-        output = await resolver.generate(kind, request, context)
-        if context.unattended and output.get("status") == "refused":
+        output = await call_resolver.generate(kind, request, current)
+        if current.unattended and output.get("status") == "refused":
             output.update(status="skipped", message=output.get("error", "Generation skipped; nothing was submitted."))
-        return _tool_result(output)
+        return _tool_result(_bounded_choose(output))
 
     tools.append(run_fal)
     return tools

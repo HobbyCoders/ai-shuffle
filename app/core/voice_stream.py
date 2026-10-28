@@ -85,6 +85,16 @@ HEALTH_PUSH_S = 2.0
 # minute). A browser that loses its connection gives up and reopens the socket
 # with resume=1 within about 30 s, so two minutes of silence means it is gone.
 BROWSER_SILENT_END_S = 120.0
+# The audio socket's close for that end (#741). A plain 1000 read as an
+# intentional server hangup, so a phone whose page was suspended never tried to
+# come back. This code tells the browser it may reopen the call with resume=1;
+# the frontend mirrors it (voiceAudioStream.ts CLIENT_INACTIVE_CLOSE_CODE).
+BROWSER_SILENT_CLOSE_CODE = 4100
+BROWSER_SILENT_CLOSE_REASON = "client-inactive"
+# A gap this long between two browser frames is logged with the page state the
+# browser reports (visibility, freeze/resume, online), so a suspended page can
+# be told apart from a network outage.
+BROWSER_GAP_LOG_S = 15.0
 HEALTH_LOG_S = 30.0
 # No microphone frame for this long while the browser says it is unmuted is
 # logged as a warning (the browser shows its own state after a few seconds).
@@ -565,6 +575,11 @@ class VoiceStream:
         self.mic_warned = False
         # When the browser last sent anything (monotonic), for BROWSER_SILENT_END_S.
         self.last_browser_at = time.monotonic()
+        # Seconds between the latest browser frame and the one before it.
+        self.browser_gap = 0.0
+        # Set when the server ends the call because the browser went silent;
+        # the audio socket then closes with BROWSER_SILENT_CLOSE_CODE.
+        self.inactive_for: int | None = None
         # The network worker that runs this conversation when it is not this
         # one (#700): the call then writes nothing into the local mirror and
         # forwards what the caller asks for (app.core.voice_remote).
@@ -640,7 +655,11 @@ class VoiceStream:
             except Exception:  # A dead provider socket must not block hang-up.
                 logger.debug("Voice %s: provider socket close failed", self.session_id, exc_info=True)
         try:
-            await self.websocket.close()
+            if self.inactive_for is not None:
+                # Recoverable: the browser may reopen the call (#741).
+                await self.websocket.close(code=BROWSER_SILENT_CLOSE_CODE, reason=BROWSER_SILENT_CLOSE_REASON)
+            else:
+                await self.websocket.close()
         except (RuntimeError, WebSocketDisconnect):
             pass
 
@@ -826,7 +845,10 @@ class VoiceStream:
             ids = (response_id, item_id)
             new_utterance = any(previous is not None and current is not None and previous != current
                                 for previous, current in zip(self.last_assistant_caption_ids, ids))
-            self.last_assistant_caption_ids = ids
+            self.last_assistant_caption_ids = tuple(
+                current if current is not None else previous
+                for previous, current in zip(self.last_assistant_caption_ids, ids)
+            )
         pending = self.pending[role]
         if pending and not pending[-1].isspace() and not delta[:1].isspace() and (
             new_utterance or (_SENTENCE_END.search(pending) and delta[:1].isupper())
@@ -1075,6 +1097,13 @@ class VoiceStream:
         if isinstance(event, dict) and set(event) == {"type", "stats"} and event["type"] == "client_stats":
             # The browser's playback and microphone figures, for the health log only.
             self.client_stats = sanitize_client_stats(event["stats"])
+            page_event = self.client_stats.get("event")
+            if page_event or self.browser_gap >= BROWSER_GAP_LOG_S:
+                # A page lifecycle report (#741): says whether a silence was the
+                # page being hidden/frozen or the device going offline.
+                logger.info("Voice %s: browser page %s after %.0f s without data; %s", self.session_id,
+                            f"event {page_event}" if page_event else "report", self.browser_gap,
+                            self.page_state())
             return
         if (not isinstance(event, dict) or set(event) != {"type", "id", "text"}
                 or event["type"] != "input_text" or not isinstance(event["id"], str)
@@ -1119,7 +1148,9 @@ class VoiceStream:
         audio_started = time.monotonic()
         while True:
             message = await self.websocket.receive()
-            self.last_browser_at = time.monotonic()
+            received_at = time.monotonic()
+            self.browser_gap = received_at - self.last_browser_at
+            self.last_browser_at = received_at
             if message["type"] == "websocket.disconnect":
                 reason = message.get("reason")
                 self.browser_close = f"code {message.get('code')}" + (f", reason {reason!r}" if reason else "")
@@ -1199,6 +1230,12 @@ class VoiceStream:
                 f"heard {self.heard}, last {_age(now, self.last_heard_at)}; "
                 f"reconnects {self.reconnects}; client {client}")
 
+    def page_state(self) -> str:
+        """The page lifecycle the browser last reported, for the drop log lines (#741)."""
+        keys = ("visibility", "online", "last_event", "last_event_age_ms", "freezes", "offlines", "hidden_ms", "muted")
+        state = " ".join(f"{key}={self.client_stats[key]}" for key in keys if key in self.client_stats)
+        return f"page {state}" if state else "page state not reported"
+
     async def health(self) -> None:
         """Tell the browser how fresh its microphone audio is; log the call's figures."""
         last_log = time.monotonic()
@@ -1207,10 +1244,14 @@ class VoiceStream:
             now = time.monotonic()
             silent = now - self.last_browser_at
             if silent >= BROWSER_SILENT_END_S:
-                # Returning ends the call like a browser close (run()).
-                logger.warning("Voice %s: the browser has sent nothing for %d s; ending the call",
-                               self.session_id, int(silent))
-                self.browser_close = f"no data for {int(silent)} s"
+                # Returning ends the call (run()); close() then uses the
+                # recoverable inactivity code, not a plain hangup (#741). The
+                # last page report says whether the page was hidden/frozen or
+                # the device offline before it went quiet.
+                self.inactive_for = int(silent)
+                logger.warning("Voice %s: the browser has sent nothing for %d s; the server is ending the call "
+                               "(close %d %s, the browser may reconnect); last %s", self.session_id, int(silent),
+                               BROWSER_SILENT_CLOSE_CODE, BROWSER_SILENT_CLOSE_REASON, self.page_state())
                 return
             mic_age = None if self.last_mic_at is None else now - self.last_mic_at
             try:
@@ -1468,6 +1509,10 @@ class VoiceStream:
                 await self.emit({"type": "ended", "reason": "provider-closed"})
             except (RuntimeError, WebSocketDisconnect):
                 pass
+        elif self.inactive_for is not None:
+            # The server's own inactivity end, not a close from the browser (#741).
+            logger.info("Voice %s: the server ended the call after %d s with no data from the browser",
+                        self.session_id, self.inactive_for)
         else:
             logger.info("Voice %s: the browser closed the audio connection (%s)", self.session_id,
                         self.browser_close or "no close code")

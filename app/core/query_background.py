@@ -358,6 +358,11 @@ async def _run_background_query_impl(
         )
         pool.put(session_id, state)
 
+    # This turn's generation context, read by the permission callback AND by
+    # the (possibly reused) client's generation tools (generation_resolver).
+    from app.core.generation_resolver import bind_turn_context
+    bind_turn_context(options)
+
     # Mark as streaming
     state.is_streaming = True
     state.streaming_started_at = datetime.now(timezone.utc)

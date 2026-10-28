@@ -7,7 +7,7 @@ vi.mock('$lib/api/runtime', () => ({
   return 'ws://localhost' + path + (query ? '?' + query : '');
  },
 }));
-import { CLIENT_STATS_MS, DEFAULT_MIC_THRESHOLD_DB, MAX_UPLOAD_BUFFER, MIC_SILENT_MS, createInputGate, micLevel, micProblem, openVoiceAudioStream } from './voiceAudioStream';
+import { CLIENT_INACTIVE_CLOSE_CODE, CLIENT_STATS_MS, DEFAULT_MIC_THRESHOLD_DB, SERVER_SILENT_MS, MAX_UPLOAD_BUFFER, MIC_SILENT_MS, createInputGate, micLevel, micProblem, openVoiceAudioStream } from './voiceAudioStream';
 
 const nodes: any[] = [];
 const contexts: any[] = [];
@@ -320,6 +320,8 @@ describe('voice PCM stream', () => {
  it.each([
   [1000, 'The voice server ended the call.', 'server-closed'],
   [1006, 'The voice connection dropped.', 'connection-dropped'],
+  // #741: the server's inactivity end is its own, recoverable reason, not a hangup.
+  [CLIENT_INACTIVE_CLOSE_CODE, 'The voice server ended the call after it stopped hearing from this device.', 'client-inactive'],
  ])('never reports an unexplained close (code %i) as a silent end', async (code, message, reason) => {
   const callbacks = handlers();
   const stream = await openVoiceAudioStream('s', {} as MediaStream, callbacks, new AbortController().signal);
@@ -494,6 +496,105 @@ describe('microphone watchdog', () => {
   expect(reports[0]).toMatchObject({ type: 'client_stats', stats: {
    captured: 1, sent: 1, underruns: 2, depth_ms: 140, max_depth_ms: 300, target_ms: 200, max_lead_ms: 21500, muted: false, context: 'running', rate: 48000, track: 'live',
   } });
+  await stream.close();
+ });
+});
+
+// #741: a locked phone's call went quiet and the server ended it; the page must
+// say what it was doing, keep reporting while muted, and notice a dead socket.
+describe('page lifecycle and keepalive', () => {
+ const micStream = () => ({ getAudioTracks: () => [{ readyState: 'live' }] }) as unknown as MediaStream;
+ const reports = () => sockets[0].send.mock.calls.map(([m]: any[]) => m).filter((m: unknown) => typeof m === 'string')
+  .map((m: string) => JSON.parse(m)).filter((m: any) => m.type === 'client_stats');
+ const health = () => sockets[0].onmessage({ data: JSON.stringify({ type: 'health', mic_age_ms: 50, mic_frames: 1 }) });
+ // The stream reads a health time of 0 as "no health reports yet"; start the clock first.
+ const fakeTime = () => { vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance', 'Date'] }); vi.advanceTimersByTime(1000); };
+ const quiet = () => { vi.spyOn(console, 'warn').mockImplementation(() => {}); vi.spyOn(console, 'info').mockImplementation(() => {}); };
+ afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+ it('reports freeze, resume, visibility and network changes at once with the page state', async () => {
+  const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+  const online = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
+  const stream = await openVoiceAudioStream('s', micStream(), handlers(), new AbortController().signal);
+  health();
+  visibility.mockReturnValue('hidden');
+  document.dispatchEvent(new Event('visibilitychange'));
+  document.dispatchEvent(new Event('freeze'));
+  document.dispatchEvent(new Event('resume'));
+  online.mockReturnValue(false);
+  window.dispatchEvent(new Event('offline'));
+  online.mockReturnValue(true);
+  window.dispatchEvent(new Event('online'));
+  const sent = reports().map((r: any) => r.stats);
+  expect(sent.map((r: any) => r.event)).toEqual(['hidden', 'freeze', 'resume', 'offline', 'online']);
+  expect(sent[1]).toMatchObject({ visibility: 'hidden', online: true, last_event: 'freeze', freezes: 1, offlines: 0 });
+  expect(sent[3]).toMatchObject({ online: false, offlines: 1 });
+  // Every key and text value passes the server's sanitizer, within its 32-key limit.
+  for (const report of sent) {
+   expect(Object.keys(report).length).toBeLessThanOrEqual(32);
+   for (const [key, value] of Object.entries(report)) {
+    expect(key).toMatch(/^[a-z0-9_]{1,32}$/);
+    if (typeof value === 'string') expect(value).toMatch(/^[a-z0-9-]{0,24}$/);
+   }
+  }
+  await stream.close();
+  sockets[0].send.mockClear();
+  window.dispatchEvent(new Event('online'));
+  expect(sockets[0].send).not.toHaveBeenCalled(); // Listeners are gone after hangup.
+ });
+
+ it('keeps reporting while muted on the audio clock, not only on the page timer', async () => {
+  fakeTime(); quiet();
+  // The page's stats timer is throttled in the background: it never fires here.
+  const pageTimer = globalThis.setInterval;
+  vi.spyOn(globalThis, 'setInterval').mockImplementation(((fn: () => void, ms?: number) =>
+   ms === CLIENT_STATS_MS ? 0 : pageTimer(fn, ms)) as typeof setInterval);
+  const stream = await openVoiceAudioStream('s', micStream(), handlers(), new AbortController().signal);
+  health();
+  stream.muteInput(true);
+  const tick = () => capture().port.onmessage({ data: { tick: true } });
+  await vi.advanceTimersByTimeAsync(CLIENT_STATS_MS);
+  expect(reports()).toHaveLength(0);
+  tick();
+  expect(reports()).toHaveLength(1);
+  expect(reports()[0].stats.muted).toBe(true);
+  tick(); // Within CLIENT_STATS_MS of the last report: nothing more.
+  expect(reports()).toHaveLength(1);
+  health();
+  await vi.advanceTimersByTimeAsync(CLIENT_STATS_MS);
+  tick();
+  expect(reports()).toHaveLength(2);
+  // An unmuted call sends audio instead; a stray tick sends nothing.
+  stream.muteInput(false);
+  health();
+  await vi.advanceTimersByTimeAsync(CLIENT_STATS_MS);
+  sockets[0].send.mockClear();
+  tick();
+  expect(sockets[0].send).not.toHaveBeenCalled();
+  await stream.close();
+ });
+
+ it('reopens a socket the server has stopped answering, but not after a stall or freeze', async () => {
+  fakeTime(); quiet();
+  const h = handlers();
+  await openVoiceAudioStream('s', micStream(), h, new AbortController().signal);
+  health();
+  await vi.advanceTimersByTimeAsync(SERVER_SILENT_MS - 2000);
+  expect(sockets[0].close).not.toHaveBeenCalled();
+  // A thawed page gives the server a moment to be heard again.
+  document.dispatchEvent(new Event('resume'));
+  await vi.advanceTimersByTimeAsync(4000);
+  expect(sockets[0].close).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(sockets[0].close).toHaveBeenCalledWith(4000, 'server not answering');
+  expect(h.closed).toHaveBeenCalledExactlyOnceWith('The voice server stopped answering.', 'connection-dropped');
+ });
+
+ it('never judges an older server that sends no health reports', async () => {
+  fakeTime(); quiet();
+  const stream = await openVoiceAudioStream('s', micStream(), handlers(), new AbortController().signal);
+  await vi.advanceTimersByTimeAsync(3 * SERVER_SILENT_MS);
+  expect(sockets[0].close).not.toHaveBeenCalled();
   await stream.close();
  });
 });

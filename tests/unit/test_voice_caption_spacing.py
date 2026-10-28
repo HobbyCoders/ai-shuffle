@@ -83,6 +83,42 @@ async def test_missing_ids_do_not_turn_word_pieces_into_new_responses():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [
+    "response.output_audio_transcript.delta", "response.audio_transcript.delta",
+    "session.output_transcript.delta",
+])
+@pytest.mark.parametrize("first_ids,middle_ids,last_ids", [
+    ({"response_id": "r1"}, {}, {"response_id": "r2"}),
+    ({"item_id": "i1"}, {}, {"item_id": "i2"}),
+    ({"response_id": "r1", "item_id": "i1"}, {"response_id": "r1"}, {"item_id": "i2"}),
+    ({"response_id": "r1", "item_id": "i1"}, {"item_id": "i1"}, {"response_id": "r2"}),
+])
+async def test_missing_caption_ids_preserve_each_last_known_boundary(
+    monkeypatch, kind, first_ids, middle_ids, last_ids,
+):
+    from app.core import turn_recorder
+
+    record = AsyncMock()
+    monkeypatch.setattr(turn_recorder, "record_voice_exchange", record)
+    events = [
+        {"type": kind, "delta": delta, **ids}
+        for delta, ids in zip(("Goo", "d news", "next bit"), (first_ids, middle_ids, last_ids))
+    ]
+    call = grok_stream(events) if kind.startswith("response.") else stream()
+    call.upstream = Upstream([json.dumps(event) for event in events])
+    await call.receive_upstream()
+    expected = "Good news next bit"
+    assert call.pending["assistant"] == expected
+    assert "".join(entry["text"] for entry in call.transcript) == expected
+    assert "".join(args.args[0]["delta"] for args in call.websocket.send_json.await_args_list) == expected
+    known = {**first_ids, **middle_ids, **last_ids}
+    assert call.last_assistant_caption_ids == (known.get("response_id"), known.get("item_id"))
+    await call.flush()
+    record.assert_awaited_once()
+    assert record.await_args.args == ("s1", None, expected)
+
+
+@pytest.mark.asyncio
 async def test_caption_boundary_spacing_does_not_change_spoken_audio():
     audio = b"\x01\x00\x02\x00"
     call = grok_stream([
