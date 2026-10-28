@@ -43,10 +43,13 @@ def test_account_settings_group_slots_and_locked_options(monkeypatch):
     assert next(o for o in caps["image"]["fields"]["model"] if o["value"] == "grok-imagine-image-2.0")["reason"] == "not yet verified"
     assert next(o for o in caps["image"]["fields"]["size"] if o["value"] == "2k")["selectable"] is False
     assert not account_view("chatgpt-a")["capabilities"]["video"]["available"]
-    for key in ("openai-api", "xai-api"):
+    from app.core.native_image_verification import verified
+    for key, kind in (("openai-api", "openai"), ("xai-api", "xai")):
         view = account_view(key)
-        assert not view["capabilities"]["image"]["available"]
-        assert view["settings"] == {"image": None, "video": None}
+        # Only the reviewed API record is enabled; API video stays unavailable.
+        assert view["capabilities"]["image"]["available"]
+        assert not view["capabilities"]["video"]["available"]
+        assert view["settings"] == {"image": verified(kind).settings(), "video": None}
         assert "auth_token" not in view
     for field, value in (("duration", 2), ("resolution", "720p"), ("aspect_ratio", "1:1"), ("generate_audio", True)):
         settings = load("grok-a").model_dump()

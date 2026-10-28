@@ -50,6 +50,7 @@ def test_catalog_uses_production_sources_and_lists_peer_and_disabled_account(
 ) -> None:
     from unittest.mock import AsyncMock
     from app.core import fal_credential, native_generation_settings as native
+    from app.core import native_image_verification as verification
     from app.core.generation_resolver import INCLUDED_PRICE
     from app.db import database, model_providers
     from app.network import generation
@@ -57,6 +58,7 @@ def test_catalog_uses_production_sources_and_lists_peer_and_disabled_account(
 
     # The client fixture stubs Sources; this test exercises the production one.
     monkeypatch.setattr(generation_sources, "Sources", ProductionSources)
+    monkeypatch.setattr(verification, "VERIFIED_API_IMAGES", {})
     rows = [{"id": "local-plan", "provider_type": "chatgpt"},
             {"id": "unverified-api", "provider_type": "openai", "auth_mode": "api_key"}]
     monkeypatch.setattr(fal_credential, "api_key", lambda *a: None)

@@ -88,8 +88,9 @@ submitted, including unattended calls.
 - **Old or unreachable peers** are listed as unavailable but never make a
   named request ambiguous when a usable candidate matches.
 - **Native plan tools.** `GenerateNativeImage` and `GenerateNativeVideo` stay
-  registered for sessions running on a verified ChatGPT or SuperGrok account,
-  as guarded aliases of `generateImage` and `generateVideo`. They never submit
+  registered for sessions running on a verified ChatGPT or SuperGrok account
+  (and `GenerateNativeImage` on an OpenAI/xAI API-key account with a reviewed
+  image record), as guarded aliases of `generateImage` and `generateVideo`. They never submit
   with the session's account implicitly: they use the same remembered or job
   choice, price, confirmation and daily-cap admission, return the same results
   (including `choose`, shown as the same choice card) and never use fal.ai.
@@ -134,14 +135,15 @@ a job binding. Each kind uses its job choice first, then its remembered choice.
 Unreadable job choices fail closed; current options, price and cap are checked
 at execution time, not assumed from the save.
 
-OpenAI/xAI API-key images remain unavailable until a reviewed live-probe record
-is added to `app/core/native_image_verification.py`. The initially empty table
-pins one exact image combination and explicit output/text-input USD rates per
-provider; it drives native settings, catalog eligibility, admission pricing and
-the official `images/generations` adapter. No subscription, custom gateway,
+OpenAI/xAI API-key images are available only for the exact combination with a
+reviewed live-probe record in `app/core/native_image_verification.py`. The
+table pins one exact image combination and explicit output/text-input USD rates
+per provider; it drives native settings, catalog eligibility, admission pricing
+and the official `images/generations` adapter. No subscription, custom gateway,
 redirect, automatic retry or other-provider fallback is used for these API calls.
 A table record is not evidence of access on every account: provider rejection
-still fails without a second submission. No paid probe is part of this change.
+still fails without a second submission. An API-key account also appears in the
+catalog only once the app has confirmed its key (a successful model-list fetch).
 
 ## Conversational preferences
 
@@ -164,25 +166,24 @@ Every execution still validates the stored choice, current price, confirmation a
 cap. API-user sessions do not get owner app-config tools; their existing scoped
 choices API is unchanged.
 
-## Pending API-image verification (disabled)
+## API-image verification records
 
-`VERIFIED_API_IMAGES` stays empty. These are **probe candidates**, not verified
-capabilities or enabled table records. After owner approval, run each exactly once;
-record a named smoke-run ID, revision, sanitized account alias, actual model/options,
-decoded artifact/container/dimensions, usage/billing and reviewed conservative output
-and input USD rates. Only then propose a code-reviewed `Verification` record. An
+Each record below comes from one owner-approved live probe (#541): exactly one
+submission, a named smoke-run ID, the running revision, a sanitized account alias,
+the actual model/options, a decoded artifact with its container and dimensions,
+observed usage/billing, and reviewed conservative output and input USD rates. An
 error or uncertain outcome must not trigger a retry or a different provider.
 
-| Named probe | Endpoint and exact candidate options | Planning allowance | Enablement |
+| Named probe | Endpoint and exact enabled options | Live result | Enabled record |
 | --- | --- | --- | --- |
-| `generation-379.openai-image` | OpenAI `/v1/images/generations`; `gpt-image-2.5-sunburst-2026-09-08`, `size=1024x1024`, `quality=low`, `output_format=png`, `n=1` | About $0.10, including input; recheck current pricing and entitlement first | Pending owner OK and live evidence |
-| `generation-379.xai-image` | xAI `/v1/images/generations`; `grok-imagine-image`, `resolution=1k`, `aspect_ratio=1:1`, `response_format=b64_json`, `n=1` | About $0.02; recheck current pricing first | Pending owner OK and live evidence |
+| `generation-379.openai-image.r1028` | OpenAI `/v1/images/generations`; `gpt-image-2.5-sunburst-2026-09-08`, `size=1024x1024`, `quality=low`, `output_format=png`, `n=1` | One 1024x1024 PNG; 14 text-input and 196 image-output tokens (about $0.006) | $0.02 per image output bound plus $5 per million input tokens (prompt bytes + 1024 overhead) |
+| `generation-379.xai-image.r1028` | xAI `/v1/images/generations`; `grok-imagine-image`, `resolution=1k`, `aspect_ratio=1:1`, `response_format=b64_json`, `n=1` | One 1024x1024 JPEG; provider-reported cost $0.02 | $0.02 per image, no separate input rate |
 
-The $0.12 combined planning allowance is not a guaranteed charge or permission to
-spend. Candidate IDs/rates come from the #507 probe plan and must be rechecked before
-submission. Public documentation is not account-specific capability evidence. Other
-models, sizes, formats, quality levels or API video routes need separate verification;
-no result may be extrapolated to an untested combination.
+Both probes ran on 2026-10-28 against revision `6484ffab8`, each through the app's
+`images/generations` adapter with the connected API-key account. Public documentation
+is not account-specific capability evidence. Other models, sizes, formats, quality
+levels or API video routes need separate verification; no result may be extrapolated
+to an untested combination.
 
 ## Selection contract
 
@@ -318,8 +319,8 @@ local media outside chat uploads.
 
 ## Current limits of this backend draft
 
-Only verified subscription combinations from the native capability table are
-eligible. The exact SuperGrok video combination has a USD 0.02 estimate from
+Only verified subscription combinations from the native capability table and
+the reviewed API-image records above are eligible. The exact SuperGrok video combination has a USD 0.02 estimate from
 the verified native probe: 1 second, 480p, 16:9, silent. It is not a quote for
 other settings or proof of a subscription quota debit. The result carries the
 backend's actual reported cost when present, with price status `reported`.
@@ -340,9 +341,11 @@ character price has unknown total until text is supplied. Unsupported units
 duration/count parameters refuse submission rather than guess. Conditional
 pricing formulas are not inferred from arbitrary resolution names.
 
-OpenAI/xAI API media routes remain unavailable: this base's Default models
-schema endpoint is fal-only, and its native API capability table declares no
-available media combinations or pricing. ChatGPT/SuperGrok image costs are not
+OpenAI/xAI API-key images run only with the exact reviewed record above, priced
+from its output bound plus the prompt's text-input bound (`status: "estimated"`),
+and count toward the daily cap like fal. OpenAI/xAI API video, audio and 3D
+remain unavailable: this base's Default models schema endpoint is fal-only and no
+other API media combination has a record. ChatGPT/SuperGrok image costs are not
 reported by their native adapters. Their verified image route runs on the
 account's ChatGPT or SuperGrok subscription login and carries no per-item
 charge, so it is priced `status: "included"` with a zero amount. It runs
@@ -351,8 +354,7 @@ to the day's spending (only a day already past the cap refuses it, like every
 other generation). An included price is never used as a substitute for an
 unknown price. They also keep working through the Settings default and the
 native plan tools above. ChatGPT
-video and native audio/3D have no verified combinations. No new live provider
-generation was exercised for this draft.
+video and native audio/3D have no verified combinations.
 
 Editing and media-transform tools retain their existing handlers and their
 pinned model from the catalog.

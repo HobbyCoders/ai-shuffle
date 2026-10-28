@@ -1,9 +1,10 @@
-"""Reviewed API-key image verification records. Empty until an owner-paid probe.
+"""Reviewed API-key image verification records from owner-paid live probes.
 
 Each provider has one enabled exact combination. Adding a record requires a
 successful real-account generation + decoded artifact, observed billing, and
 reviewed per-image USD price. Text-model discovery is NOT verification. This is
 code-reviewed data, never an environment flag or a caller-supplied price.
+Every other model, size, quality or format stays disabled until it has its own probe.
 """
 from dataclasses import dataclass
 from decimal import Decimal
@@ -45,7 +46,22 @@ class Verification:
 
 
 # Official images/generations only; no custom gateway or subscription fallback.
-VERIFIED_API_IMAGES: dict[str, Verification] = {}
+# Evidence is in issue #541 (named runs, sanitized). Output bounds are reviewed
+# ceilings above the observed charge, never the observed charge alone.
+VERIFIED_API_IMAGES: dict[str, Verification] = {
+    # One 1024x1024 PNG: 14 text-input + 196 image-output tokens (~$0.006 at
+    # $5/M input, $30/M image output). Bound: $0.02 output (~667 tokens).
+    "openai": Verification(
+        "gpt-image-2.5-sunburst-2026-09-08", "1024x1024", "low", "png", "0.02",
+        "generation-379.openai-image.r1028 (#541, 2026-10-28)", "5",
+    ),
+    # One 1024x1024 JPEG: provider-reported cost $0.02 per image with the
+    # prompt (cost_in_usd_ticks 200000000), so no separate text-input rate.
+    "xai": Verification(
+        "grok-imagine-image", "1k", None, "jpeg", "0.02",
+        "generation-379.xai-image.r1028 (#541, 2026-10-28)", "0",
+    ),
+}
 ENDPOINTS = {"openai": "https://api.openai.com/v1/images/generations",
              "xai": "https://api.x.ai/v1/images/generations"}
 

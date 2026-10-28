@@ -5198,7 +5198,7 @@ class HarnessAdapter(ProviderAdapter):
                     try:
                         native_caps = capabilities(provider_kind(_lookup_provider_row(native_account) or {}))
                     except ValueError:
-                        pass  # Unknown/API-key accounts are not verified native media lanes.
+                        pass  # Unknown accounts are not verified native media lanes.
                 for kind in ("image", "video"):
                     if native_caps.get(kind, {}).get("available"):
                         spec, handler = make_alias(kind, options.extra.get("generation_context"))

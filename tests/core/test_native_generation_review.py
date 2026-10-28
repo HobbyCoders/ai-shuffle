@@ -150,10 +150,15 @@ async def test_stale_settings_image_uses_verified_default_and_video_refuses(monk
     video.assert_not_called()
 
 
-@pytest.mark.parametrize("provider_id,exposed", [(None, False), ("openai-api", False), ("xai-api", False), ("grok-a", True), ("chatgpt-a", True)])
-async def test_image_registration_requires_verified_account(monkeypatch, provider_id, exposed):
+@pytest.mark.parametrize("provider_id,exposed,records", [
+    (None, False, True), ("openai-api", True, True), ("xai-api", True, True),
+    ("openai-api", False, False), ("xai-api", False, False), ("grok-a", True, True), ("chatgpt-a", True, True)])
+async def test_image_registration_requires_verified_account(monkeypatch, provider_id, exposed, records):
+    from app.core import native_image_verification as verification
     from app.core.provider import harness_adapter as ha
     from app.core.provider.types import SessionOptions
+    if not records:
+        monkeypatch.setattr(verification, "VERIFIED_API_IMAGES", {})
     rows, _ = accounts(monkeypatch)
     monkeypatch.setattr(ha, "_lookup_provider_row", rows.get)
     adapter = ha.HarnessAdapter()
