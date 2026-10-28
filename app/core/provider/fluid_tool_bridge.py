@@ -225,6 +225,7 @@ APP_CONFIG_RISK_MAP: Mapping[str, str] = {
         "listMcpServers", "addMcpServer", "removeMcpServer", "toggleMcpServer",
         "listProfiles", "getProfile", "createProfile", "updateProfile",
         "deleteProfile",
+        "listProjects", "createProject",
         "listConnectors", "getConnectorStatus", "toggleConnector",
         "listSubagents", "getSubagent", "createSubagent", "updateSubagent",
         "deleteSubagent",

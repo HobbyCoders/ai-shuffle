@@ -2,7 +2,7 @@
 App Configuration SDK MCP Server — AI-powered configuration via chat.
 
 Exposes AI Shuffle's configuration surfaces (hooks, automations, MCP servers,
-profiles, connectors) as SDK MCP tools.  The Claude agent can call these
+profiles, projects, connectors) as SDK MCP tools.  The Claude agent can call these
 tools directly in conversation to configure the system on the user's behalf.
 
 Architecture:
@@ -20,6 +20,7 @@ Module layout (split for maintainability):
   - config_automations.py  — automation CRUD tools
   - config_mcp_servers.py  — MCP server management tools
   - config_profiles.py     — profile CRUD tools
+  - config_projects.py     — project listing and registration
   - config_connectors.py   — connector status/toggle tools
   - config_subagents.py    — subagent CRUD tools
 """
@@ -34,6 +35,7 @@ from app.mcp.config_helpers import _tool_result
 from app.mcp.config_hooks import _create_hook_tools
 from app.mcp.config_mcp_servers import _create_mcp_tools
 from app.mcp.config_profiles import _create_profile_tools
+from app.mcp.config_projects import _create_project_tools
 from app.mcp.config_subagents import _create_subagent_tools
 
 logger = logging.getLogger(__name__)
@@ -45,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 APP_CONFIG_SYSTEM_PROMPT = """
 ## AI Shuffle configuration
-The app-config tools manage hooks, automations, MCP servers, profiles, subagents and connectors. Call getConfigCapabilities first and list before creating, to avoid duplicates. Before any write, tell the user exactly what you will create or change, with the key parameters, and wait for acknowledgment; never delete without explicit confirmation that says what will be lost. Afterwards confirm and say where to find or change it in the UI.
+The app-config tools manage projects, hooks, automations, MCP servers, profiles, subagents and connectors. Call getConfigCapabilities first and list before creating, to avoid duplicates. Before any write, tell the user exactly what you will create or change, with the key parameters, and wait for acknowledgment; never delete without explicit confirmation that says what will be lost. Afterwards confirm and say where to find or change it in the UI.
 Hook commands run with the app's permissions: explain each one. Automations run real sessions with real tools and cost: always set max_cost_per_run and max_runs_per_day. Add only MCP servers the user explicitly requests. Never expose webhook secrets, API keys or HMAC tokens; connector secrets go through the Settings UI.
 """
 
@@ -73,6 +75,7 @@ def _create_discovery_tools() -> list:
         "interval trigger; a webhook is an Automation webhook trigger or a "
         "webhook Hook; connecting a service is an MCP server; a reusable "
         "setup (\"a profile for code review\") is a Profile; "
+        "registering a folder is a Project (listProjects/createProject); "
         "Telegram/Discord/Slack is a Connector, whose secrets the user enters "
         "in the Settings UI.",
         {"type": "object", "properties": {}},
@@ -143,6 +146,11 @@ def _create_discovery_tools() -> list:
                 "Read": "Matches the file Read tool",
                 ".*": "Matches any tool (use with caution)",
             },
+            "projects": {
+                "list_tool": "listProjects",
+                "create_tool": "createProject",
+                "source": "Folder path on this worker, or a new workspace folder if omitted. No git clone URL.",
+            },
             "generation_preferences": {
                 "tool": "generationPreferences",
                 "kinds": ["image", "video", "audio", "3d"],
@@ -196,6 +204,9 @@ def get_app_config_tool_names() -> list[str]:
         "mcp__app-config__addMcpServer",
         "mcp__app-config__removeMcpServer",
         "mcp__app-config__toggleMcpServer",
+        # Projects
+        "mcp__app-config__listProjects",
+        "mcp__app-config__createProject",
         # Profiles
         "mcp__app-config__listProfiles",
         "mcp__app-config__getProfile",
@@ -240,6 +251,7 @@ def collect_app_config_tools(
     all_tools.extend(_create_automation_tools(is_admin, project_id))
     all_tools.extend(_create_mcp_tools(is_admin, project_dir))
     all_tools.extend(_create_profile_tools(is_admin))
+    all_tools.extend(_create_project_tools(is_admin))
     all_tools.extend(_create_connector_tools(is_admin))
     all_tools.extend(_create_subagent_tools(is_admin))
     all_tools.extend(_create_generation_tools(is_admin, writable=generation_preferences_writable))

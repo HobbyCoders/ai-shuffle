@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 from pathlib import Path
+from threading import Lock
 
 from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File, Request, Query, Form
 from fastapi.responses import FileResponse
@@ -25,6 +26,7 @@ from app.api.sessions_helpers import check_session_access_for_api_user
 from app.core.project_links import is_link_locked
 
 logger = logging.getLogger(__name__)
+_project_creation_lock = Lock()
 
 
 # File operation request models
@@ -160,6 +162,11 @@ def validate_project_path(path: str, allow_create: bool = False) -> Path:
             detail="Path escapes workspace boundary"
         )
 
+    if full_path.exists() and not full_path.is_dir():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Path is not a directory: {path}"
+        )
     return full_path
 
 
@@ -267,65 +274,63 @@ async def get_project(request: Request, project_id: str, token: str = Depends(re
 @router.post("", response_model=Project, status_code=status.HTTP_201_CREATED)
 async def create_project(request: ProjectCreate, token: str = Depends(require_admin)):
     """Create a new project - Admin only"""
-    def _create():
-        # Read-decide-write in ONE hop. The duplicate-id probe (twice, once for
-        # the instance-suffixed id) decides whether the INSERT happens at all;
-        # splitting it from the write would let a concurrent create claim the id
-        # in between. The directory mkdir is blocking filesystem I/O and rides
-        # the same hop rather than stalling the loop on its own.
-        payload = request
+    return await create_project_record(request)
 
-        # Check if ID already exists
-        existing = database.get_project(payload.id)
-        if existing:
-            # If the existing project belongs to a different instance, auto-suffix
-            # the ID so the same project name can exist on multiple machines.
-            if existing.get("instance_id") and existing["instance_id"] != settings.effective_instance_id:
-                import hashlib
-                suffix = hashlib.sha256(settings.effective_instance_id.encode()).hexdigest()[:6]
-                payload = payload.model_copy(update={"id": f"{payload.id}-{suffix}"})
-                # Re-check with the new ID
-                if database.get_project(payload.id):
+
+async def create_project_record(request: ProjectCreate) -> dict:
+    """Shared REST/app-config creation path; callers enforce owner permissions."""
+    def _create():
+        # Serialize local creates so concurrent REST/tool calls cannot both pass
+        # the name/path checks. Filesystem and DB work stay off the event loop.
+        with _project_creation_lock:
+            payload = request
+
+            # Keep cross-install ID suffixing: another worker may use the same ID.
+            existing = database.get_project(payload.id)
+            if existing:
+                if existing.get("instance_id") and existing["instance_id"] != settings.effective_instance_id:
+                    import hashlib
+                    suffix = hashlib.sha256(settings.effective_instance_id.encode()).hexdigest()[:6]
+                    payload = payload.model_copy(update={"id": f"{payload.id}-{suffix}"})
+                    if database.get_project(payload.id):
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail=f"Project already exists: {payload.id}"
+                        )
+                else:
                     raise HTTPException(
                         status_code=status.HTTP_409_CONFLICT,
                         detail=f"Project already exists: {payload.id}"
                     )
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Project already exists: {payload.id}"
-                )
 
-        # Determine project path and create directory if needed
-        # Normalize Docker paths first (e.g., /workspace/foo → foo)
-        effective_path = normalize_docker_path(payload.path) if payload.path else None
-
-        if effective_path and is_absolute_project_path(effective_path):
-            # Absolute path (local mode only) - create directory if it doesn't exist
-            project_path = validate_project_path(effective_path, allow_create=True)
+            effective_path = normalize_docker_path(payload.path) if payload.path else None
+            db_path = effective_path if effective_path else payload.id
+            project_path = validate_project_path(db_path, allow_create=True)
             refuse_nested_repository(project_path)
-            project_path.mkdir(parents=True, exist_ok=True)
-            db_path = effective_path
-        else:
-            # Relative path (or normalized Docker path) - create directory inside workspace
-            rel_path = effective_path if effective_path else payload.id
-            project_path = validate_project_path(rel_path)
-            refuse_nested_repository(project_path)
-            project_path.mkdir(parents=True, exist_ok=True)
-            db_path = rel_path
 
-        # Create project in database
-        settings_dict = None
-        if payload.settings:
-            settings_dict = payload.settings.model_dump(exclude_none=True)
+            # Only this worker's projects (including legacy rows) are duplicates.
+            # Resolve paths so relative, absolute and symlink spellings agree.
+            for project in database.get_all_projects():
+                if project["name"].strip().casefold() == payload.name.strip().casefold():
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"Project already exists with name '{payload.name}': {project['id']}"
+                    )
+                if get_project_working_dir_as_path(project).resolve() == project_path:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"Project already exists at path '{project_path}': {project['id']}"
+                    )
 
-        return database.create_project(
-            project_id=payload.id,
-            name=payload.name,
-            description=payload.description,
-            path=db_path,
-            settings_dict=settings_dict
-        )
+            project_path.mkdir(parents=True, exist_ok=True)
+            settings_dict = request.settings.model_dump(exclude_none=True) if request.settings else None
+            return database.create_project(
+                project_id=payload.id,
+                name=payload.name,
+                description=payload.description,
+                path=db_path,
+                settings_dict=settings_dict
+            )
 
     created = await run_sync(_create)
     _announce_catalog_change()
