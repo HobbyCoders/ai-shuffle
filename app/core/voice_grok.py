@@ -279,6 +279,9 @@ class GrokVoiceStream(VoiceStream):
                 translated = {"type": "session.output_audio.delta", "delta": event.get("delta", "")}
             elif kind in ("response.output_audio_transcript.delta", "response.audio_transcript.delta"):
                 translated = {"type": "session.output_transcript.delta", "delta": event.get("delta", "")}
+                for key in ("response_id", "item_id"):
+                    if key in event:
+                        translated[key] = event[key]
             elif kind == "conversation.item.input_audio_transcription.completed":
                 delta = self.input_transcript_delta(event)
                 if delta:
