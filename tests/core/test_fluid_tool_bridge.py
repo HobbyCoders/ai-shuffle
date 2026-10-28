@@ -301,7 +301,7 @@ def test_every_static_risk_map_tool_name_is_current(monkeypatch):
             "app/mcp/app_config_sdk.py", "app/mcp/config_automations.py",
             "app/mcp/config_connectors.py", "app/mcp/config_hooks.py",
             "app/mcp/config_mcp_servers.py", "app/mcp/config_profiles.py",
-            "app/mcp/config_subagents.py",
+            "app/mcp/config_projects.py", "app/mcp/config_subagents.py",
         ],
         "ai-tools": ["app/mcp/ai_tools_sdk.py"],
         "computer-use": ["app/mcp/computer_use_sdk.py"],

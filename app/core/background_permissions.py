@@ -593,6 +593,7 @@ TOOL_LEVELS: Dict[str, Level] = {
             "listHooks",
             "listMcpServers",
             "listProfiles",
+            "listProjects",
             "listSubagents",
         )
     },
@@ -603,6 +604,7 @@ TOOL_LEVELS: Dict[str, Level] = {
             "createAutomation",
             "createHook",
             "createProfile",
+            "createProject",
             "createSubagent",
             "deleteAutomation",
             "deleteHook",

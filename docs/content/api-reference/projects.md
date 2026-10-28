@@ -44,7 +44,11 @@ curl -X POST http://localhost:8000/api/v1/projects \
   }'
 ```
 
-`id` is required (lowercase letters, digits and hyphens). `path` points the project at an existing directory and only applies to local installs; without it the project lives in the workspace under its `id`. `settings.default_profile_id` is the agent used when a new session in this project names none.
+`id` is required (lowercase letters, digits and hyphens, up to 50 characters). `path` points at a folder on the worker, creating it if needed. Local installs allow absolute paths; Docker paths must resolve inside the workspace. Without a path the project lives in the workspace under its `id`. This endpoint does not clone Git URLs. `settings.default_profile_id` is the agent used when a new session in this project names none.
+
+Creation returns `409` if this worker already has the requested ID, name (case-insensitive) or resolved folder path. A colliding ID from a different installation still receives an installation suffix.
+
+Owner sessions with app configuration tools enabled can use `mcp__app-config__listProjects` (no parameters) and `mcp__app-config__createProject` (`name`, optional `id`, `path`, `description`). The tool derives an omitted ID from the name and returns `project_id`, `name` and `path`. It shares this endpoint's validation and creation path and the normal app configuration write approvals.
 
 ### PUT /api/v1/projects/{project_id}
 
