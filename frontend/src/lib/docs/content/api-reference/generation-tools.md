@@ -329,8 +329,9 @@ conservative reservation. A provider-reported cost is not a verified invoice.
 
 fal rates come from the account's pricing API. The shared model-schema service
 normalizes capitalization, plurals and `per` unit labels. It resolves
-item/request/generation counts, seconds or minutes with declared duration units,
-characters or 1K-character blocks with known input length, and megapixels with
+item/request/generation counts, seconds or minutes (including multi-second billing
+blocks) with declared duration units, characters or 1K-character/UTF-8-byte blocks
+with known input length, and megapixels with
 explicit dimensions or fal's documented `image_size` presets. An unresolved size
 can use the largest allowed preset only when every enum option has known
 dimensions. Fractional billing units round up for each output. A catalog-only

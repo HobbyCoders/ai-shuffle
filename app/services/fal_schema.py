@@ -213,15 +213,18 @@ class ModelSchema:
             return Decimal(1), Decimal(1)
         if unit in ("image", "video", "audio", "mesh", "3d", "generation"):
             return Decimal(1), count
-        if unit in ("character", "characters", "1k chars", "1000 characters"):
+        if unit in ("character", "characters", "1k chars", "1000 characters", "1000 utf-8 bytes"):
             if prompt is None or not prompt:
                 raise ValueError("Text length is needed for pricing.")
-            divisor = 1000 if unit in ("1k chars", "1000 characters") else 1
-            quantity = (Decimal(len(prompt)) / divisor).to_integral_value(rounding=ROUND_CEILING)
+            divisor = 1 if unit == "character" else 1000
+            length = len(prompt.encode("utf-8")) if unit == "1000 utf-8 bytes" else len(prompt)
+            quantity = (Decimal(length) / divisor).to_integral_value(rounding=ROUND_CEILING)
             return quantity, count
-        if unit in ("second", "seconds", "minute", "minutes"):
+        duration_unit = re.fullmatch(r"(?:(\d+) )?(seconds?|minutes?)", unit)
+        if duration_unit:
+            block_seconds = number(duration_unit[1] or 1) * (60 if duration_unit[2].startswith("minute") else 1)
             durations = []
-            for name in ("duration", "duration_seconds", "duration_sec", "duration_minutes", "seconds"):
+            for name in ("duration", "duration_seconds", "duration_sec", "duration_minutes", "seconds", "music_duration"):
                 if name not in fields or name not in options:
                     continue
                 field = fields[name]
@@ -244,7 +247,7 @@ class ModelSchema:
                 durations.append(number(match[1]) * (60 if in_minutes else 1))
             if len(durations) != 1:
                 raise ValueError("No unambiguous declared duration in seconds.")
-            quantity = durations[0] / (60 if unit.startswith("minute") else 1)
+            quantity = durations[0] / block_seconds
             return quantity.to_integral_value(rounding=ROUND_CEILING), count
         if unit in ("megapixel", "megapixels"):
             dimensions = options.get("image_size") if "image_size" in fields else None
