@@ -172,6 +172,12 @@ class CompactionConfig:
     # epoch_fold_spans of them into one epoch stub.
     max_resident_span_digests: int = 20
     epoch_fold_spans: int = 10
+    # Recursive folding: when more epoch stubs than this are resident, every
+    # epoch on the path (and what lies between them) merges into one coarser
+    # epoch, so repeated mechanical compaction stays bounded without the
+    # model-written summary tier. Rare by design: it rewrites the oldest
+    # region, which breaks the whole cached prefix. 0 never merges.
+    max_resident_epochs: int = 8
     # A harness reminder the model must keep seeing through any fold: the
     # (full block, change list) headers of the chain. The host sends the full
     # block once and change lists after it; when a digest, epoch, checkpoint
@@ -3350,6 +3356,19 @@ class Compactor:
             folded.append((start, end))
             if force and not resident:
                 break
+        cap = self.config.max_resident_epochs
+        if folded and cap > 0:
+            epochs = sum(
+                1 for (start, end), kind in self._digested.items()
+                if kind == EPOCH_STUB and start in index and end in index
+            )
+            if epochs > cap:
+                # Persisted like any fold (a tier-3 epoch span); a replay
+                # retires what it contains, as the live merge does.
+                merged = self.merge_epochs(nodes, before=self._tail_from)
+                if merged is not None:
+                    folded = [key for key in folded if key in self._digested]
+                    folded.append(merged)
         return folded
 
     def merge_epochs(

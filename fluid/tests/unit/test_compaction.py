@@ -1547,6 +1547,7 @@ _LEGACY_FLAGS = {"render_version": 1,
                  "deep_target_window_ratio": 0.0,
                  "hard_window_ratio": 0.0,
                  "shortfall_watermark": False,
+                 "max_resident_epochs": 0,
                  **_ITEM2_OFF}
 
 
@@ -2374,3 +2375,33 @@ async def test_engine_reads_wake_turn_sources_from_turn_started(tmp_path) -> Non
     await loop._note_wake_turn_starts(sid, nodes)
     assert loop._compactor.wake_turn_starts == {"w1", "w2", "w3"}
     await loop.aclose()
+
+
+def test_repeated_native_compaction_stays_bounded_without_summaries() -> None:
+    """Each native batch folds more digests into epochs; without recursive
+    merging the epoch stubs piled up (173 after 70 cycles) and the floor grew
+    until a model-written summary rescued it. Merged mechanically, persisted,
+    and replayed to the same view."""
+    from fluid.context.compaction import EPOCH_STUB, Promotion
+    from fluid.context.trim import estimate_tokens_of_messages
+
+    cfg = _cfg()
+    assert cfg.max_resident_epochs > 0
+    compactor = Compactor(config=cfg)
+    nodes: list[SessionNode] = []
+    persisted: list[Promotion] = []
+    afters: list[int] = []
+    for cycle in range(60):
+        for t in range(3):
+            nodes.extend(_turn(cycle * 3 + t))
+        _, promotions = compactor.apply(nodes, context_window=60_000, output_reserve_tokens=4_000)
+        persisted.extend(promotions)
+        afters.append(estimate_tokens_of_messages(compactor.view(nodes)))
+        epochs = [k for k, kind in compactor._digested.items() if kind == EPOCH_STUB]
+        assert len(epochs) <= cfg.max_resident_epochs + 1, cycle
+    # The post-compaction floor does not keep climbing with the history.
+    assert max(afters[-10:]) <= max(afters[10:20]) * 1.5
+    # A resumed compactor rebuilds the same view from the persisted decisions.
+    resumed = Compactor(config=cfg)
+    resumed.rehydrate(persisted)
+    assert resumed.view(nodes) == compactor.view(nodes)
