@@ -826,7 +826,10 @@ class VoiceStream:
             ids = (response_id, item_id)
             new_utterance = any(previous is not None and current is not None and previous != current
                                 for previous, current in zip(self.last_assistant_caption_ids, ids))
-            self.last_assistant_caption_ids = ids
+            self.last_assistant_caption_ids = tuple(
+                current if current is not None else previous
+                for previous, current in zip(self.last_assistant_caption_ids, ids)
+            )
         pending = self.pending[role]
         if pending and not pending[-1].isspace() and not delta[:1].isspace() and (
             new_utterance or (_SENTENCE_END.search(pending) and delta[:1].isupper())

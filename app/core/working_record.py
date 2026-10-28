@@ -163,6 +163,12 @@ def snapshot(session_id: str, *, offset: int = 0, limit: int = LIST_DEFAULT,
     if offset == 0:
         # Live sessions lead the first page only, under their own share.
         live = live_sessions(exclude=session_id)
+        result["note"] += (
+            " Live sessions are sampled from at most the 100 most recently updated candidates; "
+            "sessions_omitted counts only sampled sessions left off by the preview budget. "
+            "Use ListSessions(scope='all', state='all') and follow its next_offset for a full listing. "
+            "If session sharing is off, list on the owning worker. WorkingRecord next_offset pages items only."
+        )
         result["sessions"] = []
         for row in live:
             entry = _session_entry(row)
@@ -171,11 +177,6 @@ def snapshot(session_id: str, *, offset: int = 0, limit: int = LIST_DEFAULT,
             result["sessions"].append(entry)
         if len(result["sessions"]) < len(live):
             result["sessions_omitted"] = len(live) - len(result["sessions"])
-            result["note"] += (
-                " Live sessions omitted by the preview budget: use ListSessions(scope='all', state='all') "
-                "and follow its next_offset to find them. If session sharing is off, list on the owning worker. "
-                "WorkingRecord next_offset pages items only."
-            )
     for row in rows[:limit]:
         candidate = [*result["items"], _preview(row)]
         if result["items"] and len(dumps({**result, "items": candidate, "next_offset": offset + len(candidate)})
