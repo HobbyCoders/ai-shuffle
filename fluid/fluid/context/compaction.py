@@ -342,13 +342,36 @@ WAKE_TURN_SOURCES = frozenset({"unpark", "wakeup", "agent_message"})
 MIN_TRIGGER_TOKENS = 1_000
 
 
+#: The most a measurement of the current view may raise the chars/4
+#: estimate by. A tokenizer denser than chars/4 (code, JSON, non-Latin text)
+#: legitimately measures above the estimate; a ratio past this is a
+#: misreport, not a tokenizer.
+MAX_MEASURED_SCALE = 4.0
+
+
+def measurement_scale(measured: int | None, estimate: float, *, current: bool) -> float:
+    """measured/estimated calibration for the window decision.
+
+    ``current`` says the measurement was taken of the view as it is now
+    decided (no compaction rewrite since the measured call). Such a
+    measurement sizes the prompt in both directions, so a provider that
+    counts more tokens than chars/4 raises the pressure. A measurement from
+    before a rewrite is stale: it may only lower the estimate (the old
+    ``clamp(ratio, 0.6, 1.0)``), never inflate it.
+    """
+    if not measured or measured <= 0 or estimate <= 0:
+        return 1.0
+    upper = MAX_MEASURED_SCALE if current else 1.0
+    return min(upper, max(0.6, measured / estimate))
+
+
 def _in_estimate_units(tokens: int, scale: float) -> int:
     """A measured-token threshold expressed in chars/4 estimate units.
 
-    ``scale`` is measured/estimated (at most 1), so the estimate that
-    matches ``tokens`` measured is ``tokens / scale``.
+    ``scale`` is measured/estimated, so the estimate that matches ``tokens``
+    measured is ``tokens / scale``.
     """
-    if scale <= 0 or scale >= 1.0:
+    if scale <= 0 or scale == 1.0:
         return tokens
     return int(tokens / scale)
 
@@ -1445,6 +1468,7 @@ class Compactor:
         turn_boundary: bool = True,
         measured_prompt_tokens: int | None = None,
         cache: CacheSignal | None = None,
+        measured_current: bool = False,
     ) -> tuple[list[Message], list[Promotion]]:
         """Commit a batch only when its complete view saves enough.
 
@@ -1461,9 +1485,12 @@ class Compactor:
         this request. chars/4 runs about 12% high at the median and up to 49%
         high, which fired window protection at 55-64% real occupancy, so when
         a measurement exists the window decision is sized on it: the estimate
-        is scaled by ``clamp(measured / estimate, 0.6, 1.0)``. The factor never
-        exceeds 1, so a stale measurement falls back to the estimate and can
-        never inflate it. The same factor sizes the optional trigger and every
+        is scaled by :func:`measurement_scale`. With ``measured_current`` (the
+        measured call saw the view as it is decided now) the factor may exceed
+        1, so a tokenizer that counts more than chars/4 raises the pressure
+        instead of hiding a prompt near the window. A measurement from before
+        a rewrite is stale and only ever lowers the estimate. The same factor
+        sizes the optional trigger and every
         stop target the ladder and the guarded escalation compare against:
         each is divided by it, which puts it in chars/4 units, so a batch that
         is not needed on the measured prompt does not run as
@@ -1486,7 +1513,7 @@ class Compactor:
                 output_reserve_tokens=output_reserve_tokens,
                 turn_boundary=turn_boundary,
                 measured_prompt_tokens=measured_prompt_tokens,
-                cache=cache,
+                cache=cache, measured_current=measured_current,
             )
             return rendered, [replace(p, intent_pin_tokens=self._intent_budget())
                               for p in capped + promotions]
@@ -1505,6 +1532,7 @@ class Compactor:
         turn_boundary: bool,
         measured_prompt_tokens: int | None,
         cache: CacheSignal | None = None,
+        measured_current: bool = False,
     ) -> tuple[list[Message], list[Promotion]]:
         before_view = self.view(nodes)
         before = overhead_tokens + estimate_tokens_of_messages(before_view)
@@ -1515,7 +1543,7 @@ class Compactor:
         )
         if measured_prompt_tokens is not None and measured_prompt_tokens > 0 and before > 0:
             basis, measured = "measured", measured_prompt_tokens
-            scale = min(1.0, max(0.6, measured / before))
+            scale = measurement_scale(measured, before, current=measured_current)
         else:
             basis, measured, scale = "estimate", 0, 1.0
         mandatory = limit is not None and before * scale >= limit
@@ -2943,6 +2971,16 @@ class Compactor:
                           + (0 if text else self.config.summary_max_output_tokens / max(scale, 0.01)))
         projected = overhead_tokens + summary_tokens + estimate_tokens_of_messages(candidate.view(nodes[stop:]))
         return int(min(ladder, projected) * scale)
+
+    def state_token(self) -> int:
+        """A fingerprint of the decided view state (trims, image
+        consumption, spans, summaries). Equal tokens render the same nodes
+        the same way, so a host can tell whether a measurement it took is of
+        the view as now decided or of one a later rewrite replaced."""
+        return hash((
+            frozenset(self.trimmer._trimmed), frozenset(self.trimmer._image_consumed),
+            frozenset(self._digested.items()), frozenset(self._summaries),
+        ))
 
     def estimate_view_tokens(self, nodes: list[SessionNode], overhead_tokens: int = 0) -> int:
         """Estimated tokens of the current view (chars/4 units)."""

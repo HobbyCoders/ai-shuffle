@@ -1079,6 +1079,51 @@ def test_window_protection_uses_measured_prompt() -> None:
     assert roomy.last_decision["window_protection"] is False
 
 
+def test_a_current_measurement_above_the_estimate_drives_window_protection() -> None:
+    # The provider counts far more than chars/4 (code, JSON). A measurement
+    # taken of the view as it is decided now is the truth about the next
+    # prompt: it must raise the pressure, not be clamped to the estimate.
+    from fluid.context.compaction import measurement_scale
+    from fluid.context.trim import estimate_tokens_of_messages
+
+    nodes = _history(6)
+    reserve = 4_000
+    estimate = estimate_tokens_of_messages(Compactor(config=_cfg()).view(nodes))
+    window = estimate * 4
+    measured = window - 1_000  # the provider says the prompt is at the window
+
+    current = Compactor(config=_cfg())
+    _, promotions = current.apply(
+        nodes, context_window=window, output_reserve_tokens=reserve,
+        measured_prompt_tokens=measured, measured_current=True,
+    )
+    assert current.last_decision["window_protection"] is True
+    assert promotions and {p.token_basis for p in promotions} == {"measured"}
+
+    # The same number from before a rewrite is stale and cannot inflate.
+    stale = Compactor(config=_cfg())
+    stale.apply(
+        nodes, context_window=window, output_reserve_tokens=reserve,
+        measured_prompt_tokens=measured,
+    )
+    assert stale.last_decision["window_protection"] is False
+
+    assert measurement_scale(300, 100, current=True) == 3.0
+    assert measurement_scale(300, 100, current=False) == 1.0
+    assert measurement_scale(50, 100, current=True) == 0.6
+    assert measurement_scale(10_000, 100, current=True) == 4.0
+
+
+def test_state_token_changes_only_with_decided_state() -> None:
+    nodes = _history(6)
+    compactor = Compactor(config=_cfg())
+    token = compactor.state_token()
+    compactor.view(nodes)
+    assert compactor.state_token() == token
+    compactor.trimmer.mark_trimmed({(nodes[2].node_id, "t0")})
+    assert compactor.state_token() != token
+
+
 def test_window_protection_never_digests_inflight_tail() -> None:
     # Window protection acts on a size check before anything is sent. When
     # the guarded rungs cannot reach the target it must stop there: trimming

@@ -96,6 +96,11 @@ from fluid.context.compaction import (
     Promotion,
     describe_promotions,
 )
+
+# ``NativeLoop._last_call_state`` for a measurement recovered from the
+# persisted events with no compaction after it: current under the decisions
+# the engine rehydrates, whose state token is only known once they are.
+_REHYDRATED_CURRENT = object()
 from fluid.context.assistant import sanitize_assistant_history
 from fluid.context.compiler import CompiledPrompt
 from fluid.context.recall import HistoryRecall
@@ -1295,6 +1300,13 @@ class NativeLoop(BackgroundLifecycleMixin):
         # rehydrated Usage event did not record one. Window protection ignores
         # a measurement another model's tokenizer produced.
         self._last_call_model: dict[str, str | None] = {}
+        # The compactor's decided state (``Compactor.state_token``) each
+        # ``_last_call_usage`` entry was measured under: a measurement of the
+        # view as now decided may raise the window decision's estimate; one a
+        # later rewrite replaced may not (``measurement_scale``). None when
+        # unknown, ``_REHYDRATED_CURRENT`` for a resumed measurement no
+        # persisted compaction followed.
+        self._last_call_state: dict[str, Any] = {}
         # Sessions whose ``_last_call_usage`` entry was already looked for in
         # the persisted Usage events (a resume recovers it from there once).
         self._usage_rehydrated: set[str] = set()
@@ -2106,6 +2118,14 @@ class NativeLoop(BackgroundLifecycleMixin):
             return None
         return measured
 
+    def _measured_is_current(self, sid: str) -> bool:
+        """Whether the last measured call saw the view as it is decided now:
+        no compaction rewrite since (``Compactor.state_token``)."""
+        state = self._last_call_state.get(sid)
+        if state is _REHYDRATED_CURRENT:
+            state = self._last_call_state[sid] = self._compactor.state_token()
+        return state is not None and state == self._compactor.state_token()
+
     def _cache_signal(
         self, sid: str, *, overhead_tokens: int, turn_start: str | None
     ) -> Any:
@@ -2254,10 +2274,13 @@ class NativeLoop(BackgroundLifecycleMixin):
             return None
         self._usage_rehydrated.add(sid)
         try:
-            events = [event async for event in iter_events_of_class(
-                self.store, sid, 0, (Usage,))]
+            logged = [event async for event in iter_events_of_class(
+                self.store, sid, 0, (Usage, ContextCompaction))]
         except Exception:
             return None
+        events = [event for event in logged if isinstance(event, Usage)]
+        last_rewrite = max((event.seq or 0 for event in logged
+                            if isinstance(event, ContextCompaction)), default=0)
         self._seed_p_cold(sid, events)
         for event in events:
             raw = event.raw if isinstance(event.raw, dict) else {}
@@ -2277,6 +2300,9 @@ class NativeLoop(BackgroundLifecycleMixin):
                 self._last_call_usage[sid] = (event.node_id, usage)
                 model = (event.context_usage or {}).get("model")
                 self._last_call_model[sid] = model if isinstance(model, str) else None
+                self._last_call_state[sid] = (
+                    _REHYDRATED_CURRENT if (event.seq or 0) > last_rewrite else None
+                )
                 return self._last_call_usage[sid]
         return None
 
@@ -3734,8 +3760,12 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # seconds ago; rewriting it there re-bills the whole prompt.
                 turn_boundary=num_calls == 0,
                 # Window protection sizes the prompt on what the provider
-                # billed last call, not on the chars/4 estimate alone.
+                # billed last call, not on the chars/4 estimate alone; a
+                # measurement of the current view may raise it.
                 measured_prompt_tokens=measured_prompt,
+                measured_current=(
+                    measured_prompt is not None and self._measured_is_current(sid)
+                ),
                 # The provider cache as this call will find it, so a rewrite
                 # on a warm cache is priced instead of taken at the trigger.
                 cache=cache,
@@ -3802,6 +3832,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             num_calls += 1
             self._turn_model_calls = num_calls
             call_model = self.model
+            call_state = self._compactor.state_token()
             result = await self._stream_once(
                 sid, turn_id, history, sticky=call_was_sticky,
                 effort=drop_retry_effort,
@@ -4281,6 +4312,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # an estimate standing in for the missing report).
                 self._last_call_usage[sid] = (node.node_id, dict(result.usage))
                 self._last_call_model[sid] = call_model
+                self._last_call_state[sid] = call_state
             snapshot: dict[str, Any] | None = None
             try:
                 snapshot = self._context_usage_snapshot(
