@@ -389,5 +389,7 @@ async def test_options_builder_produces_trusted_context_for_native_only_grants(
         session_id="session-a",
     )
     produced = options.aih_generation_context
-    assert produced == current
+    # The builder also stamps the turn's source (prompt skips key on it).
+    from dataclasses import replace
+    assert produced == replace(current, turn_source="automation" if unattended else "user")
     assert produced.remembered_choices["video"]["account"] == "plan-a"
