@@ -95,6 +95,7 @@ from fluid.context.compaction import (
     Compactor,
     Promotion,
     describe_promotions,
+    measurement_scale,
 )
 
 # ``NativeLoop._last_call_state`` for a measurement recovered from the
@@ -104,6 +105,9 @@ _REHYDRATED_CURRENT = object()
 # Reads of a session's persisted compaction decisions per resume, and the
 # pause between them (seconds, times the attempt number).
 _REHYDRATE_ATTEMPTS = 3
+# The smallest tool result admission cuts to an excerpt: below this the
+# placeholder would save next to nothing.
+_ADMISSION_MIN_RESULT_CHARS = 2_000
 _REHYDRATE_BACKOFF_S = 0.2
 from fluid.context.assistant import sanitize_assistant_history
 from fluid.context.compiler import CompiledPrompt
@@ -3769,6 +3773,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             # Measured first: on a resumed engine it rehydrates the last
             # call's usage, which also seeds the cache signal's miss rate.
             measured_prompt = await self._measured_window_prompt(sid, nodes)
+            measured_current = (
+                measured_prompt is not None and self._measured_is_current(sid)
+            )
             cache = self._cache_signal(
                 sid, overhead_tokens=overhead_tokens,
                 turn_start=user_node.node_id if num_calls == 0 else None,
@@ -3788,9 +3795,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # billed last call, not on the chars/4 estimate alone; a
                 # measurement of the current view may raise it.
                 measured_prompt_tokens=measured_prompt,
-                measured_current=(
-                    measured_prompt is not None and self._measured_is_current(sid)
-                ),
+                measured_current=measured_current,
                 # The provider cache as this call will find it, so a rewrite
                 # on a warm cache is priced instead of taken at the trigger.
                 cache=cache,
@@ -3821,6 +3826,15 @@ class NativeLoop(BackgroundLifecycleMixin):
                     promotions.append(summary)
             if promotions:
                 rendered = self._compactor.view(nodes)
+            # Admission: fitting the window is a postcondition of compaction,
+            # never left to a provider rejection some providers never send.
+            admitted, refusal = self._admission_promotions(
+                nodes, overhead_tokens=overhead_tokens, measured=measured_prompt,
+                measured_current=measured_current,
+            )
+            if admitted:
+                promotions.extend(admitted)
+                rendered = self._compactor.view(nodes)
             history = sanitize_assistant_history(repair_dangling_tool_calls(rendered))
             if self._encrypted_reasoning_poisoned:
                 # A prior call proved the history holds reasoning blobs the
@@ -3840,6 +3854,17 @@ class NativeLoop(BackgroundLifecycleMixin):
                     batch_final=index == len(promotions) - 1,
                     batch_before_tokens=promotions[0].before_tokens,
                 )
+            if refusal is not None:
+                # Nothing left that compaction may cut: say so, never send a
+                # prompt known to be over the window.
+                log.warning("session %s: %s", sid, refusal)
+                partial, partial_cost = self._partial_usage(total_usage)
+                await self._emit_terminal_with_park(ErrorEvent(
+                    session_id=sid, node_id=parent.node_id, turn_id=turn_id,
+                    message=refusal, retriable=False, usage=partial,
+                    cost_usd=partial_cost, num_model_calls=num_calls,
+                ))
+                return
             if self._interrupted.is_set():
                 # Stop may land while a target-miss checkpoint is awaited.
                 # Persist the ladder above, but never start a main-model call.
@@ -4607,6 +4632,93 @@ class NativeLoop(BackgroundLifecycleMixin):
             steers=[_steer_receipt(*parts) for parts in delivered],
         ))
         return node
+
+    def _admission_promotions(
+        self, nodes: list[SessionNode], *, overhead_tokens: int,
+        measured: int | None, measured_current: bool,
+    ) -> tuple[list[Promotion], str | None]:
+        """Make the next request fit the window, or say it cannot.
+
+        Runs after the ladder, on the view about to be sent, sized like the
+        window decision (the chars/4 estimate calibrated by the last
+        measurement, :func:`measurement_scale`) against the window less the
+        output reserve. Over it:
+
+        1. the unguarded escalation the provider-overflow retry runs, now,
+           before the provider has to reject anything;
+        2. then the largest tool results still shown whole, newest work and
+           error results included, become an excerpt plus an exact
+           ``HistoryExpand`` ref (a persisted trim, tier 1, reason
+           ``"admission"``), largest first, until the request fits.
+
+        Returns the promotions to persist, and a refusal (the turn ends with
+        it) when even that cannot fit: the rest is the newest messages and
+        calls, which compaction never cuts. ``([], None)`` when it fits.
+        """
+        window = self.context_window
+        if not window:
+            return [], None
+        limit = window - (self.max_tokens or _DEFAULT_OUTPUT_RESERVE)
+        estimate = self._compactor.last_decision.get("before_tokens")
+        scale = measurement_scale(
+            measured, float(estimate or 0), current=measured_current,
+        )
+
+        def size() -> int:
+            return int(self._compactor.estimate_view_tokens(nodes, overhead_tokens) * scale)
+
+        before = size()
+        if before <= limit:
+            return [], None
+        promotions = list(self._compactor.escalate(
+            nodes, overhead_tokens=overhead_tokens, context_window=window,
+            output_reserve_tokens=self.max_tokens or _DEFAULT_OUTPUT_RESERVE,
+            scale=scale,
+        ))
+        current = size()
+        if current > limit:
+            trimmer = self._compactor.trimmer
+            shown = sorted(
+                (
+                    (block_chars(block), node.node_id, block.tool_use_id)
+                    for node in nodes if node.message.role == "user"
+                    for block in node.message.content
+                    if isinstance(block, ToolResultBlock)
+                    and (node.node_id, block.tool_use_id) not in trimmer._trimmed
+                    and block_chars(block) > _ADMISSION_MIN_RESULT_CHARS
+                ),
+                reverse=True,
+            )
+            cut: list[tuple[str, str]] = []
+            for chars, node_id, tool_use_id in shown:
+                if current <= limit:
+                    break
+                trimmer.mark_trimmed(
+                    [(node_id, tool_use_id)], render_version=self._compactor.render_version,
+                )
+                cut.append((node_id, tool_use_id))
+                current = size()
+            if cut:
+                promotions.append(Promotion(
+                    tier=1, reason="admission", trimmed=tuple(cut),
+                    reclaimed_chars=max(0, (before - current) * 4),
+                ))
+        after = size()
+        promotions = [
+            replace(p, before_tokens=before, after_tokens=after, decision_reason="admission")
+            for p in promotions
+        ]
+        if after <= limit:
+            log.info("admission compacted the request from ~%d to ~%d tokens "
+                     "(limit %d)", before, after, limit)
+            return promotions, None
+        return promotions, (
+            f"This conversation cannot fit the model's context window: the next "
+            f"request needs about {after:,} tokens and {limit:,} are available, "
+            f"even after compacting everything older. What is left is the "
+            f"newest messages and tool calls. Start a new chat, switch to a "
+            f"model with a larger window, or send a shorter message."
+        )
 
     def _estimate_request_input_tokens(self, history: list[Message]) -> int:
         """Cheap, conservative estimate of everything resent on the next call."""
