@@ -18,7 +18,7 @@ def _create_project_tools(is_admin: bool) -> list:
 
     @tool(
         "listProjects",
-        "List projects on this worker with their IDs, names and folder paths.",
+        "List this worker's projects: ID, name and folder path.",
         {"type": "object", "properties": {}},
     )
     async def list_projects(args: dict) -> dict:
@@ -33,8 +33,8 @@ def _create_project_tools(is_admin: bool) -> list:
 
     @tool(
         "createProject",
-        "Add an AI Shuffle project at a folder path, creating the folder if needed. "
-        "List projects first to avoid duplicates. Git clone URLs are not supported.",
+        "Register a project folder, creating it if needed. "
+        "List projects first; no Git cloning.",
         {
             "type": "object",
             "properties": {

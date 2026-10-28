@@ -204,11 +204,11 @@ def test_measurement_is_repeatable_and_deferred_catalog_is_not_sent() -> None:
     first = measure()
     assert measure() == first
     compiled, catalog, specs = compile_fixture()
-    # generationPreferences adds one deferred schema to main's 110; budgets stay unchanged.
-    assert len(specs) == 111
+    # Project listing/creation add two deferred schemas; size budgets stay unchanged.
+    assert len(specs) == 113
     for leaf in (
         "CreateWatch", "ListWatches", "PauseWatch", "StopWatch", "WorkingRecord",
-        "generationPreferences",
+        "generationPreferences", "listProjects", "createProject",
     ):
         spec = next(s for s in specs if s.name.rsplit("__", 1)[-1] == leaf)
         assert spec.description not in compiled.text

@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 APP_CONFIG_SYSTEM_PROMPT = """
 ## AI Shuffle configuration
-The app-config tools manage projects, hooks, automations, MCP servers, profiles, subagents and connectors. Call getConfigCapabilities first and list before creating, to avoid duplicates. Before any write, tell the user exactly what you will create or change, with the key parameters, and wait for acknowledgment; never delete without explicit confirmation that says what will be lost. Afterwards confirm and say where to find or change it in the UI.
+App-config manages projects, hooks, automations, MCP servers, profiles, subagents and connectors. Call getConfigCapabilities first; list before creating to avoid duplicates. Before writing, tell the user exactly what you will create or change and the key parameters; wait for acknowledgment. Never delete without explicit confirmation of what will be lost. Afterwards confirm and say where to find or change it in the UI.
 Hook commands run with the app's permissions: explain each one. Automations run real sessions with real tools and cost: always set max_cost_per_run and max_runs_per_day. Add only MCP servers the user explicitly requests. Never expose webhook secrets, API keys or HMAC tokens; connector secrets go through the Settings UI.
 """
 
@@ -66,18 +66,12 @@ def _create_discovery_tools() -> list:
 
     @tool(
         "getConfigCapabilities",
-        "Discover what can be configured in AI Shuffle — valid event types, "
-        "trigger types, available connectors, and current system stats. "
-        "Call this first before creating hooks, automations, or other config. "
-        "Which construct fits a request: blocking or guarding a command "
-        "(\"prevent rm -rf\") is a Hook (PreToolUse on Bash); \"every morning\" "
-        "is an Automation with a cron trigger, \"every 5 minutes\" one with an "
-        "interval trigger; a webhook is an Automation webhook trigger or a "
-        "webhook Hook; connecting a service is an MCP server; a reusable "
-        "setup (\"a profile for code review\") is a Profile; "
-        "registering a folder is a Project (listProjects/createProject); "
-        "Telegram/Discord/Slack is a Connector, whose secrets the user enters "
-        "in the Settings UI.",
+        "Call first for config options and counts. Guard commands with a Hook "
+        "(PreToolUse on Bash); schedule Automations with cron (every morning) "
+        "or interval (every 5 minutes). A webhook is an Automation trigger or "
+        "webhook Hook; services use MCP servers; reusable setups use Profiles; "
+        "folders use listProjects/createProject. Telegram/Discord/Slack use "
+        "Connectors; enter their secrets in Settings.",
         {"type": "object", "properties": {}},
     )
     async def get_capabilities(args: dict) -> dict:
