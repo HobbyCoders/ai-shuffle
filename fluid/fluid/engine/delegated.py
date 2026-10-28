@@ -1690,6 +1690,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         started = time.monotonic()
         archive: list[dict[str, str]] = []
         checkpoint: dict[str, Any] = {}
+        report: dict[str, Any] = {}
         # A compaction answered or not, the stored path is what Claude Code
         # may replay from now on: its ids are not new activity (#679).
         self._replay_filter.seed(nodes)
@@ -1700,7 +1701,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             messages = await asyncio.to_thread(
                 compact_messages, body.get("messages"), nodes,
                 context_window=self.compaction_window, trigger=trigger, archive=archive,
-                checkpoint=checkpoint,
+                checkpoint=checkpoint, report=report,
             )
         except NothingToCompact as exc:
             # The reason is a fixed phrase, never message content.
@@ -1738,8 +1739,16 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                                type(exc).__name__)
                 raise ValueError("could not archive the rows it would drop") from exc
         self._replay_filter.expect(messages)
-        if checkpoint:
+        if checkpoint.get("through"):
             self._pending_checkpoint = (time.monotonic(), checkpoint)
+        elif checkpoint.get("skipped"):
+            logger.warning("claude mod compaction: no portable checkpoint (%s); a re-seed "
+                           "on another worker starts from the stored path, compacted to "
+                           "fit its window", checkpoint["skipped"])
+        if report and not report.get("met"):
+            logger.warning("claude mod compaction (%s) kept ~%d tokens, over its %d target; "
+                           "what is left: %s", trigger, report.get("after_tokens", 0),
+                           report.get("target_tokens", 0), report.get("contributors"))
         logger.info("claude mod compacted through Fluid (%s): %d -> %d messages, %d archived "
                     "(%d new), %.3fs, no summarizer", trigger, len(body["messages"]),
                     len(messages), len(archive), len(fresh), time.monotonic() - started)
