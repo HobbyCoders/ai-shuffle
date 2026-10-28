@@ -59,12 +59,17 @@ def test_settings_guard_after_all_finalizers(tmp_path, body, leaked):
         "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
         "DATA_DIR": str(tmp_path / "data"),
     }
+    # pytest 9.2 captures warnings from -p imports, including Settings' legacy
+    # Pydantic config. Suppress only that deprecation, not other child warnings.
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "tests.settings_guard",
+         "-W", "ignore:^Support for class-based `config` is deprecated, use ConfigDict instead[.]"
+         ":pydantic.warnings.PydanticDeprecatedSince20",
          "--confcutdir=" + str(tmp_path), str(probe)],
         cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60,
     )
     output = result.stdout + result.stderr
+    assert "PydanticDeprecatedSince20" not in output
     if leaked:
         assert result.returncode == 1, output
         assert "Module settings leaked after test_probe.py::" in output
