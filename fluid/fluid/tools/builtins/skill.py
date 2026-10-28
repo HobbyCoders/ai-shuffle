@@ -8,6 +8,7 @@ this tool, keeping the prefix small and cache-stable.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import threading
@@ -42,7 +43,8 @@ def _note_usage(skill_path: str) -> None:
     an advisory file lock beside the sidecar for other processes — and the new
     document replaces the old one atomically: a reader never sees a half
     written file. A sidecar that does not parse is left as it is rather than
-    reset, so one bad write can never wipe every skill's counts.
+    reset, so one bad write can never wipe every skill's counts. Async callers
+    must run this off the event loop because acquiring the locks can wait.
     """
     try:
         root = Path.home() / ".fluid" / "skills"
@@ -266,7 +268,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     _, body = parse_frontmatter(raw)
     if match.scope == "plugin":
         body = _expand_plugin_body(body, match.path, plugins, ctx.cwd, sources)
-    _note_usage(match.path)
+    await asyncio.to_thread(_note_usage, match.path)
     return ToolOutcome(
         text=f"# Skill: {match.name}\n# From: {match.path}\n\n{body.strip()}"
     )

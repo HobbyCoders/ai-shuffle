@@ -114,8 +114,8 @@
 	const isSubagentChat = $derived(!!$activeSession.sessionId && $subagentChats.has($activeSession.sessionId));
 
 	// The runner chip opens the Move menu only where moving is allowed
-	// (session-move.ts: saved, not a subagent's, not an API-key chat, owner
-	// viewing). Elsewhere it names the worker read-only.
+	// (session-move.ts: saved, not a subagent's, owner viewing). Elsewhere
+	// it names the worker read-only.
 	const movable = $derived(
 		canMoveSession({
 			sessionId: $activeSession.sessionId,

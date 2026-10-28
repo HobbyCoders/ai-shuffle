@@ -113,6 +113,28 @@ async def test_validation_and_list_pagination(owner):
     assert 50 < len(full["items"]) < 100 and full["next_offset"] == len(full["items"])
 
 
+async def test_omitted_live_sessions_are_counted_and_retrievable(owner):
+    for index in range(60):
+        chat(f"live-{index}")
+    live = working_record.live_sessions(exclude=owner["id"])
+    page = await invoke(owner["id"], action="list")
+    shown = {row["session"] for row in page["sessions"]}
+    omitted = {row["session"] for row in live} - shown
+    assert omitted and page["sessions_omitted"] == len(omitted)
+    assert "ListSessions(scope='all', state='all')" in page["note"]
+    assert "next_offset" in page["note"] and "owning worker" in page["note"]
+    assert len(working_record.dumps(page["sessions"]).encode("utf-8")) <= working_record.SESSIONS_BYTES
+    assert len(working_record.dumps(page).encode("utf-8")) <= working_record.LIST_BYTES
+
+    # Exercise the advertised retrieval path against real session producers.
+    found, offset = set(), 0
+    while offset is not None:
+        listing = orch.list_sessions(owner["id"], {"scope": "all", "state": "all", "offset": offset})
+        found.update(row["id"] for row in listing["sessions"])
+        offset = listing["next_offset"]
+    assert omitted <= found
+
+
 def test_read_actions_are_safe_and_writes_are_not():
     from app.core.provider.fluid_tool_bridge import BUILTINS_RISK_CLASSIFIERS
     classify = BUILTINS_RISK_CLASSIFIERS["WorkingRecord"]

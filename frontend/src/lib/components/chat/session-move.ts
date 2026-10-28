@@ -16,7 +16,8 @@
  *     so the control stays; the move endpoint is still the authority.
  *
  * A chat an API-key user started moves like any other: the hand-off carries
- * its `api_user_id` to the receiving worker (owner decision, 2026-10-27).
+ * its `api_user_id` to workers that know that key (`api_users` replicate
+ * across workers; owner decision, 2026-10-27).
  */
 export interface SessionMoveInput {
 	sessionId: string | null | undefined;
