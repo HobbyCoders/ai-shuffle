@@ -22,6 +22,10 @@ def schema(*fields):
     ("second", [ParamField("duration", enum=["5s"])], {"duration": "5s"}, None, ("5", "1")),
     ("1K chars", [], {}, "x" * 1001, ("2", "1")),
     ("character", [], {}, "hello", ("5", "1")),
+    ("1000 UTF-8 bytes", [], {}, "日" * 334, ("2", "1")),
+    ("5 Seconds", [ParamField("duration", description="Output duration in seconds")], {"duration": 6}, None, ("2", "1")),
+    ("10 seconds", [ParamField("music_duration", enum=["95s"])], {"music_duration": "95s"}, None, ("10", "1")),
+    ("5 minutes", [ParamField("duration_seconds")], {"duration_seconds": 301}, None, ("2", "1")),
     ("megapixel", [ParamField("image_size"), ParamField("num_images")],
      {"image_size": {"width": 1024, "height": 1024}, "num_images": 2}, None, ("2", "2")),
 ])
@@ -33,13 +37,41 @@ def test_schema_resolves_declared_units_conservatively(unit, fields, options, pr
     ("token", [], {}, "hello"),
     ("second", [ParamField("duration")], {"duration": 2}, None),
     ("second", [ParamField("duration", description="milliseconds")], {"duration": 2}, None),
-    ("megapixel", [ParamField("image_size")], {"image_size": "square_hd"}, None),
+    ("megapixel", [ParamField("image_size")], {"image_size": "2k"}, None),
+    ("megapixel", [ParamField("image_size", enum=["square_hd", "auto"])], {"image_size": "auto"}, None),
+    ("megapixel", [ParamField("image_size")], {"image_size": {"width": True, "height": 1024}}, None),
+    ("1m tokens", [], {}, "hello"),
+    ("5 seconds", [ParamField("duration")], {"duration": "5"}, None),
+    ("0 seconds", [ParamField("duration_seconds")], {"duration_seconds": 5}, None),
+    ("1000 UTF-8 bytes", [], {}, None),
+    ("compute seconds", [ParamField("duration_seconds")], {"duration_seconds": 5}, None),
     ("1K chars", [], {}, None),
     ("image", [ParamField("num_images")], {"num_images": True}, None),
 ])
 def test_undeclared_or_ambiguous_quantity_is_not_guessed(unit, fields, options, prompt):
     with pytest.raises(ValueError):
         schema(*fields).pricing_quantity(unit, options, prompt)
+
+
+@pytest.mark.parametrize("unit", ["images", " IMAGES ", "per image", "Per   Images", "videos", "generations", "meshes"])
+def test_item_unit_spellings_keep_the_output_count(unit):
+    declared = schema(ParamField("num_images"))
+    assert declared.pricing_quantity(unit, {"num_images": 3}) == (Decimal(1), Decimal(3))
+
+
+@pytest.mark.parametrize("preset,quantity", [
+    ("square_hd", 2), ("square", 1), ("portrait_4_3", 1),
+    ("portrait_16_9", 1), ("landscape_4_3", 1), ("landscape_16_9", 1),
+])
+def test_documented_image_size_presets_round_up_each_output(preset, quantity):
+    declared = schema(ParamField("image_size"), ParamField("num_images"))
+    assert declared.pricing_quantity("Megapixels", {"image_size": preset, "num_images": 2}) == (Decimal(quantity), Decimal(2))
+
+
+@pytest.mark.parametrize("options", [{}, {"image_size": "unresolved"}])
+def test_unknown_image_size_uses_largest_fully_bounded_enum(options):
+    declared = schema(ParamField("image_size", enum=["square", "square_hd", "landscape_4_3"]))
+    assert declared.pricing_quantity("megapixel", options) == (Decimal(2), Decimal(1))
 
 
 async def test_real_fal_unit_rate_prices_choose_and_confirmed_execution(backend, monkeypatch):
@@ -63,6 +95,36 @@ async def test_real_fal_unit_rate_prices_choose_and_confirmed_execution(backend,
     done = await resolver.generate("video", {**args, **confirmation["retry"]}, backend.context)
     assert done["status"] == "completed"
     backend.node.call.assert_awaited_once()
+
+
+async def test_fal_preset_defaults_are_normalized_and_priced_like_saved_options(backend, monkeypatch):
+    from app.services.fal_schema import normalize_openapi, schema_service
+    monkeypatch.delattr(backend, "fal_price")
+    # The real fal input shape is an object-or-enum union, not a plain enum
+    # ParamField. Exercise normalization and default resolution before quoting.
+    declared = normalize_openapi("fake/model", {
+        "components": {"schemas": {
+            "FluxInput": {"type": "object", "required": ["prompt"], "properties": {
+                "prompt": {"type": "string"},
+                "image_size": {"anyOf": [
+                    {"$ref": "#/components/schemas/ImageSize"},
+                    {"type": "string", "enum": ["square_hd", "square", "landscape_4_3"]},
+                ], "default": "landscape_4_3"},
+                "num_images": {"type": "integer", "default": 1, "minimum": 1},
+            }},
+            "ImageSize": {"type": "object", "properties": {
+                "width": {"type": "integer"}, "height": {"type": "integer"},
+            }, "required": ["width", "height"]},
+        }},
+    })
+    assert declared.fields[1].enum is None
+    monkeypatch.setattr(schema_service, "get_schema", AsyncMock(return_value=declared))
+    original = httpx.AsyncClient
+    response = {"prices": [{"endpoint_id": "fake/model", "currency": "USD", "unit": "megapixels", "unit_price": "0.025"}]}
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: original(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=response)), **kw))
+    assert (await backend.fal_price("fake/model", {}))["total"] == "0.025"
+    assert (await backend.fal_price("fake/model", {"image_size": "square_hd", "num_images": 3}))["total"] == "0.150"
+    assert await backend.fal_price("fake/model", {"image_size": "unrecognized"}) == UNKNOWN_PRICE
 
 
 async def test_audio_choose_has_input_dependent_character_price(backend, monkeypatch):
