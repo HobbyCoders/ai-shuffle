@@ -124,6 +124,29 @@ def test_the_summarizer_line_is_fixed_text_and_calls_nothing() -> None:
   })"""
 
 
+def test_a_manual_compaction_never_falls_back_to_the_summarizer() -> None:
+    """Every path out of the mounted branch that can reach Claude Code's
+    summarizer (``next(e)``) is gated on an automatic trigger, including a
+    failure while the bridge is lazily initialized."""
+    register = (Path(CLAUDE_MOD_SOURCE) / "hooks" / "register.ts").read_text(encoding="utf-8")
+    block = register[register.index("on('session.compact'"):]
+    mounted = block[:block.index("    let instructions = e.instructions")]
+    init = mounted[mounted.index("if (!bridgeInitialized)"):mounted.index("if (mechanical)")]
+    catch = init[init.index("} catch {"):]
+    assert "return next(e)" not in catch
+    assert "fallback ? next(e)" in catch and "const fallback = e.trigger === 'auto'" in catch
+    # The one exception: the host's own emergency answer (``{"fallback"}``),
+    # which the bridge sends only for an emergency compaction at the context
+    # limit, never for one the owner started. Pin that block exactly, then
+    # require every other next(e) to be behind the automatic-only fallback.
+    emergency = mounted[mounted.index("if ('fallback' in answer) {"):]
+    emergency = emergency[:emergency.index("\n        }\n") + len("\n        }\n")]
+    assert emergency.count("next(e)") == 1 and "return next(e)" in emergency
+    rest = mounted.replace(emergency, "")
+    calls = re.findall(r"[^\n]*next\(e\)[^\n]*", rest)
+    assert calls and all("agentId" in c or "fallback ? next(e)" in c for c in calls), calls
+
+
 # ─── The gate and the argv ───────────────────────────────────────────────────
 
 

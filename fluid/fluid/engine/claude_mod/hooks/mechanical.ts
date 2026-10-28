@@ -37,13 +37,20 @@ export const COMPACT_TIMEOUT_MS = 60_000
 /** The bridge's answer: rows that stand in the conversation's place, or a
  * skip (Fluid has nothing more to reclaim) with the reason Claude Code prints
  * after "Not compacted · ". Anything else is refused. */
-export function compactionAnswer(body: unknown, originals: readonly Row[]): { messages: Row[] } | { skip: string } {
-  if (body && typeof body === 'object' && 'skip' in body) {
-    const skip = (body as { skip: unknown }).skip
-    if ('messages' in body || typeof skip !== 'string' || skip.length === 0 || skip.length > 500) {
-      throw new Error('validation')
+export function compactionAnswer(
+  body: unknown, originals: readonly Row[],
+): { messages: Row[] } | { skip: string } | { fallback: string } {
+  for (const key of ['skip', 'fallback'] as const) {
+    if (body && typeof body === 'object' && key in body) {
+      // `fallback`: the host's emergency compaction at the context limit, where
+      // Fluid freed nothing; Claude Code's summarizer may stand in.
+      const reason = (body as Record<string, unknown>)[key]
+      if ('messages' in body || ('skip' in body && 'fallback' in body) ||
+          typeof reason !== 'string' || reason.length === 0 || reason.length > 500) {
+        throw new Error('validation')
+      }
+      return key === 'skip' ? { skip: reason } : { fallback: reason }
     }
-    return { skip }
   }
   return { messages: compactedRows(body, originals) }
 }

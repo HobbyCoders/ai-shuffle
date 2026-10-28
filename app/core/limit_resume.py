@@ -39,7 +39,8 @@ setting. Reset information is recorded even when the global switch is off:
 * **Compact first.** With "Compact before resuming" on (the default) a
   session whose leg can compact (:data:`COMPACTING_LEGS`) gets a real
   ``/compact`` turn queued ahead of the continuation, so the continuation
-  re-reads a small context instead of the whole conversation.
+  re-reads a small context instead of the whole conversation. Both turns are
+  one atomic admission (the Compact-first pair), idempotent on the wake's id.
 * **One try, and nothing before the reset.** The resume's own turns are
   marked (:data:`PAYLOAD_KEY`); one that hits a limit again schedules no
   further resume. Until the reset the chat's automatic turns (wakes, peer
@@ -115,6 +116,10 @@ RESUME_PROMPT = (
     "complete, stop after a brief acknowledgement; do not invent new work."
 )
 COMPACT_PROMPT = "/compact"
+
+#: ``command_id`` prefix of a resume turn; the rest is its wake's id. The
+#: idempotency key of the compact-then-resume admission.
+RESUME_COMMAND_PREFIX = "limit-resume-"
 #: The sender a resumed worker sees, and the message it gets.
 RESUME_SENDER = "AI Shuffle"
 WORKER_RESUME_TEXT = (
@@ -1144,19 +1149,21 @@ async def _resume_chat(row: Dict[str, Any], meta: Dict[str, Any]) -> Optional[st
     if api_user_id:
         payload["api_user_id"] = api_user_id
 
-    async def submit(prompt: str) -> Optional[str]:
-        return await turn_manager.submit_async(
-            session_id, "wakeup", prompt=prompt, profile_id=profile_id,
-            project_id=row.get("project_id"), overrides=overrides,
-            payload=dict(payload),
-        )
-
     compacted = bool(meta.get("compact")) and meta.get("leg") in COMPACTING_LEGS
+    if compacted:
+        # One admission, the Compact-first pair: the compaction and the resume
+        # behind it are inserted together, so nothing lands between them and
+        # a claimant never sees one without the other.
+        payload["compact_first"] = True
     try:
-        if compacted:
-            # Queued first, so the continuation re-reads the compacted context.
-            await submit(COMPACT_PROMPT)
-        turn_id = await submit(RESUME_PROMPT)
+        turn_id = await turn_manager.submit_async(
+            session_id, "wakeup", prompt=RESUME_PROMPT, profile_id=profile_id,
+            project_id=row.get("project_id"), overrides=overrides,
+            payload=payload,
+            # The wake's own id survives a re-armed retry, so a retry after a
+            # lost acknowledgement finds the turns it already admitted.
+            command_id=f"{RESUME_COMMAND_PREFIX}{row.get('id')}" if row.get("id") else None,
+        )
     except archive_guard.SessionArchived:
         return None
     except Exception as exc:  # noqa: BLE001 — the wake-up service retries it

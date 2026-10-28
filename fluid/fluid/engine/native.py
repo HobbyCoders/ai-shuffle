@@ -95,7 +95,20 @@ from fluid.context.compaction import (
     Compactor,
     Promotion,
     describe_promotions,
+    measurement_scale,
 )
+
+# ``NativeLoop._last_call_state`` for a measurement recovered from the
+# persisted events with no compaction after it: current under the decisions
+# the engine rehydrates, whose state token is only known once they are.
+_REHYDRATED_CURRENT = object()
+# Reads of a session's persisted compaction decisions per resume, and the
+# pause between them (seconds, times the attempt number).
+_REHYDRATE_ATTEMPTS = 3
+# The smallest tool result admission cuts to an excerpt: below this the
+# placeholder would save next to nothing.
+_ADMISSION_MIN_RESULT_CHARS = 2_000
+_REHYDRATE_BACKOFF_S = 0.2
 from fluid.context.assistant import sanitize_assistant_history
 from fluid.context.compiler import CompiledPrompt
 from fluid.context.recall import HistoryRecall
@@ -1295,6 +1308,13 @@ class NativeLoop(BackgroundLifecycleMixin):
         # rehydrated Usage event did not record one. Window protection ignores
         # a measurement another model's tokenizer produced.
         self._last_call_model: dict[str, str | None] = {}
+        # The compactor's decided state (``Compactor.state_token``) each
+        # ``_last_call_usage`` entry was measured under: a measurement of the
+        # view as now decided may raise the window decision's estimate; one a
+        # later rewrite replaced may not (``measurement_scale``). None when
+        # unknown, ``_REHYDRATED_CURRENT`` for a resumed measurement no
+        # persisted compaction followed.
+        self._last_call_state: dict[str, Any] = {}
         # Sessions whose ``_last_call_usage`` entry was already looked for in
         # the persisted Usage events (a resume recovers it from there once).
         self._usage_rehydrated: set[str] = set()
@@ -2106,6 +2126,14 @@ class NativeLoop(BackgroundLifecycleMixin):
             return None
         return measured
 
+    def _measured_is_current(self, sid: str) -> bool:
+        """Whether the last measured call saw the view as it is decided now:
+        no compaction rewrite since (``Compactor.state_token``)."""
+        state = self._last_call_state.get(sid)
+        if state is _REHYDRATED_CURRENT:
+            state = self._last_call_state[sid] = self._compactor.state_token()
+        return state is not None and state == self._compactor.state_token()
+
     def _cache_signal(
         self, sid: str, *, overhead_tokens: int, turn_start: str | None
     ) -> Any:
@@ -2254,10 +2282,13 @@ class NativeLoop(BackgroundLifecycleMixin):
             return None
         self._usage_rehydrated.add(sid)
         try:
-            events = [event async for event in iter_events_of_class(
-                self.store, sid, 0, (Usage,))]
+            logged = [event async for event in iter_events_of_class(
+                self.store, sid, 0, (Usage, ContextCompaction))]
         except Exception:
             return None
+        events = [event for event in logged if isinstance(event, Usage)]
+        last_rewrite = max((event.seq or 0 for event in logged
+                            if isinstance(event, ContextCompaction)), default=0)
         self._seed_p_cold(sid, events)
         for event in events:
             raw = event.raw if isinstance(event.raw, dict) else {}
@@ -2277,6 +2308,9 @@ class NativeLoop(BackgroundLifecycleMixin):
                 self._last_call_usage[sid] = (event.node_id, usage)
                 model = (event.context_usage or {}).get("model")
                 self._last_call_model[sid] = model if isinstance(model, str) else None
+                self._last_call_state[sid] = (
+                    _REHYDRATED_CURRENT if (event.seq or 0) > last_rewrite else None
+                )
                 return self._last_call_usage[sid]
         return None
 
@@ -3380,15 +3414,36 @@ class NativeLoop(BackgroundLifecycleMixin):
         Digest rendering is deterministic, so re-applying the persisted
         decisions makes the resumed view byte-identical to the pre-restart one
         — the cache survives the restart too.
+
+        Marked done only once the read succeeds. A failed read is retried a
+        few times here and again at the next turn; until it succeeds the
+        compactor holds no persisted decisions, so it sizes and compacts the
+        whole path afresh (safe for the window, a cache rewrite), and says so.
         """
         if self._compaction_rehydrated:
             return
-        self._compaction_rehydrated = True
-        try:
-            events = [event async for event in iter_events_of_class(
-                self.store, sid, 0, (ContextCompaction,))]
-        except Exception:  # a store that cannot replay just re-compacts later
+        events: list[Any] | None = None
+        for attempt in range(_REHYDRATE_ATTEMPTS):
+            try:
+                events = [event async for event in iter_events_of_class(
+                    self.store, sid, 0, (ContextCompaction,))]
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — retried, then reported
+                log.warning(
+                    "could not read session %s's compaction decisions (attempt %d/%d): %s",
+                    sid, attempt + 1, _REHYDRATE_ATTEMPTS, type(exc).__name__,
+                )
+                if attempt + 1 < _REHYDRATE_ATTEMPTS:
+                    await asyncio.sleep(_REHYDRATE_BACKOFF_S * (attempt + 1))
+        if events is None:
+            log.error(
+                "session %s's compaction decisions are unreadable; this call "
+                "compacts the whole path afresh and the next turn retries", sid,
+            )
             return
+        self._compaction_rehydrated = True
         self._compactor.rehydrate(
             Promotion(
                 tier=e.tier,
@@ -3718,6 +3773,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             # Measured first: on a resumed engine it rehydrates the last
             # call's usage, which also seeds the cache signal's miss rate.
             measured_prompt = await self._measured_window_prompt(sid, nodes)
+            measured_current = (
+                measured_prompt is not None and self._measured_is_current(sid)
+            )
             cache = self._cache_signal(
                 sid, overhead_tokens=overhead_tokens,
                 turn_start=user_node.node_id if num_calls == 0 else None,
@@ -3734,8 +3792,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # seconds ago; rewriting it there re-bills the whole prompt.
                 turn_boundary=num_calls == 0,
                 # Window protection sizes the prompt on what the provider
-                # billed last call, not on the chars/4 estimate alone.
+                # billed last call, not on the chars/4 estimate alone; a
+                # measurement of the current view may raise it.
                 measured_prompt_tokens=measured_prompt,
+                measured_current=measured_current,
                 # The provider cache as this call will find it, so a rewrite
                 # on a warm cache is priced instead of taken at the trigger.
                 cache=cache,
@@ -3766,6 +3826,17 @@ class NativeLoop(BackgroundLifecycleMixin):
                     promotions.append(summary)
             if promotions:
                 rendered = self._compactor.view(nodes)
+            # Admission: fitting the window is a postcondition of compaction,
+            # never left to a provider rejection some providers never send.
+            # Re-checked: a ladder that just rewrote the view makes the
+            # measurement stale, and a stale one may only lower the estimate.
+            admitted, refusal = self._admission_promotions(
+                nodes, overhead_tokens=overhead_tokens, measured=measured_prompt,
+                measured_current=measured_current and self._measured_is_current(sid),
+            )
+            if admitted:
+                promotions.extend(admitted)
+                rendered = self._compactor.view(nodes)
             history = sanitize_assistant_history(repair_dangling_tool_calls(rendered))
             if self._encrypted_reasoning_poisoned:
                 # A prior call proved the history holds reasoning blobs the
@@ -3785,6 +3856,17 @@ class NativeLoop(BackgroundLifecycleMixin):
                     batch_final=index == len(promotions) - 1,
                     batch_before_tokens=promotions[0].before_tokens,
                 )
+            if refusal is not None:
+                # Nothing left that compaction may cut: say so, never send a
+                # prompt known to be over the window.
+                log.warning("session %s: %s", sid, refusal)
+                partial, partial_cost = self._partial_usage(total_usage)
+                await self._emit_terminal_with_park(ErrorEvent(
+                    session_id=sid, node_id=parent.node_id, turn_id=turn_id,
+                    message=refusal, retriable=False, usage=partial,
+                    cost_usd=partial_cost, num_model_calls=num_calls,
+                ))
+                return
             if self._interrupted.is_set():
                 # Stop may land while a target-miss checkpoint is awaited.
                 # Persist the ladder above, but never start a main-model call.
@@ -3802,6 +3884,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             num_calls += 1
             self._turn_model_calls = num_calls
             call_model = self.model
+            call_state = self._compactor.state_token()
             result = await self._stream_once(
                 sid, turn_id, history, sticky=call_was_sticky,
                 effort=drop_retry_effort,
@@ -4281,6 +4364,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # an estimate standing in for the missing report).
                 self._last_call_usage[sid] = (node.node_id, dict(result.usage))
                 self._last_call_model[sid] = call_model
+                self._last_call_state[sid] = call_state
             snapshot: dict[str, Any] | None = None
             try:
                 snapshot = self._context_usage_snapshot(
@@ -4550,6 +4634,97 @@ class NativeLoop(BackgroundLifecycleMixin):
             steers=[_steer_receipt(*parts) for parts in delivered],
         ))
         return node
+
+    def _admission_promotions(
+        self, nodes: list[SessionNode], *, overhead_tokens: int,
+        measured: int | None, measured_current: bool,
+    ) -> tuple[list[Promotion], str | None]:
+        """Make the next request fit the window, or say it cannot.
+
+        Runs after the ladder, on the view about to be sent, sized like the
+        window decision (the chars/4 estimate calibrated by the last
+        measurement, :func:`measurement_scale`) against the window less the
+        output reserve. Over it:
+
+        1. the unguarded escalation the provider-overflow retry runs, now,
+           before the provider has to reject anything;
+        2. then the largest tool results still shown whole, newest work and
+           error results included, become an excerpt plus an exact
+           ``HistoryExpand`` ref (a persisted trim, tier 1, reason
+           ``"admission"``), largest first, until the request fits.
+
+        Returns the promotions to persist, and a refusal (the turn ends with
+        it) when even that cannot fit: the rest is the newest messages and
+        calls, which compaction never cuts. ``([], None)`` when it fits.
+        """
+        window = self.context_window
+        if not window:
+            return [], None
+        # The compactor's clamp (``derive_trigger_tokens``): a small window
+        # cannot reserve a full default output budget, or a 32k local model
+        # would be refused on its very first request.
+        reserve = min(self.max_tokens or _DEFAULT_OUTPUT_RESERVE, window // 4)
+        limit = window - reserve
+        estimate = self._compactor.last_decision.get("before_tokens")
+        scale = measurement_scale(
+            measured, float(estimate or 0), current=measured_current,
+        )
+
+        def size() -> int:
+            return int(self._compactor.estimate_view_tokens(nodes, overhead_tokens) * scale)
+
+        before = size()
+        if before <= limit:
+            return [], None
+        promotions = list(self._compactor.escalate(
+            nodes, overhead_tokens=overhead_tokens, context_window=window,
+            output_reserve_tokens=self.max_tokens or _DEFAULT_OUTPUT_RESERVE,
+            scale=scale,
+        ))
+        current = size()
+        if current > limit:
+            trimmer = self._compactor.trimmer
+            shown = sorted(
+                (
+                    (block_chars(block), node.node_id, block.tool_use_id)
+                    for node in nodes if node.message.role == "user"
+                    for block in node.message.content
+                    if isinstance(block, ToolResultBlock)
+                    and (node.node_id, block.tool_use_id) not in trimmer._trimmed
+                    and block_chars(block) > _ADMISSION_MIN_RESULT_CHARS
+                ),
+                reverse=True,
+            )
+            cut: list[tuple[str, str]] = []
+            for chars, node_id, tool_use_id in shown:
+                if current <= limit:
+                    break
+                trimmer.mark_trimmed(
+                    [(node_id, tool_use_id)], render_version=self._compactor.render_version,
+                )
+                cut.append((node_id, tool_use_id))
+                current = size()
+            if cut:
+                promotions.append(Promotion(
+                    tier=1, reason="admission", trimmed=tuple(cut),
+                    reclaimed_chars=max(0, (before - current) * 4),
+                ))
+        after = size()
+        promotions = [
+            replace(p, before_tokens=before, after_tokens=after, decision_reason="admission")
+            for p in promotions
+        ]
+        if after <= limit:
+            log.info("admission compacted the request from ~%d to ~%d tokens "
+                     "(limit %d)", before, after, limit)
+            return promotions, None
+        return promotions, (
+            f"This conversation cannot fit the model's context window: the next "
+            f"request needs about {after:,} tokens and {limit:,} are available, "
+            f"even after compacting everything older. What is left is the "
+            f"newest messages and tool calls. Start a new chat, switch to a "
+            f"model with a larger window, or send a shorter message."
+        )
 
     def _estimate_request_input_tokens(self, history: list[Message]) -> int:
         """Cheap, conservative estimate of everything resent on the next call."""

@@ -1429,6 +1429,11 @@ class SessionRuntime:
 
         app_source = await asyncio.to_thread(effective_turn_source, self.turn)
         turn_overrides["turn_source"] = app_source
+        # The scheduler's emergency compaction for a turn the context limit
+        # cut off: Claude Code's summarizer may stand in if Fluid has nothing.
+        turn_overrides["emergency_compaction"] = bool(
+            (self.turn.get("payload") or {}).get(turns_db.EMERGENCY_COMPACTION_KEY)
+        )
         # A resumed turn re-runs the engine loop from the session head: no new
         # prompt is sent and no message.user is recorded, so the transcript
         # gains only the answer the failed turn never produced.

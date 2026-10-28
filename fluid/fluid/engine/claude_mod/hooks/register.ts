@@ -60,6 +60,9 @@ export const register: Register = (on) => {
   // original event), so a chat can never overflow; a manual one (/compact,
   // the app's Compact) never does: when Fluid has nothing more to reclaim or
   // cannot be reached it is skipped, and the conversation stays as it is.
+  // One deliberate exception: the host's own emergency compaction after a
+  // context-limit cut that Fluid could not shrink. The bridge answers it with
+  // {"fallback"}, and only then does a manual-trigger compaction summarize.
   // Precompute is skipped so it cannot spend a summarizer request ahead of
   // the threshold. Subagents always pass through untouched.
   on('session.compact', async ($, e, next) => {
@@ -81,8 +84,16 @@ export const register: Register = (on) => {
           await $.env.set('FLUID_CLAUDE_MOD_COMPACT_URL', undefined)
         }
       } catch {
-        try { await $.ui.log('Fluid compaction fallback: bridge initialization error', { to: 'debug' }) } catch { /* Best effort. */ }
-        return next(e)
+        // Initialization stays unset, so the next compaction tries again.
+        // Only an automatic compaction at the limit may fall back to Claude
+        // Code's summarizer; a manual one never does (see above).
+        const fallback = e.trigger === 'auto'
+        try {
+          await $.ui.log(fallback ? 'Fluid compaction fallback: bridge initialization error'
+            : 'Fluid compaction skipped: bridge initialization error', { to: 'debug' })
+        } catch { /* Best effort. */ }
+        return fallback ? next(e)
+          : { skip: 'Fluid could not compact the conversation (bridge initialization error); it is left as it is' }
       }
     }
     if (mechanical) {
@@ -111,6 +122,14 @@ export const register: Register = (on) => {
         reason = 'invalid bridge response'
         const answer = compactionAnswer(JSON.parse(response.text), rows)
         if ('messages' in answer) return answer
+        if ('fallback' in answer) {
+          // The host's emergency compaction at the context limit: Fluid freed
+          // nothing, so Claude Code's summarizer stands in, whatever the trigger.
+          try {
+            await $.ui.log(`Fluid compaction fallback: ${answer.fallback}`, { to: 'debug' })
+          } catch { /* Best effort. */ }
+          return next(e)
+        }
         // Nothing more to reclaim. Manual: an honest no-op. Automatic: the
         // context is at its limit, so Claude Code summarizes instead.
         if (!fallback) return answer

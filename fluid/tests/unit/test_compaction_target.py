@@ -81,11 +81,14 @@ class MeasuredProvider:
         yield StreamChunk("message_stop", {"stop_reason": "end_turn"})
 
 
-async def seeded_loop(tmp_path, window, *, residue=False, overhead=12000, provider=None):
+async def seeded_loop(tmp_path, window, *, residue=False, overhead=12000, provider=None,
+                      merge_epochs=True):
     provider = provider or MeasuredProvider()
     cfg = CompactionConfig(summary_enabled=True)
     if residue:
         cfg = replace(cfg, epoch_fold_spans=1, user_turn_text_cap=12000)
+    if not merge_epochs:
+        cfg = replace(cfg, max_resident_epochs=0)
     loop = NativeLoop(provider=provider, store=JsonlStore(tmp_path), model="gpt-6-astra",
                       system="s" * (overhead * 4), context_window=window, compaction=cfg)
     await loop._ensure_session()
@@ -130,8 +133,25 @@ async def test_native_manual_and_automatic_requests_use_selected_limit(tmp_path,
 
 
 @pytest.mark.parametrize("manual", [False, True])
-async def test_checkpoint_producer_reaches_target_when_epoch_residue_cannot(tmp_path, manual):
+async def test_merged_epochs_reach_target_without_a_summarizer(tmp_path, manual):
+    """Epoch residue that piled up is merged mechanically (owner rule: repeated
+    compactions keep reclaiming with no summarizer call)."""
     loop, provider, _ = await seeded_loop(tmp_path, 400000, residue=True)
+    try:
+        await loop.submit(UserTurn(content="/compact" if manual else "continue"))
+        await asyncio.wait_for(loop.wait_turn(), 10)
+        assert provider.summary_calls == 0
+        events = loop.bus.log(loop.session_id)
+        assert not [e for e in events if isinstance(e, ErrorEvent)]
+        assert not any(isinstance(e, ContextCompaction) and e.tier == 4 for e in events)
+        assert loop._compactor.estimate_view_tokens(await loop.store.load_path(loop.session_id), 12000) <= 60000
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.parametrize("manual", [False, True])
+async def test_checkpoint_producer_reaches_target_when_epoch_residue_cannot(tmp_path, manual):
+    loop, provider, _ = await seeded_loop(tmp_path, 400000, residue=True, merge_epochs=False)
     try:
         await loop.submit(UserTurn(content="/compact" if manual else "continue"))
         await asyncio.wait_for(loop.wait_turn(), 10)

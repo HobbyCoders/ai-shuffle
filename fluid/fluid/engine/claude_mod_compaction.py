@@ -731,6 +731,7 @@ def compact_messages(
     context_window: int | None = None, trigger: str = "manual",
     archive: list[dict[str, str]] | None = None,
     checkpoint: dict[str, Any] | None = None,
+    report: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Claude Code's rows, compacted mechanically against the stored path.
 
@@ -742,6 +743,14 @@ def compact_messages(
 
     ``checkpoint``, when given, is filled with the portable form of the
     compacted part (:func:`_checkpoint`), or left empty.
+
+    The target bounds the whole answer, not only the stored view: when the
+    pinned Claude Code rows would carry it past the target, superseded ones
+    leave through the note (archived) first, those of the earlier pinned
+    request, then the newest request's older additions, never the row that
+    opens the newest request. ``report``, when given, is filled with
+    ``target_tokens``, ``after_tokens``, ``met`` and, on a miss, the
+    ``contributors`` still over it (chars/4 tokens by kind).
 
     Raises :class:`NothingToCompact` when the result would not be smaller
     (for ``trigger="auto"``: small enough to leave the threshold), and
@@ -991,6 +1000,7 @@ def compact_messages(
             mark(cover, False)
     take(len(view))
     mark(-1, False)
+    _fit_pinned(out, covers, shrunk, dropped, unknown, requests, target, report)
     note = _note_row(dropped, notes, archive)
     final = _alternate(([note] if note else []) + out)
     validate_rows(final, handles=False)
@@ -1006,6 +1016,73 @@ def compact_messages(
     return final
 
 
+def _row_tokens(rows: list[dict[str, Any]]) -> int:
+    """chars/4 of the rows' content, the unit the target is in."""
+    return len(json.dumps([{k: v for k, v in r.items() if k != "handle"} for r in rows],
+                          ensure_ascii=False)) // 4
+
+
+def _fit_pinned(
+    out: list[dict[str, Any]], covers: list[int], shrunk: list[bool],
+    dropped: list[dict[str, Any]], unknown: list[tuple[int, dict[str, Any]]],
+    requests: list[int], target: int, report: dict[str, Any] | None,
+) -> None:
+    """Hold the answer to ``target`` by archiving pinned Claude Code rows.
+
+    Pinning keeps the work in hand (a skill being followed, a command's
+    expansion), counted by request, not by size: an 800k attachment or hook
+    context that accumulated over a long autonomous request stayed whole and
+    the answer kept far more than the target. Over the target, the pinned
+    rows leave through the note (archived, so a ``HistoryExpand`` ref reads
+    each back) in this order until the answer fits: the earlier pinned
+    request's, then the newest request's, oldest first. The newest
+    request's first row (the instruction or attachment set it opened with)
+    stays unless it alone outweighs half the target. Edits
+    ``out``/``covers``/``shrunk``/``dropped`` in place.
+    """
+    total = _row_tokens(out)
+    newest = requests[-1] if requests else None
+    position_of = {id(row): position for position, row in unknown}
+    pinned = [i for i, row in enumerate(out) if id(row) in position_of]
+    if total > target and pinned:
+        def owner(i: int) -> int | None:
+            return _owner(requests, position_of[id(out[i])])
+
+        earlier = [i for i in pinned if owner(i) != newest]
+        current = [i for i in pinned if owner(i) == newest]
+        order = earlier + current[1:]
+        leave: set[int] = set()
+        for i in order:
+            if total <= target:
+                break
+            leave.add(i)
+            total -= _row_tokens([out[i]])
+        # A row that alone outweighs half the answer cannot be the work in
+        # hand at this size: it leaves too, largest first, recallable.
+        for i in sorted(set(pinned) - leave, key=lambda i: -_row_tokens([out[i]])):
+            if total <= target or _row_tokens([out[i]]) <= target // 2:
+                break
+            leave.add(i)
+            total -= _row_tokens([out[i]])
+        if leave:
+            dropped.extend(out[i] for i in sorted(leave))
+            keep = [i for i in range(len(out)) if i not in leave]
+            out[:] = [out[i] for i in keep]
+            covers[:] = [covers[i] for i in keep]
+            shrunk[:] = [shrunk[i] for i in keep]
+    if report is not None:
+        after = _row_tokens(out)
+        report.update(target_tokens=target, after_tokens=after, met=after <= target)
+        if after > target:
+            claude_only = {id(row) for _, row in unknown}
+            kinds = {"claude_code_rows": 0, "stored_kept": 0, "fluid_built": 0}
+            for row in out:
+                kind = ("claude_code_rows" if id(row) in claude_only
+                        else "fluid_built" if "handle" not in row else "stored_kept")
+                kinds[kind] += _row_tokens([row])
+            report["contributors"] = kinds
+
+
 def _checkpoint(
     out: list[dict[str, Any]], covers: list[int], shrunk: list[bool],
     note: dict[str, Any] | None, nodes: list[SessionNode],
@@ -1019,8 +1096,9 @@ def _checkpoint(
     history (#685). The cut is the last compacted row, moved later until no
     later row stands for an older stored node and no tool call is left open,
     so nothing is replayed twice and every call keeps its result. Empty when
-    nothing was compacted, the rows would not validate, or they are larger
-    than ``CHECKPOINT_MAX_CHARS``.
+    nothing was compacted; ``{"skipped": reason}`` when the rows would not
+    validate or are larger than ``CHECKPOINT_MAX_CHARS`` (the caller says so:
+    a re-seed elsewhere then starts from the full path, sized by its guard).
     """
     compacted_at = [i for i, flag in enumerate(shrunk) if flag]
     if not compacted_at:
@@ -1047,10 +1125,11 @@ def _checkpoint(
             for row in _alternate(([note] if note else []) + out[: cut + 1])]
     try:
         validate_rows(rows, handles=False)
-    except ValueError:
-        return {}
-    if len(json.dumps(rows, ensure_ascii=False)) > CHECKPOINT_MAX_CHARS:
-        return {}
+    except ValueError as exc:
+        return {"skipped": f"rows do not validate ({exc})"}
+    size = len(json.dumps(rows, ensure_ascii=False))
+    if size > CHECKPOINT_MAX_CHARS:
+        return {"skipped": f"{size} chars, over the {CHECKPOINT_MAX_CHARS} limit"}
     return {"through": nodes[through].node_id, "rows": rows}
 
 
