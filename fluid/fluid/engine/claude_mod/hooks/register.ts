@@ -119,6 +119,14 @@ export const register: Register = (on) => {
         reason = 'invalid bridge response'
         const answer = compactionAnswer(JSON.parse(response.text), rows)
         if ('messages' in answer) return answer
+        if ('fallback' in answer) {
+          // The host's emergency compaction at the context limit: Fluid freed
+          // nothing, so Claude Code's summarizer stands in, whatever the trigger.
+          try {
+            await $.ui.log(`Fluid compaction fallback: ${answer.fallback}`, { to: 'debug' })
+          } catch { /* Best effort. */ }
+          return next(e)
+        }
         // Nothing more to reclaim. Manual: an honest no-op. Automatic: the
         // context is at its limit, so Claude Code summarizes instead.
         if (!fallback) return answer

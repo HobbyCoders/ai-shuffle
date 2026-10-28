@@ -551,10 +551,13 @@ async def _on_turn_settled_impl(session_id: str, turn_id: str, outcome: str) -> 
         return
 
     # A finished owner turn adds its result to the owner working record. Not
-    # a boundary cut (stop_reason tool_use): that turn's work is not done,
-    # and auto-continue below resumes it after compaction. A long owner chat
-    # is never replaced by a new one; compaction owns its context limit.
-    if outcome == "completed" and terminal.get("stop_reason") != "tool_use":
+    # a context-limit cut (``needs_compaction``, or stop_reason tool_use from
+    # a CLI too old to report it): that turn's work is not done, and
+    # compact-then-continue below resumes it. A long owner chat is never
+    # replaced by a new one; compaction owns its context limit.
+    from app.core import compact_continue
+    if (outcome == "completed" and terminal.get("stop_reason") != "tool_use"
+            and not compact_continue.needs_compaction(terminal)):
         from app.core import working_record
         try:
             await asyncio.to_thread(working_record.record_completion, session_id, settled, outcome)

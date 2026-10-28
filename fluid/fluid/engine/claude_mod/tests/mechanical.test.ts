@@ -294,5 +294,25 @@ describe('mechanical compaction', () => {
     expect(() => compactionAnswer({ skip: 'x'.repeat(501) }, rows)).toThrow()
     expect(() => compactionAnswer({ skip: 1 }, rows)).toThrow()
     expect(() => compactionAnswer({ skip: 'both', messages: rows }, rows)).toThrow()
+    expect(compactionAnswer({ fallback: 'emergency' }, rows)).toEqual({ fallback: 'emergency' })
+    expect(() => compactionAnswer({ fallback: '' }, rows)).toThrow()
+    expect(() => compactionAnswer({ fallback: 'x'.repeat(501) }, rows)).toThrow()
+    expect(() => compactionAnswer({ fallback: 'both', messages: rows }, rows)).toThrow()
+    expect(() => compactionAnswer({ fallback: 'both', skip: 'both' }, rows)).toThrow()
+  })
+
+  test('the host\'s emergency fallback lets Claude Code summarize even a manual compaction', async ($, on) => {
+    let logs = 0
+    const calls = engine(on, () => { logs++ })
+    mock.env(on, ENV)
+    mock.clock(on, { now: 0 })
+    on('http.fetch', () => ({
+      value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ fallback: 'emergency at the context limit' }) },
+    }))
+    await $.session.start(START)
+    const event = { trigger: 'manual' as const, messages: ROWS }
+    expect(await $.session.compact(event)).toEqual({ messages: ROWS })
+    expect(calls).toEqual([event])
+    expect(logs).toBe(1)
   })
 })

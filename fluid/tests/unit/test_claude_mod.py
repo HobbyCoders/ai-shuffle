@@ -135,9 +135,15 @@ def test_a_manual_compaction_never_falls_back_to_the_summarizer() -> None:
     catch = init[init.index("} catch {"):]
     assert "return next(e)" not in catch
     assert "fallback ? next(e)" in catch and "const fallback = e.trigger === 'auto'" in catch
-    # Outside the subagent pass-through, every next(e) in the mounted part is
-    # behind the automatic-only fallback.
-    calls = re.findall(r"[^\n]*next\(e\)[^\n]*", mounted)
+    # The one exception: the host's own emergency answer (``{"fallback"}``),
+    # which the bridge sends only for an emergency compaction at the context
+    # limit, never for one the owner started. Pin that block exactly, then
+    # require every other next(e) to be behind the automatic-only fallback.
+    emergency = mounted[mounted.index("if ('fallback' in answer) {"):]
+    emergency = emergency[:emergency.index("\n        }\n") + len("\n        }\n")]
+    assert emergency.count("next(e)") == 1 and "return next(e)" in emergency
+    rest = mounted.replace(emergency, "")
+    calls = re.findall(r"[^\n]*next\(e\)[^\n]*", rest)
     assert calls and all("agentId" in c or "fallback ? next(e)" in c for c in calls), calls
 
 
