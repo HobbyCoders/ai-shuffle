@@ -1,27 +1,20 @@
-"""Durable wakeups + the idle-at-edge watchdog.
+"""Durable wakeups.
 
-Two problems this module solves, both facets of the edge-of-context stall where
-the Claude Code CLI cuts a turn silently at the compaction boundary and the session
-parks forever because no next turn arrives:
+:func:`schedule` persists the wake to ``pending_wakeups`` first, so an app
+restart does not drop it, and :func:`rehydrate_pending` re-arms this install's
+rows on boot. Firing is a *claim* (delete the row, then run) so a rehydrated
+timer and a peer install cannot double-fire — and because the claim is
+destructive, a submit that raises or refuses puts the row BACK with a
+backed-off ``fire_at`` instead of dropping the wake on the floor.
 
-1. **Durable wakeups.** :func:`schedule` persists the wake to
-   ``pending_wakeups`` first, so an app restart does not drop it, and
-   :func:`rehydrate_pending` re-arms this install's rows on boot. Firing is a
-   *claim* (delete the row, then run) so a rehydrated timer and a peer install
-   cannot double-fire — and because the claim is destructive, a submit that
-   raises or refuses puts the row BACK with a backed-off ``fire_at`` instead of
-   dropping the wake on the floor.
-
-2. **Idle-at-edge watchdog.** :func:`scan_once` (run on a timer by
-   :func:`watchdog_loop`) finds sessions sitting IDLE above the context-window
-   edge and arms a wake through the SAME wakeup machinery. For a Claude Code
-   session the wake is a ``/compact`` command, which the CLI carries out at
-   once: a plain new turn compacts nothing until the context crosses the CLI's
-   own threshold (well above this watchdog's fraction on a 1M window), so the
-   old nudge announced a compaction that never ran (#1820). Other sessions get
-   the plain continuation nudge. The belt-and-braces backstop that covers the
-   cases the opt-in ScheduleWakeup and the turn scheduler's boundary
-   auto-continue miss.
+The idle-at-edge watchdog that used to live here (a periodic sweep that sent
+bare ``/compact`` turns to idle sessions near the context limit) is retired. A
+turn the context limit cuts off now reports it (``needs_compaction``) and the
+turn scheduler compacts and continues that work directly
+(:mod:`app.core.compact_continue`). An idle session needs nothing: Claude Code
+compacts before the request of its next turn, and native sessions before
+every request. Rows the old watchdog left behind are dropped at boot
+(:data:`RETIRED_SOURCES`).
 
 A wake does NOT run a query of its own. :func:`_fire` enrolls the prompt in the
 v2 turn queue (``await turn_manager.submit_async(..., source="wakeup")``), so the wake goes
@@ -43,9 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 import uuid
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -53,35 +44,6 @@ from app.core.config import settings
 from app.db import wakeups as wakeups_db
 
 logger = logging.getLogger(__name__)
-
-# The nudge a watchdog wake fires for a session that is not Claude Code's.
-# Honest + explicitly labeled so it never reads as a human instruction when it
-# renders in chat. It is only a new turn: it claims no compaction, because
-# nothing here asks the provider for one. The wording steers a session with
-# nothing left to do toward a quiet stop.
-WATCHDOG_NUDGE_PROMPT = (
-    "[auto-continue] This session was idle near the context-window limit. If "
-    "you had unfinished work, continue it exactly where you left off. If "
-    "everything is already complete, stop after a brief acknowledgement — do not "
-    "invent new work."
-)
-
-# The wake for a Claude Code session: the CLI's own command, sent bare. The
-# chat shows its "Context Compacted" card only when the CLI reports the
-# compaction, or a "Compaction failed" card with the CLI's reason.
-WATCHDOG_COMPACT_PROMPT = "/compact"
-
-
-def _watchdog_prompt(usage: Optional[Dict[str, Any]]) -> str:
-    """The wake for a session idle at the edge: ``/compact`` for Claude Code.
-
-    Only the Claude Code CLI reports ``isAutoCompactEnabled: true`` in its
-    context-usage breakdown (fluid's native legs report False and are skipped
-    before this), so that flag is what says the session runs the CLI.
-    """
-    if usage is not None and usage.get("isAutoCompactEnabled") is True:
-        return WATCHDOG_COMPACT_PROMPT
-    return WATCHDOG_NUDGE_PROMPT
 
 # Overdue-wake rehydrate stagger: on boot, wakes whose fire_at already passed are
 # re-armed a few seconds apart (capped) instead of all firing at once, so a long
@@ -126,41 +88,10 @@ _timers: "dict[str, asyncio.Task]" = {}
 # Strong refs for the (unexpected) idless row — same GC guard, no key.
 _anon_timers: "set[asyncio.Task]" = set()
 
-@dataclass
-class _WatchdogLatch:
-    """Per-session watchdog state, latched at the moment a nudge is armed.
-
-    ``fraction`` is the persisted usage fraction that triggered the nudge — a
-    later sweep only re-arms once the CURRENT fraction has visibly dropped
-    below it (compaction landed), not merely once the cooldown has elapsed.
-    ``count`` tracks lifetime nudges for this session (this process only);
-    once it hits :data:`_WATCHDOG_LIFETIME_CAP` the session is ``muted`` and
-    never re-nudged again until process restart.
-    """
-
-    monotonic_ts: float
-    fraction: float
-    count: int = 0
-    muted: bool = False
-
-
-# In-memory per-session latch for the watchdog: session_id -> _WatchdogLatch.
-# Bounds re-nudging a session whose compaction did not drop it back under the
-# fraction (rate AND count). Reset on process restart (at most one extra
-# nudge cycle per session after a restart — acceptable for a backstop).
-_watchdog_cooldown: "dict[str, _WatchdogLatch]" = {}
-
-# Required drop (as a fraction, e.g. 0.02 == 2 percentage points) between the
-# fraction latched at the last nudge and the current persisted fraction
-# before a session is eligible to be re-nudged. Guards against re-nudging a
-# session whose compaction was deferred and never actually landed.
-_WATCHDOG_DECREASE_EPSILON = 0.02
-
-# Max nudges armed for a single session over this process's lifetime. A
-# session that hits this cap is muted rather than nudged forever.
-_WATCHDOG_LIFETIME_CAP = 3
-
-_watchdog_task: "Optional[asyncio.Task]" = None
+#: ``pending_wakeups.source`` values no producer writes any more: the retired
+#: idle-at-edge watchdog's ``/compact`` nudges. A leftover row is dropped at
+#: boot instead of firing.
+RETIRED_SOURCES = frozenset({"idle_watchdog"})
 
 
 def _now_epoch() -> float:
@@ -216,23 +147,18 @@ def _session_api_user_id(session_id: Optional[str]) -> Optional[str]:
     return api_user_scope.session_api_user_id(database.get_session(session_id))
 
 
-async def _announce_dropped_wake(row: Dict[str, Any], reason: str) -> None:
-    """Tell the SESSION that a wake it was promised will never run.
+async def announce_note(
+    session_id: Optional[str], message: str, *, reason: str,
+    source: Optional[str], wakeup_id: Optional[str] = None,
+) -> None:
+    """Post a "nothing resumed by itself" note on the SESSION's own log.
 
-    The agent parked expecting to be woken, so without a note the session sits
-    silent until a human types something. The note is
-    an unfenced ``system`` frame on the session's own log — the same seam the
-    supervisor's teardown note uses — so the stall is visible where the user is
-    already looking. Strictly best-effort: never raises.
+    An unfenced ``system`` frame (the seam the supervisor's teardown note
+    uses), so the stall is visible where the user is already looking.
+    Strictly best-effort: never raises.
     """
-    session_id = row.get("session_id")
     if not session_id:
         return
-    message = (
-        "A scheduled wake-up for this session could not be started "
-        f"({reason}). Nothing resumed automatically — send a message to "
-        "continue."
-    )
     try:
         from app.core.turn_recorder import record_drained_event
 
@@ -242,14 +168,29 @@ async def _announce_dropped_wake(row: Dict[str, Any], reason: str) -> None:
             "data": {
                 "message": message,
                 "reason": reason,
-                "source": row.get("source"),
-                "wakeup_id": row.get("id"),
+                "source": source,
+                "wakeup_id": wakeup_id,
             },
         })
     except Exception:  # noqa: BLE001 — a note must never break the wake path.
         logger.debug(
             "wakeup drop note failed for session %s", session_id, exc_info=True
         )
+
+
+async def _announce_dropped_wake(row: Dict[str, Any], reason: str) -> None:
+    """Tell the SESSION that a wake it was promised will never run.
+
+    The agent parked expecting to be woken, so without a note the session sits
+    silent until a human types something.
+    """
+    await announce_note(
+        row.get("session_id"),
+        "A scheduled wake-up for this session could not be started "
+        f"({reason}). Nothing resumed automatically — send a message to "
+        "continue.",
+        reason=reason, source=row.get("source"), wakeup_id=row.get("id"),
+    )
 
 
 async def announce_removed_agent_once(row: Dict[str, Any], reason: str) -> None:
@@ -459,7 +400,7 @@ async def _fire(row: Dict[str, Any]) -> None:
 
     # The wake must run on the scheduling turn's effective model, not the
     # profile default — otherwise it re-primes the prompt cache on the wrong
-    # model. Rows without a model (e.g. idle_watchdog) keep the default path.
+    # model. Rows without a model keep the default path.
     model = row.get("model")
     overrides = {"model": model} if model else None
 
@@ -476,8 +417,7 @@ async def _fire(row: Dict[str, Any]) -> None:
             )
         else:
             # A wake runs as the key that owns the session, never as the owner:
-            # any key's agent can arm one (ScheduleWakeup) and the idle
-            # watchdog arms them on key sessions unasked.
+            # any key's agent can arm one (ScheduleWakeup).
             api_user_id = await asyncio.to_thread(_session_api_user_id, session_id)
             turn_id = await turn_manager.submit_async(
                 session_id,
@@ -775,8 +715,8 @@ async def schedule(
     """
     if source != "schedule_wakeup" and _session_user_stopped(session_id):
         # No SERVER-originated producer arms a wake on a session the user
-        # stopped — the idle watchdog above all, which exists precisely to nudge
-        # quiet sessions back to work. Any outstanding row for the source is
+        # stopped (a usage-limit resume, a hand-off resume). Any outstanding
+        # row for the source is
         # still dropped, so this never leaves a stale wake behind.
         # ``schedule_wakeup`` (the model's own tool, which returns the row to a
         # caller that reads its id) is deliberately not refused here: it can
@@ -833,6 +773,16 @@ async def rehydrate_pending() -> int:
 
     now = _now_epoch()
     overdue = 0
+    retired = [row for row in rows if row.get("source") in RETIRED_SOURCES]
+    for row in retired:
+        try:
+            await asyncio.to_thread(wakeups_db.claim_wakeup, row.get("id"))
+        except Exception:  # noqa: BLE001 — a leftover row must never block boot.
+            logger.debug("wakeup rehydrate: could not drop retired row %s", row.get("id"),
+                         exc_info=True)
+    if retired:
+        logger.info("wakeup rehydrate: dropped %d wake(s) from retired producers", len(retired))
+    rows = [row for row in rows if row.get("source") not in RETIRED_SOURCES]
     for i, row in enumerate(rows):
         try:
             fire_at = float(row.get("fire_at") or 0.0)
@@ -851,134 +801,3 @@ async def rehydrate_pending() -> int:
             "install %s", len(rows), overdue, settings.effective_instance_id,
         )
     return len(rows)
-
-
-# ---------------------------------------------------------------------------
-# Idle-at-edge watchdog
-# ---------------------------------------------------------------------------
-
-def _watchdog_eligible(session_id: str, frac: float, now_monotonic: float) -> bool:
-    """True if ``session_id`` may be nudged again given the latched state.
-
-    A previously-nudged session is only eligible once BOTH: the cooldown has
-    elapsed, AND the current fraction has dropped at least
-    :data:`_WATCHDOG_DECREASE_EPSILON` below the fraction latched at the last
-    nudge (compaction visibly landed). A muted session (lifetime cap reached)
-    is never eligible again.
-    """
-    latch = _watchdog_cooldown.get(session_id)
-    if latch is None:
-        return True
-    if latch.muted:
-        return False
-    if (now_monotonic - latch.monotonic_ts) < settings.idle_watchdog_cooldown_seconds:
-        return False
-    if frac > latch.fraction - _WATCHDOG_DECREASE_EPSILON:
-        logger.info(
-            "idle-watchdog: session %s still at %.1f%% after nudge (no decrease "
-            "observed) — holding",
-            session_id, frac * 100.0,
-        )
-        return False
-    return True
-
-
-async def scan_once() -> List[str]:
-    """One idle-at-edge sweep. Returns the session ids nudged this pass.
-
-    For each structurally-eligible candidate (idle, active, snapshot present, no
-    live turn, no pending wakeup — :func:`db.wakeups.idle_edge_candidates`) that
-    has autocompaction enabled, is over the configured context fraction, off
-    cooldown, has visibly dropped fraction since its last nudge (or was never
-    nudged), and has not hit its lifetime nudge cap, arm ONE synthetic nudge
-    through the durable wakeup machinery.
-    """
-    from app.core import compact_continue
-
-    nudged: List[str] = []
-    try:
-        candidates = await asyncio.to_thread(
-            wakeups_db.idle_edge_candidates,
-            settings.effective_instance_id,
-            "active",
-            settings.idle_watchdog_max_idle_seconds,
-        )
-    except Exception:  # noqa: BLE001 — the loop must survive a bad scan.
-        logger.exception("idle-watchdog: candidate scan failed")
-        return nudged
-
-    now_monotonic = time.monotonic()
-    fraction_gate = settings.idle_watchdog_context_fraction
-    for cand in candidates:
-        session_id = cand.get("id")
-        if not session_id:
-            continue
-        # A blocking DB read per candidate: keep it off the event loop, which
-        # stalled long enough under disk pressure to fail readiness (#2112).
-        usage = await asyncio.to_thread(compact_continue._persisted_usage, session_id)
-        # No autocompaction → no compaction edge to nudge past: fluid's native
-        # legs trim instead of autocompacting and always report False. Mirrors
-        # the same guard in compact_continue.usage_over_threshold.
-        if usage is not None and usage.get("isAutoCompactEnabled") is False:
-            continue
-        frac = compact_continue.usage_fraction(usage)
-        if frac is None or frac < fraction_gate:
-            continue
-        if not _watchdog_eligible(session_id, frac, now_monotonic):
-            continue
-        logger.info(
-            "idle-watchdog: session %s idle at %.1f%% context (>= %.0f%%) — "
-            "arming synthetic nudge",
-            session_id, frac * 100.0, fraction_gate * 100.0,
-        )
-        try:
-            await schedule(
-                session_id=session_id,
-                profile_id=cand.get("profile_id"),
-                project_id=cand.get("project_id"),
-                prompt=_watchdog_prompt(usage),
-                delay_seconds=0.0,
-                reason="idle-at-edge watchdog (#598)",
-                source="idle_watchdog",
-            )
-        except Exception:  # noqa: BLE001 — one bad arm must not abort the sweep.
-            logger.exception(
-                "idle-watchdog: failed to arm nudge for session %s", session_id
-            )
-            continue
-        prev_count = _watchdog_cooldown.get(session_id)
-        count = (prev_count.count if prev_count else 0) + 1
-        muted = count >= _WATCHDOG_LIFETIME_CAP
-        _watchdog_cooldown[session_id] = _WatchdogLatch(
-            monotonic_ts=now_monotonic, fraction=frac, count=count, muted=muted,
-        )
-        if muted:
-            logger.info(
-                "idle-watchdog: session %s reached lifetime nudge cap (%d) — "
-                "muting",
-                session_id, _WATCHDOG_LIFETIME_CAP,
-            )
-        nudged.append(session_id)
-    return nudged
-
-
-async def watchdog_loop() -> None:
-    """Periodic idle-at-edge sweep (started by ``startup.start_background_tasks``)."""
-    interval = max(30, int(settings.idle_watchdog_interval_seconds))
-    # Let boot settle (and rehydrate finish) before the first sweep.
-    await asyncio.sleep(min(30, interval))
-    while True:
-        try:
-            nudged = await scan_once()
-            if nudged:
-                logger.info(
-                    "idle-watchdog: armed %d nudge(s) this sweep", len(nudged)
-                )
-        except asyncio.CancelledError:
-            break
-        except Exception:  # noqa: BLE001
-            logger.exception("idle-watchdog sweep failed")
-        try:
-            await asyncio.sleep(interval)
-        except asyncio.CancelledError:
-            break

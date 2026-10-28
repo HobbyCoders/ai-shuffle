@@ -988,6 +988,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # A manual compaction this turn that Fluid answered as a no-op:
         # nothing more could be reclaimed, so the conversation stays as it is.
         self._compact_noop = False
+        # This turn is the host's emergency compaction (UserTurn
+        # ``emergency_compaction``): a Fluid no-op falls back to Claude Code.
+        self._turn_emergency_compaction = False
         # Claude Code's replay of compacted rows, told from new work (#679).
         self._replays = ReplayFilter()
         # The portable form of the last compaction this leg answered, with
@@ -1670,8 +1673,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         reason}`` when it could not (:class:`NothingToCompact`): the mod
         leaves a manual compaction as it is (an honest no-op, never Claude
         Code's summarizer) and lets an automatic one at the context limit
-        fall back to Claude Code. ``ValueError`` (a 400) for a request or
-        rows that do not validate.
+        fall back to Claude Code. The host's emergency compaction (a
+        ``/compact`` it sent for a turn the context limit cut off, after
+        Fluid's own reclaimed nothing) answers ``{"fallback": reason}``
+        instead: Claude Code's summarizer may stand in, as for an automatic
+        one. ``ValueError`` (a 400) for a request or rows that do not
+        validate.
         """
         if (not self._compaction_route or not isinstance(body, dict)
                 or type(body.get("v")) is not int or body["v"] != 1
@@ -1707,6 +1714,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # The reason is a fixed phrase, never message content.
             if trigger == "auto":
                 logger.info("claude mod compaction fell back to the CLI summarizer: %s", exc)
+            elif trigger == "manual" and self._turn_emergency_compaction:
+                logger.info("emergency compaction at the context limit: Fluid has nothing "
+                            "more to compact; Claude Code's summarizer stands in")
+                return {"fallback": NOTHING_TO_COMPACT}
             else:
                 self._compact_noop = True
                 logger.info("claude mod compaction (%s): nothing more to compact; "
@@ -2129,6 +2140,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             ))
             self._journal_turn_start(content)
             self._turn_compact_requested = _is_compact_command(content)
+            self._turn_emergency_compaction = (
+                self._turn_compact_requested and bool(getattr(op, "emergency_compaction", False))
+            )
             self._turn_compactions = 0
             self._turn_compact_error = None
             self._compact_noop = False
@@ -2269,6 +2283,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # host handles it like the same status from any provider.
                 status=mapper.failed_status,
                 provider_message=mapper.failed_provider_message,
+                # The CLI stopped at the context limit: the host compacts and
+                # continues the work instead of leaving it cut off.
+                outcome=mapper.failed_outcome,
             ))
             return mapper
         return mapper

@@ -889,45 +889,13 @@ class Settings(BaseSettings):
     # PR 2: migrate this area-owned legacy behaviour field.
     prompt_full_replace: bool = True
 
-    # Auto-continue an autonomous turn cut at the autocompact boundary. The
-    # Claude Code CLI ends the agentic loop when the NEXT turn would cross the
-    # autocompact threshold and DEFERS compaction to the start of the next
-    # query without surfacing it, so from the app's side the turn just ends mid-task with
-    # ``stop_reason == "tool_use"`` and the session sits silent until a human
-    # sends a message. When ON, the server detects that boundary cut at turn end
-    # and spawns ONE continuation query so the CLI compacts and the model
-    # resumes. ON by default. Set via
-    # AUTO_CONTINUE_ON_COMPACT. See app.core.compact_continue.
+    # Compact, then continue, a turn the context limit cut off. When a
+    # delegated (Claude Code) turn stops because its conversation no longer
+    # fits, the engine reports ``needs_compaction`` and the scheduler queues a
+    # Fluid compaction followed by ONE continuation of the unfinished work. ON
+    # by default. Set via AUTO_CONTINUE_ON_COMPACT. See app.core.compact_continue.
     # PR 2: migrate this area-owned legacy behaviour field.
     auto_continue_on_compact: bool = True
-
-    # Idle-at-edge watchdog. Belt-and-braces backstop for the edge-of-
-    # context stall: a periodic sweep finds sessions that sit IDLE (no in-flight
-    # turn) with context usage above ``idle_watchdog_context_fraction`` of the
-    # window and, via the durable wakeup machinery, fires ONE synthetic nudge turn
-    # — a real new turn is what makes the CLI run its deferred lazy compaction.
-    # ON by default. Kill switch: IDLE_WATCHDOG_ENABLED=false.
-    # PR 2: migrate this area-owned legacy behaviour field.
-    idle_watchdog_enabled: bool = True
-    # Sweep cadence. Also the effective idle grace: a session must still be idle
-    # (and over the fraction) at a scan tick to be nudged.
-    # PR 2: migrate this area-owned legacy behaviour field.
-    idle_watchdog_interval_seconds: int = 300
-    # Context-window fraction (totalTokens / maxTokens) at/above which an idle
-    # session is treated as "at the edge".
-    # PR 2: migrate this area-owned legacy behaviour field.
-    idle_watchdog_context_fraction: float = 0.85
-    # Per-session cooldown after a watchdog nudge, so a session whose compaction
-    # does not drop it back under the fraction is not re-nudged every tick.
-    # PR 2: migrate this area-owned legacy behaviour field.
-    idle_watchdog_cooldown_seconds: int = 1800
-    # How recently a session must have been touched (``sessions.updated_at``)
-    # to still count as a watchdog candidate. ``status='active'`` is sticky, so
-    # without this gate a session abandoned months ago near the context edge
-    # would stay eligible forever and draw a fresh nudge turn after every restart.
-    # Default 24h. Set to 0 to disable the gate. Env: IDLE_WATCHDOG_MAX_IDLE_SECONDS.
-    # PR 2: migrate this area-owned legacy behaviour field.
-    idle_watchdog_max_idle_seconds: int = 86400
 
     # ── Monitor guardrails (background shells) ────────────────────────────
     #

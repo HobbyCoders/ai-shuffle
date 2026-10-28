@@ -187,10 +187,13 @@ async def test_once_wake_keeps_existing_compact_before_resume(stopped_chat, monk
     await lr.arm("once-chat", turn["id"])
     [row] = wakeups.get_session_wakeups("once-chat", lr.LIMIT_RESUME_SOURCE)
     assert wakeups.claim_wakeup(row["id"]) is True
-    submit = AsyncMock(side_effect=["compact-turn", "resume-turn"])
+    submit = AsyncMock(return_value="resume-turn")
     monkeypatch.setattr("app.core.turn_manager.submit_async", submit)
     assert await lr.fire(row) == "resume-turn"
-    assert [call.kwargs["prompt"] for call in submit.await_args_list] == [lr.COMPACT_PROMPT, lr.RESUME_PROMPT]
+    # One atomic Compact-first admission: the compaction, then the resume.
+    [call] = submit.await_args_list
+    assert call.kwargs["prompt"] == lr.RESUME_PROMPT
+    assert call.kwargs["payload"]["compact_first"] is True
     assert (await lr.state("once-chat"))["armed"] is False
     with pytest.raises(ValueError, match="already handled"):
         await lr.arm("once-chat", turn["id"])

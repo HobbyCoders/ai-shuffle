@@ -53,10 +53,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 #: ``turns.source`` stamped on a worker's turn. Server-originated (like
-#: ``automation``): it is NOT in ``turn_scheduler._USER_SOURCES``, so it never
-#: re-arms the auto-continue latch, and a dead-lease reap aborts it rather than
-#: re-queueing it (``turns.reap_expired``) — a stranded worker must fail, not
-#: silently restart.
+#: ``automation``): a dead-lease reap aborts it rather than re-queueing it
+#: (``turns.reap_expired``) — a stranded worker must fail, not silently
+#: restart.
 WORKER_TURN_SOURCE = "provider_agent"
 
 #: ``sessions.status`` stamped on a WORKER session whose dispatch ended in the
