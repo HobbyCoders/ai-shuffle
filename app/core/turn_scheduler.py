@@ -489,7 +489,7 @@ async def _on_turn_settled_impl(session_id: str, turn_id: str, outcome: str) -> 
         from app.core import working_record
         try:
             await asyncio.to_thread(working_record.record_completion, session_id, settled, outcome)
-        except Exception:  # noqa: BLE001 — the record never blocks settlement
+        except Exception:  # the record never blocks settlement
             logger.warning("turn_scheduler: working-record completion failed for %s",
                            session_id, exc_info=True)
 

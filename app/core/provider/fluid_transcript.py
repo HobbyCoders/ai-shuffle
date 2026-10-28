@@ -2060,9 +2060,8 @@ def _append_archive(sdk_session_id: str, archive: Sequence[Dict[str, str]]) -> N
     client first; a fork's session is new), so nothing else numbers events
     for this session meanwhile; a collision anyway retries on the next seq.
     """
-    from psycopg2.extras import Json
-
     from fluid.events.model import ContextArchived, event_to_dict
+    from psycopg2.extras import Json
 
     from app.core.pg_session_store import _scrub_pg_illegal
     from app.db.base import get_cursor, get_db

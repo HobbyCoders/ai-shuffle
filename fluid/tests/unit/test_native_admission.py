@@ -132,7 +132,7 @@ async def test_an_irreducible_request_is_refused_not_sent(tmp_path, monkeypatch)
     try:
         nodes = [_node("node_a1", "assistant", [ToolUseBlock(
             id="c1", name="Write", input={"content": "w" * 600_000})])]
-        promotions, refusal = loop._admission_promotions(
+        _, refusal = loop._admission_promotions(
             nodes, overhead_tokens=0, measured=None, measured_current=False,
         )
         assert refusal and "cannot fit" in refusal
