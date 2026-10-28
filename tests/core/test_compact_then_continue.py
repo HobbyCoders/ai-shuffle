@@ -265,6 +265,19 @@ async def test_never_beside_a_parked_turn(mock_db, execute):
     assert _queued_pair_rows("c13") == []
 
 
+async def test_never_beside_another_parked_message_continuation(mock_db, execute, notes):
+    # The cut turn itself is not parked, but a SendMessage continuation parked
+    # earlier in the same session is: starting the pair would run a turn beside
+    # it (#123), so none is admitted and the chat says why.
+    parked = turns_db.enqueue_turn("c17", "agent_message", prompt="continue",
+                                   payload={"agent_message_reply_to": "parent"})
+    assert turns_db.start_turn(parked["id"], None, "runner") is not None
+    turns_db.park_turn(parked["id"], ["task-1"])
+    await _settle("c17", _cut_turn("c17", source="wakeup"))
+    assert _queued_pair_rows("c17") == []
+    notes.assert_awaited_once()
+
+
 # ─── compaction failures: bounded retry, then one emergency compaction ──────
 
 
@@ -316,6 +329,8 @@ async def test_a_failed_compaction_is_retried_then_made_an_emergency(mock_db, ex
     notes.assert_awaited_once()
     assert "context limit" in notes.await_args.args[1]
     assert "new chat" in notes.await_args.args[1]
+    # It errored rather than finding nothing: the note says it failed.
+    assert "failed" in notes.await_args.args[1]
     assert not any(c.args[0]["id"] == cont["id"] for c in execute.await_args_list)
 
 
@@ -366,6 +381,8 @@ async def test_an_emergency_no_op_drops_at_the_limit(mock_db, execute, notes):
     dropped = turns_db.get_turn(cont["id"])
     assert dropped["state"] == "aborted" and dropped["stop_reason"] == "context_limit"
     notes.assert_awaited_once()
+    assert "could not free any room" in notes.await_args.args[1]
+    assert "failed" not in notes.await_args.args[1]
     # Never a third compaction.
     assert all(t["state"] != "queued" for t in turns_db.get_queued_turns("c15"))
 

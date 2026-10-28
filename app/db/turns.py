@@ -1364,6 +1364,20 @@ def list_stalled_parked_turns(min_parked_seconds: int) -> List[Dict[str, Any]]:
         return _rows(cursor.fetchall() or [])
 
 
+def has_parked_message_continuation(session_id: str) -> bool:
+    """Whether the session holds a parked SendMessage continuation: a
+    ``parked`` turn carrying ``agent_message_reply_to``. A turn started beside
+    one is what cost a continued worker its parent (#123)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM turns WHERE session_id=%s AND state='parked' "
+            "AND payload ->> 'agent_message_reply_to' IS NOT NULL LIMIT 1",
+            (session_id,),
+        )
+        return cursor.fetchone() is not None
+
+
 def latest_reply_to_turn(
     session_id: str, owner: str, *, before_position: float,
 ) -> Optional[Dict[str, Any]]:

@@ -234,3 +234,17 @@ def test_threshold_tracks_the_cli_compaction_point():
     assert fluid_transcript.reseed_compaction_threshold(200_000) == 167_000
     # A small window never compacts below half of it.
     assert fluid_transcript.reseed_compaction_threshold(20_000) == 10_000
+
+
+def test_images_count_at_a_fixed_cost_not_their_base64_size():
+    """A screenshot's base64 data is not text the model reads: counted as
+    text, a few images would push a small transcript over the threshold."""
+    shot = {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                        "data": "A" * 400_000}}
+    entries = [
+        {"message": {"role": "user", "content": [{"type": "text", "text": "look"}, shot]}},
+        {"message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1",
+                                                   "content": [shot]}]}},
+    ]
+    tokens = fluid_transcript._estimated_tokens(entries)
+    assert 2 * fluid_transcript._RESEED_IMAGE_TOKENS <= tokens < 2 * fluid_transcript._RESEED_IMAGE_TOKENS + 200

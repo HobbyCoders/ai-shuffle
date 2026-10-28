@@ -860,9 +860,19 @@ async def _maybe_auto_continue(
     if not compact_continue.needs_compaction(terminal):
         return False
     if settled.get("state") == "parked":
-        # Parked work continues through its unpark wake. A second turn started
-        # beside a parked SendMessage continuation is what cost a worker its
+        # Parked work continues through its unpark wake.
+        return False
+    if await asyncio.to_thread(turns_db.has_parked_message_continuation, session_id):
+        # A second turn started beside a parked SendMessage continuation (any
+        # turn of the session, not only the cut one) is what cost a worker its
         # parent (#123), so a pair is never admitted beside one.
+        logger.info(
+            "turn_scheduler: %s stopped at the context limit beside a parked "
+            "SendMessage continuation — no compact-then-continue pair", session_id,
+        )
+        await _announce_paused_continuation(
+            session_id, "a parked agent-message continuation is waiting in this chat",
+        )
         return False
 
     link = (settled.get("payload") or {}).get(compact_continue.PAYLOAD_KEY) or {}
@@ -938,18 +948,24 @@ async def _announce_paused_continuation(session_id: str, reason: str) -> None:
     )
 
 
-async def _announce_context_limit(session_id: str) -> None:
-    """Say on the session that even the emergency compaction freed nothing:
-    the chat is at its context limit and what the owner can do."""
+async def _announce_context_limit(session_id: str, *, failed: bool = False) -> None:
+    """Say on the session that the emergency compaction did not compact:
+    it freed nothing, or it failed (``failed``), and what the owner can do."""
     from app.core import wakeup_service
 
+    why = (
+        "the emergency compaction failed before it could free any room"
+        if failed else
+        "even the emergency compaction could not free any room"
+    )
     await wakeup_service.announce_note(
         session_id,
-        "This chat is at its context limit: the work stopped there, and neither "
-        "Fluid's compaction nor Claude Code's summary could free any room, so it "
-        "did not continue by itself. To carry on, send a short message saying "
-        "what to do next, or start a new chat and hand the work over to it.",
-        reason="context_limit", source="auto_continue",
+        f"This chat is at its context limit: the work stopped there, and {why}, "
+        "so it did not continue by itself. To carry on, send a short message "
+        "saying what to do next (or ask for a compaction again), or start a new "
+        "chat and hand the work over to it.",
+        reason="context_limit_failed" if failed else "context_limit",
+        source="auto_continue",
     )
 
 
@@ -1000,7 +1016,12 @@ async def _gate_continuation(session_id: str, row: Dict[str, Any]) -> bool:
         "turn_scheduler: continuation %s of %s not started (%s)", row["id"], session_id, reason,
     )
     if removed is not None and verdict == "limit":
-        await _announce_context_limit(session_id)
+        compact_id = row["payload"].get("compact_before_turn_id") or ""
+        result = (
+            await asyncio.to_thread(_compaction_result, session_id, compact_id)
+            if compact_id else "failed"
+        )
+        await _announce_context_limit(session_id, failed=result == "failed")
     elif removed is not None and verdict != "owner":
         # A message from the owner already resumes the work; otherwise say why
         # nothing did.

@@ -1961,13 +1961,35 @@ def reseed_compaction_threshold(context_window: int) -> int:
     return max(window // 2, window - reserve - _CLI_AUTOCOMPACT_BUFFER_TOKENS)
 
 
+#: What one image costs the model, whatever its encoded size: base64 data
+#: counted as text would make a few screenshots look like a full window.
+_RESEED_IMAGE_TOKENS = 2_000
+
+
+def _without_images(value: Any, images: List[int]) -> Any:
+    """``value`` with every image block replaced by a marker, counting them
+    in ``images`` (tool results nest them inside their ``content``)."""
+    if isinstance(value, list):
+        return [_without_images(item, images) for item in value]
+    if isinstance(value, dict):
+        if value.get("type") == "image":
+            images[0] += 1
+            return {"type": "image"}
+        return {key: _without_images(item, images) for key, item in value.items()}
+    return value
+
+
 def _estimated_tokens(entries: Sequence[Dict[str, Any]]) -> int:
     """A conservative token estimate of what the entries hand the CLI."""
+    images = [0]
     chars = sum(
-        len(json.dumps((entry.get("message") or {}).get("content"), ensure_ascii=False))
+        len(json.dumps(
+            _without_images((entry.get("message") or {}).get("content"), images),
+            ensure_ascii=False,
+        ))
         for entry in entries
     )
-    return chars // _RESEED_CHARS_PER_TOKEN
+    return chars // _RESEED_CHARS_PER_TOKEN + images[0] * _RESEED_IMAGE_TOKENS
 
 
 def delegated_window_for(sdk_session_id: str) -> int:

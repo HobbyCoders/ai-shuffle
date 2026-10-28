@@ -24,7 +24,11 @@ Invariants (shared with tier 1, enforced here):
   stored SessionNodes keep full fidelity (rewind/fork/audit/recall see
   everything).
 * **Errors survive verbatim.** Tier 1 never trims error results; tiers 2/3
-  carry error text verbatim (capped) inside digests.
+  carry error text verbatim (capped) inside digests. The one exception is the
+  native engine's admission check (``NativeLoop._admission_promotions``): a
+  request that still cannot fit the window after the ladder may cut even an
+  error result to its opening plus an exact ``HistoryExpand`` ref, rather than
+  send an over-window request.
 * **Fork-safe.** A promotion applies only when both its boundary nodes sit on
   the currently rendered path (the parent chain is unique, so the interval is
   then identical to the one promoted). Off-path promotions are silently inert.

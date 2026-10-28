@@ -60,6 +60,9 @@ export const register: Register = (on) => {
   // original event), so a chat can never overflow; a manual one (/compact,
   // the app's Compact) never does: when Fluid has nothing more to reclaim or
   // cannot be reached it is skipped, and the conversation stays as it is.
+  // One deliberate exception: the host's own emergency compaction after a
+  // context-limit cut that Fluid could not shrink. The bridge answers it with
+  // {"fallback"}, and only then does a manual-trigger compaction summarize.
   // Precompute is skipped so it cannot spend a summarizer request ahead of
   // the threshold. Subagents always pass through untouched.
   on('session.compact', async ($, e, next) => {

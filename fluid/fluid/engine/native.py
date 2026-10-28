@@ -3828,9 +3828,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                 rendered = self._compactor.view(nodes)
             # Admission: fitting the window is a postcondition of compaction,
             # never left to a provider rejection some providers never send.
+            # Re-checked: a ladder that just rewrote the view makes the
+            # measurement stale, and a stale one may only lower the estimate.
             admitted, refusal = self._admission_promotions(
                 nodes, overhead_tokens=overhead_tokens, measured=measured_prompt,
-                measured_current=measured_current,
+                measured_current=measured_current and self._measured_is_current(sid),
             )
             if admitted:
                 promotions.extend(admitted)
@@ -4658,7 +4660,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         window = self.context_window
         if not window:
             return [], None
-        limit = window - (self.max_tokens or _DEFAULT_OUTPUT_RESERVE)
+        # The compactor's clamp (``derive_trigger_tokens``): a small window
+        # cannot reserve a full default output budget, or a 32k local model
+        # would be refused on its very first request.
+        reserve = min(self.max_tokens or _DEFAULT_OUTPUT_RESERVE, window // 4)
+        limit = window - reserve
         estimate = self._compactor.last_decision.get("before_tokens")
         scale = measurement_scale(
             measured, float(estimate or 0), current=measured_current,

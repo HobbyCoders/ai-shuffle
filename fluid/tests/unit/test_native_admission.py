@@ -140,6 +140,23 @@ async def test_an_irreducible_request_is_refused_not_sent(tmp_path, monkeypatch)
         await loop.aclose()
 
 
+async def test_a_small_window_without_max_tokens_still_admits_its_first_request(tmp_path) -> None:
+    """A 32k local model with no explicit max_tokens: the default output
+    reserve is clamped to a quarter of the window, as the compactor does, so
+    a small request is not refused against a near-zero limit."""
+    loop = NativeLoop(
+        provider=_Provider(0), store=JsonlStore(tmp_path), model="m",
+        context_window=32_768, compaction=CompactionConfig(),
+    )
+    try:
+        nodes = [_node("node_u1", "user", [Text("hello " * 500)])]
+        assert loop._admission_promotions(
+            nodes, overhead_tokens=8_000, measured=None, measured_current=False,
+        ) == ([], None)
+    finally:
+        await loop.aclose()
+
+
 async def test_a_current_measurement_counts_toward_admission(tmp_path) -> None:
     """chars/4 says it fits; the provider measured the same view at the
     window. A current measurement wins."""

@@ -891,6 +891,22 @@
           "past_bug": "#559: the bundled MCP bridge dropped the subagent caller identity."
         },
         {
+          "id": "harness-basics.compaction-limit-continues",
+          "check": "A long Claude turn cut off at the context limit compacts and carries on once",
+          "kind": "owner",
+          "how": "On a disposable candidate worker, start a throwaway Claude chat with a small context limit (about 60k) and give it a long autonomous task that keeps reading large files until the CLI stops at the limit. Do not send anything while it runs. Read the chat's turns and events afterwards. Then repeat with the queue holding a short owner message sent just before the cut. Archive the throwaway chats.",
+          "pass_when": "The cut turn's turn.completed carries terminal_reason needs_compaction. Exactly one compaction and one labelled [auto-continue] continuation follow it, the compaction card shows Fluid (not the summarizer), and the work resumes where it stopped. A second cut in the continuation gets its own single pair. With an owner message queued, no automatic pair is made and the owner message resumes the work. No new chat is created and no idle /compact turn appears.",
+          "past_bug": "Long chats were retired into a new chat at 80% before compaction ran, and the old stop_reason tool_use continuation never fired, so cut-off work sat silent."
+        },
+        {
+          "id": "harness-basics.compaction-reseed-fits",
+          "check": "Switching a compacted native chat to Claude starts Claude from the compacted state",
+          "kind": "owner",
+          "how": "On a disposable candidate worker, run a throwaway no-project chat on a native model (GPT or OpenRouter) until Fluid compacts it at least once, note the native context size, then switch the model to Claude and send one message. Read the first Claude call's usage and the chat's compaction events, then ask the model to HistorySearch a distinctive string from before the compaction. Archive the throwaway chat.",
+          "pass_when": "The first Claude call's input (cache creation plus read) is close to the native compacted size and under the Claude window, never the whole uncompacted history. HistorySearch finds the earlier string. The chat stays the same chat at any usage; no coordinator hand-off note appears.",
+          "past_bug": "A GPT-to-Opus switch re-seeded Claude Code with 446k tokens on a 400k window because the re-seed ignored native compactions, and the 80% hand-off then moved the chat to a new one."
+        },
+        {
           "id": "harness-basics.composer-suggestion-user-voice",
           "check": "Suggested next reply is written as the user, not the agent",
           "kind": "browser",
