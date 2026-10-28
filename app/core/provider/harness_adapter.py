@@ -352,6 +352,9 @@ class HarnessAdapter(ProviderAdapter):
         # Fluid turn source for the next send_query/send_resume; see
         # set_turn_source. Reset to "user" after each submit.
         self._next_turn_source: str = "user"
+        # The next submit is the host's emergency compaction at the context
+        # limit (set_emergency_compaction). Reset after each submit.
+        self._next_emergency_compaction = False
         # Only observed model output acknowledges an Away transition. Merely
         # rendering a note, accepting a submit or compacting must not consume it.
         self._pending_away_note: str | None = None
@@ -1770,6 +1773,7 @@ class HarnessAdapter(ProviderAdapter):
             await self._engine.submit(UserTurn(
                 content=cast(Any, content), source=source,
                 context_pin=self._memory_context_pin(content),
+                emergency_compaction=self._take_emergency_compaction(),
             ))
         except BaseException:
             self._memory_initial_task = task_before
@@ -1798,6 +1802,20 @@ class HarnessAdapter(ProviderAdapter):
     def _take_turn_source(self) -> str:
         source, self._next_turn_source = self._next_turn_source, "user"
         return source
+
+    def set_emergency_compaction(self, emergency: bool) -> None:
+        """Mark the next submit as the host's emergency compaction.
+
+        A ``/compact`` the scheduler sends for a turn the context limit cut
+        off, after Fluid's own compaction reclaimed nothing: Claude Code's
+        summarizer may then stand in (owner rule: the summarizer is only
+        for an automatic compaction at the limit). Next submit only.
+        """
+        self._next_emergency_compaction = bool(emergency)
+
+    def _take_emergency_compaction(self) -> bool:
+        flag, self._next_emergency_compaction = self._next_emergency_compaction, False
+        return flag
 
     @staticmethod
     def _session_runs_as_owner(session_id: str) -> bool:
@@ -4656,6 +4674,10 @@ class HarnessAdapter(ProviderAdapter):
         if trigger == "manual" and self._compact_requested_by == "app":
             # The CLI reports any /compact as manual; this one the app sent.
             metadata["requested_by"] = "app"
+        if from_cli and getattr(event, "summary", ""):
+            # Claude Code's summarizer wrote this one (Fluid's own compaction
+            # carries no CLI summary): the record of which mechanism ran.
+            metadata["summarizer"] = True
         data: Dict[str, Any] = {"compact_metadata": metadata}
         seq = getattr(event, "seq", -1)
         sid = getattr(event, "session_id", None)

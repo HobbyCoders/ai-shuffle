@@ -134,6 +134,14 @@ def _compaction_result(session_id: str, compact_turn_id: str) -> str:
     ``"compacted"`` (a compaction boundary was recorded for it),
     ``"nothing"`` (Fluid had nothing more to reclaim — an honest no-op), or
     ``"failed"`` (anything else: an error, a refusal, an aborted turn)."""
+    return _compaction_outcome(session_id, compact_turn_id)[0]
+
+
+def _compaction_outcome(session_id: str, compact_turn_id: str) -> tuple[str, Optional[str]]:
+    """:func:`_compaction_result` plus the mechanism that compacted:
+    ``"claude_code"`` when the boundary's card says Claude Code's summarizer
+    wrote it (``compact_metadata.summarizer``), ``"fluid"`` for any other
+    boundary, ``None`` when nothing compacted."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -146,14 +154,28 @@ def _compaction_result(session_id: str, compact_turn_id: str) -> str:
         rows = cursor.fetchall()
     nothing = False
     for row in rows:
-        if row["event_type"] == "system.compaction_boundary":
-            return "compacted"
         payload = parse_jsonb(row["payload"])
         payload = payload if isinstance(payload, dict) else {}
+        if row["event_type"] == "system.compaction_boundary":
+            return "compacted", ("claude_code" if _boundary_by_summarizer(payload) else "fluid")
         data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
         if payload.get("subtype") == "compact_failed" and data.get("nothing_to_compact"):
             nothing = True
-    return "nothing" if nothing else "failed"
+    return ("nothing" if nothing else "failed"), None
+
+
+def _boundary_by_summarizer(payload: Dict[str, Any]) -> bool:
+    """Whether a ``system.compaction_boundary`` payload says Claude Code's
+    summarizer wrote it (the adapter stamps ``summarizer`` on the card)."""
+    for holder in (payload, payload.get("data"), payload.get("system_data")):
+        if not isinstance(holder, dict):
+            continue
+        meta = holder.get("compact_metadata")
+        if isinstance(meta, dict) and meta.get("summarizer"):
+            return True
+        if holder.get("summarizer"):
+            return True
+    return False
 
 
 def _owner_turn_queued(session_id: str, behind: Dict[str, Any]) -> bool:
@@ -174,7 +196,11 @@ def _continuation_verdict(session_id: str, row: Dict[str, Any]) -> str:
     * ``"owner"`` — the owner queued a message: it resumes the work instead;
     * ``"run"`` — the compaction compacted the context;
     * ``"retry"`` — the compaction failed and attempts remain;
-    * ``"nothing"`` / ``"failed"`` — nothing to reclaim, or out of attempts.
+    * ``"emergency"`` — Fluid reclaimed nothing, or failed every attempt: run
+      the one emergency compaction, where Claude Code's summarizer may stand
+      in (owner rule: the summarizer is for an automatic compaction at the
+      context limit, and a turn the limit cut off is exactly that);
+    * ``"limit"`` — the emergency compaction did not compact either.
     """
     from app.core import compact_continue
 
@@ -187,10 +213,12 @@ def _continuation_verdict(session_id: str, row: Dict[str, Any]) -> str:
     result = _compaction_result(session_id, compact["id"]) if compact else "failed"
     if result == "compacted":
         return "run"
-    if result == "nothing":
-        return "nothing"
-    attempt = int((payload.get(compact_continue.PAYLOAD_KEY) or {}).get("attempt") or 1)
-    return "retry" if attempt < compact_continue.MAX_COMPACTION_ATTEMPTS else "failed"
+    link = payload.get(compact_continue.PAYLOAD_KEY) or {}
+    if link.get("emergency"):
+        return "limit"
+    if result == "failed" and int(link.get("attempt") or 1) < compact_continue.MAX_COMPACTION_ATTEMPTS:
+        return "retry"
+    return "emergency"
 
 
 def _latest_context_turn(session_id: str) -> Optional[Dict[str, Any]]:
@@ -899,6 +927,21 @@ async def _announce_paused_continuation(session_id: str, reason: str) -> None:
     )
 
 
+async def _announce_context_limit(session_id: str) -> None:
+    """Say on the session that even the emergency compaction freed nothing:
+    the chat is at its context limit and what the owner can do."""
+    from app.core import wakeup_service
+
+    await wakeup_service.announce_note(
+        session_id,
+        "This chat is at its context limit: the work stopped there, and neither "
+        "Fluid's compaction nor Claude Code's summary could free any room, so it "
+        "did not continue by itself. To carry on, send a short message saying "
+        "what to do next, or start a new chat and hand the work over to it.",
+        reason="context_limit", source="auto_continue",
+    )
+
+
 async def _gate_continuation(session_id: str, row: Dict[str, Any]) -> bool:
     """Decide a front-of-queue compact-then-continue continuation. True when
     it may start; otherwise it was dropped, retried or left waiting (and any
@@ -906,17 +949,30 @@ async def _gate_continuation(session_id: str, row: Dict[str, Any]) -> bool:
     from app.core import compact_continue
 
     verdict = await asyncio.to_thread(_continuation_verdict, session_id, row)
+    link = row["payload"].get(compact_continue.PAYLOAD_KEY) or {}
     if verdict == "run":
+        compact_id = row["payload"].get("compact_before_turn_id") or ""
+        _, mechanism = await asyncio.to_thread(_compaction_outcome, session_id, compact_id)
+        logger.info(
+            "turn_scheduler: continuation %s of %s starts after %s compaction %s (%s)",
+            row["id"], session_id, "emergency" if link.get("emergency") else "Fluid",
+            compact_id, mechanism or "unknown mechanism",
+        )
         return True
     if verdict == "wait":
         return False
-    if verdict == "retry":
-        attempt = int((row["payload"].get(compact_continue.PAYLOAD_KEY) or {}).get("attempt") or 1) + 1
-        compact = await asyncio.to_thread(turns_db.retry_pair_compaction, row["id"], attempt)
+    if verdict in ("retry", "emergency"):
+        emergency = verdict == "emergency"
+        attempt = int(link.get("attempt") or 1) + (0 if emergency else 1)
+        compact = await asyncio.to_thread(
+            turns_db.retry_pair_compaction, row["id"], attempt, emergency=emergency,
+        )
         logger.warning(
-            "turn_scheduler: compaction before continuation %s of %s failed — "
-            "attempt %d is turn %s",
-            row["id"], session_id, attempt, (compact or {}).get("id"),
+            "turn_scheduler: compaction before continuation %s of %s %s — %s is turn %s",
+            row["id"], session_id,
+            "reclaimed nothing or failed every attempt" if emergency else "failed",
+            "the emergency compaction" if emergency else f"attempt {attempt}",
+            (compact or {}).get("id"),
         )
         if compact is not None:
             kick(session_id)
@@ -926,18 +982,18 @@ async def _gate_continuation(session_id: str, row: Dict[str, Any]) -> bool:
         verdict = "failed"
     reason = {
         "owner": "superseded_by_owner",
-        "nothing": "nothing_to_compact",
+        "limit": "context_limit",
     }.get(verdict, "compaction_failed")
     removed = await asyncio.to_thread(turns_db.remove_queued_turn, row["id"], reason)
     logger.info(
         "turn_scheduler: continuation %s of %s not started (%s)", row["id"], session_id, reason,
     )
-    if removed is not None and verdict != "owner":
+    if removed is not None and verdict == "limit":
+        await _announce_context_limit(session_id)
+    elif removed is not None and verdict != "owner":
         # A message from the owner already resumes the work; otherwise say why
         # nothing did.
-        await _announce_paused_continuation(session_id, {
-            "nothing": "compacting reclaimed nothing more",
-        }.get(verdict, "the context could not be compacted"))
+        await _announce_paused_continuation(session_id, "the context could not be compacted")
     kick(session_id)
     return False
 

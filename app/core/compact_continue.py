@@ -22,7 +22,14 @@ The turn scheduler acts on that outcome (``turn_scheduler``):
    starts, the scheduler reads what the compaction did, from the log:
    compacted → it runs; failed → the compaction is retried, at most
    :data:`MAX_COMPACTION_ATTEMPTS` times; nothing to reclaim or out of retries
-   → it is dropped with a note on the session. A message the owner queued
+   → ONE emergency compaction, whose ``/compact`` row carries
+   ``turns.EMERGENCY_COMPACTION_KEY`` so the delegated leg may let Claude
+   Code's summarizer stand in when Fluid has nothing more (owner rule: the
+   summarizer is only for an automatic compaction at the context limit, and a
+   turn the limit cut off is that case; a ``/compact`` a person sends stays
+   Fluid-only). The compaction card says ``summarizer: true`` when it ran.
+   That fails too → the continuation is dropped with a note that the chat is
+   at its context limit and what the owner can do. A message the owner queued
    meanwhile always wins: the continuation is dropped and the owner's message
    resumes the work. A user Stop aborts both rows (Stop aborts every queued
    turn) and the stop latch keeps anything new from starting.

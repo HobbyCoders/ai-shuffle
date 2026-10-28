@@ -265,12 +265,24 @@ async def test_never_beside_a_parked_turn(mock_db, execute):
     assert _queued_pair_rows("c13") == []
 
 
-# ─── compaction failures: bounded retry, honest no-op ───────────────────────
+# ─── compaction failures: bounded retry, then one emergency compaction ──────
 
 
-async def test_a_failed_compaction_is_retried_then_given_up(mock_db, execute, notes):
+def _emergency(cont_id):
+    """The pair's emergency compaction row, after the gate queued it."""
+    cont = turns_db.get_turn(cont_id)
+    assert cont["state"] == "queued" and cont["payload"][cc.PAYLOAD_KEY]["emergency"] is True
+    compact = turns_db.get_turn(cont["payload"]["compact_before_turn_id"])
+    assert compact["state"] == "queued" and compact["prompt"] == cc.COMPACT_PROMPT
+    assert compact["payload"][turns_db.EMERGENCY_COMPACTION_KEY] is True
+    assert compact["command_id"].endswith("-compact-emergency")
+    return cont, compact
+
+
+async def test_a_failed_compaction_is_retried_then_made_an_emergency(mock_db, execute, notes):
     await _settle("c11", _cut_turn("c11"))
     compact, cont = _pair("c11")
+    assert turns_db.EMERGENCY_COMPACTION_KEY not in compact["payload"]
     seen = [compact["id"]]
     for attempt in range(2, cc.MAX_COMPACTION_ATTEMPTS + 1):
         _compact_failed(compact)
@@ -280,16 +292,30 @@ async def test_a_failed_compaction_is_retried_then_given_up(mock_db, execute, no
         assert cont["payload"][cc.PAYLOAD_KEY]["attempt"] == attempt
         compact = turns_db.get_turn(cont["payload"]["compact_before_turn_id"])
         assert compact["state"] == "queued" and compact["id"] not in seen
+        # Plain retries stay Fluid-only.
+        assert turns_db.EMERGENCY_COMPACTION_KEY not in compact["payload"]
         seen.append(compact["id"])
         # The retry is idempotent per attempt.
         again = turns_db.retry_pair_compaction(cont["id"], attempt)
         assert again["id"] == compact["id"]
 
+    # Every Fluid attempt failed: one emergency compaction, not a drop.
     _compact_failed(compact)
     await _settle("c11", _run(compact, outcome="aborted"))
+    cont, emergency = _emergency(cont["id"])
+    assert emergency["id"] not in seen
+    again = turns_db.retry_pair_compaction(cont["id"], cc.MAX_COMPACTION_ATTEMPTS, emergency=True)
+    assert again["id"] == emergency["id"]  # idempotent
+    notes.assert_not_awaited()
+
+    # It failed too: the chat is at its limit. Dropped, with a note saying so.
+    _compact_failed(emergency)
+    await _settle("c11", _run(emergency, outcome="aborted"))
     dropped = turns_db.get_turn(cont["id"])
-    assert dropped["state"] == "aborted" and dropped["stop_reason"] == "compaction_failed"
+    assert dropped["state"] == "aborted" and dropped["stop_reason"] == "context_limit"
     notes.assert_awaited_once()
+    assert "context limit" in notes.await_args.args[1]
+    assert "new chat" in notes.await_args.args[1]
     assert not any(c.args[0]["id"] == cont["id"] for c in execute.await_args_list)
 
 
@@ -304,15 +330,79 @@ async def test_a_refused_retry_drops_the_continuation(mock_db, execute, notes):
     notes.assert_awaited_once()
 
 
-async def test_nothing_to_compact_drops_the_continuation_with_a_note(mock_db, execute, notes):
+async def test_nothing_to_compact_runs_the_emergency_compaction(mock_db, execute, notes):
     await _settle("c12", _cut_turn("c12"))
     compact, cont = _pair("c12")
     _compact_failed(compact, nothing=True)
+    execute.reset_mock()
     await _settle("c12", _run(compact))
+    cont, emergency = _emergency(cont["id"])
+    # No plain retry first: a Fluid no-op goes straight to the emergency one.
+    assert cont["payload"][cc.PAYLOAD_KEY]["attempt"] == 1
+    assert [c.args[0]["id"] for c in execute.await_args_list] == [emergency["id"]]
+    notes.assert_not_awaited()
+
+    # Claude Code's summarizer compacted it: the work continues.
+    se_db.append_events("c12", [{
+        "type": "system.compaction_boundary", "turn_id": emergency["id"],
+        "payload": {"subtype": "compact_boundary",
+                    "data": {"compact_metadata": {"trigger": "manual", "summarizer": True}}},
+    }])
+    execute.reset_mock()
+    await _settle("c12", _run(emergency))
+    assert [c.args[0]["id"] for c in execute.await_args_list] == [cont["id"]]
+    assert turn_scheduler._compaction_outcome("c12", emergency["id"]) == ("compacted", "claude_code")
+    notes.assert_not_awaited()
+
+
+async def test_an_emergency_no_op_drops_at_the_limit(mock_db, execute, notes):
+    await _settle("c15", _cut_turn("c15"))
+    compact, cont = _pair("c15")
+    _compact_failed(compact, nothing=True)
+    await _settle("c15", _run(compact))
+    cont, emergency = _emergency(cont["id"])
+    _compact_failed(emergency, nothing=True)
+    await _settle("c15", _run(emergency))
     dropped = turns_db.get_turn(cont["id"])
-    assert dropped["state"] == "aborted" and dropped["stop_reason"] == "nothing_to_compact"
+    assert dropped["state"] == "aborted" and dropped["stop_reason"] == "context_limit"
     notes.assert_awaited_once()
-    assert "reclaimed nothing" in notes.await_args.args[1]
+    # Never a third compaction.
+    assert all(t["state"] != "queued" for t in turns_db.get_queued_turns("c15"))
+
+
+def test_the_mechanism_is_read_from_the_card(mock_db):
+    t = turns_db.enqueue_turn("c16", cc.SOURCE, prompt="/compact")
+    assert turn_scheduler._compaction_outcome("c16", t["id"]) == ("failed", None)
+    _compacted(t)
+    assert turn_scheduler._compaction_outcome("c16", t["id"]) == ("compacted", "fluid")
+
+
+def test_the_emergency_flag_reaches_the_engine_turn():
+    import app.core.provider.harness_adapter as ha
+
+    adapter = ha.HarnessAdapter()
+    assert adapter._take_emergency_compaction() is False
+    adapter.set_emergency_compaction(True)
+    assert adapter._take_emergency_compaction() is True
+    # One submit only.
+    assert adapter._take_emergency_compaction() is False
+
+
+def test_the_card_records_a_summarizer_compaction():
+    from fluid.events.model import ContextCompaction
+
+    import app.core.provider.harness_adapter as ha
+
+    adapter = ha.HarnessAdapter()
+    reason = next(iter(adapter._CLI_COMPACTION_TRIGGERS))
+    [by_cli] = adapter._compaction_card(ContextCompaction(
+        session_id="s", turn_id="t", tier=1, reason=reason, summary="what happened so far",
+    ))
+    assert by_cli.data["compact_metadata"]["summarizer"] is True
+    [by_fluid] = adapter._compaction_card(ContextCompaction(
+        session_id="s", turn_id="t", tier=1, reason=reason,
+    ))
+    assert "summarizer" not in by_fluid.data["compact_metadata"]
 
 
 # ─── (e) usage-reset compact-then-resume: one atomic, idempotent admission ──

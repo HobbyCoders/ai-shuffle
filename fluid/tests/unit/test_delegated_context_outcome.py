@@ -67,3 +67,34 @@ def test_mapper_keeps_the_outcome_for_a_failed_result():
     assert mapped.is_result and mapped.error
     assert not [e for e in mapped.events if isinstance(e, TurnComplete)]
     assert mapper.failed_outcome == NEEDS_COMPACTION
+
+
+# ── the host's emergency compaction may fall back to Claude Code's summarizer ──
+
+
+async def test_only_the_emergency_compaction_may_fall_back_on_a_no_op():
+    from fluid.engine.delegated import NOTHING_TO_COMPACT
+    from fluid.events.ops import UserTurn
+
+    from tests.unit.test_claude_mod_compaction_cycles import Chat, _loop_with, _request
+
+    chat = Chat(result_chars=100)
+    chat.grow(3)
+    loop, _ = await _loop_with(chat)
+    try:
+        request = {'v': 1, 'trigger': 'manual', 'messages': chat.cli}
+        # A /compact a person sent: an honest no-op, never the summarizer.
+        loop._turn_compact_requested, loop._turn_emergency_compaction = True, False
+        assert await _request(loop._socket_path, request, loop._mod_token) == (
+            200, {'skip': NOTHING_TO_COMPACT})
+        assert loop._compact_noop
+        # The host's emergency compaction at the context limit: fall back.
+        loop._compact_noop = False
+        loop._turn_emergency_compaction = True
+        assert await _request(loop._socket_path, request, loop._mod_token) == (
+            200, {'fallback': NOTHING_TO_COMPACT})
+        assert not loop._compact_noop
+    finally:
+        await loop.aclose()
+    # The op carries the flag; off unless the host sets it.
+    assert UserTurn(content=[]).emergency_compaction is False

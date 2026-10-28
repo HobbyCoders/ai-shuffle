@@ -387,6 +387,11 @@ AUTOMATIC_PAIR_SOURCES = frozenset({"auto_continue", "wakeup"})
 # the context limit cut off (``app.core.compact_continue.PAYLOAD_KEY``).
 COMPACTION_CONTINUATION_KEY = "compaction_continuation"
 
+# Marks a pair's emergency ``/compact`` (``retry_pair_compaction(...,
+# emergency=True)``): the delegated leg may let Claude Code's summarizer stand
+# in when Fluid has nothing more. Only the scheduler writes it, never a person.
+EMERGENCY_COMPACTION_KEY = "emergency_compaction"
+
 # The usage-reset resume's marker (``app.core.limit_resume.PAYLOAD_KEY``): kept
 # on its compact row too, so the hold on automatic turns lets both rows run.
 LIMIT_RESUME_KEY = "limit_resumed"
@@ -1193,7 +1198,9 @@ def remove_queued_turn(
     return row
 
 
-def retry_pair_compaction(continuation_id: str, attempt: int) -> Optional[Dict[str, Any]]:
+def retry_pair_compaction(
+    continuation_id: str, attempt: int, *, emergency: bool = False,
+) -> Optional[Dict[str, Any]]:
     """Queue compaction attempt ``attempt`` in front of a queued continuation.
 
     One transaction under the session admission lock: the new ``/compact`` is
@@ -1202,6 +1209,12 @@ def retry_pair_compaction(continuation_id: str, attempt: int) -> Optional[Dict[s
     Idempotent per attempt (``command_id`` ``<continuation command>-compact-<n>``):
     a repeated call returns the row the first one made. ``None`` when the
     continuation has left the queue.
+
+    ``emergency`` queues the one emergency compaction instead (``command_id``
+    ``<continuation command>-compact-emergency``): its row carries
+    :data:`EMERGENCY_COMPACTION_KEY`, so Claude Code's summarizer may stand in
+    when Fluid has nothing more, and the continuation's link records
+    ``emergency`` so it is never queued twice.
     """
     with get_db() as conn:
         cursor = conn.cursor()
@@ -1215,19 +1228,27 @@ def retry_pair_compaction(continuation_id: str, attempt: int) -> Optional[Dict[s
         row = _row(cursor.fetchone())
         if row is None:
             return None
-        command_id = f"{row.get('command_id') or continuation_id}-compact-{int(attempt)}"
+        suffix = "emergency" if emergency else str(int(attempt))
+        command_id = f"{row.get('command_id') or continuation_id}-compact-{suffix}"
         existing = get_turn_by_command(session_id, command_id, _conn=conn)
         if existing is not None:
             return existing
         payload = dict(row["payload"])
         link = {**(payload.get(COMPACTION_CONTINUATION_KEY) or {}), "attempt": int(attempt)}
+        if emergency:
+            link["emergency"] = True
+        compact_payload: Dict[str, Any] = {
+            **{k: v for k, v in payload.items()
+               if k in ("api_user_id", "user_id", "forwarded_by_device", LIMIT_RESUME_KEY)},
+            COMPACTION_CONTINUATION_KEY: link,
+        }
+        if emergency:
+            compact_payload[EMERGENCY_COMPACTION_KEY] = True
         compact = enqueue_turn(
             session_id, row["source"], prompt="/compact", profile_id=row.get("profile_id"),
             project_id=row.get("project_id"), worktree_id=row.get("worktree_id"),
             overrides=row.get("overrides") or None,
-            payload={**{k: v for k, v in payload.items()
-                        if k in ("api_user_id", "user_id", "forwarded_by_device")},
-                     COMPACTION_CONTINUATION_KEY: link},
+            payload=compact_payload,
             command_id=command_id, parent_turn_id=row.get("parent_turn_id"),
             instance_id=row.get("instance_id"), at_front=True, _conn=conn,
         )

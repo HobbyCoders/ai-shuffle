@@ -44,9 +44,14 @@ Code reported `blocking_limit` or `prompt_too_long`). If nothing you sent is
 queued, AI Shuffle then queues two turns together: a `/compact` (Fluid's own
 compaction) and one continuation that asks the agent to pick up where it left
 off. The continuation is labelled `[auto-continue]` and starts only after the
-compaction worked. A failed compaction is retried up to three times; if it
-still fails, or there was nothing more to compact, the continuation is dropped
-and the chat says the work paused. A message you send meanwhile replaces the
+compaction worked. A failed compaction is retried up to three times. If it
+still fails, or Fluid had nothing more to compact, AI Shuffle runs one
+emergency compaction that may use Claude Code's own summary when Fluid cannot
+free room (a `/compact` you send yourself never does). The compaction card
+records `summarizer: true` when Claude Code's summary ran. If the emergency
+compaction fails too, the continuation is dropped and the chat says it is at
+its context limit: send a short message saying what to do next, or start a new
+chat and hand the work over. A message you send meanwhile replaces the
 continuation, and Stop cancels both turns. A continuation that is cut off again
 gets its own compaction and continuation, up to 20 in a row without a message
 from you. Native chats compact before every model request and never need this.
