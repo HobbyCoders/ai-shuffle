@@ -2,6 +2,7 @@
 
     python -m scripts.devloop.ci plan [--shards N]
     python -m scripts.devloop.ci journeys [--shard I/N] [--out DIR] [--build]
+    python -m scripts.devloop.ci pair-journeys [--out DIR] [--build]
 
 ``journeys`` starts ``python -m scripts.devloop up --ci`` as its own child (so
 the instance's parent lease is this process, not a CI shell step that
@@ -11,6 +12,11 @@ exits), waits until it is ready (its ``DEVLOOP_READY`` line, then
 ``frontend/tests/journeys/run-all.mjs`` it runs that; otherwise it runs each
 ``*.journey.mjs`` of the shard, every one even after a failure. Shards split
 the journey files by their case count (``--list``), each file exactly once.
+
+``pair-journeys`` does the same for the two-worker journeys
+(``two-worker-*.journey.mjs``) against ``python -m scripts.devloop up --pair
+--ci`` (two paired instances; ``DEVLOOP_PAIR_READY``), all in one run. The
+single-instance shards never include them.
 
 Outputs under ``--out``: ``devloop.log`` (the instance's whole log),
 ``logs/<journey>.log``, and the runner's per-case text timelines (and contact
@@ -37,6 +43,8 @@ FRONTEND = ROOT / "frontend"
 JOURNEYS = FRONTEND / "tests" / "journeys"
 RUN_ALL = "run-all.mjs"
 READY_SECONDS = 420
+#: Two instances, a restart each and the pairing itself.
+PAIR_READY_SECONDS = 900
 JOURNEY_SECONDS = 1500
 SUMMARY_CASE_CHARS = 12_000
 SUMMARY_TOTAL_CHARS = 400_000
@@ -45,8 +53,19 @@ SUMMARY_TOTAL_CHARS = 400_000
 # ─── plan ──────────────────────────────────────────────────────────────────
 
 
+#: Journeys that need two paired instances (``up --pair``), not one.
+PAIR_PREFIX = "two-worker-"
+
+
 def journey_files(directory: Path = JOURNEYS) -> list[Path]:
-    return sorted(directory.glob("*.journey.mjs"))
+    """The single-instance journeys (the shards run these)."""
+    return sorted(path for path in directory.glob("*.journey.mjs")
+                  if not path.name.startswith(PAIR_PREFIX))
+
+
+def pair_journey_files(directory: Path = JOURNEYS) -> list[Path]:
+    """The two-worker journeys (``pair-journeys`` runs these against ``up --pair``)."""
+    return sorted(directory.glob(f"{PAIR_PREFIX}*.journey.mjs"))
 
 
 def case_count(path: Path) -> int:
@@ -94,20 +113,23 @@ def commands_for(shard_files: list[str], shards: int, directory: Path = JOURNEYS
 
 
 class DevInstance:
-    """``devloop up --ci`` as a child; its output goes to ``devloop.log``."""
+    """``devloop up --ci`` (or ``up --pair --ci``) as a child; its output goes to ``devloop.log``."""
 
-    def __init__(self, out: Path, ttl: int) -> None:
+    def __init__(self, out: Path, ttl: int, *, pair: bool = False) -> None:
         from scripts.devloop.__main__ import FAILED_LINE, READY_LINE
+        from scripts.devloop.pair import PAIR_FAILED_LINE, PAIR_READY_LINE
 
-        self.ready_line, self.failed_line = READY_LINE, FAILED_LINE
+        self.pair = pair
+        self.ready_line, self.failed_line = ((PAIR_READY_LINE, PAIR_FAILED_LINE) if pair
+                                             else (READY_LINE, FAILED_LINE))
         # A private (0700) directory of our own, as `up` requires.
         self.status = Path(tempfile.mkdtemp(prefix="ai-shuffle-devloop-ci-")) / "status.json"
         self.log_path = out / "devloop.log"
         self.ready = threading.Event()
         self.failure: str | None = None
         self.process = subprocess.Popen(
-            [sys.executable, "-m", "scripts.devloop", "up", "--ci", "--status", str(self.status),
-             "--ttl-seconds", str(ttl)],
+            [sys.executable, "-m", "scripts.devloop", "up", *(["--pair"] if pair else []), "--ci",
+             "--status", str(self.status), "--ttl-seconds", str(ttl)],
             cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
         )
         self.reader = threading.Thread(target=self._read, name="devloop-log", daemon=True)
@@ -138,7 +160,8 @@ class DevInstance:
                 return f"the dev instance was not ready within {timeout:.0f}s"
             time.sleep(0.5)
         # The same check every consumer uses: a live launcher and state "ready".
-        checked = subprocess.run([sys.executable, "-m", "scripts.devloop", "status", "--status",
+        checked = subprocess.run([sys.executable, "-m", "scripts.devloop", "status",
+                                  *(["--pair"] if self.pair else []), "--status",
                                   str(self.status), "--wait", "30"], cwd=ROOT,
                                  capture_output=True, text=True, timeout=60, check=False)
         if checked.returncode != 0:
@@ -150,8 +173,9 @@ class DevInstance:
 
     def down(self) -> None:
         if self.alive():
-            subprocess.run([sys.executable, "-m", "scripts.devloop", "down", "--status",
-                            str(self.status)], cwd=ROOT, timeout=90, check=False)
+            subprocess.run([sys.executable, "-m", "scripts.devloop", "down",
+                            *(["--pair"] if self.pair else []), "--status",
+                            str(self.status)], cwd=ROOT, timeout=240, check=False)
         try:
             self.process.wait(timeout=60)
         except subprocess.TimeoutExpired:
@@ -159,9 +183,12 @@ class DevInstance:
             self.process.wait(timeout=10)
         self.reader.join(10)
         # The guardian notes a cut-off teardown beside the status file: keep it visible.
-        note = self.status.with_name(self.status.name + ".guardian.log")
-        if note.is_file():
+        for note in sorted(self.status.parent.glob("*.guardian.log")):
             print("[ci] guardian: " + note.read_text(encoding="utf-8"), end="", flush=True)
+        # up --pair keeps each worker's whole log beside its status: keep them with the output.
+        for member_log in sorted(self.status.parent.glob("*.log")):
+            if not member_log.name.endswith(".guardian.log"):
+                shutil.copy(member_log, self.log_path.with_name(f"devloop-{member_log.name}"))
         shutil.rmtree(self.status.parent, ignore_errors=True)
 
     def log_tail(self, lines: int = 120) -> str:
@@ -243,13 +270,18 @@ def summarize(label: str, results: list[dict], reports: list[dict], problem: str
 
 
 def journeys(args: argparse.Namespace) -> int:
-    index, shards = args.shard
+    pair = args.command == "pair-journeys"
     out = args.out.resolve()
     (out / "logs").mkdir(parents=True, exist_ok=True)
     (out / "journeys").mkdir(parents=True, exist_ok=True)
-    label = f"shard {index}/{shards}"
-    mine = plan(shards)[index - 1]
-    commands = commands_for(mine, shards)
+    if pair:
+        label = "two workers"
+        commands = [["node", str(path)] for path in pair_journey_files()]
+    else:
+        index, shards = args.shard
+        label = f"shard {index}/{shards}"
+        mine = plan(shards)[index - 1]
+        commands = commands_for(mine, shards)
     print(f"[ci] {label}: {', '.join(' '.join(Path(part).name for part in c[1:]) for c in commands) or 'nothing'}",
           flush=True)
     if not commands:
@@ -266,10 +298,12 @@ def journeys(args: argparse.Namespace) -> int:
 
     old = {sig: signal.signal(sig, stop) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     try:
-        instance = DevInstance(out, args.ttl_seconds)
+        instance = DevInstance(out, args.ttl_seconds, pair=pair)
         problem = instance.wait_ready(args.ready_timeout)
-        env = {**os.environ, "DEVLOOP_STATUS": str(instance.status),
-               "JOURNEY_OUT": str(out / "journeys")}
+        env = {**os.environ, "JOURNEY_OUT": str(out / "journeys"),
+               # The journeys' `pair offline|online` calls use this interpreter.
+               "DEVLOOP_PYTHON": sys.executable,
+               ("DEVLOOP_PAIR_STATUS" if pair else "DEVLOOP_STATUS"): str(instance.status)}
         env.setdefault("JOURNEY_SHEETS", "1")
         for command in commands:
             name = " ".join(Path(part).name for part in command[1:])
@@ -343,6 +377,15 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--ttl-seconds", type=int, default=3600)
     run.add_argument("--ready-timeout", type=float, default=READY_SECONDS)
     run.add_argument("--journey-timeout", type=float, default=JOURNEY_SECONDS)
+    paired = commands.add_parser("pair-journeys",
+                                 help="Run the two-worker journeys on a fresh pair (up --pair --ci)")
+    paired.add_argument("--out", type=Path,
+                        default=Path(tempfile.gettempdir()) / "ai-shuffle-pair-journeys-ci")
+    paired.add_argument("--build", action="store_true",
+                        help="Build and stamp the frontend first if its stamp is missing or stale")
+    paired.add_argument("--ttl-seconds", type=int, default=3600)
+    paired.add_argument("--ready-timeout", type=float, default=PAIR_READY_SECONDS)
+    paired.add_argument("--journey-timeout", type=float, default=JOURNEY_SECONDS)
     args = parser.parse_args(argv)
     if args.command == "plan":
         print(json.dumps(plan(args.shards)))

@@ -14,7 +14,9 @@
 		},
 		{
 			"why": "the dev instance every journey runs against (seed data, fake AI)",
-			"globs": ["scripts/devloop/**"]
+			"globs": [
+				"scripts/devloop/**"
+			]
 		},
 		{
 			"why": "core chat surface and session stores: every journey goes through them",
@@ -64,8 +66,35 @@
 	],
 	"rules": [
 		{
+			"why": "two workers: pairing, sync, mirrors, remote turns and moving chats between workers",
+			"journeys": [
+				"two-worker-open-remote",
+				"two-worker-remote-send",
+				"two-worker-move-chat",
+				"two-worker-owner-offline"
+			],
+			"globs": [
+				"app/network/**",
+				"app/api/network.py",
+				"app/api/sessions_helpers.py",
+				"app/core/session_handoff*.py",
+				"app/core/placement*.py",
+				"app/core/checkout_manager.py",
+				"app/preview_run.py",
+				"frontend/src/lib/api/network.ts",
+				"frontend/src/lib/components/chat/ContextPillBar.svelte",
+				"frontend/src/lib/components/chat/runner-badge-menu.ts",
+				"frontend/src/lib/components/chat/MirrorSyncGate.svelte",
+				"frontend/src/lib/components/chat/mirror-sync.svelte.ts"
+			]
+		},
+		{
 			"why": "mirrored chats: the sync check ChatView runs and the gate that shows it",
-			"journeys": ["mirrored-chat", "open-unloaded-chat"],
+			"journeys": [
+				"mirrored-chat",
+				"open-unloaded-chat",
+				"two-worker-open-remote"
+			],
 			"globs": [
 				"frontend/src/lib/components/chat/MirrorSyncGate.svelte",
 				"frontend/src/lib/components/chat/mirror-sync.svelte.ts"
@@ -73,7 +102,12 @@
 		},
 		{
 			"why": "sending, streaming and rendering a reply",
-			"journeys": ["chat-send-stream", "stop-midstream", "queue-while-busy", "reload-midstream"],
+			"journeys": [
+				"chat-send-stream",
+				"stop-midstream",
+				"queue-while-busy",
+				"reload-midstream"
+			],
 			"globs": [
 				"frontend/src/lib/components/chat/AssistantMessage*",
 				"frontend/src/lib/components/chat/UserMessage*",
@@ -87,7 +121,9 @@
 		},
 		{
 			"why": "tool calls and the work log",
-			"journeys": ["tool-cards"],
+			"journeys": [
+				"tool-cards"
+			],
 			"globs": [
 				"frontend/src/lib/components/chat/ToolUseMessage*",
 				"frontend/src/lib/components/chat/ToolIcon*",
@@ -100,17 +136,31 @@
 		},
 		{
 			"why": "stopping a turn",
-			"journeys": ["stop-midstream", "chat-send-stream"],
-			"globs": ["frontend/src/lib/components/chat/StopButton*", "frontend/src/lib/components/chat/BackgroundWorkStrip*"]
+			"journeys": [
+				"stop-midstream",
+				"chat-send-stream"
+			],
+			"globs": [
+				"frontend/src/lib/components/chat/StopButton*",
+				"frontend/src/lib/components/chat/BackgroundWorkStrip*"
+			]
 		},
 		{
 			"why": "queued (pending) messages",
-			"journeys": ["queue-while-busy"],
-			"globs": ["frontend/src/lib/components/chat/Pending*", "frontend/src/lib/components/chat/pending-*"]
+			"journeys": [
+				"queue-while-busy"
+			],
+			"globs": [
+				"frontend/src/lib/components/chat/Pending*",
+				"frontend/src/lib/components/chat/pending-*"
+			]
 		},
 		{
 			"why": "errors and banners shown to the user",
-			"journeys": ["provider-errors", "phone-composer"],
+			"journeys": [
+				"provider-errors",
+				"phone-composer"
+			],
 			"globs": [
 				"frontend/src/lib/components/Banner*",
 				"frontend/src/lib/components/NotificationDock*",
@@ -122,7 +172,11 @@
 		},
 		{
 			"why": "opening and switching chats (sidebar, new-session screen, reading position)",
-			"journeys": ["switch-chats", "open-unloaded-chat", "cleared-chat"],
+			"journeys": [
+				"switch-chats",
+				"open-unloaded-chat",
+				"cleared-chat"
+			],
 			"globs": [
 				"frontend/src/lib/components/layout/Sidebar*",
 				"frontend/src/lib/components/layout/sidebar/**",
@@ -137,12 +191,19 @@
 		},
 		{
 			"why": "clearing a chat",
-			"journeys": ["cleared-chat"],
-			"globs": ["app/db/sessions.py", "frontend/src/lib/stores/session/ws-message-handlers*"]
+			"journeys": [
+				"cleared-chat"
+			],
+			"globs": [
+				"app/db/sessions.py",
+				"frontend/src/lib/stores/session/ws-message-handlers*"
+			]
 		},
 		{
 			"why": "panels around a chat (Git, side panel, settings)",
-			"journeys": ["side-panels"],
+			"journeys": [
+				"side-panels"
+			],
 			"globs": [
 				"frontend/src/lib/components/git/**",
 				"frontend/src/lib/components/layout/SessionSidePanel*",
@@ -157,7 +218,9 @@
 		},
 		{
 			"why": "the composer's controls and sheets on a phone",
-			"journeys": ["phone-composer"],
+			"journeys": [
+				"phone-composer"
+			],
 			"globs": [
 				"frontend/src/lib/components/chat/ProfileSelector*",
 				"frontend/src/lib/components/chat/WorkspaceFolderSelector*",
@@ -170,7 +233,9 @@
 		},
 		{
 			"why": "the pilot journey: a new chat in a new worktree",
-			"journeys": ["new-worktree-session"],
+			"journeys": [
+				"new-worktree-session"
+			],
 			"globs": [
 				"frontend/src/lib/components/layout/WorkspaceSelector*",
 				"frontend/src/lib/components/chat/BranchSelector*",
@@ -181,8 +246,12 @@
 		},
 		{
 			"why": "a journey file itself",
-			"journeys": ["$self"],
-			"globs": ["frontend/tests/journeys/*.journey.mjs"]
+			"journeys": [
+				"$self"
+			],
+			"globs": [
+				"frontend/tests/journeys/*.journey.mjs"
+			]
 		}
 	]
 }

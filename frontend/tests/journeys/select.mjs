@@ -19,6 +19,13 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 export const REPO = join(here, '..', '..', '..');
 
+/**
+ * Two-worker journeys (`two-worker-*.journey.mjs`, `pair: true`) run against
+ * `python -m scripts.devloop up --pair`, never against a single instance:
+ * `run-all.mjs --pair` runs them, plain `run-all.mjs` leaves them out.
+ */
+export const isPairJourney = (name) => name.startsWith('two-worker-');
+
 /** Every journey file's name (without .journey.mjs). */
 export function allJourneys() {
 	return readdirSync(here)

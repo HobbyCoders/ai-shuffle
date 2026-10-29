@@ -265,6 +265,8 @@ def supervise(
     on_start: Callable[[subprocess.Popen], None] | None = None,
     on_exit: Callable[[subprocess.Popen], None] | None = None,
     stop_timeout: float = 15,
+    hold: threading.Event | None = None,
+    on_hold: Callable[[], None] | None = None,
 ) -> int:
     """Testable lifecycle boundary. The caller exclusively owns the database.
 
@@ -277,6 +279,11 @@ def supervise(
     exited on its own while restarts are on. ``stop_timeout`` bounds each
     graceful stop before SIGKILL (open streams hold uvicorn's graceful
     shutdown); a disposable dev instance can afford a short one.
+
+    ``hold`` (with ``restart``; ``up --pair`` takes one instance offline):
+    when a restart finds it set, the app stays stopped (``on_hold`` is told)
+    until it is cleared, then starts again. PostgreSQL and the data stay up:
+    the worker process is gone, as when a real worker shuts down.
     """
     from docker.container_runtime import stop_group
 
@@ -320,6 +327,16 @@ def supervise(
                     break
             stop_group(process, stop_timeout)
             restart.clear()
+            if hold is not None and hold.is_set():
+                if on_hold is not None:
+                    on_hold()
+                while hold.is_set():
+                    if lease_over():
+                        over = True
+                        break
+                if over:
+                    break
+                restart.clear()  # source changes while offline fold into this start
         return process.poll() if process.poll() is not None else 0
     finally:
         try:

@@ -15,6 +15,9 @@
 // Env:
 //   DEVLOOP_STATUS     status JSON of the dev instance (default: the one
 //                      `python -m scripts.devloop status` reads for this checkout)
+//   DEVLOOP_PAIR_STATUS  status JSON of the paired instances a `pair: true`
+//                      journey runs against (default: `python -m scripts.devloop
+//                      status --pair`'s, from `up --pair`)
 //   CHROMIUM_PATH      Chromium binary (default /usr/bin/chromium)
 //   PLAYWRIGHT_MODULE  playwright-core (default browser-mcp's)
 //   JOURNEY_OUT        where timelines (and contact sheets with
@@ -59,6 +62,10 @@ export const THROTTLES = {
 /** Path of the dev loop's status JSON for this checkout (mirrors scripts/devloop default_status_path). */
 export function devloopStatusPath() {
 	if (process.env.DEVLOOP_STATUS) return process.env.DEVLOOP_STATUS;
+	return checkoutStatusPath();
+}
+
+function checkoutStatusPath() {
 	const digest = createHash('sha256').update(CHECKOUT).digest('hex').slice(0, 12);
 	// status_directory(): $XDG_RUNTIME_DIR when set, else a per-uid temp dir.
 	const directory = process.env.XDG_RUNTIME_DIR
@@ -67,8 +74,43 @@ export function devloopStatusPath() {
 	return join(directory, `${digest}.json`);
 }
 
+/** Path of `up --pair`'s status JSON (mirrors scripts/devloop default_pair_status_path). */
+export function devloopPairStatusPath() {
+	if (process.env.DEVLOOP_PAIR_STATUS) return process.env.DEVLOOP_PAIR_STATUS;
+	return checkoutStatusPath().replace(/\.json$/, '-pair.json');
+}
+
+/**
+ * The paired instances of `python -m scripts.devloop up --pair`:
+ * `{ path, pair, a, b }` where `a`/`b` are `{ role, name, deviceId, status }`
+ * (each member's own dev-instance status, ready and with its access link).
+ */
+export function readDevloopPair() {
+	const path = devloopPairStatusPath();
+	let pair;
+	try {
+		pair = JSON.parse(readFileSync(path, 'utf8'));
+	} catch (error) {
+		throw new Error(`no dev pair status at ${path} (${error.code || error.message}). Start one: python -m scripts.devloop up --pair`);
+	}
+	if (pair.kind !== 'pair') throw new Error(`${path} is not a dev pair status`);
+	if (pair.state !== 'ready') throw new Error(`dev pair is ${pair.state}, not ready (${path})`);
+	if (pair.pid && !processAlive(pair.pid)) throw new Error(`dev pair status is stale: pid ${pair.pid} is gone (${path})`);
+	const out = { path, pair };
+	for (const role of ['a', 'b']) {
+		const info = pair.instances?.[role];
+		if (!info?.status || !info.device_id) throw new Error(`dev pair status names no ready worker ${role.toUpperCase()}`);
+		const status = readStatusFile(info.status);
+		out[role] = { role, name: info.name, deviceId: info.device_id, status };
+	}
+	return out;
+}
+
 export function readDevloopStatus() {
-	const path = devloopStatusPath();
+	return readStatusFile(devloopStatusPath());
+}
+
+function readStatusFile(path) {
 	let status;
 	try {
 		status = JSON.parse(readFileSync(path, 'utf8'));
@@ -230,7 +272,11 @@ export async function runJourney(spec) {
 	}
 	if (!plan.length) throw new Error(`no case matches --only=${args.only}`);
 
-	const status = readDevloopStatus();
+	// A `pair: true` journey runs against `up --pair`: the page opens worker A
+	// (ctx.status is A's), and ctx.pair carries both workers. Both access
+	// cookies ride every context (each instance names its own cookie).
+	const pair = spec.pair ? readDevloopPair() : null;
+	const status = pair ? pair.a.status : readDevloopStatus();
 	const out = join(process.env.JOURNEY_OUT || join(tmpdir(), 'journeys'), spec.name);
 	mkdirSync(out, { recursive: true });
 	const { chromium } = require(process.env.PLAYWRIGHT_MODULE || resolve(CHECKOUT, 'browser-mcp/node_modules/playwright-core'));
@@ -243,8 +289,10 @@ export async function runJourney(spec) {
 	// Open the one-time access link once; every case starts from its cookie.
 	const bootstrap = await browser.newContext();
 	const bootPage = await bootstrap.newPage();
-	await bootPage.goto(status.access_link);
-	await bootPage.waitForURL((url) => !url.pathname.includes('/preview-access'), { timeout: 60_000 });
+	for (const link of pair ? [pair.a.status.access_link, pair.b.status.access_link] : [status.access_link]) {
+		await bootPage.goto(link);
+		await bootPage.waitForURL((url) => !url.pathname.includes('/preview-access'), { timeout: 60_000 });
+	}
 	const cookies = await bootstrap.cookies();
 	await bootstrap.close();
 
@@ -284,7 +332,7 @@ export async function runJourney(spec) {
 				sortAnomalies(judged.anomalies);
 			};
 			try {
-				const ctx = { page, variant, status, log };
+				const ctx = { page, variant, status, log, pair, context };
 				if (item.testCase.setup) await item.testCase.setup(ctx);
 				const recorderOpts = { ...(spec.recorder || {}), ...(item.testCase.recorder || {}) };
 				const selectors = [...(spec.recorder?.selectors || []), ...(item.testCase.recorder?.selectors || [])];
@@ -316,8 +364,10 @@ export async function runJourney(spec) {
 				}
 				await page.screenshot({ path: join(out, `${item.id}.error.png`) }).catch(() => {});
 			} finally {
-				const cleaned = await deleteCaseChats(context, status, started).catch((error) => `failed: ${error.message}`);
-				if (typeof cleaned !== 'number') lines.push(`cleanup of this case's chats ${cleaned}`);
+				for (const target of pair ? [pair.a.status, pair.b.status] : [status]) {
+					const cleaned = await deleteCaseChats(context, target, started).catch((error) => `failed: ${error.message}`);
+					if (typeof cleaned !== 'number') lines.push(`cleanup of this case's chats ${cleaned}`);
+				}
 				await context.close();
 			}
 			result.ms = Date.now() - started;

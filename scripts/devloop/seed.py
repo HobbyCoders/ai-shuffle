@@ -37,12 +37,22 @@ LONG_TURNS = 70  # 4 transcript rows each (prompt, text, tool card, answer) = 28
 #: the access session's ids come from the app and stay random).
 _ID_NAMESPACE = uuid.UUID("5f0c9b4e-2d7a-4f43-9a1e-3c6d8e0b7a21")
 _id_counters: dict[str, int] = {}
+#: Prefix of the seed's id names. ``pair-b`` uses its own, so worker B's ids
+#: never collide with worker A's (both run in one network).
+_id_prefix = ""
 
 
 def seed_id(kind: str) -> uuid.UUID:
     """The next deterministic id of ``kind`` in this seed run."""
     _id_counters[kind] = _id_counters.get(kind, 0) + 1
-    return uuid.uuid5(_ID_NAMESPACE, f"{kind}:{_id_counters[kind]}")
+    return uuid.uuid5(_ID_NAMESPACE, f"{_id_prefix}{kind}:{_id_counters[kind]}")
+
+
+class SeedDeferred(Exception):
+    """The seed cannot run on this start yet (``pair-b`` before B joined A).
+
+    Nothing was written: the record is cleared and a later start runs it.
+    """
 
 
 def ensure_dev_agent() -> str:
@@ -263,7 +273,9 @@ async def seed_default() -> dict:
     from app.db.async_database import run_sync
     from app.db.profiles import get_profile, update_profile
 
+    global _id_prefix
     _id_counters.clear()
+    _id_prefix = ""
     fake_url = os.environ.get("SHUFFLE_DEV_FAKE_AI_URL")
     if not fake_url:
         raise RuntimeError("SHUFFLE_DEV_FAKE_AI_URL is not set")
@@ -443,7 +455,94 @@ def _project_v2_row(project_v2_id: str | None) -> dict | None:
     return projects_v2.get_project_v2(project_v2_id)
 
 
-SEEDS = {"default": seed_default}
+# ─── worker B of a pair (up --pair) ─────────────────────────────────────────
+
+
+PAIR_B_PROJECT = "dev-b-project"
+PAIR_B_PROJECT_NAME = "Worker B project"
+
+
+async def seed_pair_b() -> dict:
+    """Worker B's own project and chats, once B has joined worker A's network.
+
+    ``up --pair`` starts B with this seed. Its first start is not enrolled
+    yet, so the seed defers (writes nothing). The launcher pairs B with A
+    through the invite flow, then restarts B: now the Fake AI provider and
+    the Dev agent have arrived from A, and every row written here is owned by
+    B (``owner_device_id``) and published to A by the normal sync.
+    """
+    global _id_prefix
+    from app.api.git_helpers import ensure_git_repository_record
+    from app.api.projects import create_project_record
+    from app.core.config import settings
+    from app.core.models import ProjectCreate, ProjectSettings
+    from app.db import database
+    from app.db.async_database import run_sync
+    from app.db.profiles import get_profile
+    from app.network import engine
+
+    ctx = engine.context()
+    if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
+        raise SeedDeferred("worker B seeds once it has joined worker A's network")
+    config = (get_profile(DEV_AGENT_ID) or {}).get("config") or {}
+    composite = str(config.get("model") or "")
+    if not config.get("provider") or not composite.startswith("prov:"):
+        raise RuntimeError("the Dev agent and its Fake AI provider did not arrive from worker A")
+    model = composite.split(":", 2)[2]
+    _id_counters.clear()
+    _id_prefix = "pair-b:"
+
+    workspace = Path(settings.effective_workspace_dir).resolve()
+    remotes = Path(settings.effective_data_dir).resolve().parent / "remotes"
+    remote = remotes / f"{PAIR_B_PROJECT}.git"
+    await run_sync(make_repository, workspace / PAIR_B_PROJECT, PAIR_B_PROJECT_NAME,
+                   second_branch=False, remote=remote)
+    if database.get_project(PAIR_B_PROJECT) is None:
+        await create_project_record(ProjectCreate(
+            id=PAIR_B_PROJECT, name=PAIR_B_PROJECT_NAME,
+            settings=ProjectSettings(default_profile_id=DEV_AGENT_ID)))
+    await run_sync(ensure_git_repository_record, PAIR_B_PROJECT, str(workspace / PAIR_B_PROJECT))
+
+    chats: dict[str, str] = {}
+
+    def transcript(key: str, title: str, project: str | None = None) -> Transcript:
+        chats[key] = _chat(title, composite, project)
+        return Transcript(chats[key], DEV_AGENT_ID, model)
+
+    loose = transcript("b_loose", "Worker B chat (seeded)")
+    for number in range(1, 7):
+        loose.turn(f"Worker B request {number}.", answer=f"Worker B answer {number}.")
+    await run_sync(loose.save)
+
+    project = transcript("b_project", "Worker B project chat (seeded)", PAIR_B_PROJECT)
+    project.turn("What is in this repository?", reply="Let me look.",
+                 tools=[("Bash", {"command": "ls", "description": "List files"},
+                         "README.md\nsrc\ntests", False)],
+                 answer="A README, a `src` package and a `tests` folder.")
+    await run_sync(project.save)
+
+    return {"device_id": ctx.device_id, "projects": {PAIR_B_PROJECT: str(workspace / PAIR_B_PROJECT)},
+            "remotes": {PAIR_B_PROJECT: remote.as_uri()}, "chats": chats,
+            "checkouts": {MAIN_PROJECT: await run_sync(_checkout_of_a_project, MAIN_PROJECT)}}
+
+
+def _checkout_of_a_project(project_id: str) -> str | None:
+    """B's base checkout of one of A's projects, the way a runner gets one:
+    the app's lazy self-seed clones the project's remote (A's local bare
+    repository) when no checkout is materialized here. A string says why not."""
+    from app.core import checkout_manager
+
+    try:
+        _legacy, v2 = _project(project_id)
+        row = _project_v2_row(v2)
+        if row is None:
+            return f"not synced: project {project_id} has no shared row on worker B"
+        return checkout_manager.ensure_checkout(row) or "not materialized (no clone URL)"
+    except Exception as exc:  # noqa: BLE001 — reported in the seed result, not fatal
+        return f"failed: {type(exc).__name__}: {exc}"
+
+
+SEEDS = {"default": seed_default, "pair-b": seed_pair_b}
 
 
 def _write_result(result: dict) -> None:
@@ -468,6 +567,12 @@ def _record(name: str) -> dict | None:
     except ValueError:
         record = None
     return record if isinstance(record, dict) else {"state": "started"}
+
+
+def _clear_record(name: str) -> None:
+    from app.db import database
+
+    database.delete_system_setting(f"dev_seed:{name}")
 
 
 def _save_record(name: str, record: dict) -> None:
@@ -505,6 +610,11 @@ async def seed(name: str) -> None:
     await run_sync(_save_record, name, {"state": "started"})
     try:
         result = await SEEDS[name]()
+    except SeedDeferred as exc:
+        await run_sync(_clear_record, name)
+        _write_result({"ok": True, "seed": name, "deferred": str(exc)})
+        logger.info("Dev seed %r deferred: %s", name, exc)
+        return
     except Exception as exc:
         logger.exception("Dev seed %r failed", name)
         error = f"{type(exc).__name__}: {exc}"

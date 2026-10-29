@@ -70,6 +70,37 @@ def test_lease_closes_owned_database_and_worker(tmp_path, reason, monkeypatch):
     database.close.assert_called_once()
 
 
+def test_hold_keeps_the_app_down_until_released_and_the_database_up(tmp_path):
+    """``up --pair``'s offline switch: the app stops and stays stopped, PostgreSQL stays."""
+    env = preview_environment(tmp_path, 18880, 18881)
+    database = Mock()
+    stopped, restart, hold = threading.Event(), threading.Event(), threading.Event()
+    starts: list[int] = []
+    held = threading.Event()
+    seen_while_held: list[bool] = []
+
+    def on_start(process):
+        starts.append(process.pid)
+        if len(starts) == 1:
+            hold.set()
+            restart.set()  # take it offline
+        else:
+            stopped.set()  # back online: end the lease
+
+    def on_hold():
+        held.set()
+        seen_while_held.append(database.close.called)
+        threading.Timer(.4, hold.clear).start()
+
+    supervise([sys.executable, "-c", "import time; time.sleep(60)"], env, database, ttl=30,
+              owner_pid=os.getpid(), stopped=stopped, restart=restart, on_start=on_start,
+              hold=hold, on_hold=on_hold, stop_timeout=2)
+    assert held.is_set() and len(starts) == 2
+    assert seen_while_held == [False]  # the database stayed open while offline
+    assert not psutil.pid_exists(starts[0]) and not psutil.pid_exists(starts[1])
+    database.close.assert_called_once()
+
+
 @pytest.mark.parametrize("ttl,owner", [(0, 2), (14401, 2), (60, 1)])
 def test_invalid_lease_never_starts_database(ttl, owner):
     database = Mock()
