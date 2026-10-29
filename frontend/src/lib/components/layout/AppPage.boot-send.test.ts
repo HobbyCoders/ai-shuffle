@@ -41,7 +41,7 @@ vi.mock('$lib/api/client', () => ({ api: { get: mocks.get, post: vi.fn(), put: v
 vi.mock('$lib/services/voiceCall', () => ({ isCallActiveFor: () => false, sendVoiceText: vi.fn() }));
 vi.mock('$lib/services/voiceExecutionContext', () => ({ persistVoiceContext: vi.fn(), voiceContextFor: vi.fn() }));
 vi.mock('$lib/stores/session/v2/feed-controller', () => ({
-	feedController: { start: vi.fn(), stop: vi.fn(), isFeeding: () => false, isReducerStreaming: () => false, clearOptimisticSend: vi.fn() },
+	feedController: { start: vi.fn(), stop: vi.fn(), isFeeding: () => false, isReducerStreaming: () => false, clearOptimisticSend: vi.fn(), cachedPatch: () => null, reconcileRunningTasks: () => false, hasAppliedUsage: () => false },
 	OPTIMISTIC_STREAMING_ON: { isStreaming: true, optimisticStreaming: true }
 }));
 vi.mock('$lib/components/voice/ActiveVoiceCallBar.svelte', () => ({ default: () => ({}) }));
@@ -52,9 +52,10 @@ vi.mock('$lib/components/TagManager.svelte', () => ({ default: () => ({}) }));
 vi.mock('$lib/components/SpotlightSearch.svelte', () => ({ default: () => ({}) }));
 
 import AppPage from './AppPage.svelte';
+import { api } from '$lib/api/client';
 import { activeSession } from '$lib/stores/active-session';
 import { activeView } from '$lib/stores/layout.svelte';
-import { createSessionInit, getInitGeneration, hasBootSendClaim } from '$lib/stores/session/session-init';
+import { bumpInitGeneration, createSessionInit, getInitGeneration, hasBootSendClaim } from '$lib/stores/session/session-init';
 import { createMessageSender } from '$lib/stores/session/message-sender';
 import { createSessionSwitcher } from '$lib/stores/session/session-switcher';
 import { createMessageHandlers } from '$lib/stores/session/ws-message-handlers';
@@ -92,16 +93,18 @@ function setup() {
 	mocks.newChat.mockImplementation(() => { switcher.newChat(); });
 	const createWorktree = vi.fn(async (): Promise<string | null> => null);
 	const autoCreateWorktree = vi.fn(async () => false);
+	const resend = vi.fn<ReturnType<typeof createMessageSender>['sendMessage']>();
 	const sender = createMessageSender({ update, getState, internal, wsConn, sessionEphemeralCache: cache,
 		appData: { loadSessions: vi.fn(), loadApiUserSessions: vi.fn() }, persistSession: switcher.persistSession,
-		stopTimeout: { get: () => null, set: vi.fn() }, getActiveSession: () => ({ createWorktree, autoCreateWorktree, sendMessage: vi.fn() }) });
+		stopTimeout: { get: () => null, set: vi.fn() }, getActiveSession: () => ({ createWorktree, autoCreateWorktree, sendMessage: resend }) });
+	resend.mockImplementation(sender.sendMessage);
 	const handlers = createMessageHandlers({ update, getState, internal, wsSend: send,
 		streamingSessions: writable(new Map()), backgroundPermissions: writable(new Map()),
 		gitRefreshStatus: vi.fn(), gitRefreshDiffStats: vi.fn(), gitGetProjectId: () => null, gitGetLoading: () => false,
 		appLoadSessions: vi.fn(), appLoadApiUserSessions: vi.fn(), mergeSessionPatch: () => false,
 		onNewChat: mocks.newChat, onPersistSession: switcher.persistSession, onNotifySessionComplete: vi.fn(),
 		onNotifyWaitingForResponse: vi.fn(), wsIsConnected: () => true, clearStopTimeout: vi.fn() });
-	return { sender, init, preferences, send, wsConn, createWorktree, autoCreateWorktree, adopt: () => handlers.handleMessage({ type: 'session_created', session_id: 'created', request_id: internal.pendingRequestId }) };
+	return { sender, init, preferences, send, wsConn, switcher, createWorktree, autoCreateWorktree, resend, adopt: () => handlers.handleMessage({ type: 'session_created', session_id: 'created', request_id: internal.pendingRequestId }) };
 }
 
 beforeEach(() => {
@@ -157,7 +160,7 @@ for (const view of ['absent', 'new-chat'] as const) {
 // exercise each sender refusal, and only then release preference hydration.
 for (const remounted of [false, true]) {
 	it.each([
-		'missing-worktree', 'worktree-in-flight', 'compact-first', 'connection-timeout',
+		'missing-worktree', 'worktree-in-flight', 'compact-first', 'connection-timeout', 'connection-throws', 'stray-session',
 		'dispatch-refused', 'dispatch-throws', 'create-refused', 'create-throws',
 		'auto-refused', 'auto-throws', 'existing-no-profile', 'existing-no-project'
 	])(`restores and reconnects after %s (remounted=${remounted})`, async refusal => {
@@ -169,6 +172,7 @@ for (const remounted of [false, true]) {
 		const worktree = { worktreeIntent: 'worktree' as const, worktreeMode: 'new' as const };
 		if (refusal === 'missing-worktree') state.update(s => ({ ...s, ...worktree, worktreeMode: 'existing' }));
 		if (refusal === 'worktree-in-flight') state.update(s => ({ ...s, ...worktree, messages: [{ id: 'pending', role: 'user', content: 'pending' }] }));
+		if (refusal === 'stray-session') state.update(s => ({ ...s, messages: [{ id: 'old', role: 'user', content: 'old chat' }] }));
 		if (refusal.startsWith('create-')) state.update(s => ({ ...s, ...worktree, worktreeBranch: 'feature/test' }));
 		if (refusal.startsWith('auto-')) state.update(s => ({ ...s, ...worktree }));
 		if (refusal.startsWith('existing-no-')) state.update(s => ({ ...s, ...worktree, worktreeMode: 'existing', worktreeId: 'wt', profile: refusal === 'existing-no-profile' ? '' : s.profile }));
@@ -176,10 +180,9 @@ for (const remounted of [false, true]) {
 		if (refusal === 'dispatch-throws') ctx.send.mockImplementation(() => { throw new Error('dispatch failed'); });
 		if (refusal === 'create-throws') ctx.createWorktree.mockRejectedValue(new Error('creation failed'));
 		if (refusal === 'auto-throws') ctx.autoCreateWorktree.mockRejectedValue(new Error('creation failed'));
-		if (refusal === 'connection-timeout') {
-			vi.useFakeTimers();
-			vi.spyOn(ctx.wsConn, 'isConnected').mockReturnValue(false);
-		}
+		if (refusal === 'connection-timeout') vi.useFakeTimers();
+		if (refusal.startsWith('connection-')) vi.spyOn(ctx.wsConn, 'isConnected').mockReturnValue(false);
+		if (refusal === 'connection-throws') ctx.wsConn.connect.mockImplementationOnce(() => { throw new Error('connection failed'); });
 		const sending = ctx.sender.sendMessage('refused first message', refusal === 'compact-first' ? { compactFirst: true } : undefined);
 		if (refusal === 'connection-timeout') await vi.advanceTimersByTimeAsync(3100);
 		if (refusal.endsWith('-throws') || refusal === 'compact-first') await expect(sending).rejects.toThrow();
@@ -225,4 +228,73 @@ it('logs an init rejection under a live claim, clears the restore window and rec
 	expect(get(state)).toMatchObject({ sessionId: 'created', isRestoringSession: false });
 	expect(ctx.wsConn.activate).toHaveBeenCalledOnce();
 	expect(ctx.wsConn.connect).toHaveBeenCalledOnce();
+});
+
+
+it('owns boot while the first send waits for the socket and init finishes mid-wait', async () => {
+	mocks.get.mockResolvedValue({ value: { sessionId: 'stale', title: 'Old saved chat', profile: 'old-agent' } });
+	const ctx = setup();
+	let connected = false;
+	vi.spyOn(ctx.wsConn, 'isConnected').mockImplementation(() => connected);
+	render(AppPage, { shell });
+	await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
+	const sending = ctx.sender.sendMessage('first message across connection wait');
+	expect(hasBootSendClaim(getInitGeneration())).toBe(true);
+	expect(ctx.wsConn.connect).toHaveBeenCalledOnce();
+	ctx.preferences.resolve(null);
+	await waitFor(() => expect(mocks.resolveComposerDefaultsAfterCatalog).toHaveBeenCalledOnce());
+	expect(get(state)).toMatchObject({ sessionId: null, isRestoringSession: false });
+	expect(mocks.newChat).not.toHaveBeenCalled();
+	connected = true;
+	expect(await sending).toBe(true);
+	ctx.adopt();
+	await waitFor(() => expect(mocks.openChat).toHaveBeenCalledWith('created'));
+	expect(get(state).sessionId).toBe('created');
+	expect(get(state).messages.map(message => message.content)).toEqual(['first message across connection wait']);
+	expect(ctx.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'query', session_id: null }));
+	expect(ctx.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'close_session' }));
+	expect(mocks.newChat).not.toHaveBeenCalled();
+});
+
+it('does not dispatch into a different session adopted during the connection wait', async () => {
+	mocks.get.mockResolvedValue({ value: { sessionId: 'stale' } });
+	const ctx = setup();
+	let connected = false;
+	vi.spyOn(ctx.wsConn, 'isConnected').mockImplementation(() => connected);
+	const initializing = ctx.init.init();
+	const generation = getInitGeneration();
+	const sending = ctx.sender.sendMessage('must not reach another chat');
+	// Match activeSession.switchSession's public navigation entry point.
+	bumpInitGeneration();
+	await ctx.switcher.switchSession('different');
+	connected = true;
+	expect(await sending).toBe(false);
+	expect(get(state).sessionId).toBe('different');
+	expect(ctx.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'query' }));
+	expect(hasBootSendClaim(generation)).toBe(false);
+	ctx.preferences.resolve(null);
+	await initializing;
+	expect(get(state).sessionId).toBe('different');
+});
+
+it.each(['explicit', 'auto'])('keeps a %s worktree adopted before its inner send is refused', async kind => {
+	mocks.get.mockResolvedValue({ value: { sessionId: 'stale', title: 'Old saved chat', profile: 'old-agent' } });
+	vi.mocked(api.post).mockResolvedValue({ session_id: 'created', branch_name: 'feature/test', base_branch: 'main', status: 'ready', worktree_path: '/test/worktree', query_started: false });
+	const ctx = setup();
+	ctx.createWorktree.mockImplementation(ctx.sender.createWorktree);
+	ctx.autoCreateWorktree.mockImplementation(ctx.sender.autoCreateWorktree);
+	state.update(s => ({ ...s, project: 'project', worktreeIntent: 'worktree', worktreeBranch: kind === 'explicit' ? 'feature/test' : '' }));
+	ctx.send.mockReturnValue(false);
+	render(AppPage, { shell });
+	await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
+	expect(await ctx.sender.sendMessage('refused inner send')).toBe(false);
+	expect(ctx.resend).toHaveBeenCalledWith('refused inner send', expect.objectContaining({ skipWorktreeSetup: true }));
+	expect(get(state).sessionId).toBe('created');
+	expect(hasBootSendClaim(getInitGeneration())).toBe(true);
+	ctx.preferences.resolve(null);
+	await waitFor(() => expect(mocks.resolveComposerDefaultsAfterCatalog).toHaveBeenCalledOnce());
+	expect(get(state).sessionId).toBe('created');
+	expect(get(views)).toEqual({ type: 'session', sessionId: 'created' });
+	expect(mocks.newChat).not.toHaveBeenCalled();
+	expect(ctx.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'close_session' }));
 });

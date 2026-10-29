@@ -492,7 +492,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					accepted ||= creationGen !== internal.worktreeCreationGeneration;
 					return accepted;
 				} finally {
-					if (!accepted) releaseBootSend(bootClaim);
+					// Creation can adopt the chat before its inner first send fails.
+					// That live chat still owns boot even when its draft is restored.
+					if (!accepted && !getState().sessionId) releaseBootSend(bootClaim);
 				}
 			}
 
@@ -514,32 +516,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			if (options?.compactFirst && !_state.sessionId) {
 				throw new Error('Open a chat before compacting it.');
 			}
-			if (!options?.compactFirst && !wsConn.isConnected()) {
-				wsConn.resetReconnectAttempts();
-				wsConn.connect();
-				const connected = await waitForConnection();
-				if (!connected) {
-					update(s => ({ ...s, error: 'Unable to connect. Please check your connection and try again.' }));
-					return false;
-				}
-			}
-
-			const userMsgId = `user-${Date.now()}`;
-			const isFirstMessage = _state.title === 'New Chat';
-			const newTitle = isFirstMessage
-				? prompt.substring(0, 100) + (prompt.length > 100 ? '...' : '')
-				: _state.title;
-			// Undefined while an existing session's agent is still loading: the
-			// backend resolves an omitted agent to the session's own (#418).
-			const queryProfileId = sendableComposerBinding(_state).profile;
-
-			// Sending during a live turn is a plain `query`: the turn keeps running
-			// and the backend decides when the model sees the new prompt (mid-turn
-			// steer, or the start of the next turn). Until it lands, the message
-			// shows as a pending bubble fed by `queuedMessages` — so the optimistic
-			// append below goes there instead of onto the transcript.
-			const sendWhileStreaming = !!(_state.isStreaming && _state.sessionId);
-
 			// Guard against the "stray new session" bug: a chat that was already
 			// OPENED (history/messages present) but whose sessionId went missing —
 			// e.g. a WS reconnect race nulled it after a remote session loaded —
@@ -557,194 +533,225 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				return false;
 			}
 
-			// awaitingNewSession means "we sent a prompt with no session id yet and
-			// are waiting for the backend to mint one" (consumed as
-			// `!state.sessionId && awaitingNewSession` in ws-message-handlers and
-			// session_created/start acceptance). It must only be set when there is
-			// NO session id — setting it on the 2nd+ send of an EXISTING session
-			// left a stale flag that forced shouldNotify=true for every event and
-			// muddied session-routing. Gate it on the absence of a session id.
-			// Client-generated adoption token for the outgoing new-session query.
-			// Only the awaiting (no-sessionId) path needs it: the backend echoes it
-			// in session_created + the first start frame, and the frontend adopts
-			// ONLY on a match — so a foreign session's server-initiated turn
-			// (unpark / queue drain, which carries no request_id) can't be adopted
-			// during the awaiting window on the shared device socket. null otherwise.
-			let requestId: string | null = null;
-			if (!_state.sessionId) {
-				internal.awaitingNewSession = true;
-				requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-				internal.pendingRequestId = requestId;
-			}
+			// Validation has admitted the attempt. Own boot BEFORE the first
+			// connection await; withdraw the claim if no query reaches the wire.
+			const bootClaim = !_state.sessionId ? claimBootSend() : null;
+			let querySent = false;
+			try {
+				if (!options?.compactFirst && !wsConn.isConnected()) {
+					wsConn.resetReconnectAttempts();
+					wsConn.connect();
+					const connected = await waitForConnection();
+					if (!connected) {
+						update(s => ({ ...s, error: 'Unable to connect. Please check your connection and try again.' }));
+						return false;
+					}
+				}
 
-			// Optimistic echo, in whichever place the message actually belongs.
-			// While a turn is live the prompt is NOT part of the transcript yet, so
-			// it goes onto `queuedMessages` and renders as a pending bubble; the
-			// server's `queue_updated` replaces this local row, and pendingQueue
-			// retires it once the transcript answers it.
-			//
-			// Skipped when an authoritative `queue_updated` for this session already
-			// landed since the send began: the server has described the queue for
-			// this window, so a local row added on top of it is a second copy that
-			// no later frame is guaranteed to replace.
-			const overrides = buildOverrides(_state);
-			const retryOverrides = { ...overrides };
-			// The worker can acknowledge a newer pin before a lost reply is retried.
-			// Its revision precondition is not a new owner instruction.
-			delete retryOverrides.context_window_base;
-			const clientMessageId = options?.compactFirst
-				? compactRetryId(_state.sessionId!, JSON.stringify({ prompt, profile: queryProfileId,
-					project: _state.project, uploadPaths: options.pendingUploadPaths, overrides: retryOverrides }), newLocalPendingId)
-				: newLocalPendingId();
-			const queuedEcho = (sendWhileStreaming || options?.compactFirst) && !options?.skipMessageAppend;
-			const optimisticQueuedId = queuedEcho
-				&& !pendingQueue.authoritySpokeSince(_state.sessionId, dispatchedAt)
-				? clientMessageId
-				: null;
+				// Init must not restore over this claim while the socket connects.
+				// Another adoption/navigation can still change the target: never send
+				// with the stale pre-wait session snapshot in that case.
+				if (getState().sessionId !== _state.sessionId) return false;
 
-			// Single atomic update — avoids intermediate render where streaming
-			// is cleared but the new user message hasn't been appended yet.
-			if (queuedEcho && !optimisticQueuedId) {
-				// The server already described the queue: no echo anywhere. Falling
-				// through to the transcript append below put a send into a live turn
-				// on the transcript, where the steer's own `message.user` was a
-				// second copy of it (#2016).
-				update(s => ({ ...s, error: null }));
-			} else if (options?.skipMessageAppend) {
-				update(s => ({
-					...s,
-					// S6: the feed reducer owns isStreaming; this is the declared
-					// optimistic flip, which the fold ORs in and clears on
-					// `turn.started` instead of fighting with it.
-					...OPTIMISTIC_STREAMING_ON,
-					error: null,
-					title: newTitle,
-					currentQueryProfileId: queryProfileId ?? null,
-				}));
-			} else if (optimisticQueuedId) {
-				pendingQueue.noteOptimistic(_state.sessionId, optimisticQueuedId);
-				update(s => ({
-					...s,
-					queuedMessages: [...s.queuedMessages, {
-						id: optimisticQueuedId,
-						clientMessageId,
-						content: prompt,
-						queuedAt: Date.now(),
-					}],
-					error: null,
-				}));
-			} else {
-				update(s => {
-					const baseMessages = s.messages;
-					// eslint-disable-next-line no-console
-					if (STREAM_DEBUG) console.log(`[AS] optimistic append A id=${userMsgId} prevLen=${baseMessages.length} "${prompt.slice(0, 30)}"`);
-					// A send into a parked turn is a steer: carry that turn's id so the
-					// transcript keeps it inside the turn instead of folding the turn.
-					const steerTurnId = parkedSendTurnId(s);
-					return {
+				const userMsgId = `user-${Date.now()}`;
+				const isFirstMessage = _state.title === 'New Chat';
+				const newTitle = isFirstMessage
+					? prompt.substring(0, 100) + (prompt.length > 100 ? '...' : '')
+					: _state.title;
+				// Undefined while an existing session's agent is still loading: the
+				// backend resolves an omitted agent to the session's own (#418).
+				const queryProfileId = sendableComposerBinding(_state).profile;
+
+				// Sending during a live turn is a plain `query`: the turn keeps running
+				// and the backend decides when the model sees the new prompt (mid-turn
+				// steer, or the start of the next turn). Until it lands, the message
+				// shows as a pending bubble fed by `queuedMessages` — so the optimistic
+				// append below goes there instead of onto the transcript.
+				const sendWhileStreaming = !!(_state.isStreaming && _state.sessionId);
+
+				// awaitingNewSession means "we sent a prompt with no session id yet and
+				// are waiting for the backend to mint one" (consumed as
+				// `!state.sessionId && awaitingNewSession` in ws-message-handlers and
+				// session_created/start acceptance). It must only be set when there is
+				// NO session id — setting it on the 2nd+ send of an EXISTING session
+				// left a stale flag that forced shouldNotify=true for every event and
+				// muddied session-routing. Gate it on the absence of a session id.
+				// Client-generated adoption token for the outgoing new-session query.
+				// Only the awaiting (no-sessionId) path needs it: the backend echoes it
+				// in session_created + the first start frame, and the frontend adopts
+				// ONLY on a match — so a foreign session's server-initiated turn
+				// (unpark / queue drain, which carries no request_id) can't be adopted
+				// during the awaiting window on the shared device socket. null otherwise.
+				let requestId: string | null = null;
+				if (!_state.sessionId) {
+					internal.awaitingNewSession = true;
+					requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+					internal.pendingRequestId = requestId;
+				}
+
+				// Optimistic echo, in whichever place the message actually belongs.
+				// While a turn is live the prompt is NOT part of the transcript yet, so
+				// it goes onto `queuedMessages` and renders as a pending bubble; the
+				// server's `queue_updated` replaces this local row, and pendingQueue
+				// retires it once the transcript answers it.
+				//
+				// Skipped when an authoritative `queue_updated` for this session already
+				// landed since the send began: the server has described the queue for
+				// this window, so a local row added on top of it is a second copy that
+				// no later frame is guaranteed to replace.
+				const overrides = buildOverrides(_state);
+				const retryOverrides = { ...overrides };
+				// The worker can acknowledge a newer pin before a lost reply is retried.
+				// Its revision precondition is not a new owner instruction.
+				delete retryOverrides.context_window_base;
+				const clientMessageId = options?.compactFirst
+					? compactRetryId(_state.sessionId!, JSON.stringify({ prompt, profile: queryProfileId,
+						project: _state.project, uploadPaths: options.pendingUploadPaths, overrides: retryOverrides }), newLocalPendingId)
+					: newLocalPendingId();
+				const queuedEcho = (sendWhileStreaming || options?.compactFirst) && !options?.skipMessageAppend;
+				const optimisticQueuedId = queuedEcho
+					&& !pendingQueue.authoritySpokeSince(_state.sessionId, dispatchedAt)
+					? clientMessageId
+					: null;
+
+				// Single atomic update — avoids intermediate render where streaming
+				// is cleared but the new user message hasn't been appended yet.
+				if (queuedEcho && !optimisticQueuedId) {
+					// The server already described the queue: no echo anywhere. Falling
+					// through to the transcript append below put a send into a live turn
+					// on the transcript, where the steer's own `message.user` was a
+					// second copy of it (#2016).
+					update(s => ({ ...s, error: null }));
+				} else if (options?.skipMessageAppend) {
+					update(s => ({
 						...s,
-						messages: [...baseMessages, {
-							id: userMsgId,
-							role: 'user' as const,
-							content: prompt,
-							profileId: queryProfileId,
-							...(steerTurnId ? { turnId: steerTurnId } : {}),
-							// The same command identity comes back on the durable receipt.
-							commandId: clientMessageId,
-							timestamp: new Date().toISOString(),
-						}],
-						// S6: declared optimistic flip (see the skipMessageAppend
-						// branch above) — not a competing write of isStreaming.
+						// S6: the feed reducer owns isStreaming; this is the declared
+						// optimistic flip, which the fold ORs in and clears on
+						// `turn.started` instead of fighting with it.
 						...OPTIMISTIC_STREAMING_ON,
 						error: null,
 						title: newTitle,
 						currentQueryProfileId: queryProfileId ?? null,
-					};
-				});
-			}
-
-			const remoteOnly = !_state.project && !!_state.projectV2Id;
-			const query = {
-				type: 'query',
-				client_message_id: clientMessageId,
-				prompt,
-				session_id: _state.sessionId,
-				profile: queryProfileId,
-				project: _state.project || undefined,
-				project_v2_id: remoteOnly ? _state.projectV2Id : undefined,
-				worktree_id: _state.worktreeId || undefined,
-				// Composer device pick. Creation-time only: the backend ignores it
-				// for an existing session.
-				target_instance_id: _state.deviceIntent?.id || undefined,
-				// Sidepanel mode for a NEW session. Creation-time only — the backend
-				// ignores it once the session row exists.
-				mode: _state.sessionId ? undefined : _state.mode,
-				// Existing remote-only sessions stage attachments per session;
-				// only an uncreated remote draft has no upload destination.
-				upload_paths: (!remoteOnly || !!_state.sessionId) && options?.pendingUploadPaths?.length
-					? options.pendingUploadPaths
-					: undefined,
-				// Adoption token — present only for a new-session query (see requestId).
-				// The backend echoes it in session_created + the first start frame.
-				request_id: requestId || undefined,
-				overrides,
-			};
-			if (options?.compactFirst) {
-				try {
-					const result = await compactSession(_state.sessionId!, query);
-					if (!result.queued_turn_id) {
-						throw new Error('This worker needs an update to compact and send. Your draft has been kept.');
-					}
-					clearCompactRetry(_state.sessionId!);
-					spendBindingPicks(_state.sessionId);
-				} catch (error) {
-					// Remove only our optimistic echo, never a newer session's draft
-					// or an authoritative queue snapshot that arrived in the meantime.
-					update(s => s.sessionId === _state.sessionId ? {
-						...s, queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticQueuedId),
-						error: error instanceof Error ? error.message : 'Could not compact and send.',
-					} : s);
-					throw error;
+					}));
+				} else if (optimisticQueuedId) {
+					pendingQueue.noteOptimistic(_state.sessionId, optimisticQueuedId);
+					update(s => ({
+						...s,
+						queuedMessages: [...s.queuedMessages, {
+							id: optimisticQueuedId,
+							clientMessageId,
+							content: prompt,
+							queuedAt: Date.now(),
+						}],
+						error: null,
+					}));
+				} else {
+					update(s => {
+						const baseMessages = s.messages;
+						// eslint-disable-next-line no-console
+						if (STREAM_DEBUG) console.log(`[AS] optimistic append A id=${userMsgId} prevLen=${baseMessages.length} "${prompt.slice(0, 30)}"`);
+						// A send into a parked turn is a steer: carry that turn's id so the
+						// transcript keeps it inside the turn instead of folding the turn.
+						const steerTurnId = parkedSendTurnId(s);
+						return {
+							...s,
+							messages: [...baseMessages, {
+								id: userMsgId,
+								role: 'user' as const,
+								content: prompt,
+								profileId: queryProfileId,
+								...(steerTurnId ? { turnId: steerTurnId } : {}),
+								// The same command identity comes back on the durable receipt.
+								commandId: clientMessageId,
+								timestamp: new Date().toISOString(),
+							}],
+							// S6: declared optimistic flip (see the skipMessageAppend
+							// branch above) — not a competing write of isStreaming.
+							...OPTIMISTIC_STREAMING_ON,
+							error: null,
+							title: newTitle,
+							currentQueryProfileId: queryProfileId ?? null,
+						};
+					});
 				}
-				return true;
-			}
-			// Admission, not the earlier connection/validation attempt, owns boot.
-			// No await separates the optimistic echo from this dispatch (#821).
-			const bootClaim = !_state.sessionId ? claimBootSend() : null;
-			let querySent = false;
-			try {
+
+				const remoteOnly = !_state.project && !!_state.projectV2Id;
+				const query = {
+					type: 'query',
+					client_message_id: clientMessageId,
+					prompt,
+					session_id: _state.sessionId,
+					profile: queryProfileId,
+					project: _state.project || undefined,
+					project_v2_id: remoteOnly ? _state.projectV2Id : undefined,
+					worktree_id: _state.worktreeId || undefined,
+					// Composer device pick. Creation-time only: the backend ignores it
+					// for an existing session.
+					target_instance_id: _state.deviceIntent?.id || undefined,
+					// Sidepanel mode for a NEW session. Creation-time only — the backend
+					// ignores it once the session row exists.
+					mode: _state.sessionId ? undefined : _state.mode,
+					// Existing remote-only sessions stage attachments per session;
+					// only an uncreated remote draft has no upload destination.
+					upload_paths: (!remoteOnly || !!_state.sessionId) && options?.pendingUploadPaths?.length
+						? options.pendingUploadPaths
+						: undefined,
+					// Adoption token — present only for a new-session query (see requestId).
+					// The backend echoes it in session_created + the first start frame.
+					request_id: requestId || undefined,
+					overrides,
+				};
+				if (options?.compactFirst) {
+					try {
+						const result = await compactSession(_state.sessionId!, query);
+						if (!result.queued_turn_id) {
+							throw new Error('This worker needs an update to compact and send. Your draft has been kept.');
+						}
+						clearCompactRetry(_state.sessionId!);
+						spendBindingPicks(_state.sessionId);
+					} catch (error) {
+						// Remove only our optimistic echo, never a newer session's draft
+						// or an authoritative queue snapshot that arrived in the meantime.
+						update(s => s.sessionId === _state.sessionId ? {
+							...s, queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticQueuedId),
+							error: error instanceof Error ? error.message : 'Could not compact and send.',
+						} : s);
+						throw error;
+					}
+					return true;
+				}
 				querySent = wsConn.send(query);
+				if (!querySent) {
+					// WS dropped before the frame went out. Roll the optimistic echo back
+					// and surface an error so the caller can restore the input.
+					//
+					// S6: withdrawing the flip restores the AUTHORITATIVE value — what
+					// the feed reducer currently says — rather than forcing false. A
+					// turn that is genuinely live (this send was a steer into it) keeps
+					// its indicator; nothing has to guess.
+					update(s => ({
+						...s,
+						...(optimisticQueuedId
+							? { queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticQueuedId) }
+							: {
+									optimisticStreaming: false,
+									isStreaming: feedController.isReducerStreaming(s.sessionId),
+								}),
+						error: 'Connection lost before the message was sent. Please try again.',
+					}));
+					feedController.clearOptimisticSend(_state.sessionId);
+					return false;
+				}
+				clearCompactRetry(_state.sessionId!);
+				spendBindingPicks(_state.sessionId);
+				// The pick is spent: the session now exists and its row carries the
+				// ownership, so follow-up sends must not re-assert a target. (Left
+				// intact on a failed send so a retry still goes to the chosen device.)
+				if (_state.deviceIntent) update(s => ({ ...s, deviceIntent: null }));
+				return true;
 			} finally {
 				if (!querySent) releaseBootSend(bootClaim);
 			}
-			if (!querySent) {
-				// WS dropped before the frame went out. Roll the optimistic echo back
-				// and surface an error so the caller can restore the input.
-				//
-				// S6: withdrawing the flip restores the AUTHORITATIVE value — what
-				// the feed reducer currently says — rather than forcing false. A
-				// turn that is genuinely live (this send was a steer into it) keeps
-				// its indicator; nothing has to guess.
-				update(s => ({
-					...s,
-					...(optimisticQueuedId
-						? { queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticQueuedId) }
-						: {
-								optimisticStreaming: false,
-								isStreaming: feedController.isReducerStreaming(s.sessionId),
-							}),
-					error: 'Connection lost before the message was sent. Please try again.',
-				}));
-				feedController.clearOptimisticSend(_state.sessionId);
-				return false;
-			}
-			clearCompactRetry(_state.sessionId!);
-			spendBindingPicks(_state.sessionId);
-			// The pick is spent: the session now exists and its row carries the
-			// ownership, so follow-up sends must not re-assert a target. (Left
-			// intact on a failed send so a retry still goes to the chosen device.)
-			if (_state.deviceIntent) update(s => ({ ...s, deviceIntent: null }));
-			return true;
 		},
 
 		stopGeneration() {

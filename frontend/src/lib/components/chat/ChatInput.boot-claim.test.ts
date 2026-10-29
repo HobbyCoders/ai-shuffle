@@ -62,7 +62,8 @@ it('restores a refused first-send draft even after its own worktree create adopt
 	await waitFor(() => expect(editor.textContent).toBe(TEXT));
 	expect(getInitGeneration()).toBe(generation);
 	expect(activeSession.current.draft).toContain(TEXT);
-	expect(hasBootSendClaim(generation)).toBe(false);
+	// The send failed, but its worktree already adopted a real chat.
+	expect(hasBootSendClaim(generation)).toBe(true);
 });
 
 it('runs the phone composer successful-send reconciliation after its first send adopts a chat', async () => {
