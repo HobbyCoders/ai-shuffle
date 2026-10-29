@@ -286,7 +286,32 @@ Claude Code as installed, and nothing in the instance can come before the fake.
 
 Every port is picked free at random (or `--port` / `--vite-port`); 8000 and
 8001 are always refused. The app's local listener stays on loopback; only
-the guarded preview listener and Vite bind to `--host`. Ctrl-C, SIGTERM,
+the guarded preview listener and Vite bind to `--host`.
+
+### Opening a branch copy from a phone (worker in a Docker container)
+
+A worker in a bridge-networked container publishes only its own port, so a
+phone on the LAN cannot reach a random dev port. Publish a small fixed range
+on the container once, for example `-p 18080-18089:18080-18089` in the
+container's extra parameters (recreating the container restarts the worker,
+so do it only when nothing is running in it). Then pin the instance to that
+range and use the host's LAN address:
+
+```sh
+python -m scripts.devloop up --host 0.0.0.0 --browser-host <host-LAN-IP> \
+    --port 18080 --vite-port 18081
+```
+
+Open the printed access link once on the phone (it points at the Vite port
+and sets the preview cookie); the rest of the visit stays on that port. A
+second instance at the same time takes the next pair (`18082`/`18083`). The
+guarded port answers 403 without the cookie, which is expected. This is for
+judging a UI change by hand on a real phone; it is plain HTTP, so the page
+gets no microphone (see the voice section above).
+
+### Teardown
+
+Ctrl-C, SIGTERM,
 SIGHUP (the terminal or the Monitor's pty went away), `down`, the TTL
 (`--ttl-seconds`, default 1 h, at most 4 h) and loss of the parent process all
 stop the app, PostgreSQL, Vite, the fake AI and the fake voice provider and
