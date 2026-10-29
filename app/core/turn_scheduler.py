@@ -1663,15 +1663,16 @@ async def _on_agent_message_locked(
             if earlier:
                 prompt = f"{_held_peer_block(earlier)}\n\n{prompt}"
                 extra_payload = {"held_peer_messages": earlier}
-        if extra_payload is None:
-            # One attributed message: a live turn can take it at its next tool
-            # boundary (``SessionRuntime.steer_pending``) instead of after the
-            # turn ends. A row that also carries held messages cannot, because
-            # the peer channel would deliver only the newest of them.
-            extra_payload = {
-                "task_peer_sender": sender,
-                "peer_message_content": defang_harness_markers(text),
-            }
+    if not (extra_payload or {}).get("held_peer_messages"):
+        # Reporting ownership and live delivery are independent. A resumed
+        # worker still takes an individual peer message at its next boundary;
+        # retain its reply owner without making it an ordinary queued turn.
+        # Bundled held messages must run whole, not just deliver the newest.
+        extra_payload = {
+            **(extra_payload or {}),
+            "task_peer_sender": sender,
+            "peer_message_content": defang_harness_markers(text),
+        }
     try:
         turn = await _enqueue_context_wake(
             session_id, "agent_message", [], [], prompt,
