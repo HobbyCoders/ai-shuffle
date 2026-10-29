@@ -682,7 +682,10 @@ TOOL_LEVELS: Dict[str, Level] = {
             "browser_network",
             "browser_resize",
             "browser_navigate",
-            # Records what the page shows (flight recorder); acts on nothing.
+            # Flight recorder: no account action, but while recording it runs a
+            # recorder script in the tab and can throttle its CPU and network.
+            # LOW on purpose, like browser_resize: it changes how the tab runs,
+            # not what the signed-in account does.
             "browser_record",
         )
     },

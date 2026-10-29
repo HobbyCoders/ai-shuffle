@@ -329,6 +329,33 @@ describe("runBatch", () => {
     expect(body.stopped).toMatch(/step 1 changed the page .* step 4 \(browser_act\)/);
   });
 
+  it("after a navigation, runs browser_record stop but not start or mark", async () => {
+    const tool = (calls: string[], name: string) => ({
+      inputSchema: { type: "object", properties: { url: { type: "string" }, action: { type: "string" } }, additionalProperties: false } as JsonSchema,
+      run: async (_s: Session, input: Record<string, unknown>): Promise<McpToolResult> => {
+        calls.push(input.action ? `${name}:${String(input.action)}` : name);
+        return { content: [{ type: "text", text: '{"ok":true}' }] };
+      },
+    });
+    for (const action of ["start", "mark"]) {
+      const calls: string[] = [];
+      const res = await runBatch(session, { actions: [
+        '{"tool":"browser_navigate","input":{"url":"https://example.com/"}}',
+        `{"tool":"browser_record","input":{"action":"${action}"}}`,
+      ] }, (name) => tool(calls, name));
+      const body = JSON.parse(firstText(res));
+      expect(calls).toEqual(["browser_navigate"]);
+      expect(body).toMatchObject({ ok: true, count: 1, not_run: 1 });
+      expect(body.stopped).toMatch(/step 2 \(browser_record\)/);
+    }
+    const calls: string[] = [];
+    await runBatch(session, { actions: [
+      '{"tool":"browser_navigate","input":{"url":"https://example.com/"}}',
+      '{"tool":"browser_record","input":{"action":"stop"}}',
+    ] }, (name) => tool(calls, name));
+    expect(calls).toEqual(["browser_navigate", "browser_record:stop"]);
+  });
+
   it("treats a new tab or a pending dialog as a page change too", async () => {
     for (const text of [
       '{"ok":true,"url_changed":false,"events":[{"type":"new_tab","tab_id":"tab2","url":"about:blank"}]}',
