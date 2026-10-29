@@ -1,10 +1,4 @@
-"""TurnStarted records what started the turn, and parked parents hold peer mail.
-
-Fix-now #6 and #7 (fluid half). The source makes wake metrics measurable from
-the event log; before it, a peer wake and a user prompt looked identical. The
-hold makes a host-owned (wake=False) peer message to a parked parent wait for
-the parent's next wake instead of bouncing back to a host that woke it.
-"""
+"""Turn sources, host-owned parked wakes, and pre-upgrade held-peer recovery."""
 
 from __future__ import annotations
 
@@ -64,8 +58,10 @@ class _Provider:
 
     async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
         self.requests.append(request)
-        yield StreamChunk("text_delta", text="ok")
-        yield StreamChunk("done", stop_reason="end_turn")
+        yield StreamChunk("block_start", {"index": 0, "block_type": "text"})
+        yield StreamChunk("text_delta", {"index": 0, "text": "ok"})
+        yield StreamChunk("block_stop", {"index": 0})
+        yield StreamChunk("usage", {"usage": {}, "stop_reason": "end_turn"})
 
 
 def _sources(loop: NativeLoop) -> list[str | None]:
@@ -112,6 +108,50 @@ async def _parked_loop(provider: _Provider) -> NativeLoop:
     return loop
 
 
+async def test_parked_peer_wake_and_later_message_share_one_running_turn() -> None:
+    class BlockingProvider(_Provider):
+        def __init__(self):
+            super().__init__()
+            self.block = False
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.active = 0
+            self.max_active = 0
+
+        async def stream(self, request):
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                if self.block:
+                    self.block = False
+                    self.started.set()
+                    await self.release.wait()
+                async for chunk in super().stream(request):
+                    yield chunk
+            finally:
+                self.active -= 1
+
+    provider = BlockingProvider()
+    loop = await _parked_loop(provider)
+    try:
+        provider.block = True
+        await loop.submit(AgentMessage(text="first peer message", sender="worker"))
+        await asyncio.wait_for(provider.started.wait(), 5)
+        running = loop._turn_task
+        await loop.submit(AgentMessage(text="second peer message", sender="worker"))
+        assert loop._turn_task is running
+        provider.release.set()
+        await asyncio.wait_for(loop.wait_turn(), 5)
+        assert _sources(loop) == ["user", "agent_message"]
+        assert provider.max_active == 1
+        prompts = [request.messages[-1].text() for request in provider.requests]
+        assert sum(prompt.count("first peer message") for prompt in prompts) == 1
+        assert sum(prompt.count("second peer message") for prompt in prompts) == 1
+    finally:
+        provider.release.set()
+        await loop.aclose()
+
+
 async def test_background_wake_records_unpark() -> None:
     provider = _Provider()
     loop = await _parked_loop(provider)
@@ -123,35 +163,20 @@ async def test_background_wake_records_unpark() -> None:
         await loop.aclose()
 
 
-async def test_host_owned_peer_message_to_a_parked_parent_is_held() -> None:
-    """wake=False used to raise before the park check, so the host woke the
-    parent for every interim message. It is held now and costs nothing."""
+@pytest.mark.parametrize("urgent", [False, True])
+async def test_host_owned_peer_message_to_a_parked_parent_is_refused(urgent) -> None:
+    """The host owns every idle wake, including ordinary parked messages."""
     provider = _Provider()
     loop = await _parked_loop(provider)
     try:
         calls = len(provider.requests)
-        await loop.submit(AgentMessage(text="halfway", sender="worker", wake=False))
-        assert not loop.turn_running
-        assert len(loop._queued_peer_messages) == 1
-        assert len(provider.requests) == calls
-        # The held text rides the next wake.
-        await loop.submit(BackgroundTaskFinished(task_id="task_1", summary="done"))
-        await asyncio.wait_for(loop.wait_turn(), 5)
-        assert "halfway" in provider.requests[-1].messages[-1].text()
-    finally:
-        await loop.aclose()
-
-
-async def test_urgent_host_owned_message_to_a_parked_parent_is_refused() -> None:
-    """Urgent skips the hold; with wake=False the host schedules the wake."""
-    provider = _Provider()
-    loop = await _parked_loop(provider)
-    try:
         with pytest.raises(RuntimeError, match="no turn is running"):
             await loop.submit(AgentMessage(
-                text="blocked on you", sender="worker", wake=False, urgent=True,
+                text="halfway", sender="worker", wake=False, urgent=urgent,
             ))
+        assert not loop.turn_running
         assert loop._queued_peer_messages == []
+        assert len(provider.requests) == calls
     finally:
         await loop.aclose()
 
@@ -182,10 +207,7 @@ async def test_turn_running_tracks_the_turn_task() -> None:
 
 
 async def test_a_rebuilt_parked_engine_delivers_a_held_message_once() -> None:
-    """A host that evicts the parked engine and rebuilds it holds the next
-    message on the new engine. The new engine reads the log on its first
-    turn; the message it just held is there too, so without an id check the
-    wake carried it twice."""
+    """A pre-upgrade held message is recovered once from memory and the log."""
     store = MemoryStore()
     first = await _parked_loop_on(_Provider(), store)
     provider = _Provider()
@@ -193,7 +215,7 @@ async def test_a_rebuilt_parked_engine_delivers_a_held_message_once() -> None:
         provider=provider, store=store, model="m", session_id=first.session_id,
     )
     try:
-        await rebuilt.submit(AgentMessage(text="halfway", sender="worker", wake=False))
+        assert await rebuilt._queue_if_parked(AgentMessage(text="halfway", sender="worker"))
         assert not rebuilt.turn_running
         await rebuilt.submit(BackgroundTaskFinished(task_id="task_1", summary="done"))
         await asyncio.wait_for(rebuilt.wait_turn(), 5)

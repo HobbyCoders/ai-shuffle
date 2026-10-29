@@ -825,9 +825,9 @@ def get_connector_type_info() -> List[Dict]:
         "config_fields": [],
     })
 
-    # Enrich each type with capabilities from the registered connector class
+    # Enrich from SDK-free bundled definitions, not installed runtime workers.
     from dataclasses import asdict
-    from app.core.connectors.registry import _CONNECTOR_CLASSES
+    from app.core.connectors.registry import get_bundled_connector_class
     from app.core import connector_packages
 
     types = [t for t in types if connector_packages.is_offered(t["type"])]
@@ -840,7 +840,7 @@ def get_connector_type_info() -> List[Dict]:
         type_info["plugin_update_available"] = bool(state and state.get("release") != connector_packages.CATALOG["release"])
         type_info["plugin_rollback_available"] = bool(state and state.get("previous"))
         try:
-            cls = _CONNECTOR_CLASSES[type_info["type"]]
+            cls = get_bundled_connector_class(type_info["type"])
             type_info["capabilities"] = asdict(cls.CAPABILITIES)
             type_info["max_message_length"] = cls.MAX_MESSAGE_LENGTH
             type_info["triggers"] = [asdict(t) for t in cls.TRIGGERS]

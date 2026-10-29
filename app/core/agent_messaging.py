@@ -353,9 +353,8 @@ async def deliver_message(target: str, sender: str, text: str, *,
 
     ``(DELIVERED, None)`` when its live engine took it (read at the next tool
     result), ``(QUEUED, turn id)`` when it waits on the session's queue (a
-    running receiver still takes it at its next tool boundary), ``(HELD, None)``
-    when the receiver is parked on background work and the message waits for
-    its next wake, ``(STOPPED, None)`` when the receiver was stopped. Used for
+    running receiver still takes it at its next tool boundary, and a parked
+    receiver wakes immediately), ``(STOPPED, None)`` when stopped. Used for
     local receivers and for messages another worker sent here
     (``app.core.remote_task``).
     """
@@ -368,9 +367,8 @@ async def deliver_message(target: str, sender: str, text: str, *,
     state = get_session_pool().get(target)
     adapter = getattr(state, "adapter", None)
     engine = getattr(adapter, "engine", None)
-    # An engine that says it is idle is not offered the message: the
-    # scheduler below decides between a wake and a hold on the app's own
-    # park state, which the engine's can lag. Engines that do not report
+    # An idle engine is not offered the message: the scheduler owns its wake,
+    # including while parked on background work. Engines that do not report
     # (None) are offered it as before and refuse when idle.
     if (getattr(adapter, "provider_kind", None) != "delegated"
             and engine is not None and session_runtime.get_live_runtime(target) is not None
@@ -413,12 +411,8 @@ def delivery_receipt(name: str, status: str, turn_id: str | None = None) -> dict
 
 
 def held_receipt(name: str) -> str:
-    """What the sender reads when its message was held, not delivered."""
-    return (
-        f"Held for {name} until it wakes: it is parked waiting on background "
-        "work and reads your message with its next wake. Do not wait for a "
-        "reply. Send again with urgent=true only if you are blocked on its answer."
-    )
+    """Compatibility receipt for a legacy worker reporting held delivery."""
+    return f"Queued for {name}; delivery is not yet confirmed. Do not resend."
 
 
 async def resume_unavailable(target, row):
