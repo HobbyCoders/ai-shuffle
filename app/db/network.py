@@ -1523,6 +1523,11 @@ def exchange_batch(watermarks: dict, *, limit: int = 500, lane: Optional[str] = 
         snapshot = requires_snapshot(watermarks, exclude_origin=exclude_origin, _conn=conn, _heads=heads)
         ops = ops_since(watermarks, limit=limit, lane=lane, exclude_origin=exclude_origin,
                         _conn=conn, _heads=heads)
+        from app.network import nested_secret_sync
+        if not nested_secret_sync.ops_compatible(ops, exclude_origin, conn.cursor()):
+            # Signed history cannot be rewritten or filtered without stream
+            # holes. An old peer must adopt a ciphertext-form state copy.
+            return [], heads, True
         return ops, heads, snapshot
 
 
@@ -1539,9 +1544,13 @@ def preserved_builtin_ids(_conn=None) -> List[str]:
         return _query(conn)
 
 
-def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None, _conn=None,
+def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None,
+                      check_tail_compatibility: bool = False, _conn=None,
                       _heads: Optional[Dict[str, Dict[str, int]]] = None) -> bool:
-    """A state-copy recipient can forward state even without original log rows."""
+    """Detect log gaps; only cached snapshots need whole-tail compatibility.
+
+    Normal exchanges validate just the bounded batch they are about to send.
+    """
     def _query(conn):
         cursor = conn.cursor()
         heads = local_watermarks(conn) if _heads is None else _heads
@@ -1551,6 +1560,8 @@ def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None, _c
         # retired its unchanged copy needs a state copy, not an endless FK retry.
         # Use the existing signed snapshot protocol; never mint a winning clock.
         permission_only_projection = None
+        legacy_recipient = None
+        protected = ()
         for origin, streams in heads.items():
             if origin == exclude_origin:
                 continue
@@ -1563,6 +1574,24 @@ def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None, _c
                                (origin, int(incarnation), last, head))
                 if int(cursor.fetchone()["n"]) != head - last:
                     return True
+                if check_tail_compatibility and legacy_recipient is None:
+                    from app.network import nested_secret_sync, policy
+                    legacy_recipient = exclude_origin is not None and not nested_secret_sync.enabled(cursor, recipient=exclude_origin)
+                    if legacy_recipient:
+                        protected = tuple(c.name for c in policy.COLLECTIONS.values() if c.map_secrets is not None)
+                if legacy_recipient and protected:
+                    # A retained tail can still be unservable to this receiver.
+                    # Inspect the entire protected tail, not just the next batch:
+                    # otherwise both state caches can repeatedly return a frontier
+                    # that exchange will always refuse further along the stream.
+                    placeholders = ", ".join(["%s"] * len(protected))
+                    cursor.execute("SELECT envelope FROM sync_ops WHERE origin_device_id=%s "
+                                   "AND incarnation=%s AND seq>%s AND seq<=%s "
+                                   f"AND collection IN ({placeholders})",
+                                   (origin, int(incarnation), last, head, *protected))
+                    ops = [_load(row["envelope"], {}) for row in cursor.fetchall()]
+                    if not nested_secret_sync.ops_compatible(ops, exclude_origin, cursor):
+                        return True
                 if permission_only_projection is None:
                     cursor.execute("SELECT * FROM agents WHERE id IN (%s, %s) AND is_builtin = FALSE",
                                    ("general-purpose", "frontend-designer"))
