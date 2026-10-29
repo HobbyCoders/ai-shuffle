@@ -14,6 +14,8 @@ export interface AgentMessageProjectionInput {
  * Queue snapshots can clear before the receipt arrives, so retain the last
  * known queued row until delivery or a session change; clearing is not a receipt.
  * Delivered rows use delivery="delivered", including historical held receipts.
+ * Queued senders carry only their session id, like text receipts; both resolve
+ * names through agentSenderNames, never a queue-only label lost on reload.
  * Legacy deliveries without a turn id retain their existing message id.
  */
 export function createAgentMessageProjection() {
@@ -57,8 +59,8 @@ export function createAgentMessageProjection() {
 				if (delivered.has(peer.id)) continue;
 				const existing = pending.get(peer.id);
 				const known = existing?.peer;
-				if (known && known.content === peer.content && known.senderLabel === peer.senderLabel &&
-					known.senderSessionId === peer.senderSessionId && Object.is(known.queuedAt, peer.queuedAt)) continue;
+				if (known && known.content === peer.content && known.senderSessionId === peer.senderSessionId &&
+					Object.is(known.queuedAt, peer.queuedAt)) continue;
 				// Predict the wake at first sighting, not when turn.started races its receipt.
 				const agentWake = existing ? existing.row.metadata?.agent_wake === true : input.sessionActive === false;
 				const timestamp = new Date(peer.queuedAt);
@@ -75,8 +77,7 @@ export function createAgentMessageProjection() {
 						...(agentWake ? { metadata: { agent_wake: true } } : {}),
 						...(Number.isFinite(timestamp.getTime()) ? { timestamp: timestamp.toISOString() } : {}),
 						systemData: {
-							sender: peer.senderSessionId || peer.senderLabel || 'Agent',
-							sender_label: peer.senderLabel,
+							sender: peer.senderSessionId || 'Agent',
 							content: peer.content,
 							delivery: 'queued'
 						}

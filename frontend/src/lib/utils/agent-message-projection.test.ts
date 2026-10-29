@@ -42,21 +42,43 @@ describe('agent-message transcript projection', () => {
 			systemSubtype: 'agent_message', systemData: { delivery: 'queued' },
 			timestamp: '1970-01-01T00:00:01.234Z'
 		});
-		expect(agentDelivery(rows[1])).toEqual({ sender: peer.senderSessionId, senderLabel: peer.senderLabel, content: peer.content });
+		expect(agentDelivery(rows[1])).toEqual({ sender: peer.senderSessionId, content: peer.content });
 	});
 
-	it('keeps the sender Input label and session identical when a queued message is delivered', () => {
-		const peer = pendingPeer();
+	it.each([false, true])('keeps sender Input identical when queued, delivered and reloaded (known worker=%s)', (knownWorker) => {
+		const peer = pendingPeer('peer-1', { senderLabel: 'Transient queue title' });
 		const worker: ChatMessage = {
 			id: 'worker-card', role: 'assistant', type: 'subagent', content: '',
-			agentSessionId: peer.senderSessionId, agentDescription: peer.senderLabel
+			agentSessionId: peer.senderSessionId, agentDescription: 'Review findings'
 		};
-		const names = agentSenderNames([worker]);
-		const [queued] = createAgentMessageProjection().update({ sessionId: 's1', messages: [], pendingPeerMessages: [peer] });
-		const queuedSender = agentSender(agentDelivery(queued)!, names);
-		const deliveredSender = agentSender(agentDelivery(receipt(peer))!, names);
-		expect(queuedSender).toEqual(deliveredSender);
-		expect({ label: queuedSender.name, session: queuedSender.id }).toEqual({ label: peer.senderLabel, session: peer.senderSessionId });
+		const history = knownWorker ? [worker] : [];
+		const inputFor = (message: ChatMessage, messages: ChatMessage[]) => {
+			const sender = agentSender(agentDelivery(message)!, agentSenderNames(messages));
+			return sender.id ? { label: sender.name, session: sender.id } : { label: sender.name };
+		};
+		const project = createAgentMessageProjection();
+		const queued = project.update({ sessionId: 's1', messages: history, pendingPeerMessages: [peer] });
+		const received = receipt(peer);
+		expect(received).toMatchObject({ role: 'user', type: 'text' });
+		expect(received.systemData).toBeUndefined();
+		const delivered = project.update({ sessionId: 's1', messages: [...history, received], pendingPeerMessages: [] });
+		// Replay the wire event into a fresh reducer and projection, with no queue memory.
+		const reloaded = createAgentMessageProjection().update({
+			sessionId: 's1', messages: [...history, receipt(peer)], pendingPeerMessages: []
+		});
+		const expected = knownWorker ? { label: worker.agentDescription, session: peer.senderSessionId } : { label: peer.senderSessionId };
+		expect(inputFor(queued.at(-1)!, queued)).toEqual(expected);
+		expect(inputFor(delivered.at(-1)!, delivered)).toEqual(expected);
+		expect(inputFor(reloaded.at(-1)!, reloaded)).toEqual(expected);
+		expect(delivered.at(-1)?.systemData?.sender_label).toBeUndefined();
+	});
+
+	it('does not churn rows when only a queue-only sender label changes', () => {
+		const project = createAgentMessageProjection();
+		const peer = pendingPeer();
+		const before = project.update({ sessionId: 's1', messages: [], pendingPeerMessages: [peer] });
+		const after = project.update({ sessionId: 's1', messages: [], pendingPeerMessages: [{ ...peer, senderLabel: 'A new queue title' }] });
+		expect(after).toBe(before);
 	});
 
 	it('swaps pending for delivered under the same presentation and server keys', () => {
@@ -169,11 +191,11 @@ describe('agent-message transcript projection', () => {
 		const project = createAgentMessageProjection();
 		const peer = pendingPeer();
 		const first = project.update({ sessionId: 's1', messages: [], pendingPeerMessages: [peer] });
-		const updated = { ...peer, content: 'Updated report', senderLabel: 'New label' };
+		const updated = { ...peer, content: 'Updated report', senderSessionId: 'another-session' };
 		const next = project.update({ sessionId: 's1', messages: [], pendingPeerMessages: [updated] });
 		expect(next[0]).not.toBe(first[0]);
 		expect(next[0].id).toBe(first[0].id);
-		expect(agentDelivery(next[0])).toMatchObject({ content: updated.content, senderLabel: updated.senderLabel });
+		expect(agentDelivery(next[0])).toEqual({ content: updated.content, sender: updated.senderSessionId });
 		expect(first[0].content).toBe(peer.content);
 	});
 
