@@ -59,8 +59,15 @@ async function moveWithChip(page, from, row, to) {
 	const menu = page.getByRole('menu', { name: 'Move this session' });
 	await menu.waitFor({ timeout: 15_000 });
 	await menu.getByRole('menuitemradio', { name: new RegExp(`^${row}`) }).click();
+	// A chat with a worktree asks first ("Commit, push and move"); one without
+	// moves at once. Wait for whichever comes (isVisible does not wait).
 	const confirm = page.getByRole('button', { name: /^Commit, push and (move|continue)$/ });
-	if (await confirm.isVisible({ timeout: 3000 }).catch(() => false)) await confirm.click();
+	// Each wait settles on its own (the loser times out later, quietly).
+	const asked = await Promise.race([
+		confirm.waitFor({ timeout: 30_000 }).then(() => true, () => false),
+		runnerChip(page, to).waitFor({ timeout: 30_000 }).then(() => false, () => false)
+	]);
+	if (asked) await confirm.click();
 	try {
 		await runnerChip(page, to).waitFor({ timeout: 180_000 });
 	} catch (error) {
@@ -99,11 +106,12 @@ async function expectTranscriptIntact(ctx, chat, tokens) {
 	}
 }
 
-function moveCase({ name, origin, project, there, back }) {
+function moveCase({ name, origin, project, there, back, knownBug }) {
 	return {
 		name,
 		viewports: ['desktop'],
 		throttles: ['fast'],
+		knownBug,
 		async setup(ctx) {
 			const { page, status, pair } = ctx;
 			const chat = await startChatOn(ctx, pair[origin], { project });
@@ -149,14 +157,24 @@ await runJourney({
 			origin: 'b',
 			project: null,
 			there: { step: 'continue the chat here (worker A)', from: 'Dev worker B', row: 'Continue here', to: 'Local' },
-			back: { step: 'move it back to worker B', from: 'Local', row: 'Dev worker B', to: 'Dev worker B' }
+			back: { step: 'move it back to worker B', from: 'Local', row: 'Dev worker B', to: 'Dev worker B' },
+			knownBug: {
+				issue: 820,
+				error: /^Error: worker A has "back on the first owner [a-z0-9]+" 0 times \(want 1\)$/,
+				reason: "the worker a chat left serves its own stale transcript over the REST API"
+			}
 		}),
 		moveCase({
 			name: 'worktree-handoff',
 			origin: 'a',
 			project: 'Dev sandbox',
 			there: { step: 'hand the chat and its worktree to worker B', from: 'Local', row: 'Dev worker B', to: 'Dev worker B' },
-			back: { step: 'continue it here again (worker A)', from: 'Dev worker B', row: 'Continue here', to: 'Local' }
+			back: { step: 'continue it here again (worker A)', from: 'Dev worker B', row: 'Continue here', to: 'Local' },
+			knownBug: {
+				issue: 820,
+				error: /^Error: worker B has "back on the first owner [a-z0-9]+" 0 times \(want 1\)$/,
+				reason: "the worker a chat left serves its own stale transcript over the REST API"
+			}
 		})
 	],
 	allow: [...DEV_INSTANCE_NOISE, ...PAIR_NOISE]

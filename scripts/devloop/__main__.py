@@ -414,7 +414,9 @@ class Instance:
             self._announce(seconds)
         else:
             log.info("app ready again in %.1fs (pid %s)", seconds, process.pid)
-            self.write(state="ready")
+            # A deferred seed (``pair-b`` before its worker joined) runs on a
+            # later start: keep the status's seed result current.
+            self.write(state="ready", seed=read_status(self.directory / "seed.json"))
         self.gate.open()
 
     def _announce(self, seconds: float) -> None:
@@ -501,7 +503,7 @@ def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
     if browser.is_unspecified:
         parser.error("--browser-host must name a reachable address for a wildcard --host")
     for name in ("port", "vite_port", "protected_port"):
-        value = getattr(args, name)
+        value = getattr(args, name, None)
         if value is not None and (not 1024 <= value <= 65535 or value in (8000, 8001)):
             parser.error(f"--{name.replace('_', '-')} must be a free port other than 8000/8001")
     if args.port is not None and args.port == args.vite_port:

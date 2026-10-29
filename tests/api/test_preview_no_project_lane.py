@@ -183,6 +183,23 @@ async def test_preview_send_to_another_worker_is_refused(workspace: Path) -> Non
     assert await _handler(_owner())._may_send_elsewhere("sess-x") is True
 
 
+async def test_preview_send_reaches_the_other_dev_instance_of_a_pair(workspace: Path, monkeypatch) -> None:
+    """``devloop up --pair``: the only possible peer is the launcher's other
+    instance (same checkout, labels the turn as the preview's), so the guard
+    lets it through there and nowhere else."""
+    from app.network import dev_pair
+
+    monkeypatch.setattr(dev_pair, "guarded", lambda: True)
+    monkeypatch.setenv(dev_pair.KEY_ENV, "k" * dev_pair.MIN_KEY_CHARS)
+    assert await _handler(identity.preview_principal())._may_send_elsewhere("sess-x") is True
+    # A dev instance started without a pair, or a real worker with a stray key, refuses.
+    monkeypatch.delenv(dev_pair.KEY_ENV)
+    assert await _handler(identity.preview_principal())._may_send_elsewhere("sess-x") is False
+    monkeypatch.setenv(dev_pair.KEY_ENV, "k" * dev_pair.MIN_KEY_CHARS)
+    monkeypatch.setattr(dev_pair, "guarded", lambda: False)
+    assert await _handler(identity.preview_principal())._may_send_elsewhere("sess-x") is False
+
+
 def test_a_forwarded_turn_carries_only_a_stated_caller() -> None:
     from app.network import control
 

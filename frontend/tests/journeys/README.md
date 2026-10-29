@@ -192,6 +192,43 @@ Conventions:
 - Seed what a journey needs in `scripts/devloop/seed.py`; the preview cookie
   cannot change settings, providers or preferences.
 
+## Two workers
+
+`two-worker-*.journey.mjs` need two workers in one network and run against
+`python -m scripts.devloop up --pair` (see
+[dev-loop.md](../../../docs/internal/dev-loop.md#two-workers-up---pair)), never
+against a single instance: `run-all.mjs` skips them unless given `--pair`, and
+CI runs them in their own job (`python -m scripts.devloop.ci pair-journeys`).
+
+```bash
+# terminal 1 (or a Monitor task): the pair
+python -m scripts.devloop up --pair
+
+# terminal 2
+cd frontend
+node tests/journeys/run-all.mjs --pair                # every two-worker journey
+node tests/journeys/two-worker-move-chat.journey.mjs  # one
+```
+
+A journey with `pair: true` reads the pair status (`DEVLOOP_PAIR_STATUS`, or
+the default `-pair.json` beside the single one), drives **worker A's** UI and
+gets `ctx.pair` = `{ path, a, b }`, each worker with its `role`, `name`,
+`deviceId` and `status`. One browser context holds both workers' access
+cookies (each install names its own), so a case can open worker B's UI in a
+second tab. The steps are in [`lib/pair.mjs`](lib/pair.mjs):
+
+- Assert on **both workers' own APIs**, never only the UI: `expectOwner(ctx,
+  chat, 'b')` (both report B as the owner, `is_remote` only on A),
+  `watchOwners` (every owner each worker reported, to prove a move switched it
+  once), `transcriptOn`, `userMessagesWith`, `duplicateIds`, `memberApi` for
+  anything else.
+- `setWorker(ctx, 'b', 'offline' | 'online')` stops or restarts a worker's
+  app for real (`python -m scripts.devloop pair offline b`); bring it back in a
+  `finally`. `waitPeerOnline` waits for the other worker to notice (up to the
+  network's 90 s online window).
+- Worker B's seeded chats are `PAIR_SEEDED` (ids via `pairChatId(ctx.pair.b,
+  'b_loose')`); the runner deletes chats a case created on either worker.
+
 ## Journeys
 
 | File | Guards |
@@ -209,3 +246,7 @@ Conventions:
 | `cleared-chat.journey.mjs` | The seeded cleared chat shows its own title and "Conversation cleared", not the new-session hero, without moving the composer; a chat cleared while open moves it to the centre once (its designed move, `expectShift`) and a send in it works (intermittent known bug #797). |
 | `side-panels.journey.mjs` | Git panel, session side panel and Settings-and-back at desktop, phone and both Fold sizes: open and close in one move, same chat and transcript after, reading position kept. |
 | `phone-composer.journey.mjs` | Phone and Fold cover only: focus/type/send never move the composer's bottom edge, round buttons are round and tappable, each composer sheet fits and closes (Escape or tap outside), and Send without an agent says why at once. |
+| `two-worker-open-remote.journey.mjs` | Two real workers: worker B's chat, opened on A from the new-session screen (desktop, phone), arrives through the real sync and mirror check, paints its rows once and never drops them, shows no sync pane after it painted, says it runs on Dev worker B; both workers' APIs agree B owns it and neither serves a row twice. Opening it from another chat waits on #813. |
+| `two-worker-remote-send.journey.mjs` | Two real workers: two messages sent on A in B's chat (every viewport and throttle) each show once, run on B (B's own transcript has each once), stream back and settle; ownership stays with B and neither worker serves a row twice. |
+| `two-worker-move-chat.journey.mjs` | Two real workers: a chat moved with the runner chip to the other worker and back (a loose chat from B: "Continue here" then back; a Dev sandbox chat in its worktree from A: commit, push and move, then back), sending on each owner. Both workers' APIs see the owner switch exactly once per move and keep every message once (known bug #820: the worker a chat left serves a stale transcript over REST). |
+| `two-worker-owner-offline.journey.mjs` | Two real workers: B's app stops while its chat is open on A. A notices (network view and runner chip "(offline)") with the transcript kept on screen; once B is back A sees it online without a reload and a message sent there is answered by B, once. |

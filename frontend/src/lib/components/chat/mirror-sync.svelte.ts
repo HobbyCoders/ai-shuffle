@@ -61,9 +61,20 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 	// Equal primitive values must not restart polling when those stores update.
 	const sessionId = $derived(input().sessionId);
 	const remote = $derived(input().remote);
+	// The open chat while it ran on this worker. Moved away while open, it
+	// keeps what it shows: this worker's own transcript, current at the move,
+	// which the live feed carries on from. Gating it as a first open blanked it
+	// for a frame and reloaded it. Opening another chat forgets it, so the
+	// moved chat is checked like any mirror when it is opened again.
+	let ranHere = $state<string | null>(null);
+	$effect.pre(() => {
+		const id = sessionId;
+		if (id && !remote) ranHere = id;
+		else if (id !== untrack(() => ranHere)) ranHere = null;
+	});
 	// Owner-wide watermarks advance for unrelated chats too. Gate the initial
 	// catch-up, then keep the conversation mounted during incremental sync.
-	const waiting = $derived(!!sessionId && remote && revealedSession !== sessionId);
+	const waiting = $derived(!!sessionId && remote && revealedSession !== sessionId && ranHere !== sessionId);
 	const behind = $derived(syncState === 'syncing' || syncState === 'checking');
 
 	$effect(() => {
@@ -71,14 +82,16 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 		if (!id || !remote) return;
 		const controller = new AbortController();
 		let timer: ReturnType<typeof setTimeout>;
-		let caughtUpOnce = false;
+		const movedAway = untrack(() => ranHere) === id;
+		// A chat moved away while open has no opening checkpoint to reach.
+		let caughtUpOnce = movedAway;
 		let initialTarget: { seq: number; epoch: string; tail_id: string } | null = null;
 		const notice = createConnectionBannerGrace({
 			onShow: () => { noticeVisible = true; },
 			onHide: () => { noticeVisible = false; },
 			graceMs: untrack(() => input().graceMs ?? MIRROR_SYNC_NOTICE_GRACE_MS),
 		});
-		revealedSession = null;
+		revealedSession = movedAway ? id : null;
 		noticeVisible = false;
 		syncState = 'checking';
 		pending = 0;

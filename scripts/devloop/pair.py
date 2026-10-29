@@ -20,7 +20,8 @@ loopback owner listener:
    protected loopback listener (``CLUSTER_ADVERTISE_URL``), normal peer
    ingress, never the owner port.
 3. B restarts and runs the ``pair-b`` seed: its own project and chats, owned
-   by B and published to A.
+   by B and published to A, and a clone of A's Dev sandbox project from its
+   remote (so a chat in it can move to B).
 
 Both instances get one random pair key and each other's address, and refuse
 to pair with anything else (``app/network/dev_pair.py``). The pair status
@@ -46,6 +47,7 @@ from scripts.devloop.__main__ import (
     FAILED_LINE, OFFLINE_SIGNAL, ONLINE_SIGNAL, ROOT, StatusError, _iso, ensure_private_dir,
     load_status, remove_own_status, status_alive, write_private_json,
 )
+from scripts.devloop.seed import PEER_FILE
 
 log = logging.getLogger("devloop")
 ROLES = ("a", "b")
@@ -261,11 +263,15 @@ def pair_members(a: Member, b: Member) -> dict:
 def seed_b(a: Member, b: Member) -> dict:
     """Restart B so its ``pair-b`` seed runs, then wait for its chats to reach A."""
     log.info("pair: worker B restarts and seeds its own project and chats")
+    a_seed = _seed_result(a)
+    # B also adds A's sandbox project, cloned from its remote, as a user adding
+    # the same repository on a second worker would (seed.PEER_FILE).
+    peer = Path(b.status().get("scratch_dir") or "/nonexistent") / PEER_FILE
+    write_private_json(peer, {"remotes": a_seed.get("remotes") or {}})
     b.restart()
     seed = _seed_result(b)
     if not seed.get("ok") or seed.get("deferred"):
         raise PairError(f"worker B's seed did not run: {seed}")
-    a_seed = _seed_result(a)
     a_chat = a_seed["chats"]["long"]
     b_chat = seed["chats"]["b_loose"]
 
@@ -304,6 +310,8 @@ def up_pair(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     if args.seed != "default":
         parser.error("--pair seeds both workers itself (no --seed)")
     _validate(parser, args)
+    # The launcher's own owner API calls: one line per poll otherwise.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     if args.status is None:
         args.status = default_pair_status_path()
     try:

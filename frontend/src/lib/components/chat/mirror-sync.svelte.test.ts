@@ -74,6 +74,37 @@ describe('createMirrorSync (the check ChatView runs whatever its layout)', () =>
 		unbound.destroy();
 	});
 
+	it('a chat moved away while open keeps its transcript: no gate, no reload', async () => {
+		// The open chat ran here and was just moved to another worker: what it
+		// shows is this worker's own transcript, current at the move. Gating it
+		// as a first open blanked it for a frame and reloaded it (found by the
+		// two-worker-move-chat journey on a real pair).
+		vi.useFakeTimers();
+		const fetch = vi.fn().mockImplementation(() => Promise.resolve(reply({ state: 'syncing', scope: 'session', pending_updates: 1 })));
+		vi.stubGlobal('fetch', fetch);
+		const { sync, props, onCaughtUp, destroy } = startSync({ sessionId: 'moved', remote: false });
+		props.remote = true;
+		flushSync();
+		expect(sync.active).toBe(true);
+		expect(sync.waiting).toBe(false);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(String(fetch.mock.calls[0][0])).toContain('/sessions/moved/sync-status');
+		fetch.mockImplementation(() => Promise.resolve(reply({ state: 'current' })));
+		await vi.advanceTimersByTimeAsync(4000);
+		expect(sync.waiting).toBe(false);
+		expect(onCaughtUp).not.toHaveBeenCalled();
+
+		// Another chat that is already remote is still checked first, and so is
+		// the moved chat when it is opened again later (it may have moved on).
+		props.sessionId = 'other';
+		flushSync();
+		expect(sync.waiting).toBe(true);
+		props.sessionId = 'moved';
+		flushSync();
+		expect(sync.waiting).toBe(true);
+		destroy();
+	});
+
 	it('restarts for the next chat and stops when destroyed', async () => {
 		vi.useFakeTimers();
 		const fetch = vi.fn().mockImplementation(() => Promise.resolve(reply({ state: 'checking' })));

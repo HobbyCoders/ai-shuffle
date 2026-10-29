@@ -8,6 +8,7 @@ Use it to exercise a change in the real app before you push.
 ```bash
 python -m scripts.devloop up                                          # local browser
 python -m scripts.devloop up --host 0.0.0.0 --browser-host 172.17.0.2  # remote agent browser
+python -m scripts.devloop up --pair                                   # two paired workers (below)
 ```
 
 Linux only (it reuses the `app.preview_run` lease). Run it under a Monitor
@@ -22,7 +23,7 @@ inside a private directory:
 
 | Field | What it is |
 | --- | --- |
-| `state` | `starting`, `ready`, `restarting`, `app-exited` or `stopping` |
+| `state` | `starting`, `ready`, `restarting`, `app-exited`, `offline` (`pair offline`) or `stopping` |
 | `pid`, `pid_identity` | The launcher and its start time (a reused pid is not the launcher) |
 | `mode` | `dev`, or `ci` for `--ci` |
 | `access_link`, `urls.ui` | The link to open; the UI (Vite, or the stamped build) origin |
@@ -205,6 +206,63 @@ scratch directory and PostgreSQL's socket directory. It writes one line to
 `<status>.guardian.log` when it had to do that; after a normal teardown it
 finds nothing and exits.
 
+## Two workers (`up --pair`)
+
+`python -m scripts.devloop up --pair [--ci] [--host ... --browser-host ...]`
+starts two dev instances, **Dev worker A** and **Dev worker B**, and joins
+them into one worker network, for flows that need two workers (a chat another
+worker owns, moving a chat or its worktree, an owner going offline). Each is
+an ordinary `up` (its own PostgreSQL, data, scratch, ports, fake AI and
+guardian) run as a child of the pair launcher, and the pair takes about a
+minute to be ready:
+
+1. A starts with the default seed; one restart turns that existing install
+   into a network of one (the same path an upgraded install takes).
+2. A mints a `network:join` invite for its own peer address; B enrolls with
+   the link (`POST /network/enroll`), A admits it, B copies A's snapshot and
+   both start syncing. This is the real enrollment flow, driven as the owner
+   would from Settings > Devices, with an owner session each instance writes
+   to its own scratch directory (`owner.json`, 0600) and the launcher uses
+   only on that instance's loopback owner listener. Nothing is written to a
+   database directly and no Origin is forged.
+3. B restarts and runs the `pair-b` seed: its own project (**Worker B
+   project**) and two chats owned by B (**Worker B chat (seeded)**, six
+   turns, and **Worker B project chat (seeded)**), published to A by the
+   normal sync. B also clones A's **Dev sandbox** from its remote and adds it
+   as a project, as a user adding the same repository on a second worker
+   would, so a sandbox chat can move between the two.
+
+Peers talk only over each instance's protected loopback listener (normal peer
+ingress, `CLUSTER_ADVERTISE_URL=http://127.0.0.1:<protected port>`), never
+the owner port.
+
+**A dev instance pairs only with its launcher's other instance.** The launcher
+gives both one random key (`SHUFFLE_DEV_PAIR_KEY`) and each the other's peer
+address (`SHUFFLE_DEV_PAIR_PEERS`). On a launcher-marked dev instance
+(`app/network/dev_pair.py`) every join is refused unless both sides prove
+they hold that key, and the joiner dials only the named address, so a dev
+instance can neither join nor admit the owner's real workers, the live app
+(8000/8001 are refused anyway) or another launcher's instance. Dev instances
+also never contact the cloud hub. Real workers are unaffected. Inside a pair,
+a send through the preview link may run on the other instance (elsewhere the
+preview link cannot send to a chat another worker runs): its only possible
+peer is the same checkout, which labels the turn as the preview's.
+
+The pair status file (`/tmp/ai-shuffle-devloop-<uid>/<checkout>-pair.json`,
+`kind: "pair"`) lists both instances: their names, device ids, peer
+addresses, status files (each an ordinary `up` status, with its own access
+link) and full logs (`<pair>.a.log`, `<pair>.b.log`, kept after `down`; the
+console shows only the launcher's lines and errors). `status` and `down`
+follow it (`--pair`, or `--status` naming it); `down` stops both instances
+and their guardians cover each one exactly as for a single `up`. Ending the
+launcher in any way stops both. `--ci` prints `DEVLOOP_PAIR_READY {...}` (or
+`DEVLOOP_PAIR_FAILED`).
+
+`python -m scripts.devloop pair offline|online a|b` takes one worker's app
+down for real (the process exits, its database stays) and brings it back,
+waiting for the state (`--wait`, default 90 s). Its peer notices within the
+network's online window (about 90 s).
+
 ## CI mode and the journey driver
 
 `python -m scripts.devloop up --ci` (or `DEVLOOP_CI=1`) is the
@@ -239,5 +297,7 @@ See [PR checks](../ci/pr-checks.md#ui-journeys-and-visual-regression).
   or DSN (the app's environment is PATH/LANG/LD_LIBRARY_PATH plus its own
   settings; the launcher may add only the dev loop's own `SHUFFLE_DEV_*` settings).
 * Never copy a `.env` into the checkout.
+* Never pair a dev instance with a real worker or the live app: `up --pair`
+  pairs its two instances with each other, and they refuse anything else.
 * The preview cookie cannot change auth, credentials, settings or providers,
   so seed what you need instead of clicking it into Settings.

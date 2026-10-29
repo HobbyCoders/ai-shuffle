@@ -226,6 +226,7 @@ class ArtifactPolicyTests(unittest.TestCase):
             ("android.yml", "android-ui"): "android-ui-verification-api-${{ matrix.api }}",
             ("ci-browser-workspace.yml", "workspace"): "browser-workspace-screenshots-${{ matrix.chrome-mode }}",
             ("ci-frontend.yml", "journeys"): "ui-journeys-${{ matrix.shard }}",
+            ("ci-frontend.yml", "pair-journeys"): "ui-pair-journeys",
             ("ci-frontend.yml", "visual"): "visual-regression-${{ github.sha }}",
             ("container-postgres.yml", "container-postgres"): "container-postgres-${{ github.sha }}",
             ("build-branch.yml", "build"): "container-postgres-${{ github.sha }}",

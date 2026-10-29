@@ -88,6 +88,8 @@ def test_link_and_seed_are_announced_when_the_first_start_crashed(tmp_path, monk
         assert status["access_link"] == "http://10.0.0.30:18880/link"
         assert status["seed"] == {"ok": True, "seed": "default"}
 
+        # A seed a later start ran (a deferred pair-b seed) reaches the status.
+        (tmp_path / "seed.json").write_text(json.dumps({"ok": True, "seed": "pair-b", "chats": {}}))
         again = _Process(103)
         current.append(again)
         healthy.add(103)
@@ -95,6 +97,7 @@ def test_link_and_seed_are_announced_when_the_first_start_crashed(tmp_path, monk
         _wait_for(lambda: instance.data["state"] == "ready" and instance.data["app"]["pid"] == 103)
         _wait_for(lambda: json.loads(instance.args.status.read_text())["state"] == "ready")
         assert len(announced) == 1  # later restarts only report "ready again"
+        assert json.loads(instance.args.status.read_text())["seed"]["seed"] == "pair-b"
     finally:
         instance.done.set()
         reporter.join(5)
@@ -510,3 +513,106 @@ def test_the_dev_agent_becomes_the_composer_default_for_the_owner(monkeypatch):
     seed_module.make_dev_agent_the_default()
     stored.assert_called_once_with("admin", "owner-of-admin", "composer.profile",
                                    seed_module.DEV_AGENT_ID)
+
+
+# ─── up --pair ──────────────────────────────────────────────────────────────
+
+
+def test_a_deferred_seed_writes_nothing_and_runs_on_a_later_start(seed_file, monkeypatch):
+    """``pair-b`` waits for B to join A: its first start must not record a seed."""
+    from app.db import database
+
+    monkeypatch.setitem(seed_module.SEEDS, "pair-b", AsyncMock(
+        side_effect=seed_module.SeedDeferred("worker B seeds once it has joined")))
+    asyncio.run(seed_module.seed("pair-b"))
+    assert json.loads(seed_file.read_text()) == {
+        "ok": True, "seed": "pair-b", "deferred": "worker B seeds once it has joined"}
+    assert database.get_system_setting("dev_seed:pair-b") is None
+    later = AsyncMock(return_value={"chats": {"b_loose": "b1"}})
+    monkeypatch.setitem(seed_module.SEEDS, "pair-b", later)
+    asyncio.run(seed_module.seed("pair-b"))
+    later.assert_awaited_once()
+    assert json.loads(seed_file.read_text())["chats"] == {"b_loose": "b1"}
+
+
+def test_pair_b_defers_until_enrolled(monkeypatch):
+    from app.network import engine
+
+    monkeypatch.setattr(engine, "context", lambda: None)
+    with pytest.raises(seed_module.SeedDeferred):
+        asyncio.run(seed_module.seed_pair_b())
+
+
+def test_worker_b_reads_worker_a_remotes_beside_its_data(tmp_path, monkeypatch):
+    from app.core.config import settings
+
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setattr(type(settings), "effective_data_dir", property(lambda self: str(data)))
+    assert seed_module._peer_remotes() == {}  # a lone instance: nothing to clone
+    (tmp_path / seed_module.PEER_FILE).write_text(json.dumps({"remotes": {"dev-sandbox": "file:///r.git"}}))
+    assert seed_module._peer_remotes() == {"dev-sandbox": "file:///r.git"}
+
+
+def test_worker_b_ids_never_collide_with_worker_a(monkeypatch):
+    monkeypatch.setattr(seed_module, "_id_counters", {})
+    monkeypatch.setattr(seed_module, "_id_prefix", "")
+    a = seed_module.seed_id("chat")
+    monkeypatch.setattr(seed_module, "_id_counters", {})
+    monkeypatch.setattr(seed_module, "_id_prefix", "pair-b:")
+    assert seed_module.seed_id("chat") != a
+
+
+def test_pair_status_sits_beside_the_single_one(tmp_path):
+    single = devloop.default_status_path(tmp_path)
+    paired = devloop.default_pair_status_path(tmp_path)
+    assert paired.parent == single.parent and paired.name == single.stem + "-pair.json"
+
+
+def test_a_pair_member_needs_its_launchers_key_and_peer(tmp_path, monkeypatch):
+    monkeypatch.delenv("SHUFFLE_DEV_PAIR_KEY", raising=False)
+    monkeypatch.setenv("SHUFFLE_DEV_PAIR_PEERS", "http://127.0.0.1:41002")
+    with pytest.raises(SystemExit, match="pair key"):
+        devloop.pair_member_environment(tmp_path, 41001)
+    monkeypatch.setenv("SHUFFLE_DEV_PAIR_KEY", "k" * 64)
+    env = devloop.pair_member_environment(tmp_path, 41001)
+    assert env == {"SHUFFLE_DEV_PAIR_KEY": "k" * 64, "SHUFFLE_DEV_PAIR_PEERS": "http://127.0.0.1:41002",
+                   "CLUSTER_ADVERTISE_URL": "http://127.0.0.1:41001",
+                   "SHUFFLE_DEV_OWNER_FILE": str(tmp_path / "owner.json")}
+    from app.preview_run import DEV_ENV_KEYS
+
+    assert set(env) <= DEV_ENV_KEYS  # the preview environment accepts every one
+
+
+def test_offline_switch_holds_and_frees_the_app():
+    import signal as signals
+
+    hold, restart = threading.Event(), threading.Event()
+    old = devloop.install_offline_switch(hold, restart)
+    try:
+        os.kill(os.getpid(), devloop.OFFLINE_SIGNAL)
+        assert hold.is_set() and restart.is_set()
+        restart.clear()
+        os.kill(os.getpid(), devloop.ONLINE_SIGNAL)
+        assert not hold.is_set() and not restart.is_set()
+    finally:
+        for sig, handler in old.items():
+            signals.signal(sig, handler)
+
+
+def test_status_and_down_follow_a_pair_status_file(tmp_path, capsys):
+    from scripts.devloop import pair
+
+    path = tmp_path / "pair.json"
+    path.write_text(json.dumps({"kind": "pair", "pid": 2 ** 22 + 7, "pid_identity": "1"}))
+    assert pair.is_pair_status(path)
+    assert devloop.main(["down", "--status", str(path)]) == 0
+    assert "stale" in capsys.readouterr().out and not path.exists()
+
+
+def test_pair_refuses_explicit_ports_and_seeds(monkeypatch):
+    monkeypatch.setattr(devloop.sys, "platform", "linux")
+    with pytest.raises(SystemExit):
+        devloop.main(["up", "--pair", "--port", "41000"])
+    with pytest.raises(SystemExit):
+        devloop.main(["up", "--pair", "--seed", "none"])

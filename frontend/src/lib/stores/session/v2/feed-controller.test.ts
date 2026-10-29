@@ -2270,6 +2270,25 @@ describe('feedController isStreaming single-writer (S6)', () => {
 		expect(deps.state.optimisticStreaming).toBe(false);
 	});
 
+	it('a whole turn landing in one frame still retires the optimistic flip', () => {
+		// A chat another worker runs: its events reach this worker in batches
+		// (the transcript mirror), so `turn.started` and `turn.completed` can
+		// arrive before one fold. The reducer was live in between, so the send
+		// was answered: the chat must settle, not stream forever.
+		const deps = makeDeps({ isStreaming: true, optimisticStreaming: true });
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		expect(deps.state.isStreaming).toBe(true);
+
+		hoisted.onEvent!(userMessageAt(1, 'hi'));
+		hoisted.onEvent!(turnStarted(2));
+		hoisted.onEvent!(turnCompleted(3, 'turn-2'));
+		flushRaf();
+		expect(deps.state.isStreaming).toBe(false);
+		expect(deps.state.optimisticStreaming).toBe(false);
+	});
+
 	it('noteOptimisticSend/clearOptimisticSend drive the same single flag', () => {
 		const deps = makeDeps();
 		feedController.attach(deps);

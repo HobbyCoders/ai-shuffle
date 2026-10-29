@@ -337,6 +337,79 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+  pair-journeys:
+    name: UI journeys (two workers)
+    # frontend/tests/journeys/two-worker-*.journey.mjs against two dev
+    # instances paired through the real enrollment flow (python -m
+    # scripts.devloop up --pair --ci): a chat another worker owns, a send there,
+    # moving a chat and its worktree, the owner going offline. In parallel with
+    # the four single-instance shards and about as long.
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements*.txt
+            fluid/pyproject.toml
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            browser-mcp/package-lock.json
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip==26.2.1
+          pip install -r requirements.txt
+          pip install -e ./fluid
+          # As in CI Backend: the hosted tool cache can hold group/world-writable
+          # stdlib files, which the app's import provenance checks refuse.
+          chmod -R go-w "$(python -c 'import sys; print(sys.base_prefix)')"
+      - name: Install JavaScript dependencies
+        run: |
+          npm ci --prefix frontend
+          npm ci --ignore-scripts --prefix browser-mcp
+      - name: Cache managed Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-mcp/package-lock.json') }}
+      - name: Install isolated Chromium
+        timeout-minutes: 13
+        working-directory: browser-mcp
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # Use the primary signed Ubuntu archive, not the hosted mirror's
+          # slow Azure fallback. Keep suites, components and Signed-By intact.
+          sudo sed -i -E 's|^URIs:.*|URIs: https://archive.ubuntu.com/ubuntu/|' /etc/apt/sources.list.d/ubuntu.sources
+          python3 ../scripts/ci/bounded_apt.py npx --no-install playwright-core install-deps chromium
+          timeout --kill-after=10s 90s npx --no-install playwright-core install chromium
+          node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "CHROMIUM_PATH=" + require("playwright-core").chromium.executablePath() + "\n")'
+      - name: Build and stamp the desktop UI
+        env:
+          SHUFFLE_SKIP_MOBILE_UI: '1'
+        run: |
+          (cd frontend && npm run build)
+          python -m app.preview stamp
+      - name: Run the journeys on a fresh dev pair
+        timeout-minutes: 25
+        run: |
+          export PATH="/usr/lib/postgresql/16/bin:$PATH"
+          python -m scripts.devloop.ci pair-journeys --out "$RUNNER_TEMP/ui-pair-journeys"
+      - name: Upload journey timelines
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-pair-journeys
+          path: ${{ runner.temp }}/ui-pair-journeys/
+          if-no-files-found: ignore
+          retention-days: 3
+
   visual:
     name: Visual regression (4 viewports)
     # The Playwright image of browser-mcp's playwright-core version pins the
@@ -388,7 +461,7 @@ jobs:
   javascript:
     name: JavaScript package checks
     if: always()
-    needs: [frontend, contracts, build, typechecks, mobile, tools, browser-mcp, journeys, visual]
+    needs: [frontend, contracts, build, typechecks, mobile, tools, browser-mcp, journeys, pair-journeys, visual]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -399,7 +472,7 @@ jobs:
           node --input-type=module <<'JS'
           import assert from 'node:assert/strict';
           const results = JSON.parse(process.env.RESULTS);
-          const expected = ["frontend", "contracts", "build", "typechecks", "mobile", "tools", "browser-mcp", "journeys", "visual"];
+          const expected = ["frontend", "contracts", "build", "typechecks", "mobile", "tools", "browser-mcp", "journeys", "pair-journeys", "visual"];
           assert.deepEqual(Object.keys(results).sort(), [...expected].sort(), 'missing branch');
           for (const name of expected) assert.equal(results[name].result, 'success', name);
           JS

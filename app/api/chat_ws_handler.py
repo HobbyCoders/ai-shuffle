@@ -1178,9 +1178,13 @@ class ChatWebSocketHandler:
 
         That worker cannot see this socket's principal; an older one would run
         the message as the owner's. Fails closed with an error frame (#641).
+        A dev instance of ``devloop up --pair`` is the exception: its only
+        possible peer is its launcher's other instance, same checkout, which
+        labels the forwarded turn with the preview caller.
         """
         from app.core.session_modes import CALLER_PREVIEW
-        if self._caller != CALLER_PREVIEW:
+        from app.network import dev_pair
+        if self._caller != CALLER_PREVIEW or dev_pair.in_pair():
             return True
         await self.send_json({
             "type": "error", "session_id": session_id,

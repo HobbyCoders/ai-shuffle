@@ -8,7 +8,7 @@
 // stays on screen; once B is back, A sees it online again without a reload
 // and a message sent in the chat is answered by B.
 import { runJourney } from './runner.mjs';
-import { chatState, expect, gotoApp, openFromSidebar, typeAndSend, uniq, waitChatOpen, waitTurnSettled, watchUserText } from './lib/app.mjs';
+import { chatState, expect, gotoApp, openFromSidebar, waitChat, typeAndSend, uniq, waitChatOpen, waitTurnSettled, watchUserText } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { PAIR_NOISE, PAIR_SEEDED, expectOwner, pairChatId, setWorker, transcriptOn, userMessagesWith, waitPeerOnline } from './lib/pair.mjs';
 import { frames, markTime } from './lib/timeline.mjs';
@@ -30,6 +30,8 @@ await runJourney({
 			async setup({ page, status }) {
 				sent = null;
 				await gotoApp(page, status);
+				await waitChat(page, { surface: 'new' });
+				await page.waitForTimeout(1000);
 				await openFromSidebar(page, PAIR_SEEDED.bLoose);
 				await waitChatOpen(page, { messagesAtLeast: 12 });
 				await runnerChip(page).waitFor({ timeout: 30_000 });
