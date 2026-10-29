@@ -280,10 +280,12 @@ hand-offs. A working connection is never moved just because a preferred worker
 comes back. With no reachable worker, the existing connection error and native
 Workers screen remain available for retrying or adding a worker.
 
-A manual switch opens the selected worker's chat list. A worker this phone
-holds no key for shows a short message pointing to Settings > Devices; the
-app stays where it is. The URL never carries credentials, and this path never
-pairs a new worker. The current worker's chip status uses live request evidence
+A manual switch opens the selected worker's chat list. A paired account worker
+this phone holds no key for opens native Workers with a prompt to authorize it.
+Tapping that worker runs its account enrollment, saves this phone's per-worker
+key, then opens chat. This native authorization hand-off remains available even
+while another worker is reachable; automatic failover still skips keyless workers.
+The URL never carries credentials, and this path never pairs a new worker. The current worker's chip status uses live request evidence
 when available, otherwise its directory status, never an unconditional online
 state.
 
@@ -296,7 +298,8 @@ says so over the `shuffleShell` web-message bridge, which is scoped like
   bar, `false` when it goes. The app hides or restores its bar.
 - The sheet's manage-workers action opens the page's Settings > Devices.
   `{"type":"workers"}` opens the native Workers screen only as a fallback
-  when no page connection is available; that screen also handles first setup.
+  when no page connection is available; that screen also handles first setup
+  and the paired-account authorization hand-off described above.
 - `{"type":"voice-call","active":…}` and `{"type":"voice-call-state",…}`
   from the voice call (`frontend/src/lib/services/voiceCall.ts` and
   `voiceCallNative.ts`): the app follows headset routes and keeps the call

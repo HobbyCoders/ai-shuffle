@@ -404,8 +404,7 @@ class ChatActivity : NativeScreen() {
         if (!validDocument()) return
         when (val decision = WorkerSwitch.decide(server.baseUrl, url, pairedWorkers())) {
             is WorkerSwitch.Decision.Open -> openChat(decision.server)
-            is WorkerSwitch.Decision.NeedsAuthorization ->
-                Toast.makeText(this, "${decision.server.name} is not authorized on this phone. Open Settings > Devices to connect it.", Toast.LENGTH_LONG).show()
+            is WorkerSwitch.Decision.NeedsAuthorization -> openWorkers(decision.message)
             is WorkerSwitch.Decision.Reject -> Toast.makeText(this, decision.message, Toast.LENGTH_LONG).show()
             is WorkerSwitch.Decision.AlreadyConnected, is WorkerSwitch.Decision.NotASwitch -> Unit
         }
