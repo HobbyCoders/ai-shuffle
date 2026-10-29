@@ -241,3 +241,36 @@ async def test_explicit_and_automatic_need_share_one_clearable_episode(chat, exp
     await dispatcher.reconcile("push-chat")
     assert [c["action"] for c in commands(sender)].count("alert") == 1
     assert commands(sender)[-1]["action"] == "clear"
+
+
+@pytest.mark.asyncio
+async def test_legacy_api_user_child_cannot_notify_the_owner(chat):
+    dispatcher, sender = chat
+    db.create_api_user("foreign-key", "Other user", "foreign-hash")
+    db.create_session("key-parent", "default", title="Key chat")
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE sessions SET api_user_id=%s WHERE id=%s", ("foreign-key", "key-parent"))
+        c.execute("UPDATE sessions SET is_worker=TRUE, parent_session_id=%s WHERE id=%s", ("key-parent", "push-chat"))
+    result = await dispatcher.reconcile("push-chat", explicit_id="foreign-child-tool")
+    assert not result["sent"]
+    assert attention.current_command("push-chat", "worker-a") is None
+    sender.send_to_all_devices.assert_not_awaited()
+
+
+def test_shutdown_wake_cannot_fail_a_committed_session_write():
+    from types import SimpleNamespace
+    dispatcher = attention.AttentionDispatcher()
+    queued = []
+    dispatcher.loop = SimpleNamespace(call_soon_threadsafe=queued.append)
+    dispatcher.wakeup = asyncio.Event()
+    dispatcher.wake("chat")
+    dispatcher.wakeup = asyncio.Event()  # A new lifecycle starts before old callback runs.
+    queued.pop()()
+    assert dispatcher.dirty == set()
+    assert not dispatcher.wakeup.is_set()
+    def closed(callback):
+        raise RuntimeError("Event loop is closed")
+    dispatcher.loop = SimpleNamespace(call_soon_threadsafe=closed)
+    dispatcher.wake("chat")  # Background notification cannot break the producer.
+    assert dispatcher.dirty == set()

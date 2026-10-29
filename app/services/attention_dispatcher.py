@@ -76,7 +76,11 @@ def latest_tool_id(session_id, name=None):
 
 
 def _owned(row, worker_id):
-    return bool(row and worker_id and row.get("owner_device_id") == worker_id and row.get("api_user_id") is None)
+    if not row or not worker_id or row.get("owner_device_id") != worker_id:
+        return False
+    from app.core.api_user_scope import session_api_user_id
+    # Legacy delegated rows inherit the spawning API user's principal.
+    return session_api_user_id(row) is None
 
 
 def _state(row):
@@ -178,11 +182,18 @@ class AttentionDispatcher:
         return ctx.device_id if ctx else None
 
     def wake(self, session_id):
-        if self.loop and self.wakeup:
+        loop, event = self.loop, self.wakeup
+        if loop and event:
             def add():
-                self.dirty.add(session_id)
-                self.wakeup.set()
-            self.loop.call_soon_threadsafe(add)
+                if self.wakeup is event:
+                    self.dirty.add(session_id)
+                    event.set()
+            try:
+                loop.call_soon_threadsafe(add)
+            except RuntimeError:
+                # The DB commit must remain successful if shutdown closed the
+                # loop after this thread captured it. Startup scans durable state.
+                pass
 
     @staticmethod
     def private_needs(session_id):
