@@ -33,10 +33,7 @@ popover keeps the rows it already shows.
 | `compatible_headers` | `x-ratelimit-*` from xAI and custom OpenAI-compatible hosts | Provider API key | API key | Request/token rate limits | Passive; stored, hidden | Response metadata | [xAI console](https://console.x.ai/) |
 | `codex_headers` | `x-codex-*` headers on Codex inference responses | ChatGPT sign-in | Subscription | Subscription allowance | Passive; stored, hidden in the popover | Unofficial, subscription-specific | [Codex usage](https://chatgpt.com/codex/settings/usage) |
 | `codex_usage` | `GET https://chatgpt.com/backend-api/wham/usage` | ChatGPT sign-in used for Codex inference | Subscription | Subscription allowance and plan | Polled on demand, 300 s | Unofficial, subscription-specific | [Codex usage](https://chatgpt.com/codex/settings/usage) |
-| `openai_platform_balance` | `GET /v1/dashboard/billing/credit_grants` on api.openai.com | Platform dashboard session key (encrypted network sync) | Account | Real remaining prepaid USD | Polled on demand, 300 s | Unofficial / undocumented | [Platform billing](https://platform.openai.com/settings/organization/billing/overview) |
 | `xai_management` | `GET /v1/api-key` on api.x.ai; `prepaid/balance` and `postpaid/invoice/preview` on management-api.x.ai | Inference key for team resolution; network-synced, encrypted management key for billing | Team | Prepaid remaining USD, cycle usage, spending limit | Polled on demand, 300 s | Documented API | [xAI console](https://console.x.ai/) |
-| `openai_manual` | No endpoint; Analytics usage ledger | User-entered USD balance | API key | Estimated credit balance | Local calculation, no polling | Local estimate, not a provider reading | [Billing](https://platform.openai.com/settings/organization/billing/overview) |
-| `openai_admin` | `GET /v1/organization/costs` and `/v1/organization/usage/completions` | Separate OpenAI Admin key and organization ID (encrypted network sync) | Organization | Provider-reported spend (current UTC month) and completions counts | Polled on demand, 900 s per endpoint | Documented API | [Usage](https://platform.openai.com/usage) |
 | `openrouter_key` | `GET {provider host}/api/v1/key` | OpenRouter model key | API key | Provider-reported spend and limit of that key | Polled on demand, 300 s | Documented API | [Keys](https://openrouter.ai/settings/keys) |
 | `openrouter_credits` | `GET https://openrouter.ai/api/v1/credits` | Existing model key; an already-saved legacy management key is preserved | Account | Provider-reported credit balance | Polled on demand, 300 s | Documented API | [Credits](https://openrouter.ai/settings/credits) |
 | `fal_billing` | `GET https://rest.alpha.fal.ai/billing/user_balance` | fal.ai API key (the media tools key: saved, or `FAL_KEY` / `FAL_API_KEY`) | Account | Provider-reported credit balance | Polled on demand, 300 s | Undocumented endpoint | [Billing](https://fal.ai/dashboard/billing) |
@@ -44,8 +41,7 @@ popover keeps the rows it already shows.
 | `grok_subscription` | `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` and `/v1/settings` | SuperGrok sign-in (Grok CLI OAuth) | Subscription | Subscription allowance and plan | Polled on demand, 300 s per endpoint | Unofficial, subscription-specific | [Grok](https://grok.com/) |
 
 What each source cannot report is listed with it in the registry (for example,
-the OpenAI Admin API has no prepaid credit balance and the OpenRouter key
-endpoint has no account balance). The popover shows these as "Not reported by
+the OpenRouter key endpoint has no account balance). The popover shows these as "Not reported by
 this source" next to the dashboard link.
 
 Intervals are application limits, not provider-approved rate guarantees.
@@ -67,56 +63,27 @@ reported finite balance is greater than zero. Those credits are **not USD** and
 are unrelated to OpenAI API prepaid billing. They appear in the ChatGPT row's
 expanded details, not on its collapsed header.
 
-OpenAI inference keys do not expose prepaid balance. The
-`openai_platform_balance` source reads the account's `total_available` using a
-Platform dashboard session (unofficial). Sign in through the isolated app-owned
-browser or paste a session key in Settings > Providers > the key > Usage.
+OpenAI API credit and organization spend are not collected or displayed. No
+Platform session, organization Admin key or entered balance is configured.
+ChatGPT/Codex subscription usage and banked resets are separate and unchanged.
+
 The `xai_management` source resolves the team using the inference key and reads
-prepaid balance and invoice preview using a separate management key (official).
-Billing keys and OpenAI Admin organization settings sync encrypted across the
-network, like inference keys. Any trusted worker can fetch credit while the
-network founder's usage budget is reachable, keeping readings/errors local.
-Other workers defer new requests when the founder is offline; the network-wide
-budget allows roughly one request per credential/endpoint every 300–330 seconds.
-Inference rotation or disable invalidates readings but preserves billing keys.
-Explicitly disconnecting billing access propagates its removal; an old peer's missing
-billing fields do not clear newer peers' keys. Backup-only install bindings are
-not published or used until authenticated sync establishes local trust.
+prepaid balance and invoice preview using a separate management key. Billing
+keys sync encrypted across the network. Trusted workers can fetch credit while
+the network founder's usage budget is reachable; other workers defer new requests
+while it is offline. The budget permits roughly one request per credential and
+endpoint every 300–330 seconds. Inference rotation or disable invalidates readings
+but preserves access. Explicit disconnect propagates removal; old peers' missing
+fields do not clear newer peers' keys. Backup-only installation bindings are not
+published or used until authenticated sync establishes local trust.
 See [setup and endpoint details](content/api-reference/model-providers.md#provider-reported-api-balances).
-Both headline remaining credit, source and fetched time; expired/failed or stale
-readings expose no current amount. The server's ten-minute freshness window
-covers the five-minute polling interval plus jitter. Opening balance status or
-pressing Refresh requests a poll (30-second forced-refresh cooldown; endpoint
-budgets still apply), and Settings re-reads while it runs. Optional xAI invoice
-failures do not hide prepaid credit; a deferred invoice retains its optional
-values and error states. Admin usage remains separate organization spend. Only
-fresh, error-free current-UTC-month Admin fields are merged alongside real
-remaining credit; stale/failed/prior-month totals are withheld when a balance
-is bound rather than inheriting its timestamp. A configured real-balance source always outranks manual estimates,
-including when re-authentication is needed.
 
-In **Settings > Providers > the key > Usage**, enter the current prepaid balance
-in USD (two decimals), then **Save**, only as a fallback without a Platform
-balance binding. The `openai_manual` source displays
-**~$N left (estimated)**: the entered balance minus this provider's recorded
-costs since Save. **Clear** removes this estimate without removing an Admin key
-or the inference key. Saving again restarts the baseline and timestamp. The
-Open billing link lets you compare and reset it against the actual balance.
-
-The estimate reuses Analytics' `usage_log.cost_usd` aggregation, filtered by the
-recorded `provider_id` and an exact UTC millisecond cutoff. It includes priced
-turns with reported or estimated token counts, and attributed internal calls;
-it does not infer old rows from a session's current provider. Unpriced turns,
-unattributed calls, missing/deleted ledger history and spending outside this
-app are not deducted. Prices, estimated token counts and booking time can
-differ from provider billing; an in-flight turn booked after Save is deducted
-in full. Refunds and top-ups are not detected, and the result can go negative.
-The non-secret baseline syncs with the provider; each worker subtracts only
-its own tracked spend. Paired workers' spend is not included, and both the
-Usage tab and popover tooltip state this scope. Replacing the API key clears
-the balance and cutoff; resaving or re-encrypting the same key preserves them.
-If an Admin reading also exists, it
-remains the primary source and the manual estimate appears alongside it.
+The xAI balance headlines remaining credit, source and fetched time. Expired,
+failed or stale readings expose no current amount. Ten-minute freshness covers
+the five-minute polling interval plus jitter. Opening status or pressing Refresh
+requests a poll (30-second forced-refresh cooldown; endpoint budgets still apply).
+Optional invoice failures do not hide prepaid credit; deferred invoices retain
+previous optional values and error states.
 
 fal.ai reads its balance with the ordinary fal.ai API key the media tools use.
 fal's documented billing API (`api.fal.ai/v1/account/billing`) needs a separate
@@ -135,10 +102,9 @@ Old readings are labeled "Last reported" with their age, on Claude and on every
 provider row. A passed reset does not prove
 100% remains: the panel retains the last reported percentage and says it awaits
 a new report. Compare the provider dashboard for exact idle/external usage.
-No browser scraping or challenge bypass is used. Entered-balance tracking is
-explicitly a local estimate, never a provider-reported balance.
+No browser scraping or challenge bypass is used.
 
-Two snapshot types have both a passive and a polled writer. `codex_headers` and
+The ChatGPT snapshot has both a passive and a polled writer. `codex_headers` and
 `codex_usage` describe the same ChatGPT subscription windows, and the header
 capture is free, so it keeps writing whenever a Codex turn runs. The polled
 source is the one the row is labeled with, because only a poll bounds how stale
@@ -165,9 +131,7 @@ them apart:
 - **Provider-reported credit balance**: remaining purchased credit.
 
 App-local cost figures (token counts multiplied by catalog prices) are a fifth
-measure, labeled "Estimated spend" and "app estimate" in Stats. The
-`openai_manual` registry source uses collection/support `local_estimate`, no
-endpoint or polling, and labels its derived balance as estimated.
+measure, labeled "Estimated spend" and "app estimate" in Stats.
 
 ### Subscription-specific endpoints
 

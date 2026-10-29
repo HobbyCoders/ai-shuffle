@@ -641,7 +641,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		)
 	)('omits refresh narration for $status / $lastErrorKind (cached: $cached)', async ({ status, lastErrorKind, cached }) => {
 		rateLimit.applySnapshot({ windows: [], available: false, providers: [
-			{ provider_id: 'api', provider_type: 'openai', provider_name: 'OpenAI', status,
+			{ provider_id: 'api', provider_type: 'fal', provider_name: 'fal.ai', status,
 				last_error_kind: lastErrorKind,
 				...(cached ? { credits: { balance_remaining: 12.34 },
 					windows: [{ type: 'five_hour', utilization: 42, resets_at: future() }] } : {}) },
@@ -651,7 +651,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		// No guidance to act on: the credits line says what is known, and the
 		// meta line only says when it was checked.
 		expect(container.querySelector('.provider-status')).toBeNull();
-		expect(container.querySelector('.usage-credits')?.textContent).toBe(cached ? '$12.34 left' : undefined);
+		expect(container.querySelector('.usage-credits')?.textContent).toBe(cached ? '$12.34 left' : 'Balance unavailable for this key');
 		expect(container.querySelector('.usage-meta-text')?.textContent).toMatch(/^(Checked |Not checked yet$)/);
 		expect(container.textContent).not.toMatch(/Last known|Last reported|Refresh pending|Refresh timed out|Usage unavailable/);
 		expect(container.querySelector('a[href*="platform.openai.com/settings/organization/billing"]')).toBeNull();
@@ -663,8 +663,8 @@ describe('ContextUsageBar — provider refresh status', () => {
 			expect(container.textContent).not.toContain('Claude');
 			expect(container.textContent).not.toContain('$0.00');
 		}
-		await fireEvent.click(getByRole('button', { name: 'OpenAI usage — collapse' }));
-		expect(container.querySelector('.sec-summary')?.textContent).toBe(cached ? '$12.34 left' : '—');
+		await fireEvent.click(getByRole('button', { name: 'fal.ai usage — collapse' }));
+		expect(container.querySelector('.sec-summary')?.textContent).toBe(cached ? '$12.34 left' : 'Balance unavailable');
 	});
 
 	it.each(['stale', 'unavailable', 'never_fetched'] as const)('preserves sign-in guidance for %s credentials', async (status) => {
@@ -696,72 +696,23 @@ describe('ContextUsageBar — provider refresh status', () => {
 		expect(container.textContent).not.toContain('extra credits');
 	});
 
-	it.each([12.34, 0, -2.5])('labels an entered OpenAI balance of %s as estimated with spend details', async (balance) => {
+	it.each(['openai', 'openai_balance'])('omits retired %s API balances and spend from older workers', async (provider_type) => {
 		rateLimit.applySnapshot({ windows: [], available: true, providers: [
-			{ provider_id: 'api', provider_type: 'openai', provider_name: 'OpenAI', status: 'fresh',
-				credits: { balance_remaining: balance, manual_balance: 20, estimated_spend: 20 - balance, set_at: 1750000000000 } },
+			{ provider_id: 'api', provider_type, provider_name: 'OpenAI API', status: 'fresh',
+				credits: { balance_remaining: 42, manual_balance: 50, spend_month: 8 } },
+			{ provider_id: 'codex', provider_type: 'chatgpt', status: 'fresh', credits: { balance: 12.5 } },
 		] });
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.textContent).toContain(`~$${balance.toFixed(2)} left (estimated)`);
-		await fireEvent.click(container.querySelector('[aria-label="OpenAI usage — collapse"]')!);
-		const headline = container.querySelector('.sec-summary');
-		expect(headline?.textContent).toBe(`~$${balance.toFixed(2)} left (estimated)`);
-		expect(headline?.getAttribute('title')).toContain(`~$${(20 - balance).toFixed(2)} estimated spend on this worker since`);
-		expect(headline?.getAttribute('title')).toContain("Only this worker's tracked spend is deducted; paired workers' spend");
+		expect(container.textContent).not.toMatch(/\$42|\$50|\$8|spent this month|OpenAI API/);
+		expect(container.querySelectorAll('.usage-credits')).toHaveLength(1);
+		expect(container.textContent).toContain('12.5 extra credits available');
 	});
 
-	it('preserves the Admin reading alongside the entered balance estimate', async () => {
-		rateLimit.applySnapshot({ windows: [], available: true, providers: [
-			{ provider_id: 'api', provider_type: 'openai', status: 'fresh',
-				credits: { spend_month: 5, balance_remaining: 12, manual_balance: 20, estimated_spend: 8, set_at: 1750000000000 } },
-		] });
-		const { container } = render(ContextUsageBar);
-		await openPopover(container);
-		expect(container.textContent).toContain('~$12.00 left (estimated)');
-		await fireEvent.click(container.querySelector('[aria-label="OpenAI usage — collapse"]')!);
-		expect(container.querySelector('.sec-summary')?.textContent).toBe('$5.00 spent this month');
-	});
-
-	it('labels official organization costs as spend rather than credit remaining', async () => {
-		rateLimit.applySnapshot({ windows: [], available: true, providers: [
-			{ provider_id: 'admin-api', provider_type: 'openai', provider_name: 'OpenAI', status: 'fresh',
-				credits: { spend_month: 12.34, input_tokens: 20, output_tokens: 30, num_model_requests: 2 } },
-		] });
-		const { container } = render(ContextUsageBar);
-		await openPopover(container);
-		expect(container.textContent).toContain('$12.34 organization spend this month (UTC); balance unavailable');
-		expect(container.textContent).not.toContain('$12.34 left');
-	});
-
-	it.each(['unavailable', 'stale'] as const)('says the balance is not available, without a billing link, when OpenAI billing is %s', async (status) => {
-		rateLimit.applySnapshot({ windows: [], available: false, providers: [
-			{ provider_id: 'api', provider_type: 'openai', provider_name: 'OpenAI', status,
-				last_error_kind: 'billing_access_denied',
-				...(status === 'stale' ? { credits: { balance_remaining: 12.34 }, fetched_at: 123 } : {}) },
-		] });
-		const { container, getByRole, queryByRole } = render(ContextUsageBar);
-		await openPopover(container);
-		// The action rides the one meta line; the credits line says what is known.
-		// No billing access can expose an API key's prepaid balance, so a key
-		// without one is not asked for it.
-		expect(container.querySelector('.provider-status')?.textContent ?? null).toBe(status === 'stale' ? 'Billing access required' : null);
-		expect(container.querySelector('.usage-credits')?.textContent).toBe(status === 'stale' ? '$12.34 left' : undefined);
-		expect(container.textContent).not.toContain('Last known usage');
-		expect(container.textContent).not.toContain('Sign in');
-		expect(container.textContent).not.toContain('$0.00');
-		if (status === 'stale') {
-			expect(container.textContent).toContain('$12.34 left');
-		}
-		expect(queryByRole('link', { name: /View balance/ })).toBeNull();
-		await fireEvent.click(getByRole('button', { name: 'OpenAI usage — collapse' }));
-		expect(queryByRole('link', { name: /View balance/ })).toBeNull();
-		if (status === 'stale') expect(container.textContent).toContain('$12.34 left');
-	});
-
-	it.each(['openai', 'xai'] as const)('labels %s real balance sources and hides an expired amount', async (type) => {
-		const source = type === 'openai' ? 'OpenAI Platform balance' : 'xAI Management API';
-		const id = type === 'openai' ? 'openai_platform_balance' : 'xai_management';
+	it('labels xAI balance sources and hides an expired amount', async () => {
+		const type = 'xai';
+		const source = 'xAI Management API';
+		const id = 'xai_management';
 		const source_info = { id, label: source, scope: 'account', scope_label: 'API prepaid credit',
 			measure: 'monetary_credit' as const, measure_label: 'Provider-reported credit balance', collection: 'polled' as const,
 			support: 'documented' as const, support_label: 'API', dashboard_url: 'https://example.com', min_interval_seconds: 300, freshness_seconds: 600 };
@@ -772,11 +723,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		expect(container.textContent).toContain('$12.34 left');
-		// The OpenAI Platform reading names its source; the xAI row drops its
-		// "xAI Management API" source line and keeps the figures.
-		if (type === 'openai') expect(container.textContent).toContain(source);
-		else expect(container.textContent).not.toContain(source);
-		if (type === 'openai') expect(container.textContent).toContain('$5.00 organization spend this month');
+		expect(container.textContent).not.toContain(source);
 		rateLimit.applySnapshot({ windows: [], available: true, providers: [
 			{ provider_id: 'real-balance', provider_type: type, provider_name: 'Real balance', status: 'stale',
 				credits: { balance_remaining: 12.34, spend_month: 5 }, fetched_at: 123, source, source_info, last_error_kind: 'billing_access_denied' }
@@ -784,8 +731,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		await tick();
 		expect(container.textContent).not.toContain('$12.34 left');
 		expect(container.textContent).toMatch(/balance unavailable/i);
-		if (type === 'openai') expect(container.textContent).toContain('$5.00 organization spend this month');
-		expect(container.textContent).toContain(type === 'openai' ? 'Sign in again to OpenAI Platform' : 'Replace xAI management key');
+		expect(container.textContent).toContain('Replace xAI management key');
 			if (type === 'xai') {
 				rateLimit.applySnapshot({ windows: [], available: true, providers: [
 					{ provider_id: 'real-balance', provider_type: type, status: 'stale', source, source_info,
@@ -796,34 +742,6 @@ describe('ContextUsageBar — provider refresh status', () => {
 				expect(container.textContent).not.toContain('Replace xAI management key');
 			}
 	});
-
-	it.each([12.34, 0])('preserves a successful OpenAI API balance of %s', async (balance) => {
-		rateLimit.applySnapshot({ windows: [], available: true, providers: [
-			{ provider_id: 'api', provider_type: 'openai', provider_name: 'OpenAI', status: 'fresh',
-				credits: { balance_remaining: balance } },
-		] });
-		const { container, getByRole } = render(ContextUsageBar);
-		await openPopover(container);
-		expect(container.textContent).toContain(`$${balance.toFixed(2)} left`);
-		expect(container.querySelector('a[href*="platform.openai.com/settings/organization/billing"]')).toBeNull();
-		expect(container.textContent).not.toContain('cannot read');
-		await fireEvent.click(getByRole('button', { name: 'OpenAI usage — collapse' }));
-		expect(container.textContent).toContain(`$${balance.toFixed(2)} left`);
-	});
-
-	it('requests an API credential rather than ChatGPT sign-in for missing OpenAI credentials', async () => {
-		rateLimit.applySnapshot({ windows: [], available: false, providers: [
-			{ provider_id: 'api', provider_type: 'openai', status: 'unavailable', last_error_kind: 'missing_credentials' },
-			{ provider_id: 'other', provider_type: 'openrouter', status: 'unavailable', last_error_kind: 'billing_access_denied' },
-		] });
-		const { container } = render(ContextUsageBar);
-		await openPopover(container);
-		expect(container.textContent).not.toContain('Credit balance not available for this key');
-		expect(container.textContent).not.toContain('Sign in');
-		expect(container.textContent).toContain('Balance unavailable for this key');
-		expect(container.querySelector('a[href*="platform.openai.com/settings/organization/billing"]')).toBeNull();
-	});
-
 	it('does not ask for billing access when fal.ai refuses the ordinary key', async () => {
 		rateLimit.applySnapshot({ windows: [], available: false, providers: [
 			{ provider_id: 'fal-ai', provider_type: 'fal', provider_name: 'fal.ai', status: 'unavailable', last_error_kind: 'billing_access_denied' },
@@ -838,8 +756,8 @@ describe('ContextUsageBar — provider refresh status', () => {
 
 	it('keeps stale API balances and actionable billing errors without refresh narration', async () => {
 		rateLimit.applySnapshot({ windows: [], available: false, providers: [
-			{ provider_id: 'api', provider_type: 'openai', provider_name: 'OpenAI', status: 'stale', last_error_kind: 'timeout', credits: { balance_remaining: 12.34 }, fetched_at: 123 },
-			{ provider_id: 'other', provider_type: 'openai', provider_name: 'Other API', status: 'unavailable', last_error_kind: 'billing_access_denied' },
+			{ provider_id: 'api', provider_type: 'fal', provider_name: 'fal.ai', status: 'stale', last_error_kind: 'timeout', credits: { balance_remaining: 12.34 }, fetched_at: 123 },
+			{ provider_id: 'other', provider_type: 'fal', provider_name: 'Other API', status: 'unavailable', last_error_kind: 'billing_access_denied' },
 		] });
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
@@ -1629,15 +1547,15 @@ describe('ContextUsageBar — plan usage limits', () => {
 describe('ContextUsageBar — provider visibility', () => {
 	it('hides and restores each provider independently without changing its expansion or usage data', async () => {
 		rateLimit.applySnapshot({ available: true, windows: [], providers: [
-			{ provider_id: 'api', provider_type: 'openai', provider_name: 'OpenAI', windows: [], credits: { balance_remaining: 12 } },
-			{ provider_id: 'other', provider_type: 'openai', provider_name: 'OpenAI', windows: [] }
+			{ provider_id: 'api', provider_type: 'fal', provider_name: 'fal.ai', windows: [], credits: { balance_remaining: 12 } },
+			{ provider_id: 'other', provider_type: 'fal', provider_name: 'fal.ai', windows: [] }
 		] });
 		usageSections.set({ 'provider:api': false });
 		const { container, getByRole, getAllByRole } = render(ContextUsageBar);
 		await openPopover(container);
-		await fireEvent.click(getAllByRole('button', { name: 'Hide OpenAI usage' })[0]);
+		await fireEvent.click(getAllByRole('button', { name: 'Hide fal.ai usage' })[0]);
 		expect(container.querySelector('.usage-popover')).not.toBeNull();
-		expect(getAllByRole('button', { name: 'Hide OpenAI usage' })).toHaveLength(1);
+		expect(getAllByRole('button', { name: 'Hide fal.ai usage' })).toHaveLength(1);
 		expect(usageSections.current['provider:api']).toBe(false);
 		expect(hiddenUsageProviders.current).toEqual({ 'provider:api': true });
 		expect(mocks.save).toHaveBeenLastCalledWith('context_usage_hidden_providers', { 'provider:api': true });
@@ -1647,8 +1565,8 @@ describe('ContextUsageBar — provider visibility', () => {
 		await openPopover(container);
 		expect(container.querySelectorAll('.provider-hide')).toHaveLength(1);
 		await fireEvent.click(container.querySelector('.hidden-providers summary')!);
-		await fireEvent.click(getByRole('button', { name: 'Show OpenAI usage' }));
-		expect(getByRole('button', { name: 'OpenAI usage — expand' }).getAttribute('aria-expanded')).toBe('false');
+		await fireEvent.click(getByRole('button', { name: 'Show fal.ai usage' }));
+		expect(getByRole('button', { name: 'fal.ai usage — expand' }).getAttribute('aria-expanded')).toBe('false');
 		expect(container.textContent).toContain('$12.00');
 		await fireEvent.click(getByRole('button', { name: 'Show Claude usage' }));
 		expect(container.querySelector('.hidden-providers')).toBeNull();
@@ -1657,7 +1575,7 @@ describe('ContextUsageBar — provider visibility', () => {
 
 	it('keeps context and restore controls available when every provider is hidden, and applies remote changes', async () => {
 		rateLimit.applySnapshot({ available: true, windows: [], providers: [
-			{ provider_id: 'api', provider_type: 'openai', windows: [] }
+			{ provider_id: 'api', provider_type: 'fal', windows: [] }
 		] });
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
@@ -1867,7 +1785,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		expect(summary.textContent).toBe('30% left');
 	});
 
-	it('subtexts an OpenAI API-key row as "OpenAI · API", separate from the ChatGPT row', async () => {
+	it('keeps ChatGPT usage but omits the retired OpenAI API-key row', async () => {
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [],
@@ -1892,18 +1810,17 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 
-		// Both rows show the OpenAI brand and stay SEPARATE sections; the subtext
-		// is what tells them apart.
+		// Only the subscription remains; API-key billing is not shown.
 		const deviceLabels = Array.from(container.querySelectorAll('.section-device')).map(
 			(e) => e.textContent
 		);
 		// Subscriptions (ChatGPT, then the Claude plan) above the API key.
-		expect(deviceLabels).toEqual(['OpenAI', 'Claude', 'OpenAI']);
+		expect(deviceLabels).toEqual(['OpenAI', 'Claude']);
 		const accounts = Array.from(container.querySelectorAll('.section-account:not(.provider-status)')).map(
 			(e) => e.textContent
 		);
-		expect(accounts).toEqual(['PROLITE', 'API']);
-		expect(container.querySelectorAll('.popover-section').length).toBe(3);
+		expect(accounts).toEqual(['PROLITE']);
+		expect(container.querySelectorAll('.popover-section').length).toBe(2);
 	});
 
 	it('shows one remaining account balance instead of a duplicate key-spend row', async () => {
@@ -1978,10 +1895,10 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 			(e) => e.textContent
 		);
 		// Subscriptions in the Settings order (OpenAI, Grok, Claude), then API
-		// accounts in the same order (OpenAI, OpenRouter, then fal.ai). Claude is
+		// accounts in the same order (OpenRouter, then fal.ai). Claude is
 		// ordered by the rule like any other provider, not pinned first.
-		expect(labels).toEqual(['OpenAI', 'Grok', 'Claude', 'OpenAI', 'OpenRouter', 'fal.ai']);
-		expect(accounts).toEqual(['PROLITE', 'SuperGrok', 'API', 'API', 'API']);
+		expect(labels).toEqual(['OpenAI', 'Grok', 'Claude', 'OpenRouter', 'fal.ai']);
+		expect(accounts).toEqual(['PROLITE', 'SuperGrok', 'API', 'API']);
 	});
 
 	it('does not show Codex extra-credit $0 on the ChatGPT subscription row', async () => {

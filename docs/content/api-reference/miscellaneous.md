@@ -134,7 +134,7 @@ Which providers get a row:
 - **ChatGPT (Codex) sign-in:** the subscription windows, read from the provider's own replies. Nothing extra is requested.
 - **OpenRouter:** the model key's spend and limit. With an [OpenRouter usage key](/docs/api-reference/model-providers#openrouter-usage-key), a second row (`<provider name> account`) shows the account credit balance.
 - **SuperGrok sign-in:** the subscription allowance.
-- **OpenAI API:** real remaining credit with a network-synced, encrypted Platform session key, organization spend with an Admin key, or a clearly labeled manual estimate only without a Platform balance binding. See [API balances](/docs/api-reference/model-providers#provider-reported-api-balances).
+- **OpenAI API:** no credit or spend row is shown. ChatGPT/Codex subscription usage is separate and unchanged.
 - **xAI API:** real prepaid remaining, cycle usage and spending limit with a separate management key (official); the inference key resolves the team.
 - **fal.ai:** the account credit balance, read with the [fal.ai API key](#post-apiv1settingsintegrationsfal-ai) the media tools use. No extra billing key is needed.
 

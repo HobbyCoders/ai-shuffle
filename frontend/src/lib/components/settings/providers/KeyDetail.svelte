@@ -15,7 +15,6 @@
 		supportsOpenRouterBilling,
 		type OpenRouterUsageStatus
 	} from '$lib/api/openrouter-billing';
-	import { supportsOpenAIBilling } from '$lib/api/openai-billing';
 	import { supportsXAIBalance } from '$lib/api/provider-balances';
 	import { providers } from '$lib/stores/providers.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
@@ -62,7 +61,6 @@
 	let credits = $state<OpenRouterUsageStatus | null>(null);
 
 	const openRouter = $derived(supportsOpenRouterBilling(row));
-	const openAI = $derived(supportsOpenAIBilling(row));
 	const balance = $derived(
 		openRouter && credits?.credits
 			? `$${credits.credits.balance_remaining.toFixed(2)}`
@@ -199,7 +197,7 @@
 	statusText={credential.statusText}
 	subtitle={row.enabled ? `${row.models.length} models in picker` : 'Not in the model picker'}
 	{facts}
-	tabs={gateway ? (tuning ? ['Overview', 'Models', 'Tuning'] : ['Overview', 'Models']) : ['Overview', 'Models', 'Usage']}
+	tabs={gateway ? (tuning ? ['Overview', 'Models', 'Tuning'] : ['Overview', 'Models']) : row.provider_type === 'openai' ? ['Overview', 'Models'] : ['Overview', 'Models', 'Usage']}
 	{danger}
 	item={credential.item}
 >
@@ -223,7 +221,7 @@
 					onOpenModels={() => settingsNav.setTab('providers', credential.item, 'Models')}
 				/>{/key}
 		{:else if tab === 'Usage'}
-			{#key row.id}<KeyUsage providerId={row.id} {credits} {openRouter} {openAI} xai={supportsXAIBalance(row)} />{/key}
+			{#key row.id}<KeyUsage providerId={row.id} {credits} {openRouter} xai={supportsXAIBalance(row)} />{/key}
 		{:else}
 			<RowGroup title="Connection" id="providers-connection">
 				<SettingRow label="Name">

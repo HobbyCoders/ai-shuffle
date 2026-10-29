@@ -509,11 +509,8 @@ def serialize_row(coll: policy.Collection, row: Mapping[str, Any]) -> Optional[D
         # Filter backup-only credentials before decryption: an unreadable key
         # trusted by another install must not prevent unrelated row sync or
         # hold back the collection's tombstones. Keep explicit local clears.
-        for secret, binding, companions in (
-                ("balance_key", "balance_instance_id", ()),
-                ("openai_admin_key", "openai_billing_instance_id", ("openai_billing_org_id",))):
-            if row.get(binding) != _my_instance_id():
-                excluded.update((secret, *companions))
+        if row.get("provider_type") != "xai" or row.get("balance_instance_id") != _my_instance_id():
+            excluded.add("balance_key")
     for name in coll.fields:
         if name in excluded:
             continue
@@ -541,7 +538,7 @@ def content_hash(coll: policy.Collection, record: Mapping[str, Any]) -> str:
     if coll.name == "model_providers":
         # An explicit local disconnect is an update even when the previously
         # published row omitted an untrusted/restored billing credential.
-        billing = [name for name in ("balance_key", "openai_admin_key", "openai_billing_org_id")
+        billing = [name for name in ("balance_key",)
                    if name in coll.hash_fields and name not in coll.local_fields]
         if billing:
             subset["_billing_present"] = [name for name in billing if name in record]
@@ -617,11 +614,10 @@ def _billing_refresh_needed(cursor, coll, record_id, record):
     if coll.name != "model_providers" or not record:
         return False
     previous = _read_row(cursor, coll, record_id) or {}
-    return any(record.get(secret) and (
-        previous.get(binding) != _my_instance_id()
-        or _provider_value_changed(coll, previous, secret, record[secret]))
-        for secret, binding in (("balance_key", "balance_instance_id"),
-                                ("openai_admin_key", "openai_billing_instance_id")))
+    return (record.get("provider_type", previous.get("provider_type")) == "xai"
+            and bool(record.get("balance_key")) and (
+                previous.get("balance_instance_id") != _my_instance_id()
+                or _provider_value_changed(coll, previous, "balance_key", record["balance_key"])))
 
 
 def materialize(
@@ -723,31 +719,39 @@ def materialize(
     for name in coll.fields:
         if name in coll.local_fields or name not in record:
             continue
+        if (coll.name == "model_providers" and name == "balance_key"
+                and record.get("provider_type", (previous or {}).get("provider_type")) != "xai"):
+            continue  # Do not decrypt or store retired Platform session keys.
         columns.append(name)
-        if (previous and name in ("openai_admin_key", "balance_key")
+        if (previous and name == "balance_key"
                 and not _provider_value_changed(coll, previous, name, record.get(name))):
-            # Stable ciphertext preserves Admin refusal fingerprints and the
-            # captured key guard of an in-flight Admin poll on unrelated edits.
+            # Unrelated edits must not invalidate an in-flight balance poll.
             values.append(previous.get(name))
         else:
             values.append(_column_value(coll, name, record.get(name), encrypted_columns))
     if coll.name == "model_providers":
         # Presence, not truthiness: explicit NULL clears propagate. Old peers
         # omit these fields entirely; their edits must preserve local access.
-        for secret, binding in (("balance_key", "balance_instance_id"),
-                                ("openai_admin_key", "openai_billing_instance_id")):
-            if secret in columns:
-                columns.append(binding)
-                values.append(_my_instance_id())
-        if previous and any(name in columns and _provider_value_changed(coll, previous, name, record.get(name))
-                            for name in ("auth_token", "provider_type", "base_url", "auth_mode", "enabled", "balance_key")):
+        if record.get("provider_type", (previous or {}).get("provider_type")) != "xai":
+            # An older peer may still send a Platform session key. Never store it.
+            if "balance_key" in columns:
+                values[columns.index("balance_key")] = None
+            else:
+                columns.append("balance_key")
+                values.append(None)
+            columns.extend(("balance_instance_id", "balance_snapshot"))
+            values.extend((None, None))
+        elif "balance_key" in columns:
+            columns.append("balance_instance_id")
+            values.append(_my_instance_id())
+        if previous and "balance_snapshot" not in columns and any(
+                name in columns and _provider_value_changed(coll, previous, name, record.get(name))
+                for name in ("auth_token", "provider_type", "base_url", "auth_mode", "enabled", "balance_key")):
             columns.append("balance_snapshot")
             values.append(None)
         if previous and any(name in columns and _provider_value_changed(coll, previous, name, record.get(name))
-                            for name in ("auth_token", "provider_type", "base_url", "auth_mode", "enabled",
-                                         "openai_admin_key", "openai_billing_org_id")):
-            # Admin usage is worker-local too. A late poll is guarded by its
-            # captured key/binding; never display a pre-rotation reading.
+                            for name in ("auth_token", "provider_type", "base_url", "auth_mode", "enabled")):
+            # Never display a pre-rotation usage reading.
             cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", keys)
     # Key columns always come from the record id so a hook cannot move a row.
     for name, value in zip(coll.keys, keys):
@@ -1467,8 +1471,7 @@ def _provider_credentials_kept(coll: policy.Collection, incoming: Mapping[str, A
     # its key-bearing local hash as acknowledged by a peer that never saw it.
     if any(secret in coll.fields and secret not in coll.local_fields
            and secret not in incoming and row.get(binding) == _my_instance_id()
-           for secret, binding in (("balance_key", "balance_instance_id"),
-                                   ("openai_admin_key", "openai_billing_instance_id"))):
+           for secret, binding in (("balance_key", "balance_instance_id"),)):
         return True
     if row.get("codex_last_refresh") is None:
         return False

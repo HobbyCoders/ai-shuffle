@@ -17,18 +17,18 @@ from app.db import network as store
 from app.network import crypto, engine
 from tests.core.network.harness import exchange, join
 from tests.core.network.test_billing_key_sync import PROVIDER, pair, separate_installations
-from tests.core.network.test_provider_observations import fake_http, poll
+from tests.core.network.test_provider_observations import fake_http, poll, xai_bodies
 
 pytestmark = pytest.mark.usefixtures("separate_installations")
 
 
 @pytest.mark.parametrize("delivery", ["incremental", "snapshot"])
 def test_rejected_old_value_keeps_sync_origin_and_clock_when_forwarded(workers, delivery):
-    a, b = pair(workers, "openai")
+    a, b = pair(workers)
     c, d = workers("c"), workers("d")
     join(a, c)
     exchange(a, b)
-    key = observations.PREFIX + "openai_platform_balance:" + PROVIDER
+    key = observations.PREFIX + "xai_management:" + PROVIDER
     def publish(worker, observed):
         with worker.active():
             db.set_system_setting(key, json.dumps({"observed_at": observed, "credential_revision": "same"}))
@@ -59,14 +59,13 @@ def test_rejected_old_value_keeps_sync_origin_and_clock_when_forwarded(workers, 
 
 
 def test_peer_import_survives_an_already_running_deferred_balance_poll(workers, monkeypatch):
-    a, b = pair(workers, "openai")
-    fake_http(monkeypatch, {balances.OPENAI_CREDIT_URL:
-        {"total_available": 42, "total_granted": 50, "total_used": 8}})
-    poll(a, "openai_platform_balance")
+    a, b = pair(workers)
+    fake_http(monkeypatch, xai_bodies())
+    poll(a, "xai_management")
     exchange(a, b)
     with b.active():
         from tests.core.network.test_billing_key_sync import row
-        key = observations._binding(SOURCES["openai_platform_balance"], row())[0]
+        key = observations._binding(SOURCES["xai_management"], row())[0]
         async def import_then_defer(*args):
             observations.import_keys({key})
             assert balances.status(row())["credits"]["balance_remaining"] == 42
@@ -80,8 +79,8 @@ def test_peer_import_survives_an_already_running_deferred_balance_poll(workers, 
 
 
 def test_startup_migration_removes_only_legacy_secret_named_rows(mock_db):
-    legacy = observations.PREFIX + "openai_platform_balance:" + "a" * 64
-    stable = observations.PREFIX + "openai_platform_balance:provider-id"
+    legacy = observations.PREFIX + "xai_management:" + "a" * 64
+    stable = observations.PREFIX + "xai_management:provider-id"
     unrelated = "unrelated:" + "a" * 64
     for key in (legacy, stable, unrelated):
         db.set_system_setting(key, "{}")
@@ -115,7 +114,7 @@ def test_actual_openrouter_management_save_removes_shared_observation(authentica
 
 def test_revision_uses_a_domain_separated_hkdf_key(workers, monkeypatch):
     from tests.core.network.test_billing_key_sync import row
-    a, _ = pair(workers, "openai")
+    a, _ = pair(workers)
     with a.active():
         expected = crypto._hkdf(engine.require_context().network_key, b"shuffle-provider-observation-hmac-v1")
         keys = []
@@ -124,15 +123,15 @@ def test_revision_uses_a_domain_separated_hkdf_key(workers, monkeypatch):
             keys.append(key)
             return original(key, *args, **kwargs)
         monkeypatch.setattr(hmac, "new", capture)
-        observations._binding(SOURCES["openai_platform_balance"], row())
+        observations._binding(SOURCES["xai_management"], row())
         matches = bool(keys) and hmac.compare_digest(keys[0], expected)
         assert matches
 
 
 def test_legacy_cleanup_tombstone_reaches_a_peer_already_holding_the_row(workers):
     from app.db.database import _retire_secret_named_observations
-    a, b = pair(workers, "openai")
-    key = observations.PREFIX + "openai_platform_balance:" + "b" * 64
+    a, b = pair(workers)
+    key = observations.PREFIX + "xai_management:" + "b" * 64
     with a.active():
         db.set_system_setting(key, json.dumps({"observed_at": 1000}))
         engine.record_after_commit("system_settings", key)
@@ -159,17 +158,16 @@ def test_stale_provider_snapshot_write_cannot_replace_a_newer_reading(mock_db):
 def test_newer_local_failure_keeps_imported_reading_and_error_state(workers, monkeypatch):
     import httpx
     from tests.core.network.test_billing_key_sync import row
-    a, b = pair(workers, "openai")
-    fake_http(monkeypatch, {balances.OPENAI_CREDIT_URL:
-        {"total_available": 42, "total_granted": 50, "total_used": 8}})
-    poll(a, "openai_platform_balance")
+    a, b = pair(workers)
+    fake_http(monkeypatch, xai_bodies())
+    poll(a, "xai_management")
     exchange(a, b)
     with b.active():
-        key = observations._binding(SOURCES["openai_platform_balance"], row())[0]
+        key = observations._binding(SOURCES["xai_management"], row())[0]
         expected = json.loads(db.get_system_setting(key))["observed_at"]
         async def import_then_fail(*args):
             observations.import_keys({key})
-            response = httpx.Response(401, request=httpx.Request("GET", balances.OPENAI_CREDIT_URL))
+            response = httpx.Response(401, request=httpx.Request("GET", balances.XAI_KEY_URL))
             raise httpx.HTTPStatusError("denied", request=response.request, response=response)
         monkeypatch.setattr(balances, "get", import_then_fail)
         asyncio.run(balances.poll(row()))
@@ -183,7 +181,7 @@ def test_newer_local_failure_keeps_imported_reading_and_error_state(workers, mon
 def test_future_balance_does_not_block_corrected_clock_write(workers, monkeypatch, failure):
     from app.db import provider_balances
     from tests.core.network.test_billing_key_sync import row
-    a, _ = pair(workers, "openai")
+    a, _ = pair(workers)
     now = int(time.time() * 1000)
     with a.active():
         current = row()
@@ -231,11 +229,10 @@ def test_future_provider_reading_is_stale_in_usage_api(authenticated_client, mon
 
 def test_deferred_poll_does_not_republish_an_import_as_local(workers, monkeypatch):
     from tests.core.network.test_billing_key_sync import row
-    a, b = pair(workers, "openai")
-    fake_http(monkeypatch, {balances.OPENAI_CREDIT_URL:
-        {"total_available": 42, "total_granted": 50, "total_used": 8}})
-    poll(a, "openai_platform_balance")
-    source = SOURCES["openai_platform_balance"]
+    a, b = pair(workers)
+    fake_http(monkeypatch, xai_bodies())
+    poll(a, "xai_management")
+    source = SOURCES["xai_management"]
     with a.active():
         key = observations._binding(source, row())[0]
         original = db.get_system_setting(key)
@@ -245,21 +242,21 @@ def test_deferred_poll_does_not_republish_an_import_as_local(workers, monkeypatc
             observations.import_keys({key})
         raise UsageDeferred()
     monkeypatch.setattr(balances, "get", arrive_then_defer)
-    poll(b, "openai_platform_balance")
+    poll(b, "xai_management")
     with b.active():
         assert balances.status(row())["source_worker"] == a.device_id
         assert db.get_system_setting(key) == original
 
 
-@pytest.mark.parametrize("source_id", ["openai_platform_balance", "openrouter_key"])
+@pytest.mark.parametrize("source_id", ["xai_management", "openrouter_key"])
 def test_publish_rejects_peer_provenance_in_both_local_storage_shapes(workers, monkeypatch, source_id):
     from tests.core.network.test_billing_key_sync import row
-    a, b = pair(workers, "openai")
+    a, b = pair(workers)
     with b.active():
         source = SOURCES[source_id]
-        binding = observations._binding(SOURCES["openai_platform_balance"], row())
+        binding = observations._binding(SOURCES["xai_management"], row())
         peer = {"fetched_at": int(time.time() * 1000), "credits": {"limit_remaining": 42}}
-        if source_id == "openai_platform_balance":
+        if source_id == "xai_management":
             peer["source_worker"] = a.device_id
         else:
             peer["raw"] = {"source_worker": a.device_id}

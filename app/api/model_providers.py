@@ -45,12 +45,13 @@ from app.db import database as db
 from app.db.async_database import run_sync
 from app.db.model_provider_slots import model_provider_slot
 
-from app.api import openai_billing, openrouter_billing, provider_balances  # noqa: F401
+from app.api import openrouter_billing, provider_balances
+from app.core.provider_locks import operation_lock
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/model-providers", tags=["Model Providers"])
-router.include_router(openai_billing.router)
+router.include_router(provider_balances.router)
 router.include_router(openrouter_billing.router)
 
 _VALID_PROVIDER_TYPES = ("openrouter", "custom", "openai", "chatgpt", "xai", "grok")
@@ -126,8 +127,6 @@ class ModelProviderResponse(BaseModel):
     # claims. Only these two strings leave the backend, never the token.
     account_email: Optional[str] = None
     account_plan: Optional[str] = None
-    openai_billing_org_id: Optional[str] = None
-    openai_billing_instance_id: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -372,8 +371,6 @@ def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
         codex_refresh_token_set=bool(row.get("_codex_refresh_token_set")),
         account_email=row.get("_account_email"),
         account_plan=row.get("_account_plan"),
-        openai_billing_org_id=row.get("openai_billing_org_id"),
-        openai_billing_instance_id=row.get("openai_billing_instance_id"),
         created_at=_iso(row.get("created_at")),
         updated_at=_iso(row.get("updated_at")),
     )
@@ -388,7 +385,6 @@ def _apply_token_flags(row: Dict[str, Any]) -> Dict[str, Any]:
     (``_codex_access_token_set`` / ``_codex_refresh_token_set``). The raw blobs
     never survive this call, so they can never reach ``_public_provider``.
     """
-    row.pop("openai_admin_key", None)
     token = row.pop("auth_token", None)
     row["_auth_token_set"] = bool(token)
     row["_auth_token_masked"] = mask_api_key(token) if token else ""
@@ -859,7 +855,7 @@ async def create_provider(body: ModelProviderCreate, token: str = Depends(requir
 
     base_url = _normalize_base_url(body.provider_type, body.base_url)
 
-    async with openai_billing.operation_lock(provider_id):
+    async with operation_lock(provider_id):
         row = await run_sync(
             db.create_model_provider,
             provider_id=provider_id,
@@ -959,7 +955,7 @@ async def update_provider(
         updates["auth_token"] = _encrypt_token_or_400(raw_token)
 
     if updates:
-        async with openai_billing.operation_lock(provider_id):
+        async with operation_lock(provider_id):
             row = await run_sync(db.update_model_provider, provider_id, **updates)
             if row is None:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
@@ -978,8 +974,7 @@ async def delete_provider(provider_id: str, token: str = Depends(require_admin))
     failure NEVER blocks deletion (the credential row is going away regardless).
     """
     await _best_effort_revoke_codex(provider_id)
-    async with openai_billing.operation_lock(provider_id):
-        await openai_billing.close_provider_billing(provider_id)
+    async with operation_lock(provider_id):
         deleted = await run_sync(db.delete_model_provider, provider_id)
         if not deleted:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
@@ -1011,7 +1006,7 @@ async def _best_effort_revoke_codex(provider_id: str) -> None:
 @router.post("/{provider_id}/activate", response_model=ModelProviderResponse)
 async def activate_provider(provider_id: str, token: str = Depends(require_admin)):
     """Select this saved account; its slot siblings are disabled atomically."""
-    async with openai_billing.operation_lock(provider_id):
+    async with operation_lock(provider_id):
         row = await run_sync(db.set_model_provider_enabled, provider_id, True)
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
@@ -1028,7 +1023,7 @@ async def toggle_provider(provider_id: str, token: str = Depends(require_admin))
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Model provider not found")
 
-    async with openai_billing.operation_lock(provider_id):
+    async with operation_lock(provider_id):
         row = await run_sync(
             db.set_model_provider_enabled, provider_id, not bool(existing.get("enabled"))
         )
@@ -1688,7 +1683,7 @@ async def codex_device_poll(provider_id: str, token: str = Depends(require_admin
     id_token_exp = exp_dt.isoformat() if exp_dt is not None else None
 
     from datetime import datetime, timezone
-    async with openai_billing.operation_lock(provider_id):
+    async with operation_lock(provider_id):
         row = await run_sync(
             db.set_codex_token_bundle,
             provider_id,
@@ -1860,7 +1855,7 @@ async def xai_device_poll(provider_id: str, token: str = Depends(require_admin))
     id_token_exp = exp_dt.isoformat() if exp_dt is not None else None
 
     from datetime import datetime, timezone
-    async with openai_billing.operation_lock(provider_id):
+    async with operation_lock(provider_id):
         row = await run_sync(
             db.set_codex_token_bundle,
             provider_id,

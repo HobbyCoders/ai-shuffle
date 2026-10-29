@@ -4,9 +4,7 @@ import '@fontsource-variable/jetbrains-mono';
 import '../src/app.css';
 import BrowserWorkspaceParent from './BrowserWorkspaceParent.svelte';
 import KeyUsage from '../src/lib/components/settings/providers/tabs/KeyUsage.svelte';
-const providerLogin = new URLSearchParams(location.search).has('provider-login');
-let loginOpened = false;
-let loginSocketUrl = '';
+const providerBalance = new URLSearchParams(location.search).has('provider-balance');
 import { activeSession } from '../src/lib/stores/active-session';
 import { browserPanel } from '../src/lib/stores/browser-panel.svelte';
 import type { BrowserWorkspaceState } from '../src/lib/browser-panel/workspace';
@@ -92,11 +90,6 @@ class FixtureSocket {
 	onclose: ((e: { code: number; target: unknown }) => void) | null = null;
 	constructor(url: string) {
 		sockets.push(this);
-		if (providerLogin) {
-			loginSocketUrl = url;
-			queueMicrotask(() => { this.onopen?.(); loginOpened = true; });
-			return;
-		}
 		queueMicrotask(() => {
 			this.onopen?.();
 			this.receive({
@@ -122,7 +115,6 @@ class FixtureSocket {
 		const m = JSON.parse(raw);
 		if (m.type === 'pong') return;
 		messages.push(m);
-		if (providerLogin) return;
 		if (m.op === 'takeover' && holdTakeover) {
 			pendingTakeover = { socket: this, id: m.id };
 			return;
@@ -207,7 +199,7 @@ class FixtureSocket {
 			metadata: {
 				deviceWidth: c.width,
 				deviceHeight: c.height,
-				...(providerLogin ? {} : { runtime_id: state.runtime_id, tab_id: state.active_tab_id }),
+				runtime_id: state.runtime_id, tab_id: state.active_tab_id,
 			},
 		});
 	}
@@ -255,16 +247,6 @@ Object.assign(window, {
 		page(loading: boolean) { sockets.at(-1)?.receive({ type: 'page', url: state.tabs.find(t => t.current)?.url, loading }); },
 		openSession(id: string) { browserPanel.openPanel(id); },
 		autoOpenSession(id: string) { browserPanel.autoOpenFor(id); },
-		get loginOpened() { return loginOpened; },
-		get loginSocketUrl() { return loginSocketUrl; },
-		loginHello() { sockets.at(-1)!.receive({ type: 'hello', protocol: 1 }); },
-		loginLive() {
-			const socket = sockets.at(-1)!;
-			const url = 'https://auth.example.test/private-login?secret=never-display';
-			socket.receive({ type: 'page', url, loading: false });
-			socket.receive({ type: 'status', state: 'live', url });
-			socket.frame();
-		},
 		get socketCount() { return sockets.length; },
 		get openSockets() { return sockets.filter(s => s.readyState === 1).length; },
 		// Seed identity without starting the unrelated chat transport. Notifications
@@ -293,11 +275,11 @@ Object.assign(window, {
 	},
 });
 activeSession.current.sessionId = live?.session ?? 'isolated-fixture';
-if (providerLogin) {
-	// Settings > Providers > OpenAI API key > Usage, for a key with no readable balance.
+if (providerBalance) {
+	// Settings > Providers > xAI API key > Usage, with no configured management key.
 	mount(KeyUsage, {
 		target: document.getElementById('app')!,
-		props: { providerId: 'fixture-openai', credits: null, openRouter: false, openAI: true },
+		props: { providerId: 'fixture-xai', credits: null, openRouter: false, xai: true },
 	});
 } else {
 	browserPanel.openPanel(activeSession.current.sessionId);

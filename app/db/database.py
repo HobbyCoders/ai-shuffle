@@ -325,7 +325,8 @@ def _savepoint(cursor, name: str):
 #     default). Additive; lands via the always-run guarded ADD COLUMN in
 #     _run_column_migrations.
 # 93 (2026-10-29): one shared active account per built-in provider/kind slot.
-SCHEMA_VERSION = 93
+# 94 (2026-10-29): erase retired OpenAI billing secrets and readings; keep columns for old peers.
+SCHEMA_VERSION = 94
 
 
 def _migrate_omni_tables_to_fluid(cursor):
@@ -2739,6 +2740,7 @@ def _run_column_migrations(cursor: Any) -> None:
     migrations_applied.extend(_retire_message_hooks(cursor))
     migrations_applied.extend(_retire_webhooks_and_legacy_push(cursor))
     migrations_applied.extend(_retire_fal_billing_key(cursor))
+    migrations_applied.extend(_retire_openai_billing(cursor))
     migrations_applied.extend(_retire_secret_named_observations(cursor))
     migrations_applied.extend(_retire_assistant_home(cursor))
     from app.db.session_mode_migration import migrate as migrate_session_modes
@@ -3072,6 +3074,50 @@ def _retire_secret_named_observations(cursor) -> List[str]:
     for key in keys:
         cursor.execute("DELETE FROM system_settings WHERE key = %s", (key,))
     return ["system_settings.legacy_provider_observations"] if keys else []
+
+
+def _retire_openai_billing(cursor) -> List[str]:
+    """v94: erase retired OpenAI billing secrets and cached readings, not columns.
+
+    Keep the columns for old network peers, but never read or import their
+    Admin/session keys again. xAI management access and subscription usage stay.
+    """
+    applied: List[str] = []
+    if table_exists(cursor, "model_providers"):
+        retired = (
+            "openai_admin_key", "openai_billing_org_id", "openai_billing_instance_id",
+            "manual_balance_usd", "manual_balance_set_at",
+        )
+        columns = [name for name in retired if column_exists(cursor, "model_providers", name)]
+        if columns:
+            cursor.execute(
+                "UPDATE model_providers SET " + ", ".join(name + " = NULL" for name in columns)
+                + " WHERE " + " OR ".join(name + " IS NOT NULL" for name in columns)
+            )
+            if cursor.rowcount:
+                applied.append(f"model_providers.retired_openai_billing({cursor.rowcount})")
+        if column_exists(cursor, "model_providers", "balance_key"):
+            cursor.execute(
+                "UPDATE model_providers SET balance_key = NULL, balance_instance_id = NULL, "
+                "balance_snapshot = NULL WHERE provider_type <> 'xai' AND "
+                "(balance_key IS NOT NULL OR balance_instance_id IS NOT NULL OR balance_snapshot IS NOT NULL)"
+            )
+            if cursor.rowcount:
+                applied.append(f"model_providers.retired_platform_balance({cursor.rowcount})")
+    if table_exists(cursor, "provider_usage_snapshots"):
+        cursor.execute(
+            "DELETE FROM provider_usage_snapshots WHERE provider_type IN ('openai', 'openai_balance') "
+            "OR provider_id = 'openai-api'"
+        )
+        if cursor.rowcount:
+            applied.append(f"provider_usage_snapshots.retired_openai_billing({cursor.rowcount})")
+    if table_exists(cursor, "system_settings"):
+        for prefix in ("openai_billing_", "provider_observation:openai_admin:",
+                       "provider_observation:openai_platform_balance:", "provider_observation:openai_manual:"):
+            cursor.execute("DELETE FROM system_settings WHERE key LIKE %s", (prefix + "%",))
+            if cursor.rowcount:
+                applied.append(f"system_settings.retired_openai_billing({cursor.rowcount})")
+    return applied
 
 
 def _retire_fal_billing_key(cursor) -> List[str]:
@@ -4071,8 +4117,6 @@ from app.db.model_providers import (  # noqa: F401
     get_codex_tokens,
     try_claim_codex_refresh,
     release_codex_refresh_claim,
-    set_openai_billing_binding,
-    clear_openai_billing_binding,
 )
 
 from app.db.usage_snapshots import (  # noqa: F401

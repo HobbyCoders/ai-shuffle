@@ -1,7 +1,6 @@
 import pytest
 
-from app.core.api_key_balances import parse_openai, parse_xai, usd_cents
-from app.core.openai_platform_signin import dashboard_url, session_key
+from app.core.api_key_balances import parse_xai, usd_cents
 
 
 def test_configured_balance_waits_for_first_reading(monkeypatch):
@@ -21,17 +20,6 @@ def test_configured_balance_waits_for_first_reading(monkeypatch):
     assert "deferred_until" not in status
     assert status["last_error_kind"] is None
     assert balances.status({})["status"] == "unavailable"
-
-
-def test_openai_dollars_and_zero():
-    assert parse_openai({"total_available": "0", "total_granted": "20.50", "total_used": 20.5}) == {
-        "balance_remaining": 0, "total_credits": 20.5, "total_usage": 20.5, "currency": "USD"}
-
-
-@pytest.mark.parametrize("value", [True, "NaN", "Infinity", None, {}, []])
-def test_invalid_openai_money(value):
-    with pytest.raises((ValueError, KeyError)):
-        parse_openai({"total_available": value, "total_granted": 10, "total_used": 0})
 
 
 def test_xai_ledger_sign_and_cents_not_dollars():
@@ -57,13 +45,3 @@ def test_management_template_cannot_escape_pinned_host_or_team_path():
                 "https://management-api.x.ai/v1/billing/teams/team-test/prepaid/balance?extra=1"]:
         with pytest.raises(ValueError):
             endpoint_for("xai_management", url)
-
-
-def test_session_capture_only_exact_dashboard_origin():
-    assert dashboard_url("https://api.openai.com/dashboard/onboarding/login")
-    assert dashboard_url("https://api.openai.com/v1/dashboard/billing/credit_grants")
-    for url in ["https://evil.test/v1/dashboard/", "https://api.openai.com.evil.test/dashboard/", "http://api.openai.com/dashboard/", "https://api.openai.com:444/dashboard/", "https://api.openai.com/v1/responses"]:
-        assert not dashboard_url(url)
-    assert session_key({"authorization": "Bearer sess-test-only"}) == "sess-test-only"
-    assert session_key({"Authorization": "Bearer sk-test-only"}) is None
-    assert session_key({"Authorization": "Bearer sess-bad key"}) is None

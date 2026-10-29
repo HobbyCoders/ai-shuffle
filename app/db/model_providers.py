@@ -70,10 +70,6 @@ class ModelProviderRow(TypedDict, total=False):
     codex_id_token_expires_at: Optional[str]
     codex_last_refresh: Optional[str]
     needs_reauth: bool
-    manual_balance_usd: Optional[float]
-    manual_balance_set_at: Optional[int]
-    openai_billing_org_id: Optional[str]
-    openai_billing_instance_id: Optional[str]
     created_at: str
     updated_at: str
     revision: Optional[str]
@@ -89,8 +85,6 @@ _PUBLIC_COLUMNS = (
     "default_model, small_fast_model, extra_env_json, context_window, "
     "max_output_tokens, enabled, auth_mode, codex_account_id, "
     "codex_id_token_expires_at, codex_last_refresh, needs_reauth, "
-    "openai_billing_org_id, openai_billing_instance_id, "
-    "manual_balance_usd, manual_balance_set_at, "
     "created_at, updated_at, revision"
 )
 
@@ -98,7 +92,7 @@ _PUBLIC_COLUMNS = (
 # passes ``include_token=True`` (server-side use: env overlay / re-encryption /
 # the Codex refresh worker). Kept off ``_PUBLIC_COLUMNS`` so they never travel on
 # a normal read.
-_TOKEN_COLUMNS = "auth_token, codex_access_token, codex_refresh_token, openai_admin_key, balance_key, balance_instance_id, balance_snapshot"
+_TOKEN_COLUMNS = "auth_token, codex_access_token, codex_refresh_token, balance_key, balance_instance_id, balance_snapshot"
 
 # Columns that update_model_provider accepts as direct partial updates. JSON
 # columns are handled specially (see _dump_json_value); auth_token and the two
@@ -121,14 +115,11 @@ _UPDATABLE_COLUMNS = (
     "auth_mode",
     "codex_access_token",
     "codex_refresh_token",
-    "openai_admin_key",
     "balance_key",
     "codex_account_id",
     "codex_id_token_expires_at",
     "codex_last_refresh",
     "needs_reauth",
-    "manual_balance_usd",
-    "manual_balance_set_at",
 )
 
 
@@ -477,11 +468,6 @@ def update_model_provider(
             k in kwargs and (kwargs[k] or None) != (current.get(k) or None)
             for k in ("base_url", "provider_type", "auth_mode")
         )
-        if key_changed:
-            # A balance belongs to the credential's account, not this row ID.
-            # Re-encrypting the same key must not reset the owner's baseline.
-            kwargs["manual_balance_usd"] = None
-            kwargs["manual_balance_set_at"] = None
 
     updates: List[str] = []
     values: List[Any] = []
@@ -521,7 +507,7 @@ def update_model_provider(
         saved = _parse_json_columns(row_to_dict(cursor.fetchone()))
         if saved and (changed or kwargs.get("enabled") is False):
             cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
-        if saved and (changed or any(k in kwargs for k in ("balance_key", "openai_admin_key", "codex_access_token", "codex_account_id"))):
+        if saved and (changed or any(k in kwargs for k in ("balance_key", "codex_access_token", "codex_account_id"))):
             from app.db.provider_usage_snapshots import delete_shared_observations
             delete_shared_observations(conn, provider_id)
         if saved and any(k in kwargs for k in ("enabled", "provider_type", "auth_mode")):
@@ -535,75 +521,6 @@ def update_model_provider(
                     clear_model_provider_slot(cursor, slot, provider_id)
             reconcile_model_provider_slots(cursor)
         return saved
-
-
-def set_openai_billing_binding(provider_id: str, organization_id: str, instance_id: str, admin_key: Optional[str] = None) -> Optional[ModelProviderRow]:
-    """Explicitly save shared Admin access without changing inference credentials.
-
-    The row lock protects validation and replacement, including takeover of a
-    restored installation's trust marker.
-    """
-    from urllib.parse import urlsplit
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT provider_type, base_url, auth_mode, enabled, openai_billing_instance_id FROM model_providers WHERE id = %s FOR UPDATE",
-            (provider_id,),
-        )
-        row = cursor.fetchone()
-        if not row or row["provider_type"] != "openai" or not row["enabled"]:
-            return None
-        try:
-            url = urlsplit(row["base_url"])
-            if (
-                url.scheme != "https" or url.hostname != "api.openai.com"
-                or url.port not in (None, 443) or url.username or url.password
-                or row.get("auth_mode") in {"codex", "chatgpt"}
-            ):
-                return None
-        except ValueError:
-            return None
-        cursor.execute(
-            "UPDATE model_providers SET openai_billing_org_id = %s, openai_billing_instance_id = %s, openai_admin_key = %s, updated_at = %s, revision = %s WHERE id = %s",
-            (organization_id, instance_id, admin_key, datetime.now(timezone.utc).isoformat(), str(uuid4()), provider_id),
-        )
-        cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
-        from app.db.provider_usage_snapshots import delete_shared_observations
-        delete_shared_observations(conn, provider_id)
-    return get_model_provider(provider_id)
-
-
-def clear_openai_billing_binding(
-    provider_id: str, instance_id: Optional[str] = None,
-) -> Optional[ModelProviderRow]:
-    """Remove shared Admin API access and its local snapshot, not the model key."""
-    from app.core.config import settings
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT id, openai_billing_instance_id FROM model_providers WHERE id = %s FOR UPDATE", (provider_id,)
-        )
-        row = cursor.fetchone()
-        if not row:
-            return None
-        cursor.execute(
-            "UPDATE model_providers SET openai_billing_org_id = NULL, openai_billing_instance_id = %s, openai_admin_key = NULL, updated_at = %s, revision = %s WHERE id = %s",
-            (instance_id or settings.effective_instance_id, datetime.now(timezone.utc).isoformat(), str(uuid4()), provider_id),
-        )
-        cursor.execute("SELECT raw FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
-        snapshot = cursor.fetchone()
-        raw = snapshot.get("raw") if snapshot else None
-        if isinstance(raw, str):
-            try:
-                raw = json.loads(raw)
-            except (ValueError, TypeError):
-                raw = None
-        if isinstance(raw, dict) and raw.get("source") in {"browser_platform", "openai_admin"}:
-            cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
-        from app.db.provider_usage_snapshots import delete_shared_observations
-        delete_shared_observations(conn, provider_id)
-    return get_model_provider(provider_id)
 
 
 def delete_model_provider(provider_id: str) -> bool:
