@@ -59,7 +59,7 @@ def test_owner_gate_fails_closed(owner, fields):
     assert not orch.is_owner_session(row)
 
 
-async def test_settled_starter_is_not_woken_and_gets_push(owner, monkeypatch):
+async def test_settled_starter_is_not_woken_and_keeps_only_the_bell(owner, monkeypatch):
     from app.services import push_notification
     push = []
     monkeypatch.setattr(push_notification, "fire_and_forget_notify", lambda **kw: push.append(kw))
@@ -70,12 +70,11 @@ async def test_settled_starter_is_not_woken_and_gets_push(owner, monkeypatch):
     run(receipt["session_id"], receipt["turn_id"], "Finished while starter was settled.")
     await turn_scheduler.on_turn_settled(receipt["session_id"], receipt["turn_id"], "completed")
     assert wakes(owner["id"]) == []
-    assert len(push) == 1
-    assert push[0]["data"]["session_id"] == receipt["session_id"]
+    assert push == []  # A completion is not an owner need, even after settling.
     from app.db import notifications
     assert any(row["session_id"] == receipt["session_id"] for row in notifications.list_notifications("admin"))
     await turn_scheduler.on_turn_settled(receipt["session_id"], receipt["turn_id"], "completed")
-    assert len(push) == 1 and wakes(owner["id"]) == []
+    assert push == [] and wakes(owner["id"]) == []
 
 
 def test_chat_surface_only_widens_for_owner(owner):

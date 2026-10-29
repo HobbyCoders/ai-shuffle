@@ -456,9 +456,8 @@ async def test_owner_project_runs_on_the_worker_with_the_checkout_and_reports_ba
         workers, monkeypatch, kicks, tmp_path, settled_starter):
     from app.core import away_mode
     from app.db import session_events
-    from app.services import push_notification, notification_service
+    from app.services import push_notification
     from tests.core.test_worker_checkout import git
-    monkeypatch.setattr(notification_service, "_last_push", {})
     push = []
     monkeypatch.setattr(push_notification, "fire_and_forget_notify", lambda **kw: push.append(kw))
     git(tmp_path, "init", "-b", "main")
@@ -524,8 +523,10 @@ async def test_owner_project_runs_on_the_worker_with_the_checkout_and_reports_ba
             cursor.execute("SELECT * FROM turns WHERE session_id='caller' AND source='unpark'")
             queued = [turns._row(r) for r in cursor.fetchall()]
     if settled_starter:
-        assert queued == [] and len(push) == 1
-        assert push[0]["data"]["session_id"] == new_id
+        assert queued == [] and push == []
+        from app.db import notifications
+        with b.active():
+            assert any(row["session_id"] == new_id for row in notifications.list_notifications("admin"))
         return
     [wake] = queued
     assert "<kind>session</kind>" in wake["prompt"] and "Fixed; push deferred." in wake["prompt"]

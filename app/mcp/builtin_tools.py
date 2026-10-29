@@ -1964,12 +1964,12 @@ def create_builtin_tools_server(
     # ------------------------------------------------------------------
     @tool(
         "NotifyDevices",
-        "Ask for the owner's attention ONLY when you explicitly need their input or action. "
-        "Never use for completion, parking, progress, errors, watches, expiry or updates. "
-        "Questions and approval/access cards already trigger Needs you automatically; do not double-notify. "
-        "One notification per attention episode; retries deduplicate by tool-use id. "
-        "Phone text is generic (AI Shuffle / chat title); title, body and data are not sent to the lock screen. "
-        "sent means accepted by FCM, not displayed or seen. If not sent, ask in chat instead.",
+        "Ask for the owner ONLY when you explicitly need their input or action. "
+        "Never for completions, parking, progress, errors, watches, expiry or updates. "
+        "Questions and approval/access cards trigger Needs you automatically; do not double-notify. "
+        "One notification per episode; retries dedupe by tool-use id. "
+        "Lock-screen text is generic (AI Shuffle / chat title), never title/body/data. "
+        "sent means FCM accepted, not displayed or seen. If not sent, ask in chat.",
         {"type": "object", "properties": {
             "title": {"type": "string", "description": "Why you need the owner (not sent to the lock screen)."},
             "body": {"type": "string", "description": "The input or action you need (not sent to the lock screen)."},
