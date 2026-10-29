@@ -4,6 +4,7 @@
 	import type { Session } from '$lib/api/sessions';
 	import { openSessionLink, sessionHref } from '$lib/services/session-navigation';
 	import { sessions } from '$lib/stores/app-data.svelte';
+	import { slimSessionReadEnabled } from '$lib/stores/away-mode.svelte';
 	import SessionTitleMenu from './SessionTitleMenu.svelte';
 
 	interface Props {
@@ -14,8 +15,36 @@
 		mobile?: boolean;
 	}
 	let { projectLabel = null, title = null, sessionId = null, onOpenProject, mobile = false }: Props = $props();
-	let loadedChild = $state<Session | null>(null);
-	let loadedParent = $state<Session | null>(null);
+	type Identity = Pick<Session, 'id' | 'title' | 'hidden' | 'parent_session_id'>;
+	let loadedChild = $state<Identity | null>(null);
+	let loadedParent = $state<Identity | null>(null);
+
+	async function loadIdentity(id: string, isCancelled: () => boolean): Promise<Identity | null> {
+		const path = `/sessions/${encodeURIComponent(id)}`;
+		if (slimSessionReadEnabled()) {
+			try {
+				// Share the transcript-free read with away mode and the owner panel.
+				// A small message_limit only bounds the old response, not its work.
+				const live = await api.getShared<{ session_meta?: Partial<Identity> }>(
+					`${path}/live?include_messages=false&owner_fields=true`
+				);
+				const meta = live?.session_meta;
+				if (meta?.id === id && typeof meta.hidden === 'boolean'
+					&& (meta.title === null || typeof meta.title === 'string')
+					&& (meta.parent_session_id === null || typeof meta.parent_session_id === 'string')) {
+					return meta as Identity;
+				}
+			} catch (error) {
+				// Only an unsupported route warrants an expensive compatibility read;
+				// access failures and transient server errors keep the current title.
+				const status = (error as { status?: number } | null)?.status;
+				if (status !== 404 && status !== 405 && status !== 501) throw error;
+			}
+		}
+		// Older workers do not include all identity fields. Do not revive a
+		// transcript lookup for a breadcrumb the owner has already left.
+		return isCancelled() ? null : api.get<Identity>(`${path}?message_limit=1`);
+	}
 	const child = $derived($sessions.find(s => s.id === sessionId) ?? (loadedChild?.id === sessionId ? loadedChild : null));
 	// Delegated transcripts are list-hidden; a normal fork is not a subagent.
 	const parentId = $derived(child?.hidden && child.parent_session_id !== sessionId ? child.parent_session_id : null);
@@ -25,9 +54,8 @@
 		const id = sessionId;
 		if (!id || child) return;
 		let cancelled = false;
-		// Hidden transcripts and deep links may have no sidebar row. Limit the
-		// history payload: this request needs identity, not another transcript.
-		void api.get<Session>(`/sessions/${encodeURIComponent(id)}?message_limit=1`)
+		// Hidden transcripts and deep links may have no sidebar row.
+		void loadIdentity(id, () => cancelled)
 			.then(row => { if (!cancelled) loadedChild = row; })
 			.catch(() => { /* Keep the current title when metadata is unavailable. */ });
 		return () => { cancelled = true; };
@@ -36,7 +64,7 @@
 		const id = parentId;
 		if (!id || parent) return;
 		let cancelled = false;
-		void api.get<Session>(`/sessions/${encodeURIComponent(id)}?message_limit=1`)
+		void loadIdentity(id, () => cancelled)
 			.then(row => { if (!cancelled) loadedParent = row; })
 			.catch(() => { /* A deleted or inaccessible parent is not a navigation target. */ });
 		return () => { cancelled = true; };
