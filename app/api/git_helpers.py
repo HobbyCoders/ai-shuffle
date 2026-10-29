@@ -434,7 +434,8 @@ def ensure_git_repository_record(project_id: str, working_dir: str) -> Optional[
         default_branch=default_branch,
         github_repo_name=github_repo_name
     )
-    logger.debug(f"Created git repository record for project {project_id}: {repo_id}")
+    # A concurrent first load may have won the insert; repo is then its row.
+    logger.debug(f"Git repository record for project {project_id}: {(repo or {}).get('id')}")
     _auto_link_from_repo(project_id, repo)
     _repo_record_cache[project_id] = (repo, time.monotonic())
     return repo
