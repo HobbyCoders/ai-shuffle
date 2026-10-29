@@ -110,16 +110,25 @@ def create_git_repository(
     default_branch: str = "main",
     github_repo_name: Optional[str] = None
 ) -> Optional[GitRepositoryRow]:
-    """Create a new git repository record"""
+    """Create the project's git repository record, or return the existing one.
+
+    Two first-time Git status loads can race past the existence check and
+    both insert (#790). ``project_id`` is UNIQUE, so the losing insert does
+    nothing and both callers get the one stored row, whose ``id`` may differ
+    from ``repository_id``.
+    """
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO git_repositories (id, project_id, remote_url, default_branch, github_repo_name, created_at)
-               VALUES (%s, %s, %s, %s, %s, %s)""",
+               VALUES (%s, %s, %s, %s, %s, %s)
+               ON CONFLICT (project_id) DO NOTHING""",
             (repository_id, project_id, remote_url, default_branch, github_repo_name, now)
         )
-    return get_git_repository(repository_id)
+        # READ COMMITTED: this statement sees the winner's committed row.
+        cursor.execute("SELECT * FROM git_repositories WHERE project_id = %s", (project_id,))
+        return row_to_dict(cursor.fetchone())
 
 
 def update_git_repository(
