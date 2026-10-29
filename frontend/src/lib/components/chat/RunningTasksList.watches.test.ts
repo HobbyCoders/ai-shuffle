@@ -323,14 +323,16 @@ describe('RunningTasksList watches', () => {
 		expect(screen.getByText('Watch w1')).toBeTruthy();
 	});
 
-	it('on a phone a watch alone gets the summary row that opens the list', async () => {
+	it('on a phone a watch alone gets the same collapsible row as desktop', async () => {
 		mocks.mobile = true;
 		serve([watch('w1'), watch('w2', { status: 'paused' })]);
 		render(RunningTasksList, { sessionId: 's1', variant: 'inline' });
-		const summary = await screen.findByRole('button', { name: '2 watches: 1 paused. Open the list' });
-		await fireEvent.click(summary);
-		expect(within(sheet()).getByText('Watch w1')).toBeTruthy();
-		expect(within(sheet()).getByText('2 watches · 1 paused')).toBeTruthy();
+		const toggle = await screen.findByTestId('tasks-toggle');
+		expect(toggle.textContent).toContain('2 watches');
+		expect(toggle.textContent).toContain('1 paused');
+		expect(screen.queryByRole('button', { name: /Open the list/ })).toBeNull();
+		expect(screen.getByText('Watch w1')).toBeTruthy();
+		expect(screen.queryByRole('dialog')).toBeNull();
 	});
 
 	describe('placement (#565)', () => {

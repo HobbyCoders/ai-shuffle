@@ -2066,8 +2066,8 @@
 
 			<!-- In-flight background work pinned to the history tail: agents (swarms
 			     as one expandable row) and shell tasks, grouped, each with stop and,
-			     for agents, its transcript. On a phone it is one row opening the full
-			     list. Renders nothing when nothing runs. Chats this one started
+			     for agents, its transcript. The phone shows the same collapsible row.
+			     Renders nothing when nothing runs. Chats this one started
 			     show beside the composer (BackgroundWorkStrip). -->
 			<RunningTasksList sessionId={$activeSession.sessionId} variant="inline" />
 
