@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatMessage, PendingPeerMessage } from '$lib/stores/types';
 import { reduceAll, type WireEvent } from '$lib/stores/session/v2/reducer';
-import { agentDelivery } from './agent-delivery';
+import { agentDelivery, agentSender, agentSenderNames } from './agent-delivery';
 import { createAgentMessageProjection } from './agent-message-projection';
 import { createTranscriptModelBuilder, type TranscriptModel } from './work-log';
 
@@ -43,6 +43,20 @@ describe('agent-message transcript projection', () => {
 			timestamp: '1970-01-01T00:00:01.234Z'
 		});
 		expect(agentDelivery(rows[1])).toEqual({ sender: peer.senderSessionId, senderLabel: peer.senderLabel, content: peer.content });
+	});
+
+	it('keeps the sender Input label and session identical when a queued message is delivered', () => {
+		const peer = pendingPeer();
+		const worker: ChatMessage = {
+			id: 'worker-card', role: 'assistant', type: 'subagent', content: '',
+			agentSessionId: peer.senderSessionId, agentDescription: peer.senderLabel
+		};
+		const names = agentSenderNames([worker]);
+		const [queued] = createAgentMessageProjection().update({ sessionId: 's1', messages: [], pendingPeerMessages: [peer] });
+		const queuedSender = agentSender(agentDelivery(queued)!, names);
+		const deliveredSender = agentSender(agentDelivery(receipt(peer))!, names);
+		expect(queuedSender).toEqual(deliveredSender);
+		expect({ label: queuedSender.name, session: queuedSender.id }).toEqual({ label: peer.senderLabel, session: peer.senderSessionId });
 	});
 
 	it('swaps pending for delivered under the same presentation and server keys', () => {

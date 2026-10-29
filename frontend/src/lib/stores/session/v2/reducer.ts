@@ -96,7 +96,7 @@ export interface V2SessionState {
 	 *  settled then no-ops server-side instead of interrupting the successor
 	 *  (GitHub #585). */
 	liveTurnId: string | null;
-	/** First prompt of a peer turn that started from idle, not a parked continuation. */
+	/** First prompt of a peer turn that woke an idle or parked recipient. */
 	pendingAgentWake: boolean;
 	/** Profile (agent) id the live turn is running as, from `turn.started`.
 	 *  Messages created on the live SSE path (streaming deltas, and a
@@ -1214,13 +1214,18 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				// A resuming card is live until a reply retires it.
 				mayHaveLiveRetry = true;
 			}
+			// Match the projection's active-recipient boundary: parked work may be
+			// unsettled, but a peer arriving there starts its own wake turn.
+			const sessionActive = state.parked !== true && (
+				state.isStreaming || Boolean(state.liveTurnId) ||
+				state.activeTaskSummaries.some(task => task.status === 'running')
+			);
 			return {
 				...state,
 				messages,
 				mayHaveLiveRetry,
 				attemptStartSeq: seq,
-				pendingAgentWake: (event.source === 'agent_message' || event.source === 'promotion') &&
-					!state.isStreaming && !state.parked,
+				pendingAgentWake: (event.source === 'agent_message' || event.source === 'promotion') && !sessionActive,
 				isStreaming: true,
 				parked: false,
 				liveTurnId: typeof event.turn_id === 'string' ? event.turn_id : state.liveTurnId,
