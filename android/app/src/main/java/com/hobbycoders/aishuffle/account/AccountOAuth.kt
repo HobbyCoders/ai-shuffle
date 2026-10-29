@@ -42,8 +42,12 @@ object AccountOAuth {
     suspend fun begin(store: AccountStore, createAccount: Boolean = false): AuthorizationRequest {
         store.pendingOAuth = null
         val verifier = CodeVerifierUtil.generateRandomCodeVerifier()
+        // An older account service refuses a known device id when sign-in
+        // finishes: reuse it only after this service has said it accepts that.
         val start = HubClient.call(AccountStore.DEFAULT_HUB, "/v1/oauth/start", "POST",
-            HubClient.device(store.beginSignIn()).put("code_challenge", CodeVerifierUtil.deriveCodeVerifierChallenge(verifier)))
+            HubClient.device(store.beginSignIn(fresh = !store.hubReusesDevices))
+                .put("code_challenge", CodeVerifierUtil.deriveCodeVerifierChallenge(verifier)))
+        store.hubReusesDevices = start.optBoolean("device_reuse")
         val issuer = PairingInput.origin(start.getString("issuer"))
         require(start.getString("authorization_endpoint") == "$issuer/oauth/authorize" &&
             start.getString("token_endpoint") == "$issuer/oauth/token" && start.getString("redirect_uri") == REDIRECT)
@@ -58,8 +62,14 @@ object AccountOAuth {
             .put("client_id", request.clientId).put("created_at", System.currentTimeMillis()).toString()
         return request
     }
-    suspend fun finish(store: AccountStore, data: Intent): JSONObject =
+    suspend fun finish(store: AccountStore, data: Intent): JSONObject = try {
         HubClient.call(AccountStore.DEFAULT_HUB, "/v1/oauth/exchange", "POST", consumeResponse(store, data))
+    } catch (e: HubFailure) {
+        // The kept device id may have been revoked or belong to another account:
+        // the next attempt starts as a new device.
+        if (e.status == 401 || e.status == 409 || e.status >= 500) store.beginSignIn(fresh = true)
+        throw e
+    }
 
     internal fun consumeResponse(store: AccountStore, data: Intent, now: Long = System.currentTimeMillis()): JSONObject {
         val pending = store.pendingOAuth?.let(::JSONObject) ?: error("Sign-in expired. Start again.")
