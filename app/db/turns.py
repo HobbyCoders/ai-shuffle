@@ -1275,6 +1275,7 @@ def remove_queued_turn(
     left alone (``None`` returned) instead of being aborted mid-flight.
     """
     notify_events = False
+    event_log_initialized = False
     # A caller-owned transaction also owns the post-commit session notification.
     with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
@@ -1286,8 +1287,9 @@ def remove_queued_turn(
             sid = target["session_id"]
             cursor.execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,0) "
                            "ON CONFLICT (session_id) DO NOTHING", (sid,))
-            cursor.execute("SELECT session_id FROM session_event_counters WHERE session_id=%s FOR UPDATE", (sid,))
-            cursor.fetchone()
+            cursor.execute("SELECT next_seq FROM session_event_counters WHERE session_id=%s FOR UPDATE", (sid,))
+            counter = cursor.fetchone()
+            event_log_initialized = bool(counter and counter["next_seq"] > 0)
             cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (sid,))
             cursor.fetchone()
         cursor.execute(
@@ -1298,9 +1300,11 @@ def remove_queued_turn(
             (stop_reason, turn_id),
         )
         row = _row(cursor.fetchone())
-        if row and row.get("source") == "agent_message":
+        if row and row.get("source") == "agent_message" and event_log_initialized:
             from app.db import session_events
 
+            # Never seed a legacy log with cancellation: that would suppress
+            # lazy history import. A displayed V2 peer already has a seeded log.
             # Only the guarded queued -> aborted transition cancels a peer.
             # Delivery/steering use separate transitions and never emit this.
             session_events.append_events(row["session_id"], [{

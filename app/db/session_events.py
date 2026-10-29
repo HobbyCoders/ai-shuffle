@@ -288,7 +288,7 @@ def append_backfill_events(
     session_id: str,
     events: List[Dict[str, Any]],
 ) -> Optional[Tuple[int, int]]:
-    """Append a legacy-history backfill batch under an exclusive-create gate.
+    """Append legacy history only before this session's first seq allocation.
 
     Unlike :func:`append_events`, this is the ONE-TIME lazy backfill writer
     (``app.core.history_backfill``). It is always unfenced (``run_id=None``) and
@@ -296,12 +296,12 @@ def append_backfill_events(
     otherwise a concurrent recorder append (or a second reader racing the same
     backfill) would interleave a duplicate legacy prefix into the log.
 
-    The gate is the atomic counter INSERT itself: ``ON CONFLICT DO NOTHING
-    RETURNING next_seq`` yields the allocated row ONLY when this statement
-    created the counter. If the counter already exists (a recorder or a prior
-    backfill got there first) no row is returned and we abort without writing,
-    returning ``None``. On success returns the ``(first_seq, last_seq)`` range
-    (always starting at 1). Raises ``ValueError`` if ``events`` is empty.
+    The atomic counter upsert creates or claims a zero counter. Queue cancellation
+    can reserve that zero row for locking without initializing the event log.
+    A positive counter means another writer allocated seqs; no row is returned
+    and we abort without writing, returning ``None``. On success returns the
+    ``(first_seq, last_seq)`` range (always starting at 1). Raises ``ValueError``
+    if ``events`` is empty.
     """
     if not events:
         raise ValueError("events must be non-empty")
@@ -310,15 +310,14 @@ def append_backfill_events(
     with get_db() as conn:
         cursor = conn.cursor()
 
-        # Exclusive-create gate: allocate the whole [1, n] range in one shot, but
-        # ONLY if this statement is the one that creates the counter row. A
-        # returned row proves we won; no row means another writer already
-        # allocated seqs for this session — abort silently (the log is no longer
-        # empty, so the backfill is unnecessary).
+        # Allocate [1, n] only from an absent or zero counter. The upsert locks
+        # against recorder appends and competing backfills, so only one wins.
+        # A zero reservation contains no events and must not hide legacy history.
         cursor.execute(
             "INSERT INTO session_event_counters (session_id, next_seq) "
             "VALUES (%s, %s) "
-            "ON CONFLICT (session_id) DO NOTHING "
+            "ON CONFLICT (session_id) DO UPDATE SET next_seq = EXCLUDED.next_seq "
+            "WHERE session_event_counters.next_seq = 0 "
             "RETURNING next_seq",
             (session_id, n),
         )

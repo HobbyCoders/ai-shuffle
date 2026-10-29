@@ -3,7 +3,7 @@
 Covers the full frontend-message → contract-event mapping table (golden
 shapes), the skip rows, timestamp/uuid/profile passthrough, the
 turn_id='backfill' stamp, ensure_backfilled's fast path + empty memo + failure
-tolerance, and the exclusive-create counter-gate race (one winner; backfill vs
+tolerance, and the empty-counter gate race (one winner; backfill vs
 recorder appends serialize).
 
 All conversion tests call the pure converter directly; DB tests ride the
@@ -18,6 +18,7 @@ import app.core.history_backfill as hb
 from app.core.history_backfill import convert_messages_to_events, ensure_backfilled
 from app.db import session_events as se
 from app.db import sessions as sessions_db
+from app.db.base import get_db
 from tests.shared_fixtures import reset_backfill_memo  # noqa: F401  (autouse fixture)
 
 SID = "sess-backfill"
@@ -555,7 +556,11 @@ def _bf_events(n=2, tag="bf"):
     ]
 
 
-async def test_concurrent_backfills_exactly_one_wins(mock_db):
+@pytest.mark.parametrize("zero_counter", [False, True])
+async def test_concurrent_backfills_exactly_one_wins(mock_db, zero_counter):
+    if zero_counter:
+        with get_db() as conn:
+            conn.cursor().execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,0)", (SID,))
     results = await asyncio.gather(
         asyncio.to_thread(se.append_backfill_events, SID, _bf_events(2, "a")),
         asyncio.to_thread(se.append_backfill_events, SID, _bf_events(2, "b")),
@@ -569,7 +574,11 @@ async def test_concurrent_backfills_exactly_one_wins(mock_db):
     assert len(tags) == 1  # no interleaving of the two batches
 
 
-async def test_backfill_aborts_after_recorder_append(mock_db):
+@pytest.mark.parametrize("zero_counter", [False, True])
+async def test_backfill_aborts_after_recorder_append(mock_db, zero_counter):
+    if zero_counter:
+        with get_db() as conn:
+            conn.cursor().execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,0)", (SID,))
     se.append_events(SID, [{"type": "turn.started"}])
     assert se.append_backfill_events(SID, _bf_events()) is None
     assert [r["event_type"] for r in se.get_events(SID)] == ["turn.started"]
