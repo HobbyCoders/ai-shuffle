@@ -236,11 +236,22 @@ async def _admit_parent_messages(runtime):
     for i in range(3):
         # The queue producer must infer the live reporting owner and still
         # attribute this individual message for the peer receipt channel.
-        row_id = await turn_scheduler.on_agent_message("worker", "parent", f"Parent update {i}")
-        row = turns.get_turn(row_id)
+        if runtime._live_adapter().provider_kind == "delegated":
+            result = await messaging.make_message(lambda: "parent")(
+                {"to": "worker", "message": f"Parent update {i}"}, None,
+            )
+            assert not result.is_error and result.text == "Queued for Helper"
+            row = turns.get_queued_turns("worker")[-1]
+            row_id = row["id"]
+            assert row_id in runtime._steer_attempted  # producer triggered the sweep
+        else:
+            # Exercise the native durable-queue fallback, not its direct-send
+            # fast path (whose queue-first durability is a separate change).
+            row_id = await turn_scheduler.on_agent_message("worker", "parent", f"Parent update {i}")
+            row = turns.get_turn(row_id)
+            assert await runtime.steer_pending() == 1
         assert row["payload"]["agent_message_reply_to"] == "parent"
         rows.append(row)
-        assert await runtime.steer_pending() == 1
         assert await runtime.steer_pending() == 0  # retries never duplicate it
         assert turns.get_turn(row_id)["state"] == "queued"
     return rows
@@ -253,7 +264,7 @@ async def test_resumed_busy_child_receives_three_parent_messages_at_boundaries(
     from fluid.context.steering import STEER_OPEN
     from fluid.engine.delegated import DelegatedLoop
     from fluid.engine.native import NativeLoop
-    from fluid.events import PermissionRequest, RespondPermission, SteerDelivered, TurnComplete, TurnStarted
+    from fluid.events import PermissionRequest, RespondPermission, SteerDelivered, TextDelta, TurnComplete, TurnStarted
     from fluid.events.ops import UserTurn
     from fluid.hooks.bus import HookBus
     from fluid.providers.base import ProviderCaps, StreamChunk
@@ -338,12 +349,14 @@ async def test_resumed_busy_child_receives_three_parent_messages_at_boundaries(
             seen = "\n".join(part.text for message in requests[-1].messages
                              for block in message.content if isinstance(block, ToolResultBlock)
                              for part in block.content if isinstance(part, Text))
-            assert STEER_OPEN not in seen
-            assert all(seen.count(f"Parent update {i}") == 1 for i in range(3))
-            from fluid.context.peer import PEER_OPEN_PREFIX
+        else:
+            seen = json.loads([e.text for e in events if isinstance(e, TextDelta)][-1])["main"]
+        from fluid.context.peer import PEER_OPEN_PREFIX
 
-            assert PEER_OPEN_PREFIX in seen
-            assert "host-verified parent assignment update" in seen
+        assert STEER_OPEN not in seen
+        assert all(seen.count(f"Parent update {i}") == 1 for i in range(3))
+        assert PEER_OPEN_PREFIX in seen
+        assert "host-verified parent assignment update" in seen
         recorder = TurnRecorder("worker", "resumed", None, None, None)
         recorder.turn_id = resumed_child["id"]
         for receipt in receipts:
@@ -386,8 +399,8 @@ async def test_resumed_child_ending_after_admission_keeps_unreceipted_messages_d
         frames.append(frame)
         await write(frame)
 
-    async def end_without_boundary(admit):
-        async for event in loop.bus.subscribe(sdk):
+    async def end_without_boundary(admit, since_seq):
+        async for event in loop.bus.subscribe(sdk, since_seq=since_seq):
             if isinstance(event, PermissionRequest):
                 try:
                     if admit:
@@ -399,7 +412,7 @@ async def test_resumed_child_ending_after_admission_keeps_unreceipted_messages_d
                 return
 
     loop._write_frame = capture
-    watcher = asyncio.create_task(end_without_boundary(True))
+    watcher = asyncio.create_task(end_without_boundary(True, loop.bus.last_seq(sdk)))
     try:
         await loop.submit(UserTurn(content=resumed_child["prompt"]))
         await asyncio.wait_for(loop.wait_turn(), 15)
@@ -413,7 +426,7 @@ async def test_resumed_child_ending_after_admission_keeps_unreceipted_messages_d
         for row in rows:
             assert loop._turn_task.done()
             assert turns.start_turn(row["id"])
-            watcher = asyncio.create_task(end_without_boundary(False))
+            watcher = asyncio.create_task(end_without_boundary(False, loop.bus.last_seq(sdk)))
             await loop.submit(UserTurn(content=row["prompt"]))
             await asyncio.wait_for(loop.wait_turn(), 15)
             await asyncio.wait_for(watcher, 5)

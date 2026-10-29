@@ -1224,10 +1224,10 @@ def _dedupe_frames_by_task_id(
 # Held peer messages — a parked parent is not woken for an interim message
 # ---------------------------------------------------------------------------
 #
-# A worker's progress note to a parent that is parked on that same worker does
-# not start a turn for the parent to read it: the message is held instead. The durable copy is ONE
-# ``pending_wakeups`` row per session (``source=HELD_PEER_SOURCE``) whose prompt
-# is every held message so far and whose ``fire_at`` is the promotion deadline.
+# Legacy held messages from releases that deferred parked-recipient traffic.
+# New peer messages wake immediately. Keep recovery of ONE ``pending_wakeups``
+# row per session (``source=HELD_PEER_SOURCE``) whose prompt contains all held
+# messages and whose ``fire_at`` is their original promotion deadline.
 #
 # Held messages ride the parent's NEXT turn, however that turn starts:
 #
@@ -1583,10 +1583,9 @@ async def on_agent_message(
     session_id: str, sender: str, text: str, *, reply_to: str | None = None,
     urgent: bool = False, extra_payload: Dict[str, Any] | None = None,
 ) -> str | None:
-    """Queue a peer message for ``session_id``, or hold it while it is parked.
+    """Queue a peer message for ``session_id``, waking it even while parked.
 
-    Returns the queued turn's id, :data:`HELD` when the message was held for
-    the receiver's next wake, or None when the receiver was stopped.
+    Returns the queued turn's id, or None when the receiver was stopped.
     ``extra_payload`` rides a worker continuation's turn (``reply_to`` set):
     a usage-limit resume marks its continuation with it (#1831).
     """
@@ -1620,11 +1619,10 @@ async def _on_agent_message_locked(
     completion frames and must not overwrite a peer's progress message. The
     shared context-wake path preserves attribution, bindings, and Stop's latch.
 
-    A receiver parked on background work is not woken for an ordinary
-    message: it is held (:func:`_hold_peer_message`) and delivered with the
-    next unpark wake, or promoted to a wake of its own after
-    :data:`HELD_PEER_PROMOTION_SECONDS`. ``urgent`` wakes it now and carries
-    any messages already held.
+    A peer message wakes a receiver parked on background work immediately,
+    just like an idle receiver. Held messages from an older release still
+    ride its next turn or drain through their existing promotion deadline.
+    ``urgent`` remains accepted for compatibility; it is not needed to wake.
     """
     from fluid.context.peer import format_peer_message
     from fluid.tools.hardening import defang_harness_markers
@@ -1651,13 +1649,9 @@ async def _on_agent_message_locked(
     if not reply_to:
         if task_registry.is_user_stopped(session_id):
             return None
-        if not urgent:
-            held = await _hold_peer_message(session_id, prompt)
-            if held is not _NOT_PARKED:
-                return held
-        else:
-            # An urgent message is the explicit promotion: whatever was
-            # already held rides this wake, ahead of it.
+        if urgent:
+            # Compatibility with messages held before immediate peer wakes:
+            # carry those legacy rows whole, ahead of the newest message.
             async with _terminal_delivery_lock(session_id):
                 earlier = await _take_held_peer_messages(session_id)
             if earlier:
