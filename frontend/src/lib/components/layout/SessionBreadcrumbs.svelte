@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { ChevronRight } from 'lucide-svelte';
-	import { api } from '$lib/api/client';
+	import { api, type ApiError } from '$lib/api/client';
 	import type { Session } from '$lib/api/sessions';
 	import { openSessionLink, sessionHref } from '$lib/services/session-navigation';
 	import { sessions } from '$lib/stores/app-data.svelte';
@@ -35,10 +35,12 @@
 					return meta as Identity;
 				}
 			} catch (error) {
-				// Only an unsupported route warrants an expensive compatibility read;
-				// access failures and transient server errors keep the current title.
-				const status = (error as { status?: number } | null)?.status;
-				if (status !== 404 && status !== 405 && status !== 501) throw error;
+				// FastAPI's missing-route 404 is 'Not Found'. A domain 404 such as
+				// 'Session not found: <id>' means /live exists: do not retry the
+				// transcript for a deleted/inaccessible parent (or an unknown 404).
+				const failure = error as Partial<ApiError> | null;
+				const routeMissing = failure?.status === 404 && failure.detail === 'Not Found';
+				if (!routeMissing && failure?.status !== 405 && failure?.status !== 501) throw error;
 			}
 		}
 		// Older workers do not include all identity fields. Do not revive a

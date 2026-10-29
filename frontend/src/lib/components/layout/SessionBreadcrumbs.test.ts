@@ -125,9 +125,13 @@ it('does not offer a self-referential parent link', () => {
 	expect(api.getShared).not.toHaveBeenCalled();
 });
 
-it('keeps inaccessible parents inert and keeps the current title usable', async () => {
+it.each([
+	{ status: 403, detail: 'Not accessible' },
+	{ status: 404, detail: 'Session not found: deleted' },
+	{ status: 404, detail: 'Session not found' }
+])('keeps missing or inaccessible modern parents inert without a transcript retry ($detail)', async error => {
 	vi.mocked(api.getShared).mockResolvedValueOnce(live('child', { hidden: true, parent_session_id: 'deleted' }))
-		.mockRejectedValueOnce({ status: 403, detail: 'Not accessible' });
+		.mockRejectedValueOnce(error);
 	render(SessionBreadcrumbs, { title: 'Worker', sessionId: 'child' });
 	await waitFor(() => expect(api.getShared).toHaveBeenCalledTimes(2));
 	expect(api.get).not.toHaveBeenCalled();
@@ -163,8 +167,12 @@ it.each(['id', 'title', 'hidden', 'parent_session_id'] as const)('falls back for
 	expect(api.get).toHaveBeenCalledExactlyOnceWith('/sessions/child?message_limit=1');
 });
 
-it.each([404, 405, 501])('falls back when an older worker does not support the light route (%s)', async status => {
-	vi.mocked(api.getShared).mockRejectedValueOnce({ status });
+it.each([
+	{ status: 404, detail: 'Not Found' },
+	{ status: 405, detail: 'Method Not Allowed' },
+	{ status: 501, detail: 'Not Implemented' }
+])('falls back when an older worker does not support the light route ($status)', async error => {
+	vi.mocked(api.getShared).mockRejectedValueOnce(error);
 	vi.mocked(api.get).mockResolvedValueOnce(row('child', { hidden: true, parent_session_id: 'parent' }));
 	(sessions as unknown as ReturnType<typeof writable<Session[]>>).set([row('parent')]);
 	render(SessionBreadcrumbs, { sessionId: 'child', title: 'Hidden worker' });
@@ -172,7 +180,7 @@ it.each([404, 405, 501])('falls back when an older worker does not support the l
 	expect(api.get).toHaveBeenCalledExactlyOnceWith('/sessions/child?message_limit=1');
 });
 
-it.each([401, 403, 500])('keeps the title usable without a full-history retry on an access/server failure (%s)', async status => {
+it.each([400, 401, 403, 404, 429, 500])('keeps the title usable without a full-history retry on an access/server or unknown 404 failure (%s)', async status => {
 	vi.mocked(api.getShared).mockRejectedValueOnce({ status });
 	render(SessionBreadcrumbs, { sessionId: 'child', title: 'Hidden worker' });
 	await waitFor(() => expect(api.getShared).toHaveBeenCalledTimes(1));
