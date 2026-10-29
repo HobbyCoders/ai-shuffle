@@ -308,6 +308,128 @@ describe.skipIf(!browserPath)("flight recorder in a real browser", () => {
       expect(JSON.stringify(rec.anomalies)).not.toContain("/slow");
     });
 
+    it("reports each request of a reused XMLHttpRequest once, under its own URL", async () => {
+      await start();
+      const statuses = await page.evaluate(async () => {
+        const xhr = new XMLHttpRequest();
+        const send = (method: string, url: string) => new Promise<number>((resolve) => {
+          xhr.onloadend = () => resolve(xhr.status);
+          xhr.open(method, url);
+          xhr.send();
+        });
+        const out = [await send("GET", "/boom"), await send("POST", "/missing"), await send("GET", "/ok"), await send("GET", "http://127.0.0.1:1/down")];
+        // A refused open() throws as it would without the recorder and leaves the earlier request in place.
+        xhr.open("GET", "/boom");
+        let refused = "";
+        try { xhr.open("CONNECT", "/x"); } catch (error) { refused = (error as Error).name; }
+        out.push(await new Promise<number>((resolve) => { xhr.onloadend = () => resolve(xhr.status); xhr.send(); }));
+        // A retry from the page's own handler: the first failure still reports under its URL.
+        const retry = new XMLHttpRequest();
+        out.push(await new Promise<number>((resolve) => {
+          let first = true;
+          retry.onload = () => {
+            if (first) { first = false; retry.open("GET", "/missing?retry=1"); retry.send(); } else resolve(retry.status);
+          };
+          retry.open("GET", "/boom?first=1");
+          retry.send();
+        }));
+        return { out, refused };
+      });
+      expect(statuses).toEqual({ out: [500, 404, 200, 0, 500, 404], refused: "SecurityError" });
+      const rec = await stop();
+      const requests = rec.timeline.filter((e) => e.kind === "request").map((e) => `${e.method} ${e.url} ${e.status ?? e.error}`);
+      expect(requests).toEqual([
+        "GET /boom 500",
+        "POST /missing 404",
+        "GET http://127.0.0.1:1/down network error",
+        "GET /boom 500",
+        "GET /boom?… 500",
+        "GET /missing?… 404",
+      ]);
+      expect(rec.stats.failedRequests).toBe(6);
+    });
+
+    it("keeps its wrappers transparent: same results, errors and this, no page getters run", async () => {
+      await page.evaluate(() => {
+        const w = window as any;
+        w.calls = [];
+        w.getterRuns = 0;
+        // The page's own console.error, so ours wraps it and we can see what reaches it.
+        console.error = function (this: unknown, ...args: unknown[]) { w.calls.push({ self: this === w.marker, n: args.length }); return "page-value"; };
+        w.marker = {};
+      });
+      const shape = () => page.evaluate(async () => {
+        const w = window as any;
+        let illegal = "";
+        try { await (({ fetch: window.fetch }) as any).fetch("/ok"); } catch (error) { illegal = `${(error as Error).name}: ${(error as Error).message}`; }
+        const tricky = {
+          get secret() { w.getterRuns += 1; return 1; },
+          toJSON() { w.getterRuns += 1; return {}; },
+          nested: { deeper: { deepest: { gone: true } } },
+          list: Array.from({ length: 50 }, (_, i) => i),
+        };
+        // Whatever console.error is now (ours while recording), called on another object.
+        w.marker.error = console.error;
+        const returned = w.marker.error("with this", tricky);
+        const self = w.calls.at(-1)?.self;
+        // A Proxy whose trap logs the same object: bounded, not a recursion.
+        const trap: object = new Proxy({}, { ownKeys() { console.error(trap); return []; } });
+        w.calls.length = 0;
+        console.error(trap);
+        return {
+          returned, self, illegal, fetchLength: window.fetch.length, consoleName: console.error.name,
+          openName: XMLHttpRequest.prototype.open.name, viaTrap: w.calls.length,
+          plain: (await fetch.call(undefined, "/ok")).status,
+        };
+      });
+      const before = await shape();
+      await start();
+      const during = await shape();
+      const rec = await stop();
+      expect(during).toEqual({ ...before, consoleName: "error", openName: "open", viaTrap: 2 });
+      expect(before.viaTrap).toBe(1);
+      expect(during.returned).toBe("page-value");
+      expect(during.self).toBe(true);
+      expect(during.illegal).toMatch(/^TypeError: /);
+      expect(await page.evaluate(() => (window as any).getterRuns)).toBe(0);
+      const logged = rec.timeline.find((e) => e.kind === "error" && String(e.message).startsWith("with this"));
+      expect(logged?.message).toBe('with this {"secret":[getter],"toJSON":[function],"nested":{"deeper":{"deepest":{…}}},"list":[0,1,2,3,4,5,6,7,…]}');
+    });
+
+    it("removes its page-load handoff on stop, clears stale ones on start and caps its size", async () => {
+      const keys = () => page.evaluate(() => Object.keys(sessionStorage).sort());
+      await page.evaluate(() => {
+        sessionStorage.clear();
+        sessionStorage.setItem("app-key", "kept");
+        sessionStorage.setItem("__flightRecorder:fr-old", "{\"stale\":true}");
+      });
+      const started = await start();
+      expect(await keys()).toEqual(["app-key"]);
+      // The handoff a full page load writes, here without leaving the page.
+      await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: false })));
+      expect(await keys()).toEqual([`__flightRecorder:${started.id}`, "app-key"]);
+      await stop();
+      expect(await keys()).toEqual(["app-key"]);
+
+      const big = await start({ maxEntries: 50000 });
+      await page.evaluate(() => { for (let i = 0; i < 20000; i += 1) (window as any).__flightRecorder.mark(`step ${i} `.padEnd(190, "x")); });
+      await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: false })));
+      const saved = await page.evaluate((key) => {
+        const text = sessionStorage.getItem(key) ?? "";
+        const parsed = JSON.parse(text);
+        return { length: text.length, first: parsed.timeline[0], last: parsed.timeline.at(-1).label, truncated: parsed.stats.truncated, dropped: parsed.stats.dropped };
+      }, `__flightRecorder:${big.id}`);
+      expect(saved.length).toBeLessThanOrEqual(1_000_000);
+      expect(saved.first.message).toMatch(/^\d+ earlier entries dropped to fit the page-load handoff$/);
+      expect(saved.last).toMatch(/^step 19999 /);
+      expect(saved.truncated).toBe(true);
+      expect(saved.dropped).toBeGreaterThan(10000);
+      // The live recording is untouched by the trim.
+      const rec = await stop();
+      expect(rec.timeline.filter((e) => e.kind === "mark")).toHaveLength(20000);
+      expect(await keys()).toEqual(["app-key"]);
+    });
+
     it("puts the page's own functions back on stop, and leaves a later wrapper alone", async () => {
       const before = await page.evaluate(() => [window.fetch, console.error, XMLHttpRequest.prototype.open].map(String));
       await start();
@@ -455,6 +577,28 @@ describe.skipIf(!browserPath)("flight recorder in a real browser", () => {
       const body = bodyOf(await run(session, "browser_record", { action: "stop" }));
       expect(body.ok).toBe(true);
       expect(body.note).toContain("max_duration_ms (1000) ran out");
+    });
+
+    it("marks only steps on the recorded tab and reports the others as tab_changed", async () => {
+      const recorded = bodyOf(await run(session, "browser_tabs", { op: "list" })).current;
+      expect(bodyOf(await run(session, "browser_record", { action: "start" })).ok).toBe(true);
+      const other = bodyOf(await run(session, "browser_tabs", { op: "create" })).tab_id;
+      expect(other).not.toBe(recorded);
+      await run(session, "browser_navigate", { url: `${base}/next?token=s3cret` });
+      await run(session, "browser_eval", { code: "1" });
+      const marked = bodyOf(await run(session, "browser_record", { action: "mark", label: "by hand" }));
+      expect(marked).toMatchObject({ ok: true, note: expect.stringContaining(`recorded tab ${recorded}`) });
+      await run(session, "browser_tabs", { op: "select", tab_id: recorded });
+      await run(session, "browser_eval", { code: "2" });
+      const stopped = await run(session, "browser_record", { action: "stop" });
+      const body = bodyOf(stopped);
+      const changed = body.anomalies.filter((a: { kind: string }) => a.kind === "tab_changed");
+      expect(changed).toHaveLength(1);
+      expect(changed[0].message).toMatch(new RegExp(`^2 steps ran in another tab, so this recording of tab ${recorded} does not cover them: navigate http://127\\.0\\.0\\.1:\\d+/next\\?…; eval\\.`));
+      expect(body.anomaly_count).toBe(1);
+      const marks = textOf(stopped, 1).split("\n").filter((line) => line.includes("> mark"));
+      expect(marks.map((line) => line.replace(/^.*> mark /, ""))).toEqual(['"by hand"', '"eval"']);
+      expect(JSON.stringify(stopped)).not.toContain("s3cret");
     });
 
     it("explains misuse instead of failing silently", async () => {

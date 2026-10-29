@@ -4,7 +4,7 @@
 //   node browser-mcp/scripts/sync-recorder.mjs          rewrite the embedded copy
 //   node browser-mcp/scripts/sync-recorder.mjs --check  exit 1 if it is stale
 //
-// test/recorder-sync.test.ts runs the same check, so a stale copy fails CI.
+// test/recorder-driver.test.ts runs the same check, so a stale copy fails CI.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 

@@ -5,7 +5,10 @@
  *
  * They only describe what the view is showing; nothing in the app reads them,
  * so adding or changing one never changes behaviour. Values must stay short,
- * stable and free of user data: no titles, message text, paths or full ids.
+ * stable and free of user data: no titles, message text or paths, and no
+ * full ids except one: `data-ui-row` (below) carries the full message id,
+ * because duplicate-row detection needs the exact id (a hash could collide),
+ * and message ids are opaque: they carry no user data.
  *
  * State carrier: ChatView's root, `data-ui-state="chat"`. The recorder records
  * every data-ui-* attribute on a carrier each animation frame:

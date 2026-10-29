@@ -49,11 +49,13 @@ export interface BatchItemResult {
 const OBSERVE_TOOLS: ReadonlySet<string> = new Set([
   "browser_status", "browser_snapshot", "browser_screenshot", "browser_find",
   "browser_read_text", "browser_console", "browser_network", "browser_wait",
-  "browser_record",
 ]);
 
 function isObservation(action: ParsedAction): boolean {
   if (OBSERVE_TOOLS.has(action.tool)) return true;
+  // browser_record start injects the recorder and throttles the tab, and mark
+  // changes the recording; only stop just reads what was recorded.
+  if (action.tool === "browser_record") return action.input.action === "stop";
   return action.tool === "browser_tabs" && action.input.op === "list";
 }
 

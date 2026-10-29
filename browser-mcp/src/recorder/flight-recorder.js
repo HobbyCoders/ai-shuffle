@@ -1008,17 +1008,47 @@
 
   // ---- errors --------------------------------------------------------------
 
+  // Own data property, read without running a getter.
+  function ownData(value, key) {
+    var desc = Object.getOwnPropertyDescriptor(value, key);
+    return desc && 'value' in desc ? { value: desc.value } : null;
+  }
+  // A page object as short JSON-like text: own data properties only (never a
+  // getter or toJSON, so no page code runs), at most 8 entries and 3 levels,
+  // so console.error(bigStore) stays as cheap as it is without the recorder.
+  function briefValue(value, depth) {
+    if (typeof value === 'string') return JSON.stringify(clip(value, 80));
+    if (typeof value === 'function') return '[function]';
+    if (value === null || typeof value !== 'object') return String(value);
+    var list = Array.isArray(value);
+    if (depth > 2) return list ? '[…]' : '{…}';
+    var keys = list ? null : Object.keys(value);
+    var length = list ? ownData(value, 'length') : null;
+    var count = list ? (length && typeof length.value === 'number' ? length.value : 0) : keys.length;
+    var parts = [];
+    for (var i = 0; i < count && i < 8; i += 1) {
+      var key = list ? String(i) : keys[i];
+      var item = ownData(value, key);
+      var shown = item ? briefValue(item.value, depth + 1) : list ? 'undefined' : '[getter]';
+      parts.push(list ? shown : JSON.stringify(key) + ':' + shown);
+    }
+    if (count > 8) parts.push('…');
+    return list ? '[' + parts.join(',') + ']' : '{' + parts.join(',') + '}';
+  }
   function describeValue(value) {
     try {
       if (value instanceof Error) return value.name + ': ' + value.message;
       if (typeof value === 'string') return value;
       if (value && typeof value === 'object') {
-        if (typeof value.message === 'string') return (value.name ? value.name + ': ' : '') + value.message;
-        return JSON.stringify(value);
+        var message = ownData(value, 'message');
+        if (message && typeof message.value === 'string') {
+          var name = ownData(value, 'name');
+          return (name && typeof name.value === 'string' && name.value ? name.value + ': ' : '') + message.value;
+        }
       }
-      return String(value);
+      return briefValue(value, 0);
     } catch (error) {
-      return Object.prototype.toString.call(value);
+      return '[unreadable ' + typeof value + ']';
     }
   }
   function recordError(source, message) {
@@ -1066,13 +1096,18 @@
     try {
       if (root.console && typeof root.console.error === 'function') {
         var originalError = root.console.error;
-        var wrappedError = function () {
-          if (h.active && S && S.opts.console) {
+        var describing = false;
+        var wrappedError = function error() {
+          // describing: a Proxy trap that logs while we read its object must
+          // not recurse through us.
+          if (h.active && S && S.opts.console && !describing) {
+            describing = true;
             try {
               var parts = [];
               for (var i = 0; i < arguments.length && i < 6; i += 1) parts.push(describeValue(arguments[i]));
               recordError('console', parts.join(' '));
-            } catch (error) { note(error); }
+            } catch (failure) { note(failure); }
+            describing = false;
           }
           return originalError.apply(this, arguments);
         };
@@ -1083,12 +1118,17 @@
     } catch (error) { note(error); }
     // fetch: hand back a promise that settles exactly like the original
     // (same value or same rejection) so unhandled rejections stay unhandled.
+    // The one difference while recording: the page's handlers run one
+    // microtask later, because observing a rejection without handling it
+    // takes a chained promise. Not recording, the original promise is returned.
     try {
       if (typeof root.fetch === 'function') {
         var originalFetch = root.fetch;
-        var wrappedFetch = function fetch(input, init) {
+        // One declared parameter, like the native fetch (fetch.length === 1).
+        var wrappedFetch = function fetch(input) {
           var pending = originalFetch.apply(this, arguments);
           if (!h.active || !S || !S.opts.network || !pending || typeof pending.then !== 'function') return pending;
+          var init = arguments[1];
           var method = 'GET';
           var url = '';
           try {
@@ -1111,38 +1151,66 @@
         h.restoreFetch = function () { root.fetch = originalFetch; };
       }
     } catch (error) { note(error); }
-    // XMLHttpRequest
+    // XMLHttpRequest. One state object per XHR for its whole life, and one set
+    // of listeners, added on its first send while recording. open() replaces
+    // the request the state describes. When a request finishes, readystatechange
+    // to DONE comes first; that listener snapshots the current request and its
+    // status, so abort/timeout/loadend describe the request that just ended
+    // even if a page handler already reopened the XHR (a retry). A reused XHR
+    // therefore reports each failure once, under its own URL.
     try {
       var proto = root.XMLHttpRequest && root.XMLHttpRequest.prototype;
       if (proto && h.xhr) {
         var originalOpen = proto.open;
         var originalSend = proto.send;
-        var wrappedOpen = function (method, url) {
-          try { h.xhr.set(this, { method: String(method || 'GET'), url: cleanUrl(url) }); } catch (error) { note(error); }
-          return originalOpen.apply(this, arguments);
-        };
-        var wrappedSend = function () {
+        var wrappedOpen = function open(method, url) {
+          var state = null;
+          var previous = null;
           try {
-            var info = h.xhr.get(this);
-            if (info && !info.hooked && h.active && S && S.opts.network) {
-              info.hooked = true;
-              var xhr = this;
-              xhr.addEventListener('abort', function () { info.aborted = true; });
-              xhr.addEventListener('timeout', function () { info.timeout = true; });
-              xhr.addEventListener('error', function () { info.failed = true; });
-              xhr.addEventListener('loadend', function () {
-                try {
-                  if (!h.active) return;
-                  if (xhr.status >= 400) recordRequest(info.method, info.url, { status: xhr.status });
-                  else if (xhr.status === 0) {
-                    recordRequest(info.method, info.url, {
-                      error: info.aborted ? 'aborted' : info.timeout ? 'timeout' : 'network error',
-                      aborted: Boolean(info.aborted),
-                    });
-                  }
-                } catch (error) { note(error); }
-              });
-            }
+            state = h.xhr.get(this);
+            if (!state) { state = { request: null, ending: null, hooked: false }; h.xhr.set(this, state); }
+            previous = state.request;
+            state.request = { method: String(method || 'GET'), url: cleanUrl(url) };
+          } catch (error) { note(error); state = null; }
+          try {
+            return originalOpen.apply(this, arguments);
+          } catch (error) {
+            // A refused open() leaves the earlier request in place.
+            if (state) state.request = previous;
+            throw error;
+          }
+        };
+        var hookXhr = function (xhr, state) {
+          state.hooked = true;
+          xhr.addEventListener('readystatechange', function () {
+            try {
+              // DONE (4): the current request is the one ending. A reopened XHR is at 1.
+              if (xhr.readyState === 4 && state.request) {
+                state.ending = { method: state.request.method, url: state.request.url, status: xhr.status, aborted: false, timeout: false };
+              }
+            } catch (error) { note(error); }
+          });
+          xhr.addEventListener('abort', function () { if (state.ending) state.ending.aborted = true; });
+          xhr.addEventListener('timeout', function () { if (state.ending) state.ending.timeout = true; });
+          xhr.addEventListener('loadend', function () {
+            var info = state.ending;
+            state.ending = null;
+            try {
+              if (!h.active || !S || !S.opts.network || !info) return;
+              if (info.status >= 400) recordRequest(info.method, info.url, { status: info.status });
+              else if (info.status === 0) {
+                recordRequest(info.method, info.url, {
+                  error: info.aborted ? 'aborted' : info.timeout ? 'timeout' : 'network error',
+                  aborted: info.aborted,
+                });
+              }
+            } catch (error) { note(error); }
+          });
+        };
+        var wrappedSend = function send() {
+          try {
+            var state = h.xhr.get(this);
+            if (state && !state.hooked && h.active && S && S.opts.network) hookXhr(this, state);
           } catch (error) { note(error); }
           return originalSend.apply(this, arguments);
         };
@@ -1187,11 +1255,48 @@
     } catch (error) { note(error); }
   }
   function storageKey() { return KEY_PREFIX + S.id; }
+  // The handoff shares the host app's sessionStorage quota, and is written in
+  // pagehide, possibly before the app's own pagehide writes. Keep it small.
+  var HANDOFF_MAX_CHARS = 1000000;
+  function handoffText() {
+    var text = JSON.stringify(serialize());
+    if (text.length <= HANDOFF_MAX_CHARS) return text;
+    // Too long: keep the newest entries that fit and say how many went.
+    var saved = serialize();
+    var kept = saved.timeline;
+    while (kept.length > 1 && text.length > HANDOFF_MAX_CHARS) {
+      // Proportional cut with 10% headroom: one pass, rarely two.
+      kept = kept.slice(kept.length - Math.max(1, Math.floor(kept.length * 0.9 * HANDOFF_MAX_CHARS / text.length)));
+      saved.timeline = [{ t: kept[0].t, kind: 'note', message: (S.timeline.length - kept.length) + ' earlier entries dropped to fit the page-load handoff' }].concat(kept);
+      saved.stats = JSON.parse(JSON.stringify(S.stats));
+      saved.stats.truncated = true;
+      saved.stats.dropped += S.timeline.length - kept.length;
+      text = JSON.stringify(saved);
+    }
+    return text.length <= HANDOFF_MAX_CHARS ? text : null;
+  }
+  function removeHandoff(id) {
+    try { root.sessionStorage.removeItem(KEY_PREFIX + id); } catch (error) { /* storage blocked */ }
+  }
+  // A handoff nothing resumed (the next load went to another origin and came
+  // back, or the tool side gave up first) is dead weight in the app's storage.
+  function removeStaleHandoffs() {
+    try {
+      var storage = root.sessionStorage;
+      var stale = [];
+      for (var i = 0; i < storage.length; i += 1) {
+        var key = storage.key(i);
+        if (key && key.lastIndexOf(KEY_PREFIX, 0) === 0) stale.push(key);
+      }
+      for (var j = 0; j < stale.length; j += 1) storage.removeItem(stale[j]);
+    } catch (error) { /* storage blocked */ }
+  }
   function onPageHide(event) {
     if (!S || !S.active || !S.opts.persist) return;
     if (event && event.persisted) S.bfcached = true;
     try {
-      root.sessionStorage.setItem(storageKey(), JSON.stringify(serialize()));
+      var text = handoffText();
+      if (text) root.sessionStorage.setItem(storageKey(), text);
     } catch (error) {
       note(error);
     }
@@ -1305,6 +1410,9 @@
     root.removeEventListener('pagehide', onPageHide, true);
     root.removeEventListener('pageshow', onPageShow, true);
     releaseHooks();
+    // Nothing resumes a halted recording, so a handoff it left (one written on
+    // the way into the back/forward cache, say) must not stay in the app's storage.
+    removeHandoff(S.id);
     S.endEpoch = now();
     if (reason !== 'stopped') S.timeline.push({ t: Math.round(S.endEpoch - S.startEpoch), kind: 'note', message: 'recording stopped: ' + reason });
   }
@@ -1366,6 +1474,7 @@
         halt('restarted');
       }
       var opts = normalizeOptions(input);
+      removeStaleHandoffs();
       S = {
         id: typeof input.id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(input.id) ? input.id : newId(),
         startEpoch: now(), opts: opts, timeline: [], stats: freshStats(), last: {}, frame: 0,
