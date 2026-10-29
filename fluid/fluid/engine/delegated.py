@@ -469,7 +469,8 @@ NOTHING_TO_COMPACT = (
 )
 # How Claude Code 2.1.312 reports a compaction a ``session.compact`` hook left
 # as it is: the closing status says ``compact_result: failed`` with
-# ``compact_error: "skipped: <reason>"``. A skip, not a failure.
+# ``compact_error: "skipped: <reason>"``. Only NOTHING_TO_COMPACT is a no-op;
+# the mod also skips when the bridge or history archive fails.
 COMPACT_SKIPPED_PREFIX = "skipped:"
 
 # A typed ``/compact`` (with or without the CLI's custom summary instructions).
@@ -1275,6 +1276,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             self._peer_admission_open = False
             self._drop_pending_peers()
             self._interrupted.set()
+            self._clear_main_compaction()
             pulse, self._stop_pulse = self._stop_pulse, asyncio.Event()
             pulse.set()
             await self._send_interrupt()
@@ -1488,6 +1490,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         test run, ``nohup``) is still in the CLI's process group and outlives
         it. On POSIX that group is ended as soon as the CLI is gone (#436).
         """
+        self._clear_main_compaction()
         proc, self._proc = self._proc, None
         job, self._proc_job = getattr(self, "_proc_job", None), None
         self._stdout_backlog.clear()
@@ -1778,6 +1781,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         ):
             raise ValueError("history recovery tools unavailable")
         received = time.monotonic()
+        turn_id = self._active_turn_id
         meta = await self._ensure_session()
         nodes = await self.store.load_path(meta.session_id)
         started = time.monotonic()
@@ -1850,7 +1854,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             logger.warning("claude mod compaction %s (%s) answered after the mod's %.0fs "
                            "wait; it cannot be applied and gets no checkpoint",
                            compaction_id, trigger, MOD_COMPACT_WAIT_S)
-        else:
+        elif self._active_turn_id == turn_id and not self._interrupted.is_set():
+            # An in-flight bridge request may outlive an interrupt or its turn.
+            # It must not reopen an answer that the turn's cleanup dropped.
             self._open_compaction(_CompactionTxn(
                 compaction_id=compaction_id,
                 handles=_posted_handles(body["messages"]),
@@ -1888,6 +1894,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         txns = self._open_txns
         txns.append(txn)
         del txns[:-MAX_OPEN_COMPACTIONS]
+        self._compaction_context_restored = False
+
+    def _clear_main_compaction(self) -> None:
+        """An ended/interrupted turn or a stopped CLI cannot apply its answers."""
+        self._open_txns.clear()
+        self._main_compacting = False
+        self._main_boundary_due = False
+        self._compaction_context_restored = False
 
     def _bind_compaction(self, frame: dict[str, Any], summary: str) -> str:
         """The transaction id of the compaction this main ``compact_boundary``
@@ -2323,6 +2337,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             self._peer_admission_open = False
             self._drop_pending_peers()
             self._turn_peer_ids.clear()
+            self._clear_main_compaction()
             self._active_turn_id = None
             self._pending_usage_snapshots.clear()
             self._snapshot_call_index.clear()
@@ -4331,9 +4346,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         ``compacting`` and prints only the closing status, then the boundary
         (docs/internal/claude-code-compaction-protocol.md). A compaction that
         ends in anything but success has no boundary coming, so it clears it.
-        A ``compact_error`` of ``skipped: …`` is a compaction the mod left as
-        it is (the CLI reports it as ``failed``), not a failure: it closes
-        without an error, and the turn's own note says why.
+        A ``skipped:`` close is a no-op only for the bridge's fixed
+        ``NOTHING_TO_COMPACT`` reason. Other skips (bridge, archive or recall
+        failures) keep their error, even though the CLI leaves context as it is.
 
         Returns the progress event a turn's reader publishes (session and turn
         ids left for it to fill in): ``active`` when the compaction starts,
@@ -4364,7 +4379,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             self._main_boundary_due = True
         elif result is not None:
             self._main_boundary_due = False
-            if not reported.startswith(COMPACT_SKIPPED_PREFIX):
+            self._compact_noop = (
+                reported.startswith(COMPACT_SKIPPED_PREFIX)
+                and reported[len(COMPACT_SKIPPED_PREFIX):].strip() == NOTHING_TO_COMPACT
+            )
+            if not self._compact_noop:
                 error = reported or "the compaction failed"
                 self._turn_compact_error = error
         if not was_compacting and not error:
@@ -4405,18 +4424,24 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         (docs/internal/claude-code-compaction-protocol.md). The mod only
         compacts the main conversation, and applies an answer at once or not
         at all."""
-        if self._main_compacting:
-            return True
-        now = time.monotonic()
-        return any(now - txn.answered <= MOD_COMPACT_WAIT_S for txn in self._open_txns)
+        return self._main_compacting or self._latest_compaction_answer() is not None
+
+    def _latest_compaction_answer(self) -> _CompactionTxn | None:
+        """Only the latest, still-recent answer can identify the main chat.
+
+        Older answers remain available to bind an explicitly main boundary to
+        its checkpoint, but cannot claim a subagent's hook or bare boundary.
+        """
+        txns = self._open_txns
+        if txns and time.monotonic() - txns[-1].answered <= MOD_COMPACT_WAIT_S:
+            return txns[-1]
+        return None
 
     def _names_open_answer(self, frame: dict[str, Any]) -> bool:
-        """Whether a boundary's ``logical_parent_uuid`` is a row of a Fluid
-        answer that no boundary has applied yet."""
+        """Whether the boundary names the latest, still-recent Fluid answer."""
         parent = frame.get("logical_parent_uuid")
-        return isinstance(parent, str) and bool(parent) and any(
-            txn.names(parent) for txn in self._open_txns
-        )
+        txn = self._latest_compaction_answer()
+        return isinstance(parent, str) and bool(parent) and txn is not None and bool(txn.names(parent))
 
     async def _keep_between_turn_compaction_line(self, text: str) -> bool:
         """:meth:`_keep_between_turn_compaction` for a raw stdout line."""

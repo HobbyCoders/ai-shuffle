@@ -28,7 +28,9 @@ import logging
 from pathlib import Path
 
 import pytest
-from fluid.events import CompactionCheckpoint, ContextCompaction, ToolUse
+from fluid.engine import delegated
+from fluid.events import CompactionCheckpoint, ContextArchived, ContextCompaction, ToolUse
+from fluid.events.model import DelegatedDiagnostic
 from fluid.messages import ToolResultBlock, ToolUseBlock
 from fluid.tools.registry import ToolRegistry
 
@@ -213,6 +215,73 @@ async def test_a_typed_compact_answered_by_fluid_then_one_with_nothing_left(
         assert not [t for t in _replies(again) if "Not compacted" in t]
         follow = await _turn(adapter, "Still there?")
         assert "You said: “Still there?”" in _replies(follow)[-1]
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.parametrize("failure", ["bridge", "archive", "history"])
+async def test_a_failed_manual_compaction_stays_failed_through_the_bridge(
+    monkeypatch, tmp_path, caplog, failure,
+):
+    """Real route failures become skipped closes, not a successful no-op."""
+    caplog.set_level(logging.INFO, logger="fluid.engine.delegated")
+    adapter = await _adapter(monkeypatch, tmp_path)
+    try:
+        await _history(adapter)
+        engine = adapter._engine
+        compact = delegated.compact_messages
+        emit = engine._emit
+        archive_attempts = []
+
+        def failing_compaction(rows, nodes, **kwargs):
+            if failure == "bridge":
+                raise OSError("bridge handler unavailable")
+            # A provider-only attachment must be archived before it can be dropped.
+            rows = [rows[0], {
+                "role": "user", "handle": "provider-attachment", "toolUses": [],
+                "text": "Earlier provider attachment. " * 30_000,
+            }, *rows[1:]]
+            return compact(rows, nodes, **kwargs)
+
+        async def failing_archive(event):
+            if isinstance(event, ContextArchived):
+                archive_attempts.append(event)
+                raise OSError("archive unavailable")
+            return await emit(event)
+
+        if failure == "history":
+            available = engine.registry.available
+            monkeypatch.setattr(engine.registry, "available", lambda name: (
+                False if name == "HistoryExpand" else available(name)
+            ))
+        else:
+            monkeypatch.setattr(delegated, "compact_messages", failing_compaction)
+            if failure == "archive":
+                monkeypatch.setattr(engine, "_emit", failing_archive)
+
+        messages = await _turn(adapter, "/compact")
+        [started, ended] = _system(messages, "compaction_status")
+        assert started["state"] == "started"
+        assert ended["state"] == "failed"
+        status = 500 if failure == "bridge" else 400
+        error = ("skipped: Fluid could not compact the conversation "
+                 f"(bridge HTTP {status}); it is left as it is")
+        assert ended["error"] == error
+        assert engine._turn_compact_error == error
+        assert not engine._compact_noop
+        [card] = _system(messages, "compact_failed")
+        assert card["reason"] == error and not card.get("nothing_to_compact")
+        events = await _events(adapter)
+        [diagnostic] = [e for e in events if isinstance(e, DelegatedDiagnostic)
+                        and e.kind == "compaction_failed"]
+        assert diagnostic.message == diagnostic.data["compact_error"] == error
+        assert _system(messages, "compact_boundary") == []
+        assert not [e for e in events if isinstance(e, ContextCompaction)]
+        if failure == "archive":
+            assert archive_attempts
+            assert "could not archive dropped rows" in caplog.text
+        follow = await _turn(adapter, "Still there after the failure?")
+        assert "You said: “Still there after the failure?”" in _replies(follow)[-1]
     finally:
         await adapter.disconnect()
 
