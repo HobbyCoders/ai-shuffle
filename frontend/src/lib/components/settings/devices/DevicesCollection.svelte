@@ -33,7 +33,7 @@
 	import ThisWorkerDetail from './ThisWorkerDetail.svelte';
 	import DeviceDetail from './DeviceDetail.svelte';
 	import { clientKind, clientPlatform, devicesModel, type DevicesModel } from './devices-model.svelte';
-	import { requestExpired, requestId, requestStatusText } from './device-requests.svelte';
+	import { isPendingRequest, requestId, requestStatusText } from './device-requests.svelte';
 	import { KIND_NAME } from './pairing-codes.svelte';
 	import { accountStatus } from './device-status';
 
@@ -81,25 +81,18 @@
 			},
 			{
 				label: 'Requests',
-				rows: model.requests.devices.map((d) => {
-					const expired = requestExpired(d, model.now);
-					const pending = !d.revoked_at && d.confirmation === 'pending';
-					return {
+				// Only items that still need a decision. Approved phones are listed
+				// under Phones and browsers; revoked, denied and expired ones need
+				// no action here. RequestDetail still opens a decided item by id.
+				rows: model.requests.devices
+					.filter((d) => isPendingRequest(d, model.now))
+					.map((d) => ({
 						id: requestId(d),
 						name: d.device_name || 'Unnamed device',
-						summary: pending && expired ? 'Key expired, pair again' : requestStatusText(d),
-						status: d.revoked_at
-							? 'off'
-							: pending
-								? expired
-									? 'off'
-									: 'warn'
-								: d.confirmation === 'approved'
-									? 'ok'
-									: 'err',
+						summary: requestStatusText(d),
+						status: 'warn' as StatusTone,
 						icon: ShieldQuestion
-					};
-				})
+					}))
 			},
 			{
 				label: 'Pairing codes',

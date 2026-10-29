@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, TypedDict
 
@@ -466,8 +467,8 @@ def get_paired_client(client_id: str) -> Optional[PairedClientRow]:
         return _client(cursor.fetchone())
 
 
-def revoke_paired_client(client_id: str) -> bool:
-    with get_db() as conn:
+def revoke_paired_client(client_id: str, *, _conn=None) -> bool:
+    with (get_db() if _conn is None else nullcontext(_conn)) as conn:
         cursor = conn.cursor()
         cursor.execute(
             """
