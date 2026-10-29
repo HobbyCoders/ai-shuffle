@@ -269,11 +269,23 @@ navigation and never loads it (`ui/WorkerSwitch.kt`):
 - It must equal, after normalisation, the saved origin of a worker this phone
   is already paired with (local pairings and the signed-in account's).
 
-A known worker opens the same way the Workers screen opens it, landing on its
-chat list. An account worker this phone holds no key for opens the Workers
-screen to authorize it. Anything else shows a short message and the app stays
-where it is. The URL never carries credentials, and this path never pairs a
-new worker.
+The Android app automatically opens the most recently used reachable worker
+at startup, falling through the other saved workers in last-used order. Only
+workers this phone already has authorization for are eligible; an account's
+worker listing alone is not authorization. A failed session bootstrap or
+main-frame load automatically tries the next reachable authorized worker and
+shows a short notice after its page loads. Failed origins are backed off for
+one minute, doubling on repeated outages up to five minutes, across activity
+hand-offs. A working connection is never moved just because a preferred worker
+comes back. With no reachable worker, the existing connection error and native
+Workers screen remain available for retrying or adding a worker.
+
+A manual switch opens the selected worker's chat list. A worker this phone
+holds no key for shows a short message pointing to Settings > Devices; the
+app stays where it is. The URL never carries credentials, and this path never
+pairs a new worker. The current worker's chip status uses live request evidence
+when available, otherwise its directory status, never an unconditional online
+state.
 
 The app draws its own bar (back, worker name, menu with Refresh chat and
 Workers) until the page says it draws the worker switcher itself. The page
@@ -282,8 +294,9 @@ says so over the `shuffleShell` web-message bridge, which is scoped like
 
 - `{"type":"worker-bar","shown":true}` when the worker chip mounts in the app
   bar, `false` when it goes. The app hides or restores its bar.
-- `{"type":"workers"}` from the sheet's "Pair, rename or remove workers"
-  button, which opens the app's Workers screen.
+- The sheet's manage-workers action opens the page's Settings > Devices.
+  `{"type":"workers"}` opens the native Workers screen only as a fallback
+  when no page connection is available; that screen also handles first setup.
 - `{"type":"voice-call","active":…}` and `{"type":"voice-call-state",…}`
   from the voice call (`frontend/src/lib/services/voiceCall.ts` and
   `voiceCallNative.ts`): the app follows headset routes and keeps the call
