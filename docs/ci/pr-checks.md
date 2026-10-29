@@ -881,7 +881,9 @@ baselines. A guard test fails when the image tag and playwright-core drift
 apart; bumping playwright-core means updating the tag and refreshing the
 baselines in the same PR.
 
-On failure the job uploads `visual-regression-<sha>` (3 days): `renders/`
+On failure the job uploads `visual-regression-<sha>` (3 days; on a pull
+request `<sha>` is the run's merge commit, not the PR head, so download by
+pattern as below): `renders/`
 (this run's image of every fixture and viewport), `diffs/` (changed pixels in
 red over the dimmed baseline) and `report.txt`. To accept an intended change
 (or a new fixture), copy the renders into the baselines and commit them in
@@ -889,8 +891,8 @@ the same PR; they are test fixtures, not PR evidence, so the no-screenshots
 rule in docs/internal/CONTRIBUTING.md does not apply to them:
 
 ```bash
-gh run download <run-id> -n visual-regression-<sha> -D /tmp/visual
-cp /tmp/visual/renders/*.png frontend/tests/visual-baselines/
+gh run download <run-id> -p 'visual-regression-*' -D /tmp/visual
+cp /tmp/visual/visual-regression-*/renders/*.png frontend/tests/visual-baselines/
 ```
 
 Look at the renders and diffs before committing: accept only what the change
