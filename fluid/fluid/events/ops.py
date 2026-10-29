@@ -110,9 +110,8 @@ class AgentMessage(Op):
     :mod:`fluid.context.peer`). Delivery adapts to what the receiver is doing —
     queued for its next tool result while a turn runs, or appended as a
     peer-wrapped user message if the response ends without another tool call.
-    An idle receiver parked on background work holds a non-urgent message for
-    its next wake, whatever ``wake`` says. Any other idle receiver starts an
-    ordinary user-role turn unless ``wake=False``; hosts that own turn
+    An idle receiver starts an ordinary user-role turn, including when parked
+    on background work, unless ``wake=False``; hosts that own turn
     scheduling can disable that wake, in which case the receiver raises
     RuntimeError without accepting the message. During shutdown
     or the short terminal-publication window, submission raises an explicit
@@ -129,11 +128,8 @@ class AgentMessage(Op):
     provenance: str = "peer"
     id: str | None = None
     wake: bool = True
-    # A receiver that is parked on background tasks (a parent waiting for
-    # its subagents) queues an ordinary message until its next wake instead
-    # of waking for it, since such a wake costs a model call for nothing.
-    # ``urgent`` skips the hold: the receiver wakes, or with wake=False the
-    # submit raises so the host can schedule the wake itself.
+    # Compatibility flag. All peer messages wake idle/parked receivers;
+    # wake=False still leaves scheduling to the host.
     urgent: bool = False
 
 

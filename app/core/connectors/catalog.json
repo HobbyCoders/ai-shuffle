@@ -6,16 +6,16 @@
       "module": "telegram",
       "class": "TelegramConnector",
       "files": {
-        "telegram.py": "e3025617bab8e8a8d3845f04ae029cf9e1d86e160912c618999fed9ee7a7b9b6",
-        "telegram_actions.py": "6a14a672d0ae8a797b4d8874a7fe4fd0dbfbd2928088624a4dccf1758927ae72"
+        "telegram.py": "66e9327f23bdd6676a160791b08d20aa5c8de0a80565fbdaadb5191c59a96f48",
+        "telegram_actions.py": "b1f33a8a249e16fa582c7e00bb3da22770c52a55ab513ded25b9af9b54a89281"
       }
     },
     "discord": {
       "module": "discord_connector",
       "class": "DiscordConnector",
       "files": {
-        "discord_connector.py": "87931fb5e6f1b010e3e3c81c3b264779672e88e98095665f26e501893df07a0c",
-        "discord_actions.py": "8cac0e3d12fd760a6ba9ccce7229e44d8eacdb53c33c3ac00d40401db284f7aa",
+        "discord_connector.py": "6d10e45ab4e9dd1ab980cfd9cda941b016b97810b8454641c00e9032bb97766b",
+        "discord_actions.py": "7d76da94b24d40c09b4ac6277eddf912d9dd0ce19b8b87808df4aaa98984b083",
         "watch_history.py": "043086d62c915463920475b285e0286ee32dd5c21c19de6055c20241e6b81f71"
       }
     },
@@ -38,7 +38,7 @@
       "module": "slack",
       "class": "SlackConnector",
       "files": {
-        "slack.py": "446667b2ad29e61227033edaa705c458ac72bac9a13dd6990bb96d212721a3ee",
+        "slack.py": "ada2535e945a3a8c857e6208d4031ed162be91e5bd3f903fa7329465f75dc46b",
         "slack_actions.py": "a7e2fe70523d2c21125605649ffaf69a1ad8d88f575c0bed5a480cf4911e58fb",
         "watch_history.py": "043086d62c915463920475b285e0286ee32dd5c21c19de6055c20241e6b81f71"
       }
@@ -113,7 +113,7 @@
       "module": "gmail",
       "class": "GmailConnector",
       "files": {
-        "gmail.py": "18778e0fad90a1e42fc9bb7236bff9a1edbcac69328e56e3a02cb39cf2d21b2d",
+        "gmail.py": "bce2ed7517325ca72c485ff8e82b519b7ed7bcecd449944a88c0027bf738bb81",
         "gmail_actions.py": "5d822d18f57077ec12f1e3ac9db0fbd887c3e6be0c488d463b092812373195b2",
         "gmail_history.py": "75c7e35dedc2b0324aeb767963a3a5c259c64102c2bcc53281f19d8e01a9132e"
       }
@@ -145,5 +145,5 @@
     ]
   },
   "sdk": 1,
-  "release": "3bb057b38c3aa994"
+  "release": "eecdd1c98e127c9f"
 }

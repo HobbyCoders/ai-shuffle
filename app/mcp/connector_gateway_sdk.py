@@ -377,11 +377,11 @@ def get_gateway_tool_names() -> List[str]:
     """
     names: List[str] = []
     try:
-        from app.core.connectors.registry import get_available_types, get_connector_class
+        from app.core.connectors.registry import get_available_types, get_bundled_connector_class
 
         for ctype in get_available_types():
             try:
-                cls = get_connector_class(ctype)
+                cls = get_bundled_connector_class(ctype)
             except ValueError:
                 continue
             if getattr(cls, "SUPPORTS_ACTION_GATEWAY", False) and cls.ACTIONS:
