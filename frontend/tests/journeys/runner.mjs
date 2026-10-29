@@ -48,7 +48,11 @@ export const THROTTLES = {
 export function devloopStatusPath() {
 	if (process.env.DEVLOOP_STATUS) return process.env.DEVLOOP_STATUS;
 	const digest = createHash('sha256').update(CHECKOUT).digest('hex').slice(0, 12);
-	return join(tmpdir(), 'ai-shuffle-devloop', `${digest}.json`);
+	// status_directory(): $XDG_RUNTIME_DIR when set, else a per-uid temp dir.
+	const directory = process.env.XDG_RUNTIME_DIR
+		? join(process.env.XDG_RUNTIME_DIR, 'ai-shuffle-devloop')
+		: join(tmpdir(), `ai-shuffle-devloop-${process.getuid()}`);
+	return join(directory, `${digest}.json`);
 }
 
 export function readDevloopStatus() {
