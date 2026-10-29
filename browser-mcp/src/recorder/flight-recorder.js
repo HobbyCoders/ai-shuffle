@@ -465,7 +465,11 @@
     }];
   }
 
-  /** recording_gap: part of the recording was lost (a full navigation without a handoff, or caps). */
+  /**
+   * recording_gap: part of the recording was lost (a full navigation without a
+   * handoff, the earliest entries trimmed to fit a page-load handoff, or the
+   * size cap dropping later entries).
+   */
   function detectRecordingGaps(recording) {
     const timeline = entriesOf(recording);
     const anomalies = [];
@@ -480,6 +484,15 @@
       }
     });
     const stats = recording && recording.stats;
+    if (stats && stats.handoffDropped > 0) {
+      const before = stats.handoffDroppedBeforeMs || 0;
+      anomalies.push({
+        kind: 'recording_gap',
+        indices: [],
+        t: [0, before],
+        message: `${stats.handoffDropped} earliest entries (before ${ms(before)}) were dropped to fit the page-load handoff`,
+      });
+    }
     if (stats && stats.truncated) {
       anomalies.push({
         kind: 'recording_gap',
@@ -1158,11 +1171,39 @@
     // status, so abort/timeout/loadend describe the request that just ended
     // even if a page handler already reopened the XHR (a retry). A reused XHR
     // therefore reports each failure once, under its own URL.
+    //
+    // A page handler that ran before that listener (an onreadystatechange set
+    // before the first send) can reopen the XHR inside the DONE dispatch, so
+    // our listener then sees readyState 1. open() takes the snapshot instead:
+    // the XHR is still DONE there. Chromium fires no load/loadend for an HTTP
+    // response reopened that way, so that ending is reported at once; an
+    // error, abort or timeout still gets its events, which report it.
     try {
       var proto = root.XMLHttpRequest && root.XMLHttpRequest.prototype;
       if (proto && h.xhr) {
         var originalOpen = proto.open;
         var originalSend = proto.send;
+        var settle = function (info) {
+          if (!info || info.settled) return;
+          info.settled = true;
+          if (!h.active || !S || !S.opts.network) return;
+          if (info.status >= 400) recordRequest(info.method, info.url, { status: info.status });
+          else if (info.status === 0) {
+            recordRequest(info.method, info.url, {
+              error: info.aborted ? 'aborted' : info.timeout ? 'timeout' : 'network error',
+              aborted: info.aborted,
+            });
+          }
+        };
+        // Once per request, while the XHR is DONE with it.
+        var snapshot = function (xhr, state) {
+          var request = state.request;
+          if (!request || request.ended || xhr.readyState !== 4) return;
+          request.ended = true;
+          // An earlier ending whose loadend never came is not overwritten unseen.
+          settle(state.ending);
+          state.ending = { method: request.method, url: request.url, status: xhr.status, aborted: false, timeout: false };
+        };
         var wrappedOpen = function open(method, url) {
           var state = null;
           var previous = null;
@@ -1170,6 +1211,10 @@
             state = h.xhr.get(this);
             if (!state) { state = { request: null, ending: null, hooked: false }; h.xhr.set(this, state); }
             previous = state.request;
+            if (state.hooked) {
+              snapshot(this, state);
+              if (state.ending && state.ending.status > 0) { settle(state.ending); state.ending = null; }
+            }
             state.request = { method: String(method || 'GET'), url: cleanUrl(url) };
           } catch (error) { note(error); state = null; }
           try {
@@ -1183,27 +1228,18 @@
         var hookXhr = function (xhr, state) {
           state.hooked = true;
           xhr.addEventListener('readystatechange', function () {
-            try {
-              // DONE (4): the current request is the one ending. A reopened XHR is at 1.
-              if (xhr.readyState === 4 && state.request) {
-                state.ending = { method: state.request.method, url: state.request.url, status: xhr.status, aborted: false, timeout: false };
-              }
-            } catch (error) { note(error); }
+            // DONE (4): the current request is the one ending. A reopened XHR is at 1.
+            try { snapshot(xhr, state); } catch (error) { note(error); }
           });
           xhr.addEventListener('abort', function () { if (state.ending) state.ending.aborted = true; });
           xhr.addEventListener('timeout', function () { if (state.ending) state.ending.timeout = true; });
           xhr.addEventListener('loadend', function () {
-            var info = state.ending;
-            state.ending = null;
             try {
-              if (!h.active || !S || !S.opts.network || !info) return;
-              if (info.status >= 400) recordRequest(info.method, info.url, { status: info.status });
-              else if (info.status === 0) {
-                recordRequest(info.method, info.url, {
-                  error: info.aborted ? 'aborted' : info.timeout ? 'timeout' : 'network error',
-                  aborted: info.aborted,
-                });
-              }
+              // A page that stopped readystatechange's propagation hid DONE from us.
+              snapshot(xhr, state);
+              var info = state.ending;
+              state.ending = null;
+              settle(info);
             } catch (error) { note(error); }
           });
         };
@@ -1261,7 +1297,9 @@
   function handoffText() {
     var text = JSON.stringify(serialize());
     if (text.length <= HANDOFF_MAX_CHARS) return text;
-    // Too long: keep the newest entries that fit and say how many went.
+    // Too long: keep the newest entries that fit and say how many went. These
+    // are the EARLIEST entries, so not the size cap's truncated/dropped (which
+    // count later entries never kept).
     var saved = serialize();
     var kept = saved.timeline;
     while (kept.length > 1 && text.length > HANDOFF_MAX_CHARS) {
@@ -1269,8 +1307,8 @@
       kept = kept.slice(kept.length - Math.max(1, Math.floor(kept.length * 0.9 * HANDOFF_MAX_CHARS / text.length)));
       saved.timeline = [{ t: kept[0].t, kind: 'note', message: (S.timeline.length - kept.length) + ' earlier entries dropped to fit the page-load handoff' }].concat(kept);
       saved.stats = JSON.parse(JSON.stringify(S.stats));
-      saved.stats.truncated = true;
-      saved.stats.dropped += S.timeline.length - kept.length;
+      saved.stats.handoffDropped += S.timeline.length - kept.length;
+      saved.stats.handoffDroppedBeforeMs = Math.max(saved.stats.handoffDroppedBeforeMs, kept[0].t);
       text = JSON.stringify(saved);
     }
     return text.length <= HANDOFF_MAX_CHARS ? text : null;
@@ -1361,6 +1399,7 @@
       layoutShift: { total: 0, inputTotal: 0, count: 0, top: [] },
       mounts: {}, transientMounts: 0, errors: 0, failedRequests: 0, duplicateRows: 0,
       segments: 1, lostSegments: 0, truncated: false, dropped: 0, internalErrors: 0,
+      handoffDropped: 0, handoffDroppedBeforeMs: 0,
       sampleMsTotal: 0, sampleMsMax: 0, paintedSamples: 0, probeMisses: 0,
     };
   }

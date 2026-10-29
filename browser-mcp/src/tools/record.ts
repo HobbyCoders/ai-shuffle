@@ -264,6 +264,7 @@ function compactStats(stats: Record<string, any>): Record<string, unknown> {
     duplicate_rows: stats.duplicateRows,
     page_loads: Math.max(0, (stats.segments ?? 1) - 1),
     ...(stats.lostSegments ? { lost_segments: stats.lostSegments } : {}),
+    ...(stats.handoffDropped ? { handoff_dropped_earliest: stats.handoffDropped } : {}),
     ...(stats.truncated ? { truncated: true, dropped: stats.dropped } : {}),
     recorder_ms_per_frame: stats.sampleMsAvg,
     ...(stats.internalErrors ? { recorder_internal_errors: stats.internalErrors } : {}),
