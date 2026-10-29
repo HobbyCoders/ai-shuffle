@@ -34,6 +34,6 @@ Then commit and push. The hook scans every outgoing commit for credentials, with
 
 ## Open a draft pull request
 
-Open pull requests as drafts against `main`. Describe the problem, the change, the issue it addresses, and the exact local commands and results. Say what you exercised in the running app and what you tested only with fixtures. For a visible change, describe in text what you checked in the rendered UI and at which widths; do not attach or link screenshots. Call out checks you could not run. Do not include credentials, private logs or personal data.
+Open pull requests as drafts against `main`. Describe the problem, the change, the issue it addresses, and the exact local commands and results. Say what you exercised in the running app and what you tested only with fixtures; the team's loop for that (a private dev instance, the UI journeys and the flight recorder) is in [dev-workflow.md](docs/internal/dev-workflow.md). For a visible change, describe in text what you checked in the rendered UI and at which widths; do not attach or link screenshots. Call out checks you could not run. Do not include credentials, private logs or personal data.
 
 Maintainers review the change and decide when it is ready. See [LICENSE](LICENSE) for AGPL-3.0 terms and [TRADEMARKS.md](TRADEMARKS.md) before distributing a modified build.

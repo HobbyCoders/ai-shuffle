@@ -608,7 +608,8 @@ class Runner:
             for row, out in zip(selected, out_rows):
                 current = out
                 if row["kind"] != "script":
-                    out["reason"] = "needs browser" if row["kind"] == "browser" else "owner step"
+                    out["reason"] = {"browser": "needs browser", "journey": "UI journey in CI"}.get(
+                        row["kind"], "owner step")
                     continue
                 if self.cap_exceeded:
                     out["reason"] = "token cap reached"

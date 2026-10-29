@@ -75,6 +75,7 @@ def record(path: Path, row_id: str, status: str, evidence: str, by: str = "manua
     """Add a browser/owner row result to an existing run file.
 
     Script rows cannot be overwritten: they are only ever written by a run.
+    Journey rows cannot be recorded: their evidence is CI.
     """
     if status not in ("pass", "fail"):
         raise ValueError("status must be pass or fail")
@@ -88,6 +89,8 @@ def record(path: Path, row_id: str, status: str, evidence: str, by: str = "manua
             continue
         if row.get("kind") == "script":
             raise ValueError(f"{row_id} is a script row; rerun the smoke instead of recording it")
+        if row.get("kind") == "journey":
+            raise ValueError(f"{row_id} is a UI journey row; its evidence is the journeys' CI pass, not a record")
         row.update(status=status, reason=None, recorded={"by": by, "at": now_iso()},
                    evidence={"note": evidence.strip()})
         write(path, data)
