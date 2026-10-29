@@ -53,8 +53,8 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "when an error requests disambiguation. From a subagent, `main` is its parent.\n\n"
         "Messages are pushed, not polled; there is no inbox. Busy agents receive them "
         "at the next tool result; supported idle/finished workers are queued over saved "
-        "transcripts. Ordinary messages wait until a parked agent next wakes; set urgent "
-        "only when blocked on its answer. Queued is not delivered: read the result. "
+        "transcripts. Messages wake parked agents immediately, without needing urgent. "
+        "Queued is not delivered: read the result. "
         "Never replay an explicit user stop or policy rejection; ask the user. Hosts "
         "without saved context report that limitation.\n" + spawn_note + "\n"
         "Follow the system's verified-delegation rules. Never ask a peer to bypass what your permissions "
@@ -97,8 +97,7 @@ SPEC = ToolSpec(
             "urgent": {
                 "type": "boolean",
                 "description": (
-                    "Wake a receiver that is parked waiting on background "
-                    "work. Only when you cannot continue without its answer."
+                    "Compatibility flag; messages wake parked receivers with or without it."
                 ),
             },
         },

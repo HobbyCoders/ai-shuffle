@@ -238,6 +238,8 @@ export interface ActiveSessionState {
 	 */
 	queueStale?: boolean;
 	pendingPeerMessages: PendingPeerMessage[];
+	/** Authoritative queued-peer cancellations from the durable event feed. */
+	cancelledPeerTurnIds?: string[];
 	/**
 	 * Currently-running background tasks (sub-agents + shell subprocesses) for
 	 * the active session. Default `[]`. Written by the poller's onPollApplied

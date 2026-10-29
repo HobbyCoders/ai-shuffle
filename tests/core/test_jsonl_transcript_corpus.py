@@ -1387,6 +1387,50 @@ class TestHistoryBackfill:
         await hb.ensure_backfilled(APP_SID)
         assert len(se.get_events(APP_SID)) == 12
 
+    @pytest.mark.parametrize("reader", ["get_max_seq", "can_backfill_events"])
+    async def test_failed_read_is_retryable_after_a_cancellation_prefix(self, seeded, monkeypatch, reader):
+        se.append_events(APP_SID, [{"type": "queue.cancelled", "payload": {"cancelled_turn_ids": ["peer"]}}])
+        prefix = se.get_events(APP_SID)
+
+        def boom(_sid):
+            raise RuntimeError("read temporarily unavailable")
+
+        with monkeypatch.context() as m:
+            m.setattr(se, reader, boom)
+            await hb.ensure_backfilled(APP_SID)
+        assert se.get_events(APP_SID) == prefix
+        assert APP_SID not in hb._empty_memo
+        await hb.ensure_backfilled(APP_SID)
+        rows = se.get_events(APP_SID)
+        assert rows[:len(prefix)] == prefix
+        assert len(rows) == len(prefix) + 12
+        await hb.ensure_backfilled(APP_SID)
+        assert se.get_events(APP_SID) == rows
+
+    async def test_failed_store_and_rescue_reads_do_not_memoize_empty(self, seeded, monkeypatch):
+        import app.api.sessions_helpers as sh
+        import app.core.db_message_loader as dml
+
+        se.append_events(APP_SID, [{"type": "queue.cancelled", "payload": {"cancelled_turn_ids": ["peer"]}}])
+        prefix = se.get_events(APP_SID)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("history temporarily unavailable")
+
+        with monkeypatch.context() as m:
+            m.setattr(sh, "parse_session_history_via_store", boom)
+            m.setattr(dml, "load_messages_from_db", boom)
+            assert hb._load_legacy_history(APP_SID) == []
+            await hb.ensure_backfilled(APP_SID)
+        assert se.get_events(APP_SID) == prefix
+        assert APP_SID not in hb._empty_memo
+        await hb.ensure_backfilled(APP_SID)
+        rows = se.get_events(APP_SID)
+        assert rows[:len(prefix)] == prefix
+        assert len(rows) == len(prefix) + 12
+        await hb.ensure_backfilled(APP_SID)
+        assert se.get_events(APP_SID) == rows
+
     async def test_max_seq_failure_is_a_noop(self, seeded, monkeypatch):
         def boom(_sid):
             raise RuntimeError("db down")
@@ -1398,7 +1442,7 @@ class TestHistoryBackfill:
     async def test_unconvertible_history_is_memoed_as_empty(self, mock_db, monkeypatch):
         loads = []
         monkeypatch.setattr(hb, "_load_legacy_history",
-                            lambda sid: loads.append(sid) or [{"role": "x", "type": "rate_limit"}])
+                            lambda sid, **kwargs: loads.append(sid) or [{"role": "x", "type": "rate_limit"}])
         await hb.ensure_backfilled("sess-noise")
         await hb.ensure_backfilled("sess-noise")
         assert loads == ["sess-noise"]
@@ -1406,7 +1450,7 @@ class TestHistoryBackfill:
 
     async def test_append_failure_does_not_raise(self, mock_db, monkeypatch):
         monkeypatch.setattr(hb, "_load_legacy_history",
-                            lambda sid: [{"role": "user", "type": None, "content": "hi"},
+                            lambda sid, **kwargs: [{"role": "user", "type": None, "content": "hi"},
                                          {"role": "assistant", "type": "text", "content": "yo"}])
 
         def boom(sid, events):

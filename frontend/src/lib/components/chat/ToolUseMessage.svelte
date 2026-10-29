@@ -40,7 +40,7 @@
 		input?: Record<string, unknown>;
 		partialInput?: string;
 		result?: string;
-		status: 'running' | 'complete' | 'error';
+		status: 'queued' | 'running' | 'complete' | 'error';
 		streaming?: boolean;
 		serverSide?: boolean;
 		/** Data URI of a screenshot from MCP image results (e.g. browser automation). */
@@ -105,7 +105,7 @@
 	const compactName = $derived(
 		status === 'running' ? liveToolLabel(name, input, partialInput) : displayToolName(name)
 	);
-	const stateLabel = $derived(toolStateLabel(status, dismissedQuestion));
+	const stateLabel = $derived(status === 'queued' ? 'Queued' : toolStateLabel(status, dismissedQuestion));
 	const accessibleLabel = $derived(
 		`${compactName}${preview ? `: ${preview}` : ''}. ${stateLabel}`
 	);
@@ -173,6 +173,11 @@
 				<svg class="wl-glyph is-muted" data-testid="tool-dismissed-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
 					<circle cx="12" cy="12" r="9" />
 					<path stroke-linecap="round" d="M8.5 12h7" />
+				</svg>
+			{:else if status === 'queued'}
+				<svg class="wl-glyph is-muted" data-testid="tool-status-queued" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<circle cx="12" cy="12" r="9" />
+					<path d="M12 7v5l3 2" />
 				</svg>
 			{:else if status === 'running'}
 				<svg class="wl-glyph is-running" data-testid="tool-status-running" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
