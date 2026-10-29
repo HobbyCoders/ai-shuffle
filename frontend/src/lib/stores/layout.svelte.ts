@@ -31,7 +31,7 @@ export type ViewType =
 	| 'docs'
 	| 'terminal';
 
-interface ActiveView {
+export interface ActiveView {
 	type: ViewType;
 	/** Session ID for the conversation panel, null for a new session */
 	sessionId?: string | null;

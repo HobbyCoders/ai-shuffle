@@ -33,6 +33,7 @@
 
 	import { layout, activeView, sidebarCollapsed, sidebarOverlay } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
+	import { createdChatToFollow } from './follow-created-chat';
 	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
 	import { registerSearchShortcut } from '$lib/services/search-shortcut';
 	import { settingsNav, encodeTarget } from '$lib/settings/navigation.svelte';
@@ -85,6 +86,16 @@
 	 * Create a new chat session and navigate to it
 	 */
 	let navigationClaimed = false;
+	// Set once boot has reconciled the restored session with the layout's view;
+	// until then the two may disagree on purpose (see onMount).
+	let bootReconciled = $state(false);
+	// A new chat whose first send created its session: the layout's view follows
+	// it, so a reload reopens that chat (createdChatToFollow).
+	$effect(() => {
+		if (!bootReconciled) return;
+		const follow = createdChatToFollow($activeView, $activeSession?.sessionId ?? null);
+		if (follow) layout.openChat(follow);
+	});
 	function handleNewSession() {
 		navigationClaimed = true;
 		activeSession.newChat();
@@ -275,6 +286,7 @@
 			// Layout and the restored session already agree (the ordinary reload).
 			followRestoredLane();
 		}
+		bootReconciled = true;
 
 		// Deep-link: the Android shell opens `/?session=<id>` when a notification
 		// is tapped. Open that session explicitly — it outranks the restored
