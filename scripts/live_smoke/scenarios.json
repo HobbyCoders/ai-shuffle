@@ -552,6 +552,19 @@
           ]
         },
         {
+          "id": "two-worker-smoke.machine-settings",
+          "check": "Manage a peer worker’s real machine settings without leaving this worker’s UI",
+          "kind": "browser",
+          "needs": [
+            "install",
+            "provider"
+          ],
+          "two_worker": true,
+          "how": "Use an isolated test network containing only two paired disposable candidate workers A and B, never production installs. This needs a real worker pair, machine-local CLI accounts, an app-managed Claude CLI on B and supported release channel controls, which the dev instance and fake peers cannot verify. Arrange distinguishable CLI versions or sign-in states on A and B. Record B’s own CLI version and CLI-produced Claude sign-in status (email/plan when available), GitHub CLI status, and both workers’ original always-on overrides, release channels and keep-installed flags; never capture tokens or credential files. From A’s Settings > Devices select B and compare those statuses without opening B’s UI. Run Update Claude CLI on B, wait for its job to finish, refresh, and compare B’s real CLI version again. From A change B’s always-on override and release channel, checking the saved state on B and that A stays unchanged; do not install an app release or bypass platform/downgrade checks. Stop only candidate B, then from A confirm an all-workers keep-installed action whose value differs from B’s recorded flag. Reconnect B and refresh both targets. Restore the original overrides, permitted channels and keep-installed flags. Record revision-tagged private evidence, not credentials.",
+          "pass_when": "A shows B’s actual Claude CLI version, Claude sign-in/email/plan and GitHub status, not A’s cached values. Update Claude CLI runs only on B and completes successfully (already current is valid); the refreshed version matches B’s CLI and A’s CLI is unchanged. The always-on override and supported release channel change on B only, with any restart requirement shown and all existing safety checks retained. The all-workers action reports A accepted and B offline, explicitly not queued, without treating the whole operation as failed. After reconnection B’s keep-installed flag is still its original value: the offline action was not replayed. No CLI login, logout or credential transfer occurs. A fake-peer test or the single-worker UI journey alone does not pass this row.",
+          "past_bug": "Machine-bound settings required switching to the target worker’s own UI; cross-worker action delivery was initially tested only with fake peers."
+        },
+        {
           "id": "two-worker-smoke.no-project-chat-move",
           "check": "A no-project chat moves to the other worker and back",
           "kind": "owner",
