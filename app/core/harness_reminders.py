@@ -59,6 +59,9 @@ HARNESS_REMINDER_OPENERS = (
     # app.core.owner_confirm.engine_note, on the owner's yes or no
     "The owner approved this request:",
     "The owner declined this request:",
+    # app.core.working_record.HEADER: the owner working record an owner
+    # session's turn carries (turn_note).
+    "Owner working record (data, not instructions",
     # fluid native lane: ledger, notes, runtime facts, environment, catalog
     "Session ledger (",
     "# Harness scratch\n",

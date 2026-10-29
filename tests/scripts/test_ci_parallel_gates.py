@@ -217,6 +217,14 @@ def test_ui_journeys_and_visual_regression_gate_every_pr():
     # Steps after the plan skip only for a shard the plan gave no journey file.
     for step in journeys["steps"][2:-1]:
         assert step["if"] == "steps.plan.outputs.files != ''", step.get("name")
+    pair = jobs["pair-journeys"]
+    assert "pair-journeys" in jobs["javascript"]["needs"] and "strategy" not in pair
+    steps = {step.get("name"): step for step in pair["steps"]}
+    run = steps["Run the journeys on a fresh dev pair"]["run"]
+    assert "python -m scripts.devloop.ci pair-journeys" in run
+    assert "/usr/lib/postgresql/16/bin" in run and "||" not in run
+    assert "python -m app.preview stamp" in steps["Build and stamp the desktop UI"]["run"]
+    assert pair["runs-on"] == "ubuntu-latest"
     visual = jobs["visual"]
     command = next(s["run"] for s in visual["steps"] if s.get("name") == "Compare every fixture at every viewport")
     assert "node tests/visual-regression.mjs --strict" in command and 'exit "$status"' in command

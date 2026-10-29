@@ -146,6 +146,11 @@ let usageApplied = false;
 // confirms a live turn, so a fold that lands between the two can no longer flip
 // the indicator back to false (the turn-start stutter).
 let optimisticStreaming = false;
+// The reducer showed a live turn since the last fold. A turn can start and end
+// between two folds (a chat another worker runs reaches this one in batches);
+// the confirmation still retires the optimistic flip, the latch and the app
+// flag alike, or the chat would stream forever after its turn ended.
+let turnLiveSinceFold = false;
 
 // The task registry's running list from a `/live` snapshot that landed while
 // the feed was still backfilling (#320). Applied at `caught_up`, after the
@@ -579,8 +584,9 @@ function fold(hydrationComplete = false): void {
 	hiddenStreamDirty = false;
 	const patch = transcriptPatch(reducerState, {
 		hydrationComplete,
-		appOptimistic: deps.getState().optimisticStreaming === true,
+		appOptimistic: !turnLiveSinceFold && deps.getState().optimisticStreaming === true,
 	});
+	turnLiveSinceFold = false;
 	// The reducer confirmed a live turn — the optimistic flip has served its
 	// purpose and must not survive into the next turn boundary.
 	if (reducerState.isStreaming) optimisticStreaming = false;
@@ -851,6 +857,7 @@ function teardown(capture: boolean): void {
 	lastFoldAt = 0;
 	resetFeedFlags();
 	optimisticStreaming = false;
+	turnLiveSinceFold = false;
 	currentSessionId = null;
 	seededMessages = null;
 	reducerState = initialState();
@@ -1021,6 +1028,10 @@ export const feedController: FeedController = {
 				if (ev.type === 'swarm.updated') swarms.receive(ev.swarm, sessionId);
 				if (typeof ev.command_id === 'string') clearCompactRetry(sessionId, ev.command_id);
 				reducerState = reduce(reducerState, ev);
+				if (reducerState.isStreaming) {
+					optimisticStreaming = false;
+					turnLiveSinceFold = true;
+				}
 				// An empty log learns its epoch from this first row (sse-feed).
 				adoptLogEpoch();
 				eventsReduced++;

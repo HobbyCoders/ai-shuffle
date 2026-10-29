@@ -521,25 +521,57 @@ async def seed_pair_b() -> dict:
                  answer="A README, a `src` package and a `tests` folder.")
     await run_sync(project.save)
 
-    return {"device_id": ctx.device_id, "projects": {PAIR_B_PROJECT: str(workspace / PAIR_B_PROJECT)},
-            "remotes": {PAIR_B_PROJECT: remote.as_uri()}, "chats": chats,
-            "checkouts": {MAIN_PROJECT: await run_sync(_checkout_of_a_project, MAIN_PROJECT)}}
+    projects = {PAIR_B_PROJECT: str(workspace / PAIR_B_PROJECT)}
+    checkouts: dict[str, str] = {}
+    peer = _peer_remotes()
+    if peer.get(MAIN_PROJECT):
+        # A user adding worker A's project on B too: clone its remote and add
+        # the folder. Its remote gives it the same shared project as A's, so
+        # a chat in it can move between the two workers.
+        clone = workspace / MAIN_PROJECT
+        try:
+            if not clone.exists():
+                await run_sync(_git, workspace, "clone", "-q", peer[MAIN_PROJECT], str(clone))
+            if database.get_project(MAIN_PROJECT) is None:
+                await create_project_record(ProjectCreate(
+                    id=MAIN_PROJECT, name="Dev sandbox",
+                    settings=ProjectSettings(default_profile_id=DEV_AGENT_ID)))
+            await run_sync(ensure_git_repository_record, MAIN_PROJECT, str(clone))
+            projects[MAIN_PROJECT] = str(clone)
+            checkouts[MAIN_PROJECT] = await run_sync(_checkout_of_a_project, "Dev sandbox")
+        except Exception as exc:  # noqa: BLE001 — reported in the seed result, not fatal
+            checkouts[MAIN_PROJECT] = f"failed: {type(exc).__name__}: {exc}"
+
+    return {"device_id": ctx.device_id, "projects": projects,
+            "remotes": {PAIR_B_PROJECT: remote.as_uri()}, "chats": chats, "checkouts": checkouts}
 
 
-def _checkout_of_a_project(project_id: str) -> str | None:
-    """B's base checkout of one of A's projects, the way a runner gets one:
-    the app's lazy self-seed clones the project's remote (A's local bare
-    repository) when no checkout is materialized here. A string says why not."""
-    from app.core import checkout_manager
+#: Beside a pair member's data (its scratch directory): what ``up --pair``
+#: tells worker B about worker A before B seeds (A's project remotes).
+PEER_FILE = "pair-peer.json"
 
+
+def _peer_remotes() -> dict[str, str]:
+    from app.core.config import settings
+
+    path = Path(settings.effective_data_dir).resolve().parent / PEER_FILE
     try:
-        _legacy, v2 = _project(project_id)
-        row = _project_v2_row(v2)
-        if row is None:
-            return f"not synced: project {project_id} has no shared row on worker B"
-        return checkout_manager.ensure_checkout(row) or "not materialized (no clone URL)"
-    except Exception as exc:  # noqa: BLE001 — reported in the seed result, not fatal
-        return f"failed: {type(exc).__name__}: {exc}"
+        return dict(json.loads(path.read_text(encoding="utf-8")).get("remotes") or {})
+    except (OSError, ValueError):
+        return {}
+
+
+def _checkout_of_a_project(name: str) -> str:
+    """B's base checkout of the shared project named ``name`` (only the shared
+    (v2) project row travels between workers, so it is found by name). A
+    string that is not a path says why there is none."""
+    from app.core import checkout_manager
+    from app.db import projects_v2
+
+    row = next((r for r in projects_v2.list_projects_v2() if r.get("name") == name), None)
+    if row is None:
+        return f"not synced: no shared project named {name!r} on worker B"
+    return checkout_manager.ensure_checkout(row) or "not materialized on worker B"
 
 
 SEEDS = {"default": seed_default, "pair-b": seed_pair_b}

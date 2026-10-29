@@ -6,7 +6,7 @@
 // composer sends again. Server-side, the turn ran on B: B's own transcript
 // has it, ownership did not move, and neither worker serves a row twice.
 import { fakeAiTag, runJourney } from './runner.mjs';
-import { gotoApp, openFromSidebar, typeAndSend, uniq, waitChatOpen, waitTurnSettled, watchUserText, chatState, expect } from './lib/app.mjs';
+import { gotoApp, openFromSidebar, waitChat, typeAndSend, uniq, waitChatOpen, waitTurnSettled, watchUserText, chatState, expect } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { PAIR_NOISE, PAIR_SEEDED, duplicateIds, expectOwner, pairChatId, transcriptOn, userMessagesWith } from './lib/pair.mjs';
 
@@ -45,6 +45,8 @@ await runJourney({
 			async setup({ page, status }) {
 				sent = [];
 				await gotoApp(page, status);
+				await waitChat(page, { surface: 'new' });
+				await page.waitForTimeout(1000);
 				await openFromSidebar(page, PAIR_SEEDED.bLoose);
 				await waitChatOpen(page, { messagesAtLeast: 12 });
 			},

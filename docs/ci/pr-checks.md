@@ -23,8 +23,9 @@ These workflows retain manual dispatch and also run on unfiltered
 - `ci-fluid.yml`: the complete fluid unit suite in its isolated environment.
 - `ci-frontend.yml`: four full frontend Vitest shards, production build (including
   mobile postbuild), frontend/mobile typechecks, mobile tests, contracts/docs/audit,
-  tools/WebCrypto vectors, Browser MCP, the four `UI journeys (N/4)` shards
-  and `Visual regression (4 viewports)` run in parallel. The stable
+  tools/WebCrypto vectors, Browser MCP, the four `UI journeys (N/4)` shards,
+  `UI journeys (two workers)` and `Visual regression (4 viewports)` run in
+  parallel. The stable
   `JavaScript package checks` aggregate requires every branch to succeed, so
   the journeys and the visual comparison are required for merge (see
   [UI journeys and visual regression](#ui-journeys-and-visual-regression)).
@@ -860,6 +861,22 @@ instance's whole `devloop.log`. Run the same thing locally with
 `python -m scripts.devloop.ci journeys --build` (see
 [the dev loop](../internal/dev-loop.md#ci-mode-and-the-journey-driver)), or
 one journey against your own instance as its README says.
+
+### UI journeys on two workers
+
+`UI journeys (two workers)` runs `frontend/tests/journeys/two-worker-*.journey.mjs`
+(which the single-instance shards skip) with the same setup, then
+`python -m scripts.devloop.ci pair-journeys`: it starts `python -m
+scripts.devloop up --pair --ci` (two dev instances, each with its own
+throwaway PostgreSQL 16, paired through the real enrollment flow; see
+[the dev loop](../internal/dev-loop.md#two-workers-up---pair)), waits for
+`DEVLOOP_PAIR_READY`, runs every two-worker journey against worker A's UI with
+worker B as the other worker, then `down --pair`. It runs on every pull
+request beside the four shards and takes about as long as one of them
+(PAIR_TIMING). On failure it uploads `ui-pair-journeys` (3 days): the
+timelines, the pair launcher's `devloop.log` and each worker's whole log
+(`devloop-<pair>.a.log`, `devloop-<pair>.b.log`). Run it locally with
+`python -m scripts.devloop.ci pair-journeys --build`.
 
 ### Visual regression screenshots
 

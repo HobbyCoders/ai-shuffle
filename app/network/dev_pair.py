@@ -47,6 +47,16 @@ def guarded() -> bool:
         return os.environ.get("AI_SHUFFLE_PREVIEW") == "1"
 
 
+def in_pair() -> bool:
+    """Whether this is a dev instance its launcher started as one of a pair.
+
+    Its network can hold only the launcher's other instance (every join is
+    refused otherwise), which runs the same checkout: a peer that knows a
+    forwarded turn's caller, never an older worker or a real one.
+    """
+    return guarded() and _key() is not None
+
+
 def _key() -> Optional[bytes]:
     value = (os.environ.get(KEY_ENV) or "").strip()
     return value.encode("utf-8") if len(value) >= MIN_KEY_CHARS else None
