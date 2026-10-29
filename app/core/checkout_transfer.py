@@ -426,6 +426,8 @@ def import_checkout(base, destination, state):
             # strands nothing. Ignored files are still never overwritten.
             git(dest, "checkout", "--no-overwrite-ignore", "-B", branch, head)
     else:
+        from app.core.git_worktree_ops import exclude_app_worktrees
+        exclude_app_worktrees(str(base), str(dest))
         old = git(base, "for-each-ref", "--format=%(objectname)", "refs/heads/" + branch).decode().strip()
         if old:
             _require_published(base, branch, old, head, published, f"the receiving worker's repository {base}")
