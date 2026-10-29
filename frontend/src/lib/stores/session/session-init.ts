@@ -12,6 +12,7 @@ import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 // V2 Phase 1: the SSE-fed reducer owns the transcript; destroy() tears its feed down.
 import { feedController } from './v2/feed-controller';
+import { TAB_ACTIVE_SESSION_KEY } from '../device-id';
 import { resolvePersistedProject } from './session-project';
 import { normalizeSessionMode } from '../sessionMode.svelte';
 import { DEFAULT_CONTEXT_WINDOW_CHOICE } from '$lib/constants/model-context';
@@ -67,6 +68,28 @@ const INIT_GEN_KEY = '__aihub_initGeneration';
 function getSkipRestore(): boolean {
 	if (typeof window === 'undefined') return false;
 	return sessionStorage.getItem(SKIP_RESTORE_KEY) === '1';
+}
+
+/**
+ * Whether this page load is going to reopen a chat: a `/?session=` link, or
+ * this tab's own saved chat (and no "New chat" told it to stay new). Read
+ * synchronously, so the store starts in the restore window and the first frame
+ * after a reload shows that chat loading. Waiting for init's first round trip
+ * painted the new-chat screen for up to 1.5s first (found by the
+ * reload-midstream journey). init clears the window on every path that ends
+ * up restoring nothing.
+ */
+export function tabWillRestoreChat(): boolean {
+	if (typeof window === 'undefined') return false;
+	try {
+		if (new URLSearchParams(window.location.search).get('session')) return true;
+		if (getSkipRestore()) return false;
+		const raw = sessionStorage.getItem(TAB_ACTIVE_SESSION_KEY);
+		const saved: unknown = raw ? JSON.parse(raw) : null;
+		return !!(saved && typeof saved === 'object' && (saved as { sessionId?: unknown }).sessionId);
+	} catch {
+		return false;
+	}
 }
 
 export function setSkipRestore(value: boolean) {
@@ -181,6 +204,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 			} else if (skipRestore) {
 				update(s => ({
 					...s,
+					isRestoringSession: false,
 					profile: s.profile || defaultProfile,
 					// A new session starts without a project (#371 step 4);
 					// only a compose that already picked one keeps it.
@@ -280,7 +304,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 					}
 				} else {
 					// No saved compose: a new session starts without a project.
-					update(s => ({ ...s, profile: defaultProfile, ...(s.mode === 'chat' ? {} : { project: defaultProject }) }));
+					update(s => ({ ...s, isRestoringSession: false, profile: defaultProfile, ...(s.mode === 'chat' ? {} : { project: defaultProject }) }));
 				}
 			}
 
@@ -289,6 +313,8 @@ export function createSessionInit(deps: SessionInitDeps) {
 		} catch (error) {
 			if (initGen !== getInitGeneration()) return;
 			console.error('[ActiveSession] Failed to initialize:', error);
+			// Nothing adopted: leave the restore window the store opened at load.
+			update(s => (s.sessionId ? s : { ...s, isRestoringSession: false }));
 			wsConn.activate();
 			wsConn.connect();
 		}

@@ -37,7 +37,7 @@ import {
 } from './session/session-switcher';
 
 // Extracted sub-modules
-import { createSessionInit, setSkipRestore, bumpInitGeneration } from './session/session-init';
+import { createSessionInit, setSkipRestore, bumpInitGeneration, tabWillRestoreChat } from './session/session-init';
 // V2 Phase 1: SSE-fed reducer store for v2_stream sessions (single writer).
 import { markChatUnavailable, clearUnavailableChat } from './unavailable-chat';
 import { feedController } from './session/v2/feed-controller';
@@ -434,7 +434,10 @@ function defaultState(): ActiveSessionState {
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
-let _state: ActiveSessionState = defaultState();
+// The page's first state opens the restore window when this load will reopen a
+// chat (a reload or a link), so the first frame shows that chat loading instead
+// of the new-chat screen. Only here: destroy()'s reset must not reopen it.
+let _state: ActiveSessionState = { ...defaultState(), isRestoringSession: tabWillRestoreChat() };
 
 // ─── Subscribe shim (centralized via store-utils) ───────────────────────────
 
