@@ -377,7 +377,13 @@ function readCachedTranscript(sessionId: string): CachedTranscript | null {
 function captureTranscript(): void {
 	if (!currentSessionId) return;
 	if (!everCaughtUp || sentinelPending) return; // R1
-	if (reducerState.lastSeq <= 0) return; // nothing durable to resume from
+	// No durable event yet but rows on screen: those are local optimistic sends
+	// the log does not hold, never a base to resume from. An EMPTY log that a
+	// real sentinel caught up (a cleared or not-yet-used chat) is exact as of
+	// seq 0, though, and is cached like any other: without it every re-open of
+	// that chat ran the whole load again and flashed loading → cleared (the
+	// deep-link boot re-opens the linked chat once its row is in).
+	if (reducerState.lastSeq <= 0 && reducerState.messages.length > 0) return;
 	transcriptCache.delete(currentSessionId);
 	transcriptCache.set(currentSessionId, {
 		state: sealState(reducerState),

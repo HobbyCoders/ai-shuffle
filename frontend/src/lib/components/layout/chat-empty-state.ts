@@ -63,6 +63,46 @@ export function isEmptyChatSurface(input: ChatSurfaceInput): boolean {
 	return surface === 'new' || surface === 'cleared';
 }
 
+/**
+ * How ChatView lays the surface out: the centred hero with the composer under
+ * it, or the message column with the composer docked at the bottom.
+ */
+export type ChatLayout = 'hero' | 'column';
+
+/** The layout a settled (not loading) surface has. */
+export function settledChatLayout(surface: Exclude<ChatSurface, 'loading'>): ChatLayout {
+	return surface === 'new' || surface === 'cleared' ? 'hero' : 'column';
+}
+
+/**
+ * The layout for each surface as it changes, for one view.
+ *
+ * A 'loading' surface does not yet know whether the opened chat has a
+ * transcript, so it keeps the layout the view already had instead of guessing.
+ * Guessing 'column' (as before) moved the composer to the bottom for the load
+ * and straight back to the centre when the chat turned out empty: a 1-3 frame
+ * `centre → bottom → centre` flicker whenever an empty (cleared) chat was opened
+ * from the new-session screen. Keeping the layout makes every open path move
+ * the composer at most once, when the outcome is known:
+ *
+ *   new/cleared → loading (hero)   → active (column) | cleared (hero)
+ *   active      → loading (column) → active (column) | cleared (hero)
+ *
+ * `initial` is the layout of a view that starts in 'loading' (boot restore or
+ * a deep link): the column, whose skeleton is the usual outcome.
+ *
+ * Returns a function to call with the current surface on every change; it
+ * remembers the last settled layout between calls.
+ */
+export function createChatLayoutTracker(initial: ChatLayout = 'column'): (surface: ChatSurface) => ChatLayout {
+	let settled = initial;
+	return (surface) => {
+		if (surface === 'loading') return settled;
+		settled = settledChatLayout(surface);
+		return settled;
+	};
+}
+
 /** True only for a bound session, settled and empty — i.e. a cleared conversation. */
 export function isClearedSession(input: ChatSurfaceInput): boolean {
 	return classifyChatSurface(input) === 'cleared';

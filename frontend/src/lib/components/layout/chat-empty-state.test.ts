@@ -22,6 +22,8 @@ import {
 	isClearedSession,
 	chatHeaderTitle,
 	classifyTranscriptRender,
+	createChatLayoutTracker,
+	type ChatSurface,
 	type ChatSurfaceInput
 } from './chat-empty-state';
 
@@ -214,5 +216,69 @@ describe('classifyTranscriptRender', () => {
 				isLoadingSession: true
 			})
 		).toBe('transcript');
+	});
+});
+
+/**
+ * Opening a chat whose history is not loaded yet used to dock the composer for
+ * the load and, when the chat turned out empty (cleared), snap it back to the
+ * centre 1-3 frames later (flight recorder: composer centre → bottom → centre).
+ * A load now keeps the layout the view already had, so the composer moves at
+ * most once on every path that opens a chat.
+ */
+describe('createChatLayoutTracker', () => {
+	const run = (surfaces: ChatSurface[], initial?: 'hero' | 'column') => {
+		const layout = createChatLayoutTracker(initial);
+		return surfaces.map((surface) => layout(surface));
+	};
+	/** How many times the layout changes along a sequence. */
+	const moves = (layouts: string[]) => layouts.filter((l, i) => i > 0 && l !== layouts[i - 1]).length;
+
+	it('keeps the hero while an empty chat opened from the new-session screen loads', () => {
+		const layouts = run(['new', 'loading', 'cleared']);
+		expect(layouts).toEqual(['hero', 'hero', 'hero']);
+		expect(moves(layouts)).toBe(0);
+	});
+
+	it('moves to the column once when the opened chat has a transcript', () => {
+		const layouts = run(['new', 'loading', 'active']);
+		expect(layouts).toEqual(['hero', 'hero', 'column']);
+		expect(moves(layouts)).toBe(1);
+	});
+
+	it('keeps the column (and its skeleton) while a chat opened from another chat loads', () => {
+		expect(run(['active', 'loading', 'active'])).toEqual(['column', 'column', 'column']);
+		expect(run(['active', 'loading', 'cleared'])).toEqual(['column', 'column', 'hero']);
+	});
+
+	it('loads from a cleared chat in the hero layout too', () => {
+		expect(run(['cleared', 'loading', 'active'])).toEqual(['hero', 'hero', 'column']);
+		expect(run(['cleared', 'loading', 'cleared'])).toEqual(['hero', 'hero', 'hero']);
+	});
+
+	it('starts a boot restore or deep link in the column, the usual outcome', () => {
+		expect(run(['loading', 'active'])).toEqual(['column', 'column']);
+		expect(run(['loading', 'cleared'])).toEqual(['column', 'hero']);
+		expect(run(['loading'], 'hero')).toEqual(['hero']);
+	});
+
+	it('never goes back to a layout it left within one open, whatever the order of chats', () => {
+		const surfaces: ChatSurface[] = ['new', 'cleared', 'active'];
+		for (const from of surfaces) {
+			for (const to of surfaces) {
+				const layouts = run([from, 'loading', 'loading', to]);
+				expect(moves(layouts), `${from} → loading → ${to}: ${layouts.join(' → ')}`).toBeLessThanOrEqual(1);
+			}
+		}
+	});
+
+	it('remembers the last settled layout across several loads', () => {
+		const layout = createChatLayoutTracker();
+		expect(layout('new')).toBe('hero');
+		expect(layout('loading')).toBe('hero');
+		expect(layout('active')).toBe('column');
+		expect(layout('loading')).toBe('column');
+		expect(layout('cleared')).toBe('hero');
+		expect(layout('loading')).toBe('hero');
 	});
 });

@@ -2107,6 +2107,45 @@ describe('feedController transcript cache (S2)', () => {
 		expect(feedController.hasCachedTranscript(`sess-${TRANSCRIPT_CACHE_MAX + 2}`)).toBe(true);
 	});
 
+	it('caches an empty log a real sentinel caught up, so re-opening a cleared chat shows it at once', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		// A cleared chat: its log has no events, the sentinel says so.
+		hydrate('s1', []);
+		expect(deps.state.isLoadingSession).toBe(false);
+		feedController.stop();
+		expect(feedController.hasCachedTranscript('s1')).toBe(true);
+
+		// Re-open (the deep-link boot re-opens the linked chat once its row is
+		// in). It must settle in the same call, not show loading → cleared again.
+		deps.update((s) => ({ ...s, messages: [], isLoadingSession: true }));
+		const patch = feedController.cachedPatch('s1');
+		expect(patch?.messages).toEqual([]);
+		expect(patch?.isLoadingSession).toBe(false);
+		feedController.start('s1');
+		expect(deps.state.isLoadingSession).toBe(false);
+		expect(hoisted.fromSeq).toBe(0);
+		// A message sent elsewhere meanwhile still arrives on the resumed feed.
+		hoisted.onEvent!(userMessageAt(1, 'later'));
+		hoisted.onEvent!(caughtUp(1));
+		expect((deps.state.messages as Array<{ content: string }>).map((m) => m.content)).toEqual(['later']);
+	});
+
+	it('never caches rows the log does not hold yet (an optimistic send before its first event)', () => {
+		const deps = makeDeps({
+			messages: [
+				{ id: 'opt-1', role: 'user', content: 'hi', commandId: 'req-abc', timestamp: '2026-07-15T00:00:00.000Z' },
+			],
+			isStreaming: true,
+		} as unknown as Partial<ActiveSessionState>);
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		expect((deps.state.messages as unknown[]).length).toBe(1);
+		feedController.stop();
+		expect(feedController.hasCachedTranscript('s1')).toBe(false);
+	});
+
 	it('cachedPatch() previews the same transcript the switcher primes with', () => {
 		const deps = makeDeps();
 		feedController.attach(deps);

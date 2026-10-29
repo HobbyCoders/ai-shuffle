@@ -37,7 +37,7 @@
 	import { voiceCallState, isCallSurfaceActive } from '$lib/services/voiceCall';
 	import { watchCallOutcomes } from '$lib/services/voiceCallOutcome';
 	import { RotateCcw, LoaderCircle } from 'lucide-svelte';
-	import { classifyChatSurface } from './chat-empty-state';
+	import { classifyChatSurface, createChatLayoutTracker } from './chat-empty-state';
 	import { pendingDeepLink, deepLinkLoading } from '$lib/stores/pending-deep-link';
 	// The phone shell docks prompts above its composer; the web build has none.
 	import { composerShell } from '$lib/components/chat/composer-shell';
@@ -82,7 +82,14 @@
 	$effect(() => {
 		if (settledChatId) return finishJourneyAfterPaint('chat.open', settledChatId);
 	});
-	const isEmptyState = $derived(chatSurface === 'new' || chatSurface === 'cleared');
+	// The centred hero layout (new or cleared chat) versus the message column.
+	// A load keeps the layout the view already had until its outcome is known,
+	// so opening a chat moves the composer at most once (never centre → bottom
+	// → centre for a chat that turns out empty); see createChatLayoutTracker.
+	const chatLayout = createChatLayoutTracker();
+	const isEmptyState = $derived(chatLayout(chatSurface) === 'hero');
+	// A chat opened from the hero layout, its history still on the way.
+	const isLoadingHero = $derived(chatSurface === 'loading');
 	// A BOUND, settled, empty session — a just-cleared conversation. Presents the
 	// hero with the session's own title + a "cleared" hint instead of the
 	// brand-new "Let's build your project" workspace picker.
@@ -122,6 +129,9 @@
 		}
 	}
 	const clearedTitle = $derived($activeSession.title?.trim() || 'Untitled');
+	// While loading, the title the opened chat is known by so far; the same
+	// heading stays put if the chat turns out cleared.
+	const heroTitle = $derived(isClearedSession ? clearedTitle : ($activeSession.title?.trim() || 'Loading…'));
 
 	// Voice (ruling VM18). The gate is the CALL, not the session's mode: a voice
 	// session with no call running is an ordinary chat, and only an in-flight call
@@ -341,17 +351,26 @@
 			<div class="empty-hero-content">
 				{#if unavailable}
 					<ChatUnavailableNotice chat={unavailable} onDismiss={clearUnavailableChat} />
-				{:else if isClearedSession}
+				{:else if isClearedSession || isLoadingHero}
 					<!-- Bound existing session with an empty transcript (cleared via the
 					     sessions-board broom, #558). Show its OWN title + a cleared
 					     hint so it never reads as a brand-new chat. The project is
-					     fixed for an existing session, so no workspace picker here. -->
-					<div class="cleared-hero">
+					     fixed for an existing session, so no workspace picker here.
+					     A chat opened from this layout shows the same heading while
+					     its history loads, so the composer stays put until the
+					     outcome is known (createChatLayoutTracker). -->
+					<div class="cleared-hero" class:is-loading={isLoadingHero} aria-busy={isLoadingHero}>
 						<div class="cleared-badge" aria-hidden="true">
-							<RotateCcw size={22} strokeWidth={1.5} />
+							{#if isLoadingHero}
+								<LoaderCircle size={22} strokeWidth={1.5} class="hero-spin" />
+							{:else}
+								<RotateCcw size={22} strokeWidth={1.5} />
+							{/if}
 						</div>
-						<h1 class="cleared-title" title={clearedTitle}>{clearedTitle}</h1>
-						<p class="cleared-hint">Conversation cleared — send a message to start fresh.</p>
+						<h1 class="cleared-title" title={heroTitle}>{heroTitle}</h1>
+						<p class="cleared-hint" role="status">
+							{isLoadingHero ? 'Opening the conversation…' : 'Conversation cleared — send a message to start fresh.'}
+						</p>
 					</div>
 				{:else}
 					<!-- New session: the agent leads, then one sentence saying
@@ -758,6 +777,13 @@
 		color: var(--muted-foreground);
 		line-height: 1.5;
 		max-width: 40ch;
+	}
+
+	.cleared-hero.is-loading :global(.hero-spin) {
+		animation: reconnect-spin 1s linear infinite;
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.cleared-hero.is-loading :global(.hero-spin) { animation: none; }
 	}
 
 	/* ========================================

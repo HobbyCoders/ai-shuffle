@@ -56,7 +56,8 @@ describe('ChatView — the new-session hero (#371 step 4)', () => {
 	});
 
 	it('keeps the cleared-session hero ahead of the new-session hero', () => {
-		const cleared = codeOnly.search(/\{(?:#if|:else if) isClearedSession\}/);
+		// The cleared hero also covers a chat loading from the hero layout.
+		const cleared = codeOnly.search(/\{(?:#if|:else if) isClearedSession(?: \|\| isLoadingHero)?\}/);
 		const card = codeOnly.indexOf('<NewSessionHero');
 		expect(cleared).toBeGreaterThan(-1);
 		expect(card).toBeGreaterThan(cleared);
