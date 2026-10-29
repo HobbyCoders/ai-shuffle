@@ -463,6 +463,7 @@ class _TailBatch(NamedTuple):
     prev_seq: int
     last_seq: int
     frames: Tuple[Tuple[int, str], ...]
+    epoch: Optional[str] = None
 
 
 # Pushed into the reader's gateway queue to force a read pass (cursor seeding).
@@ -645,8 +646,12 @@ class _SessionTail:
             )
             if not frames:
                 return
+            if self._epoch == EMPTY_LOG_EPOCH and cursor == 0:
+                # The first actual row names an empty log's new identity. A
+                # later DB probe could already see a different replacement.
+                self._epoch = str(rows[0]["id"])
             self._cursor = frames[-1][0]
-            self._publish(_TailBatch(cursor, frames[-1][0], frames))
+            self._publish(_TailBatch(cursor, frames[-1][0], frames, self._epoch))
             if len(rows) < _PAGE:
                 return
 
@@ -736,8 +741,8 @@ async def _replay_from(
 
 async def _tail_from_db(
     session_id: str, from_seq: int
-) -> AsyncIterator[Tuple[int, str]]:
-    """Yield ``(seq, frame)`` for everything past ``from_seq`` — the read path.
+) -> AsyncIterator[Tuple[int, str, str]]:
+    """Yield ``(seq, frame, row_id)`` past ``from_seq`` — the read path.
 
     The correctness fallback for the pushed path (and the whole delivery path
     while the gateway is down). Deliberately NOT coalesced: the live tail
@@ -750,7 +755,7 @@ async def _tail_from_db(
             return
         for row in page:
             if row["seq"] > cursor:
-                yield row["seq"], _frame(row)
+                yield row["seq"], _frame(row), str(row["id"])
                 cursor = row["seq"]
         if len(page) < _PAGE:
             return
@@ -935,6 +940,8 @@ async def event_stream(
             if isinstance(item, _TailBatch):
                 if item.prev_seq == cursor:
                     # Continues exactly where we stopped: emit as-is.
+                    if log_epoch == EMPTY_LOG_EPOCH and cursor == 0 and item.epoch:
+                        log_epoch = item.epoch
                     for seq, frame in item.frames:
                         yield frame
                         cursor = seq
@@ -966,9 +973,12 @@ async def event_stream(
             if reset:
                 yield _reset_frame(reset, checked_epoch)
                 return
-            log_epoch = checked_epoch
+            if log_epoch != EMPTY_LOG_EPOCH:
+                log_epoch = checked_epoch
             wrote = False
-            async for seq, frame in _tail_from_db(session_id, cursor):
+            async for seq, frame, row_id in _tail_from_db(session_id, cursor):
+                if log_epoch == EMPTY_LOG_EPOCH and cursor == 0:
+                    log_epoch = row_id
                 yield frame
                 cursor = seq
                 wrote = True

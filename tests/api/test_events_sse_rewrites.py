@@ -5,6 +5,7 @@ Rows go through the production mirror materializer and post-mirror notifier;
 no test injects a reset frame or calls the reader's reset machinery.
 """
 import asyncio
+import json
 from uuid import uuid4
 
 import pytest
@@ -213,4 +214,71 @@ async def test_peer_rewrite_during_initial_backfill_is_not_lost(mock_db, gw, mon
         release.set()
         if not opening.done():
             await opening
+        await stream.aclose()
+
+
+@pytest.mark.parametrize("delivery", [
+    "local-push", "mirror-missed-before-seed", "mirror-missed-fallback", "mirror-fallback-race",
+])
+async def test_empty_log_adopts_first_delivered_identity(mock_db, gw, monkeypatch, delivery):
+    monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 0.01)
+    monkeypatch.setattr(events_mod, "LIVE_RESYNC_SECONDS", 0)
+    monkeypatch.setattr(events_mod, "_push_delivery_healthy", lambda tail: True)
+    seeded, release = asyncio.Event(), asyncio.Event()
+    real_seed = events_mod._SessionTail._seed
+
+    async def controlled_seed(tail):
+        if delivery == "mirror-missed-before-seed":
+            await release.wait()
+        result = await real_seed(tail)
+        seeded.set()
+        return result
+
+    monkeypatch.setattr(events_mod._SessionTail, "_seed", controlled_seed)
+    sid = "first-" + delivery
+    database.create_session(sid, "default", title="New empty conversation")
+    stream = event_stream(sid)
+    real_check = events_mod._resume_check
+    raced = []
+
+    def check_then_replace(session_id, cursor, epoch):
+        result = real_check(session_id, cursor, epoch)
+        if (delivery == "mirror-fallback-race" and not raced and cursor == 0
+                and result[0] != events_mod.EMPTY_LOG_EPOCH):
+            raced.append(True)
+            mirror_rows(session_id, 1, replace=True)
+        return result
+
+    monkeypatch.setattr(events_mod, "_resume_check", check_then_replace)
+    try:
+        assert parse_frame(await anext(stream)) == {
+            "event": "caught_up", "data": {"seq": 0, "epoch": events_mod.EMPTY_LOG_EPOCH}}
+        if delivery != "mirror-missed-before-seed":
+            await asyncio.wait_for(seeded.wait(), 1)
+        if delivery == "local-push":
+            se.append_events(sid, [{"type": "message.user", "payload": {"content": "Local first"}}])
+            gw._handle_payload(json.dumps({"session_id": sid, "max_seq": 1}))
+        else:
+            mirror_rows(sid, 1, replace=False)  # Lose the real mirror NOTIFY.
+            release.set()
+        first = (await collect_frames(stream, 1))[0]
+        assert first["event"] == "message.user"
+        # Reconciliation runs now, not after the production 120s deadline. It
+        # must keep a valid first-message feed open instead of resetting it.
+        assert (await asyncio.wait_for(anext(stream), 1)).startswith(": keepalive")
+        assert not events_mod._tails[sid].closed
+        se.append_events(sid, [{"type": "message.user", "payload": {"content": "Local second"}}])
+        gw._handle_payload(json.dumps({"session_id": sid, "max_seq": 2}))
+        second = (await collect_frames(stream, 1))[0]
+        assert second["event"] == "message.user"
+        assert second["data"]["content"] == "Local second"
+        for payload in mirror_rows(sid, 1, replace=True):
+            gw._handle_payload(payload)
+        reset = (await collect_frames(stream, 1))[0]
+        assert reset["event"] == "reset"  # Only a real subsequent rewrite resets.
+        assert reset["data"]["epoch"] != first["data"]["id"]
+        if delivery == "mirror-fallback-race":
+            assert raced == [True]
+    finally:
+        release.set()
         await stream.aclose()
