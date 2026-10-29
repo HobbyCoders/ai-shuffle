@@ -495,10 +495,7 @@
 		sessionId: $activeSession.sessionId,
 		messages: $activeSession.messages,
 		pendingPeerMessages: $activeSession.pendingPeerMessages ?? [],
-		queueAbortSeq: $activeSession.peerQueueAbortSeq,
-		sessionUnsettled: rawLatestTurnUnsettled || $activeSession.turnParked === true ||
-			$activeSession.isLoadingSession || $activeSession.isRestoringSession || $activeSession.queueStale === true ||
-			$activeSession.optimisticStreaming === true,
+		cancelledTurnIds: $activeSession.cancelledPeerTurnIds,
 		sessionActive: rawLatestTurnUnsettled && $activeSession.turnParked !== true
 	}));
 	const transcript: TranscriptModel = $derived.by(() => {

@@ -65,8 +65,8 @@ export interface V2SessionState {
 	messages: ChatMessage[];
 	isStreaming: boolean;
 	parked: boolean;
-	/** Last durable interrupt; distinguishes cancelled queues from delivery gaps. */
-	peerQueueAbortSeq?: number;
+	/** Authoritative queued-peer cancellations, retained across event replay. */
+	cancelledPeerTurnIds?: string[];
 	/** Per-task summaries keyed by task_id — drives the tasks panel + parked
 	 *  indicator. Shape matches the `Task` the UI's activeTasks already renders. */
 	activeTaskSummaries: Task[];
@@ -1386,11 +1386,16 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			return completed;
 		}
 
+		case 'queue.cancelled': {
+			const ids = Array.isArray(event.cancelled_turn_ids)
+				? event.cancelled_turn_ids.filter((id): id is string => typeof id === 'string') : [];
+			return { ...state, cancelledPeerTurnIds: [...new Set([...(state.cancelledPeerTurnIds ?? []), ...ids])] };
+		}
+
 		case 'turn.aborted': {
 			const reason = str(event.reason);
 			let next = dismissProseThrough(closeOpen(state), seq);
 			if (reason === 'interrupt') {
-				next = { ...next, peerQueueAbortSeq: seq };
 				// Mark any still-running tool card as errored (mirrors the legacy
 				// interrupt cleanup in message-sender).
 				next = {

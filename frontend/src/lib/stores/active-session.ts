@@ -238,8 +238,8 @@ export interface ActiveSessionState {
 	 */
 	queueStale?: boolean;
 	pendingPeerMessages: PendingPeerMessage[];
-	/** Reducer interrupt sequence, used to retire cancelled projected peer rows. */
-	peerQueueAbortSeq?: number;
+	/** Authoritative queued-peer cancellations from the durable event feed. */
+	cancelledPeerTurnIds?: string[];
 	/**
 	 * Currently-running background tasks (sub-agents + shell subprocesses) for
 	 * the active session. Default `[]`. Written by the poller's onPollApplied

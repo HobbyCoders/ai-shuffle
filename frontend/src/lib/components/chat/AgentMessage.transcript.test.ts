@@ -94,7 +94,7 @@ describe('AgentMessage transcript replacement', () => {
 			{ type: 'message.user', id: 'prompt', seq: 2, turn_id: 'running-turn', content: 'Start review' }
 		] as WireEvent[]);
 		const view = render(AgentMessageTranscript, { messages: releaseMessages(state), pendingPeerMessages: [pending],
-			live: true, sessionUnsettled: true });
+			live: state.isStreaming });
 		const row = rows()[0];
 		await fireEvent.click(row);
 		row.focus();
@@ -102,11 +102,16 @@ describe('AgentMessage transcript replacement', () => {
 		const groupKey = row.closest('[data-item-key]')?.getAttribute('data-item-key');
 		state = reduce(state, { type: 'turn.aborted', id: 'send-now-interrupt', seq: 3, turn_id: 'running-turn', reason: 'interrupt' });
 		await view.rerender({ messages: releaseMessages(state), pendingPeerMessages: [pending],
-			live: false, sessionUnsettled: true, queueAbortSeq: state.peerQueueAbortSeq });
+			live: state.isStreaming });
 		expect(rows()).toEqual([row]);
+		// The queue clears while the real reducer still reports no running turn.
+		expect(state).toMatchObject({ isStreaming: false, parked: false, liveTurnId: null });
+		await view.rerender({ messages: releaseMessages(state), pendingPeerMessages: [], live: state.isStreaming });
+		expect(rows()).toEqual([row]);
+		expect(document.activeElement).toBe(row);
 		state = reduce(state, { type: 'turn.started', id: 'successor', seq: 4, turn_id: 'successor-turn', source: 'user' });
 		await view.rerender({ messages: releaseMessages(state), pendingPeerMessages: [],
-			live: true, sessionUnsettled: true, queueAbortSeq: state.peerQueueAbortSeq });
+			live: state.isStreaming });
 		expect(rows()).toEqual([row]);
 		expect(row.getAttribute('aria-expanded')).toBe('true');
 		expect(document.activeElement).toBe(row);
@@ -114,7 +119,7 @@ describe('AgentMessage transcript replacement', () => {
 		state = reduce(state, { type: 'message.user', id: 'peer-receipt', seq: 5,
 			turn_id: 'successor-turn', queued_turn_id: pending.id, content: receipt().content });
 		await view.rerender({ messages: releaseMessages(state), pendingPeerMessages: [],
-			live: true, sessionUnsettled: true, queueAbortSeq: state.peerQueueAbortSeq });
+			live: state.isStreaming });
 		expect(rows()).toEqual([row]);
 		expect(row.getAttribute('aria-expanded')).toBe('true');
 		expect(row.getAttribute('aria-label')).toContain('Complete');
@@ -123,10 +128,14 @@ describe('AgentMessage transcript replacement', () => {
 		expect(row.closest('[data-item-key]')?.getAttribute('data-item-key')).toBe(groupKey);
 	});
 
-	it('removes a queue-only Stop without waiting for a receipt that will never arrive', async () => {
+	it('removes a queue-only Stop on explicit cancellation and blocks stale snapshots', async () => {
 		const view = render(AgentMessageTranscript, { messages: [], pendingPeerMessages: [pending], live: false });
-		expect(rows()).toHaveLength(1);
+		const row = rows()[0];
 		await view.rerender({ messages: [], pendingPeerMessages: [], live: false });
+		expect(rows()).toEqual([row]);
+		const cancelled = reduceAll([{ type: 'queue.cancelled', id: 'cancelled', seq: 1,
+			cancelled_turn_ids: [pending.id] }] as WireEvent[]);
+		await view.rerender({ messages: [], pendingPeerMessages: [], live: false, cancelledTurnIds: cancelled.cancelledPeerTurnIds });
 		expect(rows()).toHaveLength(0);
 		await view.rerender({ messages: [], pendingPeerMessages: [pending], live: false });
 		expect(rows()).toHaveLength(0);

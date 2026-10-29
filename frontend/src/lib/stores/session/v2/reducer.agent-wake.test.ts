@@ -71,12 +71,16 @@ describe('agent wakes from idle or parked recipients', () => {
 		}
 	});
 
-	it('publishes a durable interrupt sequence even when Stop arrives before any output', () => {
+	it('publishes explicit cancellations without interrupting a live turn', () => {
 		const running = reduce(initialState(), event(1, 'turn.started', { turn_id: 'human-turn' }));
-		const stopped = reduce(running, event(2, 'turn.aborted', { turn_id: 'human-turn', reason: 'interrupt' }));
-		expect(stopped.messages).toEqual([]);
-		expect(stopped.peerQueueAbortSeq).toBe(2);
-		expect(reduce(stopped, event(3, 'turn.started', { turn_id: 'next-turn' })).peerQueueAbortSeq).toBe(2);
+		const cancelled = reduce(running, event(2, 'queue.cancelled', { cancelled_turn_ids: [peer.id] }));
+		expect(cancelled).toMatchObject({ cancelledPeerTurnIds: [peer.id], isStreaming: true, liveTurnId: 'human-turn' });
+		expect(cancelled.messages).toBe(running.messages);
+		const replayed = reduce(cancelled, event(3, 'queue.cancelled', { cancelled_turn_ids: [peer.id] }));
+		expect(replayed.cancelledPeerTurnIds).toEqual([peer.id]);
+		const stopped = reduce(replayed, event(4, 'turn.aborted', { turn_id: 'human-turn', reason: 'interrupt' }));
+		expect(stopped.cancelledPeerTurnIds).toEqual([peer.id]);
+		expect(reduce(stopped, event(5, 'turn.started', { turn_id: 'next-turn' })).cancelledPeerTurnIds).toEqual([peer.id]);
 	});
 
 	it('does not mark a human turn as an agent wake', () => {

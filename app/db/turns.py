@@ -1225,11 +1225,31 @@ def settle_turn(
     if run_id is not None:
         sql += "AND run_id=%s "
         params += (run_id,)
+    cancelled_peer = False
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute(sql + "RETURNING *", params)
-        row = cursor.fetchone()
+        queued_peer = False
+        if outcome == "aborted" and run_id is None:
+            cursor.execute("SELECT source, state FROM turns WHERE id=%s", (turn_id,))
+            target = cursor.fetchone()
+            if target and target["source"] == "agent_message":
+                queued_peer = target["state"] == "queued"
+                # If recovery requeues a live peer, only guarded queue removal
+                # may abort it: otherwise its cancellation would have no event.
+                sql += "AND state <> 'queued' "
+        if queued_peer:
+            row = remove_queued_turn(turn_id, stop_reason, _conn=conn)
+            cancelled_peer = row is not None
+            if row:
+                cursor.execute("UPDATE turns SET error=%s WHERE id=%s", (error, turn_id))
+                row["error"] = error
+        else:
+            cursor.execute(sql + "RETURNING *", params)
+            row = cursor.fetchone()
     result = _row(row)
+    if cancelled_peer:
+        from app.db import session_events
+        session_events.notify_session_write(result["session_id"], "session_events")
     # A queued row settled without ever starting has no interval to bank.
     _bank_ended(result)
     return result
@@ -1246,6 +1266,7 @@ def _owner_compact_follow_up(row: Optional[Dict[str, Any]]) -> bool:
 
 def remove_queued_turn(
     turn_id: str, stop_reason: str = "removed_from_queue", *, preserve_compact_first: bool = False,
+    _conn: Any = None,
 ) -> Optional[Dict[str, Any]]:
     """Atomically abort a still-``queued`` turn (queue-chip removal).
 
@@ -1253,21 +1274,22 @@ def remove_queued_turn(
     races to ``running`` between the caller's intent and this statement is
     left alone (``None`` returned) instead of being aborted mid-flight.
     """
-    with get_db() as conn:
+    notify_events = False
+    # A caller-owned transaction also owns the post-commit session notification.
+    with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
-        if preserve_compact_first:
-            # Use the transcript's lock order (counter -> session -> turn),
-            # so Stop and message delivery cannot deadlock or both record it.
-            cursor.execute("SELECT session_id FROM turns WHERE id=%s", (turn_id,))
-            target = cursor.fetchone()
-            if target:
-                sid = target["session_id"]
-                cursor.execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,0) "
-                               "ON CONFLICT (session_id) DO NOTHING", (sid,))
-                cursor.execute("SELECT session_id FROM session_event_counters WHERE session_id=%s FOR UPDATE", (sid,))
-                cursor.fetchone()
-                cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (sid,))
-                cursor.fetchone()
+        cursor.execute("SELECT session_id, source FROM turns WHERE id=%s", (turn_id,))
+        target = cursor.fetchone()
+        if target and (preserve_compact_first or target["source"] == "agent_message"):
+            # Event writes use counter -> session -> turn lock order, including
+            # cancellation, so Stop and message delivery cannot deadlock.
+            sid = target["session_id"]
+            cursor.execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,0) "
+                           "ON CONFLICT (session_id) DO NOTHING", (sid,))
+            cursor.execute("SELECT session_id FROM session_event_counters WHERE session_id=%s FOR UPDATE", (sid,))
+            cursor.fetchone()
+            cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (sid,))
+            cursor.fetchone()
         cursor.execute(
             "UPDATE turns SET state='aborted', stop_reason=%s, "
             "ended_at=NOW() "
@@ -1276,6 +1298,16 @@ def remove_queued_turn(
             (stop_reason, turn_id),
         )
         row = _row(cursor.fetchone())
+        if row and row.get("source") == "agent_message":
+            from app.db import session_events
+
+            # Only the guarded queued -> aborted transition cancels a peer.
+            # Delivery/steering use separate transitions and never emit this.
+            session_events.append_events(row["session_id"], [{
+                "type": "queue.cancelled", "turn_id": row["id"],
+                "payload": {"cancelled_turn_ids": [row["id"]]},
+            }], _conn=conn)
+            notify_events = True
         preserve_compact_first = preserve_compact_first and _owner_compact_follow_up(row)
         if (row and preserve_compact_first
                 and (row.get("payload") or {}).get("compact_before_turn_id")):
@@ -1291,7 +1323,8 @@ def remove_queued_turn(
                 "type": "message.user", "turn_id": row["id"], "command_id": row.get("command_id"),
                 "payload": {"content": content, "profile_id": row.get("profile_id"), **metadata},
             }], _conn=conn)
-    if row and preserve_compact_first and (row.get("payload") or {}).get("compact_before_turn_id"):
+            notify_events = True
+    if notify_events and _conn is None:
         session_events.notify_session_write(row["session_id"], "session_events")
     return row
 
