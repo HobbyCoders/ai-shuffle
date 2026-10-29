@@ -2028,6 +2028,7 @@ def _apply_one(data: Mapping[str, Any], ctx: NetworkContext, result: ApplyResult
 class _WireStream:
     origin: str
     incarnation: int
+    first_seq: int
     highest: int
     watermark: int
     pending: int
@@ -2047,7 +2048,7 @@ def _wire_stream(cursor, chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext
     if (first.network_id != ctx.network_id or first.origin_device_id == ctx.device_id
             or member is None or member.status != membership.STATUS_ACTIVE):
         return None
-    return _WireStream(first.origin_device_id, first.origin_incarnation,
+    return _WireStream(first.origin_device_id, first.origin_incarnation, first.origin_seq,
                        store.highest_incarnation(cursor, first.origin_device_id),
                        store.get_watermark(cursor, first.origin_device_id, first.origin_incarnation),
                        store.count_pending(cursor, first.origin_device_id, first.origin_incarnation))
@@ -2063,8 +2064,9 @@ def _buffer_pending_chunk(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Netwo
     existing duplicate-at-cap behavior. Payload validation still happens when
     the missing head arrives, exactly as for single-row buffering.
     """
-    if stream.incarnation < stream.highest or stream.pending + len(chunk) > PENDING_CAP_PER_STREAM:
-        return False
+    if (stream.first_seq <= stream.watermark + 1 or stream.incarnation < stream.highest
+            or stream.pending + len(chunk) > PENDING_CAP_PER_STREAM):
+        return False  # Ordered appends must not parse the entire chunk twice.
     member = ctx.member(stream.origin)
     if member is None or member.status != membership.STATUS_ACTIVE:
         return False
