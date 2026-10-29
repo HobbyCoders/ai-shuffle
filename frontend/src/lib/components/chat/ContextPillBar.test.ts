@@ -1,17 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
-import { writable } from 'svelte/store';
+import { writable, type Writable } from 'svelte/store';
 import ContextPillBar from './ContextPillBar.svelte';
 import { git, gitStatus } from '$lib/stores/git.svelte';
 import { adoptSession, moveSession, getQueuedMove, queueMove, cancelQueuedMove } from '$lib/api/sessions';
 import { notify } from '$lib/stores/notifications';
 import { refreshWorkerPresence, resetWorkerPresence } from '$lib/stores/worker-presence';
 import { resetOwnerTransitions } from '$lib/utils/handoff-episodes';
-import { githubAuthenticated } from '$lib/stores/auth.svelte';
 
-const { session, execution, branches, appSessions, listInstallsMock, getClusterGitStateMock } = vi.hoisted(() => ({
+const { session, auth, execution, branches, appSessions, listInstallsMock, getClusterGitStateMock } = vi.hoisted(() => ({
 	session: { store: null as any },
+	auth: { store: null as Writable<boolean> | null },
 	execution: vi.fn(),
 	branches: vi.fn(),
 	appSessions: { store: null as any },
@@ -33,7 +33,10 @@ vi.mock('$lib/stores/app-data.svelte', () => {
 		appData: { loadSessions: vi.fn() }
 	};
 });
-vi.mock('$lib/stores/auth.svelte', () => ({ githubAuthenticated: writable(false), isAuthenticated: writable(true), isAdmin: writable(true) }));
+vi.mock('$lib/stores/auth.svelte', () => {
+	auth.store = writable(false);
+	return { githubAuthenticated: auth.store, isAuthenticated: writable(true), isAdmin: writable(true) };
+});
 vi.mock('$lib/stores/git.svelte', () => ({
 	gitStatus: writable({ current_branch: 'main', is_git_repo: true }),
 	git: writable({ projectId: 'project', sessionId: 'saved-session', worktreeId: null, hydrated: true, status: { is_git_repo: true } })
@@ -73,7 +76,7 @@ afterEach(() => {
 	vi.mocked(cancelQueuedMove).mockReset();
 	execution.mockClear();
 	branches.mockClear();
-	githubAuthenticated.set(false);
+	auth.store!.set(false);
 	appSessions.store?.set([]);
 	listInstallsMock.mockReset();
 	listInstallsMock.mockResolvedValue({ installs: [] });
@@ -142,7 +145,7 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 	});
 	it('uses the composed remote owner before its session-board row arrives', async () => {
 		branches.mockClear();
-		githubAuthenticated.set(true);
+		auth.store!.set(true);
 		session.store.set({ ...base, isRemote: true, ownerDeviceName: 'Peer worker' });
 		const view = render(ContextPillBar, { sheetMode });
 		expect(view.container.textContent).toContain('Peer worker');
