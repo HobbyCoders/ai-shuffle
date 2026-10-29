@@ -2432,14 +2432,205 @@ def test_a_fluid_answered_compaction_with_no_compacting_status_is_the_mains() ->
     assert loop._take_main_boundary(_boundary(1, logical_parent_uuid="u2")) is True
 
 
-def test_a_skip_the_cli_reports_as_failed_closes_without_an_error() -> None:
+@pytest.mark.parametrize("bridge_noop", [False, True])
+def test_only_nothing_to_compact_closes_without_an_error(bridge_noop: bool) -> None:
     loop = DelegatedLoop(store=MemoryStore(), model="m", claude_cmd=["true"])
+    loop._compact_noop = bridge_noop
     loop._track_main_compaction(_STATUS_ON)
-    done = loop._track_main_compaction({**_STATUS_OFF, "compact_result": "failed",
-                                        "compact_error": "skipped: Nothing more to compact"})
+    done = loop._track_main_compaction({
+        **_STATUS_OFF, "compact_result": "failed",
+        "compact_error": f"skipped: {delegated_mod.NOTHING_TO_COMPACT}",
+    })
     assert done is not None and not done.active and done.error == ""
+    assert loop._compact_noop
     assert loop._turn_compact_error is None
     assert loop._take_main_boundary(_boundary(1)) is False
+
+
+@pytest.mark.parametrize("reason", [
+    "Fluid could not compact the conversation (bridge HTTP 400); it is left as it is",
+    "Fluid could not compact the conversation (bridge HTTP 500); it is left as it is",
+    "Fluid could not compact the conversation (bridge transport error); it is left as it is",
+    "could not archive the rows it would drop",
+    "history recovery tools unavailable",
+    "Nothing more to compact",  # not the bridge's NothingToCompact reason
+])
+@pytest.mark.parametrize("earlier_noop", [False, True])
+def test_other_skipped_compactions_close_with_an_error(reason: str, earlier_noop: bool) -> None:
+    loop = DelegatedLoop(store=MemoryStore(), model="m", claude_cmd=["true"])
+    loop._compact_noop = earlier_noop
+    loop._track_main_compaction(_STATUS_ON)
+    reported = f"skipped: {reason}"
+    done = loop._track_main_compaction({
+        **_STATUS_OFF, "compact_result": "failed", "compact_error": reported,
+    })
+    assert done is not None and (done.active, done.error) == (False, reported)
+    assert loop._turn_compact_error == reported
+    assert not loop._compact_noop
+    assert loop._take_main_boundary(_boundary(1)) is False
+
+
+def test_only_the_latest_recent_fluid_answer_identifies_the_main_compaction() -> None:
+    loop = DelegatedLoop(store=MemoryStore(), model="m", claude_cmd=["true"])
+    now = delegated_mod.time.monotonic()
+    older = delegated_mod._CompactionTxn(
+        compaction_id="cmp_older", handles=("older-row",), rows=[], checkpoint=None,
+        answered=now,
+    )
+    latest = delegated_mod._CompactionTxn(
+        compaction_id="cmp_latest", handles=("latest-row",), rows=[], checkpoint=None,
+        answered=now,
+    )
+    loop._open_compaction(older)
+    loop._open_compaction(latest)
+    assert loop._main_compaction_running()
+    assert not loop._names_open_answer(_boundary(1, logical_parent_uuid="older-row"))
+    assert loop._names_open_answer(_boundary(1, logical_parent_uuid="latest-row"))
+
+    # A still-recent older answer cannot stand in for an expired latest one.
+    latest.answered -= delegated_mod.MOD_COMPACT_WAIT_S + 1
+    assert not loop._main_compaction_running()
+    assert not loop._names_open_answer(_boundary(1, logical_parent_uuid="older-row"))
+    assert not loop._names_open_answer(_boundary(1, logical_parent_uuid="latest-row"))
+
+
+@pytest.mark.parametrize("abandoned", ["expired", "interrupted"])
+async def test_a_stale_answer_cannot_give_a_subagent_the_mains_note_or_card(abandoned) -> None:
+    calls = []
+
+    async def note():
+        calls.append("restore")
+        return "HOST CONTEXT"
+
+    async def fresh_note(_content, _pin):
+        return await note()
+
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="m", claude_cmd=["true"],
+        compact_context=note, fresh_context=fresh_note,
+    )
+    loop._proc_results = 1  # only a lost-context boundary should request a tail restore
+    await loop._ensure_session()
+    loop._open_compaction(delegated_mod._CompactionTxn(
+        compaction_id="cmp_stale", handles=("main-row",), rows=[], checkpoint=None,
+        answered=delegated_mod.time.monotonic() - (
+            delegated_mod.MOD_COMPACT_WAIT_S + 1 if abandoned == "expired" else 0
+        ),
+    ))
+    try:
+        if abandoned == "interrupted":
+            await loop.submit(Interrupt())  # abandoned even though the answer is recent
+        # The subagent's hook and boundary carry no agent id in the real protocol.
+        assert await loop._cli_session_start({"source": "compact"}) == {}
+        await loop._keep_between_turn_compaction(_boundary(1, logical_parent_uuid="main-row"))
+        assert calls == []
+        assert not loop._compaction_context_restored
+        assert _compactions(loop.bus.log(loop.session_id)) == []
+
+        # The main chat's next real boundary must still request its own restore,
+        # even if its SessionStart hook was missed (no opening status for Fluid).
+        loop._track_main_compaction(_STATUS_OFF)
+        assert loop._take_main_boundary(_boundary(2, logical_parent_uuid="main-row"))
+        assert loop._context_restore_pending
+        content, _ = await loop._fresh_turn_content([delegated_mod.Text("next")], None)
+        assert "HOST CONTEXT" in "\n".join(b.text for b in content)
+        assert calls == ["restore"]
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.parametrize("ending", ["complete", "error", "interrupt", "cancel"])
+async def test_unapplied_fluid_answers_are_dropped_when_the_turn_stops(tmp_path, ending) -> None:
+    loop = _scripted_loop(tmp_path, [[
+        {"op": "text", "text": "working"},
+        *([{"op": "wait_interrupt"}] if ending in ("interrupt", "cancel") else []),
+        {"op": "result", **({"subtype": "error_during_execution", "errors": ["failed"]}
+                            if ending == "error" else {})},
+    ]])
+    drive = loop._drive_turn
+
+    async def with_unapplied_answer(*args):
+        loop._open_compaction(delegated_mod._CompactionTxn(
+            compaction_id="cmp_unapplied", handles=("main-row",), rows=[], checkpoint=None,
+        ))
+        # A hook restored context, but its boundary will never arrive.
+        loop._compaction_context_restored = True
+        return await drive(*args)
+
+    loop._drive_turn = with_unapplied_answer
+    await loop._ensure_session()
+
+    async def stop():
+        async for event in loop.bus.subscribe(loop.session_id):
+            if isinstance(event, TextDelta):
+                if ending == "interrupt":
+                    await loop.submit(Interrupt())
+                    assert loop._open_txns == []  # not just when result arrives
+                else:
+                    loop._turn_task.cancel()
+                return
+
+    watcher = asyncio.create_task(stop()) if ending in ("interrupt", "cancel") else None
+    try:
+        await loop.submit(UserTurn(content="go"))
+        if ending == "cancel":
+            with pytest.raises(asyncio.CancelledError):
+                await loop.wait_turn()
+        else:
+            await loop.wait_turn()
+        if watcher is not None:
+            await watcher
+        assert loop._open_txns == []
+        assert not loop._main_compaction_running()
+        assert not loop._compaction_context_restored
+    finally:
+        if watcher is not None:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+        await loop.aclose()
+
+
+@pytest.mark.parametrize("abandoned", ["interrupt", "turn_ended", "new_turn"])
+async def test_an_inflight_answer_cannot_reopen_an_abandoned_compaction(monkeypatch, abandoned):
+    from fluid.tools.builtins import history_expand, history_search
+
+    registry = ToolRegistry()
+    for tool in (history_expand, history_search):
+        registry.register_builtin(tool.SPEC, tool.handler)
+    loop = DelegatedLoop(store=MemoryStore(), model="m", claude_cmd=["true"], registry=registry)
+    loop._compaction_route = True
+    loop._active_turn_id = "turn_old"
+    started, release = asyncio.Event(), asyncio.Event()
+    to_thread = asyncio.to_thread
+
+    async def held_compaction(fn, *args, **kwargs):
+        if fn is delegated_mod.compact_messages:
+            started.set()
+            await release.wait()
+            return [{"role": "user", "text": "compacted", "toolUses": []}]
+        return await to_thread(fn, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", held_compaction)
+    request = asyncio.create_task(loop._compact_mod_messages({
+        "v": 1, "trigger": "manual",
+        "messages": [{"role": "user", "text": "original", "handle": "main-row"}],
+    }))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        if abandoned == "interrupt":
+            await loop.submit(Interrupt())
+        else:
+            loop._active_turn_id = None if abandoned == "turn_ended" else "turn_new"
+        release.set()
+        answer = await asyncio.wait_for(request, timeout=5)
+        assert answer["messages"] == [{"role": "user", "text": "compacted", "toolUses": []}]
+        assert loop._open_txns == []
+        assert not loop._main_compaction_running()
+    finally:
+        release.set()
+        request.cancel()
+        await asyncio.gather(request, return_exceptions=True)
+        await loop.aclose()
 
 
 async def test_a_compaction_between_turns_is_kept_for_the_next_turn(tmp_path) -> None:
