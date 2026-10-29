@@ -65,7 +65,20 @@ export function readDevloopStatus() {
 	}
 	if (status.state !== 'ready') throw new Error(`dev instance is ${status.state}, not ready (${path})`);
 	if (!status.access_link) throw new Error(`dev instance status has no access_link (${path})`);
+	// A launcher killed before its teardown leaves a "ready" file behind.
+	if (status.pid && !processAlive(status.pid)) {
+		throw new Error(`dev instance status is stale: pid ${status.pid} is gone (${path}). Start one: python -m scripts.devloop up`);
+	}
 	return status;
+}
+
+function processAlive(pid) {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return error.code === 'EPERM';
+	}
 }
 
 /**
