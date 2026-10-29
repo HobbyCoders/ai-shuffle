@@ -355,6 +355,21 @@ After the replay, the stream sends one `event: caught_up` frame (`{"seq": N}`, n
 
 Get live session state for streaming. Returns current partial messages and streaming status.
 
+`?include_messages=false` returns the same metadata/lifecycle envelope with
+`messages: []`, without loading or projecting any transcript. Add
+`&owner_fields=true` to include `session_meta.id` (the session ID), `hidden`
+(boolean), `parent_session_id` (string or `null`), `is_remote` and `device_name`.
+The ID, hidden flag and parent ID are always present when requested, including
+for hidden child chats and forks outside the sidebar page. `session_meta.title`
+is always present, even when `null` or an empty string.
+
+These fields use the same session ownership, API-user scope and paired-client
+transcript access checks as session detail; `owner_fields` does not grant access
+to another user's chat. The top-level `has_running_tasks` boolean counts only
+running durable background tasks, not retained terminal task cards.
+`parked_task_kind` is the session's parked-work kind (string or `null`). Both are
+available without messages, so idle polling does not need session detail.
+
 `session_meta.updated_at` carries the session row's current revision timestamp,
 serialized identically to the session list and the stamp frames' `updates.updated_at`.
 It is included both with messages and with `?include_messages=false`, so clients
