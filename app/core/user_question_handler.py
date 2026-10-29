@@ -455,22 +455,6 @@ class UserQuestionHandler:
             session_id, interaction_id, request_id, QUESTION_KIND, payload,
         )
 
-        try:
-            from app.services.push_notification import fire_and_forget_notify
-
-            first_q = questions[0].get("question") if questions else "A question"
-            fire_and_forget_notify(
-                title="Question for you",
-                body=str(first_q),
-                data={
-                    "type": "user_question",
-                    "session_id": session_id,
-                    "request_id": request_id,
-                },
-            )
-        except Exception:
-            pass
-
         if nonblocking:
             # Nothing in the turn counts a posted question, so publish the
             # durable count or no other device ever shows "Has question".

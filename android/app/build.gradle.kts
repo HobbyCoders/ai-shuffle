@@ -6,6 +6,10 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Local/CI builds without Firebase config still build and run, with push off.
+val pushConfigured = file("google-services.json").isFile
+if (pushConfigured) apply(plugin = "com.google.gms.google-services")
+
 extra["license"] = "AGPL-3.0-only"
 
 // The Google Play bundle leaves out app control (the AccessibilityService):
@@ -29,6 +33,7 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders["appAuthRedirectScheme"] = "com.hobbycoders.aishuffle"
         buildConfigField("boolean", "APP_CONTROL", (!playStoreBuild).toString())
+        buildConfigField("boolean", "PUSH_ENABLED", pushConfigured.toString())
     }
 
     if (playStoreBuild) {
@@ -109,6 +114,9 @@ val checkOfflineDemo by tasks.registering {
 tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(checkOfflineDemo) }
 
 dependencies {
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-messaging:24.1.0")
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("net.openid:appauth:0.11.1")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")

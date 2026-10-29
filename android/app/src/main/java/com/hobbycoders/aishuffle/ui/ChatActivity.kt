@@ -98,6 +98,11 @@ class ChatActivity : NativeScreen() {
     private var voiceRouting: VoiceAudioRouting? = null
     private lateinit var voiceCall: VoiceCallKeeper
     private lateinit var callNotifications: CallNotificationAsk
+    private val pushPermission = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) {
+        notificationDialogOpen = false
+        if (VoiceCallService.notificationsShown(this)) voiceCall.refresh() else voiceCall.notificationsOff()
+        com.hobbycoders.aishuffle.push.PushRegistration.schedule(this)
+    }
     private var notificationDialogOpen = false
     private val notificationPermission = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) {
         notificationDialogOpen = false
@@ -311,7 +316,14 @@ class ChatActivity : NativeScreen() {
     private fun loadUi() {
         pageLoads++
         pageFailure = null
-        web.loadUrl(MobileUi.indexUrl(server.baseUrl))
+        val worker = intent.getStringExtra("push_worker_id")
+        val session = intent.getStringExtra("push_session_id")
+        val target = if (com.hobbycoders.aishuffle.push.AttentionCommand.validId(session) &&
+            worker != null && com.hobbycoders.aishuffle.push.NeedsYouNotifications.server(this, worker)?.id == server.id)
+            session else null
+        web.loadUrl(MobileUi.indexUrl(server.baseUrl) + (target?.let { "?session=$it" } ?: ""))
+        intent.removeExtra("push_session_id")
+        intent.removeExtra("push_worker_id")
     }
     private fun blocked(message: String) = WebResourceResponse("text/plain", "UTF-8", 403, "Blocked", mapOf("Cache-Control" to "no-store"), ByteArrayInputStream(message.toByteArray()))
     private fun appVersionName(): String? =
@@ -534,6 +546,12 @@ class ChatActivity : NativeScreen() {
             else {
                 web.onResume(); web.post { completeMicrophonePermission(); callKeptAlive(); askForCallNotifications() }
                 DeviceToolsRuntime.attach(this, server)
+                if (!notificationDialogOpen && !microphoneDialogOpen && !voiceCall.keptAlive) {
+                    com.hobbycoders.aishuffle.push.PushPermission.ask(this, dialogOpen = { notificationDialogOpen = it }) {
+                        runCatching { pushPermission.launch(it) }.onFailure { notificationDialogOpen = false }
+                    }
+                }
+                com.hobbycoders.aishuffle.push.PushRegistration.schedule(this)
                 web.post { if (needsSession && !isFinishing && authorized()) startSession() }
             }
         }

@@ -2425,6 +2425,10 @@ def _run_column_migrations(cursor: Any) -> None:
         cursor.execute("ALTER TABLE sessions ADD COLUMN last_assistant_question_epoch TEXT")
         migrations_applied.append("sessions.last_assistant_question_epoch")
 
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "push_attention_state"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN push_attention_state JSONB NOT NULL DEFAULT '{}'")
+        migrations_applied.append("sessions.push_attention_state")
+
     # Working time for the sidepanel. ``work_ms`` banks every finished turn's
     # live interval (app/db/turns.py), ``work_started_at`` is the live turn's
     # start. Both ride the session row so peer mirrors show them too. No

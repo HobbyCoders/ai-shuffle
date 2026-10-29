@@ -483,7 +483,7 @@ def revoke_paired_client(client_id: str) -> bool:
             cursor.execute("DELETE FROM paired_client_native_sessions WHERE client_id=%s", (client_id,))
             cursor.execute("DELETE FROM paired_client_web_reservations WHERE client_id=%s", (client_id,))
             cursor.execute(
-                "UPDATE mobile_devices SET revoked_at = NOW() WHERE paired_client_id = %s",
+                "UPDATE mobile_devices SET revoked_at = NOW(), fcm_token = NULL WHERE paired_client_id = %s",
                 (client_id,),
             )
         return changed

@@ -5,13 +5,6 @@ import pytest
 from app.services import notification_service
 
 
-@pytest.fixture(autouse=True)
-def reset_push_throttle():
-    notification_service._last_push.clear()
-    yield
-    notification_service._last_push.clear()
-
-
 async def _emit_with_mocks(**kwargs):
     created = MagicMock(
         side_effect=lambda user_id, **values: {
@@ -65,9 +58,6 @@ async def test_stalled_incident_concurrent_updates_preserve_read_state_and_do_no
             "admin", severity="error", category="wake_failed", session_id="notice-race", message="missing cwd",
         )
         assert notifications.mark_read("admin", first["id"])
-        # Defeat the ordinary 60s push throttle: incident coalescing must itself
-        # prevent another push even long after the first error.
-        notification_service._last_push.clear()
         updates = await asyncio.gather(*[
             notification_service.emit_notification(
                 "admin", severity="error", category="wake_failed", session_id="notice-race", message=f"retry {i}",
@@ -79,7 +69,7 @@ async def test_stalled_incident_concurrent_updates_preserve_read_state_and_do_no
     assert notifications.unread_count("admin") == 0
     assert len(notifications.list_notifications("admin")) == 1
     assert broadcast.await_count == 9
-    push.assert_called_once()
+    push.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -130,7 +120,7 @@ async def test_legacy_surface_normalizes_before_persistence_and_broadcast(legacy
 
 
 @pytest.mark.asyncio
-async def test_mobile_push_default_and_throttle_are_unchanged():
+async def test_error_bell_events_no_longer_push():
     with patch("app.db.async_database.run_sync", new=AsyncMock(return_value=None)), \
          patch("app.core.sync_engine.sync_engine.broadcast_notification", new=AsyncMock()), \
          patch("app.services.push_notification.fire_and_forget_notify") as push:
@@ -143,5 +133,14 @@ async def test_mobile_push_default_and_throttle_are_unchanged():
 
     assert first["persist"] is True
     assert second["persist"] is True
-    push.assert_called_once()
-    assert push.call_args.kwargs["data"]["type"] == "notification"
+    push.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("category", ["session_complete", "session_parked", "watch", "question_expired", "update_available", "api_error"])
+async def test_even_legacy_explicit_push_flag_cannot_push(category):
+    _, created, broadcast, push = await _emit_with_mocks(
+        severity="error", message="Bell history still works", category=category, push=True)
+    created.assert_called_once()
+    broadcast.assert_awaited_once()
+    push.assert_not_called()

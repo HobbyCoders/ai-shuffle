@@ -194,105 +194,30 @@ def test_small_result_is_untouched(mock_db):
 # ─── NotifyDevices ───────────────────────────────────────────────────────────
 
 
-class _Result:
-    def __init__(self, success: bool, simulated: bool = False) -> None:
-        self.success = success
-        self.simulated = simulated
+def test_notify_only_requests_owner_attention_and_uses_tool_identity(mock_db):
+    from fluid.tools.registry import current_tool_use_id
+    from app.services.attention_dispatcher import dispatcher
+    token = current_tool_use_id.set("tool-notify-1")
+    try:
+        with patch.object(dispatcher, "reconcile", new=AsyncMock(return_value={"sent": True, "accepted": 1,
+                "note": "FCM acceptance is not proof of display"})) as send:
+            body = tool_result_json(asyncio.run(_builtin_handlers()["NotifyDevices"].handler(
+                {"title": "Private title", "body": "Private input", "data": {"password": "not-transmitted"}})))
+        send.assert_awaited_once_with("session-under-test", explicit_id="tool-notify-1")
+        assert body["sent"] is True
+        assert "delivered" not in body
+        assert "not proof of display" in body["note"]
+    finally:
+        current_tool_use_id.reset(token)
 
 
-def _notify(results):
-    service = AsyncMock()
-    service.send_to_all_devices = AsyncMock(return_value=results)
-    with patch(
-        "app.services.push_notification.push_notification_service", service
-    ):
-        return tool_result_json(
-            asyncio.run(
-                _builtin_handlers()["NotifyDevices"].handler(
-                    {"title": "Release", "body": "v1.2.3 is live"}
-                )
-            )
-        )
+def test_description_forbids_automatic_noise(mock_db):
+    description = _builtin_handlers()["NotifyDevices"].description.lower()
+    assert "only" in description and "owner" in description
+    for word in ("completion", "parking", "progress", "errors", "watches", "expiry", "updates"):
+        assert word in description
+    assert "not displayed or seen" in description
 
-
-def test_no_push_receiver_is_not_a_green_light(mock_db):
-    body = _notify([])
-
-    assert body["sent"] == 0
-    assert body["delivered"] is False
-    assert body["reason"] == "no device can receive push notifications"
-    assert "nothing was delivered" in body["note"]
-    assert "tell the user in chat" in body["note"]
-    assert "in-app notification center" in body["note"]
-    # Still not an exception: there is nothing to retry.
-    assert body["success"] is True
-
-
-def test_every_device_rejecting_is_also_undelivered(mock_db):
-    body = _notify([_Result(False), _Result(False)])
-
-    assert body["sent"] == 2
-    assert body["successful"] == 0
-    assert body["delivered"] is False
-    assert body["reason"] == "all 2 device(s) rejected the push"
-    assert "nothing was delivered" in body["note"]
-
-
-def test_a_mock_mode_send_is_not_a_delivery(mock_db):
-    """No Firebase credentials: the FCM path "succeeds" without sending."""
-    body = _notify([_Result(True, simulated=True)])
-
-    assert body["sent"] == 1
-    assert body["successful"] == 0
-    assert body["delivered"] is False
-    assert "mock mode" in body["reason"]
-    assert "in-app notification center" in body["note"]
-
-
-def test_a_real_delivery_carries_no_note(mock_db):
-    body = _notify([_Result(True), _Result(False)])
-
-    assert body["sent"] == 2
-    assert body["successful"] == 1
-    assert body["delivered"] is True
-    assert "note" not in body
-    assert "reason" not in body
-
-
-def test_legacy_row_left_by_the_v90_migration_is_not_delivered(mock_db):
-    """R10-13 / NC-2: Android builds from 2026-06-24 to 2026-09-06 registered
-    ``supports_push: true`` with a UnifiedPush endpoint. v90 dropped the
-    endpoint and cleared the token, so what remains declares push with no
-    transport; the current app has no receiver, so NotifyDevices must not
-    send to it or count it."""
-    from app.services.push_notification import push_notification_service
-
-    devices = [{
-        "device_id": "phone",
-        "fcm_token": None,
-        "capabilities": {"supports_push": True, "supports_biometric": True},
-    }]
-    posted = AsyncMock()
-    with patch("app.db.mobile.get_all_mobile_devices", return_value=devices), \
-            patch.object(push_notification_service, "send_notification", posted):
-        body = tool_result_json(
-            asyncio.run(
-                _builtin_handlers()["NotifyDevices"].handler(
-                    {"title": "Release", "body": "v1.2.3 is live"}
-                )
-            )
-        )
-
-    posted.assert_not_awaited()
-    assert body["delivered"] is False
-    assert body["reason"] == "no device can receive push notifications"
-
-
-def test_description_says_push_usually_reaches_nobody(mock_db):
-    description = _builtin_handlers()["NotifyDevices"].description
-    assert "no device can receive push notifications" in description.lower()
-    assert "chat" in description.lower()
-    assert "in-app notification center" in description.lower()
 
 def test_stored_error_trace_preserves_final_exception_and_bounded_detail(mock_db):
     from app.db import error_logs
@@ -337,26 +262,18 @@ def test_logger_to_error_store_keeps_final_exception_beyond_store_cap(mock_db):
     assert page["total_chars"] == 20000
 
 
-def test_a_mix_of_mock_and_rejected_sends_names_both(mock_db):
-    """R10-23: it read "all 2 device(s) rejected the push"."""
-    body = _notify([_Result(True, simulated=True), _Result(False)])
-
-    assert body["delivered"] is False
-    assert body["reason"] == (
-        "1 device(s) rejected the push and 1 send(s) were mock mode (no Firebase credentials)"
-    )
-
-
 def test_an_unreadable_device_list_is_not_reported_as_no_receiver(mock_db):
     """R10-23: a failed device-list read read as "no device can receive push"."""
     from app.services.push_notification import DeviceListUnavailable
 
-    service = AsyncMock()
-    service.send_to_all_devices = AsyncMock(side_effect=DeviceListUnavailable("db down"))
-    with patch("app.services.push_notification.push_notification_service", service):
-        body = tool_result_json(asyncio.run(_builtin_handlers()["NotifyDevices"].handler(
-            {"title": "Release", "body": "v1.2.3 is live"})))
-
-    assert body["delivered"] is False
-    assert body["reason"] == "the registered device list could not be read"
-    assert service.send_to_all_devices.await_args.kwargs["raise_lookup_errors"] is True
+    from fluid.tools.registry import current_tool_use_id
+    from app.services.attention_dispatcher import dispatcher
+    token = current_tool_use_id.set("tool-unavailable")
+    try:
+        with patch.object(dispatcher, "reconcile", new=AsyncMock(side_effect=DeviceListUnavailable("db down"))):
+            body = tool_result_json(asyncio.run(_builtin_handlers()["NotifyDevices"].handler(
+                {"title": "Need your input", "body": "Please answer in chat"})))
+        assert body["success"] is False
+        assert "ask the owner in chat" in body["error"]
+    finally:
+        current_tool_use_id.reset(token)

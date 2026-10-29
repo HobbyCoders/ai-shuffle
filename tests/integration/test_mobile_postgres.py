@@ -120,7 +120,7 @@ def pg(monkeypatch, tmp_path):
             CREATE TABLE mobile_devices (
                 id TEXT PRIMARY KEY, device_id TEXT NOT NULL UNIQUE,
                 device_name TEXT NOT NULL, platform TEXT NOT NULL,
-                api_key_hash TEXT NOT NULL, capabilities JSONB DEFAULT '{}',
+                api_key_hash TEXT NOT NULL, capabilities JSONB DEFAULT '{}', fcm_token TEXT,
                 paired_client_id TEXT, api_key_expires_at TIMESTAMPTZ,
                 scopes JSONB NOT NULL DEFAULT '["controller"]',
                 paired_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -489,6 +489,20 @@ def test_account_authorization_cannot_race_away_worker_denial(pg):
         pg.hub.confirm_device(owner, True, account_binding=binding)
 
 
+def test_push_registration_rotation_and_unpair_do_not_restore_a_token(pg, renewal):
+    with pg.transaction() as conn:
+        conn.cursor().execute("UPDATE mobile_devices SET scopes='[\"mobile:notifications\"]' WHERE id=%s", (renewal.device['id'],))
+    device = pg.rows('mobile_devices')[0]
+    assert pg.mobile.set_push_token(device, 'first-registration')
+    assert pg.mobile.set_push_token(device, 'rotated-registration')
+    pg.mobile.clear_push_token(device['id'], 'first-registration')
+    assert pg.rows('mobile_devices')[0]['fcm_token'] == 'rotated-registration'
+    assert pg.pairing.revoke_paired_client(renewal.owner['paired_client_id'])
+    assert pg.rows('mobile_devices')[0]['fcm_token'] is None
+    assert not pg.mobile.set_push_token(device, 'late-registration')
+    assert pg.rows('mobile_devices')[0]['fcm_token'] is None
+
+
 def test_concurrent_renewals_recover_exactly_one_replacement(pg, renewal):
     import hashlib
 
@@ -508,6 +522,8 @@ def test_concurrent_renewals_recover_exactly_one_replacement(pg, renewal):
 @pytest.mark.parametrize('stop', ['deny', 'revoke'])
 @pytest.mark.parametrize('first', ['renew', 'stop'])
 def test_renewal_and_worker_denial_or_revocation_share_real_row_lock(pg, renewal, monkeypatch, first, stop):
+    with pg.transaction() as conn:
+        conn.cursor().execute("UPDATE mobile_devices SET fcm_token='registration-token' WHERE id=%s", (renewal.device['id'],))
     held, attempted, acquired_second, release = (threading.Event() for _ in range(4))
     local = threading.local()
     pids = {}
@@ -578,6 +594,8 @@ def test_renewal_and_worker_denial_or_revocation_share_real_row_lock(pg, renewal
         assert len(pg.rows('mobile_key_renewals')) == 1
     # A retry cannot restore authority, whichever transaction won the race.
     current = pg.rows('mobile_devices')[0]
+    if stop == 'revoke':
+        assert current['fcm_token'] is None
     for key_hash in (renewal.old_hash, current['api_key_hash']):
         with pytest.raises(ValueError):
             pg.mobile.renew_mobile_key(current, key_hash, 'aim-after-revocation')

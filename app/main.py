@@ -334,6 +334,8 @@ async def lifespan(app: FastAPI):
     if runner_approved:
         await start_services()
         bg_tasks = start_background_tasks()
+        from app.services.attention_dispatcher import dispatcher
+        bg_tasks.append(asyncio.create_task(dispatcher.run(), name="attention-push"))
         if os.environ.get("AI_SHUFFLE_SCRATCH_REAPER") != "0":
             from app.core.scratch_reaper import maintain_scratch
             bg_tasks.append(asyncio.create_task(maintain_scratch(), name="scratch-maintenance"))
@@ -692,6 +694,8 @@ app.include_router(emulator_api.router)
 app.include_router(terminals_api.router)
 app.include_router(terminals_api.ws_router)
 app.include_router(mobile.router)
+from app.api import push
+app.include_router(push.router)
 from app.api import mobile_tools
 app.include_router(mobile_tools.router)
 app.include_router(pairing.router)

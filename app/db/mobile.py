@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
-from app.db.base import get_db
+from app.db.base import get_db, parse_jsonb
 
 
 # ============================================================================
@@ -244,3 +244,45 @@ def delete_mobile_device(device_id: str) -> bool:
 def get_mobile_devices() -> List[MobileDeviceRow]:
     """Get all mobile devices (alias for get_all_mobile_devices)"""
     return get_all_mobile_devices()
+
+
+# Push registrations are worker-local, bound to the live paired credential.
+def push_device_is_live(device: Dict[str, Any]) -> bool:
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute("""SELECT d.id FROM mobile_devices d JOIN paired_clients p ON p.id=d.paired_client_id
+            WHERE d.id=%s AND d.api_key_hash=%s AND d.revoked_at IS NULL
+            AND p.revoked_at IS NULL AND p.device_id=d.device_id""", (device["id"], device["api_key_hash"]))
+        return c.fetchone() is not None
+
+
+def set_push_token(device: Dict[str, Any], token: Optional[str]) -> bool:
+    with get_db() as conn:
+        c = conn.cursor()
+        # Same paired-client-first lock order as unpair/renewal. A stale native
+        # request cannot re-register after removal, re-pairing or key rotation.
+        c.execute("SELECT * FROM paired_clients WHERE id=%s FOR UPDATE", (device.get("paired_client_id"),))
+        client = c.fetchone()
+        if not client or client["revoked_at"] or client["device_id"] != device["device_id"]:
+            return False
+        c.execute("SELECT * FROM mobile_devices WHERE id=%s FOR UPDATE", (device["id"],))
+        row = c.fetchone()
+        from app.core.device_keys import key_expiry
+        from datetime import datetime, timezone
+        if (not row or row["revoked_at"] or row["api_key_hash"] != device["api_key_hash"]
+                or row["paired_client_id"] != client["id"]
+                or "mobile:notifications" not in (parse_jsonb(row["scopes"]) or [])
+                or key_expiry(row) <= datetime.now(timezone.utc)):
+            return False
+        caps = _parse_capabilities(row["capabilities"])
+        caps["supports_push"] = token is not None
+        c.execute("UPDATE mobile_devices SET fcm_token=%s, capabilities=%s WHERE id=%s",
+                  (token, json.dumps(caps), device["id"]))
+        return True
+
+
+def clear_push_token(record_id: str, expected_token: str) -> None:
+    """A rejected old send must not erase a newly rotated token."""
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE mobile_devices SET fcm_token=NULL WHERE id=%s AND fcm_token=%s",
+                              (record_id, expected_token))

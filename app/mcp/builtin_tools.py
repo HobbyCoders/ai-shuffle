@@ -1964,88 +1964,36 @@ def create_builtin_tools_server(
     # ------------------------------------------------------------------
     @tool(
         "NotifyDevices",
-        "Send a push notification to registered mobile devices that can "
-        "receive push. Use for alerting the user to long-running task "
-        "completion or important events.\n"
-        "\n"
-        "Current app versions do not receive push, so usually no device can: "
-        "the result then says delivered: false with reason 'no device can "
-        "receive push notifications'. `delivered` is true only when a device "
-        "that receives push acknowledged the message. Whenever delivered is "
-        "false the user has not been told — say it in chat instead; the "
-        "in-app notification center is the channel that reaches them.",
-        {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string"},
-                "body": {"type": "string"},
-                "data": {"type": "object", "description": "Optional custom data payload."},
-            },
-            "required": ["title", "body"],
-        },
+        "Ask for the owner ONLY when you explicitly need their input or action. "
+        "Never for completions, parking, progress, errors, watches, expiry or updates. "
+        "Questions and approval/access cards trigger Needs you automatically; do not double-notify. "
+        "One notification per episode; retries dedupe by tool-use id. "
+        "Lock-screen text is generic (AI Shuffle / chat title), never title/body/data. "
+        "sent means FCM accepted, not displayed or seen. If not sent, ask in chat.",
+        {"type": "object", "properties": {
+            "title": {"type": "string", "description": "Why you need the owner (not sent to the lock screen)."},
+            "body": {"type": "string", "description": "The input or action you need (not sent to the lock screen)."},
+            "data": {"type": "object", "description": "Ignored; private data is never sent."},
+        }, "required": ["title", "body"]},
     )
     async def push_notification(args: dict) -> dict:
-        title = (args.get("title") or "").strip()
-        body = (args.get("body") or "").strip()
-        if not title or not body:
-            return _err("title and body are required.")
+        if not session_id:
+            return _err("NotifyDevices requires a chat session.")
+        from fluid.tools.registry import current_tool_use_id
+        from app.services.attention_dispatcher import dispatcher
+        tool_use_id = current_tool_use_id.get()
+        if not tool_use_id:
+            # The CLI's in-process MCP transport has no ToolCtx. Its pre-tool
+            # hook has already appended the canonical tool.use to the event log.
+            from app.services.attention_dispatcher import latest_notify_tool_id
+            tool_use_id = await asyncio.to_thread(latest_notify_tool_id, session_id)
+        if not tool_use_id:
+            return _err("No stable tool-use id; nothing sent. Ask the owner in chat instead.")
         try:
-            from app.services.push_notification import (
-                DEVICE_LIST_UNAVAILABLE_REASON,
-                IN_APP_CHANNEL_NOTE,
-                NO_PUSH_RECEIVER_REASON,
-                DeviceListUnavailable,
-                delivered_count,
-                push_notification_service,
-            )
-            lookup_failed = False
-            try:
-                results = await push_notification_service.send_to_all_devices(
-                    title=title, body=body, data=args.get("data"),
-                    raise_lookup_errors=True,
-                )
-            except DeviceListUnavailable:
-                results, lookup_failed = [], True
-            # ``successful`` counts only acknowledgements from a device that
-            # receives push: a mock-mode send left nothing on this server.
-            successful = delivered_count(results)
-            payload: Dict[str, Any] = {
-                "sent": len(results),
-                "successful": successful,
-                "delivered": successful > 0,
-            }
-            # A bare {"sent": 0, "successful": 0} reads as success. It is the
-            # opposite: the model would move on believing the user had been
-            # told. Not an exception — there is nothing to retry — but not a
-            # green light either.
-            if not results:
-                payload["reason"] = (
-                    DEVICE_LIST_UNAVAILABLE_REASON if lookup_failed else NO_PUSH_RECEIVER_REASON
-                )
-            elif not successful:
-                simulated = sum(1 for r in results if getattr(r, "simulated", False))
-                rejected = len(results) - simulated
-                if not rejected:
-                    payload["reason"] = (
-                        "push is in mock mode (no Firebase credentials); nothing "
-                        "left this server"
-                    )
-                elif simulated:
-                    payload["reason"] = (
-                        f"{rejected} device(s) rejected the push and {simulated} "
-                        "send(s) were mock mode (no Firebase credentials)"
-                    )
-                else:
-                    payload["reason"] = f"all {rejected} device(s) rejected the push"
-            if not successful:
-                payload["note"] = (
-                    f"{payload['reason']} — nothing was delivered; tell the "
-                    f"user in chat instead. {IN_APP_CHANNEL_NOTE}"
-                )
-            return _ok(payload)
-        except Exception as e:
+            return _ok(await dispatcher.reconcile(session_id, explicit_id=tool_use_id))
+        except Exception:
             logger.exception("NotifyDevices failed")
-            return _err(f"send failed: {e}")
+            return _err("Push could not be sent; ask the owner in chat instead.")
 
     all_tools.append(push_notification)
 

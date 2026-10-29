@@ -60,6 +60,9 @@ def set_session_write_hook(hook: Optional[Callable[[str, str], None]]) -> None:
 
 def notify_session_write(session_id: Optional[str], collection: str) -> None:
     """Tell the network a session's shared state changed. Never raises."""
+    if session_id:
+        from app.services.attention_dispatcher import wake
+        wake(session_id)
     hook = _session_write_hook
     if hook is None or not session_id:
         return

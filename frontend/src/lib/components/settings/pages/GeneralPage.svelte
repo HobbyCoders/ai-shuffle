@@ -23,6 +23,7 @@
 	import Switch from '../rows/Switch.svelte';
 	import { getEntry } from '$lib/settings/registry';
 	import ThemeStyleGrid from './editors/ThemeStyleGrid.svelte';
+	import NotificationsRow from './editors/NotificationsRow.svelte';
 
 	type ThemeChoice = 'light' | 'dark' | 'system';
 	const THEME_OPTIONS: { value: ThemeChoice; label: string }[] = [
@@ -137,6 +138,7 @@
 </script>
 
 <PreferencePage category="general">
+	<NotificationsRow />
 	<RowGroup title="Appearance">
 		<SettingRow id="general.theme">
 			<Segmented options={THEME_OPTIONS} value={$themePreference} onchange={setTheme} />

@@ -9,15 +9,12 @@ Every server-originated notification / banner goes through ``emit_notification``
 2. **Broadcast** it live over the user-scoped ``notification`` WS event
    (``SyncEngine.broadcast_notification``) so it reaches *every* device the user
    has open — not just one watching the originating session.
-3. **Optionally push** to mobile for high-severity notifications, reusing the
-   existing ``fire_and_forget_notify`` adapter (cluster + local fan-out), with a
-   per-(user, category) throttle so an error storm (e.g. repeated 429s) can't
-   spam the user's phone.
+Phone push is deliberately separate: only the attention dispatcher can send.
+Errors, completions, parking, watches and expiry notices stay in the bell.
 
-This replaces the ad-hoc emit points (``api_error`` yielded from the stream,
-``session_complete`` firing only an OS notification) with one funnel. Mobile
-push / webhooks / connectors remain *delivery adapters* downstream — not
-rebuilt here.
+This replaces the ad-hoc bell emit points (``api_error`` and
+``session_complete``) with one persist-and-broadcast funnel. Mobile push is
+not a delivery adapter for this funnel.
 
 Defensive throughout: a notification failing to persist or broadcast must never
 break the streaming / request path it was emitted from.
@@ -41,29 +38,9 @@ def _normalize_surface(surface: Optional[str]) -> str:
     """Collapse legacy wire values into the two supported surfaces."""
     return "banner" if surface == "banner" else "notification"
 
-# Severities that warrant a mobile push by default (high signal only).
-_PUSH_BY_DEFAULT = {"error"}
-
-# Per-(user, category) mobile-push throttle: at most one push per window so an
-# error storm can't spam the phone. Live WS + history persistence are NOT
-# throttled — only the outbound push.
-_PUSH_THROTTLE_SECONDS = 60.0
-_last_push: Dict[str, float] = {}
-
-
 def _should_push(user_id: str, category: Optional[str], severity: str, explicit: Optional[bool]) -> bool:
-    """Decide whether to fire a mobile push, applying the per-category throttle."""
-    want = explicit if explicit is not None else (severity in _PUSH_BY_DEFAULT)
-    if not want:
-        return False
-    key = f"{user_id}\x1f{category or severity}"
-    now = time.monotonic()
-    last = _last_push.get(key)
-    if last is not None and (now - last) < _PUSH_THROTTLE_SECONDS:
-        logger.debug("Mobile push throttled for %s (category=%s)", user_id, category)
-        return False
-    _last_push[key] = now
-    return True
+    """Bell events never push, even for legacy callers passing push=True."""
+    return False
 
 
 async def emit_notification(
@@ -97,7 +74,7 @@ async def emit_notification(
             unless this is explicitly true.
         action: Optional ``{"kind": str, "payload": dict}`` action descriptor,
             stored so the frontend can rebuild the button on hydration.
-        push: Override the severity-based mobile-push default.
+        push: Retired compatibility argument; ignored. Bell events never push.
 
     Returns the persisted notification (wire shape) or ``None`` on failure.
     Never raises — emitting a notification must not break its caller.
@@ -163,25 +140,6 @@ async def emit_notification(
         await sync_engine.broadcast_notification(user_id, record)
     except Exception:
         logger.debug("emit_notification: broadcast failed", exc_info=True)
-
-    # 3. Optional mobile push for high-severity, throttled per category.
-    if (record.get("occurrence_count", 1) <= 1
-            and _should_push(user_id, category, severity, push)):
-        try:
-            from app.services.push_notification import fire_and_forget_notify
-
-            fire_and_forget_notify(
-                title=title or _default_push_title(severity),
-                body=message,
-                data={
-                    "type": "notification",
-                    "severity": severity,
-                    "category": category,
-                    "session_id": session_id,
-                },
-            )
-        except Exception:
-            logger.debug("emit_notification: push failed", exc_info=True)
 
     return record
 

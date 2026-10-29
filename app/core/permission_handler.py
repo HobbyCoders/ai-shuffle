@@ -534,22 +534,6 @@ class PermissionHandler:
             session_id, interaction_id, request_id, PERMISSION_KIND, payload,
         )
 
-        # Notify watching mobile devices.
-        try:
-            from app.services.push_notification import fire_and_forget_notify
-
-            fire_and_forget_notify(
-                title="Permission needed",
-                body=f"Approve {display_name or tool_name}?",
-                data={
-                    "type": "permission_request",
-                    "session_id": session_id,
-                    "request_id": request_id,
-                },
-            )
-        except Exception:
-            pass
-
         logger.debug(f"Permission request persisted (v2): {request_id} for {tool_name}")
 
         # Block on the durable row: a peer install's answer wakes us via the

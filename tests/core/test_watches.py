@@ -100,7 +100,7 @@ async def test_alert_after_creator_settled_and_stop_from_chat(
     )
     await manager.WatchManager().run_once()
     await manager.WatchManager().run_once()
-    assert summary.await_count == 1 and len(push) == 1
+    assert summary.await_count == 1 and len(push) == 0
     current = store.get(watch["id"])
     assert current["cost_usd"] == 0.002 and current["creator_notified"]
     from app.db import notifications
@@ -828,7 +828,7 @@ async def test_expired_investigation_after_notification_reuses_chat(
     await manager.WatchManager().run_once()
     turn = turns.get_turn_by_command(event["session_id"], event["id"])
     assert turn and turn["source"] == "watch"
-    assert len(pushed) == 1
+    assert pushed == []
     assert store.events(watch["id"])[0]["session_id"] == event["session_id"]
 
 

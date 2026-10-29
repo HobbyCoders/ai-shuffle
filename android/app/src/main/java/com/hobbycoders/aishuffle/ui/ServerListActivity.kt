@@ -19,6 +19,9 @@ import com.hobbycoders.aishuffle.presence.WorkerPresence
 import com.hobbycoders.aishuffle.presence.WorkerPresenceMonitor
 
 class ServerListActivity : NativeScreen() {
+    private val pushPermission = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) {
+        com.hobbycoders.aishuffle.push.PushRegistration.schedule(this)
+    }
     private class StatusRow(val server: Server, val label: TextView, val dot: View)
     private val statusRows = mutableMapOf<String, StatusRow>()
     private val presence by lazy { WorkerPresenceMonitor(this, lifecycleScope, ::updatePresence) }
@@ -45,6 +48,8 @@ class ServerListActivity : NativeScreen() {
     override fun onResume() {
         super.onResume()
         render()
+        com.hobbycoders.aishuffle.push.PushPermission.ask(this) { pushPermission.launch(it) }
+        com.hobbycoders.aishuffle.push.PushRegistration.schedule(this)
         if (intent.getBooleanExtra("auth_expired", false)) {
             status.text = "Your sign-in expired. Sign in again to restore your workers."
             intent.removeExtra("auth_expired")

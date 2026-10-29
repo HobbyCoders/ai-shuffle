@@ -24,6 +24,17 @@ Chat shows the phone UI the paired worker serves at `https://<worker>/mobile/` (
 
 The APK bundles one copy of the phone UI for the offline demo only (Settings → offline demo, no worker). Run `bash scripts/sync-offline-demo.sh` before assembling: it builds `mobile/` and copies it to `app/src/main/assets/offline-demo/` (git-ignored). Gradle's `checkOfflineDemo` task refuses to assemble without it.
 
+## Firebase setup for Needs you push
+
+Push is optional and free; no Firebase resources are created by this repository. After merge, the owner/coordinator must:
+
+1. Create/select a Firebase project, enable **Firebase Cloud Messaging API (HTTP v1)**, and register an Android app with package **`com.hobbycoders.aishuffle`**. For FCM alone, **no SHA-1 or SHA-256 certificate fingerprints are required**. Do not change the existing Play signing key; if another Firebase feature later needs fingerprints, use the Play App Signing certificate (and debug certificate for debug builds), not an arbitrary replacement key.
+2. Download that Android app's `google-services.json`. Store its complete JSON as the **repository Actions secret `GOOGLE_SERVICES_JSON`**. The signed owner-authorized Android publication builds and Play build workflow write it to `android/app/google-services.json` when available; unsigned Android CI deliberately tests the no-config build. It is git-ignored. Gradle applies the Google Services plugin only if this file exists; without it the app still builds with `PUSH_ENABLED=false` and does not register or receive push.
+3. Create/download a sender service-account JSON for that same project with the least permission needed to send FCM messages (the `cloudmessaging.messages.create` permission, for example via Firebase Cloud Messaging API Admin). This is a **different secret** from the client `google-services.json` and from Play publishing credentials. Enter it only in the worker's **Settings → General → Notifications** password field (paste). It is encrypted and synced like provider billing keys. Never store it in GitHub source, an env file, issue, PR or chat.
+4. Install the Firebase-configured Android build, pair each worker you want to receive from, and accept the one-time notification prompt. Confirm that each worker's Notifications row shows credentials set and a registered device. On a real phone, exercise one question/answer and verify one alert, silent additions, cancellation and tap routing. Real FCM/device delivery cannot be verified without this owner setup.
+
+There is one high-importance **Needs you** channel, no push foreground service and no ongoing push notification. Device registrations are authenticated and worker-local. The server's owner-attention outbox plus Android's persisted per-session receipts deduplicate retries, reconnects and worker mirrors. Only the executing chat owner worker may send. User settings and Android can still suppress display; FCM acceptance never claims the owner saw the notification.
+
 ## Build and test
 
 Use JDK 21 (Robolectric needs it; app bytecode targets 17) and the Android SDK. From this directory:
