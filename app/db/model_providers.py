@@ -779,6 +779,5 @@ from app.core.resource_sync import install_database_mutations as _install_resour
 _install_resource_sync(
     globals(), 'settings',
     'create_model_provider update_model_provider delete_model_provider '
-    'set_model_provider_enabled set_codex_token_bundle '
-    'set_openai_billing_binding clear_openai_billing_binding',
+    'set_model_provider_enabled set_codex_token_bundle',
 )

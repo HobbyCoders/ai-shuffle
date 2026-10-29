@@ -4,14 +4,13 @@ from unittest.mock import patch
 import pytest
 
 from app.core import resource_sync
-from app.db import database, model_providers, provider_balances
+from app.db import database, model_providers
 from app.network import startup, transport
 
 
 SHARED_WRITERS = (
     "create_model_provider", "update_model_provider", "delete_model_provider",
     "set_model_provider_enabled", "set_codex_token_bundle",
-    "set_openai_billing_binding", "clear_openai_billing_binding",
 )
 
 
@@ -22,15 +21,10 @@ def test_shared_provider_writer_registration(name):
     assert getattr(database, name) is writer
 
 
-def test_balance_binding_registration():
-    assert provider_balances.bind.resource_sync == ("settings", "admin")
-
-
 @pytest.mark.parametrize("writer", [
     model_providers.record_credential_check,
     model_providers.try_claim_codex_refresh,
     model_providers.release_codex_refresh_claim,
-    provider_balances.snapshot,
 ])
 def test_local_provider_writers_do_not_request_publication(writer):
     assert not getattr(writer, "resource_sync", None)
@@ -56,10 +50,6 @@ def test_real_provider_commits_request_immediate_scan(workers, monkeypatch):
         committed(lambda: database.update_model_provider("provider", name="Renamed"))
         committed(lambda: database.set_model_provider_enabled("provider", False))
         committed(lambda: database.set_model_provider_enabled("provider", True))
-        committed(lambda: database.set_openai_billing_binding("provider", "org", "install"))
-        committed(lambda: database.clear_openai_billing_binding("provider"))
-        committed(lambda: provider_balances.bind(
-            database.get_model_provider("provider", include_token=True), "install", None))
         committed(lambda: database.set_codex_token_bundle(
             "provider", access_token=None, refresh_token=None, account_id="account"))
         requests.clear()
