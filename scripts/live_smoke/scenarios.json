@@ -552,16 +552,6 @@
           ]
         },
         {
-          "id": "two-worker-smoke.transcript-op-retention",
-          "check": "A long-offline worker recovers complete history after duplicate sync-log cleanup",
-          "kind": "owner",
-          "needs": ["install"],
-          "two_worker": true,
-          "how": "Use three disposable candidate workers, never production data. Create a throwaway chat on A and sync its prefix to B and C. Disconnect C, append more events on A, and let B exchange again to acknowledge them. In the disposable databases only, age A's event operations and C's persisted sync_peers contact beyond the configured grace (default 30 days); restart only the candidates to clear in-memory observations, then run the scheduled maintenance pass. Keep A/B exchanging. Reconnect C through ordinary sync and wait for the automatic state copy and transcript backfill, then append another message. Repeat enrollment with a recipient requesting state-copy format 1. Read the retention metrics and compare canonical transcript ids, seqs and payloads before and after. Leave physical space reclamation to a separately approved maintenance window.",
-          "pass_when": "Aged duplicate operations are bounded by recent peer frontiers and stream-head anchors; recent unknown peers pin until contact or grace expiry, and signed revocation unpins immediately. Canonical transcript/Fluid rows are unchanged. B keeps receiving new events. C receives every transcript event exactly once without re-pairing or a manual copy, then resumes ordinary operation sync. Format-1 enrollment receives the full transcript. The disable flag prevents the new pruning pass. Real installed-worker timing and mixed-binary behavior need this receipt; the deterministic PostgreSQL/HTTP lab is not an installed-worker pass.",
-          "past_bug": "The latest-op exception kept one signed payload forever for every append-only transcript event."
-        },
-        {
           "id": "two-worker-smoke.no-project-chat-move",
           "check": "A no-project chat moves to the other worker and back",
           "kind": "owner",
@@ -600,6 +590,16 @@
           "how": "Use a real Android phone with the candidate APK and two disposable candidate workers A and B; never interrupt production workers. Authorize this phone on both, use B then A, close and relaunch the app: it must open A. Make A unreachable and relaunch: it must open B. Restore A, manually select it and repeat an outage after its chat opens, once during session bootstrap (Refresh chat) and once during a main-frame page load. Record the selected worker and notice. Bring A back while B is working: the phone must stay on B. Drop B within A's cooldown and confirm no immediate bounce to A; repeat outages and record retry timing/backoff. With neither reachable, confirm connection errors and native Workers still permit retrying or adding a worker. On a separate throwaway phone profile, sync the account while B is offline so its listing is saved without a phone key. Bring B online, make A unreachable and trigger reconnect: automatic failover must still skip keyless B. Restore A and open it again, then manually choose B in the chip, follow the native Workers authorization prompt, and tap B to run account enrollment. Confirm chat opens only after the phone key is saved; never inspect or publish the key. Restore the disposable candidates and remove the throwaway phone profile afterwards.",
           "pass_when": "Startup opens the last-used reachable authorized worker, otherwise the next reachable authorized worker in recent-use order. Both bootstrap and main-frame failures switch automatically with one short offline/connected notice after the replacement loads. Healthy connections never move merely because A returns. Failed origins cannot immediately ping-pong; retries back off from 60 seconds up to five minutes across activity hand-offs. No reachable authorized worker leaves a usable connection/setup fallback. A keyless account listing is never an automatic target and cannot open chat before enrollment. Manual selection opens native Workers with an authorize-this-phone prompt; tapping the worker obtains its one-use enrollment ticket, saves this phone's per-worker key and opens chat. No credential appears in a URL or crosses to another worker. Record actual phone and candidate-worker evidence, not fixture-only results.",
           "past_bug": "The phone required manual switching after an outage; a manually selected keyless account worker could only show a toast, leaving native enrollment unreachable."
+        },
+        {
+          "id": "two-worker-smoke.transcript-op-retention",
+          "check": "A long-offline worker recovers complete history after duplicate sync-log cleanup",
+          "kind": "owner",
+          "needs": ["install"],
+          "two_worker": true,
+          "how": "Use three disposable candidate workers, never production data. Create a throwaway chat on A and sync its prefix to B and C. Disconnect C, append more events on A, and let B exchange again to acknowledge them. In the disposable databases only, age A's event operations and C's persisted sync_peers contact beyond the configured grace (default 30 days); restart only the candidates to clear in-memory observations, then run the scheduled maintenance pass. Keep A/B exchanging. Reconnect C through ordinary sync and wait for the automatic state copy and transcript backfill, then append another message. Repeat enrollment with a recipient requesting state-copy format 1. Read the retention metrics and compare canonical transcript ids, seqs and payloads before and after. Leave physical space reclamation to a separately approved maintenance window.",
+          "pass_when": "Aged duplicate operations are bounded by recent peer frontiers and stream-head anchors; recent unknown peers pin until contact or grace expiry, and signed revocation unpins immediately. Canonical transcript/Fluid rows are unchanged. B keeps receiving new events. C receives every transcript event exactly once without re-pairing or a manual copy, then resumes ordinary operation sync. Format-1 enrollment receives the full transcript. The disable flag prevents the new pruning pass. Real installed-worker timing and mixed-binary behavior need this receipt; the deterministic PostgreSQL/HTTP lab is not an installed-worker pass.",
+          "past_bug": "The latest-op exception kept one signed payload forever for every append-only transcript event."
         }
       ]
     },
