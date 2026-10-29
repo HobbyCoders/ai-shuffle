@@ -136,3 +136,46 @@ describe('settled turn media gallery', () => {
 		expect(buildDisplayItems([user, answer], options).find(item => item.kind === 'work_log')?.kind).toBe('work_log');
 	});
 });
+
+describe('generated media in the turn gallery (#784)', () => {
+	const art = (hash: string) => `/api/v1/artifacts/${hash}`;
+	const unified = (output: Record<string, unknown>) =>
+		JSON.stringify({ status: 'completed', success: true, result: { success: true, ...output } });
+	const made = (id: string, result: string, over: Partial<ChatMessage> = {}) =>
+		message(id, { type: 'tool_use', toolName: 'generateImage', toolStatus: 'complete', toolResult: result, ...over });
+
+	it('collects completed generation results, de-duplicated against prose', () => {
+		const gallery = galleryMediaForTurn([
+			made('g1', unified({ image_url: art('a') })),
+			made('g2', JSON.stringify({ success: true, image_url: art('b') })),
+			message('reply', { type: 'text', content: `![A](${art('a')}) ![B](${art('b')})` })
+		]);
+		expect(gallery.map((item) => item.src)).toEqual([art('a'), art('b')]);
+	});
+
+	it('leaves out refused, running, streaming and errored calls, and audio', () => {
+		const gallery = galleryMediaForTurn([
+			made('r', JSON.stringify({ status: 'refused', success: false, result: { success: true, image_url: art('r') } })),
+			made('run', unified({ image_url: art('run') }), { toolStatus: 'running' }),
+			made('s', unified({ image_url: art('s') }), { streaming: true }),
+			made('e', unified({ image_url: art('e') }), { toolStatus: 'error' }),
+			made('au', unified({ audio_url: art('au') })),
+			made('ok', unified({ image_url: art('ok') }))
+		]);
+		expect(gallery).toEqual([]);
+	});
+
+	it('drops a reply image the gallery shows even by its extension-less artifact URL', () => {
+		const html = rewriteWithGallery(`Both:\n\n![A](${art('a')})\n\n![Other](${art('z')})`, new Set([art('a')]));
+		expect(html).toContain('Both:');
+		expect(html).not.toContain(`![A](${art('a')})`);
+		expect(html).toContain(`![Other](${art('z')})`);
+	});
+
+	it('keeps the safe-source check', () => {
+		expect(galleryMediaForTurn([
+			made('bad', unified({ image_url: 'javascript:alert(1)' })),
+			made('ok1', unified({ image_url: art('1') }))
+		])).toEqual([]);
+	});
+});

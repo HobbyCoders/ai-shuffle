@@ -2182,3 +2182,107 @@ describe('hand-off: one transcript row', () => {
 		expect(third.handoffs).not.toBe(first.handoffs);
 	});
 });
+
+describe('generated media outside the fold (#784)', () => {
+	const art = (hash: string) => `/api/v1/artifacts/${hash}?session_id=s-784`;
+	const price = { currency: 'USD', amount: '0.04', total: '0.04', status: 'estimated' };
+	// The unified tools' envelope (app/core/generation_resolver.py).
+	const unified = (output: Record<string, unknown>) =>
+		JSON.stringify({ status: 'completed', success: true, price, result: { success: true, ...output } });
+	const generation = (result: string, over: Partial<ChatMessage> = {}) =>
+		tool({ toolName: 'mcp__ai-tools__generateImage', toolInput: { prompt: 'a lighthouse' }, toolResult: result, ...over });
+	const settled = (messages: ChatMessage[]) => {
+		const fold = settledFolds(buildDisplayItems(messages, SETTLED))[0];
+		if (fold?.kind !== 'work_log') throw new Error('expected a settled work log');
+		return fold;
+	};
+	const entryOf = (fold: ReturnType<typeof settled>, message: ChatMessage) =>
+		fold.sequence.find((entry) => entry.message.id === message.id)!;
+
+	it('keeps a single generated image visible, out of the collapsed fold', () => {
+		const made = generation(unified({ image_url: art('one') }));
+		const fold = settled([user('draw it'), tool(), made, text('Done.')]);
+		expect(entryOf(fold, made).hiddenWhenCollapsed).toBe(false);
+		expect(fold.folded.map((entry) => entry.message.id)).not.toContain(made.id);
+		expect(fold.gallery).toEqual([]);
+	});
+
+	it('keeps the old top-level result shape visible too', () => {
+		const made = generation(JSON.stringify({ success: true, image_url: '/api/generated-images/by-path?path=/w/cat.png' }));
+		const fold = settled([user('draw it'), tool(), made, text('Done.')]);
+		expect(entryOf(fold, made).hiddenWhenCollapsed).toBe(false);
+	});
+
+	it('puts two or more generated images in the gallery and folds their rows', () => {
+		const a = generation(unified({ image_url: art('a') }));
+		const b = generation(unified({ image_url: art('b'), images: [{ image_url: art('b') }, { image_url: art('c') }] }));
+		const fold = settled([user('draw three'), a, b, text('Here they are.')]);
+		expect(fold.gallery?.map((item) => item.src)).toEqual([art('a'), art('b'), art('c')]);
+		for (const row of [a, b]) {
+			expect(entryOf(fold, row).hiddenWhenCollapsed).toBe(true);
+			expect(entryOf(fold, row).inGallery).toBe(true);
+		}
+	});
+
+	it('shows an image the reply also embeds only once: the reply keeps it, the row folds', () => {
+		const made = generation(unified({ image_url: art('one') }));
+		const answer = text(`Here is your lighthouse.\n\n![Lighthouse](${art('one')})`);
+		const fold = settled([user('draw it'), made, answer]);
+		// One source, so no gallery: the visible reply shows it.
+		expect(fold.gallery).toEqual([]);
+		expect(entryOf(fold, answer).hiddenWhenCollapsed).toBe(false);
+		expect(entryOf(fold, made).hiddenWhenCollapsed).toBe(true);
+		// Expanded, the row leaves the same picture to the reply.
+		expect(entryOf(fold, made).mediaInProse).toEqual({ collapsed: [art('one')], open: [art('one')] });
+	});
+
+	it('keeps the row visible when the only embed is in prose that folds', () => {
+		const made = generation(unified({ image_url: art('one') }));
+		const narration = text(`Made it: ![x](${art('one')})`);
+		const fold = settled([user('draw it'), made, narration, tool(), text('All done.')]);
+		expect(entryOf(fold, narration).hiddenWhenCollapsed).toBe(true);
+		expect(entryOf(fold, made).hiddenWhenCollapsed).toBe(false);
+		// Collapsed, nothing else shows it; opened, the narration does.
+		expect(entryOf(fold, made).mediaInProse).toEqual({ collapsed: [], open: [art('one')] });
+	});
+
+	it('folds the rows and keeps one copy when the reply embeds a multi-image result', () => {
+		const a = generation(unified({ image_url: art('a') }));
+		const b = generation(unified({ image_url: art('b') }));
+		const answer = text(`Both:\n\n![A](${art('a')})\n\n![B](${art('b')})`);
+		const fold = settled([user('draw two'), a, b, answer]);
+		expect(fold.gallery?.map((item) => item.src)).toEqual([art('a'), art('b')]);
+		expect(entryOf(fold, a).hiddenWhenCollapsed).toBe(true);
+		expect(entryOf(fold, b).hiddenWhenCollapsed).toBe(true);
+		// The visible reply drops what the gallery shows (inGallery), and an
+		// expanded turn leaves the pictures to the reply.
+		expect(entryOf(fold, answer).inGallery).toBe(true);
+		expect(entryOf(fold, a).mediaInProse?.open).toEqual([art('a')]);
+	});
+
+	it.each([
+		['refused', { status: 'refused', success: false, price, reason: 'image_provider_restricted' }],
+		['skipped', { status: 'skipped', success: false, price, reason: 'needs_confirmation' }],
+		['needs-confirmation', { status: 'needs-confirmation', success: false, price, confirmation_token: 'tok' }]
+	])('folds a %s generation call with no media', (_label, body) => {
+		const refused = generation(JSON.stringify(body));
+		const fold = settled([user('draw it'), refused, text('It was refused.')]);
+		expect(entryOf(fold, refused).hiddenWhenCollapsed).toBe(true);
+		expect(fold.gallery).toEqual([]);
+	});
+
+	it('folds an errored generation and never treats a running one as media', () => {
+		const failed = generation(unified({ image_url: art('x') }), { toolStatus: 'error' });
+		const fold = settled([user('draw it'), failed, text('Failed.')]);
+		expect(entryOf(fold, failed).hiddenWhenCollapsed).toBe(true);
+		const running = generation(unified({ image_url: art('y') }), { toolStatus: 'running', streaming: true });
+		const live = buildDisplayItems([user('draw it'), running], LIVE);
+		expect(live.some((item) => item.kind === 'work_log' && item.gallery?.length)).toBe(false);
+	});
+
+	it('keeps a finished generated image out of a live run fold', () => {
+		const made = generation(unified({ image_url: art('one') }));
+		const items = buildDisplayItems([user('draw it'), tool(), made, text('Here it is.\n\nAnd more.'), tool()], LIVE);
+		expect(collapsedVisibleMessages(items).some((message) => message.id === made.id)).toBe(true);
+	});
+});

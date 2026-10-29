@@ -1,6 +1,14 @@
 import type { ChatMessage } from '$lib/stores/types';
 import { marked } from 'marked';
-import { mediaHtml, resolveMediaUrl, rewriteMediaMarkdown } from './media';
+import {
+	mediaHtml,
+	resolveMediaUrl,
+	rewriteMediaMarkdown,
+	toolResultMedia,
+	type MediaKind,
+	type ToolResultMediaItem
+} from './media';
+import { stripUntrustedFence } from './untrusted-fence';
 
 export interface GalleryMedia {
 	kind: 'image' | 'video';
@@ -14,7 +22,13 @@ export function safeMediaSource(src: string): boolean {
 	return /^(?:https?:\/\/|blob:|data:(?:image|video)\/|\/(?!\/))/i.test(src);
 }
 
-type ProseEmbed = readonly [kind: 'image' | 'video', src: string, label: string];
+/**
+ * `kind` is null for a markdown image whose URL names no media kind (an
+ * artifact URL, `/api/v1/artifacts/<hash>`): the markdown renderer still draws
+ * it as a picture, so a tool row must count it as shown, but it only joins the
+ * gallery through the tool row that made it.
+ */
+type ProseEmbed = readonly [kind: MediaKind | null, src: string, label: string];
 
 /**
  * Media embeds of one finished prose row, before URL resolution. Lexing is the
@@ -35,23 +49,72 @@ function embedsOf(content: string): readonly ProseEmbed[] {
 	// Only rendered embeds: fenced/inline code and ordinary text aren't media.
 	marked.walkTokens(marked.lexer(content), token => {
 		if (token.type !== 'image' && token.type !== 'link') return;
+		// Audio is kept here so a tool row can tell its clip is already in the
+		// reply; the gallery itself takes only images and video.
+		const before = embeds.length;
 		rewriteMediaMarkdown(token.raw, (kind, src, label) => {
-			if (kind !== 'audio') embeds.push([kind, src, label]);
+			embeds.push([kind, src, label]);
 			return '';
 		});
+		if (token.type === 'image' && embeds.length === before && token.href) {
+			embeds.push([null, token.href, token.text ?? '']);
+		}
 	});
-	const result = embeds.length ? embeds : NO_EMBEDS;
-	if (proseEmbeds.size >= PROSE_EMBED_CACHE_MAX) {
-		const oldest = proseEmbeds.keys().next().value;
-		if (oldest !== undefined) proseEmbeds.delete(oldest);
+	return remember(proseEmbeds, content, embeds.length ? embeds : NO_EMBEDS);
+}
+
+function remember<T>(cache: Map<string, T>, key: string, value: T): T {
+	if (cache.size >= PROSE_EMBED_CACHE_MAX) {
+		const oldest = cache.keys().next().value;
+		if (oldest !== undefined) cache.delete(oldest);
 	}
-	proseEmbeds.set(content, result);
-	return result;
+	cache.set(key, value);
+	return value;
+}
+
+const isProse = (message: ChatMessage) =>
+	message.role === 'assistant' && (message.type === 'text' || !message.type) && !!message.content;
+
+/**
+ * Resolved sources of every media embed in finished assistant prose: what the
+ * reply already shows, so a tool row does not show the same picture again.
+ */
+export function proseMediaSources(messages: readonly ChatMessage[], sessionId?: string | null): Set<string> {
+	const sources = new Set<string>();
+	for (const message of messages) {
+		if (message.streaming || !isProse(message)) continue;
+		for (const [, src] of embedsOf(message.content)) sources.add(resolveMediaUrl(src, sessionId));
+	}
+	return sources;
+}
+
+// Parsed per result string, like prose embeds: a transcript rebuild re-reads
+// every settled tool row, and most results are not generations at all.
+const toolMediaCache = new Map<string, readonly ToolResultMediaItem[]>();
+const NO_MEDIA: readonly ToolResultMediaItem[] = [];
+
+/**
+ * What a finished tool call generated (#784): media and files named by a
+ * COMPLETED result, unresolved. A running or streaming call, an error, and a
+ * refused, skipped, needs-confirmation or choose outcome have none, so they
+ * stay text-only rows exactly as before. Same reading as ToolUseMessage.
+ */
+export function completedToolMedia(message: ChatMessage): readonly ToolResultMediaItem[] {
+	if (message.type !== 'tool_use' || message.streaming || !message.toolResult) return NO_MEDIA;
+	// Persisted history has used both spellings of a finished call.
+	const status = message.toolStatus as string | undefined;
+	if (status !== 'complete' && status !== 'completed') return NO_MEDIA;
+	const result = message.toolResult;
+	const cached = toolMediaCache.get(result);
+	if (cached) return cached;
+	const items = toolResultMedia(stripUntrustedFence(result));
+	return remember(toolMediaCache, result, items.length ? items : NO_MEDIA);
 }
 
 export function galleryMediaForTurn(messages: ChatMessage[], sessionId?: string | null): GalleryMedia[] {
 	const found = new Map<string, GalleryMedia>();
-	function add(kind: 'image' | 'video', raw: string, label: string) {
+	function add(kind: MediaKind | 'file' | null, raw: string, label: string) {
+		if (kind !== 'image' && kind !== 'video') return;
 		const src = resolveMediaUrl(raw, sessionId);
 		if (!safeMediaSource(src) || found.has(src)) return;
 		found.set(src, { kind, src, label: label || `${kind === 'image' ? 'Image' : 'Video'} ${found.size + 1}` });
@@ -61,16 +124,25 @@ export function galleryMediaForTurn(messages: ChatMessage[], sessionId?: string 
 		if (message.type === 'tool_use' && message.toolScreenshot && message.toolStatus !== 'running') {
 			add('image', message.toolScreenshot, `Screenshot from ${message.toolName || 'tool'}`);
 		}
-		if (message.role === 'assistant' && (message.type === 'text' || !message.type) && message.content) {
+		// Generated media joins the gallery exactly as a screenshot does (#784).
+		for (const item of completedToolMedia(message)) {
+			add(item.kind, item.src, item.filename ?? `Generated ${item.kind}`);
+		}
+		if (isProse(message)) {
 			for (const [kind, src, label] of embedsOf(message.content)) add(kind, src, label);
 		}
 	}
 	return found.size > 1 ? [...found.values()] : [];
 }
 
+// A markdown image the media rewrite left alone (its URL names no kind).
+const PLAIN_IMAGE_MD = /!\[[^\]]*\]\(([^)\s]+)\)/g;
+
 /** Suppress only media represented by the gallery; keep prose, audio and links. */
 export function rewriteWithGallery(text: string, sources: ReadonlySet<string>, sessionId?: string | null): string {
 	return rewriteMediaMarkdown(text, (kind, src, label) =>
 		sources.has(resolveMediaUrl(src, sessionId)) ? '' : mediaHtml(kind, src, label)
-	);
+	// A generated picture the reply embeds by its artifact URL is the same
+	// picture the gallery shows from the tool row (#784).
+	).replace(PLAIN_IMAGE_MD, (match, src: string) => (sources.has(resolveMediaUrl(src, sessionId)) ? '' : match));
 }

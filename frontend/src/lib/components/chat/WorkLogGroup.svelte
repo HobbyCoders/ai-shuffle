@@ -64,7 +64,8 @@
 		/** Token-condensed variant shown instead of `summary` on narrow screens. */
 		compactSummary?: string | null;
 		gallery?: GalleryMedia[];
-		row: Snippet<[ChatMessage, number, ReadonlySet<string>?]>;
+		/** (message, index, gallery sources a prose row drops, generated media a tool row leaves to others) */
+		row: Snippet<[ChatMessage, number, ReadonlySet<string>?, ReadonlySet<string>?]>;
 		observeTurnAnchor?: Action<HTMLElement>;
 		revealMessageId?: string | null;
 		pagingEnabled?: boolean;
@@ -89,6 +90,19 @@
 		observeTurnAnchor = () => {}
 	}: Props = $props();
 	const gallerySources = $derived(new Set(gallery.map(item => item.src)));
+
+	/**
+	 * Generated media a tool row must not draw because something on screen
+	 * already shows it (#784): the gallery while the turn is collapsed, and the
+	 * prose that embeds the same picture. Only rows that made media carry it.
+	 */
+	function mediaShownElsewhere(entry: WorkLogSequenceEntry): ReadonlySet<string> | undefined {
+		const collapsed = !(mode === 'settled' && open);
+		const prose = entry.mediaInProse ? (collapsed ? entry.mediaInProse.collapsed : entry.mediaInProse.open) : [];
+		const fromGallery = collapsed && mode === 'settled' && entry.inGallery === true;
+		if (!prose.length) return fromGallery ? gallerySources : undefined;
+		return new Set([...prose, ...(fromGallery ? gallerySources : [])]);
+	}
 
 	// ── Fold state ─────────────────────────────────────────────────────────
 	// Seeded synchronously: the pre-effects below run before the subscription
@@ -576,7 +590,7 @@
 						use:observeTurnAnchor
 						use:trackTouch={rowKey(entry)}
 					>
-						{@render row(entry.message, entry.index, mode === 'settled' && !open && entry.inGallery ? gallerySources : undefined)}
+						{@render row(entry.message, entry.index, mode === 'settled' && !open && entry.inGallery ? gallerySources : undefined, mediaShownElsewhere(entry))}
 					</div>
 				{/if}
 				{#if run && runEdges.last.get(run.index) === position && runOpen(run)}

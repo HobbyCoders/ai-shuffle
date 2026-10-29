@@ -16,7 +16,8 @@
  *   never disappear behind a fold.
  */
 import type { ChatMessage } from '$lib/stores/types';
-import { galleryMediaForTurn, type GalleryMedia } from './media-gallery';
+import { completedToolMedia, galleryMediaForTurn, proseMediaSources, type GalleryMedia } from './media-gallery';
+import { resolveMediaUrl } from './media';
 import { agentDelivery } from './agent-delivery';
 import { createPrefixFold } from './prefix-fold';
 import { canRewindUserMessage } from './message-presentation';
@@ -49,6 +50,54 @@ export interface WorkLogSequenceEntry extends WorkLogEntry {
 	run?: number;
 	/** Live turn only: the row hides while its run is folded. */
 	foldsInRun?: boolean;
+	/**
+	 * Resolved sources of media this tool row generated that the turn's prose
+	 * already shows (the agent often embeds its picture in the reply), so the
+	 * row leaves them to the prose and a picture never shows twice.
+	 * `collapsed`: prose visible while the turn is collapsed; `open`: all of it.
+	 */
+	mediaInProse?: { collapsed: readonly string[]; open: readonly string[] };
+}
+
+/**
+ * Generated media a turn's prose already shows, for each tool row that made
+ * some (#784). A row whose every output is shown outside the fold (by the
+ * gallery or by visible prose) may fold; `mediaInProse` tells the row which
+ * of its outputs to leave to the prose.
+ */
+function generatedMediaPlacement(
+	response: readonly Positioned[],
+	sessionId: string | null | undefined,
+	proseVisible: (entry: Positioned) => boolean,
+	gallery: { sources: ReadonlySet<string>; entries: ReadonlySet<Positioned> } | null
+): Map<Positioned, { shown: boolean; mediaInProse?: WorkLogSequenceEntry['mediaInProse'] }> {
+	const placement = new Map<Positioned, { shown: boolean; mediaInProse?: WorkLogSequenceEntry['mediaInProse'] }>();
+	const makers = response.filter((entry) => completedToolMedia(entry.message).length > 0);
+	if (makers.length === 0) return placement;
+	const collapsed = new Set<string>();
+	const open = new Set<string>();
+	for (const entry of response) {
+		if (!isAssistantText(entry.message) || entry.message.streaming) continue;
+		const sources = proseMediaSources([entry.message], sessionId);
+		// Prose the gallery represents drops those embeds while collapsed.
+		const suppressed = gallery?.entries.has(entry) ? gallery.sources : null;
+		for (const src of sources) {
+			open.add(src);
+			if (proseVisible(entry) && !suppressed?.has(src)) collapsed.add(src);
+		}
+	}
+	for (const entry of makers) {
+		const sources = completedToolMedia(entry.message).map((item) => resolveMediaUrl(item.src, sessionId));
+		const inGallery = gallery?.entries.has(entry) ?? false;
+		const shown = sources.every((src) => collapsed.has(src) || (inGallery && gallery!.sources.has(src)));
+		const inCollapsed = sources.filter((src) => collapsed.has(src));
+		const inOpen = sources.filter((src) => open.has(src));
+		placement.set(entry, {
+			shown,
+			...(inCollapsed.length || inOpen.length ? { mediaInProse: { collapsed: inCollapsed, open: inOpen } } : {})
+		});
+	}
+	return placement;
 }
 
 /**
@@ -245,11 +294,19 @@ function isSpecialTool(msg: ChatMessage): boolean {
 	);
 }
 
-function isRoutineTool(msg: ChatMessage, gallery = false): boolean {
+/**
+ * @param gallery the turn's gallery shows this row's screenshot.
+ * @param mediaShown every output the row generated is shown outside the fold
+ *   (the gallery, or a reply that embeds the same source).
+ */
+function isRoutineTool(msg: ChatMessage, gallery = false, mediaShown = false): boolean {
 	if (msg.type !== 'tool_use' || isSpecialTool(msg)) return false;
 	// Keep screenshots visible unless a gallery represents them outside the fold.
 	// Failures still fold with the run and are counted in its summary.
-	return gallery || !msg.toolScreenshot;
+	if (msg.toolScreenshot && !gallery) return false;
+	// Generated media is the result, exactly like a screenshot (#784): the row
+	// stays out of the fold until something outside it shows every output.
+	return mediaShown || completedToolMedia(msg).length === 0;
 }
 
 /**
@@ -360,7 +417,7 @@ function isAssistantPhantom(msg: ChatMessage): boolean {
 }
 
 /** Only work known to be closed may disappear in a settled disclosure. */
-function isCompletedRoutineWork(msg: ChatMessage, gallery = false): boolean {
+function isCompletedRoutineWork(msg: ChatMessage, gallery = false, mediaShown = false): boolean {
 	if (agentDelivery(msg)) return true;
 	if (msg.type === 'thinking') return !msg.streaming;
 	// A worker card is the delegation itself: it keeps its row in every status
@@ -376,7 +433,7 @@ function isCompletedRoutineWork(msg: ChatMessage, gallery = false): boolean {
 	// presentation boundary rather than widening transport semantics.
 	const status = msg.toolStatus as string | undefined;
 	const settled = status === 'complete' || status === 'completed' || status === 'error';
-	return isRoutineTool(msg, gallery) && settled && !msg.streaming;
+	return isRoutineTool(msg, gallery, mediaShown) && settled && !msg.streaming;
 }
 
 /** Human duration: "45s", "2m 14s", "1h 03m". */
@@ -940,7 +997,7 @@ function runKeyOf(entry: Positioned): string {
 	return entry.message.serverId ?? entry.message.id ?? `at-${entry.index}`;
 }
 
-function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
+function emitLiveTurn(turn: Positioned[], items: DisplayItem[], sessionId?: string | null): void {
 	// Code-mode wrappers are not transcript rows: their dispatched tools are.
 	// Keep a streaming cell visible only until its first visible inner call arrives.
 	const lastVisibleIndex = turn.findLastIndex((entry) => !isHiddenCodeModeCell(entry.message));
@@ -1018,6 +1075,9 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
 	}
 
 	const folded = response.filter((entry) => hidden.has(entry)).map(({ message, index }) => ({ message, index }));
+	// A generated picture never folds here (it is the result), but the reply
+	// may embed it as it arrives: the row leaves it to prose on screen.
+	const media = generatedMediaPlacement(response, sessionId, (entry) => !hidden.has(entry), null);
 	items.push({
 		kind: 'work_log',
 		...workLogKeys(prefix[0] ?? response[0]),
@@ -1031,7 +1091,9 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
 			index: entry.index,
 			hiddenWhenCollapsed: false,
 			run: runOf.get(entry),
-			...(hidden.has(entry) ? { foldsInRun: true } : {})
+			...(hidden.has(entry) ? { foldsInRun: true } : {}),
+			// A live turn has no settled "open" state: WorkLogGroup reads `collapsed`.
+			...(media.get(entry)?.mediaInProse ? { mediaInProse: media.get(entry)!.mediaInProse } : {})
 		})),
 		runs,
 		durationLabel: null,
@@ -1402,7 +1464,7 @@ export function buildTranscriptModel(
 		}
 
 		if (unsettledTurn) {
-			emitLiveTurn(turn, items);
+			emitLiveTurn(turn, items, options.sessionId);
 			return;
 		}
 
@@ -1439,17 +1501,27 @@ export function buildTranscriptModel(
 		const midTurnCompactions = new Set(
 			response.filter((entry, i) => i < lastWork && isCompactionCard(entry.message))
 		);
+		const foldsAsProse = (entry: Positioned) =>
+			isAssistantText(entry.message) &&
+			!entry.message.streaming &&
+			!terminalAssistants.has(entry) &&
+			!askingProse.has(entry) &&
+			!isProtectedProse(entry.message.content);
+		// Generated media stays out of the fold like a screenshot, unless the
+		// gallery or the visible reply already shows every output (#784).
+		const media = generatedMediaPlacement(
+			response,
+			options.sessionId,
+			(entry) => !foldsAsProse(entry),
+			gallery.length > 1 ? { sources: new Set(gallery.map((item) => item.src)), entries: galleryEntries } : null
+		);
 		const shouldHide = (entry: Positioned) =>
 			!isSteer(entry) && (
-				isCompletedRoutineWork(entry.message, galleryEntries.has(entry)) ||
+				isCompletedRoutineWork(entry.message, galleryEntries.has(entry), media.get(entry)?.shown) ||
 				isGroupableSystem(entry.message) ||
 				midTurnCompactions.has(entry) ||
 				entry.message.type === 'tool_result' ||
-				(isAssistantText(entry.message) &&
-					!entry.message.streaming &&
-					!terminalAssistants.has(entry) &&
-					!askingProse.has(entry) &&
-					!isProtectedProse(entry.message.content))
+				foldsAsProse(entry)
 			);
 		const folded = response
 			.filter(shouldHide)
@@ -1485,7 +1557,8 @@ export function buildTranscriptModel(
 				message: entry.message,
 				index: entry.index,
 				hiddenWhenCollapsed: shouldHide(entry),
-				...(galleryEntries.has(entry) ? { inGallery: true } : {})
+				...(galleryEntries.has(entry) ? { inGallery: true } : {}),
+				...(media.get(entry)?.mediaInProse ? { mediaInProse: media.get(entry)!.mediaInProse } : {})
 			})),
 			durationLabel,
 			summary: summarizeWork(folded),
