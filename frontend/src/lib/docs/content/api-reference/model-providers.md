@@ -548,3 +548,5 @@ curl http://localhost:8000/api/v1/models \
 
 - `models`: built-in Claude models. Use `value` as the model id.
 - `default`: the default model. `inherit_value`: the value that means "inherit from the parent" (for subagents). `legacy_map`: full Claude model ids and the short id each maps to.
+- `providers`: enabled providers only, never with keys. `auth_kind` is `subscription` for ChatGPT and Grok subscription providers and `api` otherwise; `plan_type` names the subscription plan when known. `capability_generation` changes whenever the provider is edited. `effort_levels` lists the reasoning-effort levels a model accepts: `[]` means none, `null` means unknown (see [refresh-capabilities](#post-apiv1model-providersrefresh-capabilities)).
+- `claude`: how this install signs in to Claude (`auth_kind` `api`, `subscription` or `null`, with `plan_type` when known).
