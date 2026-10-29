@@ -682,6 +682,8 @@ TOOL_LEVELS: Dict[str, Level] = {
             "browser_network",
             "browser_resize",
             "browser_navigate",
+            # Records what the page shows (flight recorder); acts on nothing.
+            "browser_record",
         )
     },
     **{

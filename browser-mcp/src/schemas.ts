@@ -215,6 +215,22 @@ export const batchSchema: JsonSchema = {
   additionalProperties: false,
 };
 
+export const RECORD_NETWORK_PROFILES = ["none", "slow-3g", "fast-3g", "4g"] as const;
+
+export const recordSchema: JsonSchema = {
+  type: "object", additionalProperties: false, required: ["action"],
+  properties: {
+    action: { type: "string", enum: ["start", "mark", "stop"], description: "start a recording on the current tab, mark the next step, or stop and get the timeline." },
+    label: { type: "string", description: "mark: what the next step does." },
+    fields: { type: "array", items: { type: "string" }, description: "start: record only these data-ui-<field> attributes, wherever they are. Default: every data-ui-* attribute on [data-ui-state] elements." },
+    selectors: { type: "array", items: { type: "string" }, description: 'start: extra "name=css selector" fields, recorded as match counts.' },
+    cpu_throttle: { type: "number", minimum: 1, maximum: 20, description: "start: CPU slowdown factor (4 = a mid-range phone). Cleared at stop." },
+    network: { type: "string", enum: [...RECORD_NETWORK_PROFILES], description: "start: network profile until stop. Default none." },
+    keyframes: { type: "boolean", description: "start: keep screencast frames; stop returns one contact sheet of up to 12, one per signature change." },
+    max_duration_ms: { type: "integer", minimum: 1000, maximum: 600000, description: "start: stop sampling and release throttling after this long. Default 120000." },
+  },
+};
+
 export const TOOL_SCHEMAS = {
   browser_status: statusSchema,
   browser_wait: waitSchema,
@@ -231,6 +247,7 @@ export const TOOL_SCHEMAS = {
   browser_resize: resizeSchema,
   browser_upload: uploadSchema,
   browser_batch: batchSchema,
+  browser_record: recordSchema,
 } as const;
 
 export interface ValidationResult {

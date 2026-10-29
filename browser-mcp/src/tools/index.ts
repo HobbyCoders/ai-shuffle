@@ -23,6 +23,7 @@ import { runUpload, uploadStatus, type UploadInput } from "./upload.js";
 import { runBatch, type BatchInput, type BatchTool } from "./batch.js";
 import { jsonResult, errorResult, type McpToolResult } from "./result.js";
 import { runWait, type WaitInput } from "./wait.js";
+import { runRecord, markStep, type RecordInput } from "./record.js";
 
 export interface ToolDefinition {
   name: string;
@@ -54,6 +55,7 @@ const HANDLERS: Record<BrowserToolName, ToolDefinition["run"]> = {
   browser_tabs: (session, input) => runTabs(session, input as unknown as TabsInput),
   browser_resize: (session, input) => runResize(session, input as ResizeInput),
   browser_upload: (session, input) => runUpload(session, input as unknown as UploadInput),
+  browser_record: (session, input) => runRecord(session, input as unknown as RecordInput),
   browser_batch: (session, input) =>
       runBatch(session, input as unknown as BatchInput, (name) => {
         const def = TOOL_MAP.get(name);
@@ -100,6 +102,8 @@ function withDialogGate(name: BrowserToolName, run: ToolDefinition["run"]): Tool
     }
     // A batch's steps each pass through this gate themselves.
     if (name === "browser_batch") return run(session, input);
+    // A running flight recording (browser_record) gets a mark per acting step.
+    await markStep(session, name, input);
     const raced = await session.raceDialog(run(session, input));
     if (!raced.paused) return raced.value;
     return jsonResult({

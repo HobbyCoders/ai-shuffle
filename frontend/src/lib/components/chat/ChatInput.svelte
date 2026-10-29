@@ -61,6 +61,7 @@
 	import { detectProjectMismatch } from './project-mismatch';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
+	import { UI_MOUNT } from '$lib/utils/ui-signature';
 	import TiptapEditor from './TiptapEditor.svelte';
 	import VoiceRecorder from './VoiceRecorder.svelte';
 	import VoiceCallButton from './VoiceCallButton.svelte';
@@ -1401,6 +1402,7 @@
 
 <div
 	class="chat-input-wrapper"
+	data-ui-mount={UI_MOUNT.chatInput}
 	class:has-draft={hasMessageContent}
 	class:dictating={isRecording || isTranscribing}
 	class:mobile-collapsed={mobileCollapsed}
