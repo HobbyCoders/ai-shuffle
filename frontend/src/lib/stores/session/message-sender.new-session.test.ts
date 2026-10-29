@@ -40,7 +40,7 @@ vi.mock('./v2/feed-controller', () => ({
 	OPTIMISTIC_STREAMING_ON: { isStreaming: true, optimisticStreaming: true },
 }));
 
-const PICK = { id: 'inst-gaming', name: 'GamingPC' };
+const PICK = { id: 'inst-other', name: 'Other worker' };
 
 function setup(overrides: Partial<ActiveSessionState> = {}, opts: { connected?: boolean } = {}) {
 	let state = {
@@ -148,7 +148,7 @@ beforeEach(() => {
 describe('newSessionWorker', () => {
 	it('is this worker unless the composer picked another one', () => {
 		expect(newSessionWorker({ sessionId: null, deviceIntent: null })).toEqual({ isRemote: false, ownerDeviceName: null });
-		expect(newSessionWorker({ sessionId: null, deviceIntent: PICK })).toEqual({ isRemote: true, ownerDeviceName: 'GamingPC' });
+		expect(newSessionWorker({ sessionId: null, deviceIntent: PICK })).toEqual({ isRemote: true, ownerDeviceName: 'Other worker' });
 	});
 
 	it('says nothing about a bound session (its row and /live own that)', () => {
@@ -211,11 +211,11 @@ describe('every path binds a new session with a known owner', () => {
 		post.mockResolvedValueOnce(created('wt-remote', { query_started: true }));
 		const { sender, state } = setup({ deviceIntent: PICK });
 		await sender.autoCreateWorktree('hello');
-		expect(state()).toMatchObject({ sessionId: 'wt-remote', deviceIntent: null, isRemote: true, ownerDeviceName: 'GamingPC' });
+		expect(state()).toMatchObject({ sessionId: 'wt-remote', deviceIntent: null, isRemote: true, ownerDeviceName: 'Other worker' });
 
 		const ws = setup({ worktreeIntent: 'local', deviceIntent: PICK });
 		await ws.sender.sendMessage('hello');
-		expect(ws.state()).toMatchObject({ deviceIntent: null, isRemote: true, ownerDeviceName: 'GamingPC' });
+		expect(ws.state()).toMatchObject({ deviceIntent: null, isRemote: true, ownerDeviceName: 'Other worker' });
 	});
 });
 
