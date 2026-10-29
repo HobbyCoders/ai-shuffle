@@ -83,7 +83,8 @@ does not have to run it. Run the same rows against an **isolated preview
 instance** of a clean checkout at the candidate commit instead. (For everyday
 branch testing with live reload, seed data and a free scripted AI, use the
 [dev loop](dev-loop.md); it does not replace this smoke, which needs the real
-provider and the stamped build.)
+provider and the stamped build. `run --preview` refuses an instance with no
+build stamp, such as a dev-loop instance serving Vite.)
 
 1. In a separate checkout (or worktree) of the candidate, clean, at the
    commit you will tag: build the UI and stamp it.

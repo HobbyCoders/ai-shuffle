@@ -107,9 +107,13 @@ def disposable_preview_data() -> bool:
 
 
 def _saved_access() -> dict | None:
-    """The dev loop's access record, if its grant still verifies (a restart)."""
+    """The dev loop's access record, if its grant still verifies (a restart).
+
+    Only on the launcher's own disposable data: anywhere else a stray
+    ``SHUFFLE_DEV_ACCESS_FILE`` must not stop a fresh link being minted.
+    """
     path = os.environ.get("SHUFFLE_DEV_ACCESS_FILE")
-    if not path:
+    if not path or not disposable_preview_data():
         return None
     from app.core import preview_access
 
@@ -124,15 +128,20 @@ def _saved_access() -> dict | None:
 
 def _write_private_json(path: Path, data: dict) -> None:
     tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
         json.dump(data, stream)
     os.replace(tmp, path)
 
 
 def initialize_preview_access() -> None:
-    """Publish a fresh link only in the launcher's disposable, token-only preview.
+    """Publish a preview access link in a token-only preview (AI_SHUFFLE_PREVIEW=1).
 
+    Each start mints a fresh grant on a hidden session and prints its link,
+    except a dev-loop restart on the launcher's disposable data whose saved
+    grant (``SHUFFLE_DEV_ACCESS_FILE``) still verifies: that link stays valid,
+    so nothing new is minted. Owner setup runs only on that disposable data.
     Called off the event loop after schema setup. The real hidden owner session
     keeps normal preview grant verification (including session existence) intact.
     No key or session from the installed worker is copied or trusted here.

@@ -10,8 +10,8 @@ import psutil
 import pytest
 
 from app.preview_run import (
-    disposable_preview_data, initialize_preview_access, main, preview_environment, seed_dev_instance,
-    supervise,
+    disposable_preview_data, initialize_preview_access, main, preview_environment,
+    seed_dev_instance, supervise,
 )
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux preview ownership")
@@ -412,3 +412,45 @@ def test_dev_seed_runs_on_marked_disposable_data_only_when_asked(tmp_path, monke
     (tmp_path / ".branch-preview").unlink()
     asyncio.run(seed_dev_instance())  # not asked: a no-op, even without the marker
     assert seen == ["default"]
+
+
+def test_saved_access_is_reused_only_on_launcher_disposable_data(
+    bare_db: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A dev-loop restart keeps its link; without the launcher's marker a
+    saved access file is ignored and a fresh link is minted."""
+    import json
+
+    from app.core import encryption, preview_access
+    from app.core.config import settings
+    from app.db import database
+
+    access = tmp_path / "access.json"
+    env = preview_environment(tmp_path, 18880, 18881,
+                              extra={"SHUFFLE_DEV_ACCESS_FILE": str(access)})
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("SHUFFLE_PREVIEW_ACCESS_HOST", "10.0.0.30")
+    monkeypatch.setattr(settings, "data_dir", Path(env["DATA_DIR"]))
+    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: True)
+    monkeypatch.setattr(preview_access, "_listener_port", 18880)
+    monkeypatch.setattr(encryption, "_encryption_key", None)
+    monkeypatch.setattr(encryption, "_credential_status", {})
+    assert encryption.initialize_server_key(database)
+
+    initialize_preview_access()
+    first = json.loads(access.read_text())
+    assert first["url"] in capsys.readouterr().out
+    assert access.stat().st_mode & 0o777 == 0o600
+
+    initialize_preview_access()  # a restart on the same disposable data
+    assert "still valid after the restart" in capsys.readouterr().out
+    assert json.loads(access.read_text()) == first
+
+    (tmp_path / ".branch-preview").unlink()  # not the launcher's data any more
+    assert disposable_preview_data() is False
+    initialize_preview_access()
+    out = capsys.readouterr().out
+    assert "still valid" not in out and "open once in the agent browser" in out
+    assert json.loads(access.read_text())["token"] != first["token"]

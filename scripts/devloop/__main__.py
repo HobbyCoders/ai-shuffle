@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -36,15 +37,51 @@ ROOT = Path(__file__).resolve().parents[2]
 FRONTEND = ROOT / "frontend"
 log = logging.getLogger("devloop")
 #: Graceful stop budget for the app (restarts and teardown). Open SSE/WebSocket
-#: streams keep uvicorn waiting; PostgreSQL is a separate process and the data
-#: is throwaway, so a forced stop loses nothing the next start needs.
+#: streams keep uvicorn waiting, so after this the app is SIGKILLed and any
+#: in-flight work in it is cut off. PostgreSQL is a separate process and
+#: survives. The one start-up job that must not be cut, the first start's seed,
+#: is protected twice: :class:`RestartGate` holds file-change restarts until
+#: that start is ready, and a seed cut anyway is reported, never re-run.
 APP_STOP_SECONDS = 4
+#: How long the gate holds restarts for a first start that neither answers nor
+#: exits (a hang): after this an edit restarts it anyway.
+FIRST_START_GRACE_SECONDS = 180
+
+
+class StatusError(Exception):
+    """A status path that is not safely private to this user."""
+
+
+def status_directory() -> Path:
+    """Private to this user: ``$XDG_RUNTIME_DIR`` when set, else a per-uid temp dir."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime:
+        return Path(runtime) / "ai-shuffle-devloop"
+    return Path(tempfile.gettempdir()) / f"ai-shuffle-devloop-{os.getuid()}"
 
 
 def default_status_path(root: Path = ROOT) -> Path:
-    """Per checkout, under the system temp dir (never the repo)."""
+    """Per checkout, in :func:`status_directory` (never the repo)."""
     digest = hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:12]
-    return Path(tempfile.gettempdir()) / "ai-shuffle-devloop" / f"{digest}.json"
+    return status_directory() / f"{digest}.json"
+
+
+def ensure_private_dir(directory: Path) -> None:
+    """Create ``directory`` 0700, or accept it only if it is already private to us.
+
+    A shared temp dir lets another user pre-create the directory (or a symlink
+    in its place) and then read or swap the status file; refuse that.
+    """
+    try:
+        directory.mkdir(mode=0o700, parents=True)
+    except FileExistsError:
+        pass
+    info = os.lstat(directory)
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+            or info.st_mode & 0o077):
+        raise StatusError(
+            f"Refusing the status directory {directory}: it must be a real directory owned "
+            "by you with no group or other access (chmod 700), or pass another --status")
 
 
 def _iso(epoch: float) -> str:
@@ -57,6 +94,41 @@ def read_status(path: Path) -> dict | None:
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def load_status(path: Path) -> dict | None:
+    """The launcher status at ``path``: None if absent or unreadable JSON.
+
+    Raises :class:`StatusError` for a symlink, a non-file or a file another
+    user owns, so ``down`` never signals a pid someone else wrote down.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:  # ELOOP: a symlink
+        raise StatusError(f"Refusing the status file {path}: {exc.strerror}") from None
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise StatusError(
+                f"Refusing the status file {path}: it is not a regular file owned by you")
+        try:
+            data = json.loads(stream.read().decode("utf-8"))
+        except ValueError:
+            return None
+    return data if isinstance(data, dict) else None
+
+
+def write_private_json(path: Path, data: dict) -> None:
+    """Atomically replace ``path`` with a 0600 file, never through a planted link."""
+    ensure_private_dir(path.parent)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.unlink(missing_ok=True)  # a stale tmp from a killed launcher
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        json.dump(data, stream, indent=2)
+    os.replace(tmp, path)
 
 
 def status_alive(status: dict) -> bool:
@@ -90,12 +162,49 @@ def _url_host(host: str) -> str:
     return f"[{host}]" if ":" in host else host
 
 
-class Watcher(threading.Thread):
-    """Sets ``restart`` when a Python file under app/ or fluid/ changes."""
+class RestartGate:
+    """Holds file-change restarts until the first app start has settled.
 
-    def __init__(self, restart: threading.Event, *, poll: bool = False) -> None:
+    The first start seeds the data inside its lifespan, and the app answers
+    HTTP only after that, so "ready" means the seed is finished. A restart
+    before then would SIGKILL a half-done seed. Changes seen while closed fold
+    into one restart when the gate opens: on ready, on the app exiting by
+    itself (nothing left to cut; a crash must stay fixable), or after
+    :data:`FIRST_START_GRACE_SECONDS` for a start that hangs.
+    """
+
+    def __init__(self, restart: threading.Event) -> None:
+        self.restart = restart
+        self.lock = threading.Lock()
+        self.is_open = False
+        self.pending = False
+
+    def request(self) -> bool:
+        """A source change: restart now, or hold it. True if it was held."""
+        with self.lock:
+            if self.is_open:
+                self.restart.set()
+                return False
+            self.pending = True
+            return True
+
+    def open(self) -> None:
+        with self.lock:
+            if self.is_open:
+                return
+            self.is_open = True
+            if self.pending:
+                self.pending = False
+                log.info("first start settled; applying the change seen meanwhile")
+                self.restart.set()
+
+
+class Watcher(threading.Thread):
+    """Requests a restart when a Python file under app/ or fluid/ changes."""
+
+    def __init__(self, gate: RestartGate, *, poll: bool = False) -> None:
         super().__init__(name="devloop-watch", daemon=True)
-        self.restart, self.poll = restart, poll
+        self.gate, self.poll = gate, poll
         self.stop_event = threading.Event()
 
     def run(self) -> None:
@@ -110,9 +219,14 @@ class Watcher(threading.Thread):
                              stop_event=self.stop_event, debounce=1600, step=300,
                              raise_interrupt=False, force_polling=self.poll or None):
             names = sorted({os.path.relpath(path, ROOT) for _, path in changes})
-            shown = ", ".join(names[:5]) + (f" (+{len(names) - 5} more)" if len(names) > 5 else "")
-            log.info("change: %s -> restarting the app", shown)
-            self.restart.set()
+            shown = ", ".join(names[:5])
+            if len(names) > 5:
+                shown += f" (+{len(names) - 5} more)"
+            if self.gate.request():
+                log.info("change: %s -> restarting once the first start (and seed) is done",
+                         shown)
+            else:
+                log.info("change: %s -> restarting the app", shown)
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -122,11 +236,15 @@ class Instance:
     """The status file and the readiness reporting for one ``up``."""
 
     def __init__(self, args: argparse.Namespace, directory: Path, env: dict, fake: Any,
-                 vite_port: int | None) -> None:
+                 vite_port: int | None, gate: RestartGate | None = None) -> None:
         from app.core.temp_scratch import process_identity
 
         self.args, self.directory, self.env, self.fake = args, directory, env, fake
         self.vite_port = vite_port
+        self.gate = gate or RestartGate(threading.Event())
+        #: The link and seed are announced on the first start that gets ready,
+        #: which is not the first start when that one crashed.
+        self.announced = False
         self.vite: subprocess.Popen | None = None
         self.port = int(env["SHUFFLE_PREVIEW_PORT"])
         self.connect = _connect_host(str(args.host))
@@ -161,13 +279,7 @@ class Instance:
     def write(self, **changes: Any) -> None:
         with self.lock:
             self.data.update(changes)
-            path = self.args.status
-            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            tmp = path.with_name(path.name + ".tmp")
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(self.data, stream, indent=2)
-            os.replace(tmp, path)
+            write_private_json(self.args.status, self.data)
 
     # ── supervise() hook ──
     def on_app_start(self, process: subprocess.Popen) -> None:
@@ -183,9 +295,10 @@ class Instance:
     def on_app_exit(self, process: subprocess.Popen) -> None:
         """supervise(): the app exited on its own (not a restart or teardown)."""
         self.write(state="app-exited")
+        self.gate.open()  # nothing left to interrupt; the fix must restart it
 
     def report(self) -> None:
-        """Thread: announce every app (re)start once it answers HTTP."""
+        """Thread: report every app (re)start once it answers HTTP."""
         while not self.done.is_set():
             self.wake.wait(0.5)
             if not self.wake.is_set():
@@ -194,16 +307,22 @@ class Instance:
             process, started = self.app, self.app_started
             while not self.done.is_set() and process is self.app and process.poll() is None:
                 if answers_http(self.connect, self.port, "/api/preview"):
-                    seconds = round(time.monotonic() - started, 1)
-                    with self.lock:
-                        self.data["app"]["last_ready_seconds"] = seconds
-                    if self.starts == 1:
-                        self._announce(seconds)
-                    else:
-                        log.info("app ready again in %.1fs (pid %s)", seconds, process.pid)
-                        self.write(state="ready")
+                    self._ready(process, round(time.monotonic() - started, 1))
                     break
+                if time.monotonic() - started > FIRST_START_GRACE_SECONDS:
+                    self.gate.open()
                 time.sleep(0.25)
+
+    def _ready(self, process: subprocess.Popen, seconds: float) -> None:
+        with self.lock:
+            self.data["app"]["last_ready_seconds"] = seconds
+        if not self.announced:
+            self.announced = True
+            self._announce(seconds)
+        else:
+            log.info("app ready again in %.1fs (pid %s)", seconds, process.pid)
+            self.write(state="ready")
+        self.gate.open()
 
     def _announce(self, seconds: float) -> None:
         from app.core import preview_access
@@ -286,7 +405,11 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     if sys.platform != "linux":
         parser.error("The dev loop's owned PostgreSQL lease needs Linux")
     _validate(parser, args)
-    existing = read_status(args.status)
+    try:
+        ensure_private_dir(args.status.parent)
+        existing = load_status(args.status)
+    except StatusError as exc:
+        parser.error(str(exc))
     if existing and status_alive(existing):
         parser.error(f"A dev instance for this checkout is already running (pid "
                      f"{existing['pid']}): python -m scripts.devloop down")
@@ -299,6 +422,7 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     if not args.no_vite:
         _ensure_frontend()
     stopped, restart = threading.Event(), threading.Event()
+    gate = RestartGate(restart)
 
     def stop(signum: int, frame: Any) -> None:
         log.info("stopping (signal %s)", signum)
@@ -332,7 +456,7 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                 SimpleNamespace(effective_data_dir=Path(env["DATA_DIR"])),
                 port=free_port(exclude=(port, protected, int(env["PORT"]), vite_port or 0)),
             )
-            instance = Instance(args, directory, env, fake, vite_port)
+            instance = Instance(args, directory, env, fake, vite_port, gate)
             log.info("status file: %s", args.status)
             instance.write()
             if vite_port:
@@ -342,7 +466,7 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                 instance.data["vite"] = {"pid": vite.pid, "port": vite_port, "proxies_to": api}
                 log.info("vite dev (pid %s) on port %s, proxying /api to %s", vite.pid,
                          vite_port, api)
-            watcher = Watcher(restart, poll=args.poll)
+            watcher = Watcher(gate, poll=args.poll)
             watcher.start()
             reporter = threading.Thread(target=instance.report, name="devloop-report",
                                         daemon=True)
@@ -371,7 +495,7 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
 
 
 def down(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    status = read_status(args.status)
+    status = load_status(args.status)
     if status is None:
         print(f"No dev instance recorded at {args.status}")
         return 0
@@ -380,7 +504,10 @@ def down(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
               "status file")
         args.status.unlink(missing_ok=True)
         return 0
-    os.kill(status["pid"], signal.SIGTERM)
+    try:
+        os.kill(status["pid"], signal.SIGTERM)
+    except ProcessLookupError:
+        pass
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         if not status_alive(status):
@@ -392,7 +519,7 @@ def down(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
 
 
 def show(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    status = read_status(args.status)
+    status = load_status(args.status)
     if status is None or not status_alive(status):
         print(f"No running dev instance recorded at {args.status}")
         return 1
@@ -405,7 +532,8 @@ def main(argv: list[str] | None = None) -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
     start = commands.add_parser("up", help="Start a dev instance (run under Monitor)")
-    start.add_argument("--host", type=ipaddress.ip_address, default=ipaddress.ip_address("127.0.0.1"),
+    start.add_argument("--host", type=ipaddress.ip_address,
+                       default=ipaddress.ip_address("127.0.0.1"),
                        help="Bind address for the UI listeners; 0.0.0.0 for a remote browser")
     start.add_argument("--browser-host", type=ipaddress.ip_address,
                        help="Address the browser reaches this machine by (required with 0.0.0.0)")
@@ -424,13 +552,18 @@ def main(argv: list[str] | None = None) -> int:
     for command in (start, commands.add_parser("down", help="Stop the running instance"),
                     commands.add_parser("status", help="Print the running instance's status")):
         command.add_argument("--status", type=Path, default=default_status_path(),
-                             help="Status JSON path (default: per checkout, in the temp dir)")
+                             help="Status JSON path in a private (0700) directory (default: "
+                                  "per checkout, under $XDG_RUNTIME_DIR or the temp dir)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="[devloop] %(message)s", stream=sys.stdout,
                         force=True)
     logging.getLogger("watchfiles").setLevel(logging.WARNING)  # we log each restart ourselves
     handler = {"up": up, "down": down, "status": show}[args.command]
-    return handler(parser, args)
+    try:
+        return handler(parser, args)
+    except StatusError as exc:
+        print(exc, file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

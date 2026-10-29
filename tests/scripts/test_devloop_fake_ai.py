@@ -126,8 +126,9 @@ def test_multi_round_scenario_steps_by_tool_rounds(fake: FakeAI) -> None:
     def round_trip(count: int) -> list[dict]:
         messages = [prompt]
         for number in range(count):
-            messages += [{"role": "assistant", "tool_calls": [{"id": f"c{number}", "type": "function",
-                          "function": {"name": "Bash", "arguments": "{}"}}]},
+            call = {"id": f"c{number}", "type": "function",
+                    "function": {"name": "Bash", "arguments": "{}"}}
+            messages += [{"role": "assistant", "tool_calls": [call]},
                          {"role": "tool", "tool_call_id": f"c{number}", "content": "ok"}]
         return messages
 

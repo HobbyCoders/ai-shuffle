@@ -13,8 +13,12 @@ python -m scripts.devloop up --host 0.0.0.0 --browser-host 172.17.0.2  # remote 
 Linux only (it reuses the `app.preview_run` lease). Run it under a Monitor
 task and never daemonize it. When it is ready it prints one access link: open
 it **once** in the browser and stay on that port. It also prints the path of a
-status JSON (default `$TMPDIR/ai-shuffle-devloop/<checkout hash>.json`, never
-in the repo) that tools and journey tests read:
+status JSON (default `$XDG_RUNTIME_DIR/ai-shuffle-devloop/<checkout hash>.json`,
+or `$TMPDIR/ai-shuffle-devloop-<uid>/` without `XDG_RUNTIME_DIR`; never in the
+repo) that tools and journey tests read. Its directory must be yours and
+private (0700): `up` refuses a directory another user could reach or swap,
+and `down`/`status` refuse a status file you do not own, so pass `--status` only
+inside a private directory:
 
 | Field | What it is |
 | --- | --- |
@@ -37,7 +41,10 @@ stops the instance.
   restarts only the app process after a 1.6 s debounce. PostgreSQL, the data
   and the access cookie survive, and the open page reconnects on its own (about
   5-10 s). If the app crashes on start (say, a syntax error), the
-  loop logs it and waits for your next save.
+  loop logs it and waits for your next save; the access link is printed by
+  whichever start first gets ready.
+* Saves made during the first start are held until it is ready (that start
+  runs the seed, and a restart would cut it off), then applied as one restart.
 * `--no-vite` serves the stamped build instead (`(cd frontend && npm run build)
   && python -m app.preview stamp` first).
 
@@ -54,9 +61,12 @@ stops the instance.
   `.fluid/worktrees/feature-second`; a cleared chat; one in Dev other; and one
   with no project.
 
-Seeding runs inside the app at startup through the app's own functions, once
-per data directory. It refuses to run unless the data directory carries the
-launcher's `.branch-preview` marker, so it can never touch a real install.
+Seeding runs inside the app at startup through the app's own functions, at
+most once per data directory. It refuses to run unless the data directory
+carries the launcher's `.branch-preview` marker, so it can never touch a real
+install. A seed that failed, or was cut off by a stop, is never re-run on top
+of what it already wrote: later starts report it as the `seed` error (`partial
+seed from an interrupted start`); run `down` then `up` for a fresh instance.
 
 ## The fake AI
 

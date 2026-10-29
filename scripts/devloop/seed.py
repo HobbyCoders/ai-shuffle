@@ -6,9 +6,13 @@ owner setup, only on a launcher-marked disposable preview (the same guard as
 and DB functions (the provider create/fetch-models/curate handlers, project
 creation, the branch-session path, the event log), never HTTP on the owner port.
 
-Idempotent per data directory: a finished seed records ``dev_seed:<name>``
-and app restarts skip it. The outcome is written to ``SHUFFLE_DEV_SEED_FILE``
-for the launcher's status file.
+Runs at most once per data directory. The seed itself is not idempotent (it
+creates chats), so ``dev_seed:<name>`` records ``started`` before any write
+and ``done`` (with the result) or ``failed`` after. A later app start skips a
+done seed and never re-runs a started or failed one: it reports that the data
+is partial (``run down then up``) instead of piling duplicates on top. The
+outcome of every start is written to ``SHUFFLE_DEV_SEED_FILE`` for the
+launcher's status file.
 """
 from __future__ import annotations
 
@@ -95,8 +99,8 @@ _TOOLS = [
     ("Read", {"file_path": "src/app.py"},
      "1\tdef greet(name: str) -> str:\n2\t    return f\"Hello, {name}!\"", False),
     ("Grep", {"pattern": "def ", "path": "src"},
-     "src/app.py:1:def greet(name: str) -> str:\nsrc/math_utils.py:1:def add(a: int, b: int) -> int:",
-     False),
+     ("src/app.py:1:def greet(name: str) -> str:\n"
+      "src/math_utils.py:1:def add(a: int, b: int) -> int:"), False),
     ("Edit", {"file_path": "src/math_utils.py", "old_string": "return a + b",
               "new_string": "return int(a) + int(b)"},
      "The file src/math_utils.py has been updated.", False),
@@ -104,7 +108,8 @@ _TOOLS = [
      "cat: missing.txt: No such file or directory", True),
     # The native engine's default (code mode): work tools called from Python.
     ("run_python",
-     {"code": "from tools.Bash import Bash\nlog = Bash(command='git log --oneline -3')\nprint(log)"},
+     {"code": ("from tools.Bash import Bash\n"
+               "log = Bash(command='git log --oneline -3')\nprint(log)")},
      ("a1b2c3d Add tests/test_app.py (seed commit 4)\n"
       "d4e5f6a Add src/math_utils.py (seed commit 3)\n"
       "0718293 Add src/app.py (seed commit 2)"), False),
@@ -176,26 +181,33 @@ def _long_transcript(transcript: Transcript) -> None:
 
 async def _fake_provider(fake_url: str) -> tuple[str, str]:
     """Create, discover and curate the Fake AI row through the provider API's
-    own handlers (the Settings flow: add, Refresh models, save)."""
+    own handlers (the Settings flow: add, Refresh models, save).
+
+    An existing row is reused only once it is curated; one left without a
+    default model (cut off between create and save) is discovered and saved
+    again rather than handing an empty model to the agent and chats.
+    """
     from app.api import model_providers as api
     from app.db.model_providers import get_all_model_providers
 
     existing = [row for row in get_all_model_providers() if row.get("name") == PROVIDER_NAME]
+    if existing and existing[0].get("default_model"):
+        return existing[0]["id"], existing[0]["default_model"]
     if existing:
-        row = existing[0]
-        return row["id"], row.get("default_model") or ""
-    created = await api.create_provider(api.ModelProviderCreate(
-        name=PROVIDER_NAME, provider_type="custom", api_dialect="openai", base_url=fake_url,
-        auth_token="dev-fake-key-not-secret",
-    ), token="dev-seed")
-    fetched = await api._fetch_models(created.id)
+        provider_id = existing[0]["id"]
+    else:
+        provider_id = (await api.create_provider(api.ModelProviderCreate(
+            name=PROVIDER_NAME, provider_type="custom", api_dialect="openai", base_url=fake_url,
+            auth_token="dev-fake-key-not-secret",
+        ), token="dev-seed")).id
+    fetched = await api._fetch_models(provider_id)
     if not fetched.models:
         raise RuntimeError(f"Fake AI at {fake_url} listed no models")
     model = fetched.models[0]["id"]
-    await api.update_provider(created.id, api.ModelProviderUpdate(
+    await api.update_provider(provider_id, api.ModelProviderUpdate(
         models=fetched.models, default_model=model, small_fast_model=model,
     ), token="dev-seed")
-    return created.id, model
+    return provider_id, model
 
 
 # ─── chats ──────────────────────────────────────────────────────────────────
@@ -326,9 +338,32 @@ def _write_result(result: dict) -> None:
         Path(path).write_text(json.dumps(result, indent=2), encoding="utf-8")
 
 
-async def seed(name: str) -> None:
-    """Run seed ``name`` once per data directory; record the outcome."""
+#: ``seed.json`` error for a seed an earlier start began but never finished.
+PARTIAL_SEED = ("partial seed from an interrupted start; run `down` then `up` for a fresh "
+                "instance")
+
+
+def _record(name: str) -> dict | None:
     from app.db import database
+
+    raw = database.get_system_setting(f"dev_seed:{name}")
+    if not raw:
+        return None
+    try:
+        record = json.loads(raw)
+    except ValueError:
+        record = None
+    return record if isinstance(record, dict) else {"state": "started"}
+
+
+def _save_record(name: str, record: dict) -> None:
+    from app.db import database
+
+    database.set_system_setting(f"dev_seed:{name}", json.dumps(record))
+
+
+async def seed(name: str) -> None:
+    """Run seed ``name`` at most once per data directory; record the outcome."""
     from app.db.async_database import run_sync
 
     if name not in SEEDS:
@@ -336,18 +371,32 @@ async def seed(name: str) -> None:
                        "error": f"unknown seed {name!r}; known: {', '.join(sorted(SEEDS))}"})
         logger.error("Unknown dev seed %r", name)
         return
-    key = f"dev_seed:{name}"
-    done = await run_sync(database.get_system_setting, key)
-    if done:
-        _write_result({"ok": True, "seed": name, "reused": True, **json.loads(done)})
-        logger.info("Dev seed %r already applied to this data directory", name)
+    record = await run_sync(_record, name)
+    if record is not None:
+        state = record.get("state")
+        if state == "done":
+            result = record.get("result") or {}
+            _write_result({"ok": True, "seed": name, "reused": True, **result})
+            logger.info("Dev seed %r already applied to this data directory", name)
+            return
+        error = PARTIAL_SEED
+        if state == "failed":
+            error = (f"the seed failed on an earlier start ({record.get('error')}); run `down` "
+                     "then `up` for a fresh instance")
+        _write_result({"ok": False, "seed": name, "error": error})
+        logger.error("Dev seed %r not re-run: %s", name, error)
         return
+    # Before any write: a start cut off past here leaves "started" behind,
+    # which the next start reports instead of seeding a second copy.
+    await run_sync(_save_record, name, {"state": "started"})
     try:
         result = await SEEDS[name]()
     except Exception as exc:
         logger.exception("Dev seed %r failed", name)
-        _write_result({"ok": False, "seed": name, "error": f"{type(exc).__name__}: {exc}"})
+        error = f"{type(exc).__name__}: {exc}"
+        await run_sync(_save_record, name, {"state": "failed", "error": error})
+        _write_result({"ok": False, "seed": name, "error": error})
         return
-    await run_sync(database.set_system_setting, key, json.dumps(result))
+    await run_sync(_save_record, name, {"state": "done", "result": result})
     _write_result({"ok": True, "seed": name, **result})
     logger.info("Dev seed %r applied: %s", name, json.dumps(result))
