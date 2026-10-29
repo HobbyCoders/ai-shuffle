@@ -5,14 +5,6 @@ import pytest
 from scripts.measure_prompt_catalog import compile_fixture, measure
 
 
-@pytest.fixture(autouse=True)
-def _emulator_tools_listed(monkeypatch):
-    """Count the full catalog on every host: the emulator tools are only listed
-    where an emulator backend exists (Linux x86_64 today), so a Windows or macOS
-    run would otherwise see two tools fewer."""
-    monkeypatch.setattr("app.mcp.emulator_tools.emulator_tools_supported", lambda: True)
-
-
 # Measured with scripts/measure_prompt_catalog.py; chars/4 is only an estimate.
 # Canonical CI recipe: native full=126278, eager=51071; delegated append=12761,
 # delegated always-loaded bridge tools=7258.
@@ -49,7 +41,9 @@ def _emulator_tools_listed(monkeypatch):
 # Bounded WorkingRecord pages (#681): the deferred doc gains get/limit and the
 # paging rule, 792 -> 976 chars; combined_full 133,593 -> 133,777, eager
 # unchanged (53,087). The working record itself left the system prompt (#680).
-MEASURED_FULL = 133_376
+# Removing the two deferred Android tools reduces combined_full to 132,739
+# (scripts/measure_prompt_catalog.py, 2026-10-29); eager/loaded budgets stay put.
+MEASURED_FULL = 132_739
 MEASURED_EAGER = 52_573
 MEASURED_DELEGATED_APPEND = 14_716
 MEASURED_DELEGATED_LOADED_TOOLS = 7_258
@@ -204,8 +198,8 @@ def test_measurement_is_repeatable_and_deferred_catalog_is_not_sent() -> None:
     first = measure()
     assert measure() == first
     compiled, catalog, specs = compile_fixture()
-    # Project listing/creation add two deferred schemas; size budgets stay unchanged.
-    assert len(specs) == 113
+    # Project tools remain deferred; the two Android emulator schemas are gone.
+    assert len(specs) == 111
     for leaf in (
         "CreateWatch", "ListWatches", "PauseWatch", "StopWatch", "WorkingRecord",
         "generationPreferences", "listProjects", "createProject",

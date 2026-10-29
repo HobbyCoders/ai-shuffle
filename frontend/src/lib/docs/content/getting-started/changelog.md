@@ -8,6 +8,12 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
+## Unreleased
+
+### Removed
+
+- Removed the built-in Android emulator and Phone panel. Companion-app access to your real Android devices is unchanged.
+
 ## 1.1.0
 
 Watches, peer terminals, one generation tool, review mode, and a large reliability pass across hand-offs, PostgreSQL and Windows.
