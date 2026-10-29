@@ -19,8 +19,10 @@
  * Mount markers, `data-ui-mount="<Name>"`, counted as they mount and unmount:
  *   ChatView, ChatInput, NewSessionHero, MessageArea, SidePanel
  *
- * Transcript rows, `data-ui-row="<message id>"`: every top-level row of
- * MessageArea's transcript. The same id on the page twice is a duplicate row.
+ * Transcript rows, `data-ui-row`: every message row carries its message id,
+ * at the top level and inside work logs and system groups (rows without an id
+ * carry none); a top-level group carries its group key. The same value on the
+ * page twice is a duplicate row.
  *
  * Adding a field: put `data-ui-<name>` on the carrier (or another element with
  * data-ui-state), feed it a short enum-like value built here, and list it above

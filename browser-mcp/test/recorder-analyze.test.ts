@@ -171,6 +171,53 @@ describe("reversal", () => {
   });
 });
 
+describe("reversal across a scope change (path, session)", () => {
+  it("does not flag a chat switch whose loading state takes a normal time", () => {
+    const rec = recording([
+      state(0, 0, { surface: "active", session: "s:aaaaaa", messages: "12" }),
+      mark(10, "act click chat B"),
+      state(20, 1, { surface: "loading", session: "s:bbbbbb", messages: "0" }),
+      state(420, 25, { surface: "active", messages: "6" }),
+    ]);
+    expect(analyzeRecording(rec)).toEqual([]);
+  });
+
+  it("flags a flash across a scope change and says what changed", () => {
+    const rec = recording([
+      state(0, 0, { surface: "active", session: "s:aaaaaa" }),
+      mark(10, "act click chat B"),
+      state(20, 1, { surface: "loading", session: "s:bbbbbb" }),
+      state(85, 5, { surface: "active" }),
+    ]);
+    const [anomaly] = detectReversals(rec);
+    expect(anomaly).toMatchObject({ field: "surface", scope_changed: ["session"], away_ms: 65 });
+    expect(anomaly.message).toBe("surface went active → loading → active within one step: back to active after 65ms (4 frames) while session changed s:aaaaaa → s:bbbbbb");
+  });
+
+  it("flags the worktree flicker however long it lasts: the session comes back too", () => {
+    const rec = recording([
+      state(0, 0, { surface: "new", session: "none", composer: "centre" }),
+      mark(5, "act click create worktree session"),
+      state(300, 18, { surface: "active", session: "s:k2x9qa", composer: "bottom" }),
+      state(900, 54, { surface: "new", session: "none", composer: "centre" }),
+      state(1500, 90, { surface: "active", session: "s:k2x9qa", composer: "bottom" }),
+    ]);
+    const fields = detectReversals(rec).map((a) => a.field).sort();
+    expect(fields).toEqual(["composer", "session", "surface"]);
+  });
+
+  it("honours custom scope fields and flash threshold", () => {
+    const rec = recording([
+      state(0, 0, { tab: "a", panel: "open" }),
+      state(16, 1, { tab: "b", panel: "closed" }),
+      state(400, 24, { panel: "open" }),
+    ]);
+    expect(detectReversals(rec)).toHaveLength(1);
+    expect(detectReversals(rec, { scope: ["tab"] })).toEqual([]);
+    expect(detectReversals(rec, { scope: ["tab"], thresholds: { scopeFlashMs: 500 } })).toHaveLength(1);
+  });
+});
+
 describe("remount", () => {
   it("flags an unmount followed by a mount in one step", () => {
     const rec = recording([
@@ -284,6 +331,24 @@ describe("errors, requests, rows, gaps", () => {
     ]);
   });
 
+  it("reports failures across sibling URLs as one parent/* anomaly", () => {
+    const names = ["theme", "layout", "groups", "timezone"];
+    const rec = recording([
+      ...names.map((name, i) => ({ t: 10 + i, kind: "request", method: "PUT", url: `/api/v1/preferences/${name}?…`, status: 403 })),
+      { t: 20, kind: "request", method: "PUT", url: "/api/v1/preferences/theme?…", status: 403 },
+      { t: 30, kind: "request", method: "GET", url: "/api/v1/preferences/theme?…", status: 500 },
+      { t: 40, kind: "request", method: "PUT", url: "/api/v1/other/x", status: 403 },
+    ]);
+    const anomalies = detectFailedRequests(rec);
+    expect(anomalies.map((a) => a.message)).toEqual([
+      "5× PUT /api/v1/preferences/* → HTTP 403 at 10ms (4 URLs, e.g. theme?…, layout?…, groups?…)",
+      "GET /api/v1/preferences/theme?… → HTTP 500 at 30ms",
+      "PUT /api/v1/other/x → HTTP 403 at 40ms",
+    ]);
+    expect(anomalies[0]).toMatchObject({ url: "/api/v1/preferences/*", urls: 4, count: 5 });
+    expect(detectFailedRequests(rec, { thresholds: { requestSiblings: 10 } })).toHaveLength(6);
+  });
+
   it("collects duplicate row ids into one anomaly", () => {
     const rec = recording([
       { t: 40, kind: "duplicate_rows", ids: ["m1"] },
@@ -343,7 +408,8 @@ describe("formatTimeline", () => {
       "  16ms  surface=active composer=bottom   << reversal(surface), reversal(composer)",
       "  16ms  + MessageArea mounted",
       "  33ms  surface=new composer=centre   << reversal(surface), reversal(composer)",
-      "1200ms  /chat/x  surface=active composer=bottom   << reversal(surface), reversal(composer)",
+      // A new page, long after: moving on, not going back.
+      "1200ms  /chat/x  surface=active composer=bottom",
     ].join("\n"));
   });
 

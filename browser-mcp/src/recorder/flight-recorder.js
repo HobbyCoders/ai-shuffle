@@ -63,11 +63,22 @@
   /** Fields that legitimately go A -> B -> A (a load starts and ends). */
   const DEFAULT_CYCLIC_FIELDS = ['loading', 'streaming'];
 
+  /**
+   * Fields that say which thing is on screen. A field that returns to a value
+   * after one of these changed is showing a new thing (chat A active -> loading
+   * -> chat B active), not going back, unless it was only a flash.
+   */
+  const DEFAULT_SCOPE_FIELDS = ['path', 'session'];
+
   const DEFAULT_THRESHOLDS = {
     /** One layout shift at or above this is flagged. */
     layoutShiftEntry: 0.05,
     /** Total unexpected layout shift at or above this is flagged. */
     layoutShiftTotal: 0.1,
+    /** Across a scope change, a return to the same value counts only within this long. */
+    scopeFlashMs: 150,
+    /** Failed requests to this many sibling URLs are reported as one (`/parent/*`). */
+    requestSiblings: 3,
   };
 
   const GONE = '(gone)';
@@ -119,26 +130,42 @@
     return new Set(recorded);
   }
 
+  function scopeFieldsOf(recording, options) {
+    if (options && Array.isArray(options.scope)) return options.scope;
+    if (recording && recording.options && Array.isArray(recording.options.scope)) return recording.options.scope;
+    return DEFAULT_SCOPE_FIELDS;
+  }
+
   /**
    * reversal: inside one step a tracked field returns to a value it had already
    * left (new -> active -> new, or A -> B -> C -> A). Cyclic fields are exempt.
+   * When a scope field (path, session) differs between leaving and returning,
+   * the field is showing something new, so only a flash (scopeFlashMs) counts.
    */
   function detectReversals(recording, options = {}) {
     const timeline = entriesOf(recording);
     const cyclic = cyclicSet(recording, options);
+    const scopeFields = scopeFieldsOf(recording, options);
+    const flashMs = { ...DEFAULT_THRESHOLDS, ...(options.thresholds || {}) }.scopeFlashMs;
     const anomalies = [];
-    const current = {};
+    let current = {};
     // field -> runs of distinct values in the current step
     let runs = new Map();
     // field -> anomaly already raised in this step
     let raised = new Map();
     let step = 0;
 
-    function runsFor(field) {
+    function scopeOf(state, field) {
+      const scope = {};
+      for (const name of scopeFields) if (name !== field) scope[name] = name in state ? state[name] : null;
+      return scope;
+    }
+
+    function runsFor(field, before) {
       let list = runs.get(field);
       if (!list) {
-        const value = field in current ? current[field] : null;
-        list = [{ value, index: null, t: null }];
+        const value = field in before ? before[field] : null;
+        list = [{ value, index: null, t: null, scope: scopeOf(before, field) }];
         runs.set(field, list);
       }
       return list;
@@ -153,14 +180,19 @@
         return;
       }
       if (entry.kind !== 'state' || !entry.changes) return;
-      for (const [field, raw] of Object.entries(entry.changes)) {
-        const value = raw === undefined ? null : raw;
-        const list = runsFor(field);
-        current[field] = value;
+      // Every change in an entry happened in the same frame: judge each field
+      // against the whole state before and after it.
+      const before = current;
+      current = { ...current };
+      for (const [field, raw] of Object.entries(entry.changes)) current[field] = raw === undefined ? null : raw;
+      for (const field of Object.keys(entry.changes)) {
+        const value = current[field];
+        const list = runsFor(field, before);
         if (cyclic.has(field)) continue;
         const last = list[list.length - 1];
         if (last.value === value) continue;
-        list.push({ value, index, t: entry.t });
+        const scope = scopeOf(current, field);
+        list.push({ value, index, t: entry.t, scope });
         let earlier = -1;
         for (let i = list.length - 3; i >= 0; i -= 1) {
           if (list[i].value === value) { earlier = i; break; }
@@ -169,6 +201,11 @@
         const path = list.slice(earlier).map((run) => shown(run.value));
         const departure = list[earlier + 1];
         const awayMs = Math.max(0, entry.t - departure.t);
+        const moved = Object.keys(scope).filter((name) => list[earlier].scope[name] !== scope[name]);
+        if (moved.length && awayMs > flashMs) continue;
+        const scopeNote = moved.length
+          ? ` while ${moved.map((name) => `${name} changed ${shown(list[earlier].scope[name])} → ${shown(scope[name])}`).join(' and ')}`
+          : '';
         const frames = typeof entry.frame === 'number' && typeof timeline[departure.index].frame === 'number'
           ? entry.frame - timeline[departure.index].frame
           : null;
@@ -184,6 +221,7 @@
         const flicker = frames !== null && frames <= 2;
         const base = `${field} went ${path.join(' → ')} within one step: back to ${quoted(value)} after ${ms(awayMs)}`
           + (frames !== null ? ` (${frames} frame${frames === 1 ? '' : 's'})` : '')
+          + scopeNote
           + (flicker ? ' — a flicker' : '');
         const anomaly = {
           kind: 'reversal',
@@ -193,6 +231,7 @@
           away_ms: Math.round(awayMs),
           ...(frames !== null ? { frames } : {}),
           flicker,
+          ...(moved.length ? { scope_changed: moved } : {}),
           count: 1,
           indices,
           t: [departure.t, entry.t],
@@ -342,24 +381,62 @@
     });
   }
 
-  /** failed_requests: fetch/XHR answered >= 400 or failed on the network (aborts excluded). */
-  function detectFailedRequests(recording) {
+  function parentPath(url) {
+    const bare = String(url).replace(/\?.*$/, '');
+    const cut = bare.lastIndexOf('/');
+    return cut > 0 ? bare.slice(0, cut) : null;
+  }
+
+  /**
+   * failed_requests: fetch/XHR answered >= 400 or failed on the network (aborts
+   * excluded), grouped by URL. When `requestSiblings` or more URLs under one
+   * parent fail the same way (PUT /preferences/a, /b, /c → 403) they are one
+   * anomaly for `parent/*` with a few examples.
+   */
+  function detectFailedRequests(recording, options = {}) {
     const timeline = entriesOf(recording);
-    const key = (e) => `${e.method} ${e.url} ${e.status === undefined ? e.error : e.status}`;
-    return grouped(timeline, 'request', key, (e) => !e.aborted).map(({ entry, indices }) => {
-      const outcome = typeof entry.status === 'number' ? `HTTP ${entry.status}` : `network error (${entry.error || 'failed'})`;
-      const times = indices.length > 1 ? `${indices.length}× ` : '';
-      return {
-        kind: 'failed_requests',
-        method: entry.method,
-        url: entry.url,
-        ...(typeof entry.status === 'number' ? { status: entry.status } : { error: entry.error || 'failed' }),
-        count: indices.length,
-        indices,
-        t: [timeline[indices[0]].t, timeline[indices[indices.length - 1]].t],
-        message: `${times}${entry.method} ${entry.url} → ${outcome} at ${ms(entry.t)}`,
-      };
-    });
+    const siblings = { ...DEFAULT_THRESHOLDS, ...(options.thresholds || {}) }.requestSiblings;
+    const outcomeOf = (e) => (e.status === undefined ? `e:${e.error}` : `s:${e.status}`);
+    const groups = grouped(timeline, 'request', (e) => `${e.method} ${e.url} ${outcomeOf(e)}`, (e) => !e.aborted);
+    const families = new Map();
+    for (const group of groups) {
+      const parent = parentPath(group.entry.url);
+      if (parent === null) continue;
+      const key = `${group.entry.method} ${parent} ${outcomeOf(group.entry)}`;
+      const family = families.get(key) || [];
+      family.push(group);
+      families.set(key, family);
+    }
+    const merged = new Set();
+    const results = [];
+    for (const family of families.values()) {
+      if (family.length < siblings) continue;
+      family.forEach((group) => merged.add(group));
+      const first = family[0];
+      const indices = family.flatMap((group) => group.indices).sort((a, b) => a - b);
+      results.push({ entry: first.entry, indices, url: `${parentPath(first.entry.url)}/*`, examples: family.map((group) => group.entry.url) });
+    }
+    for (const group of groups) if (!merged.has(group)) results.push({ ...group, url: group.entry.url });
+    return results
+      .sort((a, b) => a.indices[0] - b.indices[0])
+      .map(({ entry, indices, url, examples }) => {
+        const outcome = typeof entry.status === 'number' ? `HTTP ${entry.status}` : `network error (${entry.error || 'failed'})`;
+        const times = indices.length > 1 ? `${indices.length}× ` : '';
+        const across = examples
+          ? ` (${examples.length} URLs, e.g. ${examples.slice(0, 3).map((example) => example.slice(example.lastIndexOf('/') + 1)).join(', ')})`
+          : '';
+        return {
+          kind: 'failed_requests',
+          method: entry.method,
+          url,
+          ...(typeof entry.status === 'number' ? { status: entry.status } : { error: entry.error || 'failed' }),
+          count: indices.length,
+          ...(examples ? { urls: examples.length } : {}),
+          indices,
+          t: [timeline[indices[0]].t, timeline[indices[indices.length - 1]].t],
+          message: `${times}${entry.method} ${url} → ${outcome} at ${ms(timeline[indices[0]].t)}${across}`,
+        };
+      });
   }
 
   /** duplicate_rows: the same data-ui-row id present more than once in the DOM. */
@@ -423,7 +500,7 @@
       ...detectRemounts(recording),
       ...detectDuplicateRows(recording),
       ...detectErrors(recording),
-      ...detectFailedRequests(recording),
+      ...detectFailedRequests(recording, options),
       ...detectLayoutShift(recording, options),
       ...detectRecordingGaps(recording),
     ];
@@ -549,7 +626,7 @@
       + (stats.maxFrameGapMs ? `, longest frame gap ${ms(stats.maxFrameGapMs)}` : '');
     return `${head}\n${formatTimeline(recording, { ...options, anomalies })}\n\nanomalies:\n${formatAnomalies(anomalies)}`;
   }
-  return { ANALYZER_VERSION, DEFAULT_CYCLIC_FIELDS, DEFAULT_THRESHOLDS, foldStates, detectReversals, detectRemounts, detectLayoutShift, detectErrors, detectFailedRequests, detectDuplicateRows, detectRecordingGaps, analyzeRecording, formatTimeline, formatAnomalies, formatReport };
+  return { ANALYZER_VERSION, DEFAULT_CYCLIC_FIELDS, DEFAULT_SCOPE_FIELDS, DEFAULT_THRESHOLDS, foldStates, detectReversals, detectRemounts, detectLayoutShift, detectErrors, detectFailedRequests, detectDuplicateRows, detectRecordingGaps, analyzeRecording, formatTimeline, formatAnomalies, formatReport };
   })();
   /* @generated-end analyze.js */
 
@@ -1169,6 +1246,7 @@
     var cyclic = Array.isArray(input.cyclic) ? input.cyclic.map(String) : ANALYZER.DEFAULT_CYCLIC_FIELDS.slice();
     if (!Array.isArray(input.cyclic)) for (var c = 0; c < opts.selectorList.length; c += 1) cyclic.push(opts.selectorList[c][0]);
     opts.cyclic = cyclic;
+    opts.scope = Array.isArray(input.scope) ? input.scope.map(String) : ANALYZER.DEFAULT_SCOPE_FIELDS.slice();
     return opts;
   }
 
@@ -1261,6 +1339,7 @@
         fields: S.opts.fields.slice(),
         selectors: S.opts.selectorList.map(function (pair) { return pair[0] + '=' + pair[1]; }),
         cyclic: S.opts.cyclic.slice(),
+        scope: (S.opts.scope || ANALYZER.DEFAULT_SCOPE_FIELDS).slice(),
       },
       recording: Boolean(S.active),
     };

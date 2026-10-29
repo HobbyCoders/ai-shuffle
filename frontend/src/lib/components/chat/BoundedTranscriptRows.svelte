@@ -3,9 +3,11 @@
 	import { createTranscriptWindow, type TranscriptRange } from './transcript-window';
 
 	/** Bounded nested rows: a single huge work log must not bypass the outer cap. */
-	let { items, keyOf, children, revealKey = null, startAtTail = false, pagingEnabled = true, label = 'log entries' }: {
+	let { items, keyOf, rowId, children, revealKey = null, startAtTail = false, pagingEnabled = true, label = 'log entries' }: {
 		items: readonly T[];
 		keyOf: (item: T) => string;
+		/** The row's message id for the flight recorder's data-ui-row (ui-signature.ts); none when it has no id. */
+		rowId?: (item: T) => string | null | undefined;
 		children: Snippet<[T]>;
 		revealKey?: string | null;
 		startAtTail?: boolean;
@@ -105,7 +107,7 @@
 		<button type="button" class="slice-page" onclick={older}>Show earlier {label}</button>
 	{/if}
 	{#each visible as item, index (keyOf(item))}
-		<div class="slice-entry" data-slice-key={keyOf(item)} data-slice-index={range.start + index}>
+		<div class="slice-entry" data-slice-key={keyOf(item)} data-slice-index={range.start + index} data-ui-row={rowId?.(item) || undefined}>
 			{@render children(item)}
 		</div>
 	{/each}

@@ -1994,7 +1994,7 @@
 				<div
 					class="msg-virtualized"
 					data-transcript-index={mountedStart + i}
-					data-ui-row={item.kind === 'message' && item.message.id ? item.message.id : displayItemKey(item)}
+					data-ui-row={item.kind === 'message' ? item.message.id || undefined : displayItemKey(item)}
 					use:observeTurnAnchor
 					id={item.kind === 'message' && item.message.id && isNavigableUserTurn(item.message) ? turnAnchorId(item.message.id) : undefined}
 					data-user-turn-id={item.kind === 'message' && item.message.id && isNavigableUserTurn(item.message) ? item.message.id : undefined}

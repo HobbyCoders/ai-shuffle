@@ -12,11 +12,11 @@ the patterns that mean something went wrong:
 
 | Anomaly | Meaning |
 | --- | --- |
-| `reversal` | A field went back to a value it had already left within one step (`surface new → active → new`). The message gives the time away and the number of frames; one or two frames is called a flicker. |
+| `reversal` | A field went back to a value it had already left within one step (`surface new → active → new`). The message gives the time away and the number of frames; one or two frames is called a flicker. If `path` or `session` changed in between, the screen is showing something new (chat A active → loading → chat B active). That only counts if it was a flash of 150ms or less, and the message says what changed. |
 | `remount` | A component marked with `data-ui-mount` unmounted and mounted again, or mounted twice, within one step. |
 | `layout_shift` | The layout moved without user input: one shift of 0.05 or more, or 0.1 in total. The message names what moved. |
 | `errors` | Uncaught errors, unhandled rejections and `console.error`, with repeats grouped. |
-| `failed_requests` | `fetch` or XHR calls that got HTTP 400 or above or failed on the network. The page's own aborts are shown in the timeline but not flagged. |
+| `failed_requests` | `fetch` or XHR calls that got HTTP 400 or above or failed on the network. When 3 or more URLs under one parent fail the same way, they are reported as one `parent/*` anomaly. The page's own aborts are shown in the timeline but not flagged. |
 | `duplicate_rows` | The same transcript `data-ui-row` id appeared in the page twice. |
 | `recording_gap` | Part of the recording was lost: a full page load to another origin, or the size cap was reached. |
 
@@ -65,8 +65,9 @@ marks it as a state carrier):
 
 `data-ui-mount` markers are on the root elements of `ChatView`, `ChatInput`
 (the composer), `NewSessionHero`, `MessageArea` (the transcript) and
-`SidePanel`. Each top-level transcript row carries `data-ui-row` set to its
-message id.
+`SidePanel`. Every transcript message row carries `data-ui-row` set to its
+message id, both at the top level and inside work logs and system groups. A
+top-level group carries its group key, and a row without an id carries none.
 
 The recorder also records `path`, which is `location.pathname` plus the query
 string. Query values whose names look like credentials (`token`, `key`,
@@ -181,7 +182,9 @@ otherwise two deliberate opposite actions read as one reversal.
 2. Add it to the list in `ui-signature.ts` and to the table above.
 3. If the field may legitimately go A → B → A within one action (like a
    spinner), pass it in `cyclic` when starting the recording, or add it to
-   `DEFAULT_CYCLIC_FIELDS` in `browser-mcp/src/recorder/analyze.js`.
+   `DEFAULT_CYCLIC_FIELDS` in `browser-mcp/src/recorder/analyze.js`. If it
+   names which thing is on screen (as `session` does), add it to
+   `DEFAULT_SCOPE_FIELDS`.
 
 The detectors live in `browser-mcp/src/recorder/analyze.js`. The recorder
 embeds a copy of it, so after editing it run

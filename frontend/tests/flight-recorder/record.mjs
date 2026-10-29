@@ -39,6 +39,7 @@ export { NETWORK_PROFILES } from '../../../browser-mcp/src/recorder/driver.js';
  *   fields         record only these data-ui-<field> attributes
  *   selectors      extra fields: ['name=css', ...] recorded as match counts
  *   cyclic         fields allowed to go A -> B -> A (default loading, streaming + selectors)
+ *   scope          fields naming what is on screen (default path, session; see analyze.js)
  *   settleMs       keep recording this long after actions resolve (default 250)
  *   maxDurationMs  recorder stops sampling after this long (default 120000)
  *
@@ -52,6 +53,7 @@ export async function withRecording(page, opts = {}, actions = async () => {}) {
 		...(opts.fields ? { fields: opts.fields } : {}),
 		...(opts.selectors ? { selectors: opts.selectors } : {}),
 		...(opts.cyclic ? { cyclic: opts.cyclic } : {}),
+		...(opts.scope ? { scope: opts.scope } : {}),
 		maxDurationMs: opts.maxDurationMs ?? 120_000
 	};
 	let throttle = {};
