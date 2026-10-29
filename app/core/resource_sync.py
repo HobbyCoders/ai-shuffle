@@ -9,6 +9,7 @@ from contextvars import ContextVar
 from functools import wraps
 import inspect
 import logging
+import os
 import re
 
 _active = ContextVar("resource_mutation", default=None)
@@ -196,6 +197,12 @@ def mutation(resource, *, scope="admin", database=True):
         wrapper.resource_sync = (resource, scope)
         return wrapper
     return decorate
+
+
+def replicated_wakes_enabled():
+    """Startup kill switch for the additional replicated writer boundaries."""
+    return os.environ.get("AI_SHUFFLE_PERF_RESOURCE_WAKE", "").strip().lower() not in (
+        "0", "false", "off", "no")
 
 
 def install_database_mutations(namespace, resource, names, *, scope="admin"):

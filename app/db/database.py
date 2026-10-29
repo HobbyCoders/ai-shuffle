@@ -3966,14 +3966,6 @@ from app.db.api_users import (  # noqa: F401
     delete_user_credential,
 )
 
-from app.core.resource_sync import install_database_mutations as _install_resource_sync
-from app.db import settings as _settings_db
-
-_install_resource_sync(
-    vars(_settings_db), "settings",
-    "set_system_setting delete_system_setting get_or_create_system_setting",
-)
-
 from app.db.settings import (  # noqa: F401
     get_user_preference,
     set_user_preference,

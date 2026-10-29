@@ -347,3 +347,15 @@ def get_all_system_settings() -> Dict[str, str]:
         cursor.execute("SELECT key, value FROM system_settings")
         rows = cursor.fetchall()
         return {row["key"]: row["value"] for row in rows}
+
+
+# Register at the implementation so direct setters and facade/API callers share
+# the same committed-write/no-op detection. Nested per-model clears emit once.
+from app.core.resource_sync import install_database_mutations as _install_resource_sync, replicated_wakes_enabled
+
+_install_resource_sync(
+    globals(), "settings",
+    "set_system_setting delete_system_setting get_or_create_system_setting",
+)
+if replicated_wakes_enabled():
+    _install_resource_sync(globals(), "preferences", "set_user_preference delete_user_preference")

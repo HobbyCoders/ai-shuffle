@@ -20,8 +20,20 @@ INVENTORY = {'projects': ('projects', 'shared', 'create_project update_project d
 INVENTORY['api_users'] = ('api_users', 'admin', 'create_api_user update_api_user delete_api_user update_credential_policy set_user_credential_policy delete_user_credential_policy set_user_credential delete_user_credential')
 
 
+INVENTORY['settings'] = ('settings', 'admin', 'set_system_setting delete_system_setting get_or_create_system_setting set_user_preference delete_user_preference')
+INVENTORY['artifacts'] = ('artifacts', 'admin', 'upsert_artifact')
+BOUNDARY_OVERRIDES = {
+    **{('subagents', name): ('settings', 'shared') for name in
+       'add_permission_rule delete_permission_rule delete_profile_permission_rules'.split()},
+    **{('tags', name): ('sessions', 'session') for name in
+       'add_session_tag remove_session_tag set_session_tags'.split()},
+    **{('settings', name): ('preferences', 'admin') for name in
+       'set_user_preference delete_user_preference'.split()},
+}
+
+
 @pytest.mark.parametrize("module,resource,scope,name", [
-    (module, resource, scope, name)
+    (module, *BOUNDARY_OVERRIDES.get((module, name), (resource, scope)), name)
     for module, (resource, scope, names) in INVENTORY.items()
     for name in names.split()
 ])
