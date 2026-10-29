@@ -37,6 +37,12 @@ conversation state. The implicit pin is validated exactly like an explicit one
 NULL placement with an empty/None ``instance_id`` falls through to
 local-default.
 
+On a worker network ``owner_device_id`` names the owner instead and wins over
+``instance_id``, exactly as ``app.network.control.owner_of`` decides it.
+``instance_id`` is local-only (it never syncs), so on a mirror it is NULL or a
+value this install wrote itself; trusting it there made a mirror look owned
+here and its sends queue locally forever (#782).
+
 Return shape — ``PlacementDecision``:
   * ``kind == "local"``  — run on this (the local) runner; ``runner_id`` is the
     local ``effective_instance_id``. This is the default for NULL placement
@@ -110,6 +116,26 @@ def _self_normalized(runner_id: str) -> str:
     except Exception:  # noqa: BLE001 — never let the network layer break resolution
         pass
     return runner_id
+
+
+def _network_owner_device(session_row: Dict[str, Any]) -> Optional[str]:
+    """The row's ``owner_device_id`` as a runner id, when it decides ownership.
+
+    On a worker network ``owner_device_id`` names the device that executes the
+    session; this device's own id maps to ``me``. Off a network (no device
+    identity) it says nothing, and ``instance_id`` keeps deciding, so a
+    shared-database install's follow-me ownership is unchanged.
+    """
+    device = (session_row.get("owner_device_id") or "").strip()
+    if not device:
+        return None
+    try:
+        from app.network import runners
+        if not runners.self_device_id():
+            return None
+    except Exception:  # noqa: BLE001 — never let the network layer break resolution
+        return None
+    return _self_normalized(device)
 
 
 def _installs_map(preloaded: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -248,8 +274,9 @@ def resolve_placement(
     """Resolve where ``session_row`` should execute (pure; writes nothing).
 
     Honors the three canonical placement forms:
-      * ``None`` / blank placement → if the row carries a non-empty
-        ``instance_id``, that owner is an IMPLICIT ``runner:<instance_id>`` pin
+      * ``None`` / blank placement → if the row names an owner (on a worker
+        network its ``owner_device_id``, else a non-empty ``instance_id``),
+        that owner is an IMPLICIT ``runner:<owner>`` pin
         (validated online+capability like an explicit pin; owner offline →
         ``"none"``); otherwise local-default (this runner).
       * ``{"where": "runner:<id>"}`` → that runner, iff online + capability-
@@ -285,17 +312,23 @@ def resolve_placement(
         # (`capable_runners(None, {})`, no checkout filter), owner offline →
         # "none". Only an ownerless
         # row (instance_id empty/None) is truly local-default.
-        # Worker network: a mirrored session carries no instance_id but names
-        # its owner device; our own device id means "me".
-        owner = _self_normalized((session_row.get("instance_id") or "").strip()
-                                 or (session_row.get("owner_device_id") or "").strip())
+        # Worker network: ``owner_device_id`` is the execution owner and
+        # supersedes the local-only ``instance_id`` (as ``control.owner_of``
+        # does). A mirror's ``instance_id`` never syncs, so it is NULL or a
+        # value this install stamped itself (#782); our own device id means "me".
+        source = "owner_device_id"
+        owner = _network_owner_device(session_row)
+        if not owner:
+            source = "instance_id"
+            owner = _self_normalized((session_row.get("instance_id") or "").strip()
+                                     or (session_row.get("owner_device_id") or "").strip())
         if owner:
             if owner in capable_runners(None, {}, installs_map):
                 return PlacementDecision(
-                    "runner", owner, f"implicit-pin:instance_id {owner} online+capable"
+                    "runner", owner, f"implicit-pin:{source} {owner} online+capable"
                 )
             return PlacementDecision(
-                "none", None, f"implicit-pin:instance_id {owner} offline or not capable"
+                "none", None, f"implicit-pin:{source} {owner} offline or not capable"
             )
         return PlacementDecision("local", me, "no placement pin — local default")
 

@@ -17,7 +17,10 @@ by Step B. The only rows that keep NULL placement are those with an
 empty-string instance_id (the legacy sentinel — skipped by both v40's IS NULL
 predicate and Step B's <> '' predicate). The backfill is additive, idempotent,
 and Step B itself never writes a legacy column. Modeled on the v60
-origin-collapse migration test."""
+origin-collapse migration test.
+
+Worker network (#782): rows that name an ``owner_device_id`` are skipped by
+both the v40 backfill and Step B; their owner is that device."""
 
 import json
 
@@ -118,6 +121,50 @@ def test_null_instance_id_adopted_by_v40_then_pinned(test_db):
         _seed_session(shim, "sess-local")
         database._run_column_migrations(shim.cursor())
         assert _placement_of(shim, "sess-local") == {"where": f"runner:{RUNNER}"}
+
+
+def _ownership_of(shim, sid):
+    cur = shim.cursor()
+    cur.execute("SELECT instance_id, owner_device_id FROM sessions WHERE id = %s", (sid,))
+    row = cur.fetchone()
+    return row["instance_id"], row["owner_device_id"]
+
+
+def test_mirror_of_another_device_is_neither_stamped_nor_pinned(test_db):
+    """#782: a worker-network mirror arrives with instance_id NULL (it never
+    syncs). The boot backfills must not claim it for this install."""
+    from tests.pg_shim import route_db_to
+
+    with route_db_to(test_db) as shim:
+        shim.cursor().execute(
+            "INSERT INTO sessions (id, instance_id, owner_device_id) VALUES (%s, %s, %s)",
+            ("sess-mirror", None, "dev-other"),
+        )
+        _seed_session(shim, "sess-legacy")  # ownerless: still adopted locally
+        database._run_column_migrations(shim.cursor())
+        database._run_column_migrations(shim.cursor())
+        assert _ownership_of(shim, "sess-mirror") == (None, "dev-other")
+        assert _placement_of(shim, "sess-mirror") is None
+        assert _ownership_of(shim, "sess-legacy") == (RUNNER, None)
+        assert _placement_of(shim, "sess-legacy") == {"where": f"runner:{RUNNER}"}
+
+
+def test_network_owned_session_keeps_null_placement(test_db):
+    """A row naming its owning device resolves from owner_device_id, so the
+    placement backfill leaves it unpinned whichever device that is."""
+    from tests.pg_shim import route_db_to
+
+    with route_db_to(test_db) as shim:
+        for sid, instance_id, device in (("sess-own", RUNNER, "dev-self"),
+                                         ("sess-stamped", RUNNER, "dev-other")):
+            shim.cursor().execute(
+                "INSERT INTO sessions (id, instance_id, owner_device_id) VALUES (%s, %s, %s)",
+                (sid, instance_id, device),
+            )
+        database._run_column_migrations(shim.cursor())
+        assert _placement_of(shim, "sess-own") is None
+        assert _placement_of(shim, "sess-stamped") is None
+        assert _ownership_of(shim, "sess-own") == (RUNNER, "dev-self")
 
 
 def test_branch_session_without_instance_id_adopted_then_pinned(test_db):

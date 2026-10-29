@@ -70,6 +70,12 @@ def initialize() -> Optional[engine.NetworkContext]:
         except Exception:  # noqa: BLE001
             logger.warning("Could not record this install's instance id on its membership", exc_info=True)
         try:
+            repaired = repair_stamped_mirror_pins(ctx.device_id)
+            if repaired:
+                logger.info("Released %d mirrored sessions pinned to this install by a boot backfill", repaired)
+        except Exception:  # noqa: BLE001
+            logger.warning("Could not repair mirrored session placements", exc_info=True)
+        try:
             from app.network import blobs
             blobs.backfill_attachment_hashes()
         except Exception:  # noqa: BLE001
@@ -160,6 +166,42 @@ def backfill_owner_device_ids(device_id: str, *, include_unscoped: bool = True) 
     if any(counts.values()):
         logger.info("Stamped owner_device_id: %s", counts)
     return counts
+
+
+def repair_stamped_mirror_pins(device_id: str) -> int:
+    """Clear the pin older boot backfills put on other workers' sessions (#782).
+
+    Older builds stamped this install's ``instance_id`` on every mirror whose
+    ``instance_id`` was NULL, and the placement backfill then pinned it here
+    (``{"where": "runner:<this install>"}``). The pin claimed another
+    worker's session for this one, so sends queued here and never ran. Its
+    owner never publishes such a pin: its own pins name itself or, after a
+    composer pick or a handoff, the device that then owns the row. So on a
+    row another device owns, that exact pin came from the backfill, and the
+    owner's placement under it was NULL. Clearing it lets placement resolve
+    the row to ``owner_device_id``; the owner's next publish overwrites it
+    anyway. Rows this device owns are never touched; re-running changes
+    nothing. Returns the number of rows cleared.
+    """
+    from app.db.base import parse_jsonb
+    me = settings.effective_instance_id
+    stamped = {"where": "runner:" + me}
+    cleared = 0
+    with store.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, placement FROM sessions WHERE instance_id = %s AND placement IS NOT NULL "
+            "AND owner_device_id IS NOT NULL AND owner_device_id <> %s",
+            (me, device_id))
+        for row in cursor.fetchall():
+            if parse_jsonb(row["placement"]) != stamped:
+                continue
+            cursor.execute(
+                "UPDATE sessions SET placement = NULL WHERE id = %s AND instance_id = %s "
+                "AND owner_device_id IS NOT NULL AND owner_device_id <> %s",
+                (row["id"], me, device_id))
+            cleared += cursor.rowcount or 0
+    return cleared
 
 
 def _install_resource_hook() -> None:

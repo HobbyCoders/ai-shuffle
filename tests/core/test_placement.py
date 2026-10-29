@@ -202,6 +202,70 @@ def test_null_placement_own_instance_id_resolves_runner_me(mock_db, monkeypatch)
     assert "implicit-pin:instance_id" in d.reason
 
 
+# ---------------------------------------------------------------------------
+# #782 — on a worker network owner_device_id, not the local-only instance_id,
+# names the owner of a NULL-placement session (as control.owner_of decides).
+# ---------------------------------------------------------------------------
+
+SELF_DEVICE = "dev-self"
+OTHER_DEVICE = "dev-other"
+
+
+@pytest.fixture
+def on_network(monkeypatch):
+    from app.network import runners
+    monkeypatch.setattr(runners, "self_device_id", lambda: SELF_DEVICE)
+
+
+def test_mirror_stamped_with_my_instance_id_resolves_to_its_owner(mock_db, monkeypatch, on_network):
+    # The boot backfill wrote this install's instance_id on a mirror of a
+    # session another device owns; the owner device still decides.
+    _stub_installs(monkeypatch, [RUNNER_ME, OTHER_DEVICE])
+    d = placement.resolve_placement(
+        {"placement": None, "instance_id": RUNNER_ME, "owner_device_id": OTHER_DEVICE}
+    )
+    assert d.kind == "runner" and d.runner_id == OTHER_DEVICE
+    assert "implicit-pin:owner_device_id" in d.reason
+
+
+def test_mirror_with_offline_owner_is_degraded_not_local(mock_db, monkeypatch, on_network):
+    _stub_installs(monkeypatch, [RUNNER_ME])
+    d = placement.resolve_placement(
+        {"placement": None, "instance_id": RUNNER_ME, "owner_device_id": OTHER_DEVICE}
+    )
+    assert d.kind == "none" and d.runner_id is None
+
+
+@pytest.mark.parametrize("instance_id", [RUNNER_ME, None, "old-install"])
+def test_own_device_session_resolves_to_me(mock_db, monkeypatch, on_network, instance_id):
+    _stub_installs(monkeypatch, [RUNNER_ME, "old-install"])
+    d = placement.resolve_placement(
+        {"placement": None, "instance_id": instance_id, "owner_device_id": SELF_DEVICE}
+    )
+    assert d.kind == "runner" and d.runner_id == RUNNER_ME
+
+
+def test_explicit_pin_still_wins_over_owner_device(mock_db, monkeypatch, on_network):
+    _stub_installs(monkeypatch, [RUNNER_ME, OTHER_DEVICE, "runner-b"])
+    for where, expected in ((f"runner:{RUNNER_ME}", RUNNER_ME), ("runner:runner-b", "runner-b")):
+        d = placement.resolve_placement(
+            {"placement": {"where": where}, "instance_id": RUNNER_ME, "owner_device_id": OTHER_DEVICE}
+        )
+        assert d.kind == "runner" and d.runner_id == expected
+
+
+def test_owner_device_is_ignored_off_a_network(mock_db, monkeypatch):
+    # No device identity: instance_id keeps deciding (shared-database follow-me).
+    from app.network import runners
+    monkeypatch.setattr(runners, "self_device_id", lambda: None)
+    _stub_installs(monkeypatch, [RUNNER_ME, OTHER_DEVICE])
+    d = placement.resolve_placement(
+        {"placement": None, "instance_id": RUNNER_ME, "owner_device_id": OTHER_DEVICE}
+    )
+    assert d.kind == "runner" and d.runner_id == RUNNER_ME
+    assert "implicit-pin:instance_id" in d.reason
+
+
 def test_pinned_runner_honored_when_online_and_capable(mock_db, monkeypatch):
     _stub_installs(monkeypatch, ["runner-b"])
     _seed_checkout(PROJECT, "runner-b", "/b/x")
