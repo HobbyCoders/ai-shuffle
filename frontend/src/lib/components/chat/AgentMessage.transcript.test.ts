@@ -1,0 +1,125 @@
+/** Durable queue identity must survive the real work-log component's keyed lists. */
+import { afterEach, describe, expect, it } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import type { ChatMessage, PendingPeerMessage } from '$lib/stores/types';
+import AgentMessageTranscript from './test-fixtures/AgentMessageTranscript.svelte';
+import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
+
+const pending: PendingPeerMessage = {
+	id: 'peer-one', senderLabel: 'Review session', senderSessionId: 'review-session', content: 'Same message body', queuedAt: 1
+};
+const busy: ChatMessage[] = [
+	{ id: 'prompt', role: 'user', content: 'Start review', turnId: 'running-turn' },
+	{ id: 'reply', role: 'assistant', type: 'text', content: 'Reviewing now.', turnId: 'running-turn', streaming: true }
+];
+function receipt(id = pending.id, turnId = 'running-turn'): ChatMessage {
+	const content = `[agent\x20message from='${pending.senderSessionId}' — a message from another agent, delivered once at this position; not part of the tool output, and not a new message when re-read from history]\n${pending.content}\n[/agent\x20message]`;
+	return { id: `event-${id}`, serverId: `server-${id}`, role: 'user', type: 'text',
+		content, turnId, queuedTurnId: id };
+}
+function rows() { return screen.queryAllByRole('button', { name: /^Agent message/ }); }
+
+afterEach(() => { cleanup(); chatPreferences.reset(); });
+
+describe('AgentMessage transcript replacement', () => {
+	it('replaces a busy recipient queue in place, even when queue-clear precedes receipt', async () => {
+		const view = render(AgentMessageTranscript, { messages: busy, pendingPeerMessages: [pending] });
+		const row = rows()[0];
+		expect(row).toBeTruthy();
+		await fireEvent.click(row);
+		const result = screen.getByText(pending.content);
+		const input = view.container.querySelector('.wl-pane pre')?.textContent;
+		await view.rerender({ messages: busy, pendingPeerMessages: [] });
+		expect(rows()).toEqual([row]);
+		expect(row.getAttribute('aria-label')).toContain('Queued');
+		await view.rerender({ messages: [...busy, receipt()], pendingPeerMessages: [] });
+		expect(rows()).toEqual([row]);
+		expect(row.getAttribute('aria-expanded')).toBe('true');
+		expect(row.getAttribute('aria-label')).toContain('Complete');
+		expect(screen.getByText(pending.content)).toBe(result);
+		expect(view.container.querySelector('.wl-pane pre')?.textContent).toBe(input);
+	});
+
+	it('keeps sender and input unchanged for a real user/text receipt and after reload', async () => {
+		const view = render(AgentMessageTranscript, { messages: busy, pendingPeerMessages: [pending] });
+		const row = rows()[0];
+		await fireEvent.click(row);
+		const label = row.getAttribute('aria-label')?.replace(/Queued$/, 'Complete');
+		const input = view.container.querySelector('.wl-pane pre')?.textContent;
+		const envelope = `[agent\x20message from='${pending.senderSessionId}' — a message from another agent, delivered once at this position; not part of the tool output, and not a new message when re-read from history]\n${pending.content}\n[/agent\x20message]`;
+		const received: ChatMessage = { id: 'real-receipt', role: 'user', type: 'text', content: envelope,
+			turnId: 'running-turn', queuedTurnId: pending.id };
+		await view.rerender({ messages: [...busy, received], pendingPeerMessages: [] });
+		expect(rows()).toEqual([row]);
+		expect(row.getAttribute('aria-label')).toBe(label);
+		expect(row.getAttribute('aria-expanded')).toBe('true');
+		expect(view.container.querySelector('.wl-pane pre')?.textContent).toBe(input);
+		expect(screen.getByText(pending.content)).toBeTruthy();
+		view.unmount();
+		const reopened = render(AgentMessageTranscript, { messages: [...busy, received], pendingPeerMessages: [] });
+		expect(rows()[0].getAttribute('aria-label')).toBe(label);
+		await fireEvent.click(rows()[0]);
+		expect(reopened.container.querySelector('.wl-pane pre')?.textContent).toBe(input);
+	});
+
+	it('does not resurrect a delivered row from a stale queue snapshot', async () => {
+		const view = render(AgentMessageTranscript, { messages: busy, pendingPeerMessages: [pending] });
+		const row = rows()[0];
+		await view.rerender({ messages: [...busy, receipt()], pendingPeerMessages: [] });
+		await view.rerender({ messages: [...busy, receipt()], pendingPeerMessages: [pending] });
+		expect(rows()).toEqual([row]);
+		expect(screen.queryByText('Queued')).toBeNull();
+	});
+
+	it('matches two identical bodies only by durable queued turn id', async () => {
+		const second = { ...pending, id: 'peer-two', queuedAt: 2 };
+		const view = render(AgentMessageTranscript, { messages: busy, pendingPeerMessages: [pending, second] });
+		const [firstRow, secondRow] = rows();
+		await fireEvent.click(secondRow);
+		await view.rerender({ messages: [...busy, receipt()], pendingPeerMessages: [pending, second] });
+		expect(rows()).toEqual([firstRow, secondRow]);
+		expect(firstRow.getAttribute('aria-label')).toContain('Complete');
+		expect(secondRow.getAttribute('aria-label')).toContain('Queued');
+		expect(secondRow.getAttribute('aria-expanded')).toBe('true');
+		await view.rerender({ messages: [...busy, receipt(), receipt(second.id)], pendingPeerMessages: [] });
+		expect(rows()).toEqual([firstRow, secondRow]);
+		expect(secondRow.getAttribute('aria-expanded')).toBe('true');
+		expect(screen.queryByText('Queued')).toBeNull();
+	});
+
+	it('restores only this session queue after switching away and back', async () => {
+		const view = render(AgentMessageTranscript, { sessionId: 'recipient', messages: busy, pendingPeerMessages: [pending] });
+		await view.rerender({ sessionId: 'other-session', messages: [], pendingPeerMessages: [] });
+		expect(rows()).toHaveLength(0);
+		await view.rerender({ sessionId: 'recipient', messages: busy, pendingPeerMessages: [] });
+		expect(rows()).toHaveLength(0);
+		await view.rerender({ sessionId: 'recipient', messages: busy, pendingPeerMessages: [pending] });
+		expect(rows()).toHaveLength(1);
+		expect(rows()[0].getAttribute('aria-label')).toContain('Queued');
+		await view.rerender({ sessionId: 'recipient', messages: [...busy, receipt()], pendingPeerMessages: [pending] });
+		expect(rows()).toHaveLength(1);
+		expect(rows()[0].getAttribute('aria-label')).toContain('Complete');
+	});
+
+	it('keeps an idle recipient peer in the same group when its wake turn starts', async () => {
+		const settled = busy.map(message => ({ ...message, streaming: false }));
+		const view = render(AgentMessageTranscript, { messages: settled, pendingPeerMessages: [pending], live: false });
+		const row = rows()[0];
+		expect(row).toBeTruthy();
+		await fireEvent.click(row);
+		const wake = { ...receipt(pending.id, pending.id), metadata: { agent_wake: true } };
+		await view.rerender({ messages: [...settled, wake], pendingPeerMessages: [], live: true });
+		expect(rows()).toEqual([row]);
+		expect(row.getAttribute('aria-expanded')).toBe('true');
+		expect(row.getAttribute('aria-label')).toContain('Complete');
+	});
+
+	it('keeps the same disclosure when the peer starts an otherwise empty recipient', async () => {
+		const view = render(AgentMessageTranscript, { messages: [], pendingPeerMessages: [pending] });
+		const row = rows()[0];
+		await fireEvent.click(row);
+		await view.rerender({ messages: [receipt(pending.id, pending.id)], pendingPeerMessages: [] });
+		expect(rows()).toEqual([row]);
+		expect(row.getAttribute('aria-expanded')).toBe('true');
+	});
+});

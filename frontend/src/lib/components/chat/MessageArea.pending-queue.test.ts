@@ -22,4 +22,21 @@ describe('MessageArea pending-queue wiring (#524)', () => {
 	it('announces the stale transition through the out-of-log announcer', () => {
 		expect(source).toMatch(/<PendingStatusAnnouncer[^>]*stale=\{!!\$activeSession\.queueStale\}/);
 	});
+
+	it('projects peer queues into the keyed transcript before grouping instead of a separate tail', () => {
+		expect(source).toContain('const agentMessageProjection = createAgentMessageProjection();');
+		expect(source).toContain('pendingPeerMessages: $activeSession.pendingPeerMessages ?? []');
+		expect(source).toContain('const messages = projectedMessages;');
+		expect(source).toContain('const model = buildTranscript(messages, {');
+		expect(source).not.toContain('PendingPeerMessages');
+	});
+
+	it('uses one AgentMessage dispatch for queued and received peer rows', () => {
+		const block = source.slice(source.indexOf('{:else if delivery}'), source.indexOf("{:else if message.type === 'command'}"));
+		expect(block).toContain('<AgentMessage');
+		expect(block).toContain('sender={sender.name}');
+		expect(block).toContain('content={delivery.content}');
+		expect(block).toContain("queued={message.systemData?.delivery === 'queued'}");
+		expect(block).not.toContain('<ToolUseMessage');
+	});
 });
