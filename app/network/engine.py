@@ -498,6 +498,41 @@ def _normalize_value(value: Any) -> Any:
     return value
 
 
+def _map_nested_secrets(coll: policy.Collection, record: Dict[str, Any], *, storing: bool = False) -> Tuple[str, ...]:
+    if coll.map_secrets is None:
+        return ()
+
+    def transform(value: str) -> str:
+        if encryption.is_encrypted(value):
+            if not encryption.is_encryption_ready():
+                raise TransientApplyError("Credential storage is locked for " + coll.name)
+            try:
+                value = encryption.decrypt_value(value)
+            except (RuntimeError, ValueError):
+                if storing:
+                    # A legacy peer sent a leaf under its own data key. Keep
+                    # our row, consume the op, and allow the repaired successor.
+                    raise _KeepObservation from None
+                # An unreadable mirror must never republish garbage over the
+                # original worker's good value. Its next scan repairs the row:
+                # decrypted leaf hashes differ from the old ciphertext hashes.
+                raise TransientApplyError("Cannot read credential storage for " + coll.name) from None
+        if storing:
+            if not encryption.is_encryption_ready():
+                raise TransientApplyError("Credential storage is locked for " + coll.name)
+            return encryption.encrypt_value(value)
+        return value
+
+    try:
+        return coll.map_secrets(record, transform)
+    except (ApplyError, _KeepObservation):
+        raise
+    except (ValueError, TypeError):
+        if storing:
+            raise _KeepObservation from None
+        raise TransientApplyError("Cannot read nested credentials for " + coll.name) from None
+
+
 def serialize_row(coll: policy.Collection, row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     """Plaintext record for a row, or None when the row is not shared."""
     if coll.shared_row is not None and not coll.shared_row(row):
@@ -529,8 +564,9 @@ def serialize_row(coll: policy.Collection, row: Mapping[str, Any]) -> Optional[D
                 raise TransientApplyError("Cannot read credential storage for " + coll.name) from None
             encrypted_columns.append(name)
         record[name] = _normalize_value(value)
+    encrypted_columns.extend(_map_nested_secrets(coll, record))
     if encrypted_columns:
-        record["_enc"] = sorted(encrypted_columns)
+        record["_enc"] = sorted(set(encrypted_columns))
     if coll.serialize_hook is not None:
         record = coll.serialize_hook(record)
     return record
@@ -708,7 +744,8 @@ def materialize(
                 retired_automation = retired_id
     if coll.materialize_hook is not None:
         record = coll.materialize_hook(record)
-    encrypted_columns = list(record.get("_enc") or [])
+    nested_columns = _map_nested_secrets(coll, record, storing=True)
+    encrypted_columns = [name for name in record.get("_enc") or [] if name not in nested_columns]
     previous = _read_row(cursor, coll, record_id) if coll.name == "model_providers" else None
     columns: List[str] = []
     values: List[Any] = []
@@ -2567,7 +2604,10 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                     losing_record = {"_deleted": True}
                 elif comparison > 0:
                     local_row = _read_row(cursor, coll, item["record_id"])
-                    losing_record = serialize_row(coll, local_row) if local_row else {}
+                    try:
+                        losing_record = serialize_row(coll, local_row) if local_row else {}
+                    except ApplyError:
+                        losing_record = {}  # a repaired snapshot may replace an unreadable legacy mirror
                 else:
                     losing_record = dict(item["record"] or {})
                 losing_record = redact_secrets(losing_record)
