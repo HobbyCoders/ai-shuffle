@@ -2636,6 +2636,11 @@
     "target_pr": 6,
     "base_settings": true
   },
+  "VITE_PERF_FINISHED_MARKDOWN_CACHE": {
+    "kind": "internal",
+    "reason": "Internal build-time performance kill switch for the finished assistant markdown cache; defaults enabled, with disable reserved for measured ablations and rollback",
+    "base_settings": false
+  },
   "VITE_PERF_PARALLEL_AUTH_PROBES": {
     "kind": "internal",
     "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Enable parallel auth probes startup optimization",
@@ -2659,6 +2664,11 @@
     "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Enable startup dedupe startup optimization",
     "target_pr": 6,
     "base_settings": true
+  },
+  "VITE_PERF_TRANSCRIPT_CONTENT_WINDOW": {
+    "kind": "internal",
+    "reason": "Internal build-time performance kill switch for the nested transcript content budget; defaults enabled, with disable reserved for measured ablations and rollback",
+    "base_settings": false
   },
   "VITE_SHUFFLE_SHELL": {
     "kind": "internal",
