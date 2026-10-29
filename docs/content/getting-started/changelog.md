@@ -125,7 +125,7 @@ Fixes from the first day of public use, plus a built-in Android emulator, faster
 
 - New Phone panel: AI Shuffle can run an Android phone emulator on Linux x86_64 workers with KVM. Install it once from the panel (about 2 GB from Google, after you accept the Android SDK License), then watch the screen live and tap, type and use Back, Home and Recents yourself.
 - Agents can boot the emulator, install an APK, open it, tap and type, read the screen layout and take screenshots with the new Emulator and EmulatorScreenshot tools, so they can test the phone apps they build.
-- Docker installs need `--device /dev/kvm`; without it the panel explains what is missing. iOS is not supported yet. See [Android emulator](/docs/features/android-emulator).
+- Docker installs need `--device /dev/kvm`; without it the panel explains what is missing. iOS is not supported yet. See Android emulator.
 
 ### Browser
 
