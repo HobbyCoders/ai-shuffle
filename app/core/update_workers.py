@@ -472,6 +472,13 @@ async def peer_action(body, from_device):
     member = context.member(from_device) if context else None
     if not member or member.kind != membership.KIND_WORKER or member.status != membership.STATUS_ACTIVE:
         raise PermissionError("Only active account workers may request application updates")
+    if body.get("operation") == "action" and isinstance(body.get("action"), dict):
+        # Machine settings adds only a typed channel operation to this family.
+        from app.core.worker_settings import ActionRequest, ReleaseChannel, apply_once, parse_request
+        request = parse_request(body)
+        if not isinstance(request, ActionRequest) or not isinstance(request.action, ReleaseChannel):
+            raise ValueError("Only release-channel is supported by this update operation")
+        return await apply_once(request, from_device)
     if body.get("operation") == "status":
         state = await run_sync(updates.status)
         return {**state, **await _async_waiting_status(state), **_build(), "deferred": _deferred is not None}

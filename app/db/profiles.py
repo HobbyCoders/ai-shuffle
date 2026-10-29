@@ -298,6 +298,21 @@ def retire_builtin_subagent(subagent_id: str) -> bool:
             "(SELECT id FROM sessions WHERE profile_id = %s))",
             ("profile_cancelled", reason, 0, settings.effective_instance_id, subagent_id, subagent_id),
         )
+        # Queued peers need the same durable cancellation as Stop/archive.
+        # A parked peer has already been delivered and must NOT be cancelled.
+        from app.db.turns import remove_queued_turn
+        cursor.execute(
+            "SELECT id FROM turns WHERE source = 'agent_message' AND state = 'queued' "
+            "AND (profile_id = %s OR (profile_id IS NULL AND session_id IN "
+            "(SELECT id FROM sessions WHERE profile_id = %s))) ORDER BY session_id, id",
+            (subagent_id, subagent_id),
+        )
+        cancelled_peers = []
+        for peer in cursor.fetchall():
+            removed = remove_queued_turn(peer["id"], "profile_removed", _conn=conn)
+            if removed:
+                cursor.execute("UPDATE turns SET error = %s WHERE id = %s", (reason, peer["id"]))
+                cancelled_peers.append(removed)
         cursor.execute(
             "UPDATE turns SET state = 'aborted', stop_reason = 'profile_removed', error = %s, ended_at = NOW() "
             "WHERE state IN ('parked', 'queued') AND (profile_id = %s OR "
@@ -305,7 +320,7 @@ def retire_builtin_subagent(subagent_id: str) -> bool:
             "RETURNING id, session_id, instance_id",
             (reason, subagent_id, subagent_id),
         )
-        cancelled = cursor.fetchall()
+        cancelled = list(cursor.fetchall()) + cancelled_peers
         for turn in cancelled:
             cursor.execute(
                 "INSERT INTO pending_wakeups (id, session_id, prompt, reason, source, instance_id, fire_at) "
@@ -327,7 +342,12 @@ def retire_builtin_subagent(subagent_id: str) -> bool:
         # an older worker. Updated peers retire the row independently.
         cursor.execute("DELETE FROM sync_records WHERE collection = %s AND record_id = %s", ("agents", subagent_id))
         cursor.execute("DELETE FROM agents WHERE id = %s AND is_builtin = TRUE", (subagent_id,))
-        return cursor.rowcount > 0
+        deleted = cursor.rowcount > 0
+    if cancelled_peers:
+        from app.db import session_events
+        for session_id in {turn["session_id"] for turn in cancelled_peers}:
+            session_events.notify_session_write(session_id, "session_events")
+    return deleted
 
 
 def get_profile_session_count(profile_id: str) -> int:

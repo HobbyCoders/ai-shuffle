@@ -23,13 +23,9 @@ from app.core.connectors import discord_actions
 
 logger = logging.getLogger(__name__)
 
-try:
-    import discord
-    from discord import Intents
+from importlib.util import find_spec
 
-    DISCORD_AVAILABLE = True
-except ImportError:
-    DISCORD_AVAILABLE = False
+DISCORD_AVAILABLE = find_spec("discord") is not None
 
 
 class DiscordConnector(BaseConnector):
@@ -134,6 +130,9 @@ class DiscordConnector(BaseConnector):
             return False
 
         try:
+            import discord
+            from discord import Intents
+
             self._status = ConnectorStatus.CONNECTING
             token = self.config["bot_token"]
 
@@ -446,6 +445,8 @@ class DiscordConnector(BaseConnector):
             return False
 
         try:
+            import discord
+
             channel = self._client.get_channel(int(platform_chat_id))
             if channel is None:
                 logger.error("Channel %s not found", platform_chat_id)
@@ -496,6 +497,8 @@ class DiscordConnector(BaseConnector):
             return False
 
         try:
+            import discord
+
             channel = self._client.get_channel(int(platform_chat_id))
             if channel is None:
                 logger.error("Channel %s not found", platform_chat_id)
@@ -620,6 +623,8 @@ class DiscordConnector(BaseConnector):
         if self._client is None:
             return False, "Discord client is not running."
         try:
+            import discord
+
             channel = self._client.get_channel(int(platform_chat_id))
         except (TypeError, ValueError):
             return False, f"Invalid approval channel id: {platform_chat_id!r}"
@@ -674,6 +679,9 @@ class DiscordConnector(BaseConnector):
             return {"success": False, "message": "discord.py is not installed"}
 
         try:
+            import discord
+            from discord import Intents
+
             client = discord.Client(intents=Intents.default())
             try:
                 await client.login(self.config["bot_token"])
@@ -729,6 +737,8 @@ async def discover_resources(bot_token: str) -> Dict[str, Any]:
         raise RuntimeError("discord.py not installed")
 
     async def _run() -> Dict[str, Any]:
+        import discord
+
         # HTTP-only client — no gateway connection.
         client = discord.Client(intents=discord.Intents.none())
         try:

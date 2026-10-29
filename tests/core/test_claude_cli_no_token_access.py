@@ -48,7 +48,8 @@ def _forbid_opening(monkeypatch, creds):
 def test_no_refresh_call_sites_remain():
     """No turn path, status route or startup step refreshes the token."""
     for rel in ("app/core/query_engine.py", "app/core/query_background.py", "app/core/startup.py",
-                "app/api/auth.py", "app/core/usage_limits.py", "app/core/cli_bridge.py"):
+                "app/api/auth.py", "app/core/usage_limits.py", "app/core/cli_bridge.py",
+                "app/core/worker_settings.py", "app/api/settings_workers.py"):
         text = (ROOT / rel).read_text()
         assert "ensure_fresh_credentials" not in text, rel
         assert "sync_back_active_account" not in text, rel
