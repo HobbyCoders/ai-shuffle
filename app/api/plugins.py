@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 from app.api.auth import require_auth, require_admin
 from app.db.async_database import run_sync
 from app.api.common import api_error_handler
+from app.network import plugins_sync
 from app.core.plugin_service import (
     get_plugin_service
 )
@@ -651,7 +652,7 @@ async def install_plugin(
     service = get_plugin_service()
     try:
         plugin = await run_sync(
-            service.install_plugin, request.plugin_id, request.scope, request.enable
+            plugins_sync.install_plugin, service, request.plugin_id, request.scope, request.enable
         )
         return PluginResponse(
             id=plugin.id,
@@ -739,6 +740,7 @@ async def uninstall_plugin(
     service = get_plugin_service()
     try:
         await run_sync(service.uninstall_plugin, plugin_id)
+        await run_sync(plugins_sync.request_uninstall, plugin_id)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

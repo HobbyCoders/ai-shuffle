@@ -921,7 +921,7 @@ def record(cursor, collection: str, record_id: str, row: Optional[Mapping[str, A
         return None  # not a shared row
     existing = store.get_record(cursor, collection, record_id)
     if plaintext is None:
-        if existing is None or bool(existing["deleted"]):
+        if not force and (existing is None or bool(existing["deleted"])):
             return None
         new_hash = ""
     else:
@@ -1171,6 +1171,10 @@ def scan_all(*, ctx: Optional[NetworkContext] = None, include_catalog: bool = Tr
             logger.warning("Catalog publish failed", exc_info=True)
             if strict:
                 raise
+    if include_catalog and selected is not None and "plugins_desired" in selected:
+        # Plugin mutations request a narrow pass too, not just periodic scans.
+        from app.network import plugins_sync
+        total += plugins_sync.publish(ctx=ctx)
     if include_catalog and selected is None:
         for module_name in ("memory_records", "plugins_sync"):
             try:

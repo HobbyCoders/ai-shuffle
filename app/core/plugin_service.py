@@ -997,7 +997,9 @@ class PluginService:
         Returns:
             List of installed plugin info
         """
-        return [self.install_plugin(plugin_id, scope, enable) for plugin_id in plugin_ids]
+        from app.network import plugins_sync
+        # Publish each successful prefix even if a later batch entry fails.
+        return [plugins_sync.install_plugin(self, plugin_id, scope, enable) for plugin_id in plugin_ids]
 
     def uninstall_plugin(self, plugin_id: str) -> bool:
         """
