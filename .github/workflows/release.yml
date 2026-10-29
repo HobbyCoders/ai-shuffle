@@ -329,9 +329,20 @@ jobs:
   # v* tags; see docs/ci/release-channels.md), after the release image passed
   # container verification in docker-publish.yml and the clean-runner buyer
   # install above. Prereleases are never offered as stable updates.
+  ui-stable:
+    needs: preflight
+    if: inputs.promote == ''
+    permissions:
+      contents: read
+    uses: ./.github/workflows/source-ui-bundle.yml
+    with:
+      source-ref: refs/tags/${{ needs.preflight.outputs.release_tag }}
+      version: ${{ needs.preflight.outputs.release_version }}
+      artifact-name: source-ui-stable
+
   source-stable:
     name: Sign the stable in-app update
-    needs: [create-release, docker, buyer-install]
+    needs: [create-release, docker, buyer-install, ui-stable]
     if: >-
       github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v') &&
       (needs.create-release.outputs.promote_latest == 'true')
@@ -356,8 +367,13 @@ jobs:
           cache-dependency-path: scripts/source-publisher/package-lock.json
       - run: npm ci --no-audit --no-fund
         working-directory: scripts/source-publisher
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-ui-stable
+          path: ${{ runner.temp }}/source-ui
       - name: Publish the signed stable source release
         env:
+          SOURCE_UI_BUNDLE_FILE: ${{ runner.temp }}/source-ui/ui.zip
           SOURCE_CHANNEL: stable
           RELEASE_TAG: ${{ needs.create-release.outputs.release_tag }}
           GH_TOKEN: ${{ github.token }}
@@ -618,7 +634,7 @@ jobs:
           if-no-files-found: ignore
 
   stage-source:
-    needs: [preflight, stage-buyer]
+    needs: [preflight, stage-buyer, ui-stable]
     runs-on: ubuntu-latest
     environment: release-signing
     concurrency:
@@ -647,8 +663,13 @@ jobs:
           node-version: '22'
       - run: npm ci --no-audit --no-fund
         working-directory: release-control/scripts/source-publisher
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-ui-stable
+          path: ${{ runner.temp }}/source-ui
       - name: Sign and retain source bytes without a D1 activation
         env:
+          SOURCE_UI_BUNDLE_FILE: ${{ runner.temp }}/source-ui/ui.zip
           SOURCE_CHANNEL: stable
           SOURCE_STAGE_FILE: ${{ runner.temp }}/source-evidence.json
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}

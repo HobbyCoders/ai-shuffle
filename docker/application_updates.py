@@ -1300,6 +1300,52 @@ class ContainerUpdates:
         except (OSError, ValueError, TypeError):
             _log("dependency cleanup deferred; retained dependencies are kept")
 
+    def prebuilt_ui(self, directory, manifest):
+        """Optional acceleration only: trust failures use the unchanged local build.
+
+        The asset name is derived, not an arbitrary URL from update metadata.
+        Existing runtime artifact transport already bounds bytes, validates
+        HTTPS redirects and never sends worker credentials to GitHub.
+        """
+        if os.environ.get("AI_SHUFFLE_PERF_PREBUILT_UI", "").strip().lower() in ("0", "false", "off"):
+            return None
+        ui = manifest.get("ui")
+        if ui is None:
+            return None
+        archive, target = directory / "ui.zip", directory / "ui"
+        try:
+            if (not isinstance(ui, dict) or ui.get("format") != 1
+                    or ui.get("revision") != manifest["revision"] or not manifest.get("version")
+                    or ui.get("version") != manifest["version"]
+                    or not isinstance(ui.get("sha256"), str) or not DIGEST.fullmatch(ui["sha256"])
+                    or not isinstance(ui.get("tree"), str) or not DIGEST.fullmatch(ui["tree"])
+                    or type(ui.get("size")) is not int or not 0 < ui["size"] <= 64 * 1024**2):
+                raise UpdateError("Invalid UI bundle metadata")
+            url = ("https://github.com/HobbyCoders/ai-shuffle/releases/download/desktop-sources/"
+                   f"{manifest['revision']}-{ui['sha256']}-ui.zip")
+            self.overlays.download({**ui, "url": url}, archive)
+            with zipfile.ZipFile(archive) as zipped:
+                if len(zipped.infolist()) > 20000 or sum(item.file_size for item in zipped.infolist()) > 256 * 1024**2:
+                    raise UpdateError("UI bundle expansion exceeds limits")
+            listing = tree_lines(extract_source(archive, target, manifest["revision"]))
+            if hashlib.sha256(listing).hexdigest() != ui["tree"]:
+                raise UpdateError("UI bundle tree does not match signed metadata")
+            stamp = json.loads((target / "ui-build.json").read_text())
+            if stamp != {"format": 1, "revision": manifest["revision"], "version": manifest["version"]}:
+                raise UpdateError("UI bundle build constants do not match this release")
+            if not all((target / name).is_file() for name in ("index.html", "mobile/index.html")):
+                raise UpdateError("UI bundle is missing a desktop or phone shell")
+            return target
+        except (OSError, ValueError, KeyError, UpdateError, httpx.HTTPError, zipfile.BadZipFile):
+            if target.exists():
+                shutil.rmtree(target)
+            if self.stop.is_set():
+                raise UpdateError("Application build interrupted")
+            _log("Prebuilt UI unavailable or invalid; building the UI from verified source")
+            return None
+        finally:
+            archive.unlink(missing_ok=True)
+
     def build(self, directory, revision, version=None):
         source = directory / "source"
         home = directory / "build-home"
@@ -1324,15 +1370,16 @@ class ContainerUpdates:
             references.append(str(cached.relative_to(self.root / "dependencies")))
         pip = [str(python), "-m", "pip", "install", "--prefer-binary", "--timeout", "120", "--retries", "10"]
         self.run_build(pip + ["--no-deps", "--no-build-isolation", "./fluid"], source, env)
+        ui = self.prebuilt_ui(directory, manifest)
         identity = self.dependency_identity("node", None, source, env) if reuse else None
-        for package in ("frontend", "tools", "browser-mcp"):
+        for package in (("tools", "browser-mcp") if ui else ("frontend", "tools", "browser-mcp")):
             self.publish("downloading", f"Building {package}…", version=revision)
             cached = self.node_dependencies(package, source, env, identity)
             if cached is not None:
                 references.append(str(cached.relative_to(self.root / "dependencies")))
             self.run_build(["npm", "run", "build"], source / package, env)
         atomic_json(directory / "dependency-cache.json", references)
-        shutil.copytree(source / "frontend/build", source / "app/static")
+        shutil.copytree(ui or source / "frontend/build", source / "app/static")
         atomic_json(directory / "complete", revision)
 
     def drop_superseded(self, revision):
