@@ -56,6 +56,11 @@ def _reset_memo() -> None:
 # public entry point
 # ----------------------------------------------------------------------
 
+def load_backfill_events(session_id: str) -> List[Dict[str, Any]]:
+    """Load exactly the legacy events eligible for import, including noise filtering."""
+    return convert_messages_to_events(session_id, _load_legacy_history(session_id))
+
+
 async def ensure_backfilled(session_id: str) -> None:
     """Backfill a session's legacy history into the event log exactly once.
 
@@ -80,7 +85,7 @@ async def ensure_backfilled(session_id: str) -> None:
         return
 
     try:
-        messages = await asyncio.to_thread(_load_legacy_history, session_id)
+        events = await asyncio.to_thread(load_backfill_events, session_id)
     except Exception:
         logger.warning(
             "[history_backfill] legacy load failed for %s — skipping backfill",
@@ -88,11 +93,6 @@ async def ensure_backfilled(session_id: str) -> None:
         )
         return
 
-    if not messages:
-        _empty_memo[session_id] = now
-        return
-
-    events = convert_messages_to_events(session_id, messages)
     if not events:
         _empty_memo[session_id] = now
         return
@@ -119,8 +119,8 @@ async def ensure_backfilled(session_id: str) -> None:
 
     first_seq, last_seq = result
     logger.info(
-        "[history_backfill] backfilled %d legacy message(s) for %s as events "
-        "[%d..%d]", len(messages), session_id, first_seq, last_seq,
+        "[history_backfill] backfilled %d legacy event(s) for %s "
+        "[%d..%d]", len(events), session_id, first_seq, last_seq,
     )
 
 

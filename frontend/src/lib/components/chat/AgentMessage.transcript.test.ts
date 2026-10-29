@@ -128,13 +128,15 @@ describe('AgentMessage transcript replacement', () => {
 		expect(row.closest('[data-item-key]')?.getAttribute('data-item-key')).toBe(groupKey);
 	});
 
-	it('removes a queue-only Stop on explicit cancellation and blocks stale snapshots', async () => {
+	it('retires an empty chat peer when its first event is cancellation and blocks stale snapshots', async () => {
 		const view = render(AgentMessageTranscript, { messages: [], pendingPeerMessages: [pending], live: false });
 		const row = rows()[0];
 		await view.rerender({ messages: [], pendingPeerMessages: [], live: false });
 		expect(rows()).toEqual([row]);
 		const cancelled = reduceAll([{ type: 'queue.cancelled', id: 'cancelled', seq: 1,
 			cancelled_turn_ids: [pending.id] }] as WireEvent[]);
+		expect(cancelled.messages).toEqual([]); // No dummy transcript initialization event.
+		expect(cancelled.cancelledPeerTurnIds).toEqual([pending.id]);
 		await view.rerender({ messages: [], pendingPeerMessages: [], live: false, cancelledTurnIds: cancelled.cancelledPeerTurnIds });
 		expect(rows()).toHaveLength(0);
 		await view.rerender({ messages: [], pendingPeerMessages: [pending], live: false });

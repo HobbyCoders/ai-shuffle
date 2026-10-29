@@ -22,10 +22,7 @@ def legacy_recipient(mock_db, monkeypatch):
 
 @pytest.fixture
 def recipient(legacy_recipient):
-    # A client can display projected rows only once its V2 log is initialized.
-    session_events.append_events(legacy_recipient, [{
-        "type": "system.note", "payload": {"content": "V2 feed initialized"},
-    }])
+    # No fake initialization event: new and cleared chats can display peers at seq 0.
     return legacy_recipient
 
 
@@ -109,6 +106,34 @@ def test_retired_builtin_reports_queued_peers_but_not_delivered_parks(recipient)
 
 
 @pytest.mark.parametrize("zero_counter", [False, True])
+async def test_empty_chat_stop_emits_first_event_and_backfill_adds_nothing(recipient, zero_counter):
+    from app.api.chat_ws_handler import _v2_peer_queue_view
+
+    if zero_counter:
+        with get_db() as conn:
+            conn.cursor().execute(
+                "INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,0)", (recipient,),
+            )
+    # Opening a genuinely empty chat leaves its V2 log empty, not initialized by a dummy event.
+    await history_backfill.ensure_backfilled(recipient)
+    assert session_events.get_events(recipient) == []
+    peer = queued(recipient)
+    assert [row["id"] for row in _v2_peer_queue_view(recipient)] == [peer["id"]]
+    await query_session_lifecycle.enter_user_stop(recipient)
+    events = session_events.get_events(recipient)
+    assert [event["event_type"] for event in events] == ["queue.cancelled"]
+    assert events[0]["seq"] == 1
+    assert events[0]["payload"]["cancelled_turn_ids"] == [peer["id"]]
+    assert _v2_peer_queue_view(recipient) == []
+    # Neither normal lazy backfill nor an explicit zero-claim attempt can add a prefix.
+    await history_backfill.ensure_backfilled(recipient)
+    assert session_events.append_backfill_events(recipient, [{
+        "type": "message.user", "payload": {"content": "Must not import over cancellation"},
+    }]) is None
+    assert session_events.get_events(recipient) == events
+
+
+@pytest.mark.parametrize("zero_counter", [False, True])
 @pytest.mark.parametrize("removal", ["stop", "archive", "remove", "settle", "retire_builtin"])
 async def test_legacy_history_survives_cancellation_then_backfill(legacy_recipient, zero_counter, removal):
     sid = legacy_recipient
@@ -154,7 +179,38 @@ async def test_legacy_history_survives_cancellation_then_backfill(legacy_recipie
     assert all(event["turn_id"] == "backfill" for event in events)
 
 
+def test_unimportable_legacy_rows_do_not_suppress_empty_log_cancellation(recipient, monkeypatch):
+    monkeypatch.setattr(history_backfill, "_load_legacy_history", lambda _: [
+        {"role": "user", "type": "queued", "content": "Not delivered"},
+    ])
+    peer = queued(recipient)
+    assert turns.remove_queued_turn(peer["id"]) is not None
+    assert cancellations(recipient) == [peer["id"]]
+
+
+async def test_failed_history_check_aborts_peer_without_poisoning_legacy_backfill(recipient, monkeypatch):
+    sessions.add_session_message(recipient, "user", "Legacy question", profile_id="cancel-agent")
+    sessions.add_session_message(recipient, "assistant", "Legacy reply", profile_id="cancel-agent")
+    peer = queued(recipient)
+
+    def fail_load(_):
+        raise RuntimeError("Legacy store temporarily unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(history_backfill, "load_backfill_events", fail_load)
+        assert turns.remove_queued_turn(peer["id"])["state"] == "aborted"
+    assert session_events.get_events(recipient) == []
+    await history_backfill.ensure_backfilled(recipient)
+    assert [event["payload"]["content"] for event in session_events.get_events(recipient)] == [
+        "Legacy question", "Legacy reply",
+    ]
+
+
 def test_existing_log_keeps_history_and_appends_cancellation(recipient):
+    session_events.append_events(recipient, [
+        {"type": "message.user", "payload": {"content": "Existing question"}},
+        {"type": "message.assistant", "payload": {"content": "Existing answer"}},
+    ])
     before = session_events.get_events(recipient)
     peer = queued(recipient)
     assert turns.remove_queued_turn(peer["id"]) is not None
