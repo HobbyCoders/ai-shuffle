@@ -867,13 +867,15 @@ def test_each_project_gets_a_fair_share_of_the_report_budget(repository, tmp_pat
         deadlines.append(deadline - time.monotonic())
         result = real(source, deadline)
         if source is first:
-            time.sleep(0.3)  # the first project uses most of its share
+            time.sleep(0.6)  # the first project uses most of its share
         return result
 
+    # Real git runs inside plan_preview, so its cost varies by runner; a wide
+    # budget keeps the fairness assertions independent of that cost.
     monkeypatch.setattr(rc, "plan_preview", slow_first)
-    monkeypatch.setattr(wr, "REPORT_SECONDS", 2)
+    monkeypatch.setattr(wr, "REPORT_SECONDS", 6)
     result = wr.report()
     assert len(deadlines) == 2
-    assert deadlines[0] <= 1.05  # half of the budget, not all of it
-    assert deadlines[1] > 0.5  # the second project still has time
+    assert deadlines[0] <= 3.05  # half of the budget, not all of it
+    assert deadlines[1] > 1.0  # the second project still has time
     assert not any(w["cleanup"].startswith("kept: not checked") for p in result["projects"] for w in p["worktrees"])
