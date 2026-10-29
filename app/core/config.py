@@ -483,13 +483,6 @@ class Settings(BaseSettings):
     # PR 2: migrate this area-owned legacy behaviour field.
     fluid_continual_model: Optional[str] = None
     fluid_skills_dir: Optional[str] = None
-    # OS-level sandbox (bubblewrap) for the code-mode kernel child. ``auto``
-    # uses it when bwrap is installed and its one-off self-test passes (else
-    # one warning, then the plain child); ``required`` refuses to start the
-    # kernel without it (every cell gets the reason as its error); ``off``
-    # never uses it. See fluid/fluid/codemode/os_sandbox.py. Env:
-    # CODE_MODE_OS_SANDBOX (fluid's KernelConfig reads the same variable).
-    code_mode_os_sandbox: str = "auto"
     # On Linux the app marks itself non-dumpable at startup
     # (prctl(PR_SET_DUMPABLE, 0)), so the model-run children that share its
     # uid (kernel, hooks, CLI, MCP servers) cannot read /proc/<app>/environ,

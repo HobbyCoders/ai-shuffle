@@ -68,22 +68,6 @@ def harden_process_introspection(*, force: bool = False) -> bool:
     return True
 
 
-def prewarm_code_mode_sandbox() -> None:
-    """Run the code-mode OS sandbox self-test in the background.
-
-    ``run_python`` is rated ``safe`` only once a self-test has passed in this
-    process, so warming it here keeps Ask mode from prompting for the first
-    cell on a host where the sandbox works. Best effort.
-    """
-    if not settings.fluid_code_mode:
-        return
-    try:
-        from fluid.codemode import os_sandbox
-        os_sandbox.prewarm(settings.code_mode_os_sandbox, sys.executable)
-    except Exception:
-        logger.debug("Code-mode OS sandbox prewarm skipped", exc_info=True)
-
-
 def _reject_legacy_sqlite() -> None:
     """Never import, rename, or ignore an old database during managed startup."""
     sqlite_path = settings.db_path

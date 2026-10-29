@@ -105,7 +105,6 @@ host semantics and do not imply a credential import.
 | `CLUSTER_ADVERTISE_URL` | Peer-reachable install URL for legacy clustering |
 | `CLUSTER_SECRET` | Legacy shared-database cluster bearer secret; generated and persisted if absent |
 | `CODEX_APP_SERVER_LOGIN_CLIENT_ID` | OAuth application identity for Codex/ChatGPT sign-in |
-| `CODE_MODE_OS_SANDBOX` | OS-level code-kernel isolation: auto, required or off |
 | `COMSPEC` | Windows command interpreter fallback |
 | `COOKIE_SECURE` | Mark cookies HTTPS-only |
 | `CORS_ORIGINS` | Additional permitted browser origins |

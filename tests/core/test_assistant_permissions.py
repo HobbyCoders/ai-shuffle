@@ -180,8 +180,9 @@ def test_the_fixed_list_asks(name, data):
     assert ap.level(name, data, SCOPE) == ap.HIGH
 
 
-def test_a_sandboxed_code_cell_is_low_and_no_scope_never_asks():
-    assert ap.level("run_python", {"code": "import subprocess"}, SCOPE, spec_risk="safe") == ap.LOW
+def test_code_cell_content_cannot_be_lowered_by_a_runtime_verdict_and_no_scope_never_asks():
+    assert ap.level("run_python", {"code": "import subprocess"}, SCOPE, spec_risk="safe") == ap.HIGH
+    assert ap.level("run_python", {"code": "print(1 + 1)"}, SCOPE) == ap.LOW
     assert not ap.needs_owner("Bash", {"command": "rm -rf /"}, None)
 
 

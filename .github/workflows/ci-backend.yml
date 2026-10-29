@@ -95,7 +95,6 @@ jobs:
           python -m pytest --durations=50 --junitxml=reports/hermetic-1.xml tests/api tests/core tests/db tests/middleware tests/contract \
               tests/performance tests/mcp tests/services tests/unit tests/scripts tests/test_*.py \
               --deselect=tests/test_scan_blocking_db.py \
-              --ignore=tests/core/test_chat_shell.py \
               --ignore=tests/core/test_container_runtime.py \
               --ignore=tests/core/test_container_image_contract.py \
               -o addopts="" -q -p no:cacheprovider --timeout=120 -n 2 \
@@ -311,26 +310,6 @@ jobs:
         run: |
           python -m pytest --durations=50 --junitxml=reports/security-4-1.xml tests/test_scan_blocking_db.py -o addopts="" -q
           python scripts/scan_blocking_db.py
-
-      - name: Isolated folder shell escape tests (real bubblewrap)
-        timeout-minutes: 13
-        # The only run of tests/core/test_chat_shell.py: the fast subset
-        # ignores it, since without bubblewrap it could run only the tests
-        # that do not need the sandbox, and this step runs all of them.
-        # Install bubblewrap, lift Ubuntu 24.04's AppArmor block on
-        # unprivileged user namespaces (the image's container needs the
-        # equivalent compose security_opt lines), and require the sandbox so
-        # a broken setup fails instead of skipping. ~10 s.
-        env:
-          CHAT_SHELL_REQUIRE_SANDBOX: '1'
-          PYTHONPATH: .:fluid
-        run: |
-          if ! command -v bwrap; then
-            python3 scripts/ci/bounded_apt.py sh -c 'apt-get update -qq && apt-get install -y -qq --no-install-recommends bubblewrap'
-          fi
-          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
-          bwrap --version
-          python -m pytest --durations=50 --junitxml=reports/security-6-1.xml tests/core/test_chat_shell.py -o addopts="" -q -rs -p no:cacheprovider --timeout=120
 
       - name: Agent isolation with real accounts (root)
         # tests/core/test_agent_isolation_root.py (#1957) needs root: it

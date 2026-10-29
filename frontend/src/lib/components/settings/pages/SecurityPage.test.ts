@@ -54,7 +54,6 @@ const loaded = (over: Partial<OwnerStatus> = {}) => ({ ok: true as const, status
 const input = (name: string) => screen.getByLabelText(name) as HTMLInputElement;
 
 let instructions: { current: string; default: string; is_customized: boolean };
-let sandbox: unknown;
 
 async function openPassword() {
 	await fireEvent.click(await screen.findByRole('button', { name: /^Owner password/ }));
@@ -75,9 +74,7 @@ beforeEach(() => {
 	owner.setTrustedLan.mockResolvedValue({ trusted_lan: true });
 	refresh.mockResolvedValue(null);
 	instructions = { current: 'Be careful.', default: 'Default rules.', is_customized: true };
-	sandbox = { mode: 'auto', state: 'active', active: true, reason: '' };
 	transport.get.mockImplementation(async (path: string) => {
-		if (path === '/deployment') return { code_sandbox: sandbox };
 		if (path === '/settings/security-instructions') return { ...instructions };
 		return {};
 	});
@@ -280,34 +277,11 @@ describe('computer use', () => {
 	});
 });
 
-describe('code sandbox', () => {
-	it('says the sandbox is active', async () => {
-		render(SecurityPage);
-		expect(await screen.findByText('Active')).toBeTruthy();
-	});
-
-	it('distinguishes unavailable, off and checking, with the reason behind the help button', async () => {
-		sandbox = { mode: 'auto', state: 'unavailable', active: false, reason: 'bwrap: No permissions to create a new namespace' };
-		const view = render(SecurityPage);
-		expect(await screen.findByText('Unavailable')).toBeTruthy();
-		await fireEvent.focus(screen.getByRole('button', { name: 'About Code sandbox' }));
-		expect((await screen.findByRole('tooltip')).textContent).toContain('No permissions to create a new namespace');
-		view.unmount();
-		sandbox = { mode: 'off', state: 'off', active: false, reason: 'CODE_MODE_OS_SANDBOX is off' };
-		const second = render(SecurityPage);
-		expect(await screen.findByText('Off')).toBeTruthy();
-		second.unmount();
-		sandbox = { mode: 'auto', state: 'checking', active: false, reason: '' };
-		render(SecurityPage);
-		await waitFor(() => expect(transport.get).toHaveBeenCalledWith('/deployment'));
-		expect(screen.getByText('Checking')).toBeTruthy();
-	});
-
-	it('opens the install guide in the docs panel', async () => {
-		render(SecurityPage);
-		await fireEvent.click(screen.getByRole('button', { name: 'Open the code sandbox guide' }));
-		expect(layout.openFeaturePage).toHaveBeenCalledWith('docs', 'getting-started/install-docker-compose');
-	});
+it('does not offer an OS sandbox setting or fetch its retired status', async () => {
+	render(SecurityPage);
+	await screen.findByText('Customized');
+	expect(screen.queryByText('Code sandbox')).toBeNull();
+	expect(transport.get).not.toHaveBeenCalledWith('/deployment');
 });
 
 describe('chat instructions', () => {

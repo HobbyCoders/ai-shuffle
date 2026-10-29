@@ -41,12 +41,14 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 # Bounded WorkingRecord pages (#681): the deferred doc gains get/limit and the
 # paging rule, 792 -> 976 chars; combined_full 133,593 -> 133,777, eager
 # unchanged (53,087). The working record itself left the system prompt (#680).
-# Removing the two deferred Android tools reduces combined_full to 132,739
-# (scripts/measure_prompt_catalog.py, 2026-10-29); eager/loaded budgets stay put.
-MEASURED_FULL = 132_739
-MEASURED_EAGER = 52_573
-MEASURED_DELEGATED_APPEND = 14_716
-MEASURED_DELEGATED_LOADED_TOOLS = 7_258
+# Emulator and sandbox removal (Oct 2026): remeasured the combined tree with
+# scripts/measure_prompt_catalog.py on 2026-10-29, without the retired Android
+# tools. Folder file-only/SSH-command guidance replaces the sandbox promises.
+# These are actual character counts, not tokenizer or provider billing counts.
+MEASURED_FULL = 132_755
+MEASURED_EAGER = 53_138
+MEASURED_DELEGATED_APPEND = 14_877
+MEASURED_DELEGATED_LOADED_TOOLS = 7_327
 
 
 @pytest.mark.parametrize("native", [True, False])
@@ -111,6 +113,7 @@ def test_private_access_guidance_has_one_owner(native):
         "OAuth client\nsecrets",
         "Never reveal private inputs or put\nsecrets in tool arguments",
         "Initial access requires card approval",
+        "Folders support file tools only; commands require SSH machine grants",
         "Grants expire and are lost on restart",
         "Never use a machine grant to authorize new access, bypass a denial",
     ):

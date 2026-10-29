@@ -829,11 +829,6 @@
     "target_pr": 4,
     "base_settings": true
   },
-  "CODE_MODE_OS_SANDBOX": {
-    "kind": "infra",
-    "reason": "OS-level code-kernel isolation: auto, required or off",
-    "base_settings": true
-  },
   "COMPUTER_USE_DISABLED": {
     "kind": "internal",
     "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Hide/disable the host computer-control tool suite",

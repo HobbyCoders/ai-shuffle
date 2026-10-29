@@ -175,5 +175,6 @@ turn digests → epoch stubs) that evicts by view transform only — the stored
 tree keeps full fidelity, every digest carries node refs, and the
 HistoryExpand/HistorySearch tools re-read originals on demand. Compaction
 became an index, not a summary. What remains genuinely open: a hard sandbox
-(container/gVisor kernel behind the same protocol) — the kernel remains the
-working substitute.
+(container/gVisor kernel behind the same protocol). The current subprocess
+kernel has in-process guards only, not an OS boundary; Python cells are
+write-class and require approval in Ask and Accept Edits on every platform.

@@ -45,11 +45,7 @@ from fluid.codemode.journal import FrictionDetector, append_friction, strip_remi
 from fluid.codemode.kernel import HostReply
 from fluid.codemode.projection import Projection, func_name
 from fluid.codemode.skills import SkillStore, referenced_skills, validate_skill
-from fluid.codemode.subprocess_kernel import (
-    KernelConfig,
-    SubprocessKernel,
-    os_sandbox_active,
-)
+from fluid.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
 from fluid.codemode.verify import verify_sources, verify_store
 from fluid.events.model import HookEvent, ToolResult, ToolUse
 from fluid.permissions.engine import PermissionEngine
@@ -127,14 +123,13 @@ def _run_python_desc(stdout_cap: int = KernelConfig.stdout_cap) -> str:
     )
 
 # ── the permission prompt for a cell ──
-# Ask mode prompts for a cell only while the kernel runs unsandboxed (see
-# ``CodeModeSession.run_python_risk``). The host renders these instead of the
-# raw tool name and a JSON-escaped, 100-character cut of the input.
+# Ask and Accept Edits prompt for every cell. The host renders these instead
+# of the raw tool name and a JSON-escaped, 100-character cut of the input.
 RUN_PYTHON_TITLE = "Run Python code"
-RUN_PYTHON_UNSANDBOXED_REASON = (
-    "The code sandbox is not active on this host, so each Python cell asks "
-    "first: it would run with the app's own file and network access. Review "
-    "the code before approving; a tool the cell calls may ask again."
+RUN_PYTHON_REASON = (
+    "Python cells run with the app's own file and network access; in-process "
+    "guards are not an OS security boundary. Review the code before approving; "
+    "a tool the cell calls may ask again."
 )
 PROMPT_PREVIEW_LINES = 20
 PROMPT_PREVIEW_CHARS = 1500
@@ -160,19 +155,18 @@ def code_preview(
     return shown
 
 
-def run_python_prompt(input: Any, *, sandboxed: bool) -> dict[str, str]:
+def run_python_prompt(input: Any) -> dict[str, str]:
     """``title``/``display_name`` and ``description`` for a ``run_python``
     permission prompt.
 
-    The description leads with why this host asks (only when the cell is
-    unsandboxed, i.e. its risk was not lowered to ``safe``), then the code as
+    The description leads with why each cell asks, then the code as
     plain text, cut by :func:`code_preview`. The app shows the whole
     description as the "Code to run" block, so a caller that tags the prompt
     (a ProviderAgent worker's approval) puts its tag in the title instead of
     prepending it here.
     """
     code = input.get("code") if isinstance(input, dict) else None
-    parts = [] if sandboxed else [RUN_PYTHON_UNSANDBOXED_REASON]
+    parts = [RUN_PYTHON_REASON]
     if isinstance(code, str) and code.strip():
         parts.append(code_preview(code))
     out = {"title": RUN_PYTHON_TITLE, "display_name": RUN_PYTHON_TITLE}
@@ -347,25 +341,13 @@ class CodeModeSession:
         """Friction entries recorded this turn (the engine's nudge trigger)."""
         return self._friction.count if self._skills is not None else 0
 
-    def os_sandbox_active(self) -> bool:
-        """Whether this session's cells run under the OS sandbox (bwrap).
-
-        The process-wide cached self-test must hold for this kernel config,
-        and a live kernel must itself have been spawned sandboxed (``auto``
-        starts it plain after a bwrap refusal). Drives ``run_python``'s risk.
-        """
-        if not os_sandbox_active(self._config):
-            return False
-        return self._kernel is None or bool(self._kernel.sandboxed)
-
     def run_python_risk(self, _input: dict | None = None) -> str:
-        """``safe`` behind the OS sandbox, else ``write`` so Ask mode prompts.
+        """Every cell is write-class: in-process guards are not a trust boundary.
 
-        Without bwrap the kernel's only boundary is the in-process audit guard,
-        which is defence in depth, not a trust boundary: a cell that escapes it
-        runs host commands as the app user.
+        Ask and Accept Edits prompt before each cell; Bypass approves it. Host
+        tool calls inside the cell still pass through their own permission gates.
         """
-        return "safe" if self.os_sandbox_active() else "write"
+        return "write"
 
     def begin_turn(self) -> None:
         """Turn boundary: reset friction budget and cross-call state."""
@@ -929,9 +911,7 @@ def register_code_mode_tools(
                 "required": ["code"],
             },
             source=CODE_MODE_SOURCE,
-            # ``write`` is the ceiling; the classifier lowers it to ``safe``
-            # only while the OS sandbox holds (see run_python_risk), so Ask
-            # mode prompts for cells whenever the kernel runs unsandboxed.
+            # In-process guards are not an OS boundary: every cell is write-class.
             risk="write",
             classify_risk=getattr(session, "run_python_risk", None),
         ),
@@ -995,8 +975,8 @@ def register_code_mode_tools(
                 {**store.sources(), name: source}, [name], config=session._config
             )
         except Exception as exc:
-            # Verification infrastructure failure (e.g. the ``required``
-            # sandbox is unavailable) is not a bad skill, but it is not a
+            # Verification infrastructure failure (e.g. the kernel cannot
+            # start) is not a bad skill, but it is not a
             # passing self-test either (R11-2). Save it unverified: the store
             # sees it as stale, the mount withholds it, and the first mount
             # whose kernel starts runs its self-test and records the verdict.
@@ -1005,7 +985,7 @@ def register_code_mode_tools(
         else:
             infra = None
             if name not in verdicts:
-                # The kernel went down (sandbox lost) before reaching it.
+                # The verification pass ended before reaching it.
                 verdicts = None
                 infra = "the verification kernel stopped before the skill ran"
         verdict = None if verdicts is None else verdicts[name]

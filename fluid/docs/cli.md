@@ -118,7 +118,7 @@ and every config file.
 | `--provider NAME` | `default_provider` | A provider block name from config (`anthropic`, `openai`, `openrouter`, `local`, `claude`, or your own). |
 | `--model NAME` | `model_override` | Model id for this run. It beats both `default_model` and the selected provider block's own `model` line. `FLUID_MODEL` is the environment equivalent. |
 | `--store DIR` | (store path, not config) | JSONL session store directory. Default `$XDG_DATA_HOME/fluid/sessions`, or `~/.local/share/fluid/sessions`. |
-| `--code-mode` | `code_mode = true` | Expose tools through the sandboxed Python kernel (`run_python`) instead of one call at a time. |
+| `--code-mode` | `code_mode = true` | Expose tools through the guarded Python subprocess kernel (`run_python`) instead of one call at a time. |
 | `--continual` | `continual = true` and `code_mode = true` | Journal kernel cells and synthesize reusable skills in the background. Implies code mode. |
 | `--skills-dir DIR` | `skills_dir` | Root for persistent skills (default `~/.fluid/skills`). |
 | `--approval-policy never_ask\|on_write\|always_ask` | `permission.approval_policy` | When the harness asks before running a tool. See Permissions below. |

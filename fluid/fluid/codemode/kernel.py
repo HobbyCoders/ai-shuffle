@@ -6,7 +6,7 @@ and mediates every tool call back to the host. v1 is the subprocess kernel
 this same protocol.
 
 The protocol is deliberately tiny: ``start`` / ``exec`` / ``stop``. ``exec``
-takes an ``on_host_call`` coroutine — the kernel invokes it for each in-sandbox
+takes an ``on_host_call`` coroutine — the kernel invokes it for each in-kernel
 tool call and blocks the kernel until it returns a ``HostReply``. That callback
 is where the host runs the SAME permission/hook gate the JSON tool path uses,
 which is the whole point: prompt injection inside the kernel is modeled as
@@ -33,7 +33,7 @@ class HostReply:
 
     ``images`` carries any binary image output the tool produced (a ``Read`` of a
     PNG, an MCP screenshot). It stays **host-side**: the kernel only ever receives
-    ``result`` text — in-sandbox the call returns the ``[image: …]`` caption — and
+    ``result`` text — in-kernel the call returns the ``[image: …]`` caption — and
     the host attaches the images to the enclosing cell's tool result so the model
     can actually see them.
 

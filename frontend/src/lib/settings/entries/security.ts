@@ -53,14 +53,6 @@ export const entries: SettingEntry[] = [
 		default: false
 	},
 	{
-		id: 'security.sandbox',
-		category: 'security',
-		section: 'Agent safety',
-		label: 'Code sandbox',
-		help: 'Isolates agents’ Python from this worker’s files and network with bubblewrap, Linux only. When it is off, Ask mode prompts before each Python cell; Bypass still asks for explicit consent requests.',
-		keywords: ['python', 'bubblewrap', 'isolation', 'code mode']
-	},
-	{
 		id: 'security.secInstr',
 		category: 'security',
 		section: 'Agent safety',
