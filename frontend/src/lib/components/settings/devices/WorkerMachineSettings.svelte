@@ -9,8 +9,8 @@
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import { MachineSettingsModel, OUTCOME_TEXT, signInText } from './machine-settings.svelte';
 
-	let { deviceId, self = false, showAvailability = true, model = new MachineSettingsModel() }: {
-		deviceId?: string; self?: boolean; showAvailability?: boolean; model?: MachineSettingsModel;
+	let { deviceId, self = false, showAvailability = true, onAvailabilityChange, model = new MachineSettingsModel() }: {
+		deviceId?: string; self?: boolean; showAvailability?: boolean; onAvailabilityChange?: () => void; model?: MachineSettingsModel;
 	} = $props();
 	const access = getSettingsAccess();
 	const worker = $derived(model.workers.find((w) => self ? w.is_self : w.device_id === deviceId));
@@ -49,7 +49,9 @@
 		else if (allAction === 'keep' || allAction === 'no-keep') action = { operation: 'claude-keep-installed', keep_installed: allAction === 'keep' };
 		else if (['on', 'off', 'default'].includes(allAction)) action = { operation: 'always-on', always_on: allAction === 'default' ? null : allAction === 'on' };
 		else action = { operation: allAction as 'claude-install' | 'claude-update' };
-		void model.act('all', action);
+		void model.act('all', action).then(() => {
+			if (action.operation === 'always-on') onAvailabilityChange?.();
+		});
 	}
 </script>
 

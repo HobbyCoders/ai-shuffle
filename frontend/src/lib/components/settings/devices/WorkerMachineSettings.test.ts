@@ -135,6 +135,20 @@ it('polls only while visible and cleans up when the detail is closed', async () 
 	expect(mocks.get).toHaveBeenCalledTimes(2);
 });
 
+it('refreshes the existing local stays-on row after an all-worker availability change', async () => {
+	const onAvailabilityChange = vi.fn();
+	render(WorkerMachineSettings, { self: true, showAvailability: false, onAvailabilityChange });
+	await screen.findByRole('button', { name: 'Update Claude CLI' });
+	expect(screen.queryByRole('combobox', { name: 'Worker stays on' })).toBeNull();
+	await fireEvent.change(screen.getByRole('combobox', { name: 'All workers action' }), { target: { value: 'off' } });
+	await fireEvent.click(screen.getByRole('button', { name: 'Apply…' }));
+	await fireEvent.click(screen.getByRole('button', { name: 'Apply to all workers' }));
+	await waitFor(() => expect(onAvailabilityChange).toHaveBeenCalledTimes(1));
+	expect(mocks.post).toHaveBeenCalledExactlyOnceWith('/settings/worker-settings/action', {
+		target: 'all', action: { operation: 'always-on', always_on: false }
+	});
+});
+
 it('never treats missing or failed status as a signed-out account', () => {
 	expect(signInText(null)).toBe('Status unavailable');
 	expect(signInText(undefined)).toBe('Status unavailable');

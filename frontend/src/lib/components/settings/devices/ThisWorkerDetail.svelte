@@ -240,7 +240,7 @@
 				</RowGroup>
 			{/if}
 			{#if availabilityError}<InlineBanner tone="warn"><span role="alert">{availabilityError}</span></InlineBanner>{/if}
-			<WorkerMachineSettings self showAvailability={false} />
+			<WorkerMachineSettings self showAvailability={false} onAvailabilityChange={loadAvailability} />
 		{:else}
 			{@render networkTab()}
 		{/if}
