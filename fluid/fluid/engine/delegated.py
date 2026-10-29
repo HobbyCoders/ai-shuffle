@@ -77,7 +77,7 @@ import socket
 import tempfile
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from fluid.engine.background import BackgroundLifecycleMixin
@@ -467,6 +467,10 @@ NOTHING_TO_COMPACT = (
     "Nothing more to compact: the context is already as small as Fluid's "
     "compaction makes it while keeping the current work as it is"
 )
+# How Claude Code 2.1.312 reports a compaction a ``session.compact`` hook left
+# as it is: the closing status says ``compact_result: failed`` with
+# ``compact_error: "skipped: <reason>"``. A skip, not a failure.
+COMPACT_SKIPPED_PREFIX = "skipped:"
 
 # A typed ``/compact`` (with or without the CLI's custom summary instructions).
 _COMPACT_COMMAND = re.compile(r"^/compact(?:\s|$)")
@@ -530,6 +534,9 @@ class _CompactionTxn:
     handles: tuple[str, ...]
     rows: list[dict[str, Any]]
     checkpoint: dict[str, Any] | None
+    # When Fluid answered (monotonic): the mod applies an answer at once or
+    # never (``MOD_COMPACT_WAIT_S``).
+    answered: float = field(default_factory=time.monotonic)
 
     def names(self, parent: str) -> int:
         """2 when ``parent`` is the last row this answer compacted, 1 when it
@@ -4277,8 +4284,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         dropped it, and it is the state that must survive every compaction.
         The host's turn note (``compact_context``) follows it: a mid-turn
         compaction folds the user message that carried it into the summary.
-        Only the main conversation's compaction (``_main_compacting``) gets
-        the note; a subagent's fires the same callback and is left without."""
+        Only the main conversation's compaction (:meth:`_main_compaction_running`)
+        gets the note; a subagent's fires the same callback and is left without."""
         source = str(data.get("source") or "startup")
         parts: list[str] = []
         # The standalone CLI owns this guidance, not embedded bare loops.
@@ -4296,7 +4303,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             ledger = self._ledger_context()
             if ledger:
                 parts.append(ledger)
-            if self._main_compacting and not data.get("agent_id"):
+            if self._main_compaction_running() and not data.get("agent_id"):
                 note = await self._compact_context_note()
                 if note:
                     parts.append(note)
@@ -4318,8 +4325,15 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         while its compaction runs, null (with ``compact_result``) after.
 
         A ``compacting`` frame also makes the next ``compact_boundary`` the
-        main conversation's (``_main_boundary_due``); a compaction that ends
-        in anything but success has no boundary coming, so it clears that.
+        main conversation's (``_main_boundary_due``), and so does a closing
+        ``compact_result: success``: when the mod answers an automatic
+        compaction, Claude Code 2.1.312 skips the step that prints
+        ``compacting`` and prints only the closing status, then the boundary
+        (docs/internal/claude-code-compaction-protocol.md). A compaction that
+        ends in anything but success has no boundary coming, so it clears it.
+        A ``compact_error`` of ``skipped: …`` is a compaction the mod left as
+        it is (the CLI reports it as ``failed``), not a failure: it closes
+        without an error, and the turn's own note says why.
 
         Returns the progress event a turn's reader publishes (session and turn
         ids left for it to fill in): ``active`` when the compaction starts,
@@ -4344,13 +4358,17 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 session_id="", turn_id=None, active=True, trigger=trigger,
             )
         error = ""
-        if frame.get("compact_result") not in (None, "success"):
+        result = frame.get("compact_result")
+        reported = str(frame.get("compact_error") or "").strip()
+        if result == "success":
+            self._main_boundary_due = True
+        elif result is not None:
             self._main_boundary_due = False
-            reported = frame.get("compact_error")
-            error = str(reported).strip() if reported else "the compaction failed"
-            self._turn_compact_error = error
+            if not reported.startswith(COMPACT_SKIPPED_PREFIX):
+                error = reported or "the compaction failed"
+                self._turn_compact_error = error
         if not was_compacting and not error:
-            return None  # a status frame about something else
+            return None  # nothing was shown as running: nothing to close
         return ContextCompacting(
             session_id="", turn_id=None, active=False, trigger=trigger, error=error,
         )
@@ -4358,13 +4376,18 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     def _take_main_boundary(self, frame: dict[str, Any]) -> bool:
         """True when this ``compact_boundary`` is the main conversation's.
 
-        The CLI sends a ``compacting`` status frame before the main thread's
-        compaction and none for a subagent's (2.1.289, as for the
-        SessionStart note above); a frame naming a parent tool call is a
-        subagent's whatever came before. Consumes the pending boundary.
+        The CLI sends a status frame for the main thread's compaction
+        (``compacting`` before, or only the closing ``compact_result``, see
+        :meth:`_track_main_compaction`) and none for a subagent's (2.1.289,
+        as for the SessionStart note above). A boundary whose
+        ``logical_parent_uuid`` names a row of an open Fluid answer is the
+        main thread's too: the mod only ever posts the main conversation. A
+        frame naming a parent tool call is a subagent's whatever came before.
+        Consumes the pending boundary.
         """
         main = not frame.get("parent_tool_use_id") and (
             self._main_boundary_due or self._main_compacting
+            or self._names_open_answer(frame)
         )
         if main:
             self._main_boundary_due = False
@@ -4373,6 +4396,27 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # later boundary must not inherit a previous cycle's put-back.
             self._compaction_context_restored = False
         return main
+
+    def _main_compaction_running(self) -> bool:
+        """The main conversation is compacting: its ``compacting`` status, or
+        a Fluid answer the mod is applying right now. When the mod answers an
+        automatic compaction, Claude Code 2.1.312 prints no ``compacting``
+        status, yet fires SessionStart(compact) before the closing status
+        (docs/internal/claude-code-compaction-protocol.md). The mod only
+        compacts the main conversation, and applies an answer at once or not
+        at all."""
+        if self._main_compacting:
+            return True
+        now = time.monotonic()
+        return any(now - txn.answered <= MOD_COMPACT_WAIT_S for txn in self._open_txns)
+
+    def _names_open_answer(self, frame: dict[str, Any]) -> bool:
+        """Whether a boundary's ``logical_parent_uuid`` is a row of a Fluid
+        answer that no boundary has applied yet."""
+        parent = frame.get("logical_parent_uuid")
+        return isinstance(parent, str) and bool(parent) and any(
+            txn.names(parent) for txn in self._open_txns
+        )
 
     async def _keep_between_turn_compaction_line(self, text: str) -> bool:
         """:meth:`_keep_between_turn_compaction` for a raw stdout line."""

@@ -2412,6 +2412,36 @@ def test_a_failed_main_compaction_leaves_no_boundary_due() -> None:
     assert loop._take_main_boundary(_boundary(1)) is False
 
 
+def test_a_fluid_answered_compaction_with_no_compacting_status_is_the_mains() -> None:
+    """Claude Code 2.1.312 prints no ``compacting`` status when the mod
+    answers an automatic compaction: only the closing status, then the
+    boundary. Both signals make that boundary the main conversation's
+    (docs/internal/claude-code-compaction-protocol.md)."""
+    from fluid.engine.delegated import _CompactionTxn
+
+    loop = DelegatedLoop(store=MemoryStore(), model="m", claude_cmd=["true"])
+    assert loop._track_main_compaction(_STATUS_OFF) is None  # nothing shown, nothing to close
+    assert loop._take_main_boundary(_boundary(1)) is True
+    assert loop._take_main_boundary(_boundary(1)) is False
+
+    # The boundary names a row of the open answer (no status read at all).
+    loop._open_compaction(_CompactionTxn(compaction_id="cmp_x", handles=("u1", "u2"),
+                                         rows=[], checkpoint=None))
+    assert loop._main_compaction_running()  # SessionStart(compact) gets the host's note
+    assert loop._take_main_boundary(_boundary(1, logical_parent_uuid="other")) is False
+    assert loop._take_main_boundary(_boundary(1, logical_parent_uuid="u2")) is True
+
+
+def test_a_skip_the_cli_reports_as_failed_closes_without_an_error() -> None:
+    loop = DelegatedLoop(store=MemoryStore(), model="m", claude_cmd=["true"])
+    loop._track_main_compaction(_STATUS_ON)
+    done = loop._track_main_compaction({**_STATUS_OFF, "compact_result": "failed",
+                                        "compact_error": "skipped: Nothing more to compact"})
+    assert done is not None and not done.active and done.error == ""
+    assert loop._turn_compact_error is None
+    assert loop._take_main_boundary(_boundary(1)) is False
+
+
 async def test_a_compaction_between_turns_is_kept_for_the_next_turn(tmp_path) -> None:
     """An idle compaction the CLI writes after a turn's result used to be
     dropped by the next turn's stale-frame drain. Now the main one is

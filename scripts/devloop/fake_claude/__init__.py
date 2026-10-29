@@ -22,6 +22,8 @@ from pathlib import Path
 
 PACKAGE = Path(__file__).resolve().parent
 SCENARIOS_DIR = PACKAGE / "scenarios"
+#: How Claude Code prints each kind of compaction (the replay fixtures).
+COMPACTION_DIR = PACKAGE / "compaction"
 CLI = PACKAGE / "cli.py"
 #: The shim's second line. The seed checks it before it creates the Claude
 #: Code agent, so that agent is only ever seeded beside the fake.

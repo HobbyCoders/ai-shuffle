@@ -1,0 +1,77 @@
+{
+  "description": "A typed /compact answered by Fluid through the mod: the conversation is replaced by Fluid's rows; no summarizer.",
+  "evidence": "Claude Code 2.1.312 bundle (read, never run): the /compact command prints status 'compacting' before the session.compact hook runs, and its finally block prints status null + compact_result. App log on a real worker: manual Fluid compactions are paired with their boundary (no 'subagent' line). Audit exports (2026-10-26): ContextCompacting active, inactive, then the boundary's ContextCompaction.",
+  "trigger": "manual",
+  "outcome": "fluid",
+  "sequence": [
+    {
+      "frame": {
+        "type": "system",
+        "subtype": "status",
+        "status": "compacting",
+        "uuid": "$uuid",
+        "session_id": "$sid"
+      }
+    },
+    {
+      "bridge": true
+    },
+    {
+      "hook": "SessionStart",
+      "input": {
+        "source": "compact"
+      }
+    },
+    {
+      "frame": {
+        "type": "system",
+        "subtype": "status",
+        "status": null,
+        "compact_result": "success",
+        "uuid": "$uuid",
+        "session_id": "$sid"
+      }
+    },
+    {
+      "apply": "answer"
+    },
+    {
+      "transcript": {
+        "type": "system",
+        "subtype": "compact_boundary",
+        "content": "Conversation compacted",
+        "level": "info",
+        "isSidechain": false,
+        "parentUuid": null,
+        "logicalParentUuid": "$logical_parent",
+        "uuid": "$boundary_uuid",
+        "compactMetadata": {
+          "trigger": "manual",
+          "preTokens": "$pre_tokens",
+          "postTokens": "$post_tokens",
+          "cumulativeDroppedTokens": "$dropped_tokens",
+          "durationMs": "$duration_ms"
+        }
+      }
+    },
+    {
+      "frame": {
+        "type": "system",
+        "subtype": "compact_boundary",
+        "uuid": "$boundary_uuid",
+        "compact_metadata": {
+          "trigger": "manual",
+          "pre_tokens": "$pre_tokens",
+          "post_tokens": "$post_tokens",
+          "cumulative_dropped_tokens": "$dropped_tokens",
+          "duration_ms": "$duration_ms"
+        },
+        "logical_parent_uuid": "$logical_parent",
+        "session_id": "$sid"
+      }
+    },
+    {
+      "replay": "answer"
+    }
+  ]
+}

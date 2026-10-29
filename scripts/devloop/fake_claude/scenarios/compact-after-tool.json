@@ -1,0 +1,15 @@
+{
+  "description": "Reads a big file, then Claude Code compacts automatically before the model call that reads the result (where real mid-turn compactions happen), then answers.",
+  "steps": [
+    {
+      "text": "Reading the big file first.",
+      "tool_calls": [
+        {"name": "Read", "input": {"file_path": "/fake/big-file.txt"}, "result_chars": 45000}
+      ]
+    },
+    {
+      "compact": true,
+      "text": "Compacted after reading it; the result is still here."
+    }
+  ]
+}

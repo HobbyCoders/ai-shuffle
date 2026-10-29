@@ -166,7 +166,17 @@ fake AI's:
 | `long-result` | a 60,000-character MCP result, replaced by Claude Code's `<persisted-output>` stub |
 | `bulk-read` | a 45,000-character Read result (no prompt), to grow the context quickly |
 | `compact` | automatic compaction mid-turn, then the answer |
-| `/compact` | manual compaction: the app's compaction route, the boundary, then the conversation replayed as fresh frames (#679) |
+| `compact-after-tool` | a big Read, then automatic compaction before the model call that reads its result |
+| `/compact` | manual compaction: the app's compaction route, then the boundary and the conversation replayed as fresh frames (#679) |
+
+Every compaction plays a replay fixture from `scripts/devloop/fake_claude/compaction/`
+(`<trigger>-<outcome>.json`: `auto` or `manual`; `fluid`, `summarizer` or
+`skip`, picked by the app's answer). Each fixture lists the frames, hooks
+and transcript entries in the real CLI's order. They were derived from
+Claude Code 2.1.312 and real transcripts; see
+[claude-code-compaction-protocol.md](claude-code-compaction-protocol.md). A
+new CLI that prints compaction differently changes a fixture, not the fake's
+code.
 | `exit-error` | the process exits 1 with stderr mid-turn; the next message resumes |
 | `error-500`, `long`, `slow`, ... | the fake AI's scenarios, played by the CLI |
 
@@ -176,7 +186,8 @@ without `result` really runs on the bridge. Every run is logged with its argv,
 the names of its environment variables (never their values), hooks, tools and
 compactions in `fake-claude.jsonl` in the scratch directory. What it cannot
 model: a real model's choices; built-in tools (Bash, Read and the rest) do not
-run; the Claude Code summarizer is a canned summary; and there is no
+run; the Claude Code summarizer is a canned summary (sized like a real one,
+keeping the newest rows as the CLI does); and there is no
 subscription usage, rate limit or real context accounting. The instance's
 own `HOME/.local/bin/claude`, which app startup puts first on PATH and the
 app's installer writes to, is also linked to the fake. The app therefore sees

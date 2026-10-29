@@ -1,0 +1,64 @@
+{
+  "description": "A typed /compact the mod skips (Fluid has nothing more to reclaim, or the bridge failed): nothing changes, nothing is summarized.",
+  "evidence": "Claude Code 2.1.312 bundle (read, never run): a skipped compaction sets the command's error to 'skipped: <reason>', so its finally block prints status null with compact_result 'failed' and compact_error 'skipped: <reason>'; the command then prints a synthetic assistant line 'Not compacted · <reason>' (model <synthetic>) and a successful result with num_turns 0 and that text (the result shape was checked live on 2.1.311, PR #726).",
+  "trigger": "manual",
+  "outcome": "skip",
+  "sequence": [
+    {
+      "frame": {
+        "type": "system",
+        "subtype": "status",
+        "status": "compacting",
+        "uuid": "$uuid",
+        "session_id": "$sid"
+      }
+    },
+    {
+      "bridge": true
+    },
+    {
+      "frame": {
+        "type": "system",
+        "subtype": "status",
+        "status": null,
+        "compact_result": "failed",
+        "compact_error": "skipped: $reason",
+        "uuid": "$uuid",
+        "session_id": "$sid"
+      }
+    },
+    {
+      "frame": {
+        "type": "assistant",
+        "uuid": "$uuid",
+        "session_id": "$sid",
+        "parent_tool_use_id": null,
+        "message": {
+          "id": "$message_id",
+          "type": "message",
+          "role": "assistant",
+          "model": "<synthetic>",
+          "content": [
+            {
+              "type": "text",
+              "text": "Not compacted · $reason"
+            }
+          ],
+          "stop_reason": "stop_sequence",
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "result": {
+        "text": "Not compacted · $reason",
+        "num_turns": 0
+      }
+    }
+  ]
+}
