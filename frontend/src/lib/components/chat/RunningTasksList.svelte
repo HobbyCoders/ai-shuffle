@@ -6,9 +6,10 @@
 	 * that expands to its member tasks, each with its own state, transcript and
 	 * stop, plus a stop for the whole swarm. Agent rows open the subagent's chat.
 	 *
-	 * variant="inline" sits under the last reply. On desktop it is the grouped
-	 * list (capped height past a handful of rows, with "Show all" for search and
-	 * filters). In the mobile shell it is one summary row that opens the sheet.
+	 * variant="inline" sits under the last reply: a collapsible grouped list
+	 * (capped height past a handful of rows, with "Show all" for search and
+	 * filters). The phone shows the same row, with larger tap targets; its full
+	 * list is also Chat controls > Running tasks.
 	 *
 	 * variant="sheet" is the full list as a modal: a full-height page on a phone
 	 * (swipe a row left to stop it), a centred panel on desktop. A sticky head
@@ -40,7 +41,6 @@
 	 */
 	import { onDestroy, tick, untrack } from 'svelte';
 	import {
-		Activity,
 		ArrowLeft,
 		ArrowRightLeft,
 		Bot,
@@ -296,7 +296,7 @@
 	let now = $state(Date.now());
 	let timer: ReturnType<typeof setInterval> | null = null;
 	const sheetVisible = $derived(variant === 'sheet' || variant === 'page' || ownSheetOpen);
-	const onScreen = $derived(sheetVisible || (variant === 'inline' && inlineOpen && !mobileShell));
+	const onScreen = $derived(sheetVisible || (variant === 'inline' && inlineOpen));
 	// Elapsed times tick each second; a watch's "Fired 5m ago" needs far less.
 	const tickMs = $derived(!onScreen ? 0 : hasRunning ? 1000 : watchRows.length ? 30_000 : 0);
 	let timerMs = 0;
@@ -1243,66 +1243,59 @@
 		{@render sheetContent(true)}
 	</div>
 {:else if hasContent}
-	{#if mobileShell}
-		<!-- Phone: one summary row; the full list opens as a sheet. -->
-		<button type="button" class="summary-row" onclick={openOwnSheet} aria-haspopup="dialog"
-			aria-label="{headLabel}: {headSub}. Open the list">
-			<span class="pulse" class:quiet={!hasRunning} aria-hidden="true">{#if hasRunning}<Activity size={16} />{:else}<Eye size={16} />{/if}</span>
-			<span class="summary-text"><b>{counts.running ? `${counts.running} running` : headLabel}</b><small>{headSub}</small></span>
-			<span class="summary-open">Open</span>
-		</button>
-	{:else}
-		<div class="inline" data-open={inlineOpen}>
-			<div class="inline-head">
-				<button type="button" class="inline-toggle" onclick={toggleInline} aria-expanded={inlineOpen}
-					data-testid="tasks-toggle" title={inlineOpen ? 'Collapse task list' : 'Show running tasks'}>
-					{#if hasRunning}
-						<span class="spinner" aria-hidden="true"></span>
-					{:else}
-						<span class="watch-mark" aria-hidden="true"><Eye size={12} strokeWidth={2} /></span>
-					{/if}
-					<span class="inline-label">{headLabel}</span>
-					<span class="inline-sub">{headSub}</span>
-					<ChevronDown size={12} class={inlineOpen ? 'inline-chev open' : 'inline-chev'} aria-hidden="true" />
-				</button>
-				{#if inlineOpen}
-					<span class="inline-tools">
-						{#if allRowCount > INLINE_CAP}
-							<button type="button" class="text-btn" onclick={openOwnSheet} aria-haspopup="dialog">Show all</button>
-						{/if}
-						{#if counts.running > 1}
-							<button type="button" class="text-btn danger" onclick={() => (confirmingAll = true)} disabled={confirmingAll}>Stop all</button>
-						{/if}
-					</span>
+	<!-- One look on desktop and phone: a collapsible row under the last reply.
+	     The full list (search, filters, swipe to stop) opens from "Show all"
+	     here and, on a phone, from Chat controls > Running tasks. -->
+	<div class="inline" class:touch={mobileShell} data-open={inlineOpen}>
+		<div class="inline-head">
+			<button type="button" class="inline-toggle" onclick={toggleInline} aria-expanded={inlineOpen}
+				data-testid="tasks-toggle" title={inlineOpen ? 'Collapse task list' : 'Show running tasks'}>
+				{#if hasRunning}
+					<span class="spinner" aria-hidden="true"></span>
+				{:else}
+					<span class="watch-mark" aria-hidden="true"><Eye size={12} strokeWidth={2} /></span>
 				{/if}
-			</div>
+				<span class="inline-label">{headLabel}</span>
+				<span class="inline-sub">{headSub}</span>
+				<ChevronDown size={12} class={inlineOpen ? 'inline-chev open' : 'inline-chev'} aria-hidden="true" />
+			</button>
 			{#if inlineOpen}
-				{#if confirmingAll && !ownSheetOpen}
-					<div class="confirm compact" role="alertdialog" aria-labelledby="{titleId}-inline-confirm">
-						<span id="{titleId}-inline-confirm">{stopAllQuestion(stoppableRows(rows).length, 'all')}</span>
-						<button type="button" class="btn ghost" onclick={() => (confirmingAll = false)}>Cancel</button>
-						<button type="button" class="btn danger" onclick={() => { filter = 'all'; query = ''; void stopAll(); }}>Stop {stoppableRows(rows).length}</button>
-					</div>
-				{/if}
-				<div class="inline-body" class:capped={inlineLineCount > INLINE_CAP}>
-					{@render groupView('Agents', inlineGroups.agents, 'compact', 'agents')}
-					{@render groupView('Shell', inlineGroups.shell, 'compact', 'shell')}
-					{@render watchGroup(watchRows, 'compact')}
-					{#if prefOnly}
-						<!-- No watch is live, but where new ones run is set: keep it changeable. -->
-						<section class="group" aria-labelledby="{titleId}-watches-empty">
-							<div class="group-head watch-head">
-								<h3 class="group-title" id="{titleId}-watches-empty"><span>Watches</span> <span class="group-count">0</span></h3>
-								{@render preferenceButton('compact')}
-							</div>
-							{@render preferencePicker('compact')}
-							<p class="empty-watch-note">No watches. Ask any chat to watch something for you.</p>
-						</section>
+				<span class="inline-tools">
+					{#if allRowCount > INLINE_CAP}
+						<button type="button" class="text-btn" onclick={openOwnSheet} aria-haspopup="dialog">Show all</button>
 					{/if}
-				</div>
+					{#if counts.running > 1}
+						<button type="button" class="text-btn danger" onclick={() => (confirmingAll = true)} disabled={confirmingAll}>Stop all</button>
+					{/if}
+				</span>
 			{/if}
 		</div>
-	{/if}
+		{#if inlineOpen}
+			{#if confirmingAll && !ownSheetOpen}
+				<div class="confirm compact" role="alertdialog" aria-labelledby="{titleId}-inline-confirm">
+					<span id="{titleId}-inline-confirm">{stopAllQuestion(stoppableRows(rows).length, 'all')}</span>
+					<button type="button" class="btn ghost" onclick={() => (confirmingAll = false)}>Cancel</button>
+					<button type="button" class="btn danger" onclick={() => { filter = 'all'; query = ''; void stopAll(); }}>Stop {stoppableRows(rows).length}</button>
+				</div>
+			{/if}
+			<div class="inline-body" class:capped={inlineLineCount > INLINE_CAP}>
+				{@render groupView('Agents', inlineGroups.agents, 'compact', 'agents')}
+				{@render groupView('Shell', inlineGroups.shell, 'compact', 'shell')}
+				{@render watchGroup(watchRows, 'compact')}
+				{#if prefOnly}
+					<!-- No watch is live, but where new ones run is set: keep it changeable. -->
+					<section class="group" aria-labelledby="{titleId}-watches-empty">
+						<div class="group-head watch-head">
+							<h3 class="group-title" id="{titleId}-watches-empty"><span>Watches</span> <span class="group-count">0</span></h3>
+							{@render preferenceButton('compact')}
+						</div>
+						{@render preferencePicker('compact')}
+						<p class="empty-watch-note">No watches. Ask any chat to watch something for you.</p>
+					</section>
+				{/if}
+			</div>
+		{/if}
+	</div>
 {/if}
 
 {#if variant === 'inline' && ownSheetOpen}
@@ -1407,7 +1400,7 @@
 	.icon-btn.busy { cursor: default; color: var(--muted-foreground); }
 	.icon-btn.busy:hover { background: transparent; }
 	.icon-btn:focus-visible, .as-button:focus-visible, .chip:focus-visible, .stop-all:focus-visible,
-	.btn:focus-visible, .text-btn:focus-visible, .inline-toggle:focus-visible, .summary-row:focus-visible,
+	.btn:focus-visible, .text-btn:focus-visible, .inline-toggle:focus-visible,
 	.clear:focus-visible, .link:focus-visible {
 		outline: 2px solid var(--ring);
 		outline-offset: -2px;
@@ -1559,29 +1552,18 @@
 	.size-compact .confirm.in-row { margin: 2px 0 4px 28px; padding: 4px 4px 4px 10px; font-size: 0.75rem; }
 	.size-compact .confirm.in-row .btn { padding: 3px 10px; }
 
-	/* ── Phone summary row (mobile shell inline) ───────────────────────────── */
-	.summary-row {
-		display: grid;
-		grid-template-columns: auto minmax(0, 1fr) auto;
-		align-items: center;
-		gap: 10px;
-		width: 100%;
-		min-height: 52px;
-		padding: 6px 6px 6px 12px;
-		border: 1px solid var(--border);
-		border-radius: var(--radius, 0.75rem);
-		background: var(--card);
-		color: var(--foreground);
-		font: inherit;
-		text-align: left;
-		cursor: pointer;
+	/* ── Phone (mobile shell inline) ───────────────────────────────────────── */
+	/* The same row as desktop; only the tap targets grow so a thumb can hit
+	   the toggle, Stop all and each row's actions. */
+	.inline.touch .inline-toggle { min-height: 36px; padding: 4px 6px; margin-left: -6px; }
+	.inline.touch .text-btn { min-height: 36px; padding: 4px 10px; }
+	.inline.touch .size-compact.row .row-inner, .inline.touch .member.size-compact { min-height: 36px; }
+	.inline.touch .size-compact .icon-btn, .inline.touch .size-compact .icon-slot { width: 32px; height: 32px; }
+	/* A phone-width row gives the task's name the room; the worker it runs on
+	   is in the full list (Chat controls > Running tasks). Watches keep theirs. */
+	@media (max-width: 520px) {
+		.inline.touch .row:not(.watch) .meta-worker { display: none; }
 	}
-	.summary-row:active { background: var(--hover-overlay); }
-	.pulse { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; color: var(--primary); background: color-mix(in oklch, var(--primary) 14%, transparent); }
-	.summary-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
-	.summary-text b { font-size: 0.875rem; font-weight: 600; }
-	.summary-text small { font-size: 0.75rem; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.summary-open { display: grid; place-items: center; min-height: 40px; padding: 0 14px; border-radius: calc(var(--radius, 0.75rem) * 0.7); background: var(--muted); font-size: 0.8125rem; font-weight: 600; }
 
 	/* ── Sheet ─────────────────────────────────────────────────────────────── */
 	.rt-layer { position: fixed; inset: 0; z-index: 170; display: flex; align-items: center; justify-content: center; }
@@ -1792,7 +1774,6 @@
 	.meta-cost { font-variant-numeric: tabular-nums; }
 	.icon-btn.resume { color: var(--primary); }
 	.watch-mark { display: grid; place-items: center; flex: none; width: 12px; height: 12px; color: var(--primary); }
-	.pulse.quiet { color: var(--muted-foreground); background: var(--muted); }
 	/* Roomy rows (the sheet, phones): name over "Fired 5m ago · $0.42", so
 	   three 44px actions still leave the name room at 320px. */
 	.size-roomy.watch .row-inner {

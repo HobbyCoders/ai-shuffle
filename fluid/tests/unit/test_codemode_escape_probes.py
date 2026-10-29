@@ -395,7 +395,7 @@ async def test_r11_1_denied_builtin_as_thread_target_is_blocked(codemode_marker,
         if target == "system"
         else f"th.start_new_thread(imp('_io').open, ({str(marker)!r}, 'w'))\n"
     )
-    k = SubprocessKernel(KernelConfig(os_sandbox="off"))
+    k = SubprocessKernel(KernelConfig())
     await k.start()
     try:
         r = await k.exec(
@@ -417,7 +417,7 @@ async def test_r11_1_denied_builtin_as_thread_target_is_blocked(codemode_marker,
 
 async def test_r11_1_python_thread_target_calling_denied_builtin_is_blocked(codemode_marker) -> None:
     marker, command = codemode_marker
-    k = SubprocessKernel(KernelConfig(os_sandbox="off"))
+    k = SubprocessKernel(KernelConfig())
     await k.start()
     try:
         r = await k.exec(
@@ -555,32 +555,28 @@ _GOOD_SELFTEST = (
 )
 
 
-@pytest.mark.parametrize("how", ["sandbox_refused", "kernel_lost_mid_pass"])
+@pytest.mark.parametrize("how", ["kernel_start_failed", "pass_ended"])
 @pytest.mark.parametrize(
     "source, mounts",
     [(_BROKEN_SELFTEST, False), (_GOOD_SELFTEST, True)],
     ids=["failing_selftest", "passing_selftest"],
 )
-async def test_r11_2_skill_saved_without_sandbox_is_verified_on_next_mount(
+async def test_r11_2_unverified_skill_is_verified_on_next_mount(
     tmp_path, monkeypatch, how, source, mounts,
 ) -> None:
-    from fluid.codemode import os_sandbox
     from fluid.codemode import session as session_mod
     from fluid.codemode.session import CodeModeSession, register_code_mode_tools
     from fluid.codemode.skills import SkillStore
     from fluid.tools.registry import ToolRegistry
 
-    if how == "sandbox_refused":
-        # ``required`` on a host whose bubblewrap self-test fails: the real
-        # verification kernel refuses to start and verify_sources raises.
-        monkeypatch.setattr(os_sandbox.sys, "platform", "linux")
-        monkeypatch.setattr(
-            os_sandbox, "self_test",
-            lambda _python: os_sandbox.SelfTest(False, "bwrap: No permissions"),
-        )
+    if how == "kernel_start_failed":
+        # A host failure starting the verification kernel is not a skill verdict.
+        async def _cannot_start(self):
+            raise RuntimeError("verification kernel could not start")
+
+        monkeypatch.setattr(SubprocessKernel, "start", _cannot_start)
     else:
-        # The sandbox went away after the kernel started: the pass ends
-        # before the skill ran and its name is absent from the verdicts.
+        # A pass ends before the skill runs; its name is absent from the verdicts.
         async def _no_verdict(*_a, **_k):
             return {}
 
@@ -589,7 +585,7 @@ async def test_r11_2_skill_saved_without_sandbox_is_verified_on_next_mount(
     store = SkillStore(tmp_path / "skills")
     registry = ToolRegistry()
     session = CodeModeSession(
-        registry, skills=store, config=KernelConfig(os_sandbox="required"),
+        registry, skills=store, config=KernelConfig(),
     )
     register_code_mode_tools(registry, session)
     try:
@@ -601,8 +597,6 @@ async def test_r11_2_skill_saved_without_sandbox_is_verified_on_next_mount(
 
         # The host is fixed: the next mount runs the self-test for real.
         monkeypatch.undo()
-        monkeypatch.setenv("CODE_MODE_OS_SANDBOX", "off")
-        session._config = KernelConfig(os_sandbox="off")
         mounted = await session._mountable_skills()
         assert ("adder" in mounted) is mounts
         assert not store.needs_verification("adder")

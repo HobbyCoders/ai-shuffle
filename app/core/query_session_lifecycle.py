@@ -441,6 +441,11 @@ async def enter_user_stop(session_id: str) -> dict:
         parked_settled = await asyncio.to_thread(
             turns_db.settle_parked_turns, session_id
         )
+        if parked_settled:
+            # Settling banked the park's working time; show the final total.
+            from app.core.turn_finalize import broadcast_work_time
+
+            await broadcast_work_time(session_id)
     except Exception:  # noqa: BLE001
         logger.warning(
             "Stop: settling parked turns failed for session %s", session_id,

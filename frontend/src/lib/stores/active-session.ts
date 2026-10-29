@@ -262,6 +262,9 @@ export interface ActiveSessionState {
 	 *  its own disk via the durable git-ops queue. Cleared as soon as the query
 	 *  is sent: the session row itself then carries the ownership. */
 	deviceIntent: DeviceIntent | null;
+	/** This view composed this conversation, rather than opening existing history.
+	 *  Ephemeral: navigation/reload must check a mirror's opening checkpoint. */
+	createdFromComposer?: boolean;
 	worktreeBranch: string;
 	worktreeBaseBranch: string;
 	worktreeCreateNewBranch: boolean;

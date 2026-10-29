@@ -357,12 +357,10 @@ _PYTHON_HIGH = re.compile(
 )
 
 
-def _python_level(code: Any, scope: Scope, spec_risk: Optional[str] = None) -> str:
+def _python_level(code: Any, scope: Scope) -> str:
     """A code-mode cell. Its tool calls are checked one by one by the engine;
-    the cell itself is low when it runs behind the OS sandbox, or when it does
-    nothing but compute and call those tools."""
-    if spec_risk == "safe":
-        return LOW
+    the cell itself is low only when it computes and calls those tools.
+    In-process guards are defence in depth, not an OS boundary."""
     if not isinstance(code, str):
         return HIGH
     if _PYTHON_HIGH.search(code) or _HIGH_COMMAND_RE.search(code):
@@ -426,19 +424,6 @@ def _check_plugin_rule(data, scope):
     return _read_level(path, scope) if path not in (None, "") else LOW
 
 
-def _emulator_rule(data, scope):
-    """The worker's emulator is a sandbox: driving it is ordinary work.
-    Installing the SDK downloads ~2 GB under a license the owner accepts, so
-    it asks; installing an APK reads a file, judged like any other read."""
-    action = data.get("action")
-    if action == "setup":
-        return HIGH
-    if action == "install":
-        path = data.get("path")
-        return _read_level(path, scope) if path not in (None, "") else HIGH
-    return LOW
-
-
 def _start_session_rule(data, scope):
     """Starting a chat here, or in a named registered project, is ordinary
     work. A chat on another worker with no project could land anywhere.
@@ -480,7 +465,7 @@ TOOL_LEVELS: Dict[str, Level] = {
     "BashOutput": LOW,
     "KillShell": LOW,
     "KillBash": LOW,
-    # run_python is decided by _python_level (it needs the engine's sandbox verdict).
+    # run_python is decided by _python_level from the cell contents and scope.
     "run_python": HIGH,
     # The harness itself: notes, skills, history, memory, questions.
     "Skill": LOW,
@@ -542,8 +527,6 @@ TOOL_LEVELS: Dict[str, Level] = {
     "PushNotification": LOW,
     "AndroidDevices": LOW,
     "AndroidAction": HIGH,
-    "Emulator": _emulator_rule,
-    "EmulatorScreenshot": LOW,
     "DesignSync": HIGH,
     # Plugins (app/mcp/plugin_tools.py): searching and checking read; an
     # install puts files on the worker (switched off, pending review), so it asks.
@@ -726,15 +709,14 @@ def declared(name: Any) -> bool:
 def level(name: Any, tool_input: Any, scope: Scope, *, spec_risk: Optional[str] = None) -> str:
     """``low`` or ``high`` for one call in an assistant session.
 
-    ``spec_risk`` is the runtime's own risk verdict for the call, when it has
-    one; only code mode's sandbox verdict is used. Never raises: a rule that
-    fails answers high.
+    ``spec_risk`` is accepted for caller compatibility, but cannot lower the
+    cell-content rating. Never raises: a rule that fails answers high.
     """
     key = canonical(name)
     data = tool_input if isinstance(tool_input, Mapping) else {}
     try:
         if key == "run_python":
-            return _python_level(data.get("code"), scope, spec_risk)
+            return _python_level(data.get("code"), scope)
         declared_level = TOOL_LEVELS.get(key, HIGH)
         if callable(declared_level):
             return HIGH if declared_level(data, scope) != LOW else LOW

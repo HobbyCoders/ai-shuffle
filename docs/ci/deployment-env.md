@@ -46,7 +46,6 @@ host semantics and do not imply a credential import.
 | `ALL_PROXY` | Fallback outbound proxy |
 | `all_proxy` | Lowercase POSIX alias for ALL_PROXY outbound proxy policy |
 | `ANDROID_HOME` | Locate existing Android SDK |
-| `ANDROID_SDK_DIR` | Directory for the managed or opted-in external Android SDK |
 | `ANDROID_SDK_ROOT` | Locate existing Android SDK (legacy alias) |
 | `API_DOCS_ENABLED` | Expose unauthenticated interactive API schema endpoints |
 | `APPDATA` | Windows roaming application-data root |
@@ -106,7 +105,6 @@ host semantics and do not imply a credential import.
 | `CLUSTER_ADVERTISE_URL` | Peer-reachable install URL for legacy clustering |
 | `CLUSTER_SECRET` | Legacy shared-database cluster bearer secret; generated and persisted if absent |
 | `CODEX_APP_SERVER_LOGIN_CLIENT_ID` | OAuth application identity for Codex/ChatGPT sign-in |
-| `CODE_MODE_OS_SANDBOX` | OS-level code-kernel isolation: auto, required or off |
 | `COMSPEC` | Windows command interpreter fallback |
 | `COOKIE_SECURE` | Mark cookies HTTPS-only |
 | `CORS_ORIGINS` | Additional permitted browser origins |
@@ -118,7 +116,6 @@ host semantics and do not imply a credential import.
 | `FILE_LOG_BACKUP_COUNT` | Retain this many rotated log files |
 | `FILE_LOG_LEVEL` | Minimum severity persisted to log files |
 | `FILE_LOG_MAX_BYTES` | Rotate each log file at this byte size |
-| `FIREBASE_CREDENTIALS` | Path to Firebase service-account credentials for push delivery |
 | `FLUID_CHILD_ENV_PASSTHROUGH` | Names of additional non-secret host variables allowed into project children |
 | `FLUID_CWD` | Working directory for standalone Fluid sessions |
 | `FLUID_GUIDANCE_HOME` | Alternate home containing harness guidance files |

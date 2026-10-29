@@ -50,7 +50,7 @@ the start directory sits under it.
 | `default_provider` | `"anthropic"` | Name of the provider block to use when `--provider` is not given. |
 | `default_model` | `"claude-sonnet-5"` | Model id used when the selected provider block has no `model` of its own. `FLUID_DEFAULT_MODEL` sets this key; a provider's `model` line takes precedence over it. |
 | `model_override` | `null` | Highest-precedence model choice: beats a provider's `model` line. Set by `--model` or `FLUID_MODEL`; not normally written in a file. |
-| `code_mode` | `false` | Expose tools through the sandboxed Python kernel (`run_python`) instead of as individual tool calls. Adds the code-mode addendum to the CLI prompt. |
+| `code_mode` | `false` | Expose tools through the guarded Python subprocess kernel (`run_python`) instead of as individual tool calls. Adds the code-mode addendum to the CLI prompt. |
 | `continual` | `false` | Journal the session and synthesize reusable skills in the background. Under `code_mode` the journal records executed cells; without it, a per-tool-call journal is kept, so plain JSON sessions learn too. `--continual` turns this and `code_mode` on together. |
 | `continual_model` | none | Pin skill synthesis to one model id regardless of the session's model. |
 | `continual_provider` | none | A native provider name whose client runs the synthesis passes. Unset, the session's provider does. The `claude` provider has no native client, so without this it keeps the journal and serves Recall and Remember but never synthesizes. |
@@ -811,7 +811,10 @@ Read outside the config loader:
 ## Code mode details
 
 With `code_mode = true` the model gets a `run_python` tool and a persistent,
-sandboxed kernel. Tools are importable in every spelling: `from tools import
+subprocess kernel, without an OS sandbox. Every cell is write-class: Ask and
+Accept Edits prompt before execution; Bypass approves it. The import/audit/I/O
+guards are defence in depth, not a security boundary. Tool calls still pass
+through their own host permission gates. Tools are importable in every spelling: `from tools import
 Glob`, `import tools; tools.Glob(...)`, `import tools.Glob`, and `from
 tools.Glob import Glob`. Standard-library imports are limited to a pure-helper
 allowlist (`DEFAULT_ALLOWLIST` in `fluid/codemode/vfs.py`): `json`, `re`,
@@ -820,8 +823,8 @@ allowlist (`DEFAULT_ALLOWLIST` in `fluid/codemode/vfs.py`): `json`, `re`,
 `typing`, `dataclasses`, `decimal`, `fractions`, `enum`, `operator`, `heapq`,
 `bisect`, `uuid`, `shlex`, `fnmatch`, `difflib`, `copy`, `pprint`,
 `unicodedata`, `html`, `ipaddress`, `struct`, `zlib`, `time`, and
-`__future__`. `open()` and the network are disabled; files go through the
-permission-gated tools. A failing cell returns a traceback trimmed to the
+`__future__`. In-process guards deny `open()` and network access; files go
+through the permission-gated tools. A failing cell returns a traceback trimmed to the
 cell's own frames.
 
 Three things keep a cell's output honest:

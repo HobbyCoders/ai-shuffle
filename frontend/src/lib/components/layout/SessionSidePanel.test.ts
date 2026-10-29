@@ -15,7 +15,7 @@ async function pressEscape(target: Window | Element = window) {
 }
 
 afterEach(() => { cleanup(); clearAllShortcuts(); });
-function mount(active: 'browser' | 'changes' | 'phone' | 'terminal' | 'artifact' = 'changes') {
+function mount(active: 'browser' | 'changes' | 'terminal' | 'artifact' = 'changes') {
 	const props = { active, expanded: false, width: 640,
 		onClose: vi.fn(), onResize: vi.fn(), onExpand: vi.fn() };
 	return { ...render(SessionSidePanel, props), props };
@@ -99,7 +99,7 @@ describe('session side panel controls', () => {
 			{ isOpen: () => modalOpen, close: () => { modalOpen = false; } },
 		]));
 
-		it.each(['phone', 'browser', 'terminal', 'artifact'] as const)('Escape closes the %s panel when no modal is open', async (view) => {
+		it.each(['browser', 'terminal', 'artifact'] as const)('Escape closes the %s panel when no modal is open', async (view) => {
 			modalOpen = false;
 			registerCloseModal();
 			const { props } = mount(view);
@@ -110,7 +110,7 @@ describe('session side panel controls', () => {
 		it('with a modal open, Escape closes only the modal and the panel stays', async () => {
 			modalOpen = true;
 			registerCloseModal();
-			const { props } = mount('phone');
+			const { props } = mount('browser');
 			await pressEscape();
 			expect(modalOpen).toBe(false);
 			expect(props.onClose).not.toHaveBeenCalled();
@@ -124,7 +124,7 @@ describe('session side panel controls', () => {
 	// panel's, so the panel sees the Escape first. One Escape still closes only
 	// the dialog.
 	describe('with a dialog opened after the panel', () => {
-		it.each(['browser', 'phone', 'terminal', 'artifact'] as const)('Escape closes only the dialog over the %s panel; the next closes the panel', async (view) => {
+		it.each(['browser', 'terminal', 'artifact'] as const)('Escape closes only the dialog over the %s panel; the next closes the panel', async (view) => {
 			registerShortcut(closeModalShortcut([]));
 			const { props } = mount(view);
 			const onCancel = vi.fn();

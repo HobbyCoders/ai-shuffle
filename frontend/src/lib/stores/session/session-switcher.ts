@@ -698,6 +698,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		update(s => ({
 			...s,
 			sessionId,
+			createdFromComposer: false,
 			isRemote: row?.is_remote,
 			ownerDeviceName: row?.device_name,
 			title: resolvedTitle,
@@ -1102,6 +1103,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		update(s => ({
 			...s,
 			sessionId: null,
+			createdFromComposer: false,
 			isRemote: undefined,
 			ownerDeviceName: undefined,
 			mode,

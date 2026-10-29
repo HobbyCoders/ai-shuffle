@@ -374,17 +374,23 @@ describe('private-access recovery and live invalidations', () => {
   await fireEvent.click(screen.getByRole('button', {name: 'Deny'})); await flush();
   expect(m.post).toHaveBeenCalledWith('/chat-access/s1/actions/a1', {allow: false});
  });
- it.each([[true, 'It can change files in the folder.'], [false, 'The folder is read-only to it.']])(
-  'labels a folder grant command as sandboxed, not remote (writable %s)', async (writable, effect) => {
+ it('describes commands as remote SSH execution', async () => {
   snapshot = {...empty(),
-   grants: [{id: 'g1', label: 'Notes', kind: 'folder', target: '/home/me/notes', expires_at: 9999999999, writable}],
-   actions: [{id: 'a1', grant_id: 'g1', operation: 'command', arguments: {command: 'grep -r todo .'}, expires_at: 9999999999}]};
+   grants: [{id: 'g1', label: 'Server', kind: 'machine', target: 'server', expires_at: 9999999999, writable: true}],
+   actions: [{id: 'a1', grant_id: 'g1', operation: 'command', arguments: {command: 'pwd'}, expires_at: 9999999999}]};
   const view = render(ChatAccess, {sessionId: 's1'}); await flush();
   await fireEvent.click(trigger());
-  expect(screen.getByText('Approve this sandboxed command?')).toBeTruthy();
+  expect(screen.getByText('Approve this remote command?')).toBeTruthy();
+  expect(view.container.querySelector('pre.pa-mono')!.textContent).toBe('$ pwd');
+  expect(screen.getByText('Runs once on the server with this account’s authority. It can change files and use the server’s network.')).toBeTruthy();
+ });
+ it.each([true, false])('keeps folder file access (writable %s)', async (writable) => {
+  snapshot = {...empty(), grants: [{id: 'g1', label: 'Notes', kind: 'folder', target: '/home/me/notes', expires_at: 9999999999, writable}]};
+  render(ChatAccess, {sessionId: 's1'}); await flush();
+  await fireEvent.click(trigger());
+  expect(screen.getByText('Notes')).toBeTruthy();
+  expect(screen.getByText(writable ? /Read\/write · session permission mode applies/ : /Read only/)).toBeTruthy();
   expect(screen.queryByText('Approve this remote command?')).toBeNull();
-  expect(view.container.querySelector('pre.pa-mono')!.textContent).toBe('$ grep -r todo .');
-  expect(screen.getByText(`Runs once in an isolated sandbox that sees only this folder and has no network. ${effect}`)).toBeTruthy();
  });
  it('keeps request form input across recovery polls and removes expired access from the next snapshot', async () => {
   snapshot = {...empty(), requests:[{id:'r1',kind:'folder',purpose:'Read the requested file',expires_at:9999999999}]};

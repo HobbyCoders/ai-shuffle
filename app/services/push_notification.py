@@ -1,13 +1,13 @@
-"""FCM HTTP v1 transport for the attention dispatcher (not the bell).
+"""Account-hub relay transport for the attention dispatcher (not the bell).
 
-No sender credential means push is off. FCM acceptance is not proof of display.
-Only generic, data-only attention commands reach Android; it owns display and
-persistent deduplication, including messages retried after an ambiguous send.
+Only signed-in, linked workers can send. No publisher credential or chat text
+leaves the worker. Android owns display and persistent version/episode receipts;
+relay acceptance is not proof that a notification was displayed or seen.
 """
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import timedelta
+import time
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -34,11 +34,14 @@ class NotificationResult:
     device_id: Optional[str] = None
     simulated: bool = False
     invalid_token: bool = False
+    not_linked: bool = False
+    retry_after: Optional[float] = None
+    permanent_failure: bool = False
 
 
 NO_PUSH_RECEIVER_REASON = "no device can receive push notifications"
 DEVICE_LIST_UNAVAILABLE_REASON = "the registered device list could not be read"
-IN_APP_CHANNEL_NOTE = "The in-app notification center remains available. Sent means accepted by FCM, not displayed or seen."
+IN_APP_CHANNEL_NOTE = "The in-app notification center remains available. Sent means accepted by the relay, not displayed or seen."
 
 
 class DeviceListUnavailable(RuntimeError):
@@ -57,59 +60,71 @@ def device_receives_push(device: Dict[str, Any]) -> bool:
 
 
 def delivered_count(results: List[NotificationResult]) -> int:
-    """Compatibility name: count FCM acceptances, NOT device displays."""
+    """Compatibility name: count relay acceptances, NOT device displays."""
     return sum(r.success and not r.simulated for r in results)
 
 
 class PushNotificationService:
     def __init__(self):
-        self._credential = None
-        self._firebase_app = None
+        self._rejected_binding = None
+        self._retry_binding = None
+        self._retry_at = 0.0
 
-    def _configure(self):
-        from app.services.push_credentials import load_account
-        encrypted, account = load_account()
-        if encrypted == self._credential:
-            return self._firebase_app
-        if self._firebase_app is not None:
-            import firebase_admin
-            firebase_admin.delete_app(self._firebase_app)
-        self._firebase_app = None
-        self._credential = None
-        if account:
-            import firebase_admin
-            from firebase_admin import credentials
-            self._firebase_app = firebase_admin.initialize_app(
-                credentials.Certificate(account), name="attention-push",
-                options={"httpTimeout": 10})
-            self._credential = encrypted
-        return self._firebase_app
+    @staticmethod
+    def _identity(binding):
+        return tuple(binding.get(k) for k in (
+            "hub_url", "server_id", "linked_by", "encrypted_secret", "instance_id"))
+
+    def linked_binding(self):
+        from app.core.managed_connection import _linked_binding
+        try:
+            binding = _linked_binding()
+        except ValueError:
+            return None
+        # An auth refusal is terminal until the owner relinks. Never turn every
+        # outbox scan (or new chat) into another rejected HTTP request.
+        return binding if self._identity(binding) != self._rejected_binding else None
+
+    def is_linked(self):
+        return self.linked_binding() is not None
 
     async def send_notification(self, device_id: str, title: str, body: str,
                                 data: Optional[Dict[str, Any]] = None,
                                 priority: NotificationPriority = NotificationPriority.HIGH) -> NotificationResult:
-        # Defence in depth: legacy emitters cannot turn arbitrary text into phone alerts.
+        # Defence in depth: legacy emitters cannot send arbitrary text to phones.
         if not data or data.get("type") != "attention" or data.get("action") not in ("alert", "update", "clear"):
             return NotificationResult(False, error="not an attention command")
+        binding = await asyncio.to_thread(self.linked_binding)
+        if binding is None:
+            return NotificationResult(False, error="not_linked", not_linked=True)
+        identity = self._identity(binding)
+        if identity == self._retry_binding and time.monotonic() < self._retry_at:
+            return NotificationResult(False, error="relay unavailable", retry_after=self._retry_at - time.monotonic())
+        from app.core import account_hub
         try:
-            app = await asyncio.to_thread(self._configure)
-            if app is None:
-                return NotificationResult(False, error="push is off: no sender credentials", simulated=True)
-            from firebase_admin import messaging
-            allowed = ("type", "action", "worker_id", "session_id", "version", "episode", "expires_at")
-            payload = {k: str(data[k]) for k in allowed}
-            generic_body = body if body.startswith("A chat needs you: ") and len(body) <= 160 else "A chat needs you"
-            payload.update(title="AI Shuffle", body=generic_body)
-            message = messaging.Message(data=payload, token=device_id,
-                android=messaging.AndroidConfig(priority=priority.value,
-                    ttl=timedelta(minutes=10), collapse_key=data["session_id"]))
-            response = await asyncio.to_thread(messaging.send, message, app=app)
-            return NotificationResult(True, message_id=response)
+            # The relay supplies the fixed title/body. Never forward caller text,
+            # the chat title, or arbitrary data (even from old persisted states).
+            payload = {k: data[k] for k in ("worker_id", "session_id", "action", "version", "episode")}
+            payload.update(token=device_id, expires_at=int(data["expires_at"]))
+            result = await asyncio.to_thread(account_hub.call, binding, "POST", "push", payload)
+            if result.get("accepted") is not True:
+                return NotificationResult(False, error="relay did not accept the send")
+            return NotificationResult(True, message_id=result.get("message_id"))
         except Exception as exc:
-            # Never log tokens, credentials, tool input or the SDK error body.
-            invalid = type(exc).__name__ in ("UnregisteredError", "SenderIdMismatchError")
-            logger.warning("Attention push failed (%s)", type(exc).__name__)
-            return NotificationResult(False, error="FCM rejected the send", invalid_token=invalid)
+            logger.debug("Attention push transport failed (%s)", type(exc).__name__)
+            status = account_hub.hub_status(exc)
+            if status in (401, 403):
+                self._rejected_binding = identity
+                return NotificationResult(False, error="not_linked", not_linked=True)
+            if status == 410:
+                return NotificationResult(False, error="token_invalid", invalid_token=True)
+            if status == 400:
+                # A malformed command cannot be repaired by retrying it.
+                return NotificationResult(False, error="invalid push command", permanent_failure=True)
+            delay = account_hub.retry_after(exc)
+            delay = max(15.0, delay or 0.0)
+            self._retry_binding, self._retry_at = identity, time.monotonic() + delay
+            return NotificationResult(False, error="relay unavailable", retry_after=delay)
 
     async def send_to_all_devices(self, title: str, body: str, data=None,
                                   device_tokens=None, raise_lookup_errors=False) -> List[NotificationResult]:
@@ -118,6 +133,13 @@ class PushNotificationService:
         from app.db import mobile
         from app.db.async_database import run_sync
         from app.core.account_hub import mobile_hub_ownership
+        binding = await run_sync(self.linked_binding)
+        if binding is None:
+            return [NotificationResult(False, error="not_linked", not_linked=True)]
+        # Check backoff before account-device verification: the shared hub client
+        # may be paused too, and that is not evidence that there are no recipients.
+        if self._identity(binding) == self._retry_binding and time.monotonic() < self._retry_at:
+            return [NotificationResult(False, error="relay unavailable", retry_after=self._retry_at - time.monotonic())]
         try:
             devices = await run_sync(mobile.get_all_mobile_devices)
         except Exception:
@@ -133,7 +155,12 @@ class PushNotificationService:
                 await run_sync(mobile_hub_ownership, device)
                 if not await run_sync(mobile.push_device_is_live, device):
                     continue
-            except Exception:
+            except Exception as exc:
+                from fastapi import HTTPException
+                if not isinstance(exc, HTTPException) or exc.status_code >= 500 or exc.status_code == 429:
+                    # An unavailable authorization/pairing lookup must not ack
+                    # the durable outbox as though every device was revoked.
+                    results.append(NotificationResult(False, error="device authorization unavailable"))
                 continue
             result = await self.send_notification(device["fcm_token"], title, body, data)
             if result.invalid_token:

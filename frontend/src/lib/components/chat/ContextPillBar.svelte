@@ -133,7 +133,7 @@
 			messageCount: contextMessageCount,
 			project: $activeSession.project || null,
 			githubAuthenticated: $githubAuthenticated,
-			isRemote: sessionRow?.is_remote ?? false,
+			isRemote: sessionRow?.is_remote ?? $activeSession.isRemote ?? false,
 			degraded,
 			isSubagent: isSubagentChat
 		})
@@ -165,8 +165,8 @@
 			worktreeBranch: $activeSession.worktreeBranch,
 			githubAuthenticated: $githubAuthenticated,
 			degraded,
-			isRemote: sessionRow?.is_remote ?? false,
-			deviceName: sessionRow?.device_name ?? null,
+			isRemote: sessionRow?.is_remote ?? $activeSession.isRemote ?? false,
+			deviceName: sessionRow?.device_name ?? $activeSession.ownerDeviceName ?? null,
 			deviceOnline: sessionRow?.device_online ?? false
 		})
 	);
@@ -265,12 +265,12 @@
 	const runnerMenu = $derived(
 		runnerBadgeMenuItems({
 			ownerId: sessionRow?.instance_id ?? null,
-			isRemote: sessionRow?.is_remote ?? false,
+			isRemote: sessionRow?.is_remote ?? $activeSession.isRemote ?? false,
 			installs: runnerInstalls,
 			eligibility: runnerEligibility,
 			hasProject: sessionHasProject,
 			isWorktree: isWorktreeSession,
-			ownerName: sessionRow?.device_name ?? null,
+			ownerName: sessionRow?.device_name ?? $activeSession.ownerDeviceName ?? null,
 			ownerOnline: typeof sessionRow?.device_online === 'boolean' ? sessionRow.device_online : null
 		})
 	);

@@ -582,6 +582,16 @@
           "past_bug": "#196: peer terminals were only verified in-process; no real two-worker run had been recorded."
         },
         {
+          "id": "two-worker-smoke.phone-worker-connection",
+          "check": "Android prefers a reachable recent worker, fails over without bouncing, and authorizes a manually chosen keyless account worker",
+          "kind": "owner",
+          "needs": ["device", "install"],
+          "two_worker": true,
+          "how": "Use a real Android phone with the candidate APK and two disposable candidate workers A and B; never interrupt production workers. Authorize this phone on both, use B then A, close and relaunch the app: it must open A. Make A unreachable and relaunch: it must open B. Restore A, manually select it and repeat an outage after its chat opens, once during session bootstrap (Refresh chat) and once during a main-frame page load. Record the selected worker and notice. Bring A back while B is working: the phone must stay on B. Drop B within A's cooldown and confirm no immediate bounce to A; repeat outages and record retry timing/backoff. With neither reachable, confirm connection errors and native Workers still permit retrying or adding a worker. On a separate throwaway phone profile, sync the account while B is offline so its listing is saved without a phone key. Bring B online, make A unreachable and trigger reconnect: automatic failover must still skip keyless B. Restore A and open it again, then manually choose B in the chip, follow the native Workers authorization prompt, and tap B to run account enrollment. Confirm chat opens only after the phone key is saved; never inspect or publish the key. Restore the disposable candidates and remove the throwaway phone profile afterwards.",
+          "pass_when": "Startup opens the last-used reachable authorized worker, otherwise the next reachable authorized worker in recent-use order. Both bootstrap and main-frame failures switch automatically with one short offline/connected notice after the replacement loads. Healthy connections never move merely because A returns. Failed origins cannot immediately ping-pong; retries back off from 60 seconds up to five minutes across activity hand-offs. No reachable authorized worker leaves a usable connection/setup fallback. A keyless account listing is never an automatic target and cannot open chat before enrollment. Manual selection opens native Workers with an authorize-this-phone prompt; tapping the worker obtains its one-use enrollment ticket, saves this phone's per-worker key and opens chat. No credential appears in a URL or crosses to another worker. Record actual phone and candidate-worker evidence, not fixture-only results.",
+          "past_bug": "The phone required manual switching after an outage; a manually selected keyless account worker could only show a toast, leaving native enrollment unreachable."
+        },
+        {
           "id": "two-worker-smoke.shared-settings-rollout",
           "check": "Shared secrets, provider replacements and plugin intent survive independently keyed and mixed-version workers",
           "kind": "owner",

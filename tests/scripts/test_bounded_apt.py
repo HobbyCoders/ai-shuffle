@@ -203,7 +203,6 @@ def test_apt_config_reuses_installed_packages_without_upgrades(tmp_path):
     ("ci-frontend.yml", "browser-mcp", "Prepare sandboxed Chromium"),
     ("ci-fluid.yml", "unit", "Install ripgrep"),
     ("ci-browser-workspace.yml", "workspace", "Install isolated Chromium"),
-    ("ci-backend.yml", "backend-security", "Isolated folder shell escape tests (real bubblewrap)"),
 ])
 def test_every_apt_install_uses_shared_bounded_supervisor(workflow, job, step_name):
     data = yaml.load((ROOT / ".github/workflows" / workflow).read_text(), Loader=yaml.BaseLoader)

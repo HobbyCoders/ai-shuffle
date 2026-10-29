@@ -40,10 +40,11 @@ const userMessage = (seq: number) => ({
 });
 
 /** Every state the feed publishes, so a transient empty transcript is caught. */
-function attachRecordingDeps() {
+function attachRecordingDeps(initial: Partial<ActiveSessionState> = {}) {
 	let state = {
 		sessionId: 's1', messages: [], isStreaming: false, activeTasks: [], queuedMessages: [],
 		pendingPeerMessages: [], pendingPermissions: [], deferredPermissions: [], pendingQuestions: [],
+		...initial,
 	} as unknown as ActiveSessionState;
 	const published: ActiveSessionState[] = [];
 	feedController.attach({
@@ -112,6 +113,49 @@ describe('mirrored chat sync drains (#2227)', () => {
 		expect(later.length).toBeGreaterThan(0);
 		expect(later.every((s) => s.messages.length >= 3 && !s.isLoadingSession)).toBe(true);
 		expect(deps.state.messages).toHaveLength(9);
+	});
+
+	it('keeps an unconfirmed first send through the opening sync and empty replay', async () => {
+		const echo = { id: 'user-first', role: 'user' as const, content: 'first prompt' };
+		const deps = attachRecordingDeps({ messages: [echo], isStreaming: true, optimisticStreaming: true });
+		vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(status('current'))));
+		feedController.start('s1');
+		feeds.onEvent!({ type: 'caught_up', seq: 0, epoch: '0' });
+		render(MirrorSyncGate, { sessionId: 's1', remote: true, onCaughtUp: () => feedController.restart('s1'), children });
+		await vi.advanceTimersByTimeAsync(0);
+		feeds.onEvent!({ type: 'caught_up', seq: 0, epoch: '0' });
+
+		expect(feeds.opened).toEqual([0, 0]);
+		// Every publication counts: even a one-frame empty fold centres the composer.
+		expect(deps.published.every((s) => s.messages.length === 1 && s.messages[0].id === echo.id)).toBe(true);
+		expect(deps.state.isStreaming).toBe(true);
+		// Replication catches up: the actual event reconciles the SAME row once.
+		feeds.onEvent!({ ...userMessage(1), content: echo.content });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(deps.state.messages).toMatchObject([{ id: echo.id, serverId: 'evt-1', content: echo.content }]);
+
+		// A confirmed row is history, not a pending send. A real clear/rewind
+		// must still discard it, including its optimistic-looking stable id.
+		feedController.restart('s1');
+		feeds.onEvent!({ type: 'caught_up', seq: 0 });
+		expect(deps.state.messages).toEqual([]);
+	});
+
+	it('settles a preserved first send when its completed turn replays in one batch', async () => {
+		const echo = { id: 'user-first', role: 'user' as const, content: 'first prompt' };
+		const deps = attachRecordingDeps({ messages: [echo], isStreaming: true, optimisticStreaming: true });
+		feedController.start('s1');
+		feeds.onEvent!({ type: 'caught_up', seq: 0 });
+		feedController.restart('s1');
+		feeds.onEvent!({ ...userMessage(1), content: echo.content });
+		feeds.onEvent!({ type: 'turn.started', id: 'start', seq: 2, session_id: 's1', turn_id: 't1' });
+		feeds.onEvent!({ type: 'turn.completed', id: 'end', seq: 3, session_id: 's1', turn_id: 't1' });
+		feeds.onEvent!({ type: 'caught_up', seq: 3 });
+		await vi.advanceTimersByTimeAsync(0);
+
+		expect(deps.state.messages).toHaveLength(1);
+		expect(deps.state.isStreaming).toBe(false);
+		expect(deps.state.optimisticStreaming).toBe(false);
 	});
 
 	it('still rebuilds from zero when the server says the log was rewritten', async () => {

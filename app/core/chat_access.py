@@ -38,7 +38,7 @@ from typing import Any, Literal
 import asyncssh
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictBool, StrictInt
 
-from app.core import chat_files, chat_services, chat_shell
+from app.core import chat_files, chat_services
 from app.core.chat_files import AccessDenied
 
 # Host-key types tried when pinning, most preferred first. RSA is one key
@@ -1413,18 +1413,12 @@ class Broker:
     async def run(self, session_id: str, grant_id: str, operation: str, arguments: dict):
         grant = await self.get(session_id, grant_id)
         if operation == "command":
-            if grant.kind not in ("machine", "folder") or (grant.kind == "folder" and grant.root is None):
-                raise AccessDenied("Commands need a machine grant or a folder grant. Local worker Bash is unavailable.")
+            if grant.kind != "machine":
+                raise AccessDenied("Commands run only on SSH machine grants; use the file tools for folders.")
             command = arguments.get("command")
             if not isinstance(command, str) or not command.strip() or len(command) > 16384 or "\x00" in command:
                 raise AccessDenied("Provide a command of at most 16,384 characters.")
             arguments = {"command": command}
-            if grant.kind == "folder":
-                # Refuse before asking the user to approve a command that cannot run.
-                await chat_shell.ensure_available()
-                # Re-read after the await: revocation closes grant.root.
-                grant = await self.get(session_id, grant_id)
-                await chat_shell.ensure_folder(grant.root)
         elif operation == "http":
             if grant.kind != "service" or grant.origin is None:
                 raise AccessDenied("This operation requires an HTTPS service grant.")
@@ -1470,13 +1464,7 @@ class Broker:
             await self.approve(grant, operation, arguments, session_id=session_id)
         await self.get(session_id, grant_id)
         if operation in ("command", "http"):
-            root = None
-            if operation == "command" and grant.kind == "folder":
-                # Duplicated before any await: revocation closes grant.root, and
-                # a reused descriptor number must never reach the sandbox.
-                root = os.dup(grant.root)
-                work = chat_shell.run(root, grant.writable, arguments["command"])
-            elif operation == "command":
+            if operation == "command":
                 work = self.remote_command(grant, arguments["command"])
             elif grant.plugin is not None:
                 work = _plugin_http(grant, arguments)
@@ -1500,8 +1488,6 @@ class Broker:
                     task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
                 grant.tasks.discard(task)
-                if root is not None:
-                    os.close(root)
         # Bounded synchronous descriptor operations cannot interleave with revoke.
         if operation == "read":
             return {"content": chat_files.read(grant.root, arguments["path"])}

@@ -42,8 +42,18 @@ function ownerKeys(install: Install): string[] {
 	return [install.id, install.device_id, install.legacy_instance_id].filter((v): v is string => !!v);
 }
 
-/** The owner's workers, current first, with their running-chat counts. */
-export function connectionWorkers(installs: readonly Install[], sessions: readonly Session[], streaming: ReadonlySet<string>): ConnectionWorker[] {
+/**
+ * The owner's workers, current first, with their running-chat counts.
+ * `currentOnline` is fresh connection evidence from the page's bounded worker
+ * refresh (false on failure/offline, true on success). Without it, use the
+ * directory's state, including for self: a cached page is not proof of reachability.
+ */
+export function connectionWorkers(
+	installs: readonly Install[],
+	sessions: readonly Session[],
+	streaming: ReadonlySet<string>,
+	currentOnline?: boolean
+): ConnectionWorker[] {
 	const usable = installs.filter((i) => i.approved !== false && !i.revoked_at);
 	const rows = usable.map((install) => {
 		const keys = ownerKeys(install);
@@ -55,7 +65,7 @@ export function connectionWorkers(installs: readonly Install[], sessions: readon
 		return {
 			id: install.id,
 			name: install.device_name || 'Worker',
-			online: install.is_self ? true : install.online,
+			online: install.is_self ? (currentOnline ?? install.online) : install.online,
 			current: !!install.is_self,
 			running,
 			baseUrl: install.base_url
@@ -90,5 +100,5 @@ export function switchRoute(
 		return { kind: 'app', url: `${url.origin}${base}?connect=${encodeURIComponent(target)}` };
 	}
 	if (!env.inApp) return { kind: 'browser', url: `${target}/mobile/` };
-	return { kind: 'unavailable', reason: 'Switch in the app menu: ⋮, then Workers' };
+	return { kind: 'unavailable', reason: 'Update the Android app to switch workers here. Manage workers in Settings > Devices.' };
 }

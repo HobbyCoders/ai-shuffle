@@ -25,8 +25,7 @@ import { assertCategoryCoverage } from '$lib/settings/testing/coverage';
 const switchFor = (name: string) => screen.getByRole('switch', { name }) as HTMLButtonElement;
 
 beforeEach(() => {
-	transport.get.mockImplementation(async (path: string) => path === '/settings/notifications'
-		? { configured: false, devices_registered: 0 } : {});
+	transport.get.mockResolvedValue({});
 	transport.put.mockResolvedValue({});
 	chatPreferences.reset();
 	saveStatus.reset();
@@ -38,16 +37,10 @@ describe('General page', () => {
 		await assertCategoryCoverage('general', () => render(GeneralPage).container);
 	});
 
-	it('loads the Notifications row status without reading credentials', async () => {
-		render(GeneralPage);
-		await screen.findByText('Push off · 0 devices');
-		expect(transport.get).toHaveBeenCalledWith('/settings/notifications');
-	});
-
 	it('groups the chat preferences under Conversation and Thinking and tools', () => {
 		render(GeneralPage);
 		const groups = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent?.trim());
-		expect(groups).toEqual(['Notifications', 'Appearance', 'Conversation', 'Thinking and tools', 'Region']);
+		expect(groups).toEqual(['Appearance', 'Conversation', 'Thinking and tools', 'Region']);
 		expect(screen.getByText('Uses an extra model call')).toBeTruthy();
 	});
 
