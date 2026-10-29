@@ -49,6 +49,7 @@ export interface BatchItemResult {
 const OBSERVE_TOOLS: ReadonlySet<string> = new Set([
   "browser_status", "browser_snapshot", "browser_screenshot", "browser_find",
   "browser_read_text", "browser_console", "browser_network", "browser_wait",
+  "browser_record",
 ]);
 
 function isObservation(action: ParsedAction): boolean {

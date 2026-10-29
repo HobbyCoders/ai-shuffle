@@ -106,7 +106,7 @@
 		</summary>
 		{#if detailsOpen}
 			<div class="sg-body">
-				<BoundedTranscriptRows items={messages} keyOf={message => message.id ?? String(messages.indexOf(message))} label="system messages" {pagingEnabled}>
+				<BoundedTranscriptRows items={messages} keyOf={message => message.id ?? String(messages.indexOf(message))} rowId={message => message.id} label="system messages" {pagingEnabled}>
 					{#snippet children(message)}<SystemMessage {message} />{/snippet}
 				</BoundedTranscriptRows>
 			</div>

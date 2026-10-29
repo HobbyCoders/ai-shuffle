@@ -30,7 +30,7 @@ TOOL_NAMES = frozenset({
     "browser_status", "browser_navigate", "browser_snapshot", "browser_act",
     "browser_screenshot", "browser_eval", "browser_find", "browser_read_text",
     "browser_console", "browser_network", "browser_resize", "browser_tabs",
-    "browser_upload", "browser_batch", "browser_wait",
+    "browser_upload", "browser_batch", "browser_wait", "browser_record",
 })
 
 # Tools the startup handshake itself depends on. A build that predates the

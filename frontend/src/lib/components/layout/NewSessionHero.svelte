@@ -24,6 +24,7 @@
 	import { avatarColorToken } from '$lib/components/agents/avatar-colors';
 	import type { AvatarId } from '$lib/api/agent-identity';
 	import ProfileSelector from '$lib/components/chat/ProfileSelector.svelte';
+	import { UI_MOUNT } from '$lib/utils/ui-signature';
 	import NewSessionSentence from './NewSessionSentence.svelte';
 
 	const profile = $derived($profiles.find((p) => p.id === $activeSession.profile) ?? null);
@@ -34,7 +35,7 @@
 	const noAgents = $derived($profilesLoaded && $profiles.length === 0);
 </script>
 
-<section class="ns-hero" style:--agent={agentTint} aria-label="New session">
+<section class="ns-hero" style:--agent={agentTint} aria-label="New session" data-ui-mount={UI_MOUNT.newSessionHero}>
 	<div class="ns-avatar">
 		<AgentAvatar {avatar} size={platform.isMobile ? 64 : 72} {color} neutral={builtin} />
 	</div>

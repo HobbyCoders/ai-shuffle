@@ -21,6 +21,7 @@ image excludes `docs/`, and the update source archive carries only
 | [managed-worker-credential-repair.md](managed-worker-credential-repair.md) | Reconnecting one revoked account worker on Android. |
 | [mobile-web-session-reservations.md](mobile-web-session-reservations.md) | Mobile web session reservations. |
 | [private-access-acceptance.md](private-access-acceptance.md) | Acceptance checks for private machine, folder and service access. |
+| [flight-recorder.md](flight-recorder.md) | The UI flight recorder: catching flicker, remounts and screens going backwards as text, and the `data-ui-*` fields it reads. |
 
 ## Internal pages that stay at their old paths
 

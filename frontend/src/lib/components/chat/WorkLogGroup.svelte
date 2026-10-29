@@ -510,7 +510,7 @@
 		{/if}
 		<div class="work-sequence" class:is-expanded={mode === 'settled' && open} class:is-collapsed={!(mode === 'settled' && open)}>
 			{#if mode === 'settled' && !open && gallery.length > 1}<MediaGallery items={gallery} />{/if}
-			<BoundedTranscriptRows items={renderSequence} keyOf={item => rowKey(item.entry)} revealKey={revealRowKey} startAtTail={true} {pagingEnabled}>
+			<BoundedTranscriptRows items={renderSequence} keyOf={item => rowKey(item.entry)} rowId={item => item.entry.message.id} revealKey={revealRowKey} startAtTail={true} {pagingEnabled}>
 			{#snippet children({ entry, position })}
 				{@const run = mode === 'live' && entry.run !== undefined ? runByIndex.get(entry.run) : undefined}
 				{@const visible = rowVisible(entry)}
@@ -617,7 +617,7 @@
 				<span class="fold-summary" title={summary}>· {summary}</span>
 			{/if}
 		</button>
-		<BoundedTranscriptRows items={[...folded, ...tail]} keyOf={rowKey} {pagingEnabled}>
+		<BoundedTranscriptRows items={[...folded, ...tail]} keyOf={rowKey} rowId={entry => entry.message.id} {pagingEnabled}>
 			{#snippet children(entry)}{@render row(entry.message, entry.index)}{/snippet}
 		</BoundedTranscriptRows>
 		<button type="button" class="wlrow fold" onclick={() => setOpen(false)} aria-expanded="true" aria-label={disclosureLabel}>
@@ -652,7 +652,7 @@
 				<span class="fold-summary" title={summary}>· {#if compactSummary}<span class="fold-prose">{summary}</span><span class="fold-compact">{compactSummary}</span>{:else}{summary}{/if}</span>
 			{/if}
 		</button>
-		<BoundedTranscriptRows items={tail} keyOf={rowKey} startAtTail={mode === 'live'} {pagingEnabled}>
+		<BoundedTranscriptRows items={tail} keyOf={rowKey} rowId={entry => entry.message.id} startAtTail={mode === 'live'} {pagingEnabled}>
 			{#snippet children(entry)}{@render row(entry.message, entry.index)}{/snippet}
 		</BoundedTranscriptRows>
 	{/if}

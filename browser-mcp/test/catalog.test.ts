@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
  describe("metadata-only browser catalog", () => {
   it("has exact runtime catalog parity, including order and all schemas", () => {
     expect(TOOL_CATALOG).toEqual(TOOL_DEFINITIONS.map(({ run, ...metadata }) => metadata));
-    expect(new Set(TOOL_CATALOG.map(t => t.name)).size).toBe(15);
+    expect(new Set(TOOL_CATALOG.map(t => t.name)).size).toBe(16);
     for (const definition of TOOL_DEFINITIONS) expect(typeof definition.run).toBe("function");
   });
   it("exports the same metadata for native sessions at build time", () => {

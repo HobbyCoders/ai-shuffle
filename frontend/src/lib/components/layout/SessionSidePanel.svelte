@@ -3,6 +3,7 @@
 	import { Maximize2, Minimize2, X } from 'lucide-svelte';
 	import type { SidePanelView } from '$lib/stores/side-panel.svelte';
 	import { whenEscapeUnclaimed } from '$lib/utils/escape-layers';
+	import { UI_MOUNT } from '$lib/utils/ui-signature';
 	let { active, expanded, width, mobile = false,
 		onClose, onResize, onExpand, children }: {
 		active: SidePanelView; expanded: boolean; width: number; mobile?: boolean;
@@ -49,7 +50,7 @@
 	cancelEscape = whenEscapeUnclaimed(e, () => onClose());
 }} />
 
-<aside bind:this={element} class="side-panel" class:expanded class:mobile class:resizing
+<aside bind:this={element} class="side-panel" class:expanded class:mobile class:resizing data-ui-mount={UI_MOUNT.sidePanel}
 	style:--panel-width={`${width}px`} aria-label="Session side panel">
 	{#if !expanded && !mobile}
 		<div class="resize-handle" role="separator" aria-label="Resize side panel"

@@ -41,6 +41,8 @@
 	import { pendingDeepLink, deepLinkLoading } from '$lib/stores/pending-deep-link';
 	// The phone shell docks prompts above its composer; the web build has none.
 	import { composerShell } from '$lib/components/chat/composer-shell';
+	// Flight-recorder signature (attribute-only; see ui-signature.ts).
+	import { UI_MOUNT, UI_STATE_CHAT, uiComposer, uiFlag, uiSessionTag } from '$lib/utils/ui-signature';
 
 	interface Props {
 		onBrowserToggle?: () => void;
@@ -147,6 +149,17 @@
 	const archivedSessionId = $derived(
 		$activeSession.sessionId && $archivedChats.has($activeSession.sessionId) ? $activeSession.sessionId : null
 	);
+	// What the flight recorder reads off this view each frame (ui-signature.ts).
+	// Derived from the same inputs as chatSurface; nothing reads them back.
+	const uiSignature = $derived({
+		session: uiSessionTag($activeSession.sessionId),
+		composer: uiComposer({ archived: Boolean(archivedSessionId), emptyHero: showEmptyHero }),
+		messages: String($activeSession.messages.length + ($activeSession.pendingPeerMessages?.length ?? 0)),
+		loading: uiFlag(
+			$activeSession.isLoadingSession || $activeSession.isRestoringSession || deepLinkLoading($pendingDeepLink, $activeSession.sessionId)
+		),
+		streaming: uiFlag($activeSession.isStreaming)
+	});
 	let surfaceHeight = $state(0);
 	let composerHeight = $state(0);
 	$effect(() => {
@@ -302,7 +315,15 @@
 	);
 </script>
 
-<div class="chat-view" bind:clientHeight={surfaceHeight} style:--chat-surface-height={surfaceHeight ? `${surfaceHeight}px` : undefined} class:transitioning-from-empty={transitioningFromEmpty} class:is-empty={showEmptyHero}>
+<div class="chat-view" bind:clientHeight={surfaceHeight} style:--chat-surface-height={surfaceHeight ? `${surfaceHeight}px` : undefined} class:transitioning-from-empty={transitioningFromEmpty} class:is-empty={showEmptyHero}
+	data-ui-state={UI_STATE_CHAT}
+	data-ui-mount={UI_MOUNT.chatView}
+	data-ui-surface={chatSurface}
+	data-ui-session={uiSignature.session}
+	data-ui-composer={uiSignature.composer}
+	data-ui-messages={uiSignature.messages}
+	data-ui-loading={uiSignature.loading}
+	data-ui-streaming={uiSignature.streaming}>
 	{#if showEmptyHero}
 		<!-- Empty state hero: workspace selector / cleared hint. The ChatInput is
 		     NOT rendered here — it lives in the always-mounted .input-slot below so

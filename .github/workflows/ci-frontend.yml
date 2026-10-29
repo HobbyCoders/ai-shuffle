@@ -225,6 +225,16 @@ jobs:
           fi
           npx -y npm@11 audit --audit-level=high
 
+      - name: Flight recorder proof page
+        # Clean transition -> no anomalies; flicker, remount and layout jump
+        # -> each flagged, unthrottled and at 4x CPU. Needs only this job's
+        # playwright-core and Chromium, not the frontend's dependencies.
+        timeout-minutes: 3
+        working-directory: frontend
+        run: |
+          export CHROMIUM_PATH="$(node -p 'require("../browser-mcp/node_modules/playwright-core").chromium.executablePath()')"
+          timeout --kill-after=10s 150s node tests/verify-flight-recorder.mjs
+
   javascript:
     name: JavaScript package checks
     if: always()

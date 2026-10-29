@@ -43,6 +43,7 @@ describe("schema floor (OpenAI strict / Gemini compat)", () => {
       "browser_navigate",
       "browser_network",
       "browser_read_text",
+      "browser_record",
       "browser_resize",
       "browser_screenshot",
       "browser_snapshot",

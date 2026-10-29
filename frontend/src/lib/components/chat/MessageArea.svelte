@@ -112,6 +112,7 @@
 	import TodoList from '$lib/components/TodoList.svelte';
 	import NotesList from '$lib/components/NotesList.svelte';
 	import { notesFromToolMessage } from '$lib/utils/note-tool';
+	import { UI_MOUNT } from '$lib/utils/ui-signature';
 	import MediaLightbox from './MediaLightbox.svelte';
 	import PendingMessages from './PendingMessages.svelte';
 	import PendingStatusAnnouncer from './PendingStatusAnnouncer.svelte';
@@ -1901,7 +1902,7 @@
 	});
 </script>
 
-<div class="transcript-shell" class:has-turn-nav={turnNavigationItems.length >= 2}>
+<div class="transcript-shell" class:has-turn-nav={turnNavigationItems.length >= 2} data-ui-mount={UI_MOUNT.messageArea}>
 <!-- Unsend verdicts are announced here, outside the busy log region below. -->
 <PendingStatusAnnouncer messages={pendingMessages} sessionId={$activeSession.sessionId} stale={!!$activeSession.queueStale} />
 <!-- role="log" is a polite live region. aria-busy while a reply streams keeps
@@ -1993,6 +1994,7 @@
 				<div
 					class="msg-virtualized"
 					data-transcript-index={mountedStart + i}
+					data-ui-row={item.kind === 'message' ? item.message.id || undefined : displayItemKey(item)}
 					use:observeTurnAnchor
 					id={item.kind === 'message' && item.message.id && isNavigableUserTurn(item.message) ? turnAnchorId(item.message.id) : undefined}
 					data-user-turn-id={item.kind === 'message' && item.message.id && isNavigableUserTurn(item.message) ? item.message.id : undefined}

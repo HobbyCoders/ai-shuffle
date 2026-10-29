@@ -29,6 +29,7 @@ BROWSER_TOOLS: List[str] = [
     "mcp__browser__browser_resize",
     "mcp__browser__browser_upload",
     "mcp__browser__browser_batch",
+    "mcp__browser__browser_record",
 ]
 
 # ============================================================================
