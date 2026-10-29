@@ -137,6 +137,15 @@ function reads(path: string): unknown {
 	if (path === '/network/advertised-addresses') return { addresses: [], advertised: ['https://desk.example.com'] };
 	if (path === '/network/lan') return { enabled: true, addresses: [], advertised: ['https://desk.example.com', 'http://10.0.0.5:8000'] };
 	if (path === '/settings/worker-availability') return { ...availability };
+	if (path === '/settings/worker-settings') return {
+		workers: (status.members ?? [member('self', { name: 'Desk', is_self: true })])
+			.filter((m) => m.kind === 'worker' && m.status === 'active')
+			.map((m) => ({
+				device_id: m.device_id, device_name: m.name, is_self: m.is_self, online: m.online,
+				outcome: 'ok', reason: 'done', status: null,
+				availability: { editable: true, always_on: availability.always_on, always_on_override: availability.always_on_override }
+			}))
+	};
 	if (path === '/mobile/hub/connection') return connection;
 	if (path === '/mobile/hub/account') return structuredClone(profile);
 	if (path === '/mobile/hub/devices/confirmations') return [{ ...request }];
@@ -403,6 +412,26 @@ describe('Devices list', () => {
 		expect(api.put).toHaveBeenLastCalledWith('/settings/worker-availability', { always_on: null });
 		await vi.waitFor(() => expect(screen.getByText('Default for a desktop')).toBeTruthy());
 		expect(screen.getByRole('switch', { name: /Always on/ }).getAttribute('aria-checked')).toBe('false');
+	});
+
+	it('refreshes the existing local stays-on row after applying availability to all workers', async () => {
+		availability = { worker_id: 'self', desktop: false, always_on: true, always_on_override: null };
+		api.post.mockImplementation(async (path: string, body: { action: { always_on: boolean } }) => {
+			expect(path).toBe('/settings/worker-settings/action');
+			availability = { ...availability, always_on: body.action.always_on, always_on_override: body.action.always_on };
+			return { request_id: 'request', workers: [{ device_id: 'self', device_name: 'Desk', outcome: 'accepted', reason: 'saved', status: null }] };
+		});
+		show('self', 'Overview');
+		expect((await screen.findByRole('switch', { name: /Always on/ })).getAttribute('aria-checked')).toBe('true');
+		await vi.waitFor(() => expect(screen.getByRole('combobox', { name: 'All workers action' }).hasAttribute('disabled')).toBe(false));
+		await fireEvent.change(screen.getByRole('combobox', { name: 'All workers action' }), { target: { value: 'off' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Apply…' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Apply to all workers' }));
+		await vi.waitFor(() => expect(screen.getByRole('switch', { name: /Always on/ }).getAttribute('aria-checked')).toBe('false'));
+		expect(screen.getByText('Set by you')).toBeTruthy();
+		expect(api.post).toHaveBeenCalledWith('/settings/worker-settings/action', {
+			target: 'all', action: { operation: 'always-on', always_on: false }
+		});
 	});
 
 	it('flips the always-on switch back when the save is refused', async () => {
