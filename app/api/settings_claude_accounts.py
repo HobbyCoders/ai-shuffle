@@ -1,4 +1,5 @@
 """Owner-only saved accounts under the existing Claude auth settings API."""
+
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -40,8 +41,13 @@ async def _call(function, *args, subscription=False):
     except accounts.AccountError as exc:
         raise http_error(exc) from None
     except OSError:
-        raise HTTPException(status_code=503, detail={"code": "storage_unavailable",
-                            "message": "Claude account storage is unavailable. No saved login was deleted."}) from None
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "storage_unavailable",
+                "message": "Claude account storage is unavailable. No saved login was deleted.",
+            },
+        ) from None
 
 
 async def _result(account_id=None):
@@ -61,9 +67,12 @@ async def list_accounts(token: str = Depends(require_admin)) -> dict[str, Any]:
 async def add_key(request: KeyRequest, token: str = Depends(require_admin)) -> dict[str, Any]:
     """Validate and save an Anthropic key, optionally selecting it."""
     if not isinstance(request.api_key, str) or not request.api_key.strip():
-        raise HTTPException(status_code=400, detail={"code": "invalid_key", "message": "API key cannot be empty."})
+        raise HTTPException(
+            status_code=400, detail={"code": "invalid_key", "message": "API key cannot be empty."}
+        )
     # Same real validation and encrypted-storage gate as the legacy endpoint.
     from app.api.settings import validate_anthropic_key
+
     await _call(accounts._require_storage)
     await validate_anthropic_key(request.api_key.strip())
     account_id = await _call(accounts.add_api_key, request.api_key, request.label, request.activate)
@@ -71,7 +80,9 @@ async def add_key(request: KeyRequest, token: str = Depends(require_admin)) -> d
 
 
 @router.post("/subscription/save-current")
-async def save_current(request: LabelRequest, token: str = Depends(require_admin)) -> dict[str, Any]:
+async def save_current(
+    request: LabelRequest, token: str = Depends(require_admin)
+) -> dict[str, Any]:
     """Request saving a CLI login; currently returns the unsupported response."""
     account_id = await _call(accounts.save_current_login, request.label, subscription=True)
     return await _result(account_id)
@@ -99,7 +110,10 @@ async def cancel(token: str = Depends(require_admin)) -> dict[str, Any]:
 
 @router.patch("/{kind}/{account_id}")
 async def rename(
-    kind: Kind, account_id: str, request: LabelRequest, token: str = Depends(require_admin),
+    kind: Kind,
+    account_id: str,
+    request: LabelRequest,
+    token: str = Depends(require_admin),
 ) -> dict[str, Any]:
     """Rename a saved account without changing the selected key or auth mode."""
     await _call(accounts.change_account, kind, account_id, "rename", request.label)
@@ -108,17 +122,25 @@ async def rename(
 
 @router.post("/{kind}/{account_id}/activate")
 async def activate(
-    kind: Kind, account_id: str, token: str = Depends(require_admin),
+    kind: Kind,
+    account_id: str,
+    token: str = Depends(require_admin),
 ) -> dict[str, Any]:
     """Select a saved key without changing the Claude Code auth mode."""
-    await _call(accounts.change_account, kind, account_id, "activate", subscription=kind == "subscription")
+    await _call(
+        accounts.change_account, kind, account_id, "activate", subscription=kind == "subscription"
+    )
     return await _result()
 
 
 @router.delete("/{kind}/{account_id}")
 async def delete(
-    kind: Kind, account_id: str, token: str = Depends(require_admin),
+    kind: Kind,
+    account_id: str,
+    token: str = Depends(require_admin),
 ) -> dict[str, Any]:
     """Delete one saved account, clearing the scalar only if it was selected."""
-    await _call(accounts.change_account, kind, account_id, "delete", subscription=kind == "subscription")
+    await _call(
+        accounts.change_account, kind, account_id, "delete", subscription=kind == "subscription"
+    )
     return await _result()

@@ -4,6 +4,7 @@ Both settings follow encrypted shared-system-settings policy. Subscription
 switching is explicitly unsupported until CLI-owned state isolation is safe on
 all supported platforms. This module never accesses CLI sign-in files.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -20,8 +21,9 @@ API_LIST_SETTING = "claude_saved_api_keys"
 _lock = threading.RLock()
 _SUBSCRIPTION_REASON = (
     "Multiple saved Claude subscription logins are not supported yet. "
-    "Safe isolation of CLI-owned identity and shared transcripts across Linux, Windows and macOS "
-    "is not verified. Keep using the existing Claude CLI sign-in; saved Anthropic API keys are supported."
+    "Safe isolation of CLI-owned identity and shared transcripts across Linux, Windows "
+    "and macOS is not verified. Keep using the existing Claude CLI sign-in; "
+    "saved Anthropic API keys are supported."
 )
 
 
@@ -85,8 +87,11 @@ def _keys():
         if account is None:
             # A legacy save or peer scalar may arrive before its list. Display
             # the credential actually used by the CLI, not a stale pointer.
-            account = {"id": "legacy-" + hashlib.sha256(active.encode()).hexdigest()[:24],
-                       "label": "Anthropic API key", "key": active}
+            account = {
+                "id": "legacy-" + hashlib.sha256(active.encode()).hexdigest()[:24],
+                "label": "Anthropic API key",
+                "key": active,
+            }
             bundle["accounts"].append(account)
         bundle["active_id"] = account["id"]
     return bundle
@@ -101,7 +106,9 @@ def _save_keys(bundle, *, update_active=False):
     # List first: a failed active-key write never loses either saved key.
     _write_setting(API_LIST_SETTING, {"accounts": bundle["accounts"]})
     if update_active:
-        active = next((a["key"] for a in bundle["accounts"] if a["id"] == bundle["active_id"]), None)
+        active = next(
+            (a["key"] for a in bundle["accounts"] if a["id"] == bundle["active_id"]), None
+        )
         if active:
             database.set_system_setting(API_SETTING, _encrypt(active))
         else:
@@ -166,7 +173,9 @@ def change_account(kind: str, account_id: str, action: str, label: str = "") -> 
             bundle["accounts"] = [a for a in bundle["accounts"] if a["id"] != account_id]
         else:
             _error("invalid_action", "Unknown account action.", 400)
-        _save_keys(bundle, update_active=action == "activate" or (action == "delete" and was_active))
+        _save_keys(
+            bundle, update_active=action == "activate" or (action == "delete" and was_active)
+        )
 
 
 def deactivate_api_key() -> None:
@@ -182,16 +191,27 @@ def accounts_payload() -> dict[str, Any]:
     from app.api.settings_crypto import mask_api_key
 
     with _lock:
-        result = {"api_key": [], "subscription": [], "subscription_support": subscription_support(),
-                  "storage_locked": not encryption.is_encryption_ready(), "error": None,
-                  "login_pending": False, "recovery_required": False}
+        result = {
+            "api_key": [],
+            "subscription": [],
+            "subscription_support": subscription_support(),
+            "storage_locked": not encryption.is_encryption_ready(),
+            "error": None,
+            "login_pending": False,
+            "recovery_required": False,
+        }
         try:
             bundle = _keys()
         except AccountError as exc:
             return {**result, "storage_locked": True, "error": exc.code}
         result["api_key"] = [
-            {"id": a["id"], "label": a["label"], "active": a["id"] == bundle["active_id"],
-             "masked_key": mask_api_key(a["key"]), "last4": a["key"][-4:] if len(a["key"]) >= 8 else None}
+            {
+                "id": a["id"],
+                "label": a["label"],
+                "active": a["id"] == bundle["active_id"],
+                "masked_key": mask_api_key(a["key"]),
+                "last4": a["key"][-4:] if len(a["key"]) >= 8 else None,
+            }
             for a in bundle["accounts"]
         ]
         return result
