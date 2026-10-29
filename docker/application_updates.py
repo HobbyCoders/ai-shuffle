@@ -994,6 +994,7 @@ class ContainerUpdates:
                     shutil.rmtree(candidate)
         except OSError:
             self.publish("idle", "Application updated. Some old build files could not be removed.")
+        self.prune_dependencies()
 
     def launch(self, env, activate=False):
         revision = self.state.get("active")
@@ -1144,6 +1145,161 @@ class ContainerUpdates:
                     "processor or newer system libraries. This version keeps working; a "
                     "newer Docker image or a corrected release is needed.") from exc
 
+    def dependency_identity(self, kind, executable, source, env):
+        """Probe the selected runtime, never the handed-over supervisor's runtime.
+
+        An unreadable identity disables reuse, not the existing build path.
+        Include the executable identity too: two overlay paths are not
+        interchangeable even if they report the same language version.
+        """
+        if kind == "python":
+            code = ("import json,platform,sys,sysconfig; print(json.dumps({"
+                    "'version':sys.version,'platform':sys.platform,'machine':platform.machine(),"
+                    "'abi':sysconfig.get_config_var('SOABI'),'tag':sys.implementation.cache_tag,"
+                    "'site':sysconfig.get_path('purelib',vars={'base':'','platbase':''}).lstrip('/')}))")
+            command = [executable, "-I", "-c", code]
+        else:
+            command = ["node", "-p", "JSON.stringify([process.version,process.platform,process.arch,process.versions.modules])"]
+        try:
+            output = subprocess.check_output(command, cwd=source, env=env, text=True,
+                                             stderr=subprocess.DEVNULL, timeout=30)
+            identity = json.loads(output)
+            if kind == "python":
+                if not isinstance(identity, dict) or not re.fullmatch(r"lib(?:64)?/python[0-9.]+/site-packages", identity.get("site", "")):
+                    return None
+                identity["executable"] = str(Path(executable).resolve())
+                identity["binary"] = file_digest(Path(executable))
+            else:
+                if not isinstance(identity, list) or len(identity) != 4 or not all(isinstance(item, str) and item for item in identity):
+                    return None
+                npm = subprocess.check_output(["npm", "--version"], cwd=source, env=env,
+                                              text=True, stderr=subprocess.DEVNULL, timeout=30).strip()
+                if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?", npm):
+                    return None
+                identity.append(npm)
+            return identity
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None
+
+    @staticmethod
+    def dependency_key(source, names, identity):
+        if identity is None or any(not (source / name).is_file() for name in names):
+            return None
+        digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode())
+        for name in names:
+            digest.update(b"\0" + name.encode() + b"\0" + (source / name).read_bytes())
+        return digest.hexdigest()
+
+    def cached_dependencies(self, group, key):
+        root = self.root / "dependencies" / group / key
+        root.mkdir(parents=True, exist_ok=True)
+        for candidate in sorted(root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+            try:
+                payload = candidate / ("venv/bin/python" if group == "python" else "node_modules")
+                if (not candidate.is_symlink() and payload.exists()
+                        and json.loads((candidate / ".complete").read_text()) == key):
+                    return candidate, True
+            except (OSError, ValueError):
+                pass
+        # Venvs embed absolute paths. Build at the FINAL path and atomically
+        # publish only the marker, never rename/copy an installed environment.
+        return Path(tempfile.mkdtemp(prefix="build-", dir=root)), False
+
+    def python_dependencies(self, directory, source, env, runtime_python):
+        names = ["requirements.lock", "requirements-native.lock", "requirements-voice.lock", "fluid/pyproject.toml"]
+        if not all((source / name).is_file() for name in names):
+            return None
+        identity = self.dependency_identity("python", runtime_python or IMAGE_PYTHON, source, env)
+        key = self.dependency_key(source, names, identity)
+        if key is None:
+            return None
+        cached, complete = self.cached_dependencies("python", key)
+        if not complete:
+            self.install_python_dependencies(cached, source, env, runtime_python, cache=True)
+        verify_venv_python(cached, runtime_python)
+        # Current application code NEVER enters the shared third-party venv.
+        # A cheap per-revision venv puts its own site-packages first, and pip
+        # (loaded from the base) installs Fluid into that revision's sys.prefix.
+        self.run_build([runtime_python or IMAGE_PYTHON, "-m", "venv", "--without-pip", str(directory / "venv")], source, env)
+        verify_venv_python(directory, runtime_python)
+        site = directory / "venv" / identity["site"]
+        site.mkdir(parents=True, exist_ok=True)
+        dependencies = cached / "venv" / identity["site"]
+        (site / "dependencies.pth").write_text(f"import site; site.addsitedir({str(dependencies)!r})\n")
+        return cached
+
+    def install_python_dependencies(self, directory, source, env, runtime_python, cache=False):
+        self.run_build([runtime_python or IMAGE_PYTHON, "-m", "venv", str(directory / "venv")], source, env)
+        verify_venv_python(directory, runtime_python)
+        python = str(directory / "venv/bin/python")
+        pip = [python, "-m", "pip", "install", "--prefer-binary", "--timeout", "120", "--retries", "10"]
+        # Every third-party package, including Fluid's build backend, remains
+        # hash-pinned to this verified source. Optional failure stays usable by
+        # THIS revision, but is never published as a reusable complete cache.
+        # -P keeps app/core/platform.py from shadowing the stdlib (#429).
+        self.run_build(pip + ["--require-hashes", "-r", "requirements.lock"], source, env)
+        try:
+            self.run_build([python, "-P", "app/core/voice_dependencies.py", "--install"], source, env)
+        except UpdateError:
+            _log("Optional ChatGPT voice libraries unavailable; call start can retry")
+        else:
+            if cache:
+                atomic_json(directory / ".complete", directory.parent.name)
+
+    def node_dependencies(self, package, source, env, identity):
+        folder = source / package
+        key = self.dependency_key(folder, ["package.json", "package-lock.json"], identity)
+        if key is None:
+            self.run_build(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], folder, env)
+            return None
+        cached, complete = self.cached_dependencies("node/" + package, key)
+        if not complete:
+            for name in ("package.json", "package-lock.json"):
+                shutil.copyfile(folder / name, cached / name)
+            self.run_build(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cached, env)
+            # npm may omit node_modules for an empty dependency closure.
+            (cached / "node_modules").mkdir(exist_ok=True)
+            atomic_json(cached / ".complete", key)
+        (folder / "node_modules").symlink_to(cached / "node_modules", target_is_directory=True)
+        return cached
+
+    def prune_dependencies(self):
+        """Keep referenced environments plus two warm entries per package.
+
+        Never guess when a retained revision's references cannot be read.
+        Partial/unpublished entries have no warm retention at all.
+        """
+        root = self.root / "dependencies"
+        if not root.exists() or self.state.get("blocked"):
+            return
+        try:
+            keep = set()
+            for reference in (self.root / "versions").glob("*/dependency-cache.json"):
+                for relative in json.loads(reference.read_text()):
+                    path = (root / relative).resolve()
+                    if not path.is_relative_to(root.resolve()):
+                        raise ValueError("invalid dependency reference")
+                    keep.add(path)
+            groups = {}
+            for entry in [*root.glob("python/*/*"), *root.glob("node/*/*/*")]:
+                if entry.is_dir() and not entry.is_symlink():
+                    group = entry.parent.parent
+                    groups.setdefault(group, []).append(entry)
+            for entries in groups.values():
+                warm = 0
+                for entry in sorted(entries, key=lambda p: p.stat().st_mtime, reverse=True):
+                    if entry.resolve() in keep:
+                        continue
+                    if (entry / ".complete").is_file() and warm < 2:
+                        warm += 1
+                    else:
+                        shutil.rmtree(entry)
+            for key in [*root.glob("python/*"), *root.glob("node/*/*")]:
+                if key.is_dir() and not key.is_symlink() and not any(key.iterdir()):
+                    key.rmdir()
+        except (OSError, ValueError, TypeError):
+            _log("dependency cleanup deferred; retained dependencies are kept")
+
     def build(self, directory, revision, version=None):
         source = directory / "source"
         home = directory / "build-home"
@@ -1159,29 +1315,25 @@ class ContainerUpdates:
         selected = selected_overlays(manifest["container"], self.image)
         env, runtime_python = self.overlays.environment(selected, env)
         self.probe_runtimes(selected, source, env)
-        self.run_build([runtime_python or IMAGE_PYTHON, "-m", "venv", str(directory / "venv")], source, env)
-        verify_venv_python(directory, runtime_python)
-        # pip's 15-second read timeout dropped an 85 MB wheel mid-download on
-        # the Unraid host and failed the whole update; allow slow mirrors.
-        # Every package, including fluid's build backend, must match a hash in
-        # the signed source's lock, so a hostile index release cannot slip in.
+        reuse = os.environ.get("AI_SHUFFLE_PERF_DOCKER_DEPENDENCY_REUSE", "").strip().lower() not in ("0", "false", "off")
+        references = []
+        cached = self.python_dependencies(directory, source, env, runtime_python) if reuse else None
+        if cached is None:
+            self.install_python_dependencies(directory, source, env, runtime_python)
+        else:
+            references.append(str(cached.relative_to(self.root / "dependencies")))
         pip = [str(python), "-m", "pip", "install", "--prefer-binary", "--timeout", "120", "--retries", "10"]
-        self.run_build(pip + ["--require-hashes", "-r", "requirements.lock"], source, env)
-        # Optional media failure must not block an otherwise valid app update.
-        try:
-            # -P keeps app/core off sys.path: its platform.py would shadow the stdlib (#429).
-            self.run_build([str(python), "-P", "app/core/voice_dependencies.py", "--install"], source, env)
-        except UpdateError:
-            # Optional media failure must not prevent the base app update.
-            # The call-start path can retry from this source's hash-pinned lock.
-            _log("Optional ChatGPT voice libraries unavailable; call start can retry")
         self.run_build(pip + ["--no-deps", "--no-build-isolation", "./fluid"], source, env)
+        identity = self.dependency_identity("node", None, source, env) if reuse else None
         for package in ("frontend", "tools", "browser-mcp"):
             self.publish("downloading", f"Building {package}…", version=revision)
-            self.run_build(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], source / package, env)
+            cached = self.node_dependencies(package, source, env, identity)
+            if cached is not None:
+                references.append(str(cached.relative_to(self.root / "dependencies")))
             self.run_build(["npm", "run", "build"], source / package, env)
+        atomic_json(directory / "dependency-cache.json", references)
         shutil.copytree(source / "frontend/build", source / "app/static")
-        (directory / "complete").write_text(revision)
+        atomic_json(directory / "complete", revision)
 
     def drop_superseded(self, revision):
         """Remove a staged build that a newer download replaced. Never one that
@@ -1306,6 +1458,7 @@ class ContainerUpdates:
             self.save()
         except Exception:
             shutil.rmtree(directory)
+            self.prune_dependencies()
             self.prune_overlays()
             if staged:
                 # The staged build is still the one Update and restart installs.
@@ -1313,6 +1466,7 @@ class ContainerUpdates:
             raise
         if staged:
             self.drop_superseded(staged)
+        self.prune_dependencies()
         self.publish("ready", "Update ready. Choose Update and restart.")
 
     def service(self):

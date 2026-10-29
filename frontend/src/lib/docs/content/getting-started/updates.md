@@ -33,6 +33,8 @@ On a Docker worker, a downloaded update that is waiting for **Update and restart
 
 **Settings → System → Updates → Allow updates** turns in-app updates on or off for every worker on your account.
 
+Docker source updates reuse third-party Python dependencies only when the signed lockfiles and selected Python runtime match. Each revision still installs its own current Fluid code separately. Node dependencies are reused only when the Node/npm versions, platform/ABI, package manifest and lockfile match; source builds still run. Incomplete installs are never reused. Dependency environments stay at their original paths, and cleanup keeps environments referenced by retained revisions plus at most two unused complete environments per package. Set `AI_SHUFFLE_PERF_DOCKER_DEPENDENCY_REUSE=0` on the supervisor to return to installing dependencies for each revision; this does not disable signature, source-tree or runtime checks.
+
 ### Runtime overlays
 
 An overlay-aware Docker supervisor can install a release's required Python, Node, Chromium and relocatable tools/libraries on the persistent data volume. Nothing changes for an ordinary release: the image's runtimes remain the default. Overlays activate only when a signed release requires a capability the image lacks and includes an archive for this architecture with a pinned SHA-256 and size limits. Downloads and installed contents are verified before use; there are no privileged package-manager operations.
