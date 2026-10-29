@@ -132,7 +132,8 @@ def state(recipient: str, *, prepare: bool = False, fmt: int = FORMAT_FULL) -> d
         if prepare and not job.done():
             return {"status": "preparing"}
         manifest = job.result()
-        needs_snapshot = store.requires_snapshot(manifest["watermarks"], exclude_origin=recipient)
+        needs_snapshot = store.requires_snapshot(
+            manifest["watermarks"], exclude_origin=recipient, check_tail_compatibility=not mode)
         # Both capture and the tail query can wait while membership changes.
         # Reacquire the live context AFTER those waits, immediately before
         # returning a wrapped keyring; do not hold membership/job locks over DB.
@@ -230,7 +231,8 @@ def capture(recipient: str, fmt: int = FORMAT_FULL) -> dict:
                     and manifest["network_id"] == ctx.network_id
                     and manifest["generation"] == ctx.generation and _reusable(manifest)
                     and manifest.get("nested_secret_rekey") == mode
-                    and not store.requires_snapshot(manifest["watermarks"], exclude_origin=recipient)):
+                    and not store.requires_snapshot(
+                        manifest["watermarks"], exclude_origin=recipient, check_tail_compatibility=not mode)):
                 # Ordinary writes may advance the frontier: reuse it while its
                 # tail is retained. Snapshot adoption or pruning can leave gaps
                 # that require recapture.

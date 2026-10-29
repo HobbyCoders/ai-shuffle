@@ -250,8 +250,10 @@ def test_cached_frontier_refreshes_for_unservable_nested_secret_tail(workers, ca
         scan()
     exchange(source, a, limit=10000)
     with a.active():
-        assert store.requires_snapshot(old["watermarks"], exclude_origin=old_peer.device_id)
-        assert store.exchange_batch(old["watermarks"], limit=1, exclude_origin=old_peer.device_id)[2]
+        assert store.requires_snapshot(old["watermarks"], exclude_origin=old_peer.device_id,
+                                       check_tail_compatibility=True)
+        batch, _, snapshot = store.exchange_batch(old["watermarks"], limit=1, exclude_origin=old_peer.device_id)
+        assert len(batch) == 1 and not snapshot  # the incompatible op is beyond this batch
         fresh = capture(old_peer.device_id)
         assert fresh["transfer"] != old["transfer"]
         assert fresh["watermarks"] != old["watermarks"]
@@ -276,3 +278,29 @@ def test_snapshot_descriptors_and_presence_are_not_direct_contact_evidence(worke
         assert compat.enabled()
     with a.active():
         assert compat.enabled()
+
+
+@pytest.mark.parametrize("supported", [False, True])
+def test_exchange_decrypts_only_the_protected_ops_in_its_batch(workers, monkeypatch, supported):
+    from app.db import settings as db_settings
+    a, b = pair(workers, supported)
+    with a.active():
+        engine.scan_all(collections=["system_settings"])
+        start = store.local_watermarks()
+        for index in range(12):
+            db_settings.set_system_setting(f"provider_observation:batch-{index}",
+                                           json.dumps({"status": "known", "sample": index}))
+        assert engine.scan_all(collections=["system_settings"]) == 12
+        pending = store.ops_since(start, exclude_origin=b.device_id)
+        assert len(pending) == 12
+        opened = []
+        original = keyring.open_envelope
+
+        def counted(ctx, op, *args, **kwargs):
+            opened.append(op.origin_seq)
+            return original(ctx, op, *args, **kwargs)
+
+        monkeypatch.setattr(keyring, "open_envelope", counted)
+        batch, _, snapshot = store.exchange_batch(start, limit=3, exclude_origin=b.device_id)
+        assert len(batch) == 3 and not snapshot
+        assert opened == ([] if supported else [op["origin_seq"] for op in batch])
