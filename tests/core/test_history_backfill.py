@@ -3,8 +3,8 @@
 Covers the full frontend-message → contract-event mapping table (golden
 shapes), the skip rows, timestamp/uuid/profile passthrough, the
 turn_id='backfill' stamp, ensure_backfilled's fast path + empty memo + failure
-tolerance, and the empty-counter gate race (one winner; backfill vs
-recorder appends serialize).
+tolerance, and the counter-serialized gate race (one winner; cancellation-only
+prefixes permit history, recorder appends block it).
 
 All conversion tests call the pure converter directly; DB tests ride the
 autouse SQLite shim (``mock_db``).
@@ -369,6 +369,19 @@ async def test_loader_failure_degrades_to_noop(mock_db, monkeypatch):
     assert se.get_events(SID) == []
 
 
+async def test_recorder_wins_between_eligibility_probe_and_backfill_claim(mock_db, monkeypatch):
+    se.append_events(SID, [{"type": "queue.cancelled", "payload": {"cancelled_turn_ids": ["peer"]}}])
+
+    def load_history(_):
+        se.append_events(SID, [{"type": "turn.started"}])
+        return list(LEGACY)
+
+    monkeypatch.setattr(hb, "_load_legacy_history", load_history)
+    await ensure_backfilled(SID)
+    assert [row["event_type"] for row in se.get_events(SID)] == ["queue.cancelled", "turn.started"]
+    assert se.get_max_seq(SID) == 2
+
+
 async def test_lost_race_is_silent(mock_db, monkeypatch):
     monkeypatch.setattr(hb, "_load_legacy_history", lambda sid: list(LEGACY))
     monkeypatch.setattr(
@@ -556,32 +569,41 @@ def _bf_events(n=2, tag="bf"):
     ]
 
 
-@pytest.mark.parametrize("zero_counter", [False, True])
-async def test_concurrent_backfills_exactly_one_wins(mock_db, zero_counter):
-    if zero_counter:
+@pytest.mark.parametrize("counter_state", ["absent", "zero", "cancelled"])
+async def test_concurrent_backfills_exactly_one_wins(mock_db, counter_state):
+    if counter_state == "zero":
         with get_db() as conn:
             conn.cursor().execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,0)", (SID,))
+    elif counter_state == "cancelled":
+        se.append_events(SID, [{"type": "queue.cancelled", "payload": {"cancelled_turn_ids": ["peer"]}}])
+    prefix = se.get_events(SID)
     results = await asyncio.gather(
         asyncio.to_thread(se.append_backfill_events, SID, _bf_events(2, "a")),
         asyncio.to_thread(se.append_backfill_events, SID, _bf_events(2, "b")),
     )
     assert sorted(r is None for r in results) == [False, True]
     winner = next(r for r in results if r is not None)
-    assert winner == (1, 2)
+    assert winner == (len(prefix) + 1, len(prefix) + 2)
     rows = se.get_events(SID)
-    assert len(rows) == 2  # the loser wrote NOTHING
-    tags = {r["payload"]["content"][0] for r in rows}
+    assert rows[:len(prefix)] == prefix
+    assert len(rows) == len(prefix) + 2  # the loser wrote NOTHING
+    tags = {r["payload"]["content"][0] for r in rows[len(prefix):]}
     assert len(tags) == 1  # no interleaving of the two batches
+    assert se.append_backfill_events(SID, _bf_events()) is None
+    assert se.get_events(SID) == rows
 
 
-@pytest.mark.parametrize("zero_counter", [False, True])
-async def test_backfill_aborts_after_recorder_append(mock_db, zero_counter):
-    if zero_counter:
+@pytest.mark.parametrize("counter_state", ["absent", "zero", "cancelled"])
+async def test_backfill_aborts_after_recorder_append(mock_db, counter_state):
+    if counter_state == "zero":
         with get_db() as conn:
             conn.cursor().execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,0)", (SID,))
+    elif counter_state == "cancelled":
+        se.append_events(SID, [{"type": "queue.cancelled", "payload": {"cancelled_turn_ids": ["peer"]}}])
     se.append_events(SID, [{"type": "turn.started"}])
+    prefix = se.get_events(SID)
     assert se.append_backfill_events(SID, _bf_events()) is None
-    assert [r["event_type"] for r in se.get_events(SID)] == ["turn.started"]
+    assert se.get_events(SID) == prefix
 
 
 async def test_recorder_append_continues_after_backfill(mock_db):

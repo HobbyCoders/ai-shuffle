@@ -6,20 +6,20 @@ JSONL / the Postgres session store). When such a session is first read through a
 V2 path (the SSE tail, a recorded turn, or a rewind), :func:`ensure_backfilled`
 converts that legacy transcript into typed contract events
 (:mod:`app.contract.events`) and appends them ONCE, so the event log carries the
-full history before any live event lands on top.
+full history even when queue cancellations were recorded before its first read.
 
 Design:
 
-- Fast path: ``session_events.get_max_seq(session_id) > 0`` → already populated,
-  return immediately. A 60s per-process memo suppresses repeated legacy loads
-  for a genuinely-empty session.
+- Fast path: an EXISTS check for any event other than ``queue.cancelled``
+  means history is already seeded. A 60s per-process memo suppresses repeated
+  legacy loads for a genuinely-empty session.
 - Legacy history is loaded via the SAME persistent chain the ``/live`` read path
   uses (``db_message_loader`` → ``jsonl``/store parser → legacy rescue),
   off-loop in a thread.
 - Every produced event is stamped ``turn_id='backfill'`` and ``run_id=NULL``.
 - The append goes through :func:`app.db.session_events.append_backfill_events`,
-  whose exclusive-create counter gate guarantees exactly one writer wins the
-  race against a concurrent recorder or a second reader.
+  whose counter lock serializes the eligibility check and append against a
+  concurrent recorder or a second reader. Cancellation-only prefixes stay put.
 """
 
 from __future__ import annotations
@@ -41,8 +41,8 @@ BACKFILL_TURN_ID = "backfill"
 
 # session_id -> monotonic time we last saw an EMPTY legacy transcript. Suppresses
 # a repeated (expensive) legacy load on every read of a session that genuinely
-# has no history yet. Only empties are memoed — once the log is populated the
-# get_max_seq fast path short-circuits.
+# has no history yet. Only empties are memoed — a non-cancellation event makes
+# the event-type fast path short-circuit.
 _EMPTY_MEMO_TTL_SECONDS = 60.0
 _empty_memo: Dict[str, float] = {}
 
@@ -56,27 +56,22 @@ def _reset_memo() -> None:
 # public entry point
 # ----------------------------------------------------------------------
 
-def load_backfill_events(session_id: str) -> List[Dict[str, Any]]:
-    """Load exactly the legacy events eligible for import, including noise filtering."""
-    return convert_messages_to_events(session_id, _load_legacy_history(session_id))
-
-
 async def ensure_backfilled(session_id: str) -> None:
     """Backfill a session's legacy history into the event log exactly once.
 
     Never raises and never blocks a turn: any failure degrades to a no-op (the
     reader simply sees whatever is already in the log). Idempotent — the
-    get_max_seq fast path and the counter gate both prevent a second backfill.
+    event-type fast path and serialized counter gate prevent a second backfill.
     """
     try:
-        max_seq = await asyncio.to_thread(session_events_db.get_max_seq, session_id)
+        eligible = await asyncio.to_thread(session_events_db.can_backfill_events, session_id)
     except Exception:
         logger.warning(
-            "[history_backfill] get_max_seq failed for %s — skipping backfill",
+            "[history_backfill] eligibility check failed for %s — skipping backfill",
             session_id, exc_info=True,
         )
         return
-    if max_seq > 0:
+    if not eligible:
         return
 
     now = time.monotonic()
@@ -85,7 +80,7 @@ async def ensure_backfilled(session_id: str) -> None:
         return
 
     try:
-        events = await asyncio.to_thread(load_backfill_events, session_id)
+        messages = await asyncio.to_thread(_load_legacy_history, session_id)
     except Exception:
         logger.warning(
             "[history_backfill] legacy load failed for %s — skipping backfill",
@@ -93,6 +88,7 @@ async def ensure_backfilled(session_id: str) -> None:
         )
         return
 
+    events = convert_messages_to_events(session_id, messages)
     if not events:
         _empty_memo[session_id] = now
         return
@@ -109,8 +105,8 @@ async def ensure_backfilled(session_id: str) -> None:
         return
 
     if result is None:
-        # Lost the exclusive-create race — another writer populated the log
-        # first. Nothing to do; their events are authoritative.
+        # Another writer appended non-cancellation events after our read.
+        # Nothing to do; their events are authoritative.
         logger.debug(
             "[history_backfill] lost backfill race for %s (log already seeded)",
             session_id,
@@ -196,6 +192,9 @@ def _load_legacy_history(session_id: str) -> List[Dict[str, Any]]:
             "[history_backfill] legacy rescue failed for %s", session_id,
             exc_info=True,
         )
+        # Do not memoize a failed read as an empty transcript. A later attempt
+        # must still be able to import history after a cancellation-only log.
+        raise
 
     return []
 
@@ -210,7 +209,7 @@ def _without_pending_prompt(
     the pre-submit dual-write). On a session whose event log is still empty (a
     brand-new session, or one just cleared by ``clear_session_conversation``)
     the lazy backfill then reads that row back as "legacy history", wins the
-    exclusive-create seq gate, and seeds ``message.user`` — after which the
+    backfill gate, and seeds ``message.user`` — after which the
     turn recorder appends the SAME message again. The user's first message
     rendered twice, durably.
 

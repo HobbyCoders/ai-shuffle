@@ -1275,7 +1275,6 @@ def remove_queued_turn(
     left alone (``None`` returned) instead of being aborted mid-flight.
     """
     notify_events = False
-    emit_peer_cancellation = False
     # A caller-owned transaction also owns the post-commit session notification.
     with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
@@ -1288,18 +1287,7 @@ def remove_queued_turn(
             cursor.execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,0) "
                            "ON CONFLICT (session_id) DO NOTHING", (sid,))
             cursor.execute("SELECT next_seq FROM session_event_counters WHERE session_id=%s FOR UPDATE", (sid,))
-            counter = cursor.fetchone()
-            emit_peer_cancellation = bool(counter and counter["next_seq"] > 0)
-            if target["source"] == "agent_message" and not emit_peer_cancellation:
-                from app.core.history_backfill import load_backfill_events
-
-                try:
-                    emit_peer_cancellation = not load_backfill_events(sid)
-                except Exception:
-                    # Still abort the row, but never let an uncertain legacy
-                    # read seed seq 1 and suppress a later successful backfill.
-                    logger.warning("Could not check legacy history before cancelling a peer for %s",
-                                   sid, exc_info=True)
+            cursor.fetchone()
             cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (sid,))
             cursor.fetchone()
         cursor.execute(
@@ -1310,11 +1298,9 @@ def remove_queued_turn(
             (stop_reason, turn_id),
         )
         row = _row(cursor.fetchone())
-        if row and row.get("source") == "agent_message" and emit_peer_cancellation:
+        if row and row.get("source") == "agent_message":
             from app.db import session_events
 
-            # Only unimported legacy history must precede cancellation. Empty
-            # V2 chats can display queued peers even before their first event.
             # Only the guarded queued -> aborted transition cancels a peer.
             # Delivery/steering use separate transitions and never emit this.
             session_events.append_events(row["session_id"], [{

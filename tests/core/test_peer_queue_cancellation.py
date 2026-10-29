@@ -125,11 +125,10 @@ async def test_empty_chat_stop_emits_first_event_and_backfill_adds_nothing(recip
     assert events[0]["seq"] == 1
     assert events[0]["payload"]["cancelled_turn_ids"] == [peer["id"]]
     assert _v2_peer_queue_view(recipient) == []
-    # Neither normal lazy backfill nor an explicit zero-claim attempt can add a prefix.
+    # Cancellation leaves backfill eligible, but an empty chat imports no rows.
+    assert session_events.can_backfill_events(recipient)
     await history_backfill.ensure_backfilled(recipient)
-    assert session_events.append_backfill_events(recipient, [{
-        "type": "message.user", "payload": {"content": "Must not import over cancellation"},
-    }]) is None
+    await history_backfill.ensure_backfilled(recipient)
     assert session_events.get_events(recipient) == events
 
 
@@ -165,45 +164,51 @@ async def test_legacy_history_survives_cancellation_then_backfill(legacy_recipie
             assert turn_manager.remove_queued(peer["id"]) is not None
 
     assert turns.get_queued_turns(sid) == []
-    assert session_events.get_events(sid) == []
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT next_seq FROM session_event_counters WHERE session_id=%s", (sid,))
-        counter = cursor.fetchone()
-    # Cancellation may reserve the lock row, but must not allocate a single seq.
-    assert counter["next_seq"] == 0
+    prefix = session_events.get_events(sid)
+    assert [event["event_type"] for event in prefix] == ["queue.cancelled"]
+    assert prefix[0]["seq"] == 1
+    assert prefix[0]["payload"]["cancelled_turn_ids"] == [peer["id"]]
     await history_backfill.ensure_backfilled(sid)
     events = session_events.get_events(sid)
-    assert [event["event_type"] for event in events] == ["message.user", "message.assistant"]
-    assert [event["payload"]["content"] for event in events] == ["Legacy question", "Legacy reply"]
-    assert all(event["turn_id"] == "backfill" for event in events)
+    assert events[:1] == prefix
+    assert [event["seq"] for event in events] == [1, 2, 3]
+    assert [event["event_type"] for event in events[1:]] == ["message.user", "message.assistant"]
+    assert [event["payload"]["content"] for event in events[1:]] == ["Legacy question", "Legacy reply"]
+    assert all(event["turn_id"] == "backfill" for event in events[1:])
+    await history_backfill.ensure_backfilled(sid)
+    assert session_events.get_events(sid) == events
 
 
-def test_unimportable_legacy_rows_do_not_suppress_empty_log_cancellation(recipient, monkeypatch):
-    monkeypatch.setattr(history_backfill, "_load_legacy_history", lambda _: [
-        {"role": "user", "type": "queued", "content": "Not delivered"},
-    ])
-    peer = queued(recipient)
-    assert turns.remove_queued_turn(peer["id"]) is not None
-    assert cancellations(recipient) == [peer["id"]]
+async def test_failed_backfill_keeps_cancellation_and_retries_the_real_history_reader(recipient, monkeypatch):
+    from app.core import db_message_loader
 
-
-async def test_failed_history_check_aborts_peer_without_poisoning_legacy_backfill(recipient, monkeypatch):
     sessions.add_session_message(recipient, "user", "Legacy question", profile_id="cancel-agent")
     sessions.add_session_message(recipient, "assistant", "Legacy reply", profile_id="cancel-agent")
     peer = queued(recipient)
+    calls = []
 
-    def fail_load(_):
+    def fail_load(session_id):
+        calls.append(session_id)
         raise RuntimeError("Legacy store temporarily unavailable")
 
     with monkeypatch.context() as patch:
-        patch.setattr(history_backfill, "load_backfill_events", fail_load)
-        assert turns.remove_queued_turn(peer["id"])["state"] == "aborted"
-    assert session_events.get_events(recipient) == []
+        patch.setattr(db_message_loader, "load_messages_from_db", fail_load)
+        await query_session_lifecycle.enter_user_stop(recipient)
+        assert calls == []  # Stop never reads history, even when that reader is down.
+        prefix = session_events.get_events(recipient)
+        assert [event["event_type"] for event in prefix] == ["queue.cancelled"]
+        await history_backfill.ensure_backfilled(recipient)
+        assert calls == [recipient]
+        assert session_events.get_events(recipient) == prefix
+        assert recipient not in history_backfill._empty_memo
     await history_backfill.ensure_backfilled(recipient)
-    assert [event["payload"]["content"] for event in session_events.get_events(recipient)] == [
+    events = session_events.get_events(recipient)
+    assert events[:1] == prefix
+    assert [event["payload"]["content"] for event in events[1:]] == [
         "Legacy question", "Legacy reply",
     ]
+    await history_backfill.ensure_backfilled(recipient)
+    assert session_events.get_events(recipient) == events
 
 
 def test_existing_log_keeps_history_and_appends_cancellation(recipient):

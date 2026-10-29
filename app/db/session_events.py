@@ -284,24 +284,40 @@ def append_events(
     return first_seq, last_seq
 
 
+def can_backfill_events(session_id: str, *, allow_empty: bool = True, _conn: Any = None) -> bool:
+    """Whether the log is empty or contains only cancellation events.
+
+    A reconnect uses ``allow_empty=False``: a cancellation-only log may still
+    need history, but an empty log cannot validate a client's existing cursor.
+    This is only a hint outside the counter lock; the writer rechecks it there.
+    """
+    populated = "" if allow_empty else (
+        " AND EXISTS (SELECT 1 FROM session_events WHERE session_id = %s)"
+    )
+    params = (session_id,) if allow_empty else (session_id, session_id)
+    with (get_db() if _conn is None else nullcontext(_conn)) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT NOT EXISTS (SELECT 1 FROM session_events WHERE session_id = %s "
+            "AND event_type <> 'queue.cancelled')" + populated + " AS eligible", params,
+        )
+        return bool(cursor.fetchone()["eligible"])
+
+
 def append_backfill_events(
     session_id: str,
     events: List[Dict[str, Any]],
 ) -> Optional[Tuple[int, int]]:
-    """Append legacy history only before this session's first seq allocation.
+    """Append legacy history once, after any cancellation-only prefix.
 
-    Unlike :func:`append_events`, this is the ONE-TIME lazy backfill writer
-    (``app.core.history_backfill``). It is always unfenced (``run_id=None``) and
-    must only win when it is the FIRST writer to allocate this session's seqs —
-    otherwise a concurrent recorder append (or a second reader racing the same
-    backfill) would interleave a duplicate legacy prefix into the log.
+    Cancellation has no transcript row and cannot mark history as imported.
+    Any other existing event refuses backfill, returning ``None``. The counter
+    lock serializes this check and allocation against recorders, cancellation,
+    and competing backfills. The check runs in a separate statement AFTER the
+    lock is acquired so a writer that waited sees the preceding writer's events.
 
-    The atomic counter upsert creates or claims a zero counter. Queue cancellation
-    can reserve that zero row for locking without initializing the event log.
-    A positive counter means another writer allocated seqs; no row is returned
-    and we abort without writing, returning ``None``. On success returns the
-    ``(first_seq, last_seq)`` range (always starting at 1). Raises ``ValueError``
-    if ``events`` is empty.
+    Returns the ``(first_seq, last_seq)`` range, with unfenced ``run_id=None``.
+    Raises ``ValueError`` if ``events`` is empty.
     """
     if not events:
         raise ValueError("events must be non-empty")
@@ -310,21 +326,22 @@ def append_backfill_events(
     with get_db() as conn:
         cursor = conn.cursor()
 
-        # Allocate [1, n] only from an absent or zero counter. The upsert locks
-        # against recorder appends and competing backfills, so only one wins.
-        # A zero reservation contains no events and must not hide legacy history.
         cursor.execute(
-            "INSERT INTO session_event_counters (session_id, next_seq) "
-            "VALUES (%s, %s) "
-            "ON CONFLICT (session_id) DO UPDATE SET next_seq = EXCLUDED.next_seq "
-            "WHERE session_event_counters.next_seq = 0 "
-            "RETURNING next_seq",
-            (session_id, n),
+            "INSERT INTO session_event_counters (session_id, next_seq) VALUES (%s, 0) "
+            "ON CONFLICT (session_id) DO NOTHING", (session_id,),
         )
-        row = cursor.fetchone()
-        if row is None:
+        cursor.execute(
+            "SELECT next_seq FROM session_event_counters WHERE session_id = %s FOR UPDATE",
+            (session_id,),
+        )
+        cursor.fetchone()
+        if not can_backfill_events(session_id, _conn=conn):
             return None
-        last_seq = int(row["next_seq"])
+        cursor.execute(
+            "UPDATE session_event_counters SET next_seq = next_seq + %s "
+            "WHERE session_id = %s RETURNING next_seq", (n, session_id),
+        )
+        last_seq = int(cursor.fetchone()["next_seq"])
         first_seq = last_seq - n + 1
 
         # Insert one row per event — always unfenced (run_id=None).

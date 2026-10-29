@@ -141,6 +141,18 @@ describe('AgentMessage transcript replacement', () => {
 		expect(rows()).toHaveLength(0);
 		await view.rerender({ messages: [], pendingPeerMessages: [pending], live: false });
 		expect(rows()).toHaveLength(0);
+		// Legacy history can arrive after the already-observed cancellation prefix.
+		let restored = reduce(cancelled, { type: 'message.user', id: 'legacy-prompt', seq: 2,
+			turn_id: 'backfill', content: 'Original question' });
+		restored = reduce(restored, { type: 'message.assistant', id: 'legacy-reply', seq: 3,
+			turn_id: 'backfill', content: 'Original answer' });
+		expect(restored.lastSeq).toBe(3);
+		expect(restored.messages.map(message => message.content)).toEqual(['Original question', 'Original answer']);
+		await view.rerender({ messages: releaseMessages(restored), pendingPeerMessages: [pending], live: false,
+			cancelledTurnIds: restored.cancelledPeerTurnIds });
+		expect(rows()).toHaveLength(0);
+		expect(screen.getByText('Original question')).toBeTruthy();
+		expect(screen.getByText('Original answer')).toBeTruthy();
 	});
 
 	it('keeps the second idle peer expanded and focused through both real receipts', async () => {
