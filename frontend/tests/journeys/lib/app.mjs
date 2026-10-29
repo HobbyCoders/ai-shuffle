@@ -150,6 +150,44 @@ export async function pickAgent(page, hero) {
 	);
 }
 
+/**
+ * Make this page a user who never picked an agent: the seed saves the Dev
+ * agent as the composer's pick on the server (scripts/devloop/seed.py,
+ * make_dev_agent_the_default), and the preview cookie may not clear it. Only
+ * that one preference is hidden from the page's reads; everything else, and
+ * every write, goes to the server unchanged. Call before the page loads.
+ */
+export async function withoutSavedAgentPick(page) {
+	const KEY = 'composer.profile';
+	await page.route(/\/api\/v1\/preferences\/all(\?|$)/, async (route) => {
+		if (route.request().method() !== 'GET') return route.continue();
+		const response = await route.fetch();
+		const body = await response.json();
+		if (body?.preferences) delete body.preferences[KEY];
+		if (body?.versions) delete body.versions[KEY];
+		await route.fulfill({ response, json: body });
+	});
+	await page.route(new RegExp(`/api/v1/preferences/${KEY.replace('.', '\\.')}(\\?|$)`), (route) =>
+		route.request().method() === 'GET' ? route.fulfill({ status: 404, json: { detail: 'Preference not found' } }) : route.continue()
+	);
+}
+
+/**
+ * Set the composer's tool access (Ask, Accept Edits, Bypass). A journey that
+ * is not about approvals sets it: whether Ask prompts for a code-mode cell
+ * depends on the host (run_python is "safe" only behind the bwrap sandbox,
+ * which GitHub's runners refuse), so Ask is not the same app on every machine.
+ */
+export async function pickAccess(page, mode) {
+	const menu = page.getByRole('menu', { name: 'Tool access' });
+	await pick(
+		page.getByRole('button', { name: /^Permission mode:/ }),
+		menu,
+		menu.getByRole('menuitemradio', { name: new RegExp(`^${mode}\\b`) }),
+		page.getByRole('button', { name: `Permission mode: ${mode}`, exact: true })
+	);
+}
+
 export async function pickProject(page, hero, project = PROJECT) {
 	const item = page.getByRole('button', { name: project, exact: true });
 	await pick(hero.getByRole('button', { name: /^No project/ }), item, item, hero.getByRole('button', { name: `Workspace folders: ${project}` }));

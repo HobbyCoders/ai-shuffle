@@ -9,7 +9,7 @@
 //   bash    [script:tool-bash]: one Bash call (echo), then the answer
 //   multi   [script:tool-multi]: two parallel calls, one more, then the answer
 import { fakeAiTag, runJourney } from './runner.mjs';
-import { PROJECT, countUserRows, expect, openNewChat, typeAndSend, uniq, waitTurnSettled, watchRowFlicker } from './lib/app.mjs';
+import { PROJECT, countUserRows, expect, openNewChat, pickAccess, typeAndSend, uniq, waitTurnSettled, watchRowFlicker } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { STOP_SELECTOR, expectNeverDecreases, expectStopFollowsStreaming, markTime } from './lib/timeline.mjs';
 
@@ -35,8 +35,11 @@ function toolCase(name) {
 	return {
 		name,
 		async setup(ctx) {
-			// A project chat, so the tools have a checkout to run in.
+			// A project chat, so the tools have a checkout to run in. Bypass, so
+			// the cards are judged and not the approval flow: under Ask the call
+			// prompts or not depending on the host's sandbox (see pickAccess).
 			await openNewChat(ctx, { project: PROJECT });
+			await pickAccess(ctx.page, 'Bypass');
 			await ctx.page.waitForTimeout(800);
 		},
 		async act({ page, mark, variant, log }) {

@@ -25,7 +25,8 @@ import {
 	uniq,
 	waitChat,
 	waitChatOpen,
-	waitTurnSettled
+	waitTurnSettled,
+	withoutSavedAgentPick
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
@@ -145,6 +146,8 @@ await runJourney({
 		{
 			name: 'new-chat-needs-agent',
 			async setup({ page, status }) {
+				// A user with no saved agent pick (the seed saves one for everybody).
+				await withoutSavedAgentPick(page);
 				await gotoApp(page, status);
 				await waitChat(page, { surface: 'new' });
 				await page.waitForTimeout(1000);

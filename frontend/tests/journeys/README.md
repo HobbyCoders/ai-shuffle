@@ -149,6 +149,11 @@ Conventions:
   `lib/app.mjs`; waits read the `data-ui-*` signature, never a fixed sleep
   for the outcome.
 - Add the journey to `map.json` (`select.mjs --check` tells you).
+- Set the state your journey depends on instead of trusting the instance's
+  defaults: tool access (`pickAccess`; under Ask a code-mode cell prompts or
+  not depending on the host's sandbox, and GitHub's runners have none), the
+  agent (the seed saves one for everybody; `withoutSavedAgentPick` gives a
+  user without one).
 - The runner deletes the chats a case created once it ends (pass or fail).
   The sidebar lists only the newest chats, so leftovers push the seeded ones
   out of it and break the next journey that opens one from the sidebar.
