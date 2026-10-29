@@ -33,7 +33,9 @@ def build_feed(feed, monkeypatch, request):
     def run(command, cwd, env):
         commands.append((list(command), Path(cwd)))
         if command[1:3] == ["-m", "venv"]:
-            if request.node.name.startswith(("test_signed_second_revision_reuses_all_third_party_dependencies", "test_corrupt_completed_cache", "test_semantically_broken_cache")):
+            if request.node.name.startswith((
+                    "test_signed_second_revision_reuses_all_third_party_dependencies",
+                    "test_corrupt_completed_cache", "test_semantically_broken_cache", "test_nested_source")):
                 subprocess.run([*command, "--without-pip"], check=True, env=env,
                                capture_output=True, timeout=20)
             else:
@@ -42,6 +44,14 @@ def build_feed(feed, monkeypatch, request):
             site = site_for(command[0])
             site.mkdir(parents=True, exist_ok=True)
             (site / "third_party_fixture.py").write_text("VALUE = 'locked dependency'\n")
+            if request.node.name.startswith("test_nested_source"):
+                package = site / "nested_fixture"
+                package.mkdir()
+                (package / "__init__.py").write_text("from .detail import VALUE\n")
+                (package / "detail.py").write_text("VALUE = 'good'\n")
+                # Real pip normally compiles installed sources before completion.
+                subprocess.run([command[0], "-I", "-c", "import nested_fixture"],
+                               check=True, env=env, capture_output=True, timeout=10)
         elif "./fluid" in command:
             site = site_for(command[0]) / "fluid"
             site.mkdir(parents=True, exist_ok=True)
@@ -245,6 +255,62 @@ def test_corrupt_completed_cache_builds_a_new_entry_without_repairing_retained_c
     output = subprocess.check_output([str(python), "-I", "-c", "import third_party_fixture; print(third_party_fixture.VALUE)"],
                                      cwd=tmp_path, text=True, timeout=10)
     assert output.strip() == "locked dependency"
+
+
+def test_nested_source_edit_cannot_hide_behind_warmed_bytecode(build_feed, monkeypatch, tmp_path):
+    updater, stage, _ = build_feed
+    monkeypatch.setattr(updates, "PYTHON_DEPENDENCY_PROBES", ("nested_fixture",))
+    stage(B, 2)
+    updater.launch({}, activate=True)
+    updater.activating()
+    updater.healthy()
+    old = next((updater.root / "dependencies/python").glob("*/*/.complete")).parent
+    marker = (old / ".complete").read_bytes()
+    source = next((old / "venv/lib").glob("python*/site-packages/nested_fixture/detail.py"))
+    assert list((source.parent / "__pycache__").glob("detail.*.pyc"))
+    original = source.stat()
+    source.write_text("VALUE = 'evil'\n")
+    os.utime(source, ns=(original.st_atime_ns, original.st_mtime_ns))
+    changed = source.stat()
+    assert (changed.st_size, changed.st_mtime_ns, changed.st_ino) == (
+        original.st_size, original.st_mtime_ns, original.st_ino)
+    assert changed.st_ctime_ns != original.st_ctime_ns
+    probe = "import nested_fixture; print(nested_fixture.VALUE)"
+    # The old probe really can pass on timestamp-valid bytecode after this edit.
+    stale = subprocess.check_output([str(old / "venv/bin/python"), "-I", "-B", "-c", probe],
+                                    cwd=tmp_path, text=True, timeout=10)
+    assert stale.strip() == "good"
+    assert updater.probe_dependencies(old)
+    second = stage(C, 3)
+    fresh = subprocess.check_output([str(updater.directory(C) / "venv/bin/python"), "-I", "-c", probe],
+                                    cwd=tmp_path, text=True, timeout=10)
+    assert fresh.strip() == "good", "a fresh revision must not import edited source hidden by old bytecode"
+    assert len(installs(second)) == 2
+    assert npm_installs(second) == []
+    assert (old / ".complete").read_bytes() == marker
+    assert source.read_text() == "VALUE = 'evil'\n", "never repair the retained installation in place"
+
+
+def test_noncritical_file_edit_preserving_mtime_is_detected_by_change_time(build_feed):
+    updater = build_feed[0]
+    key = "d" * 64
+    old, complete = updater.cached_dependencies("node/tools", key)
+    assert not complete
+    payload = old / "node_modules/notes.txt"
+    payload.parent.mkdir()
+    payload.write_text("good")
+    updater.complete_dependencies(old, "node/tools", key)
+    marker = (old / ".complete").read_bytes()
+    original = payload.stat()
+    payload.write_text("evil")
+    os.utime(payload, ns=(original.st_atime_ns, original.st_mtime_ns))
+    changed = payload.stat()
+    assert (changed.st_size, changed.st_mtime_ns, changed.st_ino) == (
+        original.st_size, original.st_mtime_ns, original.st_ino)
+    assert changed.st_ctime_ns != original.st_ctime_ns
+    replacement, complete = updater.cached_dependencies("node/tools", key)
+    assert not complete and replacement != old
+    assert (old / ".complete").read_bytes() == marker and payload.read_text() == "evil"
 
 
 def test_semantically_broken_cache_is_rejected_by_the_import_probe(build_feed, monkeypatch, tmp_path):
