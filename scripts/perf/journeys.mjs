@@ -40,9 +40,6 @@ import { SEL, initScript, collect, normalizePath, loadPlaywright } from './brows
 import { fileURLToPath } from 'node:url';
 import { summarize, median } from './stats.mjs';
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const REPO = path.resolve(HERE, '..', '..');
-
 // ── arguments ───────────────────────────────────────────────────────────────
 function parseArgs(argv) {
 	const a = {
