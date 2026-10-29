@@ -324,7 +324,8 @@ def _savepoint(cursor, name: str):
 #     fallback they already used (the agent's saved model, then the app
 #     default). Additive; lands via the always-run guarded ADD COLUMN in
 #     _run_column_migrations.
-SCHEMA_VERSION = 92
+# 93 (2026-10-29): one shared active account per built-in provider/kind slot.
+SCHEMA_VERSION = 93
 
 
 def _migrate_omni_tables_to_fluid(cursor):
@@ -2703,6 +2704,11 @@ def _run_column_migrations(cursor: Any) -> None:
 
     _migrate_provider_revisions(cursor)
 
+    # v93: retain the earliest-created enabled account (id breaks ties).
+    from app.db.model_provider_slots import lock_model_provider_slots, reconcile_model_provider_slots
+    lock_model_provider_slots(cursor)
+    reconcile_model_provider_slots(cursor, initialize=True)
+
     # Worker network (v87): private-database peers replace the shared-database
     # cluster. Additive, nullable columns naming the owning device on the
     # tables whose rows execute somewhere, plus the local network tables.
@@ -3477,7 +3483,7 @@ def migrations_fingerprint() -> str:
 
     from app.db import (
         schema_postgres, mobile_hub, network, owner_state, working_record, watches, watch_delivery,
-        session_mode_migration,
+        session_mode_migration, model_provider_slots,
     )
     from app.core import owner_auth
 
@@ -3487,7 +3493,7 @@ def migrations_fingerprint() -> str:
     # Include their sources and the network schema so upgrades cannot skip new DDL.
     for module in (
         sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network, owner_state,
-        working_record, watches, watch_delivery, session_mode_migration,
+        working_record, watches, watch_delivery, session_mode_migration, model_provider_slots,
     ):
         path = getattr(module, "__file__", None)
         if not path:
@@ -4052,6 +4058,7 @@ from app.db.connectors import (  # noqa: F401
 from app.db.model_providers import (  # noqa: F401
     create_model_provider,
     get_model_provider,
+    resolve_model_provider,
     get_all_model_providers,
     get_enabled_model_providers,
     count_configured_model_providers,

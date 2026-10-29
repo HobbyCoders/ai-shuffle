@@ -634,6 +634,14 @@ def materialize(
     """
     keys = _local_keys(coll, record_id)
     where = " AND ".join(f"{k} = %s" for k in coll.keys)
+    from app.db.model_provider_slots import (
+        SLOT_SETTING_PREFIX, lock_model_provider_slots, reconcile_model_provider_slots,
+    )
+    provider_selection = coll.name == "model_providers" or (
+        coll.name == "system_settings" and record_id.startswith(SLOT_SETTING_PREFIX)
+    )
+    if provider_selection:
+        lock_model_provider_slots(cursor)
     if record is not None:
         record = _project_legacy_agent(coll, record_id, record)
         if record is None:
@@ -774,6 +782,9 @@ def materialize(
     sql = (f"INSERT INTO {coll.table} ({', '.join(insert_columns)}) VALUES ({', '.join(['%s'] * len(insert_columns))}) "
            f"ON CONFLICT ({conflict}) DO UPDATE SET {updates}")
     cursor.execute(sql, tuple(insert_values))
+    if provider_selection:
+        # The shared slot register, not row arrival order, selects the account.
+        reconcile_model_provider_slots(cursor)
     if new_agent:
         # As for a local create: a deleted agent's API-key assignments must not
         # attach to a new agent with its id. Covers bootstrap snapshots too.
@@ -1485,6 +1496,8 @@ def _merge_losing_provider_credentials(cursor, coll: policy.Collection, record_i
     # record must not advance its timestamp while leaving old token columns.
     if not all(name in incoming for name in _PROVIDER_CREDENTIAL_FIELDS):
         return False
+    from app.db.model_provider_slots import lock_model_provider_slots, reconcile_model_provider_slots
+    lock_model_provider_slots(cursor)
     encrypted = list(incoming.get("_enc") or [])
     values = [_column_value(coll, name, incoming[name], encrypted)
               for name in _PROVIDER_CREDENTIAL_FIELDS]
@@ -1493,7 +1506,10 @@ def _merge_losing_provider_credentials(cursor, coll: policy.Collection, record_i
         f"UPDATE model_providers SET {updates}, revision = %s WHERE id = %s "
         "AND (codex_last_refresh IS NULL OR codex_last_refresh < %s)",
         (*values, str(uuid4()), record_id, incoming["codex_last_refresh"]))
-    return bool(cursor.rowcount)
+    changed = bool(cursor.rowcount)
+    if changed:
+        reconcile_model_provider_slots(cursor)
+    return changed
 
 
 def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, result: ApplyResult) -> str:

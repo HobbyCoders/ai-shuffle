@@ -376,10 +376,14 @@ def validate_provider_model(
         try:
             from app.db import database
 
-            row = database.get_model_provider(pid, include_token=False)
+            row = database.resolve_model_provider(pid, include_token=False)
         except Exception:  # noqa: BLE001 — a lookup failure reads as "missing"
             logger.exception("ProviderAgent: provider lookup failed for %s", pid)
             row = None
+
+    if row and not row.get("enabled") and provider_row is not _UNSET:
+        from app.db import database
+        row = database.resolve_model_provider(pid, include_token=False) or row
 
     if not row:
         return ModelValidation(
@@ -881,7 +885,7 @@ def worker_context_window(
         try:
             from app.db import database
 
-            row = database.get_model_provider(provider_id, include_token=False)
+            row = database.resolve_model_provider(provider_id, include_token=False)
         except Exception:  # noqa: BLE001 — query_options validates instead
             logger.debug("ProviderAgent: worker provider row read failed", exc_info=True)
             return window
@@ -2220,7 +2224,7 @@ def _provider_display_name(provider_id: Optional[str]) -> str:
     try:
         from app.db import database
 
-        row = database.get_model_provider(provider_id, include_token=False)
+        row = database.resolve_model_provider(provider_id, include_token=False)
     except Exception:  # noqa: BLE001 — cosmetic lookup, fail to the id
         logger.debug(
             "ProviderAgent: provider name lookup failed for %s",

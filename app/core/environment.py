@@ -599,7 +599,7 @@ def apply_provider_env(
     a ``base_url`` (an unauthenticated self-hosted endpoint). ``session_id`` does
     not affect the overlay.
     """
-    provider = database.get_model_provider(provider_id, include_token=True)
+    provider = database.resolve_model_provider(provider_id, include_token=True)
     if not provider:
         raise ProviderConfigError(
             f"Model provider '{provider_id}' is not configured (it may have been "

@@ -34,6 +34,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list
+from app.db.model_provider_slots import (
+    clear_model_provider_slot, lock_model_provider_slots, model_provider_slot,
+    reconcile_model_provider_slots, select_model_provider_slot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +184,7 @@ def create_model_provider(
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
+        lock_model_provider_slots(cursor)
         cursor.execute(
             """
             INSERT INTO model_providers
@@ -208,7 +213,30 @@ def create_model_provider(
                 str(uuid4()),
             ),
         )
+        slot = model_provider_slot({"provider_type": provider_type})
+        if slot and enabled:
+            select_model_provider_slot(cursor, slot, provider_id)
+        reconcile_model_provider_slots(cursor)
     return get_model_provider(provider_id)
+
+
+def resolve_model_provider(provider_id: str, include_token: bool = False) -> Optional[ModelProviderRow]:
+    """Runtime pin lookup: disabled accounts follow their active slot sibling.
+
+    Management, credential refresh and historical billing use the exact reader
+    below. Deleted rows retain the existing missing-provider behavior: their
+    slot cannot be inferred safely from an opaque id.
+    """
+    from app.db import database
+
+    row = (database.get_model_provider(provider_id, include_token=True) if include_token
+           else database.get_model_provider(provider_id))
+    slot = model_provider_slot(row) if row else None
+    if row and not row.get("enabled") and slot:
+        for sibling in database.get_enabled_model_providers():
+            if model_provider_slot(sibling) == slot:
+                return database.get_model_provider(sibling["id"], include_token=include_token)
+    return row
 
 
 def get_model_provider(
@@ -480,6 +508,10 @@ def update_model_provider(
 
     with get_db() as conn:
         cursor = conn.cursor()
+        lock_model_provider_slots(cursor)
+        cursor.execute("SELECT provider_type, auth_mode FROM model_providers WHERE id = %s", (provider_id,))
+        previous = cursor.fetchone()
+        previous_slot = model_provider_slot(previous) if previous else None
         cursor.execute(
             f"UPDATE model_providers SET {', '.join(updates)} WHERE id = %s{condition} RETURNING {_PUBLIC_COLUMNS}",
             values,
@@ -492,6 +524,16 @@ def update_model_provider(
         if saved and (changed or any(k in kwargs for k in ("balance_key", "openai_admin_key", "codex_access_token", "codex_account_id"))):
             from app.db.provider_usage_snapshots import delete_shared_observations
             delete_shared_observations(conn, provider_id)
+        if saved and any(k in kwargs for k in ("enabled", "provider_type", "auth_mode")):
+            slot = model_provider_slot(saved)
+            if previous_slot and previous_slot != slot:
+                clear_model_provider_slot(cursor, previous_slot, provider_id)
+            if slot:
+                if saved["enabled"]:
+                    select_model_provider_slot(cursor, slot, provider_id)
+                elif "enabled" in kwargs:
+                    clear_model_provider_slot(cursor, slot, provider_id)
+            reconcile_model_provider_slots(cursor)
         return saved
 
 
@@ -579,21 +621,8 @@ def delete_model_provider(provider_id: str) -> bool:
 
 
 def set_model_provider_enabled(provider_id: str, enabled: bool) -> Optional[ModelProviderRow]:
-    """Toggle a provider's ``enabled`` flag and return the fresh row."""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        clear_balance = ", balance_snapshot = NULL" if not enabled else ""
-        values = [enabled, now, str(uuid4())]
-        cursor.execute(
-            f"UPDATE model_providers SET enabled = %s, updated_at = %s, revision = %s{clear_balance} WHERE id = %s",
-            (*values, provider_id),
-        )
-        if cursor.rowcount == 0:
-            return None
-        if not enabled:
-            cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
-    return get_model_provider(provider_id)
+    """Enable exclusively within a slot, or turn just this account off."""
+    return update_model_provider(provider_id, enabled=enabled)
 
 
 # ---------------------------------------------------------------------------
@@ -618,6 +647,7 @@ def set_codex_token_bundle(
     needs_reauth: bool = False,
     auth_mode: str = "chatgpt",
     preserve_refresh_stamp: bool = False,
+    activate: bool = False,
 ) -> Optional[ModelProviderRow]:
     """Atomically persist an OAuth token bundle on a provider row.
 
@@ -641,6 +671,10 @@ def set_codex_token_bundle(
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
+        lock_model_provider_slots(cursor)
+        cursor.execute("SELECT provider_type, auth_mode FROM model_providers WHERE id = %s", (provider_id,))
+        previous = cursor.fetchone()
+        previous_slot = model_provider_slot(previous) if previous else None
         if not preserve_refresh_stamp:
             # Serialize with sync's guarded UPSERT as well as other writers.
             cursor.execute("SELECT codex_last_refresh FROM model_providers WHERE id = %s FOR UPDATE", (provider_id,))
@@ -686,6 +720,12 @@ def set_codex_token_bundle(
         if not preserve_refresh_stamp:
             from app.db.provider_usage_snapshots import delete_shared_observations
             delete_shared_observations(conn, provider_id)
+        slot = model_provider_slot({**(previous or {}), "auth_mode": auth_mode})
+        if previous_slot and previous_slot != slot:
+            clear_model_provider_slot(cursor, previous_slot, provider_id)
+        if activate and slot:
+            select_model_provider_slot(cursor, slot, provider_id)
+        reconcile_model_provider_slots(cursor)
     return get_model_provider(provider_id)
 
 

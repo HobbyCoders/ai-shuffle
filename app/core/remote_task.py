@@ -819,7 +819,7 @@ def _check_model(start: _Start) -> None:
     from app.db import database
 
     if start.provider_id:
-        provider = database.get_model_provider(start.provider_id, include_token=False)
+        provider = database.resolve_model_provider(start.provider_id, include_token=False)
         if not provider:
             raise ValueError(f"This worker has no model provider {start.provider_id!r}; nothing was started.")
         gap = _credential_gap(start.provider_id)

@@ -43,6 +43,7 @@ from app.core import (
 )
 from app.db import database as db
 from app.db.async_database import run_sync
+from app.db.model_provider_slots import model_provider_slot
 
 from app.api import openai_billing, openrouter_billing, provider_balances  # noqa: F401
 
@@ -114,6 +115,7 @@ class ModelProviderResponse(BaseModel):
     context_window: Optional[int] = None
     max_output_tokens: Optional[int] = None
     enabled: bool
+    slot: Optional[Literal["openai:key", "openai:subscription", "grok:key", "grok:subscription", "openrouter:key"]] = None
     # Codex/ChatGPT-subscription OAuth surface (blobs never exposed — only flags).
     auth_mode: Optional[str] = None
     codex_account_id: Optional[str] = None
@@ -362,6 +364,7 @@ def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
         context_window=row.get("context_window"),
         max_output_tokens=row.get("max_output_tokens"),
         enabled=bool(row.get("enabled")),
+        slot=model_provider_slot(row),
         auth_mode=row.get("auth_mode"),
         codex_account_id=row.get("codex_account_id"),
         needs_reauth=bool(row.get("needs_reauth")),
@@ -856,25 +859,26 @@ async def create_provider(body: ModelProviderCreate, token: str = Depends(requir
 
     base_url = _normalize_base_url(body.provider_type, body.base_url)
 
-    row = await run_sync(
-        db.create_model_provider,
-        provider_id=provider_id,
-        name=body.name,
-        provider_type=body.provider_type,
-        base_url=base_url,
-        api_dialect=body.api_dialect,
-        auth_token=encrypted_token,
-        models=_with_context_windows(
-            {"provider_type": body.provider_type},
-            model_modality.split_media_models(body.models)[0],
-        ),
-        default_model=body.default_model,
-        small_fast_model=body.small_fast_model,
-        extra_env=body.extra_env,
-        context_window=body.context_window,
-        max_output_tokens=body.max_output_tokens,
-        enabled=body.enabled,
-    )
+    async with openai_billing.operation_lock(provider_id):
+        row = await run_sync(
+            db.create_model_provider,
+            provider_id=provider_id,
+            name=body.name,
+            provider_type=body.provider_type,
+            base_url=base_url,
+            api_dialect=body.api_dialect,
+            auth_token=encrypted_token,
+            models=_with_context_windows(
+                {"provider_type": body.provider_type},
+                model_modality.split_media_models(body.models)[0],
+            ),
+            default_model=body.default_model,
+            small_fast_model=body.small_fast_model,
+            extra_env=body.extra_env,
+            context_window=body.context_window,
+            max_output_tokens=body.max_output_tokens,
+            enabled=body.enabled,
+        )
     if row is None:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                             detail="Could not create model provider")
@@ -1002,6 +1006,18 @@ async def _best_effort_revoke_codex(provider_id: str) -> None:
         await codex_oauth.revoke_token(refresh_plain)
     except Exception:  # noqa: BLE001 — revoke is best-effort, never blocks delete
         logger.debug("codex revoke-on-delete failed for %s", provider_id, exc_info=True)
+
+
+@router.post("/{provider_id}/activate", response_model=ModelProviderResponse)
+async def activate_provider(provider_id: str, token: str = Depends(require_admin)):
+    """Select this saved account; its slot siblings are disabled atomically."""
+    async with openai_billing.operation_lock(provider_id):
+        row = await run_sync(db.set_model_provider_enabled, provider_id, True)
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Model provider not found")
+        full_row = await run_sync(_row_with_token_flags, provider_id)
+    return _public_provider(full_row)
 
 
 @router.post("/{provider_id}/toggle", response_model=ModelProviderResponse)
@@ -1672,16 +1688,18 @@ async def codex_device_poll(provider_id: str, token: str = Depends(require_admin
     id_token_exp = exp_dt.isoformat() if exp_dt is not None else None
 
     from datetime import datetime, timezone
-    row = await run_sync(
-        db.set_codex_token_bundle,
-        provider_id,
-        access_token=enc_access,
-        refresh_token=enc_refresh,
-        account_id=bundle.account_id,
-        id_token_expires_at=id_token_exp,
-        last_refresh=datetime.now(timezone.utc).isoformat(),
-        needs_reauth=False,
-    )
+    async with openai_billing.operation_lock(provider_id):
+        row = await run_sync(
+            db.set_codex_token_bundle,
+            provider_id,
+            access_token=enc_access,
+            refresh_token=enc_refresh,
+            account_id=bundle.account_id,
+            id_token_expires_at=id_token_exp,
+            last_refresh=datetime.now(timezone.utc).isoformat(),
+            needs_reauth=False,
+            activate=True,
+        )
     _pending_enrollments.pop(provider_id, None)
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
@@ -1842,17 +1860,19 @@ async def xai_device_poll(provider_id: str, token: str = Depends(require_admin))
     id_token_exp = exp_dt.isoformat() if exp_dt is not None else None
 
     from datetime import datetime, timezone
-    row = await run_sync(
-        db.set_codex_token_bundle,
-        provider_id,
-        access_token=enc_access,
-        refresh_token=enc_refresh,
-        account_id=bundle.account_id,
-        id_token_expires_at=id_token_exp,
-        last_refresh=datetime.now(timezone.utc).isoformat(),
-        needs_reauth=False,
-        auth_mode="grok",
-    )
+    async with openai_billing.operation_lock(provider_id):
+        row = await run_sync(
+            db.set_codex_token_bundle,
+            provider_id,
+            access_token=enc_access,
+            refresh_token=enc_refresh,
+            account_id=bundle.account_id,
+            id_token_expires_at=id_token_exp,
+            last_refresh=datetime.now(timezone.utc).isoformat(),
+            needs_reauth=False,
+            activate=True,
+            auth_mode="grok",
+        )
     _pending_xai_enrollments.pop(provider_id, None)
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,

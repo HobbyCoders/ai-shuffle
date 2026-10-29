@@ -32,6 +32,7 @@ Every endpoint that returns a provider returns this shape. Stored secrets are ne
   "context_window": null,
   "max_output_tokens": null,
   "enabled": true,
+  "slot": "openrouter:key",
   "auth_mode": null,
   "codex_account_id": null,
   "needs_reauth": false,
@@ -47,6 +48,39 @@ Every endpoint that returns a provider returns this shape. Stored secrets are ne
 ```
 
 `auth_mode` cannot be set through the API. It becomes `chatgpt` after a [ChatGPT sign-in](#post-apiv1model-providersprovider_idcodexdevicestart) and `grok` after a [Grok sign-in](#post-apiv1model-providersprovider_idxaidevicestart). `needs_reauth` is `true` when a stored sign-in has stopped working and must be done again. `account_email` and `account_plan` are the email and plan id (such as `plus` or `pro`) read from a stored ChatGPT sign-in, for display; each is `null` when the sign-in does not carry it, and the token itself is never returned.
+
+### Saved accounts and active slots
+
+Save any number of accounts, including multiple ChatGPT or SuperGrok sign-ins.
+`slot` is read-only: `openai:key`, `openai:subscription`, `grok:key`,
+`grok:subscription`, `openrouter:key`, or `null` for an independent custom gateway.
+Subscription `auth_mode` wins over `provider_type` (including a `custom` row with
+`auth_mode: "chatgpt"`). API keys and subscriptions occupy separate slots.
+
+At most one account is enabled per slot; a slot may also be entirely off.
+Creating with `enabled: true`, PATCHing `enabled: true`, toggling on, activating,
+or completing a device sign-in selects that account and disables its siblings
+in the same transaction. Turning an account off does not activate another one.
+An idempotent activate call is preferable to toggle for an account switch.
+Re-fetch the provider list after switching: the response contains only the
+selected row, not the siblings whose `enabled` changed. No secret is returned.
+
+Existing `prov:<row_id>:<model>` chat, automation and subagent pins follow an
+enabled sibling in the same slot when their saved account is disabled, keeping
+the same model ID. Model availability and credential checks still apply to the
+active account. No fallback crosses slots or independent gateways. Deleted pins
+keep the missing-provider error; their slot is not guessed. Usage records retain
+the account captured for the turn, even if the owner switches before settlement.
+
+Selections sync as shared `model_provider_slot:<slot>` settings, using the
+network's last-writer-wins ordering on one selection record per slot. Provider
+row `enabled` flags are reconciled to that selection after row or setting sync,
+including snapshots and out-of-order account arrival. Older peers that only send
+row flags cannot override an existing shared selection; upgrade them to switch
+accounts across workers. Credentials remain encrypted in transit. On upgrade,
+v93 keeps the earliest-created enabled row per slot (ID breaks creation-time
+ties), disables duplicates without deleting them, and preserves existing off
+selections on subsequent startups.
 
 ### Per-model local sampling and reasoning (backend/API)
 
@@ -205,9 +239,20 @@ curl -X DELETE http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9
 
 **Response:** `{"success": true}`. Returns `404` if the provider does not exist.
 
+### POST /api/v1/model-providers/{provider_id}/activate
+
+Select this saved account. No body. Returns the provider object (`200`) with
+`enabled: true` and its `slot`. Any enabled sibling in that slot is disabled
+atomically; custom gateways are enabled independently. Calling it again keeps
+the same account active. It does not sign in, refresh models, or verify a key.
+
+**Auth:** Owner only (`401` without owner access; API-user keys get `403`).
+Returns `404` with `{"detail":"Model provider not found"}` for an unknown ID.
+The existing create/PATCH and device enrollment validation errors are unchanged.
+
 ### POST /api/v1/model-providers/{provider_id}/toggle
 
-Flip `enabled`. No body. Returns the updated provider object. Disabling invalidates readings but keeps billing access, including the OpenAI Admin key, for re-enabling.
+Flip `enabled`. No body. Returns the updated provider object. Turning on disables other accounts in the same slot atomically. Turning off leaves that slot off. Disabling invalidates readings but keeps billing access, including the OpenAI Admin key, for re-enabling.
 
 **Auth:** Owner only
 
