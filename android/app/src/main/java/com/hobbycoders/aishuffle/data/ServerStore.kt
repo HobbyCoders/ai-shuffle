@@ -30,12 +30,25 @@ class ServerStore private constructor(private val prefs: SharedPreferences) {
     var lastUsedServerId: String?
         get() = prefs.getString(KEY_LAST_USED, null)
         set(value) { prefs.edit().putString(KEY_LAST_USED, value).apply() }
-    fun markUsed(id: String) { lastUsedServerId = id }
+    @Synchronized
+    fun markUsed(id: String) {
+        val savedIds = getAll().map { it.id }.toSet()
+        val recent = (listOf(id) + recentIds()).distinct().filter { it in savedIds }
+        prefs.edit().putString(KEY_LAST_USED, id).putString(KEY_RECENT, JSONArray(recent).toString()).apply()
+    }
 
-    /** [servers] with the most recently used worker first, then insertion order. */
+    /** Full last-used order; older installs retain their last-used-then-insertion fallback. */
     fun orderedByRecentUse(servers: List<Server>): List<Server> {
-        val recent = lastUsedServerId ?: return servers
-        return servers.sortedBy { if (it.id == recent) 0 else 1 }
+        val order = recentIds().withIndex().associate { it.value to it.index }
+        return servers.sortedBy { order[it.id] ?: Int.MAX_VALUE }
+    }
+
+    private fun recentIds(): List<String> {
+        val history = runCatching {
+            val array = JSONArray(prefs.getString(KEY_RECENT, "[]"))
+            (0 until array.length()).map { array.getString(it) }
+        }.getOrDefault(emptyList())
+        return (listOfNotNull(lastUsedServerId) + history).distinct()
     }
 
     var selectedToolsServerId: String?
@@ -104,6 +117,7 @@ class ServerStore private constructor(private val prefs: SharedPreferences) {
         private const val PREFS_NAME = "ai_shuffle_secure_prefs"
         private const val KEY_SERVERS = "servers"
         private const val KEY_LAST_USED = "last_used_server"
+        private const val KEY_RECENT = "recently_used_servers"
 
         @Volatile
         private var instance: ServerStore? = null

@@ -580,13 +580,12 @@ class _SessionTail:
                     # still running; it has not seeded our cursor/epoch yet.
                     self._needs_log_check = False
                     current_epoch = await asyncio.to_thread(get_log_epoch, self.session_id)
-                    # Each client compares its own opening epoch, including one
-                    # whose backfill raced the shared reader's first seed.
-                    self._publish(_TailLogCheck(current_epoch))
-                    if current_epoch != self._epoch:
-                        if self._epoch == EMPTY_LOG_EPOCH and self._cursor == 0:
-                            self._epoch = current_epoch  # First append, not a rewrite.
-                        else:
+                    if not (self._epoch == EMPTY_LOG_EPOCH and self._cursor == 0):
+                        # Known prefixes must invalidate, even before seeding.
+                        # An empty log stays provisional: this probe can race
+                        # replacement before the first batch is actually read.
+                        self._publish(_TailLogCheck(current_epoch))
+                        if current_epoch != self._epoch:
                             self.close()
                             return
                 elif not force and max_seq <= self._cursor:
@@ -646,9 +645,9 @@ class _SessionTail:
             )
             if not frames:
                 return
-            if self._epoch == EMPTY_LOG_EPOCH and cursor == 0:
-                # The first actual row names an empty log's new identity. A
-                # later DB probe could already see a different replacement.
+            if cursor == 0:
+                # The prefix batch itself establishes identity, never a probe
+                # from before or after this read.
                 self._epoch = str(rows[0]["id"])
             self._cursor = frames[-1][0]
             self._publish(_TailBatch(cursor, frames[-1][0], frames, self._epoch))
@@ -930,18 +929,23 @@ async def event_stream(
 
             reconcile = False
             if isinstance(item, _TailLogCheck):
+                if log_epoch == EMPTY_LOG_EPOCH and cursor == 0:
+                    # No prefix to invalidate yet. Only actual row delivery
+                    # can choose this empty stream's identity.
+                    continue
                 if item.epoch != log_epoch:
-                    if log_epoch == EMPTY_LOG_EPOCH and cursor == 0:
-                        log_epoch = item.epoch  # A formerly empty log's first append.
-                    else:
-                        yield _reset_frame("epoch", item.epoch)
-                        return
+                    yield _reset_frame("epoch", item.epoch)
+                    return
                 continue
             if isinstance(item, _TailBatch):
+                if item.prev_seq == 0 and item.epoch:
+                    if log_epoch == EMPTY_LOG_EPOCH and cursor == 0:
+                        log_epoch = item.epoch
+                    elif item.epoch != log_epoch:
+                        yield _reset_frame("epoch", item.epoch)
+                        return
                 if item.prev_seq == cursor:
                     # Continues exactly where we stopped: emit as-is.
-                    if log_epoch == EMPTY_LOG_EPOCH and cursor == 0 and item.epoch:
-                        log_epoch = item.epoch
                     for seq, frame in item.frames:
                         yield frame
                         cursor = seq

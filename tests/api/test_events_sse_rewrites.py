@@ -219,10 +219,13 @@ async def test_peer_rewrite_during_initial_backfill_is_not_lost(mock_db, gw, mon
 
 @pytest.mark.parametrize("delivery", [
     "local-push", "mirror-missed-before-seed", "mirror-missed-fallback", "mirror-fallback-race",
+    "mirror-notified-race",
 ])
 async def test_empty_log_adopts_first_delivered_identity(mock_db, gw, monkeypatch, delivery):
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 0.01)
-    monkeypatch.setattr(events_mod, "LIVE_RESYNC_SECONDS", 0)
+    # The notified race must use the shared reader, not fallback reconciliation.
+    monkeypatch.setattr(events_mod, "LIVE_RESYNC_SECONDS",
+                        120 if delivery == "mirror-notified-race" else 0)
     monkeypatch.setattr(events_mod, "_push_delivery_healthy", lambda tail: True)
     seeded, release = asyncio.Event(), asyncio.Event()
     real_seed = events_mod._SessionTail._seed
@@ -250,6 +253,20 @@ async def test_empty_log_adopts_first_delivered_identity(mock_db, gw, monkeypatc
         return result
 
     monkeypatch.setattr(events_mod, "_resume_check", check_then_replace)
+    real_epoch = events_mod.get_log_epoch
+
+    def probe_then_replace(session_id):
+        epoch = real_epoch(session_id)
+        if (delivery == "mirror-notified-race" and not raced
+                and epoch != events_mod.EMPTY_LOG_EPOCH):
+            # A commits and notifies. The probe sees A, then B commits before
+            # the batch read. Both writes use the real receiver materializer.
+            raced.append(epoch)
+            for payload in mirror_rows(session_id, 1, replace=True):
+                gw._handle_payload(payload)
+        return epoch
+
+    monkeypatch.setattr(events_mod, "get_log_epoch", probe_then_replace)
     try:
         assert parse_frame(await anext(stream)) == {
             "event": "caught_up", "data": {"seq": 0, "epoch": events_mod.EMPTY_LOG_EPOCH}}
@@ -259,10 +276,18 @@ async def test_empty_log_adopts_first_delivered_identity(mock_db, gw, monkeypatc
             se.append_events(sid, [{"type": "message.user", "payload": {"content": "Local first"}}])
             gw._handle_payload(json.dumps({"session_id": sid, "max_seq": 1}))
         else:
-            mirror_rows(sid, 1, replace=False)  # Lose the real mirror NOTIFY.
+            notifications = mirror_rows(sid, 1, replace=False)
+            if delivery == "mirror-notified-race":
+                for payload in notifications:
+                    gw._handle_payload(payload)
+            # Other variants deliberately lose the real mirror NOTIFY.
             release.set()
         first = (await collect_frames(stream, 1))[0]
         assert first["event"] == "message.user"
+        if delivery == "mirror-notified-race":
+            assert len(raced) == 1
+            assert first["data"]["id"] != raced[0]
+            assert first["data"]["id"] == se.get_log_epoch(sid)
         # Reconciliation runs now, not after the production 120s deadline. It
         # must keep a valid first-message feed open instead of resetting it.
         assert (await asyncio.wait_for(anext(stream), 1)).startswith(": keepalive")
@@ -282,3 +307,77 @@ async def test_empty_log_adopts_first_delivered_identity(mock_db, gw, monkeypatc
     finally:
         release.set()
         await stream.aclose()
+
+
+async def test_empty_client_does_not_adopt_an_older_readers_probe(mock_db, gw, monkeypatch):
+    sid = "empty-client-existing-reader"
+    warm, _ = await warm_reader(sid)
+    mirror_rows(sid, 0, replace=True)
+    empty = event_stream(sid)
+    monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 0.01)
+    monkeypatch.setattr(events_mod, "LIVE_RESYNC_SECONDS", 0)
+    real_check = events_mod._resume_check
+    probed = []
+
+    def replace_before_first_delivery(session_id, cursor, epoch):
+        result = real_check(session_id, cursor, epoch)
+        if cursor == 0 and result[0] != events_mod.EMPTY_LOG_EPOCH and not probed:
+            probed.append(result[0])
+            mirror_rows(session_id, 1, replace=True)
+        return result
+
+    monkeypatch.setattr(events_mod, "_resume_check", replace_before_first_delivery)
+    try:
+        assert parse_frame(await anext(empty))["data"] == {
+            "seq": 0, "epoch": events_mod.EMPTY_LOG_EPOCH}
+        for payload in mirror_rows(sid, 1, replace=False):
+            gw._handle_payload(payload)
+        first = (await collect_frames(empty, 1))[0]
+        assert first["event"] == "message.user"
+        assert len(probed) == 1 and first["data"]["id"] != probed[0]
+        assert (await asyncio.wait_for(anext(empty), 1)).startswith(": keepalive")
+        # The other client really saw an older prefix, so it still resets.
+        assert (await collect_frames(warm, 1))[0]["event"] == "reset"
+    finally:
+        await empty.aclose()
+        await warm.aclose()
+
+
+async def test_first_batch_invalidates_another_clients_delivered_prefix(mock_db, gw, monkeypatch):
+    sid = "first-batch-shared-identity"
+    database.create_session(sid, "default", title="Concurrent empty and nonempty views")
+    entered, release = asyncio.Event(), asyncio.Event()
+    real_read = events_mod._SessionTail._read_and_publish
+
+    async def held_first_read(tail):
+        entered.set()
+        await release.wait()
+        await real_read(tail)
+
+    monkeypatch.setattr(events_mod._SessionTail, "_read_and_publish", held_first_read)
+    monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 0.01)
+    monkeypatch.setattr(events_mod, "LIVE_RESYNC_SECONDS", 120)
+    empty = event_stream(sid)
+    other = None
+    try:
+        assert parse_frame(await anext(empty))["data"]["epoch"] == events_mod.EMPTY_LOG_EPOCH
+        await asyncio.wait_for(entered.wait(), 1)
+        mirror_rows(sid, 1, replace=False)
+        other = event_stream(sid)
+        previous = [parse_frame(await asyncio.wait_for(anext(other), 1)) for _ in range(2)]
+        assert [frame["event"] for frame in previous] == ["message.user", "caught_up"]
+        mirror_rows(sid, 1, replace=True)  # Deliberately lose the mirror NOTIFY.
+        release.set()
+        first = (await collect_frames(empty, 1))[0]
+        assert first["event"] == "message.user"
+        assert first["data"]["id"] != previous[0]["data"]["id"]
+        reset = (await collect_frames(other, 1))[0]
+        assert reset["event"] == "reset"
+        assert reset["data"]["epoch"] == first["data"]["id"]
+        assert (await asyncio.wait_for(anext(empty), 1)).startswith(": keepalive")
+        assert not events_mod._tails[sid].closed
+    finally:
+        release.set()
+        await empty.aclose()
+        if other is not None:
+            await other.aclose()

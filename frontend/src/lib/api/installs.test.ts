@@ -84,6 +84,13 @@ describe('Installs API', () => {
 			expect(fetchMock.mock.calls[0][1].method).toBe('GET');
 			expect(res.self_instance_id).toBe('inst-a');
 		});
+
+		it('forwards an abort signal so a hung poll can be cancelled', async () => {
+			fetchMock.mockResolvedValueOnce(okJson({ installs: [], self_instance_id: 'inst-a' }));
+			const controller = new AbortController();
+			await listInstalls({ signal: controller.signal });
+			expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal);
+		});
 	});
 
 	describe('getClusterGitState', () => {
