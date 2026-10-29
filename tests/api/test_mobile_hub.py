@@ -4,7 +4,7 @@ from unittest.mock import Mock
 import pytest
 from fastapi import FastAPI, HTTPException, WebSocketException
 from fastapi.testclient import TestClient
-from app.api import mobile, mobile_hub
+from app.api import auth, mobile, mobile_hub
 from app.api.auth import get_paired_client_from_token, hash_api_key, require_admin
 from app.core import account_hub, encryption, pairing
 from app.core import mobile_tool_identity as controller_identity
@@ -821,6 +821,40 @@ def test_same_install_renewal_advances_chat_controller_only_on_new_session(setup
     with pytest.raises(PermissionError):
         controller_identity.revalidate(socket_principal)
     assert database.get_paired_client_by_session_hash(hash_api_key(old_token)) is None
+
+
+@pytest.mark.parametrize('purpose', ['web', 'native'])
+@pytest.mark.parametrize('transport', ['cookie', 'bearer'])
+def test_logout_after_renewal_cannot_revive_chat_controller(setup, monkeypatch, purpose, transport):
+    setup.app.include_router(auth.router)
+    bind()
+    first = enroll_via_api(setup, monkeypatch)
+    owner = store.ownership(store.local_device_id(SERVER, DEVICE))
+    store.confirm_device(owner, True)
+    old_token, socket_principal = bind_chat_controller(setup, first.json()['api_key'], purpose)
+    before = controller_store.read('renewing-chat')
+    renewed = enroll_via_api(setup, monkeypatch, ticket='renewed')
+    assert renewed.status_code == 200, renewed.text
+    assert get_paired_client_from_token(old_token, touch=False) is None
+    with pytest.raises(PermissionError):
+        controller_identity.revalidate(socket_principal)
+
+    setup.cookies.clear()
+    if transport == 'cookie':
+        setup.cookies.set('session', old_token, domain='testserver.local', path='/')
+        headers = {'Origin': str(setup.base_url).rstrip('/')}
+    else:
+        headers = {'Authorization': 'Bearer ' + old_token}
+    response = setup.post('/api/v1/auth/logout', headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json() == {'status': 'ok', 'message': 'Logged out'}
+    assert setup.cookies.get('session') is None
+
+    token = mint_chat_controller(setup, renewed.json()['api_key'], purpose)
+    assert get_paired_client_from_token(token, touch=False) is not None
+    assert controller_store.read('renewing-chat') == before
+    with pytest.raises(PermissionError):
+        controller_identity.revalidate(before)
 
 
 @pytest.mark.parametrize('purpose', ['web', 'native'])

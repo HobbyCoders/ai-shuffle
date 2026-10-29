@@ -280,8 +280,8 @@ def _renew_installation(c, identity, info, device_id, key_hash, expires_at, scop
          expires_at.isoformat(), json.dumps(scopes), keep_decision, now, device_id))
     # Expired slots are not bearer credentials, but their hashes let the next
     # authenticated mint advance matching chat bindings. Carry that continuity
-    # only for a proof-matched, non-revoked installation; logout already cleared
-    # its slots and must never recover continuity from the device id alone.
+    # only for a proof-matched, non-revoked installation. Logout clears even
+    # expired slots; never recover continuity from the device id alone.
     c.execute("""UPDATE paired_clients SET revoked_at=NULL, scopes=%s,
         session_token_hash=CASE WHEN %s THEN session_token_hash ELSE NULL END,
         session_expires_at=NULL, updated_at=%s WHERE id=%s""",

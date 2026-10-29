@@ -684,6 +684,29 @@ def _renew_chat_controllers(cursor, client_id, old_hash, new_hash):
             (new_hash, client_id, old_hash))
 
 
+def clear_expired_paired_client_session(token_hash: str) -> None:
+    """Forget logout's expired continuity proof without authenticating it."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Serialize with renewal/mint on the parent, just like live logout.
+        cursor.execute("""SELECT p.id FROM paired_clients p
+            WHERE p.session_token_hash=%s OR EXISTS (
+                SELECT 1 FROM paired_client_native_sessions n
+                WHERE n.client_id=p.id AND n.token_hash=%s) FOR UPDATE""",
+            (token_hash, token_hash))
+        for client in cursor.fetchall():
+            cursor.execute("""DELETE FROM paired_client_native_sessions
+                WHERE client_id=%s AND token_hash=%s AND expires_at<=NOW()""",
+                (client['id'], token_hash))
+            cursor.execute("""UPDATE paired_clients
+                SET session_token_hash=NULL, session_expires_at=NULL, updated_at=NOW()
+                WHERE id=%s AND session_token_hash=%s
+                AND (session_expires_at IS NULL OR session_expires_at<=NOW())""",
+                (client['id'], token_hash))
+            if cursor.rowcount:
+                cursor.execute('DELETE FROM paired_client_web_reservations WHERE client_id=%s', (client['id'],))
+
+
 def clear_paired_client_session(client_id: str, token_hash: Optional[str] = None) -> bool:
     """Invalidate a controller session without revoking the paired device."""
     with get_db() as conn:
