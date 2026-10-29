@@ -31,6 +31,8 @@ Invites are meant for your home network or a VPN such as Tailscale. Workers sign
 
 **Kept on each worker:** folders and project checkouts, ports and addresses, logs, usage numbers, and the work currently running there.
 
+Saving or clearing a preference asks the network to publish the committed change, just like other shared settings. Permission rules, chat tag membership and new attachment metadata also wake their publishers. Periodic reconciliation still catches changes made outside these writers, and offline workers catch up when they reconnect.
+
 ## Use a chat on another worker
 
 The composer's worker picker lists every online worker. Pick one, and the chat runs there.
