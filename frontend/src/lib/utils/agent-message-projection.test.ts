@@ -156,6 +156,7 @@ describe('agent-message transcript projection', () => {
 		// A Stop before any assistant output still emits this durable event.
 		state = reduce(state, { type: 'turn.aborted', id: 'stop', seq: 3, turn_id: 'running-turn', reason: 'interrupt' });
 		const stoppedInput = { sessionId: 's1', messages: releaseMessages(state), sessionActive: false,
+			sessionUnsettled: state.isStreaming || state.parked || state.liveTurnId !== null,
 			queueAbortSeq: state.peerQueueAbortSeq, pendingPeerMessages: queueClearedFirst ? [] : [peer] };
 		project.update(stoppedInput);
 		const cleared = project.update({ ...stoppedInput, pendingPeerMessages: [] });
@@ -164,6 +165,42 @@ describe('agent-message transcript projection', () => {
 		expect(project.update({ ...stoppedInput, pendingPeerMessages: [peer] })).toBe(cleared);
 		// A later, genuinely new queued message is not retired by the old abort.
 		expect(project.update({ ...stoppedInput, pendingPeerMessages: [pendingPeer('next-peer')] }).at(-1)?.id).toBe('next-peer');
+	});
+
+	it.each([true, undefined])('retains Send now peers through interrupt, successor start and receipt (unsettled=%s)', (sessionUnsettled) => {
+		let state = reduceAll([
+			{ type: 'turn.started', id: 'start', seq: 1, turn_id: 'running-turn' },
+			{ type: 'message.user', id: 'prompt', seq: 2, turn_id: 'running-turn', content: 'Review this' }
+		] as WireEvent[]);
+		const project = createAgentMessageProjection();
+		const build = createTranscriptModelBuilder();
+		const peer = pendingPeer();
+		const options = { sessionId: 's1', isStreaming: true, groupingEnabled: true };
+		const queued = project.update({ sessionId: 's1', messages: releaseMessages(state),
+			pendingPeerMessages: [peer], sessionActive: true, sessionUnsettled: true });
+		const peerRow = queued.at(-1);
+		const groupKey = workLog(build(queued, options)).key;
+		state = reduce(state, { type: 'turn.aborted', id: 'send-now-interrupt', seq: 3, turn_id: 'running-turn', reason: 'interrupt' });
+		// The successor is starting; this interrupt did not cancel the peer queue.
+		const interrupted = project.update({ sessionId: 's1', messages: releaseMessages(state),
+			pendingPeerMessages: [peer], sessionActive: false, sessionUnsettled, queueAbortSeq: state.peerQueueAbortSeq });
+		expect(interrupted.at(-1)).toBe(peerRow);
+		// Even an abort followed by queue removal is inconclusive until settlement.
+		expect(project.update({ sessionId: 's1', messages: releaseMessages(state),
+			pendingPeerMessages: [], sessionActive: false, sessionUnsettled, queueAbortSeq: state.peerQueueAbortSeq }).at(-1)).toBe(peerRow);
+		state = reduce(state, { type: 'turn.started', id: 'successor', seq: 4, turn_id: 'successor-turn', source: 'user' });
+		const gap = project.update({ sessionId: 's1', messages: releaseMessages(state), pendingPeerMessages: [],
+			sessionActive: true, sessionUnsettled: true, queueAbortSeq: state.peerQueueAbortSeq });
+		expect(gap.at(-1)).toBe(peerRow);
+		expect(gap.filter(message => agentDelivery(message))).toHaveLength(1);
+		expect(workLog(build(gap, options)).key).toBe(groupKey);
+		state = reduce(state, { type: 'message.user', id: 'peer-receipt', seq: 5, turn_id: 'successor-turn',
+			queued_turn_id: peer.id, content: envelope(peer) });
+		const delivered = project.update({ sessionId: 's1', messages: releaseMessages(state), pendingPeerMessages: [],
+			sessionActive: true, sessionUnsettled: true, queueAbortSeq: state.peerQueueAbortSeq });
+		expect(delivered.filter(message => agentDelivery(message))).toHaveLength(1);
+		expect(delivered.at(-1)).toMatchObject({ id: peerRow!.id, serverId: peerRow!.serverId, systemData: { delivery: 'delivered' } });
+		expect(workLog(build(delivered, options)).key).toBe(groupKey);
 	});
 
 	it('retires a removed peer after Stop with no running turn, without an abort event', () => {
