@@ -969,11 +969,6 @@
     "reason": "Rotate each log file at this byte size",
     "base_settings": true
   },
-  "FIREBASE_CREDENTIALS": {
-    "kind": "infra",
-    "reason": "Path to Firebase service-account credentials for push delivery",
-    "base_settings": true
-  },
   "FLUID_ANCHOR_BUDGET": {
     "kind": "internal",
     "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Allowed regression count for accepting a learning change",

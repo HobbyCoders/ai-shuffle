@@ -117,7 +117,6 @@ host semantics and do not imply a credential import.
 | `FILE_LOG_BACKUP_COUNT` | Retain this many rotated log files |
 | `FILE_LOG_LEVEL` | Minimum severity persisted to log files |
 | `FILE_LOG_MAX_BYTES` | Rotate each log file at this byte size |
-| `FIREBASE_CREDENTIALS` | Path to Firebase service-account credentials for push delivery |
 | `FLUID_CHILD_ENV_PASSTHROUGH` | Names of additional non-secret host variables allowed into project children |
 | `FLUID_CWD` | Working directory for standalone Fluid sessions |
 | `FLUID_GUIDANCE_HOME` | Alternate home containing harness guidance files |

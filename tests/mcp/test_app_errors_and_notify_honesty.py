@@ -217,6 +217,34 @@ def test_description_forbids_automatic_noise(mock_db):
     for word in ("completion", "parking", "progress", "errors", "watches", "expiry", "updates"):
         assert word in description
     assert "not displayed or seen" in description
+    assert "signed-in, linked" in description and "not_linked" in description
+    assert "a chat needs you" in description
+
+
+def test_notify_devices_not_linked_is_a_normal_unsent_result(mock_db, monkeypatch):
+    from fluid.tools.registry import current_tool_use_id
+    from app.db import database as db
+    from app.db.base import get_db
+    from app.services.attention_dispatcher import dispatcher
+    from app.services.push_notification import push_notification_service
+    db.create_session("session-under-test", "default")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET owner_device_id=%s WHERE id=%s", ("worker", "session-under-test"))
+    monkeypatch.setattr(dispatcher, "worker_id", lambda: "worker")
+    monkeypatch.setattr(dispatcher, "private_needs", lambda sid: set())
+    monkeypatch.setattr(push_notification_service, "is_linked", lambda: False)
+    token = current_tool_use_id.set("unlinked-notify")
+    try:
+        for _ in range(2):  # Even a deduplicated tool retry says why nothing was sent.
+            body = tool_result_json(asyncio.run(_builtin_handlers()["NotifyDevices"].handler(
+                {"title": "Need input", "body": "Please answer in chat"})))
+            assert body["sent"] is False and body["reason"] == "not_linked"
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute("SELECT push_attention_state FROM sessions WHERE id=%s", ("session-under-test",))
+            assert '"pending": true' not in str(c.fetchone()["push_attention_state"])
+    finally:
+        current_tool_use_id.reset(token)
 
 
 def test_stored_error_trace_preserves_final_exception_and_bounded_detail(mock_db):

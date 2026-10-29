@@ -1,4 +1,4 @@
-"""Needs you only: real DB producers with a fake FCM transport, never Google."""
+"""Needs you only: real DB producers with a fake relay transport."""
 import asyncio
 import json
 from unittest.mock import AsyncMock
@@ -38,7 +38,13 @@ async def test_zero_nonzero_extra_clear_and_new_episode(chat):
     assert [c["action"] for c in commands(sender)] == ["alert", "update"]
     assert commands(sender)[0]["episode"] == commands(sender)[1]["episode"]
     assert "private text" not in json.dumps(commands(sender))
-    assert commands(sender)[0]["body"] == "A chat needs you: Review"
+    assert commands(sender)[0]["body"] == "A chat needs you"
+    assert "Review" not in json.dumps(commands(sender))
+    # Renaming a chat cannot change an attention episode or create another send.
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET title=%s WHERE id=%s", ("Renamed private chat", "push-chat"))
+    await dispatcher.reconcile("push-chat")
+    assert len(commands(sender)) == 2
     interactions.answer_interaction(first["id"], {})
     await dispatcher.reconcile("push-chat")
     interactions.cancel_interaction(second["id"])
@@ -275,11 +281,11 @@ async def test_sdk_metadata_never_delays_private_card_or_broadcast(chat, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_no_credentials_is_not_a_future_alert_backlog(chat):
+async def test_not_linked_is_not_a_future_alert_backlog(chat):
     dispatcher, sender = chat
-    sender.send_to_all_devices.return_value = [NotificationResult(False, simulated=True)]
+    sender.send_to_all_devices.return_value = [NotificationResult(False, not_linked=True)]
     interactions.create_interaction("push-chat", "question", {}, 120)
-    assert not (await dispatcher.reconcile("push-chat"))["sent"]
+    assert await dispatcher.reconcile("push-chat") == {"sent": False, "reason": "not_linked"}
     sender.send_to_all_devices.return_value = [NotificationResult(True)]
     await dispatcher.reconcile("push-chat")
     assert len(commands(sender)) == 1

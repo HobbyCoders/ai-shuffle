@@ -232,6 +232,9 @@ def init_core() -> None:
     # booting on one database would otherwise race the seeds below.
     with database.boot_init_lock():
         init_database()
+        # Publisher sender keys belong only in the account-hub relay. Run on
+        # every boot, even when schema migrations have already been applied.
+        database.delete_system_setting("fcm_service_account")
         run_migrations()
 
         from app.db import mobile_tools, mobile_tool_identity, remote_tasks

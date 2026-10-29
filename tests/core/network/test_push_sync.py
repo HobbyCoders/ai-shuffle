@@ -1,4 +1,4 @@
-"""Sender keys and attention receipts follow the owner's encrypted network."""
+"""Retired sender keys never sync; attention receipts still follow ownership."""
 import json
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, patch
@@ -10,7 +10,7 @@ from app.core.config import settings
 from app.db import database as db
 from app.db.base import get_db
 from app.network import catalog, engine, policy
-from app.services import push_credentials, attention_dispatcher as attention
+from app.services import attention_dispatcher as attention
 from app.services.push_notification import NotificationResult
 from tests.core.network.harness import Worker, exchange, join
 
@@ -31,32 +31,50 @@ def scan():
     engine.scan_all(include_catalog=False, collections=["system_settings"])
 
 
-def test_sender_secret_synced_encrypted_rotated_and_deleted(workers):
+def test_sender_key_excluded_even_from_an_older_peer(workers, monkeypatch):
     a, b = workers("a"), workers("b")
-    assert policy.is_shared_setting_key(push_credentials.SETTING_KEY)
+    key = "fcm_service_account"
+    assert not policy.is_shared_setting_key(key)
     assert "value" in policy.collection("system_settings").encrypted
+    # Billing and other encrypted settings keep their existing policy.
+    assert policy.is_shared_setting_key("provider_billing_key:test")
     with a.active():
         engine.create_network("Push tests")
-        encrypted = encryption.encrypt_value(json.dumps({"test": "sender-account-one"}))
-        db.set_system_setting(push_credentials.SETTING_KEY, encrypted)
+        db.set_system_setting(key, encryption.encrypt_value("retired-test-sender"))
         scan()
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute("SELECT COUNT(*) AS n FROM sync_records WHERE collection='system_settings' AND record_id=%s", (key,))
+            assert c.fetchone()["n"] == 0
+        # Simulate a pre-relay worker which still considers the key shareable.
+        current = policy.is_shared_setting_key
+        with monkeypatch.context() as older:
+            older.setattr(policy, "is_shared_setting_key", lambda k: k == key or current(k))
+            scan()
     join(a, b)
     with b.active():
-        stored = db.get_system_setting(push_credentials.SETTING_KEY)
-        assert encryption.is_encrypted(stored) and stored != encrypted
-        assert push_credentials.load_account()[1] == {"test": "sender-account-one"}
-    with a.active():
-        db.set_system_setting(push_credentials.SETTING_KEY, encryption.encrypt_value(json.dumps({"test": "rotated"})))
-        scan()
-    exchange(a, b)
-    with b.active():
-        assert push_credentials.load_account()[1] == {"test": "rotated"}
-    with a.active():
-        db.delete_system_setting(push_credentials.SETTING_KEY)
-        scan()
-    exchange(a, b)
-    with b.active():
-        assert db.get_system_setting(push_credentials.SETTING_KEY) is None
+        assert db.get_system_setting(key) is None
+
+
+def test_startup_deletes_retired_key_on_every_boot(mock_db, monkeypatch):
+    from app.core import startup
+    from app.db import base
+    db.set_system_setting("fcm_service_account", "retired-ciphertext")
+    for name in ("propagate_child_priority", "_reject_legacy_sqlite", "ensure_directories", "init_database"):
+        monkeypatch.setattr(startup, name, lambda: None)
+    monkeypatch.setattr(base, "init_pool", lambda **kwargs: None)
+
+    class AfterCleanup(Exception):
+        pass
+
+    def stop_after_cleanup():
+        raise AfterCleanup
+
+    monkeypatch.setattr(startup, "run_migrations", stop_after_cleanup)
+    for _ in range(2):
+        with pytest.raises(AfterCleanup):
+            startup.init_core()
+        assert db.get_system_setting("fcm_service_account") is None
 
 
 @pytest.mark.asyncio
