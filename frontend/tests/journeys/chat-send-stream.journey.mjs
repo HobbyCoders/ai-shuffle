@@ -46,6 +46,11 @@ async function sendAndSettle({ page, mark, log }, { text, replyText, messagesAtL
 	const token = text.split(' ').find((word) => word.startsWith('tok-'));
 	expect((await countUserRows(page, token)) === 1, `the user's message (${token}) shows exactly once`);
 	expect((await composer(page).innerText()).trim() === '', 'the composer is empty after the send');
+	const selection = await page.evaluate(() => ({
+		session: JSON.parse(sessionStorage.getItem('ai-shuffle-active-session') || 'null')?.sessionId,
+		view: JSON.parse(localStorage.getItem('ai-shuffle-layout') || 'null')?.activeView
+	}));
+	expect(!!selection.session && selection.session === selection.view?.sessionId, 'the layout follows the sent chat, including a first send during boot');
 }
 
 await runJourney({

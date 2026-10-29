@@ -74,7 +74,7 @@
 		},
 		{
 			"why": "sending, streaming and rendering a reply",
-			"journeys": ["chat-send-stream", "stop-midstream", "queue-while-busy", "reload-midstream"],
+			"journeys": ["chat-send-stream", "send-during-init", "stop-midstream", "queue-while-busy", "reload-midstream"],
 			"globs": [
 				"frontend/src/lib/components/chat/AssistantMessage*",
 				"frontend/src/lib/components/chat/UserMessage*",

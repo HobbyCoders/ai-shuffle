@@ -35,6 +35,7 @@
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { createdChatToFollow } from './follow-created-chat';
 	import { chatChangedDuringBoot } from './boot-landing';
+	import { finishBootReconciliation, getInitGeneration, hasBootSendClaim } from '$lib/stores/session/session-init';
 	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
 	import { registerSearchShortcut } from '$lib/services/search-shortcut';
 	import { settingsNav, encodeTarget } from '$lib/settings/navigation.svelte';
@@ -214,12 +215,14 @@
 		// Initialize data. A deep link is bound here, before init awaits, in
 		// place of the chat this tab last had open: that chat never shows and a
 		// send never reaches it while the first loads run.
-		await activeSession.init({ deepLinkSessionId });
+		const initializing = activeSession.init({ deepLinkSessionId });
+		const initGeneration = getInitGeneration();
+		await initializing;
 		// The layout's explicit New Chat wins over an older backend session
 		// snapshot (see below). Settle that now, not after the loads: until then
 		// the composer was bound to the old session, so a send went there and the
 		// late newChat then wiped it from view (#1636).
-		const layoutNewChatWon = !navigationClaimed && !!$activeSession?.sessionId &&
+		const layoutNewChatWon = !navigationClaimed && !hasBootSendClaim(initGeneration) && !!$activeSession?.sessionId &&
 			$activeView?.type === 'session' && ($activeView.sessionId ?? null) === null;
 		if (layoutNewChatWon) activeSession.newChat();
 		// What init left open. The composer works during the loads below, so a
@@ -268,7 +271,7 @@
 		const hasDraft = hasComposerDraft($activeSession.draft);
 		// A first message typed and sent during the loads: its chat (or the send
 		// still creating it) is what the user is looking at now (#811).
-		const changedDuringLoads = chatChangedDuringBoot(sessionAfterInit, $activeSession);
+		const changedDuringLoads = hasBootSendClaim(initGeneration) || chatChangedDuringBoot(sessionAfterInit, $activeSession);
 		if (!$activeView) {
 			if (restoredSessionId) {
 				followRestoredLane();
@@ -297,6 +300,7 @@
 			followRestoredLane();
 		}
 		bootReconciled = true;
+		finishBootReconciliation(initGeneration);
 
 		// Deep-link: the Android shell opens `/?session=<id>` when a notification
 		// is tapped. Open that session explicitly — it outranks the restored

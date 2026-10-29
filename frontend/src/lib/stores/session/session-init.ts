@@ -115,6 +115,26 @@ export function bumpInitGeneration(): number {
 	return next;
 }
 
+// A send can create its chat before init's preferences arrive (#821). Keep
+// this claim separate from the navigation epoch: adopting one's own new chat
+// is NOT navigation (ChatInput uses that distinction for draft recovery and
+// collapsing the phone composer). AppPage retires it after both boot reconciles.
+let bootSend: { generation: number; pendingSend: symbol | null } | null = null;
+
+export function claimBootSend(): void {
+	if (bootSend?.generation === getInitGeneration()) {
+		bootSend.pendingSend ??= Symbol('boot-send');
+	}
+}
+
+export function hasBootSendClaim(generation: number): boolean {
+	return bootSend?.generation === generation && bootSend.pendingSend !== null;
+}
+
+export function finishBootReconciliation(generation: number): void {
+	if (bootSend?.generation === generation) bootSend = null;
+}
+
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 export function createSessionInit(deps: SessionInitDeps) {
@@ -135,6 +155,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 	 */
 	async function init(options: { deepLinkSessionId?: string | null } = {}) {
 		const initGen = bumpInitGeneration();
+		bootSend = { generation: initGen, pendingSend: null };
 
 		const deepLinkSessionId = options.deepLinkSessionId || null;
 		const skipRestore = getSkipRestore() || deepLinkSessionId !== null;
@@ -188,7 +209,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 					: switcher.loadPersistedSession(),
 			]);
 
-			if (initGen !== getInitGeneration()) {
+			if (initGen !== getInitGeneration() || hasBootSendClaim(initGen)) {
 				return;
 			}
 
@@ -311,7 +332,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 			wsConn.activate();
 			wsConn.connect();
 		} catch (error) {
-			if (initGen !== getInitGeneration()) return;
+			if (initGen !== getInitGeneration() || hasBootSendClaim(initGen)) return;
 			console.error('[ActiveSession] Failed to initialize:', error);
 			// Nothing adopted: leave the restore window the store opened at load.
 			update(s => (s.sessionId ? s : { ...s, isRestoringSession: false }));
@@ -323,6 +344,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 	// ─── destroy ─────────────────────────────────────────────────────
 
 	function destroy() {
+		bootSend = null;
 		bumpInitGeneration();
 		disconnectFn();
 		feedController.stop();

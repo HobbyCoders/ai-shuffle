@@ -103,6 +103,7 @@ await runJourney({
 				expect(Number(state) === 2, `a fresh conversation of 2 messages, not ${state}`);
 				expect((await countUserRows(page, ctx.old)) === 0, 'no message from before the clear came back');
 				expect((await countUserRows(page, fresh)) === 1, 'the new message shows once');
+				expect(await chatIdByToken(page, fresh) === ctx.chatId, 'the first send after clearing keeps the existing chat');
 			}
 		}
 	],

@@ -10,7 +10,7 @@ vi.mock('./v2/feed-controller', () => ({
 	},
 }));
 
-import { bumpInitGeneration, createSessionInit, setSkipRestore, tabWillRestoreChat, type SessionInitDeps } from './session-init';
+import { bumpInitGeneration, claimBootSend, createSessionInit, finishBootReconciliation, getInitGeneration, hasBootSendClaim, setSkipRestore, tabWillRestoreChat, type SessionInitDeps } from './session-init';
 import { feedController } from './v2/feed-controller';
 import type { ActiveSessionState, PersistedSession } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
@@ -85,6 +85,32 @@ function makeInit(
 
 	return { ...createSessionInit(deps), getState, deps };
 }
+
+describe('boot send claim lifetime (#821)', () => {
+	beforeEach(() => sessionStorage.clear());
+	it('keeps navigation identity unchanged and retires claims after reconciliation', async () => {
+		const { init } = makeInit(null);
+		await init();
+		const generation = getInitGeneration();
+		claimBootSend();
+		expect(hasBootSendClaim(generation)).toBe(true);
+		expect(getInitGeneration()).toBe(generation);
+		finishBootReconciliation(generation);
+		claimBootSend(); // normal post-boot sends do not leave a sticky claim
+		expect(hasBootSendClaim(generation)).toBe(false);
+	});
+	it('does not carry a claim into another boot or let an old reconcile clear a new claim', async () => {
+		const { init, destroy } = makeInit(null);
+		await init(); const old = getInitGeneration(); claimBootSend();
+		await init(); const current = getInitGeneration();
+		expect(hasBootSendClaim(old)).toBe(false);
+		expect(hasBootSendClaim(current)).toBe(false);
+		claimBootSend(); finishBootReconciliation(old);
+		expect(hasBootSendClaim(current)).toBe(true);
+		destroy();
+		expect(hasBootSendClaim(current)).toBe(false);
+	});
+});
 
 describe('session-init · deep link replaces the restored chat (#1923 follow-up)', () => {
 	beforeEach(() => {

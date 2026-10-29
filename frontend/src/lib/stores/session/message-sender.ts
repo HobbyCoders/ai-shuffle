@@ -26,6 +26,7 @@ import { getDefaultModel, getServerDefaultModel } from '$lib/constants/models';
 import { composerPreferences } from '../composer-preferences';
 import { sendableComposerBinding } from './composer-binding';
 import { registerReloadBlocker } from '$lib/services/app-update';
+import { claimBootSend } from './session-init';
 
 // ─── Sends in flight ─────────────────────────────────────────────────────────
 
@@ -459,6 +460,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// The same spend point records who owns the session about to be
 			// created, so every bind below starts with a known owner.
 			if (!_state.sessionId) {
+				// Own the live compose before worktree creation or the socket can
+				// await: init and BOTH layout reconciles must leave it alone (#821).
+				claimBootSend();
 				sessionEphemeralCache.remove('__new_chat__');
 				claimNewSessionWorker();
 			}
