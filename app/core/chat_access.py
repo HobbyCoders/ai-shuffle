@@ -416,7 +416,7 @@ async def _tool_attention_id(session_id: str) -> str | None:
         return await run_sync(latest_tool_id, session_id)
     except Exception:
         # Attention metadata must never break a private card (including brokers
-        # used without a supervised database). Its random card ID is the fallback.
+        # used without a supervised database). Never push a random replay identity.
         return None
 
 
@@ -628,6 +628,27 @@ class Broker:
         """The chat whose panel shows this session's items: its main chat, else itself."""
         return self._main.get(session_id, session_id)
 
+    def _track_attention(self, item: AccessRequest | Action) -> None:
+        # A phone's dedupe lookup must never delay registering/broadcasting the
+        # owner's private card. Fluid already supplies its identity synchronously.
+        from fluid.tools.registry import current_tool_use_id
+        item.attention_id = item.attention_id or current_tool_use_id.get()
+        if item.attention_id:
+            return
+        pending = self.requests if isinstance(item, AccessRequest) else self.actions
+        async def resolve():
+            identity = await _tool_attention_id(item.session_id)
+            with self._pending_lock:
+                if pending.get(item.id) is not item:
+                    return
+                item.attention_id = identity
+            if identity:
+                from app.services.attention_dispatcher import wake
+                wake(item.session_id)
+        task = asyncio.get_running_loop().create_task(resolve())
+        self._notifications.add(task)
+        task.add_done_callback(self._notifications.discard)
+
     def _notify(self, session_id: str, owner: tuple, *, saved: bool = False) -> None:
         try:
             loop = asyncio.get_running_loop()
@@ -795,10 +816,10 @@ class Broker:
                                 suggested_path=suggested_path, service_provider=service_provider,
                                 suggested_url=suggested_url, plugin_id=plugin, plugin_service=service,
                                 suggested_host=suggested_host, suggested_port=suggested_port,
-                                suggested_username=suggested_username, saved_id=saved_id,
-                                attention_id=await _tool_attention_id(session_id))
+                                suggested_username=suggested_username, saved_id=saved_id)
         with self._pending_lock:
             self.requests[request.id] = request
+        self._track_attention(request)
         self._notify(session_id, owner)
         keep_pending = False
         try:
@@ -1367,9 +1388,10 @@ class Broker:
             raise AccessDenied("Too many pending actions; resolve them in Chat access.")
         action = Action(uuid.uuid4().hex, grant.id, session_id, operation,
                         dict(arguments), min(grant.expires_at, time.time() + 240),
-                        asyncio.get_running_loop().create_future(), await _tool_attention_id(session_id))
+                        asyncio.get_running_loop().create_future())
         with self._pending_lock:
             self.actions[action.id] = action
+        self._track_attention(action)
         self._notify(session_id, grant.owner)
         try:
             await self._show_in_main(session_id, grant.owner)

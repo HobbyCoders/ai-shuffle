@@ -201,8 +201,8 @@ class AttentionDispatcher:
         now = time.time()
         # Push belongs to the executing session, even when the UI surfaces a
         # child's private-access card in its parent panel on another worker.
-        return {"access:" + (item.attention_id or item.id) for item in list(broker.requests.values()) + list(broker.actions.values())
-                if item.session_id == session_id and item.expires_at > now
+        return {"access:" + item.attention_id for item in list(broker.requests.values()) + list(broker.actions.values())
+                if item.attention_id and item.session_id == session_id and item.expires_at > now
                 and not (item.result if hasattr(item, "result") else item.decision).done()}
 
     async def reconcile(self, session_id, explicit_id=None):

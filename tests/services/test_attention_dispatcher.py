@@ -181,6 +181,59 @@ async def test_private_access_waits_and_approvals_use_executing_session(chat, mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tool_id", ["sdk-access-call", None])
+async def test_sdk_metadata_never_delays_private_card_or_broadcast(chat, monkeypatch, tool_id):
+    from app.core import chat_access
+    from app.core.sync_engine import sync_engine
+    from fluid.tools.registry import current_tool_use_id
+    broker = chat_access.Broker()
+    monkeypatch.setattr(chat_access, "broker", broker)
+    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=("worker-a", "runner", "user-7")))
+    monkeypatch.setattr(broker, "_show_in_main", AsyncMock())
+    monkeypatch.setattr(chat_access, "_defer_if_away", AsyncMock())
+    broadcast = AsyncMock()
+    monkeypatch.setattr(sync_engine, "_broadcast_user_message", broadcast)
+    identity = asyncio.get_running_loop().create_future()
+    async def slow_metadata(session_id):
+        return await identity
+    monkeypatch.setattr(chat_access, "_tool_attention_id", slow_metadata)
+    dispatcher, sender = chat
+    monkeypatch.setattr(dispatcher, "private_needs", attention.AttentionDispatcher.private_needs)
+    token = current_tool_use_id.set(None)
+    task = asyncio.create_task(broker.request("push-chat", "machine", "Private resource"))
+    try:
+        await asyncio.sleep(0)
+        assert len(broker.requests) == 1  # Visible before metadata can complete.
+        assert next(iter(broker.requests.values())).attention_id is None
+        await dispatcher.reconcile("push-chat")
+        sender.send_to_all_devices.assert_not_awaited()  # No random identity can alert first.
+        broadcast.assert_awaited_with("user-7", {
+            "type": "chat_access_changed", "session_id": "push-chat", "pending": 1})
+        identity.set_result(tool_id)
+        await asyncio.gather(*list(broker._notifications))
+        await dispatcher.reconcile("push-chat")
+        if tool_id is None:
+            sender.send_to_all_devices.assert_not_awaited()
+            return  # The owner card stays usable, never push a random card ID.
+        broker.dismiss_pending("push-chat")
+        with pytest.raises(chat_access.AccessDenied):
+            await task
+        await dispatcher.reconcile("push-chat")
+        await broker.request("push-chat", "service", "Private resource")
+        await asyncio.gather(*list(broker._notifications))
+        await dispatcher.reconcile("push-chat")
+        assert [c["action"] for c in commands(sender)] == ["alert", "clear", "update"]
+    finally:
+        current_tool_use_id.reset(token)
+        broker.dismiss_pending("push-chat")
+        if not identity.done():
+            identity.cancel()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, *list(broker._notifications), return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_no_credentials_is_not_a_future_alert_backlog(chat):
     dispatcher, sender = chat
     sender.send_to_all_devices.return_value = [NotificationResult(False, simulated=True)]
@@ -202,11 +255,15 @@ async def test_private_action_producer_and_denial_clear(chat, monkeypatch):
     dispatcher, sender = chat
     monkeypatch.setattr(dispatcher, "private_needs", attention.AttentionDispatcher.private_needs)
     grant = chat_access.Grant("grant", "push-chat", owner, "Resource", "service", "redacted", attention.time.time() + 120)
+    # The SDK producer records the canonical tool before requesting approval.
+    session_events.append_events("push-chat", [{"type": "tool.use", "payload": {
+        "id": "sdk-private-action", "name": "mcp__ai_shuffle__ChatHttpRequest"}}])
     task = asyncio.create_task(broker.approve(grant, "http", {"private": "not transmitted"}))
     try:
         async with asyncio.timeout(2):
             while not broker.actions:
                 await asyncio.sleep(0.01)
+        await asyncio.gather(*list(broker._notifications))
         await dispatcher.reconcile("push-chat")
         next(iter(broker.actions.values())).decision.set_result(False)
         with pytest.raises(chat_access.AccessDenied):

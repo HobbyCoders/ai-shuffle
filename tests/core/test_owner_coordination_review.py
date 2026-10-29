@@ -322,7 +322,8 @@ async def test_deleted_starter_keeps_report_on_child(owner, monkeypatch):
     await turn_scheduler.on_turn_settled(receipt["session_id"], receipt["turn_id"], "completed")
     await turn_scheduler.on_turn_settled(receipt["session_id"], receipt["turn_id"], "completed")
     assert sessions.get_session("starter") is None
-    assert len(pushed) == 1
+    # A deferred completion report persists in the bell/chat, never phone push.
+    assert pushed == []
     events = session_events.get_events(receipt["session_id"])
     assert sum(e["event_type"] == "orchestration.report_deferred" for e in events) == 1
 
