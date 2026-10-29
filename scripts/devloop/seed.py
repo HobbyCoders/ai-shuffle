@@ -488,7 +488,13 @@ def _project_v2_row(project_v2_id: str | None) -> dict | None:
     return projects_v2.get_project_v2(project_v2_id)
 
 
-SEEDS = {"default": seed_default}
+async def seed_long() -> dict:
+    from scripts.devloop.seed_long import seed_long as apply_long
+
+    return await apply_long()
+
+
+SEEDS = {"default": seed_default, "long": seed_long}
 
 
 def _write_result(result: dict) -> None:
