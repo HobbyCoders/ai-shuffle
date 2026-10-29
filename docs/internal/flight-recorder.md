@@ -18,7 +18,7 @@ the patterns that mean something went wrong:
 | `errors` | Uncaught errors, unhandled rejections and `console.error`, with repeats grouped. |
 | `failed_requests` | `fetch` or XHR calls that got HTTP 400 or above or failed on the network. When 3 or more URLs under one parent fail the same way, they are reported as one `parent/*` anomaly. The page's own aborts are shown in the timeline but not flagged. |
 | `duplicate_rows` | The same transcript `data-ui-row` id appeared in the page twice. |
-| `recording_gap` | Part of the recording was lost: a full page load to another origin, or the size cap was reached. |
+| `recording_gap` | Part of the recording was lost: a full page load to another origin, the earliest entries trimmed to fit a page-load handoff, or later entries dropped at the size cap. |
 | `tab_changed` | Steps ran in another tab (after `browser_tabs` select or create), so the recording does not cover them. Only the browser tool reports it. |
 
 A **step** is one user action. Steps are separated by marks, and reversals and
@@ -98,8 +98,9 @@ The recording keeps going through SvelteKit client routing (same document). It
 also survives full page loads within the same origin: the old document hands
 its timeline over through `sessionStorage`, and an init script resumes it in
 the new one. That handoff is capped at 1,000,000 characters (the oldest
-entries go first) and removed when the recording stops; `start` also clears
-any handoff an earlier recording left behind.
+entries go first, reported as a `recording_gap` naming how many and up to when)
+and removed when the recording stops; `start` also clears any handoff an
+earlier recording left behind.
 
 `browser_act`, `browser_navigate`, `browser_eval`, `browser_upload` and
 `browser_resize` mark themselves only on the recorded tab. Steps on another

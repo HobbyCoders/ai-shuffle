@@ -432,7 +432,11 @@ export function detectDuplicateRows(recording) {
   }];
 }
 
-/** recording_gap: part of the recording was lost (a full navigation without a handoff, or caps). */
+/**
+ * recording_gap: part of the recording was lost (a full navigation without a
+ * handoff, the earliest entries trimmed to fit a page-load handoff, or the
+ * size cap dropping later entries).
+ */
 export function detectRecordingGaps(recording) {
   const timeline = entriesOf(recording);
   const anomalies = [];
@@ -447,6 +451,15 @@ export function detectRecordingGaps(recording) {
     }
   });
   const stats = recording && recording.stats;
+  if (stats && stats.handoffDropped > 0) {
+    const before = stats.handoffDroppedBeforeMs || 0;
+    anomalies.push({
+      kind: 'recording_gap',
+      indices: [],
+      t: [0, before],
+      message: `${stats.handoffDropped} earliest entries (before ${ms(before)}) were dropped to fit the page-load handoff`,
+    });
+  }
   if (stats && stats.truncated) {
     anomalies.push({
       kind: 'recording_gap',

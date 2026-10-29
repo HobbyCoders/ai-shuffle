@@ -333,9 +333,25 @@ describe.skipIf(!browserPath)("flight recorder in a real browser", () => {
           retry.open("GET", "/boom?first=1");
           retry.send();
         }));
+        // The page's onreadystatechange runs before the recorder's listener (it
+        // was set before the first send) and resends from DONE. Chromium then
+        // fires no load/loadend for an HTTP failure, and an error's events
+        // arrive with readyState back at 1.
+        for (const [failing, next] of [["/boom?early=1", "/missing?early=2"], ["http://127.0.0.1:1/early", "/missing?early=3"]]) {
+          const early = new XMLHttpRequest();
+          out.push(await new Promise<number>((resolve) => {
+            let first = true;
+            early.onreadystatechange = () => {
+              if (early.readyState !== 4) return;
+              if (first) { first = false; early.open("GET", next); early.send(); } else resolve(early.status);
+            };
+            early.open("GET", failing);
+            early.send();
+          }));
+        }
         return { out, refused };
       });
-      expect(statuses).toEqual({ out: [500, 404, 200, 0, 500, 404], refused: "SecurityError" });
+      expect(statuses).toEqual({ out: [500, 404, 200, 0, 500, 404, 404, 404], refused: "SecurityError" });
       const rec = await stop();
       const requests = rec.timeline.filter((e) => e.kind === "request").map((e) => `${e.method} ${e.url} ${e.status ?? e.error}`);
       expect(requests).toEqual([
@@ -345,8 +361,12 @@ describe.skipIf(!browserPath)("flight recorder in a real browser", () => {
         "GET /boom 500",
         "GET /boom?… 500",
         "GET /missing?… 404",
+        "GET /boom?… 500",
+        "GET /missing?… 404",
+        "GET http://127.0.0.1:1/early network error",
+        "GET /missing?… 404",
       ]);
-      expect(rec.stats.failedRequests).toBe(6);
+      expect(rec.stats.failedRequests).toBe(10);
     });
 
     it("keeps its wrappers transparent: same results, errors and this, no page getters run", async () => {
@@ -417,13 +437,24 @@ describe.skipIf(!browserPath)("flight recorder in a real browser", () => {
       const saved = await page.evaluate((key) => {
         const text = sessionStorage.getItem(key) ?? "";
         const parsed = JSON.parse(text);
-        return { length: text.length, first: parsed.timeline[0], last: parsed.timeline.at(-1).label, truncated: parsed.stats.truncated, dropped: parsed.stats.dropped };
+        return {
+          length: text.length, first: parsed.timeline[0], last: parsed.timeline.at(-1).label,
+          truncated: parsed.stats.truncated, dropped: parsed.stats.dropped,
+          handoffDropped: parsed.stats.handoffDropped, before: parsed.stats.handoffDroppedBeforeMs,
+          // What the analyzer makes of the trimmed handoff once a new document resumes it.
+          gaps: (window as any).__flightRecorder.analyze(parsed).filter((a: any) => a.kind === "recording_gap").map((a: any) => a.message),
+        };
       }, `__flightRecorder:${big.id}`);
       expect(saved.length).toBeLessThanOrEqual(1_000_000);
       expect(saved.first.message).toMatch(/^\d+ earlier entries dropped to fit the page-load handoff$/);
       expect(saved.last).toMatch(/^step 19999 /);
-      expect(saved.truncated).toBe(true);
-      expect(saved.dropped).toBeGreaterThan(10000);
+      // The EARLIEST entries went: not the size cap, which drops later ones.
+      expect(saved.truncated).toBe(false);
+      expect(saved.dropped).toBe(0);
+      expect(saved.handoffDropped).toBeGreaterThan(10000);
+      expect(saved.first.message).toBe(`${saved.handoffDropped} earlier entries dropped to fit the page-load handoff`);
+      expect(saved.before).toBe(saved.first.t);
+      expect(saved.gaps).toEqual([`${saved.handoffDropped} earliest entries (before ${saved.before}ms) were dropped to fit the page-load handoff`]);
       // The live recording is untouched by the trim.
       const rec = await stop();
       expect(rec.timeline.filter((e) => e.kind === "mark")).toHaveLength(20000);
