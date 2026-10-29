@@ -46,7 +46,6 @@ host semantics and do not imply a credential import.
 | `ALL_PROXY` | Fallback outbound proxy |
 | `all_proxy` | Lowercase POSIX alias for ALL_PROXY outbound proxy policy |
 | `ANDROID_HOME` | Locate existing Android SDK |
-| `ANDROID_SDK_DIR` | Directory for the managed or opted-in external Android SDK |
 | `ANDROID_SDK_ROOT` | Locate existing Android SDK (legacy alias) |
 | `API_DOCS_ENABLED` | Expose unauthenticated interactive API schema endpoints |
 | `APPDATA` | Windows roaming application-data root |

@@ -88,7 +88,6 @@
 	import { terminals } from '$lib/stores/terminals.svelte';
 	import { terminalAccess } from '$lib/terminal/gating';
 	import type { TerminalToggle } from '$lib/components/chat/composer-shell';
-	import { phonePanel } from '$lib/stores/phone-panel.svelte';
 	import { htmlArtifactPanel } from '$lib/stores/html-artifact-panel.svelte';
 	import HtmlArtifactPanel from '$lib/components/chat/HtmlArtifactPanel.svelte';
 	import { preloadWhenIdle, runWhenIdle } from '$lib/components/deck/lazy/lazy-component';
@@ -99,7 +98,6 @@
 		BrowserSidePanel,
 		ChangedFilesPanelLazy,
 		TerminalSidePanel,
-		PhoneSidePanel,
 		type FeaturePanelKey
 	} from '$lib/components/deck/lazy/panels';
 
@@ -299,8 +297,6 @@
 	});
 	function closeSidePanel() {
 		if (activeSidePanel.active === 'browser') browserPanel.closePanel(activeTab?.sessionId ?? null);
-		// Closing the phone is remembered: the agent's later calls leave it closed.
-		else if (activeSidePanel.active === 'phone' && activeTab?.sessionId) phonePanel.close(activeTab.sessionId);
 		else sidePanel.close(panelScope);
 	}
 
@@ -371,19 +367,6 @@
 			toggle: () => terminals.toggle(sid),
 			preload: () => void TerminalSidePanel.preload(),
 		};
-	});
-	// The Phone panel has no composer toggle: it opens when the agent uses the
-	// Emulator tools (feed controller) or from "Show phone" on such a tool row.
-	// Both need to know whether this worker has the emulator API and whether
-	// the chat runs here, so ask once a chat is open and keep the remote flag
-	// current.
-	$effect(() => {
-		if (terminalSessionId) untrack(() => void phonePanel.ensureCapability());
-	});
-	$effect(() => {
-		const sid = terminalSessionId;
-		const remote = activeIsRemote;
-		if (sid) untrack(() => phonePanel.noteRemote(sid, remote));
 	});
 	/** The chat column's width: the notification dock centres on it, not on the side panel. */
 	let chatColumnWidth = $state(0);
@@ -1111,8 +1094,6 @@
 						<LazyPanel handle={TerminalSidePanel} props={{ sessionId: activeTab.sessionId, panelActions, mobile: panelOverlay }} label="the terminal" fallbackActions={panelActions} />
 					{:else if activeSidePanel.active === 'artifact' && activeTab?.sessionId && activeArtifact}
 						<HtmlArtifactPanel href={activeArtifact.href} filename={activeArtifact.filename} sessionId={activeTab.sessionId} {panelActions} mobile={panelOverlay} />
-					{:else if activeSidePanel.active === 'phone'}
-						<LazyPanel handle={PhoneSidePanel} props={{ panelActions, mobile: panelOverlay }} label="the phone" fallbackActions={panelActions} />
 					{:else if activeSidePanel.active === 'changes' && activeProject}
 						<LazyPanel handle={ChangedFilesPanelLazy} label="changed files" fallbackActions={panelActions}
 							props={{ projectId: activeProject, open: true, reviewMode: true, embedded: true,

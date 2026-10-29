@@ -97,11 +97,6 @@ LOW_CALLS = [
     ("mcp__browser__browser_navigate", {"url": "http://127.0.0.1:5173"}),
     ("mcp__computer-use__left_click", {"coordinate": [1, 2]}),
     ("run_python", {"code": "hits = Grep(pattern='x')\nprint(len(hits))"}),
-    # Driving the worker's emulator; installing an APK from the project.
-    ("mcp__builtins__Emulator", {"action": "tap", "x": 10, "y": 20}),
-    ("Emulator", {"action": "start"}),
-    ("Emulator", {"action": "install", "path": os.path.join(ROOT, "app-debug.apk")}),
-    ("EmulatorScreenshot", {}),
 ]
 
 HIGH_CALLS = [
@@ -160,10 +155,6 @@ HIGH_CALLS = [
     ("StartSession", {"title": "x", "prompt": "x", "request_id": "r", "worker": "ServerWorker"}),
     ("HandOffSession", {"worker": "ServerWorker"}),
     ("Forget", {"memory_id": "m", "expected_revision": 1, "confirm": True}),
-    # The Android SDK download (a license and ~2 GB); an APK from outside the projects.
-    ("Emulator", {"action": "setup", "accept_license": True}),
-    ("Emulator", {"action": "install", "path": OUTSIDE}),
-    ("Emulator", {"action": "install"}),
 ]
 
 

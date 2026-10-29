@@ -12,10 +12,6 @@
 	 * see is useless. Generated media (an image, video, audio clip or file a
 	 * completed generation made) follows the same rule (#784).
 	 *
-	 * An Emulator / EmulatorScreenshot row carries "Show phone" beside it when
-	 * the worker has the emulator and the Phone panel is not showing. The panel
-	 * opens by itself when the agent drives the phone live; this is the way back
-	 * after the user closed it or reopened the chat.
 	 */
 	import { untrack } from 'svelte';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
@@ -27,9 +23,7 @@
 	import { liveToolLabel, toolPreview, toolStateLabel } from '$lib/utils/tool-preview';
 	import { isDismissedQuestion, isPostedQuestion, QUESTION_DISMISSED_LABEL } from './question-outcome';
 	import { stripUntrustedFence } from '$lib/utils/untrusted-fence';
-	import { phonePanel, isEmulatorTool } from '$lib/stores/phone-panel.svelte';
-	import { PhoneSidePanel } from '$lib/components/deck/lazy/panels';
-	import { Download, Smartphone } from 'lucide-svelte';
+	import { Download } from 'lucide-svelte';
 	import {
 		mediaHtml,
 		resolveMediaUrl,
@@ -96,10 +90,6 @@
 		userToggled = true;
 		expanded = !expanded;
 	}
-
-	const showPhone = $derived(
-		isEmulatorTool(name) && phonePanel.offeredFor(sessionId) && !phonePanel.isOpen(sessionId ?? null)
-	);
 
 	// The harness's model-facing "treat as data" wrapper, removed for display.
 	const shownResult = $derived(stripUntrustedFence(result));
@@ -199,19 +189,6 @@
 			{/if}
 		</span>
 	</button>
-	{#if showPhone}
-		<button
-			type="button"
-			class="wl-phone"
-			onclick={() => phonePanel.open(sessionId ?? null)}
-			onpointerenter={() => void PhoneSidePanel.preload()}
-			onfocus={() => void PhoneSidePanel.preload()}
-			title="Show the phone the agent is using"
-		>
-			<Smartphone size={13} strokeWidth={1.9} aria-hidden="true" />
-			<span>Show phone</span>
-		</button>
-	{/if}
 	</div>
 
 	{#if expanded && (partialInput || input || result || status === 'running' || status === 'error')}
@@ -499,67 +476,6 @@
 	@keyframes wl-blink {
 		50% {
 			opacity: 0;
-		}
-	}
-
-	/* "Show phone": the one action a tool row carries, so it reads as a
-	   control (primary tint, pill) rather than another badge. */
-	.wl-phone {
-		position: relative;
-		flex: none;
-		margin-left: auto;
-		display: inline-flex;
-		align-items: center;
-		gap: 5px;
-		height: 26px;
-		padding: 0 10px 0 8px;
-		border-radius: 999px;
-		border: 1px solid color-mix(in oklab, var(--primary) 32%, var(--border));
-		background: color-mix(in oklch, var(--primary) 7%, transparent);
-		color: var(--primary);
-		font-size: 11.5px;
-		font-weight: 600;
-		letter-spacing: 0.01em;
-		white-space: nowrap;
-		cursor: pointer;
-		animation: wl-phone-in 220ms ease-out both;
-		transition: background-color 160ms ease-out, border-color 160ms ease-out, transform 120ms ease-out;
-	}
-
-	.wl-phone:hover {
-		background: color-mix(in oklch, var(--primary) 14%, transparent);
-		border-color: color-mix(in oklab, var(--primary) 55%, var(--border));
-	}
-
-	.wl-phone:active {
-		transform: scale(0.96);
-	}
-
-	.wl-phone:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
-
-	@keyframes wl-phone-in {
-		from {
-			opacity: 0;
-			transform: translateX(-4px);
-		}
-	}
-
-	@media (max-width: 639px) {
-		/* A 44px touch target without a 44px pill. */
-		.wl-phone::after {
-			content: '';
-			position: absolute;
-			inset: -9px -4px;
-		}
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.wl-phone {
-			animation: none;
-			transition: none;
 		}
 	}
 
