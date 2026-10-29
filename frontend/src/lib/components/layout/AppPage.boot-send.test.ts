@@ -92,7 +92,7 @@ function setup() {
 	mocks.destroy.mockImplementation(() => { init.destroy(); switcher.destroy(); });
 	mocks.newChat.mockImplementation(() => { switcher.newChat(); });
 	const createWorktree = vi.fn(async (): Promise<string | null> => null);
-	const autoCreateWorktree = vi.fn(async () => false);
+	const autoCreateWorktree = vi.fn<ReturnType<typeof createMessageSender>['autoCreateWorktree']>(async () => false);
 	const resend = vi.fn<ReturnType<typeof createMessageSender>['sendMessage']>();
 	const sender = createMessageSender({ update, getState, internal, wsConn, sessionEphemeralCache: cache,
 		appData: { loadSessions: vi.fn(), loadApiUserSessions: vi.fn() }, persistSession: switcher.persistSession,
