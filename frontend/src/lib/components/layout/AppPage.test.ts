@@ -141,6 +141,13 @@ describe('AppPage initial landing', () => {
   active.set({ sessionId: 'old-work', draft: '', project: null }); await boot();
   expect(mocks.newChat).toHaveBeenCalledOnce(); expect(mocks.openFeaturePage).not.toHaveBeenCalled();
  });
+ it('still clears a stale restored transcript when no first send claimed boot', async () => {
+  active.set({ sessionId: 'old-work', draft: '', project: null, messages: [{ role: 'user', content: 'old message' }] } as never);
+  await boot();
+  expect(mocks.newChat).toHaveBeenCalledOnce();
+  expect(get(activeView)).toEqual(emptyView);
+  expect(get(active).sessionId).toBeNull();
+ });
  // #1636: until this settles, the composer shows New Chat while a send goes to
  // the old session, then the late newChat wipes it from view.
  it('settles explicit new-chat intent before the startup loads finish', async () => {

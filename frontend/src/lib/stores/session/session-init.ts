@@ -115,6 +115,31 @@ export function bumpInitGeneration(): number {
 	return next;
 }
 
+// A send can create its chat before init's preferences arrive (#821). Keep
+// this claim separate from the navigation epoch: adopting one's own new chat
+// is NOT navigation (ChatInput uses that distinction for draft recovery and
+// collapsing the phone composer). AppPage retires it after both boot reconciles.
+let bootSend: { generation: number; pendingSends: Set<symbol> } | null = null;
+
+export function claimBootSend(): symbol | null {
+	if (bootSend?.generation !== getInitGeneration()) return null;
+	const claim = Symbol('boot-send');
+	bootSend.pendingSends.add(claim);
+	return claim;
+}
+
+export function releaseBootSend(claim: symbol | null): void {
+	if (claim !== null) bootSend?.pendingSends.delete(claim);
+}
+
+export function hasBootSendClaim(generation: number): boolean {
+	return bootSend?.generation === generation && bootSend.pendingSends.size > 0;
+}
+
+export function finishBootReconciliation(generation: number): void {
+	if (bootSend?.generation === generation) bootSend = null;
+}
+
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 export function createSessionInit(deps: SessionInitDeps) {
@@ -135,6 +160,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 	 */
 	async function init(options: { deepLinkSessionId?: string | null } = {}) {
 		const initGen = bumpInitGeneration();
+		bootSend = { generation: initGen, pendingSends: new Set() };
 
 		const deepLinkSessionId = options.deepLinkSessionId || null;
 		const skipRestore = getSkipRestore() || deepLinkSessionId !== null;
@@ -201,7 +227,9 @@ export function createSessionInit(deps: SessionInitDeps) {
 				// read as a pick made during that fetch and block it.
 				// Its agent is the chat's own, from /live — not the device default.
 				update(s => ({ ...s, profile: s.profile || (s.bindingUnhydrated?.profile ? '' : defaultProfile) }));
-			} else if (skipRestore) {
+			} else if (skipRestore || hasBootSendClaim(initGen)) {
+				// A send owns the live chat, not init's saved snapshot. Still fill
+				// missing defaults and re-arm the socket below, even after remount.
 				update(s => ({
 					...s,
 					isRestoringSession: false,
@@ -311,10 +339,10 @@ export function createSessionInit(deps: SessionInitDeps) {
 			wsConn.activate();
 			wsConn.connect();
 		} catch (error) {
-			if (initGen !== getInitGeneration()) return;
 			console.error('[ActiveSession] Failed to initialize:', error);
-			// Nothing adopted: leave the restore window the store opened at load.
-			update(s => (s.sessionId ? s : { ...s, isRestoringSession: false }));
+			if (initGen !== getInitGeneration()) return;
+			// A live send only vetoes stale restore writes, never error recovery.
+			update(s => ({ ...s, isRestoringSession: false }));
 			wsConn.activate();
 			wsConn.connect();
 		}
@@ -323,6 +351,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 	// ─── destroy ─────────────────────────────────────────────────────
 
 	function destroy() {
+		bootSend = null;
 		bumpInitGeneration();
 		disconnectFn();
 		feedController.stop();

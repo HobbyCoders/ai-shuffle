@@ -145,11 +145,13 @@ export async function settleServiceWorker(page, status) {
  * reconciles the restored chat with the layout only after all of them. A
  * page-side fetch wrapper, not page.route (the built app's service worker
  * makes the requests page.route would see). `window.__journeyBootHold`
- * says when the held request started and was let go. Call in `setup`.
+ * says when the held request started and was let go. With `releaseOnSignal`,
+ * its `release()` lets the case release it after the action it must overlap;
+ * `ms` remains a failure deadline, not a sleep the case must spend. Call in `setup`.
  */
-export async function holdBootLoad(page, path, ms) {
+export async function holdBootLoad(page, path, ms, { releaseOnSignal = false } = {}) {
 	await page.addInitScript(
-		({ path, ms }) => {
+		({ path, ms, releaseOnSignal }) => {
 			const hold = (window.__journeyBootHold = { path, ms, startedAt: null, releasedAt: null });
 			const original = window.fetch.bind(window);
 			window.fetch = async (input, init) => {
@@ -162,13 +164,16 @@ export async function holdBootLoad(page, path, ms) {
 				}
 				if (method === 'GET' && url === path && hold.startedAt === null) {
 					hold.startedAt = performance.now();
-					await new Promise((resolve) => setTimeout(resolve, ms));
+					await new Promise((resolve) => {
+						const timer = setTimeout(resolve, ms);
+						if (releaseOnSignal) hold.release = () => { clearTimeout(timer); resolve(); };
+					});
 					hold.releasedAt = performance.now();
 				}
 				return original(input, init);
 			};
 		},
-		{ path, ms }
+		{ path, ms, releaseOnSignal }
 	);
 }
 

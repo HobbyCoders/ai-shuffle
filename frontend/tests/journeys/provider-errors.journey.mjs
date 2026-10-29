@@ -9,7 +9,7 @@
 //   rate-limit-429   [script:rate-limit-429]: every attempt is rate limited
 //   cut              [script:cut]: the stream dies mid-reply (client retries, then gives up)
 import { fakeAiTag, runJourney } from './runner.mjs';
-import { composer, expect, openNewChat, sendButton, typeAndSend, uniq, waitChat, waitTurnSettled } from './lib/app.mjs';
+import { composer, countUserRows, expect, openNewChat, sendButton, typeAndSend, uniq, waitChat, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { STOP_SELECTOR, expectStopFollowsStreaming, markTime } from './lib/timeline.mjs';
 
@@ -31,11 +31,14 @@ function errorCase(script) {
 		async act({ page, mark, variant, log }) {
 			await mark('send');
 			const t0 = Date.now();
-			await typeAndSend(page, `provoke ${script} tok-${uniq()} ${fakeAiTag(variant, script)}`);
+			const first = `tok-${uniq()}`;
+			await typeAndSend(page, `provoke ${script} ${first} ${fakeAiTag(variant, script)}`);
 			// The client retries first; give it time, then the turn must end.
 			await alert(page).filter({ hasText: SCENARIOS[script] }).first().waitFor({ timeout: 120_000 });
 			await waitChat(page, { surface: 'active', streaming: 'false' }, { timeout: 30_000 });
 			log(`error shown ${Date.now() - t0}ms after send`);
+			const session = await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-session');
+			expect(await countUserRows(page, first) === 1, 'the first message survives the provider error');
 			await page.getByRole('button', { name: 'Dismiss error' }).first().waitFor();
 			await page.waitForTimeout(1000);
 			expect((await page.getByRole('button', { name: 'Stop generating' }).count()) === 0, 'no Stop button once the turn failed');
@@ -48,6 +51,8 @@ function errorCase(script) {
 			await sendButton(page).click();
 			await waitTurnSettled(page, { text: `You said: “retry ${retry}`, messagesAtLeast: 3 });
 			expect((await alert(page).count()) === 0, 'the old error is gone once a retry succeeded');
+			expect(await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-session') === session, 'the retry stays in the first send\'s chat');
+			expect(await countUserRows(page, first) === 1, 'retrying does not lose the failed first message');
 		},
 		verify({ recording }) {
 			expectStopFollowsStreaming(recording, { from: markTime(recording, 'send') });
