@@ -168,7 +168,8 @@ describe('AI Generation API', () => {
 
 			await expect(generateProfile('test')).rejects.toEqual({
 				detail: 'AI generation failed',
-				status: 500
+				status: 500,
+				body: { detail: 'AI generation failed' }
 			});
 		});
 
@@ -177,7 +178,8 @@ describe('AI Generation API', () => {
 
 			await expect(generateProfile('short')).rejects.toEqual({
 				detail: 'Description too short',
-				status: 422
+				status: 422,
+				body: { detail: 'Description too short' }
 			});
 		});
 	});
@@ -257,7 +259,8 @@ describe('AI Generation API', () => {
 
 			await expect(generateSubagent('test')).rejects.toEqual({
 				detail: 'AI generation failed',
-				status: 500
+				status: 500,
+				body: { detail: 'AI generation failed' }
 			});
 		});
 	});
@@ -379,7 +382,8 @@ describe('AI Generation API', () => {
 
 			await expect(generateSubagent('test description')).rejects.toEqual({
 				detail: 'Not authenticated',
-				status: 401
+				status: 401,
+				body: { detail: 'Not authenticated' }
 			});
 		});
 	});
