@@ -7,7 +7,8 @@ and ``local/windows-suite`` statuses ``scripts/local_ci.py full --attest``
 posts; a successful owner-dispatched ``windows-suite.yml`` run on main at the
 candidate also satisfies the Windows one), whether edge publication caught up, the Play gates, and
 which platforms actually need a new build, and the live smoke gate: a passing
-smoke result file for the candidate revision on every covered worker (see
+smoke result file for the candidate revision on every covered worker, and the
+UI journeys green in main-suite at the candidate for the rows they cover (see
 ``docs/internal/live-smoke.md``). Nothing is tagged, dispatched or published.
 Worker running revisions are NOT visible from here; the skill gets those from
 the ``DeployStatus`` agent tool.
@@ -37,6 +38,7 @@ if str(ROOT) not in sys.path:
 
 from scripts import local_ci
 from scripts.live_smoke import gate as smoke_gate_mod
+from scripts.live_smoke import journeys as smoke_journeys
 from scripts.live_smoke import results as smoke_results
 from scripts.live_smoke import scenarios as smoke_scenarios
 
@@ -221,19 +223,26 @@ def _variable(name: str, env: Optional[str] = None) -> Optional[str]:
     return _try(*args)
 
 
+def journey_ci(revision: str) -> dict:
+    """UI journeys' CI state at ``revision`` (main-suite on main), for the smoke rows they cover."""
+    return smoke_journeys.fetch(revision, lambda *args: _gh_json(*args))
+
+
 def smoke_gate(revision: str, workers: Optional[list] = None, skip_reason: Optional[str] = None,
                smoke_dir: Optional[str] = None, scenario_rows: Optional[list] = None,
                skip_rows: Optional[list] = None) -> dict:
     """Live smoke verdict for the candidate (``pass``, ``block`` or ``skipped``).
 
     ``workers`` are the covered workers; when omitted, every worker with a
-    result file for ``revision`` counts, and none at all blocks.
+    result file for ``revision`` counts, and none at all blocks. Rows of kind
+    ``journey`` count the UI journeys' CI pass at ``revision`` instead.
     """
     base = smoke_results.smoke_dir(smoke_dir)
     if scenario_rows is None:
         scenario_rows = smoke_scenarios.rows(smoke_scenarios.load())
+    wanted = smoke_gate_mod.journey_rows(scenario_rows) and smoke_results.REVISION.fullmatch(revision or "")
     return smoke_gate_mod.evaluate(base, revision, workers, scenario_rows, skip_reason=skip_reason,
-                                   skip_rows=skip_rows)
+                                   skip_rows=skip_rows, journey_ci=journey_ci(revision) if wanted else None)
 
 
 def pinned_candidate(candidate: str, tip: str, blockers: list) -> str:
@@ -373,6 +382,11 @@ def render(report: dict) -> str:
     if smoke:
         lines.append(f"Live smoke: {smoke['verdict']}"
                      + (f" ({smoke['skip_reason']})" if smoke.get("skip_reason") else ""))
+        journeys = smoke.get("journeys")
+        if journeys:
+            lines.append(f"  UI journeys in CI: {journeys['state']}"
+                         + (f" {journeys['url']}" if journeys.get("url") else "")
+                         + f" ({len(journeys['rows'])} smoke rows rely on them)")
         lines += [f"  owner to-do: {t}" for t in smoke.get("owner_todo", [])]
         lines += [f"  skipped blocker: {b}" for b in smoke.get("would_block", [])]
     lines += [f"  release notes must say: {line}" for line in report.get("release_notes_lines", [])]

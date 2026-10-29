@@ -10,6 +10,12 @@ a browser row not recorded (unless the row is optional). Owner rows never
 block; they are listed as owner to-dos. ``skip_reason`` overrides every
 blocker and yields the line the release notes must carry.
 
+Rows of kind ``journey`` take no result from any worker's file: their evidence
+is the UI journeys' pass in CI at the candidate (``journey_ci``, see
+``scripts/live_smoke/journeys.py``). Unless that state is ``success`` the gate
+blocks, naming the rows that rely on it; ``--skip-smoke-rows`` cannot excuse
+them.
+
 ``skip_rows`` is the narrower policy: ``[(selector, reason)]`` where the
 selector is ``two_worker`` (every row that needs the other worker) or
 comma-separated row ids. A matching row that was *not run* (peer offline, an
@@ -32,6 +38,11 @@ from scripts.live_smoke import results as results_mod
 from scripts.live_smoke import scenarios as scen
 
 TWO_WORKER = "two_worker"
+JOURNEY = "journey"
+
+
+def journey_rows(scenario_rows: Iterable[dict]) -> list:
+    return [row for row in scenario_rows if row.get("kind") == JOURNEY]
 
 
 def _row_blocker(row: dict, got: dict | None) -> tuple[str | None, str | None]:
@@ -72,6 +83,11 @@ def skip_policy(skip_rows: Iterable | None, scenario_rows: Iterable[dict]) -> tu
                 named = ", ".join(unknown) or repr(selector)
                 blockers.append(f"--skip-smoke-rows names unknown rows: {named}")
                 continue
+            journeys = sorted(ids & {row["id"] for row in journey_rows(rows)})
+            if journeys:
+                blockers.append(f"--skip-smoke-rows cannot excuse UI journey rows ({', '.join(journeys)}); "
+                                "their evidence is the journeys' CI pass at the candidate")
+                continue
         policy.append((ids, selector, reason))
     return policy, blockers
 
@@ -106,6 +122,8 @@ def evaluate_worker(base: Path, revision: str, worker: str, scenario_rows: Itera
             out["blockers"].append(f"{worker}'s preview checkout changed during the run")
     got = {r.get("id"): r for r in data.get("rows") or []}
     for row in scenario_rows:
+        if row.get("kind") == JOURNEY:
+            continue  # evidence is CI, not this file (see journey_ci in evaluate)
         result = got.get(row["id"])
         blocker, todo = _row_blocker(row, result)
         excuse = _excused(policy or [], row["id"])
@@ -145,17 +163,42 @@ def _skip_lines(per_worker: list) -> list:
     return lines
 
 
+def _journey_check(revision: str, rows: list, journey_ci: dict | None) -> tuple[dict | None, str | None]:
+    """(report entry, blocker) for the rows whose evidence is the UI journeys' CI pass."""
+    if not rows:
+        return None, None
+    ci = journey_ci or {}
+    state, url = ci.get("state") or "unknown", ci.get("url")
+    entry = {"state": state, "url": url, "rows": [row["id"] for row in rows]}
+    if state == "success":
+        return entry, None
+    where = f" ({url})" if url else ""
+    return entry, (f"UI journeys at {revision[:9]} are {state}{where}; {len(rows)} rows rely on them "
+                   f"({', '.join(entry['rows'])}). They need a main-suite run on main at this revision "
+                   "with every 'UI journeys' shard green")
+
+
 def evaluate(base: Path, revision: str, workers: list | None, scenario_rows: list,
-             skip_reason: str | None = None, skip_rows: list | None = None) -> dict:
-    """Gate verdict for ``revision``: ``pass``, ``block`` or ``skipped``."""
+             skip_reason: str | None = None, skip_rows: list | None = None,
+             journey_ci: dict | None = None) -> dict:
+    """Gate verdict for ``revision``: ``pass``, ``block`` or ``skipped``.
+
+    ``journey_ci`` is ``{"state", "url"}`` for the UI journeys in CI at
+    ``revision`` (``journeys.fetch``); it is needed only when a scenario row is
+    of kind ``journey``, and anything but ``success`` blocks.
+    """
     revision = revision or ""
     policy, blockers = skip_policy(skip_rows, scenario_rows)
+    journeys, journey_blocker = None, None
     if results_mod.REVISION.fullmatch(revision):
         workers = list(workers or []) or discover_workers(base, revision)
         per_worker = [evaluate_worker(base, revision, w, scenario_rows, policy) for w in workers]
         blockers += [b for w in per_worker for b in w["blockers"]]
         if not workers:
             blockers.append(f"no smoke result for revision {revision[:9]} in {base}")
+        journeys, journey_blocker = _journey_check(revision, journey_rows(scenario_rows), journey_ci)
+        if journey_blocker:
+            blockers.append(journey_blocker)
     else:
         workers, per_worker = [], []
         blockers.append(f"no candidate revision to check (got {revision!r})")
@@ -168,10 +211,13 @@ def evaluate(base: Path, revision: str, workers: list | None, scenario_rows: lis
         "owner_todo": [t for w in per_worker for t in w["owner_todo"]],
         "skip_reason": None,
         "skipped_rows": [{"worker": w["worker"], **item} for w in per_worker for item in w["skipped_rows"]],
+        "journeys": journeys,
         "blockers": blockers,
         "verdict": "block" if blockers else "pass",
         "release_notes_lines": [] if blockers else [
-            f"Live smoke passed on {', '.join(names)} at {revision[:9]}.", *_skip_lines(per_worker)],
+            f"Live smoke passed on {', '.join(names)} at {revision[:9]}.", *_skip_lines(per_worker),
+            *([(f"UI journeys passed in CI at {revision[:9]} ({journeys['url']}), standing in for "
+                f"{len(journeys['rows'])} live smoke rows.")] if journeys else [])],
     }
     if skip_reason is not None:
         reason = skip_reason.strip() or "no reason given"

@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from scripts.live_smoke import __main__ as cli
-from scripts.live_smoke import gate, results, scenarios
+from scripts.live_smoke import gate, journeys, results, scenarios
 from scripts.live_smoke.client import (
     AuthRefused,
     ClientError,
@@ -156,7 +156,8 @@ def _run(worker, data, tmp_path, **kw):
 def test_pass_writes_result_file_and_archives(tmp_path):
     worker = FakeWorker()
     data = _data(_script("t.1"), {"id": "t.2", "check": "Stop", "kind": "browser"},
-                 {"id": "t.3", "check": "Quit", "kind": "owner"})
+                 {"id": "t.3", "check": "Quit", "kind": "owner"},
+                 {"id": "t.4", "check": "Send", "kind": "journey", "journeys": ["chat-send-stream"]})
     result, path = _run(worker, data, tmp_path)
 
     assert path == tmp_path / REV / "ServerWorker.json"
@@ -173,6 +174,7 @@ def test_pass_writes_result_file_and_archives(tmp_path):
     assert rows["t.2"] == {"id": "t.2", "kind": "browser", "check": "Stop", "status": "not_run",
                            "reason": "needs browser", "evidence": {}}
     assert rows["t.3"]["reason"] == "owner step"
+    assert rows["t.4"]["status"] == "not_run" and rows["t.4"]["reason"] == "UI journey in CI"
     assert result["tokens"] == {"input": 100, "output": 0, "cache_write": 0, "cache_read": 50, "counted": 100}
     assert result["sessions"] == [{"session_id": "s1", "row": "t.1", "archived": True}]
     assert worker.archived == ["s1"]
@@ -537,7 +539,11 @@ def test_real_scenarios_validate_and_markdown_is_generated():
     ids = {r["id"] for r in rows}
     assert {"two-worker-smoke.9", "harness-basics.3"} <= ids
     kinds = {r["kind"] for r in rows}
-    assert kinds == {"script", "browser", "owner"}
+    assert kinds == {"script", "journey", "browser", "owner"}
+    # Hand-checked rows say why they are not automated; journey rows name real journeys.
+    assert all(r["needs"] for r in rows if r["kind"] in ("browser", "owner"))
+    names = scenarios.journey_names()
+    assert all(set(r["journeys"]) <= names for r in rows if r["kind"] == "journey")
     assert scenarios.SCENARIOS_MD.read_text(encoding="utf-8") == scenarios.render_markdown(data), (
         "scenarios.md is stale: run python -m scripts.live_smoke render")
 
@@ -551,10 +557,41 @@ def test_real_scenarios_validate_and_markdown_is_generated():
       "steps": [{"op": "workers"}]}, "only script"),
     ({"id": "t.bad-row", "check": "x", "kind": "script",
       "steps": [{"op": "start", "prompt": "p", "typo": 1}]}, "does not take"),
+    ({"id": "t.bad-row", "check": "x", "kind": "journey"}, "name their journeys"),
+    ({"id": "t.bad-row", "check": "x", "kind": "journey", "journeys": []}, "name their journeys"),
+    ({"id": "t.bad-row", "check": "x", "kind": "journey", "journeys": ["send", "send"]}, "without repeats"),
+    ({"id": "t.bad-row", "check": "x", "kind": "journey", "journeys": ["send", "nope"]}, "no UI journey named 'nope'"),
+    ({"id": "t.bad-row", "check": "x", "kind": "journey", "journeys": ["send"],
+      "steps": [{"op": "workers"}]}, "only script"),
+    ({"id": "t.bad-row", "check": "x", "kind": "owner", "needs": ["device"], "journeys": ["send"]},
+     "only journey rows"),
+    ({"id": "t.bad-row", "check": "x", "kind": "owner"}, "say why with needs"),
+    ({"id": "t.bad-row", "check": "x", "kind": "browser", "needs": []}, "say why with needs"),
+    ({"id": "t.bad-row", "check": "x", "kind": "browser", "needs": ["vibes"]}, "unknown needs"),
+    ({"id": "t.bad-row", "check": "x", "kind": "journey", "journeys": ["send"], "needs": ["device"]},
+     "only browser and owner"),
 ])
 def test_validate_rejects_bad_rows(row, msg):
     with pytest.raises(scenarios.ScenarioError, match=msg):
-        scenarios.validate(_data(row))
+        scenarios.validate(_data(row), journeys={"send"})
+
+
+def test_validate_reads_journey_names_from_the_checkout(tmp_path):
+    (tmp_path / "send.journey.mjs").write_text("")
+    (tmp_path / "runner.mjs").write_text("")
+    assert scenarios.journey_names(tmp_path) == {"send"}
+    assert "chat-send-stream" in scenarios.journey_names()
+    row = {"id": "t.covered", "check": "x", "kind": "journey", "journeys": ["chat-send-stream"]}
+    scenarios.validate(_data(row))  # the real journeys folder is the default
+
+
+def test_render_names_journeys_and_needs():
+    text = scenarios.render_markdown(_data(
+        {"id": "t.1", "check": "a", "kind": "journey", "journeys": ["send", "stop"], "how": "h"},
+        {"id": "t.2", "check": "b", "kind": "owner", "needs": ["device", "provider"], "two_worker": True}))
+    assert "| 1 | a | journey: send, stop | h |" in text
+    assert "| 2 | b | owner, two workers; needs device + provider |" in text
+    assert "`dev-instance`: could be a UI journey" in text
 
 
 @pytest.mark.parametrize("rid", ["t.14", "t.15", "t.pr521-merged-catalog", "t.stable-slug"])
@@ -606,9 +643,9 @@ def test_named_row_runs_and_is_recorded_without_renumbering(tmp_path: Path) -> N
 
 ROWS = [
     {"id": "s.1", "check": "a", "kind": "script"},
-    {"id": "s.2", "check": "b", "kind": "browser"},
-    {"id": "s.3", "check": "c", "kind": "owner"},
-    {"id": "s.4", "check": "d", "kind": "browser", "optional": True},
+    {"id": "s.2", "check": "b", "kind": "browser", "needs": ["provider"]},
+    {"id": "s.3", "check": "c", "kind": "owner", "needs": ["device"]},
+    {"id": "s.4", "check": "d", "kind": "browser", "optional": True, "needs": ["install"]},
 ]
 
 
@@ -1222,3 +1259,143 @@ def test_checkout_state_matches_the_preview_stamp_identity(tmp_path):
     (tmp_path / "tracked.txt").write_text("x")
     git("add", "tracked.txt")
     assert checkout_state(tmp_path)["clean"] is False
+
+
+# -- journey rows: the UI journeys' CI pass is their evidence --------------------
+
+JOURNEY_ROW = {"id": "s.5", "check": "e", "kind": "journey", "journeys": ["chat-send-stream"]}
+GREEN = {"state": "success", "url": "https://ci.example/run/1"}
+
+
+def test_journey_rows_pass_on_green_ci_without_a_worker_result(tmp_path):
+    _write(tmp_path)  # the worker's file has no s.5: journey rows never come from it
+    report = gate.evaluate(tmp_path, REV, ["ServerWorker"], [*ROWS, JOURNEY_ROW], journey_ci=GREEN)
+    assert report["verdict"] == "pass", report["blockers"]
+    assert report["journeys"] == {**GREEN, "rows": ["s.5"]}
+    assert report["release_notes_lines"][-1] == (
+        f"UI journeys passed in CI at {REV[:9]} (https://ci.example/run/1), standing in for 1 live smoke rows.")
+
+
+@pytest.mark.parametrize("journey_ci, state", [
+    (None, "unknown"),
+    ({"state": "missing", "url": None}, "missing"),
+    ({"state": "pending", "url": "https://ci.example/run/2"}, "pending"),
+    ({"state": "failure", "url": "https://ci.example/run/3"}, "failure"),
+])
+def test_journey_rows_block_unless_ci_is_green(tmp_path, journey_ci, state):
+    _write(tmp_path)
+    report = gate.evaluate(tmp_path, REV, ["ServerWorker"], [*ROWS, JOURNEY_ROW], journey_ci=journey_ci)
+    assert report["verdict"] == "block" and report["release_notes_lines"] == []
+    assert report["blockers"] == [next(b for b in report["blockers"] if b.startswith("UI journeys"))]
+    assert f"UI journeys at {REV[:9]} are {state}" in report["blockers"][0]
+    assert "1 rows rely on them (s.5)" in report["blockers"][0]
+
+
+def test_journey_rows_cannot_be_excused_but_skip_smoke_still_overrides(tmp_path):
+    _write(tmp_path)
+    rows = [*ROWS, JOURNEY_ROW]
+    report = gate.evaluate(tmp_path, REV, ["ServerWorker"], rows, journey_ci=GREEN, skip_rows=[("s.5", "CI down")])
+    assert report["verdict"] == "block"
+    assert report["blockers"] == [("--skip-smoke-rows cannot excuse UI journey rows (s.5); "
+                                   "their evidence is the journeys' CI pass at the candidate")]
+    skipped = gate.evaluate(tmp_path, REV, ["ServerWorker"], rows, skip_reason="hotfix")
+    assert skipped["verdict"] == "skipped" and any(b.startswith("UI journeys") for b in skipped["would_block"])
+
+
+def test_no_journey_rows_need_no_ci_state(tmp_path):
+    _write(tmp_path)
+    report = gate.evaluate(tmp_path, REV, ["ServerWorker"], ROWS)
+    assert report["verdict"] == "pass" and report["journeys"] is None
+
+
+def test_record_refuses_journey_rows(tmp_path):
+    path = results.write(results.result_path(tmp_path, REV, "ServerWorker"), {
+        "revision": REV, "worker": "ServerWorker", "rows": [
+            {"id": "s.5", "kind": "journey", "status": "not_run", "reason": "UI journey in CI"}]})
+    with pytest.raises(ValueError, match="UI journey row"):
+        results.record(path, "s.5", "pass", "watched it")
+
+
+def _job(shard, total=4, status="completed", conclusion="success"):
+    return {"name": f"javascript / UI journeys ({shard}/{total})", "status": status, "conclusion": conclusion}
+
+
+SHARDS = [_job(k) for k in (1, 2, 3, 4)]
+
+
+@pytest.mark.parametrize("jobs, state", [
+    (SHARDS + [{"name": "backend / lint", "status": "completed", "conclusion": "failure"}], "success"),
+    (SHARDS[:3] + [_job(4, conclusion="failure")], "failure"),
+    (SHARDS[:3] + [_job(4, conclusion="cancelled")], "failure"),
+    (SHARDS[:3] + [_job(4, status="in_progress", conclusion=None)], "pending"),
+    (SHARDS[:3], "missing"),
+    (SHARDS[:3] + [_job(4, total=5)], "missing"),
+    ([{"name": "backend / lint", "status": "completed", "conclusion": "success"}], "missing"),
+])
+def test_journey_shards_state(jobs, state):
+    assert journeys.shards_state(jobs) == state
+
+
+def _fake_gh(runs, jobs_by_run, calls=None):
+    def gh(*args):
+        if calls is not None:
+            calls.append(args)
+        url = args[1]
+        if "/workflows/main-suite.yml/runs?head_sha=" in url:
+            return None if runs is None else {"workflow_runs": runs}
+        run_id = int(url.split("/runs/")[1].split("/")[0])
+        jobs = jobs_by_run.get(run_id)
+        return None if jobs is None else {"jobs": jobs}
+    return gh
+
+
+def _main_run(run_id, sha=REV, branch="main"):
+    return {"id": run_id, "head_sha": sha, "head_branch": branch, "html_url": f"https://ci.example/run/{run_id}"}
+
+
+def test_journey_fetch_reads_main_suite_on_main_at_the_revision():
+    calls = []
+    gh = _fake_gh([_main_run(9, branch="feature"), _main_run(8, sha="c" * 40), _main_run(7)],
+                  {9: SHARDS, 8: SHARDS, 7: SHARDS}, calls)
+    assert journeys.fetch(REV, gh) == {"state": "success", "url": "https://ci.example/run/7"}
+    assert calls[0] == ("api", (f"repos/HobbyCoders/ai-shuffle/actions/workflows/main-suite.yml/runs"
+                                f"?head_sha={REV}&per_page=20"))
+    assert [c[1].split("/runs/")[1].split("/")[0] for c in calls[1:]] == ["7"]  # other branches and commits unread
+
+
+def test_journey_fetch_any_green_run_counts_else_the_newest_state():
+    failed = SHARDS[:3] + [_job(4, conclusion="failure")]
+    running = SHARDS[:3] + [_job(4, status="in_progress", conclusion=None)]
+    assert journeys.fetch(REV, _fake_gh([_main_run(2), _main_run(1)], {2: running, 1: SHARDS}))["state"] == "success"
+    assert journeys.fetch(REV, _fake_gh([_main_run(2), _main_run(1)], {2: running, 1: failed})) == {
+        "state": "pending", "url": "https://ci.example/run/2"}
+    assert journeys.fetch(REV, _fake_gh([], {}))["state"] == "missing"
+    assert journeys.fetch(REV, _fake_gh(None, {}))["state"] == "unknown"
+    assert journeys.fetch(REV, _fake_gh([_main_run(1)], {}))["state"] == "unknown"
+
+
+def test_journey_fetch_pages_through_long_job_lists():
+    filler = [{"name": f"job {n}", "status": "completed", "conclusion": "success"} for n in range(100)]
+    pages = {1: filler, 2: SHARDS}
+
+    def gh(*args):
+        if "head_sha=" in args[1]:
+            return {"workflow_runs": [_main_run(1)]}
+        return {"jobs": pages[int(args[1].rsplit("page=", 1)[1])]}
+    assert journeys.fetch(REV, gh)["state"] == "success"
+
+
+def test_check_cli_reads_journey_ci_only_when_rows_need_it(tmp_path, capsys, monkeypatch):
+    asked = []
+    monkeypatch.setattr(journeys, "fetch", lambda revision, gh=None: asked.append(revision) or GREEN)
+    scen_file = tmp_path / "scenarios.json"
+    _run(FakeWorker(), _data(_script("t.1")), tmp_path / "smoke")
+    base = ["--scenarios", str(scen_file), "--results-dir", str(tmp_path / "smoke")]
+    scen_file.write_text(json.dumps(_data(_script("t.1"))))
+    assert cli.main(["check", REV, *base]) == 0 and asked == []
+    covered = {"id": "t.2", "check": "send", "kind": "journey", "journeys": ["chat-send-stream"]}
+    scen_file.write_text(json.dumps(_data(_script("t.1"), covered)))
+    assert cli.main(["check", REV, *base]) == 0 and asked == [REV]
+    assert "UI journeys in CI: success https://ci.example/run/1 (1 rows)" in capsys.readouterr().out
+    monkeypatch.setattr(journeys, "fetch", lambda revision, gh=None: {"state": "failure", "url": None})
+    assert cli.main(["check", REV, *base]) == 1

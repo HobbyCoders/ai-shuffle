@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 from scripts.live_smoke import gate
+from scripts.live_smoke import journeys as journeys_mod
 from scripts.live_smoke import results as results_mod
 from scripts.live_smoke import scenarios as scen
 
@@ -106,14 +107,22 @@ def cmd_import(args) -> int:
 
 def cmd_check(args) -> int:
     data = scen.load(args.scenarios)
+    rows = scen.rows(data)
+    wanted = gate.journey_rows(rows) and results_mod.REVISION.fullmatch(args.revision or "")
+    journey_ci = journeys_mod.fetch(args.revision) if wanted else None
     report = gate.evaluate(results_mod.smoke_dir(args.results_dir), args.revision, args.worker,
-                           scen.rows(data), skip_reason=args.skip_smoke, skip_rows=args.skip_smoke_rows)
+                           rows, skip_reason=args.skip_smoke, skip_rows=args.skip_smoke_rows,
+                           journey_ci=journey_ci)
     if args.json:
         print(json.dumps(report, indent=2))
     else:
         print(f"smoke gate for {args.revision[:9]}: {report['verdict']}")
         for line in report["blockers"]:
             print(f"  - {line}")
+        if report.get("journeys"):
+            j = report["journeys"]
+            print(f"  UI journeys in CI: {j['state']}{' ' + j['url'] if j.get('url') else ''} "
+                  f"({len(j['rows'])} rows)")
         for line in report["owner_todo"]:
             print(f"  owner: {line}")
         for line in report["release_notes_lines"]:

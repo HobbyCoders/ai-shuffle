@@ -58,8 +58,10 @@ The dev instance covers the native harness, the UI, the stream and the
 database with a fake AI. It does not cover: real provider behaviour (voice
 models, real Claude Code compaction output), two real workers, Android
 native behaviour (locked-screen calls), Windows installers and updates. Those
-stay in the live smoke (`docs/internal/live-smoke.md`), which lists only rows
-that need a real device, real tokens or two workers.
+stay in the live smoke (`docs/internal/live-smoke.md`). Its hand-checked rows
+say why with `needs` (a device, a real provider, a disposable install or two
+workers); rows a journey covers are `journey` rows whose evidence is the
+journeys' CI pass, and rows tagged `dev-instance` are journeys still to write.
 
 ## Rules that do not change
 

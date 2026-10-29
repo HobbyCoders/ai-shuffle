@@ -243,7 +243,9 @@ Include in your PR description:
 A PR whose description says it was "not tried on real workers" also adds a
 row to `scripts/live_smoke/scenarios.json` that would catch the bug on
 the real workers, so the pre-release live smoke covers it (see
-[live-smoke.md](live-smoke.md)). New rows use a stable named ID such as
+[live-smoke.md](live-smoke.md)). If the dev instance can show the bug, write a
+UI journey instead (`frontend/tests/journeys/`); a hand-checked row says why it
+cannot be automated with `needs`. New rows use a stable named ID such as
 `harness-basics.pr521-merged-catalog`, never the next free number. Keep all
 existing numeric IDs unchanged. Insert rows in lexicographic ID order within
 their suite (including legacy numeric IDs, so `.10` sorts before `.2`) rather

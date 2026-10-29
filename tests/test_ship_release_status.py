@@ -165,9 +165,10 @@ def test_edge_state_uses_the_newest_run_on_sha():
 CANDIDATE = "1234567890abcdef1234567890abcdef12345678"
 SMOKE_ROWS = [
     {"id": "x.1", "check": "start", "kind": "script"},
-    {"id": "x.2", "check": "stop button", "kind": "browser"},
-    {"id": "x.3", "check": "quit", "kind": "owner"},
+    {"id": "x.2", "check": "stop button", "kind": "browser", "needs": ["install"]},
+    {"id": "x.3", "check": "quit", "kind": "owner", "needs": ["device"]},
 ]
+JOURNEY_ROW = {"id": "x.5", "check": "send", "kind": "journey", "journeys": ["chat-send-stream"]}
 
 
 def _smoke_file(base, worker, revision=CANDIDATE, **status):
@@ -258,6 +259,8 @@ def _fake_collect(monkeypatch, statuses):
     monkeypatch.setattr(srs, "_gh_json", lambda *a: statuses if a[0] == "api" else runs)
     monkeypatch.setattr(srs, "_variable", lambda *a, **k: None)
     monkeypatch.setattr(srs, "public_main_ref", lambda: "public/main")
+    # The real catalog has journey rows; their CI evidence is stubbed green here.
+    monkeypatch.setattr(srs, "journey_ci", lambda revision: {"state": "success", "url": "https://ci/run"})
 
 
 @pytest.mark.parametrize("skip, ready, notes", [
@@ -341,6 +344,48 @@ def test_skip_smoke_rows_excuses_not_run_rows_into_the_release_notes(tmp_path, m
         "Live smoke passed on ServerWorker-preview (isolated preview instance of the candidate) at 123456789.",
         "Live smoke rows not run (--skip-smoke-rows two_worker): x.4 on ServerWorker-preview. "
         "Reason: no second worker for the preview"]
+
+
+def test_smoke_gate_counts_the_journeys_ci_pass_for_journey_rows(tmp_path, monkeypatch):
+    asked = []
+    state = {"state": "failure", "url": "https://ci/run/9"}
+    monkeypatch.setattr(srs, "journey_ci", lambda revision: asked.append(revision) or state)
+    _smoke_file(tmp_path, "ServerWorker")
+    rows = SMOKE_ROWS + [JOURNEY_ROW]
+    blocked = srs.smoke_gate(CANDIDATE, ["ServerWorker"], None, str(tmp_path), scenario_rows=rows)
+    assert asked == [CANDIDATE] and blocked["verdict"] == "block"
+    assert blocked["blockers"][0].startswith("UI journeys at 123456789 are failure (https://ci/run/9)")
+    state = {"state": "success", "url": "https://ci/run/10"}
+    report = srs.smoke_gate(CANDIDATE, ["ServerWorker"], None, str(tmp_path), scenario_rows=rows)
+    assert report["verdict"] == "pass"
+    assert report["release_notes_lines"][-1] == (
+        "UI journeys passed in CI at 123456789 (https://ci/run/10), standing in for 1 live smoke rows.")
+    # No journey rows, or no candidate: GitHub is not asked.
+    srs.smoke_gate(CANDIDATE, ["ServerWorker"], None, str(tmp_path), scenario_rows=SMOKE_ROWS)
+    srs.smoke_gate("", ["ServerWorker"], None, str(tmp_path), scenario_rows=rows)
+    assert asked == [CANDIDATE, CANDIDATE]
+
+
+def test_journey_ci_reads_main_suite_through_gh(monkeypatch):
+    calls = []
+
+    def fake_gh(*args):
+        calls.append(args)
+        if "head_sha=" in args[1]:
+            return {"workflow_runs": [{"id": 5, "head_sha": CANDIDATE, "head_branch": "main", "html_url": "u"}]}
+        return {"jobs": [{"name": f"javascript / UI journeys ({k}/2)", "status": "completed",
+                          "conclusion": "success"} for k in (1, 2)]}
+    monkeypatch.setattr(srs, "_gh_json", fake_gh)
+    assert srs.journey_ci(CANDIDATE) == {"state": "success", "url": "u"}
+    assert "actions/workflows/main-suite.yml/runs" in calls[0][1] and "/runs/5/jobs" in calls[1][1]
+
+
+def test_collect_blocks_and_renders_when_the_journeys_are_not_green(tmp_path, monkeypatch):
+    _fake_collect(monkeypatch, [_status(c) for c in srs.REQUIRED_LOCAL])
+    monkeypatch.setattr(srs, "journey_ci", lambda revision: {"state": "pending", "url": "https://ci/run/3"})
+    report = srs.collect(["ServerWorker"], None, str(tmp_path))
+    assert any(b.startswith("Live smoke: UI journeys at 123456789 are pending") for b in report["blockers"])
+    assert "UI journeys in CI: pending https://ci/run/3 (" in srs.render(report)
 
 
 def test_main_passes_skip_smoke_rows_through(monkeypatch, capsys):

@@ -8,6 +8,39 @@ needs a passing smoke for the candidate revision.
 It runs **on demand before a release only**. Nothing schedules it, and edge
 updates do not start it. It spends real provider tokens.
 
+## What stays here, and what UI journeys cover
+
+Anything the [dev instance](dev-loop.md) can show with its seed data and fake
+AI belongs in a [UI journey](../../frontend/tests/journeys/README.md), not
+here: journeys run on every PR and on every push to main, so a regression
+fails CI the day it lands instead of waiting for someone to check it by hand
+before a release. The catalog keeps four kinds of row:
+
+| Kind | Who checks it | Evidence the gate reads |
+|---|---|---|
+| `script` | the runner, on a real worker with a real provider | the worker's result file |
+| `journey` | the named UI journeys, in CI | a main-suite run on main at the candidate with every `UI journeys` shard green |
+| `browser` | an agent with the browser tools | a recorded result in the worker's file |
+| `owner` | a person (the owner, or an agent on disposable installs) | listed as a to-do, never blocks |
+
+Every `browser` and `owner` row says why it is not automated with `needs`
+(one or more):
+
+- `device`: a real phone, the desktop app, a Windows or macOS install, a headset.
+- `provider`: a real model provider, a paid or subscription account, or an
+  outside service (Telegram, Gmail, fal).
+- `install`: a disposable candidate install or worker pair: restarts,
+  upgrades, database faults, containers, a second worker.
+- `owner`: the owner's own data, history or decision.
+- `dev-instance`: the row (or its main part) could be a UI journey on the dev
+  instance and has not been written yet. These are the next journeys to write;
+  when one lands, turn the row into a `journey` row naming it (or remove the
+  row when the journey covers all of it).
+
+A row that a journey covers completely becomes `"kind": "journey"` with
+`"journeys": ["<name>", ...]` (each a `frontend/tests/journeys/<name>.journey.mjs`);
+its `how` says which cases and which unit tests carry the evidence.
+
 ## Where things live
 
 | What | Path |
@@ -166,7 +199,8 @@ on Windows). Format (`format: 1`):
 ```
 
 Browser and owner rows are written `not_run` with the reason "needs
-browser" or "owner step". A `--preview` run adds
+browser" or "owner step"; journey rows with "UI journey in CI" (the gate
+ignores their status in the file). A `--preview` run adds
 `"preview": {"commit", "branch", "build_sha256", "worktree_id", "verified_at_end"}`
 and names the file and `worker` `<label>-preview`.
 
@@ -180,7 +214,8 @@ python -m scripts.live_smoke record <revision> --worker ServerWorker \
   --row two-worker-smoke.3 --status pass --evidence "snapshot /tmp/stop.png" --by owner
 ```
 
-Script rows cannot be recorded; rerun them. A worker whose file was written
+Script rows cannot be recorded; rerun them. Journey rows cannot be recorded
+either: their evidence is the journeys' CI pass. A worker whose file was written
 elsewhere (the swapped-roles pass on DesktopWorker) is brought in with
 `python -m scripts.live_smoke import <file>`.
 
@@ -196,6 +231,16 @@ revision, a file for another revision, an interrupted or over-cap run, a
 failed row, a scenario row missing from the file, a script row not run, or
 a browser row not recorded (rows marked `optional` excepted). Owner rows
 never block; they are listed as owner to-dos.
+
+Journey rows are not read from any worker's file. When the catalog has any,
+the gate asks GitHub for `main-suite.yml` runs on main at the candidate
+commit (`scripts/live_smoke/journeys.py`, through `gh`) and blocks unless one
+of them has every `UI journeys (k/N)` shard present and green. No run, a run
+still going, a failed or missing shard or an unreadable GitHub all block,
+naming the rows that rely on the journeys. `--skip-smoke-rows` cannot excuse
+journey rows (only `--skip-smoke` overrides the whole gate). A passing gate
+adds the release-notes line `UI journeys passed in CI at <rev> (<run url>),
+standing in for N live smoke rows.`
 
 A preview result (`<label>-preview`) counts like a worker's file. It also
 blocks when its stamp is for another commit or the checkout changed during
@@ -248,8 +293,12 @@ A row:
 }
 ```
 
-- `kind`: `script` (the runner drives it), `browser` or `owner` (no steps;
-  recorded by hand). `two_worker: true` marks rows that need the peer;
+- First ask whether a UI journey on the dev instance can catch the bug. If it
+  can, write the journey (and a `journey` row naming it only if the row is
+  worth keeping in the catalog); otherwise add a row here.
+- `kind`: `script` (the runner drives it), `journey` (no steps; `journeys`
+  names the covering UI journeys), `browser` or `owner` (no steps; recorded
+  by hand, and `needs` says why, see above). `two_worker: true` marks rows that need the peer;
   `optional: true` keeps a browser row from blocking; `needs_project: true`
   skips a row when the project is not found.
 - Ops: `workers`, `start` (`as`, `on: self|peer`, `prompt`, `wait`),
