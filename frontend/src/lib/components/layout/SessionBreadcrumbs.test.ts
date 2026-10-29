@@ -5,7 +5,10 @@ import type { Session } from '$lib/api/sessions';
 
 vi.mock('$lib/stores/app-data.svelte', () => ({ appData: { current: { sessions: [] } }, sessions: writable<Session[]>([]) }));
 vi.mock('$lib/stores/active-session', () => ({ activeSession: Object.assign(writable({}), { switchSession: vi.fn() }) }));
-vi.mock('$lib/api/client', () => ({ api: { get: vi.fn(), getShared: vi.fn(), patch: vi.fn(), delete: vi.fn() }, forkSession: vi.fn() }));
+vi.mock('$lib/api/client', async importOriginal => {
+	const { isRouteMissing } = await importOriginal<typeof import('$lib/api/client')>();
+	return { api: { get: vi.fn(), getShared: vi.fn(), patch: vi.fn(), delete: vi.fn() }, forkSession: vi.fn(), isRouteMissing };
+});
 // A known non-admin: the title menu's chat identity is settled without loading the assistant.
 vi.mock('$lib/stores/auth.svelte', () => ({ auth: writable({ status: { is_admin: false } }) }));
 import { sessions } from '$lib/stores/app-data.svelte';
@@ -168,7 +171,7 @@ it.each(['id', 'title', 'hidden', 'parent_session_id'] as const)('falls back for
 });
 
 it.each([
-	{ status: 404, detail: 'Not Found' },
+	{ status: 404, detail: 'Not Found', body: { detail: 'Not Found' } },
 	{ status: 405, detail: 'Method Not Allowed' },
 	{ status: 501, detail: 'Not Implemented' }
 ])('falls back when an older worker does not support the light route ($status)', async error => {
