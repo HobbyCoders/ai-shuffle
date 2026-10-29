@@ -16,7 +16,7 @@ No account or Docker login is needed to download the public image.
 
 Many NAS and home server systems have a Docker or "Container" app with a Compose or "Project" screen. Paste the two files below there, or use a terminal on the machine.
 
-> **Before enabling agent shells:** by default an agent can read this install's own database password and credential keys. Consider the [optional agent/service account split](#keep-agents-away-from-ai-shuffles-own-keys-optional) on a disposable install first. It is separate from the code-mode sandbox below and is not fail-closed; setting it to `on` alone does not prove that it is active.
+> **Before enabling agent shells:** by default an agent can read this install's own database password and credential keys. Consider the [optional agent/service account split](#keep-agents-away-from-ai-shuffles-own-keys-optional) on a disposable install first. It is independent of the in-process Python guards and is not fail-closed; setting it to `on` alone does not prove that it is active.
 
 ## Install with Docker Compose
 
@@ -63,17 +63,6 @@ services:
     # A burst of short-lived agent processes must not exhaust the process table.
     pids_limit: 8192
 
-    # The code-mode sandbox around agents' Python code, on by default. These
-    # relax Docker's default seccomp and AppArmor filters and its /proc masking
-    # for the whole container; remove them to opt out. See "The code-mode
-    # sandbox" in the install guide.
-    security_opt:
-      - seccomp=unconfined
-      # Lets the sandbox mount its own /proc:
-      - systempaths=unconfined
-      # Docker ignores this on hosts without AppArmor:
-      - apparmor=unconfined
-
     environment:
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
@@ -85,8 +74,6 @@ services:
       # does not reach the container). The install guide explains each one.
       # The reverse proxy's address, as AI Shuffle sees it:
       # TRUSTED_PROXIES: "172.18.0.1"
-      # The code-mode sandbox: auto (the default), required or off:
-      # CODE_MODE_OS_SANDBOX: "auto"
       # Ranges the built-in browser may open. This list replaces the localhost
       # default, so keep the first two ranges to still allow localhost:
       # BROWSER_SSRF_ALLOW: "127.0.0.0/8,::1/128,192.168.1.20/32"
@@ -205,11 +192,6 @@ PGID=1000
 # Never list your whole LAN.
 #TRUSTED_PROXIES=172.18.0.1
 
-# The sandbox around agents' Python code: auto (the default), required or off.
-# It needs the security_opt lines in compose.yaml; without them, auto runs
-# the code unsandboxed and says so once in the log.
-#CODE_MODE_OS_SANDBOX=auto
-
 # Address ranges the built-in browser may open. Replaces the localhost default,
 # so keep the first two ranges to still allow localhost.
 #BROWSER_SSRF_ALLOW=127.0.0.0/8,::1/128,192.168.1.20/32
@@ -266,9 +248,6 @@ docker run -d \
   --stop-timeout 120 \
   --shm-size 1g \
   --pids-limit 8192 \
-  --security-opt seccomp=unconfined \
-  --security-opt systempaths=unconfined \
-  --security-opt apparmor=unconfined \
   -e PUID=1000 \
   -e PGID=1000 \
   -e COOKIE_SECURE=false \
@@ -293,7 +272,7 @@ docker run -d \
 
 If you create the container in a web interface instead of a terminal, set the same options as the `docker run` command above. Most important is the restart policy: many of these tools create containers with no restart policy, and then AI Shuffle stays down after a failure.
 
-- **Unraid:** in **Add Container**, switch to **Advanced View** and put the options without their own field into **Extra Parameters**: `--restart unless-stopped --stop-timeout 120 --shm-size 1g --pids-limit 8192 --security-opt seccomp=unconfined --security-opt systempaths=unconfined --security-opt apparmor=unconfined`. Add the ports, volumes and variables from the command with **Add another Path, Port, Variable, Label or Device**.
+- **Unraid:** in **Add Container**, switch to **Advanced View** and put the options without their own field into **Extra Parameters**: `--restart unless-stopped --stop-timeout 120 --shm-size 1g --pids-limit 8192`. Add the ports, volumes and variables from the command with **Add another Path, Port, Variable, Label or Device**.
 - **Portainer:** under **Restart policy**, choose **Unless stopped**.
 
 For an existing hand-created install, change the policy on the **Docker host**, not inside the container: `docker update --restart=unless-stopped <container-name>`. This does not restart it. Verify with `docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' <container-name>`; it must print `unless-stopped`. Save the same policy in Unraid's template or Portainer's configuration so recreating the container preserves it. In-app source updates restart the application, not the Docker container, and cannot change its host restart policy.
@@ -403,10 +382,11 @@ If a reverse proxy (in another container, or on the host, Tailscale Serve includ
 
 ## The code-mode sandbox
 
-On Linux, agents' Python code runs in a sandbox with no network access and no access to your files. The `security_opt` lines in the compose file (and the `--security-opt` flags in `docker run`) turn it on. **Settings → Security → Code sandbox** shows whether it is active.
+The former Linux-only bubblewrap sandbox has been removed. Python cells now follow the same permission rules on every platform: **Ask** and **Accept Edits** ask before each cell; **Bypass** approves it. The in-process import, audit and I/O guards remain, but are defence in depth, not an OS security boundary. Calls to tools inside a cell still pass through their own permission gates.
 
-- To turn it off, remove those lines, or set `CODE_MODE_OS_SANDBOX` to `off`. To refuse to run code without it, set `required`.
-- **Ubuntu 24.04 and later** block the sandbox by default. Allow it with `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`, and put the same setting in a file under `/etc/sysctl.d/` to keep it after a reboot. Or run without the sandbox.
+The sandbox setting and its Security settings row are gone; old environment or saved values are ignored. Remove the old `seccomp=unconfined`, `systempaths=unconfined` and `apparmor=unconfined` options from an existing container configuration if you added them only for bubblewrap. The shipped compose files no longer relax Docker's default protections for it. There is no need to change the host's user-namespace or AppArmor policy for Python cells.
+
+Shared-folder grants keep list/read/write file access, but no longer run commands. Commands require an SSH machine grant; there is no unsandboxed local-command fallback.
 
 ## Keep agents away from AI Shuffle's own keys (optional)
 

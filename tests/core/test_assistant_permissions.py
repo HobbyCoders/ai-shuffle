@@ -97,11 +97,6 @@ LOW_CALLS = [
     ("mcp__browser__browser_navigate", {"url": "http://127.0.0.1:5173"}),
     ("mcp__computer-use__left_click", {"coordinate": [1, 2]}),
     ("run_python", {"code": "hits = Grep(pattern='x')\nprint(len(hits))"}),
-    # Driving the worker's emulator; installing an APK from the project.
-    ("mcp__builtins__Emulator", {"action": "tap", "x": 10, "y": 20}),
-    ("Emulator", {"action": "start"}),
-    ("Emulator", {"action": "install", "path": os.path.join(ROOT, "app-debug.apk")}),
-    ("EmulatorScreenshot", {}),
 ]
 
 HIGH_CALLS = [
@@ -160,10 +155,6 @@ HIGH_CALLS = [
     ("StartSession", {"title": "x", "prompt": "x", "request_id": "r", "worker": "ServerWorker"}),
     ("HandOffSession", {"worker": "ServerWorker"}),
     ("Forget", {"memory_id": "m", "expected_revision": 1, "confirm": True}),
-    # The Android SDK download (a license and ~2 GB); an APK from outside the projects.
-    ("Emulator", {"action": "setup", "accept_license": True}),
-    ("Emulator", {"action": "install", "path": OUTSIDE}),
-    ("Emulator", {"action": "install"}),
 ]
 
 
@@ -189,8 +180,9 @@ def test_the_fixed_list_asks(name, data):
     assert ap.level(name, data, SCOPE) == ap.HIGH
 
 
-def test_a_sandboxed_code_cell_is_low_and_no_scope_never_asks():
-    assert ap.level("run_python", {"code": "import subprocess"}, SCOPE, spec_risk="safe") == ap.LOW
+def test_code_cell_content_cannot_be_lowered_by_a_runtime_verdict_and_no_scope_never_asks():
+    assert ap.level("run_python", {"code": "import subprocess"}, SCOPE, spec_risk="safe") == ap.HIGH
+    assert ap.level("run_python", {"code": "print(1 + 1)"}, SCOPE) == ap.LOW
     assert not ap.needs_owner("Bash", {"command": "rm -rf /"}, None)
 
 

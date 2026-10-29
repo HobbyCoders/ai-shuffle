@@ -262,9 +262,8 @@ export async function withoutSavedAgentPick(page) {
 
 /**
  * Set the composer's tool access (Ask, Accept Edits, Bypass). A journey that
- * is not about approvals sets it: whether Ask prompts for a code-mode cell
- * depends on the host (run_python is "safe" only behind the bwrap sandbox,
- * which GitHub's runners refuse), so Ask is not the same app on every machine.
+ * is not about approvals sets Bypass explicitly: Ask and Accept Edits prompt
+ * before every Python cell on all platforms.
  */
 export async function pickAccess(page, mode) {
 	const menu = page.getByRole('menu', { name: 'Tool access' });

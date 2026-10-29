@@ -93,7 +93,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from fluid._filelock import file_lock
-from fluid.codemode.os_sandbox import REQUIRED_REFUSAL_MARK
 
 _log = logging.getLogger(__name__)
 
@@ -351,12 +350,15 @@ def names_path_outside(text: str, cwd: str | None) -> bool:
 
 _NAME_RE = re.compile(r"^[a-z_][a-z0-9_]{0,63}$")
 MAX_SKILL_BYTES = 65536
+# Read-only compatibility for skill metadata written by older versions. This
+# refusal meant no skill ran; it must never remain a cached broken verdict.
+LEGACY_SANDBOX_REFUSAL = "code_mode_os_sandbox=required, but"
 
 
-def _is_infra_verdict(error: object) -> bool:
-    """Whether a verification error is the ``required`` sandbox's refusal to
-    start the kernel: a host condition, never a verdict on the skill."""
-    return isinstance(error, str) and REQUIRED_REFUSAL_MARK in error
+def _is_legacy_sandbox_refusal(error: object) -> bool:
+    return isinstance(error, str) and error.startswith(LEGACY_SANDBOX_REFUSAL)
+
+
 # Live skills past this many are archived, least useful first (the memory cap
 # has the same posture): a library the synthesizer must re-read every pass
 # cannot grow without bound.
@@ -1020,11 +1022,11 @@ class SkillStore:
         source = path.read_text(encoding="utf-8")
         info = self._load_meta().get("skills", {}).get(name, {})
         broken = info.get("broken")
-        # A broken verdict only holds for the exact source it was issued on,
-        # and never when it was the host's sandbox refusal, not the skill's.
+        # A broken verdict only holds for the exact source it was issued on.
+        # Old host refusals are not skill failures, even with an unchanged mtime.
         if broken is not None and (
             info.get("verified_mtime") != self._mtime_ns(name)
-            or _is_infra_verdict(broken)
+            or _is_legacy_sandbox_refusal(broken)
         ):
             broken = None
         return Skill(
@@ -1069,20 +1071,16 @@ class SkillStore:
         """True when the skill was never verified for its current source."""
         info = self._load_meta().get("skills", {}).get(name, {})
         mtime = self._mtime_ns(name)
-        if _is_infra_verdict(info.get("broken")):
-            # Recorded by an older fluid while the required sandbox was
-            # unavailable: the skill never ran, so it still needs a verdict.
-            return True
-        return mtime is None or info.get("verified_mtime") != mtime
+        return (
+            _is_legacy_sandbox_refusal(info.get("broken"))
+            or mtime is None
+            or info.get("verified_mtime") != mtime
+        )
 
     def mark_verified(self, name: str, error: str | None = None) -> None:
-        """Record a verification verdict for the skill's current source.
-
-        A sandbox refusal is not a verdict (the skill never ran) and is not
-        recorded; the skill stays stale and is verified once a kernel starts.
-        """
-        if _is_infra_verdict(error):
-            return
+        """Record a verification verdict for the skill's current source."""
+        if _is_legacy_sandbox_refusal(error):
+            return  # compatibility for callers replaying old verification results
         meta = self._load_meta()
         entry = meta.setdefault("skills", {}).setdefault(name, {"uses": 0})
         entry["verified_mtime"] = self._mtime_ns(name)

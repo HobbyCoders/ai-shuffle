@@ -186,7 +186,6 @@ async def lifespan(app: FastAPI):
         init_core, init_encryption_and_sessions, init_workspace,
         check_prerequisites, start_services, start_background_tasks,
         shutdown_services, harden_process_introspection,
-        prewarm_code_mode_sandbox,
     )
     from app.core.resource_monitor import start_resource_monitor, stop_resource_monitor
     from app.core.loop_watchdog import start_loop_watchdog, stop_loop_watchdog
@@ -233,7 +232,6 @@ async def lifespan(app: FastAPI):
     if os.environ.get("TESTING") != "1":
         from app.core import process_ledger
         process_ledger.mark_run()
-    prewarm_code_mode_sandbox()
 
     # Startup phases
     init_core()
@@ -300,14 +298,6 @@ async def lifespan(app: FastAPI):
         await startup_reconcile.reconcile_at_boot(runner_approved)
     except Exception:
         logger.exception("Startup reconcile failed (non-fatal)")
-
-    # Emulator/adb processes a killed previous run left behind, and the AVD
-    # locks they hold (app/core/android_emulator). Nothing has started one yet.
-    try:
-        from app.core.android_emulator.manager import cleanup_orphans
-        await asyncio.to_thread(cleanup_orphans)
-    except Exception:
-        logger.exception("Android emulator orphan cleanup failed (non-fatal)")
 
     init_encryption_and_sessions()
     from app.preview_run import initialize_preview_access, seed_dev_instance
@@ -409,12 +399,6 @@ async def lifespan(app: FastAPI):
     stop_loop_watchdog()
     from app.core import browser_runtime
     await browser_runtime.shutdown()
-    # Running emulators belong to this process; stop them before it exits.
-    try:
-        from app.core.android_emulator.manager import get_manager as emulator_manager
-        await emulator_manager().shutdown()
-    except Exception:
-        logger.exception("Android emulator shutdown failed")
     # In-app terminals live in this process: kill every shell's process group
     # so none outlives the app (the list is empty after a restart).
     try:
@@ -689,8 +673,6 @@ app.include_router(project_memory.router)
 app.include_router(mcp.router)
 app.include_router(tools_api.router)
 app.include_router(browser_panel.router)
-from app.api import emulator as emulator_api
-app.include_router(emulator_api.router)
 app.include_router(terminals_api.router)
 app.include_router(terminals_api.ws_router)
 app.include_router(mobile.router)

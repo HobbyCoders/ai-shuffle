@@ -1,16 +1,13 @@
-"""Write-only owner sender settings and self-service native push tokens."""
-from fastapi import APIRouter, Depends, HTTPException, Request
+"""Self-service native push tokens and silent attention-state refresh."""
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, SecretStr
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
-from app.api.auth import require_admin
 from app.api.mobile import get_device_with_scope
-from app.db import mobile, settings as settings_db
+from app.db import mobile
 from app.db.async_database import run_sync
-from app.services import push_credentials
-from app.services.push_notification import device_receives_push
 
 class _PushRoute(APIRoute):
     def get_route_handler(self):
@@ -29,46 +26,9 @@ class _PushRoute(APIRoute):
 router = APIRouter(tags=["Notifications"], route_class=_PushRoute)
 
 
-class SenderConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    service_account: SecretStr
-
-
 class PushToken(BaseModel):
     model_config = ConfigDict(extra="forbid")
     token: SecretStr
-
-
-async def status():
-    devices = await run_sync(mobile.get_all_mobile_devices)
-    count = 0
-    for device in devices:
-        if device_receives_push(device) and await run_sync(mobile.push_device_is_live, device):
-            count += 1
-    return {"configured": bool(await run_sync(settings_db.get_system_setting_revision, push_credentials.SETTING_KEY)),
-            "devices_registered": count}
-
-
-@router.get("/api/v1/settings/notifications")
-async def sender_status(_: str = Depends(require_admin)):
-    return await status()
-
-
-@router.put("/api/v1/settings/notifications")
-async def save_sender(body: SenderConfig, _: str = Depends(require_admin)):
-    try:
-        await run_sync(push_credentials.save_account, body.service_account.get_secret_value())
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from None
-    except RuntimeError:
-        raise HTTPException(503, "Secret storage is locked") from None
-    return await status()
-
-
-@router.delete("/api/v1/settings/notifications")
-async def remove_sender(_: str = Depends(require_admin)):
-    await run_sync(settings_db.delete_system_setting, push_credentials.SETTING_KEY)
-    return await status()
 
 
 def _device(request):

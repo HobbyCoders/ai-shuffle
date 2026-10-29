@@ -126,24 +126,43 @@ describe('UserQuestion — nonmodal answer form', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Send answer' }));
 		expect(onRespond.mock.calls[0][0].answers['Which database should we use?']).toBe('Postgres, SQLite');
 	});
-	it('lets the user explicitly skip, undo, and replace the skip with an answer', async () => {
+	it('skipping the only question sends the skip right away', async () => {
 		const onRespond = vi.fn(); render(UserQuestion, { data: data(), onRespond });
+		await fireEvent.click(screen.getByLabelText('SQLite', { exact: false }));
 		await fireEvent.click(screen.getByRole('button', { name: 'Skip this question' }));
+		expect(onRespond).toHaveBeenCalledTimes(1);
+		expect(onRespond.mock.calls[0][0]).toMatchObject({ answers: {}, skipped: ['Which database should we use?'] });
+	});
+	it('skipping moves to the next open question, and can be undone there', async () => {
+		const onRespond = vi.fn();
+		render(UserQuestion, { data: data([question(), question({ question: 'Which cache?', header: 'Cache' })]), onRespond });
+		await fireEvent.click(screen.getByRole('button', { name: 'Skip this question' }));
+		expect(onRespond).not.toHaveBeenCalled();
+		expect(screen.getByRole('heading', { name: 'Which cache?' })).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: /Database/ }));
 		expect(screen.getByRole('button', { name: 'Skipped — undo' }).getAttribute('aria-pressed')).toBe('true');
 		await fireEvent.click(screen.getByRole('button', { name: 'Skipped — undo' }));
-		await fireEvent.click(screen.getByRole('button', { name: 'Skip this question' }));
 		await fireEvent.click(screen.getByLabelText('SQLite', { exact: false }));
-		await fireEvent.click(screen.getByRole('button', { name: 'Send answer' }));
-		expect(onRespond.mock.calls[0][0]).toMatchObject({ answers: { 'Which database should we use?': 'SQLite' }, skipped: [] });
+		await fireEvent.click(screen.getByRole('button', { name: 'Cache' }));
+		await fireEvent.click(screen.getByLabelText('Postgres', { exact: false }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Send answers' }));
+		expect(onRespond.mock.calls[0][0]).toMatchObject({
+			answers: { 'Which database should we use?': 'SQLite', 'Which cache?': 'Postgres' }, skipped: []
+		});
 	});
-	it('reports skipped questions out of band alongside the answered batch', async () => {
+	it('skipping the last open question sends the batch with the skip out of band', async () => {
 		const onRespond = vi.fn(); render(UserQuestion, { data: data([question(), question({ question: 'Which cache?', header: 'Cache' })]), onRespond });
 		await fireEvent.click(screen.getByLabelText('Postgres', { exact: false }));
 		expect((screen.getByRole('button', { name: 'Send answers' }) as HTMLButtonElement).disabled).toBe(true);
 		await fireEvent.click(screen.getByRole('button', { name: 'Cache' }));
 		await fireEvent.click(screen.getByRole('button', { name: 'Skip this question' }));
-		await fireEvent.click(screen.getByRole('button', { name: 'Send answers' }));
+		expect(onRespond).toHaveBeenCalledTimes(1);
 		expect(onRespond.mock.calls[0][0]).toMatchObject({ answers: { 'Which database should we use?': 'Postgres' }, skipped: ['Which cache?'] });
+	});
+	it('does not send a skip while disconnected', async () => {
+		const onRespond = vi.fn(); render(UserQuestion, { data: data(), onRespond, disabled: true });
+		await fireEvent.click(screen.getByRole('button', { name: 'Skip this question' }));
+		expect(onRespond).not.toHaveBeenCalled();
 	});
 	it('does not submit while disconnected', async () => {
 		const onRespond = vi.fn(); render(UserQuestion, { data: data(), onRespond, disabled: true });

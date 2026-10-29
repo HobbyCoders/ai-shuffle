@@ -111,7 +111,8 @@ def test_the_bypass_flag_is_left_off_only_for_a_known_older_cli(version, expecte
 ])
 def test_a_root_run_cli_outside_a_sandbox_gets_no_bypass_flag(monkeypatch, env, expected) -> None:
     # CLI 2.1.285 exits 1 on --allow-dangerously-skip-permissions as root
-    # outside IS_SANDBOX=1 or bubblewrap, so the flag would stop every session.
+    # without the CLI's own deliberate-sandbox markers, so the flag would stop
+    # every session. These are upstream CLI checks, not an AI Shuffle sandbox.
     monkeypatch.setattr(delegated_mod, "_ON_WINDOWS", False)
     monkeypatch.setattr(delegated_mod.os, "getuid", lambda: 0, raising=False)
     for name in ("IS_SANDBOX", "CLAUDE_CODE_BUBBLEWRAP"):

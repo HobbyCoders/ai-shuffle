@@ -237,6 +237,12 @@ connection other than the app's own loopback compaction bridge, and refuses
 `auth login`, `update` and everything except `--version`, `auth status` and
 `-p` runs. `--claude-cli none` leaves PATH alone and seeds no Claude Code agent.
 
+To stretch CLI startup (not just its first token), launch with
+`DEVLOOP_CLAUDE_STARTUP_MS=3000 python -m scripts.devloop up`. The fake waits
+before emitting its init/session-id frame; auth and version probes are not
+delayed. The default is zero. This composes with scenario `latency_ms` and
+with `--no-vite` to exercise the built frontend.
+
 It speaks stream-json like Claude Code 2.1. It calls the hooks the app
 registers and obeys a PreToolUse deny. It asks `can_use_tool` unless the mode,
 `--allowed-tools` or a read-only tool allows the call, and removes

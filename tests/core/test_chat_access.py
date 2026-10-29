@@ -299,9 +299,7 @@ async def test_folder_write_confirmation_mode_preserves_scope(broker, tmp_path, 
     await asyncio.wait_for(task, 3)
     assert (tmp_path / "ok.txt").read_text() == "written"
     assert not broker.actions
-    # Without the isolated shell a folder grant runs no commands at all.
-    from app.core import chat_shell
-    monkeypatch.setattr(chat_shell, "self_test", lambda: (False, "test host"))
+    # Folder grants never authorize commands, in any permission mode.
     for operation, args in [("write", {"path": "../escape", "content": "no"}), ("command", {"command": "no"})]:
         with pytest.raises(AccessDenied):
             await broker.run("chat", grant["id"], operation, args)
@@ -569,14 +567,10 @@ def test_folder_links_traversal_atomic_writes_and_bounds(tmp_path):
 @pytest.mark.skipif(not chat_files.available(), reason="Linux openat2 confinement required")
 @pytest.mark.asyncio
 async def test_folder_cannot_run_shell_and_writes_need_grant_and_approval(broker, tmp_path, monkeypatch):
-    # Without the isolated shell (tests/core/test_chat_shell.py covers it) a
-    # folder command is refused; a host with bubblewrap would otherwise wait
-    # for approval here.
-    from app.core import chat_shell
-    monkeypatch.setattr(chat_shell, "self_test", lambda: (False, "test host"))
     grant = await broker.create("chat", GrantInput(kind="folder", label="Folder", path=str(tmp_path)))
-    with pytest.raises(AccessDenied):
+    with pytest.raises(AccessDenied, match="Commands run only on SSH machine grants; use the file tools for folders"):
         await broker.run("chat", grant["id"], "command", {"command": "anything"})
+    assert not broker.actions  # refusal happens before asking for a one-shot approval
     with pytest.raises(AccessDenied):
         await broker.run("chat", grant["id"], "write", {"path": "x", "content": "no"})
     broker.revoke("chat", grant["id"])
@@ -643,6 +637,42 @@ def test_chat_options_never_resolve_project_or_load_project_settings(tmp_path, m
                                         if owner else {"builtins", "chat-access"})
     assert set(CHAT_MODE_RESOURCE_TOOLS) <= set(options.allowed_tools)
     assert "Bash" not in options.allowed_tools
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not chat_files.available(), reason="descriptor-relative folder access required")
+@pytest.mark.parametrize("writable", [False, True])
+@pytest.mark.parametrize("permission_mode", ["default", "acceptEdits", "bypassPermissions"])
+async def test_sdk_folder_commands_refuse_before_approval_or_execution(
+    broker, tmp_path, monkeypatch, writable, permission_mode,
+):
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+    from app.mcp import chat_access_sdk as sdk
+
+    monkeypatch.setattr(sdk, "broker", broker)
+    monkeypatch.setattr("app.db.database.get_session", lambda sid: {"permission_mode": permission_mode})
+    approve = AsyncMock(side_effect=AssertionError("folder command must not ask for approval"))
+    remote = AsyncMock(side_effect=AssertionError("folder command must not run remotely"))
+    monkeypatch.setattr(broker, "approve", approve)
+    monkeypatch.setattr(broker, "remote_command", remote)
+    grant = await broker.create("chat", GrantInput(
+        kind="folder", label="Files", path=str(tmp_path), writable=writable,
+    ))
+    tools = {t.name: t for t in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
+    try:
+        response = await tools["ChatRunCommand"].handler({
+            "grant_id": grant["id"], "command": "touch should-not-exist",
+        })
+        assert response["isError"]
+        assert "Commands run only on SSH machine grants; use the file tools for folders" in response["content"][0]["text"]
+        approve.assert_not_awaited()
+        remote.assert_not_awaited()
+        assert not broker.actions and not broker.grants[grant["id"]].tasks
+        assert list(tmp_path.iterdir()) == []
+        listed = await tools["ChatListFiles"].handler({"grant_id": grant["id"], "path": "."})
+        assert not listed.get("isError")
+    finally:
+        broker.revoke("chat", grant["id"])
 
 
 @pytest.mark.asyncio

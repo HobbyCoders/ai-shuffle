@@ -603,16 +603,6 @@ export interface WorkspaceValidation {
 	writable: boolean;
 }
 
-/** `code_sandbox` in GET /api/v1/deployment: whether agents' Python cells run
- * inside the bubblewrap sandbox (app/api/system.py code_sandbox_status). */
-export interface CodeSandboxStatus {
-	mode: 'auto' | 'required' | 'off';
-	state: 'active' | 'checking' | 'unavailable' | 'off';
-	active: boolean;
-	/** Why the sandbox is not active: the self-test's own message, or the setting that turned it off. */
-	reason: string;
-}
-
 // ============================================================================
 // Agent Export/Import API Types and Functions
 // ============================================================================

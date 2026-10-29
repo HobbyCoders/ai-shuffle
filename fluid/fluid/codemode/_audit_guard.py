@@ -78,14 +78,10 @@ events* (process spawn, native code, sockets, direct file I/O, environment
 edits) are denied from cell-run code no matter how the target object was
 obtained, and that its own decision state cannot be flipped from a cell.
 
-**The real trust boundary is the process / OS sandbox.** Operators who run
-untrusted models MUST run the kernel child under OS-level isolation (a seccomp
-profile denying ``execve``/``socket``/``open`` beyond the RPC pipe, a separate
-uid, a namespace, or a container). As of this writing the kernel ships no such
-wrapper (there is no bwrap/seccomp/nsjail/firejail/docker launcher under
-``fluid/`` for the kernel child — ``subprocess_kernel`` spawns a bare
-``python -I -S``), so this in-process guard is the only layer unless the
-deployment adds one. Do not treat it as sufficient for hostile input.
+The kernel ships no OS-level sandbox: ``subprocess_kernel`` spawns a bare
+``python -I -S`` child. Each Python cell is write-class and must pass the host
+permission gate before execution. Operators running hostile input need their
+own OS-level isolation for the deployment; these guards are not sufficient.
 
 Stdlib-only: the runner imports this as a top-level sibling module.
 """

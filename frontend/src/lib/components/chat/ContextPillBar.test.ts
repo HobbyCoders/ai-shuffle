@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
-import { writable } from 'svelte/store';
+import { writable, type Writable } from 'svelte/store';
 import ContextPillBar from './ContextPillBar.svelte';
 import { git, gitStatus } from '$lib/stores/git.svelte';
 import { adoptSession, moveSession, getQueuedMove, queueMove, cancelQueuedMove } from '$lib/api/sessions';
@@ -9,9 +9,11 @@ import { notify } from '$lib/stores/notifications';
 import { refreshWorkerPresence, resetWorkerPresence } from '$lib/stores/worker-presence';
 import { resetOwnerTransitions } from '$lib/utils/handoff-episodes';
 
-const { session, execution, appSessions, listInstallsMock, getClusterGitStateMock } = vi.hoisted(() => ({
+const { session, auth, execution, branches, appSessions, listInstallsMock, getClusterGitStateMock } = vi.hoisted(() => ({
 	session: { store: null as any },
+	auth: { store: null as Writable<boolean> | null },
 	execution: vi.fn(),
+	branches: vi.fn(),
 	appSessions: { store: null as any },
 	listInstallsMock: vi.fn(),
 	getClusterGitStateMock: vi.fn()
@@ -31,14 +33,20 @@ vi.mock('$lib/stores/app-data.svelte', () => {
 		appData: { loadSessions: vi.fn() }
 	};
 });
-vi.mock('$lib/stores/auth.svelte', () => ({ githubAuthenticated: writable(false), isAuthenticated: writable(true), isAdmin: writable(true) }));
+vi.mock('$lib/stores/auth.svelte', () => {
+	auth.store = writable(false);
+	return { githubAuthenticated: auth.store, isAuthenticated: writable(true), isAdmin: writable(true) };
+});
 vi.mock('$lib/stores/git.svelte', () => ({
 	gitStatus: writable({ current_branch: 'main', is_git_repo: true }),
 	git: writable({ projectId: 'project', sessionId: 'saved-session', worktreeId: null, hydrated: true, status: { is_git_repo: true } })
 }));
 vi.mock('./ProfileSelector.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('./WorkspaceFolderSelector.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
-vi.mock('./BranchSelector.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
+vi.mock('./BranchSelector.svelte', async () => {
+	const { default: component } = await import('$lib/test-stubs/EmptyRouteDependency.svelte');
+	return { default: (...args: Parameters<typeof component>) => { branches(); return component(...args); } };
+});
 vi.mock('$lib/components/layout/ExecutionModeBar.svelte', async () => {
 	const { default: component } = await import('$lib/test-stubs/EmptyRouteDependency.svelte');
 	return { default: (...args: Parameters<typeof component>) => { execution(); return component(...args); } };
@@ -67,6 +75,8 @@ afterEach(() => {
 	vi.mocked(queueMove).mockReset();
 	vi.mocked(cancelQueuedMove).mockReset();
 	execution.mockClear();
+	branches.mockClear();
+	auth.store!.set(false);
 	appSessions.store?.set([]);
 	listInstallsMock.mockReset();
 	listInstallsMock.mockResolvedValue({ installs: [] });
@@ -132,6 +142,19 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		session.store.set({ ...base, sessionId: null, messages: [], project: kind === 'project' ? 'project' : null, projectV2Id: kind === 'canonical' ? 'pv2-project' : null });
 		render(ContextPillBar, { sheetMode });
 		expect(execution).toHaveBeenCalledOnce();
+	});
+	it('uses the composed remote owner before its session-board row arrives', async () => {
+		branches.mockClear();
+		auth.store!.set(true);
+		session.store.set({ ...base, isRemote: true, ownerDeviceName: 'Peer worker' });
+		const view = render(ContextPillBar, { sheetMode });
+		expect(view.container.textContent).toContain('Peer worker');
+		// No local checkout selector while waiting for metadata about a REMOTE chat.
+		expect(branches).not.toHaveBeenCalled();
+		appSessions.store.set([{ id: base.sessionId, is_remote: true, device_name: 'Peer worker', controllable: true }]);
+		await tick();
+		expect(branches).not.toHaveBeenCalled();
+		expect(view.container.textContent).toContain('Peer worker');
 	});
 	it('keeps a persisted zero-message remote session in the runner view', async () => {
 		session.store.set({

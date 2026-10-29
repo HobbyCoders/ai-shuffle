@@ -75,10 +75,10 @@ export async function trackSend<T>(send: () => Promise<T>): Promise<T> {
  */
 export function newSessionWorker(
 	state: Pick<ActiveSessionState, 'sessionId' | 'deviceIntent'>
-): Pick<ActiveSessionState, 'isRemote' | 'ownerDeviceName'> | null {
+): Pick<ActiveSessionState, 'isRemote' | 'ownerDeviceName' | 'createdFromComposer'> | null {
 	if (state.sessionId) return null;
 	const target = state.deviceIntent?.id ? state.deviceIntent : null;
-	return { isRemote: target !== null, ownerDeviceName: target?.name ?? null };
+	return { isRemote: target !== null, ownerDeviceName: target?.name ?? null, createdFromComposer: true };
 }
 
 function formatWorktreeError(rawError: string, branchName: string): string {
@@ -212,7 +212,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		appData, persistSession, stopTimeout, getActiveSession,
 	} = deps;
 
-	/** Write the new session's owner onto an unbound compose before anything
+	/** Mark this as a fresh compose and write its owner before anything
 	 *  binds it (see newSessionWorker). No-op once a session is bound. */
 	function claimNewSessionWorker() {
 		update(s => {

@@ -32,7 +32,6 @@ import type { ActiveSessionState } from '../../active-session';
 import type { SdkContextUsage } from '$lib/api/sessions';
 import type { QueuedMessage, Task } from '../../types';
 import { browserPanel } from '../../browser-panel.svelte';
-import { phonePanel, isEmulatorTool } from '../../phone-panel.svelte';
 import { pendingQueue, reconcilePendingPeerMessages } from '../pending-queue';
 import { swarms } from '../../swarms';
 
@@ -1021,6 +1020,14 @@ export const feedController: FeedController = {
 				if (ev.type === 'swarm.updated') swarms.receive(ev.swarm, sessionId);
 				if (typeof ev.command_id === 'string') clearCompactRetry(sessionId, ev.command_id);
 				reducerState = reduce(reducerState, ev);
+				// A lagged mirror can replay an entire turn before the next fold.
+				// Consume optimism when the reducer confirms the turn, not only
+				// when a streaming frame paints; otherwise its completed replay
+				// leaves the compose's working flag stuck on. No history paints here.
+				if (reducerState.isStreaming && (optimisticStreaming || deps?.getState().optimisticStreaming)) {
+					optimisticStreaming = false;
+					deps?.update(s => s.optimisticStreaming ? { ...s, optimisticStreaming: false } : s);
+				}
 				// An empty log learns its epoch from this first row (sse-feed).
 				adoptLogEpoch();
 				eventsReduced++;
@@ -1075,15 +1082,6 @@ export const feedController: FeedController = {
 					// `autoOpenFor` no-ops if the user closed it for this session.
 					browserPanel.autoOpenFor(currentSessionId);
 				}
-				if (ev.type === 'tool.use' && isEmulatorTool(ev.name)) {
-					// Same rule for the phone: the composer has no Phone toggle, so the
-					// panel appears when the agent drives the emulator. LIVE events
-					// only; `autoOpenFor` no-ops once the user closed it for this
-					// session, and for a chat running on another worker.
-					const app = deps?.getState();
-					const remote = app?.sessionId === currentSessionId && app?.isRemote === true;
-					void phonePanel.autoOpenFor(currentSessionId, { remote });
-				}
 				scheduleFlush(
 					THROTTLED_EVENT_TYPES.has(String(ev.type)) ? 'throttled' : 'immediate'
 				);
@@ -1133,12 +1131,21 @@ export const feedController: FeedController = {
 
 	restart(sessionId: string) {
 		if (!deps) return;
+		// Re-hydration replaces history, not a local send the log has not
+		// confirmed yet. A new mirror may still have an empty log at its
+		// opening checkpoint; dropping its echo here centres the composer
+		// until replication delivers message.user. Origin seqs distinguish
+		// pending echoes from confirmed rows (even ones with a user-* id).
+		seedOptimistic();
+		const pending = currentSessionId === sessionId
+			? reducerState.messages.filter(m => m.role === 'user' && !reducerState.messageOriginSeq.has(m.id))
+			: [];
 		// R2: an explicit re-hydration invalidates the cached transcript — the
 		// caller is saying the state it was built from is no longer trustworthy.
 		transcriptCache.delete(sessionId);
 		deps.update((s) =>
 			s.sessionId === sessionId
-				? { ...s, messages: [], isLoadingSession: true, isHydrationSlow: false }
+				? { ...s, messages: pending, isLoadingSession: true, isHydrationSlow: false }
 				: s
 		);
 		teardown(false);

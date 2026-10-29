@@ -99,9 +99,14 @@ def _clear_stale_parked_markers(*, stop=None) -> int:
                    (instance_id,), update="parked_task_kind = NULL", stop=stop,
                    columns=("parked_task_kind",), consume=rows.extend)
 
+    from app.db import turns as turns_db
+
     for row in rows:
         session_id = _row_value(row, "id", 0)
         kind = _row_value(row, "parked_task_kind", 1)
+        # The park's working time stopped when the old process did, at a time
+        # nobody recorded. Drop the open segment rather than count the downtime.
+        turns_db.close_park_segment(session_id, bank=False)
         record_error(
             "backend",
             f"Boot reconcile: session {session_id} was parked on background "
@@ -777,7 +782,11 @@ async def _force_stalled_park(
             )
 
     try:
-        await asyncio.to_thread(turns_db.settle_parked_turns, session_id)
+        if await asyncio.to_thread(turns_db.settle_parked_turns, session_id):
+            # Settling banked the park's working time; show the final total.
+            from app.core.turn_finalize import broadcast_work_time
+
+            await broadcast_work_time(session_id)
     except Exception:  # noqa: BLE001
         logger.debug("Park watchdog: settle_parked_turns failed", exc_info=True)
 

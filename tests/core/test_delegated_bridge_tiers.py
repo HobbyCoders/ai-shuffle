@@ -31,14 +31,6 @@ from app.core.provider.fluid_tool_bridge import (
 from app.core.provider.types import SessionOptions
 
 
-@pytest.fixture(autouse=True)
-def _emulator_tools_listed(monkeypatch):
-    """Count the full catalog on every host: the emulator tools are only listed
-    where an emulator backend exists (Linux x86_64 today), so a Windows or macOS
-    run would otherwise see two tools fewer."""
-    monkeypatch.setattr("app.mcp.emulator_tools.emulator_tools_supported", lambda: True)
-
-
 SID = "11111111-1111-1111-1111-111111111111"
 CLI_PREFIX = "mcp__fluid_bundled__"
 # The loaded tier, priced with the app's estimator (chars/4) over the CLI's
@@ -155,13 +147,14 @@ async def test_rarely_used_tools_are_deferred(tmp_path):
     _options, _registry, tools = await _bridge(tmp_path)
     by_name = {t["name"]: t for t in tools}
     loaded = {name for name, t in by_name.items() if not _is_deferred(t)}
+    # Removed worker-owned tools must not leak back into either leg's catalog.
+    assert {"mcp__builtins__Emulator", "mcp__builtins__EmulatorScreenshot"}.isdisjoint(by_name)
     assert loaded == DELEGATED_LOADED_TOOLS & set(by_name)
     # The default servers carry every loaded tool except the chat lane's reader.
     assert DELEGATED_LOADED_TOOLS - set(by_name) == {"mcp__attachments__Read"}
     for name in (
         "Glob", "Grep",
         "mcp__builtins__AndroidAction", "mcp__builtins__AndroidDevices",
-        "mcp__builtins__Emulator", "mcp__builtins__EmulatorScreenshot",
         "mcp__builtins__CronCreate", "mcp__builtins__CronList",
         "mcp__builtins__GetAppErrors", "mcp__builtins__GetAppLogs",
         "mcp__builtins__ArchiveSession",

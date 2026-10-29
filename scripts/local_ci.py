@@ -65,7 +65,6 @@ FAST_SUBSET = [
     "tests/performance", "tests/mcp", "tests/services", "tests/unit", "tests/scripts",
 ]
 FAST_SUBSET_EXCLUDED = [
-    "tests/core/test_chat_shell.py",
     # Dedicated serial backend-linux step: supervisor globals and idle/disk
     # timing measurements must not share the parallel fast-subset workload.
     "tests/core/test_container_runtime.py",
@@ -519,7 +518,7 @@ def backend(ctx: Context) -> None:
 
 
 def backend_linux(ctx: Context) -> None:
-    """Steps CI Backend ran on Linux with real PostgreSQL and bubblewrap."""
+    """Steps CI Backend ran on Linux with real PostgreSQL and container contracts."""
     env = python_env()
     args = pytest_args(ctx.python, timeout=240)
     pg_ctl = shutil.which("pg_ctl")
@@ -529,11 +528,6 @@ def backend_linux(ctx: Context) -> None:
     if ctx.mode == "full" and pg_optin and not pg_bin:
         raise Failure("Container PostgreSQL opt-in requested but no PostgreSQL binaries were found; "
                       "install PostgreSQL or set SMOKE_PG_BIN.")
-    if shutil.which("bwrap"):
-        run([ctx.python, "-m", "pytest", "tests/core/test_chat_shell.py", "-rs", *args],
-            env={**env, "CHAT_SHELL_REQUIRE_SANDBOX": "1"})
-    else:
-        ctx.notes.append("Isolated folder shell tests not run: bubblewrap (bwrap) is not installed here.")
     if pg_bin:
         run([ctx.python, "-m", "pytest", "tests/smoke", "tests/db/test_schema_lifecycle.py", "-m", "boot_smoke",
              "-rs", *pytest_args(ctx.python, timeout=240, parallel=False)],
@@ -718,16 +712,16 @@ def android_unavailable() -> str | None:
 
 
 def linux_only() -> str | None:
-    return None if sys.platform.startswith("linux") else "Linux only (bubblewrap, PostgreSQL boot smoke, container contracts)"
+    return None if sys.platform.startswith("linux") else "Linux only (PostgreSQL boot smoke, container contracts)"
 
 
 SUITES = [
     Suite("backend", BACKEND_PATHS, backend, "Backend pytest: the files a change reaches (full: the whole fast subset)"),
-    Suite("backend-linux", ["app/core/chat_shell.py", "app/core/confined_files.py", "app/db/*", "app/main.py",
+    Suite("backend-linux", ["app/core/confined_files.py", "app/db/*", "app/main.py",
                             "docker/*", "Dockerfile", "entrypoint.sh", "docker-compose.yml",
-                            "tests/smoke/*", "tests/core/test_chat_shell.py",
+                            "tests/smoke/*",
                             "tests/core/test_container_runtime.py", "tests/core/test_container_image_contract.py"],
-          backend_linux, "Sandbox shell, PostgreSQL boot smoke and serial container contracts", linux_only),
+          backend_linux, "PostgreSQL boot smoke and serial container contracts", linux_only),
     Suite("fluid", ["fluid/*", "conftest.py", "scripts/ci/test_scratch.py", "app/core/temp_scratch.py"],
           fluid, "fluid unit suite"),
     Suite("frontend", ["frontend/*", "app/contract/schema/*"], frontend,

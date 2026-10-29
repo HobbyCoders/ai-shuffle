@@ -60,6 +60,7 @@
 		isAttentionStatus,
 		isLiveStatus,
 		isTurnLiveStatus,
+		isWorkCountingStatus,
 		sessionWorkMs,
 		formatElapsed,
 		formatAge,
@@ -131,11 +132,14 @@
 	// Only a turn holding the live slot ticks; a parked turn's interval has
 	// ended, so its timer takes the plain style, not the live accent.
 	const turnLive = $derived(isTurnLiveStatus(status));
+	// A parked session is still working on its background work, so its total
+	// keeps counting even though its timer keeps the plain style.
+	const counting = $derived(isWorkCountingStatus(status));
 	const lastActivity = $derived(timestamp ?? sessionTimestamp(session));
-	// Every row shows the session's total working time, which survives
-	// Done/Parked and settling. A settled row that is idle keeps its age in
-	// the hover title, where it used to be the visible value.
-	const timer = $derived(formatElapsed(sessionWorkMs(session, now, turnLive, lastActivity)));
+	// Every row shows the session's total working time, which survives Done
+	// and settling. A settled row that is idle keeps its age in the hover
+	// title, where it used to be the visible value.
+	const timer = $derived(formatElapsed(sessionWorkMs(session, now, counting, lastActivity)));
 	const timerTitle = $derived.by(() => {
 		if (!compact || live) return 'Total working time';
 		const age = formatAge(Math.max(0, now - lastActivity));
