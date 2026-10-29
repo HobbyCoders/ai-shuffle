@@ -548,10 +548,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					}
 				}
 
-				// Init must not restore over this claim while the socket connects.
-				// Another adoption/navigation can still change the target: never send
-				// with the stale pre-wait session snapshot in that case.
-				if (getState().sessionId !== _state.sessionId) return false;
+				// An unbound send must not create into a newly adopted target.
+				// Existing-chat sends already know their target: keep that id and
+				// its captured binding even if the view switches meanwhile (#418).
+				if (!_state.sessionId && getState().sessionId !== _state.sessionId) return false;
 
 				const userMsgId = `user-${Date.now()}`;
 				const isFirstMessage = _state.title === 'New Chat';
