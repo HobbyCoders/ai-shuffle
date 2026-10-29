@@ -1,0 +1,131 @@
+{
+  "description": "A typed /compact with no mod (or the mod fell back for a manual compaction at the context limit): Claude Code's summarizer.",
+  "evidence": "Claude Code 2.1.312 bundle (read, never run) and 501 of 582 real compaction boundaries in local transcripts (2.1.289-2.1.311): the boundary carries preserved_segment / preserved_messages (2-19 kept messages, median 4) and is followed by one isCompactSummary user entry (1.5k-30k chars, median 16k). The kept messages are not printed again. Session id unchanged in 582 of 582.",
+  "trigger": "manual",
+  "outcome": "summarizer",
+  "sequence": [
+    {
+      "frame": {
+        "type": "system",
+        "subtype": "status",
+        "status": "compacting",
+        "uuid": "$uuid",
+        "session_id": "$sid"
+      }
+    },
+    {
+      "bridge": true
+    },
+    {
+      "hook": "PreCompact",
+      "input": {
+        "trigger": "manual",
+        "custom_instructions": "$instructions"
+      }
+    },
+    {
+      "summarize": {
+        "keep": 2,
+        "min_chars": 1500,
+        "max_chars": 16000
+      }
+    },
+    {
+      "hook": "SessionStart",
+      "input": {
+        "source": "compact"
+      }
+    },
+    {
+      "frame": {
+        "type": "system",
+        "subtype": "status",
+        "status": null,
+        "compact_result": "success",
+        "uuid": "$uuid",
+        "session_id": "$sid"
+      }
+    },
+    {
+      "transcript": {
+        "type": "system",
+        "subtype": "compact_boundary",
+        "content": "Conversation compacted",
+        "level": "info",
+        "isSidechain": false,
+        "parentUuid": null,
+        "logicalParentUuid": "$logical_parent",
+        "uuid": "$boundary_uuid",
+        "compactMetadata": {
+          "trigger": "manual",
+          "preTokens": "$pre_tokens",
+          "postTokens": "$post_tokens",
+          "cumulativeDroppedTokens": "$dropped_tokens",
+          "durationMs": "$duration_ms",
+          "preservedSegment": {
+            "headUuid": "$preserved_head",
+            "anchorUuid": "$summary_uuid",
+            "tailUuid": "$preserved_tail"
+          },
+          "preservedMessages": {
+            "anchorUuid": "$summary_uuid",
+            "uuids": "$preserved_uuids"
+          }
+        }
+      }
+    },
+    {
+      "transcript": {
+        "type": "user",
+        "isCompactSummary": true,
+        "isVisibleInTranscriptOnly": true,
+        "parentUuid": "$boundary_uuid",
+        "uuid": "$summary_uuid",
+        "message": {
+          "role": "user",
+          "content": "$summary"
+        }
+      }
+    },
+    {
+      "frame": {
+        "type": "system",
+        "subtype": "compact_boundary",
+        "uuid": "$boundary_uuid",
+        "compact_metadata": {
+          "trigger": "manual",
+          "pre_tokens": "$pre_tokens",
+          "post_tokens": "$post_tokens",
+          "cumulative_dropped_tokens": "$dropped_tokens",
+          "duration_ms": "$duration_ms",
+          "preserved_segment": {
+            "head_uuid": "$preserved_head",
+            "anchor_uuid": "$summary_uuid",
+            "tail_uuid": "$preserved_tail"
+          },
+          "preserved_messages": {
+            "anchor_uuid": "$summary_uuid",
+            "uuids": "$preserved_uuids"
+          }
+        },
+        "logical_parent_uuid": "$logical_parent",
+        "session_id": "$sid"
+      }
+    },
+    {
+      "frame": {
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": "$summary"
+        },
+        "uuid": "$summary_uuid",
+        "timestamp": "$now",
+        "isCompactSummary": true,
+        "isVisibleInTranscriptOnly": true,
+        "session_id": "$sid",
+        "parent_tool_use_id": null
+      }
+    }
+  ]
+}

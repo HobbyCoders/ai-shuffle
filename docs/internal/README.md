@@ -12,6 +12,7 @@ image excludes `docs/`, and the update source archive carries only
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Branches, commits, pull requests, code style and test commands. |
 | [dev-workflow.md](dev-workflow.md) | The loop every change follows: reproduce on a running copy, fix every path, run the journeys, a second tester, say what was exercised. |
 | [dev-loop.md](dev-loop.md) | One command for a private, live-reloading copy of a branch with seed data and a free scripted fake AI. |
+| [claude-code-compaction-protocol.md](claude-code-compaction-protocol.md) | What the real Claude Code CLI prints around a compaction, the evidence for it, and the replay fixtures the fake CLI plays. |
 | [LOCAL_SETUP.md](LOCAL_SETUP.md) | Native source setup without Docker, including browser automation on native installs. |
 | [architecture.md](architecture.md) | Technical architecture (formerly an in-app page). |
 | [changelog-template.md](changelog-template.md) | How to write a release's changelog entry and notes. |

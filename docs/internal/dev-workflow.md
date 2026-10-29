@@ -55,8 +55,11 @@ The tools:
 ## What still needs a real device or a real provider
 
 The dev instance covers the native harness, the UI, the stream and the
-database with a fake AI. It does not cover: real provider behaviour (voice
-models, real Claude Code compaction output), two real workers, Android
+database with a fake AI. Claude Code chats run on a fake `claude` that prints
+compaction the way the real CLI does, from fixtures derived from it
+([claude-code-compaction-protocol.md](claude-code-compaction-protocol.md));
+what that page lists as not verified still needs a real CLI. It does not
+cover: real provider behaviour (voice models, a real Claude Code model), two real workers, Android
 native behaviour (locked-screen calls), Windows installers and updates. Those
 stay in the live smoke (`docs/internal/live-smoke.md`). Its hand-checked rows
 say why with `needs` (a device, a real provider, a disposable install or two

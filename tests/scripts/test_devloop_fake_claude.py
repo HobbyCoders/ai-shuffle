@@ -20,6 +20,7 @@ import pytest
 
 from scripts.devloop import fake_claude
 from scripts.devloop import seed as seed_module
+from scripts.devloop.fake_claude import cli as fake_cli
 
 TIMEOUT = 20.0
 
@@ -388,12 +389,122 @@ def test_a_skipped_manual_compaction_says_so_and_no_bridge_means_the_summarizer(
     cli.close()
     boundary = next(f for f in frames if f.get("subtype") == "compact_boundary")
     assert boundary["compact_metadata"]["trigger"] == "auto"
-    assert "logical_parent_uuid" not in boundary
+    # As Claude Code 2.1.312: the last message before the compaction.
+    assert boundary["logical_parent_uuid"]
     assert "compacted mid-turn" in _texts(frames)[-1]
     transcript, = (tmp_path / "b" / "home" / ".claude" / "projects").glob("*/*.jsonl")
     entries = [json.loads(line) for line in transcript.read_text().splitlines()]
     summary = entries[[e.get("subtype") for e in entries].index("compact_boundary") + 1]
     assert summary["isCompactSummary"] and "Hello." in summary["message"]["content"]
+
+
+COMPACTION_HOOKS = {event: [{"matcher": None, "hookCallbackIds": [f"fluid_{event}"]}]
+                    for event in ("PreCompact", "SessionStart")}
+
+
+def _printed(frames: list[dict]) -> list[tuple]:
+    """What the CLI printed (and asked) around a compaction, in the
+    fixtures' vocabulary."""
+    shape = []
+    for f in frames:
+        kind = f.get("type")
+        if kind == "control_request" and f["request"].get("subtype") == "hook_callback":
+            shape.append(("hook", f["request"]["input"]["hook_event_name"]))
+        elif kind == "system" and f.get("subtype") in ("status", "compact_boundary"):
+            shape.append((kind, f["subtype"], f.get("status"), f.get("compact_result")))
+        elif kind in ("user", "assistant", "result"):
+            shape.append((kind,))
+    return shape
+
+
+def _listed(fixture: dict, replayed: int) -> list[tuple]:
+    """The same for what the fixture lists (``replayed``: rows of the answer)."""
+    shape = []
+    for step in fixture["sequence"]:
+        if "hook" in step:
+            shape.append(("hook", step["hook"]))
+        elif "frame" in step:
+            frame = step["frame"]
+            if frame["type"] == "system":
+                shape.append(("system", frame["subtype"], frame.get("status"),
+                              frame.get("compact_result")))
+            else:
+                shape.append((frame["type"],))
+        elif step.get("replay") == "answer":
+            shape += [("replayed",)] * replayed
+        elif "result" in step:
+            shape.append(("result",))
+    return shape
+
+
+@pytest.mark.parametrize("trigger, outcome", [
+    ("auto", "fluid"), ("manual", "fluid"), ("auto", "summarizer"), ("manual", "summarizer"),
+    ("manual", "skip"),
+])
+def test_the_fake_prints_each_compaction_as_its_replay_fixture_lists_it(tmp_path, trigger,
+                                                                        outcome):
+    """The fixtures are the ground truth (derived from Claude Code 2.1.312);
+    the fake must print exactly their sequence."""
+    answer = {"fluid": _keep_last_exchange, "skip": lambda body: {"skip": "nothing left"},
+              "summarizer": lambda body: {"fallback": "nothing left"}}[outcome]
+    bridge = Bridge(answer)
+    cli = Cli(tmp_path, "--permission-mode", "bypassPermissions", "--plugin-dir",
+              _plugin(tmp_path), env=bridge.env, hooks=COMPACTION_HOOKS)
+    try:
+        cli.turn("An early question.")
+        cli.turn("[script:tool-bash]")
+        frames = cli.turn("/compact" if trigger == "manual" else "[script:compact]",
+                          _reply({}))
+    finally:
+        cli.close()
+        bridge.close()
+    replayed = len(answer(bridge.posts[0][0])["messages"]) if outcome == "fluid" else 0
+    expected = _listed(fake_cli.load_compaction(trigger, outcome), replayed)
+    printed = _printed(frames)[:len(expected)]
+    boundary = next((i for i, f in enumerate(frames) if f.get("subtype") == "compact_boundary"),
+                    None)
+    if replayed:
+        # The replay: the answer's rows as user/assistant frames, right after the boundary.
+        at = expected.index(("replayed",))
+        assert printed[at:at + replayed] == [(f["type"],) for f in
+                                             frames[boundary + 1:boundary + 1 + replayed]]
+        printed[at:at + replayed] = [("replayed",)] * replayed
+    assert printed == expected
+    if boundary is not None:
+        metadata = frames[boundary]["compact_metadata"]
+        assert metadata["trigger"] == trigger
+        assert metadata["pre_tokens"] > 0 and metadata["post_tokens"] > 0
+        assert {"cumulative_dropped_tokens", "duration_ms"} <= metadata.keys()
+        assert ("preserved_messages" in metadata) == (outcome == "summarizer")
+        assert frames[boundary]["logical_parent_uuid"]
+    tail = [f["type"] for f in frames[len(expected):]]
+    if trigger == "auto":  # the turn goes on: a model call answers
+        assert tail == ["assistant", "result"]
+    else:  # a typed /compact makes no model call; a skip printed its own result
+        assert tail == ([] if outcome == "skip" else ["result"])
+        assert frames[-1]["num_turns"] == 0
+
+
+def test_a_summarized_conversation_resumes_with_its_kept_rows(tmp_path):
+    """--resume after Claude Code's summarizer: the summary, then the kept
+    rows (looked up by uuid), then what came after; nothing is printed again."""
+    cli = Cli(tmp_path, "--permission-mode", "bypassPermissions")
+    cli.turn("An early question.")
+    cli.turn("[script:tool-bash]")
+    frames = cli.turn("/compact")
+    sid = cli.init["session_id"]
+    cli.close()
+    boundary = next(f for f in frames if f.get("subtype") == "compact_boundary")
+    kept = boundary["compact_metadata"]["preserved_messages"]["uuids"]
+    assert kept and boundary["compact_metadata"]["preserved_messages"]["anchor_uuid"]
+    again = Cli(tmp_path, "--resume", sid)
+    resumed = again.turn("After the restart.")
+    again.close()
+    assert [f["type"] for f in resumed if f["type"] != "control_response"] == [
+        "assistant", "result"]
+    log = [json.loads(line) for line in fake_claude.log_path(tmp_path).read_text().splitlines()]
+    init = [entry for entry in log if entry["kind"] == "init"][-1]
+    assert init["resumed"] and init["rows"] == 1 + len(kept)
 
 
 # ─── the delegated loop drives it ───────────────────────────────────────────

@@ -25,11 +25,14 @@ fake_claude_script.py``), and adds what a dev instance needs from a real CLI:
   characters of filler). An MCP result over 50,000 characters is saved to a
   file and replaced by a ``<persisted-output>`` stub, as Claude Code 2.1 does.
 * ``/compact`` (manual) and a step with ``"compact": true`` (automatic, mid
-  turn) compact the way the CLI with AI Shuffle's mod does: post the
-  conversation to the app's compaction route, print the boundary, then
-  replay the answer as ordinary frames with fresh uuids (Claude Code's
-  replay, #679). Without the route, or when the app declines, Claude Code's
-  summarizer stands in (a fake summary).
+  turn) compact the way Claude Code 2.1.312 with AI Shuffle's mod does, frame
+  for frame and in its order, as the replay fixtures in ``compaction/`` list
+  it (derived from the real CLI: docs/internal/claude-code-compaction-
+  protocol.md): post the conversation to the app's compaction route, then
+  SessionStart, the status, the boundary, and the answer replayed as ordinary
+  frames with fresh uuids (#679). Without the route, or when the app falls
+  back, Claude Code's summarizer stands in (a fake summary that keeps the
+  newest rows); a manual compaction the app skips is left as it is.
 * A transcript per session under the CLI config dir (``<config>/projects/
   <slug>/<id>.jsonl``), so ``--resume`` works across app restarts and an
   unknown id is refused with exit 1, as the real CLI does. It is written only
@@ -62,7 +65,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.devloop import fake_ai
-from scripts.devloop.fake_claude import FAKE_EMAIL, SCENARIOS_DIR
+from scripts.devloop.fake_claude import COMPACTION_DIR, FAKE_EMAIL, SCENARIOS_DIR
 
 FIXTURE = ROOT / "fluid" / "tests" / "fixtures" / "fake_claude_script.py"
 VERSION = "2.1.312 (Claude Code)"
@@ -80,7 +83,6 @@ MCP_START_TIMEOUT = 20.0
 MCP_CALL_TIMEOUT = 300.0
 BRIDGE_TIMEOUT = 60.0
 _COMPACT = re.compile(r"^/compact(?:\s+(.*))?$", re.DOTALL)
-NOT_COMPACTED = "Not compacted · "
 
 
 def _load_fixture() -> Any:
@@ -153,6 +155,54 @@ def filler(chars: int) -> str:
         lines.append(line)
         size += len(line) + 1
     return "\n".join(lines)[:chars]
+
+
+# ─── compaction fixtures (what the real CLI prints, in order) ───────────────
+
+_PLACEHOLDER = re.compile(r"\$([a-z_]+)")
+#: Bound afresh at every use.
+_FRESH = {"uuid": _new_uuid, "now": _now,
+          "message_id": lambda: "msg_fake_" + uuid.uuid4().hex[:20]}
+
+
+def load_compaction(trigger: str, outcome: str) -> dict:
+    """``compaction/<trigger>-<outcome>.json``: one compaction as Claude Code
+    prints it (``outcome``: ``fluid``, ``summarizer`` or ``skip``)."""
+    return json.loads((COMPACTION_DIR / f"{trigger}-{outcome}.json").read_text(encoding="utf-8"))
+
+
+def split_at_bridge(fixture: dict) -> tuple[list[dict], list[dict]]:
+    """The steps before the mod's compaction hook runs, and the rest."""
+    steps = fixture["sequence"]
+    for at, step in enumerate(steps):
+        if step.get("bridge"):
+            return steps[:at], steps[at + 1:]
+    return [], steps
+
+
+def bind(value: Any, ctx: dict[str, Any]) -> Any:
+    """``value`` with its ``$name`` placeholders filled from ``ctx``: a string
+    that is one placeholder takes the value itself (a number, a list, null),
+    others take its text. A kept-messages field is left out when nothing was
+    kept, as the CLI leaves it out when the summary covers everything."""
+    if isinstance(value, dict):
+        out = {k: bind(v, ctx) for k, v in value.items()}
+        if not ctx.get("preserved_uuids"):
+            for key in [k for k in out if k.lower().replace("_", "").startswith("preserved")]:
+                del out[key]
+        return out
+    if isinstance(value, list):
+        return [bind(v, ctx) for v in value]
+    if not isinstance(value, str) or "$" not in value:
+        return value
+
+    def lookup(name: str) -> Any:
+        return _FRESH[name]() if name in _FRESH else ctx.get(name)
+
+    whole = _PLACEHOLDER.fullmatch(value)
+    if whole:
+        return lookup(whole.group(1))
+    return _PLACEHOLDER.sub(lambda m: str(lookup(m.group(1)) or ""), value)
 
 
 # ─── MCP (stdio servers from --mcp-config) ──────────────────────────────────
@@ -302,6 +352,7 @@ class DevClaude(script.Fake):
         self.message_id: str | None = None
         self.counter = 0
         self.model_calls = 0
+        self.dropped_tokens = 0  # what compaction removed so far (cumulative_dropped_tokens)
         self.mcp: dict[str, McpServer] = {}
         self.transcript = self._transcript_path()
         self.mod_loaded = False
@@ -326,9 +377,13 @@ class DevClaude(script.Fake):
                                      "timestamp": _now(), **entry}) + "\n")
 
     def _restore(self) -> None:
-        """The rows after the last compaction, from the transcript."""
+        """The rows after the last compaction, from the transcript, as the CLI
+        loads them: the summary, then the kept rows (``preservedMessages``,
+        looked up by uuid), then what came after."""
         assert self.transcript is not None
         rows: list[dict] = []
+        by_uuid: dict[str, dict] = {}
+        kept: list[dict] = []
         for line in self.transcript.read_text(encoding="utf-8").splitlines():
             try:
                 entry = json.loads(line)
@@ -336,8 +391,19 @@ class DevClaude(script.Fake):
                 continue
             if entry.get("type") == "system" and entry.get("subtype") == "compact_boundary":
                 rows = []
+                preserved = (entry.get("compactMetadata") or {}).get("preservedMessages") or {}
+                kept = [by_uuid[u] for u in preserved.get("uuids") or [] if u in by_uuid]
+                self.last_uuid = entry.get("uuid") or self.last_uuid
+                self.dropped_tokens = int((entry.get("compactMetadata") or {}).get(
+                    "cumulativeDroppedTokens") or self.dropped_tokens)
+            elif entry.get("type") == "user" and entry.get("isCompactSummary"):
+                content = (entry.get("message") or {}).get("content")
+                rows = [{"role": "user", "text": content if isinstance(content, str) else "",
+                         "toolUses": [], "handle": entry.get("uuid")}, *kept]
+                self.last_uuid = (kept[-1]["handle"] if kept else entry.get("uuid"))
             elif isinstance(entry.get("fakeRow"), dict):
                 rows.append(entry["fakeRow"])
+                by_uuid[entry.get("uuid")] = entry["fakeRow"]
                 self.last_uuid = entry.get("uuid") or self.last_uuid
         self.rows = rows
 
@@ -555,9 +621,11 @@ class DevClaude(script.Fake):
             {"tool_use_id": call["id"], "tool": call["name"], "input": call["input"]}]},
             "tool_use")
 
-    def result_frame(self, text: str, *, subtype: str = "success", error: bool = False) -> None:
+    def result_frame(self, text: str, *, subtype: str = "success", error: bool = False,
+                     num_turns: int | None = None) -> None:
         self.emit({"type": "result", "subtype": subtype, "is_error": error,
-                   "duration_ms": 40, "duration_api_ms": 25, "num_turns": self.model_calls,
+                   "duration_ms": 40, "duration_api_ms": 25,
+                   "num_turns": self.model_calls if num_turns is None else num_turns,
                    "result": text, "session_id": self.sid, "total_cost_usd": 0.0,
                    "usage": self.usage(len(fake_ai._tokens(text)) or 1),
                    "permission_denials": []})
@@ -574,16 +642,9 @@ class DevClaude(script.Fake):
         log("turn", session_id=self.sid, prompt=fake_ai.visible("\n".join(texts))[:300],
             compact=bool(command))
         if command:
-            reason = self.compact("manual", command.group(1))
-            if reason is not None:
-                self.message_id = "msg_fake_" + uuid.uuid4().hex[:20]
-                note = NOT_COMPACTED + reason
-                self.emit({"type": "assistant", "uuid": _new_uuid(), "session_id": self.sid,
-                           "parent_tool_use_id": None, "message": {
-                               "id": self.message_id, "role": "assistant", "model": "<synthetic>",
-                               "content": [{"type": "text", "text": note}]}})
-                return self.result_frame(note)
-            return self.result_frame("")
+            if not self.compact("manual", command.group(1)):  # a skip printed its own result
+                self.result_frame("", num_turns=0)
+            return
         full = "\n".join(texts)
         stored = [b if b.get("type") == "text" else {"type": "text", "text": f"[{b.get('type')}]"}
                   for b in blocks]
@@ -753,37 +814,67 @@ class DevClaude(script.Fake):
                 "</persisted-output>")
 
     # ── compaction ──
-    def compact(self, trigger: str, instructions: str | None) -> str | None:
-        """Compact the conversation; None when it did, else the skip reason."""
-        self.hook("PreCompact", {"trigger": trigger, "custom_instructions": instructions})
-        self.emit({"type": "system", "subtype": "status", "status": "compacting",
-                   "session_id": self.sid, "uuid": _new_uuid()})
+    def compact(self, trigger: str, instructions: str | None) -> bool:
+        """Compact the conversation the way Claude Code 2.1.312 does, frame by
+        frame as ``compaction/<trigger>-<outcome>.json`` lists it (the replay
+        fixtures, derived from the real CLI; see
+        docs/internal/claude-code-compaction-protocol.md). True when it ended
+        the turn (a skipped ``/compact`` prints its own result)."""
+        started = time.monotonic()
         before = self.context_tokens()
-        reason = None
-        if not self.rows:
-            reason = "Not enough messages to compact."
-        else:
+        ctx: dict[str, Any] = {"sid": self.sid, "logical_parent": self.last_uuid,
+                               "pre_tokens": before, "instructions": instructions,
+                               "boundary_uuid": _new_uuid(), "summary_uuid": _new_uuid()}
+        outcome, answer = "summarizer", None
+        if trigger == "manual" and not self.rows:
+            outcome, ctx["reason"] = "skip", "Not enough messages to compact."
+        prelude, _ = split_at_bridge(load_compaction(trigger, "summarizer"))
+        # What the CLI prints before the mod's hook runs is the same for every
+        # outcome of a trigger (a test checks it): the typed command's
+        # "compacting" status; nothing for an automatic compaction.
+        self.play_compaction(prelude, ctx)
+        if outcome != "skip":
             try:
                 answer = self.ask_bridge(trigger)
             except BridgeError as exc:
-                answer = None
-                if trigger == "manual":
-                    reason = (f"Fluid could not compact the conversation ({exc}); it is left "
-                              "as it is")
-            if reason is None:
-                if answer is not None and isinstance(answer.get("messages"), list):
-                    self.apply(answer["messages"], trigger, before)
-                elif answer is not None and "skip" in answer and trigger == "manual":
-                    reason = str(answer["skip"])
-                else:  # not mounted, a fallback, or an automatic skip: the summarizer
-                    self.summarize(trigger, before)
-        self.emit({"type": "system", "subtype": "status", "status": None,
-                   "compact_result": "success" if reason is None else "skipped",
-                   "session_id": self.sid, "uuid": _new_uuid()})
-        log("compact", trigger=trigger, skipped=reason, rows=len(self.rows))
-        if reason is None:
-            self.hook("SessionStart", {"source": "compact"})
-        return reason
+                if trigger == "manual":  # the mod leaves a manual one as it is
+                    outcome = "skip"
+                    ctx["reason"] = (f"Fluid could not compact the conversation ({exc}); it is "
+                                     "left as it is")
+            if outcome != "skip" and answer is not None:
+                if isinstance(answer.get("messages"), list):
+                    outcome, ctx["answer"] = "fluid", answer["messages"]
+                elif "skip" in answer and trigger == "manual":
+                    outcome, ctx["reason"] = "skip", str(answer["skip"])
+                # else: a fallback or an automatic skip: the summarizer
+        _, steps = split_at_bridge(load_compaction(trigger, outcome))
+        ctx["started"] = started
+        self.play_compaction(steps, ctx)
+        log("compact", trigger=trigger, outcome=outcome, rows=len(self.rows))
+        return outcome == "skip"
+
+    def play_compaction(self, steps: list[dict], ctx: dict[str, Any]) -> None:
+        """Run fixture steps: frames and transcript entries (placeholders bound
+        from ``ctx``), hooks, the conversation's replacement, the replay."""
+        for step in steps:
+            if "hook" in step:
+                self.hook(step["hook"], bind(step.get("input") or {}, ctx))
+            elif "frame" in step:
+                self.emit(bind(step["frame"], ctx))
+            elif "transcript" in step:
+                self._write(bind(step["transcript"], ctx))
+            elif "apply" in step:
+                self.apply(ctx["answer"], ctx)
+            elif "summarize" in step:
+                self.summarize(ctx, **step["summarize"])
+            elif step.get("replay") == "answer":
+                for entry in ctx["replay_entries"]:
+                    self._write(entry)
+                for frame in ctx["replay"]:
+                    self.emit(frame)
+            elif "result" in step:
+                text = bind(step["result"].get("text", ""), ctx)
+                self.result_frame(text, num_turns=step["result"].get("num_turns"))
 
     def ask_bridge(self, trigger: str) -> dict | None:
         """The app's answer from the mod's compaction route; None when not mounted."""
@@ -822,23 +913,20 @@ class DevClaude(script.Fake):
             raise BridgeError("invalid bridge response")
         return answer
 
-    def boundary(self, trigger: str, before: int, *, parent: str | None) -> None:
-        frame_uuid = _new_uuid()
-        metadata = {"trigger": trigger, "pre_tokens": before}
-        frame = {"type": "system", "subtype": "compact_boundary", "uuid": frame_uuid,
-                 "session_id": self.sid, "compact_metadata": metadata}
-        if parent:
-            frame["logical_parent_uuid"] = parent
-        self._write({"type": "system", "subtype": "compact_boundary", "uuid": frame_uuid,
-                     "content": "Conversation compacted", "logicalParentUuid": parent,
-                     "compactMetadata": {"trigger": trigger, "preTokens": before}})
-        self.boundary_uuid = frame_uuid
-        self.emit(frame)
+    def _compacted(self, ctx: dict[str, Any]) -> None:
+        """The counts the boundary reports, once the conversation is replaced."""
+        after = self.context_tokens()
+        self.dropped_tokens += max(0, ctx["pre_tokens"] - after)
+        ctx.update(post_tokens=after, dropped_tokens=self.dropped_tokens,
+                   duration_ms=max(1, round((time.monotonic() - ctx["started"]) * 1000)))
 
-    def apply(self, rows: list[dict], trigger: str, before: int) -> None:
-        """Fluid's answer: the boundary, then the rows replayed as fresh frames."""
-        self.boundary(trigger, before, parent=self.last_uuid)
-        self.rows, self.last_uuid = [], self.boundary_uuid
+    def apply(self, rows: list[dict], ctx: dict[str, Any]) -> None:
+        """Fluid's answer replaces the conversation. Claude Code then prints
+        every row of it as an ordinary frame with a fresh uuid (the replay,
+        #679): kept in ``ctx`` for the fixture's ``replay`` step, after the
+        boundary."""
+        kept, frames, entries = [], [], []
+        parent = ctx["boundary_uuid"]
         for row in rows:
             row = {k: v for k, v in row.items() if k != "handle"}
             if row["role"] == "assistant":
@@ -854,21 +942,45 @@ class DevClaude(script.Fake):
                              "is_error": r.get("isError", False)} for r in results]
                            if results else row["text"])
                 message = {"role": "user", "content": content}
-            handle = self._add(row["role"], message, row)
-            self.emit({"type": row["role"], "uuid": handle, "session_id": self.sid,
-                       "parent_tool_use_id": None, "message": message})
+            handle = _new_uuid()
+            row = {**row, "handle": handle}
+            kept.append(row)
+            entries.append({"type": row["role"], "uuid": handle, "parentUuid": parent,
+                            "message": message, "fakeRow": row})
+            frames.append({"type": row["role"], "message": message, "uuid": handle,
+                           "timestamp": _now(), "session_id": self.sid,
+                           "parent_tool_use_id": None})
+            parent = handle
+        self.rows, self.last_uuid = kept, parent
+        self._compacted(ctx)
+        ctx.update(replay=frames, replay_entries=entries)
 
-    def summarize(self, trigger: str, before: int) -> None:
-        """Claude Code's own summarizer, faked: one summary row replaces the rest."""
-        asks = [r["text"] for r in self.rows if r["role"] == "user" and r["text"]]
-        summary = ("This session is being continued from a previous conversation that ran out "
-                   f"of context. The fake Claude CLI summarized {len(self.rows)} messages. The "
-                   "user's requests were:\n" + "\n".join(
-                       f"- {fake_ai.summary(fake_ai.visible(a), 120)}" for a in asks[-5:]))
-        self.boundary(trigger, before, parent=None)
-        self.rows, self.last_uuid = [], self.boundary_uuid
-        self._add("user", {"role": "user", "content": summary},
-                  {"role": "user", "text": summary, "toolUses": []}, isCompactSummary=True)
+    def summarize(self, ctx: dict[str, Any], *, keep: int, min_chars: int,
+                  max_chars: int) -> None:
+        """Claude Code's own summarizer, faked: a summary row, then the newest
+        ``keep`` rows kept as they are (``preserved_messages``; never a tool
+        result without its call). The kept rows are not printed again. The
+        summary is a quarter of what it folds, within the real range."""
+        start = max(1, len(self.rows) - keep)
+        while start < len(self.rows) and self.rows[start].get("toolResults"):
+            start += 1  # a result must stay beside its call: keep neither
+        kept = self.rows[start:] if keep else []
+        folded = self.rows[: len(self.rows) - len(kept)]
+        asks = [r["text"] for r in folded if r["role"] == "user" and r["text"]]
+        head = ("This session is being continued from a previous conversation that ran out "
+                f"of context. The fake Claude CLI summarized {len(folded)} messages. The "
+                "user's requests were:\n" + "\n".join(
+                    f"- {fake_ai.summary(fake_ai.visible(a), 120)}" for a in asks[-5:]))
+        size = min(max_chars, max(min_chars, len(json.dumps(folded)) // 4))
+        summary = head + "\n\n" + filler(max(0, size - len(head) - 2))
+        handle = ctx["summary_uuid"]
+        self.rows = [{"role": "user", "text": summary, "toolUses": [], "handle": handle}, *kept]
+        self.last_uuid = kept[-1]["handle"] if kept else handle
+        uuids = [r["handle"] for r in kept]
+        ctx.update(summary=summary, preserved_uuids=uuids,
+                   preserved_head=uuids[0] if uuids else None,
+                   preserved_tail=uuids[-1] if uuids else None, replay_entries=[])
+        self._compacted(ctx)
 
 
 class _UnixConnection(http.client.HTTPConnection):
