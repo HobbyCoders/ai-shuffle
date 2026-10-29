@@ -9,7 +9,10 @@ from unittest.mock import Mock
 import psutil
 import pytest
 
-from app.preview_run import initialize_preview_access, main, preview_environment, supervise
+from app.preview_run import (
+    disposable_preview_data, initialize_preview_access, main, preview_environment, seed_dev_instance,
+    supervise,
+)
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux preview ownership")
 
@@ -248,3 +251,164 @@ def test_setup_bootstrap_requires_preview_and_disposable_data(
     if preview == "0":
         assert capsys.readouterr().out == ""
 
+
+
+# ─── dev loop (scripts/devloop) ─────────────────────────────────────────────
+
+
+def test_dev_environment_never_inherits_credentials_or_dev_settings(tmp_path, monkeypatch):
+    for key, value in {"DATA_DIR": "/not-owned", "DATABASE_URL": "postgres://live",
+                       "OPENAI_API_KEY": "sk-live", "ANTHROPIC_API_KEY": "sk-ant-live",
+                       "SENTRY_DSN": "https://live", "SHUFFLE_DEV_SEED": "inherited",
+                       "AI_SHUFFLE_DEV_API": "http://localhost:8000"}.items():
+        monkeypatch.setenv(key, value)
+    env = preview_environment(tmp_path, 18880, 18881,
+                              extra={"SHUFFLE_DEV_FAKE_AI_URL": "http://127.0.0.1:9"})
+    assert env["DATA_DIR"] == str(tmp_path / "data")
+    assert env["SHUFFLE_DEV_FAKE_AI_URL"] == "http://127.0.0.1:9"
+    for key in ("DATABASE_URL", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "SENTRY_DSN",
+                "SHUFFLE_DEV_SEED", "AI_SHUFFLE_DEV_API"):
+        assert key not in env
+    assert not {value for value in env.values()} & {"sk-live", "sk-ant-live", "postgres://live"}
+
+
+@pytest.mark.parametrize("key", ["DATA_DIR", "HOME", "DATABASE_URL", "OPENAI_API_KEY",
+                                 "SHUFFLE_DEV_", "shuffle_dev_seed"])
+def test_dev_environment_extras_cannot_replace_isolation(tmp_path, key):
+    with pytest.raises(ValueError, match="SHUFFLE_DEV_"):
+        preview_environment(tmp_path, 18880, 18881, extra={key: "x"})
+
+
+def _starts_worker(record: Path, *, crash_first: bool = False) -> list[str]:
+    code = (f"import os,sys,time,pathlib; p=pathlib.Path({str(record)!r}); "
+            "n=len(p.read_text().split()) if p.exists() else 0; "
+            "p.open('a').write(str(os.getpid())+' '); "
+            f"sys.exit(1) if {crash_first!r} and n == 0 else time.sleep(60)")
+    return [sys.executable, "-c", code]
+
+
+def _pids(record: Path) -> list[int]:
+    return [int(pid) for pid in record.read_text().split()] if record.exists() else []
+
+
+def _wait_for(predicate, timeout: float = 10.0) -> None:
+    import time
+
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, "timed out"
+        time.sleep(0.05)
+
+
+def test_restart_replaces_only_the_app_process(tmp_path):
+    record = tmp_path / "pids"
+    env = preview_environment(tmp_path, 18880, 18881)
+    database, stopped, restart = Mock(), threading.Event(), threading.Event()
+    started = []
+
+    def drive():
+        _wait_for(lambda: len(_pids(record)) == 1)
+        restart.set()
+        restart.set()  # a burst of changes folds into one restart
+        _wait_for(lambda: len(_pids(record)) == 2)
+        stopped.set()
+
+    driver = threading.Thread(target=drive)
+    driver.start()
+    supervise(_starts_worker(record), env, database, ttl=30, owner_pid=os.getpid(),
+              stopped=stopped, restart=restart, on_start=started.append, stop_timeout=2)
+    driver.join()
+    first, second = _pids(record)
+    assert [process.pid for process in started] == [first, second]
+    assert not psutil.pid_exists(first) and not psutil.pid_exists(second)
+    database.open.assert_called_once()  # PostgreSQL and data stay across restarts
+    database.close.assert_called_once()
+
+
+def test_crashed_app_waits_for_a_change_instead_of_ending_the_lease(tmp_path):
+    record = tmp_path / "pids"
+    env = preview_environment(tmp_path, 18880, 18881)
+    database, stopped, restart = Mock(), threading.Event(), threading.Event()
+    exited = []
+
+    def on_exit(process):
+        exited.append(process.returncode)
+        restart.set()  # what the file watcher does on the fix
+
+    def stop_after_second_start():
+        _wait_for(lambda: len(_pids(record)) == 2)
+        stopped.set()
+
+    driver = threading.Thread(target=stop_after_second_start)
+    driver.start()
+    supervise(_starts_worker(record, crash_first=True), env, database, ttl=30,
+              owner_pid=os.getpid(), stopped=stopped, restart=restart, on_exit=on_exit,
+              stop_timeout=2)
+    driver.join()
+    assert exited == [1]  # only the real crash, never the teardown
+    assert not any(psutil.pid_exists(pid) for pid in _pids(record))
+    database.close.assert_called_once()
+
+
+def test_without_restart_an_exited_app_ends_the_lease(tmp_path):
+    record = tmp_path / "pids"
+    env = preview_environment(tmp_path, 18880, 18881)
+    database = Mock()
+    code = supervise(_starts_worker(record, crash_first=True), env, database, ttl=30,
+                     owner_pid=os.getpid())
+    assert code == 1 and len(_pids(record)) == 1
+    database.close.assert_called_once()
+
+
+def _dev_env(tmp_path, monkeypatch, *, marker: str | None = "own", preview: str = "1"):
+    from app.core.config import settings
+
+    env = preview_environment(tmp_path, 18880, 18881, extra={"SHUFFLE_DEV_SEED": "default"})
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("AI_SHUFFLE_PREVIEW", preview)
+    data = Path(env["DATA_DIR"])
+    monkeypatch.setattr(settings, "data_dir", data)
+    if marker is None:
+        (tmp_path / ".branch-preview").unlink()
+    elif marker == "other":
+        (tmp_path / ".branch-preview").write_text("/somewhere/else/data")
+    return data
+
+
+@pytest.mark.parametrize("marker,preview", [(None, "1"), ("other", "1"), ("own", "0")])
+def test_dev_seed_refuses_anything_but_launcher_disposable_data(
+    tmp_path, monkeypatch, marker, preview,
+):
+    import asyncio
+
+    from scripts.devloop import seed as seed_module
+
+    _dev_env(tmp_path, monkeypatch, marker=marker, preview=preview)
+    called = Mock()
+    monkeypatch.setattr(seed_module, "seed", called)
+    assert disposable_preview_data() is False
+    with pytest.raises(RuntimeError, match="refusing to seed"):
+        asyncio.run(seed_dev_instance())
+    called.assert_not_called()
+
+
+def test_dev_seed_runs_on_marked_disposable_data_only_when_asked(tmp_path, monkeypatch):
+    import asyncio
+
+    from scripts.devloop import seed as seed_module
+
+    _dev_env(tmp_path, monkeypatch)
+    seen = []
+
+    async def fake_seed(name):
+        seen.append(name)
+
+    monkeypatch.setattr(seed_module, "seed", fake_seed)
+    assert disposable_preview_data() is True
+    asyncio.run(seed_dev_instance())
+    assert seen == ["default"]
+    monkeypatch.delenv("SHUFFLE_DEV_SEED")
+    (tmp_path / ".branch-preview").unlink()
+    asyncio.run(seed_dev_instance())  # not asked: a no-op, even without the marker
+    assert seen == ["default"]

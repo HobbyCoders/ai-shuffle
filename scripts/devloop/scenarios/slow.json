@@ -1,0 +1,10 @@
+{
+  "description": "Streams slowly. Override with [script:slow tps=2 latency_ms=1500].",
+  "tps": 6,
+  "latency_ms": 600,
+  "steps": [
+    {
+      "text": "This reply streams slowly, a few tokens per second, so you can watch the typing indicator, the stop button and the scroll-follow behaviour while it is still arriving. It keeps going for a little while longer to give you time to click around, switch chats and come back. Done."
+    }
+  ]
+}

@@ -310,10 +310,12 @@ async def lifespan(app: FastAPI):
         logger.exception("Android emulator orphan cleanup failed (non-fatal)")
 
     init_encryption_and_sessions()
-    from app.preview_run import initialize_preview_access
+    from app.preview_run import initialize_preview_access, seed_dev_instance
     await run_sync(initialize_preview_access)
     init_workspace()
     check_prerequisites()
+    # Dev loop only (SHUFFLE_DEV_SEED on a launcher-marked disposable preview).
+    await seed_dev_instance()
     # Sync, scan and presence loops need unlocked credential storage (secrets
     # travel decrypted under the network key), so they start after
     # ``init_encryption_and_sessions``.

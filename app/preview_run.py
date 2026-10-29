@@ -3,11 +3,15 @@
 No inherited DATA_DIR, credential file or database URL is used. Run under a
 Monitor task, never daemonize it. Normal exit, Ctrl-C, SIGTERM, parent loss and
 TTL expiry all run the same teardown. SIGKILL cannot execute Python finalizers.
+The dev loop (``python -m scripts.devloop up``) reuses this lease with a
+restart hook and ``SHUFFLE_DEV_*`` settings.
 """
 from __future__ import annotations
 
 import argparse
 import ipaddress
+import json
+import logging
 import os
 import signal
 import socket
@@ -17,13 +21,18 @@ import threading
 import time
 from pathlib import Path
 from types import FrameType, SimpleNamespace
-from typing import TYPE_CHECKING, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Callable, Iterable, Mapping, Sequence
 from uuid import uuid4
 
 from app.core.temp_scratch import process_identity, scratch_directory
 
 if TYPE_CHECKING:
     from docker.container_runtime import Database
+
+logger = logging.getLogger(__name__)
+
+#: The only settings a launcher may add to the controlled preview environment.
+DEV_ENV_PREFIX = "SHUFFLE_DEV_"
 
 
 def free_port(*, exclude: Iterable[int] = ()) -> int:
@@ -38,7 +47,16 @@ def free_port(*, exclude: Iterable[int] = ()) -> int:
 def preview_environment(
     directory: str | Path, port: int, protected_port: int, *, host: str = "127.0.0.1",
     browser_host: str | None = None, ttl_seconds: int = 3600,
+    extra: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
+    """The app's whole environment: nothing inherited but PATH/LANG/LD_LIBRARY_PATH.
+
+    ``extra`` may only add ``SHUFFLE_DEV_*`` settings; it can never replace an
+    isolation setting (data dir, home, ports) or smuggle in a credential.
+    """
+    for key in extra or {}:
+        if not key.startswith(DEV_ENV_PREFIX) or not key[len(DEV_ENV_PREFIX):]:
+            raise ValueError(f"Preview environment extras must be {DEV_ENV_PREFIX}* settings: {key}")
     directory = Path(directory)
     home = directory / "home"
     home.mkdir()
@@ -63,7 +81,48 @@ def preview_environment(
                SHUFFLE_PREVIEW_HOST=host, SHUFFLE_PREVIEW_ACCESS_HOST=browser_host or host,
                SHUFFLE_PREVIEW_ACCESS_TTL=str(ttl_seconds),
                PYTHONPATH=str(root) + os.pathsep + str(root / "fluid"))
+    env.update({key: str(value) for key, value in (extra or {}).items()})
     return env
+
+
+def disposable_preview_data() -> bool:
+    """Whether this process runs on a launcher-marked, throwaway data directory.
+
+    Only :func:`preview_environment` writes the marker, outside DATA_DIR and
+    naming it exactly. Raw preview mode against caller-managed data, or a real
+    install with a stray variable, never qualifies.
+    """
+    if os.environ.get("AI_SHUFFLE_PREVIEW") != "1":
+        return False
+    from app.core.config import settings
+
+    data = settings.effective_data_dir.resolve()
+    marker = data.parent / ".branch-preview"
+    return marker.is_file() and marker.read_text() == str(data)
+
+
+def _saved_access() -> dict | None:
+    """The dev loop's access record, if its grant still verifies (a restart)."""
+    path = os.environ.get("SHUFFLE_DEV_ACCESS_FILE")
+    if not path:
+        return None
+    from app.core import preview_access
+
+    try:
+        saved = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if isinstance(saved, dict) and preview_access.verify(saved.get("token")) is not None:
+        return saved
+    return None
+
+
+def _write_private_json(path: Path, data: dict) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        json.dump(data, stream)
+    os.replace(tmp, path)
 
 
 def initialize_preview_access() -> None:
@@ -91,14 +150,25 @@ def initialize_preview_access() -> None:
 
     # Only the owned launcher marks its fresh data directory. Raw preview mode
     # against caller-managed data must not silently configure an installation.
-    data = settings.effective_data_dir.resolve()
-    marker = data.parent / ".branch-preview"
-    if marker.is_file() and marker.read_text() == str(data):
+    if disposable_preview_data():
+        data = settings.effective_data_dir.resolve()
         owner_auth.configure_installation()
         database.set_system_setting(
             f"workspace_path:{settings.effective_instance_id}", str(data.parent / "workspace"),
         )
         auth_service.set_onboarding_complete()
+        if os.environ.get("SHUFFLE_DEV_SEED"):
+            # The seeded agent owns the access session, so a dev instance has
+            # no stand-in "Branch preview access" agent in its picker.
+            from scripts.devloop.seed import ensure_dev_agent
+            ensure_dev_agent()
+
+    # A dev-loop restart keeps the link it already printed: the grant's
+    # session and the signing key both survive in the kept data directory.
+    saved = _saved_access()
+    if saved is not None:
+        print("Branch preview access is still valid after the restart", flush=True)
+        return
 
     profiles = get_all_profiles()
     profile_id = profiles[0]["id"] if profiles else "branch-preview-access"
@@ -109,14 +179,59 @@ def initialize_preview_access() -> None:
     ttl = int(os.environ["SHUFFLE_PREVIEW_ACCESS_TTL"])
     token = preview_access.mint(session_id, ttl_seconds=ttl)
     url = preview_access.preview_url(session_id, browser_host, port, token=token)
-    print(f"Branch preview access (open once in the agent browser): {url}", flush=True)
+    access_file = os.environ.get("SHUFFLE_DEV_ACCESS_FILE")
+    if os.environ.get("SHUFFLE_DEV_UI") == "vite":
+        # The listener serves no UI here; the launcher prints the Vite link.
+        print("Branch preview access minted; the dev loop prints the link to open", flush=True)
+    else:
+        print(f"Branch preview access (open once in the agent browser): {url}", flush=True)
+    if access_file:
+        _write_private_json(Path(access_file), {
+            "session_id": session_id, "token": token, "url": url,
+            "expires_at": int(time.time()) + ttl,
+        })
+
+
+async def seed_dev_instance() -> None:
+    """Seed a dev-loop instance (``SHUFFLE_DEV_SEED``) through the app's own code.
+
+    Refuses anything but the launcher's disposable data directory, exactly
+    like the owner setup above: the seed creates an owner-visible provider,
+    projects and chats and must never touch a real install.
+    """
+    name = os.environ.get("SHUFFLE_DEV_SEED")
+    if not name:
+        return
+    if not disposable_preview_data():
+        raise RuntimeError(
+            "SHUFFLE_DEV_SEED is only honoured on a launcher-owned disposable preview; "
+            "refusing to seed this data directory"
+        )
+    from scripts.devloop.seed import seed
+
+    await seed(name)
 
 
 def supervise(
     command: Sequence[str], env: Mapping[str, str], database: Database, *, ttl: float,
     owner_pid: int, stopped: threading.Event | None = None,
+    restart: threading.Event | None = None,
+    on_start: Callable[[subprocess.Popen], None] | None = None,
+    on_exit: Callable[[subprocess.Popen], None] | None = None,
+    stop_timeout: float = 15,
 ) -> int:
-    """Testable lifecycle boundary. The caller exclusively owns the database."""
+    """Testable lifecycle boundary. The caller exclusively owns the database.
+
+    With ``restart`` (the dev loop), setting the event replaces only the app
+    process; PostgreSQL and the data directory stay. Changes signalled while
+    the old process is stopping fold into the same restart (the new process
+    loads the latest code anyway). An app that exits on its own (a syntax
+    error mid-edit) waits for the next ``restart`` instead of ending the lease.
+    ``on_start`` sees every app process started; ``on_exit`` sees one that
+    exited on its own while restarts are on. ``stop_timeout`` bounds each
+    graceful stop before SIGKILL (open streams hold uvicorn's graceful
+    shutdown); a disposable dev instance can afford a short one.
+    """
     from docker.container_runtime import stop_group
 
     owner_start = process_identity(owner_pid)
@@ -125,19 +240,44 @@ def supervise(
     stopped = stopped or threading.Event()
     process = None
     deadline = time.monotonic() + ttl
+    step = 0.5 if restart is None else 0.2
+
+    def lease_over() -> bool:
+        return (stopped.wait(min(step, max(0, deadline - time.monotonic())))
+                or time.monotonic() >= deadline
+                or process_identity(owner_pid) != owner_start)
+
     try:
         database.open()
         database.publish_descriptor()
-        process = subprocess.Popen(command, env=env, start_new_session=True)
-        while process.poll() is None:
-            if (stopped.wait(min(0.5, max(0, deadline - time.monotonic())))
-                    or time.monotonic() >= deadline
-                    or process_identity(owner_pid) != owner_start):
+        while True:
+            process = subprocess.Popen(command, env=env, start_new_session=True)
+            if on_start is not None:
+                on_start(process)
+            over = False
+            while process.poll() is None and not (restart is not None and restart.is_set()):
+                if lease_over():
+                    over = True
+                    break
+            if over or restart is None:
                 break
+            if not restart.is_set():
+                logger.warning("Preview app exited with code %s; waiting for a source change "
+                               "to restart it", process.poll())
+                if on_exit is not None:
+                    on_exit(process)
+                while not restart.is_set():
+                    if lease_over():
+                        over = True
+                        break
+                if over:
+                    break
+            stop_group(process, stop_timeout)
+            restart.clear()
         return process.poll() if process.poll() is not None else 0
     finally:
         try:
-            stop_group(process, 15)
+            stop_group(process, stop_timeout)
         finally:
             database.close()
 

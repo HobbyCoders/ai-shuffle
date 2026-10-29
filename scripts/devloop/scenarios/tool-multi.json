@@ -1,0 +1,36 @@
+{
+  "description": "Two tool rounds: two parallel calls, then one more, then the final text. Calls Bash directly when the request offers it, else from one run_python cell (the native engine's code mode).",
+  "steps": [
+    {
+      "text": "Let me look around first.",
+      "tool_calls": [
+        {
+          "name": "Bash",
+          "input": {
+            "command": "pwd"
+          }
+        },
+        {
+          "name": "Bash",
+          "input": {
+            "command": "ls -la"
+          }
+        }
+      ]
+    },
+    {
+      "text": "One more check.",
+      "tool_calls": [
+        {
+          "name": "Bash",
+          "input": {
+            "command": "git status --short || true"
+          }
+        }
+      ]
+    },
+    {
+      "text": "I ran three commands across two rounds: `pwd`, `ls -la` and `git status`. Done."
+    }
+  ]
+}

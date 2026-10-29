@@ -1,0 +1,12 @@
+{
+  "description": "Every attempt is rate limited (HTTP 429, retry-after 1).",
+  "steps": [
+    {
+      "error": {
+        "status": 429,
+        "message": "fake-ai: scripted rate limit",
+        "retry_after": "1"
+      }
+    }
+  ]
+}

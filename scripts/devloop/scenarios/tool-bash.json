@@ -1,0 +1,19 @@
+{
+  "description": "Turn 1 calls Bash once (echo); turn 2 gives the final text. Calls Bash directly when the request offers it, else from one run_python cell (the native engine's code mode).",
+  "steps": [
+    {
+      "text": "I'll run a quick command.",
+      "tool_calls": [
+        {
+          "name": "Bash",
+          "input": {
+            "command": "echo hello from fake ai"
+          }
+        }
+      ]
+    },
+    {
+      "text": "The command printed `hello from fake ai`. All done."
+    }
+  ]
+}

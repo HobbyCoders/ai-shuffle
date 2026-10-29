@@ -1,0 +1,8 @@
+{
+  "description": "Short streamed reply that echoes a summary of the prompt.",
+  "steps": [
+    {
+      "text": "Fake AI here. You said: “{summary}”\n\nSend `[script:NAME]` to play a scenario: {scenarios}."
+    }
+  ]
+}

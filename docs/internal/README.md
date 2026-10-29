@@ -10,6 +10,7 @@ image excludes `docs/`, and the update source archive carries only
 | --- | --- |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | The developer half of the former README: the app and the Fluid harness, how sessions run, source builds, repository layout. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Branches, commits, pull requests, code style and test commands. |
+| [dev-loop.md](dev-loop.md) | One command for a private, live-reloading copy of a branch with seed data and a free scripted fake AI. |
 | [LOCAL_SETUP.md](LOCAL_SETUP.md) | Native source setup without Docker, including browser automation on native installs. |
 | [architecture.md](architecture.md) | Technical architecture (formerly an in-app page). |
 | [changelog-template.md](changelog-template.md) | How to write a release's changelog entry and notes. |

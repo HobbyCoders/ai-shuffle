@@ -32,6 +32,14 @@ def _git(root: Path, *args: str) -> str:
     ).strip()
 
 
+def _checkout_identity(root: Path) -> dict:
+    return {
+        "branch": _git(root, "branch", "--show-current"),
+        "commit": _git(root, "rev-parse", "HEAD"),
+        "worktree_id": hashlib.sha256(str(root.resolve()).encode()).hexdigest(),
+    }
+
+
 def _source_identity(root: Path) -> dict:
     files = set(_git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "frontend").split("\0"))
     digest = hashlib.sha256()
@@ -39,12 +47,7 @@ def _source_identity(root: Path) -> dict:
         path = root / name
         digest.update(name.encode() + b"\0")
         digest.update(hashlib.sha256(path.read_bytes()).digest() if path.is_file() else b"<deleted>")
-    return {
-        "branch": _git(root, "branch", "--show-current"),
-        "commit": _git(root, "rev-parse", "HEAD"),
-        "worktree_id": hashlib.sha256(str(root.resolve()).encode()).hexdigest(),
-        "source_sha256": digest.hexdigest(),
-    }
+    return {**_checkout_identity(root), "source_sha256": digest.hexdigest()}
 
 
 def _build_digest(directory: Path) -> str:
@@ -113,6 +116,19 @@ def install_preview(app, root: Path | None = None) -> bool:
     if os.environ.get("AI_SHUFFLE_PREVIEW") != "1":
         return False
     root = root or Path(__file__).resolve().parent.parent
+    if os.environ.get("SHUFFLE_DEV_UI") == "vite":
+        # Dev loop: this checkout's Vite dev server serves the UI (with HMR)
+        # and proxies /api here, so there is no build to stamp or serve. The
+        # identity still names the checkout for tools and journey tests.
+        identity = {**_checkout_identity(root), "ui": "vite"}
+        router = APIRouter(dependencies=[Depends(_require_preview_owner)])
+
+        @router.get("/api/preview")
+        async def dev_identity():
+            return JSONResponse(identity, headers={"Cache-Control": "no-store"})
+
+        app.include_router(router)
+        return True
     directory = _build_dir(root)
     try:
         identity = json.loads((directory / MANIFEST).read_text(encoding="utf-8"))

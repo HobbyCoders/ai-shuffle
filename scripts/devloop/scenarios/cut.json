@@ -1,0 +1,10 @@
+{
+  "description": "The stream dies mid-reply without a terminal frame.",
+  "tps": 20,
+  "steps": [
+    {
+      "text": "This reply starts streaming normally and then the connection drops somewhere in the middle of this sentence, before any finish frame or usage report arrives, so the client sees a broken stream.",
+      "cut_after_chars": 90
+    }
+  ]
+}
