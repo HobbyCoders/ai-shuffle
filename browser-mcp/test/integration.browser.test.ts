@@ -759,10 +759,26 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     it("does not ignore a newly started ticker that has never mutated before dispatch", async () => {
       const page = await load('<button>Unobserved</button><span id="clock"></span>');
       const target = await ref("Unobserved");
-      await page.evaluate(() => { setInterval(() => { document.getElementById("clock")!.textContent = String(Date.now()); }, 100); });
+      type TickerState = { dispatched: boolean; ticks: number; ticksAtDispatch: number };
+      await page.evaluate(() => {
+        const clock = document.getElementById("clock")!;
+        const ticker: TickerState = { dispatched: false, ticks: 0, ticksAtDispatch: -1 };
+        (window as unknown as { ticker: TickerState }).ticker = ticker;
+        document.querySelector("button")!.addEventListener("click", () => {
+          ticker.ticksAtDispatch = ticker.ticks;
+          ticker.dispatched = true;
+        });
+        // Gate writes on dispatch, not on a <100ms CDP round trip. Even a slow
+        // runner must see no pre-action text history for this ticker.
+        setInterval(() => {
+          if (ticker.dispatched) clock.textContent = String(++ticker.ticks);
+        }, 100);
+      });
       const result = body(await runAct(session, { kind: "click", ref: target }));
       expect(result).toMatchObject({ ok: true, settle_capped: true, text_churn_ignored: false });
-      expect(result.timings.dispatch_ms).toBeLessThan(90);
+      const ticker = await page.evaluate(() => (window as unknown as { ticker: TickerState }).ticker);
+      expect(ticker.ticksAtDispatch).toBe(0);
+      expect(ticker.ticks).toBeGreaterThanOrEqual(2);
       await page.goto("about:blank");
     });
     it("does not retain replaced iframe documents while the agent is idle", async () => {
