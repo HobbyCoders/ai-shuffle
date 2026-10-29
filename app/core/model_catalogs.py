@@ -1,6 +1,7 @@
 """Shared, bounded model discovery snapshots; curation stays on the provider row."""
 from datetime import datetime, timezone
 import hashlib
+import hmac
 import json
 import logging
 from typing import Any, Mapping
@@ -21,12 +22,22 @@ def key(provider_id: str) -> str:
     return PREFIX + provider_id
 
 
-def binding(row: Mapping[str, Any] | None) -> str | None:
-    """Fingerprint the endpoint and decrypted credential, never its ciphertext.
+def _binding_key() -> tuple[bytes, str]:
+    from app.core.pairing import pairing_key
+    from app.network import crypto, engine
 
-    Subscription account IDs survive routine token renewal. If a legacy sign-in
-    has no account ID, bind conservatively to its decrypted access token instead.
-    An unreadable credential has no usable binding; its snapshots cannot be read.
+    ctx = engine.cached_context()
+    secret = ctx.network_key if ctx else pairing_key().encode("utf-8")
+    return crypto._hkdf(secret, b"shuffle-model-catalog-binding-hmac-v2"), "network" if ctx else "local"
+
+
+def binding(row: Mapping[str, Any] | None) -> str | None:
+    """HMAC the endpoint and credential under a domain-separated network key.
+
+    Paired workers agree without publishing an offline credential verifier.
+    Unpaired workers use their local-only pairing key and do not share snapshots.
+    Account IDs survive renewal; legacy sign-ins bind to the successful request's
+    access token. Unreadable credentials have no usable binding.
     """
     if row is None:
         return None
@@ -43,7 +54,9 @@ def binding(row: Mapping[str, Any] | None) -> str | None:
     credential_hash = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     fields = [row.get(field) or "" for field in ("provider_type", "base_url", "api_dialect", "auth_mode")]
     value = json.dumps([*fields, credential_hash], separators=(",", ":"), ensure_ascii=False)
-    return "v1:" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
+    secret, scope = _binding_key()
+    digest = hmac.new(secret, b"model-catalog-binding-v2\0" + value.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"v2:{scope}:" + digest[:32]
 
 
 def _model(entry: dict[str, Any]) -> dict[str, Any]:
@@ -71,14 +84,15 @@ def save(provider_id: str, catalog: dict[str, Any], *, expected_binding: str | N
 
     Re-read the current binding immediately before writing and skip discovery
     whose binding has changed. Reads verify it too, so a concurrent or synced
-    credential change cannot make an older snapshot usable.
+    credential change cannot make an older snapshot usable. Unpaired workers
+    skip snapshot publication because their HMAC key is local-only.
 
     Above 512 KiB, omit pricing first, then context/capability metadata and
     recommendations. Never truncate model IDs or labels. If it still cannot
     fit, log one warning and return None without replacing the previous snapshot.
     The caller keeps the full live discovery result regardless of compaction.
     """
-    if not expected_binding:
+    if not expected_binding or expected_binding.startswith("v2:local:"):
         return None
     device_id = settings.effective_instance_id
     worker = db.get_install(device_id) or {}

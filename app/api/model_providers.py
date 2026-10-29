@@ -22,7 +22,7 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -700,9 +700,10 @@ def _generic_auth_token(row: Dict[str, Any]) -> Optional[str]:
 
 
 async def _fetch_codex_models(
-    provider_id: str, *, client: httpx.AsyncClient
+    provider_id: str, *, client: httpx.AsyncClient,
+    on_success: Optional[Callable[[str, Optional[str]], None]] = None,
 ) -> List[Dict[str, Any]]:
-    """Live ``GET /backend-api/codex/models`` with Codex OAuth + one 401 retry."""
+    """Fetch Codex models and identify the token/account of the successful attempt."""
     access_token, account_id = _subscription_access_token(
         provider_id, kind="chatgpt"
     )
@@ -755,6 +756,8 @@ async def _fetch_codex_models(
     models = _parse_models_response(
         _codex_visible_payload(payload), provider_type="chatgpt"
     )
+    if on_success:
+        on_success(access_token, account_id)
     return [m for m in models if m.get("id") not in _CODEX_EXCLUDED_MODEL_IDS]
 
 
@@ -785,13 +788,18 @@ async def _fetch_upstream_with_grok_retry(
     token: str,
     *,
     client: httpx.AsyncClient,
+    account_id: Optional[str] = None,
+    on_success: Optional[Callable[[str, Optional[str]], None]] = None,
 ) -> List[Dict[str, Any]]:
-    """SuperGrok catalog fetch: one 401 → refresh → retry."""
+    """Fetch Grok models and identify the token/account of the successful attempt."""
     try:
-        return await fetch_upstream_models(
+        models = await fetch_upstream_models(
             row["base_url"], token, client=client,
             provider_type=row.get("provider_type"),
         )
+        if on_success:
+            on_success(token, account_id)
+        return models
     except UpstreamModelsError as exc:
         if str(exc) != "http_401":
             raise
@@ -810,12 +818,15 @@ async def _fetch_upstream_with_grok_retry(
             status_code=status.HTTP_409_CONFLICT,
             detail=_CATALOG_RECONNECT_GROK,
         )
-    access, _ = _subscription_access_token(provider_id, kind="xai")
+    access, account_id = _subscription_access_token(provider_id, kind="xai")
     try:
-        return await fetch_upstream_models(
+        models = await fetch_upstream_models(
             row["base_url"], access, client=client,
             provider_type=row.get("provider_type"),
         )
+        if on_success:
+            on_success(access, account_id)
+        return models
     except UpstreamModelsError as exc:
         if str(exc) == "http_401":
             raise HTTPException(
@@ -1201,16 +1212,23 @@ async def _fetch_models(provider_id: str, *, backfill_context: bool = True) -> F
                             detail="Model provider not found")
 
     checked_binding = model_catalogs.binding(row)
+
+    def record_subscription_binding(access: str, account: Optional[str]) -> None:
+        """Capture credentials used by the successful attempt, not a later DB read."""
+        nonlocal checked_binding
+        checked_binding = model_catalogs.binding({**row, "codex_access_token": access, "codex_account_id": account})
+
     kind = model_catalog_presets.preset_kind_for(row)
     from app.core.http_client import get_http_client
     client = get_http_client()
     try:
         if kind == "chatgpt":
-            models = await _fetch_codex_models(provider_id, client=client)
+            models = await _fetch_codex_models(provider_id, client=client, on_success=record_subscription_binding)
         elif row.get("auth_mode") == "grok":
-            access, _ = _subscription_access_token(provider_id, kind="xai")
+            access, account = _subscription_access_token(provider_id, kind="xai")
             models = await _fetch_upstream_with_grok_retry(
-                provider_id, row, access, client=client,
+                provider_id, row, access, client=client, account_id=account,
+                on_success=record_subscription_binding,
             )
         else:
             auth_token = _generic_auth_token(row)

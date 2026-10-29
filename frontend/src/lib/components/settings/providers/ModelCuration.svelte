@@ -83,7 +83,11 @@
 
 	const id = $derived(row?.id ?? providerId ?? '');
 	const current = $derived(row ?? providers.current.providers?.find((p) => p.id === id));
-	let catalog = $state<ModelCatalogSnapshot | null>(null);
+	/** A catalog may beat its provider row over sync; keep it hidden until matched. */
+	let candidate = $state<ModelCatalogSnapshot | null>(null);
+	const catalog = $derived(candidate?.binding &&
+		(candidate.binding === current?.catalog_binding || (mode === 'setup' && !current))
+		? candidate : null);
 	/** Revision that produced the displayed selection, not a later store read. */
 	let selectionRevision = $state<string | null | undefined>();
 	let reloadPending = false;
@@ -111,16 +115,12 @@
 	});
 
 	function reconcile() {
-		if (catalog && (!catalog.binding || catalog.binding !== current?.catalog_binding)) {
-			catalog = null;
-			liveCatalog = null;
-			sharedFetchedAt = null;
-			hiddenMedia = [];
-			typeable = false;
-		}
 		const stored = current?.models ?? [];
 		rows = catalog ? rowsFromFetch(stored, catalog) : rowsFromStored(stored);
 		selectionRevision = current?.revision;
+		hiddenMedia = catalog?.hidden ?? [];
+		if (candidate) typeable = !!catalog && catalog.models.length === 0;
+		source = catalog?.source ?? '';
 	}
 
 	// Resource subscribers run concurrently. Reconcile again when the provider
@@ -158,9 +158,9 @@
 				// Discovery can backfill metadata and bump the provider revision.
 				await providers.refreshProviders();
 				// Keep the full live result; the shared copy may omit optional metadata.
-				if (current && (!res.binding || res.binding !== current.catalog_binding)) res = null;
+				if (mode === 'setup' && current && (!res.binding || res.binding !== current.catalog_binding)) res = null;
 			}
-			catalog = res;
+			candidate = res;
 			if (!res) {
 				liveCatalog = null;
 				sharedFetchedAt = null;
@@ -169,6 +169,7 @@
 				reconcile();
 				return;
 			}
+			if (!catalog) { reconcile(); return; }
 			source = res.source;
 			if (mode === 'setup') {
 				const selected = new Set(rows.filter((r) => r.checked).map((r) => r.id));
@@ -185,7 +186,7 @@
 			const detail = getErrorMessage(e, 'Could not fetch models');
 			if (mode === 'setup' && describeFetchFailure(detail, providerName).kind === 'rejected') {
 				rows = [];
-				catalog = null;
+				candidate = null;
 			}
 			// A rejected key needs a new key, not typed model names.
 			typeable = describeFetchFailure(detail, providerName).kind !== 'rejected';

@@ -162,6 +162,32 @@ describe('shared catalog and concurrent curation', () => {
 		expect(mocks.patch).not.toHaveBeenCalled();
 	});
 
+	it.each([false, true])('shows catalog B once binding B catches up (catalog first=%s)', async (catalogFirst) => {
+		mocks.get.mockResolvedValueOnce(catalog);
+		const view = render(ModelCuration, { row: router([entry('old')]) });
+		await screen.findByRole('checkbox', { name: 'new' });
+		const incoming = { source: 'upstream', binding: 'fixture-binding-b', models: [entry('remote-b'), entry('new-b')] };
+		let finish!: (value: typeof incoming) => void;
+		mocks.get.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+		resourceSync.invalidate(['settings']);
+		await waitFor(() => expect(mocks.get).toHaveBeenCalledTimes(2));
+		if (catalogFirst) {
+			finish(incoming);
+			await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh model list' }) as HTMLButtonElement).disabled).toBe(false));
+			expect(screen.queryByRole('checkbox', { name: 'new-b' })).toBeNull();
+		}
+		await view.rerender({ row: { ...router([entry('remote-b')]), catalog_binding: 'fixture-binding-b', revision: 'binding-b-revision' } });
+		if (!catalogFirst) finish(incoming);
+		await screen.findByRole('checkbox', { name: 'new-b' });
+		expect((screen.getByRole('checkbox', { name: 'remote-b' }) as HTMLInputElement).checked).toBe(true);
+		expect(screen.queryByRole('checkbox', { name: 'old' })).toBeNull();
+		await toggle('new-b');
+		expect(saved().map((model: ProviderModelEntry) => model.id)).toEqual(['remote-b', 'new-b']);
+		expect(mocks.patch.mock.calls.at(-1)![1].expected_revision).toBe('binding-b-revision');
+		expect(mocks.get).toHaveBeenCalledTimes(2);
+		expect(mocks.post).not.toHaveBeenCalled();
+	});
+
 	it('does not resurrect an old selection when a remote prop changes during refresh', async () => {
 		let finish!: (value: typeof catalog) => void;
 		mocks.post.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));

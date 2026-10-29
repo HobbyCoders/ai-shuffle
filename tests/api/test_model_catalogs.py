@@ -1,8 +1,10 @@
 """Shared discovery is independent of curation and revision-guarded edits."""
 import json
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -24,7 +26,8 @@ def _credential_verdict(provider_id: str) -> str | None:
 
 
 @pytest.fixture
-def provider(authenticated_client, mock_db):
+def provider(authenticated_client, mock_db, monkeypatch):
+    monkeypatch.setattr(model_catalogs, "_binding_key", lambda: (b"fixture-network-hmac-key", "network"))
     encryption.set_encryption_key("fixture-password", db)
     response = authenticated_client.post(ROOT, json={
         "name": "Controlled fixture", "provider_type": "custom",
@@ -34,6 +37,74 @@ def provider(authenticated_client, mock_db):
     })
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def test_binding_is_keyed_per_network_and_local_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Public fields and a guessed low-entropy token cannot verify a binding alone."""
+    from app.core import pairing
+    from app.network import engine
+
+    row = {"provider_type": "custom", "base_url": "https://gateway.test/v1", "auth_token": "weak-token"}
+    monkeypatch.setattr(engine, "cached_context", lambda: SimpleNamespace(network_key=b"a" * 32))
+    first = model_catalogs.binding(row)
+    assert first.startswith("v2:network:")
+    assert model_catalogs.binding(dict(row)) == first
+    monkeypatch.setattr(engine, "cached_context", lambda: SimpleNamespace(network_key=b"b" * 32))
+    assert model_catalogs.binding(row) != first
+    monkeypatch.setattr(engine, "cached_context", lambda: None)
+    monkeypatch.setattr(pairing, "pairing_key", lambda: "fixture-local-key-a")
+    local = model_catalogs.binding(row)
+    assert local.startswith("v2:local:") and local != first
+    assert model_catalogs.binding(row) == local
+    monkeypatch.setattr(pairing, "pairing_key", lambda: "fixture-local-key-b")
+    assert model_catalogs.binding(row) != local
+
+
+def test_unpaired_discovery_is_not_shared(
+    authenticated_client: TestClient, provider: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local-only HMAC keeps live discovery usable without publishing a snapshot."""
+    monkeypatch.setattr(model_catalogs, "_binding_key", lambda: (b"fixture-local-hmac-key", "local"))
+    monkeypatch.setattr(api, "fetch_upstream_models", AsyncMock(return_value=[{"id": "local-model", "label": "Local"}]))
+    response = authenticated_client.post(f"{ROOT}/{provider['id']}/fetch-models")
+    assert response.status_code == 200, response.text
+    assert response.json()["binding"].startswith("v2:local:")
+    assert response.json()["models"][0]["id"] == "local-model"
+    assert response.json()["fetched_at"] is None
+    assert db.get_system_setting(model_catalogs.key(provider["id"])) is None
+
+
+@pytest.mark.parametrize("mode", ["chatgpt", "grok"])
+def test_accountless_subscription_retry_uses_successful_request_binding(
+    authenticated_client: TestClient, provider: dict[str, Any], monkeypatch: pytest.MonkeyPatch, mode: str,
+) -> None:
+    """Drive 401, token rotation, successful retry, and snapshot consumption end to end."""
+    from app.core import http_client, xai_token_refresh
+
+    db.set_codex_token_bundle(provider["id"], access_token=encryption.encrypt_value("fixture-expired-access"),
+                              refresh_token=encryption.encrypt_value("fixture-refresh"), account_id=None, auth_mode=mode)
+    before = model_catalogs.binding(db.get_model_provider(provider["id"], include_token=True))
+    client = AsyncMock(spec=httpx.AsyncClient)
+    client.get.side_effect = [httpx.Response(401), httpx.Response(200, json={"data": [{"id": "retried-model"}]})]
+    monkeypatch.setattr(http_client, "get_http_client", lambda: client)
+
+    async def refresh(*args: Any, **kwargs: Any) -> bool:
+        db.set_codex_token_bundle(provider["id"], access_token=encryption.encrypt_value("fixture-fresh-access"),
+                                  refresh_token=encryption.encrypt_value("fixture-next-refresh"), account_id=None, auth_mode=mode)
+        return True
+
+    module = api.codex_token_refresh if mode == "chatgpt" else xai_token_refresh
+    monkeypatch.setattr(module, "refresh_on_401_once", refresh)
+    response = authenticated_client.post(f"{ROOT}/{provider['id']}/fetch-models")
+    assert response.status_code == 200, response.text
+    current = model_catalogs.binding(db.get_model_provider(provider["id"], include_token=True))
+    assert current != before
+    assert response.json()["binding"] == current
+    assert response.json()["fetched_at"]
+    assert response.json()["models"][0]["id"] == "retried-model"
+    assert client.get.call_args_list[0].kwargs["headers"]["Authorization"] == "Bearer fixture-expired-access"
+    assert client.get.call_args_list[1].kwargs["headers"]["Authorization"] == "Bearer fixture-fresh-access"
+    assert authenticated_client.get(f"{ROOT}/{provider['id']}/model-catalog").json()["binding"] == current
 
 
 def test_inflight_old_key_catalog_is_not_saved(
