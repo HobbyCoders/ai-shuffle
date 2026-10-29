@@ -88,6 +88,41 @@ describe('AgentMessage transcript replacement', () => {
 		expect(screen.queryByText('Queued')).toBeNull();
 	});
 
+	it('keeps the expanded Send now peer mounted across interrupt and successor receipt', async () => {
+		let state = reduceAll([
+			{ type: 'turn.started', id: 'start', seq: 1, turn_id: 'running-turn' },
+			{ type: 'message.user', id: 'prompt', seq: 2, turn_id: 'running-turn', content: 'Start review' }
+		] as WireEvent[]);
+		const view = render(AgentMessageTranscript, { messages: releaseMessages(state), pendingPeerMessages: [pending],
+			live: true, sessionUnsettled: true });
+		const row = rows()[0];
+		await fireEvent.click(row);
+		row.focus();
+		const body = screen.getByText(pending.content);
+		const groupKey = row.closest('[data-item-key]')?.getAttribute('data-item-key');
+		state = reduce(state, { type: 'turn.aborted', id: 'send-now-interrupt', seq: 3, turn_id: 'running-turn', reason: 'interrupt' });
+		await view.rerender({ messages: releaseMessages(state), pendingPeerMessages: [pending],
+			live: false, sessionUnsettled: true, queueAbortSeq: state.peerQueueAbortSeq });
+		expect(rows()).toEqual([row]);
+		state = reduce(state, { type: 'turn.started', id: 'successor', seq: 4, turn_id: 'successor-turn', source: 'user' });
+		await view.rerender({ messages: releaseMessages(state), pendingPeerMessages: [],
+			live: true, sessionUnsettled: true, queueAbortSeq: state.peerQueueAbortSeq });
+		expect(rows()).toEqual([row]);
+		expect(row.getAttribute('aria-expanded')).toBe('true');
+		expect(document.activeElement).toBe(row);
+		expect(screen.getByText(pending.content)).toBe(body);
+		state = reduce(state, { type: 'message.user', id: 'peer-receipt', seq: 5,
+			turn_id: 'successor-turn', queued_turn_id: pending.id, content: receipt().content });
+		await view.rerender({ messages: releaseMessages(state), pendingPeerMessages: [],
+			live: true, sessionUnsettled: true, queueAbortSeq: state.peerQueueAbortSeq });
+		expect(rows()).toEqual([row]);
+		expect(row.getAttribute('aria-expanded')).toBe('true');
+		expect(row.getAttribute('aria-label')).toContain('Complete');
+		expect(document.activeElement).toBe(row);
+		expect(screen.getByText(pending.content)).toBe(body);
+		expect(row.closest('[data-item-key]')?.getAttribute('data-item-key')).toBe(groupKey);
+	});
+
 	it('removes a queue-only Stop without waiting for a receipt that will never arrive', async () => {
 		const view = render(AgentMessageTranscript, { messages: [], pendingPeerMessages: [pending], live: false });
 		expect(rows()).toHaveLength(1);
