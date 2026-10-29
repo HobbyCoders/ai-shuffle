@@ -49,7 +49,6 @@ FAST_SUBSET_DIRS = (
 # the container supervisor has global state and idle/disk timing measurements.
 FAST_SUBSET_EXCLUDED = {
     "tests/test_scan_blocking_db.py",
-    "tests/core/test_chat_shell.py",
     "tests/core/test_container_runtime.py",
     "tests/core/test_container_image_contract.py",
 }

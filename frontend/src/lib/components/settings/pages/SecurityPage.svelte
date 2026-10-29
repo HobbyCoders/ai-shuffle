@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
 	 * Security: Sign-in (owner password, trusted LAN) and Agent safety (agents
-	 * run as you, computer use, code sandbox, chat instructions).
+	 * run as you, computer use, chat instructions).
 	 *
 	 * Owner access and the chat instructions are worker settings; the
 	 * instructions keep an explicit Save and survive a change made elsewhere
@@ -9,18 +9,14 @@
 	 * store, polled only while this page is mounted.
 	 */
 	import { onMount } from 'svelte';
-	import { BookOpen } from 'lucide-svelte';
-	import { api, getErrorMessage, type CodeSandboxStatus } from '$lib/api/client';
+	import { api, getErrorMessage } from '$lib/api/client';
 	import { fetchOwnerStatus, setTrustedLan, type OwnerStatus, type OwnerStatusFailure } from '$lib/api/owner';
 	import { ownerAccess } from '$lib/stores/owner-access.svelte';
 	import { computerUse } from '$lib/stores/computerUse.svelte';
-	import { layout } from '$lib/stores/layout.svelte';
 	import { desktop } from '$lib/services/desktop';
 	import { watchResources } from '$lib/services/watch-resources';
 	import { flashSaved } from '$lib/settings/save-status.svelte';
-	import { FORBIDDEN_TEXT, isForbidden, loadState } from '$lib/settings/access.svelte';
-	import { getEntry } from '$lib/settings/registry';
-	import type { StatusTone } from '$lib/settings/types';
+	import { FORBIDDEN_TEXT, isForbidden } from '$lib/settings/access.svelte';
 	import PreferencePage from '../shell/PreferencePage.svelte';
 	import RowGroup from '../rows/RowGroup.svelte';
 	import SettingRow from '../rows/SettingRow.svelte';
@@ -187,32 +183,6 @@
 		return () => computerUse.stop();
 	});
 
-	/* ---------- code sandbox ---------- */
-
-	// The install guide's section "The code-mode sandbox".
-	const SANDBOX_DOCS = 'getting-started/install-docker-compose';
-	let sandbox = $state<CodeSandboxStatus | null>(null);
-	let sandboxForbidden = $state(false);
-
-	const sandboxView = $derived.by((): { text: string; tone: StatusTone } => {
-		if (sandboxForbidden) return { text: FORBIDDEN_TEXT, tone: 'off' };
-		if (!sandbox || sandbox.state === 'checking') return { text: 'Checking', tone: 'busy' };
-		if (sandbox.active) return { text: 'Active', tone: 'ok' };
-		if (sandbox.state === 'off') return { text: 'Off', tone: 'off' };
-		return { text: 'Unavailable', tone: 'warn' };
-	});
-	const sandboxHelp = $derived(
-		sandbox && !sandbox.active && sandbox.state !== 'checking' && sandbox.reason
-			? `${sandbox.reason}. ${getEntry('security.sandbox')?.help ?? ''}`
-			: undefined
-	);
-
-	async function loadSandbox() {
-		const result = await loadState(() => api.get<{ code_sandbox?: CodeSandboxStatus }>('/deployment'));
-		if (result.status === 'ok') sandbox = result.data?.code_sandbox ?? null;
-		else if (result.status === 'forbidden') sandboxForbidden = true;
-	}
-
 	/* ---------- chat instructions ---------- */
 
 	// Formerly "security instructions". The worker also answers
@@ -316,7 +286,6 @@
 
 	onMount(() => {
 		void loadOwner();
-		void loadSandbox();
 		void loadInstructions();
 	});
 	watchResources(['settings'], () => loadInstructions(true));
@@ -413,16 +382,6 @@
 				disabled={!computerUse.available || computerBusy}
 				onchange={(on) => void setDedicatedDesktop(on)}
 			/>
-		</SettingRow>
-		<SettingRow id="security.sandbox" hint="bubblewrap" hintMono help={sandboxHelp}>
-			<button
-				type="button"
-				class="st-btn ghost icon sm"
-				aria-label="Open the code sandbox guide"
-				title="Code sandbox guide"
-				onclick={() => layout.openFeaturePage('docs', SANDBOX_DOCS)}><BookOpen /></button
-			>
-			<ValueText value={sandboxView.text} status={sandboxView.tone} />
 		</SettingRow>
 		<SettingRow id="security.secInstr" expanded={instrOpen && instrLoad === 'ok' ? instrEditor : undefined}>
 			{#if instrLoad === 'ok'}

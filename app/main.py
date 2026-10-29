@@ -186,7 +186,6 @@ async def lifespan(app: FastAPI):
         init_core, init_encryption_and_sessions, init_workspace,
         check_prerequisites, start_services, start_background_tasks,
         shutdown_services, harden_process_introspection,
-        prewarm_code_mode_sandbox,
     )
     from app.core.resource_monitor import start_resource_monitor, stop_resource_monitor
     from app.core.loop_watchdog import start_loop_watchdog, stop_loop_watchdog
@@ -233,7 +232,6 @@ async def lifespan(app: FastAPI):
     if os.environ.get("TESTING") != "1":
         from app.core import process_ledger
         process_ledger.mark_run()
-    prewarm_code_mode_sandbox()
 
     # Startup phases
     init_core()

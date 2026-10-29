@@ -8,6 +8,13 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
+## Unreleased
+
+### Security
+
+- Removed the Linux-only bubblewrap sandbox around agents' Python cells. Ask mode now asks before every Python cell on Linux too; Accept Edits also asks, while Bypass approves. In-process guards remain, but are not an OS security boundary. The sandbox setting and status row are gone.
+- Shared-folder grants no longer run commands. Folder list/read/write access is unchanged; commands run only on SSH machine grants.
+
 ## 1.1.0
 
 Watches, peer terminals, one generation tool, review mode, and a large reliability pass across hand-offs, PostgreSQL and Windows.

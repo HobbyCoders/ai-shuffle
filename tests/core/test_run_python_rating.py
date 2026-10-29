@@ -1,11 +1,7 @@
-"""S2-1 residual: the app's sessions rate ``run_python`` by the OS sandbox.
+"""Python cells are write-class in every app session and permission mode.
 
-Without bubblewrap (the stock Docker compose) the code-mode kernel's only
-boundary is the in-process guard, so ``run_python`` is a write-class tool: an
-Ask session (``default``) prompts for it, and so does Accept Edits (a kernel is
-not a file edit); Bypass approves it. Behind the sandbox it stays ``safe`` and
-nothing prompts.
-The delegated leg's grant list (safe-rated in-proc tools only) never carries it.
+Ask and Accept Edits prompt for each cell; Bypass approves it. The delegated
+leg's safe-tool grant list never carries run_python.
 """
 
 from __future__ import annotations
@@ -22,10 +18,7 @@ from fluid.codemode.session import CodeModeSession, register_code_mode_tools
 from fluid.tools.registry import ToolRegistry
 
 
-def _run_python_spec(monkeypatch, active: bool):
-    monkeypatch.setattr(
-        "fluid.codemode.session.os_sandbox_active", lambda _config=None: active
-    )
+def _run_python_spec():
     registry = ToolRegistry()
     register_code_mode_tools(registry, CodeModeSession(registry))
     return next(s for s in registry.list_tools(loaded_only=False) if s.name == "run_python")
@@ -42,25 +35,18 @@ def _decision(mode: str, spec) -> str:
 
 
 @pytest.mark.parametrize(
-    "active,mode,expected",
-    [
-        (False, "default", "prompt"),
-        (False, "acceptEdits", "prompt"),
-        (False, "bypassPermissions", "allow"),
-        (True, "default", "allow"),
-        (True, "acceptEdits", "allow"),
-        (True, "bypassPermissions", "allow"),
-    ],
+    "mode,expected",
+    [("default", "prompt"), ("acceptEdits", "prompt"), ("bypassPermissions", "allow")],
 )
-def test_ask_prompts_for_run_python_only_without_the_sandbox(monkeypatch, active, mode, expected):
-    spec = _run_python_spec(monkeypatch, active)
-    assert spec.effective_risk({"code": "print(1)"}) == ("safe" if active else "write")
+def test_each_cell_is_write_class_and_follows_the_session_mode(mode, expected):
+    spec = _run_python_spec()
+    assert spec.effective_risk({"code": "print(1)"}) == "write"
     assert _decision(mode, spec) == expected
+    assert _decision(mode, spec) == expected  # approval never lowers the next cell's risk
 
 
-@pytest.mark.parametrize("active", [False, True])
-def test_delegated_safe_grants_never_carry_run_python(monkeypatch, tmp_path, active):
-    _run_python_spec(monkeypatch, active)
+def test_delegated_safe_grants_never_carry_run_python(tmp_path):
+    _run_python_spec()
     options = SessionOptions(
         model="fable",
         cwd=str(tmp_path),
@@ -97,12 +83,12 @@ async def _bridged_context(risk: str, tool_input: dict, name: str = "run_python"
 
 
 @pytest.mark.asyncio
-async def test_unsandboxed_cell_prompt_has_a_title_reason_and_plain_code():
+async def test_cell_prompt_has_a_title_reason_and_plain_code():
     code = 'import os\nprint("a\\tb", os.getcwd())\n' + "".join(f"x{i} = {i}\n" for i in range(40))
     ctx = await _bridged_context("write", {"code": code})
     assert ctx.title == "Run Python code" and ctx.display_name == "Run Python code"
     reason, preview = ctx.description.split("\n\n", 1)
-    assert "sandbox is not active" in reason
+    assert "not an OS security boundary" in reason
     # Plain text, not JSON: real newlines and quotes, no \n / \" escapes.
     assert preview.startswith('import os\nprint("a\\tb", os.getcwd())\nx0 = 0\n')
     assert '\\"' not in preview and "{\"code\"" not in preview
@@ -123,17 +109,17 @@ async def test_long_single_line_cell_is_cut_at_the_char_budget():
 
 
 @pytest.mark.asyncio
-async def test_sandboxed_cell_prompt_has_no_sandbox_reason_and_other_tools_none():
-    ctx = await _bridged_context("safe", {"code": "print(1)"})
+async def test_cell_prompt_always_has_a_reason_and_other_tools_none():
+    ctx = await _bridged_context("write", {"code": "print(1)"})
     assert ctx.title == "Run Python code"
-    assert ctx.description == "print(1)"
+    assert "not an OS security boundary" in ctx.description
+    assert ctx.description.endswith("\n\nprint(1)")
     other = await _bridged_context("write", {"command": "ls"}, name="Bash")
     assert not hasattr(other, "title") and not hasattr(other, "description")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("risk", ["write", "safe"])
-async def test_a_workers_cell_prompt_keeps_its_tag_out_of_the_code_block(risk):
+async def test_a_workers_cell_prompt_keeps_its_tag_out_of_the_code_block():
     """R15-4: a ProviderAgent worker's approval prepended "Requested by
     ProviderAgent worker ..." to the description, which the app shows whole as
     the "Code to run" block. The tag now rides the title; the description is
@@ -142,7 +128,7 @@ async def test_a_workers_cell_prompt_keeps_its_tag_out_of_the_code_block(risk):
 
     from app.core import provider_agent_approvals as approvals
 
-    ctx = await _bridged_context(risk, {"code": "print(1)\n"})
+    ctx = await _bridged_context("write", {"code": "print(1)\n"})
     route = approvals.WorkerApprovalRoute(
         worker_session_id="worker-1", parent_session_id="parent-1",
         label="reviewer", provider_id="prov-openai", model_id="gpt-5.5",

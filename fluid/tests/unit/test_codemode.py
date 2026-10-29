@@ -291,11 +291,8 @@ async def test_four_tool_schema_and_task_uses_three_tools() -> None:
 
 @pytest.mark.parametrize("decision,expect_error", [("allow", False), ("deny", True)])
 async def test_destructive_host_call_triggers_permission_request(
-    decision, expect_error, monkeypatch
+    decision, expect_error
 ) -> None:
-    # run_python itself is safe only behind the OS sandbox; pin it on so the
-    # one prompt here is the inner host call's.
-    monkeypatch.setattr(CodeModeSession, "os_sandbox_active", lambda self: True)
     @tool("wipe", "Delete a record.", {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}, risk="destructive")
     async def wipe(args: dict) -> dict:
         return {"content": [{"type": "text", "text": f"wiped {args['id']}"}]}
@@ -311,15 +308,27 @@ async def test_destructive_host_call_triggers_permission_request(
         provider=provider, store=store, model="claude-sonnet-5", session_id=sid,
         registry=registry, codemode=session, permissions=PermissionEngine("on_write"),
     )
-    holder, got, watcher = await _watch_first(loop, sid, PermissionRequest)
+    asked: list[PermissionRequest] = []
+
+    async def answer_permissions():
+        async for event in loop.bus.subscribe(sid):
+            if isinstance(event, PermissionRequest):
+                asked.append(event)
+                await loop.submit(RespondPermission(
+                    request_id=event.request_id,
+                    decision="allow" if event.name == "run_python" else decision,
+                ))
+                if event.name == "mcp__db__wipe":
+                    return
+
+    watcher = asyncio.create_task(answer_permissions())
     try:
         await loop.submit(UserTurn(content="wipe u1"))
-        await asyncio.wait_for(got.wait(), timeout=15)
-        req: PermissionRequest = holder["e"]
-        assert req.name == "mcp__db__wipe" and req.risk == "destructive"
-        await loop.submit(RespondPermission(request_id=req.request_id, decision=decision))
-        await loop.wait_turn()
+        await asyncio.wait_for(loop.wait_turn(), timeout=15)
         await watcher
+        assert [(event.name, event.risk) for event in asked] == [
+            ("run_python", "write"), ("mcp__db__wipe", "destructive"),
+        ]
 
         rp = next(e for e in loop.bus.log(sid) if isinstance(e, ToolResult) and e.name == "run_python")
         if expect_error:

@@ -72,12 +72,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # ripgrep is not optional comfort: the agent's Grep tool falls back to a pure
 # Python scan without it, which is slow enough to dominate a session (one
 # audited run logged 66 fallback notices).
-# bubblewrap sandboxes the code-mode kernel child (code_mode_os_sandbox); it
-# only takes effect when the container may create user namespaces, otherwise
-# the kernel logs why and runs without it.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    bubblewrap \
     curl \
     ca-certificates \
     gnupg \

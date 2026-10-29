@@ -233,41 +233,16 @@ certificate; that browser exception is separate from service-grant pinning.
 This is disposable-service acceptance, not a claim that the owner's unRAID API,
 Android/native app, or production certificate rotation has been exercised.
 
-## Isolated folder shell (#1267)
+## Folder file access and SSH commands
 
-`ChatRunCommand` on a folder grant runs one command through
-`app/core/chat_shell.py`: bubblewrap with new user, pid, network, ipc, uts and
-cgroup namespaces, no nested user namespaces, the grant's open descriptor bound
-at `/work` (read-only for a read-only grant), read-only `/usr` and Python prefix,
-a private `/proc`, `/dev` and a 64 MiB `/tmp`. Limits: 60 s wall and CPU, 1 GiB
-address space, 64 MiB per file, 256 open files, 64 processes. A seccomp filter
-allows only IPv4/IPv6 sockets and stream socket pairs, and refuses io_uring,
-the keyring calls and other ABIs: the network namespace does not close
-Unix-domain sockets, and a listening one inside the folder (a `/tmp` grant can
-hold the worker's own trust-authenticated PostgreSQL socket) would be a route
-out. Approval works exactly as for SSH commands. It refuses, before any
-approval card, on a non-Linux or root worker, on an architecture other than
-x86_64 or aarch64, without bubblewrap 0.8+ options (`--bind-fd`,
-`--ro-bind-fd`, `--size`, `--disable-userns`, `--seccomp`), when the Python
-prefix contains the data directory, when the self-test fails, or when another
-mount sits inside the folder.
-
-Before each command, before the approval card and again after it, a bounded
-walk of the folder (100,000 entries, 10 s, 256 levels) refuses the command if a
-regular file has more links than the folder holds: a hard link to a file
-elsewhere on the same filesystem would let the sandbox read and write it. Going
-past a bound, an unreadable directory or another device refuses too. After a
-command in a writable folder, setuid and setgid bits it set are cleared, so the
-host never honours them; files that had them before keep them.
-
-CI runs `tests/core/test_chat_shell.py` against real bubblewrap 0.9.0 on Ubuntu
-24.04 with the sandbox required: writes outside `/work`, symlinks to host paths,
-`/proc/1/root`, leaked descriptors, loopback and external network, a host
-Unix socket listening inside the folder, hard links to host files, setuid
-bits, nested user namespaces, surviving background processes, the limits, the timeout and the
-approval path. The Docker image already ships bubblewrap; the container needs
-the compose file's `security_opt` lines, as for the code-mode sandbox. The
-image path has not been exercised on the owner's ServerWorker host.
+Folder grants support only `ChatListFiles`, `ChatReadFile` and `ChatWriteFile`.
+`ChatRunCommand` refuses a folder grant before an approval card or process is
+created, with guidance to use the file tools. There is no local-command fallback.
+SSH machine grants still run commands as the approved remote account, with the
+existing per-action approval outside Bypass, timeout, bounded output and
+revocation handling. Descriptor-relative file confinement and write approvals
+are unchanged. `tests/core/test_chat_access.py` covers folder refusal and file
+access alongside real disposable SSH command execution.
 
 Still outstanding for #1267: Windows/macOS folder brokers, owner-device routing
 for mirrored sessions, and a supported remote HTTPS deployment path. Certificate

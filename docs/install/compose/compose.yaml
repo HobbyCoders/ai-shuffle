@@ -34,17 +34,6 @@ services:
     # A burst of short-lived agent processes must not exhaust the process table.
     pids_limit: 8192
 
-    # The code-mode sandbox around agents' Python code, on by default. These
-    # relax Docker's default seccomp and AppArmor filters and its /proc masking
-    # for the whole container; remove them to opt out. See "The code-mode
-    # sandbox" in the install guide.
-    security_opt:
-      - seccomp=unconfined
-      # Lets the sandbox mount its own /proc:
-      - systempaths=unconfined
-      # Docker ignores this on hosts without AppArmor:
-      - apparmor=unconfined
-
     environment:
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
@@ -56,8 +45,6 @@ services:
       # does not reach the container). The install guide explains each one.
       # The reverse proxy's address, as AI Shuffle sees it:
       # TRUSTED_PROXIES: "172.18.0.1"
-      # The code-mode sandbox: auto (the default), required or off:
-      # CODE_MODE_OS_SANDBOX: "auto"
       # Ranges the built-in browser may open. This list replaces the localhost
       # default, so keep the first two ranges to still allow localhost:
       # BROWSER_SSRF_ALLOW: "127.0.0.0/8,::1/128,192.168.1.20/32"

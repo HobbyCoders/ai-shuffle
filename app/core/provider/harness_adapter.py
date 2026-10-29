@@ -266,7 +266,7 @@ def _prompt_enrichment(tool_name: str, ev: PermissionRequestEvent) -> Dict[str, 
     try:
         from fluid.codemode.session import run_python_prompt
 
-        return run_python_prompt(ev.input, sandboxed=ev.risk == "safe")
+        return run_python_prompt(ev.input)
     except Exception:  # noqa: BLE001 — a prettier prompt is never worth a denial
         logger.debug("run_python prompt enrichment failed", exc_info=True)
         return {}
@@ -6289,11 +6289,8 @@ def _codemode_kernel_config() -> KernelConfig:
 
     Do not raise ``stdout_cap`` to fit subagent reports: sync Task results
     already carry a bounded head plus ``report_path`` (``app.core.task_dispatch``).
-    The OS sandbox mode comes from the app setting so a value in the .env
-    file reaches the kernel (the env var alone would not).
     """
-    from app.core.config import settings
-    return KernelConfig(os_sandbox=settings.code_mode_os_sandbox)
+    return KernelConfig()
 
 
 def _delegated_bridge_deferral(options: SessionOptions):
