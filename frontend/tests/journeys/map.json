@@ -34,6 +34,8 @@
 				"frontend/src/lib/components/chat/MessageArea.svelte",
 				"frontend/src/lib/components/chat/ChatInput.svelte",
 				"frontend/src/lib/components/chat/BoundedTranscriptRows.svelte",
+				"frontend/src/lib/components/chat/MirrorSyncGate.svelte",
+				"frontend/src/lib/components/chat/mirror-sync.svelte.ts",
 				"frontend/src/lib/services/session-navigation.ts",
 				"frontend/src/lib/services/live-sync.ts",
 				"frontend/src/lib/api/client.ts",

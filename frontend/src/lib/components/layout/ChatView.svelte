@@ -24,6 +24,7 @@
 	import { forkOfferedSessionHere } from '$lib/components/chat/fork-here';
 	import MessageArea from '$lib/components/chat/MessageArea.svelte';
 	import MirrorSyncGate from '$lib/components/chat/MirrorSyncGate.svelte';
+	import { createMirrorSync, mirrorSyncHeadline } from '$lib/components/chat/mirror-sync.svelte';
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
 	import ArchivedChatBar from '$lib/components/chat/ArchivedChatBar.svelte';
 	import { archivedChats } from '$lib/stores/archived-chats';
@@ -37,7 +38,7 @@
 	import { voiceCallState, isCallSurfaceActive } from '$lib/services/voiceCall';
 	import { watchCallOutcomes } from '$lib/services/voiceCallOutcome';
 	import { RotateCcw, LoaderCircle } from 'lucide-svelte';
-	import { classifyChatSurface, createChatLayoutTracker } from './chat-empty-state';
+	import { chatHeaderTitle, chatHeroKind, chatLayoutSurface, classifyChatSurface, createChatLayoutTracker } from './chat-empty-state';
 	import { pendingDeepLink, deepLinkLoading } from '$lib/stores/pending-deep-link';
 	// The phone shell docks prompts above its composer; the web build has none.
 	import { composerShell } from '$lib/components/chat/composer-shell';
@@ -55,10 +56,12 @@
 
 	// Classify the empty-message surface. While a session's history is being
 	// fetched (boot restore OR an openChat navigation) messages is still [] but
-	// sessionId already points at the target — showing an empty hero then would
-	// invite sends into an invisible session AND could flash the cleared hint for
-	// a session that turns out to have messages, so the load window renders the
-	// message column (non-empty), not a hero. See chat-empty-state.ts + #558.
+	// sessionId already points at the target, so the surface is 'loading': never
+	// the new-chat hero (it would invite sends into an invisible session) and
+	// never the cleared hint (the chat may turn out to have messages). A load
+	// keeps the layout the view already had (hero or message column) until its
+	// outcome is known; see createChatLayoutTracker below, chat-empty-state.ts
+	// and #558.
 	const chatSurface = $derived(
 		classifyChatSurface({
 			sessionId: $activeSession.sessionId,
@@ -82,18 +85,42 @@
 	$effect(() => {
 		if (settledChatId) return finishJourneyAfterPaint('chat.open', settledChatId);
 	});
+	// A mirrored chat (owned by another worker) is checked against its owner
+	// before it is shown, whatever the layout: a chat opened from the hero keeps
+	// the hero while it loads, so the check must not wait for the message
+	// column to mount MirrorSyncGate. Its first catch-up reloads the transcript
+	// (#2227). An unknown owner reads as mirrored, as the gate always did.
+	const mirrorRemote = $derived(
+		$sessions.find(s => s.id === $activeSession.sessionId)?.is_remote ?? $activeSession.isRemote ?? true
+	);
+	const mirrorDevice = $derived(
+		$sessions.find(s => s.id === $activeSession.sessionId)?.device_name ?? $activeSession.ownerDeviceName
+	);
+	const mirrorSync = createMirrorSync(() => ({
+		sessionId: $activeSession.sessionId,
+		remote: mirrorRemote,
+		onCaughtUp: () => activeSession.reloadSession()
+	}));
 	// The centred hero layout (new or cleared chat) versus the message column.
 	// A load keeps the layout the view already had until its outcome is known,
 	// so opening a chat moves the composer at most once (never centre → bottom
 	// → centre for a chat that turns out empty); see createChatLayoutTracker.
+	// A mirrored chat's first sync check is part of its load (chatLayoutSurface).
 	const chatLayout = createChatLayoutTracker();
-	const isEmptyState = $derived(chatLayout(chatSurface) === 'hero');
-	// A chat opened from the hero layout, its history still on the way.
-	const isLoadingHero = $derived(chatSurface === 'loading');
-	// A BOUND, settled, empty session — a just-cleared conversation. Presents the
-	// hero with the session's own title + a "cleared" hint instead of the
-	// brand-new "Let's build your project" workspace picker.
-	const isClearedSession = $derived(chatSurface === 'cleared');
+	// What the view presents: a mirrored chat still waiting for its first sync
+	// shows no transcript yet (the hero or the gate's pane), so it reads as
+	// loading, like the history load it is part of.
+	const presentedSurface = $derived(chatLayoutSurface(chatSurface, { mirrorSyncPending: mirrorSync.waiting }));
+	const isEmptyState = $derived(chatLayout(presentedSurface) === 'hero');
+	// Which hero the hero layout shows: the new-session hero, a cleared chat,
+	// a chat opened from the hero still loading, or a mirrored chat waiting
+	// for its first sync.
+	const heroKind = $derived(chatHeroKind({ surface: chatSurface, mirrorSyncPending: mirrorSync.waiting }));
+	// (A 'cleared' hero is a BOUND, settled, empty session — a just-cleared
+	// conversation: the session's own title + a "cleared" hint instead of the
+	// brand-new "Let's build your project" workspace picker.)
+	// The bound chat's hero is still waiting (history load or first sync).
+	const isLoadingHero = $derived(heroKind === 'loading' || heroKind === 'syncing');
 	// A chat that could not be opened, while this surface is still the unbound
 	// New Chat it fell back to. Binding any chat hides it.
 	const unavailable = $derived($activeSession.sessionId ? null : $unavailableChat);
@@ -128,10 +155,24 @@
 			return false;
 		}
 	}
-	const clearedTitle = $derived($activeSession.title?.trim() || 'Untitled');
-	// While loading, the title the opened chat is known by so far; the same
-	// heading stays put if the chat turns out cleared.
-	const heroTitle = $derived(isClearedSession ? clearedTitle : ($activeSession.title?.trim() || 'Loading…'));
+	// The bound hero's heading: the header's rule (chatHeaderTitle), so a chat
+	// whose name is not known yet reads "Loading…", never "New Chat" (the
+	// switcher's placeholder), while it opens.
+	const heroTitle = $derived(
+		chatHeaderTitle({
+			sessionId: $activeSession.sessionId,
+			title: $activeSession.title,
+			messageCount: 0,
+			loading: isLoadingHero
+		})
+	);
+	const heroHint = $derived(
+		heroKind === 'syncing'
+			? mirrorSyncHeadline(mirrorSync.syncState, mirrorDevice)
+			: isLoadingHero
+				? 'Opening the conversation…'
+				: 'Conversation cleared — send a message to start fresh.'
+	);
 
 	// Voice (ruling VM18). The gate is the CALL, not the session's mode: a voice
 	// session with no call running is an ordinary chat, and only an in-flight call
@@ -150,7 +191,7 @@
 	// A brand-new session (not a cleared one or the "could not open" notice)
 	// leads with the agent and the "Runs on …" sentence, which stands in for
 	// the composer's chip row until the first message.
-	const showNewSessionHero = $derived(showEmptyHero && chatSurface === 'new' && !unavailable);
+	const showNewSessionHero = $derived(showEmptyHero && heroKind === 'new' && !unavailable);
 
 	// Keep the editor mounted through call transitions so drafts and file chips survive.
 	const showComposer = true;
@@ -161,10 +202,13 @@
 	);
 	// What the flight recorder reads off this view each frame (ui-signature.ts).
 	// Derived from the same inputs as chatSurface; nothing reads them back.
+	// The surface and message count are what is on screen: a mirrored chat's
+	// transcript is not shown until its first sync, so both read as loading
+	// and 0 until then.
 	const uiSignature = $derived({
 		session: uiSessionTag($activeSession.sessionId),
 		composer: uiComposer({ archived: Boolean(archivedSessionId), emptyHero: showEmptyHero }),
-		messages: String($activeSession.messages.length + ($activeSession.pendingPeerMessages?.length ?? 0)),
+		messages: mirrorSync.waiting ? '0' : String($activeSession.messages.length + ($activeSession.pendingPeerMessages?.length ?? 0)),
 		loading: uiFlag(
 			$activeSession.isLoadingSession || $activeSession.isRestoringSession || deepLinkLoading($pendingDeepLink, $activeSession.sessionId)
 		),
@@ -328,7 +372,7 @@
 <div class="chat-view" bind:clientHeight={surfaceHeight} style:--chat-surface-height={surfaceHeight ? `${surfaceHeight}px` : undefined} class:transitioning-from-empty={transitioningFromEmpty} class:is-empty={showEmptyHero}
 	data-ui-state={UI_STATE_CHAT}
 	data-ui-mount={UI_MOUNT.chatView}
-	data-ui-surface={chatSurface}
+	data-ui-surface={presentedSurface}
 	data-ui-session={uiSignature.session}
 	data-ui-composer={uiSignature.composer}
 	data-ui-messages={uiSignature.messages}
@@ -351,14 +395,15 @@
 			<div class="empty-hero-content">
 				{#if unavailable}
 					<ChatUnavailableNotice chat={unavailable} onDismiss={clearUnavailableChat} />
-				{:else if isClearedSession || isLoadingHero}
+				{:else if heroKind !== 'new'}
 					<!-- Bound existing session with an empty transcript (cleared via the
 					     sessions-board broom, #558). Show its OWN title + a cleared
 					     hint so it never reads as a brand-new chat. The project is
 					     fixed for an existing session, so no workspace picker here.
 					     A chat opened from this layout shows the same heading while
-					     its history loads, so the composer stays put until the
-					     outcome is known (createChatLayoutTracker). -->
+					     its history loads (or, mirrored, while its first sync runs),
+					     so the composer stays put until the outcome is known
+					     (createChatLayoutTracker). -->
 					<div class="cleared-hero" class:is-loading={isLoadingHero} aria-busy={isLoadingHero}>
 						<div class="cleared-badge" aria-hidden="true">
 							{#if isLoadingHero}
@@ -369,7 +414,9 @@
 						</div>
 						<h1 class="cleared-title" title={heroTitle}>{heroTitle}</h1>
 						<p class="cleared-hint" role="status">
-							{isLoadingHero ? 'Opening the conversation…' : 'Conversation cleared — send a message to start fresh.'}
+							<!-- One short line in every state (no update count): a hint that
+							     wraps to two lines and back moves the centred composer. -->
+							{heroHint}
 						</p>
 					</div>
 				{:else}
@@ -426,12 +473,9 @@
 				     new session creation (sessionId: undefined → new ID).
 				     onCaughtUp fires once per opened mirrored chat (its first catch-up);
 				     later backlog drains arrive through the live feed (#2227). -->
-				<MirrorSyncGate
-					sessionId={$activeSession.sessionId}
-					remote={$sessions.find(s => s.id === $activeSession.sessionId)?.is_remote ?? $activeSession.isRemote}
-					deviceName={$sessions.find(s => s.id === $activeSession.sessionId)?.device_name ?? $activeSession.ownerDeviceName}
-					onCaughtUp={() => activeSession.reloadSession()}
-				>
+				<!-- The sync check itself runs at the top of this view (mirrorSync),
+				     so it started even if the chat opened in the hero layout. -->
+				<MirrorSyncGate sync={mirrorSync} deviceName={mirrorDevice}>
 					<MessageArea />
 				</MirrorSyncGate>
 			</div>

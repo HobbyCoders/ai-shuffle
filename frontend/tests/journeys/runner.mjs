@@ -30,6 +30,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { contactSheet, withRecording } from '../flight-recorder/record.mjs';
+import { checkExpectShift, classifyKnownBug, designedShifts } from './lib/verdict.mjs';
 
 const require = createRequire(import.meta.url);
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -167,7 +168,7 @@ function parseArgs(argv) {
  * spec:
  *   name       journey name (output folder)
  *   cases      [{ name, setup?(ctx), act(ctx), verify?(ctx), viewports?, throttles?,
- *                 allow?, recorder? }]
+ *                 allow?, expectShift?, knownBug?, recorder? }]
  *              ctx = { page, variant, status, mark?, log, recording? }
  *              `setup` runs unrecorded (navigate, stage the composer);
  *              `act` runs inside withRecording and must end in a settled UI;
@@ -189,7 +190,13 @@ function parseArgs(argv) {
  *              marker goes once the bug is fixed. A race that only sometimes
  *              shows sets `intermittent: true`: a pass is then reported as
  *              "did not reproduce" instead of failing; remove the marker when
- *              the issue is closed.
+ *              the issue is closed. A failure whose recording was lost (no
+ *              anomaly list came back) is never a known bug: plain FAIL.
+ *              A case may carry `expectShift: [{ step, composer: [from, to],
+ *              maxValue, reason }]` for a composer move the product makes on
+ *              purpose without user input (lib/verdict.mjs designedShifts):
+ *              that step must move the composer from → to exactly once, and
+ *              only that move's own shift, up to maxValue, is excused.
  *   viewports  default DEFAULT_VIEWPORTS
  *   throttles  default Object.keys(THROTTLES)
  *   recorder   extra withRecording options (a case's `recorder` adds to it;
@@ -200,6 +207,7 @@ export async function runJourney(spec) {
 	for (const rule of spec.allow || []) checkAllowRule(rule);
 	for (const testCase of spec.cases) {
 		for (const rule of testCase.allow || []) checkAllowRule(rule);
+		checkExpectShift(testCase.name, testCase.expectShift);
 		const known = testCase.knownBug;
 		if (known && (!/^\d+$/.test(String(known.issue)) || !(known.error instanceof RegExp) || !known.reason)) {
 			throw new Error(`case ${testCase.name}: knownBug needs { issue: <number>, error: <RegExp>, reason }`);
@@ -257,7 +265,7 @@ export async function runJourney(spec) {
 					if (pattern.test(text)) log(`console.${message.type()} +${Date.now() - started}ms: ${text.slice(0, 300)}`);
 				});
 			}
-			const result = { id: item.id, ok: false, anomalies: [], allowed: [], text: '', error: null };
+			const result = { id: item.id, ok: false, anomalies: [], allowed: [], designed: [], text: '', error: null, recorded: false };
 			const allow = [...(spec.allow || []), ...(item.testCase.allow || [])];
 			const sortAnomalies = (anomalies) => {
 				for (const anomaly of anomalies) {
@@ -265,6 +273,15 @@ export async function runJourney(spec) {
 					if (rule) result.allowed.push({ message: anomaly.message, reason: rule.reason });
 					else result.anomalies.push(anomaly);
 				}
+			};
+			// The case's designed composer moves (expectShift): excuse exactly their
+			// own layout shift; a missing, extra or larger move is an anomaly no
+			// `allow` can hide.
+			const judge = (recording, anomalies, options) => {
+				const judged = designedShifts(recording, anomalies, item.testCase.expectShift, options);
+				result.designed.push(...judged.excused);
+				for (const problem of judged.problems) result.anomalies.push({ kind: 'expect_shift', message: problem });
+				sortAnomalies(judged.anomalies);
 			};
 			try {
 				const ctx = { page, variant, status, log };
@@ -278,7 +295,8 @@ export async function runJourney(spec) {
 					({ mark }) => item.testCase.act({ ...ctx, mark })
 				);
 				result.text = recording.text;
-				sortAnomalies(recording.anomalies);
+				result.recorded = true;
+				judge(recording.recording, recording.anomalies);
 				if (item.testCase.verify) await item.testCase.verify({ ...ctx, recording: recording.recording });
 				result.ok = result.anomalies.length === 0;
 				if (process.env.JOURNEY_SHEETS === '1') {
@@ -286,10 +304,16 @@ export async function runJourney(spec) {
 				}
 			} catch (error) {
 				result.error = error.stack || String(error);
-				result.text = error.flightRecording || '';
+				// A verify failure comes after a complete recording: keep its text.
+				result.text = error.flightRecording || result.text;
 				// A failed step still owes what it recorded before failing: a flicker
-				// there is a gate failure even in a case marked as a known bug.
-				sortAnomalies(error.flightAnomalies || []);
+				// there is a gate failure even in a case marked as a known bug. No
+				// anomaly list means the recording was lost (or never started):
+				// nothing then shows the failure was the known one alone.
+				if (Array.isArray(error.flightAnomalies)) {
+					result.recorded = true;
+					judge(error.flightRecordingData, error.flightAnomalies, { partial: true });
+				}
 				await page.screenshot({ path: join(out, `${item.id}.error.png`) }).catch(() => {});
 			} finally {
 				const cleaned = await deleteCaseChats(context, status, started).catch((error) => `failed: ${error.message}`);
@@ -297,33 +321,21 @@ export async function runJourney(spec) {
 				await context.close();
 			}
 			result.ms = Date.now() - started;
-			result.status = result.ok ? 'pass' : 'fail';
 			const known = item.testCase.knownBug;
-			if (known) {
-				const firstLine = result.error
-					? result.error.split('\n')[0]
-					: result.anomalies.map((a) => a.message).join(' | ');
-				if (!result.ok && result.anomalies.length === 0 && known.error.test(firstLine)) {
-					result.status = 'known-bug';
-					result.ok = true;
-					result.knownBug = `#${known.issue}: ${known.reason}`;
-				} else if (!result.ok && result.error && known.error.test(firstLine)) {
-					// The known failure, but the recording caught more before it.
-					result.error = `known bug #${known.issue} failed as expected, but the recording also caught: ${result.anomalies.map((a) => a.message).join(' | ')}\n${result.error}`;
-				} else if (result.ok && known.intermittent) {
-					result.knownBug = `#${known.issue} did not reproduce this time (intermittent): ${known.reason}`;
-				} else if (result.ok) {
-					result.status = 'fail';
-					result.ok = false;
-					result.error = `known bug #${known.issue} no longer reproduces here: remove this case's knownBug marker (and close the issue once fixed everywhere)`;
-				}
-			}
+			const verdict = classifyKnownBug(result, known);
+			result.status = verdict.status;
+			result.ok = verdict.ok;
+			result.error = verdict.error;
+			if (verdict.knownBug) result.knownBug = verdict.knownBug;
 			const label = { pass: 'PASS', fail: 'FAIL', 'known-bug': `KNOWN BUG #${known?.issue}` }[result.status];
 			const report = [
 				`# ${item.id}  ${label}  (${result.ms}ms)`,
 				...lines,
 				result.error ? `error: ${result.error}` : '',
 				result.text,
+				result.designed.length
+					? `designed moves (expectShift):\n${result.designed.map((d) => `  - composer move at ${d.t}ms in "${d.step}" measured ${d.value}  [${d.reason}]`).join('\n')}`
+					: '',
 				result.allowed.length
 					? `allowed (environment noise):\n${result.allowed.map((a) => `  - ${a.message}  [${a.reason}]`).join('\n')}`
 					: ''
@@ -353,7 +365,8 @@ export async function runJourney(spec) {
 					ms: r.ms,
 					error: r.error ? r.error.split('\n')[0] : null,
 					anomalies: r.anomalies.map((a) => a.message),
-					allowed: r.allowed
+					allowed: r.allowed,
+					designed: r.designed
 				}))
 			},
 			null,

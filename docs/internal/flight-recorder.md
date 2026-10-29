@@ -57,10 +57,10 @@ marks it as a state carrier):
 
 | Attribute | Values |
 | --- | --- |
-| `data-ui-surface` | `new`, `cleared`, `loading` or `active`, the output of `classifyChatSurface` in `layout/chat-empty-state.ts` |
+| `data-ui-surface` | `new`, `cleared`, `loading` or `active`, the output of `classifyChatSurface` in `layout/chat-empty-state.ts`; a mirrored chat waiting for its first sync reads `loading` (`chatLayoutSurface`) |
 | `data-ui-session` | `none`, or `s:` plus a 6-character hash of the bound session id |
 | `data-ui-composer` | `centre` (under the new-chat hero), `bottom` (docked) or `hidden` (archived chat) |
-| `data-ui-messages` | the transcript message count, including pending peer messages |
+| `data-ui-messages` | the transcript message count, including pending peer messages; `0` while a mirrored chat waits for its first sync (its transcript is not shown) |
 | `data-ui-loading` | `true` while history loads (opening a chat, boot restore or a deep link) |
 | `data-ui-streaming` | `true` while a reply streams |
 
@@ -127,7 +127,10 @@ await contactSheet(keyframes, `${process.env.SCREENSHOT_DIR}/new-chat.jpg`);
 `frontend/tests/flight-recorder/record.mjs` uses playwright-core from
 `browser-mcp/node_modules`, the same as `visual-regression.mjs`, and works
 with Chromium only (it needs CDP). If the actions throw, the recording still
-stops, throttling is cleared, and `error.flightRecording` holds the timeline.
+stops, throttling is cleared, and `error.flightRecording` holds the timeline;
+when the recording survived, `error.flightAnomalies` holds what it caught up
+to the failure (the journey runner treats a failure without it as a lost
+recording, never as a known bug).
 `frontend/tests/verify-flight-recorder.mjs` is a working example. Journeys
 against a dev instance use the shared runner in `frontend/tests/journeys/`
 (viewport × throttle variants, one report per case; see its README). It runs in

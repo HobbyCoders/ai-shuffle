@@ -45,7 +45,9 @@ export { NETWORK_PROFILES } from '../../../browser-mcp/src/recorder/driver.js';
  *
  * Returns { text, anomalies, keyframes, recording }. If `actions` throws, the
  * recording still stops, throttling is cleared, and the error carries the
- * timeline as error.flightRecording.
+ * timeline as error.flightRecording and, when the recording survived, its
+ * anomalies as error.flightAnomalies and the whole result as
+ * error.flightRecordingData.
  */
 export async function withRecording(page, opts = {}, actions = async () => {}) {
 	const cdp = await page.context().newCDPSession(page);
@@ -90,7 +92,12 @@ export async function withRecording(page, opts = {}, actions = async () => {}) {
 	if (failure) {
 		if (recording?.text) failure.flightRecording = recording.text;
 		// What the recorder caught before the failure: a known bug must not hide it.
-		if (Array.isArray(recording?.anomalies)) failure.flightAnomalies = recording.anomalies;
+		// Absent when the recording was lost: the runner then never reads the
+		// failure as a known bug.
+		if (Array.isArray(recording?.anomalies)) {
+			failure.flightAnomalies = recording.anomalies;
+			failure.flightRecordingData = recording;
+		}
 		throw failure;
 	}
 	if (!recording || recording.ok === false) {

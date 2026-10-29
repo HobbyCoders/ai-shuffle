@@ -2107,7 +2107,7 @@ describe('feedController transcript cache (S2)', () => {
 		expect(feedController.hasCachedTranscript(`sess-${TRANSCRIPT_CACHE_MAX + 2}`)).toBe(true);
 	});
 
-	it('caches an empty log a real sentinel caught up, so re-opening a cleared chat shows it at once', () => {
+	it('caches an empty log a real sentinel caught up, so re-opening a cleared chat IN PLACE keeps it settled', () => {
 		const deps = makeDeps();
 		feedController.attach(deps);
 		// A cleared chat: its log has no events, the sentinel says so.
@@ -2116,12 +2116,14 @@ describe('feedController transcript cache (S2)', () => {
 		feedController.stop();
 		expect(feedController.hasCachedTranscript('s1')).toBe(true);
 
-		// Re-open (the deep-link boot re-opens the linked chat once its row is
-		// in). It must settle in the same call, not show loading → cleared again.
-		deps.update((s) => ({ ...s, messages: [], isLoadingSession: true }));
+		// Re-open while the view still shows it settled and empty (the deep-link
+		// boot re-opens the linked chat once its row is in). The switcher primes
+		// its single update with the patch, so it never shows cleared → loading
+		// → cleared.
 		const patch = feedController.cachedPatch('s1');
 		expect(patch?.messages).toEqual([]);
 		expect(patch?.isLoadingSession).toBe(false);
+		deps.update((s) => ({ ...s, ...patch }));
 		feedController.start('s1');
 		expect(deps.state.isLoadingSession).toBe(false);
 		expect(hoisted.fromSeq).toBe(0);
@@ -2129,6 +2131,60 @@ describe('feedController transcript cache (S2)', () => {
 		hoisted.onEvent!(userMessageAt(1, 'later'));
 		hoisted.onEvent!(caughtUp(1));
 		expect((deps.state.messages as Array<{ content: string }>).map((m) => m.content)).toEqual(['later']);
+	});
+
+	it('never presents a cached EMPTY log as settled to a view opening it from elsewhere', () => {
+		// The chat was empty when this tab last saw it; since then another
+		// device, a mirror replication or a background delivery wrote to it.
+		// Showing the cached emptiness would read "Conversation cleared" and
+		// then jump to the messages.
+		const deps = makeDeps();
+		feedController.attach(deps);
+		hydrate('s1', []);
+		feedController.stop();
+		expect(feedController.hasCachedTranscript('s1')).toBe(true);
+
+		// The user is on another chat, then opens s1 (the switcher's reset).
+		deps.update((s) => ({ ...s, sessionId: 's2', messages: [{ id: 'x', role: 'user', content: 'other' }] as never, isLoadingSession: false }));
+		expect(feedController.cachedPatch('s1')).toBeNull();
+		const published: ActiveSessionState[] = [];
+		const write = deps.update.getMockImplementation()!;
+		deps.update.mockImplementation((fn) => {
+			write(fn);
+			published.push(deps.state);
+		});
+		deps.update((s) => ({ ...s, sessionId: 's1', messages: [], isLoadingSession: true }));
+		feedController.start('s1');
+		// Still loading: the empty entry is only the resume cursor.
+		expect(deps.state.isLoadingSession).toBe(true);
+		expect(hoisted.fromSeq).toBe(0);
+		hoisted.onEvent!(userMessageAt(1, 'written elsewhere'));
+		expect(deps.state.isLoadingSession).toBe(true);
+		hoisted.onEvent!(caughtUp(1));
+		expect(deps.state.isLoadingSession).toBe(false);
+		expect((deps.state.messages as Array<{ content: string }>).map((m) => m.content)).toEqual(['written elsewhere']);
+		// No frame of s1 was ever a settled empty chat (the "cleared" surface).
+		const clearedFrames = published.filter(
+			(s) => s.sessionId === 's1' && !s.isLoadingSession && !s.isRestoringSession && s.messages.length === 0
+		);
+		expect(clearedFrames).toEqual([]);
+	});
+
+	it('a genuinely cleared chat opened from elsewhere settles on its first caught_up', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		hydrate('s1', []);
+		feedController.stop();
+		deps.update((s) => ({ ...s, sessionId: 's1', messages: [], isLoadingSession: true }));
+		expect(feedController.cachedPatch('s1')).toBeNull();
+		feedController.start('s1');
+		expect(deps.state.isLoadingSession).toBe(true);
+		hoisted.onEvent!(caughtUp(0));
+		expect(deps.state.isLoadingSession).toBe(false);
+		expect(deps.state.messages).toEqual([]);
+		// And it is cached again for the next re-open in place.
+		feedController.stop();
+		expect(feedController.hasCachedTranscript('s1')).toBe(true);
 	});
 
 	it('never caches rows the log does not hold yet (an optimistic send before its first event)', () => {

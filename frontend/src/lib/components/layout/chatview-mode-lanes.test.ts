@@ -42,7 +42,7 @@ describe('ChatView — the new-session hero (#371 step 4)', () => {
 
 	it('has no project row under the composer: the hero sentence names the project', () => {
 		expect(codeOnly).not.toMatch(/ProjectSlot|project-slot-wrap/);
-		expect(codeOnly).toContain("const showNewSessionHero = $derived(showEmptyHero && chatSurface === 'new' && !unavailable)");
+		expect(codeOnly).toContain("const showNewSessionHero = $derived(showEmptyHero && heroKind === 'new' && !unavailable)");
 		expect(codeOnly).toContain('newSession={showNewSessionHero}');
 	});
 
@@ -56,8 +56,9 @@ describe('ChatView — the new-session hero (#371 step 4)', () => {
 	});
 
 	it('keeps the cleared-session hero ahead of the new-session hero', () => {
-		// The cleared hero also covers a chat loading from the hero layout.
-		const cleared = codeOnly.search(/\{(?:#if|:else if) isClearedSession(?: \|\| isLoadingHero)?\}/);
+		// Every bound hero (cleared, loading from the hero layout, a mirrored
+		// chat's first sync) comes first; only an unbound chat gets the new one.
+		const cleared = codeOnly.search(/\{(?:#if|:else if) heroKind !== 'new'\}/);
 		const card = codeOnly.indexOf('<NewSessionHero');
 		expect(cleared).toBeGreaterThan(-1);
 		expect(card).toBeGreaterThan(cleared);

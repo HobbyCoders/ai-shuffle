@@ -235,6 +235,13 @@ jobs:
           export CHROMIUM_PATH="$(node -p 'require("../browser-mcp/node_modules/playwright-core").chromium.executablePath()')"
           timeout --kill-after=10s 150s node tests/verify-flight-recorder.mjs
 
+      - name: Journey runner verdicts
+        # How a journey case is judged (designed composer moves, known bugs,
+        # a lost recording), without a browser or a dev instance.
+        timeout-minutes: 2
+        working-directory: frontend
+        run: timeout --kill-after=10s 60s node --test tests/journeys/lib/verdict.test.mjs
+
   journeys:
     name: UI journeys (${{ matrix.shard }}/4)
     # Real app, real PostgreSQL 16, fake AI, real Chromium: every

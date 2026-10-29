@@ -1,7 +1,7 @@
 /**
- * Pure classifiers for how the chat surface should present when the active
- * session has zero messages — extracted from MainPanel / ChatView so the logic
- * can be unit-tested without the Svelte runtime.
+ * Pure classifiers for how the chat surface presents while the active session
+ * has zero messages, and how ChatView lays it out — extracted from MainPanel /
+ * ChatView so the logic can be unit-tested without the Svelte runtime.
  *
  * Background (see PR #558): clearing a session's conversation from the chat view
  * wipes its transcript IN PLACE — the session survives, the sdk_session_id is
@@ -22,6 +22,14 @@
  *                NOT flash the cleared-empty hint for a session that will turn
  *                out to have messages.
  *   - active   → has messages
+ *
+ * Layout rule: a load keeps the layout the view already had (the centred hero
+ * or the message column) until its outcome is known, so opening a chat moves
+ * the composer at most once (createChatLayoutTracker). A loading chat in the
+ * hero layout shows a bound "opening" hero, never the new-chat or cleared copy;
+ * in the column it shows MessageArea's skeleton (classifyTranscriptRender). A
+ * mirrored chat's first sync check counts as part of its load
+ * (chatLayoutSurface).
  */
 
 export type ChatSurface = 'new' | 'cleared' | 'loading' | 'active';
@@ -49,18 +57,6 @@ export function classifyChatSurface(input: ChatSurfaceInput): ChatSurface {
 	if (isRestoringSession || isLoadingSession) return 'loading';
 	if (sessionId) return 'cleared';
 	return 'new';
-}
-
-/**
- * Whether ChatView should render its centered empty surface (the New-Chat hero
- * or the cleared-conversation hero) rather than the active message column.
- * True for 'new' and 'cleared'; 'loading' and 'active' render the message column
- * (matching the pre-existing restore-window behaviour that avoids sends landing
- * in an invisible session).
- */
-export function isEmptyChatSurface(input: ChatSurfaceInput): boolean {
-	const surface = classifyChatSurface(input);
-	return surface === 'new' || surface === 'cleared';
 }
 
 /**
@@ -103,10 +99,45 @@ export function createChatLayoutTracker(initial: ChatLayout = 'column'): (surfac
 	};
 }
 
+/**
+ * The surface ChatView's layout follows. A mirrored (remote) chat whose first
+ * sync with its owning worker is still pending is part of the open: once the
+ * owner catches up the transcript is reloaded, so presenting the mirror's copy
+ * first (or its emptiness as "cleared") would show one conversation and then
+ * swap it. Its layout is held like a load's until the sync check reveals it.
+ * A genuinely new chat (nothing bound) never waits on a sync.
+ */
+export function chatLayoutSurface(surface: ChatSurface, opts: { mirrorSyncPending: boolean }): ChatSurface {
+	if (opts.mirrorSyncPending && surface !== 'new') return 'loading';
+	return surface;
+}
+
+/**
+ * What the centred hero shows when ChatView is in the hero layout:
+ *   - new      the new-session hero (agent + "Runs on …")
+ *   - cleared  the chat's own title + "Conversation cleared"
+ *   - loading  the chat's title + "Opening the conversation…" (a chat opened
+ *              from the hero layout, its history on the way)
+ *   - syncing  the chat's title + the mirror's "Checking sync with …" (a
+ *              mirrored chat waiting for its first catch-up)
+ */
+export type ChatHeroKind = 'new' | 'cleared' | 'loading' | 'syncing';
+
+export function chatHeroKind(input: { surface: ChatSurface; mirrorSyncPending: boolean }): ChatHeroKind {
+	if (input.surface === 'new') return 'new';
+	if (input.mirrorSyncPending) return 'syncing';
+	if (input.surface === 'cleared') return 'cleared';
+	// 'loading', or 'active' held in the hero by a load (chatLayoutSurface).
+	return 'loading';
+}
+
 /** True only for a bound session, settled and empty — i.e. a cleared conversation. */
 export function isClearedSession(input: ChatSurfaceInput): boolean {
 	return classifyChatSurface(input) === 'cleared';
 }
+
+/** The title an unstarted or not-yet-named chat carries in the session store. */
+export const NEW_CHAT_TITLE = 'New Chat';
 
 export interface ChatHeaderTitleInput {
 	/** The session id the chat is bound to, or null for an unstarted New Chat. */
@@ -125,22 +156,30 @@ export interface ChatHeaderTitleInput {
  * which previously fell through to a misleading "New Chat". Falls back to
  * 'Untitled' for a bound session with no title, and to 'New Chat' only for a
  * genuinely unbound, empty chat.
+ *
+ * While a bound chat loads, a blank title and the 'New Chat' placeholder both
+ * mean "not known yet" (the switcher and boot restore fall back to the
+ * placeholder until the row or /live names the chat), so it reads 'Loading…':
+ * an existing chat is never called "New Chat" while it opens.
  */
 export function chatHeaderTitle(input: ChatHeaderTitleInput): string {
 	const { sessionId, title, messageCount, loading = false } = input;
 	if (sessionId || messageCount > 0) {
+		const known = title?.trim() || '';
+		if (loading && sessionId && (!known || known === NEW_CHAT_TITLE)) return 'Loading…';
 		// A deep link binds before its title is known: say it is loading rather
 		// than call the chat Untitled for the moment before /live answers.
-		return title?.trim() || (loading ? 'Loading…' : 'Untitled');
+		return known || (loading ? 'Loading…' : 'Untitled');
 	}
-	return 'New Chat';
+	return NEW_CHAT_TITLE;
 }
 
 /**
  * What MessageArea should draw for the current surface.
  *
- * ChatView suppresses its own hero while a session's history is in flight, but
- * the message column it renders instead contains MessageArea — whose empty
+ * When a load starts in the message column (opened from another chat, or a
+ * boot restore / deep link), ChatView keeps that column, which contains
+ * MessageArea — whose empty
  * branch keyed purely on `messages.length === 0` and therefore drew the full
  * "Start a Conversation" hero on EVERY switch, indistinguishable from a
  * brand-new empty chat, before the incoming transcript popped in.

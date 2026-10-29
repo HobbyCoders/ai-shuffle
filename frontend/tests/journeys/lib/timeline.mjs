@@ -115,6 +115,33 @@ export function expectNeverDecreases(recording, field, { from = 0 } = {}) {
 	}
 }
 
+/**
+ * The composer's positions over the recording (`data-ui-composer`: centre,
+ * bottom, hidden), each change once, from `from` on: ['centre', 'bottom'] is
+ * one move. Every painted frame counts, so a move and its undo one frame later
+ * shows as two.
+ */
+export function composerPositions(recording, { from = 0 } = {}) {
+	const out = [];
+	for (const { t, state } of frames(recording)) {
+		if (t < from || state.composer === undefined || state.composer === null) continue;
+		if (out[out.length - 1] !== state.composer) out.push(state.composer);
+	}
+	return out;
+}
+
+/**
+ * The composer must take exactly the designed positions, in order: one entry
+ * per position, so ['centre'] means it never moved and ['bottom', 'centre']
+ * means exactly one move. An extra move (a flicker, a move back) fails.
+ */
+export function expectComposerPositions(recording, expected, { from = 0 } = {}) {
+	const seen = composerPositions(recording, { from });
+	if (seen.length !== expected.length || seen.some((value, i) => value !== expected[i])) {
+		throw new Error(`composer went ${seen.join(' → ') || '(nowhere)'}, designed ${expected.join(' → ')}`);
+	}
+}
+
 /** Recorder selector for the composer's Stop button (field `stop`). */
 export const STOP_SELECTOR = 'stop=button[aria-label="Stop generating"]';
 /** Recorder selector for the composer's Send button (field `send`). */

@@ -1,105 +1,49 @@
-<script lang="ts" module>
-	/** How long a mirrored chat must stay behind its owner, after it was
-	 *  current, before the "Syncing updates" pill shows again. Owner-wide
-	 *  replication gaps of a poll or two are normal and must not flash it. */
-	export const MIRROR_SYNC_NOTICE_GRACE_MS = 3000;
-</script>
-
 <script lang="ts">
 	import { untrack, type Snippet } from 'svelte';
-	import { apiBase, withAuth } from '$lib/api/runtime';
-	import { createConnectionBannerGrace } from '$lib/stores/session/connection-banner-grace';
 	import { LoaderCircle, CloudOff } from 'lucide-svelte';
+	import { createMirrorSync, mirrorSyncHeadline, MIRROR_SYNC_NOTICE_GRACE_MS, type MirrorSync } from './mirror-sync.svelte';
 
-	let { sessionId, remote = true, deviceName, onCaughtUp, graceMs = MIRROR_SYNC_NOTICE_GRACE_MS, children }: {
-		sessionId: string | null;
+	let { sessionId = null, remote = true, deviceName, onCaughtUp, graceMs = MIRROR_SYNC_NOTICE_GRACE_MS, sync: external, children }: {
+		sessionId?: string | null;
 		remote?: boolean;
 		deviceName?: string | null;
 		/** Fires ONCE per opened session: its opening checkpoint is materialized.
 		 *  Later drains of a live backlog must not reload the transcript —
 		 *  the live SSE feed already delivers every replicated event, and an
-		 *  explicit log rewrite reaches the feed as its own `reset` (#2227). */
-		onCaughtUp: () => void;
+		 *  explicit log rewrite reaches the feed as its own `reset` (#2227).
+		 *  Unused when `sync` is given (its owner wired it). */
+		onCaughtUp?: () => void;
 		graceMs?: number;
+		/** A sync check the parent already runs for this chat (ChatView runs one
+		 *  whatever its layout, so a chat opened from the hero is checked while
+		 *  it loads). Without it the gate runs its own. */
+		sync?: MirrorSync;
 		children: Snippet;
 	} = $props();
-	let syncState = $state<'checking' | 'syncing' | 'current' | 'offline'>('checking');
-	let pending = $state(0);
-	let revealedSession = $state<string | null>(null);
-	// Shown only after the chat has stayed behind for the grace period.
-	let syncNoticeVisible = $state(false);
-	// Props may be getters over whole stores (ChatView's $activeSession/$sessions).
-	// Equal primitive values must not restart polling when those stores reload.
-	const pollingSessionId = $derived(sessionId);
-	const pollingRemote = $derived(remote);
-	// Owner-wide watermarks advance for unrelated chats too. Gate the initial
-	// catch-up, then keep the conversation mounted during incremental sync.
-	const waiting = $derived(!!sessionId && remote && revealedSession !== sessionId);
-	const behind = $derived(syncState === 'syncing' || syncState === 'checking');
+	// Decided once: a gate either renders its parent's check or owns one.
+	const sync: MirrorSync = untrack(() => external) ?? createMirrorSync(() => ({
+		sessionId,
+		remote,
+		graceMs,
+		onCaughtUp: () => onCaughtUp?.(),
+	}));
+	const waiting = $derived(sync.waiting);
+	const syncState = $derived(sync.syncState);
+	const pending = $derived(sync.pending);
+	const behind = $derived(sync.behind);
+	const syncNoticeVisible = $derived(sync.noticeVisible);
 	const deviceLabel = $derived(deviceName || 'the owning worker');
-
-	$effect(() => {
-		const id = pollingSessionId;
-		if (!id || !pollingRemote) return;
-		const controller = new AbortController();
-		let timer: ReturnType<typeof setTimeout>;
-		let caughtUpOnce = false;
-		let initialTarget: { seq: number; epoch: string; tail_id: string } | null = null;
-		const notice = createConnectionBannerGrace({
-			onShow: () => { syncNoticeVisible = true; },
-			onHide: () => { syncNoticeVisible = false; },
-			graceMs: untrack(() => graceMs),
-		});
-		revealedSession = null;
-		syncNoticeVisible = false;
-		syncState = 'checking';
-		pending = 0;
-		async function poll() {
-			try {
-				const query = new URLSearchParams();
-				if (initialTarget && !caughtUpOnce) {
-					query.set('initial_seq', String(initialTarget.seq));
-					query.set('initial_epoch', initialTarget.epoch);
-					query.set('initial_tail_id', initialTarget.tail_id);
-				}
-				const suffix = query.size ? `?${query}` : '';
-				const response = await fetch(`${apiBase()}/sessions/${encodeURIComponent(id!)}/sync-status${suffix}`, withAuth({ signal: controller.signal }));
-				if (!response.ok) throw new Error('Sync status unavailable');
-				const status = await response.json();
-				if (controller.signal.aborted) return;
-				if (!['checking', 'syncing', 'current', 'offline'].includes(status.state)) throw new Error('Invalid sync status');
-				// Pin an opening checkpoint instead of chasing a continuously writing
-				// owner. The server replaces it on an epoch change or truncation.
-				if (!caughtUpOnce && status.initial_target) initialTarget = status.initial_target;
-				const firstCatchUp = !caughtUpOnce && (status.state === 'current' || status.initial_caught_up === true);
-				if (firstCatchUp) caughtUpOnce = true;
-				syncState = status.state;
-				pending = status.scope === 'owner' ? 0 : (!caughtUpOnce
-					? status.initial_pending_updates ?? status.pending_updates ?? 0
-					: status.pending_updates ?? 0);
-				if (firstCatchUp || status.state === 'current' || status.state === 'offline') revealedSession = id;
-				notice.setConnected(status.state !== 'syncing' && status.state !== 'checking');
-				if (firstCatchUp) untrack(onCaughtUp);
-			} catch {
-				// Keep a known backlog visible on a failed poll; never call it current.
-			} finally {
-				if (!controller.signal.aborted) timer = setTimeout(poll, 2000);
-			}
-		}
-		void poll();
-		return () => { controller.abort(); clearTimeout(timer); notice.destroy(); };
-	});
 </script>
 
 {#if waiting}
 	<div class="mirror-sync" role="status" aria-live="polite">
 		<LoaderCircle size={20} aria-hidden="true" />
-		<strong>{syncState === 'syncing' ? 'Syncing from' : 'Checking sync with'} {deviceLabel}…</strong>
+		<strong>{mirrorSyncHeadline(syncState, deviceName)}</strong>
 		<p>Catching up before showing the current conversation, tasks and agents.</p>
 		{#if syncState === 'syncing' && pending > 0}<p>{pending} updates remaining</p>{/if}
 	</div>
 {:else}
-	{#if sessionId && remote}
+	{#if sync.active}
 		<!-- Floats over the transcript instead of pushing it down, so a later
 		     drain never moves the conversation. The live region stays mounted so
 		     screen readers announce its text changes. -->

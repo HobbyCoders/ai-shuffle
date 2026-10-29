@@ -18,7 +18,8 @@
 import { describe, it, expect } from 'vitest';
 import {
 	classifyChatSurface,
-	isEmptyChatSurface,
+	chatHeroKind,
+	chatLayoutSurface,
 	isClearedSession,
 	chatHeaderTitle,
 	classifyTranscriptRender,
@@ -70,22 +71,6 @@ describe('classifyChatSurface', () => {
 		expect(
 			classifyChatSurface(clearedSession({ messageCount: 2, isLoadingSession: true }))
 		).toBe('active');
-	});
-});
-
-describe('isEmptyChatSurface', () => {
-	it('is true for a new chat and a cleared session', () => {
-		expect(isEmptyChatSurface(newChat())).toBe(true);
-		expect(isEmptyChatSurface(clearedSession())).toBe(true);
-	});
-
-	it('is false while history is loading (renders the message column instead)', () => {
-		expect(isEmptyChatSurface(clearedSession({ isRestoringSession: true }))).toBe(false);
-		expect(isEmptyChatSurface(clearedSession({ isLoadingSession: true }))).toBe(false);
-	});
-
-	it('is false once there are messages', () => {
-		expect(isEmptyChatSurface(clearedSession({ messageCount: 1 }))).toBe(false);
 	});
 });
 
@@ -144,6 +129,17 @@ describe('chatHeaderTitle', () => {
 		expect(
 			chatHeaderTitle({ sessionId: 'sess-1', title: 'Named', messageCount: 0, loading: true })
 		).toBe('Named');
+	});
+
+	it('never calls an existing chat "New Chat" while it loads (the placeholder is not a name)', () => {
+		// The switcher and boot restore fall back to the 'New Chat' placeholder
+		// until the sidebar row or /live names the chat.
+		expect(chatHeaderTitle({ sessionId: 'sess-1', title: 'New Chat', messageCount: 0, loading: true })).toBe('Loading…');
+		expect(chatHeaderTitle({ sessionId: 'sess-1', title: '  New Chat ', messageCount: 0, loading: true })).toBe('Loading…');
+		// Settled, it is the chat's stored title like any other.
+		expect(chatHeaderTitle({ sessionId: 'sess-1', title: 'New Chat', messageCount: 0 })).toBe('New Chat');
+		// An unbound compose is the new chat.
+		expect(chatHeaderTitle({ sessionId: null, title: 'New Chat', messageCount: 0, loading: true })).toBe('New Chat');
 	});
 
 	it('falls back to "Untitled" for a bound session with no/blank title', () => {
@@ -280,5 +276,105 @@ describe('createChatLayoutTracker', () => {
 		expect(layout('loading')).toBe('column');
 		expect(layout('cleared')).toBe('hero');
 		expect(layout('loading')).toBe('hero');
+	});
+});
+
+/**
+ * A mirrored chat (owned by another worker) is checked against its owner before
+ * it is shown, and its first catch-up reloads the transcript. That check is
+ * part of the open: it runs whatever the layout, and the layout waits for it
+ * like it waits for a load, so a remote chat opened from the hero never shows
+ * its mirror's transcript and then swaps it for a "Checking sync…" pane.
+ */
+describe('chatLayoutSurface (a mirrored chat\'s first sync)', () => {
+	it('holds the layout like a load while the first sync is pending', () => {
+		expect(chatLayoutSurface('active', { mirrorSyncPending: true })).toBe('loading');
+		expect(chatLayoutSurface('cleared', { mirrorSyncPending: true })).toBe('loading');
+		expect(chatLayoutSurface('loading', { mirrorSyncPending: true })).toBe('loading');
+	});
+
+	it('is the surface itself once synced, and for a chat nothing is bound to', () => {
+		for (const surface of ['new', 'cleared', 'loading', 'active'] as ChatSurface[]) {
+			expect(chatLayoutSurface(surface, { mirrorSyncPending: false })).toBe(surface);
+		}
+		expect(chatLayoutSurface('new', { mirrorSyncPending: true })).toBe('new');
+	});
+
+	/** One open of a remote chat: [surface, sync pending] per step. */
+	const open = (steps: Array<[ChatSurface, boolean]>, initial?: 'hero' | 'column') => {
+		const layout = createChatLayoutTracker(initial);
+		return steps.map(([surface, pending]) => ({
+			layout: layout(chatLayoutSurface(surface, { mirrorSyncPending: pending })),
+			hero: chatHeroKind({ surface, mirrorSyncPending: pending })
+		}));
+	};
+	const moves = (layouts: string[]) => layouts.filter((l, i) => i > 0 && l !== layouts[i - 1]).length;
+
+	it('opened from the hero: the history lands while the sync is still checking, then the reload', () => {
+		// new → open (loading, sync starts at once) → history arrives (active,
+		// still checking) → caught up: reload (loading) → transcript.
+		const steps = open([
+			['new', false],
+			['loading', true],
+			['active', true],
+			['loading', false],
+			['active', false]
+		]);
+		expect(steps.map((s) => s.layout)).toEqual(['hero', 'hero', 'hero', 'hero', 'column']);
+		expect(moves(steps.map((s) => s.layout))).toBe(1);
+		// The hero says what it waits for, and never the new-chat or cleared copy.
+		expect(steps.map((s) => s.hero)).toEqual(['new', 'syncing', 'syncing', 'loading', 'loading']);
+	});
+
+	it('opened from the hero, empty on the mirror: never "cleared" before the owner says so', () => {
+		const steps = open([
+			['new', false],
+			['loading', true],
+			['cleared', true],
+			['loading', false],
+			['cleared', false]
+		]);
+		expect(steps.map((s) => s.layout)).toEqual(['hero', 'hero', 'hero', 'hero', 'hero']);
+		expect(steps.map((s) => s.hero)).toEqual(['new', 'syncing', 'syncing', 'loading', 'cleared']);
+	});
+
+	it('opened from another chat: the column stays (MirrorSyncGate shows the check there)', () => {
+		const layouts = open([
+			['active', false],
+			['loading', true],
+			['active', true],
+			['loading', false],
+			['active', false]
+		]).map((s) => s.layout);
+		expect(layouts).toEqual(['column', 'column', 'column', 'column', 'column']);
+	});
+
+	it('never moves the composer more than once on any order of outcomes', () => {
+		const outcomes: ChatSurface[] = ['cleared', 'active'];
+		for (const from of ['new', 'cleared', 'active'] as ChatSurface[]) {
+			for (const mirror of outcomes) {
+				for (const final of outcomes) {
+					const layouts = open([
+						[from, false],
+						['loading', true],
+						[mirror, true],
+						['loading', false],
+						[final, false]
+					]).map((s) => s.layout);
+					expect(moves(layouts), `${from} → ${mirror} (syncing) → ${final}: ${layouts.join(' → ')}`).toBeLessThanOrEqual(1);
+				}
+			}
+		}
+	});
+});
+
+describe('chatHeroKind', () => {
+	it('is the new-session hero only for an unbound chat', () => {
+		expect(chatHeroKind({ surface: 'new', mirrorSyncPending: false })).toBe('new');
+		expect(chatHeroKind({ surface: 'cleared', mirrorSyncPending: false })).toBe('cleared');
+		expect(chatHeroKind({ surface: 'loading', mirrorSyncPending: false })).toBe('loading');
+		// Held in the hero by a load: still the loading hero, never the new one.
+		expect(chatHeroKind({ surface: 'active', mirrorSyncPending: false })).toBe('loading');
+		expect(chatHeroKind({ surface: 'cleared', mirrorSyncPending: true })).toBe('syncing');
 	});
 });

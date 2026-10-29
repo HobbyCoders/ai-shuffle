@@ -25,6 +25,7 @@ import {
 	waitTurnSettled
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
+import { expectComposerPositions } from './lib/timeline.mjs';
 
 /** The cleared state: its own title and hint, composer centred, no new-session hero. */
 async function expectClearedState(page, title) {
@@ -51,7 +52,9 @@ await runJourney({
 				await expectClearedState(page, SEEDED.cleared);
 				await page.waitForTimeout(1500);
 				await expectClearedState(page, SEEDED.cleared);
-			}
+			},
+			// Opened from the new-session screen, the composer never moves.
+			verify: ({ recording }) => expectComposerPositions(recording, ['centre'])
 		},
 		{
 			name: 'clear-then-send',
@@ -62,14 +65,17 @@ await runJourney({
 				error: /^Error: reply never arrived: "You said: “after clearing"/,
 				reason: 'after an in-place clear the server event stream skips the restarted log, so the reply never reaches the open chat'
 			},
-			allow: [
+			expectShift: [
 				{
-					kind: 'layout_shift',
-					message: /input-slot in ChatView/,
+					step: 'the server clears the open chat',
+					composer: ['bottom', 'centre'],
+					maxValue: 0.15,
 					reason:
-						'the clear comes from the server, not from input on this page, so the expected move of the composer from the bottom to the centred cleared layout counts as an unprompted shift'
+						'the clear comes from the server, not from input on this page: the composer moves once from the bottom to the centred cleared layout'
 				}
 			],
+			// Docked, centred by the clear, docked again by the send: two moves.
+			verify: ({ recording }) => expectComposerPositions(recording, ['bottom', 'centre', 'bottom']),
 			async setup(ctx) {
 				const { page } = ctx;
 				ctx.old = `tok-${uniq()}`;

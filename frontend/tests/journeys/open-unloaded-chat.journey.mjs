@@ -18,9 +18,18 @@
 //   <target>-from-chat     another open chat  → sidebar row
 //   long-from-cleared      an empty chat      → sidebar row (hero → column)
 //   <target>-deep-link     a full load of /?session=<id>
+//
+// Each case's `verify` names the composer positions it is designed to take,
+// read on every painted frame: one entry per position, so a second move, or
+// a move there and back, fails even when it is too small or too quick to
+// count as a layout shift.
 import { runJourney } from './runner.mjs';
 import { SEEDED, gotoApp, openFromSidebar, seededChatId, waitChat, waitChatOpen } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
+import { expectComposerPositions } from './lib/timeline.mjs';
+
+/** The composer takes exactly these positions over the case. */
+const composer = (...positions) => ({ recording }) => expectComposerPositions(recording, positions);
 
 /** What each target looks like once open. */
 const OPENED = {
@@ -59,22 +68,26 @@ const viaDeepLink = (target) => async ({ page, status, mark }) => {
 await runJourney({
 	name: 'open-unloaded-chat',
 	cases: [
-		{ name: 'long-from-new', setup: fromNew, act: viaSidebar('long') },
-		{ name: 'cleared-from-new', setup: fromNew, act: viaSidebar('cleared') },
-		{ name: 'long-from-chat', setup: fromChat('no_project'), act: viaSidebar('long') },
-		{ name: 'cleared-from-chat', setup: fromChat('no_project'), act: viaSidebar('cleared') },
-		{ name: 'long-from-cleared', setup: fromChat('cleared'), act: viaSidebar('long') },
-		{ name: 'long-deep-link', setup: fromNew, act: viaDeepLink('long') },
+		{ name: 'long-from-new', setup: fromNew, act: viaSidebar('long'), verify: composer('centre', 'bottom') },
+		{ name: 'cleared-from-new', setup: fromNew, act: viaSidebar('cleared'), verify: composer('centre') },
+		{ name: 'long-from-chat', setup: fromChat('no_project'), act: viaSidebar('long'), verify: composer('bottom') },
+		{ name: 'cleared-from-chat', setup: fromChat('no_project'), act: viaSidebar('cleared'), verify: composer('bottom', 'centre') },
+		{ name: 'long-from-cleared', setup: fromChat('cleared'), act: viaSidebar('long'), verify: composer('centre', 'bottom') },
+		{ name: 'long-deep-link', setup: fromNew, act: viaDeepLink('long'), verify: composer('centre', 'bottom') },
 		{
 			name: 'cleared-deep-link',
 			setup: fromNew,
 			act: viaDeepLink('cleared'),
-			allow: [
+			// The new page docks the composer for its load, then the cleared
+			// chat centres it: one designed move after the reload, never back.
+			verify: composer('centre', 'bottom', 'centre'),
+			expectShift: [
 				{
-					kind: 'layout_shift',
-					message: /input-slot in ChatView/,
+					step: 'load a link to the cleared chat',
+					composer: ['bottom', 'centre'],
+					maxValue: 0.15,
 					reason:
-						'a page opened by a link starts loading with the composer docked, the layout of the usual outcome (a transcript); a cleared chat then moves it once to the centre (createChatLayoutTracker). One move, never a reversal, which the journey still checks; its measured size straddles the 0.1 limit run to run'
+						'a page opened by a link starts loading with the composer docked, the layout of the usual outcome (a transcript); a cleared chat then centres it once (createChatLayoutTracker), with no input on the page'
 				}
 			]
 		}
