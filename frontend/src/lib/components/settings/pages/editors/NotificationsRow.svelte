@@ -31,8 +31,9 @@
 		const value = key;
 		key = ''; // Write-only: never retain the pasted secret after dispatch.
 		try {
-			status = remove ? await api.delete<PushStatus>(path)
+			const updated = remove ? await api.delete<PushStatus>(path)
 				: await api.put<PushStatus>(path, { service_account: value });
+			status = updated ?? await api.get<PushStatus>(path);
 			flashSaved();
 		} catch (e) { error = getErrorMessage(e); }
 		finally { busy = false; }

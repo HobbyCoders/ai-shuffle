@@ -36,6 +36,17 @@ describe('Needs you sender settings', () => {
         expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Could not save credentials');
         expect(document.body.textContent).not.toContain('private-json-input');
     });
+    it('refreshes status when a worker returns no content after removal', async () => {
+        mocks.get.mockResolvedValueOnce({ configured: true, devices_registered: 1 })
+            .mockResolvedValueOnce({ configured: false, devices_registered: 1 });
+        mocks.remove.mockResolvedValue(undefined);
+        render(NotificationsRow);
+        await screen.findByText('Credentials set · 1 device');
+        await fireEvent.click(screen.getByRole('button', { name: /Manage push/ }));
+        await fireEvent.click(screen.getByRole('button', { name: 'Remove credentials' }));
+        await screen.findByText('Push off · 1 device');
+        expect(mocks.get).toHaveBeenCalledTimes(2);
+    });
     it('shows configured status without reading the key and supports removal', async () => {
         mocks.get.mockResolvedValue({ configured: true, devices_registered: 1 });
         mocks.remove.mockResolvedValue({ configured: false, devices_registered: 1 });
