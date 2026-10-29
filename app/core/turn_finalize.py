@@ -248,14 +248,16 @@ async def clear_parked_marker_if_idle(session_id: str) -> bool:
     except Exception:
         logger.debug("parked-marker idle check failed", exc_info=True)
         return False
+    # The background work the park counted is over: stop the card's clock.
+    # Before the marker clear, so a turn that takes the live slot in between
+    # still sees the park and banks it up to its own start.
+    await close_park_work_time(session_id)
     cleared = await _write_parked_task_kind(session_id, None)
     if cleared:
         logger.info(
             "turn_finalize: cleared the parked marker on %s — its last "
             "background task settled between turns", session_id,
         )
-        # The background work the park counted is over: stop the card's clock.
-        await close_park_work_time(session_id)
     return cleared
 
 

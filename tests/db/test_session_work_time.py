@@ -196,6 +196,40 @@ def test_restart_drops_the_park_without_counting_downtime(mock_db):
     assert _work(sid) == (after_park, None)
 
 
+def test_adhoc_turn_beside_a_park_keeps_the_park_open(mock_db):
+    sid = _mk("wt-adhoc-park")
+    first = _run(sid, seconds=60)
+    _park(sid, first["id"])
+    after_park, open_at = _work(sid)
+    turns.record_adhoc_turn(sid, "api_query", prompt="side question")
+    banked, still_open = _work(sid)
+    assert still_open is not None
+    assert turns.interval_ms(still_open, open_at) == 0
+    assert turns.interval_ms(open_at, still_open) == 0
+    assert banked >= after_park
+
+
+def test_prompt_during_a_park_pauses_and_resumes_the_park(mock_db):
+    """Time a park's background work waits on the user is not working time,
+    and the answer starts the park's clock again."""
+    sid = _mk("wt-park-prompt")
+    first = _run(sid, seconds=60)
+    _park(sid, first["id"])
+    after_park = _work(sid)[0]
+    _backdate_segment(sid, 90)
+    assert turns.pause_session_work(sid) is True
+    paused, live = _work(sid)
+    assert live is None
+    assert 89_000 <= paused - after_park <= 92_000
+    assert turns.resume_session_work(sid) is True
+    assert _work(sid)[1] is not None
+    # Once the park has settled, an answer does not reopen anything.
+    turns.settle_parked_turns(sid)
+    database.set_session_parked_task_kind(sid, None)
+    assert _work(sid)[1] is None
+    assert turns.resume_session_work(sid) is False
+
+
 def test_stale_start_without_a_park_is_not_banked_at_the_next_turn(mock_db):
     """A start a failed write left behind is not a park: the next turn
     re-derives it without counting the idle gap."""
