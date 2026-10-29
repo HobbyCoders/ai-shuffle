@@ -180,6 +180,19 @@
 			]
 		},
 		{
+			"why": "Claude Code compaction: the card, the context meter, and the delegated leg and mod that turn the CLI's compaction frames into them",
+			"journeys": ["compaction"],
+			"globs": [
+				"frontend/src/lib/components/SystemMessage.svelte",
+				"frontend/src/lib/components/chat/ContextUsageBar.svelte",
+				"app/core/provider/harness_adapter.py",
+				"fluid/fluid/engine/delegated.py",
+				"fluid/fluid/engine/delegated_proto.py",
+				"fluid/fluid/engine/claude_mod_compaction.py",
+				"fluid/fluid/engine/claude_mod/**"
+			]
+		},
+		{
 			"why": "a journey file itself",
 			"journeys": ["$self"],
 			"globs": ["frontend/tests/journeys/*.journey.mjs"]
