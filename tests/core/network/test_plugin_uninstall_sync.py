@@ -19,6 +19,10 @@ def clear_outbox_hold(monkeypatch):
 
 
 class Service(FakeService):
+    def get_installation_records(self, plugin_id):
+        plugin = self.installed.get(plugin_id)
+        return [{"scope": plugin.scope}] if plugin else []
+
     def install_plugin(self, plugin_id, scope="user", enable=True):
         plugin = super().install_plugin(plugin_id, scope)
         plugin.enabled = enable
@@ -172,3 +176,107 @@ def test_batch_keeps_successful_reinstall_before_later_failure(workers, monkeypa
             PluginService.install_plugins_batch(service, [PID, "bad@missing"])
         assert plugins_sync.publish() == 1
         assert not deleted(a)["deleted"]
+
+
+def test_project_only_uninstall_keeps_peers_shared_install(workers, monkeypatch):
+    a, b = workers("a"), workers("b")
+    inventories, current = services(monkeypatch)
+    inventories["b"].installed[PID].scope = "project"
+    with a.active():
+        engine.create_network("Scopes")
+        plugins_sync.publish()
+    join(a, b)
+    current["name"] = "b"
+    with b.active():
+        asyncio.run(api.uninstall_plugin(PID, token="test"))
+        assert plugins_sync.publish() == 0
+        assert not deleted(b)["deleted"]
+    exchange(b, a)
+    current["name"] = "a"
+    with a.active():
+        plugins_sync.apply_desired([PID])
+        assert PID in inventories["a"].installed
+        assert not deleted(a)["deleted"]
+
+
+@pytest.mark.parametrize("failed_save_first", [False, True])
+def test_owner_approval_publishes_pending_agent_reinstall(workers, monkeypatch, tmp_path, failed_save_first):
+    from app.core import plugin_install, plugin_service
+    from app.mcp import plugin_tools
+
+    a, b = workers("a"), workers("b")
+    inventories, current = services(monkeypatch)
+    with a.active():
+        engine.create_network("Approved reinstall")
+        plugins_sync.publish()
+        asyncio.run(api.uninstall_plugin(PID, token="test"))
+        plugins_sync.publish()
+    join(a, b)
+    assert deleted(a)["deleted"]
+    current["name"] = "b"
+    with b.active():
+        assert plugins_sync.apply_desired([PID]) == 1
+    current["name"] = "a"
+    monkeypatch.setattr(plugin_service, "_get_fluid_dir", lambda: tmp_path / "fluid")
+    service = PluginService()
+    monkeypatch.setattr(plugin_tools, "_service", lambda: service)
+    monkeypatch.setattr(plugin_tools, "install_refusal", lambda _: None)
+    monkeypatch.setattr(api, "get_plugin_service", lambda: service)
+    monkeypatch.setattr(plugins_sync, "_service", lambda: service)
+
+    def fetch_plugin(svc, plugin_id, scope, enable, requested_by):
+        # Only the marketplace download is stubbed. The real agent handler,
+        # provenance producer, registry and owner-enable path are exercised.
+        record = {"scope": scope, "version": "2.0", "installPath": str(svc.CACHE_DIR / "tools")}
+        record.update(plugin_install._agent_request(None, requested_by))
+        svc._write_json_file(svc.INSTALLED_FILE, {"version": 2, "plugins": {plugin_id: [record]}})
+        svc._write_json_file(svc.SETTINGS_FILE, {"enabledPlugins": {plugin_id: enable}})
+        return svc.get_installed_plugins()[0]
+
+    monkeypatch.setattr(plugin_install, "install_plugin", fetch_plugin)
+    with a.active():
+        plugin_tools.install_listed(PID, {"session_id": "throwaway", "agent_id": "test"})
+        assert service.get_installed_plugins()[0].approval == "pending"
+        assert plugins_sync.publish() == 0
+        assert deleted(a)["deleted"]
+        if failed_save_first:
+            writer = service._write_json_file
+            monkeypatch.setattr(service, "_write_json_file", lambda path, data: False)
+            with pytest.raises(api.HTTPException):
+                asyncio.run(api.enable_plugin(PID, token="test"))
+            assert service.get_installed_plugins()[0].approval == "pending"
+            assert plugins_sync.publish() == 0
+            assert deleted(a)["deleted"]
+            monkeypatch.setattr(service, "_write_json_file", writer)
+        asyncio.run(api.enable_plugin(PID, token="test"))
+        assert service.get_installed_plugins()[0].approval is None
+        assert plugins_sync.publish() == 1
+        assert not deleted(a)["deleted"]
+    exchange(a, b)
+    monkeypatch.setattr(plugins_sync, "_service", lambda: inventories["b"])
+    with b.active():
+        assert not deleted(b)["deleted"]
+        assert plugins_sync.apply_desired([PID]) == 1
+        assert inventories["b"].get_enabled_plugins()[PID]
+
+
+@pytest.mark.parametrize("records,shared", [
+    ({"scope": "project"}, False),
+    ([{"scope": "project"}, {"scope": "user"}], True),
+    ({"version": "legacy"}, True),
+    ([{"scope": "local"}], False),
+])
+def test_uninstall_reads_all_real_registry_scopes_before_removal(workers, monkeypatch, tmp_path, records, shared):
+    from app.core import plugin_service
+    a = workers("a")
+    monkeypatch.setattr(plugin_service, "_get_fluid_dir", lambda: tmp_path / "fluid")
+    service = PluginService()
+    monkeypatch.setattr(api, "get_plugin_service", lambda: service)
+    monkeypatch.setattr(plugins_sync, "_service", lambda: service)
+    service._write_json_file(service.INSTALLED_FILE, {"version": 2, "plugins": {PID: records}})
+    with a.active():
+        engine.create_network("All installation scopes")
+        asyncio.run(api.uninstall_plugin(PID, token="test"))
+        assert service.get_installation_records(PID) == []
+        assert plugins_sync.publish() == int(shared)
+        assert bool(deleted(a)) == shared

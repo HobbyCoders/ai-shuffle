@@ -739,8 +739,11 @@ async def uninstall_plugin(
     """Uninstall a plugin - Admin only"""
     service = get_plugin_service()
     try:
+        records = await run_sync(service.get_installation_records, plugin_id)
+        shared = any(record.get("scope", "user") in ("user", "global", None) for record in records)
         await run_sync(service.uninstall_plugin, plugin_id)
-        await run_sync(plugins_sync.request_uninstall, plugin_id)
+        if shared:
+            await run_sync(plugins_sync.request_uninstall, plugin_id)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

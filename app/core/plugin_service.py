@@ -736,6 +736,14 @@ class PluginService:
     # Installed Plugins
     # =========================================================================
 
+    def get_installation_records(self, plugin_id: str) -> List[Dict[str, Any]]:
+        """All scopes, not just the first installation displayed by the UI."""
+        installed = self._read_json_file(self.INSTALLED_FILE, {"plugins": {}}, for_update=True)
+        records = installed.get("plugins", {}).get(plugin_id, [])
+        if isinstance(records, dict):  # version 1 registry
+            records = [records]
+        return [record for record in records if isinstance(record, dict)] if isinstance(records, list) else []
+
     def get_installed_plugins(self) -> List[PluginInfo]:
         """Get all installed plugins"""
         installed_data = self._read_json_file(self.INSTALLED_FILE, {"version": 2, "plugins": {}})
@@ -1036,12 +1044,19 @@ class PluginService:
             return connector_packages.set_enabled(kind, True)
         if _authored_mod.is_authored(plugin_id):
             return _authored_mod.enable(self, plugin_id, content_hash)
+        pending = next((record for record in self.get_installation_records(plugin_id)
+                        if record.get("approval") == "pending"
+                        and record.get("scope", "user") in ("user", "global", None)), None)
         settings = self._read_json_file(self.SETTINGS_FILE, {}, for_update=True)
         if "enabledPlugins" not in settings:
             settings["enabledPlugins"] = {}
         settings["enabledPlugins"][plugin_id] = True
         written = self._write_json_file(self.SETTINGS_FILE, settings)
-        self._clear_pending(plugin_id)
+        if written:
+            if pending is not None:
+                from app.network import plugins_sync
+                plugins_sync.request_install(plugin_id, version=pending.get("version", "unknown"), enabled=True)
+            self._clear_pending(plugin_id)
         return written
 
     def _clear_pending(self, plugin_id: str) -> None:

@@ -52,21 +52,26 @@ def request_uninstall(plugin_id: str) -> None:
                        (_REMOVAL_PREFIX + plugin_id, "1"))
 
 
-def install_plugin(service, plugin_id: str, scope: str, enable: bool):
-    """An explicit install may replace a tombstone; an inventory scan may not."""
-    plugin = service.install_plugin(plugin_id, scope, enable)
-    if scope not in ("user", "global", None) or _authored(plugin_id):
-        return plugin
-    info = _installed(service).get(plugin_id)
-    if info is None:
-        return plugin  # pending approval or a registry write that did not stick
+def request_install(plugin_id: str, *, version: str, enabled: bool) -> None:
+    """An explicit install or owner approval may replace a tombstone."""
+    if _authored(plugin_id):
+        return
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM system_settings WHERE key = %s", (_REMOVAL_PREFIX + plugin_id,))
         cursor.execute("""INSERT INTO network_plugins_desired (id, version, enabled, config, updated_at)
                           VALUES (%s, %s, %s, %s, NOW()) ON CONFLICT (id) DO UPDATE SET
                           version = EXCLUDED.version, enabled = EXCLUDED.enabled, updated_at = NOW()""",
-                       (plugin_id, info["version"], info["enabled"], json.dumps({})))
+                       (plugin_id, version, enabled, json.dumps({})))
+
+
+def install_plugin(service, plugin_id: str, scope: str, enable: bool):
+    """An explicit install may replace a tombstone; an inventory scan may not."""
+    plugin = service.install_plugin(plugin_id, scope, enable)
+    if scope in ("user", "global", None) and not _authored(plugin_id):
+        info = _installed(service).get(plugin_id)
+        if info is not None:  # pending approval is not an owner's install
+            request_install(plugin_id, **info)
     return plugin
 
 
