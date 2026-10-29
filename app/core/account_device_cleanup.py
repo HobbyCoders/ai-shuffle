@@ -100,9 +100,18 @@ def run_once():
     revoked = failures = 0
     for entry in stale_entries(store.live_account_entries(binding['server_id'])):
         try:
-            # Account authority first, so it cannot readmit the local entry.
-            _revoke_on_account(binding, entry['hub_device_id'])
-            if database.revoke_paired_client(entry['paired_client_id']):
+            with database.get_db() as conn:
+                store.lock_account_entry(conn.cursor(), entry)
+                # Earlier hub calls can take time. Recompute eligibility with
+                # the current rows, and require the snapshot's activity AND
+                # credential generation to match. Hold the candidate's locks
+                # through hub-first revocation so use/renewal cannot race it.
+                current = store.live_account_entries(binding['server_id'], _conn=conn)
+                if entry not in stale_entries(current):
+                    continue
+                _revoke_on_account(binding, entry['hub_device_id'])
+                changed = database.revoke_paired_client(entry['paired_client_id'], _conn=conn)
+            if changed:
                 close_paired_client_sockets(entry['paired_client_id'])
                 revoked += 1
         except Exception:  # noqa: BLE001 - retried on the next start

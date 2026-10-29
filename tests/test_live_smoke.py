@@ -537,7 +537,11 @@ def test_real_scenarios_validate_and_markdown_is_generated():
         assert ids_in_suite == sorted(ids_in_suite), "insert new rows in ID order"
     assert data["defaults"]["token_cap"] == 600000
     ids = {r["id"] for r in rows}
-    assert {"two-worker-smoke.9", "harness-basics.3"} <= ids
+    assert {"two-worker-smoke.9", "harness-basics.3",
+            "account-phones.sign-in-renewal-and-duplicate-cleanup"} <= ids
+    phones = next(r for r in rows if r["id"] == "account-phones.sign-in-renewal-and-duplicate-cleanup")
+    assert phones["kind"] == "owner"
+    assert set(phones["needs"]) == {"provider", "install", "device"}
     kinds = {r["kind"] for r in rows}
     assert kinds == {"script", "journey", "browser", "owner"}
     # Hand-checked rows say why they are not automated; journey rows name real journeys.

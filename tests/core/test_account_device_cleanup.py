@@ -1,5 +1,5 @@
 """One-time cleanup of the duplicate phone entries left by weekly re-sign-ins."""
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from fastapi import HTTPException
@@ -75,12 +75,12 @@ def worker(monkeypatch):
     store.activate()
 
 
-def enroll(n, enrolled_at):
+def enroll(n, enrolled_at, proof_hash=None):
     hub_device = f'3333333{n}-3333-3333-3333-333333333333'
     identity = {'account_id': ACCOUNT, 'device_id': hub_device, 'device_name': 'samsung SM-F956U', 'server_id': SERVER}
     info = DeviceInfo(device_id=hub_device, device_name='x', platform='android', capabilities={})
     device_id = store.enroll(identity, info, hash_api_key(f'aim_{n}'), datetime.now(timezone.utc) + timedelta(days=90),
-                             list(pairing.DEFAULT_MOBILE_SCOPES), scoped=True)
+                             list(pairing.DEFAULT_MOBILE_SCOPES), scoped=True, install_proof_hash=proof_hash)
     store.confirm_device(store.ownership(device_id), True)
     with database.get_db() as conn:
         conn.cursor().execute('UPDATE mobile_devices SET created_at=%s, last_seen=%s WHERE device_id=%s',
@@ -108,3 +108,51 @@ def test_hub_failure_keeps_local_entry_and_retries_next_start(worker, monkeypatc
     assert database.get_paired_client(old['paired_client_id'])['revoked_at'] is None
     monkeypatch.setattr(account_hub, 'call', lambda *a, **k: {'ok': True})
     assert cleanup.run_once() == 1
+
+
+@pytest.mark.parametrize('activity', ['authenticate', 'renew', 'renew-with-same-activity'])
+def test_cleanup_rechecks_candidate_after_an_earlier_hub_call(worker, monkeypatch, activity):
+    from starlette.requests import Request
+
+    from app.api import mobile
+
+    older = [enroll(1, T0, proof_hash='proof'), enroll(2, T0 + timedelta(days=7), proof_hash='proof')]
+    keeper = enroll(3, T0 + timedelta(days=14))
+    candidates = cleanup.stale_entries(store.live_account_entries(SERVER))
+    assert len(candidates) == 2
+    refreshed = candidates[1]
+    calls = []
+
+    def revoke_and_use_other_phone(binding, method, suffix, body=None):
+        calls.append((method, suffix))
+        assert suffix.endswith(candidates[0]['hub_device_id'])
+        # The second candidate becomes active while the first hub call is in
+        # flight, after the cleanup took its original snapshot. Use real auth
+        # and enrollment producers rather than mutating that snapshot.
+        if activity == 'authenticate':
+            number = next(i for i, owner in enumerate(older, 1) if owner['device_id'] == refreshed['device_id'])
+            monkeypatch.setattr(account_hub, 'require_active', lambda owner: None)
+            request = Request({'type': 'http', 'headers': [(b'authorization', f'Bearer aim_{number}'.encode())]})
+            assert mobile.get_device_from_api_key(request)['device_id'] == refreshed['device_id']
+        else:
+            identity = {'account_id': ACCOUNT, 'device_id': refreshed['hub_device_id'],
+                        'device_name': refreshed['device_name'], 'server_id': SERVER}
+            info = DeviceInfo(device_id=refreshed['hub_device_id'], device_name='x', platform='android', capabilities={})
+            store.enroll(identity, info, hash_api_key('aim_refreshed'),
+                         datetime.now(UTC) + timedelta(days=90),
+                         list(pairing.DEFAULT_MOBILE_SCOPES), scoped=True, install_proof_hash='proof')
+            if activity == 'renew-with-same-activity':
+                # Even if activity timestamps coincide, a changed credential
+                # generation must not be revoked from the old snapshot.
+                with database.get_db() as conn:
+                    conn.cursor().execute('UPDATE mobile_devices SET last_seen=%s WHERE device_id=%s',
+                                          (refreshed['device_seen'], refreshed['device_id']))
+                assert database.get_mobile_device(refreshed['device_id'])['id'] == refreshed['mobile_record_id']
+        return {'ok': True}
+
+    monkeypatch.setattr(account_hub, 'call', revoke_and_use_other_phone)
+    assert cleanup.run_once() == 1
+    assert calls == [('DELETE', 'account/devices/' + candidates[0]['hub_device_id'])]
+    assert database.get_paired_client(candidates[0]['paired_client_id'])['revoked_at'] is not None
+    assert database.get_paired_client(refreshed['paired_client_id'])['revoked_at'] is None
+    assert database.get_paired_client(keeper['paired_client_id'])['revoked_at'] is None

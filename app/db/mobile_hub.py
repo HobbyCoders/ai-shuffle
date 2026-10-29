@@ -278,10 +278,19 @@ def _renew_installation(c, identity, info, device_id, key_hash, expires_at, scop
         WHERE device_id=%s""",
         (record_id, info.platform, key_hash, json.dumps(info.capabilities.model_dump()),
          expires_at.isoformat(), json.dumps(scopes), keep_decision, now, device_id))
-    c.execute("""UPDATE paired_clients SET revoked_at=NULL, scopes=%s, session_token_hash=NULL,
-        session_expires_at=NULL, updated_at=%s WHERE id=%s""", (json.dumps(scopes), now, client['id']))
+    # Expired slots are not bearer credentials, but their hashes let the next
+    # authenticated mint advance matching chat bindings. Carry that continuity
+    # only for a proof-matched, non-revoked installation; logout already cleared
+    # its slots and must never recover continuity from the device id alone.
+    c.execute("""UPDATE paired_clients SET revoked_at=NULL, scopes=%s,
+        session_token_hash=CASE WHEN %s THEN session_token_hash ELSE NULL END,
+        session_expires_at=NULL, updated_at=%s WHERE id=%s""",
+        (json.dumps(scopes), keep_decision, now, client['id']))
     c.execute('DELETE FROM mobile_key_renewals WHERE device_id=%s', (device_id,))
-    c.execute('DELETE FROM paired_client_native_sessions WHERE client_id=%s', (client['id'],))
+    if keep_decision:
+        c.execute('UPDATE paired_client_native_sessions SET expires_at=NOW() WHERE client_id=%s', (client['id'],))
+    else:
+        c.execute('DELETE FROM paired_client_native_sessions WHERE client_id=%s', (client['id'],))
     c.execute('DELETE FROM paired_client_web_reservations WHERE client_id=%s', (client['id'],))
     c.execute("""INSERT INTO mobile_install_proofs (device_id, proof_hash) VALUES (%s, %s)
         ON CONFLICT(device_id) DO UPDATE SET proof_hash=excluded.proof_hash""", (device_id, proof_hash))
@@ -384,21 +393,36 @@ def list_confirmations():
     return result
 
 
-def live_account_entries(server_id):
-    """Unrevoked account-enrolled phones on this worker, with their enrollment
-    and last-use times and the worker decision (for the duplicate cleanup)."""
+def lock_account_entry(cursor, entry):
+    """Hold a cleanup candidate against enrollment, use, repair and revocation.
+
+    Lock in enrollment order. The caller must re-read the candidate afterwards
+    and keep this transaction open through both the hub and local revocation.
+    """
+    from app.db.device_identity import lock_device_identity
+    lock_device_identity(cursor, entry['device_id'])
+    for table in ('mobile_worker_authorizations', 'mobile_hub_authorizations'):
+        cursor.execute(f'SELECT device_id FROM {table} WHERE device_id=%s FOR UPDATE', (entry['device_id'],))
+    cursor.execute('SELECT id FROM paired_clients WHERE id=%s FOR UPDATE', (entry['paired_client_id'],))
+    cursor.execute('SELECT id FROM mobile_devices WHERE device_id=%s FOR UPDATE', (entry['device_id'],))
+
+
+def live_account_entries(server_id, *, _conn=None):
+    """Unrevoked account-enrolled phones, including activity and credential generation."""
+    if _conn is None:
+        with get_db() as conn:
+            return live_account_entries(server_id, _conn=conn)
     result = []
-    with get_db() as conn:
-        c = conn.cursor()
-        for table in ('mobile_worker_authorizations', 'mobile_hub_authorizations'):
-            c.execute(f"""SELECT a.device_id, a.paired_client_id, a.account_id, a.hub_device_id,
-                a.server_id, p.device_name, p.platform, p.last_seen AS client_seen,
-                d.created_at, d.last_seen AS device_seen, f.decision
-                FROM {table} a
-                JOIN paired_clients p ON p.id=a.paired_client_id
-                JOIN mobile_devices d ON d.device_id=a.device_id AND d.paired_client_id=p.id
-                LEFT JOIN mobile_worker_confirmations f ON f.server_id=a.server_id
-                    AND f.device_id=a.device_id AND f.paired_client_id=a.paired_client_id
-                WHERE a.server_id=%s AND p.revoked_at IS NULL AND d.revoked_at IS NULL""", (server_id,))
-            result.extend(dict(row) for row in c.fetchall())
+    c = _conn.cursor()
+    for table in ('mobile_worker_authorizations', 'mobile_hub_authorizations'):
+        c.execute(f"""SELECT a.device_id, a.paired_client_id, a.account_id, a.hub_device_id,
+            a.server_id, p.device_name, p.platform, p.last_seen AS client_seen,
+            d.created_at, d.last_seen AS device_seen, d.id AS mobile_record_id, d.api_key_hash, f.decision
+            FROM {table} a
+            JOIN paired_clients p ON p.id=a.paired_client_id
+            JOIN mobile_devices d ON d.device_id=a.device_id AND d.paired_client_id=p.id
+            LEFT JOIN mobile_worker_confirmations f ON f.server_id=a.server_id
+                AND f.device_id=a.device_id AND f.paired_client_id=a.paired_client_id
+            WHERE a.server_id=%s AND p.revoked_at IS NULL AND d.revoked_at IS NULL""", (server_id,))
+        result.extend(dict(row) for row in c.fetchall())
     return result

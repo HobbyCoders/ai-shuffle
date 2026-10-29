@@ -7,8 +7,11 @@ from fastapi.testclient import TestClient
 from app.api import mobile, mobile_hub
 from app.api.auth import get_paired_client_from_token, hash_api_key, require_admin
 from app.core import account_hub, encryption, pairing
+from app.core import mobile_tool_identity as controller_identity
 from app.core.models import DeviceInfo
-from app.db import mobile_hub as store, database
+from app.db import database, sessions
+from app.db import mobile_hub as store
+from app.db import mobile_tool_identity as controller_store
 
 HUB = 'https://hub.example.com'
 SERVER = '11111111-1111-1111-1111-111111111111'
@@ -775,3 +778,75 @@ def test_deleted_entry_stays_a_tombstone(setup, monkeypatch, test_db):
     database.delete_mobile_device(device_id)
     assert enroll_via_api(setup, monkeypatch, ticket='again').status_code == 409
     assert database.get_mobile_device(device_id) is None
+
+
+def mint_chat_controller(setup, key, purpose):
+    response = setup.post('/api/v1/mobile/web-session', json={'purpose': purpose},
+                          headers={'Authorization': 'Bearer ' + key})
+    assert response.status_code == 200, response.text
+    return response.json()['session_token']
+
+
+def bind_chat_controller(setup, key, purpose):
+    token = mint_chat_controller(setup, key, purpose)
+    owner = store.ownership(store.local_device_id(SERVER, DEVICE))
+    principal = controller_identity.principal('paired', owner['paired_client_id'], token)
+    sessions.create_session('renewing-chat', 'default', is_active=True, model='sonnet')
+    controller_identity.bind_session('renewing-chat', principal, new=True)
+    return token, principal
+
+
+@pytest.mark.parametrize('purpose', ['web', 'native'])
+def test_same_install_renewal_advances_chat_controller_only_on_new_session(setup, monkeypatch, purpose):
+    bind()
+    first = enroll_via_api(setup, monkeypatch)
+    owner = store.ownership(store.local_device_id(SERVER, DEVICE))
+    store.confirm_device(owner, True)
+    old_token, socket_principal = bind_chat_controller(setup, first.json()['api_key'], purpose)
+    before = controller_store.read('renewing-chat')
+
+    renewed = enroll_via_api(setup, monkeypatch, ticket='renewed')
+    assert renewed.status_code == 200, renewed.text
+    assert controller_store.read('renewing-chat') == before
+    assert database.get_paired_client_by_session_hash(hash_api_key(old_token)) is None
+    with pytest.raises(PermissionError):
+        controller_identity.revalidate(socket_principal)
+    assert setup.post('/api/v1/mobile/web-session', json={'purpose': purpose},
+                      headers={'Authorization': 'Bearer ' + first.json()['api_key']}).status_code == 401
+
+    token = mint_chat_controller(setup, renewed.json()['api_key'], purpose)
+    assert controller_store.read('renewing-chat') == dict(before, credential_hash=hash_api_key(token))
+    controller_identity.validate(controller_store.read('renewing-chat'))
+    # The socket retains its old principal even after the stored chat advances.
+    with pytest.raises(PermissionError):
+        controller_identity.revalidate(socket_principal)
+    assert database.get_paired_client_by_session_hash(hash_api_key(old_token)) is None
+
+
+@pytest.mark.parametrize('purpose', ['web', 'native'])
+@pytest.mark.parametrize('break_continuity', ['logout', 'revoked', 'no-stored-proof', 'denied'])
+def test_install_renewal_cannot_revive_untrusted_chat_controller(setup, monkeypatch, purpose, break_continuity):
+    bind()
+    first = enroll_via_api(setup, monkeypatch, proof=None if break_continuity == 'no-stored-proof' else PROOF)
+    owner = store.ownership(store.local_device_id(SERVER, DEVICE))
+    store.confirm_device(owner, True)
+    old_token, _ = bind_chat_controller(setup, first.json()['api_key'], purpose)
+    if break_continuity == 'logout':
+        assert database.clear_paired_client_session(owner['paired_client_id'], hash_api_key(old_token))
+    elif break_continuity == 'revoked':
+        assert database.revoke_paired_client(owner['paired_client_id'])
+    elif break_continuity == 'denied':
+        store.confirm_device(owner, False)
+    before = controller_store.read('renewing-chat')
+    renewed = enroll_via_api(setup, monkeypatch, ticket='renewed')
+    if break_continuity == 'denied':
+        assert renewed.status_code == 409
+    else:
+        assert renewed.status_code == 200, renewed.text
+        if break_continuity in ('revoked', 'no-stored-proof'):
+            device = database.get_mobile_device(owner['device_id'])
+            store.confirm_device(owner, True, mobile_record_id=device['id'])
+        mint_chat_controller(setup, renewed.json()['api_key'], purpose)
+    assert controller_store.read('renewing-chat') == before
+    with pytest.raises(PermissionError):
+        controller_identity.revalidate(before)

@@ -62,12 +62,17 @@ object AccountOAuth {
             .put("client_id", request.clientId).put("created_at", System.currentTimeMillis()).toString()
         return request
     }
-    suspend fun finish(store: AccountStore, data: Intent): JSONObject = try {
-        HubClient.call(AccountStore.DEFAULT_HUB, "/v1/oauth/exchange", "POST", consumeResponse(store, data))
+    suspend fun finish(store: AccountStore, data: Intent): JSONObject = finish(store, data) { body ->
+        HubClient.call(AccountStore.DEFAULT_HUB, "/v1/oauth/exchange", "POST", body)
+    }
+
+    internal suspend fun finish(store: AccountStore, data: Intent,
+                                exchange: suspend (JSONObject) -> JSONObject): JSONObject = try {
+        exchange(consumeResponse(store, data))
     } catch (e: HubFailure) {
-        // The kept device id may have been revoked or belong to another account:
-        // the next attempt starts as a new device.
-        if (e.status == 401 || e.status == 409 || e.status >= 500) store.beginSignIn(fresh = true)
+        // Only a definitive rejection means the kept id was revoked or belongs
+        // to another account. Outages and connection failures keep id + proof.
+        if (e.status == 401 || e.status == 409) store.beginSignIn(fresh = true)
         throw e
     }
 
