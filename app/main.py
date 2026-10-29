@@ -362,6 +362,8 @@ async def lifespan(app: FastAPI):
         orphan_backfill_task = asyncio.create_task(reconcile_orphans_once())
         from app.core.fsmonitor_cleanup import cleanup_once as cleanup_fsmonitor_once
         bg_tasks.append(asyncio.create_task(cleanup_fsmonitor_once(), name="fsmonitor-cleanup"))
+        from app.core.account_device_cleanup import cleanup_once as cleanup_duplicate_phones_once
+        bg_tasks.append(asyncio.create_task(cleanup_duplicate_phones_once(), name="duplicate-phone-cleanup"))
 
     if settings.api_docs_enabled:
         logger.info(f"API docs: http://localhost:{settings.port}/docs")

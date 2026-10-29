@@ -13,8 +13,9 @@ import kotlin.coroutines.resume
 class AccountRepository(private val context: Context) {
     val store = AccountStore(context)
     private val servers = ServerStore.get(context)
-    suspend fun clearLocal() {
-        store.clear()
+    /** [forgetInstall] only for an explicit sign-out, deletion or revocation (see [AccountStore.beginSignIn]). */
+    suspend fun clearLocal(forgetInstall: Boolean = false) {
+        store.clear(forgetInstall)
         com.hobbycoders.aishuffle.tools.DeviceToolsRuntime.stop()
         servers.removeAccountServers()
         context.sendBroadcast(Intent(ACTION_CLEARED).setPackage(context.packageName))
@@ -52,7 +53,9 @@ class AccountRepository(private val context: Context) {
             val ticket = HubClient.call(session.hub, "/v1/servers/$id/tickets", "POST", token = session.token).getString("ticket")
             // This request has NO account Authorization header. Only a one-use ticket crosses origins.
             val enrolled = WorkerEnrollment.request(pending.name) {
-                HubClient.call(pending.baseUrl, "/api/v1/mobile/hub/enroll", "POST", JSONObject().put("ticket", ticket).put("device_info", HubClient.device(session.deviceId).put("capabilities", JSONObject().put("supports_push", false))))
+                HubClient.call(pending.baseUrl, "/api/v1/mobile/hub/enroll", "POST", JSONObject().put("ticket", ticket)
+                    .put("device_info", HubClient.device(session.deviceId).put("capabilities", JSONObject().put("supports_push", false)))
+                    .put("install_proof", store.installProof(id)))
             }
             require(enrolled.getString("device_id") == session.deviceId) { "Server returned the wrong device identity. Contact its administrator." }
             require(enrolled.getString("api_key").startsWith("aim_")) { "Server returned an unsupported device key." }

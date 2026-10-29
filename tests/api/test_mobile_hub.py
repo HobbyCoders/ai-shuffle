@@ -665,3 +665,113 @@ def test_hub_rate_limit_reported_distinctly(setup, monkeypatch, caplog):
     assert 'rate limiting' in failure.value.detail
     assert 'HTTP 429' in caplog.text
     assert 'Too many requests' not in caplog.text
+
+
+PROOF = 'p' * 43
+
+
+def enroll_via_api(setup, monkeypatch, proof=PROOF, account=ACCOUNT, ticket='ticket'):
+    current = dict(identity(), account_id=account)
+    monkeypatch.setattr(account_hub, 'call', lambda b, m, p, body=None:
+                        dict(current) if p == 'exchange' else {'active': True, 'account_id': account, 'device_id': DEVICE})
+    body = {'ticket': ticket, 'device_info': info().model_dump()}
+    if proof is not None:
+        body['install_proof'] = proof
+    return setup.post('/api/v1/mobile/hub/enroll', json=body)
+
+
+def entry_counts(test_db):
+    return tuple(test_db.execute(f'SELECT count(*) FROM {t}').fetchone()[0]
+                 for t in ('paired_clients', 'mobile_devices', 'mobile_worker_authorizations', 'mobile_worker_confirmations'))
+
+
+def test_same_installation_renews_its_entry_and_keeps_approval(setup, monkeypatch, test_db):
+    bind()
+    first = enroll_via_api(setup, monkeypatch)
+    assert first.status_code == 200, first.text
+    owner = store.ownership(store.local_device_id(SERVER, DEVICE))
+    store.confirm_device(owner, True)
+    record = database.get_mobile_device(owner['device_id'])['id']
+    counts = entry_counts(test_db)
+    second = enroll_via_api(setup, monkeypatch, ticket='second-ticket')
+    assert second.status_code == 200, second.text
+    assert second.json()['confirmation'] == 'approved'
+    assert entry_counts(test_db) == counts  # No new row anywhere.
+    row = database.get_mobile_device(owner['device_id'])
+    assert row['id'] == record
+    assert row['api_key_hash'] == hash_api_key(second.json()['api_key'])
+    assert database.get_mobile_device_by_api_key_hash(hash_api_key(first.json()['api_key'])) is None
+    assert store.ownership(owner['device_id'])['paired_client_id'] == owner['paired_client_id']
+
+
+def test_renewal_needs_the_same_installation_proof(setup, monkeypatch, test_db):
+    bind()
+    first = enroll_via_api(setup, monkeypatch)
+    device_id = store.local_device_id(SERVER, DEVICE)
+    store.confirm_device(store.ownership(device_id), True)
+    # Same account and hub device id, different installation (or an older app).
+    for proof in ('q' * 43, None):
+        assert enroll_via_api(setup, monkeypatch, proof=proof).status_code == 409
+    assert database.get_mobile_device(device_id)['api_key_hash'] == hash_api_key(first.json()['api_key'])
+    # Never carried to another account either.
+    assert enroll_via_api(setup, monkeypatch, account='55555555-5555-5555-5555-555555555555').status_code in (403, 409)
+    assert store.confirmation(store.ownership(device_id)) == 'approved'
+
+
+def test_entry_from_older_app_is_renewed_as_a_new_request(setup, monkeypatch, test_db):
+    bind()
+    assert enroll_via_api(setup, monkeypatch, proof=None).status_code == 200  # An older app: no proof.
+    device_id = store.local_device_id(SERVER, DEVICE)
+    store.confirm_device(store.ownership(device_id), True)
+    counts = entry_counts(test_db)
+    response = enroll_via_api(setup, monkeypatch)
+    assert response.status_code == 200, response.text
+    assert response.json()['confirmation'] == 'pending'
+    assert entry_counts(test_db) == counts
+    # Renewals from now on keep the owner's decision.
+    owner = store.ownership(device_id)
+    store.confirm_device(owner, True, mobile_record_id=database.get_mobile_device(device_id)['id'])
+    assert enroll_via_api(setup, monkeypatch, ticket='again').json()['confirmation'] == 'approved'
+
+
+def test_denied_entry_stays_denied(setup, monkeypatch, test_db):
+    bind()
+    enroll_via_api(setup, monkeypatch)
+    device_id = store.local_device_id(SERVER, DEVICE)
+    store.confirm_device(store.ownership(device_id), False)
+    hash_before = database.get_mobile_device(device_id)['api_key_hash']
+    assert enroll_via_api(setup, monkeypatch, ticket='again').status_code == 409
+    assert database.get_mobile_device(device_id)['api_key_hash'] == hash_before
+    assert store.confirmation(store.ownership(device_id)) == 'denied'
+
+
+def test_revoked_entry_returns_only_as_a_request_for_the_owner(setup, monkeypatch, test_db):
+    from app.core.config import settings
+    store.bind(HUB, SERVER, encryption.encrypt_value(SECRET), 'managed:' + settings.effective_instance_id)
+    store.activate()
+    enroll_via_api(setup, monkeypatch)
+    device_id = store.local_device_id(SERVER, DEVICE)
+    owner = store.ownership(device_id)
+    store.confirm_device(owner, True)
+    assert database.revoke_paired_client(owner['paired_client_id'])
+    counts = entry_counts(test_db)
+    response = enroll_via_api(setup, monkeypatch, ticket='again')
+    assert response.status_code == 200, response.text
+    assert response.json()['confirmation'] == 'pending'
+    assert entry_counts(test_db) == counts
+    row = database.get_mobile_device(device_id)
+    assert row['revoked_at'] is None
+    # The managed worker's automatic approval refuses it; only the owner decides.
+    with pytest.raises(ValueError, match='Confirm this device'):
+        store.confirm_device(owner, True, account_binding=store.get_binding())
+    assert store.confirmation(owner) == 'pending'
+    assert store.confirm_device(owner, True, mobile_record_id=row['id']) == 'approved'
+
+
+def test_deleted_entry_stays_a_tombstone(setup, monkeypatch, test_db):
+    bind()
+    enroll_via_api(setup, monkeypatch)
+    device_id = store.local_device_id(SERVER, DEVICE)
+    database.delete_mobile_device(device_id)
+    assert enroll_via_api(setup, monkeypatch, ticket='again').status_code == 409
+    assert database.get_mobile_device(device_id) is None

@@ -110,7 +110,7 @@ class AccountActivity : NativeScreen() {
                     val code = PairingInput.code(pairCode.text.toString())
                     confirm("Request sign-in?", "Approve this phone on your trusted device to finish signing in.") {
                         runWork {
-                            val request = HubClient.call(origin, "/v1/pairing/exchange", "POST", HubClient.device(repo.store.beginSignIn()).put("code", code))
+                            val request = HubClient.call(origin, "/v1/pairing/exchange", "POST", HubClient.device(repo.store.beginSignIn(fresh = true)).put("code", code))
                             pairCode.setText("")
                             status.text = "Waiting for approval on your trusted device. Keep this screen open."
                             val deadline = Instant.now().plusSeconds(300)
@@ -227,7 +227,7 @@ class AccountActivity : NativeScreen() {
         button("Sign out") {
             confirm("Sign out?", "This removes your account connections from this phone. Direct worker connections stay saved. If you’re offline, revoke this device from another trusted device too.") {
                 runWork {
-                    repo.clearLocal()
+                    repo.clearLocal(forgetInstall = true)
                     try { HubClient.call(session.hub, "/v1/sessions/current", "DELETE", token = session.token) }
                     catch (e: kotlinx.coroutines.CancellationException) { throw e }
                     catch (_: Exception) { /* Local sign-out already completed. */ }
@@ -275,7 +275,7 @@ class AccountActivity : NativeScreen() {
         val session = repo.store.session() ?: return deletionFinished()
         status.text = "Checking your account…"
         when (AccountDeletion.check { HubClient.call(session.hub, "/v1/devices", token = session.token) }) {
-            AccountDeletion.Result.ACCESS_ENDED -> { repo.clearLocal(); deletionFinished() }
+            AccountDeletion.Result.ACCESS_ENDED -> { repo.clearLocal(forgetInstall = true); deletionFinished() }
             AccountDeletion.Result.STILL_ACTIVE -> {
                 deleteAccount()
                 status.text = "Your account is still active. Finish deletion in the browser, then come back here."
@@ -308,7 +308,7 @@ class AccountActivity : NativeScreen() {
                     confirm("Revoke this device?", "${d.getString("name")} will lose access to your account and workers.") {
                         runWork {
                             HubClient.call(session.hub, "/v1/devices/${HubClient.segment(d.getString("id"))}", "DELETE", token = session.token)
-                            if (current) { repo.clearLocal(); form("login", launchOAuth = false); status.text = "This device was revoked." }
+                            if (current) { repo.clearLocal(forgetInstall = true); form("login", launchOAuth = false); status.text = "This device was revoked." }
                             else { devices(session); status.text = "Device revoked." }
                         }
                     }

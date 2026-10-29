@@ -28,17 +28,42 @@ class AccountStoreLifecycleTest {
         store.clear()
         assertEquals("https://custom.example.com", store.hub)
     }
-    @Test fun everyExplicitSignInGetsFreshAuthorizationIdentity() {
+    @Test fun signInKeepsTheInstallationIdentityUntilAFreshOneIsNeeded() {
+        assertFalse(store.hasInstallIdentity())
         val first = store.beginSignIn()
         assertEquals(first, store.installId)
-        assertNotEquals(first, store.beginSignIn())
+        assertTrue(store.hasInstallIdentity())
+        assertEquals(first, store.beginSignIn())
+        assertNotEquals(first, store.beginSignIn(fresh = true))
     }
-    @Test fun logoutAndRevocationCannotReuseTombstonedIdentity() {
+    @Test fun expiredSessionKeepsIdentityAndProofSoWorkersRenewTheSameEntry() {
         val first = store.beginSignIn()
+        val proof = store.installProof("server-one")
         store.save(session(first))
         store.clear()
         assertNull(store.session())
+        assertEquals(first, store.beginSignIn())
+        assertEquals(proof, store.installProof("server-one"))
+    }
+    @Test fun logoutAndRevocationCannotReuseTombstonedIdentity() {
+        val first = store.beginSignIn()
+        val proof = store.installProof("server-one")
+        store.save(session(first))
+        store.clear(forgetInstall = true)
+        assertNull(store.session())
+        assertFalse(store.hasInstallIdentity())
         assertNotEquals(first, store.beginSignIn())
+        assertNotEquals(proof, store.installProof("server-one"))
+    }
+    @Test fun installProofIsPerWorkerAndNeverTheSecret() {
+        store.beginSignIn()
+        val one = store.installProof("server-one")
+        assertTrue(one.matches(Regex("[0-9a-f]{64}")))
+        assertEquals(one, store.installProof("server-one"))
+        assertNotEquals(one, store.installProof("server-two"))
+        val fresh = store.beginSignIn(fresh = true)
+        assertNotEquals(one, store.installProof("server-one"))
+        assertEquals(fresh, store.installId)
     }
     @Test fun acceptingSessionPreservesVerifiedIdentityAfterClearingOldAccount() {
         val requested = store.beginSignIn()

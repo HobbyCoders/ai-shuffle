@@ -112,6 +112,7 @@ const profile = {
 let status: NetworkStatus;
 let availability = { worker_id: 'self', desktop: true, always_on: false, always_on_override: null as boolean | null };
 let connection: unknown;
+let confirmations: (typeof request)[] | null = null;
 function reads(path: string): unknown {
 	if (path === '/network/status') return status;
 	if (path === '/cluster/installs')
@@ -139,7 +140,7 @@ function reads(path: string): unknown {
 	if (path === '/settings/worker-availability') return { ...availability };
 	if (path === '/mobile/hub/connection') return connection;
 	if (path === '/mobile/hub/account') return structuredClone(profile);
-	if (path === '/mobile/hub/devices/confirmations') return [{ ...request }];
+	if (path === '/mobile/hub/devices/confirmations') return confirmations ?? [{ ...request }];
 	throw new Error('Unexpected GET ' + path);
 }
 
@@ -149,6 +150,7 @@ let keepAlive: () => void;
 beforeEach(async () => {
 	vi.resetAllMocks();
 	settingsNav.reset();
+	confirmations = null;
 	status = enrolled();
 	availability = { worker_id: 'self', desktop: true, always_on: false, always_on_override: null };
 	connection = { signed_in: true, status: 'connected', code: null, qr_svg: null, error: null };
@@ -228,6 +230,33 @@ describe('Devices list', () => {
 		expect(screen.getByRole('button', { name: /Pixel 9 Pro/ }).textContent).toContain('Wants to be approved');
 		expect(screen.getByRole('button', { name: /Desk/ }).textContent).toContain('1.0, linux, ready');
 		expect(screen.queryByText(/admin/i)).toBeNull();
+	});
+
+	it('lists only requests that still need a decision', async () => {
+		const decided = (n: string, extra: Partial<typeof request>) => ({
+			...request,
+			device_id: `dev-${n}`,
+			paired_client_id: `pc-${n}`,
+			device_name: `Phone ${n}`,
+			...extra
+		});
+		confirmations = [
+			decided('pending', {}),
+			decided('approved', { confirmation: 'approved' }),
+			decided('denied', { confirmation: 'denied' }),
+			decided('revoked', { confirmation: 'approved', revoked_at: '2026-10-01T00:00:00Z' }),
+			decided('expired', { api_key_expires_at: '2020-01-01T00:00:00Z' })
+		];
+		await model.requests.refresh();
+		show();
+		expect(screen.getByRole('button', { name: /Phone pending/ }).textContent).toContain('Wants to be approved');
+		for (const n of ['approved', 'denied', 'revoked', 'expired']) {
+			expect(screen.queryByRole('button', { name: new RegExp(`Phone ${n}`) })).toBeNull();
+		}
+		// A decided item still opens by id (e.g. right after approving it).
+		cleanup();
+		show('req:dev-approved:pc-approved');
+		expect(screen.getAllByText('Approved').length).toBeGreaterThan(0);
 	});
 
 	it('approves a request only after "IDs match?"', async () => {
