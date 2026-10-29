@@ -425,6 +425,25 @@ async def test_keep_installed_uses_target_scoped_local_writer(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_one_failed_instance_lookup_keeps_other_target_outcomes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ws, "_directory", lambda: [row("broken"), row("good"), row("unknown")])
+
+    def resolve(target: dict[str, object]) -> str | None:
+        if target["device_id"] == "broken":
+            raise RuntimeError("private database error")
+        return "good-instance" if target["device_id"] == "good" else None
+
+    save = Mock()
+    monkeypatch.setattr(ws, "_instance", resolve)
+    monkeypatch.setattr(ws.worker_availability, "save_for_instance", save)
+    result = await ws.dispatch(ws.Dispatch(target="all", action={"operation": "always-on", "always_on": True}))
+    assert [r["outcome"] for r in result["workers"]] == ["uncertain", "accepted", "unsupported"]
+    assert result["workers"][2]["reason"] == "unknown-instance"
+    save.assert_called_once_with("good-instance", True)
+    assert "private" not in json.dumps(result)
+
+
+@pytest.mark.asyncio
 async def test_one_failed_shared_write_keeps_other_target_outcomes(monkeypatch):
     monkeypatch.setattr(ws, "_directory", lambda: [row("broken"), row("good")])
     def save(instance, value):

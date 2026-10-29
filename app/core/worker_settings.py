@@ -358,16 +358,16 @@ async def dispatch(request: Dispatch) -> dict[str, Any]:
     async def send(row: dict[str, Any]) -> dict[str, Any]:
         async with semaphore:
             if isinstance(request.action, AlwaysOn):
-                instance = await run_sync(_instance, row)
-                if instance is None:
-                    result = _result("unsupported", "unknown-instance")
-                else:
-                    try:
-                        await run_sync(worker_availability.save_for_instance, instance, request.action.always_on)
-                    except Exception:
-                        result = _result("uncertain")
+                try:
+                    instance = await run_sync(_instance, row)
+                    if instance is None:
+                        result = _result("unsupported", "unknown-instance")
                     else:
+                        await run_sync(worker_availability.save_for_instance, instance, request.action.always_on)
                         result = _result("accepted", "saved")
+                except Exception:
+                    # Resolution failures must not discard sibling workers' outcomes.
+                    result = _result("uncertain")
             elif not row["online"]:
                 result = _result("offline")
             elif row["is_self"]:
