@@ -591,6 +591,8 @@ async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.r
         transport.note_watermarks(device_id, body.watermarks, catalog_backlog=body.catalog_backlog)
 
         def _work():
+            store.touch_member(device_id, capabilities=body.capabilities or {}, endpoints=body.endpoints or None,
+                               version=body.version, incarnation=body.incarnation, platform=body.platform)
             released = False
             if engine.outbox_held():
                 # The journal is the durable offline buffer. Once this comparison
@@ -601,8 +603,6 @@ async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.r
             elif released:
                 catalog.publish_owned()
             tokens.remember_binding_support(device_id, body.token_binding_proof)
-            store.touch_member(device_id, capabilities=body.capabilities or None, endpoints=body.endpoints or None,
-                               version=body.version, incarnation=body.incarnation, platform=body.platform)
             ops, heads, snapshot = store.exchange_batch(body.watermarks, limit=body.limit, lane=body.lane,
                                                        exclude_origin=device_id)
             return {"ops": ops, "watermarks": heads, "generation": ctx.generation,
@@ -644,7 +644,10 @@ async def peer_op(origin: str, incarnation: int, seq: int, at_or_after: bool = F
 
         def _work():
             with store.get_db() as conn:
-                return store.get_op(conn.cursor(), origin, incarnation, seq, at_or_after=at_or_after)
+                from app.network import nested_secret_sync
+                cursor = conn.cursor()
+                op = store.get_op(cursor, origin, incarnation, seq, at_or_after=at_or_after)
+                return op if op and nested_secret_sync.ops_compatible([op], device_id, cursor) else None
 
         op = await run_sync(_work)
         if op is None:
@@ -750,7 +753,7 @@ async def peer_snapshot(collection: Optional[str] = None, offset: int = 0,
         # Retired collections answer with an empty page for joiners on older builds.
         if collection not in policy.COLLECTIONS and collection not in policy.RETIRED_COLLECTIONS:
             raise HTTPException(404, "Unknown collection")
-        return await run_sync(engine.snapshot_chunk, collection, max(0, offset))
+        return await run_sync(engine.snapshot_chunk, collection, max(0, offset), recipient=device_id)
 
 
 @router.post("/startup-sync")

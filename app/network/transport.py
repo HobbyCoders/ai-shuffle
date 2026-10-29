@@ -778,7 +778,7 @@ class PeerLink:
         their_endpoints = validate_endpoints(their_endpoints) if isinstance(their_endpoints, list) else []
         capabilities = exchange.get("capabilities")
         await asyncio.to_thread(store.touch_member, self.device_id,
-                                capabilities=capabilities if isinstance(capabilities, dict) else None,
+                                capabilities=capabilities if isinstance(capabilities, dict) else {},
                                 endpoints=their_endpoints or None, version=exchange.get("version"),
                                 incarnation=exchange.get("incarnation"))
         if their_endpoints:
@@ -1092,11 +1092,13 @@ def _description() -> dict:
 
 
 def _capabilities() -> dict:
+    from app.network.nested_secret_sync import CAPABILITY
     try:
         from app.core.runner_capabilities import detect_capabilities
-        return detect_capabilities()
+        capabilities = detect_capabilities()
     except Exception:  # noqa: BLE001
-        return {}
+        capabilities = {}
+    return {**capabilities, CAPABILITY: 1}
 
 
 

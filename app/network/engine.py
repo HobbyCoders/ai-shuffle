@@ -45,7 +45,7 @@ from app.core import encryption
 from app.db import network as store
 from app.db.base import get_db
 from app.db.profiles import RETIRED_BUILTIN_IDS
-from app.network import crypto, envelope as envelope_mod, identity as identity_mod, membership, policy
+from app.network import crypto, envelope as envelope_mod, identity as identity_mod, membership, policy, nested_secret_sync
 from app.network.envelope import Envelope, OP_DELETE, OP_UPSERT
 from app.network.membership import Member
 
@@ -498,12 +498,14 @@ def _normalize_value(value: Any) -> Any:
     return value
 
 
-def _map_nested_secrets(coll: policy.Collection, record: Dict[str, Any], *, storing: bool = False) -> Tuple[str, ...]:
+def _map_nested_secrets(coll: policy.Collection, record: Dict[str, Any], *, storing: bool = False,
+                        nested_rekey: bool = True) -> Tuple[str, ...]:
     if coll.map_secrets is None:
         return ()
 
     def transform(value: str) -> str:
-        if encryption.is_encrypted(value):
+        original, encrypted = value, encryption.is_encrypted(value)
+        if encrypted:
             if not encryption.is_encryption_ready():
                 raise TransientApplyError("Credential storage is locked for " + coll.name)
             try:
@@ -517,14 +519,15 @@ def _map_nested_secrets(coll: policy.Collection, record: Dict[str, Any], *, stor
                 # original worker's good value. Its next scan repairs the row:
                 # decrypted leaf hashes differ from the old ciphertext hashes.
                 raise TransientApplyError("Cannot read credential storage for " + coll.name) from None
-        if storing:
+        if storing or (not nested_rekey and not encrypted):
             if not encryption.is_encryption_ready():
                 raise TransientApplyError("Credential storage is locked for " + coll.name)
             return encryption.encrypt_value(value)
-        return value
+        return value if nested_rekey else original
 
     try:
-        return coll.map_secrets(record, transform)
+        columns = coll.map_secrets(record, transform)
+        return columns if storing or nested_rekey else ()
     except (ApplyError, _KeepObservation):
         raise
     except (ValueError, TypeError):
@@ -533,7 +536,8 @@ def _map_nested_secrets(coll: policy.Collection, record: Dict[str, Any], *, stor
         raise TransientApplyError("Cannot read nested credentials for " + coll.name) from None
 
 
-def serialize_row(coll: policy.Collection, row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+def serialize_row(coll: policy.Collection, row: Mapping[str, Any], *, cursor=None,
+                  nested_rekey: Optional[bool] = None) -> Optional[Dict[str, Any]]:
     """Plaintext record for a row, or None when the row is not shared."""
     if coll.shared_row is not None and not coll.shared_row(row):
         return None
@@ -564,7 +568,16 @@ def serialize_row(coll: policy.Collection, row: Mapping[str, Any]) -> Optional[D
                 raise TransientApplyError("Cannot read credential storage for " + coll.name) from None
             encrypted_columns.append(name)
         record[name] = _normalize_value(value)
-    encrypted_columns.extend(_map_nested_secrets(coll, record))
+    if coll.map_secrets is not None:
+        quorum = nested_secret_sync.quorum(cursor) if nested_rekey is not False else None
+        nested_rekey = bool(quorum)
+        nested_columns = _map_nested_secrets(coll, record, nested_rekey=nested_rekey)
+        encrypted_columns.extend(nested_columns)
+        if nested_columns:
+            record["_nested_rekey"] = quorum
+        if not nested_rekey and coll.name == "automations" and isinstance(record.get("triggers"), list):
+            # The legacy materializer expects TEXT here, not a wire JSON array.
+            record["triggers"] = json.dumps(record["triggers"])
     if encrypted_columns:
         record["_enc"] = sorted(set(encrypted_columns))
     if coll.serialize_hook is not None:
@@ -582,6 +595,8 @@ def content_hash(coll: policy.Collection, record: Mapping[str, Any]) -> str:
         if billing:
             subset["_billing_present"] = [name for name in billing if name in record]
     subset["_enc"] = record.get("_enc") or []
+    if "_nested_rekey" in record:
+        subset["_nested_rekey"] = record["_nested_rekey"]
     return crypto.sha256_hex(envelope_mod.record_bytes(subset))
 
 
@@ -820,6 +835,9 @@ def materialize(
     sql = (f"INSERT INTO {coll.table} ({', '.join(insert_columns)}) VALUES ({', '.join(['%s'] * len(insert_columns))}) "
            f"ON CONFLICT ({conflict}) DO UPDATE SET {updates}")
     cursor.execute(sql, tuple(insert_values))
+    if coll.name == "presence" and record_id == origin_device_id:
+        cursor.execute("UPDATE network_members SET capabilities = %s WHERE device_id = %s",
+                       (json.dumps(record.get("capabilities") or {}), record_id))
     if new_agent:
         # As for a local create: a deleted agent's API-key assignments must not
         # attach to a new agent with its id. Covers bootstrap snapshots too.
@@ -916,7 +934,7 @@ def record(cursor, collection: str, record_id: str, row: Optional[Mapping[str, A
     coll = policy.collection(collection)
     if row is None and not _incoming_row_is_shared(coll, record_id, None):
         return None  # do not retract an already-synced copy of a now-local row
-    plaintext = serialize_row(coll, row) if row is not None else None
+    plaintext = serialize_row(coll, row, cursor=cursor) if row is not None else None
     if row is not None and plaintext is None:
         return None  # not a shared row
     existing = store.get_record(cursor, collection, record_id)
@@ -966,11 +984,11 @@ def keep_local_rewrite(cursor, collection: str, record_id: str, before_row: Mapp
     existing = store.get_record(cursor, collection, record_id)
     if existing is None or bool(existing["deleted"]):
         return False
-    before = serialize_row(coll, before_row)
+    before = serialize_row(coll, before_row, cursor=cursor)
     if before is None or content_hash(coll, before) != existing["content_hash"]:
         return False
     after_row = _read_row(cursor, coll, record_id)
-    after = serialize_row(coll, after_row) if after_row is not None else None
+    after = serialize_row(coll, after_row, cursor=cursor) if after_row is not None else None
     if after is None:
         return False
     store.put_record(cursor, collection, record_id, clock=int(existing["clock"]),
@@ -1647,7 +1665,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         local_row = _read_row(cursor, coll, env.record_id)
         if local_row is not None:
             try:
-                local_plain = serialize_row(coll, local_row)
+                local_plain = serialize_row(coll, local_row, cursor=cursor)
             except ApplyError:
                 local_plain = None
             incoming_hash = content_hash(coll, plaintext) if env.op == OP_UPSERT else ""
@@ -1680,7 +1698,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         local_hash = env.content_hash
         if row is not None:
             try:
-                reserialized = serialize_row(coll, row)
+                reserialized = serialize_row(coll, row, cursor=cursor)
                 if reserialized is not None:
                     local_hash = content_hash(coll, reserialized)
             except ApplyError:
@@ -2396,15 +2414,15 @@ def snapshot_manifest(*, ctx: Optional[NetworkContext] = None) -> dict:
 
 
 def snapshot_chunk(collection: str, offset: int = 0, *, ctx: Optional[NetworkContext] = None,
-                   limit: int = SNAPSHOT_CHUNK, _conn=None) -> dict:
+                   limit: int = SNAPSHOT_CHUNK, _conn=None, recipient: Optional[str] = None) -> dict:
     """Legacy offset-addressed snapshot page, with the existing wire format."""
-    chunk, _ = _snapshot_page(collection, offset, ctx=ctx, limit=limit, _conn=_conn)
+    chunk, _ = _snapshot_page(collection, offset, ctx=ctx, limit=limit, _conn=_conn, recipient=recipient)
     return chunk
 
 
 def snapshot_page(collection: str, offset: int = 0, *, after_record_id: Optional[str] = None,
                   ctx: Optional[NetworkContext] = None, limit: int = SNAPSHOT_CHUNK, _conn=None,
-                  encoding: Optional[str] = None):
+                  encoding: Optional[str] = None, recipient: Optional[str] = None):
     """Seek through one repeatable-read export without rescanning earlier pages.
 
     The record cursor stays local; the signed/encrypted page still uses the
@@ -2413,7 +2431,7 @@ def snapshot_page(collection: str, offset: int = 0, *, after_record_id: Optional
     that asked for it: an older worker cannot open such a page).
     """
     return _snapshot_page(collection, offset, ctx=ctx, limit=limit, _conn=_conn,
-                          keyset=True, after_record_id=after_record_id, encoding=encoding)
+                          keyset=True, after_record_id=after_record_id, encoding=encoding, recipient=recipient)
 
 
 #: Largest page body accepted after decompression.
@@ -2455,7 +2473,8 @@ def seal_snapshot_chunk(collection: str, offset: int, items: list, more: bool, *
 
 
 def snapshot_item(cursor, coll: policy.Collection, version: Mapping[str, Any], *,
-                  row: Optional[Mapping[str, Any]] = None, row_known: bool = False) -> dict:
+                  row: Optional[Mapping[str, Any]] = None, row_known: bool = False,
+                  nested_rekey: Optional[bool] = None) -> dict:
     """One record as a snapshot carries it: its sync version and its row (None when deleted)."""
     item = {"record_id": version["record_id"], "clock": int(version["clock"]),
             "origin_device_id": version["origin_device_id"], "deleted": bool(version["deleted"]),
@@ -2463,13 +2482,14 @@ def snapshot_item(cursor, coll: policy.Collection, version: Mapping[str, Any], *
     if not item["deleted"]:
         if not row_known:
             row = _read_row(cursor, coll, version["record_id"])
-        item["record"] = serialize_row(coll, row) if row is not None else None
+        item["record"] = serialize_row(coll, row, cursor=cursor, nested_rekey=nested_rekey) if row is not None else None
         if item["record"] is None:
             item["deleted"] = True
     return item
 
 
-def _snapshot_page(collection, offset, *, ctx, limit, _conn, keyset=False, after_record_id=None, encoding=None):
+def _snapshot_page(collection, offset, *, ctx, limit, _conn, keyset=False, after_record_id=None, encoding=None,
+                   recipient=None):
     """Build a page and return its private continuation cursor."""
     ctx = ctx or require_context()
     retired = collection in policy.RETIRED_COLLECTIONS
@@ -2492,7 +2512,11 @@ def _snapshot_page(collection, offset, *, ctx, limit, _conn, keyset=False, after
             versions = [dict(r) for r in cursor.fetchall()]
         more = len(versions) > limit
         versions = versions[:limit]
-        items = [snapshot_item(cursor, coll, version) for version in versions]
+        nested_rekey = None
+        if coll is not None and coll.map_secrets is not None:
+            nested_rekey = nested_secret_sync.enabled(cursor) and (
+                recipient is None or nested_secret_sync.enabled(cursor, recipient=recipient))
+        items = [snapshot_item(cursor, coll, version, nested_rekey=nested_rekey) for version in versions]
     signed = seal_snapshot_chunk(collection, offset, items, more, ctx=ctx, encoding=encoding)
     return signed, versions[-1]["record_id"] if versions else after_record_id
 
@@ -2609,7 +2633,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                 elif comparison > 0:
                     local_row = _read_row(cursor, coll, item["record_id"])
                     try:
-                        losing_record = serialize_row(coll, local_row) if local_row else {}
+                        losing_record = serialize_row(coll, local_row, cursor=cursor) if local_row else {}
                     except ApplyError:
                         losing_record = {}  # a repaired snapshot may replace an unreadable legacy mirror
                 else:
@@ -2661,7 +2685,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             local_hash = content_hash(coll, item["record"])
             if row is not None:
                 try:
-                    reserialized = serialize_row(coll, row)
+                    reserialized = serialize_row(coll, row, cursor=cursor)
                     if reserialized is not None:
                         local_hash = content_hash(coll, reserialized)
                 except ApplyError:
@@ -3070,7 +3094,7 @@ def publish_presence(*, capabilities: Optional[dict] = None, version: Optional[s
     row = {
         "device_id": ctx.device_id,
         "endpoints": endpoints if endpoints is not None else _own_endpoints(),
-        "capabilities": capabilities or {},
+        "capabilities": {nested_secret_sync.CAPABILITY: 1, **(capabilities or {})},
         "version": version,
         "source_revision": running_revision(),
         "platform": identity_mod.platform_name(),
@@ -3094,6 +3118,8 @@ def publish_presence(*, capabilities: Optional[dict] = None, version: Optional[s
                    updated_at = EXCLUDED.updated_at""",
             (row["device_id"], json.dumps(row["endpoints"]), json.dumps(row["capabilities"]), row["version"],
              row["source_revision"], row["platform"], row["incarnation"], row["instance_id"], row["updated_at"]))
+        cursor.execute("UPDATE network_members SET capabilities = %s WHERE device_id = %s",
+                       (json.dumps(row["capabilities"]), ctx.device_id))
         changed = record(cursor, "presence", ctx.device_id, row, ctx=ctx) is not None
         # Upgrade old local-only renames without asking the user to rename again.
         # Only seed our own name: a peer's cached hostname is not authoritative.

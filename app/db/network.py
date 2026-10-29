@@ -1523,6 +1523,11 @@ def exchange_batch(watermarks: dict, *, limit: int = 500, lane: Optional[str] = 
         snapshot = requires_snapshot(watermarks, exclude_origin=exclude_origin, _conn=conn, _heads=heads)
         ops = ops_since(watermarks, limit=limit, lane=lane, exclude_origin=exclude_origin,
                         _conn=conn, _heads=heads)
+        from app.network import nested_secret_sync
+        if not nested_secret_sync.ops_compatible(ops, exclude_origin, conn.cursor()):
+            # Signed history cannot be rewritten or filtered without stream
+            # holes. An old peer must adopt a ciphertext-form state copy.
+            return [], heads, True
         return ops, heads, snapshot
 
 

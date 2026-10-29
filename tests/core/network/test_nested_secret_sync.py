@@ -12,7 +12,7 @@ from app.api import connector_oauth, connector_plaid
 from app.core import automation_service, connector_service, encryption
 from app.db import database as db
 from app.network import engine, policy
-from tests.core.network.harness import Worker, exchange, join
+from tests.core.network.harness import Worker, exchange, join as bootstrap
 
 COLLECTIONS = ("connectors", "automations", "system_settings")
 SECRET = "nested-test-credential"
@@ -32,7 +32,22 @@ def data_keys(monkeypatch):
     monkeypatch.setattr(Worker, "active", active)
 
 
+def join(a, b):
+    # A newly admitted member is unknown until its own presence reaches peers.
+    bootstrap(a, b)
+    for worker in (a, b):
+        with worker.active():
+            engine.publish_presence()
+    exchange(a, b)
+    exchange(b, a)
+    exchange(a, b)
+    with a.active():
+        scan()  # the enlarged upgraded quorum republishes without a user edit
+    exchange(a, b)
+
+
 def produce():
+    engine.publish_presence()
     db.create_connector("connector", "gmail", "Mail",
                         connector_service.encrypt_config({"client_secret": SECRET,
                             "refresh_token": SECRET, "label": "enc:literal"}, "gmail"), [])
