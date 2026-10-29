@@ -517,3 +517,42 @@ async def test_superseded_non_transcript_head_preserves_signed_rollback_proof(pg
         assert database.get_system_setting("tts_model") == "after-restore"
         assert store.local_watermarks()[source.device_id]["2"] == 3
     assert len(transcript(relay)) == 7
+
+
+@pytest.mark.parametrize("cache", ["disk", "job"])
+async def test_pruned_tail_refreshes_legacy_peer_snapshot_caches(pg_workers, monkeypatch, cache):
+    source, peer = pg_workers("source"), pg_workers("legacy-peer")
+    with source.active():
+        engine.create_network("Retention")
+    publish(source, 3, create=True)
+    admit(source, peer)
+    capture = peer_snapshot.capture if cache == "disk" else peer_snapshot.state
+    with source.active():
+        stale = capture(peer.device_id, fmt=peer_snapshot.FORMAT_DEFERRED)
+        assert stale["nested_secret_rekey"] is False
+    publish(source, 8)
+    with source.active():
+        # A complete compatible tail may safely reuse the older cached copy.
+        assert not store.requires_snapshot(stale["watermarks"], exclude_origin=peer.device_id,
+                                           check_tail_compatibility=True)
+        assert capture(peer.device_id, fmt=peer_snapshot.FORMAT_DEFERRED)["transfer"] == stale["transfer"]
+    old_ops(source)
+    source.sql("INSERT INTO sync_peers(device_id, last_contact, updated_at) "
+               "VALUES (%s, '2000-01-01', '2000-01-01')", (peer.device_id,))
+    before = protected_rows(source)
+    await prune_once(source, monkeypatch)
+    assert op_count(source) == 1  # the signed head is not a complete tail
+    assert protected_rows(source) == before
+    with source.active():
+        assert store.requires_snapshot(stale["watermarks"], exclude_origin=peer.device_id,
+                                       check_tail_compatibility=True)
+        with patch.object(store, "requires_snapshot", wraps=store.requires_snapshot) as checked:
+            fresh = capture(peer.device_id, fmt=peer_snapshot.FORMAT_DEFERRED)
+        assert checked.call_count
+        assert all(call.kwargs.get("check_tail_compatibility") is True for call in checked.call_args_list)
+        assert fresh["transfer"] != stale["transfer"]
+        assert fresh["watermarks"] == store.local_watermarks()
+        assert not store.requires_snapshot(fresh["watermarks"], exclude_origin=peer.device_id,
+                                           check_tail_compatibility=True)
+        assert not store.exchange_batch(fresh["watermarks"], exclude_origin=peer.device_id)[2]
+        assert capture(peer.device_id, fmt=peer_snapshot.FORMAT_DEFERRED)["transfer"] == fresh["transfer"]

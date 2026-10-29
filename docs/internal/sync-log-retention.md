@@ -112,6 +112,12 @@ rewinding the source outbox to an older backup frontier, an authenticated proof
 request makes `_check_rollback` bump the identity incarnation; the next signed
 operations use the new stream and apply at the relay without sequence reuse.
 This simulates an older outbox, not a full managed-database restore rehearsal.
+The merged whole-tail compatibility check is covered with real PostgreSQL for
+both disk and in-flight peer-snapshot caches serving a legacy recipient. A
+complete compatible tail reuses the old transfer; pruning that tail down to its
+signed head invalidates it and produces a fresh, reusable frontier. Both cache
+paths explicitly opt into the whole-tail check; retained heads are never
+mistaken for a complete catch-up log.
 
 The deterministic count ratchet was run on unchanged main before implementation:
 all three runs retained **12 of 12** aged unique event ops and failed the target
