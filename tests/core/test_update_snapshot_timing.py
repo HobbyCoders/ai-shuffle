@@ -104,3 +104,92 @@ def test_spawn_logs_bracket_popen_without_command_environment_or_paths(monkeypat
     assert "duration_seconds=0.125" in output
     assert ("application child spawn failed" if failure else "application child spawned pid=123") in output
     assert "private" not in output
+
+
+@pytest.fixture
+def stderr_fault(monkeypatch):
+    """A real print/write failure, isolated from pytest's own stderr."""
+    def fail_on(fragment):
+        writes = []
+
+        def write(text):
+            writes.append(text)
+            if fragment in text:
+                raise OSError("diagnostic sink unavailable")
+            return len(text)
+
+        stream = SimpleNamespace(write=write, flush=lambda: None)
+        monkeypatch.setattr(runtime, "sys", SimpleNamespace(stderr=stream))
+        return writes
+
+    return fail_on
+
+
+@pytest.mark.parametrize("fragment", [
+    "database snapshot starting",
+    "source_database_bytes=",
+    "database snapshot complete",
+    "",  # a permanently unavailable diagnostic sink
+])
+def test_snapshot_stderr_failure_cannot_prevent_or_invalidate_the_copy(db, stderr_fault, fragment):
+    writes = stderr_fault(fragment)
+    db.snapshot(SNAPSHOT)
+    assert any(fragment in text for text in writes)
+    assert db.admin_script.call_count == 2
+    assert db.query.call_count == 2
+    assert "CREATE DATABASE" in db.admin_script.call_args.args[0]
+
+
+def test_failed_snapshot_stderr_failure_does_not_mask_the_original_error(db, monkeypatch, stderr_fault):
+    monkeypatch.setattr(runtime, "STOP", SimpleNamespace(is_set=lambda: False))
+    original = runtime.RuntimeFailure("snapshot failed")
+    db.admin_script.side_effect = [None, original, original, original]
+    writes = stderr_fault("database snapshot failed")
+    with pytest.raises(runtime.RuntimeFailure) as caught:
+        db.snapshot(SNAPSHOT)
+    assert caught.value is original
+    assert any("database snapshot failed" in text for text in writes)
+    assert db.admin_script.call_count == 4
+    assert db.query.call_count == 1
+
+
+@pytest.mark.parametrize("fragment", ["application child spawn starting", "application child spawned", ""])
+def test_update_stderr_failure_still_returns_the_live_candidate(monkeypatch, tmp_path, stderr_fault, fragment):
+    """Never lose the candidate and let fallback roll back beneath a live writer."""
+    writes = stderr_fault(fragment)
+    monkeypatch.setattr(runtime, "isolation", lambda: SimpleNamespace(ACTIVE=None))
+    current, candidate = SimpleNamespace(pid=122), SimpleNamespace(pid=123, poll=lambda: None)
+    spawn = Mock(return_value=candidate)
+    monkeypatch.setattr(runtime.subprocess, "Popen", spawn)
+    stop = Mock()
+    monkeypatch.setattr(runtime, "stop_group", stop)
+    command, env = ["candidate"], {"A": "1"}
+    updates = SimpleNamespace(
+        root=tmp_path,
+        lifecycle=Mock(side_effect=[{"active_sessions": 0}, {"stopped": True}]),
+        launch=Mock(return_value=(command, tmp_path, env)),
+        snapshot_room=Mock(),
+        activating=Mock(),
+    )
+
+    tracked = runtime.restart_into_update(current, updates, {})
+
+    assert tracked is candidate and tracked.poll() is None
+    assert any(fragment in text for text in writes)
+    stop.assert_called_once_with(current, 30)
+    updates.activating.assert_called_once_with()
+    spawn.assert_called_once_with(command, cwd=tmp_path, env=env, start_new_session=True)
+
+
+@pytest.mark.parametrize("fragment", ["application child spawn starting", "application child spawn failed", ""])
+def test_spawn_stderr_failure_does_not_mask_the_original_error(monkeypatch, stderr_fault, fragment):
+    writes = stderr_fault(fragment)
+    monkeypatch.setattr(runtime, "isolation", lambda: SimpleNamespace(ACTIVE=None))
+    original = OSError("candidate could not spawn")
+    spawn = Mock(side_effect=original)
+    monkeypatch.setattr(runtime.subprocess, "Popen", spawn)
+    with pytest.raises(OSError) as caught:
+        runtime.start_app(["candidate"], None, {})
+    assert caught.value is original
+    assert any(fragment in text for text in writes)
+    spawn.assert_called_once_with(["candidate"], cwd=None, env={}, start_new_session=True)
