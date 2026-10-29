@@ -556,6 +556,7 @@ function transcriptPatch(
 		optimisticStreaming: rs.isStreaming ? false : optimistic,
 		liveTurnId: rs.liveTurnId,
 		turnParked: rs.parked,
+		cancelledPeerTurnIds: rs.cancelledPeerTurnIds,
 		liveModel: rs.liveModel,
 		liveRequestedModel: rs.liveRequestedModel,
 		liveProvider: rs.liveProvider,
@@ -1020,6 +1021,14 @@ export const feedController: FeedController = {
 				if (ev.type === 'swarm.updated') swarms.receive(ev.swarm, sessionId);
 				if (typeof ev.command_id === 'string') clearCompactRetry(sessionId, ev.command_id);
 				reducerState = reduce(reducerState, ev);
+				// A lagged mirror can replay an entire turn before the next fold.
+				// Consume optimism when the reducer confirms the turn, not only
+				// when a streaming frame paints; otherwise its completed replay
+				// leaves the compose's working flag stuck on. No history paints here.
+				if (reducerState.isStreaming && (optimisticStreaming || deps?.getState().optimisticStreaming)) {
+					optimisticStreaming = false;
+					deps?.update(s => s.optimisticStreaming ? { ...s, optimisticStreaming: false } : s);
+				}
 				// An empty log learns its epoch from this first row (sse-feed).
 				adoptLogEpoch();
 				eventsReduced++;
@@ -1123,12 +1132,21 @@ export const feedController: FeedController = {
 
 	restart(sessionId: string) {
 		if (!deps) return;
+		// Re-hydration replaces history, not a local send the log has not
+		// confirmed yet. A new mirror may still have an empty log at its
+		// opening checkpoint; dropping its echo here centres the composer
+		// until replication delivers message.user. Origin seqs distinguish
+		// pending echoes from confirmed rows (even ones with a user-* id).
+		seedOptimistic();
+		const pending = currentSessionId === sessionId
+			? reducerState.messages.filter(m => m.role === 'user' && !reducerState.messageOriginSeq.has(m.id))
+			: [];
 		// R2: an explicit re-hydration invalidates the cached transcript — the
 		// caller is saying the state it was built from is no longer trustworthy.
 		transcriptCache.delete(sessionId);
 		deps.update((s) =>
 			s.sessionId === sessionId
-				? { ...s, messages: [], isLoadingSession: true, isHydrationSlow: false }
+				? { ...s, messages: pending, isLoadingSession: true, isHydrationSlow: false }
 				: s
 		);
 		teardown(false);

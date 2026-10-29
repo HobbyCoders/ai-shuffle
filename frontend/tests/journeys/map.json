@@ -170,14 +170,18 @@
 			]
 		},
 		{
-			"why": "the pilot journey: a new chat in a new worktree",
+			"why": "a new worktree chat with the native harness or Claude Code, including delegated CLI startup and session binding",
 			"journeys": ["new-worktree-session"],
 			"globs": [
 				"frontend/src/lib/components/layout/WorkspaceSelector*",
 				"frontend/src/lib/components/chat/BranchSelector*",
 				"frontend/src/lib/stores/git*",
 				"app/api/git_worktrees.py",
-				"app/api/sessions_worktree.py"
+				"app/api/sessions_worktree.py",
+				"frontend/src/lib/components/chat/mirror-sync.svelte.ts",
+				"frontend/src/lib/components/chat/MirrorSyncGate.svelte",
+				"app/core/provider/harness_adapter.py",
+				"fluid/fluid/engine/delegated*.py"
 			]
 		},
 		{

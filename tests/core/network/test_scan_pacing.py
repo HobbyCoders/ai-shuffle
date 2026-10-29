@@ -106,9 +106,9 @@ async def test_writes_during_scan_are_retained_and_bursts_are_coalesced(monkeypa
         return 0
 
     monkeypatch.setattr(engine, "scan_all", scan)
-    clock.actions = [(0.5, transport.request_scan), (1, transport.request_scan)]
+    clock.actions = [(0.02, transport.request_scan), (0.05, transport.request_scan)]
     await clock.run()
-    assert clock.scans == [0, 2, 4]
+    assert clock.scans == pytest.approx([0, 0.1, 0.2])
 
 
 async def test_failures_back_off_instead_of_retrying_in_a_tight_loop(monkeypatch):
@@ -118,17 +118,19 @@ async def test_failures_back_off_instead_of_retrying_in_a_tight_loop(monkeypatch
     assert clock.scans == [0, 4, 12, 28, 60, 120, 180]
 
 
-@pytest.mark.parametrize("phase", ["cooldown", "idle_wait"])
+@pytest.mark.parametrize("phase", ["debounce", "idle_wait"])
 async def test_shutdown_cancels_either_wait(monkeypatch, phase):
     clock = ScanClock(monkeypatch, passes=2)
     monkeypatch.setattr(engine, "scan_all", Mock(return_value=0))
+    if phase == "debounce":
+        clock.actions = [(0.1, transport.request_scan)]
 
     async def cancel(*args, **kwargs):
         if phase == "idle_wait":
             args[0].close()
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(transport.asyncio, "sleep" if phase == "cooldown" else "wait_for", cancel)
+    monkeypatch.setattr(transport.asyncio, "sleep" if phase == "debounce" else "wait_for", cancel)
     await clock.run()
     assert clock.scans == [0]
 
@@ -155,7 +157,7 @@ async def test_committed_profile_write_wakes_idle_scanner(monkeypatch, tmp_path)
             clock.actions = [(65, lambda: database.create_profile(
                 profile_id="wake-test", name="Wake test", description=None, config={}))]
             await clock.run()
-            assert clock.scans == [0, 4, 12, 28, 60, 65]
+            assert clock.scans == pytest.approx([0, 4, 12, 28, 60, 65.1])
             with store.get_db() as conn:
                 row = store.get_record(conn.cursor(), "agents", "wake-test")
             assert row is not None
@@ -166,14 +168,76 @@ async def test_committed_profile_write_wakes_idle_scanner(monkeypatch, tmp_path)
         tokens.reset_for_tests()
 
 
+@pytest.mark.parametrize("wake_at", [0.1, 1.5, 3.0])
+async def test_urgent_wake_interrupts_rest_with_one_bounded_debounce(monkeypatch, wake_at):
+    clock = ScanClock(monkeypatch, passes=2)
+    scan = Mock(return_value=0)
+    monkeypatch.setattr(engine, "scan_all", scan)
+    clock.actions = [(wake_at, lambda: transport.request_scan(["agents"]))]
+    await clock.run()
+    assert clock.scans == pytest.approx([0, wake_at + 0.1])
+    assert scan.call_args_list[1].kwargs["collections"] == {"agents"}
+
+
+async def test_urgent_burst_cannot_extend_debounce_or_trigger_one_scan_per_write(monkeypatch):
+    clock = ScanClock(monkeypatch, passes=2)
+    scan = Mock(return_value=0)
+    monkeypatch.setattr(engine, "scan_all", scan)
+    clock.actions = [(i / 10000, lambda: transport.request_scan(["agents"]))
+                     for i in range(1, 1001)]
+    await clock.run()
+    assert clock.scans == pytest.approx([0, 0.1001])
+    assert scan.call_count == 2  # One initial pass, one pass for all 1,000 writes.
+
+
+async def test_continuous_wakes_preserve_default_full_reconciliation_deadline(monkeypatch):
+    clock = ScanClock(monkeypatch, passes=602)
+
+    def scan(**kwargs):
+        transport.request_scan(["agents"])
+        return 0
+
+    scans = Mock(side_effect=scan)
+    monkeypatch.setattr(engine, "scan_all", scans)
+    await clock.run()
+    full = [at for at, call in zip(clock.scans, scans.call_args_list) if not call.kwargs]
+    assert full == pytest.approx([0, transport.SCAN_IDLE_MAX_SECONDS])
+    assert clock.scans == pytest.approx([i / 10 for i in range(602)])
+
+
+async def test_urgent_wake_cannot_bypass_transcript_backlog_rest(monkeypatch):
+    from app.network import catalog
+
+    clock = ScanClock(monkeypatch, passes=3)
+    monkeypatch.setattr(catalog, "take_events_backlog", Mock(side_effect=[True, False, False]))
+
+    def scan(**kwargs):
+        transport.request_scan(["agents"])
+        return 0
+
+    monkeypatch.setattr(engine, "scan_all", scan)
+    await clock.run()
+    assert clock.scans == pytest.approx([0, 0.5, 0.6])
+
+
+@pytest.mark.parametrize("value", ["0", "false", " OFF ", "no"])
+async def test_scanner_wake_kill_switch_restores_previous_floor(monkeypatch, value):
+    monkeypatch.setenv("AI_SHUFFLE_PERF_SCAN_WAKE", value)
+    clock = ScanClock(monkeypatch, passes=2)
+    monkeypatch.setattr(engine, "scan_all", Mock(return_value=0))
+    clock.actions = [(0.1, lambda: transport.request_scan(["agents"]))]
+    await clock.run()
+    assert clock.scans == [0, 2]
+
+
 async def test_known_write_wakes_only_its_collections(monkeypatch):
     clock = ScanClock(monkeypatch, passes=3)
     scan = Mock(return_value=0)
     monkeypatch.setattr(engine, "scan_all", scan)
     clock.actions = [(1, lambda: transport.request_scan(["agents"])),
-                     (1.5, lambda: transport.request_scan(["agents", "system_settings"]))]
+                     (1.025, lambda: transport.request_scan(["agents", "system_settings"]))]
     await clock.run()
-    assert clock.scans == [0, 2, 6]
+    assert clock.scans == pytest.approx([0, 1.1, 5.1])
     assert scan.call_args_list[0].kwargs == {}
     assert scan.call_args_list[1].kwargs == {
         "collections": {"agents", "system_settings"}, "include_catalog": False, "strict": True}
@@ -182,6 +246,9 @@ async def test_known_write_wakes_only_its_collections(monkeypatch):
 
 @pytest.mark.parametrize("collection", ["agents", "sessions"])
 async def test_targeted_writes_during_pass_survive_and_cannot_starve_full_scan(monkeypatch, collection):
+    # Compress this deadline to retain the 32-pass real-publisher fixture.
+    # The default 60-second deadline has a separate continuous-wake ratchet.
+    monkeypatch.setattr(transport, "SCAN_IDLE_MAX_SECONDS", 3.0)
     clock = ScanClock(monkeypatch, passes=32)
     calls = []
     def scan(**kwargs):
@@ -190,7 +257,7 @@ async def test_targeted_writes_during_pass_survive_and_cannot_starve_full_scan(m
         return 0
     monkeypatch.setattr(engine, "scan_all", scan)
     await clock.run()
-    assert clock.scans == list(range(0, 64, 2))
+    assert clock.scans == pytest.approx([i / 10 for i in range(32)])
     assert calls[0] == calls[30] == {}
     assert all(calls[i].get("collections") == {collection} for i in range(1, 30))
     assert calls[31]["collections"] == {collection}
@@ -202,7 +269,7 @@ async def test_unhandled_writes_request_full_reconciliation(monkeypatch, collect
     scan = Mock(return_value=0)
     monkeypatch.setattr(engine, "scan_all", scan)
     clock.actions = [(1, lambda: transport.request_scan(["agents"])),
-                     (1.5, lambda: transport.request_scan([collection]))]
+                     (1.025, lambda: transport.request_scan([collection]))]
     await clock.run()
     assert [call.kwargs for call in scan.call_args_list] == [{}, {}]
 
@@ -225,9 +292,9 @@ async def test_catalog_and_shared_writes_coalesce_without_full_scan(monkeypatch)
     scan = Mock(return_value=0)
     monkeypatch.setattr(engine, "scan_all", scan)
     clock.actions = [(1, lambda: transport.request_scan(["agents"])),
-                     (1.5, lambda: transport.request_scan(list(policy.CATALOG_COLLECTIONS)))]
+                     (1.025, lambda: transport.request_scan(list(policy.CATALOG_COLLECTIONS)))]
     await clock.run()
-    assert clock.scans == [0, 2, 6]
+    assert clock.scans == pytest.approx([0, 1.1, 5.1])
     assert [call.kwargs for call in scan.call_args_list] == [
         {}, {"collections": {"agents", *policy.CATALOG_COLLECTIONS},
              "include_catalog": True, "strict": True}, {}]
@@ -241,6 +308,9 @@ async def test_session_mutations_publish_without_shared_reads_and_reconcile_exte
     from tests.core.network.harness import Worker
 
     worker = Worker("catalog-wakes", tmp_path)
+    # Compress this deadline to retain the 32-pass real-publisher fixture.
+    # The default 60-second deadline has a separate continuous-wake ratchet.
+    monkeypatch.setattr(transport, "SCAN_IDLE_MAX_SECONDS", 3.0)
     clock = ScanClock(monkeypatch, passes=32)
     original_scan = engine.scan_all
     passes = []
@@ -297,7 +367,7 @@ async def test_session_mutations_publish_without_shared_reads_and_reconcile_exte
             startup._install_resource_hook()
             monkeypatch.setattr(engine, "scan_all", scan)
             await clock.run()
-            assert clock.scans == list(range(0, 64, 2))
+            assert clock.scans == pytest.approx([i / 10 for i in range(32)])
             assert session_records[1]["content_hash"] != baseline_session
             assert session_records[2]["deleted"]
             assert passes[0][0] == passes[30][0] == {}
@@ -342,7 +412,7 @@ async def test_session_ids_coalesce_and_writes_during_a_pass_stay_queued(monkeyp
 
     monkeypatch.setattr(engine, "scan_all", scan)
     clock.actions = [(1, lambda: transport.request_scan(_catalog_names(), session_ids=["b"])),
-                     (1.5, lambda: transport.request_scan(_catalog_names(), session_ids=["a", "b"]))]
+                     (1.025, lambda: transport.request_scan(_catalog_names(), session_ids=["a", "b"]))]
     await clock.run()
     catalog = set(_catalog_names())
     assert calls == [
@@ -358,8 +428,8 @@ async def test_catalog_wake_without_ids_widens_to_the_whole_catalog(monkeypatch)
     scan = Mock(return_value=0)
     monkeypatch.setattr(engine, "scan_all", scan)
     clock.actions = [(1, lambda: transport.request_scan(_catalog_names(), session_ids=["a"])),
-                     (1.2, lambda: transport.request_scan(_catalog_names())),
-                     (1.5, lambda: transport.request_scan(_catalog_names(), session_ids=["b"]))]
+                     (1.02, lambda: transport.request_scan(_catalog_names())),
+                     (1.025, lambda: transport.request_scan(_catalog_names(), session_ids=["b"]))]
     await clock.run()
     assert scan.call_args_list[1].kwargs == {
         "collections": set(_catalog_names()), "include_catalog": True, "strict": True}
@@ -374,7 +444,7 @@ async def test_dirty_session_cap_falls_back_to_the_whole_catalog(monkeypatch, ex
     ids = [f"s{i:04d}" for i in range(transport.SCAN_DIRTY_SESSIONS_MAX + extra)]
     half = len(ids) // 2
     clock.actions = [(1, lambda: transport.request_scan(_catalog_names(), session_ids=ids[:half])),
-                     (1.5, lambda: transport.request_scan(_catalog_names(), session_ids=ids[half:]))]
+                     (1.025, lambda: transport.request_scan(_catalog_names(), session_ids=ids[half:]))]
     await clock.run()
     kwargs = scan.call_args_list[1].kwargs
     assert kwargs["collections"] == set(_catalog_names())

@@ -198,6 +198,8 @@ def ssh(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ssh_uses_existing_pinned_connection_and_grant_lifetime(ssh):
+    import asyncssh
+
     broker, grant, output, writes, closed, connect, connection = ssh
     rows = await targets.targets("chat")
     assert rows == [{"kind": "ssh", "grant_id": "grant", "name": "Approved machine", "available": True}]
@@ -205,7 +207,7 @@ async def test_ssh_uses_existing_pinned_connection_and_grant_lifetime(ssh):
     terminal = await targets.create(registry, api.CreateTerminal(session_id="chat", target=api.TargetRef(kind="ssh", grant_id="grant")),
                                     "owner", None)
     connect.assert_awaited_once_with(grant)
-    connection.create_process.assert_awaited_once_with(term_type="xterm-256color", term_size=(80, 24), encoding=None, stderr=targets.asyncssh.STDOUT)
+    connection.create_process.assert_awaited_once_with(term_type="xterm-256color", term_size=(80, 24), encoding=None, stderr=asyncssh.STDOUT)
     await output.put(b"\xffhost\r\n")
     async with asyncio.timeout(2):
         while not terminal.scrollback.size:

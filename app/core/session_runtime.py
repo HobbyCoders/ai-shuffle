@@ -1877,8 +1877,9 @@ class SessionRuntime:
                     sender_id = payload.get("orchestration_sender")
                     if sender_id:
                         from app.core import session_orchestration
-                        sender = await asyncio.to_thread(session_orchestration._caller, sender_id)
-                        await asyncio.to_thread(session_orchestration._target, sender, self.session_id)
+                        await asyncio.to_thread(
+                            session_orchestration.recheck_message_scope, payload, self.session_id,
+                        )
                         provenance = "same-owner"
                     else:
                         from app.core import agent_messaging

@@ -770,3 +770,14 @@ def release_codex_refresh_claim(provider_id: str, owner: str) -> None:
             """,
             (provider_id, owner),
         )
+
+
+from app.core.resource_sync import install_database_mutations as _install_resource_sync
+
+# Credential verdicts and refresh leases are worker-local observations, not
+# edits to shared provider configuration; they must not wake the scanner.
+_install_resource_sync(
+    globals(), 'settings',
+    'create_model_provider update_model_provider delete_model_provider '
+    'set_model_provider_enabled set_codex_token_bundle',
+)

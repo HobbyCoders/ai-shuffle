@@ -434,7 +434,7 @@ class TestDiscoverResources:
                 closed["value"] = True
 
         fake_discord, *_ = _make_fake_discord(FakeClient)
-        with patch.object(discord_connector, "discord", fake_discord), \
+        with patch.dict("sys.modules", {"discord": fake_discord}), \
              patch.object(discord_connector, "DISCORD_AVAILABLE", True):
             result = await discord_connector.discover_resources("tok")
 
@@ -474,7 +474,7 @@ class TestDiscoverResources:
 
         fake_discord, LoginFailure, _, _ = _make_fake_discord(FakeClient)
         holder["LoginFailure"] = LoginFailure
-        with patch.object(discord_connector, "discord", fake_discord), \
+        with patch.dict("sys.modules", {"discord": fake_discord}), \
              patch.object(discord_connector, "DISCORD_AVAILABLE", True):
             with pytest.raises(ValueError, match="Invalid bot token"):
                 await discord_connector.discover_resources("tok")
@@ -508,7 +508,7 @@ class TestDiscoverResources:
 
         fake_discord, _, Forbidden, _ = _make_fake_discord(FakeClient)
         holder["Forbidden"] = Forbidden
-        with patch.object(discord_connector, "discord", fake_discord), \
+        with patch.dict("sys.modules", {"discord": fake_discord}), \
              patch.object(discord_connector, "DISCORD_AVAILABLE", True):
             result = await discord_connector.discover_resources("tok")
 

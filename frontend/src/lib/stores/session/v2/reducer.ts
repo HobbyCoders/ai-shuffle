@@ -65,6 +65,8 @@ export interface V2SessionState {
 	messages: ChatMessage[];
 	isStreaming: boolean;
 	parked: boolean;
+	/** Authoritative queued-peer cancellations, retained across event replay. */
+	cancelledPeerTurnIds?: string[];
 	/** Per-task summaries keyed by task_id — drives the tasks panel + parked
 	 *  indicator. Shape matches the `Task` the UI's activeTasks already renders. */
 	activeTaskSummaries: Task[];
@@ -96,7 +98,7 @@ export interface V2SessionState {
 	 *  settled then no-ops server-side instead of interrupting the successor
 	 *  (GitHub #585). */
 	liveTurnId: string | null;
-	/** First prompt of a peer turn that started from idle, not a parked continuation. */
+	/** First prompt of a peer turn that woke an idle or parked recipient. */
 	pendingAgentWake: boolean;
 	/** Profile (agent) id the live turn is running as, from `turn.started`.
 	 *  Messages created on the live SSE path (streaming deltas, and a
@@ -1214,13 +1216,18 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				// A resuming card is live until a reply retires it.
 				mayHaveLiveRetry = true;
 			}
+			// Match the projection's active-recipient boundary: parked work may be
+			// unsettled, but a peer arriving there starts its own wake turn.
+			const sessionActive = state.parked !== true && (
+				state.isStreaming || Boolean(state.liveTurnId) ||
+				state.activeTaskSummaries.some(task => task.status === 'running')
+			);
 			return {
 				...state,
 				messages,
 				mayHaveLiveRetry,
 				attemptStartSeq: seq,
-				pendingAgentWake: (event.source === 'agent_message' || event.source === 'promotion') &&
-					!state.isStreaming && !state.parked,
+				pendingAgentWake: (event.source === 'agent_message' || event.source === 'promotion') && !sessionActive,
 				isStreaming: true,
 				parked: false,
 				liveTurnId: typeof event.turn_id === 'string' ? event.turn_id : state.liveTurnId,
@@ -1377,6 +1384,12 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				}
 			}
 			return completed;
+		}
+
+		case 'queue.cancelled': {
+			const ids = Array.isArray(event.cancelled_turn_ids)
+				? event.cancelled_turn_ids.filter((id): id is string => typeof id === 'string') : [];
+			return { ...state, cancelledPeerTurnIds: [...new Set([...(state.cancelledPeerTurnIds ?? []), ...ids])] };
 		}
 
 		case 'turn.aborted': {

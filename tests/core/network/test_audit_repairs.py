@@ -583,10 +583,10 @@ def test_unreadable_row_is_skipped_without_publishing_a_deletion(workers, monkey
     set_owner_pref(a, "locked", 2)
     real = engine.serialize_row
 
-    def locked(coll, row):
+    def locked(coll, row, **kwargs):
         if coll.name == "user_preferences" and row.get("key") == "locked":
             raise engine.TransientApplyError("Credential storage is locked; cannot share user_preferences")
-        return real(coll, row)
+        return real(coll, row, **kwargs)
     monkeypatch.setattr(engine, "serialize_row", locked)
     set_owner_pref(a, "fine", 3)
     ops = _pref_ops(a)

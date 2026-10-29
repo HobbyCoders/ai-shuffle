@@ -180,8 +180,8 @@ class PackageConnector(BaseConnector):
 
 
 def proxy_class(kind, path, spec):
-    from app.core.connectors.registry import _CONNECTOR_CLASSES
-    bundled = _CONNECTOR_CLASSES[kind]
+    from app.core.connectors.registry import get_bundled_connector_class
+    bundled = get_bundled_connector_class(kind)
     attrs = {key: getattr(bundled, key) for key in ("CAPABILITIES", "MAX_MESSAGE_LENGTH", "TRIGGERS", "ACTIONS", "TOOLS", "SUPPORTS_ACTION_GATEWAY")}
     attrs.update(PACKAGE_PATH=path, PACKAGE_SPEC=spec, __module__=__name__)
     for method in ("send_typing_indicator", "send_ack_reaction", "mark_as_read", "execute_action", "execute_tool",
