@@ -34,7 +34,9 @@ The display-only provider never calls an API; do not send messages to it.
 The ordinary disposable-data/once-only seed guard still applies. Status has
 `sessions.{small,large,other}`, `sizes` and `seed_seconds`. Record the actual seed
 duration and window DOM count with results; this is a load model, not a claim
-that all real chats have identical density.
+that all real chats have identical density. A shared Linux lab validation took
+26.186 seconds to seed and mounted about 54k elements in a 120-row window
+(desktop 54,113; phone 53,917), close to the Phase-1 rich field windows.
 
 ## Chat journeys (lab and read-only field)
 
@@ -71,7 +73,8 @@ node scripts/perf/chat-journeys.mjs --platform both --runs 1 --journeys scroll \
 * **Remote**: cold open and cached return for each supplied remote-owned chat.
   Verify actual ownership and a connected peer before calling this a remote
   result; using a local id tests only the runner. A one-worker seed is not a
-  network/mirror fixture.
+  network/mirror fixture. The standing paired-worker check is
+  `harness-basics.perf-remote-open-rig` in the live-smoke catalog.
 
 Desktop is **1280x800, 1x CPU**; phone is **390x844, touch, `/mobile/`, 4x CPU**.
 No artificial network shaping; report topology separately. Each cell has raw
