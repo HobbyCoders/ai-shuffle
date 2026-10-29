@@ -15,9 +15,11 @@ await runJourney({
 		name: 'status-and-all-worker-confirmation',
 		async setup({ page, status }) {
 			await page.goto(status.urls.ui);
-			// Layout preference hydration may still close a mobile sidebar. Wait
-			// for the app's real boot-reconciliation/paint marker, not a timer.
-			await page.waitForFunction(() => performance.getEntriesByType('measure').some((e) => e.name.startsWith('shuffle:app.bootstrap:')));
+			// The fresh preview may have no provider/model chip. Wait for the
+			// real chat shell and its initial preference requests to settle
+			// before opening the mobile drawer (hydration restores its state).
+			await page.locator('[data-ui-state="chat"][data-ui-loading="false"]').waitFor();
+			await page.waitForLoadState('networkidle');
 			await showSidebar(page);
 			await page.getByRole('button', { name: 'Settings', exact: true }).click();
 			await page.getByRole('button', { name: 'Devices', exact: true }).click();
