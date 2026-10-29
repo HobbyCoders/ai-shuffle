@@ -66,9 +66,16 @@
 		selections[index] = [];
 		skipped[index] = false;
 	}
+	// Skipping moves on: to the next open question, or, when none is left, it
+	// sends the request so the tray closes instead of waiting for another click.
 	function toggleSkip() {
-		skipped[active] = !skipped[active];
-		if (skipped[active]) { selections[active] = []; written[active] = ''; }
+		if (skipped[active]) { skipped[active] = false; return; }
+		skipped[active] = true;
+		selections[active] = [];
+		written[active] = '';
+		const next = questions.findIndex((_, i) => !skipped[i] && !answer(i));
+		if (next === -1) send();
+		else active = next;
 	}
 	function pickModel(value: string) {
 		selections[active] = value ? [value] : [];
@@ -81,6 +88,9 @@
 	}
 	function submit(event: SubmitEvent) {
 		event.preventDefault();
+		send();
+	}
+	function send() {
 		if (disabled || !canSubmit) return;
 		const answers: Record<string, string> = {};
 		const skippedKeys: string[] = [];
