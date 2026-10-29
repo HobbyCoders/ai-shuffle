@@ -34,8 +34,6 @@
 				"frontend/src/lib/components/chat/MessageArea.svelte",
 				"frontend/src/lib/components/chat/ChatInput.svelte",
 				"frontend/src/lib/components/chat/BoundedTranscriptRows.svelte",
-				"frontend/src/lib/components/chat/MirrorSyncGate.svelte",
-				"frontend/src/lib/components/chat/mirror-sync.svelte.ts",
 				"frontend/src/lib/services/session-navigation.ts",
 				"frontend/src/lib/services/live-sync.ts",
 				"frontend/src/lib/api/client.ts",
@@ -65,6 +63,14 @@
 		}
 	],
 	"rules": [
+		{
+			"why": "mirrored chats: the sync check ChatView runs and the gate that shows it",
+			"journeys": ["mirrored-chat", "open-unloaded-chat"],
+			"globs": [
+				"frontend/src/lib/components/chat/MirrorSyncGate.svelte",
+				"frontend/src/lib/components/chat/mirror-sync.svelte.ts"
+			]
+		},
 		{
 			"why": "sending, streaming and rendering a reply",
 			"journeys": ["chat-send-stream", "stop-midstream", "queue-while-busy", "reload-midstream"],
