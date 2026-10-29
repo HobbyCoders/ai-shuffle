@@ -245,3 +245,88 @@ describe('ToolUseMessage — Show phone on Emulator rows', () => {
 		expect(screen.queryByRole('button', { name: 'Show phone' })).toBeNull();
 	});
 });
+
+describe('ToolUseMessage — generated media results (#784)', () => {
+	const price = { currency: 'USD', unit: 'item', amount: '0.04', total: '0.04', status: 'estimated' };
+	const art = (hash: string, suffix = '') => `/api/v1/artifacts/${hash}${suffix}?session_id=s-784`;
+	// The unified tools' envelope: app/core/generation_resolver.py result("completed", …, result=output).
+	const unified = (output: Record<string, unknown>) =>
+		JSON.stringify({ status: 'completed', success: true, price, choice: { source: 'openai', model: 'gpt-image-1' }, result: output }, null, 2);
+
+	async function expandRow(name: string, result: string, status: 'complete' | 'error' = 'complete') {
+		const view = render(ToolUseMessage, {
+			props: { name, sessionId: 's-784', input: { prompt: 'a lighthouse' }, result, status }
+		});
+		await fireEvent.click(view.container.querySelector('.wlrow') as HTMLElement);
+		return view.container;
+	}
+	const resultPane = (container: HTMLElement) => [...container.querySelectorAll('.wl-pane')].at(-1) as HTMLElement;
+
+	it('renders a unified generateImage result as the image, not JSON', async () => {
+		const c = await expandRow('mcp__ai-tools__generateImage', unified({
+			success: true, image_url: art('h1'), images: [{ image_url: art('h1') }], warning: null
+		}));
+		const pane = resultPane(c);
+		expect(pane.querySelector('[data-testid="tool-media-note"]')?.textContent).toBe('Image generated');
+		const img = pane.querySelector('[data-testid="tool-media"] img.media-zoomable') as HTMLImageElement;
+		expect(img).not.toBeNull();
+		expect(img.getAttribute('src')).toContain('/api/v1/artifacts/h1');
+		expect(pane.querySelector('pre')).toBeNull();
+		expect(pane.textContent).not.toContain('"status"');
+	});
+
+	it('renders every image of a multi-image result', async () => {
+		const c = await expandRow('mcp__ai-tools__generateImage', unified({
+			success: true, image_url: art('a'), images: [{ image_url: art('a') }, { image_url: art('b') }, { image_url: art('c') }]
+		}));
+		expect(c.querySelector('[data-testid="tool-media-note"]')?.textContent).toBe('3 images generated');
+		expect(c.querySelectorAll('[data-testid="tool-media"] img')).toHaveLength(3);
+	});
+
+	it('renders unified video and audio results with their players', async () => {
+		let c = await expandRow('mcp__ai-tools__generateVideo', unified({
+			success: true, video_url: art('v', '/video.mp4'), output_url: art('v', '/video.mp4'), outputs: [{ url: art('v', '/video.mp4') }]
+		}));
+		expect(c.querySelector('[data-testid="tool-media"] video')).not.toBeNull();
+		expect(c.querySelector('[data-testid="tool-media-note"]')?.textContent).toBe('Video generated');
+		cleanup();
+		c = await expandRow('mcp__ai-tools__generateAudio', unified({
+			success: true, audio_url: art('t'), output_url: art('t'), outputs: [{ url: art('t') }]
+		}));
+		expect(c.querySelector('[data-testid="tool-media"] audio')).not.toBeNull();
+		expect(c.querySelector('[data-testid="tool-media-note"]')?.textContent).toBe('Audio generated');
+	});
+
+	it('renders a unified 3D result as a download link', async () => {
+		const c = await expandRow('mcp__ai-tools__textTo3D', unified({ success: true, output_url: art('m'), outputs: [{ url: art('m') }] }));
+		const link = c.querySelector('[data-testid="tool-media-file"]') as HTMLAnchorElement;
+		expect(link).not.toBeNull();
+		expect(link.getAttribute('href')).toContain('/api/v1/artifacts/m');
+		expect(c.querySelector('[data-testid="tool-media"]')).toBeNull();
+	});
+
+	it('still renders the old top-level shape', async () => {
+		const c = await expandRow('mcp__ai-tools__generateImage', JSON.stringify({
+			success: true, image_url: '/api/generated-images/by-path?path=/w/cat.png', filename: 'cat.png'
+		}));
+		expect(c.querySelector('[data-testid="tool-media-note"]')?.textContent).toBe('Image generated');
+		expect(c.querySelector('[data-testid="tool-media"] img')).not.toBeNull();
+	});
+
+	it.each([
+		['refused', { status: 'refused', success: false, price, reason: 'image_provider_restricted', error: 'Images are set to the ChatGPT plan.' }],
+		['skipped', { status: 'skipped', success: false, price, reason: 'needs_confirmation', message: 'Generation skipped.' }],
+		['needs-confirmation', { status: 'needs-confirmation', success: false, price, confirmation_token: 'tok', retry: { confirmed: true } }],
+		['failed', { status: 'failed', success: false, price, result: { success: false, error: 'upstream', image_url: '/w/x.png' } }]
+	])('keeps a %s result as text, never as media', async (_label, body) => {
+		const c = await expandRow('mcp__ai-tools__generateImage', JSON.stringify(body, null, 2));
+		expect(c.querySelector('[data-testid="tool-media-note"]')).toBeNull();
+		expect(c.querySelector('[data-testid="tool-media"]')).toBeNull();
+		expect(resultPane(c).querySelector('pre')?.textContent).toContain(`"status": "${body.status}"`);
+	});
+
+	it('never shows media for a row that ended in error', async () => {
+		const c = await expandRow('mcp__ai-tools__generateImage', unified({ success: true, image_url: art('e') }), 'error');
+		expect(c.querySelector('[data-testid="tool-media"]')).toBeNull();
+	});
+});
