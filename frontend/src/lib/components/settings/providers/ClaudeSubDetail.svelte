@@ -148,6 +148,9 @@
 		{#if status?.relogin_notice}<InlineBanner tone="warn">{status.relogin_notice.message}</InlineBanner>{/if}
 	{/snippet}
 	{#snippet children(tab: string | null)}
+		{#if tab === 'Overview'}
+			<p class="pv-note">Claude uses one subscription sign-in on this worker. To change it, sign out and sign in again. You can save multiple Anthropic API keys separately.</p>
+		{/if}
 		{#if tab === 'Models'}
 			<BuiltInModels />
 		{:else if tab === 'Usage'}

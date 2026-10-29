@@ -27,7 +27,6 @@
 	import ValueText from '../rows/ValueText.svelte';
 	import TextField from '../rows/TextField.svelte';
 	import Segmented from '../rows/Segmented.svelte';
-	import Switch from '../rows/Switch.svelte';
 	import ProviderTile from './ProviderTile.svelte';
 	import ModelCuration from './ModelCuration.svelte';
 	import LocalTuning from './LocalTuning.svelte';
@@ -35,7 +34,7 @@
 	import { passthroughModels } from './curation';
 	import { supportsLocalTuning, tunedModels } from './local-tuning';
 	import { hostOf, supportsNativeImages, type CredentialView, type ProviderView } from './providers-model';
-	import { setCredentialEnabled } from './provider-actions';
+	import CredentialControl from './CredentialControl.svelte';
 
 	interface Props {
 		credential: CredentialView;
@@ -203,14 +202,7 @@
 >
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet primary()}
-		<span class="onoff">
-			{row.enabled ? 'On' : 'Off'}
-			<Switch
-				checked={row.enabled}
-				label="{credential.name} on"
-				onchange={(v) => setCredentialEnabled(credential, v)}
-			/>
-		</span>
+		<CredentialControl {credential} showState />
 	{/snippet}
 	{#snippet children(tab: string | null)}
 		{#if tab === 'Models'}
@@ -292,13 +284,3 @@
 		{/if}
 	{/snippet}
 </DetailPane>
-
-<style>
-	.onoff {
-		display: inline-flex;
-		align-items: center;
-		gap: 8px;
-		font-size: 13px;
-		color: var(--st-mfg);
-	}
-</style>

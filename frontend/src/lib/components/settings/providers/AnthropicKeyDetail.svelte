@@ -1,8 +1,5 @@
 <script lang="ts">
-	/**
-	 * The Anthropic API key: Claude Code authenticates with it in API key mode.
-	 * Billed per use by Anthropic; the loop guard does not apply.
-	 */
+	/** One saved Anthropic key. Account selection never changes the Claude Code mode. */
 	import { getErrorMessage } from '$lib/api/client';
 	import { providers } from '$lib/stores/providers.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
@@ -14,141 +11,80 @@
 	import ValueText from '../rows/ValueText.svelte';
 	import TextField from '../rows/TextField.svelte';
 	import ProviderTile from './ProviderTile.svelte';
+	import CredentialControl from './CredentialControl.svelte';
 	import BuiltInModels from './tabs/BuiltInModels.svelte';
-	import { CLAUDE_KEY_ITEM, type CredentialView, type ProviderView } from './providers-model';
-	import { changeClaudeMode } from './provider-actions';
+	import type { CredentialView, ProviderView } from './providers-model';
+	import { changeClaudeMode, startSetup } from './provider-actions';
 
-	interface Props {
-		credential: CredentialView;
-		provider: ProviderView;
-	}
-
-	let { credential, provider }: Props = $props();
-
+	let { credential, provider }: { credential: CredentialView; provider: ProviderView } = $props();
+	const account = $derived(credential.account);
 	const mode = $derived(providers.current.claude?.mode ?? 'subscription');
-	const keySet = $derived(!!providers.current.claude?.api_key.set || providers.current.anthropicKeySet);
-	const masked = $derived(
-		providers.current.anthropicKeyMasked ||
-			(providers.current.claude?.api_key.last4 ? `sk-ant-…${providers.current.claude.api_key.last4}` : '')
-	);
-	const position = $derived(
-		mode === 'off'
-			? 'Claude is off'
-			: mode === 'api_key'
-				? keySet
-					? 'Runs every Claude session'
-					: 'Selected, not ready'
-				: 'Standby for Claude'
-	);
-
-	let replacing = $state(false);
-	let key = $state('');
+	const masked = $derived(account?.masked_key || providers.current.anthropicKeyMasked || 'No key selected');
 	let saving = $state(false);
 	let error = $state('');
 
-	async function save() {
-		if (!key.trim() || saving) return;
+	async function rename(label: string) {
+		if (!account || label.trim() === account.label || saving) return;
 		saving = true;
 		error = '';
 		try {
-			await providers.setAnthropicKey(key);
-			await providers.loadClaude();
-			key = '';
-			replacing = false;
+			await providers.renameAnthropicAccount(account.id, label);
 			flashSaved();
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Save failed';
-		} finally {
-			saving = false;
-		}
+			error = getErrorMessage(e, 'Could not rename this account');
+		} finally { saving = false; }
 	}
 
 	async function remove() {
 		const back = provider.item;
+		error = '';
 		try {
-			await providers.clearAnthropicKey();
-			await providers.loadClaude();
+			if (account) await providers.deleteAnthropicAccount(account.id);
+			else { await providers.clearAnthropicKey(); await providers.loadClaude(); }
 			settingsNav.selectItem(back, 'providers');
-		} catch (e) {
-			error = getErrorMessage(e, 'Remove failed');
-		}
+		} catch (e) { error = getErrorMessage(e, 'Could not remove this account'); }
 	}
 
-	const danger = $derived<DangerAction[]>(
-		keySet
-			? [
-					{
-						label: 'Remove this credential',
-						hint: 'Deletes the stored key',
-						button: 'Remove',
-						question: 'Remove the Anthropic key?',
-						onConfirm: remove
-					}
-				]
-			: []
-	);
+	const danger = $derived<DangerAction[]>(account || providers.current.anthropicKeySet ? [{
+		label: 'Remove this credential',
+		hint: account?.active ? 'Leaves API key mode with no selected key; other saved keys are kept' : 'Deletes only this saved key',
+		button: 'Remove',
+		question: `Remove ${credential.name}?`,
+		onConfirm: remove
+	}] : []);
 </script>
 
-<DetailPane
-	name={credential.name}
-	badge="API key"
-	status={credential.status}
-	statusText={credential.statusText}
-	subtitle={position}
-	facts={[
-		{ label: 'Key', value: masked || null, mono: true },
-		{ label: 'Billing', value: 'Per use' },
-		{ label: 'Models', value: 'Built in' }
-	]}
-	tabs={['Overview', 'Models']}
-	{danger}
-	item={CLAUDE_KEY_ITEM}
->
+<DetailPane name={credential.name} badge="API key" status={credential.status} statusText={credential.statusText}
+	subtitle={credential.on ? 'Runs every Claude session in API key mode' : account?.active ? 'Selected for API key mode' : 'Saved Anthropic account'}
+	facts={[{ label: 'Key', value: masked, mono: true }, { label: 'Billing', value: 'Per use' }, { label: 'Models', value: 'Built in' }]}
+	tabs={['Overview', 'Models']} {danger} item={credential.item}>
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet primary()}
-		{#if mode !== 'api_key' && keySet}
-			<button type="button" class="st-btn" onclick={() => changeClaudeMode('api_key')}>Use for Claude</button>
+		{#if account}<CredentialControl {credential} />{/if}
+		{#if (account?.active || !account && providers.current.anthropicKeySet) && mode !== 'api_key'}
+			<button type="button" class="st-btn" onclick={() => changeClaudeMode('api_key')}>Use API key mode</button>
 		{/if}
 	{/snippet}
 	{#snippet children(tab: string | null)}
 		{#if tab === 'Models'}
 			<BuiltInModels />
 		{:else}
-			<RowGroup title="Key">
-				<SettingRow label="Key">
-					<ValueText mono tone="fg" value={masked || (keySet ? 'Key stored' : 'No key stored')} />
+			<RowGroup title="Account">
+				{#if account}
+					<SettingRow label="Name"><TextField value={account.label} width={220} maxlength={120} disabled={saving} onchange={rename} /></SettingRow>
+				{/if}
+				<SettingRow id="providers.anthropicKey" label="Key"><ValueText mono tone="fg" value={masked} /></SettingRow>
+				<SettingRow label="Account selection" hint="Changing the selected key keeps the Claude Code mode unchanged">
+					<ValueText value={credential.statusText} status={credential.status} />
 				</SettingRow>
-				<SettingRow id="providers.anthropicKey" label={replacing || !keySet ? 'New key' : undefined}>
-					{#if replacing || !keySet}
-						<TextField
-							bind:value={key}
-							type="password"
-							mono
-							placeholder="sk-ant-…"
-							width={200}
-							disabled={saving}
-							label="New Anthropic key"
-						/>
-						<button type="button" class="st-btn primary" disabled={saving || !key.trim()} onclick={save}>Save</button>
-						{#if keySet}
-							<button
-								type="button"
-								class="st-btn ghost"
-								disabled={saving}
-								onclick={() => ((replacing = false), (key = ''))}>Cancel</button
-							>
-						{/if}
-					{:else}
-						<button type="button" class="st-btn" onclick={() => (replacing = true)}>Replace</button>
-					{/if}
+				<SettingRow label="Another API key" hint="The new key becomes selected">
+					<button type="button" class="st-btn" onclick={() => startSetup(provider, 'anthropic')}>Add key</button>
 				</SettingRow>
 			</RowGroup>
 			{#if error}<p class="pv-msg err" role="alert">{error}</p>{/if}
 			<RowGroup title="Billing">
 				<SettingRow label="Billed"><ValueText tone="fg" value="Per use, Anthropic Console" /></SettingRow>
-				<SettingRow label="Spend limit" hint="Loop guard is off here"
-					><ValueText value="Set in Anthropic Console" /></SettingRow
-				>
+				<SettingRow label="Spend limit" hint="Loop guard is off here"><ValueText value="Set in Anthropic Console" /></SettingRow>
 			</RowGroup>
 		{/if}
 	{/snippet}
