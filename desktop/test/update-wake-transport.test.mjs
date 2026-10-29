@@ -33,6 +33,15 @@ test('old workers stop the subscription after 404 instead of spinning', async ()
   assert.equal(calls, 1); assert.equal(wakes, 0);
 });
 
+test('stop clears a transport-error backoff without retrying or leaking its timer', async t => {
+  let calls = 0, pending = null;
+  t.mock.method(globalThis, 'setTimeout', callback => { pending = callback; return 42; });
+  t.mock.method(globalThis, 'clearTimeout', timer => { assert.equal(timer, 42); pending = null; });
+  const stop = followUpdateRequests(async () => { calls++; throw Error('offline'); }, () => assert.fail('no wake on failure'));
+  await settle(); assert.equal(typeof pending, 'function');
+  stop(); await settle(); assert.equal(pending, null); assert.equal(calls, 1);
+});
+
 test('stop cancels one held request and no late response can wake the updater', async () => {
   let calls = 0, wakes = 0, resolve, signal;
   const stop = followUpdateRequests(async (_generation, value) => { calls++; signal = value; return new Promise(done => { resolve = done; }); }, () => { wakes++; });
