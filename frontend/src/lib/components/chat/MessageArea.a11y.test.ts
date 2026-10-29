@@ -30,7 +30,7 @@ describe('MessageArea error banner', () => {
 
 	it('is one snippet, used wherever the error shows (empty and active transcript)', () => {
 		expect(banner.length).toBeGreaterThan(0);
-		expect(source.match(/\{@render errorBanner\(\$activeSession\.error\)\}/g)).toHaveLength(2);
+		expect(source.match(/\{@render errorBanner\(\$activeSession\.error, \$activeSession\.forkOfferSessionId\)\}/g)).toHaveLength(2);
 		// No second, hand-rolled copy of the old banner.
 		expect(source).not.toContain('&times;</button>');
 	});

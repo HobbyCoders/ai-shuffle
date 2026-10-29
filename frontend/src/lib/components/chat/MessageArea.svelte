@@ -1950,7 +1950,7 @@
 			<!-- Error display for empty state -->
 			{#if $activeSession.error}
 				<div class="max-w-5xl mx-auto w-full px-4 sm:px-8 pt-4">
-					{@render errorBanner($activeSession.error)}
+					{@render errorBanner($activeSession.error, $activeSession.forkOfferSessionId)}
 				</div>
 			{/if}
 			<div class="flex-1 flex items-center justify-center">
@@ -2061,7 +2061,7 @@
 
 			<!-- Error -->
 			{#if $activeSession.error}
-				{@render errorBanner($activeSession.error)}
+				{@render errorBanner($activeSession.error, $activeSession.forkOfferSessionId)}
 			{/if}
 
 			<!-- In-flight background work pinned to the history tail: agents (swarms
@@ -2114,12 +2114,12 @@
 <!-- The chat's error (a failed turn, a refused send). Announced as an alert;
      the dismiss control is named and has a full-size hit area, so a phone can
      clear it as easily as a mouse. -->
-{#snippet errorBanner(message: string)}
+{#snippet errorBanner(message: string, forkOfferSessionId: string | null | undefined)}
 	<div role="alert" class="chat-error-banner bg-destructive/10 border border-destructive/30 text-destructive pl-4 pr-1.5 py-1.5 rounded-lg flex items-center justify-between gap-2 shadow-s">
 		<span class="text-sm py-1.5">{message}</span>
 		<span class="flex items-center gap-1 shrink-0">
-			{#if $activeSession.forkOfferSessionId}
-				<button type="button" onclick={() => forkOfferedSessionHere($activeSession.forkOfferSessionId!)} class="text-sm font-medium underline underline-offset-2 hover:opacity-80 px-1.5">Fork here</button>
+			{#if forkOfferSessionId}
+				<button type="button" onclick={() => forkOfferedSessionHere(forkOfferSessionId)} class="text-sm font-medium underline underline-offset-2 hover:opacity-80 px-1.5">Fork here</button>
 			{/if}
 			<button type="button" onclick={() => activeSession.clearError()} class="chat-error-dismiss" aria-label="Dismiss error" title="Dismiss">
 				<X size={16} strokeWidth={2} aria-hidden="true" />
