@@ -1,0 +1,18 @@
+{
+  "description": "An MCP tool result over 50,000 characters: Claude Code saves it to a file and hands on a <persisted-output> stub instead.",
+  "steps": [
+    {
+      "text": "Let me pull a large result from memory.",
+      "tool_calls": [
+        {
+          "name": "mcp__fluid_bundled__mcp__builtins__Recall",
+          "input": {"ids": ["m1"]},
+          "result_chars": 60000
+        }
+      ]
+    },
+    {
+      "text": "The result was over 50,000 characters, so the CLI kept a stub with a 2KB preview and the file path."
+    }
+  ]
+}

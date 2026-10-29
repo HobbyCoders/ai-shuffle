@@ -1,8 +1,9 @@
 """Owned Linux preview: one parent/TTL lease owns both the app and PostgreSQL.
 
 No inherited DATA_DIR, credential file or database URL is used. Run under a
-Monitor task, never daemonize it. Normal exit, Ctrl-C, SIGTERM, parent loss and
-TTL expiry all run the same teardown. SIGKILL cannot execute Python finalizers.
+Monitor task, never daemonize it. Normal exit, Ctrl-C, SIGTERM, SIGHUP, parent
+loss and TTL expiry all run the same teardown. SIGKILL cannot execute Python
+finalizers (the dev loop adds a detached guardian for that case).
 The dev loop (``python -m scripts.devloop up``) reuses this lease with a
 restart hook and its own settings (``DEV_ENV_KEYS``).
 """
@@ -322,7 +323,8 @@ def main(argv: list[str] | None = None) -> int:
     def stop(signum: int, frame: FrameType | None) -> None:
         stopped.set()
         runtime.STOP.set()
-    old = {sig: signal.signal(sig, stop) for sig in (signal.SIGINT, signal.SIGTERM)}
+    # SIGHUP too: the terminal or a Monitor's pty going away is a stop.
+    old = {sig: signal.signal(sig, stop) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     try:
         with scratch_directory("ai-shuffle-preview-") as directory:
             env = preview_environment(

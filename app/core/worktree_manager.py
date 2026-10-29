@@ -376,57 +376,12 @@ class WorktreeManager:
         We deliberately use ``.git/info/exclude`` (a local, untracked ignore
         file) rather than the tracked ``.gitignore`` so we never modify files
         the user has committed. Idempotent: the entry is only appended once.
+        Shared with every other checkout creator (``exclude_app_worktrees``).
         """
-        ignore_entry = ".fluid/worktrees/"
-        try:
-            git_dir = Path(main_dir) / ".git"
-            if git_dir.is_dir():
-                # Normal repo: .git is a directory → write info/exclude there.
-                info_dir = git_dir / "info"
-            elif git_dir.is_file():
-                # The project path is itself a git worktree (its .git is a file
-                # pointing at the real git dir). The shared exclude file lives in
-                # the *common* git dir, which we resolve via rev-parse. Writing to
-                # the worktree's own git dir would not cover this checkout's
-                # untracked-file rules the same way.
-                result = self.git_service._run_git(
-                    main_dir, ["rev-parse", "--git-common-dir"], timeout=5
-                )
-                if result.returncode != 0 or not result.stdout.strip():
-                    logger.warning(
-                        f"Could not resolve --git-common-dir for {main_dir}: "
-                        f"{result.stderr.strip()}"
-                    )
-                    return
-                common_dir = result.stdout.strip()
-                common_path = Path(common_dir)
-                if not common_path.is_absolute():
-                    # rev-parse may return a path relative to main_dir.
-                    common_path = (Path(main_dir) / common_path).resolve()
-                info_dir = common_path / "info"
-            else:
-                # No .git at all — nothing we can do.
-                return
+        from app.core.git_worktree_ops import exclude_app_worktrees, repo_worktree_lock
 
-            info_dir.mkdir(parents=True, exist_ok=True)
-            exclude_file = info_dir / "exclude"
-
-            existing = ""
-            if exclude_file.exists():
-                existing = exclude_file.read_text(encoding="utf-8", errors="ignore")
-            # Already present (match either the new .fluid entry or a legacy
-            # .claude one — both keep their respective dirs out of git status)
-            existing_entries = {line.strip() for line in existing.splitlines()}
-            if ignore_entry in existing_entries:
-                return
-
-            prefix = "" if (not existing or existing.endswith("\n")) else "\n"
-            with exclude_file.open("a", encoding="utf-8") as f:
-                f.write(f"{prefix}{ignore_entry}\n")
-            logger.debug(f"Added '{ignore_entry}' to {exclude_file}")
-        except Exception as e:
-            # Non-fatal: worst case the worktree dir shows up as untracked.
-            logger.warning(f"Failed to update git info/exclude for {main_dir}: {e}")
+        with repo_worktree_lock(main_dir):
+            exclude_app_worktrees(main_dir)
 
     def _get_relative_worktree_path_from_full(self, full_path: Path, project_path: str = "") -> str:
         """

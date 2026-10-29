@@ -1,0 +1,18 @@
+{
+  "description": "Calls Bash once (asks for permission unless the mode or a rule allows it), then answers. The output is scripted; nothing runs.",
+  "steps": [
+    {
+      "text": "I'll run a quick command.",
+      "tool_calls": [
+        {
+          "name": "Bash",
+          "input": {"command": "echo hello from the fake claude cli", "description": "Print a greeting"},
+          "result": "hello from the fake claude cli"
+        }
+      ]
+    },
+    {
+      "text": "The command printed `hello from the fake claude cli`. All done."
+    }
+  ]
+}

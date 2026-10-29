@@ -32,6 +32,17 @@ MAIN_PROJECT = "dev-sandbox"
 OTHER_PROJECT = "dev-other"
 SECOND_BRANCH = "feature/second"
 LONG_TURNS = 70  # 4 transcript rows each (prompt, text, tool card, answer) = 280
+#: The seed's own ids (chats, turns, tool calls) come from this namespace and a
+#: per-kind counter, so every run seeds the same ids (the branch session's and
+#: the access session's ids come from the app and stay random).
+_ID_NAMESPACE = uuid.UUID("5f0c9b4e-2d7a-4f43-9a1e-3c6d8e0b7a21")
+_id_counters: dict[str, int] = {}
+
+
+def seed_id(kind: str) -> uuid.UUID:
+    """The next deterministic id of ``kind`` in this seed run."""
+    _id_counters[kind] = _id_counters.get(kind, 0) + 1
+    return uuid.uuid5(_ID_NAMESPACE, f"{kind}:{_id_counters[kind]}")
 
 
 def ensure_dev_agent() -> str:
@@ -63,8 +74,14 @@ def _git(cwd: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def make_repository(path: Path, name: str, *, second_branch: bool) -> None:
-    """A small real repository: a few commits on main, optionally a branch."""
+def make_repository(path: Path, name: str, *, second_branch: bool,
+                    remote: Path | None = None) -> None:
+    """A small real repository: a few commits on main, optionally a branch.
+
+    With ``remote``, a local bare repository there becomes ``origin``
+    (``file://``) with every branch pushed and tracked, so Fetch, Pull and
+    ahead/behind work offline (no network, no credentials).
+    """
     if (path / ".git").exists():
         return
     path.mkdir(parents=True, exist_ok=True)
@@ -88,6 +105,11 @@ def make_repository(path: Path, name: str, *, second_branch: bool) -> None:
         _git(path, "add", "src/feature.py")
         _git(path, "commit", "-q", "-m", "Add the second-branch feature flag")
         _git(path, "checkout", "-q", "main")
+    if remote is not None:
+        remote.parent.mkdir(parents=True, exist_ok=True)
+        _git(remote.parent, "init", "-q", "--bare", str(remote))
+        _git(path, "remote", "add", "origin", remote.resolve().as_uri())
+        _git(path, "push", "-q", "-u", "origin", "--all")
 
 
 # ─── transcripts ────────────────────────────────────────────────────────────
@@ -132,13 +154,13 @@ class Transcript:
              answer: str = "", finished: bool = True) -> None:
         from app.contract import events as contract
 
-        turn_id = str(uuid.uuid4())
+        turn_id = str(seed_id("turn"))
         self._event(contract.TurnStarted, turn_id, profile_id=self.profile_id, source="user")
         self._event(contract.MessageUser, turn_id, content=prompt, profile_id=self.profile_id)
         if reply:
             self._event(contract.MessageAssistant, turn_id, content=reply, model=self.model)
         for name, tool_input, result, is_error in tools:
-            call_id = "toolu_seed_" + uuid.uuid4().hex[:16]
+            call_id = "toolu_seed_" + seed_id("tool").hex[:16]
             self._event(contract.ToolUse, turn_id, tool_use_id=call_id, name=name,
                         input=tool_input)
             if result is not None:
@@ -223,7 +245,7 @@ def _project(project_id: str) -> tuple[str | None, str | None]:
 def _chat(title: str, composite: str, project_id: str | None = None) -> str:
     from app.db import database
 
-    session_id = str(uuid.uuid4())
+    session_id = str(seed_id("chat"))
     legacy, v2 = _project(project_id) if project_id else (None, None)
     database.create_session(session_id=session_id, profile_id=DEV_AGENT_ID, project_id=legacy,
                             project_v2_id=v2, title=title, is_active=True, model=composite)
@@ -231,15 +253,17 @@ def _chat(title: str, composite: str, project_id: str | None = None) -> str:
 
 
 async def seed_default() -> dict:
+    from app.api.git_helpers import ensure_git_repository_record
     from app.api.projects import create_project_record
     from app.api.sessions_helpers import CreateWorktreeSessionRequest
     from app.api.sessions_worktree import _create_v2_branch_session
     from app.core.config import settings
-    from app.core.models import ProjectCreate
+    from app.core.models import ProjectCreate, ProjectSettings
     from app.db import database
     from app.db.async_database import run_sync
     from app.db.profiles import get_profile, update_profile
 
+    _id_counters.clear()
     fake_url = os.environ.get("SHUFFLE_DEV_FAKE_AI_URL")
     if not fake_url:
         raise RuntimeError("SHUFFLE_DEV_FAKE_AI_URL is not set")
@@ -250,15 +274,29 @@ async def seed_default() -> dict:
     config = dict((get_profile(DEV_AGENT_ID) or {}).get("config") or {})
     config.update(provider=provider_id, model=composite)
     update_profile(DEV_AGENT_ID, config=config)
+    await run_sync(make_dev_agent_the_default)
 
     workspace = Path(settings.effective_workspace_dir).resolve()
-    projects = {}
+    # Beside the data and workspace in the launcher's scratch directory: not a
+    # folder the workspace lists as a project, and removed with the instance.
+    remotes = Path(settings.effective_data_dir).resolve().parent / "remotes"
+    projects, remote_urls = {}, {}
     for project_id, name, branch in ((MAIN_PROJECT, "Dev sandbox", True),
                                      (OTHER_PROJECT, "Dev other", False)):
-        await run_sync(make_repository, workspace / project_id, name, second_branch=branch)
+        remote = remotes / f"{project_id}.git"
+        await run_sync(make_repository, workspace / project_id, name, second_branch=branch,
+                       remote=remote)
         if database.get_project(project_id) is None:
-            await create_project_record(ProjectCreate(id=project_id, name=name))
+            await create_project_record(ProjectCreate(
+                id=project_id, name=name,
+                settings=ProjectSettings(default_profile_id=DEV_AGENT_ID)))
+        # What the Git panel's first poll does: record the repository and link
+        # the project to its remote, before the chats below create its shared
+        # (v2) project row. Done later, that row keeps the remote-less origin
+        # and the composer's project picker lists the project twice.
+        await run_sync(ensure_git_repository_record, project_id, str(workspace / project_id))
         projects[project_id] = str(workspace / project_id)
+        remote_urls[project_id] = remote.as_uri()
 
     chats: dict[str, str] = {}
 
@@ -316,9 +354,85 @@ async def seed_default() -> dict:
 
     return {
         "provider_id": provider_id, "model": model, "agent_id": DEV_AGENT_ID,
-        "projects": projects, "worktree_path": created.worktree_path, "chats": chats,
-        "long_chat_events": long_events,
+        "projects": projects, "remotes": remote_urls, "worktree_path": created.worktree_path,
+        "chats": chats, "long_chat_events": long_events,
+        "claude_cli": await seed_claude_cli(),
     }
+
+
+#: The composer's agent pick (frontend composer-preferences ``composer.profile``).
+COMPOSER_PROFILE_KEY = "composer.profile"
+
+
+def make_dev_agent_the_default() -> None:
+    """New chats use the Dev agent (and so the Fake AI) without a click.
+
+    The agent browser's preview cookie may not write preferences, so the seed
+    stores the composer's pick directly, through the same storage and for the
+    same identity the preferences API resolves for an owner request (the
+    preview cookie is one).
+    """
+    from app.core.preference_identity import principal_preference_identity
+    from app.db import database
+
+    user_type, user_id = principal_preference_identity({"kind": "admin"})
+    database.set_user_preference(user_type, user_id, COMPOSER_PROFILE_KEY, DEV_AGENT_ID)
+
+
+# ─── Claude Code CLI (the dev loop's fake) ──────────────────────────────────
+
+
+CLAUDE_AGENT_ID = "dev-claude-code"
+CLAUDE_MODEL = "sonnet"
+
+
+def _fake_claude_cli() -> str:
+    """The ``claude`` this app would run, when it is the dev loop's fake shim.
+
+    The same PATH-only resolution the delegated leg uses. Anything else (no
+    CLI, a real one) raises, so the Claude Code agent is never seeded beside a
+    CLI that could reach a real sign-in.
+    """
+    from app.core.provider.harness_adapter import _resolve_claude_cmd
+    from scripts.devloop import fake_claude
+
+    path = _resolve_claude_cmd()[0]
+    if not fake_claude.is_fake(path):
+        raise RuntimeError(f"the claude on PATH ({path}) is not the dev loop's fake")
+    return path
+
+
+async def seed_claude_cli() -> dict:
+    """The **Dev (Claude Code)** agent and one chat on it, when the fake CLI is on PATH.
+
+    The agent picks a Claude model and no provider row, so its turns take the
+    delegated leg (the ``claude`` CLI) in subscription mode; the fake reports a
+    sign-in for an ``.invalid`` account. No credential is stored anywhere.
+    """
+    from app.db import database
+    from app.db.async_database import run_sync
+    from app.db.profiles import create_profile, get_profile
+
+    try:
+        cli = await run_sync(_fake_claude_cli)
+    except Exception as exc:  # noqa: BLE001 — not seeded, and the status says why
+        return {"skipped": f"{type(exc).__name__}: {exc}"}
+    if get_profile(CLAUDE_AGENT_ID) is None:
+        create_profile(
+            CLAUDE_AGENT_ID, "Dev (Claude Code)",
+            "Seeded by the dev loop. Runs on the fake Claude Code CLI "
+            "(scripts/devloop/fake_claude): no model, no network, no credential.",
+            {"system_prompt": {"type": "preset", "preset": "claude_code"},
+             "model": CLAUDE_MODEL},
+            if_absent=True,
+        )
+    legacy, v2 = await run_sync(_project, MAIN_PROJECT)
+    session_id = str(seed_id("chat"))
+    await run_sync(lambda: database.create_session(
+        session_id=session_id, profile_id=CLAUDE_AGENT_ID, project_id=legacy,
+        project_v2_id=v2, title="Claude Code CLI (seeded)", is_active=True,
+        model=CLAUDE_MODEL))
+    return {"agent_id": CLAUDE_AGENT_ID, "chat": session_id, "cli": cli}
 
 
 def _project_v2_row(project_v2_id: str | None) -> dict | None:

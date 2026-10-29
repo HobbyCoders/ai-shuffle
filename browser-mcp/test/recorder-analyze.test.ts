@@ -366,6 +366,21 @@ describe("errors, requests, rows, gaps", () => {
     expect(detectRecordingGaps(rec).map((a) => a.kind)).toEqual(["recording_gap", "recording_gap"]);
   });
 
+  it("tells a trimmed page-load handoff (earliest entries) apart from the size cap (later entries)", () => {
+    const trimmed = recording([{ t: 900, kind: "note", message: "40 earlier entries dropped to fit the page-load handoff" }], {
+      stats: { truncated: false, dropped: 0, handoffDropped: 40, handoffDroppedBeforeMs: 900 },
+    });
+    expect(detectRecordingGaps(trimmed)).toEqual([{
+      kind: "recording_gap", indices: [], t: [0, 900],
+      message: "40 earliest entries (before 900ms) were dropped to fit the page-load handoff",
+    }]);
+    const both = recording([], { stats: { truncated: true, dropped: 7, handoffDropped: 40, handoffDroppedBeforeMs: 900 } });
+    expect(detectRecordingGaps(both).map((a) => a.message)).toEqual([
+      "40 earliest entries (before 900ms) were dropped to fit the page-load handoff",
+      "the recording hit its size cap; 7 later entries were not kept",
+    ]);
+  });
+
   it("orders anomalies by kind, then time", () => {
     const rec = recording([
       { t: 1, kind: "error", source: "console", message: "late" },

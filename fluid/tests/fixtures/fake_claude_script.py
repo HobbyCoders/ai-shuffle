@@ -426,13 +426,18 @@ class Fake:
         else:
             raise SystemExit(f"fake_claude_script: unknown op {op!r}")
 
-    def main(self) -> int:
-        spawn_exit = self.script.get("spawn_exit")
-        if spawn_exit:
-            sys.stderr.write(spawn_exit.get("stderr", "") + "\n")
-            return int(spawn_exit.get("code", 1))
+    def steps_for(self, msg: dict, index: int, turns: list) -> list:
+        """The steps that answer user frame ``msg`` (the ``index``-th of this
+        process). Scripted turns in order, then a plain text turn. The dev
+        loop's fake CLI (``scripts/devloop/fake_claude``) overrides this to
+        pick a scenario from the prompt instead."""
+        if index < len(turns):
+            return turns[index]
+        return [{"op": "text", "text": "Hello from the scripted fake."}, {"op": "result"}]
+
+    def init_frame(self) -> dict:
         init = self.script.get("init") or {}
-        frame = {
+        return {
             "type": "system", "subtype": "init", "session_id": self.sid,
             "model": init.get("model", "claude-fake"),
             "tools": init.get("tools", ["Bash", "Read", "Edit", "mcp__fluid_bundled__Recall"]),
@@ -441,6 +446,14 @@ class Fake:
             "claude_code_version": init.get("claude_code_version", "2.1.280"),
             "apiKeySource": init.get("apiKeySource", "none"),
         }
+
+    def main(self) -> int:
+        spawn_exit = self.script.get("spawn_exit")
+        if spawn_exit:
+            sys.stderr.write(spawn_exit.get("stderr", "") + "\n")
+            return int(spawn_exit.get("code", 1))
+        init = self.script.get("init") or {}
+        frame = self.init_frame()
         plugin_dir = _flag("--plugin-dir")
         if plugin_dir is not None:
             # As CLI 2.1.287 reports a --plugin-dir folder: listed as
@@ -466,9 +479,7 @@ class Fake:
             if msg is None:
                 return 0
             self.interrupted = False
-            steps = turns[index] if index < len(turns) else [
-                {"op": "text", "text": "Hello from the scripted fake."}, {"op": "result"},
-            ]
+            steps = self.steps_for(msg, index, turns)
             index += 1
             for step in steps:
                 self.run_step(step)

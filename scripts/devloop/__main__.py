@@ -1,8 +1,9 @@
 """One command for a private, live-reloading dev copy of this checkout.
 
     python -m scripts.devloop up [--host 0.0.0.0 --browser-host IP] [--ttl-seconds N]
-                                 [--no-vite] [--seed default|none] [--status PATH]
-    python -m scripts.devloop status [--status PATH]
+                                 [--no-vite] [--seed default|none] [--status PATH] [--ci]
+                                 [--claude-cli fake|none]
+    python -m scripts.devloop status [--status PATH] [--wait SECONDS]
     python -m scripts.devloop down [--status PATH]
 
 ``up`` starts the fake AI, an isolated app with its own throwaway PostgreSQL
@@ -10,7 +11,9 @@
 frontend; seeds data; prints one access link; writes a status JSON. It
 restarts only the app process when a Python file under app/ or fluid/
 changes. Run it under a Monitor task, never daemonize it: Ctrl-C, SIGTERM,
-``down``, parent loss and the TTL all tear everything down.
+SIGHUP, ``down``, parent loss and the TTL all tear everything down, and a
+detached guardian (``scripts/devloop/guardian.py``) finishes the teardown if
+``up`` itself is SIGKILLed. ``--ci`` is the non-interactive form CI uses.
 """
 from __future__ import annotations
 
@@ -46,6 +49,13 @@ APP_STOP_SECONDS = 4
 #: How long the gate holds restarts for a first start that neither answers nor
 #: exits (a hang): after this an edit restarts it anyway.
 FIRST_START_GRACE_SECONDS = 180
+#: ``--ci`` prints exactly one of these, then a JSON object, on one stdout line.
+READY_LINE = "DEVLOOP_READY"
+FAILED_LINE = "DEVLOOP_FAILED"
+#: Signals that stop ``up`` with a full teardown. SIGHUP: the terminal or the
+#: Monitor's pty went away. TaskStop SIGTERMs the group, then SIGKILLs every
+#: descendant about a second later; the guardian finishes what that cuts off.
+STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
 class StatusError(Exception):
@@ -132,13 +142,16 @@ def write_private_json(path: Path, data: dict) -> None:
 
 
 def status_alive(status: dict) -> bool:
-    """The recorded launcher is still the same live process (not a reused pid)."""
-    from app.core.temp_scratch import process_identity
+    """The recorded launcher is still the same live process (not a reused pid).
+
+    An exited launcher its parent has not reaped yet (a zombie, as when the
+    CI driver that started it runs ``down``) still has its start time; it is
+    gone all the same.
+    """
+    from scripts.devloop.guardian import alive
 
     pid, identity = status.get("pid"), status.get("pid_identity")
-    if not isinstance(pid, int) or pid <= 1 or identity is None:
-        return False
-    return process_identity(pid) == identity
+    return isinstance(pid, int) and isinstance(identity, str) and alive(pid, identity)
 
 
 def answers_http(host: str, port: int, path: str = "/", timeout: float = 1.0) -> bool:
@@ -163,40 +176,62 @@ def _url_host(host: str) -> str:
 
 
 class RestartGate:
-    """Holds file-change restarts until the first app start has settled.
+    """Holds file-change restarts until a start has got ready (and so seeded).
 
-    The first start seeds the data inside its lifespan, and the app answers
-    HTTP only after that, so "ready" means the seed is finished. A restart
-    before then would SIGKILL a half-done seed. Changes seen while closed fold
-    into one restart when the gate opens: on ready, on the app exiting by
-    itself (nothing left to cut; a crash must stay fixable), or after
-    :data:`FIRST_START_GRACE_SECONDS` for a start that hangs.
+    A start seeds the data inside its lifespan, and the app answers HTTP only
+    after that, so "ready" means the seed is finished (done or failed). A
+    restart before then would SIGKILL a half-done seed. The gate opens for good
+    (:attr:`is_open`) only when a start gets ready. Until then each start holds
+    the changes seen while it runs and folds them into one restart when it
+    stops being cuttable: it exited by itself (a crash must stay fixable) or it
+    hung past :data:`FIRST_START_GRACE_SECONDS`. That pass lasts only until the
+    next start: the start the fix triggers is the one that seeds, so it is held
+    closed again (:meth:`started`).
     """
 
     def __init__(self, restart: threading.Event) -> None:
         self.restart = restart
         self.lock = threading.Lock()
         self.is_open = False
+        #: The current start crashed or hung: nothing to cut until the next one.
+        self.passing = False
         self.pending = False
 
     def request(self) -> bool:
         """A source change: restart now, or hold it. True if it was held."""
         with self.lock:
-            if self.is_open:
+            if self.is_open or self.passing:
                 self.restart.set()
                 return False
             self.pending = True
             return True
 
+    def started(self) -> None:
+        """A new app start: hold changes again until it is ready (or not cuttable)."""
+        with self.lock:
+            self.passing = False
+
+    def release(self) -> None:
+        """The current start exited by itself or hung: let changes restart it."""
+        with self.lock:
+            if self.is_open or self.passing:
+                return
+            self.passing = True
+            self._flush("the app start ended or hung; applying the change seen meanwhile")
+
     def open(self) -> None:
+        """A start got ready: its seed is finished, restarts pass from now on."""
         with self.lock:
             if self.is_open:
                 return
             self.is_open = True
-            if self.pending:
-                self.pending = False
-                log.info("first start settled; applying the change seen meanwhile")
-                self.restart.set()
+            self._flush("first start settled; applying the change seen meanwhile")
+
+    def _flush(self, message: str) -> None:
+        if self.pending:
+            self.pending = False
+            log.info(message)
+            self.restart.set()
 
 
 class Watcher(threading.Thread):
@@ -242,6 +277,13 @@ class Instance:
         self.args, self.directory, self.env, self.fake = args, directory, env, fake
         self.vite_port = vite_port
         self.gate = gate or RestartGate(threading.Event())
+        #: Set by a stop signal: the status says "stopping" and is never rewritten.
+        self.retired = False
+        #: ``up``'s managed PostgreSQL, recorded for the guardian once it runs.
+        self.database: Any = None
+        #: ``up``'s stop event; ``--ci`` sets it when the instance cannot be used.
+        self.stopped: threading.Event | None = None
+        self.failed: str | None = None
         #: The link and seed are announced on the first start that gets ready,
         #: which is not the first start when that one crashed.
         self.announced = False
@@ -259,15 +301,16 @@ class Instance:
         self.data: dict[str, Any] = {
             "format": 1, "pid": os.getpid(), "pid_identity": process_identity(os.getpid()),
             "checkout": str(ROOT), "branch": _branch(), "state": "starting",
+            "mode": "ci" if getattr(args, "ci", False) else "dev",
             "started_at": _iso(self.started), "expires_at": _iso(self.started + args.ttl_seconds),
             "access_link": None,
             "urls": {"ui": f"http://{self.browser}:{vite_port or self.port}/",
                      "vite": f"http://{self.browser}:{vite_port}/" if vite_port else None,
                      "preview_listener": f"http://{self.browser}:{self.port}/"},
-            "app": {"pid": None, "starts": 0, "last_ready_seconds": None,
+            "app": {"pid": None, "pid_identity": None, "starts": 0, "last_ready_seconds": None,
                     "local_port": int(env["PORT"]),
                     "protected_port": int(env["SHUFFLE_PROTECTED_PORT"])},
-            "vite": None,
+            "vite": None, "postgres": None,
             "fake_ai": {"url": fake.url, "request_log": str(fake.log_path),
                         "scenarios_dir": str(fake.scenarios.directory),
                         "scenarios": sorted(fake.scenarios.load())},
@@ -278,16 +321,46 @@ class Instance:
     # ── status file ──
     def write(self, **changes: Any) -> None:
         with self.lock:
+            if self.retired:
+                return
             self.data.update(changes)
             write_private_json(self.args.status, self.data)
 
+    def retire(self) -> None:
+        """A stop began: say so at once, before the slow teardown.
+
+        A stop from Monitor/TaskStop SIGKILLs this process about a second after
+        its SIGTERM, long before the app and PostgreSQL are down, so "ready"
+        must not survive until the end of the teardown. Nothing rewrites the
+        file after this; the guardian removes it if the teardown is cut off.
+        """
+        with self.lock:
+            if self.retired:
+                return
+            self.retired = True
+            self.data["state"] = "stopping"
+            try:
+                write_private_json(self.args.status, self.data)
+            except (OSError, StatusError):
+                self.args.status.unlink(missing_ok=True)
+
     # ── supervise() hook ──
     def on_app_start(self, process: subprocess.Popen) -> None:
+        from app.core.temp_scratch import process_identity
+
         self.starts += 1
+        self.gate.started()
         self.app, self.app_started = process, time.monotonic()
         log.info("app %s (pid %s)", "starting" if self.starts == 1 else "restarting", process.pid)
         with self.lock:
-            self.data["app"].update(pid=process.pid, starts=self.starts)
+            self.data["app"].update(pid=process.pid, pid_identity=process_identity(process.pid),
+                                    starts=self.starts)
+            postgres = getattr(self.database, "process", None)
+            if postgres is not None and self.data["postgres"] is None:
+                socket = getattr(self.database, "socket", None)
+                self.data["postgres"] = {"pid": postgres.pid,
+                                         "pid_identity": process_identity(postgres.pid),
+                                         "socket_dir": str(socket) if socket else None}
         self.write(state="starting" if self.starts == 1 else "restarting")
         self.wake.set()
 
@@ -295,7 +368,9 @@ class Instance:
     def on_app_exit(self, process: subprocess.Popen) -> None:
         """supervise(): the app exited on its own (not a restart or teardown)."""
         self.write(state="app-exited")
-        self.gate.open()  # nothing left to interrupt; the fix must restart it
+        # Nothing left to interrupt: the fix must restart it. Only this start's
+        # pass: the start the fix triggers seeds and is held closed again.
+        self.gate.release()
 
     def report(self) -> None:
         """Thread: report every app (re)start once it answers HTTP."""
@@ -310,7 +385,7 @@ class Instance:
                     self._ready(process, round(time.monotonic() - started, 1))
                     break
                 if time.monotonic() - started > FIRST_START_GRACE_SECONDS:
-                    self.gate.open()
+                    self.gate.release()
                 time.sleep(0.25)
 
     def _ready(self, process: subprocess.Popen, seconds: float) -> None:
@@ -354,6 +429,25 @@ class Instance:
             log.error("SEED FAILED: %s", seed.get("error"))
         for line in lines:
             log.info(line)
+        if getattr(self.args, "ci", False):
+            self._ci_verdict(link, seed, seconds)
+
+    def _ci_verdict(self, link: str | None, seed: dict | None, seconds: float) -> None:
+        """``--ci``: one machine-readable line; an unusable instance stops at once."""
+        problem = None
+        if not link:
+            problem = "no access link was minted"
+        elif self.args.seed != "none" and not (seed or {}).get("ok"):
+            problem = f"seed failed: {(seed or {}).get('error', 'no seed result')}"
+        record = {"status": str(self.args.status), "ui": self.data["urls"]["ui"],
+                  "pid": os.getpid(), "seconds": seconds}
+        if problem is None:
+            print(READY_LINE + " " + json.dumps(record), flush=True)
+            return
+        self.failed = problem
+        print(FAILED_LINE + " " + json.dumps({**record, "error": problem}), flush=True)
+        if self.stopped is not None:
+            self.stopped.set()
 
 
 def _branch() -> str | None:
@@ -396,9 +490,40 @@ def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
         parser.error("--port and --vite-port must differ")
     if not 0 < args.ttl_seconds <= 14400:
         parser.error("--ttl-seconds must be positive and at most four hours")
-    if args.no_vite and not (ROOT / "frontend" / "build" / ".shuffle-preview.json").is_file():
-        parser.error("--no-vite serves the stamped build: (cd frontend && npm run build) "
-                     "&& python -m app.preview stamp")
+    if args.ci:
+        if not args.host.is_loopback or args.browser_host is not None:
+            parser.error("--ci binds loopback only (no --host/--browser-host)")
+        if args.vite_port is not None:
+            parser.error("--ci serves the stamped build; --vite-port does not apply")
+        args.no_vite = True
+    if args.no_vite:
+        problem = stamped_build_problem()
+        if problem:
+            parser.error(f"--no-vite{'/--ci' if args.ci else ''} serves the stamped build, "
+                         f"but {problem}: (cd frontend && SHUFFLE_SKIP_MOBILE_UI=1 npm run build) "
+                         "&& python -m app.preview stamp")
+
+
+def stamped_build_problem(root: Path = ROOT) -> str | None:
+    """Why the app would refuse this checkout's frontend build, or None.
+
+    The app compares the stamp with the sources and the build at start and
+    exits when they differ; checking first turns that into one clear error.
+    """
+    from app.preview import MANIFEST, _build_digest, _build_dir, _source_identity
+
+    directory = _build_dir(root)
+    try:
+        stamp = json.loads((directory / MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "frontend/build has no stamp"
+    try:
+        expected = {**_source_identity(root), "build_sha256": _build_digest(directory)}
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return f"the build cannot be checked ({exc})"
+    if stamp != expected:
+        return "the frontend sources or build changed since the stamp"
+    return None
 
 
 def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
@@ -418,22 +543,33 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     from docker import container_runtime as runtime
     from docker.container_runtime import stop_group
     from scripts.devloop.fake_ai import FakeAI
+    from scripts.devloop.guardian import spawn_guardian
 
     if not args.no_vite:
         _ensure_frontend()
     stopped, restart = threading.Event(), threading.Event()
     gate = RestartGate(restart)
+    holder: dict[str, Instance] = {}
 
     def stop(signum: int, frame: Any) -> None:
         log.info("stopping (signal %s)", signum)
         stopped.set()
         runtime.STOP.set()
+        if "instance" in holder:
+            # Off the signal frame: retire() takes the status lock, which this
+            # (main) thread may hold right now.
+            threading.Thread(target=holder["instance"].retire, name="devloop-retire",
+                             daemon=True).start()
 
-    old = {sig: signal.signal(sig, stop) for sig in (signal.SIGINT, signal.SIGTERM)}
+    old = {sig: signal.signal(sig, stop) for sig in STOP_SIGNALS}
     fake = vite = watcher = instance = reporter = None
     try:
         with scratch_directory("ai-shuffle-preview-") as raw:
             directory = Path(raw)
+            # First, before anything it would have to clean up exists: a
+            # detached process that finishes the teardown if this one is
+            # SIGKILLed (TaskStop does that a second after its SIGTERM).
+            guardian = spawn_guardian(args.status, directory)
             fake = FakeAI(log_path=directory / "fake-ai-requests.jsonl",
                           latency_ms=args.latency_ms, tps=args.tps)
             port = args.port or free_port()
@@ -452,35 +588,65 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                 browser_host=str(args.browser_host or args.host), ttl_seconds=args.ttl_seconds,
                 extra=extra,
             )
+            claude_cli = None
+            if args.claude_cli == "fake":
+                from scripts.devloop import fake_claude
+
+                # Only the instance's PATH: the shim lives in its scratch dir.
+                bin_dir = fake_claude.install(directory)
+                env["PATH"] = fake_claude.instance_path(env["PATH"], bin_dir)
+                fake_claude.cover_home(Path(env["HOME"]), bin_dir)
+                claude_cli = {"mode": "fake", "path": str(bin_dir / "claude"),
+                              "log": str(fake_claude.log_path(directory))}
+                log.info("fake Claude Code CLI on the app's PATH only: %s (log %s)",
+                         claude_cli["path"], claude_cli["log"])
             database = runtime.Database(
                 SimpleNamespace(effective_data_dir=Path(env["DATA_DIR"])),
                 port=free_port(exclude=(port, protected, int(env["PORT"]), vite_port or 0)),
             )
             instance = Instance(args, directory, env, fake, vite_port, gate)
+            instance.database, instance.stopped = database, stopped
+            instance.data["guardian"] = guardian
+            instance.data["claude_cli"] = claude_cli or {"mode": "none"}
+            holder["instance"] = instance
             log.info("status file: %s", args.status)
             instance.write()
+            if stopped.is_set():  # a signal before the instance existed
+                instance.retire()
             if vite_port:
+                from app.core.temp_scratch import process_identity
+
                 api = f"http://{_url_host(instance.connect)}:{port}"
                 vite = subprocess.Popen(_vite_command(str(args.host), vite_port), cwd=FRONTEND,
                                         env=vite_environment(env, api), start_new_session=True)
-                instance.data["vite"] = {"pid": vite.pid, "port": vite_port, "proxies_to": api}
+                instance.data["vite"] = {"pid": vite.pid,
+                                         "pid_identity": process_identity(vite.pid),
+                                         "port": vite_port, "proxies_to": api}
                 log.info("vite dev (pid %s) on port %s, proxying /api to %s", vite.pid,
                          vite_port, api)
-            watcher = Watcher(gate, poll=args.poll)
-            watcher.start()
+            if not args.ci:  # a CI run tests one fixed revision: no restarts
+                watcher = Watcher(gate, poll=args.poll)
+                watcher.start()
             reporter = threading.Thread(target=instance.report, name="devloop-report",
                                         daemon=True)
             reporter.start()
             code = supervise([sys.executable, "-m", "app.main"], env, database,
                              ttl=args.ttl_seconds, owner_pid=os.getppid(), stopped=stopped,
-                             restart=restart, on_start=instance.on_app_start,
-                             on_exit=instance.on_app_exit,
+                             restart=None if args.ci else restart,
+                             on_start=instance.on_app_start, on_exit=instance.on_app_exit,
                              stop_timeout=APP_STOP_SECONDS)
             log.info("lease ended (app exit code %s); tearing down", code)
+            if args.ci and not instance.announced and not stopped.is_set():
+                instance.failed = f"the app exited (code {code}) before it was ready"
+                print(FAILED_LINE + " " + json.dumps({"status": str(args.status),
+                                                      "error": instance.failed}), flush=True)
+            if args.ci:
+                return 1 if instance.failed else 0
             return code
     finally:
         if instance is not None:
             instance.done.set()
+            instance.retire()
         if watcher is not None:
             watcher.stop()
         if vite is not None:
@@ -488,7 +654,7 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         if fake is not None:
             fake.close()
         if instance is not None:
-            args.status.unlink(missing_ok=True)
+            remove_own_status(args.status, os.getpid())
         for sig, handler in old.items():
             signal.signal(sig, handler)
         log.info("stopped; app, PostgreSQL, Vite and the fake AI are down")
@@ -518,13 +684,55 @@ def down(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     return 1
 
 
+def remove_own_status(path: Path, pid: int, identity: str | None = None) -> bool:
+    """Delete the status file only if it still names launcher ``pid`` (and identity).
+
+    A newer ``up`` for the same checkout may already have replaced it; that
+    one's file must survive an older launcher's (or guardian's) cleanup.
+    """
+    try:
+        status = load_status(path)
+    except StatusError:
+        return False
+    if status is None or status.get("pid") != pid:
+        return False
+    if identity is not None and status.get("pid_identity") != identity:
+        return False
+    path.unlink(missing_ok=True)
+    return True
+
+
 def show(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    status = load_status(args.status)
-    if status is None or not status_alive(status):
-        print(f"No running dev instance recorded at {args.status}")
-        return 1
-    print(json.dumps(status, indent=2))
-    return 0
+    """Print the running instance's status. 0 when it is running (``--wait``: ready).
+
+    A file whose launcher is gone (a reused pid included) is stale: it is
+    reported and removed, never shown as a running instance.
+    """
+    deadline = time.monotonic() + (args.wait or 0)
+    while True:
+        status = load_status(args.status)
+        if status is not None and not status_alive(status):
+            remove_own_status(args.status, status.get("pid"), status.get("pid_identity"))
+            print(f"Stale dev instance status at {args.status}: launcher pid "
+                  f"{status.get('pid')} is gone; removed it")
+            return 1
+        ready = status is not None and status.get("state") == "ready"
+        if status is not None and (ready or not args.wait):
+            print(json.dumps(status, indent=2))
+            return 0
+        if status is not None and status.get("state") in ("app-exited", "stopping"):
+            print(json.dumps(status, indent=2))
+            print(f"The dev instance is {status['state']}, not ready", file=sys.stderr)
+            return 1
+        if time.monotonic() >= deadline:
+            if status is None:
+                print(f"No running dev instance recorded at {args.status}")
+            else:
+                print(json.dumps(status, indent=2))
+                print(f"The dev instance did not get ready within {args.wait}s",
+                      file=sys.stderr)
+            return 1
+        time.sleep(0.5)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -547,10 +755,21 @@ def main(argv: list[str] | None = None) -> int:
                        help="Fake AI delay before each reply")
     start.add_argument("--tps", type=float, default=0.0,
                        help="Fake AI streamed tokens per second (0 = fast)")
+    start.add_argument("--claude-cli", choices=("fake", "none"), default="fake",
+                       help="fake (default): a scripted claude CLI on the app's PATH, so Claude "
+                            "Code chats run (scripts/devloop/fake_claude); none: leave PATH alone")
     start.add_argument("--poll", action="store_true",
                        help="Poll for source changes (for filesystems without inotify)")
+    start.add_argument("--ci", action="store_true", default=os.environ.get("DEVLOOP_CI") == "1",
+                       help="Non-interactive run (also DEVLOOP_CI=1): loopback only, the "
+                            "stamped build instead of Vite, no restarts, one "
+                            f"{READY_LINE}/{FAILED_LINE} JSON line, exit 1 if unusable")
+    status_command = commands.add_parser("status", help="Print the running instance's status")
+    status_command.add_argument("--wait", type=float, default=0, metavar="SECONDS",
+                                help="Wait up to SECONDS for the instance to be ready; "
+                                     "exit 0 only once it is")
     for command in (start, commands.add_parser("down", help="Stop the running instance"),
-                    commands.add_parser("status", help="Print the running instance's status")):
+                    status_command):
         command.add_argument("--status", type=Path, default=default_status_path(),
                              help="Status JSON path in a private (0700) directory (default: "
                                   "per checkout, under $XDG_RUNTIME_DIR or the temp dir)")

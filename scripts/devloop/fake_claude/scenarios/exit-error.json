@@ -1,0 +1,9 @@
+{
+  "description": "Starts answering, then the CLI process exits with code 1 and a message on stderr.",
+  "steps": [
+    {
+      "text": "Starting on it…",
+      "exit": {"code": 1, "stderr": "fake claude: scripted crash (exit code 1)"}
+    }
+  ]
+}
