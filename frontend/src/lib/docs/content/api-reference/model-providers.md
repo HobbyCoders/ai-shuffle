@@ -180,7 +180,7 @@ Update a provider. Takes the same fields as create, all optional, with the same 
 
 - Omitting `auth_token` or sending it blank keeps the stored key.
 - Sending `context_window` or `max_output_tokens` as `null` clears it; omitting it leaves it unchanged.
-- `models` replaces the whole list.
+- `models` replaces the whole list. Send `expected_revision` from the provider response to guard a curation save. A stale revision returns `409` without changing the provider; reload its current selection before editing again.
 - Disabling the provider or rotating its inference key invalidates readings but keeps its [OpenAI usage key](#openai-usage-key). Admin requests require an enabled, official OpenAI API provider; only explicit disconnect removes the shared Admin key.
 
 ```bash
@@ -194,7 +194,7 @@ Returns `404` if the provider does not exist.
 
 ### DELETE /api/v1/model-providers/{provider_id}
 
-Delete a provider. A stored ChatGPT sign-in is revoked first when possible; a failed revoke does not block the delete. Any OpenAI usage key on the provider is removed too.
+Delete a provider. A stored ChatGPT sign-in is revoked first when possible; a failed revoke does not block the delete. Any OpenAI usage key and the shared discovery snapshot for the provider are removed too.
 
 **Auth:** Owner only
 
@@ -233,6 +233,14 @@ A provider error carries the HTTP status and the provider's own short message (`
 
 ## Model catalog
 
+### GET /api/v1/model-providers/{provider_id}/model-catalog
+
+**Auth:** Owner only
+
+Read the last successful discovery snapshot without contacting upstream, or `null` if the provider has not been refreshed yet (`404` if the provider does not exist). The snapshot contains `source`, `models`, `hidden`, `recommended`, `fetched_at` (UTC), `fetched_by_device` and `fetched_by_name`. It is separate from the curated `models` selection.
+
+Settings > Providers shows this shared snapshot and its **Last refreshed** time and worker. Refreshing on one worker publishes it to the others through settings sync; open Models tabs update without a page reload and newly discovered models stay unchecked. Concurrent selection edits are reconciled from the current provider revision.
+
 ### POST /api/v1/model-providers/{provider_id}/fetch-models
 
 Fetch the provider's live model list from upstream so you can pick which ones to offer. Send the models you want back through [PATCH](#patch-apiv1model-providersprovider_id) as `models`; refresh never adds or removes curated models. Known per-model context windows are included in the result and missing windows on already-curated models are backfilled from presets or the upstream catalog. Existing per-model windows, including owner edits, are kept. Concurrent provider edits take precedence over the backfill.
@@ -262,7 +270,9 @@ curl -X POST http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9a6
 
 `models` holds text models only, at most 2000. Each has `id` and `label`, plus `context_window`, `pricing` (OpenRouter prices) and `reasoning_capabilities` when upstream reports them. `hidden` lists the audio, voice, image and video models that were held back, each with a `media_kind`.
 
-**Errors:** `404` provider not found. `409` when a ChatGPT or Grok sign-in is missing or expired (sign in again). `400` when credential storage is unavailable. `502` when the upstream request fails.
+A successful fetch saves a compact, token-free snapshot in the shared `model_catalog:<provider_id>` system setting (maximum 512 KiB). Failed fetches leave the previous snapshot intact. Snapshots contain public model metadata and worker attribution, never credentials or endpoints.
+
+**Errors:** `404` provider not found. `409` when a ChatGPT or Grok sign-in is missing or expired (sign in again). `400` when credential storage is unavailable. `502` when the upstream request fails or the snapshot exceeds the size limit.
 
 ### POST /api/v1/model-providers/refresh-capabilities
 

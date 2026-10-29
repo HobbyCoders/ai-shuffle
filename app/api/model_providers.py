@@ -37,6 +37,7 @@ from app.core import (
     encryption,
     grok_rate_limit_resets,
     model_catalog_presets,
+    model_catalogs,
     model_modality,
     model_registry,
     xai_oauth,
@@ -44,6 +45,7 @@ from app.core import (
 from app.db import database as db
 from app.db.async_database import run_sync
 
+from app.api import model_catalogs as catalog_api
 from app.api import openai_billing, openrouter_billing, provider_balances  # noqa: F401
 
 logger = logging.getLogger(__name__)
@@ -51,6 +53,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/model-providers", tags=["Model Providers"])
 router.include_router(openai_billing.router)
 router.include_router(openrouter_billing.router)
+router.include_router(catalog_api.router)
 
 _VALID_PROVIDER_TYPES = ("openrouter", "custom", "openai", "chatgpt", "xai", "grok")
 
@@ -84,6 +87,7 @@ class ModelProviderCreate(BaseModel):
 
 class ModelProviderUpdate(BaseModel):
     """Request body for a partial update. All fields optional."""
+    expected_revision: Optional[str] = None
     name: Optional[str] = None
     provider_type: Optional[str] = None
     base_url: Optional[str] = None
@@ -128,6 +132,7 @@ class ModelProviderResponse(BaseModel):
     openai_billing_instance_id: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    revision: Optional[str] = None
 
 
 class ModelProviderListResponse(BaseModel):
@@ -373,6 +378,7 @@ def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
         openai_billing_instance_id=row.get("openai_billing_instance_id"),
         created_at=_iso(row.get("created_at")),
         updated_at=_iso(row.get("updated_at")),
+        revision=row.get("revision"),
     )
 
 
@@ -956,8 +962,11 @@ async def update_provider(
 
     if updates:
         async with openai_billing.operation_lock(provider_id):
-            row = await run_sync(db.update_model_provider, provider_id, **updates)
+            row = await run_sync(db.update_model_provider, provider_id,
+                                 expected_revision=body.expected_revision, **updates)
             if row is None:
+                if body.expected_revision is not None and await run_sync(db.get_model_provider, provider_id):
+                    raise HTTPException(status_code=409, detail="Models changed on another worker. Reload and try again.")
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                                     detail="Model provider not found")
 
@@ -980,6 +989,7 @@ async def delete_provider(provider_id: str, token: str = Depends(require_admin))
         if not deleted:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                                 detail="Model provider not found")
+        await run_sync(model_catalogs.delete, provider_id)
     return {"success": True}
 
 
@@ -1151,7 +1161,7 @@ async def _record_credential_check(
 
 @router.post("/{provider_id}/fetch-models", response_model=FetchModelsResponse)
 async def fetch_models(provider_id: str, token: str = Depends(require_admin)):
-    return await _fetch_models(provider_id)
+    return await catalog_api.store_catalog(provider_id, await _fetch_models(provider_id))
 
 
 async def _fetch_models(provider_id: str, *, backfill_context: bool = True):

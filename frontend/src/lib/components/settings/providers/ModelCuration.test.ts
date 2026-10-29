@@ -8,6 +8,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/sv
 import type { ModelProvider, ProviderModelEntry } from '$lib/api/model-providers';
 
 const mocks = vi.hoisted(() => ({
+	get: vi.fn(),
 	post: vi.fn(),
 	patch: vi.fn(),
 	refresh: vi.fn(),
@@ -16,7 +17,7 @@ const mocks = vi.hoisted(() => ({
 	loadClaude: vi.fn()
 }));
 vi.mock('$lib/api/client', () => ({
-	api: { post: mocks.post, patch: mocks.patch },
+	api: { get: mocks.get, post: mocks.post, patch: mocks.patch },
 	getErrorMessage: (e: { message?: string } | undefined, fallback: string) => e?.message ?? fallback
 }));
 vi.mock('$lib/stores/providers.svelte', async () => {
@@ -35,6 +36,7 @@ vi.mock('$lib/stores/providers.svelte', async () => {
 });
 vi.mock('$lib/stores/notifications', () => ({ notify: mocks.notify }));
 
+import { resourceSync } from '$lib/services/resource-sync';
 import ModelCuration from './ModelCuration.svelte';
 import DraftHarness from './DraftHarness.test.svelte';
 import { providerDrafts } from './drafts.svelte';
@@ -72,7 +74,8 @@ const toggle = async (id: string) => {
 };
 
 beforeEach(() => {
-	vi.clearAllMocks();
+	vi.resetAllMocks();
+	mocks.get.mockResolvedValue(null);
 	mocks.patch.mockResolvedValue({});
 	mocks.refresh.mockResolvedValue(undefined);
 	providerDrafts.list = [];
@@ -80,6 +83,67 @@ beforeEach(() => {
 	settingsNav.reset();
 });
 afterEach(cleanup);
+
+describe('shared catalog and concurrent curation', () => {
+	const catalog = { source: 'upstream', models: [entry('old'), entry('remote'), entry('new')] };
+
+	it('does not resurrect an old selection when a remote prop changes during refresh', async () => {
+		let finish!: (value: typeof catalog) => void;
+		mocks.post.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+		const view = render(ModelCuration, { row: router([entry('old')]) });
+		await waitFor(() => expect(mocks.post).toHaveBeenCalled());
+		await view.rerender({ row: { ...router([entry('remote')]), revision: 'remote-revision' } });
+		finish(catalog);
+		await screen.findByRole('checkbox', { name: 'new' });
+		await waitFor(() => expect((screen.getByRole('checkbox', { name: 'remote' }) as HTMLInputElement).checked).toBe(true));
+		expect((screen.getByRole('checkbox', { name: 'old' }) as HTMLInputElement).checked).toBe(false);
+		await toggle('new');
+		expect(saved().map((m: ProviderModelEntry) => m.id)).toEqual(['remote', 'new']);
+		expect(mocks.patch.mock.calls.at(-1)![1].expected_revision).toBe('remote-revision');
+	});
+
+	it('renders the stored snapshot without fetching upstream or auto-selecting new models', async () => {
+		mocks.get.mockResolvedValue({ ...catalog, fetched_at: '2026-10-29T12:00:00Z',
+			fetched_by_device: 'worker-a', fetched_by_name: 'Fixture worker A' });
+		render(ModelCuration, { row: router([entry('remote')]) });
+		expect(await screen.findByText((_, node) => node?.tagName === 'P' && /Last refreshed .* on Fixture worker A/.test(node.textContent ?? ''))).toBeTruthy();
+		expect((screen.getByRole('checkbox', { name: 'remote' }) as HTMLInputElement).checked).toBe(true);
+		expect((screen.getByRole('checkbox', { name: 'new' }) as HTMLInputElement).checked).toBe(false);
+		expect(mocks.post).not.toHaveBeenCalled();
+	});
+
+
+	it('reads remote settings live without an upstream fetch and reconciles the later provider prop', async () => {
+		mocks.get.mockResolvedValueOnce({ source: 'upstream', models: [entry('old')] });
+		const view = render(ModelCuration, { row: { ...router([entry('old')]), revision: 'before' } });
+		await screen.findByRole('checkbox', { name: 'old' });
+		await waitFor(() => expect(mocks.get).toHaveBeenCalledTimes(1));
+		mocks.get.mockResolvedValue(catalog);
+		resourceSync.invalidate(['settings']);
+		await screen.findByRole('checkbox', { name: 'new' });
+		await view.rerender({ row: { ...router([entry('remote')]), revision: 'after' } });
+		await waitFor(() => expect((screen.getByRole('checkbox', { name: 'remote' }) as HTMLInputElement).checked).toBe(true));
+		expect((screen.getByRole('checkbox', { name: 'old' }) as HTMLInputElement).checked).toBe(false);
+		expect((screen.getByRole('checkbox', { name: 'new' }) as HTMLInputElement).checked).toBe(false);
+		expect(mocks.post).not.toHaveBeenCalled();
+	});
+
+	it('sends the displayed revision and reloads after a refused stale save', async () => {
+		mocks.get.mockResolvedValue(catalog);
+		mocks.post.mockResolvedValue(catalog);
+		mocks.patch.mockRejectedValueOnce({ status: 409, message: 'Models changed on another worker' });
+		const view = render(ModelCuration, { row: { ...router([entry('old')]), revision: 'old-revision' } });
+		mocks.refresh.mockImplementationOnce(async () => {
+			await view.rerender({ row: { ...router([entry('remote')]), revision: 'current-revision' } });
+		});
+		await toggle('new');
+		expect(mocks.patch.mock.calls.at(-1)![1].expected_revision).toBe('old-revision');
+		await waitFor(() => expect(mocks.refresh).toHaveBeenCalled());
+		await waitFor(() => expect((screen.getByRole('checkbox', { name: 'remote' }) as HTMLInputElement).checked).toBe(true));
+		expect((screen.getByRole('checkbox', { name: 'old' }) as HTMLInputElement).checked).toBe(false);
+		expect(mocks.patch).toHaveBeenCalledTimes(1);
+	});
+});
 
 describe('Models tab', () => {
 	it('keeps normalized saved evidence when a refresh only returns stale raw fields', async () => {
@@ -249,6 +313,7 @@ describe('adding an API key', () => {
 		await waitFor(() =>
 			expect((screen.getByRole('checkbox', { name: 'model-a Model A' }) as HTMLInputElement).checked).toBe(true)
 		);
+		await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh model list' }) as HTMLButtonElement).disabled).toBe(false));
 		mocks.patch.mockRejectedValueOnce(new Error('Save unavailable'));
 		await fireEvent.click(screen.getByRole('button', { name: 'Use selected (1)' }));
 		expect((await screen.findByRole('alert')).textContent).toBe('Save unavailable');

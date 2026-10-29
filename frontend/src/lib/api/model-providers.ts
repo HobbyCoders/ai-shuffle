@@ -140,6 +140,8 @@ export interface ModelProvider {
 	account_plan?: string | null;
 	created_at: string | null;
 	updated_at: string | null;
+	/** Opaque generation used to reject stale whole-selection saves. */
+	revision?: string | null;
 }
 
 export interface ModelProvidersResponse {
@@ -165,7 +167,7 @@ export interface ModelProviderCreate {
 }
 
 /** Partial update — every field optional. Blank/omitted `auth_token` = unchanged. */
-export type ModelProviderUpdate = Partial<ModelProviderCreate>;
+export type ModelProviderUpdate = Partial<ModelProviderCreate> & { expected_revision?: string | null };
 
 export async function listModelProviders(): Promise<ModelProvidersResponse> {
 	return api.get('/model-providers');
@@ -198,7 +200,8 @@ export async function toggleModelProvider(id: string): Promise<ModelProvider> {
  * the provider's OpenAI-compatible `/models`). `"preset"` remains in the union
  * for older payloads. The caller
  * check-selects from `models` and persists the curated subset via
- * `updateModelProvider(id, { models })` — this call itself persists nothing.
+ * `updateModelProvider(id, { models, expected_revision })`. Discovery saves a
+ * separate shared catalog, never a selection.
  */
 export interface FetchModelsResult {
 	source: 'preset' | 'upstream';
@@ -211,6 +214,17 @@ export interface FetchModelsResult {
 	/** Ids from the provider's built-in chat roster that `models` holds, in
 	 *  roster order. Empty for a provider with no roster; absent on older payloads. */
 	recommended?: string[];
+}
+
+export interface ModelCatalogSnapshot extends FetchModelsResult {
+	fetched_at?: string;
+	fetched_by_device?: string;
+	fetched_by_name?: string;
+}
+
+/** Read the last shared discovery snapshot without an upstream request. */
+export async function getModelCatalog(id: string): Promise<ModelCatalogSnapshot | null> {
+	return api.get(`/model-providers/${id}/model-catalog`);
 }
 
 export async function fetchProviderModels(id: string): Promise<FetchModelsResult> {
