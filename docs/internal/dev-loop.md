@@ -132,6 +132,56 @@ It answers `GET /v1/models` and streaming `/v1/chat/completions`,
 `/v1/messages` and `/v1/responses`. The native-leg tests use the same wire
 code (`scripts/devloop/fake_wire.py`).
 
+## Claude Code chats: the fake `claude` CLI (`--claude-cli fake`, the default)
+
+The Fake AI only drives the native harness. Claude Code chats run the `claude`
+CLI instead, so `up` writes a fake one into the instance's scratch directory
+(`fake-claude-bin/claude`, which runs `scripts/devloop/fake_claude/cli.py`) and
+puts it first on the app's PATH. Only the instance's PATH changes. Any other
+PATH directory that holds a `claude` (`~/.local/bin`, an npm prefix) is
+replaced by a mirror of its other programs, so a missing shim shows "Claude
+Code is not installed" and the real CLI is never reached. The seed then adds
+the **Dev (Claude Code)** agent and the **Claude Code CLI (seeded)** chat, but
+only if the `claude` the app resolves is the fake. The fake reports a sign-in
+for `fake-claude@devloop.invalid`. It holds no credential, opens no network
+connection other than the app's own loopback compaction bridge, and refuses
+`auth login`, `update` and everything except `--version`, `auth status` and
+`-p` runs. `--claude-cli none` leaves PATH alone and seeds no Claude Code agent.
+
+It speaks stream-json like Claude Code 2.1. It calls the hooks the app
+registers and obeys a PreToolUse deny. It asks `can_use_tool` unless the mode,
+`--allowed-tools` or a read-only tool allows the call, and removes
+`--disallowed-tools` from its tool list. It really connects the app's MCP
+bridge from `--mcp-config` and keeps a transcript under the instance's
+`CLAUDE_CONFIG_DIR`, so `--resume` works and an unknown id exits 1. Scenarios
+use the fake AI's format and the same `[script:NAME]` tag. The CLI's own
+scenarios in `scripts/devloop/fake_claude/scenarios/` come first, then the
+fake AI's:
+
+| Tag | What it exercises |
+| --- | --- |
+| (none) / `default` | a streamed echo |
+| `tool-bash` | one Bash call with a permission prompt (the output is scripted; nothing runs) |
+| `tool-mcp` | a real `ListAgents` call through the app's MCP bridge |
+| `long-result` | a 60,000-character MCP result, replaced by Claude Code's `<persisted-output>` stub |
+| `bulk-read` | a 45,000-character Read result (no prompt), to grow the context quickly |
+| `compact` | automatic compaction mid-turn, then the answer |
+| `/compact` | manual compaction: the app's compaction route, the boundary, then the conversation replayed as fresh frames (#679) |
+| `exit-error` | the process exits 1 with stderr mid-turn; the next message resumes |
+| `error-500`, `long`, `slow`, ... | the fake AI's scenarios, played by the CLI |
+
+A step may add `"result": "..."` or `"result_chars": N` to a tool call,
+`"compact": true`, or `"exit": {"code": 1, "stderr": "..."}`. An MCP call
+without `result` really runs on the bridge. Every run is logged with its argv,
+the names of its environment variables (never their values), hooks, tools and
+compactions in `fake-claude.jsonl` in the scratch directory. What it cannot
+model: a real model's choices; built-in tools (Bash, Read and the rest) do not
+run; the Claude Code summarizer is a canned summary; and there is no
+subscription usage, rate limit or real context accounting. The instance's
+own `HOME/.local/bin/claude`, which app startup puts first on PATH and the
+app's installer writes to, is also linked to the fake. The app therefore sees
+Claude Code as installed, and nothing in the instance can come before the fake.
+
 ## Ports and teardown
 
 Every port is picked free at random (or `--port` / `--vite-port`); 8000 and

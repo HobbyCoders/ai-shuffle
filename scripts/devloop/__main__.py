@@ -2,6 +2,7 @@
 
     python -m scripts.devloop up [--host 0.0.0.0 --browser-host IP] [--ttl-seconds N]
                                  [--no-vite] [--seed default|none] [--status PATH] [--ci]
+                                 [--claude-cli fake|none]
     python -m scripts.devloop status [--status PATH] [--wait SECONDS]
     python -m scripts.devloop down [--status PATH]
 
@@ -587,6 +588,18 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                 browser_host=str(args.browser_host or args.host), ttl_seconds=args.ttl_seconds,
                 extra=extra,
             )
+            claude_cli = None
+            if args.claude_cli == "fake":
+                from scripts.devloop import fake_claude
+
+                # Only the instance's PATH: the shim lives in its scratch dir.
+                bin_dir = fake_claude.install(directory)
+                env["PATH"] = fake_claude.instance_path(env["PATH"], bin_dir)
+                fake_claude.cover_home(Path(env["HOME"]), bin_dir)
+                claude_cli = {"mode": "fake", "path": str(bin_dir / "claude"),
+                              "log": str(fake_claude.log_path(directory))}
+                log.info("fake Claude Code CLI on the app's PATH only: %s (log %s)",
+                         claude_cli["path"], claude_cli["log"])
             database = runtime.Database(
                 SimpleNamespace(effective_data_dir=Path(env["DATA_DIR"])),
                 port=free_port(exclude=(port, protected, int(env["PORT"]), vite_port or 0)),
@@ -594,6 +607,7 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             instance = Instance(args, directory, env, fake, vite_port, gate)
             instance.database, instance.stopped = database, stopped
             instance.data["guardian"] = guardian
+            instance.data["claude_cli"] = claude_cli or {"mode": "none"}
             holder["instance"] = instance
             log.info("status file: %s", args.status)
             instance.write()
@@ -741,6 +755,9 @@ def main(argv: list[str] | None = None) -> int:
                        help="Fake AI delay before each reply")
     start.add_argument("--tps", type=float, default=0.0,
                        help="Fake AI streamed tokens per second (0 = fast)")
+    start.add_argument("--claude-cli", choices=("fake", "none"), default="fake",
+                       help="fake (default): a scripted claude CLI on the app's PATH, so Claude "
+                            "Code chats run (scripts/devloop/fake_claude); none: leave PATH alone")
     start.add_argument("--poll", action="store_true",
                        help="Poll for source changes (for filesystems without inotify)")
     start.add_argument("--ci", action="store_true", default=os.environ.get("DEVLOOP_CI") == "1",

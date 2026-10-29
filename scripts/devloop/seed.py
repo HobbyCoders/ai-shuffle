@@ -356,6 +356,7 @@ async def seed_default() -> dict:
         "provider_id": provider_id, "model": model, "agent_id": DEV_AGENT_ID,
         "projects": projects, "remotes": remote_urls, "worktree_path": created.worktree_path,
         "chats": chats, "long_chat_events": long_events,
+        "claude_cli": await seed_claude_cli(),
     }
 
 
@@ -376,6 +377,62 @@ def make_dev_agent_the_default() -> None:
 
     user_type, user_id = principal_preference_identity({"kind": "admin"})
     database.set_user_preference(user_type, user_id, COMPOSER_PROFILE_KEY, DEV_AGENT_ID)
+
+
+# ─── Claude Code CLI (the dev loop's fake) ──────────────────────────────────
+
+
+CLAUDE_AGENT_ID = "dev-claude-code"
+CLAUDE_MODEL = "sonnet"
+
+
+def _fake_claude_cli() -> str:
+    """The ``claude`` this app would run, when it is the dev loop's fake shim.
+
+    The same PATH-only resolution the delegated leg uses. Anything else (no
+    CLI, a real one) raises, so the Claude Code agent is never seeded beside a
+    CLI that could reach a real sign-in.
+    """
+    from app.core.provider.harness_adapter import _resolve_claude_cmd
+    from scripts.devloop import fake_claude
+
+    path = _resolve_claude_cmd()[0]
+    if not fake_claude.is_fake(path):
+        raise RuntimeError(f"the claude on PATH ({path}) is not the dev loop's fake")
+    return path
+
+
+async def seed_claude_cli() -> dict:
+    """The **Dev (Claude Code)** agent and one chat on it, when the fake CLI is on PATH.
+
+    The agent picks a Claude model and no provider row, so its turns take the
+    delegated leg (the ``claude`` CLI) in subscription mode; the fake reports a
+    sign-in for an ``.invalid`` account. No credential is stored anywhere.
+    """
+    from app.db import database
+    from app.db.async_database import run_sync
+    from app.db.profiles import create_profile, get_profile
+
+    try:
+        cli = await run_sync(_fake_claude_cli)
+    except Exception as exc:  # noqa: BLE001 — not seeded, and the status says why
+        return {"skipped": f"{type(exc).__name__}: {exc}"}
+    if get_profile(CLAUDE_AGENT_ID) is None:
+        create_profile(
+            CLAUDE_AGENT_ID, "Dev (Claude Code)",
+            "Seeded by the dev loop. Runs on the fake Claude Code CLI "
+            "(scripts/devloop/fake_claude): no model, no network, no credential.",
+            {"system_prompt": {"type": "preset", "preset": "claude_code"},
+             "model": CLAUDE_MODEL},
+            if_absent=True,
+        )
+    legacy, v2 = await run_sync(_project, MAIN_PROJECT)
+    session_id = str(seed_id("chat"))
+    await run_sync(lambda: database.create_session(
+        session_id=session_id, profile_id=CLAUDE_AGENT_ID, project_id=legacy,
+        project_v2_id=v2, title="Claude Code CLI (seeded)", is_active=True,
+        model=CLAUDE_MODEL))
+    return {"agent_id": CLAUDE_AGENT_ID, "chat": session_id, "cli": cli}
 
 
 def _project_v2_row(project_v2_id: str | None) -> dict | None:
