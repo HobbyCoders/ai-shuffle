@@ -156,6 +156,31 @@ describe('AppPage initial landing', () => {
   // The remembered project and branch resolve against the loaded catalog.
   expect(mocks.resolveComposerDefaultsAfterCatalog).toHaveBeenCalledOnce();
  });
+ // #811: a returning visit (the layout saved New Chat, nothing restored) whose
+ // first message is typed and sent while the loads run. The reconcile took the
+ // chat that send created for a stale backend session and closed it: the chat
+ // existed (sidebar) but the page went back to an empty New Chat.
+ it('keeps the chat a send created during the startup loads when the layout saved New Chat', async () => {
+  let release!: () => void; mocks.load.mockReturnValue(new Promise<void>(resolve => { release = resolve; }));
+  render(AppPage, { shell });
+  await waitFor(() => expect(mocks.load).toHaveBeenCalled());
+  active.set({ sessionId: 'sent-during-load', draft: '', project: null });
+  release(); await waitFor(() => expect(mocks.initGlobalStt).toHaveBeenCalledOnce());
+  expect(mocks.newChat).not.toHaveBeenCalled();
+  expect(get(active).sessionId).toBe('sent-during-load');
+  // The layout follows the created chat, so a reload reopens it.
+  await waitFor(() => expect(get(activeView)).toEqual({ type: 'session', sessionId: 'sent-during-load' }));
+ });
+ it('keeps a first send still creating its chat when the startup loads end (no layout snapshot)', async () => {
+  let release!: () => void; mocks.load.mockReturnValue(new Promise<void>(resolve => { release = resolve; }));
+  views.set(null); render(AppPage, { shell });
+  await waitFor(() => expect(mocks.load).toHaveBeenCalled());
+  // The send cleared the draft and shows its message; the session id is not back yet.
+  active.set({ sessionId: null, draft: '', project: null, messages: [{ role: 'user' }] } as never);
+  release(); await waitFor(() => expect(mocks.initGlobalStt).toHaveBeenCalledOnce());
+  expect(mocks.newChat).not.toHaveBeenCalled(); expect(mocks.openChat).toHaveBeenCalledWith(null);
+  expect((get(active) as unknown as { messages: unknown[] }).messages).toHaveLength(1);
+ });
  // #1636 review: the composer holds a send until the catalog answers, so the
  // catalog starts loading alongside init instead of after it.
  it('starts all independent bootstrap reads alongside init without reconciling early', async () => {

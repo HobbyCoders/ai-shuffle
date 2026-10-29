@@ -29,6 +29,7 @@
 				"frontend/src/lib/components/layout/chat-empty-state.ts",
 				"frontend/src/lib/components/layout/MainPanel.svelte",
 				"frontend/src/lib/components/layout/AppPage.svelte",
+				"frontend/src/lib/components/layout/boot-landing.ts",
 				"frontend/src/lib/components/layout/AppLayout.svelte",
 				"frontend/src/lib/components/layout/RootLayout.svelte",
 				"frontend/src/lib/components/chat/MessageArea.svelte",

@@ -34,6 +34,7 @@
 	import { layout, activeView, sidebarCollapsed, sidebarOverlay } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { createdChatToFollow } from './follow-created-chat';
+	import { chatChangedDuringBoot } from './boot-landing';
 	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
 	import { registerSearchShortcut } from '$lib/services/search-shortcut';
 	import { settingsNav, encodeTarget } from '$lib/settings/navigation.svelte';
@@ -221,6 +222,10 @@
 		const layoutNewChatWon = !navigationClaimed && !!$activeSession?.sessionId &&
 			$activeView?.type === 'session' && ($activeView.sessionId ?? null) === null;
 		if (layoutNewChatWon) activeSession.newChat();
+		// What init left open. The composer works during the loads below, so a
+		// different chat after them is one the user created or opened meanwhile,
+		// and the reconcile must not close it (#811).
+		const sessionAfterInit = $activeSession?.sessionId ?? null;
 		// Finish the New Chat's remembered project and branch as soon as the
 		// catalog is in, even under text typed while it loaded.
 		const catalogLoaded = catalogLoad.then(() => activeSession.resolveComposerDefaultsAfterCatalog());
@@ -261,12 +266,16 @@
 		// An empty landing is the new-session composer (handleNewSession below);
 		// a surviving draft keeps the composer it was typed in.
 		const hasDraft = hasComposerDraft($activeSession.draft);
+		// A first message typed and sent during the loads: its chat (or the send
+		// still creating it) is what the user is looking at now (#811).
+		const changedDuringLoads = chatChangedDuringBoot(sessionAfterInit, $activeSession);
 		if (!$activeView) {
 			if (restoredSessionId) {
 				followRestoredLane();
 				layout.openChat(restoredSessionId);
-			} else if (hasDraft) {
-				// Do not clear a surviving draft just because the layout snapshot is absent.
+			} else if (hasDraft || changedDuringLoads) {
+				// Do not clear a surviving draft, or a first send still creating
+				// its chat, just because the layout snapshot is absent.
 				layout.openChat(null);
 			} else {
 				handleNewSession();
@@ -275,9 +284,10 @@
 			// Layout says "new chat" but backend has a session — the user explicitly
 			// clicked New Chat (layout persists synchronously) but the async backend
 			// persist may not have completed. Respect the layout's explicit intent.
-			// When that was settled right after init, a session id here is one a
-			// send made during the loads, and it stays.
-			if (!layoutNewChatWon) activeSession.newChat();
+			// A session that appeared after init is not that stale one: a send
+			// made it during the loads (the layout follows it once boot is
+			// reconciled, createdChatToFollow), so it stays.
+			if (!layoutNewChatWon && !changedDuringLoads) activeSession.newChat();
 		} else if ($activeView.type === 'session' && currentViewSessionId !== restoredSessionId) {
 			// Layout view and active session disagree — backend is authoritative
 			followRestoredLane();

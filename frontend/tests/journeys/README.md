@@ -63,7 +63,22 @@ and gives every case a fresh browser context with that cookie.
 Output: one text report per case (the timeline, its anomalies and what was
 allowed as noise) on stdout and in `$JOURNEY_OUT/<journey>/` (default
 `$TMPDIR/journeys`). Exit code 1 if any case failed. Keep these out of the
-repo. Options:
+repo.
+
+A failed case also names the phase it failed in (`setup`, `act` or `verify`)
+and adds a **page trace** ([`lib/trace.mjs`](lib/trace.mjs)): what the page
+did over the whole case, the unrecorded `setup` included. It lists API requests
+and their status (method and path, no query), WebSocket frames by type (a
+`query` with whether it had a session, a request id and an agent, and the
+prompt's length), console errors and warnings, page errors and navigations.
+`typeAndSend` notes the composer before and after its click and 1.5 s later
+(the text's length and first characters, Send enabled or not, the chat
+signature, any banner or alert). A first send that went nowhere then shows
+whether the text was there, Send was pressed, the `query` went out and what
+came back. It records shapes, never message content beyond the journey's own
+prompt start.
+
+Options:
 
 | Env | Effect |
 | --- | --- |
@@ -176,6 +191,12 @@ Conventions:
   sidebar, send, wait for a settled turn, read the scroll position) are in
   `lib/app.mjs`; waits read the `data-ui-*` signature, never a fixed sleep
   for the outcome.
+- In CI the instance is on loopback, a secure context, so the built app's
+  service worker installs on a case's first load and the app reloads once
+  when it takes control (a plain-HTTP dev instance has no worker, so this
+  only happens in CI). A case that reloads on purpose calls
+  `settleServiceWorker(page, status)` in `setup` first, so its reload is the
+  only one.
 - Add the journey to `map.json` (`select.mjs --check` tells you).
 - How a case is judged (designed moves, known bugs, a lost recording) has its
   own self-test, no browser needed: `node --test
@@ -197,7 +218,7 @@ Conventions:
 | File | Guards |
 | --- | --- |
 | `new-worktree-session.journey.mjs` | Starting a new session (auto worktree, new branch, existing branch, main checkout) and sending its first message never shows the centred composer again, reloads or remounts the transcript. |
-| `chat-send-stream.journey.mjs` | A message in a new chat streams a reply that settles: the message shows once, `[script:long]` renders its code block and table (no raw fences), a follow-up works, and on every frame Stop shows while the reply streams and is gone once it ends. |
+| `chat-send-stream.journey.mjs` | A message in a new chat streams a reply that settles: the message shows once, `[script:long]` renders its code block and table (no raw fences), a follow-up works, and on every frame Stop shows while the reply streams and is gone once it ends. A returning visit's first message typed and sent the moment the composer shows, while a boot load is still held (`holdBootLoad`), keeps its text up to Send and its chat stays open after the load ends (#811). |
 | `tool-cards.journey.mjs` | `[script:tool-bash]` and `[script:tool-multi]`: the work log builds forward (no row leaves and comes back, no remount), the final text lands, the folded log names what ran, expanding shows one Complete card per call. |
 | `stop-midstream.journey.mjs` | Stop during `[script:slow tps=3]`: streaming ends and stays ended, Stop goes away, the partial reply stays without the rest arriving, the next message gets its reply. |
 | `queue-while-busy.journey.mjs` | A second message sent while a slow reply streams shows at once (queued), is delivered once after the first turn and answered; never shown twice on any frame, no pending bubble left. |
