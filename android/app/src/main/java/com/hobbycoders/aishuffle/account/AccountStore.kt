@@ -45,6 +45,10 @@ class AccountStore internal constructor(private val prefs: android.content.Share
     }
     /** Whether [beginSignIn] would reuse an id that an earlier sign-in already used. */
     fun hasInstallIdentity() = prefs.contains("install_id")
+    /** The account service's last /v1/oauth/start said it accepts a known device id. */
+    var hubReusesDevices: Boolean
+        get() = prefs.getBoolean("hub_device_reuse", false)
+        set(value) { prefs.edit().putBoolean("hub_device_reuse", value).commit() }
     /**
      * Proof that a worker enrollment comes from THIS installation, distinct per
      * worker so one worker cannot replay it to another. Only the hash is kept

@@ -55,6 +55,12 @@ class AccountStoreLifecycleTest {
         assertNotEquals(first, store.beginSignIn())
         assertNotEquals(proof, store.installProof("server-one"))
     }
+    @Test fun reuseIsOffUntilTheServiceAdvertisesItAndSurvivesSignOut() {
+        assertFalse(store.hubReusesDevices)
+        store.hubReusesDevices = true
+        store.clear(forgetInstall = true)
+        assertTrue(store.hubReusesDevices)
+    }
     @Test fun installProofIsPerWorkerAndNeverTheSecret() {
         store.beginSignIn()
         val one = store.installProof("server-one")

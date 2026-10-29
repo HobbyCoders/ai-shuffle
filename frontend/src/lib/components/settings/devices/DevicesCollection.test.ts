@@ -8,6 +8,7 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/sve
 import type { Install } from '$lib/api/installs';
 import type { PairedClient } from '$lib/api/pairing';
 import type { NetworkMember, NetworkStatus } from '$lib/api/network';
+import type { WorkerDeviceConfirmation } from '$lib/api/worker-device-confirmations';
 
 const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() }));
 const banner = vi.hoisted(() => vi.fn());
@@ -93,7 +94,7 @@ const enrolled = (): NetworkStatus => ({
 	pending_joins: [],
 	hub: { linked: false }
 });
-const request = {
+const request: WorkerDeviceConfirmation = {
 	device_id: 'dev-a',
 	hub_device_id: 'dv_7f3a91c2e4',
 	paired_client_id: 'pc-a',
@@ -112,7 +113,7 @@ const profile = {
 let status: NetworkStatus;
 let availability = { worker_id: 'self', desktop: true, always_on: false, always_on_override: null as boolean | null };
 let connection: unknown;
-let confirmations: (typeof request)[] | null = null;
+let confirmations: WorkerDeviceConfirmation[] | null = null;
 function reads(path: string): unknown {
 	if (path === '/network/status') return status;
 	if (path === '/cluster/installs')
@@ -233,7 +234,7 @@ describe('Devices list', () => {
 	});
 
 	it('lists only requests that still need a decision', async () => {
-		const decided = (n: string, extra: Partial<typeof request>) => ({
+		const decided = (n: string, extra: Partial<WorkerDeviceConfirmation>): WorkerDeviceConfirmation => ({
 			...request,
 			device_id: `dev-${n}`,
 			paired_client_id: `pc-${n}`,
