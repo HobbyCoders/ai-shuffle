@@ -8,7 +8,7 @@
 
 ## Running-app checks
 
-<!-- Say what you exercised in the app, or explicitly say it was tested only with fixtures. For visible changes, describe in text what you checked and at which widths; do not attach or link screenshots. Never include secrets or private data. -->
+<!-- Follow docs/internal/dev-workflow.md. List the journeys you ran against a dev instance (`python -m scripts.devloop up`) and their result, the flight recorder result for the flows you changed (no anomalies, or each one explained), and what a separate tester tried. For a bug fix, name the journey that reproduced it before the fix. If something was tested only with fixtures, say why and link the follow-up. Describe rendered checks in text with widths; do not attach or link screenshots. Never include secrets or private data. -->
 
 ## Not covered here
 
