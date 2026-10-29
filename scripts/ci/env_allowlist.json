@@ -2227,6 +2227,31 @@
     "reason": "Development-only assembled worker bundle root",
     "base_settings": true
   },
+  "SHUFFLE_DEV_ACCESS_FILE": {
+    "kind": "internal",
+    "reason": "Dev-loop launcher file where a disposable preview records its access link so app restarts reuse it; never inherited from the worker",
+    "base_settings": false
+  },
+  "SHUFFLE_DEV_FAKE_AI_URL": {
+    "kind": "internal",
+    "reason": "Dev-loop launcher's loopback fake AI endpoint that the disposable preview seed registers as its provider; never inherited from the worker",
+    "base_settings": false
+  },
+  "SHUFFLE_DEV_SEED": {
+    "kind": "internal",
+    "reason": "Dev-loop seed name; honoured only on a launcher-marked disposable preview data directory, never inherited from the worker",
+    "base_settings": false
+  },
+  "SHUFFLE_DEV_SEED_FILE": {
+    "kind": "internal",
+    "reason": "Dev-loop launcher file where a disposable preview reports its seed result; never inherited from the worker",
+    "base_settings": false
+  },
+  "SHUFFLE_DEV_UI": {
+    "kind": "internal",
+    "reason": "Dev-loop launcher flag: the disposable preview's UI is served by Vite dev, so the listener serves only /api/preview",
+    "base_settings": false
+  },
   "SHUFFLE_EXTENSION": {
     "kind": "internal",
     "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",

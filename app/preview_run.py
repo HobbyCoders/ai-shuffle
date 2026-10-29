@@ -4,7 +4,7 @@ No inherited DATA_DIR, credential file or database URL is used. Run under a
 Monitor task, never daemonize it. Normal exit, Ctrl-C, SIGTERM, parent loss and
 TTL expiry all run the same teardown. SIGKILL cannot execute Python finalizers.
 The dev loop (``python -m scripts.devloop up``) reuses this lease with a
-restart hook and ``SHUFFLE_DEV_*`` settings.
+restart hook and its own settings (``DEV_ENV_KEYS``).
 """
 from __future__ import annotations
 
@@ -31,8 +31,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: The only settings a launcher may add to the controlled preview environment.
-DEV_ENV_PREFIX = "SHUFFLE_DEV_"
+#: The only settings a launcher may add to the controlled preview environment
+#: (the dev loop's; see docs/internal/dev-loop.md).
+DEV_ENV_KEYS = frozenset({
+    "SHUFFLE_DEV_ACCESS_FILE", "SHUFFLE_DEV_FAKE_AI_URL", "SHUFFLE_DEV_SEED",
+    "SHUFFLE_DEV_SEED_FILE", "SHUFFLE_DEV_UI",
+})
 
 
 def free_port(*, exclude: Iterable[int] = ()) -> int:
@@ -51,12 +55,13 @@ def preview_environment(
 ) -> dict[str, str]:
     """The app's whole environment: nothing inherited but PATH/LANG/LD_LIBRARY_PATH.
 
-    ``extra`` may only add ``SHUFFLE_DEV_*`` settings; it can never replace an
+    ``extra`` may only add the dev loop's settings (:data:`DEV_ENV_KEYS`); it can never replace an
     isolation setting (data dir, home, ports) or smuggle in a credential.
     """
     for key in extra or {}:
-        if not key.startswith(DEV_ENV_PREFIX) or not key[len(DEV_ENV_PREFIX):]:
-            raise ValueError(f"Preview environment extras must be {DEV_ENV_PREFIX}* settings: {key}")
+        if key not in DEV_ENV_KEYS:
+            raise ValueError(f"Preview environment extras must be one of "
+                             f"{', '.join(sorted(DEV_ENV_KEYS))}: {key}")
     directory = Path(directory)
     home = directory / "home"
     home.mkdir()

@@ -108,7 +108,7 @@ the data.
 * Never point it at, or run it beside, the live worker's data, database or
   ports; it never reads them, and it inherits no `DATA_DIR`, `DATABASE_URL`, key
   or DSN (the app's environment is PATH/LANG/LD_LIBRARY_PATH plus its own
-  settings; launcher extras must be `SHUFFLE_DEV_*`).
+  settings; the launcher may add only the dev loop's own `SHUFFLE_DEV_*` settings).
 * Never copy a `.env` into the checkout.
 * The preview cookie cannot change auth, credentials, settings or providers,
   so seed what you need instead of clicking it into Settings.
