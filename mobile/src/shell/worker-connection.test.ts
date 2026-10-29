@@ -28,6 +28,17 @@ describe('"Connected to" workers', () => {
 		]);
 	});
 
+	it('does not assume the current worker is online', () => {
+		const rows = connectionWorkers([install('pc', { is_self: true, online: false })], [], new Set());
+		expect(rows[0]).toMatchObject({ current: true, online: false });
+	});
+
+	it('uses fresh connection evidence only for the current worker', () => {
+		const installs = [install('pc', { is_self: true }), install('unraid')];
+		expect(connectionWorkers(installs, [], new Set(), false).map((row) => row.online)).toEqual([false, true]);
+		expect(connectionWorkers([install('pc', { is_self: true, online: false })], [], new Set(), true)[0].online).toBe(true);
+	});
+
 	it('leaves out revoked and unapproved workers', () => {
 		const rows = connectionWorkers([install('pc', { is_self: true }), install('x', { approved: false }), install('y', { revoked_at: 'now' })], [], new Set());
 		expect(rows).toHaveLength(1);
@@ -48,8 +59,10 @@ describe('switching the app\'s connection', () => {
 			.toEqual({ kind: 'browser', url: 'https://unraid.test/mobile/' });
 	});
 
-	it('points to the app menu when the app cannot switch from the page', () => {
-		expect(switchRoute(unraid, { inApp: true, canSwitch: false, pageUrl: page }).kind).toBe('unavailable');
+	it('points to Settings and an app update when an old app cannot switch', () => {
+		expect(switchRoute(unraid, { inApp: true, canSwitch: false, pageUrl: page })).toEqual({
+			kind: 'unavailable', reason: 'Update the Android app to switch workers here. Manage workers in Settings > Devices.'
+		});
 	});
 
 	it('does nothing for the current worker and refuses an offline one', () => {

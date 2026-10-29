@@ -416,8 +416,10 @@ class _RecordingProvider:
 
         self.calls += 1
         self.prompts.append(request.messages[-1].text())
-        yield StreamChunk("text_delta", text="Acknowledged")
-        yield StreamChunk("done", stop_reason="end_turn")
+        yield StreamChunk("block_start", {"index": 0, "block_type": "text"})
+        yield StreamChunk("text_delta", {"index": 0, "text": "Acknowledged"})
+        yield StreamChunk("block_stop", {"index": 0})
+        yield StreamChunk("usage", {"usage": {}, "stop_reason": "end_turn"})
 
 
 async def _parked_root(workers, monkeypatch, runtime_present):
@@ -455,6 +457,16 @@ def _held_rows(session_id):
     from app.db import wakeups as wakeups_db
 
     return wakeups_db.get_session_wakeups(session_id, wakeup_service.HELD_PEER_SOURCE)
+
+
+async def _legacy_main(text):
+    """Persist the parked note exactly as the previous release did."""
+    from fluid.context.peer import format_peer_message
+    from app.core import turn_scheduler
+
+    return await turn_scheduler._hold_peer_message(
+        "root", format_peer_message("reporting-worker", text).strip(),
+    )
 
 
 async def _message_main(text, *, urgent=False):
@@ -533,8 +545,8 @@ async def test_worker_message_to_idle_parent_uses_owned_turn_queue(
 ):
     """A real Task sends its parked parent a progress message, then completes.
 
-    The message must not wake the parent: it is held, the sender is told so,
-    and the parent reads it once, in the unpark wake the completion brings.
+    The message wakes the parent immediately, before the worker finishes,
+    and the later completion wake must not deliver that progress note again.
     ``runtime_present=False`` covers the scheduler fallback; True covers a
     live engine, which the app does not offer an idle-time message to.
     """
@@ -545,14 +557,17 @@ async def test_worker_message_to_idle_parent_uses_owned_turn_queue(
     )
     try:
         result = await _message_main("Progress before completion")
-        assert result.text == messaging.held_receipt("main")
+        assert result.text == "Queued for main"
         assert engine._turn_task is None, "SendMessage started an unowned engine turn"
-        assert turns_db.get_queued_turns("root") == []
-        assert kicks == []
-        (held,) = _held_rows("root")
-        assert "Progress before completion" in held["prompt"]
-        assert "from='reporting-worker'" in held["prompt"]
-        assert held["profile_id"] == "profile"
+        (message,) = turns_db.get_queued_turns("root")
+        assert message["source"] == "agent_message"
+        assert message["payload"]["task_peer_sender"] == "reporting-worker"
+        assert kicks == ["root"]
+        assert _held_rows("root") == []
+        assert not workers.jobs["reporting-worker"].done()
+        await _run_queued(engine, "root")
+        assert provider.calls == 1
+        assert provider.prompts[0].count("Progress before completion") == 1
 
         # dispatch_worker produces the real terminal frame. Feed that to the
         # real scheduler (dispatch_env captured it rather than auto-running it).
@@ -562,17 +577,12 @@ async def test_worker_message_to_idle_parent_uses_owned_turn_queue(
         (wake,) = turns_db.get_queued_turns("root")
         assert wake["source"] == "unpark"
         assert wake["payload"]["task_ids"] == ["reporting-worker"]
-        assert "Progress before completion" in wake["payload"]["held_peer_messages"]
+        assert "held_peer_messages" not in wake["payload"]
         assert _held_rows("root") == []
 
         await _run_queued(engine, "root")
-        assert provider.calls == 1
-        (request_text,) = provider.prompts
-        reminder = request_text[request_text.index("<system-reminder>"):]
-        assert "Progress before completion" in reminder
-        assert request_text.index("<task-notification>") < request_text.index(
-            "Progress before completion"
-        )
+        assert provider.calls == 2
+        assert "Progress before completion" not in provider.prompts[1]
         assert turns_db.get_queued_turns("root") == []
     finally:
         await engine.aclose()
@@ -590,7 +600,7 @@ async def test_urgent_worker_message_wakes_a_parked_parent_now(
         workers, monkeypatch, runtime_present,
     )
     try:
-        await _message_main("Interim note")
+        await _legacy_main("Interim note")
         assert kicks == []
         result = await _message_main("Blocked: may I edit control.py?", urgent=True)
         assert result.text == "Queued for main"
@@ -610,9 +620,9 @@ async def test_urgent_worker_message_wakes_a_parked_parent_now(
 
 def test_held_receipt_tells_the_sender_not_to_wait():
     text = messaging.held_receipt("main")
-    assert text.startswith("Held for main until it wakes")
-    assert "Do not wait for a reply" in text
-    assert "urgent=true" in text
+    assert text.startswith("Queued for main")
+    assert "Do not resend" in text
+    assert "urgent" not in text and "Held for" not in text
     assert "Delivered" not in text
 
 
@@ -628,9 +638,9 @@ async def test_held_messages_are_promoted_durably_across_a_restart(
 
     engine, provider, kicks, context = await _parked_root(workers, monkeypatch, False)
     try:
-        await _message_main("First interim note")
+        await _legacy_main("First interim note")
         (first,) = _held_rows("root")
-        await _message_main("Second interim note")
+        await _legacy_main("Second interim note")
         (held,) = _held_rows("root")
         assert held["fire_at"] == pytest.approx(first["fire_at"], abs=1.0)
         assert held["fire_at"] - first["fire_at"] < 1.0

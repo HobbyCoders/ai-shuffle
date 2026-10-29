@@ -54,6 +54,7 @@ from app.core.history_backfill import ensure_backfilled
 from app.core.turn_recorder import slim_turn_usage_payload
 from app.db.session_events import (
     EMPTY_LOG_EPOCH,
+    can_backfill_events,
     get_events,
     get_compaction_events_before,
     get_log_epoch,
@@ -828,23 +829,18 @@ async def event_stream(
 
         # Consecutive historical streaming deltas remain coalesced into one
         # frame per run (see ``_replay_from``).
-        replayed = False
         async for seq, frame in _replay_from(session_id, cursor):
             yield frame
             cursor = seq
-            replayed = True
             frames_sent += 1
             bytes_sent += len(frame)
 
-        # 1a. Legacy-history seeding, made LAZY. ``ensure_backfilled``
-        #     re-materializes a whole legacy transcript into ``session_events``;
-        #     it is needed only when this feed is the render authority AND the
-        #     log has nothing to serve. A populated log (the overwhelmingly
-        #     common case) pays no probing read, and a reconnect
-        #     (``from_seq > 0``) never re-seeds history the client already holds
-        #     — seeding one there would replay a duplicate legacy prefix past a
-        #     cursor the client cannot reconcile.
-        if not replayed and cursor == 0 and from_seq == 0:
+        # 1a. Cancellation is durable but has no transcript row. A cancellation-
+        #     only log still needs legacy history, including on a reconnect that
+        #     has already seen that prefix. Probe only event types, not history;
+        #     the backfill writer rechecks under the counter lock. New history
+        #     appends AFTER the current cursor, so normal replay serves it once.
+        if await asyncio.to_thread(can_backfill_events, session_id, allow_empty=from_seq == 0):
             await ensure_backfilled(session_id)
             async for seq, frame in _replay_from(session_id, cursor):
                 yield frame

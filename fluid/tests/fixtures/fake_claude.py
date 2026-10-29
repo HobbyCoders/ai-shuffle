@@ -430,6 +430,11 @@ def turn_peer_boundary(sid: str) -> None:
     }})
     resp = wait_for("control_response") or {}
     allowed = (resp.get("response") or {}).get("response", {}).get("behavior") == "allow"
+    if os.environ.get("FAKE_CLAUDE_PEER_NO_BOUNDARY") == "1":
+        # The CLI can end after transport admission without another tool result.
+        emit(assistant_frame(sid, [{"type": "text", "text": "Ended before tool result."}], "end_turn"))
+        emit(result_frame(sid))
+        return
     sub = "toolu_sub_1"
     sub_frame = assistant_frame(
         sid, [{"type": "tool_use", "id": sub, "name": "Bash", "input": args}], "tool_use",
