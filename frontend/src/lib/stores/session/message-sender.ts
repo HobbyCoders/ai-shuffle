@@ -26,7 +26,7 @@ import { getDefaultModel, getServerDefaultModel } from '$lib/constants/models';
 import { composerPreferences } from '../composer-preferences';
 import { sendableComposerBinding } from './composer-binding';
 import { registerReloadBlocker } from '$lib/services/app-update';
-import { claimBootSend } from './session-init';
+import { claimBootSend, releaseBootSend } from './session-init';
 
 // ─── Sends in flight ─────────────────────────────────────────────────────────
 
@@ -460,9 +460,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// The same spend point records who owns the session about to be
 			// created, so every bind below starts with a known owner.
 			if (!_state.sessionId) {
-				// Own the live compose before worktree creation or the socket can
-				// await: init and BOTH layout reconciles must leave it alone (#821).
-				claimBootSend();
 				sessionEphemeralCache.remove('__new_chat__');
 				claimNewSessionWorker();
 			}
@@ -482,15 +479,21 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// counts as sent: the request is out, and its text must not
 				// reappear in the view the user moved to.
 				const creationGen = internal.worktreeCreationGeneration;
-				let accepted: boolean;
-				if (_state.worktreeMode === 'existing' && _state.worktreeId) {
-					accepted = await startSessionOnExistingWorktree(prompt, options?.pendingUploadPaths);
-				} else if (_state.worktreeBranch) {
-					accepted = (await getActiveSession().createWorktree(prompt, options?.pendingUploadPaths)) !== null;
-				} else {
-					accepted = await getActiveSession().autoCreateWorktree(prompt, options?.pendingUploadPaths);
+				const bootClaim = claimBootSend();
+				let accepted = false;
+				try {
+					if (_state.worktreeMode === 'existing' && _state.worktreeId) {
+						accepted = await startSessionOnExistingWorktree(prompt, options?.pendingUploadPaths);
+					} else if (_state.worktreeBranch) {
+						accepted = (await getActiveSession().createWorktree(prompt, options?.pendingUploadPaths)) !== null;
+					} else {
+						accepted = await getActiveSession().autoCreateWorktree(prompt, options?.pendingUploadPaths);
+					}
+					accepted ||= creationGen !== internal.worktreeCreationGeneration;
+					return accepted;
+				} finally {
+					if (!accepted) releaseBootSend(bootClaim);
 				}
-				return accepted || creationGen !== internal.worktreeCreationGeneration;
 			}
 
 			// Backstop: a worktree-intended NEW session must never fall through to
@@ -705,7 +708,15 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				}
 				return true;
 			}
-			const querySent = wsConn.send(query);
+			// Admission, not the earlier connection/validation attempt, owns boot.
+			// No await separates the optimistic echo from this dispatch (#821).
+			const bootClaim = !_state.sessionId ? claimBootSend() : null;
+			let querySent = false;
+			try {
+				querySent = wsConn.send(query);
+			} finally {
+				if (!querySent) releaseBootSend(bootClaim);
+			}
 			if (!querySent) {
 				// WS dropped before the frame went out. Roll the optimistic echo back
 				// and surface an error so the caller can restore the input.

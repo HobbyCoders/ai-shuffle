@@ -70,8 +70,9 @@ const base = () => ({ sessionId: null, title: 'New Chat', mode: 'chat', draft: '
 	isStreaming: false, isRestoringSession: false, error: null } as unknown as ActiveSessionState);
 function deferred<T>() {
 	let resolve!: (value: T) => void;
-	const promise = new Promise<T>(done => { resolve = done; });
-	return { promise, resolve };
+	let reject!: (error: Error) => void;
+	const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+	return { promise, resolve, reject };
 }
 function setup() {
 	const update = state.update, getState = () => get(state);
@@ -81,7 +82,7 @@ function setup() {
 	const wsConn = { send, isConnected: () => true, resetReconnectAttempts: vi.fn(), activate: vi.fn(), connect: vi.fn(), disconnect: vi.fn(), destroy: vi.fn() };
 	const cache = { save: vi.fn(), restore: () => null, remove: vi.fn() };
 	const switcher = createSessionSwitcher({ update, getState, internal, wsSend: send, sessionEphemeralCache: cache, onPersistTimerChanged: vi.fn() });
-	const preferences = deferred<null>();
+	const preferences = deferred<{ selectedProfile: string; selectedProject: string } | null>();
 	const init = createSessionInit({ update, getState, internal, wsConn, defaultState: base, setState: state.set, notifySubscribers: vi.fn(),
 		switcher: { ...switcher, loadSelectionFromBackend: () => preferences.promise, refreshSessionMetadata: vi.fn(async () => {}) },
 		appData: { loadSessions: vi.fn() }, disconnect: vi.fn(), persistSession: switcher.persistSession,
@@ -89,16 +90,18 @@ function setup() {
 	mocks.init.mockImplementation(init.init);
 	mocks.destroy.mockImplementation(() => { init.destroy(); switcher.destroy(); });
 	mocks.newChat.mockImplementation(() => { switcher.newChat(); });
+	const createWorktree = vi.fn(async (): Promise<string | null> => null);
+	const autoCreateWorktree = vi.fn(async () => false);
 	const sender = createMessageSender({ update, getState, internal, wsConn, sessionEphemeralCache: cache,
 		appData: { loadSessions: vi.fn(), loadApiUserSessions: vi.fn() }, persistSession: switcher.persistSession,
-		stopTimeout: { get: () => null, set: vi.fn() }, getActiveSession: vi.fn() });
+		stopTimeout: { get: () => null, set: vi.fn() }, getActiveSession: () => ({ createWorktree, autoCreateWorktree, sendMessage: vi.fn() }) });
 	const handlers = createMessageHandlers({ update, getState, internal, wsSend: send,
 		streamingSessions: writable(new Map()), backgroundPermissions: writable(new Map()),
 		gitRefreshStatus: vi.fn(), gitRefreshDiffStats: vi.fn(), gitGetProjectId: () => null, gitGetLoading: () => false,
 		appLoadSessions: vi.fn(), appLoadApiUserSessions: vi.fn(), mergeSessionPatch: () => false,
 		onNewChat: mocks.newChat, onPersistSession: switcher.persistSession, onNotifySessionComplete: vi.fn(),
 		onNotifyWaitingForResponse: vi.fn(), wsIsConnected: () => true, clearStopTimeout: vi.fn() });
-	return { sender, init, preferences, send, adopt: () => handlers.handleMessage({ type: 'session_created', session_id: 'created', request_id: internal.pendingRequestId }) };
+	return { sender, init, preferences, send, wsConn, createWorktree, autoCreateWorktree, adopt: () => handlers.handleMessage({ type: 'session_created', session_id: 'created', request_id: internal.pendingRequestId }) };
 }
 
 beforeEach(() => {
@@ -108,7 +111,7 @@ beforeEach(() => {
 	mocks.ready.mockReturnValue(vi.fn()); mocks.reconcileSessionMode.mockReturnValue('chat');
 	vi.stubGlobal('fetch', vi.fn(async () => new Response('{}')));
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); mocks.destroy(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 for (const view of ['absent', 'new-chat'] as const) {
 	for (const snapshot of ['absent', 'null', 'old'] as const) {
@@ -131,6 +134,8 @@ for (const view of ['absent', 'new-chat'] as const) {
 			ctx.preferences.resolve(null);
 			await waitFor(() => expect(mocks.ready).toHaveBeenCalledOnce());
 			expect(mocks.newChat).not.toHaveBeenCalled();
+			expect(ctx.wsConn.activate).toHaveBeenCalledOnce();
+			expect(ctx.wsConn.connect).toHaveBeenCalledOnce();
 			expect(ctx.send).not.toHaveBeenCalledWith({ type: 'close_session' });
 			expect(get(state).sessionId).toBe(pendingId ? null : 'created');
 			expect(get(state).messages.map(message => message.content)).toEqual(['first message']);
@@ -146,3 +151,78 @@ for (const view of ['absent', 'new-chat'] as const) {
 		});
 	}
 }
+
+
+// A failed admission is not live ownership. Hold init with a real promise,
+// exercise each sender refusal, and only then release preference hydration.
+for (const remounted of [false, true]) {
+	it.each([
+		'missing-worktree', 'worktree-in-flight', 'compact-first', 'connection-timeout',
+		'dispatch-refused', 'dispatch-throws', 'create-refused', 'create-throws',
+		'auto-refused', 'auto-throws', 'existing-no-profile', 'existing-no-project'
+	])(`restores and reconnects after %s (remounted=${remounted})`, async refusal => {
+		mocks.get.mockResolvedValue({ value: { sessionId: 'saved', title: 'Saved chat', profile: 'saved-profile' } });
+		const ctx = setup();
+		if (remounted) ctx.init.destroy();
+		const initializing = ctx.init.init();
+		const generation = getInitGeneration();
+		const worktree = { worktreeIntent: 'worktree' as const, worktreeMode: 'new' as const };
+		if (refusal === 'missing-worktree') state.update(s => ({ ...s, ...worktree, worktreeMode: 'existing' }));
+		if (refusal === 'worktree-in-flight') state.update(s => ({ ...s, ...worktree, messages: [{ id: 'pending', role: 'user', content: 'pending' }] }));
+		if (refusal.startsWith('create-')) state.update(s => ({ ...s, ...worktree, worktreeBranch: 'feature/test' }));
+		if (refusal.startsWith('auto-')) state.update(s => ({ ...s, ...worktree }));
+		if (refusal.startsWith('existing-no-')) state.update(s => ({ ...s, ...worktree, worktreeMode: 'existing', worktreeId: 'wt', profile: refusal === 'existing-no-profile' ? '' : s.profile }));
+		if (refusal === 'dispatch-refused') ctx.send.mockReturnValue(false);
+		if (refusal === 'dispatch-throws') ctx.send.mockImplementation(() => { throw new Error('dispatch failed'); });
+		if (refusal === 'create-throws') ctx.createWorktree.mockRejectedValue(new Error('creation failed'));
+		if (refusal === 'auto-throws') ctx.autoCreateWorktree.mockRejectedValue(new Error('creation failed'));
+		if (refusal === 'connection-timeout') {
+			vi.useFakeTimers();
+			vi.spyOn(ctx.wsConn, 'isConnected').mockReturnValue(false);
+		}
+		const sending = ctx.sender.sendMessage('refused first message', refusal === 'compact-first' ? { compactFirst: true } : undefined);
+		if (refusal === 'connection-timeout') await vi.advanceTimersByTimeAsync(3100);
+		if (refusal.endsWith('-throws') || refusal === 'compact-first') await expect(sending).rejects.toThrow();
+		else expect(await sending).toBe(false);
+		expect(hasBootSendClaim(generation)).toBe(false);
+		ctx.preferences.resolve({ selectedProfile: 'default-profile', selectedProject: 'default-project' });
+		await initializing;
+		expect(get(state).sessionId).toBe('saved');
+		expect(ctx.wsConn.activate).toHaveBeenCalledOnce();
+		expect(ctx.wsConn.connect).toHaveBeenCalled();
+		expect(ctx.wsConn.activate.mock.invocationCallOrder[0]).toBeLessThan(ctx.wsConn.connect.mock.invocationCallOrder.at(-1)!);
+		if (remounted) expect(ctx.wsConn.destroy.mock.invocationCallOrder[0]).toBeLessThan(ctx.wsConn.activate.mock.invocationCallOrder[0]);
+	});
+}
+
+it.each([false, true])('fills defaults and re-arms the socket under an accepted send (adopted=%s)', async adopted => {
+	mocks.get.mockResolvedValue({ value: { sessionId: 'stale', profile: 'stale-profile', project: 'stale-project' } });
+	const ctx = setup();
+	state.update(s => ({ ...s, mode: 'code', profile: '', project: '' }));
+	const initializing = ctx.init.init();
+	expect(await ctx.sender.sendMessage('accepted first message')).toBe(true);
+	if (adopted) ctx.adopt();
+	ctx.preferences.resolve({ selectedProfile: 'default-profile', selectedProject: 'default-project' });
+	await initializing;
+	expect(get(state)).toMatchObject({ sessionId: adopted ? 'created' : null, profile: 'default-profile', project: 'default-project', isRestoringSession: false });
+	expect(get(state).messages.map(message => message.content)).toEqual(['accepted first message']);
+	expect(ctx.wsConn.activate).toHaveBeenCalledOnce();
+	expect(ctx.wsConn.connect).toHaveBeenCalledOnce();
+});
+
+it('logs an init rejection under a live claim, clears the restore window and reconnects', async () => {
+	mocks.get.mockResolvedValue({ value: { sessionId: 'stale' } });
+	const ctx = setup();
+	const initializing = ctx.init.init();
+	expect(await ctx.sender.sendMessage('accepted first message')).toBe(true);
+	ctx.adopt();
+	state.update(s => ({ ...s, isRestoringSession: true }));
+	const failure = new Error('preference hydration failed');
+	const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+	ctx.preferences.reject(failure);
+	await initializing;
+	expect(error).toHaveBeenCalledWith('[ActiveSession] Failed to initialize:', failure);
+	expect(get(state)).toMatchObject({ sessionId: 'created', isRestoringSession: false });
+	expect(ctx.wsConn.activate).toHaveBeenCalledOnce();
+	expect(ctx.wsConn.connect).toHaveBeenCalledOnce();
+});

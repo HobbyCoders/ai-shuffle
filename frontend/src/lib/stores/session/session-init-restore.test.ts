@@ -10,7 +10,7 @@ vi.mock('./v2/feed-controller', () => ({
 	},
 }));
 
-import { bumpInitGeneration, claimBootSend, createSessionInit, finishBootReconciliation, getInitGeneration, hasBootSendClaim, setSkipRestore, tabWillRestoreChat, type SessionInitDeps } from './session-init';
+import { bumpInitGeneration, claimBootSend, createSessionInit, finishBootReconciliation, getInitGeneration, hasBootSendClaim, releaseBootSend, setSkipRestore, tabWillRestoreChat, type SessionInitDeps } from './session-init';
 import { feedController } from './v2/feed-controller';
 import type { ActiveSessionState, PersistedSession } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
@@ -101,12 +101,16 @@ describe('boot send claim lifetime (#821)', () => {
 	});
 	it('does not carry a claim into another boot or let an old reconcile clear a new claim', async () => {
 		const { init, destroy } = makeInit(null);
-		await init(); const old = getInitGeneration(); claimBootSend();
+		await init(); const old = getInitGeneration(); const oldClaim = claimBootSend();
 		await init(); const current = getInitGeneration();
 		expect(hasBootSendClaim(old)).toBe(false);
 		expect(hasBootSendClaim(current)).toBe(false);
-		claimBootSend(); finishBootReconciliation(old);
+		const first = claimBootSend(); const second = claimBootSend();
+		finishBootReconciliation(old); releaseBootSend(oldClaim); releaseBootSend(second);
 		expect(hasBootSendClaim(current)).toBe(true);
+		releaseBootSend(first);
+		expect(hasBootSendClaim(current)).toBe(false);
+		claimBootSend();
 		destroy();
 		expect(hasBootSendClaim(current)).toBe(false);
 	});
