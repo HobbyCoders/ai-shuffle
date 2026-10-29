@@ -9,7 +9,8 @@ import asyncio
 import time
 import uuid
 from collections import OrderedDict
-from typing import Annotated, Literal
+from collections.abc import Awaitable, Callable
+from typing import Annotated, Any, Literal, TypeVar
 
 from pydantic import BaseModel, Field, StrictBool, StrictFloat, StrictInt, TypeAdapter, ValidationError
 
@@ -66,7 +67,8 @@ class ActionRequest(Input):
 PEER_REQUEST = TypeAdapter(Annotated[StatusRequest | ActionRequest, Field(discriminator="operation")])
 
 
-def parse_request(body):
+def parse_request(body: object) -> StatusRequest | ActionRequest:
+    """Validate the closed peer envelope without reflecting invalid input."""
     try:
         return PEER_REQUEST.validate_python(body)
     except ValidationError:
@@ -122,35 +124,43 @@ class Result(BaseModel):
 FANOUT = 8
 READ_TIMEOUT = 3.0
 CACHE_SECONDS = 5.0
-_readings = {}
-_receipts = OrderedDict()
+T = TypeVar("T")
+_readings: dict[str, tuple[asyncio.Task[Any], float]] = {}
+_receipts: OrderedDict[tuple[str, str], tuple[float, str, dict[str, Any]]] = OrderedDict()
 _action_lock = asyncio.Lock()
 
 
-def _result(outcome, reason=None, **fields):
+def _result(outcome: Outcome, reason: Reason | None = None, **fields: Any) -> dict[str, Any]:
     return Result(outcome=outcome, reason=reason or outcome, **fields).model_dump()
 
 
-async def _cached(key, read):
-    """Share in-flight reads, including a slow CLI probe; no subprocess stampede."""
-    now = time.monotonic()
+async def _cached(key: str, read: Callable[[], Awaitable[T]]) -> T | None:
+    """Share in-flight reads; cache their results for five seconds after completion."""
     entry = _readings.get(key)
-    if entry is None or (entry[0].done() and now >= entry[1]):
-        async def safe_read():
+    if entry is None or (entry[0].done() and time.monotonic() >= entry[1]):
+        async def safe_read() -> T | None:
             try:
                 return await read()
             except Exception:
                 # Never echo exception/CLI output, which may contain private data.
                 return None
-        entry = (asyncio.create_task(safe_read()), now + CACHE_SECONDS)
+
+        def completed(task: asyncio.Task[T | None]) -> None:
+            current = _readings.get(key)
+            if current is not None and current[0] is task:
+                _readings[key] = (task, time.monotonic() + CACHE_SECONDS)
+
+        task = asyncio.create_task(safe_read())
+        entry = (task, float("inf"))
         _readings[key] = entry
+        task.add_done_callback(completed)
     try:
         return await asyncio.wait_for(asyncio.shield(entry[0]), timeout=READ_TIMEOUT)
     except TimeoutError:
         return None
 
 
-def _claude():
+def _claude() -> dict[str, Any]:
     install = claude_cli_install.payload()
     cli = claude_cli_status.get_status()
     return ClaudeStatus(**{key: install[key] for key in (
@@ -159,7 +169,7 @@ def _claude():
         status_available=cli.error is None).model_dump()
 
 
-async def local_status():
+async def local_status() -> dict[str, Any]:
     claude, github, channel = await asyncio.gather(
         _cached("claude", lambda: run_sync(_claude)),
         _cached("github", lambda: run_sync(auth_service.is_github_authenticated)),
@@ -168,12 +178,12 @@ async def local_status():
     return MachineStatus(claude=claude, github_signed_in=github, release_channel=channel).model_dump()
 
 
-def _invalidate():
+def _invalidate() -> None:
     for key in ("claude", "channel"):
         _readings.pop(key, None)
 
 
-def _local_action(action):
+def _local_action(action: Action) -> dict[str, Any]:
     if isinstance(action, ReleaseChannel):
         # The same platform, launcher acknowledgement and downgrade checks as
         # the local Updates picker. Never write update-channel.json ourselves.
@@ -203,7 +213,7 @@ def _local_action(action):
     return _result("accepted", "saved" if isinstance(action, ClaudeKeep) else "done")
 
 
-async def apply_once(body: ActionRequest, from_device: str):
+async def apply_once(body: ActionRequest, from_device: str) -> dict[str, Any]:
     """Remember a receipt before dispatch; even an uncertain retry cannot execute twice."""
     now = time.time()
     if not now <= body.expires_at <= now + 15:
@@ -236,7 +246,7 @@ async def apply_once(body: ActionRequest, from_device: str):
         return result
 
 
-async def peer_action(body, from_device):
+async def peer_action(body: object, from_device: str) -> dict[str, Any]:
     ctx = engine.context()
     member = ctx.member(from_device) if ctx else None
     if (not member or from_device == ctx.device_id or member.kind != membership.KIND_WORKER
@@ -248,7 +258,9 @@ async def peer_action(body, from_device):
     return await apply_once(request, from_device)
 
 
-async def _remote(row, body, *, action="worker-settings"):
+async def _remote(
+    row: dict[str, Any], body: dict[str, Any], *, action: str = "worker-settings",
+) -> dict[str, Any]:
     try:
         raw = await asyncio.wait_for(control.call(row["device_id"], action, body, timeout=3), timeout=4)
         return Result.model_validate(raw).model_dump()
@@ -268,7 +280,7 @@ async def _remote(row, body, *, action="worker-settings"):
         return _result("uncertain")
 
 
-def _directory():
+def _directory() -> list[dict[str, Any]]:
     listing = runners.directory()
     rows = listing["runners"]
     if not any(row["is_self"] for row in rows):
@@ -280,16 +292,25 @@ def _directory():
     return rows
 
 
-def _instance(row):
+def _instance(row: dict[str, Any]) -> str | None:
     if row["is_self"]:
         return settings.effective_instance_id
-    if row.get("legacy_instance_id"):
-        return row["legacy_instance_id"]
-    aliases = [alias for alias, device in engine.instance_aliases().items() if device == row["device_id"]]
-    return aliases[0] if len(aliases) == 1 else None
+    device_id = row["device_id"]
+    # This local-only table is written solely from verified signed presence.
+    # A current claim supersedes the install ID embedded in an older certificate.
+    with database.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT instance_id FROM network_instance_aliases WHERE device_id = %s", (device_id,))
+        current = cursor.fetchone()
+    instance = current["instance_id"] if current is not None else row.get("legacy_instance_id")
+    # The alias map also enforces active membership and collision refusal. Its
+    # device-ID identity entries are routing aliases, never install claims.
+    if instance and instance != device_id and engine.instance_aliases().get(instance) == device_id:
+        return instance
+    return None
 
 
-def _availability(row):
+def _availability(row: dict[str, Any]) -> dict[str, bool | None]:
     instance = _instance(row)
     override = None
     if instance:
@@ -300,18 +321,18 @@ def _availability(row):
     return {"editable": instance is not None, "always_on": effective, "always_on_override": override}
 
 
-async def snapshot():
+async def snapshot() -> dict[str, list[dict[str, Any]]]:
     rows = await run_sync(_directory)
     semaphore = asyncio.Semaphore(FANOUT)
 
-    async def read(row):
+    async def read(row: dict[str, Any]) -> dict[str, Any]:
         availability = await run_sync(_availability, row)
         if row["is_self"]:
             result = _result("ok", "done", status=await local_status())
         elif not row["online"]:
             result = _result("offline")
         else:
-            async def read_peer():
+            async def read_peer() -> dict[str, Any]:
                 # Hold a slot until the underlying call ends, even if the UI's
                 # short read budget has elapsed and the task is cached in flight.
                 async with semaphore:
@@ -324,7 +345,7 @@ async def snapshot():
     return {"workers": await asyncio.gather(*(read(row) for row in rows))}
 
 
-async def dispatch(request: Dispatch):
+async def dispatch(request: Dispatch) -> dict[str, Any]:
     rows = await run_sync(_directory)
     selected = rows if request.target == "all" else [r for r in rows if r["device_id"] == request.target]
     if not selected:
@@ -334,7 +355,7 @@ async def dispatch(request: Dispatch):
                          action=request.action)
     semaphore = asyncio.Semaphore(FANOUT)
 
-    async def send(row):
+    async def send(row: dict[str, Any]) -> dict[str, Any]:
         async with semaphore:
             if isinstance(request.action, AlwaysOn):
                 instance = await run_sync(_instance, row)

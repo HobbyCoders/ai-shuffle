@@ -1,8 +1,10 @@
 """Machine-settings wire contract, controlled peer fanout and token-free status."""
 import asyncio
+import inspect
 import json
 import time
 from types import SimpleNamespace
+from typing import get_type_hints
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -23,6 +25,10 @@ def isolated(monkeypatch):
     member = SimpleNamespace(kind=membership.KIND_WORKER, status=membership.STATUS_ACTIVE)
     ctx = SimpleNamespace(device_id="receiver", member=lambda _: member)
     monkeypatch.setattr(engine, "context", lambda: ctx)
+    monkeypatch.setattr(engine, "instance_aliases", lambda: {
+        row["legacy_instance_id"]: row["device_id"] for row in ws._directory()
+        if row.get("legacy_instance_id")
+    })
     monkeypatch.setattr(ws.claude_cli_install, "_in_use", lambda: [])
     yield
     ws._readings.clear()
@@ -146,6 +152,71 @@ async def test_slow_reads_are_parallel_cached_and_share_inflight(monkeypatch):
     gate.set()
     assert await ws._cached("one", probe) == "ready"
     assert calls == 1
+
+
+@pytest.mark.parametrize("name", ["parse_request", "peer_action", "local_status", "apply_once", "snapshot", "dispatch"])
+def test_public_functions_have_resolvable_parameter_and_return_annotations(name: str) -> None:
+    function = getattr(ws, name)
+    hints = get_type_hints(function)
+    assert "return" in hints
+    assert all(parameter in hints for parameter in inspect.signature(function).parameters)
+
+
+@pytest.mark.asyncio
+async def test_slow_read_cache_expires_after_completion_not_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(ws, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    monkeypatch.setattr(ws, "READ_TIMEOUT", 0.01)
+    gate = asyncio.Event()
+    calls = 0
+
+    async def probe() -> str:
+        nonlocal calls
+        calls += 1
+        await gate.wait()
+        return "ready"
+
+    assert await ws._cached("slow", probe) is None
+    pending = ws._readings["slow"][0]
+    clock.now = 3.5
+    gate.set()
+    assert await pending == "ready"
+    await asyncio.sleep(0)
+
+    clock.now = 5.0
+    assert await ws._cached("slow", probe) == "ready"
+    assert calls == 1  # The next poll reuses the read that outlived its short timeout.
+    clock.now = 3.5 + ws.CACHE_SECONDS
+    assert await ws._cached("slow", probe) == "ready"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_invalidated_read_cannot_replace_or_extend_a_new_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(ws, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    monkeypatch.setattr(ws, "READ_TIMEOUT", 0.01)
+    gate = asyncio.Event()
+
+    async def slow() -> str:
+        await gate.wait()
+        return "old"
+
+    assert await ws._cached("claude", slow) is None
+    pending = ws._readings["claude"][0]
+    ws._invalidate()
+    clock.now = 1.0
+    fresh = AsyncMock(return_value="new")
+    assert await ws._cached("claude", fresh) == "new"
+    clock.now = 5.0
+    gate.set()
+    assert await pending == "old"
+    await asyncio.sleep(0)
+    assert await ws._cached("claude", fresh) == "new"
+    assert fresh.await_count == 1
+    clock.now = 1.0 + ws.CACHE_SECONDS
+    assert await ws._cached("claude", fresh) == "new"
+    assert fresh.await_count == 2
 
 
 @pytest.mark.asyncio
