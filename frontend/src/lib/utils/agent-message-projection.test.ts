@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatMessage, PendingPeerMessage } from '$lib/stores/types';
-import { reduceAll, type WireEvent } from '$lib/stores/session/v2/reducer';
+import { reduce, reduceAll, releaseMessages, type WireEvent } from '$lib/stores/session/v2/reducer';
 import { agentDelivery, agentSender, agentSenderNames } from './agent-delivery';
 import { createAgentMessageProjection } from './agent-message-projection';
 import { createTranscriptModelBuilder, type TranscriptModel } from './work-log';
@@ -142,6 +142,62 @@ describe('agent-message transcript projection', () => {
 		expect(delivered[1].systemData?.delivery).toBe('delivered');
 	});
 
+	it.each([false, true])('removes a stopped peer after the queue clears (queue cleared first=%s)', (queueClearedFirst) => {
+		let state = reduceAll([
+			{ type: 'turn.started', id: 'start', seq: 1, turn_id: 'running-turn' },
+			{ type: 'message.user', id: 'prompt', seq: 2, turn_id: 'running-turn', content: 'Review this' }
+		] as WireEvent[]);
+		const project = createAgentMessageProjection();
+		const peer = pendingPeer();
+		const queued = project.update({ sessionId: 's1', messages: releaseMessages(state), sessionActive: true, pendingPeerMessages: [peer] });
+		if (queueClearedFirst) {
+			expect(project.update({ sessionId: 's1', messages: releaseMessages(state), sessionActive: true, pendingPeerMessages: [] })).toBe(queued);
+		}
+		// A Stop before any assistant output still emits this durable event.
+		state = reduce(state, { type: 'turn.aborted', id: 'stop', seq: 3, turn_id: 'running-turn', reason: 'interrupt' });
+		const stoppedInput = { sessionId: 's1', messages: releaseMessages(state), sessionActive: false,
+			queueAbortSeq: state.peerQueueAbortSeq, pendingPeerMessages: queueClearedFirst ? [] : [peer] };
+		project.update(stoppedInput);
+		const cleared = project.update({ ...stoppedInput, pendingPeerMessages: [] });
+		expect(cleared.some(message => agentDelivery(message))).toBe(false);
+		expect(project.update({ ...stoppedInput, pendingPeerMessages: [] })).toBe(cleared);
+		expect(project.update({ ...stoppedInput, pendingPeerMessages: [peer] })).toBe(cleared);
+		// A later, genuinely new queued message is not retired by the old abort.
+		expect(project.update({ ...stoppedInput, pendingPeerMessages: [pendingPeer('next-peer')] }).at(-1)?.id).toBe('next-peer');
+	});
+
+	it('retires a removed peer after Stop with no running turn, without an abort event', () => {
+		const project = createAgentMessageProjection();
+		const peer = pendingPeer();
+		const input = { sessionId: 's1', messages: [], sessionActive: false, sessionUnsettled: false };
+		expect(project.update({ ...input, pendingPeerMessages: [peer] })).toHaveLength(1);
+		expect(project.update({ ...input, pendingPeerMessages: [] })).toEqual([]);
+		expect(project.update({ ...input, pendingPeerMessages: [peer] })).toEqual([]);
+	});
+
+	it.each([false, true])('retains a receipt gap while active, parked or starting (active=%s)', (sessionActive) => {
+		const project = createAgentMessageProjection();
+		const peer = pendingPeer();
+		const input = { sessionId: 's1', messages: [], sessionActive, sessionUnsettled: true };
+		const queued = project.update({ ...input, pendingPeerMessages: [peer] });
+		expect(project.update({ ...input, pendingPeerMessages: [] })).toBe(queued);
+		expect(project.update({ ...input, pendingPeerMessages: [] })).toBe(queued);
+		const delivered = project.update({ ...input, messages: [receipt(peer, {}, !sessionActive)], pendingPeerMessages: [] });
+		expect(delivered).toHaveLength(1);
+		expect(delivered[0].id).toBe(queued[0].id);
+		expect(delivered[0].systemData?.delivery).toBe('delivered');
+	});
+
+	it('invalidates the memo when a waiting recipient becomes fully settled', () => {
+		const project = createAgentMessageProjection();
+		const peer = pendingPeer();
+		const messages: ChatMessage[] = [];
+		const pendingPeerMessages: PendingPeerMessage[] = [];
+		project.update({ sessionId: 's1', messages, pendingPeerMessages: [peer], sessionActive: false, sessionUnsettled: true });
+		expect(project.update({ sessionId: 's1', messages, pendingPeerMessages, sessionActive: false, sessionUnsettled: true })).toHaveLength(1);
+		expect(project.update({ sessionId: 's1', messages, pendingPeerMessages, sessionActive: false, sessionUnsettled: false })).toEqual([]);
+	});
+
 	it('clears session memory when switching away and back, then uses the returning snapshot', () => {
 		const project = createAgentMessageProjection();
 		const a = pendingPeer('a');
@@ -268,6 +324,36 @@ describe('projected agent-message work-log grouping', () => {
 		expect(delivered.foldKey).toBe(queued.foldKey);
 		expect(delivered.sequence[0].message.id).toBe(queued.sequence[0].message.id);
 		expect(delivered.sequence[0].message.serverId).toBe(queued.sequence[0].message.serverId);
+	});
+
+	it.each([false, true])('keeps two idle peers in the first wake group (same snapshot=%s)', (sameSnapshot) => {
+		const project = createAgentMessageProjection();
+		const build = createTranscriptModelBuilder();
+		const first = pendingPeer();
+		const second = pendingPeer('peer-2');
+		const history: ChatMessage[] = [prompt, { id: 'answer', role: 'assistant', type: 'text', content: 'Previous answer.' }];
+		const options = { sessionId: 's1', isStreaming: false, groupingEnabled: true };
+		if (!sameSnapshot) project.update({ sessionId: 's1', messages: history, pendingPeerMessages: [first], sessionActive: false });
+		const queuedRows = project.update({ sessionId: 's1', messages: history, pendingPeerMessages: [first, second], sessionActive: false });
+		const queuedModel = build(queuedRows, options);
+		const key = workLog(queuedModel, first.id).key;
+		expect(workLog(queuedModel, second.id).key).toBe(key);
+		expect(queuedRows.filter(message => message.metadata?.agent_wake === true)).toHaveLength(1);
+		let state = reduceAll([
+			{ type: 'turn.started', id: 'wake', seq: 1, turn_id: first.id, source: 'agent_message' },
+			{ type: 'message.user', id: 'received-first', seq: 2, turn_id: first.id, queued_turn_id: first.id, content: envelope(first) }
+		] as WireEvent[]);
+		const receiving = project.update({ sessionId: 's1', messages: [...history, ...releaseMessages(state)],
+			pendingPeerMessages: [second], sessionActive: false });
+		expect(workLog(build(receiving, { ...options, isStreaming: true }), second.id).key).toBe(key);
+		state = reduce(state, { type: 'message.user', id: 'received-second', seq: 3,
+			turn_id: first.id, queued_turn_id: second.id, content: envelope(second) });
+		expect(state.messages.map(message => message.metadata?.agent_wake === true)).toEqual([true, false]);
+		const delivered = project.update({ sessionId: 's1', messages: [...history, ...releaseMessages(state)],
+			pendingPeerMessages: [], sessionActive: true });
+		const deliveredModel = build(delivered, { ...options, isStreaming: true });
+		expect(workLog(deliveredModel, second.id).key).toBe(key);
+		expect(workLog(deliveredModel, second.id).foldKey).toBe(workLog(queuedModel, second.id).foldKey);
 	});
 
 	it.each([false, true, undefined])('predicts idle wakes without changing mid-turn grouping (active=%s)', (sessionActive) => {

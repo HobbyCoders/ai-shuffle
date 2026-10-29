@@ -65,6 +65,8 @@ export interface V2SessionState {
 	messages: ChatMessage[];
 	isStreaming: boolean;
 	parked: boolean;
+	/** Last durable interrupt; distinguishes cancelled queues from delivery gaps. */
+	peerQueueAbortSeq?: number;
 	/** Per-task summaries keyed by task_id — drives the tasks panel + parked
 	 *  indicator. Shape matches the `Task` the UI's activeTasks already renders. */
 	activeTaskSummaries: Task[];
@@ -1388,6 +1390,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			const reason = str(event.reason);
 			let next = dismissProseThrough(closeOpen(state), seq);
 			if (reason === 'interrupt') {
+				next = { ...next, peerQueueAbortSeq: seq };
 				// Mark any still-running tool card as errored (mirrors the legacy
 				// interrupt cleanup in message-sender).
 				next = {

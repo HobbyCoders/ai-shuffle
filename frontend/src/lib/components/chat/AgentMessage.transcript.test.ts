@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import type { ChatMessage, PendingPeerMessage } from '$lib/stores/types';
+import { reduce, reduceAll, releaseMessages, type WireEvent } from '$lib/stores/session/v2/reducer';
 import AgentMessageTranscript from './test-fixtures/AgentMessageTranscript.svelte';
 import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 
@@ -85,6 +86,44 @@ describe('AgentMessage transcript replacement', () => {
 		expect(rows()).toEqual([firstRow, secondRow]);
 		expect(secondRow.getAttribute('aria-expanded')).toBe('true');
 		expect(screen.queryByText('Queued')).toBeNull();
+	});
+
+	it('removes a queue-only Stop without waiting for a receipt that will never arrive', async () => {
+		const view = render(AgentMessageTranscript, { messages: [], pendingPeerMessages: [pending], live: false });
+		expect(rows()).toHaveLength(1);
+		await view.rerender({ messages: [], pendingPeerMessages: [], live: false });
+		expect(rows()).toHaveLength(0);
+		await view.rerender({ messages: [], pendingPeerMessages: [pending], live: false });
+		expect(rows()).toHaveLength(0);
+	});
+
+	it('keeps the second idle peer expanded and focused through both real receipts', async () => {
+		const second = { ...pending, id: 'peer-two', content: 'Second idle message body', queuedAt: 2 };
+		const settled = busy.map(message => ({ ...message, streaming: false }));
+		const view = render(AgentMessageTranscript, { messages: settled, pendingPeerMessages: [pending, second], live: false });
+		const [firstRow, secondRow] = rows();
+		await fireEvent.click(secondRow);
+		secondRow.focus();
+		const body = screen.getByText(second.content);
+		const groupKey = secondRow.closest('[data-item-key]')?.getAttribute('data-item-key');
+		expect(groupKey).toBe(firstRow.closest('[data-item-key]')?.getAttribute('data-item-key'));
+		let state = reduceAll([
+			{ type: 'turn.started', id: 'wake', seq: 1, turn_id: pending.id, source: 'agent_message' },
+			{ type: 'message.user', id: 'first-receipt', seq: 2, turn_id: pending.id, queued_turn_id: pending.id, content: receipt().content }
+		] as WireEvent[]);
+		await view.rerender({ messages: [...settled, ...releaseMessages(state)], pendingPeerMessages: [second], live: true });
+		expect(rows()).toEqual([firstRow, secondRow]);
+		expect(secondRow.getAttribute('aria-expanded')).toBe('true');
+		expect(document.activeElement).toBe(secondRow);
+		state = reduce(state, { type: 'message.user', id: 'second-receipt', seq: 3,
+			turn_id: pending.id, queued_turn_id: second.id, content: receipt().content.replace(pending.content, second.content) });
+		await view.rerender({ messages: [...settled, ...releaseMessages(state)], pendingPeerMessages: [], live: true });
+		expect(rows()).toEqual([firstRow, secondRow]);
+		expect(secondRow.getAttribute('aria-expanded')).toBe('true');
+		expect(secondRow.getAttribute('aria-label')).toContain('Complete');
+		expect(document.activeElement).toBe(secondRow);
+		expect(screen.getByText(second.content)).toBe(body);
+		expect(secondRow.closest('[data-item-key]')?.getAttribute('data-item-key')).toBe(groupKey);
 	});
 
 	it('restores only this session queue after switching away and back', async () => {

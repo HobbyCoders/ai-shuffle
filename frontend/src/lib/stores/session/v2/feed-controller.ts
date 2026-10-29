@@ -556,6 +556,7 @@ function transcriptPatch(
 		optimisticStreaming: rs.isStreaming ? false : optimistic,
 		liveTurnId: rs.liveTurnId,
 		turnParked: rs.parked,
+		peerQueueAbortSeq: rs.peerQueueAbortSeq,
 		liveModel: rs.liveModel,
 		liveRequestedModel: rs.liveRequestedModel,
 		liveProvider: rs.liveProvider,

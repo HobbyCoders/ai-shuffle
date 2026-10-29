@@ -8,16 +8,18 @@
 	import AgentMessage from '../AgentMessage.svelte';
 	import WorkLogGroup from '../WorkLogGroup.svelte';
 
-	let { sessionId = 'recipient', messages = [], pendingPeerMessages = [], live = true }: {
+	let { sessionId = 'recipient', messages = [], pendingPeerMessages = [], live = true, queueAbortSeq, sessionUnsettled }: {
 		sessionId?: string;
 		messages?: ChatMessage[];
 		pendingPeerMessages?: PendingPeerMessage[];
 		live?: boolean;
+		queueAbortSeq?: number;
+		sessionUnsettled?: boolean;
 	} = $props();
 	const projection = createAgentMessageProjection();
 	const buildTranscript = createTranscriptModelBuilder();
 	const folds = createFoldState();
-	const projected = $derived(projection.update({ sessionId, messages, pendingPeerMessages, sessionActive: live }));
+	const projected = $derived(projection.update({ sessionId, messages, pendingPeerMessages, sessionActive: live, queueAbortSeq, sessionUnsettled: sessionUnsettled ?? live }));
 	const model = $derived(buildTranscript(projected, { sessionId, isStreaming: live, latestTurnUnsettled: live, groupingEnabled: true }));
 	const names = $derived(agentSenderNames(messages));
 	function itemKey(item: DisplayItem): string {
