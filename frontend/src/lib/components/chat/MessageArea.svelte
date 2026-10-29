@@ -34,7 +34,7 @@
 	import { derived as derivedStore } from 'svelte/store';
 	import { activeSession, backgroundPermissions } from '$lib/stores/active-session';
 	import { sessionEphemeralCache } from '$lib/stores/session-cache';
-	import { createScrollTopPersist } from './scroll-top-persist';
+	import { createScrollTopPersist, readLeavingScrollTop } from './scroll-top-persist';
 	import { privateAccessPending } from '$lib/stores/chat-access';
 	import { isTranscriptProseDismissed, proseQuestionDismissals, proseQuestionSessions } from '$lib/stores/session/prose-questions';
 	import { needsYouCount, openSessionNeeds } from '$lib/components/layout/session-card-data';
@@ -1456,8 +1456,13 @@
 		if (containerRef) {
 			// eslint-disable-next-line no-console
 			if (STREAM_DEBUG) console.log(`[AS] onDestroy saving cacheKey=${cacheKey} ST=${containerRef.scrollTop} autoS=${shouldAutoScroll} SH=${containerRef.scrollHeight} CH=${containerRef.clientHeight}`);
-			scrollPositionCache.set(cacheKey, containerRef.scrollTop);
-			scrollTopPersist.destroy(cacheKey, containerRef.scrollTop);
+			// A container already out of the layout reads 0: keep the reader's
+			// last captured position then (readLeavingScrollTop).
+			const leftAt = readLeavingScrollTop(containerRef, scrollPositionCache.get(cacheKey));
+			if (leftAt !== undefined) {
+				scrollPositionCache.set(cacheKey, leftAt);
+				scrollTopPersist.destroy(cacheKey, leftAt);
+			}
 			// Persist auto-scroll state so remounting this component
 			// (e.g. returning from settings) resumes at the right position
 			autoScrollCache.set(cacheKey, shouldAutoScroll);

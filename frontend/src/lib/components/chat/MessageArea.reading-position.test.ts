@@ -41,7 +41,9 @@ describe('MessageArea reading position', () => {
 
 	it('saves the position and the follow state when the component goes away', () => {
 		const destroy = block('onDestroy(() => {', '// ── Session-switch scroll save/restore');
-		expect(destroy).toContain('scrollPositionCache.set(cacheKey, containerRef.scrollTop)');
+		// A detached container reads 0; the last captured position is kept then.
+		expect(destroy).toContain('const leftAt = readLeavingScrollTop(containerRef, scrollPositionCache.get(cacheKey));');
+		expect(destroy).toContain('scrollPositionCache.set(cacheKey, leftAt)');
 		expect(destroy).toContain('autoScrollCache.set(cacheKey, shouldAutoScroll)');
 	});
 
@@ -68,7 +70,7 @@ describe('MessageArea reading position', () => {
 		const persist = block('const scrollTopPersist = createScrollTopPersist({', 'function handleScroll() {');
 		expect(persist).toContain("currentKey: () => $activeSession.sessionId ?? 'new'");
 		expect(persist).toContain('writeLeft: (key, position) => sessionEphemeralCache.patchScrollTop(key, position)');
-		expect(block('onDestroy(() => {', '// ── Session-switch scroll save/restore')).toContain('scrollTopPersist.destroy(cacheKey, containerRef.scrollTop)');
+		expect(block('onDestroy(() => {', '// ── Session-switch scroll save/restore')).toContain('scrollTopPersist.destroy(cacheKey, leftAt)');
 		// A switch files the leaving position under the LEAVING id, never into the
 		// store, which already belongs to the session entered.
 		const sw = block('if (currentId === prevId) return;', 'prevTrackedSessionId = currentId;');
