@@ -126,6 +126,16 @@ def test_workspace_cases_keep_real_browser_and_ui_security_checks():
     assert "[$CHROME_MODE]" in steps["Verify shared browser and rendered desktop/mobile UI"]["run"]
 
 
+def test_browser_mcp_job_runs_the_flight_recorder_proof_page():
+    steps = {step.get("name"): step for step in workflow("ci-frontend.yml")["jobs"]["browser-mcp"]["steps"]}
+    proof = steps["Flight recorder proof page"]
+    assert proof["working-directory"] == "frontend"
+    assert "node tests/verify-flight-recorder.mjs" in proof["run"]
+    assert "||" not in proof["run"]
+    names = list(steps)
+    assert names.index("Flight recorder proof page") > names.index("Prepare sandboxed Chromium")
+
+
 def test_chromium_install_phases_fail_closed_without_retrying_tests(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()

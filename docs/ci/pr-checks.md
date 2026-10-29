@@ -77,7 +77,7 @@ three desktop shards, not the separate stable-release portability matrix.
 | frontend | `javascript` → four Vitest shards, production build, typechecks and contracts |
 | mobile | `javascript` → mobile tests/typecheck and frontend production postbuild |
 | tools + network vectors | `javascript` → Tools tests and WebCrypto vectors |
-| browser-mcp | `javascript` → Browser MCP build and full tests |
+| browser-mcp | `javascript` → Browser MCP build and full tests, then the flight recorder proof page (`frontend/tests/verify-flight-recorder.mjs`) |
 | docs | `android-and-docs` → exact local docs-copy helper; JavaScript contracts also compare copies |
 | desktop | `desktop` → existing typecheck and all unit tests |
 | android-bridge | `android-and-docs` → existing local Node download-bridge tests |

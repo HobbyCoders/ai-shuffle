@@ -691,6 +691,60 @@
     }
   }
 
+  // ---- painted-state probe -------------------------------------------------
+  //
+  // What a frame paints is the DOM after EVERY requestAnimationFrame callback
+  // has run, and ours usually runs first. Sampling inside it would record a
+  // state a later page callback replaces before paint (never on screen) and
+  // stamp rAF-driven changes a frame late. So each frame our rAF callback
+  // nudges the size of a hidden probe, and its ResizeObserver callback, which
+  // the browser runs after all rAF callbacks and layout and before paint,
+  // takes the sample. The probe lives in a closed shadow root so the per-frame
+  // nudge is invisible to the page's MutationObservers; its host is one
+  // hidden, inert element after <body>. If the probe ever stops reporting,
+  // sampling falls back to the rAF callback.
+
+  var PROBE_STYLE = 'position:fixed!important;top:0!important;left:0!important;width:0!important;height:0!important;'
+    + 'overflow:hidden!important;visibility:hidden!important;pointer-events:none!important;contain:strict!important;'
+    + 'display:block!important;margin:0!important;padding:0!important;border:0!important;z-index:-2147483647!important;';
+
+  function installProbe() {
+    if (S.probe === false || S.probe || typeof ResizeObserver !== 'function') return;
+    var doc = root.document;
+    if (!doc.body || !doc.documentElement) return; // still parsing; sample in rAF meanwhile
+    try {
+      var host = doc.createElement('flight-recorder-probe');
+      host.setAttribute('aria-hidden', 'true');
+      host.setAttribute('style', PROBE_STYLE);
+      var shadow = host.attachShadow ? host.attachShadow({ mode: 'closed' }) : host;
+      var box = doc.createElement('div');
+      box.setAttribute('style', 'position:absolute;top:0;left:0;height:1px;width:1px;');
+      shadow.appendChild(box);
+      var probe = { host: host, box: box, flip: false, pending: false, misses: 0, observer: null };
+      probe.observer = new ResizeObserver(function () {
+        if (!S || !S.active || S.probe !== probe || !probe.pending) return;
+        probe.pending = false;
+        probe.misses = 0;
+        S.stats.paintedSamples += 1;
+        try { sample(); } catch (error) { note(error); }
+      });
+      probe.observer.observe(box);
+      doc.documentElement.appendChild(host);
+      S.probe = probe;
+    } catch (error) {
+      note(error);
+      S.probe = false;
+    }
+  }
+
+  function removeProbe() {
+    var probe = S && S.probe;
+    if (!probe) return;
+    try { probe.observer.disconnect(); } catch (error) { /* gone */ }
+    try { if (probe.host.parentNode) probe.host.parentNode.removeChild(probe.host); } catch (error) { /* gone */ }
+    S.probe = null;
+  }
+
   function tick() {
     if (!S || !S.active) return;
     S.raf = root.requestAnimationFrame(tick);
@@ -706,8 +760,30 @@
       S.lastFrameEpoch = at;
       S.frame += 1;
       S.stats.frames += 1;
-      sample();
-      if (at - S.startEpoch > S.opts.maxDurationMs) halt('reached maxDurationMs (' + S.opts.maxDurationMs + 'ms)');
+      if (at - S.startEpoch > S.opts.maxDurationMs) {
+        halt('reached maxDurationMs (' + S.opts.maxDurationMs + 'ms)');
+        return;
+      }
+      if (!S.probe) installProbe();
+      var probe = S.probe;
+      if (probe && probe.pending) {
+        // Last frame's probe never reported (removed by the page, or the
+        // frame was skipped). Catch up here; give up on it after a few.
+        probe.misses += 1;
+        S.stats.probeMisses += 1;
+        sample();
+        if (probe.misses >= 3 || !probe.host.isConnected) {
+          removeProbe();
+          S.probe = probe.misses >= 3 ? false : null;
+        }
+      }
+      if (S.probe) {
+        S.probe.flip = !S.probe.flip;
+        S.probe.box.style.width = S.probe.flip ? '2px' : '1px';
+        S.probe.pending = true;
+      } else {
+        sample();
+      }
     } catch (error) {
       note(error);
     }
@@ -1031,7 +1107,6 @@
     try {
       push({ t: elapsed(), kind: 'visibility', state: root.document.hidden ? 'hidden' : 'visible' });
       S.lastFrameEpoch = 0;
-      sample();
     } catch (error) { note(error); }
   }
   function storageKey() { return KEY_PREFIX + S.id; }
@@ -1103,8 +1178,14 @@
       layoutShift: { total: 0, inputTotal: 0, count: 0, top: [] },
       mounts: {}, transientMounts: 0, errors: 0, failedRequests: 0, duplicateRows: 0,
       segments: 1, lostSegments: 0, truncated: false, dropped: 0, internalErrors: 0,
-      sampleMsTotal: 0, sampleMsMax: 0,
+      sampleMsTotal: 0, sampleMsMax: 0, paintedSamples: 0, probeMisses: 0,
     };
+  }
+
+  function withDefaults(stats) {
+    var merged = freshStats();
+    if (stats && typeof stats === 'object') for (var key in stats) merged[key] = stats[key];
+    return merged;
   }
 
   function activate() {
@@ -1113,6 +1194,7 @@
     S.rowsDirty = true;
     S.duplicates = S.duplicates || {};
     S.lastFrameEpoch = 0;
+    S.probe = null;
     installHooks();
     try {
       S.observer = new MutationObserver(onMutations);
@@ -1136,6 +1218,7 @@
     if (!S || !S.active) return;
     S.active = false;
     try { root.cancelAnimationFrame(S.raf); } catch (error) { /* gone */ }
+    removeProbe();
     try { if (S.observer) { onMutations(S.observer.takeRecords()); S.observer.disconnect(); } } catch (error) { note(error); }
     try { if (S.shifts) { onShifts({ getEntries: function () { return S.shifts.takeRecords ? S.shifts.takeRecords() : []; } }); S.shifts.disconnect(); } } catch (error) { note(error); }
     root.removeEventListener('error', onError, true);
@@ -1236,7 +1319,7 @@
       if (saved && saved.id === config.id && Array.isArray(saved.timeline)) {
         S = {
           id: saved.id, startEpoch: saved.startEpoch, opts: saved.opts, timeline: saved.timeline,
-          stats: saved.stats, last: saved.last || {}, frame: saved.frame || 0,
+          stats: withDefaults(saved.stats), last: saved.last || {}, frame: saved.frame || 0,
           initialMounts: saved.initialMounts || {}, shiftSources: saved.shiftSources || {}, duplicates: {},
         };
         S.stats.segments += 1;
@@ -1272,7 +1355,6 @@
   function mark(label) {
     try {
       if (!S || !S.active) return { ok: false, error: 'not recording' };
-      sample();
       var index = push({ t: elapsed(), kind: 'mark', label: clip(label === undefined ? '' : label, 200) }, true);
       return { ok: index >= 0, index: index };
     } catch (error) {
@@ -1284,10 +1366,7 @@
   function stop() {
     try {
       if (!S) return lastResult ? lastResult : { ok: false, error: 'not recording' };
-      if (S.active) {
-        try { sample(); } catch (error) { note(error); }
-        halt('stopped');
-      }
+      if (S.active) halt('stopped');
       var result = build();
       result.ok = true;
       lastResult = result;

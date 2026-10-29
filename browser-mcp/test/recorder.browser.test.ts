@@ -192,6 +192,53 @@ describe.skipIf(!browserPath)("flight recorder in a real browser", () => {
       expect(surface?.flicker).toBe(true);
     });
 
+    it("records what is painted: a state set and undone inside one frame is not a flicker", async () => {
+      await start();
+      await page.evaluate(() => new Promise<void>((resolve) => {
+        const view = document.getElementById("view")!;
+        // Both callbacks run before the same paint; "active" is never on screen.
+        requestAnimationFrame(() => { view.dataset.uiSurface = "active"; });
+        requestAnimationFrame(() => { view.dataset.uiSurface = "new"; });
+        requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      }));
+      const rec = await stop();
+      expect(rec.anomalies).toEqual([]);
+      expect(rec.text).not.toContain("surface=active");
+      expect(rec.stats.paintedSamples).toBeGreaterThan(0);
+    });
+
+    it("keeps its per-frame probe out of the page's DOM observers and queries", async () => {
+      await page.evaluate(() => {
+        (window as any).mutations = 0;
+        new MutationObserver((records) => { (window as any).mutations += records.length; })
+          .observe(document, { childList: true, subtree: true, attributes: true, characterData: true });
+      });
+      await start();
+      await page.waitForTimeout(300);
+      const seen = await page.evaluate(() => ({
+        mutations: (window as any).mutations,
+        divs: document.querySelectorAll("div").length,
+        bodyChildren: document.body.children.length,
+      }));
+      const rec = await stop();
+      // Only the one-time insertion of the probe host, never the per-frame nudges.
+      expect(seen.mutations).toBeLessThanOrEqual(1);
+      expect(seen.divs).toBe(1);
+      expect(rec.stats.frames).toBeGreaterThan(5);
+      expect(rec.stats.probeMisses).toBeLessThanOrEqual(1);
+      expect(await page.evaluate(() => document.querySelector("flight-recorder-probe"))).toBeNull();
+    });
+
+    it("falls back to sampling in its own frame callback when the page removes the probe", async () => {
+      await start();
+      await page.waitForTimeout(100);
+      await page.evaluate(() => document.querySelector("flight-recorder-probe")?.remove());
+      await page.evaluate(() => (window as any).flicker());
+      const rec = await stop();
+      expect(rec.anomalies.some((a) => a.kind === "reversal" && a.field === "surface")).toBe(true);
+      expect(rec.stats.internalErrors).toBe(0);
+    });
+
     it("flags a remount", async () => {
       await start();
       await page.evaluate(() => (window as any).remount());
