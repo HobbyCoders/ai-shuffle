@@ -280,3 +280,43 @@ def test_uninstall_reads_all_real_registry_scopes_before_removal(workers, monkey
         assert service.get_installation_records(PID) == []
         assert plugins_sync.publish() == int(shared)
         assert bool(deleted(a)) == shared
+
+
+def test_connector_package_uninstall_publishes_shared_tombstone(workers, monkeypatch, tmp_path):
+    from datetime import datetime, timezone
+    from app.core import connector_packages, plugin_service
+
+    a, b = workers("a"), workers("b")
+    current = {"name": "a"}
+    monkeypatch.setattr(plugin_service, "_get_fluid_dir", lambda: tmp_path / current["name"] / "fluid")
+    monkeypatch.setattr(connector_packages, "root", lambda: tmp_path / current["name"] / "connector-runtimes")
+    inventories = {}
+    for name in ("a", "b"):
+        current["name"] = name
+        inventories[name] = PluginService()
+        # Use the installer's actual active-record writer, without downloading
+        # a runtime. Uninstall preserves binaries and only removes this record.
+        connector_packages._publish("gmail", {
+            "release": connector_packages.CATALOG["release"], "enabled": True,
+            "installed_at": datetime.now(timezone.utc).isoformat(),
+        })
+    monkeypatch.setattr(api, "get_plugin_service", lambda: inventories[current["name"]])
+    monkeypatch.setattr(plugins_sync, "_service", lambda: inventories[current["name"]])
+    pid = connector_packages.package_id("gmail")
+    current["name"] = "a"
+    with a.active():
+        engine.create_network("Connector packages")
+        assert plugins_sync.publish() == 1
+    join(a, b)
+    with a.active():
+        asyncio.run(api.uninstall_plugin(pid, token="test"))
+        assert connector_packages.record("gmail") is None
+        assert plugins_sync.publish() == 1
+        assert store.get_record(a.shim.cursor(), "plugins_desired", pid)["deleted"]
+    exchange(a, b)
+    current["name"] = "b"
+    with b.active():
+        assert connector_packages.record("gmail") is not None
+        assert plugins_sync.publish() == 0  # stale connector inventory cannot revive it
+        assert plugins_sync.apply_desired([pid]) == 1
+        assert connector_packages.record("gmail") is None

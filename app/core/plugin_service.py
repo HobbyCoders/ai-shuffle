@@ -737,7 +737,11 @@ class PluginService:
     # =========================================================================
 
     def get_installation_records(self, plugin_id: str) -> List[Dict[str, Any]]:
-        """All scopes, not just the first installation displayed by the UI."""
+        """All scopes, including connector packages outside the plugin registry."""
+        from app.core import connector_packages
+        if connector_packages.kind_for(plugin_id):
+            return [{"scope": plugin.scope, "version": plugin.version}
+                    for plugin in connector_packages.installed() if plugin.id == plugin_id]
         installed = self._read_json_file(self.INSTALLED_FILE, {"plugins": {}}, for_update=True)
         records = installed.get("plugins", {}).get(plugin_id, [])
         if isinstance(records, dict):  # version 1 registry
