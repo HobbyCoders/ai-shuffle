@@ -557,7 +557,13 @@ def _watches_handler() -> Any:
     return handle
 
 
+def _worker_settings_handler():
+    from app.core.worker_settings import peer_action
+    return peer_action
+
+
 _LAZY_HANDLERS = {
+    "worker-settings": _worker_settings_handler,
     "watches": _watches_handler,
     "terminal": _terminal_handler,
     "terminal-owner": _terminal_owner_handler,

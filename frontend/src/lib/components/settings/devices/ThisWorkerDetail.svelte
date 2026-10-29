@@ -35,6 +35,7 @@
 	import StatusDot from '../rows/StatusDot.svelte';
 	import Switch from '../rows/Switch.svelte';
 	import { JoinFlow } from './join-flow.svelte';
+	import WorkerMachineSettings from './WorkerMachineSettings.svelte';
 	import type { DevicesModel } from './devices-model.svelte';
 
 	interface Props {
@@ -239,6 +240,7 @@
 				</RowGroup>
 			{/if}
 			{#if availabilityError}<InlineBanner tone="warn"><span role="alert">{availabilityError}</span></InlineBanner>{/if}
+			<WorkerMachineSettings self showAvailability={false} />
 		{:else}
 			{@render networkTab()}
 		{/if}
