@@ -55,7 +55,7 @@
 </script>
 
 <DetailPane name={credential.name} badge="API key" status={credential.status} statusText={credential.statusText}
-	subtitle={credential.on ? 'Runs every Claude session in API key mode' : account?.active ? 'Selected for API key mode' : 'Saved Anthropic account'}
+	subtitle={credential.on ? 'Runs every Claude session in API key mode' : account?.active ? 'Used when Claude Code is in API key mode' : 'Saved Anthropic account'}
 	facts={[{ label: 'Key', value: masked, mono: true }, { label: 'Billing', value: 'Per use' }, { label: 'Models', value: 'Built in' }]}
 	tabs={['Overview', 'Models']} {danger} item={credential.item}>
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
