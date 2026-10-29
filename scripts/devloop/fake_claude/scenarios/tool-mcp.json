@@ -1,0 +1,14 @@
+{
+  "description": "Calls a real tool on the app's bundled MCP bridge (ListAgents, read-only): the fake CLI really runs it there, as the CLI would.",
+  "steps": [
+    {
+      "text": "Let me list the agents through the app's tool bridge.",
+      "tool_calls": [
+        {"name": "mcp__fluid_bundled__mcp__builtins__ListAgents", "input": {}}
+      ]
+    },
+    {
+      "text": "That list came from the app itself, through its MCP bridge."
+    }
+  ]
+}

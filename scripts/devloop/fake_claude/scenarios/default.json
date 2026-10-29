@@ -1,0 +1,8 @@
+{
+  "description": "Short streamed reply from the fake Claude Code CLI that echoes a summary of the prompt.",
+  "steps": [
+    {
+      "text": "Fake Claude Code CLI here (no model, no network). You said: “{summary}”\n\nSend `[script:NAME]` to play a scenario: {scenarios}. `/compact` compacts the conversation."
+    }
+  ]
+}

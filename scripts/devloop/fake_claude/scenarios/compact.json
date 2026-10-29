@@ -1,0 +1,9 @@
+{
+  "description": "Compacts automatically mid-turn (as at the context limit), replays the compacted conversation as fresh frames, then answers. Type /compact for a manual compaction.",
+  "steps": [
+    {
+      "compact": true,
+      "text": "The conversation was compacted mid-turn and I carried on. You said: “{summary}”"
+    }
+  ]
+}

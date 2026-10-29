@@ -1,0 +1,14 @@
+{
+  "description": "Reads a 45,000-character file (just under the 50k stub limit; Read needs no approval), to grow the context fast. A few of these and /compact has old tool output to fold.",
+  "steps": [
+    {
+      "text": "Reading a big file.",
+      "tool_calls": [
+        {"name": "Read", "input": {"file_path": "/fake/big-file.txt"}, "result_chars": 45000}
+      ]
+    },
+    {
+      "text": "Read 45,000 characters."
+    }
+  ]
+}
