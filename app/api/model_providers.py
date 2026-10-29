@@ -165,6 +165,9 @@ class FetchModelsResponse(BaseModel):
     models: List[Dict[str, Any]]
     hidden: List[Dict[str, Any]] = []
     recommended: List[str] = []
+    fetched_at: Optional[str] = None
+    fetched_by_device: Optional[str] = None
+    fetched_by_name: Optional[str] = None
 
 
 class CodexDeviceStartResponse(BaseModel):
@@ -959,6 +962,12 @@ async def update_provider(
     raw_token = (body.auth_token or "").strip()
     if raw_token:
         updates["auth_token"] = _encrypt_token_or_400(raw_token)
+    # A discovery snapshot belongs to the key and endpoint that produced it.
+    # Treat an explicit nonblank replacement as a new binding conservatively.
+    catalog_binding_changed = bool(raw_token) or any(
+        field in updates and (updates[field] or None) != (existing.get(field) or None)
+        for field in ("base_url", "provider_type", "api_dialect")
+    )
 
     if updates:
         async with openai_billing.operation_lock(provider_id):
@@ -969,6 +978,8 @@ async def update_provider(
                     raise HTTPException(status_code=409, detail="Models changed on another worker. Reload and try again.")
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                                     detail="Model provider not found")
+            if catalog_binding_changed:
+                await run_sync(model_catalogs.delete, provider_id)
 
     full_row = await run_sync(_row_with_token_flags, provider_id)
     return _public_provider(full_row)

@@ -87,6 +87,38 @@ afterEach(cleanup);
 describe('shared catalog and concurrent curation', () => {
 	const catalog = { source: 'upstream', models: [entry('old'), entry('remote'), entry('new')] };
 
+
+	it.each([false, true])('setup validates the current key live instead of trusting a cached catalog (wizard=%s)', async (wizard) => {
+		mocks.get.mockResolvedValue(catalog);
+		mocks.post.mockRejectedValue(new Error('Could not fetch models from the provider upstream: http_401'));
+		const onRejected = vi.fn();
+		render(ModelCuration, { mode: 'setup', providerId: 'router', wizard, onRejected });
+		await screen.findByRole('alert');
+		expect(mocks.post).toHaveBeenCalledWith('/model-providers/router/fetch-models');
+		expect(mocks.get).not.toHaveBeenCalled();
+		expect(screen.queryByRole('checkbox')).toBeNull();
+		if (wizard) expect(onRejected).toHaveBeenCalled();
+		expect((screen.getByRole('button', { name: 'Use selected' }) as HTMLButtonElement).disabled).toBe(true);
+		expect(mocks.patch).not.toHaveBeenCalled();
+	});
+
+	it.each([false, true])('keeps full live discovery across resource echoes when sharing is compacted/skipped (shared=%s)', async (shared) => {
+		const old = { source: 'upstream', models: [entry('old')], fetched_at: '2026-10-29T12:00:00Z' };
+		const fetched_at = shared ? '2026-10-29T12:01:00Z' : null;
+		mocks.get.mockResolvedValue(old);
+		mocks.post.mockResolvedValue({ source: 'upstream', models: [entry('new', { pricing: { prompt: '0.1' } })], fetched_at });
+		render(ModelCuration, { row: router([entry('old')]) });
+		await screen.findByRole('checkbox', { name: 'old' });
+		await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh model list' }) as HTMLButtonElement).disabled).toBe(false));
+		await fireEvent.click(screen.getByRole('button', { name: 'Refresh model list' }));
+		await screen.findByRole('checkbox', { name: 'new' });
+		mocks.get.mockResolvedValue(shared ? { source: 'upstream', models: [entry('new')], fetched_at } : old);
+		resourceSync.invalidate(['settings']);
+		await waitFor(() => expect(mocks.get).toHaveBeenCalledTimes(2));
+		await toggle('new');
+		expect(saved().find((m: ProviderModelEntry) => m.id === 'new').pricing).toEqual({ prompt: '0.1' });
+	});
+
 	it('does not resurrect an old selection when a remote prop changes during refresh', async () => {
 		let finish!: (value: typeof catalog) => void;
 		mocks.post.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));

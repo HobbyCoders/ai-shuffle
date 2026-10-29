@@ -214,13 +214,13 @@ export interface FetchModelsResult {
 	/** Ids from the provider's built-in chat roster that `models` holds, in
 	 *  roster order. Empty for a provider with no roster; absent on older payloads. */
 	recommended?: string[];
+	/** Attribution of a successfully shared refresh; null when sharing was skipped. */
+	fetched_at?: string | null;
+	fetched_by_device?: string | null;
+	fetched_by_name?: string | null;
 }
 
-export interface ModelCatalogSnapshot extends FetchModelsResult {
-	fetched_at?: string;
-	fetched_by_device?: string;
-	fetched_by_name?: string;
-}
+export type ModelCatalogSnapshot = FetchModelsResult;
 
 /** Read the last shared discovery snapshot without an upstream request. */
 export async function getModelCatalog(id: string): Promise<ModelCatalogSnapshot | null> {

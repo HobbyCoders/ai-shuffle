@@ -87,6 +87,9 @@
 	/** Revision that produced the displayed selection, not a later store read. */
 	let selectionRevision = $state<string | null | undefined>();
 	let reloadPending = false;
+	/** Keep richer local discovery across echoes of the same shared generation. */
+	let liveCatalog: ModelCatalogSnapshot | null = null;
+	let sharedFetchedAt: string | null = null;
 
 	let rows = $state<CurationRow[]>([]);
 	let loading = $state(false);
@@ -126,12 +129,25 @@
 		error = '';
 		failure = null;
 		try {
-			let res = refresh ? null : await getModelCatalog(id);
-			if (!res && (refresh || fetchMissing)) {
+			// Setup validates the current key: an old snapshot is not auth evidence.
+			const live = refresh || mode === 'setup' || wizard;
+			let res = live ? null : await getModelCatalog(id);
+			if (!live) {
+				const stamp = res?.fetched_at ?? null;
+				if (liveCatalog && stamp === sharedFetchedAt) {
+					res = liveCatalog;
+				} else {
+					sharedFetchedAt = stamp;
+					liveCatalog = null;
+				}
+			}
+			if (!res && (live || fetchMissing)) {
 				res = await providers.fetchProviderModels(id);
+				liveCatalog = res;
+				sharedFetchedAt = res.fetched_at ?? sharedFetchedAt;
 				// Discovery can backfill metadata and bump the provider revision.
 				await providers.refreshProviders();
-				res = (await getModelCatalog(id)) ?? res;
+				// Keep the full live result; the shared copy may omit optional metadata.
 			}
 			catalog = res;
 			if (!res) { reconcile(); return; }
@@ -146,6 +162,10 @@
 			typeable = (res.models?.length ?? 0) === 0;
 		} catch (e) {
 			const detail = getErrorMessage(e, 'Could not fetch models');
+			if (mode === 'setup' && describeFetchFailure(detail, providerName).kind === 'rejected') {
+				rows = [];
+				catalog = null;
+			}
 			// A rejected key needs a new key, not typed model names.
 			typeable = describeFetchFailure(detail, providerName).kind !== 'rejected';
 			if (wizard) {

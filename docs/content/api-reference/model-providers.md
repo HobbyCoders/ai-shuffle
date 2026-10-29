@@ -178,7 +178,7 @@ Update a provider. Takes the same fields as create, all optional, with the same 
 
 **Auth:** Owner only
 
-- Omitting `auth_token` or sending it blank keeps the stored key.
+- Omitting `auth_token` or sending it blank keeps the stored key. Replacing the key or changing the endpoint invalidates its shared discovery snapshot; setup always checks the current key live, never from a cached catalog.
 - Sending `context_window` or `max_output_tokens` as `null` clears it; omitting it leaves it unchanged.
 - `models` replaces the whole list. Send `expected_revision` from the provider response to guard a curation save. A stale revision returns `409` without changing the provider; reload its current selection before editing again.
 - Disabling the provider or rotating its inference key invalidates readings but keeps its [OpenAI usage key](#openai-usage-key). Admin requests require an enabled, official OpenAI API provider; only explicit disconnect removes the shared Admin key.
@@ -270,9 +270,9 @@ curl -X POST http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9a6
 
 `models` holds text models only, at most 2000. Each has `id` and `label`, plus `context_window`, `pricing` (OpenRouter prices) and `reasoning_capabilities` when upstream reports them. `hidden` lists the audio, voice, image and video models that were held back, each with a `media_kind`.
 
-A successful fetch saves a compact, token-free snapshot in the shared `model_catalog:<provider_id>` system setting (maximum 512 KiB). Failed fetches leave the previous snapshot intact. Snapshots contain public model metadata and worker attribution, never credentials or endpoints.
+A successful fetch returns the complete live catalog and tries to save a compact, token-free snapshot in the shared `model_catalog:<provider_id>` system setting (maximum 512 KiB). If needed, the shared copy omits pricing first, then context/reasoning metadata and recommendations; it never truncates model IDs or labels. If even that cannot fit, sharing is skipped with one warning and the previous snapshot is kept. Successful sharing adds `fetched_at`, `fetched_by_device` and `fetched_by_name` to the live response; these are `null` if sharing was skipped. The panel keeps the complete live result even when the shared copy is compacted or not saved. Failed upstream fetches leave the previous snapshot intact. Snapshots contain public model metadata and worker attribution, never credentials or endpoints.
 
-**Errors:** `404` provider not found. `409` when a ChatGPT or Grok sign-in is missing or expired (sign in again). `400` when credential storage is unavailable. `502` when the upstream request fails or the snapshot exceeds the size limit.
+**Errors:** `404` provider not found. `409` when a ChatGPT or Grok sign-in is missing or expired (sign in again). `400` when credential storage is unavailable. `502` when the upstream request fails. Sharing or size-limit failures do not fail successful discovery.
 
 ### POST /api/v1/model-providers/refresh-capabilities
 

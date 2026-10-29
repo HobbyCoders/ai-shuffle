@@ -1,6 +1,6 @@
 """Shared discovery is independent of curation and revision-guarded edits."""
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -11,6 +11,14 @@ from app.db import database as db
 from app.network.policy import is_shared_setting_key
 
 ROOT = "/api/v1/model-providers"
+
+
+def _credential_verdict(provider_id: str) -> str | None:
+    """Read the private verdict without exposing it on public provider rows."""
+    with db.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT credential_status FROM model_providers WHERE id = %s", (provider_id,))
+        return cursor.fetchone()["credential_status"]
 
 
 @pytest.fixture
@@ -83,13 +91,99 @@ def test_refresh_finishing_after_delete_cannot_resurrect_snapshot(authenticated_
     assert db.get_system_setting(model_catalogs.key(provider["id"])) is None
 
 
-def test_oversized_catalog_preserves_previous_snapshot(authenticated_client, provider, monkeypatch):
+def test_oversized_catalog_returns_live_discovery_and_keeps_previous_snapshot(authenticated_client, provider, monkeypatch, caplog):
     db.set_system_setting(model_catalogs.key(provider["id"]), '{"models":[]}')
     monkeypatch.setattr(api, "fetch_upstream_models", AsyncMock(return_value=[
         {"id": "too-large", "label": "x" * model_catalogs.MAX_BYTES},
     ]))
-    assert authenticated_client.post(f"{ROOT}/{provider['id']}/fetch-models").status_code == 502
+    response = authenticated_client.post(f"{ROOT}/{provider['id']}/fetch-models")
+    assert response.status_code == 200, response.text
+    assert response.json()["models"][0]["id"] == "too-large"
+    assert response.json()["fetched_at"] is None
     assert db.get_system_setting(model_catalogs.key(provider["id"])) == '{"models":[]}'
+    assert sum("too large to share" in r.message for r in caplog.records) == 1
+
+
+@pytest.mark.parametrize("updates", [
+    {"auth_token": "fixture-replacement-key"},
+    {"base_url": "http://127.0.0.1:19124/v1"},
+])
+def test_binding_change_invalidates_snapshot_with_credential_verdict(authenticated_client, provider, monkeypatch, updates):
+    monkeypatch.setattr(api, "fetch_upstream_models", AsyncMock(return_value=[{"id": "saved", "label": "Saved"}]))
+    assert authenticated_client.post(f"{ROOT}/{provider['id']}/fetch-models").status_code == 200
+    assert db.get_system_setting(model_catalogs.key(provider["id"])) is not None
+    assert _credential_verdict(provider["id"]) is not None
+    changed = authenticated_client.patch(f"{ROOT}/{provider['id']}", json=updates)
+    assert changed.status_code == 200, changed.text
+    assert _credential_verdict(provider["id"]) is None
+    assert db.get_system_setting(model_catalogs.key(provider["id"])) is None
+    monkeypatch.setattr(api, "fetch_upstream_models", AsyncMock(side_effect=api.UpstreamModelsError("http_401")))
+    assert authenticated_client.post(f"{ROOT}/{provider['id']}/fetch-models").status_code == 502
+    assert db.get_system_setting(model_catalogs.key(provider["id"])) is None
+
+
+def test_unchanged_binding_or_refused_patch_keeps_snapshot(authenticated_client, provider):
+    key = model_catalogs.key(provider["id"])
+    db.set_system_setting(key, '{"models":[]}')
+    unchanged = authenticated_client.patch(f"{ROOT}/{provider['id']}", json={
+        "base_url": provider["base_url"], "auth_token": "", "name": "Renamed fixture",
+    })
+    assert unchanged.status_code == 200
+    assert db.get_system_setting(key) == '{"models":[]}'
+    refused = authenticated_client.patch(f"{ROOT}/{provider['id']}", json={
+        "auth_token": "fixture-refused-key", "expected_revision": provider["revision"],
+    })
+    assert refused.status_code == 409
+    assert db.get_system_setting(key) == '{"models":[]}'
+
+
+def test_large_priced_catalog_shares_compact_copy_but_returns_full_discovery(authenticated_client, provider, monkeypatch):
+    models = [{
+        "id": f"fixture-{n:04d}-" + "a" * 32, "label": "Example model " + "x" * 40,
+        "context_window": 200000,
+        "pricing": {field: "0.000000000123456789" for field in model_catalogs._PRICE_FIELDS},
+        "reasoning_capabilities": {"version": 1, "effort_levels": ["low", "medium", "high"], "default_effort": "high"},
+    } for n in range(2000)]
+    assert len(json.dumps(models, separators=(",", ":")).encode()) > model_catalogs.MAX_BYTES
+    monkeypatch.setattr(api, "fetch_upstream_models", AsyncMock(return_value=models))
+    response = authenticated_client.post(f"{ROOT}/{provider['id']}/fetch-models")
+    assert response.status_code == 200, response.text
+    assert response.json()["models"][0]["pricing"] == models[0]["pricing"]
+    assert response.json()["fetched_at"]
+    value = db.get_system_setting(model_catalogs.key(provider["id"]))
+    assert len(value.encode()) <= model_catalogs.MAX_BYTES
+    shared = json.loads(value)
+    assert len(shared["models"]) == 2000
+    assert all("pricing" not in model for model in shared["models"])
+    assert shared["fetched_at"] == response.json()["fetched_at"]
+
+
+def test_pricing_is_omitted_before_context_and_reasoning(authenticated_client, provider, monkeypatch):
+    model = {
+        "id": "saved", "label": "Saved", "context_window": 200000,
+        "pricing": {"prompt": "0." + "1" * 2000},
+        "reasoning_capabilities": {"version": 1, "effort_levels": ["high"], "default_effort": "high"},
+    }
+    monkeypatch.setattr(model_catalogs, "MAX_BYTES", 1024)
+    monkeypatch.setattr(api, "fetch_upstream_models", AsyncMock(return_value=[model]))
+    response = authenticated_client.post(f"{ROOT}/{provider['id']}/fetch-models")
+    assert response.status_code == 200, response.text
+    assert response.json()["models"][0]["pricing"] == model["pricing"]
+    shared = model_catalogs.read(provider["id"])["models"][0]
+    assert "pricing" not in shared
+    assert shared["context_window"] == model["context_window"]
+    assert shared["reasoning_capabilities"] == model["reasoning_capabilities"]
+
+
+def test_sharing_error_returns_discovery_without_logging_exception(authenticated_client, provider, monkeypatch, caplog):
+    monkeypatch.setattr(api, "fetch_upstream_models", AsyncMock(return_value=[{"id": "saved", "label": "Saved"}]))
+    monkeypatch.setattr(model_catalogs, "save", Mock(side_effect=RuntimeError("fixture-private-error-detail")))
+    response = authenticated_client.post(f"{ROOT}/{provider['id']}/fetch-models")
+    assert response.status_code == 200, response.text
+    assert response.json()["models"][0]["id"] == "saved"
+    assert response.json()["fetched_at"] is None
+    assert sum("Could not share model catalog" in r.message for r in caplog.records) == 1
+    assert "fixture-private-error-detail" not in caplog.text
 
 
 def test_stale_curation_patch_is_refused(authenticated_client, provider):
