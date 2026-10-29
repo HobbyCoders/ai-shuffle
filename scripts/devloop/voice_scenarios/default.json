@@ -1,0 +1,3 @@
+{
+  "description": "No caller script: greets when the app asks, says every note the app sends for speech and nothing for quiet context. Type into the call (the composer) to hand the chat agent a request."
+}

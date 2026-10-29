@@ -35,8 +35,8 @@ logger = logging.getLogger(__name__)
 #: The only settings a launcher may add to the controlled preview environment
 #: (the dev loop's; see docs/internal/dev-loop.md).
 DEV_ENV_KEYS = frozenset({
-    "SHUFFLE_DEV_ACCESS_FILE", "SHUFFLE_DEV_FAKE_AI_URL", "SHUFFLE_DEV_SEED",
-    "SHUFFLE_DEV_SEED_FILE", "SHUFFLE_DEV_UI",
+    "SHUFFLE_DEV_ACCESS_FILE", "SHUFFLE_DEV_FAKE_AI_URL", "SHUFFLE_DEV_FAKE_VOICE_URL",
+    "SHUFFLE_DEV_SEED", "SHUFFLE_DEV_SEED_FILE", "SHUFFLE_DEV_UI", "SHUFFLE_DEV_VOICE_ENGINE",
 })
 
 

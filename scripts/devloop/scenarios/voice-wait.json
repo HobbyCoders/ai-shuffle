@@ -1,0 +1,10 @@
+{
+  "description": "Starts a short background job (Monitor), writes an update and ends its turn waiting on it (the turn parks). The job prints [script:voice-wait-done], so the wake turn (its completion notice) plays that scenario. For voice calls: the update before the wait is said, then the result.",
+  "steps": [
+    {
+      "text": "I'll start the build in the background.",
+      "tool_calls": [{"name": "Monitor", "input": {"command": "sleep 4 && echo 'build ok [script:voice-wait-done]'"}}]
+    },
+    {"text": "The build is running in the background now. I'll wait for it and tell you the result as soon as it finishes."}
+  ]
+}

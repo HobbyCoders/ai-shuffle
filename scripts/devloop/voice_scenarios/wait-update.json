@@ -1,0 +1,8 @@
+{
+  "description": "The caller asks for a build; the chat agent (fake AI [script:voice-wait]) starts it in the background, writes an update and waits. That update must be said before the wait ends, and the result after it.",
+  "steps": [
+    {"wait_audio_ms": 300},
+    {"caller": "Start the build and tell me how it goes. [script:voice-wait]"},
+    {"handoff": true, "ack": "Starting it."}
+  ]
+}

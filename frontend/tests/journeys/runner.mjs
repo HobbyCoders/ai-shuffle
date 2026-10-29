@@ -203,6 +203,9 @@ function parseArgs(argv) {
  *   throttles  default Object.keys(THROTTLES)
  *   recorder   extra withRecording options (a case's `recorder` adds to it;
  *              `selectors` are concatenated)
+ *   browser    optional `(status) => ({ args, context })`: extra Chromium
+ *              launch flags (fake microphone, see lib/voice.mjs) and options
+ *              for every case's browser context (permissions)
  */
 export async function runJourney(spec) {
 	const args = parseArgs(process.argv.slice(2));
@@ -236,10 +239,11 @@ export async function runJourney(spec) {
 	const out = join(process.env.JOURNEY_OUT || join(tmpdir(), 'journeys'), spec.name);
 	mkdirSync(out, { recursive: true });
 	const { chromium } = require(process.env.PLAYWRIGHT_MODULE || resolve(CHECKOUT, 'browser-mcp/node_modules/playwright-core'));
+	const extra = spec.browser ? await spec.browser(status) : {};
 	const browser = await chromium.launch({
 		headless: process.env.JOURNEY_HEADED !== '1',
 		executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium',
-		args: ['--no-sandbox']
+		args: ['--no-sandbox', ...(extra.args || [])]
 	});
 
 	// Open the one-time access link once; every case starts from its cookie.
@@ -254,7 +258,7 @@ export async function runJourney(spec) {
 	try {
 		for (const item of plan) {
 			const variant = { viewport: item.viewport, throttle: THROTTLES[item.throttle], throttleName: item.throttle };
-			const context = await browser.newContext({ ...VIEWPORTS[item.viewport] });
+			const context = await browser.newContext({ ...VIEWPORTS[item.viewport], ...(extra.context || {}) });
 			await context.addCookies(cookies);
 			const page = await context.newPage();
 			// Unrecorded evidence (setup's sends above all), printed when the case fails.

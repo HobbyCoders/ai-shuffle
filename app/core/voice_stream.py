@@ -20,6 +20,8 @@ from websockets.exceptions import ConnectionClosed, ConnectionClosedOK
 
 from app.db import database
 from app.db.async_database import run_sync
+# LIVE_URL is the real GPT Live socket; live_url() is it or a dev instance's fake.
+from app.core.voice_endpoints import LIVE_URL, live_url  # noqa: F401
 from app.core.voice_models import LIVE_MODEL, LIVE_MODELS
 from app.core.voice_options import effective_options, validate_options
 from app.core.voice_prompts import (
@@ -279,7 +281,11 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
     decoded = decode_provider_model(selected)
     provider_id, model_id = decoded if decoded else (None, selected)
     if provider_id:
-        validation = await run_sync(validate_provider_model, provider_id, model_id)
+        # The same rule as a typed send to this chat (query_options): a main
+        # session runs any enabled provider, custom gateways included. The
+        # stricter servable rule is for cross-provider workers; it refused every
+        # call on a custom-provider chat with "model unavailable".
+        validation = await run_sync(validate_provider_model, provider_id, model_id, require_servable=False)
         if not validation.ok:
             return "The selected chat model is unavailable. Ask the user to choose another model."
     binding = row.get("voice_config") or {}
@@ -394,7 +400,6 @@ async def _delegate_to_owner(owner: str, row: dict, transcript: str, on_submitte
     return ""
 
 
-LIVE_URL ="wss://api.openai.com/v1/live/sessions"
 # A dropped GPT Live connection is retried with backoff for about 20 seconds,
 # long enough for a phone to move between Wi-Fi and mobile data. No attempt
 # starts after RECONNECT_WINDOW_S; each attempt (connect plus session start)
@@ -593,7 +598,7 @@ class VoiceStream:
 
     @property
     def upstream_url(self):
-        return LIVE_URL if self.is_live else "wss://fal.run/fal-ai/personaplex/realtime"
+        return live_url() if self.is_live else "wss://fal.run/fal-ai/personaplex/realtime"
 
     # How the provider is named in the reconnect log lines.
     provider_label = "GPT Live"

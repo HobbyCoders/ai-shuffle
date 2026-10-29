@@ -248,6 +248,43 @@ async def test_subscription_resumes_active_tasks_and_cleans_up(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_call_placed_mid_reply_tells_the_whole_reply(monkeypatch):
+    """Found by the voice-call journey (busy): a call started while the chat
+    streamed said only the words after the call began, from mid-sentence."""
+    from types import SimpleNamespace
+    from app.core import event_gateway
+    monkeypatch.setattr(event_gateway, "get_gateway", lambda: SimpleNamespace(subscribe=lambda sid: asyncio.Queue(),
+                                                                             unsubscribe=lambda sid, q: None))
+    monkeypatch.setattr(voice_progress.background_tasks, "list_session_nonterminal_background_tasks", lambda sid: [])
+    monkeypatch.setattr(voice_progress.turns, "get_live_turn", lambda sid: {"id": "t"})
+    monkeypatch.setattr(voice_progress.session_events, "get_max_seq", lambda sid: 15)
+    monkeypatch.setattr(voice_progress.session_events, "get_user_seq_for_turn", lambda sid, tid: 11)
+    log = [
+        dict(event("assistant.text_delta", {"text": "Old turn."}, turn="old"), seq=9),
+        dict(event("message.user", {"content": "go"}), seq=11),
+        dict(event("assistant.text_delta", {"text": "Let me look."}), seq=12),
+        dict(event("tool.use", {"name": "Read"}), seq=13),
+        dict(event("assistant.text_delta", {"text": "This reply streams slowly, "}), seq=14),
+        dict(event("assistant.text_delta", {"text": "a few tokens per "}, turn="other"), seq=15),
+        dict(event("assistant.text_delta", {"text": "second. Done."}), seq=16),  # after the call opened
+    ]
+    reads = []
+
+    def get_events(sid, from_seq=0, limit=500):
+        reads.append(from_seq)
+        return [e for e in log if e["seq"] > from_seq][:limit]
+
+    monkeypatch.setattr(voice_progress.session_events, "get_events", get_events)
+    p = voice_progress.VoiceProgress("s", AsyncMock())
+    await p.open()
+    assert reads == [10]  # from the turn's start, not the whole log
+    assert p.text == {"t": "This reply streams slowly, "}
+    p.consume(log[-1])
+    p.consume(dict(event("turn.completed"), seq=17))
+    assert p.pending["turn:t"][0] == voice_progress.RESULT_NOTE + "This reply streams slowly, second. Done."
+
+
+@pytest.mark.asyncio
 async def test_handoffs_capture_only_new_speech(monkeypatch):
     from app.core import turn_recorder
     monkeypatch.setattr(turn_recorder, "record_voice_exchange", AsyncMock())

@@ -408,7 +408,8 @@ def _parsed(argv):
     parser = Mock()
     parser.error.side_effect = SystemExit
     args = SimpleNamespace(host=ipaddress.ip_address("127.0.0.1"), browser_host=None, port=None,
-                           vite_port=None, ttl_seconds=60, no_vite=False, ci=True, seed="default")
+                           vite_port=None, ttl_seconds=60, no_vite=False, ci=True, seed="default",
+                           fake_voice_host=ipaddress.ip_address("127.0.0.1"))
     for key, value in argv.items():
         setattr(args, key, value)
     return parser, args
@@ -421,7 +422,8 @@ def test_ci_serves_the_stamped_build_on_loopback_only(monkeypatch):
     assert args.no_vite is True
     for bad in ({"host": ipaddress.ip_address("0.0.0.0"),
                  "browser_host": ipaddress.ip_address("10.0.0.5")},
-                {"vite_port": 18555}):
+                {"vite_port": 18555},
+                {"fake_voice_host": ipaddress.ip_address("0.0.0.0")}):
         parser, args = _parsed(bad)
         with pytest.raises(SystemExit):
             devloop._validate(parser, args)
@@ -430,6 +432,17 @@ def test_ci_serves_the_stamped_build_on_loopback_only(monkeypatch):
     with pytest.raises(SystemExit):
         devloop._validate(parser, args)
     assert "has no stamp" in parser.error.call_args.args[0]
+
+
+def test_the_fake_voice_binds_loopback_or_every_address(monkeypatch):
+    monkeypatch.setattr(devloop, "stamped_build_problem", lambda: None)
+    for good in ("127.0.0.1", "0.0.0.0"):
+        parser, args = _parsed({"ci": False, "no_vite": True, "fake_voice_host": ipaddress.ip_address(good)})
+        devloop._validate(parser, args)
+    parser, args = _parsed({"ci": False, "no_vite": True, "fake_voice_host": ipaddress.ip_address("10.0.0.5")})
+    with pytest.raises(SystemExit):
+        devloop._validate(parser, args)
+    assert "--fake-voice-host" in parser.error.call_args.args[0]
 
 
 def test_ci_flag_defaults_from_the_environment(monkeypatch):
@@ -510,3 +523,30 @@ def test_the_dev_agent_becomes_the_composer_default_for_the_owner(monkeypatch):
     seed_module.make_dev_agent_the_default()
     stored.assert_called_once_with("admin", "owner-of-admin", "composer.profile",
                                    seed_module.DEV_AGENT_ID)
+
+
+# ─── voice seed ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("engine,model", [("gpt-live", "gpt-live-1"), ("grok", "grok-voice-latest")])
+def test_voice_is_seeded_on_the_fake_only_on_a_dev_instance(bare_db, mock_encryption, monkeypatch, engine, model):
+    from app.api.settings import get_voice_settings
+    from app.core import voice_endpoints
+    from app.db.model_providers import get_all_model_providers
+
+    monkeypatch.setenv("SHUFFLE_DEV_VOICE_ENGINE", engine)
+    monkeypatch.setattr(voice_endpoints, "fake_voice_origin", lambda: None)
+    assert "skipped" in asyncio.run(seed_module.seed_voice("http://127.0.0.1:9/v1"))
+    assert not get_all_model_providers() and get_voice_settings()["voice_mode_enabled"] is False
+
+    monkeypatch.setattr(voice_endpoints, "fake_voice_origin", lambda: "127.0.0.1:9")
+    first = asyncio.run(seed_module.seed_voice("http://127.0.0.1:9/v1"))
+    assert first["model"] == model
+    voice = get_voice_settings()
+    assert voice["voice_mode_enabled"] is True and voice["voice_model"] == model
+    assert voice["voice_provider_id"] == first["providers"][engine]
+    rows = {r["name"]: r for r in get_all_model_providers()}
+    assert {rows[name]["provider_type"] for name in rows} == {"openai", "xai"}
+    # Idempotent: a second run reuses the rows.
+    assert asyncio.run(seed_module.seed_voice("http://127.0.0.1:9/v1"))["providers"] == first["providers"]
+    assert len(get_all_model_providers()) == 2

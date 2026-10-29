@@ -39,8 +39,9 @@ def _fingerprint(api_key: str) -> str:
 async def _fetch_status(api_key: str) -> int:
     """HTTP status of the model lookup. Raises on network failure."""
     from app.core.http_client import get_http_client
+    from app.core.voice_endpoints import live_11_probe_url
     response = await get_http_client().get(
-        MODEL_URL, headers={"Authorization": f"Bearer {api_key}"},
+        live_11_probe_url(), headers={"Authorization": f"Bearer {api_key}"},
         timeout=PROBE_TIMEOUT_S, follow_redirects=False,
     )
     return response.status_code

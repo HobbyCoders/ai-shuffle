@@ -88,6 +88,10 @@ drive the instance in Chromium and fail on any flight-recorder anomaly; see
   last turn ends on an unfinished tool call; a branch session checked out under
   `.fluid/worktrees/feature-second`; a cleared chat; one in Dev other; and one
   with no project.
+* Voice calls on, funded by **Fake voice (dev, GPT Live)** (OpenAI) or **Fake
+  voice (dev, Grok)** (xAI), per `up --voice-engine gpt-live|grok`. Both rows
+  carry a dummy key and list no chat models; calls on them reach only the
+  fake voice provider (below).
 
 Seeding runs inside the app at startup through the app's own functions, at
 most once per data directory. It refuses to run unless the data directory
@@ -103,7 +107,10 @@ It is chosen by the request alone, so it behaves the same after restarts:
 * Plain messages get a short streamed echo of what you wrote.
 * `[script:NAME]` anywhere in your message plays `scripts/devloop/scenarios/NAME.json`:
   `default`, `long`, `slow`, `tool-bash`, `tool-multi`, `error-500`,
-  `rate-limit-429`, `cut`. Unknown names reply with the list.
+  `rate-limit-429`, `cut`, and for voice calls `voice-reply` (a
+  three-paragraph reply) and `voice-wait` (an update, a background job and a
+  wait; the job's output tags its wake turn `voice-wait-done`). Unknown names
+  reply with the list.
 * Options ride in the tag: `[script:slow tps=2 latency_ms=1500]`.
 
 A scenario is a list of `steps`. The step played is the number of tool rounds
@@ -131,6 +138,88 @@ values and then the tag override them. The fake AI also runs alone:
 It answers `GET /v1/models` and streaming `/v1/chat/completions`,
 `/v1/messages` and `/v1/responses`. The native-leg tests use the same wire
 code (`scripts/devloop/fake_wire.py`).
+
+## Voice calls: the fake voice provider
+
+`up` also starts a fake realtime voice provider
+(`scripts/devloop/fake_voice.py`) and names it to the app in
+`SHUFFLE_DEV_FAKE_VOICE_URL`. A call placed from the UI then runs the app's
+real call code end to end: the call button and dock, the browser microphone
+over the call's audio socket, the server's transport (`VoiceStream` for GPT
+Live, `GrokVoiceStream` for Grok), the bridge, and the hand-off to the chat
+agent on the fake AI. Only the provider's address changes
+(`app/core/voice_endpoints.py`), so it is free and deterministic.
+
+It plays a voice model that does exactly what the app asks: it greets when
+told to, says every note the app sends for speech in the chat agent's own
+words (once, with the text it was asked to tell), and says nothing for quiet
+context. The caller's side comes from a scenario in
+`scripts/devloop/voice_scenarios/`, chosen by `[voice:NAME]` in a chat message
+before the call (options ride in the tag: `[voice:relay reply_delay_ms=800]`):
+
+| Scenario | What happens |
+| --- | --- |
+| `default` | No caller script. Type into the call to hand the agent a request. |
+| `relay` | The caller asks; the voice hands off with a short ack; the agent's three-paragraph reply (`[script:voice-reply]`) must be said once, in full. |
+| `wait-update` | The agent starts a background job, writes an update and waits (`[script:voice-wait]`); the update is said, then the result. |
+| `busy` | Placed while the chat answers: that reply is said when it lands, then a new request is relayed. |
+| `inactivity` | The provider ends its session for inactivity (once per chat line). |
+| `renew` | The provider ends its session as expired while the agent works; the app reconnects. |
+| `error` | The provider reports an error mid-call (once per chat line). |
+| `drop` | The provider connection is cut without a close. |
+
+Steps (one key each): `wait_audio_ms` (wait for that much speech-level
+microphone audio, so a script never runs ahead of a real microphone),
+`wait_ms`, `wait_speech` (wait until N notes were said), `caller` (the
+caller's words, as the provider's transcript events), `handoff` (with `ack`,
+the voice's own words), `say`, `error`, `close` (a reason: `inactive`,
+`expired`), `drop`. Options: `word_ms`, `start_delay_ms`, `reply_delay_ms`
+(slow provider), `step_timeout_ms`. A session that resumes a call (its history
+carries the app's renewal note) plays `default`, so a reconnect never replays
+the script. New scenario files are picked up without a restart.
+
+Everything it saw and said is logged as JSON lines: the status file's
+`fake_voice.log` (`speech`, `note`, `handoff`, `caller`, `audio`, sessions),
+also `GET <fake_voice.control>log?since=N`. `GET …/scenarios` lists the
+scenarios; `GET …/arm?scenario=NAME` makes the next new session without a tag
+play NAME (for a client that cannot type a tag first). The fake also answers
+the GPT-Live-1.1 access check with 404. It runs alone too:
+`python -m scripts.devloop.fake_voice --port N [--host 0.0.0.0] [--log PATH]`.
+
+The fake is used only on a dev instance: the URL must be a bare loopback
+`ws://host:port` and the data directory must carry the launcher's
+`.branch-preview` marker (as for the seed). On that instance, and only there,
+the preview cookie may place calls (`attach`, `audio`, `hangup` on
+`/api/v1/voice/sessions/<id>/`); everywhere else calls stay owner-only.
+`tests/core/test_voice_endpoints.py` proves a normal config cannot reach it.
+
+The journeys place calls with Chromium's fake media
+(`frontend/tests/journeys/lib/voice.mjs`): a looped tone with pauses as the
+microphone (constant sound with no words would trip the app's
+"provider stopped hearing" check), no permission prompt.
+
+### From a phone or an Android emulator
+
+The app always talks to the fake over loopback; a phone or emulator only
+needs the app itself. Start the instance on an address the device reaches and
+open the printed access link there:
+
+```sh
+python -m scripts.devloop up --host 0.0.0.0 --browser-host <worker-IP> \
+    --fake-voice-host 0.0.0.0
+```
+
+An Android emulator on the same machine reaches the host as `10.0.2.2`
+(`--browser-host 10.0.2.2`); on another machine use that machine's LAN IP.
+(The emulator path has not been run yet: the first locked-phone test is
+expected to confirm these addresses.)
+`--fake-voice-host 0.0.0.0` also opens the fake's log and scenario controls
+(`/fake/log`, `/fake/arm`) on the LAN, so a test driving the device from
+elsewhere can arm a scenario (the native app cannot type a `[voice:…]` tag
+before a call on a fresh chat) and read what the voice was asked to say. The
+status file's `fake_voice.control` then names the browser-facing address. A
+plain-HTTP LAN page is not a secure context, so a browser there gets no
+microphone; the native app is not affected.
 
 ## Claude Code chats: the fake `claude` CLI (`--claude-cli fake`, the default)
 
@@ -200,7 +289,8 @@ Every port is picked free at random (or `--port` / `--vite-port`); 8000 and
 the guarded preview listener and Vite bind to `--host`. Ctrl-C, SIGTERM,
 SIGHUP (the terminal or the Monitor's pty went away), `down`, the TTL
 (`--ttl-seconds`, default 1 h, at most 4 h) and loss of the parent process all
-stop the app, PostgreSQL, Vite and the fake AI and delete the data. A stop
+stop the app, PostgreSQL, Vite, the fake AI and the fake voice provider and
+delete the data. A stop
 first rewrites the status as `stopping`, before the slow teardown, so nothing
 reads a dying instance as ready.
 

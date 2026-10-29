@@ -194,6 +194,19 @@
 			]
 		},
 		{
+			"why": "voice calls: the call button, call dock and client, and the server's call transports, bridge and hand-off to the chat agent",
+			"journeys": ["voice-call", "voice-provider-endings"],
+			"globs": [
+				"frontend/src/lib/services/voice*",
+				"frontend/src/lib/components/voice/**",
+				"frontend/src/lib/components/chat/VoiceCallButton.svelte",
+				"frontend/src/lib/api/voice*",
+				"app/api/voice*.py",
+				"app/core/voice_*.py",
+				"app/core/preview_access.py"
+			]
+		},
+		{
 			"why": "a journey file itself",
 			"journeys": ["$self"],
 			"globs": ["frontend/tests/journeys/*.journey.mjs"]

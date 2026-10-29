@@ -212,6 +212,11 @@ Conventions:
   out of it and break the next journey that opens one from the sidebar.
 - Seed what a journey needs in `scripts/devloop/seed.py`; the preview cookie
   cannot change settings, providers or preferences.
+- Voice calls: pass `browser: voiceBrowser` (`lib/voice.mjs`) for Chromium's
+  fake microphone, name the caller's script with `[voice:NAME]` in a chat
+  message before the call, and judge the call by the fake voice provider's log
+  (`fakeVoiceLog`: what the app asked the voice to say, what it said) as well
+  as the UI. See [the fake voice provider](../../../docs/internal/dev-loop.md#voice-calls-the-fake-voice-provider).
 
 ## Journeys
 
@@ -229,5 +234,7 @@ Conventions:
 | `reload-midstream.journey.mjs` | Reloading during a slow reply (plain, or after opening it by link) goes straight back to the chat (never the new-chat screen on the way), the reply finishes, and message and reply each show once. |
 | `cleared-chat.journey.mjs` | The seeded cleared chat shows its own title and "Conversation cleared", not the new-session hero, without moving the composer; a chat cleared while open moves it to the centre once (its designed move, `expectShift`) and a send in it works (intermittent known bug #797). |
 | `side-panels.journey.mjs` | Git panel, session side panel and Settings-and-back at desktop, phone and both Fold sizes: open and close in one move, same chat and transcript after, reading position kept. |
+| `voice-call.journey.mjs` | A real call from the UI on the fake voice provider: it goes live, greets once, says nothing unasked and ends with End (`start-end`); the caller's request is handed to the chat agent and its whole reply is said once, never an acknowledgement in its place (`relay`, also with a slow provider); an update the agent writes before it waits is said, then the result (`wait-update`); a call placed while the chat answers says that reply when it lands, then relays a new request (`busy`). |
+| `voice-provider-endings.journey.mjs` | The provider ends or breaks the call: an inactivity end (GPT Live) ends the call quietly with a notice and a new call works (Grok: renewed, no second greeting); a provider error shows its reason, leaves no call controls and a retry works; a session that expires while the agent works is renewed without a second greeting and the reply is said there once, in full. |
 | `phone-composer.journey.mjs` | Phone and Fold cover only: focus/type/send never move the composer's bottom edge, round buttons are round and tappable, each composer sheet fits and closes (Escape or tap outside), and Send without an agent says why at once. |
 | `compaction.journey.mjs` | A Claude Code chat on the dev instance's fake `claude`, which prints compaction as the real CLI does (replay of the whole conversation after the boundary included; [protocol](../../../docs/internal/claude-code-compaction-protocol.md)): automatic mid-turn, typed `/compact`, and right after a tool result. The compaction shows once (its card, or the turn's folded work log that names it and holds one card), no prompt or answer shows twice after the replay, the context meter does not rise, a follow-up is answered, and a reload goes straight back to the same rows. |

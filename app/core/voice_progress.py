@@ -264,6 +264,35 @@ def split_bytes(text: str, size: int) -> list[str]:
     return pieces
 
 
+def streamed_text(session_id: str, turn_id: str, upto_seq: int) -> str:
+    """The public text ``turn_id`` streamed up to ``upto_seq``, as ``consume`` keeps it.
+
+    Read from the turn's first user row (the whole log when that is unknown),
+    with the same rules: deltas add, a whole text message replaces, a tool call
+    or result starts afresh (the text before it was a progress update).
+    """
+    seq = max(0, (session_events.get_user_seq_for_turn(session_id, turn_id) or 1) - 1)
+    text = ""
+    while seq < upto_seq:
+        batch = session_events.get_events(session_id, from_seq=seq, limit=500)
+        for event in batch:
+            if event["seq"] > upto_seq:
+                return text
+            seq = event["seq"]
+            if event.get("turn_id") != turn_id:
+                continue
+            kind, payload = event.get("event_type"), event.get("payload") or {}
+            if kind == "assistant.text_delta":
+                text = (text + (payload.get("text") or ""))[:TEXT_MAX_CHARS]
+            elif kind == "message.assistant" and payload.get("kind") in (None, "text"):
+                text = (payload.get("content") or "")[:TEXT_MAX_CHARS]
+            elif kind in ("tool.use", "tool.result"):
+                text = ""
+        if len(batch) < 500:
+            break
+    return text
+
+
 def question_note(request: dict, limit: int = 900) -> str:
     """The text of an on-screen question card, for the voice to read out.
 
@@ -367,6 +396,12 @@ class VoiceProgress:
             live = await run_sync(turns.get_live_turn, self.session_id)
             if live:
                 self.active_turns.add(live["id"])
+                # The reply it already streamed: its end is told as the whole
+                # reply, so without this a call placed mid-reply said only the
+                # words after the call began, from mid-sentence.
+                streamed = await run_sync(streamed_text, self.session_id, live["id"], self.seq)
+                if streamed:
+                    self.text[live["id"]] = streamed[:TEXT_MAX_CHARS]
                 self.note("chat", "Work on an earlier request is already running. Do not start it again.")
         # A call that starts mid-work hears the whole picture at once, as quiet
         # context, instead of one task line every UPDATE_INTERVAL.

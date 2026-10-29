@@ -13,6 +13,7 @@ from collections import OrderedDict
 
 from websockets.exceptions import ConnectionClosed
 
+from app.core.voice_endpoints import grok_url
 from app.core.voice_models import GROK_URL
 from app.core.voice_progress import NOTE_PREFIX, SPOKEN_NOTE_PREFIX
 from app.core.voice_prompts import LIVE_INSTRUCTIONS
@@ -125,7 +126,7 @@ class GrokVoiceStream(VoiceStream):
 
     @property
     def upstream_url(self):
-        return GROK_URL
+        return grok_url()  # The real xAI socket, or a dev instance's fake.
 
     def reconnect_reason(self, reader, done):
         """Renew before the hour is up; restore a dropped or provider-ended session.
