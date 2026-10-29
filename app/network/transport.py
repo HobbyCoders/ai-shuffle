@@ -22,6 +22,7 @@ import asyncio
 import contextvars
 import json
 import logging
+import os
 import random
 import threading
 import time
@@ -49,6 +50,9 @@ SYNC_ACTIVE_SECONDS = 1.0
 PEER_BACKOFF_BASE_SECONDS = 2.0
 PEER_BACKOFF_MAX_SECONDS = 900.0
 SCAN_INTERVAL_SECONDS = 2.0
+# An urgent wake interrupts the idle rest, then collects a fixed window of
+# writes. Later writes never extend it; even continuous wakes leave some rest.
+SCAN_WAKE_DEBOUNCE_SECONDS = 0.1
 # While a transcript backlog remains, the scanner rests as long as the pass
 # took (at least this long, at most SCAN_INTERVAL_SECONDS): about half its
 # time publishing instead of a third, and never back to back (#1978).
@@ -780,7 +784,7 @@ class PeerLink:
         their_endpoints = validate_endpoints(their_endpoints) if isinstance(their_endpoints, list) else []
         capabilities = exchange.get("capabilities")
         await asyncio.to_thread(store.touch_member, self.device_id,
-                                capabilities=capabilities if isinstance(capabilities, dict) else None,
+                                capabilities=capabilities if isinstance(capabilities, dict) else {},
                                 endpoints=their_endpoints or None, version=exchange.get("version"),
                                 incarnation=exchange.get("incarnation"))
         if their_endpoints:
@@ -1094,11 +1098,13 @@ def _description() -> dict:
 
 
 def _capabilities() -> dict:
+    from app.network.nested_secret_sync import CAPABILITY
     try:
         from app.core.runner_capabilities import detect_capabilities
-        return detect_capabilities()
+        capabilities = detect_capabilities()
     except Exception:  # noqa: BLE001
-        return {}
+        capabilities = {}
+    return {**capabilities, CAPABILITY: 1}
 
 
 
@@ -1538,17 +1544,28 @@ async def scan_loop() -> None:
                        max(SCAN_BACKLOG_REST_SECONDS, time.monotonic() - started))
             await asyncio.sleep(rest)
             continue
-        # Coalesce streaming writes and requests arriving during the scan.
-        # Even a slow scan or repeated failure must leave the worker some rest.
-        await asyncio.sleep(SCAN_INTERVAL_SECONDS)
-        if not _scan_wake.is_set() and delay > SCAN_INTERVAL_SECONDS:
-            try:
-                await asyncio.wait_for(
-                    _scan_wake.wait(), timeout=delay - SCAN_INTERVAL_SECONDS)
-            except asyncio.TimeoutError:
-                pass
+        await _scan_rest(delay)
         if _scan_wake.is_set():
             delay = SCAN_INTERVAL_SECONDS
+
+
+async def _scan_rest(delay: float) -> None:
+    """Wait interruptibly, then debounce once, never once per queued write."""
+    urgent = os.environ.get("AI_SHUFFLE_PERF_SCAN_WAKE", "").strip().lower() not in (
+        "0", "false", "off", "no")
+    if not urgent:
+        # Short-lived kill switch: preserve the previous two-second floor.
+        await asyncio.sleep(SCAN_INTERVAL_SECONDS)
+        delay -= SCAN_INTERVAL_SECONDS
+    if not _scan_wake.is_set() and delay > 0:
+        try:
+            await asyncio.wait_for(_scan_wake.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            return
+    if urgent and _scan_wake.is_set():
+        # A fixed window also handles writes made during the pass. Do not clear
+        # the event or the dirty sets here: the next pass takes their snapshot.
+        await asyncio.sleep(SCAN_WAKE_DEBOUNCE_SECONDS)
 
 
 def _owner_wake_pass(*, dirty: set, sessions: Optional[set], candidates: Optional[set],

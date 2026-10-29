@@ -19,6 +19,7 @@
 	import type { DangerAction } from '../shell/DangerZone.svelte';
 	import { clientKind, clientPlatform, type DevicesModel } from './devices-model.svelte';
 	import { routeLabel } from '$lib/api/network';
+	import WorkerMachineSettings from './WorkerMachineSettings.svelte';
 
 	interface Props {
 		model: DevicesModel;
@@ -126,6 +127,7 @@
 				</SettingRow>
 			{/if}
 		</RowGroup>
+		<WorkerMachineSettings deviceId={member.device_id} />
 	</DetailPane>
 {:else if joining}
 	<DetailPane

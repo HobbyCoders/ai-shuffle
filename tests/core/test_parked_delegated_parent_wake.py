@@ -143,12 +143,15 @@ async def test_a_completion_frame_without_the_worker_marker_still_wakes(mock_db)
 
 
 async def test_a_held_peer_message_rides_the_workers_wake(mock_db):
-    """The worker's progress note is held while the parent is parked on it,
-    and is delivered with the completion wake, not at the promotion deadline."""
+    """A progress note held before upgrade rides the worker's completion wake
+    once, rather than being delivered again at the promotion deadline."""
+    from fluid.context.peer import format_peer_message
+
     _park_on_worker("dp3", "worker-3", "tu-3")
-    assert await turn_scheduler.on_agent_message(
-        "dp3", "worker-3", "halfway through the audit",
+    assert await turn_scheduler._hold_peer_message(
+        "dp3", format_peer_message("worker-3", "halfway through the audit").strip(),
     ) == turn_scheduler.HELD
+    (held,) = _held_rows("dp3")
 
     enqueued = []
     real_enqueue = turn_scheduler._enqueue_context_wake
@@ -164,14 +167,44 @@ async def test_a_held_peer_message_rides_the_workers_wake(mock_db):
         await provider_agent._notify_caller_terminal(
             "dp3", "worker-3", "tu-3", "completed", "audit done",
         )
+        (wake,) = enqueued
+        assert await turn_scheduler.fold_held_peer_messages_for_turn("dp3", wake) == ""
+        assert await turn_scheduler.promote_held_peer_messages("dp3", held["prompt"]) is None
+        assert await turn_scheduler.fold_held_peer_messages_for_turn("dp3", wake) == ""
 
     (wake,) = enqueued
     assert wake["source"] == "unpark"
     assert "<task-id>worker-3</task-id>" in wake["prompt"]
-    assert "halfway through the audit" in wake["prompt"]
+    assert wake["prompt"].count("halfway through the audit") == 1
     assert "halfway through the audit" in wake["payload"]["held_peer_messages"]
     # Taken off the held row, so the promotion deadline has nothing to deliver.
     assert _held_rows("dp3") == []
+
+
+async def test_an_ordinary_peer_message_wakes_a_parked_parent_promptly(mock_db):
+    """Progress wakes the parent while its worker is still running, without urgency."""
+    parked = _park_on_worker("dp6", "worker-6", "tu-6")
+    engine = _Engine()
+
+    with patch.object(session_runtime, "execute", new=engine):
+        sent_at = time.monotonic()
+        turn_id = await turn_scheduler.on_agent_message(
+            "dp6", "worker-6", "halfway through the audit",
+        )
+        started = await _wait_for_start(engine, timeout=_PROMPT_WAKE_SECONDS)
+
+    assert turn_id not in (None, turn_scheduler.HELD)
+    assert started is not None, "the ordinary peer message never woke the parked parent"
+    started_at, wake = started
+    assert started_at - sent_at < _PROMPT_WAKE_SECONDS
+    assert wake["id"] == turn_id and wake["source"] == "agent_message"
+    assert wake["parent_turn_id"] == parked["id"]
+    assert wake["prompt"].count("halfway through the audit") == 1
+    assert wake["payload"]["task_peer_sender"] == "worker-6"
+    assert (task_registry.get_task("dp6", "worker-6") or {})["status"] == "running"
+    assert len(engine.started) == 1
+    assert turns_db.get_queued_turns("dp6") == []
+    assert _held_rows("dp6") == []
 
 
 def _held_rows(session_id):

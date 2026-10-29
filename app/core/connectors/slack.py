@@ -23,15 +23,9 @@ from app.core.connectors import slack_actions
 
 logger = logging.getLogger(__name__)
 
-try:
-    from slack_sdk.web.async_client import AsyncWebClient
-    from slack_sdk.socket_mode.aiohttp import SocketModeClient
-    from slack_sdk.socket_mode.request import SocketModeRequest
-    from slack_sdk.socket_mode.response import SocketModeResponse
+from importlib.util import find_spec
 
-    SLACK_SDK_AVAILABLE = True
-except ImportError:
-    SLACK_SDK_AVAILABLE = False
+SLACK_SDK_AVAILABLE = find_spec("slack_sdk") is not None
 
 class SlackConnector(BaseConnector):
     """
@@ -119,6 +113,9 @@ class SlackConnector(BaseConnector):
 
     async def _do_connect(self) -> None:
         """Start the Slack Socket Mode client."""
+        from slack_sdk.web.async_client import AsyncWebClient
+        from slack_sdk.socket_mode.aiohttp import SocketModeClient
+
         bot_token = self.config["bot_token"]
         app_token = self.config["app_token"]
 
@@ -185,6 +182,8 @@ class SlackConnector(BaseConnector):
     ) -> None:
         """Process a Socket Mode event."""
         try:
+            from slack_sdk.socket_mode.response import SocketModeResponse
+
             # Acknowledge the event
             response = SocketModeResponse(envelope_id=req.envelope_id)
             await client.send_socket_mode_response(response)
@@ -579,6 +578,8 @@ class SlackConnector(BaseConnector):
             return {"success": False, "message": "slack_sdk is not installed"}
 
         try:
+            from slack_sdk.web.async_client import AsyncWebClient
+
             client = AsyncWebClient(token=self.config["bot_token"])
             result = await client.auth_test()
             bot_name = result.get("user", "Unknown")

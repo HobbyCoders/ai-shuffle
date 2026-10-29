@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httplib2
 import pytest
+from googleapiclient import discovery
 from googleapiclient.errors import HttpError
 
 from app.core.connectors import gmail as gmail_module
@@ -199,20 +200,20 @@ class TestParsing:
 class TestConnect:
     async def test_connect_without_watch_does_not_poll(self, monkeypatch):
         svc = FakeGmail([full_message("m1")])
-        monkeypatch.setattr(gmail_module, "build", MagicMock(return_value=svc))
+        monkeypatch.setattr(discovery, "build", MagicMock(return_value=svc))
         conn = make_gmail()
         conn._email_address = ""
         assert await conn.connect() is True
         assert conn._email_address == "me@example.com"
         assert conn._poll_task is None and svc.list_calls == []
-        gmail_module.build.assert_called_once()
-        assert gmail_module.build.call_args.args == ("gmail", "v1")
-        creds = gmail_module.build.call_args.kwargs["credentials"]
+        discovery.build.assert_called_once()
+        assert discovery.build.call_args.args == ("gmail", "v1")
+        creds = discovery.build.call_args.kwargs["credentials"]
         assert creds.refresh_token == "1//rt" and creds.client_id == CONFIG["client_id"]
 
     async def test_connect_with_watch_seeds_and_polls(self, monkeypatch):
         svc = FakeGmail([full_message("m1"), full_message("m2")])
-        monkeypatch.setattr(gmail_module, "build", MagicMock(return_value=svc))
+        monkeypatch.setattr(discovery, "build", MagicMock(return_value=svc))
         conn = make_gmail(config={"watch_inbox": "True", "labels": "INBOX, IMPORTANT ,", "max_results": "5",
                                   "poll_interval_seconds": "3600"})
         assert await conn.connect() is True
@@ -226,7 +227,7 @@ class TestConnect:
     async def test_seed_failure_is_tolerated(self, monkeypatch):
         svc = FakeGmail()
         svc.fail["list"] = http_error(503, "Backend Error")
-        monkeypatch.setattr(gmail_module, "build", MagicMock(return_value=svc))
+        monkeypatch.setattr(discovery, "build", MagicMock(return_value=svc))
         conn = make_gmail(config={"watch_inbox": "true", "poll_interval_seconds": "3600"})
         assert await conn.connect() is True
         assert conn._seen_message_ids == set()
@@ -235,7 +236,7 @@ class TestConnect:
     async def test_revoked_refresh_token_fails_connect(self, monkeypatch):
         svc = FakeGmail()
         svc.fail["profile"] = http_error(401, "Request had invalid authentication credentials.")
-        monkeypatch.setattr(gmail_module, "build", MagicMock(return_value=svc))
+        monkeypatch.setattr(discovery, "build", MagicMock(return_value=svc))
         conn = make_gmail()
         assert await conn.connect() is False
         assert conn.status == ConnectorStatus.ERROR
@@ -438,12 +439,12 @@ class TestMisc:
         assert "gmail_invoke" in conn.get_context_instructions("x")
 
     async def test_test_connection(self, monkeypatch):
-        monkeypatch.setattr(gmail_module, "build", MagicMock(return_value=FakeGmail(email_address="owner@example.com")))
+        monkeypatch.setattr(discovery, "build", MagicMock(return_value=FakeGmail(email_address="owner@example.com")))
         assert await make_gmail().test_connection() == {"success": True, "message": "Authenticated as owner@example.com"}
 
         bad = FakeGmail()
         bad.fail["profile"] = http_error(403, "insufficient scopes")
-        monkeypatch.setattr(gmail_module, "build", MagicMock(return_value=bad))
+        monkeypatch.setattr(discovery, "build", MagicMock(return_value=bad))
         res = await make_gmail().test_connection()
         assert res["success"] is False and "403" in res["message"]
 

@@ -8,7 +8,7 @@ Items 6-10 of the round-9 fix plan:
 * Grep/Glob missing paths, Edit mismatches and MCP tool errors return as a
   cell's results instead of aborting it (timeouts and denials still do);
 * subagents are named from their Task, SendMessage errors list who is
-  reachable, and interim peer messages queue while the parent is parked;
+  reachable, and peer messages wake a parked parent;
 * trim placeholders say what was lost and where it still lives, and short
   error results no longer block segment digestion;
 * Note/Monitor/run_python wording matches the behaviour above.
@@ -362,7 +362,7 @@ class _IdleProvider:
         yield StreamChunk("message_stop", {})
 
 
-async def test_interim_peer_message_queues_while_parked() -> None:
+async def test_interim_peer_message_wakes_a_parked_parent() -> None:
     provider = _IdleProvider()
     loop = NativeLoop(provider=provider, store=MemoryStore(), model="m", system="s")
     await loop.submit(UserTurn(content="start"))
@@ -373,19 +373,20 @@ async def test_interim_peer_message_queues_while_parked() -> None:
         task_id="task_1", worker_session_id=None, description="worker",
     )
     await loop.submit(AgentMessage(text="halfway there", sender="worker"))
-    await asyncio.sleep(0.1)
-    assert loop._turn_task.done(), "an interim message must not wake a parked parent"
-    assert len(provider.prompts) == 1
-    # Urgent still wakes.
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+    assert len(provider.prompts) == 2
+    assert provider.prompts[1].count("halfway there") == 1
+    assert loop._queued_peer_messages == []
+    # The urgent parameter remains accepted, but does not change wake policy.
     await loop.submit(AgentMessage(text="need a decision now", sender="worker", urgent=True))
     await asyncio.wait_for(loop.wait_turn(), timeout=5)
-    assert len(provider.prompts) == 2 and "need a decision now" in provider.prompts[1]
-    assert "halfway there" in provider.prompts[1]  # the queued one rode along
+    assert len(provider.prompts) == 3 and "need a decision now" in provider.prompts[2]
+    assert "halfway there" not in provider.prompts[2]
     # Not parked: an ordinary message wakes as before.
     loop._background_pending.clear()
     await loop.submit(AgentMessage(text="done", sender="worker"))
     await asyncio.wait_for(loop.wait_turn(), timeout=5)
-    assert len(provider.prompts) == 3 and "done" in provider.prompts[2]
+    assert len(provider.prompts) == 4 and "done" in provider.prompts[3]
     await loop.aclose()
 
 
@@ -402,8 +403,8 @@ async def test_queued_peer_message_survives_engine_eviction() -> None:
     first._background_pending["task_1"] = BackgroundTaskReceipt(
         task_id="task_1", worker_session_id=None, description="worker",
     )
-    await first.submit(AgentMessage(text="interim note", sender="worker"))
-    await asyncio.sleep(0.05)
+    # Persist a message exactly as the previous release did while parked.
+    assert await first._queue_if_parked(AgentMessage(text="interim note", sender="worker"))
     assert len(provider.prompts) == 1
     await first.aclose()
 

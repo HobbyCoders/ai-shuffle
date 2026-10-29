@@ -10,6 +10,48 @@ Endpoints behind the **Devices** settings: the network your workers share, the i
 
 Endpoints marked **Owner only** reject API-user keys (`aih_...`) with `403`. The examples send an owner token from `POST /api/v1/owner/login` (see [Owner password](/docs/api-reference/authentication#owner-password)).
 
+## Worker machine settings
+
+Settings > Devices shows machine settings inside each network worker’s detail.
+The same controls work from another worker’s UI or a paired phone’s web UI.
+Claude/GitHub sign-in is **status only**: there is no remote sign-in or logout.
+Claude account/email/plan comes only from the stock CLI’s own status output;
+no CLI sign-in credential is read, stored, copied or returned.
+
+`GET /api/v1/settings/worker-settings` (**Owner only**) returns `workers` with
+`device_id`, `device_name`, `online`, `is_self`, `outcome`, `reason`, `status`
+and `availability`. Status has the Claude CLI install/version/keep-installed,
+job kind/state and sign-in/email/plan, GitHub CLI sign-in boolean, and release
+channel/editability/restart requirement. Unknown/slow probes stay unknown, not
+signed out. Reads are parallel, bounded, coalesced and cached briefly. No peer
+addresses, local paths, installer output or credentials are returned.
+
+`POST /api/v1/settings/worker-settings/action` (**Owner only; not an agent
+preview**) accepts a worker `device_id` or `"all"` in `target`, and one typed
+`action`:
+
+- `{"operation":"claude-install"}` or `{"operation":"claude-update"}`
+- `{"operation":"claude-keep-installed","keep_installed":true}`
+- `{"operation":"release-channel","channel":"stable"}` (`nightly` also)
+- `{"operation":"always-on","always_on":true}` (`false` or `null` for default)
+
+It returns a `request_id` and per-worker outcomes: `accepted`, `offline`,
+`unsupported`, `refused` or `uncertain`. Accepted means started/saved, not that
+an installer finished; poll status for its job state. An uncertain delivery
+must be checked before retrying. Offline machine actions are never queued or
+replayed. A stays-on edit changes the authorized target’s existing shared row
+without remote execution, including while offline; it syncs on reconnection.
+An unknown worker never silently means the current worker.
+
+Peer control allow-lists only `worker-settings` status/actions (and extends
+`application-update` with the typed channel action). Receivers independently
+check active worker membership, exact arguments, request ID and a 15-second
+expiry. Short-lived receipts suppress duplicate delivery. No recursive fanout,
+arbitrary HTTP paths or shell commands are accepted. CLI operations retain
+platform/ownership/busy checks; channels retain launcher/downgrade checks.
+`claude_sign_in_supported:false` is an explicit extension point, not an
+implemented sign-in operation.
+
 ## Needs you push
 
 Phone push is enabled only for a signed-in, linked HobbyCoders worker and goes through the account-hub relay. Android asks for system notification permission once at app start. Publisher credentials are never stored on workers. Local use and the in-app bell do not require an account.

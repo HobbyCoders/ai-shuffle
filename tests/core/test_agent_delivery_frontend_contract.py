@@ -1,8 +1,8 @@
 """Peer-message prompts the chat renders, pinned to a shared fixture (#1618).
 
 A turn that delivers peer messages records its prompt as the turn's
-``message.user``. The real scheduler builds four shapes: one idle message (a
-single envelope), and three that carry messages held while the parent was
+``message.user``. The real scheduler builds four shapes: one immediate message (a
+single envelope), and three that carry messages held by the previous release while
 parked, inside a ``<system-reminder>`` (a promotion wake, an unpark wake after
 its task notification, and an urgent message after the held ones).
 ``frontend/src/lib/utils/__fixtures__/agent-delivery-producer.json`` holds
@@ -50,10 +50,15 @@ def _park(session_id):
     turns_db.park_turn(turn["id"], ["worker-a", "worker-b"])
 
 
-async def _hold(session_id):
+async def _legacy_hold(session_id):
+    """Persist parked messages as the previous release did, before immediate wakes."""
+    from fluid.context.peer import format_peer_message
+
     _park(session_id)
     for sender, text in HELD:
-        assert await turn_scheduler.on_agent_message(session_id, sender, text) == turn_scheduler.HELD
+        assert await turn_scheduler._hold_peer_message(
+            session_id, format_peer_message(sender, text).strip(),
+        ) == turn_scheduler.HELD
 
 
 def _only_queued(session_id):
@@ -67,12 +72,12 @@ async def _prompts():
     await turn_scheduler.on_agent_message("idle", "worker-c", "Done; report attached.")
     out["idle_single"] = _only_queued("idle")["prompt"]
 
-    await _hold("promo")
+    await _legacy_hold("promo")
     (row,) = _held_rows("promo")
     await turn_scheduler.promote_held_peer_messages("promo", row["prompt"])
     out["promotion"] = _only_queued("promo")["prompt"]
 
-    await _hold("wake")
+    await _legacy_hold("wake")
     frame = {"task_id": "worker-a", "status": "completed", "summary": "worker-a finished"}
     async with turn_scheduler._terminal_delivery_lock("wake"):
         await turn_scheduler._enqueue_context_wake(
@@ -81,7 +86,7 @@ async def _prompts():
         )
     out["unpark_with_held"] = _only_queued("wake")["prompt"]
 
-    await _hold("urgent")
+    await _legacy_hold("urgent")
     await turn_scheduler.on_agent_message("urgent", "worker-c", "Blocked: may I edit control.py?", urgent=True)
     out["urgent_with_held"] = _only_queued("urgent")["prompt"]
     return out
