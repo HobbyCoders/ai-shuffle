@@ -95,6 +95,68 @@ async def test_preference_write_publishes_one_signed_op_and_applies_on_peer(
         assert settings.get_user_preference("admin", "source-owner", key) is None
 
 
+@pytest.mark.parametrize("route", ["chat-instructions", "security-instructions"])
+async def test_instruction_reset_api_publishes_a_tombstone_and_missing_reset_does_not_wake(
+        workers, monkeypatch, resource_hook, route):
+    from app.api import settings as settings_api
+
+    a, b = workers("instruction-source"), workers("instruction-peer")
+    with a.active():
+        engine.create_network("Instruction reset wakes")
+    join(a, b)
+    with a.active():
+        database.set_system_setting("security_instructions", "Customized instructions")
+        engine.scan_collection("system_settings")
+    converge([a, b])
+    with b.active():
+        assert database.get_system_setting("security_instructions") == "Customized instructions"
+
+    app = FastAPI()
+    app.include_router(settings_api.router)
+    app.dependency_overrides[settings_api.require_admin] = lambda: "authenticated"
+    clock = ScanClock(monkeypatch, passes=2)
+    original_scan = engine.scan_all
+    scans = Mock(side_effect=lambda **kwargs: original_scan(**kwargs) if kwargs else 0)
+    monkeypatch.setattr(engine, "scan_all", scans)
+    kick = Mock(wraps=engine.kick)
+    monkeypatch.setattr(engine, "kick", kick)
+    resource_hook.reset_mock()
+
+    with a.active(), TestClient(app) as client:
+        marks = store.local_watermarks()
+
+        def reset():
+            response = client.delete(f"/api/v1/settings/{route}")
+            assert response.status_code == 200 and response.json()["success"]
+
+        clock.actions = [(1, reset)]
+        await clock.run()
+        expected = {"system_settings", "model_providers", "permission_rules"}
+        assert resource_hook.call_count == 1
+        assert set(resource_hook.call_args.args[0]) == expected
+        assert scans.call_args_list[1].kwargs == {
+            "collections": expected, "include_catalog": False, "strict": True}
+        assert kick.call_count == 1
+        ops = store.ops_since(marks, limit=10, exclude_origin=b.device_id)
+        assert len(ops) == 1 and ops[0]["signature"]
+        assert ops[0]["record_id"] == "security_instructions"
+        assert database.get_system_setting("security_instructions") is None
+
+        # Reset is still a successful API response when already at the default,
+        # but an absent row must not wake publication or mint another tombstone.
+        marks = store.local_watermarks()
+        resource_hook.reset_mock()
+        kick.reset_mock()
+        reset()
+        resource_hook.assert_not_called()
+        kick.assert_not_called()
+        assert store.ops_since(marks, limit=10, exclude_origin=b.device_id) == []
+    with b.active():
+        result = engine.apply_batch(ops)
+        assert result.applied == 1 and result.rejected == 0
+        assert database.get_system_setting("security_instructions") is None
+
+
 def test_preference_noops_conflicts_and_failed_commit_do_not_wake(monkeypatch, resource_hook):
     settings.set_user_preference("account", "owner", "theme", "old")
     old = settings.get_user_preference("account", "owner", "theme")
