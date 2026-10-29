@@ -114,7 +114,7 @@ def state(recipient: str, *, prepare: bool = False, fmt: int = FORMAT_FULL) -> d
             raise ValueError("Peer is no longer a member")
         from app.network import nested_secret_sync
         mode = nested_secret_sync.enabled() and nested_secret_sync.enabled(recipient=recipient)
-        key = (str(settings.data_dir), recipient, ctx.network_id, ctx.generation, fmt, mode)
+        key = (str(settings.data_dir), recipient, ctx.network_id, ctx.generation, fmt)
         with _jobs_lock:
             for saved_key, job in list(_jobs.items()):
                 if job.done() and (job.exception() is not None or not _reusable(job.result())):
@@ -144,7 +144,8 @@ def state(recipient: str, *, prepare: bool = False, fmt: int = FORMAT_FULL) -> d
         if (manifest["network_id"] != current.network_id or manifest["generation"] != current.generation
                 or manifest["recipient"] != recipient):
             raise ValueError("Membership changed during peer capture; retry")
-        if not needs_snapshot and nested_secret_sync.transfer_compatible(manifest, recipient):
+        if (not needs_snapshot and manifest.get("nested_secret_rekey") == mode
+                and nested_secret_sync.transfer_compatible(manifest, recipient)):
             return manifest
         # Pruning or adopting another worker's snapshot can advance our head
         # without retaining its ops. In that case this frontier cannot catch up

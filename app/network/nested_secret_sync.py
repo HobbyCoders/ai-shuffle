@@ -7,7 +7,7 @@ import hashlib
 import json
 
 from app.core import encryption
-from app.db.base import get_db
+from app.db import network as store
 
 CAPABILITY = "nested-secret-rekey"
 
@@ -28,7 +28,7 @@ def enabled(cursor=None, *, recipient=None):
     Missing advertisements fail closed; revoked members do not block rollout.
     """
     if cursor is None:
-        with get_db() as conn:
+        with store.get_db() as conn:
             return enabled(conn.cursor(), recipient=recipient)
     cursor.execute("""SELECT m.device_id, m.capabilities AS contact, p.capabilities AS presence
                       FROM network_members m LEFT JOIN network_presence p ON p.device_id = m.device_id
@@ -46,7 +46,7 @@ def quorum(cursor=None):
     quorum published plaintext. Its first advertisement must republish too.
     """
     if cursor is None:
-        with get_db() as conn:
+        with store.get_db() as conn:
             return quorum(conn.cursor())
     if not enabled(cursor):
         return None
