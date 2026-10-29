@@ -29,6 +29,51 @@ def repo_worktree_lock(main_dir: str) -> threading.RLock:
         return lock
 
 
+APP_WORKTREES_EXCLUDE = ".fluid/worktrees/"
+
+
+def exclude_app_worktrees(main_dir: str, path: Optional[str] = None) -> None:
+    """Keep the app's ``.fluid/worktrees/`` out of *main_dir*'s ``git status``.
+
+    Every path that creates a checkout under ``<main_dir>/.fluid/worktrees/``
+    calls this (#791); with *path* it does nothing unless *path* lies there.
+    The entry goes in the repository's local ``info/exclude`` (in the common
+    git dir when *main_dir* is itself a linked worktree), never the tracked
+    ``.gitignore``. Idempotent and best effort: a failure only leaves the
+    folder showing as untracked.
+    """
+    from pathlib import Path
+
+    main = Path(os.path.abspath(main_dir))
+    if path is not None and main / ".fluid" / "worktrees" not in Path(os.path.abspath(path)).parents:
+        return
+    try:
+        git_dir = main / ".git"
+        if git_dir.is_dir():
+            info_dir = git_dir / "info"
+        elif git_dir.is_file():
+            from app.core.worktree_report import _git
+            common = (_git(str(main), "rev-parse", "--git-common-dir", timeout=5) or "").strip()
+            if not common:
+                logger.warning("Could not resolve --git-common-dir for %s", main)
+                return
+            # rev-parse may answer relative to main_dir.
+            info_dir = (main / common).resolve() / "info"
+        else:
+            return
+        info_dir.mkdir(parents=True, exist_ok=True)
+        exclude_file = info_dir / "exclude"
+        existing = exclude_file.read_text(encoding="utf-8", errors="ignore") if exclude_file.exists() else ""
+        if APP_WORKTREES_EXCLUDE in {line.strip() for line in existing.splitlines()}:
+            return
+        prefix = "" if (not existing or existing.endswith("\n")) else "\n"
+        with exclude_file.open("a", encoding="utf-8") as f:
+            f.write(f"{prefix}{APP_WORKTREES_EXCLUDE}\n")
+        logger.debug("Added '%s' to %s", APP_WORKTREES_EXCLUDE, exclude_file)
+    except Exception as e:  # noqa: BLE001 - never fail a checkout over an ignore rule
+        logger.warning("Failed to update git info/exclude for %s: %s", main, e)
+
+
 def forget_stale_worktree_metadata(main_dir: str, worktree_path: str) -> None:
     """Forget ONE stale Git registration, touching only its administrative files.
 
@@ -184,6 +229,7 @@ class GitWorktreeMixin:
                      base_branch: Optional[str] = None, *, fetch_base: bool = True) -> Tuple[bool, Optional[str]]:
         """Add a worktree; serialised per repository (see repo_worktree_lock)."""
         with repo_worktree_lock(main_dir):
+            exclude_app_worktrees(main_dir, path)
             return self._add_worktree_unlocked(main_dir, path, branch, new_branch=new_branch,
                                                base_branch=base_branch, fetch_base=fetch_base)
 
