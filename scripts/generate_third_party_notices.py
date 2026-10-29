@@ -44,6 +44,7 @@ ANDROID_LICENSES = {
     "net.openid": "Apache-2.0",
     "androidx": "Apache-2.0",
     "com.google.android.material": "Apache-2.0",
+    "com.google.firebase": "Apache-2.0",
     "org.jetbrains.kotlinx": "Apache-2.0",
     "com.squareup.okhttp3": "Apache-2.0",
     "com.journeyapps": "Apache-2.0",
@@ -209,13 +210,13 @@ def android_packages() -> list[tuple[str, str, str, str]]:
     gradle = (ROOT / "android/app/build.gradle.kts").read_text(encoding="utf-8")
     rows = []
     for group, artifact, version in re.findall(
-        r'(?:implementation|testImplementation|androidTestImplementation)\("([^:"]+):([^:"]+):([^"]+)"\)',
+        r'(?:implementation|testImplementation|androidTestImplementation)\((?:platform\()?"([^:"]+):([^:"]+):([^:"]+)"\)',
         gradle,
     ):
         family = "androidx" if group.startswith("androidx.") else group
         license_ = ANDROID_LICENSES[family]
         repository = "https://dl.google.com/dl/android/maven2" if family in {
-            "androidx", "com.google.android.material"
+            "androidx", "com.google.android.material", "com.google.firebase"
         } else "https://repo.maven.apache.org/maven2"
         url = f"{repository}/{group.replace('.', '/')}/{artifact}/{version}/{artifact}-{version}.pom"
         rows.append((f"{group}:{artifact}", version, license_, url))

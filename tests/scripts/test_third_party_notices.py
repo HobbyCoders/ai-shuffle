@@ -26,11 +26,22 @@ def test_mobile_dependencies_use_the_frontend_lock():
 def test_all_android_declarations_are_noticed():
     text = (ROOT / "THIRD_PARTY_NOTICES.md").read_text()
     gradle = (ROOT / "android/app/build.gradle.kts").read_text()
-    declared = re.findall(r'(?:implementation|testImplementation|androidTestImplementation)\("([^":]+):([^":]+):([^":]+)"\)', gradle)
+    declared = re.findall(r'(?:implementation|testImplementation|androidTestImplementation)\((?:platform\()?"([^":]+):([^":]+):([^":]+)"\)', gradle)
     rows = notices.android_packages()
     assert len(rows) == len(declared) > 0
     for row in rows:
         assert notices._table([row]).splitlines()[-1] in text
+
+
+def test_firebase_platform_and_sdk_have_google_maven_license_sources():
+    rows = {row[0]: row for row in notices.android_packages()}
+    for package in ("firebase-bom", "firebase-messaging"):
+        row = rows[f"com.google.firebase:{package}"]
+        assert row[2] == "Apache-2.0"
+        assert row[3] == (
+            "https://dl.google.com/dl/android/maven2/com/google/firebase/"
+            f"{package}/{row[1]}/{package}-{row[1]}.pom"
+        )
 
 
 def test_python_locks_are_noticed_for_every_platform():

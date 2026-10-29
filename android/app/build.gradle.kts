@@ -115,7 +115,7 @@ tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(checkOfflineD
 
 dependencies {
     implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
-    implementation("com.google.firebase:firebase-messaging")
+    implementation("com.google.firebase:firebase-messaging:24.1.0")
     implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("net.openid:appauth:0.11.1")
     implementation("androidx.core:core-ktx:1.13.1")
