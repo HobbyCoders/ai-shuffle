@@ -24,8 +24,9 @@ def _supports(value):
 def enabled(cursor=None, *, recipient=None):
     """All active members, including offline/unknown ones, must advertise it.
 
-    The direct-contact cache can withdraw a stale presence claim on downgrade.
-    Missing advertisements fail closed; revoked members do not block rollout.
+    Direct-contact capabilities are independent of signed/relayed presence.
+    Both must confirm support; only another direct contact can lift a withdrawal.
+    Unknown contacts fail closed; revoked members do not block rollout.
     """
     if cursor is None:
         with store.get_db() as conn:

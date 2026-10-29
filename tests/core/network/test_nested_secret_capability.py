@@ -13,7 +13,7 @@ from app.network import engine, keyring, nested_secret_sync as compat, peer_snap
 from app.network.envelope import Envelope
 from tests.core.network.harness import exchange, join as bootstrap
 from tests.core.network.test_nested_secret_sync import (
-    COLLECTIONS, SECRET, check_secrets, data_keys, legacy_collections, produce, scan,
+    COLLECTIONS, SECRET, check_secrets, contact, data_keys, legacy_collections, produce, scan,
 )
 
 
@@ -49,6 +49,7 @@ def pair(workers, supported):
         engine.publish_presence()
     bootstrap(a, b)
     advertise(b, supported)
+    contact(b, a)
     exchange(b, a)
     return a, b
 
@@ -84,6 +85,7 @@ def test_mixed_network_stays_ciphertext_then_last_upgrade_republishes(workers, m
         assert SECRET not in json.dumps(b.sql("SELECT * FROM automations"))
         assert SECRET not in json.dumps(b.sql("SELECT * FROM system_settings"))
     advertise(b, True)
+    contact(b, a)
     exchange(b, a)
     with a.active():
         assert compat.enabled()
@@ -155,6 +157,7 @@ def test_cached_state_pages_are_rejected_and_recaptured_after_downgrade(workers,
         assert old["nested_secret_rekey"]
         assert peer_snapshot.page(b.device_id, old["transfer"], 0)
     advertise(b, False)
+    contact(b, a)
     exchange(b, a)
     with a.active():
         with pytest.raises(ValueError, match="expired"):
@@ -185,3 +188,91 @@ def test_direct_contact_can_withdraw_stale_presence_before_flush(workers):
         latest = [op for op in store.ops_since({}) if op["collection"] == "connectors"][-1]
         record, _ = keyring.open_envelope(engine.context(), Envelope.from_dict(latest))
         assert all(encryption.is_encrypted(value) for value in leaves("connectors", record))
+
+
+@pytest.mark.parametrize("delivery", ["ops", "snapshot"])
+def test_delayed_relayed_presence_cannot_undo_direct_withdrawal(workers, delivery):
+    a, b = pair(workers, True)
+    with a.active():
+        produce()
+        scan()
+    c = workers("relay")
+    bootstrap(a, c)
+    advertise(c, True)
+    contact(c, a)
+    with b.active():
+        engine.publish_presence(version="unseen-before-downgrade")
+    exchange(b, c)
+    with a.active():
+        asyncio.run(api.peer_exchange(api.ExchangeRequest(watermarks={}, capabilities={}), device_id=b.device_id))
+        assert not compat.enabled(recipient=b.device_id)
+    if delivery == "ops":
+        exchange(c, a)
+    else:
+        with c.active():
+            chunk = engine.snapshot_chunk("presence")
+        with a.active():
+            engine.apply_snapshot_chunk(chunk)
+    with a.active():
+        assert engine.presence_of(b.device_id)["version"] == "unseen-before-downgrade"
+        assert not compat.enabled(recipient=b.device_id)
+        assert not compat.enabled()
+        ops, _, snapshot = store.exchange_batch({}, exclude_origin=b.device_id)
+        assert not ops and snapshot
+        original = next(op for op in store.ops_since({}) if op["collection"] == "connectors")
+        with pytest.raises(HTTPException):
+            asyncio.run(api.peer_op(original["origin_device_id"], original["origin_incarnation"],
+                                     original["origin_seq"], device_id=b.device_id))
+        chunk = asyncio.run(api.peer_snapshot(collection="connectors", device_id=b.device_id))
+        record = engine.open_snapshot_chunk(chunk, ctx=engine.context())["items"][0]["record"]
+        assert all(encryption.is_encrypted(value) for value in leaves("connectors", record))
+        assert not peer_snapshot.capture(b.device_id)["nested_secret_rekey"]
+
+
+@pytest.mark.parametrize("cache", ["disk", "job"])
+def test_cached_frontier_refreshes_for_unservable_nested_secret_tail(workers, cache):
+    a, source = pair(workers, True)
+    old_peer = workers("legacy")
+    bootstrap(a, old_peer)
+    advertise(old_peer, False)
+    contact(old_peer, a)
+    exchange(old_peer, a)
+    with a.active():
+        capture = peer_snapshot.state if cache == "job" else peer_snapshot.capture
+        old = capture(old_peer.device_id)
+        assert old["nested_secret_rekey"] is False
+    # This sender has not learned about the legacy member. The signed plaintext
+    # op arrives late, behind more than one normal batch of harmless presence.
+    with source.active():
+        for index in range(501):
+            engine.publish_presence(version=f"delayed-{index}")
+        produce()
+        scan()
+    exchange(source, a, limit=10000)
+    with a.active():
+        assert store.requires_snapshot(old["watermarks"], exclude_origin=old_peer.device_id)
+        assert store.exchange_batch(old["watermarks"], limit=1, exclude_origin=old_peer.device_id)[2]
+        fresh = capture(old_peer.device_id)
+        assert fresh["transfer"] != old["transfer"]
+        assert fresh["watermarks"] != old["watermarks"]
+        assert not store.exchange_batch(fresh["watermarks"], exclude_origin=old_peer.device_id)[2]
+        assert capture(old_peer.device_id)["transfer"] == fresh["transfer"]
+
+
+def test_snapshot_descriptors_and_presence_are_not_direct_contact_evidence(workers):
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Independent evidence")
+        engine.publish_presence()
+    bootstrap(a, b)
+    with b.active():
+        assert engine.presence_of(a.device_id)["capabilities"][compat.CAPABILITY] == 1
+        assert store.get_member(a.device_id)["capabilities"] == {}
+        assert not compat.enabled(recipient=a.device_id)
+    advertise(b, True)
+    contact(b, a)
+    exchange(b, a)
+    with b.active():
+        assert compat.enabled()
+    with a.active():
+        assert compat.enabled()

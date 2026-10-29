@@ -8,9 +8,9 @@ from unittest.mock import patch
 
 import pytest
 
-from app.api import connector_oauth, connector_plaid
+from app.api import connector_oauth, connector_plaid, network as network_api
 from app.core import automation_service, connector_service, encryption
-from app.db import database as db
+from app.db import database as db, network as store
 from app.network import engine, policy
 from tests.core.network.harness import Worker, exchange, join as bootstrap
 
@@ -32,12 +32,24 @@ def data_keys(monkeypatch):
     monkeypatch.setattr(Worker, "active", active)
 
 
+def contact(sender, receiver):
+    """Drive the real contact writer separately from signed presence delivery."""
+    with sender.active():
+        body = network_api.ExchangeRequest(watermarks=store.local_watermarks(),
+            capabilities=engine.presence_of(sender.device_id)["capabilities"])
+    with receiver.active():
+        response = asyncio.run(network_api.peer_exchange(body, device_id=sender.device_id))
+    with sender.active():
+        store.touch_member(receiver.device_id, capabilities=response["capabilities"])
+
+
 def join(a, b):
     # A newly admitted member is unknown until its own presence reaches peers.
     bootstrap(a, b)
     for worker in (a, b):
         with worker.active():
             engine.publish_presence()
+    contact(b, a)
     exchange(a, b)
     exchange(b, a)
     exchange(a, b)

@@ -566,7 +566,7 @@ async def peer_token(body: TokenRequest) -> dict:
                             signature=body.signature, endpoint=body.endpoint, bound_signature=body.bound_signature,
                             token_binding_proof=body.token_binding_proof,
                             binding_present=bool({"endpoint", "bound_signature"} & body.model_fields_set))
-    await run_sync(store.touch_member, body.device_id, capabilities=body.capabilities or None,
+    await run_sync(store.touch_member, body.device_id, capabilities=body.capabilities or {},
                    endpoints=body.endpoints or None, version=body.version, incarnation=body.incarnation,
                    platform=body.platform)
     transport.note_contact(body.device_id)

@@ -1556,6 +1556,9 @@ def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None, _c
         # retired its unchanged copy needs a state copy, not an endless FK retry.
         # Use the existing signed snapshot protocol; never mint a winning clock.
         permission_only_projection = None
+        from app.network import nested_secret_sync, policy
+        legacy_recipient = None
+        protected = tuple(c.name for c in policy.COLLECTIONS.values() if c.map_secrets is not None)
         for origin, streams in heads.items():
             if origin == exclude_origin:
                 continue
@@ -1568,6 +1571,21 @@ def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None, _c
                                (origin, int(incarnation), last, head))
                 if int(cursor.fetchone()["n"]) != head - last:
                     return True
+                if legacy_recipient is None:
+                    legacy_recipient = exclude_origin is not None and not nested_secret_sync.enabled(cursor, recipient=exclude_origin)
+                if legacy_recipient and protected:
+                    # A retained tail can still be unservable to this receiver.
+                    # Inspect the entire protected tail, not just the next batch:
+                    # otherwise both state caches can repeatedly return a frontier
+                    # that exchange will always refuse further along the stream.
+                    placeholders = ", ".join(["%s"] * len(protected))
+                    cursor.execute("SELECT envelope FROM sync_ops WHERE origin_device_id=%s "
+                                   "AND incarnation=%s AND seq>%s AND seq<=%s "
+                                   f"AND collection IN ({placeholders})",
+                                   (origin, int(incarnation), last, head, *protected))
+                    ops = [_load(row["envelope"], {}) for row in cursor.fetchall()]
+                    if not nested_secret_sync.ops_compatible(ops, exclude_origin, cursor):
+                        return True
                 if permission_only_projection is None:
                     cursor.execute("SELECT * FROM agents WHERE id IN (%s, %s) AND is_builtin = FALSE",
                                    ("general-purpose", "frontend-designer"))

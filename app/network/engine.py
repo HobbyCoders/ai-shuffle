@@ -835,9 +835,6 @@ def materialize(
     sql = (f"INSERT INTO {coll.table} ({', '.join(insert_columns)}) VALUES ({', '.join(['%s'] * len(insert_columns))}) "
            f"ON CONFLICT ({conflict}) DO UPDATE SET {updates}")
     cursor.execute(sql, tuple(insert_values))
-    if coll.name == "presence" and record_id == origin_device_id:
-        cursor.execute("UPDATE network_members SET capabilities = %s WHERE device_id = %s",
-                       (json.dumps(record.get("capabilities") or {}), record_id))
     if new_agent:
         # As for a local create: a deleted agent's API-key assignments must not
         # attach to a new agent with its id. Covers bootstrap snapshots too.
@@ -3004,9 +3001,9 @@ def enroll_from_response(response: Mapping[str, Any], *, device_name: str,
                                 legacy_instance_id=legacy_by_device.get(member.device_id), _conn=conn)
         for public in response.get("members") or []:
             if public.get("device_id") in members and (public.get("endpoints") or public.get("capabilities")):
+                # Forwarded descriptors are routing hints, not direct-contact evidence.
                 store.touch_member(public["device_id"], endpoints=public.get("endpoints") or [],
-                                   capabilities=public.get("capabilities") or {}, version=public.get("version"),
-                                   platform=public.get("platform"), _conn=conn)
+                                   version=public.get("version"), platform=public.get("platform"), _conn=conn)
         issuer = response.get("issuer") or {}
         if issuer.get("device_id") in members and issuer.get("endpoints"):
             store.touch_member(issuer["device_id"], endpoints=issuer["endpoints"], _conn=conn)
