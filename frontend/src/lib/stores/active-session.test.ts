@@ -630,3 +630,37 @@ describe('activeSession.resolveInteractionByRequestId (#606 item 4)', () => {
 		expect(ids(activeSession.current.pendingPermissions)).toEqual(['perm-1']);
 	});
 });
+
+// "New chat" tells a reload of the tab to stay on the new-session screen. The
+// flag outlived the first send: once the new chat existed, a reload (say mid
+// reply) dropped the user on an empty new chat instead of the chat they were
+// in. Found by the reload-midstream journey.
+describe('a reload after a new chat is sent', () => {
+	const SKIP = '__aihub_skipSessionRestore';
+	afterEach(() => {
+		vi.useRealTimers();
+		sessionStorage.removeItem(SKIP);
+		sessionStorage.removeItem('ai-shuffle-active-session');
+	});
+
+	it('keeps the new-session screen while the chat is unsent', async () => {
+		vi.useFakeTimers();
+		activeSession.current.sessionId = null;
+		activeSession.newChat();
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(sessionStorage.getItem(SKIP)).toBe('1');
+	});
+
+	it('restores the chat once its first send created it', async () => {
+		vi.useFakeTimers();
+		activeSession.current.sessionId = null;
+		activeSession.newChat();
+		expect(sessionStorage.getItem(SKIP)).toBe('1');
+		// The first send adopts the server's new session id and persists it.
+		activeSession.current.sessionId = 'created-by-first-send';
+		activeSession.setTitle('created-by-first-send', 'first message');
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(JSON.parse(sessionStorage.getItem('ai-shuffle-active-session')!).sessionId).toBe('created-by-first-send');
+		expect(sessionStorage.getItem(SKIP)).toBeNull();
+	});
+});

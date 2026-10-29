@@ -26,7 +26,8 @@ Object.defineProperties(Range.prototype, {
 
 const TEXT = 'held until the projects load';
 let sends: MockInstance;
-const notices = () => notifications.current.history.map(n => n.message);
+// A refused send is said in a live banner (seen at once), not only the bell.
+const notices = () => notifications.current.live.filter(n => n.surface === 'banner').map(n => n.message);
 
 beforeEach(async () => {
 	sessionStorage.clear();

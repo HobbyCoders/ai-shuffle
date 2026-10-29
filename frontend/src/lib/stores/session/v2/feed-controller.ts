@@ -377,7 +377,17 @@ function readCachedTranscript(sessionId: string): CachedTranscript | null {
 function captureTranscript(): void {
 	if (!currentSessionId) return;
 	if (!everCaughtUp || sentinelPending) return; // R1
-	if (reducerState.lastSeq <= 0) return; // nothing durable to resume from
+	// No durable event yet but rows on screen: those are local optimistic sends
+	// the log does not hold, never a base to resume from. An EMPTY log that a
+	// real sentinel caught up (a cleared or not-yet-used chat) is exact as of
+	// seq 0, though, and is cached: a re-open of that chat IN PLACE (the
+	// deep-link boot re-opens the linked chat once its row is in) then keeps
+	// the settled empty view instead of running the whole load again and
+	// flashing cleared → loading → cleared. It is never presented as settled to
+	// a view that is not already showing it (`presentsSettled`): an empty entry
+	// says nothing about what reached the log since (another device or tab,
+	// mirror replication, a background delivery).
+	if (reducerState.lastSeq <= 0 && reducerState.messages.length > 0) return;
 	transcriptCache.delete(currentSessionId);
 	transcriptCache.set(currentSessionId, {
 		state: sealState(reducerState),
@@ -391,6 +401,30 @@ function captureTranscript(): void {
 		if (oldest === undefined) break;
 		transcriptCache.delete(oldest);
 	}
+}
+
+/**
+ * Whether a cached entry may be published as the session's settled transcript
+ * (hydration complete, no loading state) before the new feed's `caught_up`.
+ *
+ * A non-empty entry is exact as of its cursor and the resumed feed only adds
+ * to it, so it always may. An EMPTY entry (lastSeq 0) only may when the view
+ * is already showing this very session settled and empty, i.e. a re-open in
+ * place, which then changes nothing on screen. Opened from anywhere else, an
+ * empty entry would present "Conversation cleared" for a chat that may have
+ * gained messages since it was cached, and then jump to them; there it is only
+ * the resume cursor and the session stays `loading` until `caught_up`.
+ */
+function presentsSettled(entry: CachedTranscript, sessionId: string): boolean {
+	if (entry.lastSeq > 0) return true;
+	const app = deps?.getState();
+	return (
+		!!app &&
+		app.sessionId === sessionId &&
+		!app.isLoadingSession &&
+		!app.isRestoringSession &&
+		app.messages.length === 0
+	);
 }
 
 /** Test/diagnostic hook: how many sessions currently hold a cached transcript. */
@@ -721,7 +755,9 @@ export interface FeedController {
 	// ── Transcript cache (S2) ──────────────────────────────────────
 	/**
 	 * The `activeSession` patch that a cached transcript would publish for this
-	 * session, or null when nothing is cached. Lets the session-switcher prime
+	 * session, or null when nothing is cached (or only an empty log is, and the
+	 * view is not already showing this session settled: presentsSettled). Lets
+	 * the session-switcher prime
 	 * its SINGLE switch-in update with the real transcript, so the reset never
 	 * paints an empty list first. Peek only — `start()` adopts the same entry.
 	 */
@@ -863,8 +899,10 @@ export const feedController: FeedController = {
 		resetFeedFlags();
 		hydrationStartedAt = Date.now();
 
-		// S2: resume from the cached transcript when we hold one.
+		// S2: resume from the cached transcript when we hold one. Read whether it
+		// may be shown as settled BEFORE anything below touches the app state.
 		const cached = readCachedTranscript(sessionId);
+		const settledFromCache = cached !== null && presentsSettled(cached, sessionId);
 		reducerState = cached ? cached.state : initialState();
 		resumeFromSeq = cached ? cached.lastSeq : 0;
 		usageApplied = cached ? cached.usageApplied : false;
@@ -1086,10 +1124,11 @@ export const feedController: FeedController = {
 		seedOptimistic();
 		// On a cache hit the transcript published here is EXACT as of the resume
 		// cursor, so hydration is complete for everything the user can see: fold
-		// with `true` and the spinner never appears. On a miss this only clears
-		// stale transcript state, leaving loading/restoring true until the
-		// matching caught_up folds the final view.
-		fold(cached !== null);
+		// with `true` and the spinner never appears. On a miss, or an empty entry
+		// opened from another view (presentsSettled), this only clears stale
+		// transcript state, leaving loading/restoring true until the matching
+		// caught_up folds the final view.
+		fold(settledFromCache);
 	},
 
 	restart(sessionId: string) {
@@ -1123,7 +1162,9 @@ export const feedController: FeedController = {
 
 	cachedPatch(sessionId: string) {
 		const entry = readCachedTranscript(sessionId);
-		if (!entry) return null;
+		// An empty entry primes only a re-open in place (presentsSettled); for
+		// any other switch-in the switcher's own reset (loading) stands.
+		if (!entry || !presentsSettled(entry, sessionId)) return null;
 		// The entry is sealed, so publishing its arrays is safe; `appOptimistic`
 		// is false because a switch-in has no send of its own in flight.
 		return transcriptPatch(entry.state, { hydrationComplete: true, appOptimistic: false });

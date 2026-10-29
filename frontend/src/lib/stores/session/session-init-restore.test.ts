@@ -10,7 +10,7 @@ vi.mock('./v2/feed-controller', () => ({
 	},
 }));
 
-import { bumpInitGeneration, createSessionInit, type SessionInitDeps } from './session-init';
+import { bumpInitGeneration, createSessionInit, setSkipRestore, tabWillRestoreChat, type SessionInitDeps } from './session-init';
 import { feedController } from './v2/feed-controller';
 import type { ActiveSessionState, PersistedSession } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
@@ -531,5 +531,72 @@ describe('session-init · the restored session keeps its own lane', () => {
 
 		expect(getState().mode).toBe(expected);
 		expect(getState().project).toBe(project);
+	});
+});
+
+/**
+ * A reload painted the new-chat screen for up to 1.5s before the tab's chat
+ * came back: the restore window opened only after init's first round trip.
+ * The store now starts in the window when this load will reopen a chat
+ * (tabWillRestoreChat), and init closes it whenever nothing is restored.
+ * Found by the reload-midstream journey.
+ */
+describe('session-init · the restore window from the first frame', () => {
+	beforeEach(() => {
+		sessionStorage.clear();
+		window.history.replaceState(null, '', '/');
+	});
+
+	it('expects a restore when this tab saved a chat', () => {
+		expect(tabWillRestoreChat()).toBe(false);
+		sessionStorage.setItem('ai-shuffle-active-session', JSON.stringify({ sessionId: 'tab-chat' }));
+		expect(tabWillRestoreChat()).toBe(true);
+	});
+
+	it('expects none for an unsent new chat, a saved compose or a corrupt slot', () => {
+		sessionStorage.setItem('ai-shuffle-active-session', JSON.stringify({ sessionId: 'tab-chat' }));
+		setSkipRestore(true);
+		expect(tabWillRestoreChat()).toBe(false);
+		setSkipRestore(false);
+		sessionStorage.setItem('ai-shuffle-active-session', JSON.stringify({ sessionId: null, title: 'New Chat' }));
+		expect(tabWillRestoreChat()).toBe(false);
+		sessionStorage.setItem('ai-shuffle-active-session', '{not json');
+		expect(tabWillRestoreChat()).toBe(false);
+	});
+
+	it('expects a restore for a link, whatever the tab saved', () => {
+		setSkipRestore(true);
+		window.history.replaceState(null, '', '/?session=linked');
+		expect(tabWillRestoreChat()).toBe(true);
+	});
+
+	it('init closes the window when there is nothing to restore', async () => {
+		const { init, getState, deps } = makeInit(null);
+		deps.setState(baseState({ isRestoringSession: true }));
+		await init();
+		expect(getState().isRestoringSession).toBe(false);
+	});
+
+	it('init closes it on the "New chat" path too', async () => {
+		setSkipRestore(true);
+		const { init, getState, deps } = makeInit({ sessionId: 'old' } as PersistedSession);
+		deps.setState(baseState({ isRestoringSession: true }));
+		await init();
+		expect(getState().isRestoringSession).toBe(false);
+		expect(getState().sessionId).toBeNull();
+	});
+
+	it('init closes it when it fails before adopting a chat', async () => {
+		const { init, getState, deps } = makeInit(null, vi.fn(async () => { throw new Error('offline'); }));
+		deps.setState(baseState({ isRestoringSession: true }));
+		await init();
+		expect(getState().isRestoringSession).toBe(false);
+	});
+
+	it('keeps it open while the saved chat is being restored', async () => {
+		const { init, getState, deps } = makeInit({ sessionId: 'tab-chat', title: 'Chat' } as PersistedSession);
+		deps.setState(baseState({ isRestoringSession: true }));
+		await init();
+		expect(getState()).toMatchObject({ sessionId: 'tab-chat', isRestoringSession: true });
 	});
 });

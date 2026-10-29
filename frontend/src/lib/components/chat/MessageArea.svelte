@@ -30,10 +30,11 @@
 	 * - This prevents scroll jumping when switching between cards
 	 */
 	import { tick, untrack, onMount, onDestroy } from 'svelte';
+	import { X } from 'lucide-svelte';
 	import { derived as derivedStore } from 'svelte/store';
 	import { activeSession, backgroundPermissions } from '$lib/stores/active-session';
 	import { sessionEphemeralCache } from '$lib/stores/session-cache';
-	import { createScrollTopPersist } from './scroll-top-persist';
+	import { createScrollTopPersist, readLeavingScrollTop } from './scroll-top-persist';
 	import { privateAccessPending } from '$lib/stores/chat-access';
 	import { isTranscriptProseDismissed, proseQuestionDismissals, proseQuestionSessions } from '$lib/stores/session/prose-questions';
 	import { needsYouCount, openSessionNeeds } from '$lib/components/layout/session-card-data';
@@ -1455,8 +1456,13 @@
 		if (containerRef) {
 			// eslint-disable-next-line no-console
 			if (STREAM_DEBUG) console.log(`[AS] onDestroy saving cacheKey=${cacheKey} ST=${containerRef.scrollTop} autoS=${shouldAutoScroll} SH=${containerRef.scrollHeight} CH=${containerRef.clientHeight}`);
-			scrollPositionCache.set(cacheKey, containerRef.scrollTop);
-			scrollTopPersist.destroy(cacheKey, containerRef.scrollTop);
+			// A container already out of the layout reads 0: keep the reader's
+			// last captured position then (readLeavingScrollTop).
+			const leftAt = readLeavingScrollTop(containerRef, scrollPositionCache.get(cacheKey));
+			if (leftAt !== undefined) {
+				scrollPositionCache.set(cacheKey, leftAt);
+				scrollTopPersist.destroy(cacheKey, leftAt);
+			}
 			// Persist auto-scroll state so remounting this component
 			// (e.g. returning from settings) resumes at the right position
 			autoScrollCache.set(cacheKey, shouldAutoScroll);
@@ -1944,15 +1950,7 @@
 			<!-- Error display for empty state -->
 			{#if $activeSession.error}
 				<div class="max-w-5xl mx-auto w-full px-4 sm:px-8 pt-4">
-					<div class="bg-destructive/10 border border-destructive/30 text-destructive px-4 py-3 rounded-lg flex items-center justify-between shadow-s">
-						<span class="text-sm">{$activeSession.error}</span>
-						<span class="flex items-center gap-3 shrink-0">
-							{#if $activeSession.forkOfferSessionId}
-								<button type="button" onclick={() => forkOfferedSessionHere($activeSession.forkOfferSessionId!)} class="text-sm font-medium underline underline-offset-2 hover:opacity-80">Fork here</button>
-							{/if}
-							<button onclick={() => activeSession.clearError()} class="text-destructive hover:opacity-80">&times;</button>
-						</span>
-					</div>
+					{@render errorBanner($activeSession.error, $activeSession.forkOfferSessionId)}
 				</div>
 			{/if}
 			<div class="flex-1 flex items-center justify-center">
@@ -2063,15 +2061,7 @@
 
 			<!-- Error -->
 			{#if $activeSession.error}
-				<div class="bg-destructive/10 border border-destructive/30 text-destructive px-4 py-3 rounded-lg flex items-center justify-between shadow-s">
-					<span class="text-sm">{$activeSession.error}</span>
-					<span class="flex items-center gap-3 shrink-0">
-						{#if $activeSession.forkOfferSessionId}
-							<button type="button" onclick={() => forkOfferedSessionHere($activeSession.forkOfferSessionId!)} class="text-sm font-medium underline underline-offset-2 hover:opacity-80">Fork here</button>
-						{/if}
-						<button onclick={() => activeSession.clearError()} class="text-destructive hover:opacity-80">&times;</button>
-					</span>
-				</div>
+				{@render errorBanner($activeSession.error, $activeSession.forkOfferSessionId)}
 			{/if}
 
 			<!-- In-flight background work pinned to the history tail: agents (swarms
@@ -2121,6 +2111,23 @@
 
 <!-- The one dispatch table: message → component. Shared with WorkLogGroup so a
      folded row renders exactly as it would inline. -->
+<!-- The chat's error (a failed turn, a refused send). Announced as an alert;
+     the dismiss control is named and has a full-size hit area, so a phone can
+     clear it as easily as a mouse. -->
+{#snippet errorBanner(message: string, forkOfferSessionId: string | null | undefined)}
+	<div role="alert" class="chat-error-banner bg-destructive/10 border border-destructive/30 text-destructive pl-4 pr-1.5 py-1.5 rounded-lg flex items-center justify-between gap-2 shadow-s">
+		<span class="text-sm py-1.5">{message}</span>
+		<span class="flex items-center gap-1 shrink-0">
+			{#if forkOfferSessionId}
+				<button type="button" onclick={() => forkOfferedSessionHere(forkOfferSessionId)} class="text-sm font-medium underline underline-offset-2 hover:opacity-80 px-1.5">Fork here</button>
+			{/if}
+			<button type="button" onclick={() => activeSession.clearError()} class="chat-error-dismiss" aria-label="Dismiss error" title="Dismiss">
+				<X size={16} strokeWidth={2} aria-hidden="true" />
+			</button>
+		</span>
+	</div>
+{/snippet}
+
 {#snippet messageBody(message: ChatMessage, messageIndex: number, gallerySources?: ReadonlySet<string>, hiddenMedia?: ReadonlySet<string>)}
 	{@const delivery = agentDelivery(message)}
 	{@const handoff = handoffAnchors.get(message)}
@@ -2309,6 +2316,27 @@
 <MediaLightbox />
 
 <style>
+	/* The error banner's dismiss: a 32px square (44px on touch) around a 16px X. */
+	.chat-error-dismiss {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 2rem;
+		height: 2rem;
+		border-radius: 0.375rem;
+		color: var(--destructive);
+		transition: background-color 150ms ease-out;
+	}
+	.chat-error-dismiss:hover { background: color-mix(in oklch, var(--destructive) 12%, transparent); }
+	.chat-error-dismiss:active { background: color-mix(in oklch, var(--destructive) 18%, transparent); }
+	.chat-error-dismiss:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+	@media (pointer: coarse) {
+		.chat-error-dismiss { width: 2.75rem; height: 2.75rem; }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.chat-error-dismiss { transition: none; }
+	}
+
 	/* Keep the browser's scroll anchoring active so a resize of off-screen
 	   content ABOVE the viewport (e.g. a virtualized message being re-estimated
 	   while the tail streams) adjusts scrollTop to hold the visible content

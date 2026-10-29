@@ -33,6 +33,7 @@ import { archivedChats } from '../archived-chats';
 import { subagentChats } from '../subagent-chats';
 // V2 Phase 1: SSE-fed reducer store — the transcript authority for a session.
 import { feedController } from './v2/feed-controller';
+import { setSkipRestore } from './session-init';
 import { pendingQueue } from './pending-queue';
 import { queueHydration } from './queue-hydration';
 import { beginJourney } from '$lib/services/journey-timing';
@@ -531,6 +532,12 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 	async function doPersist() {
 		const value = buildPersistValue();
+		// "New chat" tells a reload of this tab to stay on the new-session screen
+		// (setSkipRestore). Once the tab's chat is a real one (the first send
+		// created it), a reload must bring that chat back: before, the flag
+		// outlived the send and a reload dropped the user on an empty new chat
+		// mid-reply (found by the reload-midstream journey).
+		if (value.sessionId) setSkipRestore(false);
 		// (a) Tab-local slot: sessionStorage is per-tab, so reloading THIS tab
 		//     restores THIS tab's session even when another tab wrote the server
 		//     device key afterwards. No server row, no tab id in the key.

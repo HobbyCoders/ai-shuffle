@@ -73,3 +73,16 @@ export function createScrollTopPersist(deps: ScrollTopPersistDeps): ScrollTopPer
 		cancel
 	};
 }
+
+/**
+ * The reading position to save as the transcript unmounts. A container still
+ * in the layout is read directly. One already taken out of it (opening
+ * Settings or another full page tears the chat down after its node left the
+ * layout, so scrollTop and clientHeight read 0) keeps `captured`, the position
+ * the reader's last scroll frame recorded. Reading 0 there overwrote the
+ * reader's place, and coming back pinned them to the bottom.
+ */
+export function readLeavingScrollTop(container: HTMLElement, captured: number | undefined): number | undefined {
+	const laidOut = container.isConnected && container.clientHeight > 0;
+	return laidOut ? container.scrollTop : captured;
+}

@@ -1,0 +1,188 @@
+{
+	"$comment": "Changed file → UI journeys it needs (select.mjs). Paths are repo-relative globs (** any depth, * within a name). A file matching an 'all' rule runs every journey; otherwise the union of every matching rule. Tests (*.test.ts) never select anything. Keep this in step when adding a journey: every journey must be reachable from some rule (select.mjs --check).",
+	"all": [
+		{
+			"why": "the journeys' own harness and the recorder they judge by",
+			"globs": [
+				"frontend/tests/journeys/runner.mjs",
+				"frontend/tests/journeys/lib/**",
+				"frontend/tests/journeys/map.json",
+				"frontend/tests/flight-recorder/**",
+				"browser-mcp/src/recorder/**",
+				"frontend/src/lib/utils/ui-signature.ts"
+			]
+		},
+		{
+			"why": "the dev instance every journey runs against (seed data, fake AI)",
+			"globs": ["scripts/devloop/**"]
+		},
+		{
+			"why": "core chat surface and session stores: every journey goes through them",
+			"globs": [
+				"frontend/src/lib/stores/session/**",
+				"frontend/src/lib/stores/active-session*",
+				"frontend/src/lib/stores/app-data*",
+				"frontend/src/lib/stores/session-cache*",
+				"frontend/src/lib/stores/session-owner*",
+				"frontend/src/lib/stores/pending-deep-link*",
+				"frontend/src/lib/components/layout/ChatView.svelte",
+				"frontend/src/lib/components/layout/chat-empty-state.ts",
+				"frontend/src/lib/components/layout/MainPanel.svelte",
+				"frontend/src/lib/components/layout/AppPage.svelte",
+				"frontend/src/lib/components/layout/AppLayout.svelte",
+				"frontend/src/lib/components/layout/RootLayout.svelte",
+				"frontend/src/lib/components/chat/MessageArea.svelte",
+				"frontend/src/lib/components/chat/ChatInput.svelte",
+				"frontend/src/lib/components/chat/BoundedTranscriptRows.svelte",
+				"frontend/src/lib/services/session-navigation.ts",
+				"frontend/src/lib/services/live-sync.ts",
+				"frontend/src/lib/api/client.ts",
+				"frontend/src/lib/api/sessions.ts",
+				"frontend/src/routes/+page.svelte",
+				"frontend/src/routes/+layout.svelte",
+				"frontend/src/routes/+layout.ts",
+				"frontend/src/app.css",
+				"frontend/src/app.html",
+				"frontend/package.json",
+				"frontend/package-lock.json",
+				"frontend/vite.config.*",
+				"frontend/svelte.config.*"
+			]
+		},
+		{
+			"why": "the server's session event stream and turn engine feed every journey",
+			"globs": [
+				"app/api/events.py",
+				"app/api/sessions.py",
+				"app/api/websocket*.py",
+				"app/db/session_events.py",
+				"app/core/query_*.py",
+				"app/core/turn_*.py",
+				"app/core/session_runtime*.py"
+			]
+		}
+	],
+	"rules": [
+		{
+			"why": "mirrored chats: the sync check ChatView runs and the gate that shows it",
+			"journeys": ["mirrored-chat", "open-unloaded-chat"],
+			"globs": [
+				"frontend/src/lib/components/chat/MirrorSyncGate.svelte",
+				"frontend/src/lib/components/chat/mirror-sync.svelte.ts"
+			]
+		},
+		{
+			"why": "sending, streaming and rendering a reply",
+			"journeys": ["chat-send-stream", "stop-midstream", "queue-while-busy", "reload-midstream"],
+			"globs": [
+				"frontend/src/lib/components/chat/AssistantMessage*",
+				"frontend/src/lib/components/chat/UserMessage*",
+				"frontend/src/lib/components/chat/MessageActions*",
+				"frontend/src/lib/components/chat/composer-*",
+				"frontend/src/lib/components/chat/submit-guards*",
+				"frontend/src/lib/components/chat/stoppable-work*",
+				"frontend/src/lib/utils/chat-markdown*",
+				"frontend/src/lib/components/ui/**"
+			]
+		},
+		{
+			"why": "tool calls and the work log",
+			"journeys": ["tool-cards"],
+			"globs": [
+				"frontend/src/lib/components/chat/ToolUseMessage*",
+				"frontend/src/lib/components/chat/ToolIcon*",
+				"frontend/src/lib/components/chat/ToolScreenshot*",
+				"frontend/src/lib/components/chat/WorkLogGroup*",
+				"frontend/src/lib/components/chat/SystemMessageGroup*",
+				"frontend/src/lib/utils/work-log*",
+				"frontend/src/lib/utils/tool-*"
+			]
+		},
+		{
+			"why": "stopping a turn",
+			"journeys": ["stop-midstream", "chat-send-stream"],
+			"globs": ["frontend/src/lib/components/chat/StopButton*", "frontend/src/lib/components/chat/BackgroundWorkStrip*"]
+		},
+		{
+			"why": "queued (pending) messages",
+			"journeys": ["queue-while-busy"],
+			"globs": ["frontend/src/lib/components/chat/Pending*", "frontend/src/lib/components/chat/pending-*"]
+		},
+		{
+			"why": "errors and banners shown to the user",
+			"journeys": ["provider-errors", "phone-composer"],
+			"globs": [
+				"frontend/src/lib/components/Banner*",
+				"frontend/src/lib/components/NotificationDock*",
+				"frontend/src/lib/stores/notifications*",
+				"frontend/src/lib/services/error-*",
+				"app/core/provider/**",
+				"app/api/model_providers*.py"
+			]
+		},
+		{
+			"why": "opening and switching chats (sidebar, new-session screen, reading position)",
+			"journeys": ["switch-chats", "open-unloaded-chat", "cleared-chat"],
+			"globs": [
+				"frontend/src/lib/components/layout/Sidebar*",
+				"frontend/src/lib/components/layout/sidebar/**",
+				"frontend/src/lib/components/layout/SessionCard*",
+				"frontend/src/lib/components/layout/session-card-data*",
+				"frontend/src/lib/components/layout/NewSessionHero*",
+				"frontend/src/lib/components/layout/NewSessionSentence*",
+				"frontend/src/lib/components/layout/SessionBreadcrumbs*",
+				"frontend/src/lib/components/chat/scroll-*",
+				"frontend/src/lib/stores/device-id*"
+			]
+		},
+		{
+			"why": "clearing a chat",
+			"journeys": ["cleared-chat"],
+			"globs": ["app/db/sessions.py", "frontend/src/lib/stores/session/ws-message-handlers*"]
+		},
+		{
+			"why": "panels around a chat (Git, side panel, settings)",
+			"journeys": ["side-panels"],
+			"globs": [
+				"frontend/src/lib/components/git/**",
+				"frontend/src/lib/components/layout/SessionSidePanel*",
+				"frontend/src/lib/components/layout/git-*",
+				"frontend/src/lib/components/layout/main-panel-header*",
+				"frontend/src/lib/components/layout/FeaturePanelHost*",
+				"frontend/src/lib/components/settings/**",
+				"frontend/src/lib/components/browser/**",
+				"frontend/src/lib/stores/side-panel*",
+				"frontend/src/lib/stores/git*"
+			]
+		},
+		{
+			"why": "the composer's controls and sheets on a phone",
+			"journeys": ["phone-composer"],
+			"globs": [
+				"frontend/src/lib/components/chat/ProfileSelector*",
+				"frontend/src/lib/components/chat/WorkspaceFolderSelector*",
+				"frontend/src/lib/components/chat/WatchWorkerPicker*",
+				"frontend/src/lib/components/chat/composer-*",
+				"frontend/src/lib/components/layout/RunsOnPicker*",
+				"frontend/src/lib/components/GroupedSelector*",
+				"frontend/src/lib/components/ui/**"
+			]
+		},
+		{
+			"why": "the pilot journey: a new chat in a new worktree",
+			"journeys": ["new-worktree-session"],
+			"globs": [
+				"frontend/src/lib/components/layout/WorkspaceSelector*",
+				"frontend/src/lib/components/chat/BranchSelector*",
+				"frontend/src/lib/stores/git*",
+				"app/api/git_worktrees.py",
+				"app/api/sessions_worktree.py"
+			]
+		},
+		{
+			"why": "a journey file itself",
+			"journeys": ["$self"],
+			"globs": ["frontend/tests/journeys/*.journey.mjs"]
+		}
+	]
+}

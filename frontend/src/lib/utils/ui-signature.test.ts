@@ -48,7 +48,7 @@ describe('flight-recorder attributes stay on their elements', () => {
 		for (const attribute of [
 			'data-ui-state={UI_STATE_CHAT}',
 			'data-ui-mount={UI_MOUNT.chatView}',
-			'data-ui-surface={chatSurface}',
+			'data-ui-surface={presentedSurface}',
 			'data-ui-session={uiSignature.session}',
 			'data-ui-composer={uiSignature.composer}',
 			'data-ui-messages={uiSignature.messages}',
