@@ -36,13 +36,13 @@ internal object NeedsYouNotifications {
     fun bind(context: Context, worker: String, server: Server) {
         if (!AttentionCommand.validId(worker)) return
         prefs(context).edit().putString("worker:$worker", JSONObject().put("server", server.id)
-            .put("device", server.deviceId).toString()).commit()
+            .put("device", server.deviceId).put("origin", server.baseUrl).toString()).commit()
     }
     fun server(context: Context, worker: String): Server? {
         if (!AttentionCommand.validId(worker)) return null
         val mapping = runCatching { JSONObject(prefs(context).getString("worker:$worker", "")!!) }.getOrNull() ?: return null
         return ServerStore.get(context).getById(mapping.optString("server"))?.takeIf {
-            it.deviceId == mapping.optString("device") && authorized(context, it)
+            it.deviceId == mapping.optString("device") && it.baseUrl == mapping.optString("origin") && authorized(context, it)
         }
     }
     @Synchronized

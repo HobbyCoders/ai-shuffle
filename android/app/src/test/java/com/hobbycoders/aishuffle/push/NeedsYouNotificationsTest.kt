@@ -60,6 +60,14 @@ class NeedsYouNotificationsTest {
         NeedsYouNotifications.cancelMissing(app, "dev_worker", emptySet())
         assertEquals(0, manager.activeNotifications.size)
     }
+    @Test fun workerBindingRecordsTheAuthenticatedPairedOrigin() {
+        NeedsYouNotifications.bind(app, "dev_worker", server)
+        val raw = app.getSharedPreferences("needs_you_push", Context.MODE_PRIVATE).getString("worker:dev_worker", "")!!
+        val binding = org.json.JSONObject(raw)
+        assertEquals(server.id, binding.getString("server"))
+        assertEquals(server.deviceId, binding.getString("device"))
+        assertEquals(server.baseUrl, binding.getString("origin"))
+    }
     @Test fun unboundOrMalformedPushCannotDisplay() {
         NeedsYouNotifications.receive(app, mapOf("type" to "attention", "worker_id" to "../../bad"))
         assertNull(NeedsYouNotifications.server(app, "https://worker.invalid"))

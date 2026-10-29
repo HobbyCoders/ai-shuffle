@@ -48,7 +48,8 @@ class PushRegistrationWorker(context: Context, params: WorkerParameters) : Corou
             // Re-check the saved device after network I/O: never bind a removed,
             // re-paired, or signed-out connection from an old response.
             val current = store.getById(server.id) ?: continue
-            if (current.deviceId != server.deviceId || !NeedsYouNotifications.authorized(context, current)) continue
+            if (current.deviceId != server.deviceId || current.baseUrl != server.baseUrl ||
+                current.accountId != server.accountId || !NeedsYouNotifications.authorized(context, current)) continue
             val worker = result.data.optString("worker_id")
             if (!AttentionCommand.validId(worker)) continue
             NeedsYouNotifications.bind(context, worker, current)
