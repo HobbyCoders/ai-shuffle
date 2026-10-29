@@ -19,7 +19,7 @@ await runJourney({
 			const { page, status } = ctx;
 			await openNewChat(ctx);
 			await settleServiceWorker(page, status);
-			await holdBootLoad(page, BOOT_HOLD.path, BOOT_HOLD.ms);
+			await holdBootLoad(page, BOOT_HOLD.path, BOOT_HOLD.ms, { releaseOnSignal: true });
 			ctx.closed = [];
 			page.on('websocket', socket => socket.on('framesent', ({ payload }) => {
 				try {
@@ -43,6 +43,7 @@ await runJourney({
 			const beforeRelease = await page.evaluate(() => window.__journeyBootHold);
 			expect(beforeRelease.releasedAt === null, 'the first turn finished before preference hydration (not just isStreaming protection)');
 			await mark('preference hydration finishes');
+			await page.evaluate(() => window.__journeyBootHold.release());
 			await page.waitForFunction(() => window.__journeyBootHold?.releasedAt != null, null, { timeout: BOOT_HOLD.ms + 30_000 });
 			await page.waitForTimeout(2000);
 			expect(ctx.closed.length === 0, `boot must not send close_session: ${JSON.stringify(ctx.closed)}`);
@@ -50,13 +51,17 @@ await runJourney({
 			expect(await countUserRows(page, token) === 1, 'the first message stays in the transcript exactly once');
 			const view = await page.evaluate(() => JSON.parse(localStorage.getItem('ai-shuffle-layout') || 'null')?.activeView);
 			expect(view?.type === 'session' && typeof view.sessionId === 'string', `layout follows the created chat: ${JSON.stringify(view)}`);
-			log(`first send and settled reply survived ${BOOT_HOLD.ms}ms preference hold; no close_session`);
+			log(`first send and settled reply completed while preferences were held; released explicitly, no close_session`);
 			const session = await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-session');
 			await mark('reload the created chat');
 			await page.reload({ waitUntil: 'domcontentloaded' });
 			// A reload is an intentional document replacement, not a boot reversal.
 			await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
 			await mark('page reloaded');
+			// Only the first send is under test here; release the reload's hold
+			// as soon as its preference request starts, without spending a timer.
+			await page.waitForFunction(() => typeof window.__journeyBootHold?.release === 'function', null, { timeout: 30_000 });
+			await page.evaluate(() => window.__journeyBootHold.release());
 			await waitTurnSettled(page, { text: 'Fake AI here', messagesAtLeast: 2 });
 			expect(await countUserRows(page, token) === 1, 'reloading reopens this chat with its first message');
 			const reloaded = await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-session');
