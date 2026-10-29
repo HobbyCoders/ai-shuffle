@@ -30,6 +30,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { contactSheet, withRecording } from '../flight-recorder/record.mjs';
+import { composerSnapshot } from './lib/app.mjs';
+import { attachTrace } from './lib/trace.mjs';
 import { checkExpectShift, classifyKnownBug, designedShifts } from './lib/verdict.mjs';
 
 const require = createRequire(import.meta.url);
@@ -255,6 +257,9 @@ export async function runJourney(spec) {
 			const context = await browser.newContext({ ...VIEWPORTS[item.viewport] });
 			await context.addCookies(cookies);
 			const page = await context.newPage();
+			// Unrecorded evidence (setup's sends above all), printed when the case fails.
+			const trace = attachTrace(page);
+			let phase = 'setup';
 			const lines = [];
 			const log = (line) => lines.push(line);
 			const started = Date.now();
@@ -286,6 +291,8 @@ export async function runJourney(spec) {
 			try {
 				const ctx = { page, variant, status, log };
 				if (item.testCase.setup) await item.testCase.setup(ctx);
+				phase = 'act';
+				trace.note('> setup done; act (recorded) starts');
 				const recorderOpts = { ...(spec.recorder || {}), ...(item.testCase.recorder || {}) };
 				const selectors = [...(spec.recorder?.selectors || []), ...(item.testCase.recorder?.selectors || [])];
 				if (selectors.length) recorderOpts.selectors = selectors;
@@ -297,6 +304,7 @@ export async function runJourney(spec) {
 				result.text = recording.text;
 				result.recorded = true;
 				judge(recording.recording, recording.anomalies);
+				phase = 'verify';
 				if (item.testCase.verify) await item.testCase.verify({ ...ctx, recording: recording.recording });
 				result.ok = result.anomalies.length === 0;
 				if (process.env.JOURNEY_SHEETS === '1') {
@@ -304,6 +312,9 @@ export async function runJourney(spec) {
 				}
 			} catch (error) {
 				result.error = error.stack || String(error);
+				result.phase = phase;
+				const now = await composerSnapshot(page).catch((e) => `unavailable (${e.message.split('\n')[0]})`);
+				trace.note(`at failure: ${JSON.stringify(now)}`);
 				// A verify failure comes after a complete recording: keep its text.
 				result.text = error.flightRecording || result.text;
 				// A failed step still owes what it recorded before failing: a flicker
@@ -331,8 +342,11 @@ export async function runJourney(spec) {
 			const report = [
 				`# ${item.id}  ${label}  (${result.ms}ms)`,
 				...lines,
-				result.error ? `error: ${result.error}` : '',
+				result.error ? `error (in ${result.phase || 'verdict'}): ${result.error}` : '',
 				result.text,
+				// The recorder covers only `act`; a failure gets what the page did
+				// around it too (setup's sends, requests, socket frames, console).
+				result.status === 'fail' ? `page trace (unrecorded steps included):\n${trace.text()}` : '',
 				result.designed.length
 					? `designed moves (expectShift):\n${result.designed.map((d) => `  - composer move at ${d.t}ms in "${d.step}" measured ${d.value}  [${d.reason}]`).join('\n')}`
 					: '',
@@ -364,6 +378,7 @@ export async function runJourney(spec) {
 					knownBug: r.knownBug || null,
 					ms: r.ms,
 					error: r.error ? r.error.split('\n')[0] : null,
+					phase: r.error ? r.phase || null : null,
 					anomalies: r.anomalies.map((a) => a.message),
 					allowed: r.allowed,
 					designed: r.designed

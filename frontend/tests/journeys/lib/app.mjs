@@ -5,6 +5,8 @@
 //
 // Guide: tests/journeys/README.md.
 
+import { traceNote } from './trace.mjs';
+
 export const PROJECT = 'Dev sandbox';
 export const AGENT = 'Dev agent';
 /** Seeded chat titles (scripts/devloop/seed.py) by the seed's own keys. */
@@ -102,6 +104,72 @@ export async function gotoApp(page, status, path = '/') {
 	await page.locator(CHAT).waitFor({ timeout: 90_000 });
 	// The model chip appears once providers have loaded: the app is hydrated.
 	await page.getByRole('button', { name: /^Model: / }).first().waitFor({ timeout: 60_000 });
+}
+
+/**
+ * Settle the service worker's first visit (unrecorded, for `setup`). In a
+ * secure context (CI's loopback; a plain-HTTP dev instance has no worker) the
+ * first load installs /sw.js, which claims the page, and the app reloads once
+ * on that claim (pwa.svelte.ts → app-update-watch). A case that reloads on
+ * purpose would race that second load, so: wait for the worker to control the
+ * page, then reload into a document it controls from the start (no claim, no
+ * second load) and wait for the app again. No-op without a worker.
+ */
+export async function settleServiceWorker(page, status) {
+	const controlled = await page
+		.evaluate(async () => {
+			if (!('serviceWorker' in navigator)) return false;
+			const ready = await Promise.race([
+				navigator.serviceWorker.ready.then(() => true),
+				new Promise((resolve) => setTimeout(() => resolve(false), 15_000))
+			]);
+			if (!ready) return false;
+			// The claim (and the app's reaction to it) follows activation.
+			const deadline = performance.now() + 5000;
+			while (!navigator.serviceWorker.controller && performance.now() < deadline) {
+				await new Promise((resolve) => setTimeout(resolve, 50));
+			}
+			return !!navigator.serviceWorker.controller;
+		})
+		// The app's own reload replaced the document mid-wait: a worker is there.
+		.catch(() => true);
+	if (!controlled) return;
+	await page.reload();
+	await page.locator(CHAT).waitFor({ timeout: 90_000 });
+	await page.getByRole('button', { name: /^Model: / }).first().waitFor({ timeout: 60_000 });
+}
+
+/**
+ * Hold the first GET of `path` (an /api/v1 path) in every later document for
+ * `ms`, the way a slow network holds one of the boot's first loads: AppPage
+ * reconciles the restored chat with the layout only after all of them. A
+ * page-side fetch wrapper, not page.route (the built app's service worker
+ * makes the requests page.route would see). `window.__journeyBootHold`
+ * says when the held request started and was let go. Call in `setup`.
+ */
+export async function holdBootLoad(page, path, ms) {
+	await page.addInitScript(
+		({ path, ms }) => {
+			const hold = (window.__journeyBootHold = { path, ms, startedAt: null, releasedAt: null });
+			const original = window.fetch.bind(window);
+			window.fetch = async (input, init) => {
+				const method = (init?.method || (typeof input === 'object' && input.method) || 'GET').toUpperCase();
+				let url = '';
+				try {
+					url = new URL(typeof input === 'string' ? input : input.url, location.href).pathname;
+				} catch {
+					/* not a URL */
+				}
+				if (method === 'GET' && url === path && hold.startedAt === null) {
+					hold.startedAt = performance.now();
+					await new Promise((resolve) => setTimeout(resolve, ms));
+					hold.releasedAt = performance.now();
+				}
+				return original(input, init);
+			};
+		},
+		{ path, ms }
+	);
 }
 
 /**
@@ -226,12 +294,45 @@ export const composer = (page) => page.getByRole('textbox', { name: 'Message' })
 export const sendButton = (page) => page.getByRole('button', { name: 'Send', exact: true });
 export const stopButton = (page) => page.getByRole('button', { name: /^Stop/ });
 
+/**
+ * What the composer area shows right now, for the case's trace: the text's
+ * length and first characters (the journey's own prompt), Send's state, the
+ * chat signature and any banner or alert on screen.
+ */
+export function composerSnapshot(page) {
+	return page.evaluate((selector) => {
+		const box = document.querySelector('[role="textbox"][aria-label="Message"]');
+		const send = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.textContent || '').trim() === 'Send');
+		const chat = document.querySelector(selector);
+		const text = (box?.innerText || '').trim();
+		const alerts = [...document.querySelectorAll('[role="alert"], [role="status"]')]
+			.map((el) => (el.innerText || '').trim().replace(/\s+/g, ' '))
+			.filter(Boolean)
+			.slice(0, 4)
+			.map((line) => line.slice(0, 120));
+		return {
+			composer: box ? { chars: text.length, start: text.slice(0, 24), focused: box.contains(document.activeElement) } : null,
+			send: send ? { disabled: send.disabled, ariaDisabled: send.getAttribute('aria-disabled'), title: send.getAttribute('title') } : null,
+			chat: chat ? ['surface', 'session', 'composer', 'messages', 'loading', 'streaming'].map((k) => `${k}=${chat.getAttribute(`data-ui-${k}`)}`).join(' ') : null,
+			alerts
+		};
+	}, CHAT);
+}
+
 /** Type into the composer and press its Send button. */
 export async function typeAndSend(page, text) {
 	const box = composer(page);
 	await box.click();
 	await box.fill(text);
+	traceNote(page, `send helper: before click ${JSON.stringify(await composerSnapshot(page).catch((e) => String(e)))}`);
 	await sendButton(page).click();
+	traceNote(page, `send helper: after click ${JSON.stringify(await composerSnapshot(page).catch((e) => String(e)))}`);
+	// A second look once the click's work has had a moment, without holding the step.
+	page
+		.waitForTimeout(1500)
+		.then(() => composerSnapshot(page))
+		.then((snap) => traceNote(page, `send helper: 1.5s after click ${JSON.stringify(snap)}`))
+		.catch(() => {});
 }
 
 /** Whether this variant is a touch phone (the sidebar is an overlay drawer there). */
