@@ -162,7 +162,7 @@ def _count_queries(monkeypatch):
     return queries
 
 
-def test_live_identity_sql_is_history_independent(metadata_client, monkeypatch):
+def test_live_identity_sql_is_history_independent(metadata_client, monkeypatch, mock_db):
     # Count real busy reads every time, not whichever side of its 1.5 s cache
     # expiry the large fixture happens to land on. This is the uncached budget.
     monkeypatch.setattr("app.core.streaming_status.CACHE_TTL_SECONDS", 0)
@@ -171,6 +171,13 @@ def test_live_identity_sql_is_history_independent(metadata_client, monkeypatch):
         # Warm lazy imports/registries before either measured request.
         assert _live(metadata_client, sid).status_code == 200
 
+    # Equal revision stamps leave only identifier/title lengths as a possible
+    # wire-size difference, regardless of when the two fixtures were written.
+    mock_db.execute(
+        "UPDATE sessions SET updated_at = ? WHERE id IN (?, ?)",
+        ("2026-01-01T00:00:00.000000+00:00", "short-history", "long-history"),
+    )
+    mock_db.commit()
     queries = _count_queries(monkeypatch)
     loaders = (
         "app.api.sessions.load_event_messages",
@@ -185,12 +192,20 @@ def test_live_identity_sql_is_history_independent(metadata_client, monkeypatch):
                   for target in loaders]
         counts = []
         statements = []
+        wire_sizes = []
+        non_identity_sizes = []
         for sid in ("short-history", "long-history"):
             queries.clear()
             response = _live(metadata_client, sid)
             assert response.status_code == 200, response.text
-            assert response.json()["session_meta"]["id"] == sid
-            assert response.json()["messages"] == []
+            body = response.json()
+            assert body["session_meta"]["id"] == body["session_meta"]["title"] == body["session_id"] == sid
+            assert body["messages"] == []
+            wire_sizes.append(len(response.content))
+            assert wire_sizes[-1] <= 2 * 1024, wire_sizes
+            # The fixture's ID occurs in session_id, session_meta.id and title.
+            # All other bytes must stay fixed when history grows 1,000-fold.
+            non_identity_sizes.append(wire_sizes[-1] - 3 * len(sid.encode("utf-8")))
             assert not any("session_events" in sql.lower() for sql in queries), queries
             counts.append(len(queries))
             statements.append(list(queries))
@@ -198,6 +213,7 @@ def test_live_identity_sql_is_history_independent(metadata_client, monkeypatch):
             guard.assert_not_called()
     assert counts[0] == counts[1] > 0, (counts, statements)
     assert counts[0] <= 12, (counts, statements)
+    assert non_identity_sizes[0] == non_identity_sizes[1], wire_sizes
 
     # Negative control: a one-message detail window is NOT metadata-only. Its
     # real projection still pages all history, so this same zero-read budget
@@ -212,4 +228,4 @@ def test_live_identity_sql_is_history_independent(metadata_client, monkeypatch):
         assert event_reads, queries
         detail_counts.append(len(event_reads))
     assert detail_counts[1] > detail_counts[0], detail_counts
-    print(f"metadata SQL={counts}; detail session_events reads={detail_counts}")
+    print(f"metadata SQL={counts}, bytes={wire_sizes}; detail session_events reads={detail_counts}")

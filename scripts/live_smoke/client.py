@@ -28,7 +28,9 @@ API = "/api/v1"
 
 
 class ClientError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class Unreachable(ClientError):
@@ -77,10 +79,12 @@ class HttpWorkerClient:
         except httpx.TransportError as exc:
             raise Unreachable(f"{self.base_url} unreachable: {type(exc).__name__}") from None
         if resp.status_code in (401, 403):
-            raise AuthRefused(f"{method} {path}: HTTP {resp.status_code}; {AUTH_HINT}")
+            raise AuthRefused(f"{method} {path}: HTTP {resp.status_code}; {AUTH_HINT}",
+                              status_code=resp.status_code)
         if resp.status_code >= 400:
             detail = resp.text[:300].replace("\n", " ")
-            raise ClientError(f"{method} {path}: HTTP {resp.status_code} {detail}")
+            raise ClientError(f"{method} {path}: HTTP {resp.status_code} {detail}",
+                              status_code=resp.status_code)
         return resp.json() if resp.content else {}
 
     def preview_identity(self) -> dict:

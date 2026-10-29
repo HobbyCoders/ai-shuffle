@@ -85,12 +85,27 @@ class AppClient(HttpWorkerClient):
             return True
         return bool(self.state(sid).get("is_streaming"))
 
+    def _idle_metadata(self, sid: str) -> dict:
+        try:
+            metadata = self._req("GET", f"/sessions/{sid}/live", params={"include_messages": "false"})
+        except ClientError as exc:
+            # Only an unsupported route permits the expensive legacy read.
+            # Auth, transport and ordinary server failures must still surface.
+            if exc.status_code not in (404, 405, 501):
+                raise
+        else:
+            if "has_running_tasks" in metadata and "parked_task_kind" in metadata:
+                return metadata
+        # Older workers omit these fields; /state alone would misread parked
+        # work as idle. Preserve their old task-presence source until updated.
+        return self._req("GET", f"/sessions/{sid}", params={"message_limit": 5})
+
     def wait_idle(self, sid: str, *, deadline: float) -> tuple[float | None, bool]:
         """Poll until the turn is over. Returns (time it went idle, timed_out)."""
         idle_since: float | None = None
         saw_busy = False
         while time.time() < deadline:
-            s = self._req("GET", f"/sessions/{sid}/live", params={"include_messages": "false"})
+            s = self._idle_metadata(sid)
             busy = self._busy(sid, s)
             saw_busy = saw_busy or busy
             if not busy and saw_busy:
