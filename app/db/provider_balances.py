@@ -64,3 +64,9 @@ def snapshot(row, value):
         """, (json.dumps(value), row["id"], row.get("revision"), row.get("balance_key"),
               row.get("balance_instance_id")))
         return cur.fetchone() is not None
+
+
+from app.core.resource_sync import install_database_mutations as _install_resource_sync
+
+# The binding changes the shared key; poll snapshots are local-only.
+_install_resource_sync(globals(), 'settings', 'bind')
