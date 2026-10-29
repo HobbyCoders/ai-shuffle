@@ -22,16 +22,24 @@ inside a private directory:
 
 | Field | What it is |
 | --- | --- |
-| `state` | `starting`, `ready`, `restarting` or `app-exited` |
-| `access_link`, `urls.ui` | The link to open; the UI (Vite) origin |
+| `state` | `starting`, `ready`, `restarting`, `app-exited` or `stopping` |
+| `pid`, `pid_identity` | The launcher and its start time (a reused pid is not the launcher) |
+| `mode` | `dev`, or `ci` for `--ci` |
+| `access_link`, `urls.ui` | The link to open; the UI (Vite, or the stamped build) origin |
 | `urls.preview_listener` | The app's guarded listener (Vite proxies `/api` to it) |
 | `app.pid`, `app.starts`, `app.last_ready_seconds` | The current app process, restart count and its last start time |
+| `postgres`, `vite`, `guardian` | Those processes (pid and start time), for the guardian's cleanup |
 | `fake_ai.url`, `fake_ai.request_log` | The fake AI and its JSONL log of every model request |
 | `data_dir`, `workspace_dir`, `expires_at` | Throwaway data, the seeded projects, the TTL deadline |
-| `seed` | What was seeded (ids of the provider, agent, projects and chats) or the seed error |
+| `seed` | What was seeded (ids of the provider, agent, projects, remotes and chats) or the seed error |
 
-`python -m scripts.devloop status` prints it; `python -m scripts.devloop down`
-stops the instance.
+`python -m scripts.devloop status` prints it (exit 0 while the launcher
+runs); `status --wait SECONDS` waits until the instance is `ready` and exits 1
+if it stops, its app exits or the time runs out. `python -m scripts.devloop
+down` stops the instance. A status file whose launcher is gone (same pid and
+start time no longer running, an unreaped zombie included) is **stale**:
+`status` and `down` say so and remove it, and the journey runner refuses a
+status whose pid is gone.
 
 UI journeys (`frontend/tests/journeys/*.journey.mjs`) read that status file,
 drive the instance in Chromium and fail on any flight-recorder anomaly; see
@@ -47,8 +55,12 @@ drive the instance in Chromium and fail on any flight-recorder anomaly; see
   5-10 s). If the app crashes on start (say, a syntax error), the
   loop logs it and waits for your next save; the access link is printed by
   whichever start first gets ready.
-* Saves made during the first start are held until it is ready (that start
-  runs the seed, and a restart would cut it off), then applied as one restart.
+* Saves made while a start that has not yet been ready runs are held until
+  it is ready (that start runs the seed, and a restart would cut it off), then
+  applied as one restart. A start that crashed (or hangs past 3 minutes) lets
+  the next save restart it, but the start that save triggers is held again: if
+  the very first start crashed before seeding, the fixed start seeds, and a
+  second save during it waits. After the first ready start, saves restart at once.
 * `--no-vite` serves the stamped build instead (`(cd frontend && npm run build)
   && python -m app.preview stamp` first).
 
@@ -57,9 +69,21 @@ drive the instance in Chromium and fail on any flight-recorder anomaly; see
 * Owner setup done; the agent browser's preview cookie is the owner.
 * Model provider **Fake AI (dev)** (custom, OpenAI dialect, dummy key, model
   `fake-ai` discovered through the normal Refresh-models path) and the
-  **Dev agent** using it.
+  **Dev agent** using it. The Dev agent is the composer's default for the
+  owner (the `composer.profile` preference, written by the seed through the
+  app's own preference storage, since the preview cookie may not write
+  preferences) and each seeded project's default agent, so a new chat runs on
+  the fake AI without a click.
 * Projects **Dev sandbox** (a real git repo: commits on `main`, branch
-  `feature/second`) and **Dev other**, under the instance's workspace.
+  `feature/second`) and **Dev other**, under the instance's workspace. Each
+  has an `origin` remote: a local bare repository (`file://`, under the
+  scratch directory's `remotes/`, never in the workspace) with every branch
+  pushed and tracked, so Fetch, Pull and ahead/behind work offline. The seed
+  records each repository the way the Git panel's first poll does, so the
+  project's shared row carries the remote's identity from the start.
+* The seed's own ids (chats, turns, tool calls) are fixed (UUIDv5 from a
+  constant namespace and a counter), so every instance seeds the same ids; the
+  branch session's id and the access session's come from the app.
 * Chats: a 280-row transcript with tool cards, code blocks and errors; one whose
   last turn ends on an unfinished tool call; a branch session checked out under
   `.fluid/worktrees/feature-second`; a cleared chat; one in Dev other; and one
@@ -113,9 +137,50 @@ code (`scripts/devloop/fake_wire.py`).
 Every port is picked free at random (or `--port` / `--vite-port`); 8000 and
 8001 are always refused. The app's local listener stays on loopback; only
 the guarded preview listener and Vite bind to `--host`. Ctrl-C, SIGTERM,
-`down`, the TTL (`--ttl-seconds`, default 1 h, at most 4 h) and loss of the
-parent process all stop the app, PostgreSQL, Vite and the fake AI and delete
-the data.
+SIGHUP (the terminal or the Monitor's pty went away), `down`, the TTL
+(`--ttl-seconds`, default 1 h, at most 4 h) and loss of the parent process all
+stop the app, PostgreSQL, Vite and the fake AI and delete the data. A stop
+first rewrites the status as `stopping`, before the slow teardown, so nothing
+reads a dying instance as ready.
+
+Stopping the Monitor task (TaskStop, or the stop button) SIGTERMs the task's
+process group and about a second later SIGKILLs every process under it,
+`up` included, long before the app and PostgreSQL are down; a SIGKILL runs no
+cleanup. So `up` first starts a **guardian** (`scripts/devloop/guardian.py`):
+a detached process (its own session, reparented away from the task) that
+waits for the launcher to be gone, then kills what it recorded (app, Vite and
+PostgreSQL, each only while its pid still has the recorded start time),
+removes the status file if it still names the dead launcher, and removes the
+scratch directory and PostgreSQL's socket directory. It writes one line to
+`<status>.guardian.log` when it had to do that; after a normal teardown it
+finds nothing and exits.
+
+## CI mode and the journey driver
+
+`python -m scripts.devloop up --ci` (or `DEVLOOP_CI=1`) is the
+non-interactive form: loopback only, no Vite (it serves this checkout's
+stamped production build, checked before anything starts: `(cd frontend &&
+SHUFFLE_SKIP_MOBILE_UI=1 npm run build) && python -m app.preview stamp`), no
+file watching or restarts, the default seed and an instant fake AI. Once
+ready it prints one line, `DEVLOOP_READY {"status": ..., "ui": ..., "pid":
+..., "seconds": ...}`; an instance that cannot be used (the app exits before
+ready, no access link, a failed seed) prints `DEVLOOP_FAILED {..., "error":
+...}`, tears down and exits 1.
+
+`python -m scripts.devloop.ci journeys [--shard I/N] [--out DIR] [--build]`
+is what CI runs: it starts `up --ci` as its own child (so the instance's
+parent lease is the driver), waits for the ready line and `status`, runs the
+journeys, then `down`. With one shard it runs
+`frontend/tests/journeys/run-all.mjs` when there is one, else every
+`*.journey.mjs`; with N shards it splits the journey files by case count
+(`python -m scripts.devloop.ci plan --shards N` prints the split) and runs
+each file of its shard, all of them even after a failure. `--build` builds
+and stamps the UI first when the stamp is missing or stale. It writes
+`devloop.log`, `logs/<journey>.log` and the per-case timelines (and contact
+sheets) under `--out`, prints the failing timelines, appends a summary to
+`$GITHUB_STEP_SUMMARY`, and exits 1 if anything failed. Run it locally the
+same way (PostgreSQL 16 binaries on `PATH`, Chromium via `CHROMIUM_PATH`).
+See [PR checks](../ci/pr-checks.md#ui-journeys-and-visual-regression).
 
 ## Safety rules
 

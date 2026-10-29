@@ -199,3 +199,32 @@ def test_desktop_evidence_rejects_missing_duplicated_or_failed_shards(tmp_path):
 if __name__ == "__main__":
     assert sys.argv[1] == "--desktop-evidence"
     desktop_evidence(Path(sys.argv[2]))
+
+
+def test_ui_journeys_and_visual_regression_gate_every_pr():
+    jobs = workflow("ci-frontend.yml")["jobs"]
+    assert {"journeys", "visual"} <= set(jobs["javascript"]["needs"])
+    journeys = jobs["journeys"]
+    assert journeys["strategy"]["fail-fast"] == "false"
+    shards = journeys["strategy"]["matrix"]["shard"]
+    steps = {step.get("name"): step for step in journeys["steps"]}
+    plan = steps["Plan this shard"]["run"]
+    assert f"plan --shards {len(shards)}" in plan
+    run = steps["Run the journeys on a fresh dev instance"]["run"]
+    assert f'--shard "${{{{ matrix.shard }}}}/{len(shards)}"' in run
+    assert "/usr/lib/postgresql/16/bin" in run and "||" not in run
+    assert "python -m app.preview stamp" in steps["Build and stamp the desktop UI"]["run"]
+    # Steps after the plan skip only for a shard the plan gave no journey file.
+    for step in journeys["steps"][2:-1]:
+        assert step["if"] == "steps.plan.outputs.files != ''", step.get("name")
+    visual = jobs["visual"]
+    command = next(s["run"] for s in visual["steps"] if s.get("name") == "Compare every fixture at every viewport")
+    assert "node tests/visual-regression.mjs --strict" in command and 'exit "$status"' in command
+
+
+def test_visual_regression_image_matches_the_pinned_playwright_core():
+    """Baselines are renders of this exact Chromium: bump both together."""
+    lock = json.loads((ROOT / "browser-mcp/package-lock.json").read_text(encoding="utf-8"))
+    version = lock["packages"]["node_modules/playwright-core"]["version"]
+    image = workflow("ci-frontend.yml")["jobs"]["visual"]["container"]["image"]
+    assert image == f"mcr.microsoft.com/playwright:v{version}-noble"
