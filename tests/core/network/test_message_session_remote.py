@@ -526,3 +526,57 @@ async def test_only_owner_chats_message_another_worker(workers, monkeypatch, kic
     with b.active():
         outcome = await _tool("MessageSession", MESSAGE)
     assert outcome.is_error and "Only the owner's chats can message chats on another worker" in outcome.text
+
+
+@pytest.mark.parametrize("invalidate", [None, "membership", "receiver_stop", "receiver_archive",
+                                        "receiver_owner", "forwarding_provenance"])
+async def test_remote_message_steers_a_busy_receiver_with_current_remote_scope(
+    workers, monkeypatch, kicks, invalidate,
+):
+    from types import SimpleNamespace
+    from app.core import session_runtime
+    from dataclasses import replace
+    from app.network import membership
+
+    a, b, _ = _two_workers(workers, monkeypatch)
+    with a.active():
+        live = turns.enqueue_turn("target", "user", prompt="working", profile_id="default")
+        assert turns.start_turn(live["id"])
+        runtime = session_runtime.SessionRuntime(live)
+        adapter = SimpleNamespace(steer_peer=AsyncMock(), steer=AsyncMock())
+        monkeypatch.setattr(runtime, "_live_adapter", lambda: adapter)
+    with b.active():
+        result = await _tool("MessageSession", MESSAGE)
+        assert not result.is_error, result.text
+    with a.active():
+        (row,) = agent_turns("target")
+        assert row["payload"]["forwarded_by_device"] == b.device_id
+        # A replicated caller row is not local wake authority on this worker.
+        with pytest.raises(ValueError, match="local"):
+            orch._caller("caller")
+        if invalidate == "membership":
+            ctx = engine.context()
+            ctx.members[b.device_id] = replace(ctx.member(b.device_id), status=membership.STATUS_REVOKED)
+        elif invalidate == "receiver_stop":
+            task_registry.mark_user_stopped("target")
+        elif invalidate == "receiver_archive":
+            _update(a, "target", publish=False, status="archived")
+        elif invalidate == "receiver_owner":
+            _api_user(a, user_id="foreign")
+            _update(a, "target", publish=False, api_user_id="foreign")
+        elif invalidate == "forwarding_provenance":
+            payload = {**row["payload"], "forwarded_by_device": "different-worker"}
+            with get_db() as conn:
+                conn.cursor().execute("UPDATE turns SET payload=%s WHERE id=%s", (json.dumps(payload), row["id"]))
+        submitted = await runtime.steer_pending()
+        if invalidate:
+            assert submitted == 0
+            adapter.steer_peer.assert_not_awaited()
+        else:
+            assert submitted == 1
+            adapter.steer_peer.assert_awaited_once_with(
+                MESSAGE["message"], sender="caller", id=row["id"], provenance="same-owner",
+            )
+            assert await runtime.steer_pending() == 0
+        adapter.steer.assert_not_awaited()
+        assert turns.get_turn(row["id"])["state"] == "queued"  # only a receipt retires it

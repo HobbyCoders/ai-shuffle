@@ -198,6 +198,25 @@ def _target(caller, session_id, *, allow_stopped=False, owner=None):
     return row
 
 
+def recheck_message_scope(payload, receiver_id):
+    """Revalidate a queued MessageSession without turning a mirror into a caller.
+
+    A remote row was admitted by the authenticated control action, whose worker
+    checked the sender and chain budget. Recheck that worker's membership and
+    the local receiver's current owner/scope; it is not a local sender chat.
+    """
+    sender_id = payload["orchestration_sender"]
+    origin = payload.get("orchestration_remote_origin")
+    forwarded = payload.get("forwarded_by_device")
+    if origin or forwarded:
+        if not isinstance(origin, str) or not origin or origin != forwarded:
+            raise PermissionError("Remote peer message has inconsistent authenticated provenance.")
+        _calling_worker(origin, "message chats here")
+        _target({"id": sender_id}, receiver_id, owner=_OWNER_CHAT)
+    else:
+        _target(_caller(sender_id), receiver_id)
+
+
 def list_sessions(session_id, data):
     from app.db import sessions
     from app.core.task_registry import task_registry
