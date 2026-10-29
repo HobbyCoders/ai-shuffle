@@ -127,7 +127,7 @@ describe('createMirrorSync (the check ChatView runs whatever its layout)', () =>
 		render(MirrorSyncGate, { sync, deviceName: 'Unraid', children });
 		await vi.advanceTimersByTimeAsync(0);
 		expect(screen.getByText('Syncing from Unraid…')).toBeTruthy();
-		expect(screen.queryByText('transcript')).toBeNull();
+		expect(screen.getByText('transcript').closest('[aria-hidden="true"]')).not.toBeNull();
 		await vi.advanceTimersByTimeAsync(2000);
 		// One poll per interval: the controller's, not one per mounted gate.
 		expect(fetch).toHaveBeenCalledTimes(2);
