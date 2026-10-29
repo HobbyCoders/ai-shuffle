@@ -13,7 +13,7 @@ export const entries: SettingEntry[] = [
 		category: 'general',
 		section: 'Notifications',
 		label: 'Notifications',
-		keywords: ['push', 'Android', 'Firebase', 'FCM', 'needs you', 'service account']
+		keywords: ['push', 'Android', 'phone', 'needs you', 'HobbyCoders', 'sign in']
 	},
 	{
 		id: 'general.theme',

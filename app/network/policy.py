@@ -87,6 +87,7 @@ _LOCAL_SETTING_PATTERNS = [
         # to this worker, like the Claude auth mode (claude_auth_mode:<instance>).
         r"^claude_cloud_(config|secrets)$",
         r"^encryption_salt$",
+        r"^fcm_service_account$",  # Retired publisher key; reject older peers too.
         r"^owner_preference_identity$",
         r"^owner_auth_",
         r"^schema_migrations_fingerprint$",

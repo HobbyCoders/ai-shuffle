@@ -12,7 +12,7 @@ Endpoints marked **Owner only** reject API-user keys (`aih_...`) with `403`. The
 
 ## Needs you push
 
-`GET /api/v1/settings/notifications` (**Owner only**) returns `configured` and `devices_registered`; it never returns the credential. `PUT` accepts `{"service_account": "<JSON pasted in Settings>"}` and encrypts it. `DELETE` removes it. Do not send this secret through a chat or command example.
+`GET /api/v1/settings/notifications` (**Owner only**) returns `linked`, `devices` (live Android registrations) and `enabled`. Phone push is enabled only for a signed-in, linked HobbyCoders worker and goes through the account-hub relay. There is no sender-key editor or sender `PUT`/`DELETE`; publisher credentials are never stored on workers. Local use and the in-app bell do not require an account.
 
 Android paired-device credentials with `mobile:notifications` scope may `PUT /api/v1/mobile/push-token` with `{"token":"<FCM registration token>"}` to register or rotate **their own** token, or `DELETE` that route to unregister. Expired, revoked, unrelated and API-user credentials cannot register. Unpairing clears the token. Tokens rejected by FCM are pruned without erasing a concurrently rotated token. These registrations are worker-local, not synced to other workers.
 

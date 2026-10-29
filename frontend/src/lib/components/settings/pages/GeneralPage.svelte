@@ -138,7 +138,6 @@
 </script>
 
 <PreferencePage category="general">
-	<NotificationsRow />
 	<RowGroup title="Appearance">
 		<SettingRow id="general.theme">
 			<Segmented options={THEME_OPTIONS} value={$themePreference} onchange={setTheme} />
@@ -167,6 +166,7 @@
 			<SelectField value={$timezonePreference} groups={TIME_ZONES} onchange={setTimezone} />
 		</SettingRow>
 	</RowGroup>
+	<NotificationsRow />
 </PreferencePage>
 
 {#snippet chatRow(id: string, key: ChatKey)}

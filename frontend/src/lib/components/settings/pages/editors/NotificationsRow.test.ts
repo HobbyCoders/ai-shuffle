@@ -2,59 +2,46 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import NotificationsRow from './NotificationsRow.svelte';
 
-const mocks = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn(), remove: vi.fn(), saved: vi.fn() }));
-vi.mock('$lib/api/client', () => ({ api: { get: mocks.get, put: mocks.put, delete: mocks.remove }, getErrorMessage: () => 'Could not save credentials' }));
+const mocks = vi.hoisted(() => ({ get: vi.fn(), go: vi.fn() }));
+vi.mock('$lib/api/client', () => ({ api: { get: mocks.get }, getErrorMessage: () => 'Could not load status' }));
+vi.mock('$lib/api/account', () => ({ ACCOUNT_CHANGED_EVENT: 'shuffle-account-changed' }));
 vi.mock('$lib/settings/registry', () => ({ getEntry: () => ({ label: 'Notifications' }) }));
 vi.mock('$lib/settings/access.svelte', () => ({ getSettingsAccess: () => ({ readOnly: false }) }));
-vi.mock('$lib/settings/navigation.svelte', () => ({ settingsNav: { pendingOpen: null, consumeOpen: () => false } }));
-vi.mock('$lib/settings/save-status.svelte', () => ({ flashSaved: mocks.saved }));
+vi.mock('$lib/settings/navigation.svelte', () => ({ settingsNav: { go: mocks.go, pendingOpen: null, consumeOpen: () => false } }));
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
-describe('Needs you sender settings', () => {
-    it('shows push off and opens a write-only credential field', async () => {
-        mocks.get.mockResolvedValue({ configured: false, devices_registered: 0 });
+describe('Phone notification relay status', () => {
+    it('offers the existing account sign-in entry point without a key field', async () => {
+        mocks.get.mockResolvedValue({ linked: false, devices: 0, enabled: false });
         render(NotificationsRow);
-        await screen.findByText('Push off · 0 devices');
-        await fireEvent.click(screen.getByRole('button', { name: /Set up push/ }));
-        const field = screen.getByLabelText('Firebase sender service-account JSON') as HTMLInputElement;
-        expect(field.type).toBe('password');
-        expect(field.value).toBe('');
-        expect((screen.getByRole('button', { name: 'Save credentials' }) as HTMLButtonElement).disabled).toBe(true);
-        expect(screen.getByText(/No completion or parking alerts/)).toBeTruthy();
+        await screen.findByText('Sign in to your HobbyCoders account to get phone notifications');
+        await fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+        expect(mocks.go).toHaveBeenCalledWith({ category: 'devices', item: 'account' });
+        expect(document.querySelector('input')).toBeNull();
     });
-    it('clears pasted credentials after dispatch even if saving fails', async () => {
-        mocks.get.mockResolvedValue({ configured: false, devices_registered: 2 });
-        mocks.put.mockRejectedValue(new Error('not echoed'));
+    it.each([0, 1, 2])('shows the linked worker’s device count (%s)', async (devices) => {
+        mocks.get.mockResolvedValue({ linked: true, devices, enabled: true });
         render(NotificationsRow);
-        await screen.findByText('Push off · 2 devices');
-        await fireEvent.click(screen.getByRole('button', { name: /Set up push/ }));
-        const field = screen.getByLabelText('Firebase sender service-account JSON') as HTMLInputElement;
-        await fireEvent.input(field, { target: { value: 'private-json-input' } });
-        await fireEvent.click(screen.getByRole('button', { name: 'Save credentials' }));
-        await waitFor(() => expect(field.value).toBe(''));
-        expect(mocks.put).toHaveBeenCalledWith('/settings/notifications', { service_account: 'private-json-input' });
-        expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Could not save credentials');
-        expect(document.body.textContent).not.toContain('private-json-input');
+        await screen.findByText(`Phone notifications: on · ${devices} device${devices === 1 ? '' : 's'}`);
+        expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull();
+        expect(document.querySelector('input')).toBeNull();
     });
-    it('refreshes status when a worker returns no content after removal', async () => {
-        mocks.get.mockResolvedValueOnce({ configured: true, devices_registered: 1 })
-            .mockResolvedValueOnce({ configured: false, devices_registered: 1 });
-        mocks.remove.mockResolvedValue(undefined);
-        render(NotificationsRow);
-        await screen.findByText('Credentials set · 1 device');
-        await fireEvent.click(screen.getByRole('button', { name: /Manage push/ }));
-        await fireEvent.click(screen.getByRole('button', { name: 'Remove credentials' }));
-        await screen.findByText('Push off · 1 device');
-        expect(mocks.get).toHaveBeenCalledTimes(2);
+    it('refreshes after sign-in and sign-out, and removes its listener on teardown', async () => {
+        mocks.get.mockResolvedValueOnce({ linked: false, devices: 0, enabled: false })
+            .mockResolvedValueOnce({ linked: true, devices: 1, enabled: true });
+        const view = render(NotificationsRow);
+        await screen.findByRole('button', { name: 'Sign in' });
+        window.dispatchEvent(new Event('shuffle-account-changed'));
+        await screen.findByText('Phone notifications: on · 1 device');
+        view.unmount();
+        window.dispatchEvent(new Event('shuffle-account-changed'));
+        await waitFor(() => expect(mocks.get).toHaveBeenCalledTimes(2));
     });
-    it('shows configured status without reading the key and supports removal', async () => {
-        mocks.get.mockResolvedValue({ configured: true, devices_registered: 1 });
-        mocks.remove.mockResolvedValue({ configured: false, devices_registered: 1 });
+    it('reports a failed status load without offering credential setup', async () => {
+        mocks.get.mockRejectedValue(new Error('unavailable'));
         render(NotificationsRow);
-        await screen.findByText('Credentials set · 1 device');
-        await fireEvent.click(screen.getByRole('button', { name: /Manage push/ }));
-        await fireEvent.click(screen.getByRole('button', { name: 'Remove credentials' }));
-        await screen.findByText('Push off · 1 device');
-        expect(mocks.remove).toHaveBeenCalledWith('/settings/notifications');
+        expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Could not load status');
+        expect(screen.getByText('Phone notification status unavailable')).toBeTruthy();
+        expect(document.querySelector('input')).toBeNull();
     });
 });

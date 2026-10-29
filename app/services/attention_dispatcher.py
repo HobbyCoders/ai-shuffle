@@ -3,7 +3,7 @@
 Inputs are *pending* interactions, private-access waits and the existing prose
 question projection, never lifecycle events or bell severity. State travels in
 the owner-ordered session catalog. Android also persists version/episode receipts
-so retries, reordering and an FCM acceptance followed by a crash cannot re-alert.
+so retries, reordering and a relay acceptance followed by a crash cannot re-alert.
 """
 from __future__ import annotations
 
@@ -19,10 +19,11 @@ from app.db.async_database import run_sync
 logger = logging.getLogger(__name__)
 
 
-def reduce_attention(previous, needs, user_position, *, active=True, explicit_id=None, title="Chat", now=None):
+def reduce_attention(previous, needs, user_position, *, active=True, explicit_id=None, now=None):
     """Pure state machine with bounded durable identity receipts for replay."""
     now = time.time() if now is None else now
     state = dict(previous or {})
+    state.pop("title", None)  # Discard titles from older, synced receipts.
     seen = dict.fromkeys(state.get("seen", []))
     calls = dict.fromkeys(state.get("calls", []))
     if explicit_id in calls:
@@ -44,14 +45,14 @@ def reduce_attention(previous, needs, user_position, *, active=True, explicit_id
     if explicit is not None:
         needs.add("explicit:" + str(explicit["id"] if isinstance(explicit, dict) else explicit))
     old_needs = set(state.get("needs", []))
-    if needs == old_needs and not explicit_id and title == state.get("title", title):
+    if needs == old_needs and not explicit_id:
         return state, False
     was_pending, pending = bool(old_needs), bool(needs)
     new_need = bool(needs - seen.keys())
     action = "alert" if pending and not was_pending and new_need else "update" if pending else "clear"
     seen.update(dict.fromkeys(sorted(needs)))
     state.update(needs=sorted(needs), seen=list(seen)[-200:], calls=list(calls)[-200:],
-                 explicit=explicit, title=title)
+                 explicit=explicit)
     # An idle session's completion, parking, errors or settle cannot enqueue a push.
     if not pending and not was_pending:
         return state, False
@@ -116,7 +117,7 @@ def _transition(session_id, worker_id, private_needs, explicit_id=None):
         boundary = c.fetchone()
         active = row.get("status") != "archived" and not (boundary and boundary["event_type"] == "system.note")
         state, changed = reduce_attention(previous, needs, position, active=active,
-            explicit_id=explicit_id, title=(row.get("title") or "Chat")[:120])
+            explicit_id=explicit_id)
         if state != previous:
             c.execute("UPDATE sessions SET push_attention_state=%s WHERE id=%s", (json.dumps(state), session_id))
     if state != previous:
@@ -149,7 +150,7 @@ def current_command(session_id, worker_id):
         return {"type": "attention", "worker_id": worker_id, "session_id": session_id,
                 "version": str(state["version"]), "episode": state.get("episode", ""),
                 "action": state["action"], "title": "AI Shuffle",
-                "body": "A chat needs you: " + state.get("title", "Chat"),
+                "body": "A chat needs you",
                 "expires_at": str(int(state.get("enqueued_at", 0) + 600))}
 
 
@@ -215,23 +216,30 @@ class AttentionDispatcher:
             state = await run_sync(_transition, session_id, worker_id, self.private_needs(session_id), explicit_id)
             if state is None:
                 return {"sent": False, "reason": "only the chat's owner worker may send"}
+            from app.services.push_notification import push_notification_service, delivered_count
+            if self.sender is None and not await run_sync(push_notification_service.is_linked):
+                if state.get("pending"):
+                    await run_sync(_ack, session_id, worker_id, state["version"])
+                return {"sent": False, "reason": "not_linked"}
             if not state.get("pending"):
                 return {"sent": False, "deduplicated": True}
             # Recheck ownership/latest state immediately before transport. Never send stale work.
             command = await run_sync(current_command, session_id, worker_id)
             if command is None or int(command["version"]) != state["version"]:
                 return {"sent": False, "reason": "attention changed"}
-            from app.services.push_notification import push_notification_service, delivered_count
             if time.time() > state["enqueued_at"] + 600:
                 results = []
             else:
                 sender = self.sender or push_notification_service
                 results = await sender.send_to_all_devices("AI Shuffle", command["body"], data=command, raise_lookup_errors=True)
-            # Failed real sends remain in the outbox. No credential/recipient is off, not a backlog.
-            if not results or all(r.success or r.simulated or r.invalid_token for r in results):
+            # Transient relay failures stay pending. Unlinked/invalid recipients
+            # are terminal, not a backlog that would alert on a later sign-in.
+            if not results or all(r.success or r.simulated or r.invalid_token or r.not_linked or r.permanent_failure for r in results):
                 await run_sync(_ack, session_id, worker_id, state["version"])
+            if any(r.not_linked for r in results):
+                return {"sent": False, "reason": "not_linked"}
             return {"sent": delivered_count(results) > 0, "accepted": delivered_count(results),
-                    "note": "FCM acceptance is not proof of display or that the owner has seen it."}
+                    "note": "Relay acceptance is not proof of display or that the owner has seen it."}
 
     async def run(self):
         self.loop = asyncio.get_running_loop()

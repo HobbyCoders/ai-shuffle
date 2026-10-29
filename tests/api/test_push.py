@@ -1,4 +1,4 @@
-"""Owner-only write-only credentials and authenticated self-device token rotation."""
+"""Owner relay status and authenticated self-device token rotation."""
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
@@ -6,58 +6,35 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, NoEncryption
 
 from app.api import push
-from app.core import encryption
-from app.db import mobile, pairing, settings
+from app.db import mobile, pairing
 from app.db.base import get_db
 
 PATH = "/api/v1/settings/notifications"
 TOKEN_PATH = "/api/v1/mobile/push-token"
 
 
-def account():
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    return json.dumps({"type": "service_account", "project_id": "test-project", "client_email": "test@test-project.iam.gserviceaccount.com",
-        "private_key": key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode(),
-        "token_uri": "https://oauth2.googleapis.com/token"})
+def test_notification_status_requires_owner(client):
+    assert client.get(PATH).status_code in (401, 403)
 
 
-@pytest.mark.parametrize("method", ["get", "put", "delete"])
-def test_sender_settings_require_owner(client, method):
-    kwargs = {"json": {"service_account": "not-secret"}} if method == "put" else {}
-    assert getattr(client, method)(PATH, **kwargs).status_code in (401, 403)
-
-
-def test_sender_json_write_only_encrypted_and_removed(authenticated_client):
-    raw = account()
-    response = authenticated_client.put(PATH, json={"service_account": raw})
-    assert response.status_code == 200, response.text
-    assert response.json() == {"configured": True, "devices_registered": 0}
-    stored = settings.get_system_setting("fcm_service_account")
-    assert encryption.is_encrypted(stored)
-    assert json.loads(encryption.decrypt_value(stored)) == json.loads(raw)
-    for result in (response, authenticated_client.get(PATH), authenticated_client.get("/api/settings")):
-        assert "private_key" not in result.text and json.loads(raw)["private_key"] not in result.text
-    assert authenticated_client.delete(PATH).json()["configured"] is False
-    assert settings.get_system_setting("fcm_service_account") is None
-
-
-@pytest.mark.parametrize("value", ["not json", "{}", '{"type":"service_account","token_uri":"https://evil.invalid"}'])
-def test_bad_json_never_saved_or_echoed(authenticated_client, value):
-    response = authenticated_client.put(PATH, json={"service_account": value})
-    assert response.status_code == 400
-    assert settings.get_system_setting("fcm_service_account") is None
-    assert "evil.invalid" not in response.text
-
-
-def test_validation_does_not_echo_pasted_secret(authenticated_client):
-    response = authenticated_client.put(PATH, json={"service_account": {"private_key": "private-input-sentinel"}})
-    assert response.status_code == 422
-    assert "private-input-sentinel" not in response.text
+@pytest.mark.parametrize("linked", [True, False])
+def test_status_returns_link_devices_and_enabled(native, authenticated_client, monkeypatch, linked):
+    client, headers, _ = native
+    assert client.put(TOKEN_PATH, headers=headers, json={"token": "test-token"}).status_code == 200
+    monkeypatch.setattr(push.push_notification_service, "is_linked", lambda: linked)
+    response = authenticated_client.get(PATH)
+    assert response.status_code == 200
+    assert response.json() == {"linked": linked, "devices": 1, "enabled": linked}
     assert "no-store" in response.headers["cache-control"]
+    assert "test-token" not in response.text
+
+
+@pytest.mark.parametrize("method", ["put", "delete"])
+def test_sender_key_routes_are_removed(authenticated_client, method):
+    response = getattr(authenticated_client, method)(PATH)
+    assert response.status_code == 405
 
 
 @pytest.fixture
@@ -129,7 +106,8 @@ def test_scope_expiry_and_foreign_device_cannot_register(native):
 
 def test_native_key_cannot_write_sender_and_unpaired_snapshot_is_refused(native):
     client, headers, _ = native
-    assert client.put(PATH, headers=headers, json={"service_account": "not-secret"}).status_code == 403
+    assert client.get(PATH, headers=headers).status_code == 403
+    assert client.put(PATH, headers=headers, json={"service_account": "not-secret"}).status_code == 405
     assert client.get("/api/v1/mobile/push-state").status_code == 401
 
 

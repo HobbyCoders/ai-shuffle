@@ -55,13 +55,13 @@ Disconnect the worker from your account in **Settings → Devices**, and remove 
 
 ## Android Needs you notifications
 
-Phone push is off until you configure it. In **Settings → General → Notifications**, paste the Firebase sender service-account JSON. The field is write-only: AI Shuffle encrypts it at rest and syncs it between your workers using the same encrypted secret transport as provider billing keys. Remove it there to turn push off. Do not put the JSON in an environment file, repository or chat.
+Phone notifications need a HobbyCoders account sign-in. Sign in and link each worker in **Settings → Devices → Shuffle account**. Workers that are not linked get no phone push; local use and the in-app bell are unaffected. Notifications go through the HobbyCoders account-hub relay using the worker’s account link. No Firebase sender key is stored on your workers.
 
-Use an Android build configured for the same Firebase project, pair it with each worker you use, and allow the app's one-time notification prompt. The Notifications row shows whether credentials are set and how many Android devices are registered with this worker. Removing a paired phone revokes its registration; rotating its token updates the registration automatically.
+Use the Firebase-configured Android build, pair it with each linked worker you use, and allow the app’s one-time notification prompt. **Settings → General → Notifications** shows whether phone notifications are on and how many Android devices are registered with this worker. Removing a paired phone revokes its registration; rotating its token updates the registration automatically.
 
 The **Needs you** channel alerts only when a chat goes from no pending needs to at least one question, permission/approval card, private-access request/approval or trailing prose question, or when an agent explicitly asks for you with `NotifyDevices`. More pending items update the same notification silently. Answering, dismissing, expiry or settling clears it once nothing needs you. Completions, parking, progress, errors, watches and update notices never produce phone alerts; the in-app bell still works as before.
 
-Lock-screen text contains only “AI Shuffle” and “A chat needs you: <chat title>”, never the question, tool input or private-access details. Google handles the push transport and receives that title and the worker/chat identifiers. Tap opens that worker and chat. “Sent” means FCM accepted the message, not that Android displayed it or that you saw it. Delivery can be delayed or unavailable (for example after force-stopping the app); opening the app silently refreshes current state.
+Lock-screen text is fixed: “AI Shuffle” and “A chat needs you”. Chat titles, questions, tool input and private-access details are never sent. The HobbyCoders relay and Google receive the phone registration token and worker/chat identifiers needed for delivery and tap routing. Tap opens that worker and chat. “Sent” means the relay accepted the message, not that Android displayed it or that you saw it. Delivery can be delayed or unavailable (for example after force-stopping the app); opening the app silently refreshes current state.
 
 ## Private access details
 

@@ -26,7 +26,7 @@ const switchFor = (name: string) => screen.getByRole('switch', { name }) as HTML
 
 beforeEach(() => {
 	transport.get.mockImplementation(async (path: string) => path === '/settings/notifications'
-		? { configured: false, devices_registered: 0 } : {});
+		? { linked: false, devices: 0, enabled: false } : {});
 	transport.put.mockResolvedValue({});
 	chatPreferences.reset();
 	saveStatus.reset();
@@ -40,14 +40,14 @@ describe('General page', () => {
 
 	it('loads the Notifications row status without reading credentials', async () => {
 		render(GeneralPage);
-		await screen.findByText('Push off · 0 devices');
+		await screen.findByText('Sign in to your HobbyCoders account to get phone notifications');
 		expect(transport.get).toHaveBeenCalledWith('/settings/notifications');
 	});
 
 	it('groups the chat preferences under Conversation and Thinking and tools', () => {
 		render(GeneralPage);
 		const groups = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent?.trim());
-		expect(groups).toEqual(['Notifications', 'Appearance', 'Conversation', 'Thinking and tools', 'Region']);
+		expect(groups).toEqual(['Appearance', 'Conversation', 'Thinking and tools', 'Region', 'Notifications']);
 		expect(screen.getByText('Uses an extra model call')).toBeTruthy();
 	});
 
