@@ -741,6 +741,15 @@ def materialize(
             # Admin usage is worker-local too. A late poll is guarded by its
             # captured key/binding; never display a pre-rotation reading.
             cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", keys)
+    if previous:
+        from app.db.model_providers import _same_secret
+        # The verdict is worker-local and belongs to this credential/endpoint,
+        # just as on update_model_provider. Re-encryption is not a new key.
+        if ("auth_token" in record and not _same_secret(previous.get("auth_token"), record["auth_token"])) or any(
+                name in record and (previous.get(name) or None) != (record[name] or None)
+                for name in ("base_url", "provider_type", "auth_mode")):
+            columns.append("credential_status")
+            values.append(None)
     # Key columns always come from the record id so a hook cannot move a row.
     for name, value in zip(coll.keys, keys):
         if name in columns:
