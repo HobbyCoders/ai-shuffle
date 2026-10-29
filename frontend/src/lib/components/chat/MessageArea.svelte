@@ -83,6 +83,8 @@
 	import { createSettleHold, createTurnHandoffHold } from '$lib/utils/settle-hold';
 	import {
 		createTranscriptWindow,
+		transcriptItemCost,
+		TRANSCRIPT_CONTENT_BUDGET,
 		classifyTurnEntry,
 		settleSkippedTurns,
 		turnTopsFromVisibility,
@@ -683,7 +685,14 @@
 	// A bounded slice, not an idle queue that eventually mounts all history.
 	// Explicit navigation remains available while streaming; hidden views do no
 	// optional mounting. A keyed DOM anchor survives eviction at either edge.
-	const transcriptWindow = createTranscriptWindow();
+	const transcriptWindow = createTranscriptWindow({
+		// Real row geometry is kept: no estimated-height placeholders that move
+		// the reader after anchor restoration. Dense code/table replies consume
+		// more of the bounded range than a short prompt or a collapsed tool.
+		cost: import.meta.env.VITE_PERF_TRANSCRIPT_CONTENT_WINDOW !== '0'
+			? (index) => transcriptItemCost(displayItems[index]) : undefined,
+		budget: TRANSCRIPT_CONTENT_BUDGET
+	});
 	let mountedRange = $state<TranscriptRange>({ start: 0, end: 0 });
 	const mountedStart = $derived(mountedRange.start);
 	const mountedEnd = $derived(mountedRange.end);
@@ -753,7 +762,7 @@
 			// Restoring a remount uses the same bounded coordinate system as the
 			// saved scrollTop, never a full-history mount.
 			if (isNewSession && saved && autoScrollCache.get(sessionKey) === false && count > 0) {
-				next = transcriptWindow.windowAround(Math.min(count - 1, saved.start + Math.floor(transcriptWindow.cap / 2)));
+				next = transcriptWindow.restoreRange(saved);
 			}
 			applyMountedRange(next, !isNewSession && !shouldAutoScroll);
 		});

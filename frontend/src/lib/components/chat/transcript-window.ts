@@ -22,6 +22,31 @@ export interface TranscriptRange { readonly start: number; readonly end: number 
 
 /** Hard limit for outer items; nested row windows need their own bound. */
 export const TRANSCRIPT_WINDOW_CAP = 120;
+/** Approximate nested markup work, in addition to the outer-row cap. A single
+ * oversize message is shown in full, on its own: history is never truncated. */
+export const TRANSCRIPT_CONTENT_BUDGET = 12_000;
+
+import type { ChatMessage } from '$lib/stores/types';
+import type { DisplayItem } from '$lib/utils/work-log';
+const contentCosts = new WeakMap<DisplayItem, number>();
+function messageCost(message: ChatMessage): number {
+	const content = message.content ?? '';
+	// Fences/tables expand into many elements (especially syntax-token spans).
+	// Plain prose is cheap. No parse, sanitize or DOM creation is needed to pick
+	// the window; the item identity memo makes warm navigation a constant read.
+	const rich = /```|~~~|\|[^\n]+\|/.test(content);
+	return 64 + Math.ceil(content.length / (rich ? 4 : 80));
+}
+export function transcriptItemCost(item: DisplayItem): number {
+	const hit = contentCosts.get(item);
+	if (hit !== undefined) return hit;
+	const cost = item.kind === 'message' ? messageCost(item.message)
+		: item.kind === 'system_group' ? item.messages.reduce((sum, message) => sum + messageCost(message), 32)
+		: item.sequence.reduce((sum, entry) => sum +
+			((item.mode === 'settled' ? !entry.hiddenWhenCollapsed : !entry.foldsInRun) ? messageCost(entry.message) : 0), 96);
+	contentCosts.set(item, cost);
+	return cost;
+}
 
 function rangeAt(start: number, count: number, cap: number, previous?: TranscriptRange): TranscriptRange {
 	if (!Number.isInteger(count) || count < 0 || !Number.isInteger(cap) || cap < 1) {
@@ -35,28 +60,57 @@ function rangeAt(start: number, count: number, cap: number, previous?: Transcrip
 /** Pure per-view range controller. No timers or idle expansion: only explicit
  * navigation moves into history. Apply the same controller to rows inside a
  * large group: an outer-item cap alone cannot bound nested mounted rows. */
-export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30 }: { cap?: number; step?: number } = {}) {
-	if (!Number.isInteger(cap) || cap < 1 || !Number.isInteger(step) || step < 1) {
-		throw new RangeError('Transcript cap and step must be positive integers');
+export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30, cost, budget = Infinity }: {
+	cap?: number; step?: number; cost?: (index: number) => number; budget?: number
+} = {}) {
+	if (!Number.isInteger(cap) || cap < 1 || !Number.isInteger(step) || step < 1 || !(budget > 0)) {
+		throw new RangeError('Transcript cap, step and content budget must be positive');
 	}
-	// Keep overlap for a keyed DOM anchor whenever the cap permits it.
 	step = Math.min(step, Math.max(1, cap - 1));
 	let count = 0;
 	let range: TranscriptRange = { start: 0, end: 0 };
 	let followsTail = true;
 	let hidden = false;
 	let streaming = false;
-	function move(start: number): TranscriptRange {
-		range = rangeAt(start, count, cap, range);
+	const weighted = !!cost && Number.isFinite(budget);
+	const charge = (index: number) => Math.max(1, cost?.(index) ?? 1);
+	function commit(start: number, end: number): TranscriptRange {
+		if (range.start !== start || range.end !== end) range = { start, end };
 		return range;
 	}
-	function toTail(): TranscriptRange {
-		followsTail = true;
-		return move(count - cap);
+	function move(start: number): TranscriptRange {
+		if (!weighted) { range = rangeAt(start, count, cap, range); return range; }
+		start = Math.max(0, Math.min(Math.floor(start), Math.max(0, count - 1)));
+		let end = start, used = 0;
+		while (end < count && end - start < cap) {
+			const next = charge(end);
+			if (end > start && used + next > budget) break;
+			used += next; end++;
+		}
+		return commit(start, end);
 	}
+	function endingAt(end: number): TranscriptRange {
+		if (!weighted) return move(end - cap);
+		end = Math.max(0, Math.min(count, end));
+		let start = end, used = 0;
+		while (start > 0 && end - start < cap) {
+			const next = charge(start - 1);
+			if (start < end && used + next > budget) break;
+			used += next; start--;
+		}
+		return commit(start, end);
+	}
+	const shift = () => weighted ? Math.min(step, Math.max(1, Math.floor((range.end - range.start) / 4))) : step;
+	function toTail(): TranscriptRange { followsTail = true; return endingAt(count); }
 	function extendOlder(): TranscriptRange {
 		followsTail = false;
-		return move(range.start - step);
+		if (!weighted) return move(range.start - step);
+		if (!range.start) return range;
+		const previous = range;
+		const next = endingAt(range.end - shift());
+		// A sudden oversize row can exceed the remaining overlap budget. Still
+		// make progress and show it in full, rather than making history unreachable.
+		return next.start < previous.start ? next : move(previous.start - 1);
 	}
 	return {
 		cap,
@@ -67,30 +121,40 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30 
 			if (!Number.isInteger(next) || next < 0) throw new RangeError('Item count must be a non-negative integer');
 			count = next;
 			followsTail = options.followTail ?? followsTail;
-			// Hidden appends do not grow the mounted slice. Shrinks must still clamp.
 			if (hidden && count >= range.end) return range;
-			return move(followsTail ? count - cap : range.start);
+			return followsTail ? endingAt(count) : move(range.start);
 		},
 		extendOlder,
 		loadOlder: extendOlder,
 		extendNewer(): TranscriptRange {
-			const next = move(range.start + step);
+			const previous = range;
+			let next = move(range.start + shift());
+			if (weighted && next.end <= previous.end && previous.end < count) next = move(previous.end);
 			followsTail = next.end === count;
 			return next;
 		},
 		windowAround(index: number): TranscriptRange {
 			if (!Number.isInteger(index) || index < 0 || index >= count) return range;
 			followsTail = false;
-			return move(index - Math.floor(cap / 2));
+			if (!weighted) return move(index - Math.floor(cap / 2));
+			let start = index, end = index + 1, used = charge(index);
+			let left = true, right = true;
+			while (end - start < cap && (left || right)) {
+				if (left && start > 0 && used + charge(start - 1) <= budget) { used += charge(--start); }
+				else left = false;
+				if (end - start === cap) break;
+				if (right && end < count && used + charge(end) <= budget) { used += charge(end++); }
+				else right = false;
+			}
+			return commit(start, end);
 		},
+		/** Saved scrollTop is relative to this exact bounded range, not cap/2. */
+		restoreRange(saved: TranscriptRange): TranscriptRange { followsTail = false; return move(saved.start); },
 		toTail,
-		onStreamingChange(value: boolean): TranscriptRange {
-			streaming = value;
-			return range;
-		},
+		onStreamingChange(value: boolean): TranscriptRange { streaming = value; return range; },
 		pauseWhenHidden(value: boolean): TranscriptRange {
 			hidden = value;
-			return hidden ? range : move(followsTail ? count - cap : range.start);
+			return hidden ? range : followsTail ? endingAt(count) : move(range.start);
 		}
 	};
 }
