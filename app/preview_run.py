@@ -33,10 +33,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 #: The only settings a launcher may add to the controlled preview environment
-#: (the dev loop's; see docs/internal/dev-loop.md).
+#: (the dev loop's; see docs/internal/dev-loop.md). The pair keys and the
+#: advertised address are set only by ``up --pair`` (two paired instances):
+#: ``SHUFFLE_DEV_PAIR_*`` limit pairing to the launcher's other instance
+#: (:mod:`app.network.dev_pair`) and ``CLUSTER_ADVERTISE_URL`` names the
+#: instance's own loopback peer listener, which its peer dials.
 DEV_ENV_KEYS = frozenset({
     "SHUFFLE_DEV_ACCESS_FILE", "SHUFFLE_DEV_FAKE_AI_URL", "SHUFFLE_DEV_SEED",
-    "SHUFFLE_DEV_SEED_FILE", "SHUFFLE_DEV_UI",
+    "SHUFFLE_DEV_SEED_FILE", "SHUFFLE_DEV_UI", "SHUFFLE_DEV_OWNER_FILE",
+    "SHUFFLE_DEV_PAIR_KEY", "SHUFFLE_DEV_PAIR_PEERS", "CLUSTER_ADVERTISE_URL",
 })
 
 
@@ -172,6 +177,7 @@ def initialize_preview_access() -> None:
             f"workspace_path:{settings.effective_instance_id}", str(data.parent / "workspace"),
         )
         auth_service.set_onboarding_complete()
+        _write_owner_token()
         if os.environ.get("SHUFFLE_DEV_SEED"):
             # The seeded agent owns the access session, so a dev instance has
             # no stand-in "Branch preview access" agent in its picker.
@@ -205,6 +211,31 @@ def initialize_preview_access() -> None:
             "session_id": session_id, "token": token, "url": url,
             "expires_at": int(time.time()) + ttl,
         })
+
+
+def _write_owner_token() -> None:
+    """``up --pair`` only: an owner session for the launcher (``SHUFFLE_DEV_OWNER_FILE``).
+
+    The launcher pairs its two instances through the app's own owner API
+    (create the invite on one, enroll the other), as a Bearer on the loopback
+    owner listener: no browser Origin to forge, and the preview cookie may not
+    touch pairing or the network. Written 0600 into the launcher's private
+    scratch directory, on the launcher's disposable data only; a restart keeps
+    a token that still verifies.
+    """
+    path = os.environ.get("SHUFFLE_DEV_OWNER_FILE")
+    if not path or not disposable_preview_data():
+        return
+    from app.core import owner_auth
+
+    try:
+        saved = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        saved = None
+    if isinstance(saved, dict) and owner_auth.local_session(saved.get("token")):
+        return
+    token, expires = owner_auth.issue_session("devloop-pair", 1)
+    _write_private_json(Path(path), {"token": token, "expires_at": expires.isoformat()})
 
 
 async def seed_dev_instance() -> None:

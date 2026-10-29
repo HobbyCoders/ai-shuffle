@@ -81,6 +81,8 @@ class JoinRequest(BaseModel):
     code: str = Field(min_length=1, max_length=64)
     device: DeviceDescription
     inviter_fingerprint: Optional[str] = Field(default=None, max_length=64)
+    # Only between two dev-loop instances of one launcher (app.network.dev_pair).
+    dev_pair: Optional[str] = Field(default=None, max_length=128)
 
 
 class ApproveJoin(BaseModel):
@@ -492,7 +494,7 @@ async def receive_join(body: JoinRequest, request: Request) -> dict:
     _join_limiter.check(client_ip)
     try:
         result = await run_sync(enrollment.receive_join, code=body.code, device=body.device.model_dump(),
-                                inviter_fingerprint=body.inviter_fingerprint)
+                                inviter_fingerprint=body.inviter_fingerprint, dev_pair=body.dev_pair)
     except enrollment.EnrollmentError as exc:
         raise HTTPException(400, str(exc)) from exc
     _join_limiter.clear(client_ip)

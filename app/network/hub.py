@@ -71,6 +71,12 @@ def _bootstrap_mismatch(reason: str) -> HubError:
 # ---------------------------------------------------------------------------
 
 def _binding() -> Optional[dict]:
+    from app.network import dev_pair
+
+    if dev_pair.guarded():
+        # A disposable dev instance never joins (or admits into) an account's
+        # network: it pairs only with its launcher's other instance.
+        return None
     try:
         binding = binding_store.get_binding()
     except Exception:  # noqa: BLE001

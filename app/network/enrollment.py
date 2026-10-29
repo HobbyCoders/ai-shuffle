@@ -38,6 +38,7 @@ from app.db import network as store
 from app.db.async_database import run_sync
 from app.db import pairing as pairing_db
 from app.network import crypto, engine, identity as identity_mod, membership
+from app.network import dev_pair as dev_pair_mod
 from app.network.endpoints import dial_endpoints, is_secure_endpoint, plain_http_is_local, validate_endpoints
 
 logger = logging.getLogger(__name__)
@@ -103,11 +104,21 @@ def parse_join_link(value: str) -> Dict[str, str]:
 # Inviter side
 # ---------------------------------------------------------------------------
 
-def receive_join(*, code: str, device: Dict[str, Any], inviter_fingerprint: Optional[str]) -> dict:
-    """Consume a join code and admit the device that presented it."""
+def receive_join(*, code: str, device: Dict[str, Any], inviter_fingerprint: Optional[str],
+                 dev_pair: Optional[str] = None) -> dict:
+    """Consume a join code and admit the device that presented it.
+
+    ``dev_pair`` is the joiner's proof that the same dev-loop launcher started
+    it; only a disposable dev instance asks for one (:mod:`app.network.dev_pair`).
+    """
     ctx = engine.context()
     if ctx is None:
         raise EnrollmentError("This worker has no network to join")
+    try:
+        # Before the code is consumed: a refused joiner costs the invite nothing.
+        dev_pair_mod.check_join(pairing_core.normalize_pairing_code(code), dev_pair)
+    except dev_pair_mod.DevPairRefused as exc:
+        raise EnrollmentError(str(exc)) from exc
     if inviter_fingerprint and not crypto.fingerprint_matches(ctx.identity.signing_public, inviter_fingerprint):
         raise EnrollmentError("The fingerprint you verified does not belong to this worker")
     try:
@@ -163,7 +174,7 @@ def receive_join(*, code: str, device: Dict[str, Any], inviter_fingerprint: Opti
         global_events.resources_changed("network")
     except Exception:  # noqa: BLE001
         pass
-    return {
+    result = {
         "join_id": join_id,
         "poll_secret": poll_secret,
         "status": status,
@@ -172,6 +183,10 @@ def receive_join(*, code: str, device: Dict[str, Any], inviter_fingerprint: Opti
                     "network_name": ctx.name},
         "joiner_fingerprint": crypto.fingerprint(signing_public),
     }
+    admitted = dev_pair_mod.admission_proof(pairing_core.normalize_pairing_code(code), join_id)
+    if admitted:
+        result["dev_pair"] = admitted
+    return result
 
 
 def poll_join(join_id: str, poll_secret: str) -> dict:
@@ -262,6 +277,11 @@ async def start_enrollment(*, endpoint_url: str, code: str, inviter_fingerprint:
     endpoint = pairing_core.sanitize_endpoint_url(endpoint_url)
     if not endpoint:
         raise EnrollmentError("An endpoint is required")
+    try:
+        # A dev instance sends its code only to its launcher's other instance.
+        dev_pair_mod.check_join_target(endpoint)
+    except dev_pair_mod.DevPairRefused as exc:
+        raise EnrollmentError(str(exc)) from exc
     if not plain_http_is_local(endpoint):
         # The one-time code travels in this request. Plain http is acceptable
         # only where the path is a local one: the same machine, the home LAN
@@ -291,6 +311,12 @@ async def start_enrollment(*, endpoint_url: str, code: str, inviter_fingerprint:
     }
     if not payload["code"]:
         raise EnrollmentError("Join code must have 12 characters")
+    try:
+        proof = dev_pair_mod.join_proof(payload["code"])
+    except dev_pair_mod.DevPairRefused as exc:
+        raise EnrollmentError(str(exc)) from exc
+    if proof:
+        payload["dev_pair"] = proof
     async with httpx.AsyncClient(follow_redirects=False, timeout=20.0) as client:
         try:
             response = await client.post(endpoint + "/api/v1/network/join", json=payload)
@@ -309,6 +335,10 @@ async def start_enrollment(*, endpoint_url: str, code: str, inviter_fingerprint:
     if len(_normalize_fp(inviter.get("fingerprint"))) < 32:
         raise EnrollmentError("The inviter did not identify itself")
     join_id = data["join_id"]
+    try:
+        dev_pair_mod.check_admission(payload["code"], str(join_id), data.get("dev_pair"))
+    except dev_pair_mod.DevPairRefused as exc:
+        raise EnrollmentError(str(exc)) from exc
     if engine.context() is not None:
         # The inviter admitted us: only now give up the network we had.
         await run_sync(engine.leave_network)
