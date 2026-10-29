@@ -111,6 +111,13 @@
 	});
 
 	function reconcile() {
+		if (catalog && (!catalog.binding || catalog.binding !== current?.catalog_binding)) {
+			catalog = null;
+			liveCatalog = null;
+			sharedFetchedAt = null;
+			hiddenMedia = [];
+			typeable = false;
+		}
 		const stored = current?.models ?? [];
 		rows = catalog ? rowsFromFetch(stored, catalog) : rowsFromStored(stored);
 		selectionRevision = current?.revision;
@@ -133,11 +140,14 @@
 			const live = refresh || mode === 'setup' || wizard;
 			let res = live ? null : await getModelCatalog(id);
 			if (!live) {
-				const stamp = res?.fetched_at ?? null;
-				if (liveCatalog && stamp === sharedFetchedAt) {
+				const sameBinding = !!liveCatalog?.binding && liveCatalog.binding === current?.catalog_binding;
+				const sameSnapshot = !!res?.fetched_at && res.binding === liveCatalog?.binding && res.fetched_at === sharedFetchedAt;
+				// No snapshot is not a generation: keep an unshared live result only
+				// when the provider still proves the non-null binding that produced it.
+				if (sameBinding && (sameSnapshot || (!res && !sharedFetchedAt))) {
 					res = liveCatalog;
 				} else {
-					sharedFetchedAt = stamp;
+					sharedFetchedAt = res?.fetched_at ?? null;
 					liveCatalog = null;
 				}
 			}
@@ -148,16 +158,27 @@
 				// Discovery can backfill metadata and bump the provider revision.
 				await providers.refreshProviders();
 				// Keep the full live result; the shared copy may omit optional metadata.
+				if (current && (!res.binding || res.binding !== current.catalog_binding)) res = null;
 			}
 			catalog = res;
-			if (!res) { reconcile(); return; }
+			if (!res) {
+				liveCatalog = null;
+				sharedFetchedAt = null;
+				hiddenMedia = [];
+				typeable = false;
+				reconcile();
+				return;
+			}
 			source = res.source;
 			if (mode === 'setup') {
 				const selected = new Set(rows.filter((r) => r.checked).map((r) => r.id));
 				rows = rowsForSetup(res, selected);
 				selectionRevision ??= current?.revision;
 				if (wizard) rows = precheckRecommended(rows, res.recommended);
-			} else reconcile();
+			} else {
+				reconcile();
+				if (!catalog) return;
+			}
 			hiddenMedia = res.hidden ?? [];
 			typeable = (res.models?.length ?? 0) === 0;
 		} catch (e) {

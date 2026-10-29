@@ -140,6 +140,8 @@ export interface ModelProvider {
 	account_plan?: string | null;
 	created_at: string | null;
 	updated_at: string | null;
+	/** Fingerprint of the current endpoint/credential, not curation or token ciphertext. */
+	catalog_binding?: string | null;
 	/** Opaque generation used to reject stale whole-selection saves. */
 	revision?: string | null;
 }
@@ -214,6 +216,8 @@ export interface FetchModelsResult {
 	/** Ids from the provider's built-in chat roster that `models` holds, in
 	 *  roster order. Empty for a provider with no roster; absent on older payloads. */
 	recommended?: string[];
+	/** Credential binding that produced this discovery, including unshared live results. */
+	binding?: string | null;
 	/** Attribution of a successfully shared refresh; null when sharing was skipped. */
 	fetched_at?: string | null;
 	fetched_by_device?: string | null;

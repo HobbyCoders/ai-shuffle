@@ -29,7 +29,7 @@ async def get_catalog(provider_id: str, token: str = Depends(require_admin)) -> 
 async def store_catalog(provider_id: str, response: FetchModelsResponse) -> FetchModelsResponse:
     """Share discovery best-effort, returning the complete live result regardless."""
     try:
-        snapshot = await run_sync(model_catalogs.save, provider_id, response.model_dump())
+        snapshot = await run_sync(model_catalogs.save, provider_id, response.model_dump(), expected_binding=response.binding)
         if snapshot:
             return response.model_copy(update={field: snapshot[field] for field in (
                 "fetched_at", "fetched_by_device", "fetched_by_name",

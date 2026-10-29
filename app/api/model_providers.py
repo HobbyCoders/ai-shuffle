@@ -111,6 +111,7 @@ class ModelProviderResponse(BaseModel):
     api_dialect: Optional[str] = None
     auth_token_set: bool
     auth_token_masked: str
+    catalog_binding: Optional[str] = None
     models: List[Dict[str, Any]]
     default_model: Optional[str] = None
     small_fast_model: Optional[str] = None
@@ -165,6 +166,7 @@ class FetchModelsResponse(BaseModel):
     models: List[Dict[str, Any]]
     hidden: List[Dict[str, Any]] = []
     recommended: List[str] = []
+    binding: Optional[str] = None
     fetched_at: Optional[str] = None
     fetched_by_device: Optional[str] = None
     fetched_by_name: Optional[str] = None
@@ -363,6 +365,7 @@ def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
         api_dialect=row.get("api_dialect"),
         auth_token_set=bool(row.get("_auth_token_set")),
         auth_token_masked=row.get("_auth_token_masked", ""),
+        catalog_binding=row.get("_catalog_binding"),
         models=models,
         default_model=row.get("default_model"),
         small_fast_model=row.get("small_fast_model"),
@@ -394,6 +397,7 @@ def _apply_token_flags(row: Dict[str, Any]) -> Dict[str, Any]:
     (``_codex_access_token_set`` / ``_codex_refresh_token_set``). The raw blobs
     never survive this call, so they can never reach ``_public_provider``.
     """
+    row["_catalog_binding"] = model_catalogs.binding(row)
     row.pop("openai_admin_key", None)
     token = row.pop("auth_token", None)
     row["_auth_token_set"] = bool(token)
@@ -1171,11 +1175,12 @@ async def _record_credential_check(
 
 
 @router.post("/{provider_id}/fetch-models", response_model=FetchModelsResponse)
-async def fetch_models(provider_id: str, token: str = Depends(require_admin)):
+async def fetch_models(provider_id: str, token: str = Depends(require_admin)) -> FetchModelsResponse:
+    """Fetch live discovery and share it only for the credential that was checked."""
     return await catalog_api.store_catalog(provider_id, await _fetch_models(provider_id))
 
 
-async def _fetch_models(provider_id: str, *, backfill_context: bool = True):
+async def _fetch_models(provider_id: str, *, backfill_context: bool = True) -> FetchModelsResponse:
     """Fetch a provider's live model catalog for the curation UI.
 
     Every provider is pulled from upstream on this call (Refresh models):
@@ -1195,6 +1200,7 @@ async def _fetch_models(provider_id: str, *, backfill_context: bool = True):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Model provider not found")
 
+    checked_binding = model_catalogs.binding(row)
     kind = model_catalog_presets.preset_kind_for(row)
     from app.core.http_client import get_http_client
     client = get_http_client()
@@ -1251,6 +1257,7 @@ async def _fetch_models(provider_id: str, *, backfill_context: bool = True):
     ]
     return FetchModelsResponse(
         source="upstream", models=models, hidden=hidden, recommended=recommended,
+        binding=checked_binding,
     )
 
 

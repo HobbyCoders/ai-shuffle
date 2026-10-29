@@ -237,7 +237,11 @@ A provider error carries the HTTP status and the provider's own short message (`
 
 **Auth:** Owner only
 
-Read the last successful discovery snapshot without contacting upstream, or `null` if the provider has not been refreshed yet (`404` if the provider does not exist). The snapshot contains `source`, `models`, `hidden`, `recommended`, `fetched_at` (UTC), `fetched_by_device` and `fetched_by_name`. It is separate from the curated `models` selection.
+Read the last successful discovery snapshot without contacting upstream, or `null` if none matches the current credential and endpoint (`404` if the provider does not exist). The snapshot contains `source`, `models`, `hidden`, `recommended`, `binding`, `fetched_at` (UTC), `fetched_by_device` and `fetched_by_name`. It is separate from the curated `models` selection.
+
+`binding` fingerprints the provider type, endpoint, dialect/auth mode and a hash of the decrypted API key or subscription account identity. No credential or endpoint is stored in the snapshot. Provider responses expose the current fingerprint as `catalog_binding`, and live discovery includes `binding` even when sharing is skipped. Different ciphertexts for the same key do not change it. Subscription account IDs also keep it stable across routine token renewals; a legacy sign-in without an account ID conservatively binds to its decrypted access token instead. Legacy snapshots without a binding are ignored.
+
+Saving re-checks the binding used for the upstream request, and reading re-checks it against the current provider. An in-flight old-key refresh or a delayed sync record therefore cannot make an old-key catalog usable after a credential change. The panel drops mismatched live results too, including oversized catalogs that were never shared; ordinary echoes of the same proven binding keep the full local metadata.
 
 Settings > Providers shows this shared snapshot and its **Last refreshed** time and worker. Refreshing on one worker publishes it to the others through settings sync; open Models tabs update without a page reload and newly discovered models stay unchecked. Concurrent selection edits are reconciled from the current provider revision.
 

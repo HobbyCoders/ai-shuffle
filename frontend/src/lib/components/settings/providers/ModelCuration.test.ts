@@ -65,6 +65,7 @@ const router = (models: ProviderModelEntry[]): ModelProvider =>
 		name: 'OpenRouter API key',
 		provider_type: 'openrouter',
 		base_url: 'https://openrouter.ai/api',
+		catalog_binding: 'fixture-binding-a',
 		models
 	});
 const saved = () => mocks.patch.mock.calls.at(-1)![1].models;
@@ -85,7 +86,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('shared catalog and concurrent curation', () => {
-	const catalog = { source: 'upstream', models: [entry('old'), entry('remote'), entry('new')] };
+	const catalog = { source: 'upstream', binding: 'fixture-binding-a', models: [entry('old'), entry('remote'), entry('new')] };
 
 
 	it.each([false, true])('setup validates the current key live instead of trusting a cached catalog (wizard=%s)', async (wizard) => {
@@ -103,20 +104,51 @@ describe('shared catalog and concurrent curation', () => {
 	});
 
 	it.each([false, true])('keeps full live discovery across resource echoes when sharing is compacted/skipped (shared=%s)', async (shared) => {
-		const old = { source: 'upstream', models: [entry('old')], fetched_at: '2026-10-29T12:00:00Z' };
+		const old = { source: 'upstream', binding: 'fixture-binding-a', models: [entry('old')], fetched_at: '2026-10-29T12:00:00Z' };
 		const fetched_at = shared ? '2026-10-29T12:01:00Z' : null;
 		mocks.get.mockResolvedValue(old);
-		mocks.post.mockResolvedValue({ source: 'upstream', models: [entry('new', { pricing: { prompt: '0.1' } })], fetched_at });
+		mocks.post.mockResolvedValue({ source: 'upstream', binding: 'fixture-binding-a', models: [entry('new', { pricing: { prompt: '0.1' } })], fetched_at });
 		render(ModelCuration, { row: router([entry('old')]) });
 		await screen.findByRole('checkbox', { name: 'old' });
 		await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh model list' }) as HTMLButtonElement).disabled).toBe(false));
 		await fireEvent.click(screen.getByRole('button', { name: 'Refresh model list' }));
 		await screen.findByRole('checkbox', { name: 'new' });
-		mocks.get.mockResolvedValue(shared ? { source: 'upstream', models: [entry('new')], fetched_at } : old);
+		mocks.get.mockResolvedValue(shared ? { source: 'upstream', binding: 'fixture-binding-a', models: [entry('new')], fetched_at } : old);
 		resourceSync.invalidate(['settings']);
 		await waitFor(() => expect(mocks.get).toHaveBeenCalledTimes(2));
 		await toggle('new');
 		expect(saved().find((m: ProviderModelEntry) => m.id === 'new').pricing).toEqual({ prompt: '0.1' });
+	});
+
+	it.each([false, true])('drops unshared old-key models when the binding changes (catalog event first=%s)', async (catalogFirst) => {
+		mocks.post.mockResolvedValue({ source: 'upstream', binding: 'fixture-binding-a', models: [entry('old-key-only')], fetched_at: null });
+		const view = render(ModelCuration, { row: router([]) });
+		await screen.findByRole('checkbox', { name: 'old-key-only' });
+		await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh model list' }) as HTMLButtonElement).disabled).toBe(false));
+		if (catalogFirst) {
+			resourceSync.invalidate(['settings']);
+			await waitFor(() => expect(mocks.get).toHaveBeenCalledTimes(2));
+		}
+		await view.rerender({ row: { ...router([]), catalog_binding: 'fixture-binding-b', revision: 'new-key' } });
+		if (!catalogFirst) {
+			resourceSync.invalidate(['settings']);
+			await waitFor(() => expect(mocks.get).toHaveBeenCalledTimes(2));
+		}
+		await waitFor(() => expect(screen.queryByRole('checkbox', { name: 'old-key-only' })).toBeNull());
+		expect(mocks.post).toHaveBeenCalledTimes(1);
+		expect(mocks.patch).not.toHaveBeenCalled();
+	});
+
+	it('discards an in-flight old-binding response after the provider key changes', async () => {
+		let finish!: (value: typeof catalog) => void;
+		mocks.post.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+		const view = render(ModelCuration, { row: router([]) });
+		await waitFor(() => expect(mocks.post).toHaveBeenCalled());
+		await view.rerender({ row: { ...router([]), catalog_binding: 'fixture-binding-b', revision: 'new-key' } });
+		finish(catalog);
+		await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh model list' }) as HTMLButtonElement).disabled).toBe(false));
+		expect(screen.queryByRole('checkbox', { name: 'new' })).toBeNull();
+		expect(mocks.patch).not.toHaveBeenCalled();
 	});
 
 	it('does not resurrect an old selection when a remote prop changes during refresh', async () => {
@@ -146,7 +178,7 @@ describe('shared catalog and concurrent curation', () => {
 
 
 	it('reads remote settings live without an upstream fetch and reconciles the later provider prop', async () => {
-		mocks.get.mockResolvedValueOnce({ source: 'upstream', models: [entry('old')] });
+		mocks.get.mockResolvedValueOnce({ source: 'upstream', binding: 'fixture-binding-a', models: [entry('old')] });
 		const view = render(ModelCuration, { row: { ...router([entry('old')]), revision: 'before' } });
 		await screen.findByRole('checkbox', { name: 'old' });
 		await waitFor(() => expect(mocks.get).toHaveBeenCalledTimes(1));
@@ -180,7 +212,7 @@ describe('shared catalog and concurrent curation', () => {
 describe('Models tab', () => {
 	it('keeps normalized saved evidence when a refresh only returns stale raw fields', async () => {
 		const canonical = { version: 1 as const, effort_levels: ['low', 'high', 'max'], default_effort: 'max' };
-		mocks.post.mockResolvedValue({ source: 'upstream', models: [entry('keep', stale), entry('toggle')] });
+		mocks.post.mockResolvedValue({ source: 'upstream', binding: 'fixture-binding-a', models: [entry('keep', stale), entry('toggle')] });
 		render(ModelCuration, { row: router([entry('keep', { reasoning_capabilities: canonical })]) });
 		await toggle('toggle');
 		expect(mocks.patch).toHaveBeenCalledWith('/model-providers/router', expect.anything());
@@ -188,7 +220,7 @@ describe('Models tab', () => {
 	});
 
 	it('replaces stale metadata with explicit fresh empties and keeps stored extras checked', async () => {
-		mocks.post.mockResolvedValue({ source: 'upstream', models: [entry('fresh'), entry('toggle')] });
+		mocks.post.mockResolvedValue({ source: 'upstream', binding: 'fixture-binding-a', models: [entry('fresh'), entry('toggle')] });
 		render(ModelCuration, { row: router([entry('fresh', stale), entry('extra')]) });
 		await toggle('toggle');
 		expect(saved()).toEqual([entry('extra'), entry('fresh'), entry('toggle')]);
@@ -197,6 +229,7 @@ describe('Models tab', () => {
 	it('keeps missing raw fields from storage while replacing the fresh ones', async () => {
 		mocks.post.mockResolvedValue({
 			source: 'upstream',
+			binding: 'fixture-binding-a',
 			models: [{ id: 'partial', label: 'partial', supported_reasoning_levels: [] }, entry('toggle')]
 		});
 		render(ModelCuration, { row: router([entry('partial', stale)]) });
@@ -214,14 +247,14 @@ describe('Models tab', () => {
 
 	it('keeps each model’s context window and pricing', async () => {
 		const model = { ...entry('saved'), context_window: 123, pricing: { prompt: '0.1' } };
-		mocks.post.mockResolvedValue({ source: 'upstream', models: [entry('saved'), entry('other')] });
+		mocks.post.mockResolvedValue({ source: 'upstream', binding: 'fixture-binding-a', models: [entry('saved'), entry('other')] });
 		render(ModelCuration, { row: router([model]) });
 		await toggle('other');
 		expect(saved()[0]).toEqual({ ...entry('saved'), context_window: 123, pricing: { prompt: '0.1' } });
 	});
 
 	it('rolls a failed save back and says so', async () => {
-		mocks.post.mockResolvedValue({ source: 'upstream', models: [entry('a')] });
+		mocks.post.mockResolvedValue({ source: 'upstream', binding: 'fixture-binding-a', models: [entry('a')] });
 		mocks.patch.mockRejectedValueOnce(new Error('nope'));
 		render(ModelCuration, { row: router([]) });
 		await toggle('a');
@@ -240,7 +273,7 @@ describe('Models tab', () => {
 	});
 
 	it('offers typing for an empty list but not for a rejected key', async () => {
-		mocks.post.mockResolvedValueOnce({ source: 'upstream', models: [] });
+		mocks.post.mockResolvedValueOnce({ source: 'upstream', binding: 'fixture-binding-a', models: [] });
 		render(ModelCuration, { row: router([]) });
 		expect(await screen.findByLabelText('Model name')).toBeTruthy();
 		cleanup();
@@ -251,7 +284,7 @@ describe('Models tab', () => {
 	});
 
 	it('does not offer typing when the list has models', async () => {
-		mocks.post.mockResolvedValue({ source: 'upstream', models: [entry('a')] });
+		mocks.post.mockResolvedValue({ source: 'upstream', binding: 'fixture-binding-a', models: [entry('a')] });
 		render(ModelCuration, { row: router([]) });
 		await screen.findByRole('checkbox', { name: 'a' });
 		expect(screen.queryByLabelText('Model name')).toBeNull();
@@ -260,6 +293,7 @@ describe('Models tab', () => {
 	it('explains a media model the filter finds in the hidden list', async () => {
 		mocks.post.mockResolvedValue({
 			source: 'upstream',
+			binding: 'fixture-binding-a',
 			models: [entry('chat')],
 			hidden: [{ id: 'gpt-image-2', label: 'GPT Image 2', media_kind: 'image' }]
 		});
@@ -291,7 +325,7 @@ describe('adding an API key', () => {
 
 	beforeEach(() => {
 		mocks.post.mockImplementation(async (url: string) =>
-			url.endsWith('/fetch-models') ? { source: 'upstream', models: catalog } : { id: 'new-provider' }
+			url.endsWith('/fetch-models') ? { source: 'upstream', binding: 'fixture-binding-a', models: catalog } : { id: 'new-provider' }
 		);
 	});
 
@@ -325,7 +359,7 @@ describe('adding an API key', () => {
 		mocks.post.mockImplementation(async (url: string) => {
 			if (!url.endsWith('/fetch-models')) return { id: 'new-provider' };
 			if (fetches++ === 0) throw new Error('Catalog unavailable');
-			return { source: 'upstream', models: catalog };
+			return { source: 'upstream', binding: 'fixture-binding-a', models: catalog };
 		});
 		start('openai');
 		await fireEvent.input(screen.getByLabelText('API key'), { target: { value: 'test-key' } });
