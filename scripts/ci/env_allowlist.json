@@ -146,6 +146,14 @@
     "target_pr": 2,
     "base_settings": true
   },
+  "AI_SHUFFLE_PERF_DOCKER_DEPENDENCY_REUSE": {
+    "kind": "internal",
+    "reason": "Supervisor-only dependency-cache rollback switch; source signatures, runtime checks and per-revision app code remain mandatory."
+  },
+  "AI_SHUFFLE_PERF_PREBUILT_UI": {
+    "kind": "internal",
+    "reason": "Updater-only rollback to verified-source UI compilation; bundle integrity and independent source verification remain mandatory."
+  },
   "AI_SHUFFLE_PERF_PROVIDER_HTTP_REUSE": {
     "kind": "internal",
     "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Reuse native HTTP clients instead of rebuilding them per operation",
