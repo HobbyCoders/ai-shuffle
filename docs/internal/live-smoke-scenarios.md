@@ -11,6 +11,14 @@ record those with `python -m scripts.live_smoke record`. Hand-checked rows
 say why they are not automated (`needs`): `device`: a real phone, desktop app, Windows/macOS install or other hardware; `provider`: a real model provider, paid or subscription account, or outside service; `install`: a disposable candidate install or worker pair (restarts, upgrades, faults, containers); `owner`: the owner's own data, history or decision; `dev-instance`: could be a UI journey on the dev instance with the fake AI; not written yet.
 Default token cap per run: 600000 tokens.
 
+## mirror-cache
+
+Use an approved disposable candidate worker pair, synthetic long history and throwaway chats only. Never restart a production worker.
+
+| # | Check | Kind | How | Pass when | Past bug |
+|---|---|---|---|---|---|
+| warm-peer-catch-up | A warm mirrored chat keeps its cursor and mounted transcript through real owner catch-up | browser, two workers; needs install + device + provider | On paired disposable candidate workers, open a long mirrored chat on the receiver, switch away, then reopen it with an unchanged owner. Record SSE start cursors, MessageArea mounts and the real sync-status responses. Repeat while the owner appends a real streaming reply and while the receiver reconnects after a half-open stream. On the disposable owner perform an actual epoch-changing rewind and reopen the mirror. Repeat on desktop at 1280x800 and the real /mobile/ shell at 390x844 with the flight recorder. Archive the throwaway chats and retain the exact candidate builds and private recordings. Do not simulate peer metadata, sync-status or replication for this row. | An unchanged warm return opens one positive-cursor reader, with zero sequence-zero replacements and no transcript remount through the freshness checkpoint. Stale content stays hidden, inaccessible and inert until caught up; the same mounted subtree is then revealed. New owner events and reconnects arrive without omissions or duplicate rows. A genuine epoch rewrite invalidates the old cached view and cursor. Seeded preview, mocked sync-status, unit tests and a green build alone do not pass this paired-worker row. | Opening freshness was treated as invalidation: every warm mirrored chat discarded its cached reducer, replayed from sequence zero and remounted the transcript. |
+
 ## approval-scopes
 
 Use two disposable candidate workers and throwaway agents and chats.
