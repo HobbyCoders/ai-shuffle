@@ -34,6 +34,50 @@ from fluid.store.base import MemoryStore
 from fluid.tools.inproc import create_inproc_server, tool
 from fluid.tools.registry import ToolCtx, ToolImage, ToolOutcome, ToolRegistry, ToolSpec
 
+
+@pytest.mark.parametrize("passes", [True, False], ids=["passing-selftest", "broken-selftest"])
+async def test_a_recorded_sandbox_refusal_is_ignored_and_reverified(tmp_path, passes) -> None:
+    """Old host refusals must not poison unchanged skills after an upgrade."""
+    from fluid.codemode.skills import SkillStore
+
+    store = SkillStore(tmp_path / "skills")
+    source = (
+        '"""Adder."""\n'
+        "def adder(n):\n    return n + 1\n"
+        f"def _selftest():\n    assert adder(1) == {2 if passes else 3}\n"
+    )
+    store.save("adder", source)
+    refusal = (
+        "code_mode_os_sandbox=required, but the bubblewrap sandbox is "
+        "unavailable on this host (bwrap: No permissions); the code-mode "
+        "kernel was not started."
+    )
+    meta = store._load_meta()
+    meta.setdefault("skills", {}).setdefault("adder", {}).update(
+        verified_mtime=store._mtime_ns("adder"), broken=refusal,
+    )
+    store._save_meta(meta)
+    assert store.get("adder").broken is None
+    assert store.needs_verification("adder")
+
+    session = CodeModeSession(ToolRegistry(), skills=store)
+    try:
+        mounted = await session._mountable_skills()
+        assert ("adder" in mounted) is passes
+        assert not store.needs_verification("adder")
+        verdict = store.get("adder").broken
+        if passes:
+            assert verdict is None
+        else:
+            assert "AssertionError" in verdict
+        # Replaying an old host result must not overwrite the real verdict.
+        store.mark_verified("adder", refusal)
+        assert store.get("adder").broken == verdict
+        assert store._load_meta()["skills"]["adder"].get("broken") == verdict
+    finally:
+        await session.aclose()
+
+
 # ── scripted provider (same shape as test_tool_loop) ──────────────────────
 
 def _text(text: str) -> list[StreamChunk]:

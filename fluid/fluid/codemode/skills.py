@@ -350,6 +350,13 @@ def names_path_outside(text: str, cwd: str | None) -> bool:
 
 _NAME_RE = re.compile(r"^[a-z_][a-z0-9_]{0,63}$")
 MAX_SKILL_BYTES = 65536
+# Read-only compatibility for skill metadata written by older versions. This
+# refusal meant no skill ran; it must never remain a cached broken verdict.
+LEGACY_SANDBOX_REFUSAL = "code_mode_os_sandbox=required, but"
+
+
+def _is_legacy_sandbox_refusal(error: object) -> bool:
+    return isinstance(error, str) and error.startswith(LEGACY_SANDBOX_REFUSAL)
 
 
 # Live skills past this many are archived, least useful first (the memory cap
@@ -1016,7 +1023,11 @@ class SkillStore:
         info = self._load_meta().get("skills", {}).get(name, {})
         broken = info.get("broken")
         # A broken verdict only holds for the exact source it was issued on.
-        if broken is not None and info.get("verified_mtime") != self._mtime_ns(name):
+        # Old host refusals are not skill failures, even with an unchanged mtime.
+        if broken is not None and (
+            info.get("verified_mtime") != self._mtime_ns(name)
+            or _is_legacy_sandbox_refusal(broken)
+        ):
             broken = None
         return Skill(
             name=name,
@@ -1060,10 +1071,16 @@ class SkillStore:
         """True when the skill was never verified for its current source."""
         info = self._load_meta().get("skills", {}).get(name, {})
         mtime = self._mtime_ns(name)
-        return mtime is None or info.get("verified_mtime") != mtime
+        return (
+            _is_legacy_sandbox_refusal(info.get("broken"))
+            or mtime is None
+            or info.get("verified_mtime") != mtime
+        )
 
     def mark_verified(self, name: str, error: str | None = None) -> None:
         """Record a verification verdict for the skill's current source."""
+        if _is_legacy_sandbox_refusal(error):
+            return  # compatibility for callers replaying old verification results
         meta = self._load_meta()
         entry = meta.setdefault("skills", {}).setdefault(name, {"uses": 0})
         entry["verified_mtime"] = self._mtime_ns(name)
