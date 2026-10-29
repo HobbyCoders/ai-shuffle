@@ -1592,19 +1592,24 @@ async def prune_loop() -> None:
         while True:
             try:
                 pruned = 0
+                prune_kwargs: Dict[str, Any] = {"stop": stop}
                 ctx = engine.context()
                 if ctx is not None and ctx.bootstrap_state == engine.BOOTSTRAP_READY:
+                    # Protect the same signed heads across both passes, whatever
+                    # their collection and whether another origin superseded them.
+                    heads = await asyncio.to_thread(store.retention_heads)
+                    prune_kwargs["_heads"] = heads
                     # Copy before crossing into the maintenance thread. These are
                     # authenticated observations, never optimistic push counters.
                     observations = {peer: {"seen_at": _peer_watermark_at[peer],
                                            "watermarks": {o: dict(s) for o, s in marks.items()}}
                                     for peer, marks in _peer_watermarks.items() if peer in _peer_watermark_at}
                     pruned += await asyncio.to_thread(store.prune_transcript_ops, ctx.device_id,
-                                                     observations, stop=stop)
+                                                     observations, stop=stop, _heads=heads)
                 # Shrink append-only history before the legacy superseded-record
                 # scan; otherwise millions of unique event ids can exhaust its
                 # statement budget before transcript retention gets a turn.
-                pruned += await asyncio.to_thread(store.prune_ops, stop=stop)
+                pruned += await asyncio.to_thread(store.prune_ops, **prune_kwargs)
                 if pruned:
                     logger.info("Pruned %d old sync operations", pruned)
             except asyncio.CancelledError:

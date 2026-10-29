@@ -22,7 +22,7 @@ Audit of the production readers/writers:
 | Path | What it reads; what a missing old op means |
 | --- | --- |
 | `app/db/network.py:ops_since`, `exchange_batch`; `app/api/network.py:peer_exchange`; `app/network/transport.py:PeerLink._sync_once` | Bounded signed log deficits per origin/incarnation. `requires_snapshot` compares the available count with the entire advertised interval, so a gap anywhere (not only below MIN(seq)) sets `snapshot_required`. Push refuses an incomplete prefix. |
-| `network.py:local_watermarks`, `_log_heads`, `next_origin_seq`, `own_watermark` | Received applied frontiers live in `sync_watermarks`; local/forwarding heads and local sequence allocation use the remaining log. Keep the **last envelope of every origin/incarnation**, even when ancient. The legacy prune also protects transcript anchors when another origin superseded their record. |
+| `network.py:local_watermarks`, `_log_heads`, `next_origin_seq`, `own_watermark` | Received applied frontiers live in `sync_watermarks`; local/forwarding heads and local sequence allocation use the remaining log. Keep the **last envelope of every origin/incarnation**, even when ancient. Both pruning passes protect the same captured signed heads **in every collection**, even when another origin superseded their record. |
 | `app/api/network.py:peer_op`; `transport.py:PeerLink._check_rollback` | A retained signed op at-or-after the requested seq proves an own-stream backup rollback. Keeping a stream-head envelope preserves that proof; it need not be every event's envelope. |
 | `network.py:ops_after_ingest` | Log-tail helper; no production callers (only its store test). It is not a durable chat consumer. |
 | `network.py:sync_pending` helpers; `engine.py:apply_batch` / pending drain | Independently stored envelopes for ordering, FK and key recovery. Retention never touches this table. Applied streams are contiguous; a receiver behind a pruned deficit uses state copy rather than inventing an acknowledgement. |
@@ -104,7 +104,14 @@ sync. All event ids, seqs and payloads match, without duplicates; B and C both
 receive the following events through normal operation sync. Recent unknown
 peers, minimum frontiers, restart pinning, never-contacted expiry, revocation /
 rekey, kill switch, invalid config, cancellable committed batches, materialization
-checks, stream anchors and legacy full-copy enrollment are also covered.
+checks, stream anchors and legacy full-copy enrollment are also covered. The
+rollback regression publishes aged events followed by a session-header head,
+then a valid signed header update from another worker. Both retention passes
+remove all event envelopes without removing the superseded header anchor. After
+rewinding the source outbox to an older backup frontier, an authenticated proof
+request makes `_check_rollback` bump the identity incarnation; the next signed
+operations use the new stream and apply at the relay without sequence reuse.
+This simulates an older outbox, not a full managed-database restore rehearsal.
 
 The deterministic count ratchet was run on unchanged main before implementation:
 all three runs retained **12 of 12** aged unique event ops and failed the target

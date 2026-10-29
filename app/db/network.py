@@ -834,23 +834,41 @@ def count_ops(_conn=None) -> int:
         return _query(conn.cursor())
 
 
-def prune_ops(*, keep_days: int = 30, _conn=None, stop=None) -> int:
+def retention_heads(_conn=None) -> List[dict]:
+    """Capture signed stream anchors once for both retention passes."""
+    from app.db import retention
+
+    with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
+        cur = conn.cursor()
+        retention.set_timeout(cur)
+        return _log_heads(cur)
+
+
+def prune_ops(*, keep_days: int = 30, _conn=None, stop=None, _heads: Optional[List[dict]] = None) -> int:
     """Legacy retention for superseded ops; latest transcript ops are pruned separately.
 
     Snapshots read sync_records + materialized rows, not these envelopes. Keep
     this conservative rule for other collections; see prune_transcript_ops.
-    Transcript stream-head anchors survive this pass too, even if a different
-    origin later superseded the same record.
+    Every stream-head anchor survives both passes, whatever its collection and
+    even if a different origin later superseded the same record.
     """
+    if stop is not None and stop.is_set():
+        return 0
+    heads = retention_heads(_conn) if _heads is None else _heads
+    if not heads:
+        return 0
     cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).isoformat()
     from app.db.retention import BATCH_SIZE, delete_batches
 
+    protected = ", ".join("(%s, %s, %s)" for _ in heads)
+    anchors = tuple(value for h in heads for value in (h["origin_device_id"], h["incarnation"], h["s"]))
     sql = """DELETE FROM sync_ops WHERE ingest_id IN (
                  SELECT o.ingest_id FROM sync_ops o
                  WHERE o.created_at < %s AND o.ingest_id > %s
-                   AND (o.collection <> 'session_events' OR EXISTS (
+                   AND (o.origin_device_id, o.incarnation, o.seq) NOT IN (""" + protected + """)
+                   AND EXISTS (
                        SELECT 1 FROM sync_ops h WHERE h.origin_device_id = o.origin_device_id
-                         AND h.incarnation = o.incarnation AND h.seq > o.seq))
+                         AND h.incarnation = o.incarnation AND h.seq > o.seq)
                    AND EXISTS (
                      SELECT 1 FROM sync_ops n
                      WHERE n.collection = o.collection AND n.record_id = o.record_id
@@ -859,9 +877,9 @@ def prune_ops(*, keep_days: int = 30, _conn=None, stop=None) -> int:
 
     def advance(cursor):
         rows = cursor.fetchall()
-        return cutoff, max((r["ingest_id"] for r in rows), default=0), BATCH_SIZE
+        return cutoff, max((r["ingest_id"] for r in rows), default=0), *anchors, BATCH_SIZE
 
-    return delete_batches(sql, (cutoff, 0, BATCH_SIZE), advance=advance, stop=stop,
+    return delete_batches(sql, (cutoff, 0, *anchors, BATCH_SIZE), advance=advance, stop=stop,
                           cursor=_conn.cursor() if _conn is not None else None)
 
 
@@ -870,7 +888,7 @@ PEER_GRACE_DAYS_ENV = "AI_SHUFFLE_SYNC_OP_PEER_GRACE_DAYS"
 
 
 def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
-                         keep_days: int = 30, _conn=None, stop=None) -> int:
+                         keep_days: int = 30, _conn=None, stop=None, _heads: Optional[List[dict]] = None) -> int:
     """Retire redundant transcript envelopes, never transcript/record rows.
 
     Recent active workers pin at their last authenticated committed frontier;
@@ -922,7 +940,7 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
                 peers[device_id] = observation.get("watermarks") or {}
             else:
                 expired.append(device_id)
-        heads = _log_heads(cur)
+        heads = _log_heads(cur) if _heads is None else _heads
 
     total = bytes_estimate = 0
     frontiers = {}

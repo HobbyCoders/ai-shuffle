@@ -18,7 +18,15 @@ from app.db import base, database, retention
 from app.db import network as store
 from app.db import session_events as events_db
 from app.db.schema_postgres import create_postgres_schema
-from app.network import catalog, engine, hub, peer_snapshot, transcripts, transport
+from app.network import (
+    catalog,
+    engine,
+    hub,
+    identity,
+    peer_snapshot,
+    transcripts,
+    transport,
+)
 from tests.core.network.harness import _ACTIVE, Worker
 from tests.core.network.test_transport import ServedBy
 from tests.db.schema_lifecycle_helpers import pg16_bindir, pg_connect, private_postgres
@@ -431,3 +439,81 @@ async def test_legacy_prune_cannot_remove_a_superseded_transcript_stream_anchor(
         assert store.next_origin_seq(conn.cursor(), source.device_id, 1) == next_seq
     publish(source, 1)
     assert len(transcript(source)) == 3
+
+
+async def test_superseded_non_transcript_head_preserves_signed_rollback_proof(pg_workers, monkeypatch):
+    source, relay = pg_workers("source"), pg_workers("relay")
+    with source.active():
+        engine.create_network("Retention")
+    admit(source, relay)
+    publish(source, 3, create=True)
+    with source.active(), store.get_db() as conn:
+        backup_frontier = store.own_watermark(conn.cursor(), source.device_id, 1)
+
+    # Later transcript events are followed by a signed session-header update.
+    # That non-transcript envelope, not an event, is now A's stream head.
+    publish(source, 4)
+    with source.active():
+        database.update_session("chat", title="Source header")
+        catalog.publish_owned()
+    head = source.sql(
+        "SELECT seq, collection FROM sync_ops WHERE origin_device_id=%s "
+        "AND incarnation=1 ORDER BY seq DESC LIMIT 1", (source.device_id,))[0]
+    assert head["collection"] == "sessions" and head["seq"] > backup_frontier
+    await sync(relay, ServedBy(source, "https://source.example.com"))
+    with relay.active():
+        database.update_session("chat", title="Newer replica header")
+        with store.get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM sessions WHERE id='chat'")
+            newer = engine.record(cur, "sessions", "chat", cur.fetchone())
+            assert newer and newer["origin_device_id"] == relay.device_id
+        peer_heads = store.local_watermarks()
+    relay.sql("UPDATE sync_ops SET created_at='2000-01-01' WHERE origin_device_id=%s", (source.device_id,))
+    relay.sql("INSERT INTO sync_peers(device_id, last_contact) VALUES (%s, '2000-01-01') "
+              "ON CONFLICT(device_id) DO UPDATE SET last_contact=EXCLUDED.last_contact", (source.device_id,))
+    transport._peer_watermarks.pop(source.device_id, None)
+    before = protected_rows(relay)
+    await prune_once(relay, monkeypatch)
+    assert protected_rows(relay) == before
+    assert relay.sql("SELECT COUNT(*) AS n FROM sync_ops WHERE collection='session_events'")[0]["n"] == 0
+    with relay.active(), store.get_db() as conn:
+        cur = conn.cursor()
+        proof = store.get_op(cur, source.device_id, 1, backup_frontier + 1, at_or_after=True)
+        assert proof and proof["origin_seq"] == head["seq"]
+        assert proof["collection"] == "sessions"
+        assert store.next_origin_seq(cur, source.device_id, 1) == head["seq"] + 1
+        assert store.local_watermarks(conn)[source.device_id] == peer_heads[source.device_id]
+
+    # Simulate restoring A's outbox to the older backup frontier. Its identity
+    # and canonical transcript rows stay intact; only test-owned log copies are
+    # rewound, as in the existing transport restore-from-backup regression.
+    source.sql("DELETE FROM sync_ops WHERE origin_device_id=%s AND incarnation=1 AND seq>%s",
+               (source.device_id, backup_frontier))
+    served = ServedBy(relay, "https://relay.example.com")
+    with source.active():
+        with store.get_db() as conn:
+            assert store.own_watermark(conn.cursor(), source.device_id, 1) == backup_frontier
+        async with httpx.AsyncClient(transport=served.transport()) as client:
+            link = transport.PeerLink(relay.device_id, [served.base_url])
+            assert await link._check_rollback(client, engine.context(), peer_heads)
+        assert identity.load().incarnation == 2
+        assert engine.context().identity.incarnation == 2
+        with store.get_db() as conn:
+            # Rollback recovery publishes presence and the local member name.
+            assert store.next_origin_seq(conn.cursor(), source.device_id, 2) == 3
+        database.set_system_setting("tts_model", "after-restore")
+        engine.scan_collection("system_settings")
+        with store.get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT seq, envelope FROM sync_ops WHERE origin_device_id=%s AND incarnation=2 ORDER BY seq",
+                        (source.device_id,))
+            fresh = [dict(row) for row in cur.fetchall()]
+    assert [row["seq"] for row in fresh] == [1, 2, 3]
+    assert [row["envelope"]["collection"] for row in fresh] == ["presence", "member_names", "system_settings"]
+    summary = await sync(relay, ServedBy(source, "https://source.example.com"))
+    assert summary["received"] == 3
+    with relay.active():
+        assert database.get_system_setting("tts_model") == "after-restore"
+        assert store.local_watermarks()[source.device_id]["2"] == 3
+    assert len(transcript(relay)) == 7
