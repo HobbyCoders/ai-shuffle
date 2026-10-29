@@ -20,19 +20,21 @@ logger = logging.getLogger(__name__)
 
 
 def reduce_attention(previous, needs, user_position, *, active=True, explicit_id=None, title="Chat", now=None):
-    """Pure state machine. Each identity is observed once, even after replay."""
+    """Pure state machine with bounded durable identity receipts for replay."""
     now = time.time() if now is None else now
     state = dict(previous or {})
-    seen = set(state.get("seen", []))
-    calls = set(state.get("calls", []))
+    seen = dict.fromkeys(state.get("seen", []))
+    calls = dict.fromkeys(state.get("calls", []))
     if explicit_id in calls:
         explicit_id = None
     explicit = state.get("explicit")
-    if explicit and explicit != user_position:
+    # Older states stored only the position; preserve them until cleared.
+    position = explicit.get("position") if isinstance(explicit, dict) else explicit
+    if explicit is not None and position != user_position:
         explicit = None
     if explicit_id:
-        calls.add(explicit_id)
-        explicit = user_position
+        calls[explicit_id] = None
+        explicit = {"id": explicit_id, "position": user_position}
     needs = set(needs) if active else set()
     if needs or not active:
         # A real card/question takes over the same episode. An explicit request
@@ -40,15 +42,15 @@ def reduce_attention(previous, needs, user_position, *, active=True, explicit_id
         explicit = None
     # A standalone explicit request waits for an owner reply or settlement.
     if explicit is not None:
-        needs.add("explicit:" + str(explicit))
+        needs.add("explicit:" + str(explicit["id"] if isinstance(explicit, dict) else explicit))
     old_needs = set(state.get("needs", []))
     if needs == old_needs and not explicit_id and title == state.get("title", title):
         return state, False
     was_pending, pending = bool(old_needs), bool(needs)
-    new_need = bool(needs - seen)
+    new_need = bool(needs - seen.keys())
     action = "alert" if pending and not was_pending and new_need else "update" if pending else "clear"
-    seen.update(needs)
-    state.update(needs=sorted(needs), seen=sorted(seen), calls=sorted(calls),
+    seen.update(dict.fromkeys(sorted(needs)))
+    state.update(needs=sorted(needs), seen=list(seen)[-200:], calls=list(calls)[-200:],
                  explicit=explicit, title=title)
     # An idle session's completion, parking, errors or settle cannot enqueue a push.
     if not pending and not was_pending:

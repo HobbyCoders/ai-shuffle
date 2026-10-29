@@ -88,6 +88,34 @@ async def test_explicit_tool_id_dedupe_survives_reply_and_restart(chat):
 
 
 @pytest.mark.asyncio
+async def test_later_explicit_tool_alerts_after_settle_at_same_user_position(chat):
+    dispatcher, sender = chat
+    await dispatcher.reconcile("push-chat", explicit_id="tool-1")
+    session_events.append_events("push-chat", [
+        {"type": "system.note", "payload": {"subtype": "session_settled"}}])
+    await dispatcher.reconcile("push-chat")
+    session_events.append_events("push-chat", [{"type": "turn.started", "payload": {}}])
+    await dispatcher.reconcile("push-chat", explicit_id="tool-2")
+    assert [c["action"] for c in commands(sender)] == ["alert", "clear", "alert"]
+    assert commands(sender)[-1]["episode"] != commands(sender)[0]["episode"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_tool_retry_after_settle_and_restart_is_silent(chat, monkeypatch):
+    dispatcher, sender = chat
+    await dispatcher.reconcile("push-chat", explicit_id="tool-1")
+    session_events.append_events("push-chat", [
+        {"type": "system.note", "payload": {"subtype": "session_settled"}}])
+    await dispatcher.reconcile("push-chat")
+    replacement = attention.AttentionDispatcher(sender)
+    monkeypatch.setattr(replacement, "worker_id", lambda: "worker-a")
+    monkeypatch.setattr(replacement, "private_needs", lambda sid: set())
+    session_events.append_events("push-chat", [{"type": "turn.started", "payload": {}}])
+    await replacement.reconcile("push-chat", explicit_id="tool-1")
+    assert [c["action"] for c in commands(sender)] == ["alert", "clear"]
+
+
+@pytest.mark.asyncio
 async def test_trailing_prose_producing_path_and_owner_answer(chat):
     dispatcher, sender = chat
     session_events.append_events("push-chat", [
@@ -140,6 +168,19 @@ async def test_expired_interaction_and_api_user_do_not_notify(chat):
         conn.cursor().execute("UPDATE sessions SET api_user_id=%s WHERE id=%s", ("someone-else", "push-chat"))
     await dispatcher.reconcile("push-chat", explicit_id="tool-foreign")
     sender.send_to_all_devices.assert_not_awaited()
+
+
+def test_attention_history_keeps_recent_need_and_tool_id_dedupe_bounded():
+    state = {}
+    tool_ids = [f"tool-{i}" for i in range(205)]
+    for tool_id in tool_ids:
+        state, _ = attention.reduce_attention(state, set(), [None, None], explicit_id=tool_id)
+        state, _ = attention.reduce_attention(state, set(), [None, None], active=False)
+    assert state["calls"] == tool_ids[-200:]
+    assert state["seen"] == ["explicit:" + tool_id for tool_id in tool_ids[-200:]]
+    state, changed = attention.reduce_attention(state, set(), [None, None], explicit_id=tool_ids[-1])
+    assert not changed
+    assert state["action"] == "clear"
 
 
 def test_replayed_need_identity_after_zero_is_silent():

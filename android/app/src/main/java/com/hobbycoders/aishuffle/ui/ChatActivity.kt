@@ -99,6 +99,8 @@ class ChatActivity : NativeScreen() {
     private lateinit var voiceCall: VoiceCallKeeper
     private lateinit var callNotifications: CallNotificationAsk
     private val pushPermission = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) {
+        notificationDialogOpen = false
+        if (VoiceCallService.notificationsShown(this)) voiceCall.refresh() else voiceCall.notificationsOff()
         com.hobbycoders.aishuffle.push.PushRegistration.schedule(this)
     }
     private var notificationDialogOpen = false
@@ -544,7 +546,11 @@ class ChatActivity : NativeScreen() {
             else {
                 web.onResume(); web.post { completeMicrophonePermission(); callKeptAlive(); askForCallNotifications() }
                 DeviceToolsRuntime.attach(this, server)
-                com.hobbycoders.aishuffle.push.PushPermission.ask(this) { pushPermission.launch(it) }
+                if (!notificationDialogOpen && !microphoneDialogOpen && !voiceCall.keptAlive) {
+                    com.hobbycoders.aishuffle.push.PushPermission.ask(this, dialogOpen = { notificationDialogOpen = it }) {
+                        runCatching { pushPermission.launch(it) }.onFailure { notificationDialogOpen = false }
+                    }
+                }
                 com.hobbycoders.aishuffle.push.PushRegistration.schedule(this)
                 web.post { if (needsSession && !isFinishing && authorized()) startSession() }
             }

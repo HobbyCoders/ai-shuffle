@@ -92,6 +92,22 @@ def test_token_self_registration_rotation_delete_and_revocation(native):
     assert client.put(TOKEN_PATH, headers=headers, json={"token": "stale-token"}).status_code == 401
 
 
+@pytest.mark.parametrize("token", ["test-push-token", None])
+def test_device_list_exposes_registration_status_not_token(native, authenticated_client, token):
+    client, headers, _ = native
+    if token:
+        assert client.put(TOKEN_PATH, headers=headers, json={"token": token}).status_code == 200
+
+    response = authenticated_client.get("/api/v1/mobile/devices")
+
+    assert response.status_code == 200, response.text
+    device = response.json()[0]
+    assert device["device_id"] == "phone"
+    assert "fcm_token" not in device
+    assert "test-push-token" not in response.text
+    assert device["push_registered"] is bool(token)
+
+
 @pytest.mark.parametrize("method", ["put", "delete"])
 def test_tokens_require_native_device_key(native, method):
     client, headers, _ = native

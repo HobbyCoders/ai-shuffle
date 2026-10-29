@@ -347,7 +347,7 @@ async def list_devices(token: str = Depends(require_admin)):
             device_name=d["device_name"],
             platform=d["platform"],
             capabilities=DeviceCapabilities(**d.get("capabilities", {})),
-            fcm_token=d.get("fcm_token"),
+            push_registered=bool(d.get("fcm_token")),
             api_key_expires_at=(
                 datetime.fromisoformat(d["api_key_expires_at"])
                 if isinstance(d.get("api_key_expires_at"), str)

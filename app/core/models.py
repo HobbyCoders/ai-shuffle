@@ -1272,7 +1272,7 @@ class MobileDevice(BaseModel):
     device_name: str
     platform: str
     capabilities: DeviceCapabilities
-    fcm_token: Optional[str] = None
+    push_registered: bool = False
     api_key_expires_at: Optional[datetime] = None
     scopes: List[str] = Field(default_factory=list)
     revoked_at: Optional[datetime] = None
