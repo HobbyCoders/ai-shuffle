@@ -40,6 +40,13 @@ def test_pending_buffer_kill_switch_is_internal_only():
     assert entry["base_settings"] is False
 
 
+def test_scanner_wake_kill_switch_is_internal_only():
+    allowed = json.loads((ROOT / "scripts/ci/env_allowlist.json").read_text())
+    entry = allowed["AI_SHUFFLE_PERF_SCAN_WAKE"]
+    assert entry["kind"] == "internal"
+    assert entry["base_settings"] is False
+
+
 def test_scanner_detects_new_fields_aliases_and_own_prefix_reads():
     source = '''class Config(BaseSettings):
     harmless_name: bool = Field(False, validation_alias="AI_SHUFFLE_NEW_BEHAVIOUR")

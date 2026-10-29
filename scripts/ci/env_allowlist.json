@@ -157,6 +157,11 @@
     "target_pr": 2,
     "base_settings": true
   },
+  "AI_SHUFFLE_PERF_SCAN_WAKE": {
+    "kind": "internal",
+    "reason": "Temporary default-on rollback switch for interruptible network scanner rest and bounded urgent-wake coalescing",
+    "base_settings": false
+  },
   "AI_SHUFFLE_PERF_SLIM_USAGE_REPLAY": {
     "kind": "internal",
     "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Slim usage replay payloads",
