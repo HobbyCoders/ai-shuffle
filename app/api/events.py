@@ -39,6 +39,7 @@ from typing import (
     Sequence,
     Set,
     Tuple,
+    Union,
 )
 
 from fastapi import APIRouter, Depends, Request
@@ -48,7 +49,7 @@ from starlette.requests import ClientDisconnect
 from app.api.auth import require_auth
 from app.api.sessions_helpers import require_transcript_session
 from app.api.sse_utils import is_client_disconnect
-from app.core.event_gateway import get_gateway
+from app.core.event_gateway import LOG_RECHECK, get_gateway
 from app.core.harness_reminders import strip_harness_reminders
 from app.core.history_backfill import ensure_backfilled
 from app.core.turn_recorder import slim_turn_usage_payload
@@ -430,6 +431,11 @@ def _frame(row: Dict[str, Any]) -> str:
     return f"id: {row['seq']}\nevent: {row['event_type']}\ndata: {data}\n\n"
 
 
+def _reset_frame(reason: str, epoch: str) -> str:
+    data = json.dumps({"reason": reason, "epoch": epoch})
+    return f"event: reset\ndata: {data}\n\n"
+
+
 # ---------------------------------------------------------------------------
 # Shared per-session tail reader
 #
@@ -463,6 +469,10 @@ class _TailBatch(NamedTuple):
 _KICK = object()
 
 
+class _TailLogCheck(NamedTuple):
+    epoch: str
+
+
 class _TailSubscriber:
     """One connected SSE client's slot on a session's shared reader."""
 
@@ -486,6 +496,8 @@ class _SessionTail:
         # Cursor of the last row published. ``None`` until seeded (see _seed).
         self._cursor: Optional[int] = None
         self._hint: Optional[int] = None
+        self._epoch: Optional[str] = None
+        self._needs_log_check = False
         self._gateway = get_gateway()
         self._queue = self._gateway.subscribe(session_id)
         self._task = loop.create_task(self._run())
@@ -528,7 +540,7 @@ class _SessionTail:
         except RuntimeError:
             pass  # the reader's loop is already closed — nothing left to stop
 
-    def note_cursor(self, cursor: int) -> None:
+    def note_cursor(self, cursor: int, epoch: Optional[str] = None) -> None:
         """Seed the reader from a client that just finished its backfill.
 
         The reader must not start at the CURRENT tail: an event appended between
@@ -541,6 +553,8 @@ class _SessionTail:
         if self._cursor is not None or self.closed:
             return
         self._hint = cursor if self._hint is None else min(self._hint, cursor)
+        if self._epoch is None:
+            self._epoch = epoch
         self._kick()
 
     def _kick(self) -> None:
@@ -555,13 +569,27 @@ class _SessionTail:
         try:
             while True:
                 item = await self._queue.get()
-                force, max_seq = self._drain_ticks(item)
+                force, max_seq, recheck_log = self._drain_ticks(item)
+                self._needs_log_check = self._needs_log_check or recheck_log
                 if self._cursor is None:
                     if self._hint is None or not await self._seed():
                         continue
+                if self._needs_log_check:
+                    # Keep hints received while the first client's backfill was
+                    # still running; it has not seeded our cursor/epoch yet.
+                    self._needs_log_check = False
+                    current_epoch = await asyncio.to_thread(get_log_epoch, self.session_id)
+                    # Each client compares its own opening epoch, including one
+                    # whose backfill raced the shared reader's first seed.
+                    self._publish(_TailLogCheck(current_epoch))
+                    if current_epoch != self._epoch:
+                        if self._epoch == EMPTY_LOG_EPOCH and self._cursor == 0:
+                            self._epoch = current_epoch  # First append, not a rewrite.
+                        else:
+                            self.close()
+                            return
                 elif not force and max_seq <= self._cursor:
-                    # Redundant tick (e.g. a bare notify_session wake): nothing
-                    # past our cursor exists, so no read at all.
+                    # A bare/local duplicate wake is still free of DB probes.
                     continue
                 await self._read_and_publish()
         except asyncio.CancelledError:
@@ -577,20 +605,22 @@ class _SessionTail:
             # rather than waiting out a keepalive interval.
             self._publish(None)
 
-    def _drain_ticks(self, item: Any) -> Tuple[bool, int]:
-        """Collapse a burst of queued ticks into one (force, max_seq) decision."""
-        force = item is _KICK
+    def _drain_ticks(self, item: Any) -> Tuple[bool, int, bool]:
+        """Collapse ticks without losing a mirrored-log identity check."""
+        recheck_log = item is LOG_RECHECK
+        force = item is _KICK or recheck_log
         max_seq = 0 if force else int(item)
         while True:
             try:
                 nxt = self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-            if nxt is _KICK:
+            if nxt is _KICK or nxt is LOG_RECHECK:
                 force = True
+                recheck_log = recheck_log or nxt is LOG_RECHECK
             else:
                 max_seq = max(max_seq, int(nxt))
-        return force, max_seq
+        return force, max_seq, recheck_log
 
     async def _seed(self) -> bool:
         try:
@@ -620,7 +650,7 @@ class _SessionTail:
             if len(rows) < _PAGE:
                 return
 
-    def _publish(self, batch: Optional[_TailBatch]) -> None:
+    def _publish(self, batch: Optional[Union[_TailBatch, _TailLogCheck]]) -> None:
         for sub in list(self._subs):
             try:
                 sub.queue.put_nowait(batch)
@@ -729,7 +759,7 @@ async def _tail_from_db(
 def _resume_check(
     session_id: str, from_seq: int, epoch: Optional[str]
 ) -> Tuple[str, Optional[str]]:
-    """Return ``(current_epoch, reset_reason)`` for a connect.
+    """Return ``(current_epoch, reset_reason)`` for connect or reconciliation.
 
     A resume (``from_seq > 0``) that names the epoch it was served from is
     reset when that log is gone (``"epoch"``: cleared or rewritten), or when
@@ -776,8 +806,7 @@ async def event_stream(
             _resume_check, session_id, from_seq, epoch
         )
         if reset_reason:
-            data = json.dumps({"reason": reset_reason, "epoch": log_epoch})
-            yield f"event: reset\ndata: {data}\n\n"
+            yield _reset_frame(reset_reason, log_epoch)
             logger.info(
                 "SSE feed reset: session=%s from_seq=%s reason=%s",
                 session_id, from_seq, reset_reason,
@@ -854,13 +883,12 @@ async def event_stream(
 
         # Seed the shared reader from this client's post-backfill cursor, so the
         # very next append is pushed rather than waited for.
-        tail.note_cursor(cursor)
-
         if log_epoch == EMPTY_LOG_EPOCH and cursor > 0:
             # The log was empty when we looked and has rows now (a first turn,
             # or the legacy seed above). Every row sent belongs to the new log,
             # so name it; otherwise the next resume would be reset for nothing.
             log_epoch = await asyncio.to_thread(get_log_epoch, session_id)
+        tail.note_cursor(cursor, log_epoch)
 
         # 1b. Catch-up sentinel: mark the history/live boundary so the client can
         #     paint the whole backfilled transcript in ONE batch instead of
@@ -896,6 +924,14 @@ async def event_stream(
                 timed_out = True
 
             reconcile = False
+            if isinstance(item, _TailLogCheck):
+                if item.epoch != log_epoch:
+                    if log_epoch == EMPTY_LOG_EPOCH and cursor == 0:
+                        log_epoch = item.epoch  # A formerly empty log's first append.
+                    else:
+                        yield _reset_frame("epoch", item.epoch)
+                        return
+                continue
             if isinstance(item, _TailBatch):
                 if item.prev_seq == cursor:
                     # Continues exactly where we stopped: emit as-is.
@@ -921,6 +957,16 @@ async def event_stream(
                     yield ": keepalive\n\n"
                 continue
 
+            # Correctness fallback if a mirror replacement's NOTIFY was lost,
+            # or a slow consumer dropped its identity marker. Never reconcile
+            # from an old cursor into a different log, even if the new head grew.
+            checked_epoch, reset = await asyncio.to_thread(
+                _resume_check, session_id, cursor, log_epoch
+            )
+            if reset:
+                yield _reset_frame(reset, checked_epoch)
+                return
+            log_epoch = checked_epoch
             wrote = False
             async for seq, frame in _tail_from_db(session_id, cursor):
                 yield frame
