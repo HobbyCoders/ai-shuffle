@@ -5,8 +5,8 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class WorkerFailoverTest {
-    private val pc = Server("pc", "GamingPC", "https://pc.example", "aim_pc", "phone")
-    private val nas = Server("nas", "Unraid", "https://nas.example", "aim_nas", "phone")
+    private val pc = Server("pc", "DesktopWorker", "https://pc.example", "aim_pc", "phone")
+    private val nas = Server("nas", "ServerWorker", "https://nas.example", "aim_nas", "phone")
     private val laptop = Server("laptop", "Laptop", "https://laptop.example", "aim_laptop", "phone")
     private val recent = listOf(pc, nas, laptop)
     private val online = recent.map { it.id }.toSet()
