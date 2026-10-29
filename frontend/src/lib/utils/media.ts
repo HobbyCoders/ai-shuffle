@@ -313,39 +313,142 @@ export interface ResultMedia {
 	filename?: string;
 }
 
-interface ToolResultShape {
-	success?: boolean;
-	video_url?: string;
-	audio_url?: string;
-	image_url?: string;
-	image_base64?: string;
-	audio_base64?: string;
-	mime_type?: string;
+/** A generated output named by a tool result: playable media, or a plain file (3D model, other). */
+export interface ToolResultMediaItem {
+	kind: MediaKind | 'file';
+	src: string;
 	filename?: string;
 }
 
+type JsonObject = Record<string, unknown>;
+
+const isObject = (value: unknown): value is JsonObject =>
+	!!value && typeof value === 'object' && !Array.isArray(value);
+const text = (value: unknown): string | undefined =>
+	typeof value === 'string' && value.trim() ? value : undefined;
+
+// Envelope outcomes that made nothing (app/core/generation_resolver.py
+// result()): an envelope in any of these never shows as generated media.
+const NOT_GENERATED = new Set([
+	'refused', 'skipped', 'needs-confirmation', 'needs_confirmation', 'choose', 'catalog', 'failed'
+]);
+
+// Sources the row may hand to {@html}: app/worker paths, web URLs, blobs and
+// inline media. Anything else (javascript:, file:, …) is dropped.
+const SAFE_SOURCE = /^(?:https?:\/\/|blob:|data:(?:image|video|audio)\/|\/(?!\/))/i;
+
 /**
- * Extract embeddable media from an AI-tool JSON result string, or null.
+ * The payload carrying the media fields, or null when the call made nothing.
+ *
+ * Old tools put the fields at the top: `{success, image_url, …}`. The unified
+ * generation tools (#379) wrap the backend's output as
+ * `{status: "completed", success: true, price, choice, result: {success, image_url, images, …}}`;
+ * refused / skipped / needs-confirmation / choose envelopes carry no `result`
+ * and `success: false`.
+ */
+function generatedPayload(data: unknown): JsonObject | null {
+	if (!isObject(data) || data.success !== true) return null;
+	if (typeof data.status === 'string' && NOT_GENERATED.has(data.status.toLowerCase())) return null;
+	if (isObject(data.result) && (data.status !== undefined || 'success' in data.result)) {
+		if (data.status !== undefined && data.status !== 'completed') return null;
+		return data.result.success === true ? data.result : null;
+	}
+	return data;
+}
+
+function mimeKind(mime: unknown): MediaKind | 'file' | null {
+	const type = text(mime)?.toLowerCase() ?? '';
+	if (type.startsWith('image/')) return 'image';
+	if (type.startsWith('video/')) return 'video';
+	if (type.startsWith('audio/')) return 'audio';
+	return type ? 'file' : null;
+}
+
+/**
+ * Every generated output a successful tool result names, primary first and
+ * de-duplicated. Reads both result shapes (see {@link generatedPayload}):
+ * `image_url` / `video_url` / `audio_url`, inline `image_base64` /
+ * `audio_base64`, an `images` list (native and old multi-image results), fal
+ * `outputs` lists, and file-only results (`file_url`, `model_url`, a 3D
+ * `output_url`). Returns [] for errors, non-JSON and non-success outcomes.
+ */
+export function toolResultMedia(content: string | undefined): ToolResultMediaItem[] {
+	if (!content) return [];
+	let data: unknown;
+	try {
+		data = JSON.parse(content);
+	} catch {
+		return [];
+	}
+	const payload = generatedPayload(data);
+	if (!payload) return [];
+
+	const items: ToolResultMediaItem[] = [];
+	const seen = new Set<string>();
+	const add = (kind: ToolResultMediaItem['kind'], src: string | undefined, filename?: unknown) => {
+		if (!src || seen.has(src) || !SAFE_SOURCE.test(src)) return;
+		seen.add(src);
+		items.push({ kind, src, filename: text(filename) });
+	};
+	const name = payload.filename;
+	const inline = (b64: unknown, fallback: string) => {
+		const body = text(b64);
+		const mime = text(payload.mime_type);
+		return body ? `data:${mime && mimeKind(mime) !== 'file' ? mime : fallback};base64,${body}` : undefined;
+	};
+
+	add('video', text(payload.video_url), name);
+	add('audio', text(payload.audio_url), name);
+	add('image', text(payload.image_url), name);
+	add('image', inline(payload.image_base64, 'image/png'), name);
+	add('audio', inline(payload.audio_base64, 'audio/mpeg'), name);
+
+	// The primary key says what a list's unlabelled entries are: fal artifact
+	// URLs (`/api/v1/artifacts/<hash>?…`) have no extension to classify.
+	const hint: ToolResultMediaItem['kind'] = items[0]?.kind ?? 'file';
+	if (Array.isArray(payload.images)) {
+		for (const image of payload.images) {
+			if (isObject(image)) add('image', text(image.image_url) ?? text(image.url), image.filename);
+			else add('image', text(image));
+		}
+	}
+	if (Array.isArray(payload.outputs)) {
+		for (const output of payload.outputs) {
+			if (!isObject(output)) continue;
+			const src = text(output.url);
+			if (src) add(mimeKind(output.mime_type) ?? classifyMediaUrl(src) ?? hint, src, output.filename);
+		}
+	}
+	for (const key of ['file_url', 'model_url', 'output_url'] as const) {
+		const src = text(payload[key]);
+		if (src) add(mimeKind(payload.mime_type) ?? classifyMediaUrl(src) ?? hint, src, name);
+	}
+	return items;
+}
+
+const KIND_WORDS: Record<ToolResultMediaItem['kind'], [one: string, many: string]> = {
+	image: ['Image', 'images'],
+	video: ['Video', 'videos'],
+	audio: ['Audio', 'audio clips'],
+	file: ['File', 'files']
+};
+
+/** "Image generated", "4 images generated", "2 outputs generated" (mixed kinds). */
+export function toolResultMediaLabel(items: readonly ToolResultMediaItem[]): string {
+	if (items.length === 0) return '';
+	const kinds = new Set(items.map((item) => item.kind));
+	if (kinds.size > 1) return `${items.length} outputs generated`;
+	const [one, many] = KIND_WORDS[items[0].kind];
+	return items.length === 1 ? `${one} generated` : `${items.length} ${many} generated`;
+}
+
+/**
+ * The first embeddable media of an AI-tool JSON result string, or null.
  * Prefers explicit *_url fields, falling back to inline base64.
  */
 export function extractToolResultMedia(content: string): ResultMedia | null {
-	let data: ToolResultShape;
-	try {
-		data = JSON.parse(content) as ToolResultShape;
-	} catch {
-		return null;
-	}
-	if (!data || !data.success) return null;
-	if (data.video_url) return { kind: 'video', src: data.video_url, filename: data.filename };
-	if (data.audio_url) return { kind: 'audio', src: data.audio_url, filename: data.filename };
-	if (data.image_url) return { kind: 'image', src: data.image_url, filename: data.filename };
-	if (data.image_base64) {
-		return { kind: 'image', src: `data:${data.mime_type || 'image/png'};base64,${data.image_base64}`, filename: data.filename };
-	}
-	if (data.audio_base64) {
-		return { kind: 'audio', src: `data:${data.mime_type || 'audio/mpeg'};base64,${data.audio_base64}`, filename: data.filename };
-	}
-	return null;
+	const first = toolResultMedia(content).find((item) => item.kind !== 'file');
+	return first ? { kind: first.kind as MediaKind, src: first.src, filename: first.filename } : null;
 }
 
 // Markdown media patterns. Convention: image syntax ![alt](url) → image;

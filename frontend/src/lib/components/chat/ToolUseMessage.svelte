@@ -28,7 +28,16 @@
 	import { stripUntrustedFence } from '$lib/utils/untrusted-fence';
 	import { phonePanel, isEmulatorTool } from '$lib/stores/phone-panel.svelte';
 	import { PhoneSidePanel } from '$lib/components/deck/lazy/panels';
-	import { Smartphone } from 'lucide-svelte';
+	import { Download, Smartphone } from 'lucide-svelte';
+	import {
+		mediaHtml,
+		resolveMediaUrl,
+		retryImages,
+		toolResultMedia,
+		toolResultMediaLabel,
+		type MediaKind
+	} from '$lib/utils/media';
+	import { sanitizeHtml } from '$lib/utils/sanitize';
 
 	interface Props {
 		name: string;
@@ -104,29 +113,22 @@
 		`${compactName}${preview ? `: ${preview}` : ''}. ${stateLabel}`
 	);
 
-	function toolResultHasMedia(content: string): boolean {
-		try {
-			const data = JSON.parse(content);
-			return data.success && (
-				data.image_url || data.image_base64 || data.video_url ||
-				data.audio_url || data.audio_base64 || data.file_url
-			);
-		} catch {
-			return false;
-		}
-	}
-
-	/** Short label for the generated-media kind ("Image" | "Video" | "Audio"). */
-	function toolResultMediaLabel(content: string): string {
-		try {
-			const data = JSON.parse(content);
-			if (data.video_url) return 'Video';
-			if (data.audio_url || data.audio_base64) return 'Audio';
-			return 'Image';
-		} catch {
-			return 'Image';
-		}
-	}
+	// A generation's result renders as its media, not JSON: both the old
+	// top-level shape and the unified tools' nested `result` (#784). A refused,
+	// skipped or needs-confirmation result has none, so it stays as text.
+	const generated = $derived(status === 'complete' ? toolResultMedia(shownResult) : []);
+	const generatedLabel = $derived(toolResultMediaLabel(generated));
+	const playable = $derived(
+		generated.filter((item) => item.kind !== 'file').map((item, i, all) =>
+			sanitizeHtml(mediaHtml(
+				item.kind as MediaKind,
+				resolveMediaUrl(item.src, sessionId),
+				`Generated ${item.kind}${all.length > 1 ? ` ${i + 1}` : ''}`,
+				item.filename
+			))
+		)
+	);
+	const files = $derived(generated.filter((item) => item.kind === 'file'));
 </script>
 
 <div class="wl-item">
@@ -213,12 +215,32 @@
 			{/if}
 			<div class="wl-panel">
 				<div class="wl-panel-label">Result</div>
-				<div class="wl-pane">
+				<div class="wl-pane" class:is-media={generated.length > 0}>
 					{#if dismissedQuestion}
 						<pre class="is-muted" data-testid="tool-dismissed-result">{shownResult}</pre>
 					{:else if result}
-						{#if toolResultHasMedia(result)}
-							<span class="wl-media-note">{toolResultMediaLabel(result)} generated</span>
+						{#if generated.length > 0}
+							<span class="wl-media-note" data-testid="tool-media-note">{generatedLabel}</span>
+							{#if playable.length > 0}
+								<div class="wl-media" class:is-many={playable.length > 1} data-testid="tool-media" use:retryImages>
+									{#each playable as html, i (i)}
+										{@html html}
+									{/each}
+								</div>
+							{/if}
+							{#each files as file (file.src)}
+								<a
+									class="wl-file"
+									data-testid="tool-media-file"
+									href={resolveMediaUrl(file.src, sessionId)}
+									download={file.filename ?? ''}
+									target="_blank"
+									rel="noopener noreferrer"
+								>
+									<Download size={13} strokeWidth={1.9} aria-hidden="true" />
+									<span>{file.filename ?? 'Download file'}</span>
+								</a>
+							{/each}
 						{:else}
 							<pre>{shownResult}</pre>
 						{/if}
@@ -517,7 +539,103 @@
 	}
 
 	.wl-media-note {
+		display: block;
 		font-size: 11.5px;
 		color: var(--emerald);
+	}
+
+	/* Generated media sits in the Result pane at a working size: the shared
+	   player markup (media.ts) with its expand/download overlay and lightbox,
+	   scaled down so the work log stays a log. */
+	.wl-pane.is-media {
+		max-height: none;
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 8px;
+	}
+
+	/* Stretch, not shrink-to-fit: the players' percentage max-widths need a
+	   definite width, or a video collapses to its border. */
+	.wl-media {
+		align-self: stretch;
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+		min-width: 0;
+	}
+
+	.wl-media :global(.generated-media-container) {
+		margin: 0;
+		max-width: 100%;
+	}
+
+	.wl-media :global(.generated-media-container > img),
+	.wl-media :global(.generated-media-container > video) {
+		display: block;
+		max-height: 240px;
+		box-shadow: none;
+	}
+
+	.wl-media :global(.generated-media-container > video) {
+		width: min(100%, 427px);
+	}
+
+	.wl-media.is-many :global(.generated-media-container > img),
+	.wl-media.is-many :global(.generated-media-container > video) {
+		max-height: 160px;
+	}
+
+	.wl-media :global(.generated-audio) {
+		width: min(28rem, 100%);
+	}
+
+	.wl-file {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		max-width: 100%;
+		min-height: 28px;
+		padding: 0 10px 0 8px;
+		border-radius: 7px;
+		border: 1px solid var(--border);
+		color: var(--foreground);
+		font-family: var(--font-mono);
+		font-size: 11.5px;
+		text-decoration: none;
+		transition: background-color 160ms ease-out, border-color 160ms ease-out;
+	}
+
+	.wl-file span {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.wl-file :global(svg) {
+		flex: none;
+		color: var(--subtle-foreground);
+	}
+
+	.wl-file:hover {
+		background: var(--scrim);
+		border-color: color-mix(in oklab, var(--foreground) 22%, var(--border));
+	}
+
+	.wl-file:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+
+	@media (max-width: 639px) {
+		.wl-file {
+			min-height: 44px;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.wl-file {
+			transition: none;
+		}
 	}
 </style>

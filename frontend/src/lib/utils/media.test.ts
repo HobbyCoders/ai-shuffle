@@ -9,6 +9,8 @@ import {
 	rewriteMediaMarkdown,
 	clampRevealToMediaBoundary,
 	extractToolResultMedia,
+	toolResultMedia,
+	toolResultMediaLabel,
 	filenameFromMediaUrl,
 	IMAGE_RETRY_DELAYS_MS,
 	retryImageLoad,
@@ -143,6 +145,114 @@ describe('extractToolResultMedia', () => {
 	it('returns null for failures or non-JSON', () => {
 		expect(extractToolResultMedia('{"success":false,"image_url":"/x.png"}')).toBeNull();
 		expect(extractToolResultMedia('not json')).toBeNull();
+	});
+
+	it('reads the unified tools\' nested result too', () => {
+		const nested = JSON.stringify({ status: 'completed', success: true, result: { success: true, image_url: '/a/1' } });
+		expect(extractToolResultMedia(nested)).toEqual({ kind: 'image', src: '/a/1', filename: undefined });
+	});
+});
+
+describe('toolResultMedia', () => {
+	const price = { currency: 'USD', unit: 'item', amount: '0.04', total: '0.04', status: 'estimated' };
+	const choice = { source: 'openai', account: 'acct-1', model: 'gpt-image-1', worker: 'w-1' };
+	// app/core/generation_resolver.py result("completed", …, result=output)
+	const unified = (output: Record<string, unknown>) =>
+		JSON.stringify({ status: 'completed', success: true, price, choice, result: output }, null, 2);
+	const art = (hash: string, suffix = '') => `/api/v1/artifacts/${hash}${suffix}?session_id=s-1`;
+
+	it('reads the old top-level shape for every kind', () => {
+		expect(toolResultMedia('{"success":true,"image_url":"/w/a.png","filename":"a.png"}')).toEqual([
+			{ kind: 'image', src: '/w/a.png', filename: 'a.png' }
+		]);
+		expect(toolResultMedia('{"success":true,"video_url":"/w/v.mp4"}')).toEqual([{ kind: 'video', src: '/w/v.mp4', filename: undefined }]);
+		expect(toolResultMedia('{"success":true,"audio_url":"/w/t.wav"}')[0].kind).toBe('audio');
+		expect(toolResultMedia('{"success":true,"audio_base64":"AAAA","mime_type":"audio/wav"}')[0].src).toBe('data:audio/wav;base64,AAAA');
+		expect(toolResultMedia('{"success":true,"file_url":"/w/report.pdf","filename":"report.pdf"}')).toEqual([
+			{ kind: 'file', src: '/w/report.pdf', filename: 'report.pdf' }
+		]);
+		// Old 3D results name a GLB.
+		expect(toolResultMedia('{"success":true,"status":"SUCCEEDED","model_url":"https://cdn.example.com/m.glb"}')[0].kind).toBe('file');
+	});
+
+	it('reads an old multi-image `images` list once each', () => {
+		const items = toolResultMedia(JSON.stringify({
+			success: true, image_url: '/w/1.png',
+			images: [{ image_url: '/w/1.png' }, { image_url: '/w/2.png' }, { image_url: '/w/3.png' }]
+		}));
+		expect(items.map((i) => i.src)).toEqual(['/w/1.png', '/w/2.png', '/w/3.png']);
+		expect(items.every((i) => i.kind === 'image')).toBe(true);
+	});
+
+	it('reads the unified nested image result from native accounts, with every image', () => {
+		// generation_sources.execute_local, native image routes.
+		const items = toolResultMedia(unified({
+			success: true, image_url: art('h1'), images: [{ image_url: art('h1') }, { image_url: art('h2') }], warning: null
+		}));
+		expect(items).toEqual([
+			{ kind: 'image', src: art('h1'), filename: undefined },
+			{ kind: 'image', src: art('h2'), filename: undefined }
+		]);
+	});
+
+	it('reads the unified nested fal result: kind key, output_url and outputs list', () => {
+		// generation_sources._artifact_result
+		const image = toolResultMedia(unified({
+			success: true, image_url: art('a'), output_url: art('a'), outputs: [{ url: art('a') }, { url: art('b') }]
+		}));
+		expect(image.map((i) => [i.kind, i.src])).toEqual([['image', art('a')], ['image', art('b')]]);
+
+		const video = toolResultMedia(unified({
+			success: true, video_url: art('v', '/video.mp4'), output_url: art('v', '/video.mp4'), outputs: [{ url: art('v', '/video.mp4') }]
+		}));
+		expect(video).toEqual([{ kind: 'video', src: art('v', '/video.mp4'), filename: undefined }]);
+
+		const audio = toolResultMedia(unified({ success: true, audio_url: art('t'), output_url: art('t'), outputs: [{ url: art('t') }] }));
+		expect(audio.map((i) => i.kind)).toEqual(['audio']);
+
+		const model = toolResultMedia(unified({ success: true, output_url: art('m'), outputs: [{ url: art('m') }] }));
+		expect(model).toEqual([{ kind: 'file', src: art('m'), filename: undefined }]);
+	});
+
+	it('reads the unified native video result', () => {
+		expect(toolResultMedia(unified({ success: true, video_url: art('nv', '/video.mp4') }))[0].kind).toBe('video');
+	});
+
+	it('shows nothing for a call that made nothing', () => {
+		const envelope = (status: string, extra: Record<string, unknown> = {}) =>
+			JSON.stringify({ status, success: false, price, ...extra });
+		expect(toolResultMedia(envelope('refused', { reason: 'image_provider_restricted', error: 'no' }))).toEqual([]);
+		expect(toolResultMedia(envelope('skipped', { reason: 'needs_confirmation', choice }))).toEqual([]);
+		expect(toolResultMedia(envelope('needs-confirmation', { confirmation_token: 't', retry: { confirmed: true } }))).toEqual([]);
+		expect(toolResultMedia(envelope('choose', { options: [] }))).toEqual([]);
+		// A failed run keeps the backend's output under `result`.
+		expect(toolResultMedia(envelope('failed', { result: { success: false, image_url: '/w/x.png' } }))).toEqual([]);
+		// Even a stray success flag on a non-completed envelope, or a failed inner result.
+		expect(toolResultMedia(JSON.stringify({ status: 'skipped', success: true, result: { success: true, image_url: '/w/x.png' } }))).toEqual([]);
+		expect(toolResultMedia(JSON.stringify({ status: 'completed', success: true, result: { success: false, image_url: '/w/x.png' } }))).toEqual([]);
+		// Discovery is "successful" but is not media.
+		expect(toolResultMedia(JSON.stringify({ status: 'catalog', success: true, price, options: [{ model: 'm' }] }))).toEqual([]);
+		expect(toolResultMedia('{"success":false,"error":"denied","image_url":"/w/x.png"}')).toEqual([]);
+		expect(toolResultMedia('not json')).toEqual([]);
+		expect(toolResultMedia(undefined)).toEqual([]);
+	});
+
+	it('drops sources that are not safe to render', () => {
+		expect(toolResultMedia('{"success":true,"image_url":"javascript:alert(1)"}')).toEqual([]);
+		expect(toolResultMedia('{"success":true,"file_url":"//evil.example/x"}')).toEqual([]);
+	});
+});
+
+describe('toolResultMediaLabel', () => {
+	const item = (kind: 'image' | 'video' | 'audio' | 'file') => ({ kind, src: `/${kind}` });
+	it('names the kind and counts several', () => {
+		expect(toolResultMediaLabel([item('image')])).toBe('Image generated');
+		expect(toolResultMediaLabel([item('video')])).toBe('Video generated');
+		expect(toolResultMediaLabel([item('audio')])).toBe('Audio generated');
+		expect(toolResultMediaLabel([item('file')])).toBe('File generated');
+		expect(toolResultMediaLabel([item('image'), { kind: 'image', src: '/2' }])).toBe('2 images generated');
+		expect(toolResultMediaLabel([item('image'), item('file')])).toBe('2 outputs generated');
+		expect(toolResultMediaLabel([])).toBe('');
 	});
 });
 
