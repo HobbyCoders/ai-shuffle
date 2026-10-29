@@ -129,6 +129,15 @@ def log(message):
     print(f"{stamp} container runtime: {message}", file=sys.stderr, flush=True)
 
 
+def _telemetry_log(message):
+    # Optional diagnostics must never change snapshot/spawn control flow. In
+    # particular, a successful Popen must still return its now-running child.
+    try:
+        log(message)
+    except Exception:
+        pass
+
+
 def load_startup_settings():
     """Only mount paths, from image-installed dependencies; no app imports.
 
@@ -450,8 +459,8 @@ class Database:
         """Copy APP_DB to ``name`` while the application is stopped."""
         _rollback_name(name, "rollback")
         started = time.monotonic()
-        log("database snapshot starting strategy=FILE_COPY")
-        log(f"database snapshot source_database_bytes={self._snapshot_bytes(APP_DB)}")
+        _telemetry_log("database snapshot starting strategy=FILE_COPY")
+        _telemetry_log(f"database snapshot source_database_bytes={self._snapshot_bytes(APP_DB)}")
         complete, attempts, copy_seconds = False, 0, 0.0
         try:
             self.admin_script(f"DROP DATABASE IF EXISTS {name}")
@@ -473,7 +482,7 @@ class Database:
                     copy_seconds += time.monotonic() - copy_started
         finally:
             copied = self._snapshot_bytes(name) if complete else "unknown"
-            log(f"database snapshot {'complete' if complete else 'failed'} "
+            _telemetry_log(f"database snapshot {'complete' if complete else 'failed'} "
                 f"duration_seconds={time.monotonic() - started:.3f} copy_seconds={copy_seconds:.3f} "
                 f"attempts={attempts} copied_database_bytes={copied}")
 
@@ -804,14 +813,14 @@ def start_app(command, cwd, env, updates_root=None):
             module.ensure_traversable(updates_root, log)
         command = module.app_command(command)
     started = time.monotonic()
-    log("application child spawn starting")
+    _telemetry_log("application child spawn starting")
     try:
         child = subprocess.Popen(command, cwd=cwd, env=env, start_new_session=True)
     except Exception as exc:
-        log(f"application child spawn failed ({type(exc).__name__}) "
+        _telemetry_log(f"application child spawn failed ({type(exc).__name__}) "
             f"duration_seconds={time.monotonic() - started:.3f}")
         raise
-    log(f"application child spawned pid={child.pid} duration_seconds={time.monotonic() - started:.3f}")
+    _telemetry_log(f"application child spawned pid={child.pid} duration_seconds={time.monotonic() - started:.3f}")
     return child
 
 
