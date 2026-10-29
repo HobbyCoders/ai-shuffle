@@ -158,18 +158,33 @@ export async function pickAgent(page, hero) {
  * every write, goes to the server unchanged. Call before the page loads.
  */
 export async function withoutSavedAgentPick(page) {
-	const KEY = 'composer.profile';
-	await page.route(/\/api\/v1\/preferences\/all(\?|$)/, async (route) => {
-		if (route.request().method() !== 'GET') return route.continue();
-		const response = await route.fetch();
-		const body = await response.json();
-		if (body?.preferences) delete body.preferences[KEY];
-		if (body?.versions) delete body.versions[KEY];
-		await route.fulfill({ response, json: body });
-	});
-	await page.route(new RegExp(`/api/v1/preferences/${KEY.replace('.', '\\.')}(\\?|$)`), (route) =>
-		route.request().method() === 'GET' ? route.fulfill({ status: 404, json: { detail: 'Preference not found' } }) : route.continue()
-	);
+	// In the page, not page.route: the built app's service worker (/sw.js)
+	// makes the requests page.route would see, so only a page-side wrapper of
+	// fetch reliably meets them (Vite's dev server has no service worker).
+	await page.addInitScript((key) => {
+		const original = window.fetch.bind(window);
+		const pathOf = (input) => {
+			try {
+				return new URL(typeof input === 'string' ? input : input.url, location.href).pathname;
+			} catch {
+				return '';
+			}
+		};
+		window.fetch = async (input, init) => {
+			const method = (init?.method || (typeof input === 'object' && input.method) || 'GET').toUpperCase();
+			const path = pathOf(input);
+			if (method === 'GET' && path === `/api/v1/preferences/${encodeURIComponent(key)}`) {
+				return new Response(JSON.stringify({ detail: 'Preference not found' }), { status: 404, headers: { 'content-type': 'application/json' } });
+			}
+			const response = await original(input, init);
+			if (method !== 'GET' || path !== '/api/v1/preferences/all' || !response.ok) return response;
+			const body = await response.clone().json().catch(() => null);
+			if (!body?.preferences) return response;
+			delete body.preferences[key];
+			if (body.versions) delete body.versions[key];
+			return new Response(JSON.stringify(body), { status: response.status, headers: response.headers });
+		};
+	}, 'composer.profile');
 }
 
 /**
