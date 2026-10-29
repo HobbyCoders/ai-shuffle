@@ -454,6 +454,11 @@ class DevClaude(script.Fake):
         return any(fnmatch.fnmatchcase(name, p) for p in self.disallowed)
 
     def init_frame(self) -> dict:
+        # Delay only the fake process, before its first init/session-id frame.
+        delay_ms = max(0.0, fake_ai._number(os.environ.get("FAKE_CLAUDE_STARTUP_MS"), 0.0))
+        if delay_ms:
+            log("startup_delay", milliseconds=delay_ms)
+            time.sleep(delay_ms / 1000)
         frame = super().init_frame()
         frame.update(
             model=self.model, tools=self.tools(), claude_code_version=VERSION.split()[0],
