@@ -86,25 +86,17 @@ class TestRefreshScheduling:
         assert peak == 4
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("success", [True, False])
-    async def test_api_result_does_not_trigger_subscription_billing(self, success):
-        """Each row gets only its own registry sources.
-
-        The Admin-API poll's outcome must not cascade into the ChatGPT
-        subscription poll, and the API-key row must never be handed to it.
-        """
+    async def test_api_key_row_never_triggers_subscription_billing(self):
+        """OpenAI API billing is gone; only the subscription row is polled."""
         monitor = ProviderUsageMonitor()
         rows = [{"id": "api", "provider_type": "openai", "base_url": "https://api.openai.com"},
                 {"id": "sub", "provider_type": "chatgpt"}]
         with patch("app.db.database.get_enabled_model_providers", return_value=rows), patch.object(
-            monitor, "_poll_openai_provider", new=AsyncMock(return_value=success)
-        ) as poll, patch.object(
             monitor, "_poll_codex_provider", new=AsyncMock()
         ) as codex, patch("app.db.database.get_codex_tokens") as tokens, patch.object(
             monitor, "_poll_fal", new=AsyncMock()
         ):
             await monitor.poll_once()
-        poll.assert_awaited_once_with(rows[0])
         codex.assert_awaited_once_with(rows[1])
         tokens.assert_not_called()
 
@@ -192,27 +184,28 @@ def monitor():
 
 class TestPollOnce:
     @pytest.mark.asyncio
-    async def test_skips_chatgpt_anthropic_xai_and_custom_openai_hosts(self, monitor):
+    async def test_skips_anthropic_xai_and_all_openai_api_hosts(self, monitor):
         rows = [
             {"id": "p-chatgpt", "provider_type": "chatgpt", "base_url": "https://x"},
             {"id": "p-anthropic", "provider_type": "anthropic", "base_url": "https://x"},
             {"id": "p-openai-custom", "provider_type": "openai", "base_url": "https://my-proxy.example/v1"},
+            {"id": "p-openai-platform", "provider_type": "openai", "base_url": "https://api.openai.com/v1"},
             {"id": "p-xai", "provider_type": "xai", "base_url": "https://api.x.ai", "auth_token": "xai-key"},
         ]
         with patch("app.db.database.get_enabled_model_providers", return_value=rows), \
              patch.object(monitor, "_poll_provider", new=AsyncMock()) as poll_provider, \
              patch.object(monitor, "_poll_grok_provider", new=AsyncMock()) as poll_grok, \
-             patch.object(monitor, "_poll_openai_provider", new=AsyncMock()) as poll_openai, \
+             patch.object(monitor, "_poll_codex_provider", new=AsyncMock()) as poll_codex, \
              patch.object(monitor, "_poll_fal", new=AsyncMock()) as poll_fal:
             await monitor.poll_once()
 
         poll_provider.assert_not_called()
         poll_grok.assert_not_called()
-        poll_openai.assert_not_called()
+        poll_codex.assert_called_once_with(rows[0])
         poll_fal.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_polls_openrouter_grok_and_openai_platform_rows(self, monitor):
+    async def test_polls_openrouter_grok_and_chatgpt_but_not_openai_api_rows(self, monitor):
         rows = [
             {"id": "p-chatgpt", "provider_type": "chatgpt", "base_url": "https://x"},
             {"id": "p-or", "provider_type": "openrouter", "base_url": "https://openrouter.ai/api/v1"},
@@ -223,13 +216,13 @@ class TestPollOnce:
         with patch("app.db.database.get_enabled_model_providers", return_value=rows), \
              patch.object(monitor, "_poll_provider", new=AsyncMock()) as poll_provider, \
              patch.object(monitor, "_poll_grok_provider", new=AsyncMock()) as poll_grok, \
-             patch.object(monitor, "_poll_openai_provider", new=AsyncMock()) as poll_openai, \
+             patch.object(monitor, "_poll_codex_provider", new=AsyncMock()) as poll_codex, \
              patch.object(monitor, "_poll_fal", new=AsyncMock()) as poll_fal:
             await monitor.poll_once()
 
         poll_provider.assert_called_once_with(rows[1])
         poll_grok.assert_called_once_with(rows[2])
-        poll_openai.assert_called_once_with(rows[3])
+        poll_codex.assert_called_once_with(rows[0])
         poll_fal.assert_called_once()
 
     @pytest.mark.asyncio

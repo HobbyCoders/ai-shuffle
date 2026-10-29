@@ -68,7 +68,7 @@ def test_actual_v92_startup_deduplicates_enabled_accounts(pg):
     with pg() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT version FROM schema_version")
-        assert cursor.fetchone()["version"] == 93
+        assert cursor.fetchone()["version"] == database.SCHEMA_VERSION
     database.set_model_provider_enabled("later", True)
     database.init_database()
     assert [r["id"] for r in database.get_enabled_model_providers()] == ["later"]

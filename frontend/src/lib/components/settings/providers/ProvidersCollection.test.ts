@@ -160,7 +160,9 @@ describe('the list', () => {
 		await show();
 		await fireEvent.click(screen.getByRole('button', { name: 'OpenAI API key, On' }));
 		expect(settingsNav.selectedItem('providers')).toBe('mp:p1');
-		expect(await screen.findByRole('tab', { name: /Usage/ })).toBeTruthy();
+		expect(await screen.findByRole('tab', { name: 'Overview' })).toBeTruthy();
+		expect(screen.getByRole('tab', { name: 'Models' })).toBeTruthy();
+		expect(screen.queryByRole('tab', { name: 'Usage' })).toBeNull();
 	});
 });
 

@@ -83,9 +83,10 @@ def test_funding_paths_never_cross():
 
 
 def _logins_and_key():
-    _make_login()
     _make_login("prov-stale", name="Stale", needs_reauth=True)
     _make_provider("prov-empty", name="Empty", provider_type="grok", auth_token=None, auth_mode="grok")
+    # The connected login is the selected account in grok:subscription.
+    _make_login()
     _make_provider("xai-key", name="xAI", provider_type="xai")
 
 
