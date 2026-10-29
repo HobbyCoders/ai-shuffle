@@ -1186,16 +1186,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._turn_progress_at = time.monotonic()
         self._turn_cancel_reason: str | None = None
         self._watchdog_task: asyncio.Task | None = None
-        # Peer messages that arrived while this session was parked on
-        # background tasks: delivered with the next wake (or user turn)
-        # instead of each waking the parent on its own.
+        # Pre-upgrade messages held while parked: rehydrate and deliver once
+        # with the next turn. New peer messages wake immediately instead.
         self._queued_peer_messages: list[AgentMessage] = []
         self._queued_peer_rehydrated = False
         # The model the last ProfileResolved event was emitted for.
         self._profile_resolved_for: str | None = None
-        # The last AgentMessage op submit() held rather than delivered, so a
-        # host can tell its sender "held" instead of "delivered".
-        self.last_held_message: AgentMessage | None = None
         # Runtime-facts block bookkeeping (see _environment_reminder): the
         # facts text last sent to the model, and whether this engine has
         # already harvested them into the memory store.
@@ -1729,14 +1725,9 @@ class NativeLoop(BackgroundLifecycleMixin):
                     raise RuntimeError("receiver is finishing its turn; retry the peer message")
                 self._pending_steers.append(replace(op, text=text))
             else:
-                # Parked comes first: a parent waiting on background work holds
-                # an ordinary message for its next wake whether or not the host
-                # owns wakes. Checking ``wake`` first sent every host-owned
-                # (wake=False) message to a parked parent back to the host,
-                # which woke the parent for it.
-                if not op.urgent and await self._queue_if_parked(replace(op, text=text)):
-                    self.last_held_message = op
-                    return
+                # Ordinary peer traffic wakes parked receivers too. A host
+                # that owns scheduling gets an explicit refusal and keeps the
+                # message on its durable queue instead of an engine-only hold.
                 if not op.wake:
                     raise RuntimeError("no turn is running; peer message was not delivered")
                 from fluid.context.peer import format_peer_message
@@ -3295,15 +3286,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._profile_resolved_for = self.model
 
     async def _queue_if_parked(self, op: AgentMessage) -> bool:
-        """Hold an idle-time peer message when the session is parked.
+        """Legacy held-row writer, retained for recovery fixtures.
 
-        Parked on background work (typically the sender itself): the message
-        waits for the wake the completion brings instead of paying a turn
-        now to read an interim note. It is persisted as a
-        ``SubagentEvent(kind="progress")`` so a host that evicts the parked
-        engine and rebuilds it for the wake still delivers it (see
-        :meth:`_rehydrate_queued_peer_messages`). Returns False when the
-        session is not parked, in which case the caller wakes as usual.
+        New AgentMessage admissions never use this path. Pre-upgrade
+        ``SubagentEvent(kind="progress")`` rows still recover through
+        :meth:`_rehydrate_queued_peer_messages` and drain once on the next turn.
         """
         async with self._background_lock:
             await self._rehydrate_background_lifecycle_unlocked()

@@ -267,6 +267,10 @@ class LinkRequest(BaseModel):
 class EnrollRequest(BaseModel):
     ticket: SecretStr = Field(min_length=1, max_length=128)
     device_info: DeviceInfo
+    # Per-worker secret of this app installation (HMAC of an install secret
+    # with the server id). Lets the same installation renew its entry on a
+    # later account sign-in instead of piling up a new one. Older apps omit it.
+    install_proof: SecretStr | None = Field(default=None, min_length=43, max_length=128)
 
 
 @router.post('/link')
@@ -326,16 +330,23 @@ def enroll(body: EnrollRequest):
     from app.core.device_keys import KEY_LIFETIME_DAYS
     expires = datetime.now(timezone.utc) + timedelta(days=KEY_LIFETIME_DAYS)
     scopes = list(pairing.DEFAULT_MOBILE_SCOPES)
+    proof = body.install_proof.get_secret_value() if body.install_proof else None
     try:
-        store.enroll(identity, body.device_info, hashlib.sha256(key.encode()).hexdigest(), expires, scopes, scoped=True)
+        device_id = store.enroll(identity, body.device_info, hashlib.sha256(key.encode()).hexdigest(), expires, scopes,
+                                 scoped=True, install_proof_hash=hashlib.sha256(proof.encode()).hexdigest() if proof else None)
     except ValueError:
         raise HTTPException(409, 'Device already authorized; use a fresh installation identity') from None
     except Exception:
         # Includes uniqueness races: never leak database statements or key hashes.
         raise HTTPException(409, 'Device enrollment unavailable; obtain a new ticket') from None
+    owner = store.ownership(device_id)
+    if owner:
+        # A renewal replaced the key: sockets opened with the old one close now.
+        from app.api.ws_key_watch import close_paired_client_sockets
+        close_paired_client_sockets(owner['paired_client_id'])
     # Android keeps its account identity on the wire; rows and credentials are
     # distinct per worker even when both workers share the same database.
     return JSONResponse({'api_key': key, 'device_id': identity['device_id'],
                          'expires_at': expires.isoformat(), 'scopes': scopes,
-                         'confirmation': 'pending'},
+                         'confirmation': store.confirmation(owner) if owner else 'pending'},
                         headers={'Cache-Control': 'no-store'})

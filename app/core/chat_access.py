@@ -35,7 +35,6 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-import asyncssh
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictBool, StrictInt
 
 from app.core import chat_files, chat_services
@@ -200,6 +199,7 @@ def apply_saved_edit(current: GrantInput, edit: SavedConnectionEdit) -> GrantInp
             key = key or current.private_key.get_secret_value()
             if not key:
                 raise AccessDenied("This connection signs in with a password. Enter a private key to use one.")
+            import asyncssh
             try:
                 asyncssh.import_private_key(key, passphrase or None)
             except (asyncssh.KeyImportError, ValueError, TypeError):
@@ -557,6 +557,7 @@ def grant_failure(exc: BaseException) -> tuple[int, str]:
         return 409, str(exc)
     if isinstance(exc, AccessDenied):
         return 400, str(exc)
+    import asyncssh
     if isinstance(exc, (asyncssh.KeyImportError, asyncssh.KeyEncryptionError)):
         return 400, "The private key could not be read. Check the key and its passphrase."
     if isinstance(exc, asyncssh.PermissionDenied):
@@ -1000,6 +1001,8 @@ class Broker:
         secret, password or key is sent. ``None`` means the server has no key
         of that type.
         """
+        import asyncssh
+
         seen: list[str] = []
 
         class Recorder(asyncssh.SSHClient):
@@ -1045,6 +1048,8 @@ class Broker:
         raise AccessDenied(f"No host key on this server matches that fingerprint. The server offered: {keys}.")
 
     async def connection(self, grant: Grant):
+        import asyncssh
+
         class PinnedHost(asyncssh.SSHClient):
             def validate_host_public_key(self, host, addr, port, key):
                 return hmac.compare_digest(key.get_fingerprint("sha256"), grant.fingerprint)
@@ -1119,6 +1124,8 @@ class Broker:
                 grant.secret = spec.secret.get_secret_value()
                 grant.target = origin.url
             else:
+                import asyncssh
+
                 address = await resolve_machine_address(spec.host, spec.port)
                 fingerprint = spec.fingerprint.strip()
                 if fingerprint and not re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}=?", fingerprint):
