@@ -40,7 +40,9 @@ jobs:
           node-version: '22'
       - name: Resolve the immutable UI source revision
         id: source
-        run: echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          revision=$(git rev-parse HEAD)
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
       - name: Build desktop and phone together without publication credentials
         env:
           UI_REVISION: ${{ steps.source.outputs.revision }}
