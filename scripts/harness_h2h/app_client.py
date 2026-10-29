@@ -90,7 +90,7 @@ class AppClient(HttpWorkerClient):
         idle_since: float | None = None
         saw_busy = False
         while time.time() < deadline:
-            s = self._req("GET", f"/sessions/{sid}", params={"message_limit": 5})
+            s = self._req("GET", f"/sessions/{sid}/live", params={"include_messages": "false"})
             busy = self._busy(sid, s)
             saw_busy = saw_busy or busy
             if not busy and saw_busy:
