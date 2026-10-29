@@ -189,8 +189,10 @@ function reloadCase(name, spec) {
 		allow: [
 			{
 				kind: 'layout_shift',
-				// Only when the biggest move is the composer and its chip row.
-				message: /\(moved: div\.input-slot in ChatView, span\.ctx-chip in ChatInput/,
+				// Only a small move whose biggest frame is the composer (its chip row may be
+				// attributed in the same frame or the next, so it is optional here); a total
+				// of 0.1 or more is not #818 and still fails.
+				message: /shifted 0\.0\d+ in total; biggest [^(]*\(moved: div\.input-slot in ChatView(, span\.ctx-chip in ChatInput)?\)/,
 				reason:
 					'known bug #818: on a phone a reloaded project chat moves the composer as its context chips load (not compaction: a no-project chat does not)'
 			}
