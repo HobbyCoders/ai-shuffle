@@ -25,10 +25,8 @@ import androidx.webkit.ScriptHandler
 import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
-import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.hobbycoders.aishuffle.R
 import com.hobbycoders.aishuffle.account.AccountRepository
-import com.hobbycoders.aishuffle.account.AccountStore
 import com.hobbycoders.aishuffle.account.PairingInput
 import com.hobbycoders.aishuffle.account.ManagedWorkerRepair
 import com.hobbycoders.aishuffle.account.WorkerRepairFailure
@@ -37,14 +35,10 @@ import com.hobbycoders.aishuffle.data.ServerStore
 import com.hobbycoders.aishuffle.model.Server
 import com.hobbycoders.aishuffle.net.ApiClient
 import com.hobbycoders.aishuffle.net.ApiResult
-import com.hobbycoders.aishuffle.presence.ProbeResult
-import com.hobbycoders.aishuffle.presence.WorkerPresenceProbe
 import com.hobbycoders.aishuffle.tools.DeviceToolsRuntime
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import com.google.android.material.button.MaterialButton
 import java.io.ByteArrayInputStream
 
@@ -92,6 +86,7 @@ class ChatActivity : NativeScreen() {
     private lateinit var repairButton: MaterialButton
     private lateinit var downloads: ChatDownloads
     private var switchJob: Job? = null
+    private var needsFailover = false
     /** The native worker-name bar (back, name, menu); hidden while the page draws its own. */
     private var nativeBar: View? = null
     private var shellBridgeInstalled = false
@@ -144,7 +139,6 @@ class ChatActivity : NativeScreen() {
         try { PairingInput.origin(server.baseUrl) } catch (_: Exception) { heading("HTTPS required", "Pair this server again using its HTTPS address. Existing insecure credentials will not be sent."); return }
         sessionOwner = ChatSessionOwner(this, server)
         if (!authorized()) { finish(); return }
-        ServerStore.get(this).markUsed(server.id)
         voiceCall = VoiceCallKeeper(this, server.id, server.name,
             visible = { lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED) },
             microphoneAllowed = { ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED },
@@ -280,17 +274,30 @@ class ChatActivity : NativeScreen() {
                 if (pageFailure != null) workerDocumentAllowed = false
             }
             override fun onPageFinished(view: WebView, url: String) {
-                if (MobileUi.isUiUrl(server.baseUrl, url)) status.text = pageFailure ?: fileNotice.message.orEmpty()
+                if (MobileUi.isUiUrl(server.baseUrl, url)) {
+                    status.text = pageFailure ?: fileNotice.message.orEmpty()
+                    if (pageFailure == null && workerDocumentAllowed && authorized()) {
+                        ServerStore.get(this@ChatActivity).markUsed(server.id)
+                        intent.getStringExtra(EXTRA_OFFLINE_WORKER)?.let { previous ->
+                            Toast.makeText(this@ChatActivity, "$previous is offline — connected to ${server.name}", Toast.LENGTH_SHORT).show()
+                            intent.removeExtra(EXTRA_OFFLINE_WORKER)
+                        }
+                    }
+                }
             }
             override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
                 // A worker from before the phone UI moved to /mobile/ answers 404 here.
-                if (request.isForMainFrame && MobileUi.isUiUrl(server.baseUrl, request.url.toString()))
+                if (request.isForMainFrame && MobileUi.isUiUrl(server.baseUrl, request.url.toString())) {
                     pageFailed(view, MobileUi.loadFailure(response.statusCode))
+                    if (WorkerFailover.unreachableHttp(response.statusCode)) failOver()
+                }
             }
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                 // ERROR_UNKNOWN covers a load we replaced ourselves (Refresh chat); not a failure.
-                if (request.isForMainFrame && error.errorCode != ERROR_UNKNOWN && MobileUi.isUiUrl(server.baseUrl, request.url.toString()))
+                if (request.isForMainFrame && error.errorCode != ERROR_UNKNOWN && MobileUi.isUiUrl(server.baseUrl, request.url.toString())) {
                     pageFailed(view, "Chat could not reach ${server.name}. Check the connection, then refresh chat.")
+                    failOver()
+                }
             }
             override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: android.net.http.SslError) {
                 handler.cancel(); status.text = "HTTPS verification failed. Fix the server certificate before reconnecting."
@@ -384,26 +391,21 @@ class ChatActivity : NativeScreen() {
             .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             .apply { if (message != null) putExtra("sync_message", message) })
     }
-    /** Open chat on another paired worker; the same hand-off as the Workers screen and the offline offer. */
-    private fun openChat(target: Server) {
-        startActivity(Intent(this, ChatActivity::class.java).putExtra(EXTRA_SERVER_ID, target.id))
+    /** Open only this target's own paired session; no token or credential crosses workers. */
+    private fun openChat(target: Server, offlineWorker: String? = null) {
+        startActivity(Intent(this, ChatActivity::class.java).putExtra(EXTRA_SERVER_ID, target.id)
+            .apply { if (offlineWorker != null) putExtra(EXTRA_OFFLINE_WORKER, offlineWorker) })
         finish()
     }
     /** Workers this install may open: local pairings and the signed-in account's (as on the Workers screen). */
-    private fun pairedWorkers(): List<Server> {
-        val store = ServerStore.get(this)
-        val account = AccountStore(this).session()
-        return store.orderedByRecentUse(store.getAll().filter {
-            it.accountId == null || (it.accountId == account?.accountId && it.hubUrl == account?.hub)
-        })
-    }
+    private fun pairedWorkers(): List<Server> = WorkerConnections.paired(this)
     /** The page asked to connect to another worker (`?connect=`). Only an already paired one is opened. */
     private fun switchWorker(url: String) {
         if (!validDocument()) return
         when (val decision = WorkerSwitch.decide(server.baseUrl, url, pairedWorkers())) {
             is WorkerSwitch.Decision.Open -> openChat(decision.server)
             is WorkerSwitch.Decision.NeedsAuthorization ->
-                openWorkers("Tap ${decision.server.name} to authorize it on this phone, then open chat.")
+                Toast.makeText(this, "${decision.server.name} is not authorized on this phone. Open Settings > Devices to connect it.", Toast.LENGTH_LONG).show()
             is WorkerSwitch.Decision.Reject -> Toast.makeText(this, decision.message, Toast.LENGTH_LONG).show()
             is WorkerSwitch.Decision.AlreadyConnected, is WorkerSwitch.Decision.NotASwitch -> Unit
         }
@@ -552,7 +554,11 @@ class ChatActivity : NativeScreen() {
                     }
                 }
                 com.hobbycoders.aishuffle.push.PushRegistration.schedule(this)
-                web.post { if (needsSession && !isFinishing && authorized()) startSession() }
+                web.post {
+                    if (!isFinishing && authorized()) {
+                        if (needsFailover) failOver() else if (needsSession) startSession()
+                    }
+                }
             }
         }
     }
@@ -581,6 +587,8 @@ class ChatActivity : NativeScreen() {
     }
     private fun startSession(reload: Boolean = false) {
         if (sessionJob?.isActive == true || !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return
+        switchJob?.cancel()
+        needsFailover = false
         needsSession = true
         if (reload) reloadOnSession = true
         val attempt = ++sessionAttempt
@@ -626,37 +634,26 @@ class ChatActivity : NativeScreen() {
                             if (owns() && WebSessionBootstrap.current(shared)) status.text = result.message + "\n" +
                                 ((error as? WorkerRepairFailure)?.message ?: "This worker could not be verified for repair. Refresh your workers and try again.")
                         }
-                    } else if (result.statusCode == null && owns() && WebSessionBootstrap.current(shared)) {
-                        // No HTTP answer at all: the worker is unreachable. Another one may be online.
-                        offerOnlineWorker()
+                    } else if (WorkerFailover.unreachableHttp(result.statusCode) && owns() && WebSessionBootstrap.current(shared)) {
+                        failOver()
                     }
                 }
                 is ApiResult.NeedsCfAccess -> status.text = "Cloudflare Access rejected this device. Pair the server again with a valid service token."
             }
         }
     }
-    /** The worker did not answer: probe the others and offer to switch to one that is online. */
-    private fun offerOnlineWorker() {
-        if (switchJob?.isActive == true) return
-        val store = ServerStore.get(this)
-        val account = AccountStore(this).session()
-        val others = store.orderedByRecentUse(store.getAll().filter { it.id != server.id && !it.needsAccountAuthorization &&
-            (it.accountId == null || (it.accountId == account?.accountId && it.hubUrl == account?.hub)) })
-        if (others.isEmpty()) return
+    /** A failed worker is quarantined across activities, so two broken workers cannot bounce us back and forth. */
+    private fun failOver() {
+        needsFailover = true
+        if (switchJob?.isActive == true || isFinishing || isDestroyed || !authorized() ||
+            !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return
         switchJob = lifecycleScope.launch {
-            val online = withTimeoutOrNull(8_000) {
-                others.map { candidate -> async { candidate to WorkerPresenceProbe.check(candidate) } }
-                    .map { it.await() }.filter { it.second == ProbeResult.ONLINE }.map { it.first }
-            }.orEmpty()
-            if (online.isEmpty() || isFinishing || isDestroyed || !authorized() ||
+            val target = WorkerConnections.reachable(this@ChatActivity, server)
+            if (isFinishing || isDestroyed || !authorized() ||
                 !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return@launch
-            val names = online.map { "${it.name} · ${it.host}" }.toTypedArray()
-            MaterialAlertDialogBuilder(this@ChatActivity)
-                .setTitle("${server.name} is not reachable")
-                .setMessage("Switch to another device that is online?")
-                .setItems(names) { _, index -> openChat(online[index]) }
-                .setNegativeButton("Stay", null)
-                .show()
+            needsFailover = false
+            if (target != null) openChat(target, server.name)
+            // Otherwise keep today's error, Refresh chat, and native Workers screen reachable.
         }
     }
     override fun onDestroy() {
@@ -682,6 +679,7 @@ class ChatActivity : NativeScreen() {
     }
     companion object {
         const val EXTRA_SERVER_ID = "server_id"
+        private const val EXTRA_OFFLINE_WORKER = "offline_worker"
         /** Instrumentation tests only: answers phone UI requests for a fixture worker that has no network. */
         @androidx.annotation.VisibleForTesting @Volatile internal var uiFixture: ((WebResourceRequest) -> WebResourceResponse?)? = null
     }
