@@ -1,5 +1,17 @@
 // node --test scripts/perf/stats.test.mjs
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { nearestRank, summarize } from './stats.mjs';
+import { normalizePath, sidebarFull } from './journeys.mjs';
+import { initScript, collect, windowCounters, PLATFORMS } from './browser-helpers.mjs';
+import { parseArgs, summarizeCells } from './chat-journeys.mjs';
+import { main as startupMain } from './startup-repeat.mjs';
 
+
+test('startup rejects unsafe configuration before spawning anything', async () => {
+	await assert.rejects(startupMain(['--runs', '0']), /Invalid startup flags/);
+	await assert.rejects(startupMain(['--out', '/tmp/x.json', '--session', 'https://secret']), /session/);
+});
 
 test('chat and original rig share the serializable instrumentation', () => {
 	assert.equal(typeof initScript, 'function');
@@ -40,12 +52,6 @@ test('failed runs are reported, not coerced into zero-latency successes', () => 
 	assert.equal(summary.cold.apiRequests.p75, null);
 });
 
-import test from 'node:test';
-import assert from 'node:assert/strict';
-import { nearestRank, summarize } from './stats.mjs';
-import { normalizePath, sidebarFull } from './journeys.mjs';
-import { initScript, collect, windowCounters, PLATFORMS } from './browser-helpers.mjs';
-import { parseArgs, summarizeCells } from './chat-journeys.mjs';
 
 test('nearest-rank p75 picks an observed sample, rank = ceil(0.75 n)', () => {
 	// n=20 -> rank 15

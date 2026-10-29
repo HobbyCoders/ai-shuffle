@@ -22,7 +22,7 @@ def rich_markdown(number: int) -> str:
     a real engineering chat even when tool groups are collapsed by default.
     """
     sections = []
-    for section in range(8):
+    for section in range(5):
         sections.append(f"""### Check {number}.{section}: replay and rendering
 
 The **request boundary** keeps `session_id`, `from_seq` and **ownership** separate.
@@ -61,6 +61,14 @@ def read_window(store, session_id: str, before: int = 120):
 
 
 class LongTranscript(Transcript):
+    def __init__(self, *args):
+        super().__init__(*args)
+        self._ids: dict[str, int] = {}
+
+    def _id(self, kind: str) -> uuid.UUID:
+        self._ids[kind] = self._ids.get(kind, 0) + 1
+        return uuid.uuid5(uuid.UUID(self.session_id), f"{kind}:{self._ids[kind]}")
+
     def _event(self, cls: type, turn_id: str, **fields) -> None:
         super()._event(cls, turn_id, **fields)
         index = len(self.events)
@@ -74,9 +82,7 @@ class LongTranscript(Transcript):
 def build_transcript(name: str, turns: int) -> LongTranscript:
     """Build independently of the DB; tests can ratchet event/content counts."""
     from app.contract import events as ev
-    from scripts.devloop.seed import _id_counters
 
-    _id_counters.clear()
     transcript = LongTranscript(SESSIONS[name], DEV_AGENT_ID, "perf-model")
     for number in range(turns):
         result = rich_markdown(number)

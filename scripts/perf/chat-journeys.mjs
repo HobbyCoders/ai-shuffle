@@ -130,6 +130,7 @@ export async function snapshot(p, override = {}) {
 }
 
 export async function coldOpen(p, origin, id) {
+	p.requestBaseline = p.apiRequests;
 	await p.page.goto(`${origin}${p.route}?session=${encodeURIComponent(id)}`, { waitUntil: 'commit' });
 	await waitUsable(p);
 	return snapshot(p);

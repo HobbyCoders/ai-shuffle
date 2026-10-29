@@ -21,7 +21,6 @@ cannot hide a per-row read and one-time process caches cannot fake one.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import re
 import threading
@@ -32,26 +31,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from tests.performance.metrics import count_statements
+
 SMALL = 25
 LARGE = 250
-
-_DML = re.compile(r"^\s*(SELECT|INSERT|UPDATE|DELETE|WITH)\b", re.IGNORECASE)
-
-
-@contextlib.contextmanager
-def count_statements(raw_conn):
-    """Collect every DML statement executed on ``raw_conn`` inside the block."""
-    statements: list[str] = []
-
-    def _trace(sql: str) -> None:
-        if _DML.match(sql):
-            statements.append(sql)
-
-    raw_conn.set_trace_callback(_trace)
-    try:
-        yield statements
-    finally:
-        raw_conn.set_trace_callback(None)
 
 
 def _shape(sql: str) -> str:
