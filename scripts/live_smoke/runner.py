@@ -271,6 +271,12 @@ class Runner:
             raise SetupError(f"--preview: the instance reports revision {self.revision[:9] or 'none'} but serves "
                              f"a preview stamped at {commit[:9] or 'none'}; start it with "
                              "SHUFFLE_SOURCE_REVISION set to the stamped commit")
+        if identity.get("ui") == "vite" or not identity.get("build_sha256"):
+            # The dev loop (scripts.devloop) serves the UI from Vite dev with
+            # hot reload: no stamped build, so nothing pins what was tested.
+            raise SetupError("--preview: the instance serves no stamped build (a dev-loop instance "
+                             "hot-reloads its UI from Vite); start a stamped preview with "
+                             "python -m app.preview stamp and python -m app.preview run")
         local = self.checkout()
         if identity.get("worktree_id") != local["worktree_id"]:
             raise SetupError("--preview: the instance runs from another checkout; run the smoke from "

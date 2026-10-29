@@ -1118,6 +1118,12 @@ def test_preview_run_is_written_as_a_marked_preview_result(tmp_path):
     (None, {"clean": False}, "must be clean"),
     (None, {"head": "c" * 40}, "must be clean"),
     ({"commit": "c" * 40, "worktree_id": WORKTREE}, {}, "SHUFFLE_SOURCE_REVISION"),
+    # A dev-loop (Vite) instance or any identity without a build stamp is no release preview.
+    ({"branch": "main", "commit": REV, "worktree_id": WORKTREE, "ui": "vite"}, {}, "no stamped build"),
+    ({"branch": "main", "commit": REV, "worktree_id": WORKTREE, "source_sha256": "1" * 64}, {},
+     "no stamped build"),
+    ({"branch": "main", "commit": REV, "worktree_id": WORKTREE, "ui": "vite", "build_sha256": "2" * 64},
+     {}, "no stamped build"),
 ])
 def test_preview_run_refuses_an_instance_it_cannot_prove(tmp_path, identity, checkout, message):
     worker = PreviewWorker(identity=identity)

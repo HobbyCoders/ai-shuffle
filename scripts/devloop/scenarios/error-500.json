@@ -1,0 +1,11 @@
+{
+  "description": "Every attempt fails with HTTP 500 (the client may retry first).",
+  "steps": [
+    {
+      "error": {
+        "status": 500,
+        "message": "fake-ai: scripted internal server error"
+      }
+    }
+  ]
+}
