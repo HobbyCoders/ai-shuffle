@@ -97,6 +97,7 @@ _binding_warning_at: Dict[str, float] = {}
 # Authenticated peer frontiers, retained across failed/retried pulls. A failed
 # request does not make a known backlog disappear. Only committed watermarks do.
 _peer_watermarks: Dict[str, dict] = {}
+_peer_watermark_at: Dict[str, float] = {}
 _snapshot_peers: set[str] = set()
 _peer_catalog_backlog: Dict[str, bool] = {}
 # Only viewed chats request transcript heads. Bound memory and exchange work;
@@ -116,6 +117,7 @@ _applying: Dict[str, asyncio.Future] = {}
 
 def note_watermarks(device_id: str, watermarks: dict, *, catalog_backlog: bool = False) -> None:
     _peer_watermarks[device_id] = {origin: dict(streams) for origin, streams in watermarks.items()}
+    _peer_watermark_at[device_id] = time.time()
     _peer_catalog_backlog[device_id] = catalog_backlog
 
 
@@ -1589,7 +1591,20 @@ async def prune_loop() -> None:
         await asyncio.sleep(PRUNE_STARTUP_DELAY_SECONDS)
         while True:
             try:
-                pruned = await asyncio.to_thread(store.prune_ops, stop=stop)
+                pruned = 0
+                ctx = engine.context()
+                if ctx is not None and ctx.bootstrap_state == engine.BOOTSTRAP_READY:
+                    # Copy before crossing into the maintenance thread. These are
+                    # authenticated observations, never optimistic push counters.
+                    observations = {peer: {"seen_at": _peer_watermark_at[peer],
+                                           "watermarks": {o: dict(s) for o, s in marks.items()}}
+                                    for peer, marks in _peer_watermarks.items() if peer in _peer_watermark_at}
+                    pruned += await asyncio.to_thread(store.prune_transcript_ops, ctx.device_id,
+                                                     observations, stop=stop)
+                # Shrink append-only history before the legacy superseded-record
+                # scan; otherwise millions of unique event ids can exhaust its
+                # statement budget before transcript retention gets a turn.
+                pruned += await asyncio.to_thread(store.prune_ops, stop=stop)
                 if pruned:
                     logger.info("Pruned %d old sync operations", pruned)
             except asyncio.CancelledError:
@@ -1726,6 +1741,7 @@ def forget_peers() -> None:
     _links_generation = None
     _last_contact.clear()
     _peer_watermarks.clear()
+    _peer_watermark_at.clear()
     _snapshot_peers.clear()
     _peer_catalog_backlog.clear()
     with _session_watermark_lock:
