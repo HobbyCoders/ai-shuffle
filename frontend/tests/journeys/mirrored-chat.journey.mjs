@@ -2,7 +2,7 @@
 // new-session screen.
 //
 // A mirrored chat is checked against its owner before it is shown, and the
-// first catch-up reloads its transcript (#2227). ChatView keeps the centred
+// first catch-up reveals its existing live transcript. ChatView keeps the centred
 // hero while a chat opened from it loads, so the check must run whatever the
 // layout. Bug this guards (review of PR #807): the check lived only in the
 // message column (MirrorSyncGate), so it started after the history arrived:
@@ -14,7 +14,7 @@
 // One dev instance has no second worker, so the page sees a seeded chat as
 // mirrored: its session rows say `is_remote` with a peer's name, and the
 // owner's sync status is scripted (two "syncing" answers, then caught up).
-// Everything else (history, the reload, the layout) is the real app.
+// Everything else (history, cursor resume, layout) is the real app.
 //
 // Cases (from the new-session screen, through the sidebar):
 //   long-from-new     a mirrored transcript: the hero says it is syncing,
@@ -41,6 +41,7 @@ async function simulateMirroredChat(page, status, key) {
 		({ id, peer, syncingPolls }) => {
 			const original = window.fetch.bind(window);
 			window.__mirrorSyncPolls = 0;
+			window.__mirrorReaders = [];
 			const pathOf = (input) => {
 				try {
 					return new URL(typeof input === 'string' ? input : input.url, location.href).pathname;
@@ -60,6 +61,9 @@ async function simulateMirroredChat(page, status, key) {
 			window.fetch = async (input, init) => {
 				const method = (init?.method || (typeof input === 'object' && input.method) || 'GET').toUpperCase();
 				const path = pathOf(input);
+				if (path === `/api/v1/sessions/${id}/events`) {
+					window.__mirrorReaders.push(Number(new URL(typeof input === 'string' ? input : input.url, location.href).searchParams.get('from_seq') || 0));
+				}
 				if (path === `/api/v1/sessions/${id}/sync-status`) {
 					window.__mirrorSyncPolls += 1;
 					const target = { seq: 1, epoch: 'simulated', tail_id: 'simulated' };
@@ -111,6 +115,30 @@ await runJourney({
 	name: 'mirrored-chat',
 	recorder: { selectors: ['syncpane=.mirror-sync', 'synchero=.cleared-hero.is-loading', 'rows=[data-ui-row]'] },
 	cases: [
+		{
+			name: 'warm-cursor-through-freshness',
+			async setup(ctx) {
+				await fromNew('long')(ctx);
+				await openFromSidebar(ctx.page, SEEDED.long);
+				await waitChatOpen(ctx.page, { messagesAtLeast: 50 });
+				await ctx.page.waitForFunction(() => window.__mirrorSyncPolls > 2);
+				await openFromSidebar(ctx.page, SEEDED.no_project);
+				await waitChatOpen(ctx.page);
+				await ctx.page.evaluate(() => { window.__mirrorSyncPolls = 0; window.__mirrorReaders = []; });
+			},
+			async act({ page, mark }) {
+				await mark(OPEN);
+				await openFromSidebar(page, SEEDED.long);
+				await page.waitForFunction(() => window.__mirrorSyncPolls > 2);
+				await waitChatOpen(page, { messagesAtLeast: 50 });
+				const readers = await page.evaluate(() => window.__mirrorReaders);
+				expect(readers.length === 1 && readers[0] > 0,
+					`warm mirror must keep one cursor-resume reader through freshness, got ${JSON.stringify(readers)}`);
+			},
+			verify({ recording }) {
+				expectNeverDecreases(recording, 'rows', { from: markTime(recording, OPEN) });
+			}
+		},
 		{
 			name: 'long-from-new',
 			setup: fromNew('long'),
