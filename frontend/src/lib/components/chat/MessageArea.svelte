@@ -47,6 +47,8 @@
 	import { STREAM_DEBUG } from '$lib/utils/debug-log';
 	import UserMessage from './UserMessage.svelte';
 	import { agentDelivery, agentSender, agentSenderNames } from '$lib/utils/agent-delivery';
+	import { createAgentMessageProjection } from '$lib/utils/agent-message-projection';
+	import AgentMessage from './AgentMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import TurnActivity from './TurnActivity.svelte';
 	import TurnNavigator from './TurnNavigator.svelte';
@@ -117,7 +119,6 @@
 	import MediaLightbox from './MediaLightbox.svelte';
 	import PendingMessages from './PendingMessages.svelte';
 	import PendingStatusAnnouncer from './PendingStatusAnnouncer.svelte';
-	import PendingPeerMessages from './PendingPeerMessages.svelte';
 	import RunningTasksList from './RunningTasksList.svelte';
 	import {
 		approvalCardData,
@@ -489,8 +490,15 @@
 		};
 
 	const buildTranscript = createTranscriptModelBuilder();
+	const agentMessageProjection = createAgentMessageProjection();
+	const projectedMessages = $derived(agentMessageProjection.update({
+		sessionId: $activeSession.sessionId,
+		messages: $activeSession.messages,
+		pendingPeerMessages: $activeSession.pendingPeerMessages ?? [],
+		sessionActive: rawLatestTurnUnsettled && $activeSession.turnParked !== true
+	}));
 	const transcript: TranscriptModel = $derived.by(() => {
-		const messages = $activeSession.messages;
+		const messages = projectedMessages;
 		const sessionId = $activeSession.sessionId;
 		const sessionSwarms = $swarms.bySession[sessionId ?? ''];
 		const isStreamingNow = $activeSession.isStreaming;
@@ -2033,9 +2041,6 @@
 				</div>
 			{/if}
 
-			<!-- Peer messages stay attributed and read-only, outside user queue controls. -->
-			<PendingPeerMessages messages={pendingPeerMessages} />
-
 			<!-- Prompts already sent but not yet delivered to the model. They sit
 			     below the transcript, above the activity indicator, until the
 			     backend hands them over (mid-turn steer or next-turn start). -->
@@ -2136,12 +2141,11 @@
 		<HandoffCard episode={handoff} progress={progressForEpisode(handoff, handoffPendingView)} />
 	{:else if delivery}
 		{@const sender = agentSender(delivery, agentNames)}
-		<ToolUseMessage
-			name="Agent message"
-			input={sender.id ? { label: sender.name, session: sender.id } : { label: sender.name }}
-			previewTitle={sender.id ? `${sender.name} (session ${sender.id})` : undefined}
-			result={delivery.content}
-			status="complete"
+		<AgentMessage
+			sender={sender.name}
+			senderId={sender.id}
+			content={delivery.content}
+			queued={message.systemData?.delivery === 'queued'}
 		/>
 	{:else if message.type === 'command'}
 		<!-- Slash command invocation (e.g., /commit, /ralph-loop) -->
