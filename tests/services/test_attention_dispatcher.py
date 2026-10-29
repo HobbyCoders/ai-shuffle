@@ -227,3 +227,17 @@ def test_cli_canonical_tool_use_id_is_read_without_private_input(chat):
     assert attention.latest_notify_tool_id("push-chat") == "cli-notify-1"
     session_events.append_events("push-chat", [{"type": "tool.use", "payload": {"id": "other", "name": "Bash"}}])
     assert attention.latest_notify_tool_id("push-chat") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit_first", [True, False])
+async def test_explicit_and_automatic_need_share_one_clearable_episode(chat, explicit_first):
+    dispatcher, sender = chat
+    if explicit_first:
+        await dispatcher.reconcile("push-chat", explicit_id="one-call")
+    question = interactions.create_interaction("push-chat", "question", {}, 120)
+    await dispatcher.reconcile("push-chat", explicit_id=None if explicit_first else "one-call")
+    interactions.answer_interaction(question["id"], {})
+    await dispatcher.reconcile("push-chat")
+    assert [c["action"] for c in commands(sender)].count("alert") == 1
+    assert commands(sender)[-1]["action"] == "clear"

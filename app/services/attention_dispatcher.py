@@ -34,9 +34,11 @@ def reduce_attention(previous, needs, user_position, *, active=True, explicit_id
         calls.add(explicit_id)
         explicit = user_position
     needs = set(needs) if active else set()
-    if not active:
+    if needs or not active:
+        # A real card/question takes over the same episode. An explicit request
+        # must not keep it alive after the owner answers/dismisses that card.
         explicit = None
-    # An explicit request stays pending until an owner reply or settlement.
+    # A standalone explicit request waits for an owner reply or settlement.
     if explicit is not None:
         needs.add("explicit:" + str(explicit))
     old_needs = set(state.get("needs", []))
