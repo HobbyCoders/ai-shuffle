@@ -89,6 +89,8 @@ export async function withRecording(page, opts = {}, actions = async () => {}) {
 	}
 	if (failure) {
 		if (recording?.text) failure.flightRecording = recording.text;
+		// What the recorder caught before the failure: a known bug must not hide it.
+		if (Array.isArray(recording?.anomalies)) failure.flightAnomalies = recording.anomalies;
 		throw failure;
 	}
 	if (!recording || recording.ok === false) {
