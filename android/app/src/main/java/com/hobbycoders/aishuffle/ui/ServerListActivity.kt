@@ -3,6 +3,8 @@ package com.hobbycoders.aishuffle.ui
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.os.Bundle
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -19,6 +21,16 @@ import com.hobbycoders.aishuffle.presence.WorkerPresence
 import com.hobbycoders.aishuffle.presence.WorkerPresenceMonitor
 
 class ServerListActivity : NativeScreen() {
+    private var autoConnectPending = false
+    private var connectionJob: Job? = null
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        autoConnectPending = savedInstanceState?.getBoolean("auto_connect_pending") ?: (intent.action == Intent.ACTION_MAIN)
+    }
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean("auto_connect_pending", autoConnectPending)
+        super.onSaveInstanceState(outState)
+    }
     private val pushPermission = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) {
         com.hobbycoders.aishuffle.push.PushRegistration.schedule(this)
     }
@@ -43,8 +55,12 @@ class ServerListActivity : NativeScreen() {
         }
     }
     private fun refreshPresence() { presence.start(statusRows.values.map { it.server }, AccountRepository(this).store.session()) }
-    override fun onStop() { presence.stop(); super.onStop() }
-    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent) }
+    override fun onStop() { connectionJob?.cancel(); presence.stop(); super.onStop() }
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        autoConnectPending = intent.action == Intent.ACTION_MAIN
+    }
     override fun onResume() {
         super.onResume()
         render()
@@ -56,6 +72,19 @@ class ServerListActivity : NativeScreen() {
         }
         intent.getStringExtra("sync_message")?.let { status.text = it; intent.removeExtra("sync_message") }
         ServerStore.get(this).selectedToolsServer()?.let { com.hobbycoders.aishuffle.tools.DeviceToolsRuntime.attach(this, it) }
+        if (autoConnectPending && connectionJob?.isActive != true) {
+            connectionJob = lifecycleScope.launch {
+                val target = WorkerConnections.reachable(this@ServerListActivity)
+                if (isFinishing || !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return@launch
+                autoConnectPending = false
+                if (target != null) {
+                    openWorker(target)
+                    finish()
+                } else if (WorkerConnections.paired(this@ServerListActivity).isNotEmpty()) {
+                    status.text = "No authorized worker is reachable. Check the connection, retry a worker, or add one."
+                }
+            }
+        }
     }
     private fun openAccount(mode: String) { startActivity(Intent(this, AccountActivity::class.java).putExtra("mode", mode)) }
     private fun openWorker(server: Server) {
