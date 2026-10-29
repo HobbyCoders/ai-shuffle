@@ -46,6 +46,13 @@ export interface SubmitGuardInput {
 	 * behaviour.
 	 */
 	mode?: SessionMode;
+	/**
+	 * The composer is bound to an existing chat. Its project is fixed: the open
+	 * chat offers no project picker, so a bound chat with no project (its
+	 * project was deleted, which leaves the chat's project NULL) is sent as it
+	 * is and the server runs it without one.
+	 */
+	isBoundSession?: boolean;
 }
 
 /**
@@ -78,7 +85,9 @@ export function evaluateSubmitGuards(s: SubmitGuardInput): SubmitBlock | null {
 	// construction — `newChatModeState` clears the project slice for them and
 	// neither surface renders a picker — so demanding a project there refuses
 	// every send with advice the user has no control to follow.
-	if (!s.hasProject && (s.mode ?? 'code') === 'code') {
+	// Only a NEW code chat can pick a project; refusing an open one sent the user
+	// looking for a picker that is not there (found by the phone-composer journey).
+	if (!s.hasProject && (s.mode ?? 'code') === 'code' && !s.isBoundSession) {
 		return { notice: { message: 'Select a project first.', tone: 'warning' } };
 	}
 

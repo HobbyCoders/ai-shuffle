@@ -50,7 +50,7 @@
 	import LimitResumeBanner from './LimitResumeBanner.svelte';
 	import { isAdmin } from '$lib/stores/auth.svelte';
 	import { acknowledge, acknowledgedTokens, coldSendText, shouldWarn } from './cold-send';
-	import { notify } from '$lib/stores/notifications';
+	import { notify, type NotificationSeverity } from '$lib/stores/notifications';
 	import { evaluateSubmitGuards, gateBlocksComposer, projectRulesLane, sendButtonState, NO_CREDENTIAL_REASON } from './submit-guards';
 	import { attachmentBlockReason } from './attach-disable';
 	// Collapse / gesture / sheet behaviour is the mobile app's; the web build
@@ -881,6 +881,15 @@
 		}
 	}
 
+	/**
+	 * Say why a send did not go out, at once and where the user is looking: a
+	 * live banner. A plain notification only adds to the bell's count (in the
+	 * closed drawer on a phone), so the refused tap read as a dead button.
+	 */
+	function refuseSend(message: string, severity: NotificationSeverity) {
+		notify.banner(message, { severity, persist: false, duration_ms: 6000 });
+	}
+
 	// Handle form submission
 	async function handleSubmit(compactBeforeSend = false) {
 		if (!ownsComposer() || heldForCatalog || (compacting && !compactBeforeSend)) return;
@@ -904,10 +913,11 @@
 			hasProject: !!$activeSession.project || !!$activeSession.projectV2Id,
 			// The project guard is a code-lane requirement; the projectless lanes
 			// would otherwise refuse every send.
-			mode: projectLane
+			mode: projectLane,
+			isBoundSession: !!$activeSession.sessionId
 		});
 		if (block) {
-			if (block.notice) notify(block.notice.message, { severity: block.notice.tone });
+			if (block.notice) refuseSend(block.notice.message, block.notice.tone);
 			return;
 		}
 
@@ -947,7 +957,7 @@
 		if (loaded) activeSession.resolveComposerDefaultsAfterCatalog();
 		if (!loaded || appData.projectCatalogFailed) {
 			catalogHoldWaived = true;
-			notify("Projects didn't load, so your usual project and branch may not be set. Check them, then send again.", { severity: 'warning' });
+			refuseSend("Projects didn't load, so your usual project and branch may not be set. Check them, then send again.", 'warning');
 			return false;
 		}
 		return true;
@@ -1047,7 +1057,7 @@
 			// earlier attempt's banner standing.
 			const now = get(activeSession);
 			if (!(now.error && reasonSet.error) && !(now.worktreeError && reasonSet.worktreeError)) {
-				notify('Message not sent. Try again.', { severity: 'warning' });
+				refuseSend('Message not sent. Try again.', 'warning');
 			}
 			// A slow create can fail after the user started a new message: put
 			// the refused one back in front of it instead of replacing it.

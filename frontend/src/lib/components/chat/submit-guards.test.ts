@@ -109,6 +109,24 @@ describe('evaluateSubmitGuards', () => {
 		expect(block!.notice).toEqual({ message: 'Select a project first.', tone: 'warning' });
 	});
 
+	// An open code chat whose project was deleted (sessions.project_id is
+	// ON DELETE SET NULL) has no project and no picker to choose one: refusing
+	// it with "Select a project first." blocked every send for good. The
+	// project guard is for choosing a project for a NEW code chat only.
+	it('lets an open code chat without a project send (its project is fixed)', () => {
+		expect(evaluateSubmitGuards(ready({ hasProject: false, mode: 'code', isBoundSession: true }))).toBeNull();
+	});
+
+	it('still asks a new code chat for a project', () => {
+		const block = evaluateSubmitGuards(ready({ hasProject: false, mode: 'code', isBoundSession: false }));
+		expect(block!.notice?.message).toBe('Select a project first.');
+	});
+
+	it('still blocks an open chat for a missing agent or a running upload', () => {
+		expect(evaluateSubmitGuards(ready({ hasProject: false, isBoundSession: true, hasProfile: false }))!.notice?.message).toMatch(/agent/i);
+		expect(evaluateSubmitGuards(ready({ hasProject: false, isBoundSession: true, isUploading: true }))!.notice?.message).toMatch(/upload/i);
+	});
+
 	// A projectless lane skips only the project guard; everything ahead of it in
 	// the chain still applies.
 	it('still blocks a chat-lane send with no agent selected', () => {
