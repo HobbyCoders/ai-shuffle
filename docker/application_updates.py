@@ -47,6 +47,9 @@ def atomic_json(path, value):
 # Immutable interpreter from the Dockerfile's python base image. A handed-over
 # supervisor's sys.executable may belong to an overlay or an older release venv.
 IMAGE_PYTHON = "/usr/local/bin/python3"
+# Bump when the venv/pip installation recipe changes independently of signed inputs.
+PYTHON_DEPENDENCY_RECIPE = 1
+PYTHON_DEPENDENCY_PROBES = ("fastapi", "uvicorn", "httpx", "pydantic", "cryptography")
 ORIGIN = "https://hobbycoders.com"
 REVISION = re.compile(r"[a-f0-9]{40}")
 DIGEST = re.compile(r"[a-f0-9]{64}")
@@ -1153,8 +1156,10 @@ class ContainerUpdates:
         interchangeable even if they report the same language version.
         """
         if kind == "python":
-            code = ("import json,platform,sys,sysconfig; print(json.dumps({"
+            code = ("import json,platform,sys,sysconfig,ensurepip,importlib.metadata,importlib.util; print(json.dumps({"
                     "'version':sys.version,'platform':sys.platform,'machine':platform.machine(),"
+                    "'ensurepip':ensurepip.version(),"
+                    "'pip':importlib.metadata.version('pip') if importlib.util.find_spec('pip') else None,"
                     "'abi':sysconfig.get_config_var('SOABI'),'tag':sys.implementation.cache_tag,"
                     "'site':sysconfig.get_path('purelib',vars={'base':'','platbase':''}).lstrip('/')}))")
             command = [executable, "-I", "-c", code]
@@ -1166,6 +1171,10 @@ class ContainerUpdates:
             identity = json.loads(output)
             if kind == "python":
                 if not isinstance(identity, dict) or not re.fullmatch(r"lib(?:64)?/python[0-9.]+/site-packages", identity.get("site", "")):
+                    return None
+                if not isinstance(identity.get("ensurepip"), str) or not identity["ensurepip"]:
+                    return None
+                if identity.get("pip") is not None and (not isinstance(identity["pip"], str) or not identity["pip"]):
                     return None
                 identity["executable"] = str(Path(executable).resolve())
                 identity["binary"] = file_digest(Path(executable))
@@ -1190,30 +1199,162 @@ class ContainerUpdates:
             digest.update(b"\0" + name.encode() + b"\0" + (source / name).read_bytes())
         return digest.hexdigest()
 
-    def cached_dependencies(self, group, key):
+    @staticmethod
+    def dependency_contents(directory, group):
+        """Fingerprint all file metadata and critical executable contents.
+
+        Full-file hashing cost 23s with cold-data hints on a realistic NVMe
+        installation. Check every path/size/mode/mtime/inode/link; hash entrypoints,
+        installation metadata and native code. This is local damage detection,
+        not a security boundary against an owner forging cache files/metadata.
+        """
+        payload = directory / ("venv" if group == "python" else "node_modules")
+        if payload.is_symlink() or not payload.is_dir():
+            raise ValueError("Missing dependency payload")
+        resolved = payload.resolve()
+        digest = hashlib.sha256(b"dependency-contents-2\0")
+        critical, directory_modes, nonempty = set(), {}, set()
+
+        def unreadable(error):
+            raise error
+
+        def exported_paths(value):
+            if isinstance(value, str):
+                yield value
+            elif isinstance(value, dict):
+                for child in value.values():
+                    yield from exported_paths(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from exported_paths(child)
+
+        for base, directories, files in os.walk(payload, onerror=unreadable):
+            base = Path(base)
+            directory_modes[base.relative_to(payload).as_posix()] = base.stat().st_mode
+            links = [name for name in directories if (base / name).is_symlink()]
+            directories[:] = sorted(name for name in directories if name not in links)
+            if files or links:
+                parent = base
+                while parent != payload.parent:
+                    nonempty.add(parent.relative_to(payload).as_posix())
+                    parent = parent.parent
+            for name in sorted(files + links):
+                entry = base / name
+                relative = entry.relative_to(payload)
+                info = entry.lstat()
+                link = os.readlink(entry) if stat.S_ISLNK(info.st_mode) else None
+                record = [relative.as_posix(), info.st_mode, info.st_size, info.st_mtime_ns,
+                          info.st_ino, info.st_dev, link]
+                digest.update(json.dumps(record, separators=(",", ":")).encode() + b"\n")
+                if link is not None:
+                    target = entry.resolve(strict=True)
+                    if target.is_relative_to(resolved):
+                        if target.is_file():
+                            critical.add(target.relative_to(resolved))
+                    else:
+                        if group != "python" or relative.parent != Path("bin") or not name.startswith("python") or not target.is_file():
+                            raise ValueError("External dependency link")
+                        digest.update(file_digest(target).encode())
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    raise ValueError("Non-regular dependency payload")
+                native = name.endswith((".so", ".pyd", ".dll", ".node", ".wasm", ".dylib")) or ".so." in name
+                if native or info.st_mode & 0o111:
+                    critical.add(relative)
+                if group == "python":
+                    parts = relative.parts
+                    if "site-packages" in parts:
+                        parts = parts[parts.index("site-packages") + 1:]
+                        top_module = len(parts) == 1 and name.endswith(".py")
+                        package_init = len(parts) == 2 and name in ("__init__.py", "__main__.py")
+                        top_bytecode = name.endswith(".pyc") and (
+                            len(parts) == 2 and parts[0] == "__pycache__" or
+                            len(parts) == 3 and parts[1] == "__pycache__" and name.startswith(("__init__.", "__main__.")))
+                        metadata = any(part.endswith(".dist-info") for part in parts)
+                        if top_module or package_init or top_bytecode or metadata:
+                            critical.add(relative)
+                    if name.endswith(".pth") or name == "pyvenv.cfg":
+                        critical.add(relative)
+                elif name in ("package.json", "package-lock.json", ".package-lock.json"):
+                    critical.add(relative)
+                    if name == "package.json":
+                        package = json.loads(entry.read_bytes())
+                        if not isinstance(package, dict):
+                            raise ValueError("Invalid installed package manifest")
+                        declared = [package.get(field) for field in ("main", "module", "exports", "bin", "browser")]
+                        for value in ["index.js", *exported_paths(declared)]:
+                            if "*" in value or "?" in value:
+                                continue
+                            target = (base / value).resolve()
+                            if target.is_relative_to(resolved):
+                                for candidate in (target, Path(str(target) + ".js"), target / "index.js"):
+                                    if candidate.is_file():
+                                        critical.add(candidate.relative_to(resolved))
+                                        break
+        # Ignore only unused empty directories (e.g. Vite's transient temp dir).
+        for name in sorted(nonempty):
+            digest.update(json.dumps([name, directory_modes[name]]).encode() + b"\n")
+        for relative in sorted(critical):
+            digest.update(b"\0critical\0" + os.fsencode(relative.as_posix()) + b"\0")
+            digest.update(file_digest(payload / relative).encode())
+        return digest.hexdigest()
+
+    @staticmethod
+    def probe_dependencies(directory, env=None):
+        # A bounded smoke import catches unusable core packages beyond metadata.
+        # -I ignores ambient module paths; -B never changes shared bytecode.
+        code = ("import importlib,importlib.util; "
+                f"[importlib.import_module(name) for name in {PYTHON_DEPENDENCY_PROBES!r} "
+                "if importlib.util.find_spec(name)]")
+        try:
+            subprocess.run([str(directory / "venv/bin/python"), "-I", "-B", "-c", code],
+                           env=env, check=True, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=15)
+            return True
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    def complete_dependencies(self, directory, group, key, env=None):
+        try:
+            if group == "python" and not self.probe_dependencies(directory, env):
+                raise ValueError("Dependency import probe failed")
+            contents = self.dependency_contents(directory, group)
+            atomic_json(directory / ".complete", {"format": 2, "key": key, "contents": contents})
+        except (OSError, ValueError, RuntimeError):
+            # Still usable by this revision, but never publish an unverified cache.
+            _log("Dependency installation cannot be verified; keeping it private to this revision")
+
+    def cached_dependencies(self, group, key, env=None):
         root = self.root / "dependencies" / group / key
         root.mkdir(parents=True, exist_ok=True)
-        for candidate in sorted(root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+        for candidate in sorted(root.iterdir(), key=lambda p: p.lstat().st_mtime, reverse=True):
             try:
-                payload = candidate / ("venv/bin/python" if group == "python" else "node_modules")
-                if (not candidate.is_symlink() and payload.exists()
-                        and json.loads((candidate / ".complete").read_text()) == key):
+                if candidate.is_symlink():
+                    continue
+                marker = json.loads((candidate / ".complete").read_text())
+                if (isinstance(marker, dict)
+                        and marker.get("format") == 2 and marker.get("key") == key
+                        and marker.get("contents") == self.dependency_contents(candidate, group)
+                        and (group != "python" or self.probe_dependencies(candidate, env))):
                     return candidate, True
-            except (OSError, ValueError):
+            except (OSError, ValueError, RuntimeError):
                 pass
         # Venvs embed absolute paths. Build at the FINAL path and atomically
         # publish only the marker, never rename/copy an installed environment.
         return Path(tempfile.mkdtemp(prefix="build-", dir=root)), False
 
     def python_dependencies(self, directory, source, env, runtime_python):
-        names = ["requirements.lock", "requirements-native.lock", "requirements-voice.lock", "fluid/pyproject.toml"]
+        names = ["requirements.lock", "requirements-native.lock", "requirements-voice.lock",
+                 "fluid/pyproject.toml", "app/core/voice_dependencies.py"]
         if not all((source / name).is_file() for name in names):
             return None
         identity = self.dependency_identity("python", runtime_python or IMAGE_PYTHON, source, env)
+        if identity is not None:
+            identity = {**identity, "install_recipe": PYTHON_DEPENDENCY_RECIPE}
         key = self.dependency_key(source, names, identity)
         if key is None:
             return None
-        cached, complete = self.cached_dependencies("python", key)
+        cached, complete = self.cached_dependencies("python", key, env)
         if not complete:
             self.install_python_dependencies(cached, source, env, runtime_python, cache=True)
         verify_venv_python(cached, runtime_python)
@@ -1225,7 +1366,12 @@ class ContainerUpdates:
         site = directory / "venv" / identity["site"]
         site.mkdir(parents=True, exist_ok=True)
         dependencies = cached / "venv" / identity["site"]
-        (site / "dependencies.pth").write_text(f"import site; site.addsitedir({str(dependencies)!r})\n")
+        # Keep import-generated bytecode outside the shared installation, so
+        # normal imports never change its integrity manifest or retained code.
+        bytecode = str(directory / "pycache")
+        (site / "dependencies.pth").write_text(
+            f"import sys, site; sys.pycache_prefix = sys.pycache_prefix or {bytecode!r}; "
+            f"site.addsitedir({str(dependencies)!r})\n")
         return cached
 
     def install_python_dependencies(self, directory, source, env, runtime_python, cache=False):
@@ -1244,7 +1390,7 @@ class ContainerUpdates:
             _log("Optional ChatGPT voice libraries unavailable; call start can retry")
         else:
             if cache:
-                atomic_json(directory / ".complete", directory.parent.name)
+                self.complete_dependencies(directory, "python", directory.parent.name, env)
 
     def node_dependencies(self, package, source, env, identity):
         folder = source / package
@@ -1259,7 +1405,7 @@ class ContainerUpdates:
             self.run_build(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cached, env)
             # npm may omit node_modules for an empty dependency closure.
             (cached / "node_modules").mkdir(exist_ok=True)
-            atomic_json(cached / ".complete", key)
+            self.complete_dependencies(cached, "node/" + package, key)
         (folder / "node_modules").symlink_to(cached / "node_modules", target_is_directory=True)
         return cached
 
@@ -1297,7 +1443,7 @@ class ContainerUpdates:
             for key in [*root.glob("python/*"), *root.glob("node/*/*")]:
                 if key.is_dir() and not key.is_symlink() and not any(key.iterdir()):
                     key.rmdir()
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, RuntimeError):
             _log("dependency cleanup deferred; retained dependencies are kept")
 
     def build(self, directory, revision, version=None):

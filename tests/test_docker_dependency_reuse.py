@@ -1,5 +1,6 @@
 """Signed-source dependency reuse: deterministic installs, not timing thresholds."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -32,7 +33,7 @@ def build_feed(feed, monkeypatch, request):
     def run(command, cwd, env):
         commands.append((list(command), Path(cwd)))
         if command[1:3] == ["-m", "venv"]:
-            if request.node.name == "test_signed_second_revision_reuses_all_third_party_dependencies":
+            if request.node.name.startswith(("test_signed_second_revision_reuses_all_third_party_dependencies", "test_corrupt_completed_cache", "test_semantically_broken_cache")):
                 subprocess.run([*command, "--without-pip"], check=True, env=env,
                                capture_output=True, timeout=20)
             else:
@@ -49,6 +50,10 @@ def build_feed(feed, monkeypatch, request):
         elif command[:2] == ["npm", "ci"]:
             (cwd / "node_modules").mkdir(parents=True, exist_ok=True)
             (cwd / "node_modules/installed.txt").write_text("dependencies")
+            package = cwd / "node_modules/dependency-fixture"
+            package.mkdir()
+            (package / "package.json").write_text('{"main":"index.js"}')
+            (package / "index.js").write_text("module.exports = 'locked dependency';")
         elif command == ["npm", "run", "build"] and cwd.name == "frontend":
             (cwd / "build").mkdir(parents=True)
             (cwd / "build/index.html").write_text(env["GITHUB_SHA"])
@@ -60,6 +65,7 @@ def build_feed(feed, monkeypatch, request):
             "requirements.lock": "# pinned core\n",
             "requirements-native.lock": "# pinned native\n",
             "requirements-voice.lock": "# pinned voice\n",
+            "app/core/voice_dependencies.py": "# signed optional-dependency installer\n",
             "fluid/pyproject.toml": "[project]\nname='fluid'\nversion='0.1.0'\n",
             "fluid/fixture_revision.py": f"REVISION = {revision!r}\n",
         }
@@ -88,6 +94,16 @@ def npm_installs(commands):
 def test_signed_second_revision_reuses_all_third_party_dependencies(build_feed, tmp_path):
     updater, stage, _ = build_feed
     first = stage(B, 2)
+    cached = next((updater.root / "dependencies/python").glob("*/*/.complete")).parent
+    before_import = updater.dependency_contents(cached, "python")
+    old_python = updater.directory(B) / "venv/bin/python"
+    probe = "import sys; from fluid.fixture_revision import REVISION; import third_party_fixture; print(REVISION); print(sys.pycache_prefix)"
+    imported = subprocess.check_output([str(old_python), "-I", "-c", probe], cwd=tmp_path, text=True, timeout=10)
+    assert imported.splitlines() == [B, str(updater.directory(B) / "pycache")]
+    assert updater.dependency_contents(cached, "python") == before_import
+    updater.launch({}, activate=True)
+    updater.activating()
+    updater.healthy()
     second = stage(C, 3)
     assert installs(first) and len(npm_installs(first)) == 3
     assert installs(second) == [], "same signed closure must not reinstall third-party Python/voice dependencies"
@@ -98,6 +114,9 @@ def test_signed_second_revision_reuses_all_third_party_dependencies(build_feed, 
         [str(python), "-I", "-c", "from fluid.fixture_revision import REVISION; import third_party_fixture; print(REVISION)"],
         cwd=tmp_path, text=True, timeout=10)
     assert result.strip() == C, "reusing deps must never execute the previous Fluid source"
+    rollback = subprocess.check_output([str(old_python), "-I", "-c", probe], cwd=tmp_path, text=True, timeout=10)
+    assert rollback.splitlines() == [B, str(updater.directory(B) / "pycache")]
+    assert updater.dependency_contents(cached, "python") == before_import
 
 
 @pytest.mark.parametrize("lock", ["requirements.lock", "requirements-native.lock", "requirements-voice.lock"])
@@ -171,6 +190,113 @@ def test_interrupted_node_install_is_not_reused(build_feed, monkeypatch):
     assert npm_installs(second) == ["frontend", "tools", "browser-mcp"]
 
 
+@pytest.mark.parametrize("group", ["python", "node/tools"])
+@pytest.mark.parametrize("damage", ["missing", "same-size", "extra-bytecode", "symlink-loop"])
+def test_corrupt_completed_cache_builds_a_new_entry_without_repairing_retained_code(build_feed, tmp_path, group, damage):
+    updater, stage, _ = build_feed
+    stage(B, 2)
+    updater.launch({}, activate=True)
+    updater.activating()
+    updater.healthy()
+    root = updater.root / "dependencies" / group
+    old = next(root.glob("*/*/.complete")).parent
+    marker = (old / ".complete").read_bytes()
+    if group == "python":
+        payload = next((old / "venv/lib").glob("python*/site-packages/third_party_fixture.py"))
+    else:
+        payload = old / "node_modules/dependency-fixture/index.js"
+    original = payload.read_bytes()
+    original_stat = payload.stat()
+    if damage == "missing":
+        payload.unlink()
+    elif damage == "same-size":
+        payload.write_bytes(b"!" * len(original))
+        os.utime(payload, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        changed = payload.stat()
+        assert (changed.st_size, changed.st_mtime_ns, changed.st_ino) == (
+            original_stat.st_size, original_stat.st_mtime_ns, original_stat.st_ino)
+    elif damage == "symlink-loop":
+        payload.unlink()
+        payload.symlink_to(payload.name)
+    else:
+        payload = payload.parent / "__pycache__/unexpected.pyc"
+        payload.parent.mkdir(exist_ok=True)
+        payload.write_bytes(b"damaged bytecode")
+    second = stage(C, 3)
+    if group == "python":
+        assert len(installs(second)) == 2
+        assert npm_installs(second) == []
+    else:
+        assert installs(second) == []
+        assert npm_installs(second) == ["tools"]
+    entries = {item.parent for item in root.glob("*/*/.complete")}
+    assert len(entries) == 2 and old in entries, "a retained tree must never be repaired in place"
+    assert (old / ".complete").read_bytes() == marker
+    if damage == "missing":
+        assert not payload.exists()
+    elif damage == "symlink-loop":
+        assert payload.is_symlink() and os.readlink(payload) == payload.name
+    else:
+        assert payload.read_bytes() != original
+    if group != "python":
+        fresh = next(iter(entries - {old})) / "node_modules/dependency-fixture/index.js"
+        assert fresh.read_bytes() == original
+    python = updater.directory(C) / "venv/bin/python"
+    output = subprocess.check_output([str(python), "-I", "-c", "import third_party_fixture; print(third_party_fixture.VALUE)"],
+                                     cwd=tmp_path, text=True, timeout=10)
+    assert output.strip() == "locked dependency"
+
+
+def test_semantically_broken_cache_is_rejected_by_the_import_probe(build_feed, monkeypatch, tmp_path):
+    updater, stage, _ = build_feed
+    monkeypatch.setattr(updates, "PYTHON_DEPENDENCY_PROBES", ("third_party_fixture",))
+    stage(B, 2)
+    updater.launch({}, activate=True)
+    updater.activating()
+    updater.healthy()
+    old = next((updater.root / "dependencies/python").glob("*/*/.complete")).parent
+    module = next((old / "venv/lib").glob("python*/site-packages/third_party_fixture.py"))
+    module.write_text("raise RuntimeError('unusable installed package')\n")
+    # A content-valid installation can still be semantically unusable.
+    updates.atomic_json(old / ".complete", {"format": 2, "key": old.parent.name,
+                                            "contents": updater.dependency_contents(old, "python")})
+    second = stage(C, 3)
+    assert len(installs(second)) == 2
+    assert npm_installs(second) == []
+    assert module.read_text().startswith("raise RuntimeError"), "never repair the retained tree"
+    output = subprocess.check_output([str(updater.directory(C) / "venv/bin/python"), "-I", "-c",
+                                      "import third_party_fixture; print(third_party_fixture.VALUE)"],
+                                     cwd=tmp_path, text=True, timeout=10)
+    assert output.strip() == "locked dependency"
+
+
+@pytest.mark.parametrize("input_name", ["installer", "recipe", "pip", "ensurepip"])
+def test_python_install_recipe_inputs_invalidate_only_python(build_feed, monkeypatch, input_name):
+    updater, stage, _ = build_feed
+    stage(B, 2)
+    changes = None
+    if input_name == "installer":
+        changes = {"app/core/voice_dependencies.py": "# corrected signed installer\n"}
+    elif input_name == "recipe":
+        monkeypatch.setattr(updates, "PYTHON_DEPENDENCY_RECIPE", "next-recipe", raising=False)
+    else:
+        original_probe = updater.dependency_identity
+        monkeypatch.setattr(updater, "dependency_identity", lambda kind, *args:
+                            {**original_probe(kind, *args), input_name: "changed-version"} if kind == "python"
+                            else original_probe(kind, *args))
+    second = stage(C, 3, changes)
+    assert len(installs(second)) == 2
+    assert npm_installs(second) == []
+
+
+def test_selected_python_probe_records_the_effective_seed_and_base_pip_versions(feed, tmp_path):
+    import ensurepip
+    import importlib.metadata
+    identity = feed[0].dependency_identity("python", sys.executable, tmp_path, {})
+    assert identity["ensurepip"] == ensurepip.version()
+    assert identity["pip"] == importlib.metadata.version("pip")
+
+
 def test_runtime_and_package_manifest_are_dependency_inputs(tmp_path):
     (tmp_path / "package.json").write_text('{"dependencies":{"example":"1"}}')
     (tmp_path / "package-lock.json").write_text("locked")
@@ -198,6 +324,10 @@ def test_cache_requires_complete_marker_matching_key_and_payload(feed):
     third, complete = updater.cached_dependencies("node/tools", key)
     assert not complete and third not in (first, second)
     updates.atomic_json(first / ".complete", key)
+    assert updater.cached_dependencies("node/tools", key)[1] is False, "legacy existence-only markers are not proof"
+    updater.complete_dependencies(first, "node/tools", key)
+    broken_link = first.parent / "loop"
+    broken_link.symlink_to(broken_link.name, target_is_directory=True)
     assert updater.cached_dependencies("node/tools", key) == (first, True)
 
 
