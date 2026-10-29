@@ -166,25 +166,27 @@ def test_a_running_child_takes_the_message_at_its_next_tool_result(workers, monk
         assert not agent_messaging.may_message("someone-else", child)
 
 
-def test_a_parked_child_holds_the_message_unless_urgent(workers, monkeypatch, kicks):
+def test_a_parked_child_wakes_for_ordinary_messages_too(workers, monkeypatch, kicks):
     a, b, _ = network(workers, monkeypatch)
     child = started_child(a, b)
     with a.active():
         [turn] = [t for t in all_turns(child) if t["source"] == "provider_agent"]
         assert turns.start_turn(turn["id"])
         turns.park_turn(turn["id"], ["bg-1"])
-    held = send(b, child, "Ping when the scan is done.")
-    assert not held.is_error and "Default on ServerWorker" in held.text
-    assert held.text == agent_messaging.held_receipt("Default on ServerWorker")
+    ordinary = send(b, child, "Ping when the scan is done.")
+    assert not ordinary.is_error and ordinary.text == "Queued for Default on ServerWorker"
     with a.active():
-        assert message_turns(child) == []
+        [wake] = message_turns(child)
+        assert wake["prompt"].count("Ping when the scan is done.") == 1
+        assert wake["payload"]["task_peer_sender"] == "caller"
     urgent = send(b, child, "Stop the scan now.", urgent=True)
     assert not urgent.is_error and urgent.text == "Queued for Default on ServerWorker"
     with a.active():
-        [wake] = message_turns(child)
-        # The urgent wake carries the message held before it.
-        assert "Ping when the scan is done." in wake["prompt"]
-        assert "Stop the scan now." in wake["prompt"]
+        first, second = message_turns(child)
+        assert first["id"] == wake["id"]
+        assert second["prompt"].count("Stop the scan now.") == 1
+        assert "Ping when the scan is done." not in second["prompt"]
+    assert kicks.count(child) == 3  # initial dispatch and both message wakes
 
 
 # --- resume a finished child -----------------------------------------------------------

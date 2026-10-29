@@ -1,4 +1,5 @@
 """Worker-scoped account bindings, separate from shared LAN authorization."""
+import hmac
 import json
 import uuid
 from datetime import datetime, timezone
@@ -42,6 +43,11 @@ def create_schema(cursor):
         paired_client_id TEXT NOT NULL, decision TEXT NOT NULL,
         mobile_record_id TEXT NOT NULL, decided_at TEXT NOT NULL,
         PRIMARY KEY(server_id, device_id, paired_client_id)
+    )""")
+    # Hash of the per-worker proof an account installation sends at enrollment.
+    # Only the same installation can renew its entry and keep a decision.
+    cursor.execute("""CREATE TABLE IF NOT EXISTS mobile_install_proofs (
+        device_id TEXT PRIMARY KEY, proof_hash TEXT NOT NULL
     )""")
     cursor.execute("""CREATE TABLE IF NOT EXISTS mobile_key_renewals (
         device_id TEXT PRIMARY KEY, mobile_record_id TEXT NOT NULL,
@@ -152,11 +158,13 @@ def ownership(device_id=None, *, paired_client_id=None):
         return None
 
 
-def enroll(identity, info, key_hash, expires_at, scopes, *, session_token_hash=None, scoped=False):
-    """Never upsert: all three rows commit together or none do.
+def enroll(identity, info, key_hash, expires_at, scopes, *, session_token_hash=None, scoped=False,
+           install_proof_hash=None):
+    """All rows commit together or none do; an existing entry is never overwritten
+    except by renew_installation (same account, hub device and installation proof).
 
     Tombstone authorizations are intentionally retained after local deletion.
-    Reusing an old hub device identity requires explicit administrative repair.
+    Reusing a deleted or denied hub device identity requires a fresh identity.
     """
     hub_device_id = identity['device_id']
     device_id = local_device_id(identity['server_id'], hub_device_id) if scoped else hub_device_id
@@ -170,6 +178,9 @@ def enroll(identity, info, key_hash, expires_at, scopes, *, session_token_hash=N
         c = conn.cursor()
         from app.db.device_identity import lock_device_identity
         lock_device_identity(c, device_id)
+        if scoped and install_proof_hash and _renew_installation(
+                c, identity, info, device_id, key_hash, expires_at, scopes, install_proof_hash, now):
+            return device_id
         for table in ('mobile_devices', 'paired_clients', 'mobile_hub_authorizations', 'mobile_worker_authorizations'):
             c.execute(f"SELECT device_id FROM {table} WHERE device_id = %s", (device_id,))
             if c.fetchone():
@@ -199,7 +210,91 @@ def enroll(identity, info, key_hash, expires_at, scopes, *, session_token_hash=N
             c.execute('''UPDATE paired_clients SET session_token_hash=%s,
                 session_expires_at=%s WHERE id=%s''',
                 (session_token_hash, expires_at.isoformat(), client_id))
+        if scoped and install_proof_hash:
+            c.execute("""INSERT INTO mobile_install_proofs (device_id, proof_hash) VALUES (%s, %s)
+                ON CONFLICT(device_id) DO UPDATE SET proof_hash=excluded.proof_hash""",
+                (device_id, install_proof_hash))
     return device_id
+
+
+def _renew_installation(c, identity, info, device_id, key_hash, expires_at, scopes, proof_hash, now):
+    """Re-enrollment of an existing entry by the same account and hub device.
+
+    Returns False when there is no entry (a normal first enrollment). Raises
+    ValueError when the entry cannot be renewed. Otherwise replaces the key on
+    the SAME rows, so one phone keeps one entry across account sign-ins:
+
+    - Denied stays denied; a locally deleted entry stays a tombstone.
+    - A stored proof must match. Only then is it the same installation and an
+      approval is kept: the hub ticket proves the account and device id, but
+      anyone holding the account password can obtain a ticket for a known id.
+    - No stored proof (enrolled by an older app): the entry is treated like a
+      fresh enrollment, pending exactly as a new identity would be.
+    - Owner-revoked: comes back only as a request needing a manual decision;
+      a new record id makes the managed-worker auto-approval refuse it.
+    """
+    c.execute('SELECT * FROM mobile_worker_authorizations WHERE device_id=%s FOR UPDATE', (device_id,))
+    auth = c.fetchone()
+    if not auth:
+        return False
+    if (auth['account_id'] != identity['account_id'] or auth['server_id'] != identity['server_id']
+            or auth['hub_device_id'] != identity['device_id']):
+        raise ValueError('Device already authorized; use a fresh installation identity')
+    c.execute('SELECT * FROM paired_clients WHERE id=%s FOR UPDATE', (auth['paired_client_id'],))
+    client = c.fetchone()
+    c.execute('SELECT * FROM mobile_devices WHERE device_id=%s FOR UPDATE', (device_id,))
+    device = c.fetchone()
+    if (not client or not device or client['device_id'] != device_id
+            or device['paired_client_id'] != client['id']):
+        raise ValueError('Device already authorized; use a fresh installation identity')
+    c.execute("""SELECT decision FROM mobile_worker_confirmations
+        WHERE server_id=%s AND device_id=%s AND paired_client_id=%s FOR UPDATE""",
+        (auth['server_id'], device_id, client['id']))
+    previous = c.fetchone()
+    if previous and previous['decision'] == 'denied':
+        raise ValueError('This device was denied by the worker owner')
+    c.execute('SELECT proof_hash FROM mobile_install_proofs WHERE device_id=%s FOR UPDATE', (device_id,))
+    stored = c.fetchone()
+    if stored and not hmac.compare_digest(stored['proof_hash'], proof_hash):
+        raise ValueError('Device already authorized; use a fresh installation identity')
+    revoked = bool(client['revoked_at'] or device['revoked_at'])
+    keep_decision = stored is not None and not revoked
+    record_id = device['id'] if keep_decision else uuid.uuid4().hex[:8]
+    if not keep_decision:
+        # Revoked: pin the decision to the OLD record, so the renewed one reads
+        # as pending and is never "original"; only the owner can approve it.
+        decision_record = device['id'] if revoked else record_id
+        c.execute("""INSERT INTO mobile_worker_confirmations
+            (server_id, device_id, paired_client_id, decision, mobile_record_id, decided_at)
+            VALUES (%s, %s, %s, 'pending', %s, %s)
+            ON CONFLICT(server_id, device_id, paired_client_id) DO UPDATE
+            SET decision='pending', mobile_record_id=excluded.mobile_record_id, decided_at=excluded.decided_at
+            WHERE mobile_worker_confirmations.decision != 'denied'""",
+            (auth['server_id'], device_id, client['id'], decision_record, now))
+    # The old key, its renewal receipt and every session derived from it end here.
+    c.execute("""UPDATE mobile_devices SET id=%s, platform=%s, api_key_hash=%s, capabilities=%s,
+        api_key_expires_at=%s, scopes=%s, revoked_at=NULL,
+        fcm_token=CASE WHEN %s THEN fcm_token ELSE NULL END, last_seen=%s
+        WHERE device_id=%s""",
+        (record_id, info.platform, key_hash, json.dumps(info.capabilities.model_dump()),
+         expires_at.isoformat(), json.dumps(scopes), keep_decision, now, device_id))
+    # Expired slots are not bearer credentials, but their hashes let the next
+    # authenticated mint advance matching chat bindings. Carry that continuity
+    # only for a proof-matched, non-revoked installation. Logout clears even
+    # expired slots; never recover continuity from the device id alone.
+    c.execute("""UPDATE paired_clients SET revoked_at=NULL, scopes=%s,
+        session_token_hash=CASE WHEN %s THEN session_token_hash ELSE NULL END,
+        session_expires_at=NULL, updated_at=%s WHERE id=%s""",
+        (json.dumps(scopes), keep_decision, now, client['id']))
+    c.execute('DELETE FROM mobile_key_renewals WHERE device_id=%s', (device_id,))
+    if keep_decision:
+        c.execute('UPDATE paired_client_native_sessions SET expires_at=NOW() WHERE client_id=%s', (client['id'],))
+    else:
+        c.execute('DELETE FROM paired_client_native_sessions WHERE client_id=%s', (client['id'],))
+    c.execute('DELETE FROM paired_client_web_reservations WHERE client_id=%s', (client['id'],))
+    c.execute("""INSERT INTO mobile_install_proofs (device_id, proof_hash) VALUES (%s, %s)
+        ON CONFLICT(device_id) DO UPDATE SET proof_hash=excluded.proof_hash""", (device_id, proof_hash))
+    return True
 
 
 def confirmation(owner):
@@ -295,4 +390,39 @@ def list_confirmations():
             result.extend(dict(row) for row in c.fetchall())
     for item in result:
         item['confirmation'] = confirmation(item)
+    return result
+
+
+def lock_account_entry(cursor, entry):
+    """Hold a cleanup candidate against enrollment, use, repair and revocation.
+
+    Lock in enrollment order. The caller must re-read the candidate afterwards
+    and keep this transaction open through both the hub and local revocation.
+    """
+    from app.db.device_identity import lock_device_identity
+    lock_device_identity(cursor, entry['device_id'])
+    for table in ('mobile_worker_authorizations', 'mobile_hub_authorizations'):
+        cursor.execute(f'SELECT device_id FROM {table} WHERE device_id=%s FOR UPDATE', (entry['device_id'],))
+    cursor.execute('SELECT id FROM paired_clients WHERE id=%s FOR UPDATE', (entry['paired_client_id'],))
+    cursor.execute('SELECT id FROM mobile_devices WHERE device_id=%s FOR UPDATE', (entry['device_id'],))
+
+
+def live_account_entries(server_id, *, _conn=None):
+    """Unrevoked account-enrolled phones, including activity and credential generation."""
+    if _conn is None:
+        with get_db() as conn:
+            return live_account_entries(server_id, _conn=conn)
+    result = []
+    c = _conn.cursor()
+    for table in ('mobile_worker_authorizations', 'mobile_hub_authorizations'):
+        c.execute(f"""SELECT a.device_id, a.paired_client_id, a.account_id, a.hub_device_id,
+            a.server_id, p.device_name, p.platform, p.last_seen AS client_seen,
+            d.created_at, d.last_seen AS device_seen, d.id AS mobile_record_id, d.api_key_hash, f.decision
+            FROM {table} a
+            JOIN paired_clients p ON p.id=a.paired_client_id
+            JOIN mobile_devices d ON d.device_id=a.device_id AND d.paired_client_id=p.id
+            LEFT JOIN mobile_worker_confirmations f ON f.server_id=a.server_id
+                AND f.device_id=a.device_id AND f.paired_client_id=a.paired_client_id
+            WHERE a.server_id=%s AND p.revoked_at IS NULL AND d.revoked_at IS NULL""", (server_id,))
+        result.extend(dict(row) for row in c.fetchall())
     return result

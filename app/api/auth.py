@@ -500,9 +500,9 @@ async def logout(request: Request, response: Response):
     if cookie_token or not bearer_token:
         owner_auth.same_origin(request)
     for token in dict.fromkeys(t for t in (cookie_token, bearer_token) if t):
+        from app.core.pairing import hash_controller_session
         paired_client = await run_sync(get_paired_client_from_token, token, touch=False)
         if paired_client:
-            from app.core.pairing import hash_controller_session
             await run_sync(db.clear_paired_client_session, paired_client["id"], hash_controller_session(token))
             # The device's open sockets re-check now and close (4001) instead of
             # at their periodic re-check; its other live sessions pass and stay.
@@ -510,6 +510,9 @@ async def logout(request: Request, response: Response):
             close_paired_client_sockets(paired_client["id"])
             await run_sync(audit_service.log_logout, request, paired_client["id"], "paired_client")
         else:
+            # Renewal expires slots but retains their hashes for chat continuity.
+            # Logout must discard that proof even though it cannot authenticate.
+            await run_sync(db.clear_expired_paired_client_session, hash_controller_session(token))
             valid_session = await run_sync(db.get_auth_session, token)
             auth_service.logout(token)
             if valid_session:

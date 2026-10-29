@@ -953,9 +953,8 @@ async def test_delivery_submits_an_agent_message_naming_the_sender(tmp_path) -> 
     assert submitted[0].sender == "main"
 
 
-async def test_a_message_held_by_a_parked_receiver_gets_a_held_receipt(tmp_path) -> None:
-    """A parked receiver holds an ordinary message for its next wake, so the
-    sender must not read "Delivered" and wait for a reply; urgent still wakes."""
+async def test_a_message_wakes_a_parked_receiver_and_gets_a_delivery_receipt(tmp_path) -> None:
+    """An ordinary message starts a parked worker immediately, like urgent."""
     from fluid.engine.native import NativeLoop
     from fluid.tools.registry import BackgroundTaskReceipt
     from tests.unit.test_turn_source import _Provider
@@ -976,9 +975,10 @@ async def test_a_message_held_by_a_parked_receiver_gets_a_held_receipt(tmp_path)
             {"to": "research", "message": "halfway there"}, ToolCtx(),
         )
         assert not outcome.is_error
-        assert outcome.text.startswith("Held for research until it wakes")
-        assert "Delivered" not in outcome.text
-        assert not receiver.turn_running
+        assert outcome.text.startswith("Delivered to research")
+        await asyncio.wait_for(receiver.wait_turn(), 5)
+        assert receiver._queued_peer_messages == []
+        assert provider.requests[-1].messages[-1].text().count("halfway there") == 1
 
         outcome = await host.agent_message(
             {"to": "research", "message": "blocked", "urgent": True}, ToolCtx(),
