@@ -120,6 +120,17 @@ describe('shared catalog and concurrent curation', () => {
 		expect(saved().find((m: ProviderModelEntry) => m.id === 'new').pricing).toEqual({ prompt: '0.1' });
 	});
 
+	it('keeps rich unshared discovery across a null-snapshot echo of the same proven binding', async () => {
+		mocks.post.mockResolvedValue({ source: 'upstream', binding: 'fixture-binding-a', models: [entry('unshared', { pricing: { prompt: '0.1' } })], fetched_at: null });
+		render(ModelCuration, { row: router([]) });
+		await screen.findByRole('checkbox', { name: 'unshared' });
+		await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh model list' }) as HTMLButtonElement).disabled).toBe(false));
+		resourceSync.invalidate(['settings']);
+		await waitFor(() => expect(mocks.get).toHaveBeenCalledTimes(2));
+		await toggle('unshared');
+		expect(saved()[0].pricing).toEqual({ prompt: '0.1' });
+	});
+
 	it.each([false, true])('drops unshared old-key models when the binding changes (catalog event first=%s)', async (catalogFirst) => {
 		mocks.post.mockResolvedValue({ source: 'upstream', binding: 'fixture-binding-a', models: [entry('old-key-only')], fetched_at: null });
 		const view = render(ModelCuration, { row: router([]) });
