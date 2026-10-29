@@ -2,11 +2,12 @@
 
     python -m scripts.devloop up [--host 0.0.0.0 --browser-host IP] [--ttl-seconds N]
                                  [--no-vite] [--seed default|none] [--status PATH] [--ci]
-                                 [--claude-cli fake|none]
+                                 [--claude-cli fake|none] [--voice-engine gpt-live|grok]
+                                 [--fake-voice-host 127.0.0.1|0.0.0.0]
     python -m scripts.devloop status [--status PATH] [--wait SECONDS]
     python -m scripts.devloop down [--status PATH]
 
-``up`` starts the fake AI, an isolated app with its own throwaway PostgreSQL
+``up`` starts the fake AI and the fake voice provider, an isolated app with its own throwaway PostgreSQL
 (``app.preview_run``'s lease), and Vite dev with HMR for this checkout's
 frontend; seeds data; prints one access link; writes a status JSON. It
 restarts only the app process when a Python file under app/ or fluid/
@@ -56,6 +57,8 @@ FAILED_LINE = "DEVLOOP_FAILED"
 #: Monitor's pty went away. TaskStop SIGTERMs the group, then SIGKILLs every
 #: descendant about a second later; the guardian finishes what that cuts off.
 STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+#: ``up --voice-engine``: the engine the seed sets for calls (both reach the fake voice provider).
+VOICE_ENGINES = ("gpt-live", "grok")
 
 
 class StatusError(Exception):
@@ -490,9 +493,13 @@ def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
         parser.error("--port and --vite-port must differ")
     if not 0 < args.ttl_seconds <= 14400:
         parser.error("--ttl-seconds must be positive and at most four hours")
+    if str(args.fake_voice_host) not in ("127.0.0.1", "0.0.0.0"):
+        parser.error("--fake-voice-host must be 127.0.0.1 or 0.0.0.0 (the app reaches it over loopback)")
     if args.ci:
         if not args.host.is_loopback or args.browser_host is not None:
             parser.error("--ci binds loopback only (no --host/--browser-host)")
+        if not args.fake_voice_host.is_loopback:
+            parser.error("--ci binds loopback only (no --fake-voice-host)")
         if args.vite_port is not None:
             parser.error("--ci serves the stamped build; --vite-port does not apply")
         args.no_vite = True
@@ -543,6 +550,7 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     from docker import container_runtime as runtime
     from docker.container_runtime import stop_group
     from scripts.devloop.fake_ai import FakeAI
+    from scripts.devloop.fake_voice import FakeVoice
     from scripts.devloop.guardian import spawn_guardian
 
     if not args.no_vite:
@@ -562,7 +570,7 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                              daemon=True).start()
 
     old = {sig: signal.signal(sig, stop) for sig in STOP_SIGNALS}
-    fake = vite = watcher = instance = reporter = None
+    fake = fake_voice = vite = watcher = instance = reporter = None
     try:
         with scratch_directory("ai-shuffle-preview-") as raw:
             directory = Path(raw)
@@ -572,11 +580,17 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             guardian = spawn_guardian(args.status, directory)
             fake = FakeAI(log_path=directory / "fake-ai-requests.jsonl",
                           latency_ms=args.latency_ms, tps=args.tps)
+            # The app always reaches it over loopback; --fake-voice-host only
+            # opens its log and scenario controls to another machine.
+            fake_voice = FakeVoice(log_path=directory / "fake-voice.jsonl",
+                                   host=str(args.fake_voice_host))
             port = args.port or free_port()
             protected = free_port(exclude=(port,))
             vite_port = None if args.no_vite else (
                 args.vite_port or free_port(exclude=(port, protected)))
             extra = {"SHUFFLE_DEV_FAKE_AI_URL": fake.url,
+                     "SHUFFLE_DEV_FAKE_VOICE_URL": fake_voice.url,
+                     "SHUFFLE_DEV_VOICE_ENGINE": args.voice_engine,
                      "SHUFFLE_DEV_ACCESS_FILE": str(directory / "access.json"),
                      "SHUFFLE_DEV_SEED_FILE": str(directory / "seed.json")}
             if args.seed != "none":
@@ -608,6 +622,14 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             instance.database, instance.stopped = database, stopped
             instance.data["guardian"] = guardian
             instance.data["claude_cli"] = claude_cli or {"mode": "none"}
+            control_host = (instance.browser if not ipaddress.ip_address(str(args.fake_voice_host)).is_loopback
+                            else "127.0.0.1")
+            instance.data["fake_voice"] = {
+                "url": fake_voice.url, "engine": args.voice_engine,
+                "control": f"http://{control_host}:{fake_voice.port}/fake/",
+                "log": str(fake_voice.log_path),
+                "scenarios_dir": str(fake_voice.scenarios.directory),
+                "scenarios": sorted(fake_voice.scenarios.load())}
             holder["instance"] = instance
             log.info("status file: %s", args.status)
             instance.write()
@@ -653,11 +675,13 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             stop_group(vite, 10)
         if fake is not None:
             fake.close()
+        if fake_voice is not None:
+            fake_voice.close()
         if instance is not None:
             remove_own_status(args.status, os.getpid())
         for sig, handler in old.items():
             signal.signal(sig, handler)
-        log.info("stopped; app, PostgreSQL, Vite and the fake AI are down")
+        log.info("stopped; app, PostgreSQL, Vite, the fake AI and the fake voice are down")
 
 
 def down(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
@@ -755,6 +779,12 @@ def main(argv: list[str] | None = None) -> int:
                        help="Fake AI delay before each reply")
     start.add_argument("--tps", type=float, default=0.0,
                        help="Fake AI streamed tokens per second (0 = fast)")
+    start.add_argument("--voice-engine", choices=VOICE_ENGINES, default="gpt-live",
+                       help="Voice engine the seed sets for calls; both reach the fake voice provider")
+    start.add_argument("--fake-voice-host", type=ipaddress.ip_address,
+                       default=ipaddress.ip_address("127.0.0.1"),
+                       help="Bind the fake voice provider's log and scenario controls here "
+                            "(127.0.0.1, or 0.0.0.0 for a phone or emulator test on another machine)")
     start.add_argument("--claude-cli", choices=("fake", "none"), default="fake",
                        help="fake (default): a scripted claude CLI on the app's PATH, so Claude "
                             "Code chats run (scripts/devloop/fake_claude); none: leave PATH alone")

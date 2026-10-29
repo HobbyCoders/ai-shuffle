@@ -1,0 +1,6 @@
+{
+  "description": "The wake turn of [script:voice-wait]: the background build's result.",
+  "steps": [
+    {"text": "The build finished and passed. Nothing else needs doing."}
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "description": "The caller asks for something; the voice hands it to the chat agent (fake AI [script:voice-reply], a three-paragraph reply) with a short acknowledgement of its own. The reply must come back as one note and be said in full, once.",
+  "steps": [
+    {"wait_audio_ms": 300},
+    {"caller": "Can you check the build for me? [script:voice-reply]"},
+    {"handoff": true, "ack": "Let me check."}
+  ]
+}

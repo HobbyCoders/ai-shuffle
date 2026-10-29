@@ -52,6 +52,7 @@ import hmac
 import ipaddress
 import logging
 import os
+import re
 import secrets
 import time
 from dataclasses import dataclass
@@ -111,6 +112,8 @@ MUTATION_DENY_PREFIXES = (
     "/api/v1/voice",
 )
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+#: Placing a call on a chat: attach it, open its audio socket, hang up.
+_DEV_VOICE_CALL = re.compile(r"/api/v1/voice/sessions/[^/]+/(?:attach|audio|hangup)")
 #: The listener the agent browser uses (see :mod:`app.serve`). The browser is
 #: refused the worker's local and protected ports because a request from the
 #: same host to them is the owner; this one never confers that trust, and
@@ -353,6 +356,13 @@ def mutation_allowed(path: str, method: str) -> bool:
     # (issue #371). Owner only, even when the browser is also the owner.
     if path.startswith("/api/v1/sessions/") and path.rstrip("/").endswith("/attach-project"):
         return False
+    if _DEV_VOICE_CALL.fullmatch(path):
+        # Calls spend the owner's voice provider, so a preview may not place
+        # one (#420), except on a dev instance, whose only voice provider is
+        # the dev loop's fake (app.core.voice_endpoints).
+        from app.core.voice_endpoints import dev_calls_allowed
+
+        return dev_calls_allowed()
     return not path.startswith(MUTATION_DENY_PREFIXES)
 
 

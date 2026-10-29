@@ -101,7 +101,7 @@ async def test_handoff_reuses_same_session_and_composer_binding(monkeypatch, sel
         "model": selected, "profile_id": "profile-1", "effort": "high",
         "provider_id": "voice-funding-provider", "permission_mode": "default", "fast": True,
     })
-    monkeypatch.setattr(provider_agent, "validate_provider_model", lambda *args: SimpleNamespace(ok=True))
+    monkeypatch.setattr(provider_agent, "validate_provider_model", lambda *args, **kwargs: SimpleNamespace(ok=True))
     dispatch = AsyncMock()
     monkeypatch.setattr(provider_agent, "dispatch_worker", dispatch)
     submit = AsyncMock(return_value="turn-1")
@@ -117,6 +117,31 @@ async def test_handoff_reuses_same_session_and_composer_binding(monkeypatch, sel
     assert (overrides["provider"], overrides["model"], overrides["effort"]) == (provider, selected, "high")
     assert overrides["permission_mode"] == "default" and overrides["fast"] is True
     dispatch.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled,curated,handed_off", [(True, True, True), (False, True, False), (True, False, False)])
+async def test_handoff_runs_on_a_custom_provider_chat_as_a_typed_send_does(monkeypatch, enabled, curated, handed_off):
+    """A chat bound to a custom (OpenAI-compatible) provider takes typed sends,
+    so a call on it hands requests off too. The real validator runs: only the
+    cross-provider worker rule was refusing it ("model unavailable"); a
+    disabled row or an uncurated model is still refused."""
+    from app.core import turn_manager
+    row = {"id": "custom-1", "name": "Gateway", "provider_type": "custom", "api_dialect": "openai",
+           "enabled": enabled, "models_json": json.dumps([{"id": "local-model"}] if curated else [])}
+    monkeypatch.setattr(voice_stream.database, "get_session", lambda _: {
+        "model": "prov:custom-1:local-model", "profile_id": "p", "mode": "chat"})
+    monkeypatch.setattr(voice_stream.database, "get_model_provider", lambda pid, include_token=False: row
+                        if pid == "custom-1" else None)
+    submit = AsyncMock(return_value="turn-1")
+    monkeypatch.setattr(turn_manager, "submit_async", submit)
+    monkeypatch.setattr(turn_manager, "wait_settled", AsyncMock(return_value={"state": "completed"}))
+    monkeypatch.setattr(voice_stream, "_turn_reply", lambda session, turn: "Done")
+    reply = await voice_stream.delegate_to_selected_model("s1", "user: test")
+    assert (reply == "Done") is handed_off
+    assert submit.await_count == int(handed_off)
+    if not handed_off:
+        assert "unavailable" in reply
 
 
 @pytest.mark.asyncio

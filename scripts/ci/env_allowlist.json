@@ -2237,6 +2237,11 @@
     "reason": "Dev-loop launcher's loopback fake AI endpoint that the disposable preview seed registers as its provider; never inherited from the worker",
     "base_settings": false
   },
+  "SHUFFLE_DEV_FAKE_VOICE_URL": {
+    "kind": "internal",
+    "reason": "Dev-loop launcher's loopback fake realtime voice provider; voice calls use it only for a bare loopback ws:// URL on a launcher-marked disposable preview data directory, never inherited from the worker",
+    "base_settings": false
+  },
   "SHUFFLE_DEV_SEED": {
     "kind": "internal",
     "reason": "Dev-loop seed name; honoured only on a launcher-marked disposable preview data directory, never inherited from the worker",
@@ -2250,6 +2255,11 @@
   "SHUFFLE_DEV_UI": {
     "kind": "internal",
     "reason": "Dev-loop launcher flag: the disposable preview's UI is served by Vite dev, so the listener serves only /api/preview",
+    "base_settings": false
+  },
+  "SHUFFLE_DEV_VOICE_ENGINE": {
+    "kind": "internal",
+    "reason": "Dev-loop voice engine (gpt-live or grok) the disposable preview seed turns on; the seed acts on it only when calls resolve to the dev loop's fake voice provider, never inherited from the worker",
     "base_settings": false
   },
   "SHUFFLE_EXTENSION": {

@@ -1,0 +1,9 @@
+{
+  "description": "The provider ends the session for inactivity (GPT Live: session.closed with reason 'inactive'; Grok: a clean socket close). Plays once per chat line, so the next call on the chat stays up.",
+  "once": true,
+  "steps": [
+    {"wait_audio_ms": 300},
+    {"wait_ms": 800},
+    {"close": "inactive"}
+  ]
+}

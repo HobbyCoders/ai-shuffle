@@ -357,7 +357,52 @@ async def seed_default() -> dict:
         "projects": projects, "remotes": remote_urls, "worktree_path": created.worktree_path,
         "chats": chats, "long_chat_events": long_events,
         "claude_cli": await seed_claude_cli(),
+        "voice": await seed_voice(fake_url),
     }
+
+
+# ─── voice calls (the dev loop's fake voice provider) ───────────────────────
+
+
+#: ``up --voice-engine`` → (provider name, provider type, engine id).
+VOICE_SETUPS = {
+    "gpt-live": ("Fake voice (dev, GPT Live)", "openai", "gpt-live-1"),
+    "grok": ("Fake voice (dev, Grok)", "xai", "grok-voice-latest"),
+}
+
+
+async def seed_voice(fake_ai_url: str) -> dict:
+    """Voice calls on, on the engine ``SHUFFLE_DEV_VOICE_ENGINE`` names.
+
+    One OpenAI and one xAI provider row with a dummy key fund the GPT Live and
+    Grok engines, created and selected through the Settings handlers. Only
+    when the app resolves voice calls to the dev loop's fake
+    (``app.core.voice_endpoints``), so no call can reach a real provider with
+    them. The rows list no chat models, and their base URL is the fake AI, so
+    nothing else in the app sends them anywhere either.
+    """
+    from app.api import model_providers as api
+    from app.api.settings import VoiceSettingsUpdateRequest, update_voice_settings
+    from app.core.voice_endpoints import fake_voice_origin
+    from app.db.model_providers import get_all_model_providers
+
+    if fake_voice_origin() is None:
+        return {"skipped": "voice calls do not resolve to the dev loop's fake voice provider"}
+    engine = os.environ.get("SHUFFLE_DEV_VOICE_ENGINE") or "gpt-live"
+    if engine not in VOICE_SETUPS:
+        raise RuntimeError(f"unknown SHUFFLE_DEV_VOICE_ENGINE {engine!r}")
+    existing = {row.get("name"): row["id"] for row in get_all_model_providers()}
+    providers = {}
+    for key, (name, provider_type, _model) in VOICE_SETUPS.items():
+        providers[key] = existing.get(name) or (await api.create_provider(api.ModelProviderCreate(
+            name=name, provider_type=provider_type, base_url=fake_ai_url,
+            auth_token="dev-fake-voice-key-not-secret",
+        ), token="dev-seed")).id
+    model = VOICE_SETUPS[engine][2]
+    await update_voice_settings(VoiceSettingsUpdateRequest(
+        voice_mode_enabled=True, voice_model=model, voice_provider_id=providers[engine],
+    ), token="dev-seed")
+    return {"engine": engine, "model": model, "providers": providers}
 
 
 #: The composer's agent pick (frontend composer-preferences ``composer.profile``).

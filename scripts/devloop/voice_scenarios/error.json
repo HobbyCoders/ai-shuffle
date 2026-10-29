@@ -1,0 +1,9 @@
+{
+  "description": "The provider reports an error mid-call. Plays once per chat line, so a retry on the chat stays up.",
+  "once": true,
+  "steps": [
+    {"wait_audio_ms": 300},
+    {"wait_ms": 600},
+    {"error": "The fake voice provider had an internal error."}
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "description": "The call starts while the chat is still answering. The voice says that reply once it lands, then the caller asks something new, which is relayed too.",
+  "steps": [
+    {"wait_speech": 1},
+    {"wait_audio_ms": 200},
+    {"caller": "Thanks. Now check the build too. [script:voice-reply]"},
+    {"handoff": true, "ack": "On it."}
+  ]
+}

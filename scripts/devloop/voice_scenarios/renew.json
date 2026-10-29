@@ -1,0 +1,10 @@
+{
+  "description": "The caller asks; while the chat agent works (fake AI waits 4 s), the provider ends its session as expired. The app reconnects (a resumed session, no second greeting) and the reply is said there, once.",
+  "steps": [
+    {"wait_audio_ms": 300},
+    {"caller": "Check the build please. [script:voice-reply latency_ms=4000]"},
+    {"handoff": true, "ack": "Sure."},
+    {"wait_ms": 1200},
+    {"close": "expired"}
+  ]
+}
