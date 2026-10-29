@@ -1964,13 +1964,13 @@ def create_builtin_tools_server(
     # ------------------------------------------------------------------
     @tool(
         "NotifyDevices",
-        "Ask for the owner ONLY when you explicitly need their input or action. "
+        "Ask for the owner ONLY when you explicitly need input/action. "
         "Never for completions, parking, progress, errors, watches, expiry or updates. "
-        "Questions and approval/access cards trigger Needs you automatically; do not double-notify. "
-        "One notification per episode; retries dedupe by tool-use id. "
-        "Phone push requires a signed-in, linked HobbyCoders worker; otherwise sent: false, reason: not_linked. "
-        "Lock-screen text is fixed (AI Shuffle / A chat needs you), never chat titles or tool input. "
-        "sent means relay accepted, not displayed or seen. If not sent, ask in chat.",
+        "Question/approval/access cards notify automatically; do not double-notify. "
+        "One alert per episode; retries dedupe by tool-use id. "
+        "Push needs a signed-in, linked HobbyCoders worker; otherwise sent: false, reason: not_linked. "
+        "Fixed text: AI Shuffle / A chat needs you; no chat titles or tool input. "
+        "sent means relay accepted, not displayed or seen. Otherwise ask in chat.",
         {"type": "object", "properties": {
             "title": {"type": "string", "description": "Why you need the owner (not sent to the lock screen)."},
             "body": {"type": "string", "description": "The input or action you need (not sent to the lock screen)."},

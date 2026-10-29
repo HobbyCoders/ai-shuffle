@@ -347,7 +347,9 @@ def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384
         # The reason is the exception class plus its own message (socket, TLS,
         # JSON, or the status line above); hub bodies and credentials never
         # appear in it.
-        if suffix != 'push':  # Expected push refusals/outages are handled quietly by its outbox.
+        if suffix == 'push':
+            logger.debug('Account hub push failed (%s)', type(exc).__name__)
+        else:
             logger.warning('Account hub %s %s failed: %s: %s', method, suffix, type(exc).__name__, exc)
         if status == 503 and wait:
             detail = 'Account hub is paused'

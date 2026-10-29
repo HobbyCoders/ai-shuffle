@@ -65,11 +65,6 @@
 	],
 	"rules": [
 		{
-			"why": "phone push relay status and its account sign-in entry point",
-			"journeys": ["phone-notifications"],
-			"globs": ["frontend/src/lib/components/settings/pages/GeneralPage.svelte", "frontend/src/lib/components/settings/pages/editors/NotificationsRow.svelte", "app/api/push.py"]
-		},
-		{
 			"why": "mirrored chats: the sync check ChatView runs and the gate that shows it",
 			"journeys": ["mirrored-chat", "open-unloaded-chat"],
 			"globs": [

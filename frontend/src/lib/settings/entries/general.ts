@@ -9,13 +9,6 @@ import type { SettingEntry } from '../types';
 
 export const entries: SettingEntry[] = [
 	{
-		id: 'general.notifications',
-		category: 'general',
-		section: 'Notifications',
-		label: 'Notifications',
-		keywords: ['push', 'Android', 'phone', 'needs you', 'HobbyCoders', 'sign in']
-	},
-	{
 		id: 'general.theme',
 		category: 'general',
 		section: 'Appearance',

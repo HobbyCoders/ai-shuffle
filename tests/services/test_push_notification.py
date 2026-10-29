@@ -118,6 +118,19 @@ async def test_authenticated_relay_contract_without_chat_text(hub, reply, action
 
 
 @pytest.mark.asyncio
+async def test_transport_failures_log_only_exception_classes_at_debug(hub, monkeypatch, caplog):
+    import logging
+    caplog.set_level(logging.DEBUG, logger="app.core.account_hub")
+    caplog.set_level(logging.DEBUG, logger="app.services.push_notification")
+    monkeypatch.setattr(account_hub, "_PinnedHTTPS", Mock(side_effect=TimeoutError("private-test-sentinel")))
+    result = await PushNotificationService().send_notification("private-token", "ignored", "ignored", COMMAND)
+    assert not result.success and result.retry_after == 15
+    assert "TimeoutError" in caplog.text and "HubResponseError" in caplog.text
+    assert "private-test-sentinel" not in caplog.text and "private-token" not in caplog.text
+    assert all(record.levelno == logging.DEBUG for record in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_bad_shape_is_terminal_without_pruning_or_claiming_acceptance(hub):
     hub[1].append((400, {"error": "bad_shape"}, {}))
     result = await PushNotificationService().send_notification("token", "ignored", "ignored", COMMAND)

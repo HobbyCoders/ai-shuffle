@@ -1,15 +1,13 @@
-"""Owner relay status and self-service native push tokens."""
-from fastapi import APIRouter, Depends, HTTPException, Request
+"""Self-service native push tokens and silent attention-state refresh."""
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, SecretStr
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
-from app.api.auth import require_admin
 from app.api.mobile import get_device_with_scope
 from app.db import mobile
 from app.db.async_database import run_sync
-from app.services.push_notification import device_receives_push, push_notification_service
 
 class _PushRoute(APIRoute):
     def get_route_handler(self):
@@ -31,21 +29,6 @@ router = APIRouter(tags=["Notifications"], route_class=_PushRoute)
 class PushToken(BaseModel):
     model_config = ConfigDict(extra="forbid")
     token: SecretStr
-
-
-async def status():
-    devices = await run_sync(mobile.get_all_mobile_devices)
-    count = 0
-    for device in devices:
-        if device_receives_push(device) and await run_sync(mobile.push_device_is_live, device):
-            count += 1
-    linked = await run_sync(push_notification_service.is_linked)
-    return {"linked": linked, "devices": count, "enabled": linked}
-
-
-@router.get("/api/v1/settings/notifications")
-async def sender_status(_: str = Depends(require_admin)):
-    return await status()
 
 
 def _device(request):

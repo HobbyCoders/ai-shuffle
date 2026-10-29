@@ -1,4 +1,4 @@
-"""Owner relay status and authenticated self-device token rotation."""
+"""No web push settings; authenticated self-device token rotation remains."""
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
@@ -15,26 +15,10 @@ PATH = "/api/v1/settings/notifications"
 TOKEN_PATH = "/api/v1/mobile/push-token"
 
 
-def test_notification_status_requires_owner(client):
-    assert client.get(PATH).status_code in (401, 403)
-
-
-@pytest.mark.parametrize("linked", [True, False])
-def test_status_returns_link_devices_and_enabled(native, authenticated_client, monkeypatch, linked):
-    client, headers, _ = native
-    assert client.put(TOKEN_PATH, headers=headers, json={"token": "test-token"}).status_code == 200
-    monkeypatch.setattr(push.push_notification_service, "is_linked", lambda: linked)
-    response = authenticated_client.get(PATH)
-    assert response.status_code == 200
-    assert response.json() == {"linked": linked, "devices": 1, "enabled": linked}
-    assert "no-store" in response.headers["cache-control"]
-    assert "test-token" not in response.text
-
-
-@pytest.mark.parametrize("method", ["put", "delete"])
-def test_sender_key_routes_are_removed(authenticated_client, method):
+@pytest.mark.parametrize("method", ["get", "put", "delete"])
+def test_push_settings_routes_are_removed(authenticated_client, method):
     response = getattr(authenticated_client, method)(PATH)
-    assert response.status_code == 405
+    assert response.status_code == 404
 
 
 @pytest.fixture
@@ -106,8 +90,8 @@ def test_scope_expiry_and_foreign_device_cannot_register(native):
 
 def test_native_key_cannot_write_sender_and_unpaired_snapshot_is_refused(native):
     client, headers, _ = native
-    assert client.get(PATH, headers=headers).status_code == 403
-    assert client.put(PATH, headers=headers, json={"service_account": "not-secret"}).status_code == 405
+    assert client.get(PATH, headers=headers).status_code == 404
+    assert client.put(PATH, headers=headers, json={"service_account": "not-secret"}).status_code == 404
     assert client.get("/api/v1/mobile/push-state").status_code == 401
 
 

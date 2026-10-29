@@ -23,7 +23,6 @@
 	import Switch from '../rows/Switch.svelte';
 	import { getEntry } from '$lib/settings/registry';
 	import ThemeStyleGrid from './editors/ThemeStyleGrid.svelte';
-	import NotificationsRow from './editors/NotificationsRow.svelte';
 
 	type ThemeChoice = 'light' | 'dark' | 'system';
 	const THEME_OPTIONS: { value: ThemeChoice; label: string }[] = [
@@ -166,7 +165,6 @@
 			<SelectField value={$timezonePreference} groups={TIME_ZONES} onchange={setTimezone} />
 		</SettingRow>
 	</RowGroup>
-	<NotificationsRow />
 </PreferencePage>
 
 {#snippet chatRow(id: string, key: ChatKey)}

@@ -57,7 +57,7 @@ Disconnect the worker from your account in **Settings → Devices**, and remove 
 
 Phone notifications need a HobbyCoders account sign-in. Sign in and link each worker in **Settings → Devices → Shuffle account**. Workers that are not linked get no phone push; local use and the in-app bell are unaffected. Notifications go through the HobbyCoders account-hub relay using the worker’s account link. No Firebase sender key is stored on your workers.
 
-Use the Firebase-configured Android build, pair it with each linked worker you use, and allow the app’s one-time notification prompt. **Settings → General → Notifications** shows whether phone notifications are on and how many Android devices are registered with this worker. Removing a paired phone revokes its registration; rotating its token updates the registration automatically.
+Use the Firebase-configured Android build and pair it with each linked worker you use. Android asks for system notification permission once at app start; there is no extra explanation dialog. Removing a paired phone revokes its registration; rotating its token updates the registration automatically.
 
 The **Needs you** channel alerts only when a chat goes from no pending needs to at least one question, permission/approval card, private-access request/approval or trailing prose question, or when an agent explicitly asks for you with `NotifyDevices`. More pending items update the same notification silently. Answering, dismissing, expiry or settling clears it once nothing needs you. Completions, parking, progress, errors, watches and update notices never produce phone alerts; the in-app bell still works as before.
 

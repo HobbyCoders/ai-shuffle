@@ -111,6 +111,7 @@ class PushNotificationService:
                 return NotificationResult(False, error="relay did not accept the send")
             return NotificationResult(True, message_id=result.get("message_id"))
         except Exception as exc:
+            logger.debug("Attention push transport failed (%s)", type(exc).__name__)
             status = account_hub.hub_status(exc)
             if status in (401, 403):
                 self._rejected_binding = identity
