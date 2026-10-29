@@ -1261,6 +1261,33 @@
           "past_bug": "An old agent flag made the rewind dialog offer a file restore the backend always refused, with a warning that blamed a missing checkpoint."
         },
         {
+          "id": "harness-basics.source-update-dependency-reuse",
+          "check": "Docker source revisions reuse only complete compatible dependencies and run current Fluid",
+          "kind": "owner",
+          "needs": ["install"],
+          "how": "Use only a disposable candidate container, synthetic data and an ephemeral signed-source acceptance feed; this cannot be proved by a normal dev preview. Stage two source revisions with identical Python/Node dependency closures, changing a harmless Fluid probe in the second. Record third-party pip downloads/install commands and npm ci by package, excluding the separately installed current Fluid code. Import the changed Fluid probe in a fresh interpreter. Change one Python lock, then one Node package lock in separate signed fixtures. Interrupt only the candidate during an incomplete dependency installation and retry. Stage enough revisions to exercise cleanup, then restart each retained revision. Repeat once with AI_SHUFFLE_PERF_DOCKER_DEPENDENCY_REUSE=0. Never stop a production updater or use production signing keys.",
+          "pass_when": "The second identical-closure revision makes zero third-party pip downloads/installs and zero npm ci calls, yet executes the new Fluid code. Each lock change misses only its relevant dependency cache. Interrupted/partial environments are never reused; active and retained revisions remain startable at the original venv paths, and no more than two unused complete environments per package remain. The rollback flag restores per-revision dependency preparation without weakening signatures or runtime checks. These are real-candidate acceptance checks, not a pass from the offline wheel lab.",
+          "past_bug": "Every container source update created a fresh Python environment and reinstalled byte-identical dependencies, while reusing an entire old app environment would run stale Fluid code."
+        },
+        {
+          "id": "harness-basics.source-update-desktop-wake-build",
+          "check": "Installed desktop builds reuse unchanged outputs and consume web update commands once",
+          "kind": "owner",
+          "needs": ["device", "install"],
+          "how": "Use only disposable installed desktop and older-worker candidates, synthetic data and signed acceptance fixtures; this needs the installed control connection rather than a normal preview. Stage two revisions changing app/Fluid only, then separate revisions changing a tool source, a browser build script and one package lock. Record build/npm subprocesses and run the new app/Fluid code. From the real web Updates action just after an authenticated bridge heartbeat, record command enqueue/consume receipts without waiting for another timer tick; duplicate a wake and let another heartbeat pass. Expire a queued request, disconnect/reconnect the candidate, and stop/restart only its app while a wake request is held. Test old-worker 404 fallback and each of AI_SHUFFLE_PERF_DESKTOP_BUILD_REUSE=0 and AI_SHUFFLE_PERF_DESKTOP_UPDATE_PUSH=0. Refuse invalid-token, wrong-listener and nonlocal wake access. Never upgrade or stop production workers.",
+          "pass_when": "Unchanged packages run zero builds and npm ci while current app/Fluid code runs. A source edit rebuilds only its package; a script-only edit does not reinstall dependencies, and a lock change installs only its package. The actual web command is consumed promptly and executes exactly once across duplicate hints/heartbeats; expired commands never run. A held request closes on disconnect, stop or restart, and never leaks another waiter. Old workers and the push rollback switch keep the unchanged 30-second polling path; the build rollback switch recompiles normally. Authentication, command expiry and atomic consumption stay enforced. Fake-clock or socket unit tests alone do not pass this installed-worker row.",
+          "past_bug": "Source updates rebuilt unchanged tools/browser/desktop packages and a build-script-only manifest edit invalidated npm reuse; web Update commands could wait for the next 30-second control poll."
+        },
+        {
+          "id": "harness-basics.source-update-prebuilt-ui",
+          "check": "Signed desktop and phone UI bundles skip local compilation and fail safely",
+          "kind": "owner",
+          "needs": ["device", "install"],
+          "how": "Use a disposable desktop install and candidate container with synthetic data and an ephemeral acceptance signing key; publication and an installed-launcher handover cannot be proved by a dev preview. Upgrade the desktop candidate from an older launcher to launcher 9, exercising the documented launcher-swap acceptance flow, then offer another signed source revision with its matching CI-produced desktop/phone UI asset. Record frontend npm ci/build invocations and the served revision/version stamp on / at 1280x800 and /mobile/ at 390x844. Repeat with an unreachable asset, corrupt asset bytes and a validly signed descriptor naming a wrong revision/version/tree; keep the independent source signature valid for those UI-fallback cases. Separately offer an invalid source signature. Repeat with AI_SHUFFLE_PERF_PREBUILT_UI=0 and with an older updater that ignores the optional UI field. Never publish test keys or update a production install.",
+          "pass_when": "A valid bundle skips every local frontend install/build and both actual shells serve the matching new revision/version. Invalid or missing UI falls back to verified-source compilation without changing runtime, first-boot or rollback checks; an invalid source signature still refuses the source update. The flag and older updater build locally. The installed swap, profile preservation, restart confirmation and rollback acceptance checks pass before release; an in-memory download fixture or preview alone does not pass this row.",
+          "past_bug": "Each source update reinstalled frontend dependencies and rebuilt identical desktop/phone UI; sharing unsigned or mismatched build output would risk stale or untrusted application assets."
+        },
+        {
           "id": "harness-basics.swarm-restart-settle",
           "check": "A swarm cut off by an app restart settles and can be cancelled",
           "kind": "owner",
