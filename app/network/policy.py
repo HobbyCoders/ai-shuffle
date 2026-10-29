@@ -13,6 +13,7 @@ Collections that are not listed here never leave the worker.
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
@@ -52,6 +53,9 @@ class Collection:
     # Optional hooks so a collection can adapt identity-bearing values.
     serialize_hook: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None
     materialize_hook: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None
+    # Map schema-defined secret leaves, returning their containing columns.
+    # Those columns are redacted as secrets, but not encrypted as outer blobs.
+    map_secrets: Optional[Callable[[Dict[str, Any], Callable[[str], str]], Tuple[str, ...]]] = None
     notes: str = ""
 
     def record_id(self, row: Mapping[str, Any]) -> str:
@@ -146,6 +150,49 @@ def _shared_setting_row(row: Mapping[str, Any]) -> bool:
     return is_shared_setting_key(str(row.get("key", "")))
 
 
+def _map_secret_keys(config, names, transform):
+    if not isinstance(config, dict):
+        return config
+    return {key: transform(value) if key in names and isinstance(value, str) and value else value
+            for key, value in config.items()}
+
+
+def _connector_secrets(record, transform):
+    from app.core.connector_service import get_sensitive_fields
+    if "config" not in record:
+        return ()
+    record["config"] = _map_secret_keys(record["config"], get_sensitive_fields(record.get("type")), transform)
+    return ("config",)
+
+
+def _automation_secrets(record, transform):
+    columns = []
+    if record.get("trigger_type") == "webhook" and "trigger_config" in record:
+        record["trigger_config"] = _map_secret_keys(record.get("trigger_config"), ("secret",), transform)
+        columns.append("trigger_config")
+    triggers = record.get("triggers")
+    # Older peers sent this TEXT column as JSON text rather than a wire array.
+    if isinstance(triggers, str):
+        triggers = json.loads(triggers)
+    if isinstance(triggers, list):
+        record["triggers"] = [
+            {**trigger, "config": _map_secret_keys(trigger.get("config"), ("secret",), transform)}
+            if isinstance(trigger, dict) and trigger.get("type") == "webhook" else trigger
+            for trigger in triggers]
+        columns.append("triggers")
+    return tuple(columns)
+
+
+def _setting_secrets(record, transform):
+    # Other settings (especially worker-local OAuth state) are not JSON secrets.
+    if record.get("key") not in ("connector_google_oauth", "connector_plaid_app") or not record.get("value"):
+        return ()
+    config = json.loads(record["value"])
+    record["value"] = json.dumps(_map_secret_keys(config, ("client_secret",), transform),
+                               separators=(",", ":"), ensure_ascii=False)
+    return ("value",)
+
+
 # ---------------------------------------------------------------------------
 # The registry
 # ---------------------------------------------------------------------------
@@ -185,7 +232,7 @@ _register(Collection(
 _register(Collection(
     name="system_settings", table="system_settings", keys=("key",),
     fields=("key", "value", "updated_at"), encrypted=("value",), resource="settings", priority=10,
-    shared_row=_shared_setting_row,
+    shared_row=_shared_setting_row, map_secrets=_setting_secrets,
     notes="Only keys is_shared_setting_key() accepts. Values that are enc: ciphertext travel decrypted."))
 
 _register(Collection(
@@ -288,7 +335,8 @@ _register(Collection(
             "project_id", "output_config", "max_turns", "timeout_seconds", "max_cost_per_run",
             "max_cost_per_day", "max_cost_total", "max_runs_per_day", "is_enabled", "requires_approval",
             "action_steps", "triggers", "owner_device_id", "model", "provider_id", "created_at", "updated_at"),
-    json_fields=("trigger_config", "output_config"), encrypted=("triggers", "trigger_config"),
+    json_fields=("trigger_config", "output_config", "triggers"), encrypted=("triggers", "trigger_config"),
+    map_secrets=_automation_secrets,
     local_fields=("status", "last_run_at", "last_error", "run_count", "failure_count", "total_cost_used"),
     resource="automations", priority=80,
     notes="Definition only. Runs, fires and approvals stay on the owner device."))
@@ -297,7 +345,7 @@ _register(Collection(
     name="connectors", table="connectors", keys=("id",),
     fields=("id", "type", "name", "api_user_id", "config", "events", "is_active", "owner_device_id",
             "created_at", "updated_at"),
-    json_fields=("config", "events"), encrypted=("config",),
+    json_fields=("config", "events"), encrypted=("config",), map_secrets=_connector_secrets,
     local_fields=("status", "status_message", "last_connected_at", "last_error", "last_event_at",
                   "failure_count", "runner_id"),
     resource="connectors", priority=80,

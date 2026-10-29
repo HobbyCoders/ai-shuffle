@@ -22,38 +22,28 @@ from app.core.connectors.registry import (  # noqa: F401
     get_available_types,
 )
 
-# Register built-in connector types
-from app.core.connectors.telegram import TelegramConnector
-from app.core.connectors.discord_connector import DiscordConnector
-from app.core.connectors.whatsapp import WhatsAppConnector
-from app.core.connectors.webhook_connector import WebhookConnector
-from app.core.connectors.slack import SlackConnector
-from app.core.connectors.line import LINEConnector
-from app.core.connectors.signal_connector import SignalConnector
-from app.core.connectors.imessage import IMessageConnector
-from app.core.connectors.msteams import MSTeamsConnector
-from app.core.connectors.bluebubbles import BlueBubblesConnector
-from app.core.connectors.spotify import SpotifyConnector
-from app.core.connectors.hue import HueConnector
-from app.core.connectors.homeassistant import HomeAssistantConnector
-from app.core.connectors.gmail import GmailConnector
-from app.core.connectors.plaid import PlaidConnector
+def __getattr__(name):
+    # Preserve explicit imports of the old package-level class exports without
+    # resolving every other connector as a side effect.
+    from app.core.connectors.registry import CATALOG, get_bundled_connector_class
+    for kind, spec in CATALOG["packages"].items():
+        if spec["class"] == name:
+            return get_bundled_connector_class(kind)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-register_connector("telegram", TelegramConnector)
-register_connector("discord", DiscordConnector)
-register_connector("whatsapp", WhatsAppConnector)
-register_connector("webhook", WebhookConnector)
-register_connector("slack", SlackConnector)
-register_connector("line", LINEConnector)
-register_connector("signal", SignalConnector)
-register_connector("imessage", IMessageConnector)
-register_connector("msteams", MSTeamsConnector)
-register_connector("bluebubbles", BlueBubblesConnector)
-register_connector("spotify", SpotifyConnector)
-register_connector("hue", HueConnector)
-register_connector("homeassistant", HomeAssistantConnector)
-register_connector("gmail", GmailConnector)
-register_connector("plaid", PlaidConnector)
+
+# Short-lived rollback switch: opt back into the original eager imports.
+import os as _os
+if _os.environ.get("AI_SHUFFLE_PERF_LAZY_CONNECTORS", "").strip().lower() in ("0", "false", "off"):
+    from importlib import import_module as _import_module
+    from app.core.connectors.registry import get_bundled_connector_class as _bundled
+    for _kind in get_available_types():
+        _bundled(_kind)
+    for _sdk in ("aiogram", "discord", "slack_sdk", "google.oauth2.credentials", "googleapiclient.discovery"):
+        try:
+            _import_module(_sdk)
+        except ImportError:
+            pass  # Optional SDKs were also tolerated by the eager implementation.
 
 # Global singleton — imported by other modules
 from app.core.connectors.manager import connector_manager  # noqa: F401, E402

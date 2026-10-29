@@ -4212,6 +4212,7 @@ from app.db.pairing import (  # noqa: F401
     ensure_paired_client_for_mobile,
     set_paired_client_session,
     clear_paired_client_session,
+    clear_expired_paired_client_session,
     consume_grant_for_runner,
 )
 
