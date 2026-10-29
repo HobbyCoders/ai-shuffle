@@ -18,6 +18,7 @@ import {
 	sidebarGroup,
 	isLiveStatus,
 	isTurnLiveStatus,
+	isWorkCountingStatus,
 	isRemovedDeviceSession,
 	isRemovedProjectSession,
 	isVisibleSidebarSession,
@@ -574,6 +575,20 @@ describe('sessionWorkMs (#1619)', () => {
 		for (const s of ['parked', 'done', 'idle', 'pr', 'pr_merged', 'offline'] as const) {
 			expect(isTurnLiveStatus(s)).toBe(false);
 		}
+	});
+
+	it('keeps counting while parked: a park only lasts while background work runs', () => {
+		for (const s of ['working', 'parked', 'needs_permission', 'has_question', 'await'] as const) {
+			expect(isWorkCountingStatus(s)).toBe(true);
+		}
+		for (const s of ['done', 'idle', 'pr', 'pr_merged', 'offline'] as const) {
+			expect(isWorkCountingStatus(s)).toBe(false);
+		}
+		// The server opens the park segment at the park time; the total grows
+		// from there with the clock.
+		const parkedAt = session({ work_ms: 60_000, work_started_at: '2026-10-01T12:00:00Z' });
+		expect(sessionWorkMs(parkedAt, Date.parse('2026-10-01T12:05:00Z'), isWorkCountingStatus('parked')))
+			.toBe(60_000 + 300_000);
 	});
 });
 

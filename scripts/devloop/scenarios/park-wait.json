@@ -1,0 +1,10 @@
+{
+  "description": "Starts a 20-second background job (Monitor) and ends its turn waiting on it, so the session parks for about 20 seconds; the job's completion wakes it with a plain echo reply. For the sidebar's parked state and its working-time timer.",
+  "steps": [
+    {
+      "text": "I'll start the build in the background.",
+      "tool_calls": [{"name": "Monitor", "input": {"command": "sleep 20 && echo 'build ok'"}}]
+    },
+    {"text": "The build is running in the background now. I'll wait for it."}
+  ]
+}

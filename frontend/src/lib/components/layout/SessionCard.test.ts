@@ -454,6 +454,19 @@ describe('SessionCard actions', () => {
 		expect(container.querySelector('.timer')?.textContent).toBe('2m 00s');
 	});
 
+	it('keeps counting while parked on background work', async () => {
+		// Parked at 12:05 with 90s banked; the server keeps the park's segment open.
+		const { container, rerender } = renderCard(
+			{ work_ms: 90_000, work_started_at: '2026-08-20T12:05:00Z' },
+			{ status: 'parked' }
+		);
+		expect(container.querySelector('.timer')?.textContent).toBe('2m 30s');
+
+		// Ten minutes later the background work is still running.
+		await rerender({ now: Date.parse('2026-08-20T12:16:00Z') } as never);
+		expect(container.querySelector('.timer')?.textContent).toBe('12m 30s');
+	});
+
 	it('closes a stale live interval at the last activity once the turn is done', () => {
 		// The done frame arrived before the row update that banks the turn:
 		// the interval ends at the last activity and does not keep growing.

@@ -2,9 +2,9 @@
 
 The sidebar card shows how long a session has actually worked. Every turn
 transition that ends a live interval banks it onto the session row once;
-idle gaps between turns (and the wait while a turn is parked on background
-work) never count. The total survives completion and parking and keeps
-growing when a later turn runs.
+idle gaps between turns never count, but the wait while a session is parked
+on its own background work does (owner decision, 2026-10-29). The total
+survives completion and keeps growing when a later turn runs.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -108,28 +108,135 @@ def test_running_turn_sets_live_start_and_settle_banks_it(mock_db):
     assert 89_000 <= banked <= 92_000
 
 
-def test_total_survives_park_and_grows_with_the_next_turn(mock_db):
-    """Run -> park -> (idle) -> wake -> complete: the total never resets, the
-    park wait is not counted, and the wake's own interval is added."""
+def _park(sid: str, turn_id: str, *, kind: str = "agent") -> dict:
+    """Park like the runtime does: marker written at turn end, then the park."""
+    database.set_session_parked_task_kind(sid, kind)
+    parked = turns.park_turn(turn_id, ["task-1"])
+    assert parked is not None
+    return parked
+
+
+def test_park_keeps_counting_until_the_parked_rows_settle(mock_db):
+    """Run -> park -> (background work) -> settle: the park wait counts,
+    because a session only parks while its own background work runs."""
     sid = _mk("wt-park")
     first = _run(sid, seconds=120)
-    parked = turns.park_turn(first["id"], ["task-1"])
-    after_park, live = _work(sid)
-    assert live is None
+    parked = _park(sid, first["id"])
+    after_park, open_at = _work(sid)
     assert after_park == turns.interval_ms(parked["started_at"], parked["ended_at"])
+    # The park segment opens at the park time.
+    assert turns.interval_ms(open_at, parked["ended_at"]) == 0
+    assert turns.interval_ms(parked["ended_at"], open_at) == 0
 
-    # The background work finishes much later; settling the parked row moves
-    # its ended_at but must not bank the wait.
-    turns.settle_parked_turns(sid)
-    assert _work(sid)[0] == after_park
-
-    wake = _run(sid, "unpark", seconds=30)
-    assert _work(sid)[0] == after_park  # a running turn banks nothing yet
-    done = turns.settle_turn(wake["id"], "completed")
+    # The background work runs for ten minutes, then the park settles.
+    _backdate_segment(sid, 600)
+    assert turns.settle_parked_turns(sid) == 1
     total, live = _work(sid)
     assert live is None
-    assert total == after_park + turns.interval_ms(done["started_at"], done["ended_at"])
-    assert total > after_park
+    assert 599_000 <= total - after_park <= 602_000
+
+    # Settled twice banks nothing more.
+    turns.settle_parked_turns(sid)
+    assert _work(sid)[0] == total
+
+
+def test_wake_turn_banks_the_park_and_counts_its_own_interval(mock_db):
+    sid = _mk("wt-wake")
+    first = _run(sid, seconds=120)
+    _park(sid, first["id"])
+    after_park = _work(sid)[0]
+    _backdate_segment(sid, 300)  # five minutes of background work
+
+    wake = turns.enqueue_turn(sid, "unpark", prompt="monitor completed")
+    started = turns.start_turn(wake["id"])
+    banked, live = _work(sid)
+    assert 299_000 <= banked - after_park <= 302_000
+    # The live segment is now the wake turn's own.
+    assert turns.interval_ms(live, started["started_at"]) == 0
+    assert turns.interval_ms(started["started_at"], live) == 0
+
+    done = turns.settle_turn(started["id"], "completed")
+    total, live = _work(sid)
+    assert live is None
+    assert total == banked + turns.interval_ms(done["started_at"], done["ended_at"])
+
+
+def test_clearing_the_parked_marker_closes_the_park(mock_db):
+    sid = _mk("wt-clear")
+    first = _run(sid, seconds=60)
+    _park(sid, first["id"])
+    after_park = _work(sid)[0]
+    _backdate_segment(sid, 120)
+    database.set_session_parked_task_kind(sid, None)
+    assert turns.close_park_segment(sid) is True
+    total, live = _work(sid)
+    assert live is None
+    assert 119_000 <= total - after_park <= 122_000
+    assert turns.close_park_segment(sid) is False
+
+
+def test_close_park_segment_leaves_a_live_turn_alone(mock_db):
+    sid = _mk("wt-close-live")
+    _run(sid, seconds=60)
+    before = _work(sid)
+    assert turns.close_park_segment(sid) is False
+    assert _work(sid) == before
+
+
+def test_restart_drops_the_park_without_counting_downtime(mock_db):
+    sid = _mk("wt-boot")
+    first = _run(sid, seconds=60)
+    _park(sid, first["id"])
+    after_park = _work(sid)[0]
+    _backdate_segment(sid, 3600)  # the server was down for an hour
+    assert turns.close_park_segment(sid, bank=False) is True
+    assert _work(sid) == (after_park, None)
+    # The parked row settling later must not bank the downtime either.
+    turns.settle_parked_turns(sid)
+    assert _work(sid) == (after_park, None)
+
+
+def test_adhoc_turn_beside_a_park_keeps_the_park_open(mock_db):
+    sid = _mk("wt-adhoc-park")
+    first = _run(sid, seconds=60)
+    _park(sid, first["id"])
+    after_park, open_at = _work(sid)
+    turns.record_adhoc_turn(sid, "api_query", prompt="side question")
+    banked, still_open = _work(sid)
+    assert still_open is not None
+    assert turns.interval_ms(still_open, open_at) == 0
+    assert turns.interval_ms(open_at, still_open) == 0
+    assert banked >= after_park
+
+
+def test_prompt_during_a_park_pauses_and_resumes_the_park(mock_db):
+    """Time a park's background work waits on the user is not working time,
+    and the answer starts the park's clock again."""
+    sid = _mk("wt-park-prompt")
+    first = _run(sid, seconds=60)
+    _park(sid, first["id"])
+    after_park = _work(sid)[0]
+    _backdate_segment(sid, 90)
+    assert turns.pause_session_work(sid) is True
+    paused, live = _work(sid)
+    assert live is None
+    assert 89_000 <= paused - after_park <= 92_000
+    assert turns.resume_session_work(sid) is True
+    assert _work(sid)[1] is not None
+    # Once the park has settled, an answer does not reopen anything.
+    turns.settle_parked_turns(sid)
+    database.set_session_parked_task_kind(sid, None)
+    assert _work(sid)[1] is None
+    assert turns.resume_session_work(sid) is False
+
+
+def test_stale_start_without_a_park_is_not_banked_at_the_next_turn(mock_db):
+    """A start a failed write left behind is not a park: the next turn
+    re-derives it without counting the idle gap."""
+    sid = _mk("wt-stale")
+    _backdate_segment(sid, 3600)
+    _run(sid)
+    assert _work(sid)[0] == 0
 
 
 def test_settle_is_banked_once(mock_db):

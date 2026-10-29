@@ -509,9 +509,10 @@ class Session(SessionBase):
     # stays False for unset/legacy construction.
     v2_stream: bool = False
     # Working time for the sidepanel card. ``work_ms`` is the banked total of
-    # every finished turn's live interval (idle gaps between turns never count);
-    # ``work_started_at`` is the running turn's start, NULL when none is live.
-    # The card shows ``work_ms`` plus the live interval while a turn runs.
+    # every finished turn's live interval and every park's wait on background
+    # work (idle gaps between turns never count); ``work_started_at`` is the
+    # open segment's start (the running turn, or the park), NULL when neither.
+    # The card shows ``work_ms`` plus the open segment while it runs.
     work_ms: int = 0
     work_started_at: Optional[datetime] = None
     last_user_message_at: Optional[datetime] = None

@@ -113,8 +113,10 @@
 	}: Props = $props();
 
 	// Statuses whose elapsed timer ticks live (1s) rather than showing a coarse age.
+	// A parked session's total keeps counting while its background work runs.
 	const LIVE_TICK_STATUSES: ReadonlySet<string> = new Set([
 		'working',
+		'parked',
 		'needs_permission',
 		'has_question',
 		'await'

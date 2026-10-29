@@ -248,6 +248,10 @@ async def clear_parked_marker_if_idle(session_id: str) -> bool:
     except Exception:
         logger.debug("parked-marker idle check failed", exc_info=True)
         return False
+    # The background work the park counted is over: stop the card's clock.
+    # Before the marker clear, so a turn that takes the live slot in between
+    # still sees the park and banks it up to its own start.
+    await close_park_work_time(session_id)
     cleared = await _write_parked_task_kind(session_id, None)
     if cleared:
         logger.info(
@@ -255,6 +259,31 @@ async def clear_parked_marker_if_idle(session_id: str) -> bool:
             "background task settled between turns", session_id,
         )
     return cleared
+
+
+async def close_park_work_time(session_id: str) -> bool:
+    """Bank a park's working time once the park ends with no turn following,
+    and push the new total to every sidebar. Never raises."""
+    try:
+        from app.db import turns as turns_db
+
+        closed = await asyncio.to_thread(turns_db.close_park_segment, session_id)
+    except Exception:
+        logger.debug("closing park work time failed for %s", session_id, exc_info=True)
+        return False
+    if closed:
+        await broadcast_work_time(session_id)
+    return closed
+
+
+async def broadcast_work_time(session_id: str) -> None:
+    """Push the session's working-time fields to every device. Never raises."""
+    try:
+        from app.core.session_runtime import _broadcast_work_time
+
+        await _broadcast_work_time(session_id)
+    except Exception:
+        logger.debug("work-time broadcast failed for %s", session_id, exc_info=True)
 
 
 async def settle_stopped_monitor_parks(session_id: str) -> bool:
@@ -291,6 +320,9 @@ async def settle_stopped_monitor_parks(session_id: str) -> bool:
                 if any(age < PENDING_WAKE_LIMIT_SECONDS for age in pending.values()):
                     return False
         settled = await asyncio.to_thread(turns_db.settle_parked_turns, session_id)
+        if settled:
+            # Settling banked the park's working time; show the final total.
+            await broadcast_work_time(session_id)
         await clear_parked_marker_if_idle(session_id)
         return bool(settled)
     except Exception:
