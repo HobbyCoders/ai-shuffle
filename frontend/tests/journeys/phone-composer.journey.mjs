@@ -39,8 +39,14 @@ const composerGeometry = (page) =>
 		const region = document.querySelector(`[aria-label="${label}"]`);
 		if (!region) return null;
 		const box = region.getBoundingClientRect();
-		const round = ['Send', 'Attach files', 'Start voice input'].map((name) => {
-			const el = region.querySelector(`button[aria-label="${name}"]`);
+		// The resting circle right of dictate is Send, or Talk when voice calls
+		// are on (composerCircles): the dev instance seeds voice on.
+		const visible = (name) =>
+			[...region.querySelectorAll(`button[aria-label="${name}"]`)].find((el) => el.getClientRects().length > 0);
+		const round = [['Send', 'Start a call in this conversation'], ['Attach files'], ['Start voice input']].map((names) => {
+			const found = names.map((n) => [n, visible(n)]).find(([, el]) => el);
+			const name = found ? found[0] : names.join(' or ');
+			const el = found?.[1];
 			if (!el) return { name, missing: true };
 			const r = el.getBoundingClientRect();
 			return { name, w: Math.round(r.width), h: Math.round(r.height), radius: parseFloat(getComputedStyle(el).borderTopLeftRadius) };
