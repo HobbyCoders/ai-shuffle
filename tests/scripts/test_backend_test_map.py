@@ -182,7 +182,6 @@ def test_module_names(path, expected):
     ("tests/test_top.py", True),
     ("tests/core/helpers.py", False),
     ("tests/integration/test_slow.py", False),
-    ("tests/core/test_chat_shell.py", False),
 ])
 def test_fast_subset_matches_the_workflow(path, expected):
     assert tm.fast_subset(path) is expected

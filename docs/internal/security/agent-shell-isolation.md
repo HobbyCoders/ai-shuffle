@@ -27,6 +27,13 @@ descriptor, keys and PostgreSQL files. It is off by default. The Windows
 split below is still pending, and the desktop apps keep the single-account
 boundary described here.
 
+Code-mode Python cells have no OS sandbox on any platform. The subprocess,
+import allowlist, audit/I/O guards, credential environment scrub and memory
+limits remain defence in depth. Every cell is write-class: Ask and Accept Edits
+prompt each time; Bypass approves. Host tool calls retain their own gates.
+Folder grants expose list/read/write only; `ChatRunCommand` requires an SSH
+machine grant and never falls back to an unsandboxed local command.
+
 ## Storage and process paths reviewed
 
 | Material | Writer / consumer | Current protection and remaining exposure |

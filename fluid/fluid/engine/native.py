@@ -6115,7 +6115,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 "tool_use_id": tool_use_id,
             })
 
-        # run_python is engine-driven: it opens the kernel; the kernel's in-sandbox
+        # run_python is engine-driven: it opens the kernel; the kernel's in-process
         # tool calls are gated by HostBridge (see CodeModeSession.run_python),
         # which runs its own MRTR round-trip through this loop's
         # ``_collect_input_responses`` — so an in-kernel input_required pause

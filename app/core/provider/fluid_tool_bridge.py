@@ -147,11 +147,6 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     # actions also wait for an on-phone Allow).
     "AndroidDevices": "safe",
     "AndroidAction": "write",
-    # This worker's emulator: actions change the device (and setup downloads
-    # the SDK), so the tool is gated; its read-only actions are classified
-    # safe per call (BUILTINS_RISK_CLASSIFIERS). A screenshot only looks.
-    "Emulator": "write",
-    "EmulatorScreenshot": "safe",
     # Monitor runs a host shell command; fluid rates its own Monitor "write".
     "Monitor": "write",
     "TaskOutput": "safe",
@@ -181,12 +176,6 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     "Swarm": "write",
 }
 
-def _emulator_risk(data: dict) -> str:
-    from app.mcp.emulator_tools import classify_risk
-
-    return classify_risk(data)
-
-
 # Per-call risk for builtins whose actions differ (``register_sdk_tools``).
 def _swarm_risk(data: dict) -> str:
     from fluid.tools.builtins.swarm import SPEC
@@ -195,7 +184,6 @@ def _swarm_risk(data: dict) -> str:
 
 
 BUILTINS_RISK_CLASSIFIERS: Mapping[str, Callable[[dict], str]] = {
-    "Emulator": _emulator_risk,
     "Swarm": _swarm_risk,
     "WorkingRecord": lambda data: "safe" if data.get("action") in ("list", "get") else "write",
 }

@@ -161,7 +161,7 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
     for target in ("tests/api", "tests/core", "tests/db", "tests/middleware", "tests/contract", "tests/performance",
                    "tests/mcp", "tests/services", "tests/unit", "tests/scripts", "tests/test_*.py"):
         assert target in text
-    for exclusion in ("--deselect=tests/test_scan_blocking_db.py", "--ignore=tests/core/test_chat_shell.py",
+    for exclusion in ("--deselect=tests/test_scan_blocking_db.py",
                       "--ignore=tests/core/test_container_runtime.py", "--ignore=tests/core/test_container_image_contract.py"):
         assert exclusion in text
     assert '-n 2' in text and 'scripts.ci.backend_shards' in text
@@ -172,13 +172,13 @@ def test_all_security_commands_flags_and_timing_artifacts_remain_unconditional()
     security = jobs["backend-security"]
     text = json.dumps(security)
     for command in ("tests/test_scan_blocking_db.py", "scripts/scan_blocking_db.py",
-                    "tests/core/test_chat_shell.py", "tests/core/test_agent_isolation_root.py",
+                    "tests/core/test_agent_isolation_root.py",
                     "tests/integration/test_postgres_safety.py", "tests/db/test_usage_budget_postgres.py",
                     "tests/core/test_pg_session_store.py", "tests/core/test_pg_session_store_rewind.py",
                     "python -m pip_audit --skip-editable", "python -m pip_audit -r requirements-voice.lock",
                     "tests/scripts", "tests/test_buyer_docs.py", "tests/core/test_docs_content.py"):
         assert command in text
-    for flag in ("CHAT_SHELL_REQUIRE_SANDBOX", "AGENT_ISOLATION_ROOT_REQUIRED", "PG_SAFETY_TEST"):
+    for flag in ("AGENT_ISOLATION_ROOT_REQUIRED", "PG_SAFETY_TEST"):
         assert any(step.get("env", {}).get(flag) == "1" for step in security["steps"])
     assert 'chmod -R go-w' in text
     contracts = json.dumps(jobs["backend-contracts"])

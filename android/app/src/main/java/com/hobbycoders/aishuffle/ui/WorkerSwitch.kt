@@ -23,7 +23,7 @@ internal object WorkerSwitch {
     private const val MAX_VALUE = 512
 
     const val MALFORMED = "Could not switch workers: that address is not valid."
-    const val UNKNOWN = "That worker is not paired with this phone. Pair it in Workers first."
+    const val UNKNOWN = "That worker is not paired with this phone. Connect it in Settings > Devices first."
 
     sealed class Decision {
         /** Not a switch request: the navigation is handled as before. */
@@ -32,8 +32,10 @@ internal object WorkerSwitch {
         data class Reject(val message: String) : Decision()
         /** The target is the worker already shown. */
         object AlreadyConnected : Decision()
-        /** A paired account worker this phone holds no key for yet: authorize it in Workers. */
-        data class NeedsAuthorization(val server: Server) : Decision()
+        /** A paired account worker without this phone's key: native Workers must enroll it first. */
+        data class NeedsAuthorization(val server: Server) : Decision() {
+            val message: String get() = "Tap ${server.name} to authorize it on this phone, then open chat."
+        }
         /** Open chat on this paired worker. */
         data class Open(val server: Server) : Decision()
     }

@@ -1767,15 +1767,6 @@ def create_builtin_tools_server(
 
     all_tools.extend([android_devices, android_action])
 
-    # This worker's Android emulator (app/mcp/emulator_tools.py); listed only
-    # where the platform has an emulator backend (Linux or Windows x86_64).
-    try:
-        from app.mcp.emulator_tools import build_emulator_tools
-
-        all_tools.extend(build_emulator_tools(tool, cwd=cwd))
-    except Exception:  # noqa: BLE001 — the emulator never blocks a session
-        logger.warning("emulator tool registration failed", exc_info=True)
-
     # ------------------------------------------------------------------
     # ScheduleWakeup — pause + resume session after a delay
     # ------------------------------------------------------------------
@@ -1964,12 +1955,13 @@ def create_builtin_tools_server(
     # ------------------------------------------------------------------
     @tool(
         "NotifyDevices",
-        "Ask for the owner ONLY when you explicitly need their input or action. "
+        "Ask for the owner ONLY when you explicitly need input/action. "
         "Never for completions, parking, progress, errors, watches, expiry or updates. "
-        "Questions and approval/access cards trigger Needs you automatically; do not double-notify. "
-        "One notification per episode; retries dedupe by tool-use id. "
-        "Lock-screen text is generic (AI Shuffle / chat title), never title/body/data. "
-        "sent means FCM accepted, not displayed or seen. If not sent, ask in chat.",
+        "Question/approval/access cards notify automatically; do not double-notify. "
+        "One alert per episode; retries dedupe by tool-use id. "
+        "Push needs a signed-in, linked HobbyCoders worker; otherwise sent: false, reason: not_linked. "
+        "Fixed text: AI Shuffle / A chat needs you; no chat titles or tool input. "
+        "sent means relay accepted, not displayed or seen. Otherwise ask in chat.",
         {"type": "object", "properties": {
             "title": {"type": "string", "description": "Why you need the owner (not sent to the lock screen)."},
             "body": {"type": "string", "description": "The input or action you need (not sent to the lock screen)."},
@@ -3025,8 +3017,6 @@ def get_builtin_tool_names() -> List[str]:
     names = [
         "mcp__builtins__AndroidDevices",
         "mcp__builtins__AndroidAction",
-        "mcp__builtins__Emulator",
-        "mcp__builtins__EmulatorScreenshot",
         "mcp__builtins__ScheduleWakeup",
         "mcp__builtins__Task",
         "mcp__builtins__Swarm",

@@ -68,22 +68,6 @@ def harden_process_introspection(*, force: bool = False) -> bool:
     return True
 
 
-def prewarm_code_mode_sandbox() -> None:
-    """Run the code-mode OS sandbox self-test in the background.
-
-    ``run_python`` is rated ``safe`` only once a self-test has passed in this
-    process, so warming it here keeps Ask mode from prompting for the first
-    cell on a host where the sandbox works. Best effort.
-    """
-    if not settings.fluid_code_mode:
-        return
-    try:
-        from fluid.codemode import os_sandbox
-        os_sandbox.prewarm(settings.code_mode_os_sandbox, sys.executable)
-    except Exception:
-        logger.debug("Code-mode OS sandbox prewarm skipped", exc_info=True)
-
-
 def _reject_legacy_sqlite() -> None:
     """Never import, rename, or ignore an old database during managed startup."""
     sqlite_path = settings.db_path
@@ -232,6 +216,9 @@ def init_core() -> None:
     # booting on one database would otherwise race the seeds below.
     with database.boot_init_lock():
         init_database()
+        # Publisher sender keys belong only in the account-hub relay. Run on
+        # every boot, even when schema migrations have already been applied.
+        database.delete_system_setting("fcm_service_account")
         run_migrations()
 
         from app.db import mobile_tools, mobile_tool_identity, remote_tasks

@@ -606,14 +606,16 @@ function workStartedMs(s: Session): number | null {
 
 /**
  * Total time the session has spent working, in ms: the banked `work_ms`
- * (every finished turn) plus the turn running now. Idle time between turns
- * never counts, so the total survives Done/Parked and keeps growing when a
- * later turn runs (#1619).
+ * (every finished turn and park) plus the segment open now — a running turn,
+ * or a park waiting on its background work. Idle time between turns never
+ * counts, so the total survives Done and keeps growing while the session is
+ * parked or a later turn runs (#1619).
  *
- * `turnLive` says whether this device still sees the turn running. When it
- * does not but the row still carries a start (the row update that banks the
- * finished turn has not arrived yet), the interval is closed at the row's
- * last activity instead of growing with the clock.
+ * `turnLive` says whether this device still sees the session working (a live
+ * turn or a park). When it does not but the row still carries a start (the
+ * row update that banks the finished segment has not arrived yet), the
+ * interval is closed at the row's last activity instead of growing with the
+ * clock.
  */
 export function sessionWorkMs(
 	s: Session,
@@ -632,6 +634,13 @@ export function sessionWorkMs(
  *  one blocked on a prompt mid-turn. A parked turn has ended its interval. */
 export function isTurnLiveStatus(status: SessionCardStatus): boolean {
 	return isLiveStatus(status) && status !== 'parked';
+}
+
+/** Statuses whose working-time total grows with the clock: a live turn, or a
+ *  park — a session only parks while its own background work still runs, so
+ *  the server keeps the park's segment open until the park ends. */
+export function isWorkCountingStatus(status: SessionCardStatus): boolean {
+	return isTurnLiveStatus(status) || status === 'parked';
 }
 
 /** Live elapsed time, e.g. "42s", "4m 12s", "1h 04m". */

@@ -138,11 +138,12 @@ lifetime cap; sessions age instead of dying.
 
 **Code-as-actions.** Instead of the model requesting tools one JSON call at a
 time, fluid projects tools as typed Python functions into a persistent,
-sandboxed kernel. The model writes a few lines of code that loop, filter, and
+subprocess kernel. The model writes a few lines of code that loop, filter, and
 combine tools in one shot — dramatically fewer round trips, and tool schemas
-stay out of the prompt until needed. The sandbox blocks network and direct file
-access (files go through permission-gated tools), and its memory limits hold on
-both Linux/macOS and Windows.
+stay out of the prompt until needed. In-process guards block network and direct
+file access (files go through permission-gated tools); they are defence in depth,
+not an OS sandbox. Every cell is write-class: Ask and Accept Edits prompt, while
+Bypass approves. Memory limits hold on Linux/macOS and Windows.
 
 **A harness that learns.** With the continual mode on, fluid keeps an episodic
 journal of what actually happened — executed kernel cells under code mode, or

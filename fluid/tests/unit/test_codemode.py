@@ -34,6 +34,50 @@ from fluid.store.base import MemoryStore
 from fluid.tools.inproc import create_inproc_server, tool
 from fluid.tools.registry import ToolCtx, ToolImage, ToolOutcome, ToolRegistry, ToolSpec
 
+
+@pytest.mark.parametrize("passes", [True, False], ids=["passing-selftest", "broken-selftest"])
+async def test_a_recorded_sandbox_refusal_is_ignored_and_reverified(tmp_path, passes) -> None:
+    """Old host refusals must not poison unchanged skills after an upgrade."""
+    from fluid.codemode.skills import SkillStore
+
+    store = SkillStore(tmp_path / "skills")
+    source = (
+        '"""Adder."""\n'
+        "def adder(n):\n    return n + 1\n"
+        f"def _selftest():\n    assert adder(1) == {2 if passes else 3}\n"
+    )
+    store.save("adder", source)
+    refusal = (
+        "code_mode_os_sandbox=required, but the bubblewrap sandbox is "
+        "unavailable on this host (bwrap: No permissions); the code-mode "
+        "kernel was not started."
+    )
+    meta = store._load_meta()
+    meta.setdefault("skills", {}).setdefault("adder", {}).update(
+        verified_mtime=store._mtime_ns("adder"), broken=refusal,
+    )
+    store._save_meta(meta)
+    assert store.get("adder").broken is None
+    assert store.needs_verification("adder")
+
+    session = CodeModeSession(ToolRegistry(), skills=store)
+    try:
+        mounted = await session._mountable_skills()
+        assert ("adder" in mounted) is passes
+        assert not store.needs_verification("adder")
+        verdict = store.get("adder").broken
+        if passes:
+            assert verdict is None
+        else:
+            assert "AssertionError" in verdict
+        # Replaying an old host result must not overwrite the real verdict.
+        store.mark_verified("adder", refusal)
+        assert store.get("adder").broken == verdict
+        assert store._load_meta()["skills"]["adder"].get("broken") == verdict
+    finally:
+        await session.aclose()
+
+
 # ── scripted provider (same shape as test_tool_loop) ──────────────────────
 
 def _text(text: str) -> list[StreamChunk]:
@@ -291,11 +335,8 @@ async def test_four_tool_schema_and_task_uses_three_tools() -> None:
 
 @pytest.mark.parametrize("decision,expect_error", [("allow", False), ("deny", True)])
 async def test_destructive_host_call_triggers_permission_request(
-    decision, expect_error, monkeypatch
+    decision, expect_error
 ) -> None:
-    # run_python itself is safe only behind the OS sandbox; pin it on so the
-    # one prompt here is the inner host call's.
-    monkeypatch.setattr(CodeModeSession, "os_sandbox_active", lambda self: True)
     @tool("wipe", "Delete a record.", {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}, risk="destructive")
     async def wipe(args: dict) -> dict:
         return {"content": [{"type": "text", "text": f"wiped {args['id']}"}]}
@@ -311,15 +352,27 @@ async def test_destructive_host_call_triggers_permission_request(
         provider=provider, store=store, model="claude-sonnet-5", session_id=sid,
         registry=registry, codemode=session, permissions=PermissionEngine("on_write"),
     )
-    holder, got, watcher = await _watch_first(loop, sid, PermissionRequest)
+    asked: list[PermissionRequest] = []
+
+    async def answer_permissions():
+        async for event in loop.bus.subscribe(sid):
+            if isinstance(event, PermissionRequest):
+                asked.append(event)
+                await loop.submit(RespondPermission(
+                    request_id=event.request_id,
+                    decision="allow" if event.name == "run_python" else decision,
+                ))
+                if event.name == "mcp__db__wipe":
+                    return
+
+    watcher = asyncio.create_task(answer_permissions())
     try:
         await loop.submit(UserTurn(content="wipe u1"))
-        await asyncio.wait_for(got.wait(), timeout=15)
-        req: PermissionRequest = holder["e"]
-        assert req.name == "mcp__db__wipe" and req.risk == "destructive"
-        await loop.submit(RespondPermission(request_id=req.request_id, decision=decision))
-        await loop.wait_turn()
+        await asyncio.wait_for(loop.wait_turn(), timeout=15)
         await watcher
+        assert [(event.name, event.risk) for event in asked] == [
+            ("run_python", "write"), ("mcp__db__wipe", "destructive"),
+        ]
 
         rp = next(e for e in loop.bus.log(sid) if isinstance(e, ToolResult) and e.name == "run_python")
         if expect_error:

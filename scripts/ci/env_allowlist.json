@@ -215,19 +215,9 @@
     "reason": "Fallback outbound proxy",
     "base_settings": true
   },
-  "ANDROID_AVD_HOME": {
-    "kind": "internal",
-    "reason": "Place Android virtual-device state under the managed SDK",
-    "base_settings": false
-  },
   "ANDROID_HOME": {
     "kind": "infra",
     "reason": "Locate existing Android SDK",
-    "base_settings": true
-  },
-  "ANDROID_SDK_DIR": {
-    "kind": "infra",
-    "reason": "Directory for the managed or opted-in external Android SDK",
     "base_settings": true
   },
   "ANDROID_SDK_ROOT": {
@@ -839,11 +829,6 @@
     "target_pr": 4,
     "base_settings": true
   },
-  "CODE_MODE_OS_SANDBOX": {
-    "kind": "infra",
-    "reason": "OS-level code-kernel isolation: auto, required or off",
-    "base_settings": true
-  },
   "COMPUTER_USE_DISABLED": {
     "kind": "internal",
     "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Hide/disable the host computer-control tool suite",
@@ -952,24 +937,6 @@
     "reason": "Use the controlled Electron download stage during source updates",
     "base_settings": false
   },
-  "EMULATOR_IDLE_TIMEOUT_SECONDS": {
-    "kind": "internal",
-    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Stop an unused emulator after this idle period; 0 keeps it running",
-    "target_pr": 3,
-    "base_settings": true
-  },
-  "EMULATOR_MAX_DEVICES": {
-    "kind": "internal",
-    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Maximum simultaneous Android emulators",
-    "target_pr": 3,
-    "base_settings": true
-  },
-  "EMULATOR_SYSTEM_IMAGE": {
-    "kind": "internal",
-    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Android SDK system-image package used for devices",
-    "target_pr": 3,
-    "base_settings": true
-  },
   "FAL_API_KEY": {
     "kind": "internal",
     "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Alternate fal.ai API credential fallback",
@@ -995,11 +962,6 @@
   "FILE_LOG_MAX_BYTES": {
     "kind": "infra",
     "reason": "Rotate each log file at this byte size",
-    "base_settings": true
-  },
-  "FIREBASE_CREDENTIALS": {
-    "kind": "infra",
-    "reason": "Path to Firebase service-account credentials for push delivery",
     "base_settings": true
   },
   "FLUID_ANCHOR_BUDGET": {

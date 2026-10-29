@@ -305,13 +305,18 @@ def retire_builtin_subagent(subagent_id: str) -> bool:
             "RETURNING id, session_id, instance_id",
             (reason, subagent_id, subagent_id),
         )
-        for turn in cursor.fetchall():
+        cancelled = cursor.fetchall()
+        for turn in cancelled:
             cursor.execute(
                 "INSERT INTO pending_wakeups (id, session_id, prompt, reason, source, instance_id, fire_at) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
                 ("profile-cancelled-" + turn["id"], turn["session_id"], "", reason,
                  "profile_cancelled", turn["instance_id"] or settings.effective_instance_id, 0),
             )
+        # A cancelled park ends its counted working time (app/db/turns.py).
+        from app.db.turns import close_park_segment
+        for session_id in sorted({turn["session_id"] for turn in cancelled}):
+            close_park_segment(session_id, _conn=conn)
         cursor.execute(
             "UPDATE sessions SET parked_task_kind = NULL WHERE profile_id = %s", (subagent_id,)
         )

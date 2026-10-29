@@ -75,7 +75,7 @@ three desktop shards, not the separate stable-release portability matrix.
 | Local `full` stage | Hosted job / reusable workflow |
 | --- | --- |
 | backend | `backend` → CI Backend's four shards and security (scanner + scanner tests) |
-| backend-linux | `backend` → contracts (real PostgreSQL boot/schema, serial container tests) and security (real bubblewrap) |
+| backend-linux | `backend` → contracts (real PostgreSQL boot/schema, serial container tests) and security (real-account isolation) |
 | fluid | `fluid` → complete isolated fluid unit suite |
 | frontend | `javascript` → four Vitest shards, production build, typechecks and contracts |
 | mobile | `javascript` → mobile tests/typecheck and frontend production postbuild |
@@ -151,7 +151,7 @@ fixture can launch. CDP fixtures honor `CHROMIUM_PATH` instead of preferring a
 distro/snap wrapper over the managed browser. Production browser security
 settings are unchanged. Fluid's
 ripgrep install uses the same bounded policy. These installs, every
-browser-workspace matrix case, and backend security's missing-bubblewrap install
+browser-workspace matrix case
 share `scripts/ci/bounded_apt.py`. Root npm writes use a disposable temporary cache,
 never the runner's `~/.npm`. Its apt config
 installs only missing packages (`--no-upgrade` semantics), reusing runner-image
@@ -197,7 +197,7 @@ then upload per-shard receipts, timings and JUnit. The unchanged hermetic exclus
 still run with their stronger real-environment prerequisites. The legacy dispatch
 input remains accepted; shard parallelism is fixed at two workers.
 
-`backend-security` always runs the blocking-DB guard, real bubblewrap escapes,
+`backend-security` always runs the blocking-DB guard,
 required root/real-account isolation, real PostgreSQL pool/transaction cases,
 Python public and voice-lock audits, pinned workflow syntax/action lint, and the
 full workflow/publication/security/docs policy regression suite. Required flags,
@@ -263,7 +263,7 @@ The suites the hook used to select locally run in full on every PR:
 | Former push-gate suite | PR CI job |
 | --- | --- |
 | backend | CI Backend's four shards (`tests/api` … `tests/scripts`, `tests/test_*.py`) |
-| backend-linux | CI Backend contracts and security (real PostgreSQL, container contracts, bubblewrap) |
+| backend-linux | CI Backend contracts and security (real PostgreSQL, container contracts, real-account isolation) |
 | fluid | `ci-fluid.yml` |
 | frontend, mobile, tools, browser-mcp | `ci-frontend.yml` (Vitest shards, typechecks, mobile, tools, Browser MCP) |
 | docs | `ci-frontend.yml` contracts/docs and `ci-artifact-policy.yml` (`main_suite.py android-and-docs`) |

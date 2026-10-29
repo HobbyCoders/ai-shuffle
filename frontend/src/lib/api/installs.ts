@@ -35,8 +35,8 @@ export interface InstallsResponse {
 }
 
 /** List every registered install (annotated with `is_self`). */
-export async function listInstalls(): Promise<InstallsResponse> {
-	return api.get<InstallsResponse>('/cluster/installs');
+export async function listInstalls(options: { signal?: AbortSignal } = {}): Promise<InstallsResponse> {
+	return api.get<InstallsResponse>('/cluster/installs', options.signal ? { signal: options.signal } : undefined);
 }
 
 /** Rename a device (the friendly name shown on its sessions). */

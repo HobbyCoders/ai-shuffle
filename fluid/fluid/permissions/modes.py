@@ -23,7 +23,7 @@ from fluid.permissions.rules import Rule
 # (edit, create or rewrite a file, edit a notebook). ``Edit`` and ``Write`` are
 # fluid's own builtins; ``MultiEdit`` and ``NotebookEdit`` are the Claude Code
 # spellings a delegated CLI or a settings file can name. Nothing else belongs
-# here: ``Bash``, ``run_python`` (an unsandboxed kernel is a shell, not an
+# here: ``Bash``, ``run_python`` (the kernel is a shell, not an
 # edit), ``WebFetch``, memory writes, skill saves and screen control are all
 # write-class calls the mode still asks about. Hosts extend this set only
 # through :func:`accept_edits_rules` / their own tables built from it — never by

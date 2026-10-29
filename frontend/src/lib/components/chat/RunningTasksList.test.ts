@@ -236,15 +236,20 @@ describe('RunningTasksList grouping and counts', () => {
 		expect(screen.getByTestId('tasks-toggle').getAttribute('aria-expanded')).toBe('false');
 	});
 
-	it('inline on a phone is one summary row that opens the sheet', async () => {
+	it('inline on a phone is the same collapsible list as desktop, with no Open card', async () => {
 		mocks.mobile = true;
 		setTasks([task('a'), task('b', { kind: 'shell' })]);
-		render(RunningTasksList, { sessionId: 's1', variant: 'inline' });
-		const summary = screen.getByRole('button', { name: /2 running tasks: 1 agent · 1 shell task/ });
+		const { container } = render(RunningTasksList, { sessionId: 's1', variant: 'inline' });
+		expect(screen.queryByRole('button', { name: /Open the list/ })).toBeNull();
+		expect(container.querySelector('.inline.touch')).not.toBeNull();
+		const toggle = screen.getByTestId('tasks-toggle');
+		expect(toggle.textContent).toContain('2 running tasks');
+		expect(toggle.getAttribute('aria-expanded')).toBe('true');
+		expect(screen.getByText('Task a')).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Stop all' })).toBeTruthy();
+		await fireEvent.click(toggle);
+		expect(toggle.getAttribute('aria-expanded')).toBe('false');
 		expect(screen.queryByText('Task a')).toBeNull();
-		await fireEvent.click(summary);
-		expect(within(sheet()).getByText('Task a')).toBeTruthy();
-		await fireEvent.click(within(sheet()).getByRole('button', { name: 'Close running tasks' }));
 		expect(screen.queryByRole('dialog')).toBeNull();
 	});
 });

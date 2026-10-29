@@ -9,11 +9,6 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 FIXTURE = json.loads((Path(__file__).parents[1] / "fixtures" / "agent_tool_prefix_budget.json").read_text())
 
 
-@pytest.fixture(autouse=True)
-def stable_tools(monkeypatch):
-    monkeypatch.setattr("app.mcp.emulator_tools.emulator_tools_supported", lambda: True)
-
-
 @pytest.mark.parametrize("native", [True, False], ids=["native", "delegated"])
 def test_agent_tool_prefix_size_and_deferred_session_view(native):
     result = measure(native=native)

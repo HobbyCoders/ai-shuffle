@@ -105,7 +105,7 @@ _CELL_DONE = []
 #     without also digging the nonce out of the closure.
 # This is defence in depth, not a boundary: a cell that traverses a tool stub's
 # ``__closure__`` chain can still reach both the pipe and the nonce in-process.
-# The OS sandbox is the real boundary (see ``_audit_guard`` module docstring).
+# No OS sandbox ships with the kernel; hosts must permission-gate each cell.
 
 
 def _framing(pipe_in, pipe_out, nonce_box):

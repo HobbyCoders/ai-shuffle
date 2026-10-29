@@ -119,7 +119,6 @@ Installed into the Docker image and the desktop installer's Python runtime (`req
 | evdev-binary | 2.0.0 | BSD-3-Clause | https://pypi.org/project/evdev-binary/2.0.0/ |
 | execnet | 2.1.2 | MIT | https://execnet.readthedocs.io/en/latest/ |
 | fastapi | 0.141.1 | MIT | https://github.com/fastapi/fastapi |
-| firebase-admin | 6.8.0 | Apache Software License | https://github.com/firebase/firebase-admin-python |
 | freezegun | 1.5.5 | Apache-2.0 | https://github.com/spulec/freezegun |
 | frozenlist | 1.8.0 | Apache-2.0 | https://github.com/aio-libs/frozenlist |
 | google-api-core | 2.38.0 | Apache Software License | https://github.com/googleapis/google-cloud-python/tree/main/packages/google-api-core |
