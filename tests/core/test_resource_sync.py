@@ -96,6 +96,39 @@ def test_missing_connector_delete_does_not_initialize_journal() -> None:
         purge.assert_not_called()
 
 
+@pytest.mark.parametrize("rollback", [False, True])
+def test_multiple_resource_registrations_share_one_after_commit_connection(events, rollback):
+    from app.core.resource_sync import install_database_mutations
+    from app.db import base
+
+    committed = []
+    namespace = {"get_db": base.get_db}
+
+    def write(key):
+        with namespace["get_db"]() as conn:
+            conn.cursor().execute(
+                "INSERT INTO system_settings (key, value, updated_at, revision) VALUES (%s, %s, %s, %s)",
+                (key, "value", "now", "revision"),
+            )
+            base.after_commit(conn, lambda: committed.append(key))
+            assert key not in committed
+            if rollback:
+                raise RuntimeError("simulate rollback")
+        return True
+
+    namespace.update(write_settings=write, write_preferences=write)
+    install_database_mutations(namespace, "settings", "write_settings")
+    install_database_mutations(namespace, "preferences", "write_preferences")
+    for name in ("write_settings", "write_preferences"):
+        if rollback:
+            with pytest.raises(RuntimeError, match="simulate rollback"):
+                namespace[name](name)
+        else:
+            assert namespace[name](name)
+    assert committed == ([] if rollback else ["write_settings", "write_preferences"])
+    assert resources(events) == ([] if rollback else [["settings"]] * 3 + [["preferences"]] * 3)
+
+
 def test_system_settings_initialization_noop_and_delete(events):
     from app.db import settings
     settings.set_system_setting("sync-test", "secret value")
