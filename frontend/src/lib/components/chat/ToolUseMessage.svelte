@@ -9,7 +9,8 @@
 	 *
 	 * Expanding reveals the Input / Result panels indented past the icon gutter.
 	 * Screenshots stay OUTSIDE the collapsible body: a screenshot the user can't
-	 * see is useless.
+	 * see is useless. Generated media (an image, video, audio clip or file a
+	 * completed generation made) follows the same rule (#784).
 	 *
 	 * An Emulator / EmulatorScreenshot row carries "Show phone" beside it when
 	 * the worker has the emulator and the Phone panel is not showing. The panel
@@ -52,9 +53,15 @@
 		screenshot?: string;
 		/** Hover text for the preview, when it should say more than the preview. */
 		previewTitle?: string;
+		/**
+		 * Resolved sources of generated media shown elsewhere on screen (the
+		 * turn's gallery, or a reply that embeds the same picture): not drawn
+		 * again here, so a picture never shows twice.
+		 */
+		hiddenMedia?: ReadonlySet<string>;
 	}
 
-	let { name, sessionId, input, partialInput, result, status: rawStatus, streaming = false, serverSide = false, screenshot, previewTitle }: Props = $props();
+	let { name, sessionId, input, partialInput, result, status: rawStatus, streaming = false, serverSide = false, screenshot, previewTitle, hiddenMedia }: Props = $props();
 
 	// The delegated Claude engine posts a question card and then has to deny the
 	// CLI's own AskUserQuestion call (an away owner's auto-answer goes back the
@@ -113,22 +120,32 @@
 		`${compactName}${preview ? `: ${preview}` : ''}. ${stateLabel}`
 	);
 
-	// A generation's result renders as its media, not JSON: both the old
-	// top-level shape and the unified tools' nested `result` (#784). A refused,
-	// skipped or needs-confirmation result has none, so it stays as text.
-	const generated = $derived(status === 'complete' ? toolResultMedia(shownResult) : []);
+	// A generation's result IS its media, so it renders below the row like a
+	// screenshot, never only inside the Result pane (#784). Both the old
+	// top-level shape and the unified tools' nested `result` count. A refused,
+	// skipped, needs-confirmation, failed or still-running call has none, so it
+	// stays a text row. (Persisted history also spells a finished call "completed".)
+	const finished = $derived(status === 'complete' || (rawStatus as string) === 'completed');
+	const generated = $derived(finished && !streaming ? toolResultMedia(shownResult) : []);
 	const generatedLabel = $derived(toolResultMediaLabel(generated));
+	const outputs = $derived(
+		generated
+			.map((item) => ({ ...item, url: resolveMediaUrl(item.src, sessionId) }))
+			.filter((item) => !hiddenMedia?.has(item.url))
+	);
 	const playable = $derived(
-		generated.filter((item) => item.kind !== 'file').map((item, i, all) =>
-			sanitizeHtml(mediaHtml(
+		outputs.filter((item) => item.kind !== 'file').map((item, i, all) => ({
+			kind: item.kind,
+			html: sanitizeHtml(mediaHtml(
 				item.kind as MediaKind,
-				resolveMediaUrl(item.src, sessionId),
+				item.url,
 				`Generated ${item.kind}${all.length > 1 ? ` ${i + 1}` : ''}`,
 				item.filename
 			))
-		)
+		}))
 	);
-	const files = $derived(generated.filter((item) => item.kind === 'file'));
+	const pictures = $derived(playable.filter((item) => item.kind !== 'audio').length);
+	const files = $derived(outputs.filter((item) => item.kind === 'file'));
 </script>
 
 <div class="wl-item">
@@ -215,32 +232,13 @@
 			{/if}
 			<div class="wl-panel">
 				<div class="wl-panel-label">Result</div>
-				<div class="wl-pane" class:is-media={generated.length > 0}>
+				<div class="wl-pane">
 					{#if dismissedQuestion}
 						<pre class="is-muted" data-testid="tool-dismissed-result">{shownResult}</pre>
 					{:else if result}
 						{#if generated.length > 0}
+							<!-- The media itself sits below the row, outside this body. -->
 							<span class="wl-media-note" data-testid="tool-media-note">{generatedLabel}</span>
-							{#if playable.length > 0}
-								<div class="wl-media" class:is-many={playable.length > 1} data-testid="tool-media" use:retryImages>
-									{#each playable as html, i (i)}
-										{@html html}
-									{/each}
-								</div>
-							{/if}
-							{#each files as file (file.src)}
-								<a
-									class="wl-file"
-									data-testid="tool-media-file"
-									href={resolveMediaUrl(file.src, sessionId)}
-									download={file.filename ?? ''}
-									target="_blank"
-									rel="noopener noreferrer"
-								>
-									<Download size={13} strokeWidth={1.9} aria-hidden="true" />
-									<span>{file.filename ?? 'Download file'}</span>
-								</a>
-							{/each}
 						{:else}
 							<pre>{shownResult}</pre>
 						{/if}
@@ -259,6 +257,33 @@
 	<!-- Outside the collapsible body on purpose: the screenshot is the result. -->
 	{#if screenshot}
 		<ToolScreenshot {screenshot} {name} {sessionId} />
+	{/if}
+
+	<!-- Generated media too: the picture is the result (#784). Same shared
+	     player markup as a screenshot (expand, download, lightbox). -->
+	{#if playable.length > 0}
+		<div class="tool-media" class:is-many={pictures > 1} data-testid="tool-media" use:retryImages>
+			{#each playable as item, i (i)}
+				{@html item.html}
+			{/each}
+		</div>
+	{/if}
+	{#if files.length > 0}
+		<div class="tool-files">
+			{#each files as file (file.src)}
+				<a
+					class="wl-file"
+					data-testid="tool-media-file"
+					href={file.url}
+					download={file.filename ?? ''}
+					target="_blank"
+					rel="noopener noreferrer"
+				>
+					<Download size={13} strokeWidth={1.9} aria-hidden="true" />
+					<span>{file.filename ?? 'Download file'}</span>
+				</a>
+			{/each}
+		</div>
 	{/if}
 </div>
 
@@ -544,50 +569,53 @@
 		color: var(--emerald);
 	}
 
-	/* Generated media sits in the Result pane at a working size: the shared
-	   player markup (media.ts) with its expand/download overlay and lightbox,
-	   scaled down so the work log stays a log. */
-	.wl-pane.is-media {
-		max-height: none;
-		display: flex;
-		flex-direction: column;
-		align-items: flex-start;
-		gap: 8px;
-	}
-
-	/* Stretch, not shrink-to-fit: the players' percentage max-widths need a
-	   definite width, or a video collapses to its border. */
-	.wl-media {
-		align-self: stretch;
-		display: flex;
-		flex-wrap: wrap;
-		gap: 8px;
+	/* Generated media below the row, like ToolScreenshot: the shared player
+	   markup (media.ts) brings its own spacing, border, expand/download overlay
+	   and lightbox, so one output reads exactly like a screenshot. */
+	.tool-media {
+		display: block;
 		min-width: 0;
 	}
 
-	.wl-media :global(.generated-media-container) {
+	/* Several outputs of one call tile on a row, smaller, so four pictures do
+	   not become a wall. A tile wraps on a phone. */
+	.tool-media.is-many {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+		margin: 16px 0;
+	}
+
+	.tool-media.is-many :global(.generated-media-container) {
 		margin: 0;
 		max-width: 100%;
 	}
 
-	.wl-media :global(.generated-media-container > img),
-	.wl-media :global(.generated-media-container > video) {
+	.tool-media.is-many :global(.generated-media-container > img),
+	.tool-media.is-many :global(.generated-media-container > video) {
 		display: block;
-		max-height: 240px;
-		box-shadow: none;
+		max-height: 220px;
 	}
 
-	.wl-media :global(.generated-media-container > video) {
-		width: min(100%, 427px);
+	/* A video needs a definite width: the player's percentage max-width
+	   against a shrink-to-fit container collapses it to its border. */
+	.tool-media :global(.generated-media-container > video) {
+		width: min(100%, 640px);
 	}
 
-	.wl-media.is-many :global(.generated-media-container > img),
-	.wl-media.is-many :global(.generated-media-container > video) {
-		max-height: 160px;
+	.tool-media.is-many :global(.generated-media-container > video) {
+		width: min(100%, 392px);
 	}
 
-	.wl-media :global(.generated-audio) {
+	.tool-media :global(.generated-audio) {
 		width: min(28rem, 100%);
+	}
+
+	.tool-files {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+		margin: 8px 0;
 	}
 
 	.wl-file {

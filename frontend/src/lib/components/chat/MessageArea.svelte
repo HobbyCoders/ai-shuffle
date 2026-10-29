@@ -2119,7 +2119,7 @@
 
 <!-- The one dispatch table: message → component. Shared with WorkLogGroup so a
      folded row renders exactly as it would inline. -->
-{#snippet messageBody(message: ChatMessage, messageIndex: number, gallerySources?: ReadonlySet<string>)}
+{#snippet messageBody(message: ChatMessage, messageIndex: number, gallerySources?: ReadonlySet<string>, hiddenMedia?: ReadonlySet<string>)}
 	{@const delivery = agentDelivery(message)}
 	{@const handoff = handoffAnchors.get(message)}
 	{#if handoff}
@@ -2265,6 +2265,7 @@
 				sessionId={activeSessionId}
 				serverSide={message.serverSide ?? message.server_side ?? false}
 				screenshot={message.toolScreenshot}
+				{hiddenMedia}
 			/>
 			{#if saved}<GenerationSavedChoice {saved} />{/if}
 		{/if}

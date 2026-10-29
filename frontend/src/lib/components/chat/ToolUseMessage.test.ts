@@ -253,64 +253,82 @@ describe('ToolUseMessage — generated media results (#784)', () => {
 	const unified = (output: Record<string, unknown>) =>
 		JSON.stringify({ status: 'completed', success: true, price, choice: { source: 'openai', model: 'gpt-image-1' }, result: output }, null, 2);
 
-	async function expandRow(name: string, result: string, status: 'complete' | 'error' = 'complete') {
-		const view = render(ToolUseMessage, {
-			props: { name, sessionId: 's-784', input: { prompt: 'a lighthouse' }, result, status }
-		});
-		await fireEvent.click(view.container.querySelector('.wlrow') as HTMLElement);
-		return view.container;
+	// The row is NOT expanded: generated media, like a screenshot, is the
+	// result and must be visible without opening anything.
+	function row(name: string, result: string, over: Record<string, unknown> = {}) {
+		return render(ToolUseMessage, {
+			props: { name, sessionId: 's-784', input: { prompt: 'a lighthouse' }, result, status: 'complete', ...over }
+		}).container;
 	}
-	const resultPane = (container: HTMLElement) => [...container.querySelectorAll('.wl-pane')].at(-1) as HTMLElement;
+	const outside = (c: HTMLElement) => c.querySelector('.wl-item > [data-testid="tool-media"]');
+	const resultPane = (c: HTMLElement) => [...c.querySelectorAll('.wl-pane')].at(-1) as HTMLElement;
 
-	it('renders a unified generateImage result as the image, not JSON', async () => {
-		const c = await expandRow('mcp__ai-tools__generateImage', unified({
+	it('shows a unified generateImage result below the row, outside the collapsed body', () => {
+		const c = row('mcp__ai-tools__generateImage', unified({
 			success: true, image_url: art('h1'), images: [{ image_url: art('h1') }], warning: null
 		}));
-		const pane = resultPane(c);
-		expect(pane.querySelector('[data-testid="tool-media-note"]')?.textContent).toBe('Image generated');
-		const img = pane.querySelector('[data-testid="tool-media"] img.media-zoomable') as HTMLImageElement;
+		expect(c.querySelector('.wl-body')).toBeNull();
+		const img = outside(c)?.querySelector('img.media-zoomable') as HTMLImageElement;
 		expect(img).not.toBeNull();
 		expect(img.getAttribute('src')).toContain('/api/v1/artifacts/h1');
-		expect(pane.querySelector('pre')).toBeNull();
-		expect(pane.textContent).not.toContain('"status"');
+		// The shared player markup: expand (lightbox) and download, like a screenshot.
+		expect(outside(c)?.querySelector('.media-expand-btn')).not.toBeNull();
+		expect(outside(c)?.querySelector('.media-download-btn')).not.toBeNull();
 	});
 
-	it('renders every image of a multi-image result', async () => {
-		const c = await expandRow('mcp__ai-tools__generateImage', unified({
+	it('keeps only a short label in the expanded Result pane', async () => {
+		const c = row('mcp__ai-tools__generateImage', unified({ success: true, image_url: art('h1') }));
+		await fireEvent.click(c.querySelector('.wlrow') as HTMLElement);
+		const pane = resultPane(c);
+		expect(pane.querySelector('[data-testid="tool-media-note"]')?.textContent).toBe('Image generated');
+		expect(pane.querySelector('img, video, audio')).toBeNull();
+		expect(c.querySelectorAll('img.media-zoomable')).toHaveLength(1);
+	});
+
+	it('shows every image of a multi-image result, tiled', () => {
+		const c = row('mcp__ai-tools__generateImage', unified({
 			success: true, image_url: art('a'), images: [{ image_url: art('a') }, { image_url: art('b') }, { image_url: art('c') }]
 		}));
-		expect(c.querySelector('[data-testid="tool-media-note"]')?.textContent).toBe('3 images generated');
-		expect(c.querySelectorAll('[data-testid="tool-media"] img')).toHaveLength(3);
+		expect(outside(c)?.querySelectorAll('img')).toHaveLength(3);
+		expect(outside(c)?.classList.contains('is-many')).toBe(true);
 	});
 
-	it('renders unified video and audio results with their players', async () => {
-		let c = await expandRow('mcp__ai-tools__generateVideo', unified({
+	it('shows unified video and audio results with their players', () => {
+		let c = row('mcp__ai-tools__generateVideo', unified({
 			success: true, video_url: art('v', '/video.mp4'), output_url: art('v', '/video.mp4'), outputs: [{ url: art('v', '/video.mp4') }]
 		}));
-		expect(c.querySelector('[data-testid="tool-media"] video')).not.toBeNull();
-		expect(c.querySelector('[data-testid="tool-media-note"]')?.textContent).toBe('Video generated');
+		expect(outside(c)?.querySelector('video')).not.toBeNull();
 		cleanup();
-		c = await expandRow('mcp__ai-tools__generateAudio', unified({
+		c = row('mcp__ai-tools__generateAudio', unified({
 			success: true, audio_url: art('t'), output_url: art('t'), outputs: [{ url: art('t') }]
 		}));
-		expect(c.querySelector('[data-testid="tool-media"] audio')).not.toBeNull();
-		expect(c.querySelector('[data-testid="tool-media-note"]')?.textContent).toBe('Audio generated');
+		expect(outside(c)?.querySelector('audio')).not.toBeNull();
 	});
 
-	it('renders a unified 3D result as a download link', async () => {
-		const c = await expandRow('mcp__ai-tools__textTo3D', unified({ success: true, output_url: art('m'), outputs: [{ url: art('m') }] }));
-		const link = c.querySelector('[data-testid="tool-media-file"]') as HTMLAnchorElement;
+	it('shows a unified 3D result as a download link outside the body', () => {
+		const c = row('mcp__ai-tools__textTo3D', unified({ success: true, output_url: art('m'), outputs: [{ url: art('m') }] }));
+		const link = c.querySelector('.wl-item > .tool-files [data-testid="tool-media-file"]') as HTMLAnchorElement;
 		expect(link).not.toBeNull();
 		expect(link.getAttribute('href')).toContain('/api/v1/artifacts/m');
-		expect(c.querySelector('[data-testid="tool-media"]')).toBeNull();
+		expect(outside(c)).toBeNull();
 	});
 
-	it('still renders the old top-level shape', async () => {
-		const c = await expandRow('mcp__ai-tools__generateImage', JSON.stringify({
+	it('still shows the old top-level shape', () => {
+		const c = row('mcp__ai-tools__generateImage', JSON.stringify({
 			success: true, image_url: '/api/generated-images/by-path?path=/w/cat.png', filename: 'cat.png'
 		}));
-		expect(c.querySelector('[data-testid="tool-media-note"]')?.textContent).toBe('Image generated');
-		expect(c.querySelector('[data-testid="tool-media"] img')).not.toBeNull();
+		expect(outside(c)?.querySelector('img')).not.toBeNull();
+	});
+
+	it('leaves media shown elsewhere (gallery or reply) to that place', () => {
+		const result = unified({ success: true, image_url: art('a'), images: [{ image_url: art('a') }, { image_url: art('b') }] });
+		const shown = render(ToolUseMessage, { props: { name: 'generateImage', sessionId: 's-784', result, status: 'complete' } });
+		const [first] = [...shown.container.querySelectorAll('img')].map((img) => img.getAttribute('src') ?? '');
+		cleanup();
+		const c = row('generateImage', result, { hiddenMedia: new Set([first]) });
+		const sources = [...c.querySelectorAll('img')].map((img) => img.getAttribute('src'));
+		expect(sources).toHaveLength(1);
+		expect(sources[0]).toContain('/api/v1/artifacts/b');
 	});
 
 	it.each([
@@ -318,15 +336,20 @@ describe('ToolUseMessage — generated media results (#784)', () => {
 		['skipped', { status: 'skipped', success: false, price, reason: 'needs_confirmation', message: 'Generation skipped.' }],
 		['needs-confirmation', { status: 'needs-confirmation', success: false, price, confirmation_token: 'tok', retry: { confirmed: true } }],
 		['failed', { status: 'failed', success: false, price, result: { success: false, error: 'upstream', image_url: '/w/x.png' } }]
-	])('keeps a %s result as text, never as media', async (_label, body) => {
-		const c = await expandRow('mcp__ai-tools__generateImage', JSON.stringify(body, null, 2));
+	])('keeps a %s result as text inside the body, never as media', async (_label, body) => {
+		const c = row('mcp__ai-tools__generateImage', JSON.stringify(body, null, 2));
+		expect(c.querySelector('[data-testid="tool-media"], [data-testid="tool-media-file"]')).toBeNull();
+		await fireEvent.click(c.querySelector('.wlrow') as HTMLElement);
 		expect(c.querySelector('[data-testid="tool-media-note"]')).toBeNull();
-		expect(c.querySelector('[data-testid="tool-media"]')).toBeNull();
 		expect(resultPane(c).querySelector('pre')?.textContent).toContain(`"status": "${body.status}"`);
 	});
 
-	it('never shows media for a row that ended in error', async () => {
-		const c = await expandRow('mcp__ai-tools__generateImage', unified({ success: true, image_url: art('e') }), 'error');
-		expect(c.querySelector('[data-testid="tool-media"]')).toBeNull();
+	it('shows no media for an errored, running or streaming row', () => {
+		const result = unified({ success: true, image_url: art('e') });
+		for (const over of [{ status: 'error' }, { status: 'running' }, { status: 'complete', streaming: true }]) {
+			const c = row('mcp__ai-tools__generateImage', result, over);
+			expect(c.querySelector('img')).toBeNull();
+			cleanup();
+		}
 	});
 });
