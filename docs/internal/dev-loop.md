@@ -33,6 +33,10 @@ inside a private directory:
 `python -m scripts.devloop status` prints it; `python -m scripts.devloop down`
 stops the instance.
 
+UI journeys (`frontend/tests/journeys/*.journey.mjs`) read that status file,
+drive the instance in Chromium and fail on any flight-recorder anomaly; see
+`frontend/tests/journeys/README.md`.
+
 ## Live reload
 
 * **UI**: Vite dev (`frontend/`, HMR). Saving a `.svelte`/`.ts` file updates the

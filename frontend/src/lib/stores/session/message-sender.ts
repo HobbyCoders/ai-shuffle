@@ -57,6 +57,29 @@ export async function trackSend<T>(send: () => Promise<T>): Promise<T> {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/**
+ * Who owns the session an unbound compose is about to create. The backend
+ * creates it on this worker unless the composer's "Runs on" pick names
+ * another one, so the owner is known before any request goes out.
+ *
+ * Every creation path writes this onto the compose BEFORE it binds the new
+ * session id, and every bind keeps it (they spread the state). Left unset,
+ * `isRemote` stayed undefined until the sidebar list reloaded, and ChatView's
+ * MirrorSyncGate reads an unknown owner as a mirrored chat: it swapped the
+ * new transcript for "Checking sync…", then, on its first "current" answer,
+ * reloaded the feed from seq 0. That replay could catch up before the turn's
+ * first event was logged, so the chat went full page → reload → the centred
+ * empty composer → full page on every new session (the owner's report).
+ * Returns null for a bound compose: its owner comes from the row or /live.
+ */
+export function newSessionWorker(
+	state: Pick<ActiveSessionState, 'sessionId' | 'deviceIntent'>
+): Pick<ActiveSessionState, 'isRemote' | 'ownerDeviceName'> | null {
+	if (state.sessionId) return null;
+	const target = state.deviceIntent?.id ? state.deviceIntent : null;
+	return { isRemote: target !== null, ownerDeviceName: target?.name ?? null };
+}
+
 function formatWorktreeError(rawError: string, branchName: string): string {
 	const lower = rawError.toLowerCase();
 
@@ -188,6 +211,15 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		appData, persistSession, stopTimeout, getActiveSession,
 	} = deps;
 
+	/** Write the new session's owner onto an unbound compose before anything
+	 *  binds it (see newSessionWorker). No-op once a session is bound. */
+	function claimNewSessionWorker() {
+		update(s => {
+			const owner = newSessionWorker(s);
+			return owner ? { ...s, ...owner } : s;
+		});
+	}
+
 	// ─── Internal helper for worktree existing branch sessions ──────
 
 	async function startSessionOnExistingWorktree(prompt: string, pendingUploadPaths?: string[]): Promise<boolean> {
@@ -304,6 +336,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		}
 		// A "Runs on" pick creates the conversation on that worker; the call
 		// itself runs here and forwards to it (#700).
+		claimNewSessionWorker();
 		const creationGen = internal.worktreeCreationGeneration;
 		const adopt = (sessionId: string, extra: Partial<ActiveSessionState> = {}): string | null => {
 			if (creationGen !== internal.worktreeCreationGeneration) return null;
@@ -423,8 +456,11 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// (plain query, createWorktree, autoCreateWorktree) clears it. The
 			// worktree branches used to leave the entry behind, and the next
 			// New Chat restored the previous chat's prompt into the composer.
+			// The same spend point records who owns the session about to be
+			// created, so every bind below starts with a known owner.
 			if (!_state.sessionId) {
 				sessionEphemeralCache.remove('__new_chat__');
+				claimNewSessionWorker();
 			}
 
 			// Worktree sessions never block on send: the backend resolves/validates
@@ -767,6 +803,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const remoteOnly = !projectId && !!projectV2Id;
 			const overridesSnapshot = buildOverrides();
 
+			claimNewSessionWorker();
 			update(s => ({ ...s, isCreatingWorktree: true, worktreeError: null }));
 
 			try {
@@ -829,6 +866,29 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					return null;
 				}
 
+				// Connect BEFORE binding: the bind and the first message's
+				// optimistic row (sendMessage below) must land in the same frame.
+				// Bound with no row, the chat reads as a settled empty session —
+				// the centred "cleared" composer — for as long as the socket takes.
+				if (prompt && !wsConn.isConnected()) {
+					wsConn.connect();
+					await waitForConnectionVoid();
+				}
+
+				if (prompt && creationGen !== internal.worktreeCreationGeneration) {
+					console.debug('[Worktree] User navigated away during WS connect wait');
+					wsConn.send({
+						type: 'query',
+						prompt,
+						session_id: response.session_id,
+						profile: queryProfileId,
+						project: projectId,
+						overrides: overridesSnapshot,
+						upload_paths: pendingUploadPaths?.length ? pendingUploadPaths : undefined,
+					});
+					return null;
+				}
+
 				update(s => ({
 					...s,
 					sessionId: response.session_id,
@@ -842,25 +902,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				persistSession();
 
 				if (prompt) {
-					if (!wsConn.isConnected()) {
-						wsConn.connect();
-						await waitForConnectionVoid();
-					}
-
-					if (creationGen !== internal.worktreeCreationGeneration) {
-						console.debug('[Worktree] User navigated away during WS connect wait');
-						wsConn.send({
-							type: 'query',
-							prompt,
-							session_id: response.session_id,
-							profile: queryProfileId,
-							project: projectId,
-							overrides: overridesSnapshot,
-							upload_paths: pendingUploadPaths?.length ? pendingUploadPaths : undefined,
-						});
-						return null;
-					}
-
 					// The POST created the session but carried no prompt, so it had no
 					// turn to attach uploads to — this follow-up query is that turn.
 					// Locally the files are already in the checkout and the backend
@@ -870,6 +911,19 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						skipWorktreeSetup: true,
 						pendingUploadPaths,
 					});
+					// This view bound the session itself, so nothing else opens its
+					// feed: the follow-up query lands as a queued turn, whose WS
+					// `start` may never reach this device. Without the feed the
+					// reply only appeared when some later reload opened it, after
+					// the turn had finished — and a turn folded whole in one batch
+					// never clears the optimistic streaming flag, so the chat sat
+					// on "working" for good. Start it now, after the optimistic row
+					// exists, as autoCreateWorktree does (FIX B in feed-controller).
+					if (creationGen === internal.worktreeCreationGeneration
+						&& getState().sessionId === response.session_id
+						&& !feedController.isFeeding(response.session_id)) {
+						feedController.start(response.session_id);
+					}
 					if (!sent && creationGen === internal.worktreeCreationGeneration) return null;
 				}
 				return response.session_id;
@@ -944,6 +998,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const deviceIntentSnap = _state.deviceIntent;
 			const userMsgId = `user-${Date.now()}`;
 
+			claimNewSessionWorker();
 			const creationGen = internal.worktreeCreationGeneration;
 
 			// NOTE: intentionally no AbortController. The backend now creates the

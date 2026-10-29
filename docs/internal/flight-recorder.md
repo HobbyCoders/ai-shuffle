@@ -127,7 +127,9 @@ await contactSheet(keyframes, `${process.env.SCREENSHOT_DIR}/new-chat.jpg`);
 `browser-mcp/node_modules`, the same as `visual-regression.mjs`, and works
 with Chromium only (it needs CDP). If the actions throw, the recording still
 stops, throttling is cleared, and `error.flightRecording` holds the timeline.
-`frontend/tests/verify-flight-recorder.mjs` is a working example. It runs in
+`frontend/tests/verify-flight-recorder.mjs` is a working example. Journeys
+against a dev instance use the shared runner in `frontend/tests/journeys/`
+(viewport × throttle variants, one report per case; see its README). It runs in
 CI after the Browser MCP tests, on the proof page
 `frontend/tests/flight-recorder/fixture.html`:
 
