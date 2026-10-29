@@ -528,8 +528,60 @@ async def test_only_owner_chats_message_another_worker(workers, monkeypatch, kic
     assert outcome.is_error and "Only the owner's chats can message chats on another worker" in outcome.text
 
 
+@pytest.mark.parametrize("remote_lineage", ["sender", "receiver"])
+async def test_local_message_with_remote_start_lineage_steers_a_busy_receiver(
+    workers, monkeypatch, kicks, remote_lineage,
+):
+    from types import SimpleNamespace
+    from app.core import session_runtime
+
+    a, b, _ = _two_workers(workers, monkeypatch)
+    with b.active():
+        started = await remote_start.start(remote_start.ARGS)
+        assert not started.is_error, started.text
+        remote_started = json.loads(started.text)["session_id"]
+    with a.active():
+        (start_turn,) = agent_turns(remote_started)
+        assert start_turn["payload"]["orchestration_remote_origin"] == b.device_id
+        assert turns.start_turn(start_turn["id"])
+        if remote_lineage == "sender":
+            turns.settle_turn(start_turn["id"], "completed")
+            sender_id, receiver_id = remote_started, "target"
+            live = turns.enqueue_turn(receiver_id, "user", prompt="working", profile_id="default")
+            assert turns.start_turn(live["id"])
+        else:
+            sender_id, receiver_id = "target", remote_started
+            live = start_turn
+        runtime = session_runtime.SessionRuntime(live)
+        adapter = SimpleNamespace(steer_peer=AsyncMock(), steer=AsyncMock())
+        monkeypatch.setattr(runtime, "_live_adapter", lambda: adapter)
+        monkeypatch.setitem(session_runtime._live_runtimes, receiver_id, runtime)
+
+        result = await _tool("MessageSession", {
+            "session_id": receiver_id, "message": "Local message from a remote-started chain",
+            "request_id": "local-" + remote_lineage,
+        }, sender=sender_id)
+        assert not result.is_error, result.text
+        queued = turns.get_turn(json.loads(result.text)["turn_id"])
+        assert queued["payload"]["orchestration_remote_origin"] == b.device_id
+        assert "forwarded_by_device" not in queued["payload"]
+        adapter.steer_peer.assert_awaited_once_with(
+            "Local message from a remote-started chain", sender=sender_id,
+            id=queued["id"], provenance="same-owner",
+        )
+        adapter.steer.assert_not_awaited()
+        assert await runtime.steer_pending() == 0
+        assert turns.get_turn(queued["id"])["state"] == "queued"  # receipt owns retirement
+        assert queued["payload"]["orchestration_message_transport"] == "local"
+        # Existing local rows with remote ancestry have no transport stamp.
+        legacy_payload = dict(queued["payload"])
+        legacy_payload.pop("orchestration_message_transport")
+        orch.recheck_message_scope(legacy_payload, receiver_id)
+
+
 @pytest.mark.parametrize("invalidate", [None, "membership", "receiver_stop", "receiver_archive",
-                                        "receiver_owner", "forwarding_provenance"])
+                                        "receiver_owner", "forwarding_provenance", "missing_forwarding",
+                                        "empty_forwarding", "transport_mismatch", "legacy_transport"])
 async def test_remote_message_steers_a_busy_receiver_with_current_remote_scope(
     workers, monkeypatch, kicks, invalidate,
 ):
@@ -551,6 +603,7 @@ async def test_remote_message_steers_a_busy_receiver_with_current_remote_scope(
     with a.active():
         (row,) = agent_turns("target")
         assert row["payload"]["forwarded_by_device"] == b.device_id
+        assert row["payload"]["orchestration_message_transport"] == "remote"
         # A replicated caller row is not local wake authority on this worker.
         with pytest.raises(ValueError, match="local"):
             orch._caller("caller")
@@ -564,12 +617,27 @@ async def test_remote_message_steers_a_busy_receiver_with_current_remote_scope(
         elif invalidate == "receiver_owner":
             _api_user(a, user_id="foreign")
             _update(a, "target", publish=False, api_user_id="foreign")
-        elif invalidate == "forwarding_provenance":
-            payload = {**row["payload"], "forwarded_by_device": "different-worker"}
+        elif invalidate in {"forwarding_provenance", "missing_forwarding", "empty_forwarding",
+                            "transport_mismatch", "legacy_transport"}:
+            payload = dict(row["payload"])
+            if invalidate == "missing_forwarding":
+                payload.pop("forwarded_by_device")
+            elif invalidate == "transport_mismatch":
+                payload["orchestration_message_transport"] = "local"
+            elif invalidate == "legacy_transport":
+                payload.pop("orchestration_message_transport")
+            else:
+                payload["forwarded_by_device"] = "" if invalidate == "empty_forwarding" else "different-worker"
             with get_db() as conn:
                 conn.cursor().execute("UPDATE turns SET payload=%s WHERE id=%s", (json.dumps(payload), row["id"]))
+            # A genuinely relayed message must not fall back to a local sender
+            # check when its authenticated forwarding identity is damaged.
+            from unittest.mock import Mock
+
+            caller = Mock(side_effect=AssertionError("relayed message used local sender authority"))
+            monkeypatch.setattr(orch, "_caller", caller)
         submitted = await runtime.steer_pending()
-        if invalidate:
+        if invalidate not in {None, "legacy_transport"}:
             assert submitted == 0
             adapter.steer_peer.assert_not_awaited()
         else:
@@ -579,4 +647,7 @@ async def test_remote_message_steers_a_busy_receiver_with_current_remote_scope(
             )
             assert await runtime.steer_pending() == 0
         adapter.steer.assert_not_awaited()
+        if invalidate in {"forwarding_provenance", "missing_forwarding", "empty_forwarding",
+                          "transport_mismatch", "legacy_transport"}:
+            caller.assert_not_called()
         assert turns.get_turn(row["id"])["state"] == "queued"  # only a receipt retires it
