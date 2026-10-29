@@ -10,6 +10,10 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 
 ## Unreleased
 
+### Removed
+
+- Removed the built-in Android emulator and Phone panel. Companion-app access to your real Android devices is unchanged.
+
 ### Security
 
 - Removed the Linux-only bubblewrap sandbox around agents' Python cells. Ask mode now asks before every Python cell on Linux too; Accept Edits also asks, while Bypass approves. In-process guards remain, but are not an OS security boundary. The sandbox setting and status row are gone.
@@ -126,7 +130,7 @@ Fixes from the first day of public use, plus a built-in Android emulator, faster
 
 - New Phone panel: AI Shuffle can run an Android phone emulator on Linux x86_64 workers with KVM. Install it once from the panel (about 2 GB from Google, after you accept the Android SDK License), then watch the screen live and tap, type and use Back, Home and Recents yourself.
 - Agents can boot the emulator, install an APK, open it, tap and type, read the screen layout and take screenshots with the new Emulator and EmulatorScreenshot tools, so they can test the phone apps they build.
-- Docker installs need `--device /dev/kvm`; without it the panel explains what is missing. iOS is not supported yet. See [Android emulator](/docs/features/android-emulator).
+- Docker installs need `--device /dev/kvm`; without it the panel explains what is missing. iOS is not supported yet. See Android emulator.
 
 ### Browser
 

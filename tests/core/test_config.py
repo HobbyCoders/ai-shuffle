@@ -26,6 +26,28 @@ def isolate_directory_defaults(monkeypatch):
     monkeypatch.delenv("WORKSPACE_DIR", raising=False)
 
 
+def test_removed_emulator_settings_are_ignored(tmp_path, monkeypatch):
+    from app.core.config import Settings
+
+    # Old env files and saved settings may outlive the removed feature. Even
+    # invalid values must be ignored rather than validated during startup.
+    legacy = {
+        "android_sdk_dir": "old-sdk",
+        "emulator_max_devices": "not-an-integer",
+        "emulator_idle_timeout_seconds": "not-an-integer",
+        "emulator_system_image": "old-image",
+    }
+    env_file = tmp_path / "legacy.env"
+    env_file.write_text("\n".join(f"{key.upper()}={value}" for key, value in legacy.items()))
+    for key, value in legacy.items():
+        monkeypatch.setenv(key.upper(), value)
+    settings = Settings(
+        _env_file=env_file, data_dir=tmp_path, workspace_dir=tmp_path, **legacy,
+    )
+    assert legacy.keys().isdisjoint(Settings.model_fields)
+    assert legacy.keys().isdisjoint(settings.model_dump())
+
+
 class TestSettingsDefaults:
     """Test default settings values."""
 

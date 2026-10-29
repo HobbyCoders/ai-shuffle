@@ -194,22 +194,6 @@ def test_android_device_listing_is_safe_and_action_stays_gated():
     assert registry.get("mcp__builtins__AndroidAction").risk == "write"
 
 
-def test_emulator_looking_is_safe_and_driving_stays_gated():
-    """The Emulator tool's risk follows its action; the screenshot is safe."""
-    cfg = {"type": "sdk", "name": "builtins", "instance": _Instance()}
-    record_sdk_server_tools(cfg, [_tool("Emulator"), _tool("EmulatorScreenshot")])
-
-    registry = ToolRegistry()
-    register_recorded_sdk_servers(registry, {"builtins": cfg})
-    emulator = registry.get("mcp__builtins__Emulator")
-    assert emulator.risk == "write"
-    for action in ("status", "ui", "logcat"):
-        assert emulator.classify_risk({"action": action}) == "safe", action
-    for action in ("setup", "start", "install", "tap", "text"):
-        assert emulator.classify_risk({"action": action}) == "write", action
-    assert registry.get("mcp__builtins__EmulatorScreenshot").risk == "safe"
-
-
 def test_deferred_servers_land_in_the_deferred_tier_and_stay_loadable():
     """Native-leg tiering: app-config/ai-tools schemas stay out of the prompt
     prefix (deferred, ToolSearch-loadable) while builtins remain eager."""
@@ -296,7 +280,7 @@ def test_every_static_risk_map_tool_name_is_current(monkeypatch):
 
     module_files = {
         "builtins": ["app/mcp/builtin_tools.py", "app/mcp/plugin_tools.py",
-                     "app/mcp/emulator_tools.py", "app/mcp/working_record_tools.py"],
+                     "app/mcp/working_record_tools.py"],
         "app-config": [
             "app/mcp/app_config_sdk.py", "app/mcp/config_automations.py",
             "app/mcp/config_connectors.py", "app/mcp/config_hooks.py",

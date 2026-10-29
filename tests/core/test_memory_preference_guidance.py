@@ -6,18 +6,11 @@ leg pays for both copies.
 """
 from __future__ import annotations
 
-import pytest
-
 import app.core.provider.harness_adapter as ha
 from scripts.measure_prompt_catalog import compile_fixture
 
 PHRASE = "not a new dated rule"
 WHEN_EXAMPLE = "When choosing a model for a subagent"
-
-
-@pytest.fixture(autouse=True)
-def _emulator_tools_listed(monkeypatch):
-    monkeypatch.setattr("app.mcp.emulator_tools.emulator_tools_supported", lambda: True)
 
 
 def test_native_leg_carries_the_rule_once_in_remember():

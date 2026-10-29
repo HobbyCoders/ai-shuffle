@@ -424,19 +424,6 @@ def _check_plugin_rule(data, scope):
     return _read_level(path, scope) if path not in (None, "") else LOW
 
 
-def _emulator_rule(data, scope):
-    """The worker's emulator is a sandbox: driving it is ordinary work.
-    Installing the SDK downloads ~2 GB under a license the owner accepts, so
-    it asks; installing an APK reads a file, judged like any other read."""
-    action = data.get("action")
-    if action == "setup":
-        return HIGH
-    if action == "install":
-        path = data.get("path")
-        return _read_level(path, scope) if path not in (None, "") else HIGH
-    return LOW
-
-
 def _start_session_rule(data, scope):
     """Starting a chat here, or in a named registered project, is ordinary
     work. A chat on another worker with no project could land anywhere.
@@ -540,8 +527,6 @@ TOOL_LEVELS: Dict[str, Level] = {
     "PushNotification": LOW,
     "AndroidDevices": LOW,
     "AndroidAction": HIGH,
-    "Emulator": _emulator_rule,
-    "EmulatorScreenshot": LOW,
     "DesignSync": HIGH,
     # Plugins (app/mcp/plugin_tools.py): searching and checking read; an
     # install puts files on the worker (switched off, pending review), so it asks.
