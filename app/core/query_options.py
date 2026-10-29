@@ -1355,6 +1355,8 @@ def build_options_from_profile(
         )
         if _fallback_default is not None:
             provider_id, model_to_use = _fallback_default
+            if provider_pin_id is None:
+                provider_pin_id = provider_id
             logger.info(
                 "[Provider] No model named; using default model %r (provider %r).",
                 model_to_use, provider_id,

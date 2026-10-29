@@ -830,6 +830,9 @@ class HarnessAdapter(ProviderAdapter):
             self._engine.deny_carries_steers = deny_carries_steers
         else:
             provider_client, provider_http = await _build_provider_client(kind, options)
+            # Credential resolution may follow a switch after the SDK snapshot.
+            # Turn settlement reads these options; the original Task pin stays put.
+            self._record_applied("aih_provider_id", options.extra.get("provider_id"))
             self._provider_http = provider_http
             # fluid's bare Task builtin needs the app's dispatcher injected
             # (fluid owns the shape, the app owns the spawning).

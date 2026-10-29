@@ -1262,6 +1262,24 @@
           "past_bug": "#580: a 2s acquisition timeout became a failed worker ResultMessage."
         },
         {
+          "id": "harness-basics.pr840-runtime-pin-follow",
+          "check": "Existing chats and automation pins follow the newly active saved account",
+          "kind": "owner",
+          "needs": ["provider", "install"],
+          "how": "On a disposable candidate worker with two real saved accounts A and B in one provider/kind slot, select A, start a throwaway chat and a paused automation pinned to A, and give a Task worker a provider-specific model assignment different from its native-Claude assignment. Send a short turn, activate B in Settings > Providers, and send a follow-up in the same chat and one automation run. Dispatch the Task worker. Inspect the serving account and usage ledger without exposing credentials. Repeat a fresh chat with no model/provider binding. Switch back and archive the throwaway sessions. Real credential acceptance and per-account usage cannot be proved by the dev instance's fake provider or its public-response Settings fixture.",
+          "pass_when": "Each slot has exactly one active account. The existing chat and automation keep their model and original durable pin, but the next turn authenticates and books usage to B. Task keeps the original provider's model-map assignment, including a first default-provider turn. Turning B off does not silently select A. No provider or model fallback occurs.",
+          "past_bug": "PR #840: first default turns lost the Task pin, and a late account switch sent B's credentials while usage settled against A."
+        },
+        {
+          "id": "harness-basics.pr840-second-subscription-sign-in",
+          "check": "A second ChatGPT or SuperGrok sign-in saves a distinct account and selects its slot",
+          "kind": "owner",
+          "needs": ["provider", "install"],
+          "how": "On a disposable candidate worker, use Settings > Providers to sign in to ChatGPT account A, then Add another subscription and complete sign-in as a different ChatGPT account B. Repeat for two SuperGrok accounts. Use private input/sign-in controls; never put tokens or codes in evidence. Reopen Providers, activate each saved sibling in turn, and send a short follow-up in a throwaway chat originally pinned to A. Cancel an additional sign-in and confirm the saved accounts remain. Real browser/device OAuth and provider account identity require real accounts; the seeded Settings journey covers only switching public account rows, not enrollment.",
+          "pass_when": "Both distinct accounts remain saved under each subscription slot; only the newly activated sibling is on and marked Active. Switching subscriptions does not disable an API-key account in the other kind. A follow-up uses the selected subscription with no history loss, duplicate saved row or overwritten sibling login. Cancelled enrollment leaves the prior selection and credentials intact. Claude Code's single existing sign-in is unchanged.",
+          "past_bug": "PR #840 added saved ChatGPT/SuperGrok accounts without real-worker second-sign-in acceptance coverage."
+        },
+        {
           "id": "harness-basics.rewind-file-restore-retired",
           "check": "Rewind never offers file restore and old agents lose the retired flag",
           "kind": "owner",

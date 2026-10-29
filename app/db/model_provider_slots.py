@@ -8,8 +8,11 @@ Custom gateways have no slot and retain independent enabled flags.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Mapping, Optional
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from psycopg import Cursor
 
 SLOT_SETTING_PREFIX = "model_provider_slot:"
 # Shared by local writers and network materialization, including empty slots.
@@ -30,12 +33,13 @@ def model_provider_slot(row: Mapping[str, Any]) -> Optional[str]:
             "openrouter": "openrouter:key"}.get(kind)
 
 
-def lock_model_provider_slots(cursor) -> None:
+def lock_model_provider_slots(cursor: Cursor) -> None:
     """Transaction lock, not a process lock: covers multiple app workers too."""
     cursor.execute("SELECT pg_advisory_xact_lock(%s)", (_SLOT_LOCK_KEY,))
 
 
-def select_model_provider_slot(cursor, slot: str, provider_id: Optional[str]) -> None:
+def select_model_provider_slot(cursor: Cursor, slot: str, provider_id: Optional[str]) -> None:
+    """Write the slot selection register, or an explicit off selection."""
     cursor.execute(
         "INSERT INTO system_settings (key, value, updated_at, revision) VALUES (%s, %s, %s, %s) "
         "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, "
@@ -44,7 +48,7 @@ def select_model_provider_slot(cursor, slot: str, provider_id: Optional[str]) ->
     )
 
 
-def clear_model_provider_slot(cursor, slot: str, provider_id: str) -> None:
+def clear_model_provider_slot(cursor: Cursor, slot: str, provider_id: str) -> None:
     """Clear only this account's selection, never a sibling's newer selection."""
     cursor.execute("SELECT value FROM system_settings WHERE key = %s", (SLOT_SETTING_PREFIX + slot,))
     selection = cursor.fetchone()
@@ -52,7 +56,7 @@ def clear_model_provider_slot(cursor, slot: str, provider_id: str) -> None:
         select_model_provider_slot(cursor, slot, None)
 
 
-def reconcile_model_provider_slots(cursor, *, initialize: bool = False) -> None:
+def reconcile_model_provider_slots(cursor: Cursor, *, initialize: bool = False) -> None:
     """Project selections atomically; initialize legacy slots deterministically.
 
     A selection can arrive before its account in sync: leave that slot off until

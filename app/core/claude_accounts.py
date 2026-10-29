@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from typing import Any, Callable, NoReturn
 from uuid import uuid4
 
 from app.core import encryption
@@ -25,7 +26,9 @@ _SUBSCRIPTION_REASON = (
 
 
 class AccountError(RuntimeError):
-    def __init__(self, code: str, detail: str, status: int = 409):
+    """A safe account-management error with a stable API code and HTTP status."""
+
+    def __init__(self, code: str, detail: str, status: int = 409) -> None:
         super().__init__(detail)
         self.code, self.status = code, status
 
@@ -90,6 +93,7 @@ def _keys():
 
 
 def active_api_key() -> str | None:
+    """Read the decrypted active key, including the legacy scalar setting."""
     return _read_setting(API_SETTING)
 
 
@@ -110,7 +114,8 @@ def _label(value, default=""):
     return value.strip() or default
 
 
-def add_api_key(key, label="", activate=True):
+def add_api_key(key: str, label: str = "", activate: bool = True) -> str:
+    """Save or relabel a key, optionally select it, and return its account ID."""
     if not isinstance(key, str) or not key.strip():
         _error("invalid_key", "API key cannot be empty.", 400)
     key = key.strip()
@@ -129,7 +134,8 @@ def add_api_key(key, label="", activate=True):
         return account["id"]
 
 
-def subscription_support():
+def subscription_support() -> dict[str, Any]:
+    """Describe the unchanged single-CLI-login subscription capability."""
     return {"supported": False, "reason": _SUBSCRIPTION_REASON}
 
 
@@ -137,7 +143,8 @@ def _unsupported_subscription():
     _error("unsupported", _SUBSCRIPTION_REASON, 501)
 
 
-def change_account(kind, account_id, action, label=""):
+def change_account(kind: str, account_id: str, action: str, label: str = "") -> None:
+    """Rename, activate or delete a saved key without changing Claude auth mode."""
     if kind == "subscription":
         _unsupported_subscription()
     if kind != "api_key":
@@ -162,14 +169,16 @@ def change_account(kind, account_id, action, label=""):
         _save_keys(bundle, update_active=action == "activate" or (action == "delete" and was_active))
 
 
-def deactivate_api_key():
+def deactivate_api_key() -> None:
+    """Clear the selected scalar key while retaining every saved account."""
     with _lock:
         bundle = _keys()
         bundle["active_id"] = None
         _save_keys(bundle, update_active=True)
 
 
-def accounts_payload():
+def accounts_payload() -> dict[str, Any]:
+    """Return masked account summaries, selection and safe storage errors."""
     from app.api.settings_crypto import mask_api_key
 
     with _lock:
@@ -188,17 +197,21 @@ def accounts_payload():
         return result
 
 
-def save_current_login(label=""):
+def save_current_login(label: str = "") -> NoReturn:
+    """Refuse saving CLI subscription state until isolated logins are supported."""
     _unsupported_subscription()
 
 
-async def mutate_subscription(function, *args):
+async def mutate_subscription(function: Callable[..., Any], *args: Any) -> NoReturn:
+    """Refuse saved-subscription mutations without touching CLI state."""
     _unsupported_subscription()
 
 
-async def start_login(*, external=False):
+async def start_login(*, external: bool = False) -> NoReturn:
+    """Refuse a second Claude CLI login; the existing sign-in stays unchanged."""
     _unsupported_subscription()
 
 
-async def cancel_login():
+async def cancel_login() -> NoReturn:
+    """Refuse cancellation of the unsupported saved-subscription login flow."""
     _unsupported_subscription()
