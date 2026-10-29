@@ -213,7 +213,7 @@ async function nodeOutputKey(name: string, opts: BuildOptions, identity: string,
   const hash = createHash('sha256').update(`node-build-1\0${name}\0${identity}\0${dependencies}\0`);
   hash.update(await nodeTree(path.join(opts.source, name), true));
   for (const entry of (await fs.readdir(opts.source, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
-    if (entry.isFile() && (entry.name.endsWith('.json') || entry.name === '.npmrc')) hash.update(entry.name + '\0').update(await fs.readFile(path.join(opts.source, entry.name))).update('\0');
+    if (entry.isFile() && (entry.name.endsWith('.json') || entry.name === '.npmrc')) hash.update(entry.name + '\0' + createHash('sha256').update(await fs.readFile(path.join(opts.source, entry.name))).digest('hex') + '\n');
   }
   return hash.digest('hex');
 }
