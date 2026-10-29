@@ -65,6 +65,7 @@ beforeEach(() => {
 				const created = row({
 					...(body as Partial<ModelProvider>),
 					id: 'gw-new',
+					catalog_binding: 'fixture-gateway-binding',
 					auth_token_set: !!(body as { auth_token?: string }).auth_token
 				});
 				worker.state.rows = [...worker.state.rows, created];
@@ -72,6 +73,7 @@ beforeEach(() => {
 			},
 			'POST /model-providers/:id/fetch-models': () => ({
 				source: 'upstream',
+				binding: 'fixture-gateway-binding',
 				models: catalog
 			})
 		}
