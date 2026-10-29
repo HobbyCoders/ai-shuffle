@@ -64,7 +64,8 @@ async def ensure_backfilled(session_id: str) -> None:
     event-type fast path and serialized counter gate prevent a second backfill.
     """
     try:
-        eligible = await asyncio.to_thread(session_events_db.can_backfill_events, session_id)
+        max_seq = await asyncio.to_thread(session_events_db.get_max_seq, session_id)
+        eligible = max_seq == 0 or await asyncio.to_thread(session_events_db.can_backfill_events, session_id)
     except Exception:
         logger.warning(
             "[history_backfill] eligibility check failed for %s — skipping backfill",
@@ -80,15 +81,15 @@ async def ensure_backfilled(session_id: str) -> None:
         return
 
     try:
-        messages = await asyncio.to_thread(_load_legacy_history, session_id)
+        messages = await asyncio.to_thread(_load_legacy_history, session_id, raise_on_error=True)
+        events = convert_messages_to_events(session_id, messages)
     except Exception:
         logger.warning(
-            "[history_backfill] legacy load failed for %s — skipping backfill",
+            "[history_backfill] legacy load or conversion failed for %s — skipping backfill",
             session_id, exc_info=True,
         )
         return
 
-    events = convert_messages_to_events(session_id, messages)
     if not events:
         _empty_memo[session_id] = now
         return
@@ -124,7 +125,7 @@ async def ensure_backfilled(session_id: str) -> None:
 # legacy history loading (persistent chain)
 # ----------------------------------------------------------------------
 
-def _load_legacy_history(session_id: str) -> List[Dict[str, Any]]:
+def _load_legacy_history(session_id: str, *, raise_on_error: bool = False) -> List[Dict[str, Any]]:
     """Load a session's legacy transcript in frontend message format.
 
     Mirrors the ``/live`` persistent fallback chain (``app.api.sessions``
@@ -133,6 +134,9 @@ def _load_legacy_history(session_id: str) -> List[Dict[str, Any]]:
       0. fluid store (flag-on sessions) — short-circuits everything below
       1. Postgres session store parse
       2. legacy rescue: empty store → legacy ``session_messages``
+
+    Default callers receive an empty list when rescue fails. Backfill opts into
+    ``raise_on_error`` so it can catch the error without memoizing a failed read.
     """
     session = sessions_db.get_session(session_id)
     if not session:
@@ -192,9 +196,8 @@ def _load_legacy_history(session_id: str) -> List[Dict[str, Any]]:
             "[history_backfill] legacy rescue failed for %s", session_id,
             exc_info=True,
         )
-        # Do not memoize a failed read as an empty transcript. A later attempt
-        # must still be able to import history after a cancellation-only log.
-        raise
+        if raise_on_error:
+            raise
 
     return []
 

@@ -27,7 +27,7 @@ LEGACY = [
 
 async def test_stream_backfills_legacy_history_first(mock_db, gw, monkeypatch):
     """An empty log with legacy history serves that history as v2 events."""
-    monkeypatch.setattr(hb, "_load_legacy_history", lambda sid: list(LEGACY))
+    monkeypatch.setattr(hb, "_load_legacy_history", lambda sid, **kwargs: list(LEGACY))
 
     agen = event_stream("sess-bf-a", 0)
     try:
@@ -47,7 +47,7 @@ async def test_stream_backfills_legacy_history_first(mock_db, gw, monkeypatch):
 async def test_caught_up_sentinel_follows_legacy_backfill(mock_db, gw, monkeypatch):
     """The catch-up sentinel is emitted after the legacy-history backfill frames,
     so a session hydrated purely from legacy history still paints in one batch."""
-    monkeypatch.setattr(hb, "_load_legacy_history", lambda sid: list(LEGACY))
+    monkeypatch.setattr(hb, "_load_legacy_history", lambda sid, **kwargs: list(LEGACY))
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 30.0)
 
     agen = event_stream("sess-bf-cu", 0)
@@ -75,7 +75,7 @@ async def test_caught_up_sentinel_follows_legacy_backfill(mock_db, gw, monkeypat
 
 
 async def test_backfilled_then_live_events_share_one_seq_space(mock_db, gw, monkeypatch):
-    monkeypatch.setattr(hb, "_load_legacy_history", lambda sid: list(LEGACY))
+    monkeypatch.setattr(hb, "_load_legacy_history", lambda sid, **kwargs: list(LEGACY))
 
     agen = event_stream("sess-bf-b", 0)
     try:
@@ -95,7 +95,7 @@ async def test_populated_log_skips_legacy_load(mock_db, gw, monkeypatch):
     se.append_events("sess-bf-c", [{"type": "turn.started"}])
     calls = []
     monkeypatch.setattr(
-        hb, "_load_legacy_history", lambda sid: calls.append(sid) or list(LEGACY)
+        hb, "_load_legacy_history", lambda sid, **kwargs: calls.append(sid) or list(LEGACY)
     )
 
     agen = event_stream("sess-bf-c", 0)
@@ -110,7 +110,7 @@ async def test_populated_log_skips_legacy_load(mock_db, gw, monkeypatch):
 
 
 async def test_second_stream_does_not_duplicate_backfill(mock_db, gw, monkeypatch):
-    monkeypatch.setattr(hb, "_load_legacy_history", lambda sid: list(LEGACY))
+    monkeypatch.setattr(hb, "_load_legacy_history", lambda sid, **kwargs: list(LEGACY))
 
     agen1 = event_stream("sess-bf-d", 0)
     try:
@@ -174,7 +174,7 @@ async def test_cancellation_prefix_backfills_past_the_replay_cursor(mock_db, gw,
 
 
 async def test_backfill_failure_does_not_break_the_stream(mock_db, gw, monkeypatch):
-    def _boom(sid):
+    def _boom(sid, **kwargs):
         raise RuntimeError("legacy store down")
     monkeypatch.setattr(hb, "_load_legacy_history", _boom)
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 0.05)

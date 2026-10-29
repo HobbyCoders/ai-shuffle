@@ -326,7 +326,7 @@ LEGACY = [
 
 
 async def test_ensure_backfilled_appends_converted_history(mock_db, monkeypatch):
-    monkeypatch.setattr(hb, "_load_legacy_history", lambda sid: list(LEGACY))
+    monkeypatch.setattr(hb, "_load_legacy_history", lambda sid, **kwargs: list(LEGACY))
     await ensure_backfilled(SID)
     rows = se.get_events(SID)
     assert [r["event_type"] for r in rows] == ["message.user", "message.assistant"]
@@ -340,7 +340,7 @@ async def test_fast_path_skips_loader_when_log_populated(mock_db, monkeypatch):
     se.append_events(SID, [{"type": "turn.started"}])
     calls = []
     monkeypatch.setattr(
-        hb, "_load_legacy_history", lambda sid: calls.append(sid) or []
+        hb, "_load_legacy_history", lambda sid, **kwargs: calls.append(sid) or []
     )
     await ensure_backfilled(SID)
     assert calls == []
@@ -350,7 +350,7 @@ async def test_fast_path_skips_loader_when_log_populated(mock_db, monkeypatch):
 async def test_empty_memo_suppresses_reload_within_ttl(mock_db, monkeypatch):
     calls = []
     monkeypatch.setattr(
-        hb, "_load_legacy_history", lambda sid: calls.append(sid) or []
+        hb, "_load_legacy_history", lambda sid, **kwargs: calls.append(sid) or []
     )
     await ensure_backfilled(SID)
     await ensure_backfilled(SID)
@@ -362,17 +362,35 @@ async def test_empty_memo_suppresses_reload_within_ttl(mock_db, monkeypatch):
 
 
 async def test_loader_failure_degrades_to_noop(mock_db, monkeypatch):
-    def _boom(sid):
+    def _boom(sid, **kwargs):
         raise RuntimeError("legacy store unavailable")
     monkeypatch.setattr(hb, "_load_legacy_history", _boom)
     await ensure_backfilled(SID)  # must not raise
     assert se.get_events(SID) == []
 
 
+async def test_conversion_failure_is_a_retryable_noop(mock_db, monkeypatch):
+    monkeypatch.setattr(hb, "_load_legacy_history", lambda sid, **kwargs: list(LEGACY))
+
+    def fail_conversion(*args):
+        raise RuntimeError("conversion temporarily unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(hb, "convert_messages_to_events", fail_conversion)
+        await ensure_backfilled(SID)
+    assert se.get_events(SID) == []
+    assert SID not in hb._empty_memo
+    await ensure_backfilled(SID)
+    rows = se.get_events(SID)
+    assert [row["event_type"] for row in rows] == ["message.user", "message.assistant"]
+    await ensure_backfilled(SID)
+    assert se.get_events(SID) == rows
+
+
 async def test_recorder_wins_between_eligibility_probe_and_backfill_claim(mock_db, monkeypatch):
     se.append_events(SID, [{"type": "queue.cancelled", "payload": {"cancelled_turn_ids": ["peer"]}}])
 
-    def load_history(_):
+    def load_history(_, **kwargs):
         se.append_events(SID, [{"type": "turn.started"}])
         return list(LEGACY)
 
@@ -383,7 +401,7 @@ async def test_recorder_wins_between_eligibility_probe_and_backfill_claim(mock_d
 
 
 async def test_lost_race_is_silent(mock_db, monkeypatch):
-    monkeypatch.setattr(hb, "_load_legacy_history", lambda sid: list(LEGACY))
+    monkeypatch.setattr(hb, "_load_legacy_history", lambda sid, **kwargs: list(LEGACY))
     monkeypatch.setattr(
         se, "append_backfill_events", lambda sid, events: None
     )
