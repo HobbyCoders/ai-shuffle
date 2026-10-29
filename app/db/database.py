@@ -987,12 +987,21 @@ def _run_column_migrations(cursor: Any) -> None:
         # Backfill any remaining sessions with NULL instance_id (e.g. ungrouped
         # sessions without a project_id that the original migration missed).
         # Assigns them to the current instance so they stop leaking across installs.
+        # A row that names an owning network device is left alone (#782): a
+        # mirror of another worker's session arrives with instance_id NULL
+        # (the column never syncs), and stamping it made the mirror look owned
+        # here. This device's id is not known yet at this point, so every row
+        # with owner_device_id set is skipped; this worker's own rows lose
+        # nothing, because create_session and a handoff always set instance_id
+        # and placement resolves a NULL one from owner_device_id.
         try:
             with _savepoint(cursor, "sp_instance_backfill"):
                 from app.core.config import settings
                 _ph = ph()
+                _unowned = (" AND owner_device_id IS NULL"
+                            if column_exists(cursor, "sessions", "owner_device_id") else "")
                 cursor.execute(
-                    f"UPDATE sessions SET instance_id = {_ph} WHERE instance_id IS NULL",
+                    f"UPDATE sessions SET instance_id = {_ph} WHERE instance_id IS NULL{_unowned}",
                     (settings.effective_instance_id,)
                 )
                 if cursor.rowcount and cursor.rowcount > 0:
@@ -2289,13 +2298,19 @@ def _run_column_migrations(cursor: Any) -> None:
     # adoption is v40's long-established semantic, not nondeterminism Phase 4
     # introduces.
     # `instance_id` / `cloud_branch` / `worktree_*` are NEVER written here.
+    # Worker network (#782): a row naming an owning device is skipped. Its
+    # owner is `owner_device_id`, which a NULL placement already resolves to;
+    # `instance_id` is local-only there, so on a mirror it names this install
+    # and a pin built from it would claim another worker's session.
     if table_exists(cursor, "sessions") and column_exists(cursor, "sessions", "placement"):
         import json as _json_placement
 
+        _unowned = (" AND owner_device_id IS NULL"
+                    if column_exists(cursor, "sessions", "owner_device_id") else "")
         cursor.execute(
             "SELECT id, instance_id FROM sessions "
             "WHERE placement IS NULL "
-            "AND instance_id IS NOT NULL AND instance_id <> ''"
+            "AND instance_id IS NOT NULL AND instance_id <> ''" + _unowned
         )
         pinned = 0
         for row in cursor.fetchall():
