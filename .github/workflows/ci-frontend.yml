@@ -235,10 +235,153 @@ jobs:
           export CHROMIUM_PATH="$(node -p 'require("../browser-mcp/node_modules/playwright-core").chromium.executablePath()')"
           timeout --kill-after=10s 150s node tests/verify-flight-recorder.mjs
 
+  journeys:
+    name: UI journeys (${{ matrix.shard }}/4)
+    # Real app, real PostgreSQL 16, fake AI, real Chromium: every
+    # frontend/tests/journeys/*.journey.mjs against a fresh dev instance
+    # (python -m scripts.devloop up --ci). Shards split the journey files by
+    # case count, each file exactly once; a shard with none ends after the plan.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Plan this shard
+        id: plan
+        run: |
+          plan=$(python3 -m scripts.devloop.ci plan --shards 4)
+          files=$(python3 -c 'import json, sys; print(" ".join(json.loads(sys.argv[1])[int(sys.argv[2]) - 1]))' "$plan" "${{ matrix.shard }}")
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+          echo "UI journeys shard ${{ matrix.shard }}/4: ${files:-no journey files} (plan: $plan)" >> "$GITHUB_STEP_SUMMARY"
+      - if: steps.plan.outputs.files != ''
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements*.txt
+            fluid/pyproject.toml
+      - if: steps.plan.outputs.files != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            browser-mcp/package-lock.json
+      - name: Install Python dependencies
+        if: steps.plan.outputs.files != ''
+        run: |
+          python -m pip install --upgrade pip==26.2.1
+          pip install -r requirements.txt
+          pip install -e ./fluid
+          # As in CI Backend: the hosted tool cache can hold group/world-writable
+          # stdlib files, which the app's import provenance checks refuse.
+          chmod -R go-w "$(python -c 'import sys; print(sys.base_prefix)')"
+      - name: Install JavaScript dependencies
+        if: steps.plan.outputs.files != ''
+        run: |
+          npm ci --prefix frontend
+          npm ci --ignore-scripts --prefix browser-mcp
+      - name: Cache managed Chromium
+        if: steps.plan.outputs.files != ''
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-mcp/package-lock.json') }}
+      - name: Install isolated Chromium
+        if: steps.plan.outputs.files != ''
+        timeout-minutes: 13
+        working-directory: browser-mcp
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # Use the primary signed Ubuntu archive, not the hosted mirror's
+          # slow Azure fallback. Keep suites, components and Signed-By intact.
+          sudo sed -i -E 's|^URIs:.*|URIs: https://archive.ubuntu.com/ubuntu/|' /etc/apt/sources.list.d/ubuntu.sources
+          python3 ../scripts/ci/bounded_apt.py npx --no-install playwright-core install-deps chromium
+          timeout --kill-after=10s 90s npx --no-install playwright-core install chromium
+          node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "CHROMIUM_PATH=" + require("playwright-core").chromium.executablePath() + "\n")'
+      - name: Build and stamp the desktop UI
+        if: steps.plan.outputs.files != ''
+        # The dev instance serves this build (no Vite in CI). The phone UI is
+        # not needed: journeys drive the desktop UI at phone sizes too.
+        env:
+          SHUFFLE_SKIP_MOBILE_UI: '1'
+        run: |
+          (cd frontend && npm run build)
+          python -m app.preview stamp
+      - name: Run the journeys on a fresh dev instance
+        if: steps.plan.outputs.files != ''
+        timeout-minutes: 25
+        run: |
+          # The runner's preinstalled, stopped PostgreSQL 16 binaries; the dev
+          # instance initializes its own throwaway cluster on a free port.
+          export PATH="/usr/lib/postgresql/16/bin:$PATH"
+          python -m scripts.devloop.ci journeys --shard "${{ matrix.shard }}/4" --out "$RUNNER_TEMP/ui-journeys"
+      - name: Upload journey timelines
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-journeys-${{ matrix.shard }}
+          path: ${{ runner.temp }}/ui-journeys/
+          if-no-files-found: ignore
+          retention-days: 3
+
+  visual:
+    name: Visual regression (4 viewports)
+    # The Playwright image of browser-mcp's playwright-core version pins the
+    # Chromium build, the OS and its fonts, so renders are identical run to
+    # run. The committed baselines are this image's renders: when the
+    # playwright-core version changes, this tag changes with it (a policy test
+    # checks) and the baselines are refreshed (docs/ci/pr-checks.md).
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: mcr.microsoft.com/playwright:v1.61.1-noble
+      options: --ipc=host
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache npm downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: visual-npm-${{ hashFiles('frontend/package-lock.json', 'browser-mcp/package-lock.json') }}
+      - name: Install JavaScript dependencies
+        run: |
+          npm ci
+          npm ci --ignore-scripts --prefix ../browser-mcp
+          npx svelte-kit sync
+      - name: Compare every fixture at every viewport
+        run: |
+          export PLAYWRIGHT_MODULE="$PWD/../browser-mcp/node_modules/playwright-core"
+          export CHROMIUM_PATH="$(node -p 'require(process.env.PLAYWRIGHT_MODULE).chromium.executablePath()')"
+          export VISUAL_OUT="$RUNNER_TEMP/visual-regression"
+          status=0
+          timeout --kill-after=10s 600s node tests/visual-regression.mjs --strict || status=$?
+          { echo '### Visual regression'; echo; echo '```text'; cat "$VISUAL_OUT/report.txt" 2>/dev/null || echo 'no report'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" != 0 ]; then
+            echo "::error::Renders differ from frontend/tests/visual-baselines (or a baseline is missing). The artifact's renders/ are this run's images; see docs/ci/pr-checks.md, Visual regression."
+          fi
+          exit "$status"
+      - name: Upload renders and diffs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-regression-${{ github.sha }}
+          path: ${{ runner.temp }}/visual-regression/
+          if-no-files-found: ignore
+          retention-days: 3
+
   javascript:
     name: JavaScript package checks
     if: always()
-    needs: [frontend, contracts, build, typechecks, mobile, tools, browser-mcp]
+    needs: [frontend, contracts, build, typechecks, mobile, tools, browser-mcp, journeys, visual]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -249,7 +392,7 @@ jobs:
           node --input-type=module <<'JS'
           import assert from 'node:assert/strict';
           const results = JSON.parse(process.env.RESULTS);
-          const expected = ["frontend", "contracts", "build", "typechecks", "mobile", "tools", "browser-mcp"];
+          const expected = ["frontend", "contracts", "build", "typechecks", "mobile", "tools", "browser-mcp", "journeys", "visual"];
           assert.deepEqual(Object.keys(results).sort(), [...expected].sort(), 'missing branch');
           for (const name of expected) assert.equal(results[name].result, 'success', name);
           JS

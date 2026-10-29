@@ -23,8 +23,11 @@ These workflows retain manual dispatch and also run on unfiltered
 - `ci-fluid.yml`: the complete fluid unit suite in its isolated environment.
 - `ci-frontend.yml`: four full frontend Vitest shards, production build (including
   mobile postbuild), frontend/mobile typechecks, mobile tests, contracts/docs/audit,
-  tools/WebCrypto vectors and Browser MCP run in parallel. The stable
-  `JavaScript package checks` aggregate requires every branch to succeed.
+  tools/WebCrypto vectors, Browser MCP, the four `UI journeys (N/4)` shards
+  and `Visual regression (4 viewports)` run in parallel. The stable
+  `JavaScript package checks` aggregate requires every branch to succeed, so
+  the journeys and the visual comparison are required for merge (see
+  [UI journeys and visual regression](#ui-journeys-and-visual-regression)).
 - `desktop.yml`: desktop typecheck and unit tests; packaging stays manual.
 - `desktop-source-checks.yml`: source-update protocol regressions.
 - `windows-suite.yml`: three native desktop shards on PRs, with a fail-closed
@@ -825,17 +828,73 @@ Stable/Nightly choice in silent installs), `ci-browser-workspace.yml` and `conta
 Dispatch one only when a local run cannot answer the question, never to find
 out whether tests pass.
 
-## Visual regression screenshots (local, not a CI job)
+## UI journeys and visual regression
 
-`cd frontend && npm run test:visual` renders the standalone fixtures (Git
-panel, turn navigator, side panel, composer, usage rows) at desktop
-(1440×900), phone (412×915) and the Galaxy Z Fold 6 inner (884×1104) and
-cover (360×882) screens, opens the panel or popover under test, and compares
-each with `frontend/tests/visual-baselines/`. Run it before and after chat UI
-work; accept intended changes with `node tests/visual-regression.mjs --update`
-and commit the new baselines in the same PR (they are test fixtures, not PR
-evidence, so the no-screenshots rule in docs/internal/CONTRIBUTING.md does not
-apply to them). Pass a fixture name to run one
-(`node tests/visual-regression.mjs usage-rows`). It uses the browser runtime's
-playwright-core and Chromium, freezes the page clock, and is deliberately not a
-CI job to keep runner minutes down.
+Both run on every pull request in `ci-frontend.yml` on free standard runners
+and feed the required `JavaScript package checks` aggregate. Neither uses a
+path filter (no frontend job does).
+
+### UI journeys
+
+`UI journeys (N/4)`: each shard installs the Python and JavaScript
+dependencies (pip/npm caches) and Chromium (browser-mcp's pinned
+playwright-core build, cached), builds and stamps the desktop UI, then runs
+`python -m scripts.devloop.ci journeys --shard N/4`. That starts a fresh dev
+instance (`python -m scripts.devloop up --ci`: real app, its own throwaway
+PostgreSQL 16 from the runner's `/usr/lib/postgresql/16/bin`, seed data, the
+scripted fake AI, loopback only), waits for its ready line and `status`, runs
+the shard's `frontend/tests/journeys/*.journey.mjs` files in Chromium, then
+`down`. The plan step splits the journey files across the four shards by
+case count, each file exactly once (`python -m scripts.devloop.ci plan
+--shards 4`); a shard with no file stops after the plan, and a plan with no
+journey file at all fails. With one journey file (16 cases) its shard takes
+about 4 minutes of journeys plus setup. When the journeys outgrow four
+shards (a shard over about 10 minutes), raise the shard count in the matrix,
+the plan step and `--shard` together (a guard test checks they agree).
+
+Every case's text timeline (marks, state changes, anomalies) is printed in
+the job log; failing ones also go to the job summary. On failure the shard
+uploads `ui-journeys-<N>` (3 days): `journeys/<journey>/<case>.txt`, keyframe
+contact sheets (`.jpg`), error screenshots, `logs/<journey>.log` and the
+instance's whole `devloop.log`. Run the same thing locally with
+`python -m scripts.devloop.ci journeys --build` (see
+[the dev loop](../internal/dev-loop.md#ci-mode-and-the-journey-driver)), or
+one journey against your own instance as its README says.
+
+### Visual regression screenshots
+
+`Visual regression (4 viewports)` runs `node tests/visual-regression.mjs
+--strict`: the standalone fixtures (Git panel, turn navigator, side panel,
+composer, usage rows) at desktop (1440×900), phone (412×915) and the Galaxy
+Z Fold 6 inner (884×1104) and cover (360×882) screens, with the panel or
+popover under test opened, the page clock frozen, animations off and web
+fonts settled, each compared with `frontend/tests/visual-baselines/` (0.2%
+of pixels may differ). `--strict` also fails a render with no baseline.
+
+Renders must be identical run to run, so the job runs in the official
+Playwright container `mcr.microsoft.com/playwright:v<version>-noble`, where
+`<version>` is browser-mcp's locked playwright-core: that pins the Chromium
+build, the OS and its fonts. The committed baselines are that container's
+renders; a render on your own machine differs slightly (fonts, GPU), so
+local runs are for before/after comparisons of your own, not for producing
+baselines. A guard test fails when the image tag and playwright-core drift
+apart; bumping playwright-core means updating the tag and refreshing the
+baselines in the same PR.
+
+On failure the job uploads `visual-regression-<sha>` (3 days): `renders/`
+(this run's image of every fixture and viewport), `diffs/` (changed pixels in
+red over the dimmed baseline) and `report.txt`. To accept an intended change
+(or a new fixture), copy the renders into the baselines and commit them in
+the same PR; they are test fixtures, not PR evidence, so the no-screenshots
+rule in docs/internal/CONTRIBUTING.md does not apply to them:
+
+```bash
+gh run download <run-id> -n visual-regression-<sha> -D /tmp/visual
+cp /tmp/visual/renders/*.png frontend/tests/visual-baselines/
+```
+
+Look at the renders and diffs before committing: accept only what the change
+meant to change. Locally, `cd frontend && npm run test:visual` (or
+`node tests/visual-regression.mjs <fixture>`) compares against the baselines
+and `--update` overwrites them with your machine's renders (do not commit
+those).

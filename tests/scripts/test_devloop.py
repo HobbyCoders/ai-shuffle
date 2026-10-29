@@ -69,12 +69,20 @@ def test_link_and_seed_are_announced_when_the_first_start_crashed(tmp_path, monk
         current.append(crashed)
         instance.on_app_start(crashed)
         instance.on_app_exit(crashed)
-        assert gate.is_open  # a crash leaves nothing to cut: the fix may restart it
+        # A crash leaves nothing to cut: the fix may restart it ...
+        assert gate.passing and not gate.is_open
+        assert gate.request() is False and restart.is_set()
+        restart.clear()
         fixed = _Process(102)
         current.append(fixed)
-        healthy.add(102)
         instance.on_app_start(fixed)
+        # ... but the start the fix triggers seeds, so it is held closed again.
+        assert gate.request() is True and not restart.is_set()
+        healthy.add(102)
         _wait_for(lambda: instance.data["state"] == "ready")
+        _wait_for(lambda: gate.is_open)
+        assert restart.is_set()  # the save held during the seeding start, applied once
+        restart.clear()
         assert len(announced) == 1 and instance.starts == 2
         status = json.loads(instance.args.status.read_text())
         assert status["access_link"] == "http://10.0.0.30:18880/link"
@@ -105,7 +113,8 @@ def test_restarts_wait_for_the_first_start_and_its_seed():
     assert gate.request() is False and restart.is_set()
 
 
-def test_a_first_start_that_never_settles_opens_the_gate_after_the_grace(tmp_path, monkeypatch):
+def test_a_first_start_that_never_settles_lets_changes_through_after_the_grace(
+        tmp_path, monkeypatch):
     monkeypatch.setattr(devloop, "answers_http", lambda *a, **k: False)
     monkeypatch.setattr(devloop, "FIRST_START_GRACE_SECONDS", 0.1)
     gate = devloop.RestartGate(threading.Event())
@@ -114,10 +123,39 @@ def test_a_first_start_that_never_settles_opens_the_gate_after_the_grace(tmp_pat
     reporter.start()
     try:
         instance.on_app_start(_Process(201))
-        _wait_for(lambda: gate.is_open)
+        _wait_for(lambda: gate.passing)
+        assert not gate.is_open  # only this hung start; the next one is held again
     finally:
         instance.done.set()
         reporter.join(5)
+
+
+def test_a_crash_before_the_seed_never_opens_the_gate_for_good():
+    """Regression: the first start crashed before seeding, so the fix's start
+    seeds; a second save during that start must wait, not cut the seed."""
+    restart = threading.Event()
+    gate = devloop.RestartGate(restart)
+    gate.started()
+    assert gate.request() is True  # a save while the first start runs: held
+    gate.release()  # that start crashed: the held save restarts it
+    assert restart.is_set() and not gate.is_open
+    restart.clear()
+    gate.started()  # the fixed start, which runs the seed
+    assert gate.request() is True and not restart.is_set()
+    assert gate.request() is True and not restart.is_set()  # folded
+    gate.open()  # ready: the seed is done
+    assert restart.is_set()
+    restart.clear()
+    gate.started()  # later starts pass straight through
+    assert gate.request() is False and restart.is_set()
+
+
+def test_a_crash_after_the_gate_opened_changes_nothing():
+    restart = threading.Event()
+    gate = devloop.RestartGate(restart)
+    gate.open()
+    gate.release()
+    assert gate.is_open and not gate.passing
 
 
 # ─── status file ────────────────────────────────────────────────────────────
@@ -303,3 +341,172 @@ def test_fake_provider_reuses_a_curated_row_and_creates_a_missing_one(monkeypatc
     assert asyncio.run(seed_module._fake_provider("http://127.0.0.1:9/v1")) == ("new", "fake-ai")
     create.assert_awaited_once()
     fetch.assert_awaited_once_with("new")
+
+
+# ─── stopping, stale status and --ci ────────────────────────────────────────
+
+
+def test_a_stop_says_stopping_at_once_and_nothing_rewrites_it(tmp_path):
+    """TaskStop SIGKILLs the launcher about a second after its SIGTERM: the
+    status must stop saying "ready" before the slow teardown starts."""
+    instance = _instance(tmp_path)
+    instance.write(state="ready", access_link="http://127.0.0.1:1/link")
+    instance.retire()
+    assert json.loads(instance.args.status.read_text())["state"] == "stopping"
+    instance.write(state="ready")  # a late reporter thread
+    instance.on_app_exit(_Process(5, returncode=1))
+    assert json.loads(instance.args.status.read_text())["state"] == "stopping"
+
+
+def test_launcher_handles_hangup_as_a_stop():
+    import signal
+
+    assert {signal.SIGINT, signal.SIGTERM, signal.SIGHUP} <= set(devloop.STOP_SIGNALS)
+
+
+def test_only_the_launcher_that_wrote_the_status_removes_it(tmp_path):
+    path = tmp_path / "dev.json"
+    path.write_text(json.dumps({"pid": 4242, "pid_identity": "77"}))
+    assert devloop.remove_own_status(path, 4243) is False  # a newer `up` wrote it
+    assert devloop.remove_own_status(path, 4242, "78") is False  # a reused pid
+    assert path.exists()
+    assert devloop.remove_own_status(path, 4242, "77") is True and not path.exists()
+    assert devloop.remove_own_status(path, 4242) is False  # already gone
+
+
+def test_status_removes_a_stale_file_instead_of_showing_it(tmp_path, capsys):
+    path = tmp_path / "dev.json"
+    path.write_text(json.dumps({"pid": 2 ** 22 + 7, "pid_identity": "1", "state": "ready"}))
+    assert devloop.main(["status", "--status", str(path)]) == 1
+    assert "Stale" in capsys.readouterr().out and not path.exists()
+
+
+def test_status_wait_returns_once_ready_and_refuses_a_stopping_instance(tmp_path, capsys):
+    from app.core.temp_scratch import process_identity
+
+    path = tmp_path / "dev.json"
+    live = {"pid": os.getpid(), "pid_identity": process_identity(os.getpid())}
+    path.write_text(json.dumps({**live, "state": "starting"}))
+
+    def later():
+        time.sleep(0.6)
+        path.write_text(json.dumps({**live, "state": "ready"}))
+
+    writer = threading.Thread(target=later)
+    writer.start()
+    assert devloop.main(["status", "--status", str(path), "--wait", "10"]) == 0
+    writer.join()
+    assert json.loads(capsys.readouterr().out)["state"] == "ready"
+    path.write_text(json.dumps({**live, "state": "stopping"}))
+    assert devloop.main(["status", "--status", str(path), "--wait", "10"]) == 1
+    path.write_text(json.dumps({**live, "state": "starting"}))
+    assert devloop.main(["status", "--status", str(path), "--wait", "0.6"]) == 1
+    assert "did not get ready" in capsys.readouterr().err
+
+
+def _parsed(argv):
+    parser = Mock()
+    parser.error.side_effect = SystemExit
+    args = SimpleNamespace(host=ipaddress.ip_address("127.0.0.1"), browser_host=None, port=None,
+                           vite_port=None, ttl_seconds=60, no_vite=False, ci=True, seed="default")
+    for key, value in argv.items():
+        setattr(args, key, value)
+    return parser, args
+
+
+def test_ci_serves_the_stamped_build_on_loopback_only(monkeypatch):
+    monkeypatch.setattr(devloop, "stamped_build_problem", lambda: None)
+    parser, args = _parsed({})
+    devloop._validate(parser, args)
+    assert args.no_vite is True
+    for bad in ({"host": ipaddress.ip_address("0.0.0.0"),
+                 "browser_host": ipaddress.ip_address("10.0.0.5")},
+                {"vite_port": 18555}):
+        parser, args = _parsed(bad)
+        with pytest.raises(SystemExit):
+            devloop._validate(parser, args)
+    monkeypatch.setattr(devloop, "stamped_build_problem", lambda: "frontend/build has no stamp")
+    parser, args = _parsed({})
+    with pytest.raises(SystemExit):
+        devloop._validate(parser, args)
+    assert "has no stamp" in parser.error.call_args.args[0]
+
+
+def test_ci_flag_defaults_from_the_environment(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(devloop, "up", lambda parser, args: seen.setdefault("ci", args.ci) and 0)
+    monkeypatch.setenv("DEVLOOP_CI", "1")
+    devloop.main(["up"])
+    assert seen["ci"] is True
+
+
+def _ci_instance(tmp_path, seed):
+    instance = _instance(tmp_path)
+    instance.args.ci, instance.args.seed = True, "default"
+    instance.stopped = threading.Event()
+    (tmp_path / "access.json").write_text(json.dumps({"url": "http://127.0.0.1:18880/link"}))
+    if seed is not None:
+        (tmp_path / "seed.json").write_text(json.dumps(seed))
+    return instance
+
+
+def test_ci_prints_one_ready_line(tmp_path, capsys):
+    instance = _ci_instance(tmp_path, {"ok": True, "seed": "default"})
+    instance._announce(1.5)
+    lines = [line for line in capsys.readouterr().out.splitlines()
+             if line.startswith(("DEVLOOP_READY", "DEVLOOP_FAILED"))]
+    assert len(lines) == 1 and lines[0].startswith("DEVLOOP_READY ")
+    record = json.loads(lines[0].split(" ", 1)[1])
+    assert record["status"] == str(instance.args.status) and record["seconds"] == 1.5
+    assert not instance.stopped.is_set() and instance.failed is None
+
+
+def test_ci_stops_an_instance_whose_seed_failed(tmp_path, capsys):
+    instance = _ci_instance(tmp_path, {"ok": False, "error": "RuntimeError: boom"})
+    instance._announce(1.0)
+    out = capsys.readouterr().out
+    assert "DEVLOOP_FAILED " in out and "DEVLOOP_READY" not in out
+    assert "boom" in instance.failed and instance.stopped.is_set()
+
+
+# ─── seed content ───────────────────────────────────────────────────────────
+
+
+def test_seeded_repositories_fetch_from_a_local_bare_remote(tmp_path):
+    import subprocess
+
+    repo, remote = tmp_path / "workspace" / "dev-sandbox", tmp_path / "remotes" / "dev-sandbox.git"
+    seed_module.make_repository(repo, "Dev sandbox", second_branch=True, remote=remote)
+    git = ["git", "-C", str(repo)]
+    assert subprocess.run([*git, "remote", "get-url", "origin"], capture_output=True, text=True,
+                          check=True).stdout.strip() == remote.resolve().as_uri()
+    subprocess.run([*git, "fetch", "origin", "--prune"], check=True, capture_output=True)
+    upstream = subprocess.run([*git, "rev-parse", "--abbrev-ref", "main@{upstream}"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+    assert upstream == "origin/main"
+    branches = subprocess.run(["git", "-C", str(remote), "branch", "--format=%(refname:short)"],
+                              capture_output=True, text=True, check=True).stdout.split()
+    assert sorted(branches) == ["feature/second", "main"]
+
+
+def test_seed_ids_are_the_same_on_every_run():
+    seed_module._id_counters.clear()
+    first = [seed_module.seed_id("chat"), seed_module.seed_id("turn"), seed_module.seed_id("chat")]
+    seed_module._id_counters.clear()
+    again = [seed_module.seed_id("chat"), seed_module.seed_id("turn"), seed_module.seed_id("chat")]
+    assert first == again and len(set(first)) == 3
+
+
+def test_the_dev_agent_becomes_the_composer_default_for_the_owner(monkeypatch):
+    """The preview cookie cannot write preferences; the seed stores the pick for
+    the identity the preferences API resolves for an owner (admin) request."""
+    from app.core import preference_identity
+    from app.db import database
+
+    monkeypatch.setattr(preference_identity, "principal_preference_identity",
+                        lambda principal: ("admin", f"owner-of-{principal['kind']}"))
+    stored = Mock()
+    monkeypatch.setattr(database, "set_user_preference", stored)
+    seed_module.make_dev_agent_the_default()
+    stored.assert_called_once_with("admin", "owner-of-admin", "composer.profile",
+                                   seed_module.DEV_AGENT_ID)
