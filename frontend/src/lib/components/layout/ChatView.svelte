@@ -89,7 +89,9 @@
 	// before it is shown, whatever the layout: a chat opened from the hero keeps
 	// the hero while it loads, so the check must not wait for the message
 	// column to mount MirrorSyncGate. Its first catch-up reloads the transcript
-	// (#2227). An unknown owner reads as mirrored, as the gate always did.
+	// (#2227). A conversation just composed here has no old transcript to
+	// reveal: keep its local echo and live feed through that checkpoint.
+	// An unknown owner reads as mirrored, as the gate always did.
 	const mirrorRemote = $derived(
 		$sessions.find(s => s.id === $activeSession.sessionId)?.is_remote ?? $activeSession.isRemote ?? true
 	);
@@ -99,6 +101,7 @@
 	const mirrorSync = createMirrorSync(() => ({
 		sessionId: $activeSession.sessionId,
 		remote: mirrorRemote,
+		createdFromComposer: $activeSession.createdFromComposer,
 		onCaughtUp: () => activeSession.reloadSession()
 	}));
 	// The centred hero layout (new or cleared chat) versus the message column.

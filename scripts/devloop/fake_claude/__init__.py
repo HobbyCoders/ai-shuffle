@@ -50,7 +50,8 @@ def install(directory: Path, *, python: str | None = None) -> Path:
         MARKER,
         f"FAKE_CLAUDE_ROOT={shlex.quote(str(directory))}",
         f"FAKE_CLAUDE_LOG={shlex.quote(str(log_path(directory)))}",
-        "export FAKE_CLAUDE_ROOT FAKE_CLAUDE_LOG",
+        f"FAKE_CLAUDE_STARTUP_MS={shlex.quote(os.environ.get('DEVLOOP_CLAUDE_STARTUP_MS', '0'))}",
+        "export FAKE_CLAUDE_ROOT FAKE_CLAUDE_LOG FAKE_CLAUDE_STARTUP_MS",
         # -I: no PYTHON* variables, no user site, not the caller's directory.
         f"exec {shlex.quote(python or sys.executable)} -I {shlex.quote(str(CLI))} \"$@\"",
     ]

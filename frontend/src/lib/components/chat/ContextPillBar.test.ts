@@ -8,10 +8,12 @@ import { adoptSession, moveSession, getQueuedMove, queueMove, cancelQueuedMove }
 import { notify } from '$lib/stores/notifications';
 import { refreshWorkerPresence, resetWorkerPresence } from '$lib/stores/worker-presence';
 import { resetOwnerTransitions } from '$lib/utils/handoff-episodes';
+import { githubAuthenticated } from '$lib/stores/auth.svelte';
 
-const { session, execution, appSessions, listInstallsMock, getClusterGitStateMock } = vi.hoisted(() => ({
+const { session, execution, branches, appSessions, listInstallsMock, getClusterGitStateMock } = vi.hoisted(() => ({
 	session: { store: null as any },
 	execution: vi.fn(),
+	branches: vi.fn(),
 	appSessions: { store: null as any },
 	listInstallsMock: vi.fn(),
 	getClusterGitStateMock: vi.fn()
@@ -38,7 +40,10 @@ vi.mock('$lib/stores/git.svelte', () => ({
 }));
 vi.mock('./ProfileSelector.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('./WorkspaceFolderSelector.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
-vi.mock('./BranchSelector.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
+vi.mock('./BranchSelector.svelte', async () => {
+	const { default: component } = await import('$lib/test-stubs/EmptyRouteDependency.svelte');
+	return { default: (...args: Parameters<typeof component>) => { branches(); return component(...args); } };
+});
 vi.mock('$lib/components/layout/ExecutionModeBar.svelte', async () => {
 	const { default: component } = await import('$lib/test-stubs/EmptyRouteDependency.svelte');
 	return { default: (...args: Parameters<typeof component>) => { execution(); return component(...args); } };
@@ -67,6 +72,8 @@ afterEach(() => {
 	vi.mocked(queueMove).mockReset();
 	vi.mocked(cancelQueuedMove).mockReset();
 	execution.mockClear();
+	branches.mockClear();
+	githubAuthenticated.set(false);
 	appSessions.store?.set([]);
 	listInstallsMock.mockReset();
 	listInstallsMock.mockResolvedValue({ installs: [] });
@@ -132,6 +139,19 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		session.store.set({ ...base, sessionId: null, messages: [], project: kind === 'project' ? 'project' : null, projectV2Id: kind === 'canonical' ? 'pv2-project' : null });
 		render(ContextPillBar, { sheetMode });
 		expect(execution).toHaveBeenCalledOnce();
+	});
+	it('uses the composed remote owner before its session-board row arrives', async () => {
+		branches.mockClear();
+		githubAuthenticated.set(true);
+		session.store.set({ ...base, isRemote: true, ownerDeviceName: 'Peer worker' });
+		const view = render(ContextPillBar, { sheetMode });
+		expect(view.container.textContent).toContain('Peer worker');
+		// No local checkout selector while waiting for metadata about a REMOTE chat.
+		expect(branches).not.toHaveBeenCalled();
+		appSessions.store.set([{ id: base.sessionId, is_remote: true, device_name: 'Peer worker', controllable: true }]);
+		await tick();
+		expect(branches).not.toHaveBeenCalled();
+		expect(view.container.textContent).toContain('Peer worker');
 	});
 	it('keeps a persisted zero-message remote session in the runner view', async () => {
 		session.store.set({

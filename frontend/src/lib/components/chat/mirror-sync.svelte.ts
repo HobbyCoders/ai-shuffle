@@ -29,6 +29,9 @@ export interface MirrorSyncInput {
 	sessionId: string | null;
 	/** Whether the chat is a mirror of another worker's (only then is it polled). */
 	remote: boolean;
+	/** A conversation composed in this view has no pre-existing history to
+	 *  open. Keep its local echo visible and follow the live feed, not a reset. */
+	createdFromComposer?: boolean;
 	/** Fires ONCE per opened session: its opening checkpoint is materialized.
 	 *  Later drains of a live backlog must not reload the transcript —
 	 *  the live SSE feed already delivers every replicated event, and an
@@ -61,9 +64,10 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 	// Equal primitive values must not restart polling when those stores update.
 	const sessionId = $derived(input().sessionId);
 	const remote = $derived(input().remote);
+	const createdFromComposer = $derived(input().createdFromComposer === true);
 	// Owner-wide watermarks advance for unrelated chats too. Gate the initial
 	// catch-up, then keep the conversation mounted during incremental sync.
-	const waiting = $derived(!!sessionId && remote && revealedSession !== sessionId);
+	const waiting = $derived(!!sessionId && remote && !createdFromComposer && revealedSession !== sessionId);
 	const behind = $derived(syncState === 'syncing' || syncState === 'checking');
 
 	$effect(() => {
@@ -71,7 +75,9 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 		if (!id || !remote) return;
 		const controller = new AbortController();
 		let timer: ReturnType<typeof setTimeout>;
-		let caughtUpOnce = false;
+		// A fresh compose already shows the outgoing message; there is no
+		// earlier transcript to reveal or reload at the opening checkpoint.
+		let caughtUpOnce = createdFromComposer;
 		let initialTarget: { seq: number; epoch: string; tail_id: string } | null = null;
 		const notice = createConnectionBannerGrace({
 			onShow: () => { noticeVisible = true; },
