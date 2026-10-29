@@ -10,6 +10,10 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 
 ## Unreleased
 
+### Fixed
+
+- Skipping an agent's question now moves on. With one question, **Skip this question** sends the skip and closes the question. With several, it jumps to the next unanswered one and sends everything once the last is answered or skipped. Before, a skipped question stayed open until you also pressed Send.
+
 ### Removed
 
 - Removed the built-in Android emulator and Phone panel. Companion-app access to your real Android devices is unchanged.
