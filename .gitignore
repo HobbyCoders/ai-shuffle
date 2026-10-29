@@ -32,6 +32,9 @@ venv
 env
 ENV
 
+# Firebase client configuration is supplied privately at build time.
+**/google-services.json
+
 # Environment variables
 .env
 *.env

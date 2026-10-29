@@ -45,6 +45,9 @@
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|uiMode" />
         <activity android:name=".ui.OfflineDemoActivity" android:exported="false" />
         <activity android:name=".ui.WorkerRepairActivity" android:exported="false" />
+        <service android:name=".push.NeedsYouMessagingService" android:exported="false">
+            <intent-filter><action android:name="com.google.firebase.MESSAGING_EVENT" /></intent-filter>
+        </service>
         <service android:name=".ui.VoiceCallService" android:exported="false"
             android:foregroundServiceType="microphone" />
         <service android:name=".tools.ShuffleAccessibilityService" android:exported="true"

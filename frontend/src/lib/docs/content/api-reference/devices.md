@@ -10,6 +10,14 @@ Endpoints behind the **Devices** settings: the network your workers share, the i
 
 Endpoints marked **Owner only** reject API-user keys (`aih_...`) with `403`. The examples send an owner token from `POST /api/v1/owner/login` (see [Owner password](/docs/api-reference/authentication#owner-password)).
 
+## Needs you push
+
+`GET /api/v1/settings/notifications` (**Owner only**) returns `configured` and `devices_registered`; it never returns the credential. `PUT` accepts `{"service_account": "<JSON pasted in Settings>"}` and encrypts it. `DELETE` removes it. Do not send this secret through a chat or command example.
+
+Android paired-device credentials with `mobile:notifications` scope may `PUT /api/v1/mobile/push-token` with `{"token":"<FCM registration token>"}` to register or rotate **their own** token, or `DELETE` that route to unregister. Expired, revoked, unrelated and API-user credentials cannot register. Unpairing clears the token. Tokens rejected by FCM are pruned without erasing a concurrently rotated token. These registrations are worker-local, not synced to other workers.
+
+`GET /api/v1/mobile/push-state` uses the same scope and returns this executing worker's current generic attention commands for a **silent** reconnect refresh. It is not an event stream and does not trigger a new alert. Versions and episode receipts deduplicate retries on Android.
+
 ## Network status
 
 Every worker has its own device identity and belongs to at most one network. Workers in a network sync settings, profiles and provider keys, and each session runs on one worker.

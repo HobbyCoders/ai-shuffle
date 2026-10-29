@@ -350,6 +350,7 @@ def create_postgres_schema(cursor: Any) -> None:
             last_user_message_epoch TEXT,
             last_assistant_question_seq BIGINT,
             last_assistant_question_epoch TEXT,
+            push_attention_state JSONB NOT NULL DEFAULT '{}',
             -- Worker network: the device this session executes on. Replaces
             -- instance_id as the owner; NULL means "this worker" until the
             -- startup backfill stamps it.

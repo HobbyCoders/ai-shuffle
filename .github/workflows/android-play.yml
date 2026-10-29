@@ -99,6 +99,16 @@ jobs:
         run: |
           name="$(python3 android/ci/resolve-version-name.py --release-tag "$RELEASE_TAG")"
           echo "ANDROID_VERSION_NAME=$name" >> "$GITHUB_ENV"
+      - name: Configure Firebase client (optional)
+        if: github.event_name != 'pull_request'
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        shell: bash
+        run: |
+          if [ -n "$GOOGLE_SERVICES_JSON" ]; then
+            printf '%s' "$GOOGLE_SERVICES_JSON" > "$GITHUB_WORKSPACE/android/app/google-services.json"
+          fi
+
       - name: Require existing release signing secrets
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}

@@ -77,8 +77,7 @@ def turn_cost(event: dict[str, Any]) -> float | None:
 async def notify(
     watch: dict[str, Any], event: dict[str, Any], message: str, session_id: str | None = None
 ) -> None:
-    # The bell is the durable exactly-once report. Push is a best-effort
-    # transport; mark attempted before sending so reboot cannot double-push.
+    # Watches remain in the bell; they never generate phone push.
     from app.core.watch_delivery import share
 
     session_id = session_id or watch.get("creating_session_id")
@@ -97,13 +96,6 @@ async def notify(
     )
     if not event.get("notification_sent"):
         await run_sync(store.update_event, event["id"], notification_sent=True)
-        from app.services.push_notification import fire_and_forget_notify
-
-        fire_and_forget_notify(
-            watch["description"],
-            message,
-            {"watch_id": watch["id"], "session_id": session_id or "", "notification_id": nid},
-        )
 
 
 class WatchManager:

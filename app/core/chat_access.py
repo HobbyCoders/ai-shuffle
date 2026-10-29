@@ -295,6 +295,7 @@ class Action:
     arguments: dict
     expires_at: float
     decision: asyncio.Future
+    attention_id: str | None = None
 
     def public(self):
         return {key: getattr(self, key) for key in (
@@ -322,6 +323,7 @@ class AccessRequest:
     plugin_id: str = ""
     plugin_service: str = ""
     timer: asyncio.TimerHandle | None = None
+    attention_id: str | None = None
 
     def model_pending(self):
         return {"status": "awaiting_user", "request_id": self.id,
@@ -400,6 +402,22 @@ def owner_from_row(row: dict | None) -> tuple:
     # Legacy worker rows inherit their principal from the delegation parent,
     # exactly as session authorization does; NULL is not necessarily the owner.
     return (row.get("owner_device_id"), row.get("instance_id"), session_api_user_id(row))
+
+
+async def _tool_attention_id(session_id: str) -> str | None:
+    # Private waits are ephemeral; their originating canonical tool identity is
+    # not. Recreating a card after restart must not create a second phone alert.
+    from fluid.tools.registry import current_tool_use_id
+    if current_tool_use_id.get():
+        return current_tool_use_id.get()
+    from app.db.async_database import run_sync
+    from app.services.attention_dispatcher import latest_tool_id
+    try:
+        return await run_sync(latest_tool_id, session_id)
+    except Exception:
+        # Attention metadata must never break a private card (including brokers
+        # used without a supervised database). Its random card ID is the fallback.
+        return None
 
 
 #: Longest delegation chain walked to find a subagent's main chat.
@@ -510,6 +528,8 @@ async def publish_change(session_id: str, api_user_id: str | None, *, saved: boo
     count with nothing private in it) lets the sidebar mark a session that is
     not open as needing the owner. ``None`` when unknown (an older owner).
     """
+    from app.services.attention_dispatcher import wake
+    wake(session_id)
     resources = [f"chat-access:{session_id}"] + (["chat-access"] if saved else [])
     try:
         from app.core.global_events import global_events
@@ -775,7 +795,8 @@ class Broker:
                                 suggested_path=suggested_path, service_provider=service_provider,
                                 suggested_url=suggested_url, plugin_id=plugin, plugin_service=service,
                                 suggested_host=suggested_host, suggested_port=suggested_port,
-                                suggested_username=suggested_username, saved_id=saved_id)
+                                suggested_username=suggested_username, saved_id=saved_id,
+                                attention_id=await _tool_attention_id(session_id))
         with self._pending_lock:
             self.requests[request.id] = request
         self._notify(session_id, owner)
@@ -1346,7 +1367,7 @@ class Broker:
             raise AccessDenied("Too many pending actions; resolve them in Chat access.")
         action = Action(uuid.uuid4().hex, grant.id, session_id, operation,
                         dict(arguments), min(grant.expires_at, time.time() + 240),
-                        asyncio.get_running_loop().create_future())
+                        asyncio.get_running_loop().create_future(), await _tool_attention_id(session_id))
         with self._pending_lock:
             self.actions[action.id] = action
         self._notify(session_id, grant.owner)

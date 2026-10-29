@@ -173,11 +173,27 @@ object ApiClient {
         }
     }
 
-    /**
-     * POST {base}/api/v1/mobile/web-session — returns the session token used to
-     * authenticate the WebView. Requires the aim_ key (and the CF Access service
-     * token, if the server is behind Access).
-     */
+    /** Register/rotate only this saved phone credential's token, or revoke it. */
+    suspend fun pushToken(server: Server, token: String?): ApiResult<JSONObject> = withCurrentServer(server) { current ->
+        withContext(Dispatchers.IO) {
+            val request = Request.Builder().url("${current.baseUrl}/api/v1/mobile/push-token")
+                .header("Authorization", "Bearer ${current.apiKey}")
+                .cfAccess(current.cfAccessClientId, current.cfAccessClientSecret)
+                .apply { if (token == null) delete() else put(JSONObject().put("token", token).toString().toRequestBody(JSON_MEDIA.toMediaType())) }
+                .build()
+            execute(request, hasCfCreds = current.hasCfAccess) { it }
+        }
+    }
+
+    suspend fun pushState(server: Server): ApiResult<JSONObject> = withCurrentServer(server) { current ->
+        withContext(Dispatchers.IO) {
+            val request = Request.Builder().url("${current.baseUrl}/api/v1/mobile/push-state")
+                .header("Authorization", "Bearer ${current.apiKey}")
+                .cfAccess(current.cfAccessClientId, current.cfAccessClientSecret).get().build()
+            execute(request, hasCfCreds = current.hasCfAccess) { it }
+        }
+    }
+
     enum class SessionPurpose(val value: String) { WEB("web") }
 
     internal const val WEB_RESERVATION_HEADER = "X-Shuffle-Web-Session-Reservation"
