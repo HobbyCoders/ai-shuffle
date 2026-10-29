@@ -15,9 +15,11 @@ await runJourney({
 		name: 'status-and-all-worker-confirmation',
 		async setup({ page, status }) {
 			await page.goto(status.urls.ui);
-			// Layout preference hydration may still close a mobile sidebar. Wait
-			// for the app's real boot-reconciliation/paint marker, not a timer.
-			await page.waitForFunction(() => performance.getEntriesByType('measure').some((e) => e.name.startsWith('shuffle:app.bootstrap:')));
+			// A fresh context starts with no layout view. Boot reconciliation
+			// writes the new-chat view after preference hydration; it may close
+			// the phone drawer first. Read that real producer's completion, not
+			// network-idle (the app intentionally keeps an event stream open).
+			await page.waitForFunction(() => JSON.parse(localStorage.getItem('ai-shuffle-layout') || 'null')?.activeView?.type === 'session');
 			await showSidebar(page);
 			await page.getByRole('button', { name: 'Settings', exact: true }).click();
 			await page.getByRole('button', { name: 'Devices', exact: true }).click();
