@@ -2,6 +2,19 @@ import { describe, expect, it } from 'vitest';
 import { createTranscriptWindow } from './transcript-window';
 
 describe('nested transcript mount budget', () => {
+ it('atomically resumes with the incoming item vector, including an empty hydration reset', () => {
+  let costs = Array(20).fill(1000);
+  const window = createTranscriptWindow({ budget: 12000, cost: (i: number) => {
+   if (i >= costs.length) throw new Error('charged a leaving-session row');
+   return costs[i];
+  } });
+  window.setItemCount(costs.length);
+  window.pauseWhenHidden(true);
+  costs = [];
+  expect(window.setItemCount(0, { hidden: false })).toEqual({ start: 0, end: 0 });
+  costs = Array(40).fill(1000);
+  expect(window.setItemCount(costs.length, { hidden: false })).toEqual({ start: 28, end: 40 });
+ });
  it('bounds rich content as well as the 120 outer rows across twenty bidirectional shifts', () => {
   const costs = Array.from({ length: 1200 }, (_, i) => i % 3 === 0 ? 2400 : 48);
   const budget = 12000;

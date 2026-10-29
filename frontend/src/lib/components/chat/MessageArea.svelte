@@ -757,8 +757,10 @@
 			const saved = isNewSession ? mountedRangeCache.get(sessionKey) : undefined;
 			windowSessionKey = sessionKey;
 			transcriptWindow.onStreamingChange(streaming);
-			transcriptWindow.pauseWhenHidden(typeof document !== 'undefined' && document.hidden);
-			let next = transcriptWindow.setItemCount(count, { followTail: isNewSession || shouldAutoScroll });
+			let next = transcriptWindow.setItemCount(count, {
+				followTail: isNewSession || shouldAutoScroll,
+				hidden: typeof document !== 'undefined' && document.hidden
+			});
 			// Restoring a remount uses the same bounded coordinate system as the
 			// saved scrollTop, never a full-history mount.
 			if (isNewSession && saved && autoScrollCache.get(sessionKey) === false && count > 0) {

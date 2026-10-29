@@ -117,9 +117,12 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 		get visibleRange() { return range; },
 		get followsTail() { return followsTail; },
 		get isStreaming() { return streaming; },
-		setItemCount(next: number, options: { followTail?: boolean } = {}): TranscriptRange {
+		setItemCount(next: number, options: { followTail?: boolean; hidden?: boolean } = {}): TranscriptRange {
 			if (!Number.isInteger(next) || next < 0) throw new RangeError('Item count must be a non-negative integer');
+			// Visibility and the current item vector form one transaction. Resuming
+			// with the PREVIOUS count can charge rows removed by a session switch.
 			count = next;
+			hidden = options.hidden ?? hidden;
 			followsTail = options.followTail ?? followsTail;
 			if (hidden && count >= range.end) return range;
 			return followsTail ? endingAt(count) : move(range.start);
