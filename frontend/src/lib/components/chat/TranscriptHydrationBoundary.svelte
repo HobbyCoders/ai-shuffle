@@ -1,0 +1,124 @@
+<script lang="ts" module>
+	import type { Readable } from 'svelte/store';
+	import type { ActiveSessionState } from '$lib/stores/active-session';
+
+	/** Only transcript descendants read this; the composer/permission trays stay live. */
+	export const TRANSCRIPT_PRESENTATION = Symbol('transcript-presentation');
+	export const TRANSCRIPT_LOADING_GRACE_MS = 180;
+	export type TranscriptPresentation = Readable<ActiveSessionState>;
+</script>
+
+<script lang="ts">
+	import { onMount, onDestroy, setContext, type Snippet } from 'svelte';
+	import { get, writable } from 'svelte/store';
+	import { activeSession } from '$lib/stores/active-session';
+	import { classifyChatSurface, type ChatSurface } from '$lib/components/layout/chat-empty-state';
+	import TranscriptLoadingSkeleton from './TranscriptLoadingSkeleton.svelte';
+
+	let { children, graceMs = TRANSCRIPT_LOADING_GRACE_MS, mirrorPending = false, onSurface }: {
+		children: Snippet;
+		graceMs?: number;
+		/** The ancestor gate owns inertness and its own notice during a remote barrier. */
+		mirrorPending?: boolean;
+		onSurface?: (surface: ChatSurface, messageCount: number, sessionId: string | null | undefined) => void;
+	} = $props();
+
+	const initial = get(activeSession);
+	const presented = writable(initial);
+	setContext<TranscriptPresentation>(TRANSCRIPT_PRESENTATION, { subscribe: presented.subscribe });
+	// One shallow state shell, not a per-session cache or a second rendered tree.
+	// Arrays stay owned by the native feed; no whole-history copy on each token.
+	let settled = initial.isLoadingSession || initial.isRestoringSession ? null : { ...initial };
+	let shown = initial;
+	let retaining = $state(false);
+	let targetSessionId = $state(initial.sessionId);
+	let graceElapsed = $state(false);
+	let pendingTarget: string | null = null;
+	let epoch = 0;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+
+	function cancelGrace() {
+		epoch++;
+		if (timer !== undefined) clearTimeout(timer);
+		timer = undefined;
+		pendingTarget = null;
+		graceElapsed = false;
+	}
+
+	onMount(() => activeSession.subscribe(current => {
+		targetSessionId = current.sessionId;
+		const loading = current.isLoadingSession || current.isRestoringSession;
+		if (!loading) {
+			cancelGrace();
+			retaining = false;
+			settled = current.sessionId ? { ...current } : null;
+			shown = current;
+			presented.set(current);
+			return;
+		}
+
+		// A rapid A → B → C navigation gets C's own grace; B's timer cannot
+		// reveal a skeleton over C, nor fire after C has already been painted.
+		const target = current.sessionId ?? 'restoring';
+		if (pendingTarget !== target) {
+			// Once a genuine slow load has shown the notice, keep it continuous
+			// across another navigation instead of flashing the old rows back in.
+			const alreadyShown = graceElapsed;
+			cancelGrace();
+			pendingTarget = target;
+			graceElapsed = alreadyShown;
+			if (!alreadyShown) {
+				const mine = epoch;
+				timer = setTimeout(() => {
+					if (mine !== epoch || pendingTarget !== target) return;
+					timer = undefined;
+					graceElapsed = true;
+				}, Math.max(0, graceMs));
+			}
+		}
+
+		retaining = settled !== null;
+		if (settled) {
+			// Ignore partial/stale feed publications until this target is ready.
+			if (shown !== settled) { shown = settled; presented.set(settled); }
+		} else {
+			// A cold first visit has no outgoing conversation to retain.
+			shown = current;
+			presented.set(current);
+		}
+	}));
+	onDestroy(cancelGrace);
+
+	const overlay = $derived(retaining && graceElapsed && !mirrorPending);
+	const messageCount = $derived($presented.messages.length + ($presented.pendingPeerMessages?.length ?? 0));
+	$effect(() => onSurface?.(overlay ? 'loading' : classifyChatSurface({
+		sessionId: $presented.sessionId,
+		messageCount,
+		isLoadingSession: $presented.isLoadingSession,
+		isRestoringSession: $presented.isRestoringSession
+	}), overlay ? 0 : messageCount, overlay ? targetSessionId : $presented.sessionId));
+</script>
+
+<div class="transcript-hydration" data-transcript-pending={retaining ? 'true' : undefined}>
+	<div class="transcript-presentation" inert={retaining && !mirrorPending} class:is-concealed={overlay}>
+		{@render children()}
+	</div>
+	{#if overlay}
+		<div class="hydration-overlay"><TranscriptLoadingSkeleton /></div>
+	{/if}
+</div>
+
+<style>
+	.transcript-hydration, .transcript-presentation {
+		display: flex;
+		flex: 1;
+		min-width: 0;
+		min-height: 0;
+		flex-direction: column;
+	}
+	.transcript-hydration { position: relative; }
+	/* Keep the old mounted geometry/reader snapshot intact underneath the
+	   delayed notice. Publishing a synthetic empty old state would erase it. */
+	.is-concealed { visibility: hidden; }
+	.hydration-overlay { position: absolute; inset: 0; overflow: hidden; }
+</style>

@@ -24,7 +24,7 @@
 // a move there and back, fails even when it is too small or too quick to
 // count as a layout shift.
 import { runJourney } from './runner.mjs';
-import { SEEDED, gotoApp, openFromSidebar, seededChatId, waitChat, waitChatOpen } from './lib/app.mjs';
+import { SEEDED, expect, gotoApp, openFromSidebar, seededChatId, waitChat, waitChatOpen } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { expectComposerPositions } from './lib/timeline.mjs';
 
@@ -65,9 +65,138 @@ const viaDeepLink = (target) => async ({ page, status, mark }) => {
 	await OPENED[target](page);
 };
 
+// The switch-flash cases use the REAL mobile shell, unlike a narrow desktop
+// viewport. Hold only delivery of an actual native SSE response: no reducer,
+// content or loading flag is fabricated.
+async function prepareHeldSwitch(ctx, delayMs) {
+	const { page, status, variant } = ctx;
+	const target = seededChatId(status, 'other_project');
+	await page.addInitScript(({ target, delayMs }) => {
+		const fetchOriginal = window.fetch.bind(window);
+		const hold = window.__switchHydrationHold = { started: null, released: null };
+		window.fetch = async (input, init) => {
+			const response = await fetchOriginal(input, init);
+			const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+			if (url.pathname === `/api/v1/sessions/${target}/events` && hold.started === null) {
+				hold.started = performance.now();
+				await new Promise(resolve => setTimeout(resolve, delayMs));
+				hold.released = performance.now();
+			}
+			return response;
+		};
+	}, { target, delayMs });
+	const prefix = variant.viewport === 'phone' ? '/mobile/' : '/';
+	await page.goto(new URL(`${prefix}?session=${encodeURIComponent(seededChatId(status, 'no_project'))}`, status.urls.ui).toString());
+	await page.getByRole('textbox', { name: 'Message' }).waitFor({ timeout: 60_000 });
+	await waitChatOpen(page, { messagesAtLeast: 2, hold: 500 });
+	await page.getByRole('textbox', { name: 'Message' }).fill('Draft for the outgoing chat');
+}
+
+async function openSwitchChat(page, key) {
+	if (new URL(page.url()).pathname.startsWith('/mobile/')) {
+		await page.getByRole('button', { name: /^Open menu/ }).click();
+		const group = page.getByRole('group', { name: `${SEEDED[key]} session`, exact: true });
+		await group.getByRole('button').first().click();
+	} else await openFromSidebar(page, SEEDED[key]);
+}
+
+async function sampleSwitchFrames(page) {
+	await page.evaluate(() => {
+		const composer = document.querySelector('[role="textbox"][aria-label="Message"]');
+		const log = document.querySelector('[role="log"][aria-label="Conversation messages"]');
+		const firstRow = log?.querySelector('.msg-virtualized');
+		window.__switchHydrationFrames = [];
+		window.__switchHydrationSampling = true;
+		const sample = t => {
+			if (!window.__switchHydrationSampling) return;
+			const chat = document.querySelector('[data-ui-state="chat"]');
+			const pending = !!document.querySelector('[data-transcript-pending="true"]');
+			const loader = document.querySelector('.loading-transcript');
+			const rows = [...document.querySelectorAll('[role="log"] .msg-virtualized')];
+			window.__switchHydrationFrames.push({
+				t, pending, heldAt: window.__switchHydrationHold.started,
+				loader: !!loader && getComputedStyle(loader).visibility !== 'hidden',
+				visibleRows: rows.filter(row => getComputedStyle(row).visibility !== 'hidden').length,
+				outgoingConnected: !!firstRow?.isConnected,
+				composerSame: composer === document.querySelector('[role="textbox"][aria-label="Message"]'),
+				logSame: log === document.querySelector('[role="log"][aria-label="Conversation messages"]'),
+				outgoingDraft: composer?.textContent?.includes('Draft for the outgoing chat'),
+				surface: chat?.dataset.uiSurface,
+				session: chat?.dataset.uiSession,
+				target: chat?.dataset.uiTargetSession,
+				loading: chat?.dataset.uiLoading
+			});
+			requestAnimationFrame(sample);
+		};
+		requestAnimationFrame(sample);
+	});
+}
+
+async function finishSwitchFrames(page, log, { slow = false } = {}) {
+	const frames = await page.evaluate(() => {
+		window.__switchHydrationSampling = false;
+		return window.__switchHydrationFrames;
+	});
+	const pending = frames.filter(frame => frame.pending && frame.heldAt !== null);
+	// The first 100ms is deliberately inside the production 180ms grace, with
+	// room for response-header/frame scheduling jitter on 4x CPU.
+	const underGrace = pending.filter(frame => frame.t - frame.heldAt < 100);
+	expect(underGrace.length > 0, 'observed the real incoming history while under grace');
+	expect(underGrace.every(frame => !frame.loader && frame.visibleRows > 0 && frame.outgoingConnected), 'no empty/skeleton frame under grace');
+	expect(frames.every(frame => frame.composerSame && frame.logSame), 'composer and MessageArea retain their identity');
+	expect(pending.every(frame => !frame.outgoingDraft), 'the incoming composer never displays the outgoing draft');
+	if (slow) {
+		expect(pending.some(frame => frame.loader && frame.outgoingConnected), 'a slow load shows its overlay without discarding the old rows');
+	}
+	log(`switch frames=${frames.length}, pending=${pending.length}, under-grace=${underGrace.length}, loader=${pending.filter(frame => frame.loader).length}`);
+}
+
+const heldSwitch = (delayMs, slow = false) => ({
+	setup: ctx => prepareHeldSwitch(ctx, delayMs),
+	async act({ page, mark, log }) {
+		await sampleSwitchFrames(page);
+		await mark('open an unvisited short chat');
+		await openSwitchChat(page, 'other_project');
+		await waitChatOpen(page, { messagesAtLeast: 2, hold: 250 });
+		await finishSwitchFrames(page, log, { slow });
+	},
+	verify: composer('bottom')
+});
+
 await runJourney({
 	name: 'open-unloaded-chat',
 	cases: [
+		{ name: 'short-switch-under-grace', ...heldSwitch(80) },
+		{ name: 'short-switch-slow-overlay', ...heldSwitch(800, true) },
+		{ name: 'short-rapid-switch-cancels-overlay',
+			setup: ctx => prepareHeldSwitch(ctx, 3000),
+			async act({ page, mark, log }) {
+				const outgoing = await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-session');
+				expect(typeof outgoing === 'string', 'outgoing session has a safe diagnostic tag');
+				await sampleSwitchFrames(page);
+				await mark('start B then return to A before its history settles');
+				await openSwitchChat(page, 'other_project');
+				await page.waitForFunction(() => window.__switchHydrationHold.started !== null);
+				await openSwitchChat(page, 'no_project');
+				await page.waitForFunction(tag => {
+					const chat = document.querySelector('[data-ui-state="chat"]');
+					return chat?.dataset.uiSession === tag && chat?.dataset.uiTargetSession === tag && chat?.dataset.uiLoading === 'false';
+				}, outgoing);
+				const readyAt = await page.evaluate(() => performance.now());
+				await page.waitForFunction(() => window.__switchHydrationHold.released !== null, undefined, { timeout: 6000 });
+				await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+				const frames = await page.evaluate(() => {
+					window.__switchHydrationSampling = false;
+					return window.__switchHydrationFrames;
+				});
+				const settled = frames.filter(frame => frame.t >= readyAt);
+				expect(settled.length > 0, 'sampled the late stale response');
+				expect(settled.every(frame => frame.session === outgoing && frame.target === outgoing && !frame.loader && frame.visibleRows > 0), 'no stale rows/overlay after returning to A');
+				expect(frames.every(frame => frame.composerSame && frame.logSame), 'rapid navigation preserves the composer/transcript shell');
+				log(`rapid switch: ${frames.length} frames, ${settled.length} after A settled; stale response ignored`);
+			},
+			verify: composer('bottom')
+		},
 		{ name: 'long-from-new', setup: fromNew, act: viaSidebar('long'), verify: composer('centre', 'bottom') },
 		{ name: 'cleared-from-new', setup: fromNew, act: viaSidebar('cleared'), verify: composer('centre') },
 		{ name: 'long-from-chat', setup: fromChat('no_project'), act: viaSidebar('long'), verify: composer('bottom') },

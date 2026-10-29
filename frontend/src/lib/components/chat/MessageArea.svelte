@@ -29,10 +29,12 @@
 	 * - Scroll position is restored on component mount (not on every tab prop change)
 	 * - This prevents scroll jumping when switching between cards
 	 */
-	import { tick, untrack, onMount, onDestroy } from 'svelte';
+	import { tick, untrack, onMount, onDestroy, getContext } from 'svelte';
 	import { X } from 'lucide-svelte';
 	import { derived as derivedStore } from 'svelte/store';
-	import { activeSession, backgroundPermissions } from '$lib/stores/active-session';
+	import { activeSession as liveActiveSession, backgroundPermissions } from '$lib/stores/active-session';
+	import { TRANSCRIPT_PRESENTATION, type TranscriptPresentation } from './TranscriptHydrationBoundary.svelte';
+	import TranscriptLoadingSkeleton from './TranscriptLoadingSkeleton.svelte';
 	import { sessionEphemeralCache } from '$lib/stores/session-cache';
 	import { createScrollTopPersist, readLeavingScrollTop } from './scroll-top-persist';
 	import { privateAccessPending } from '$lib/stores/chat-access';
@@ -130,6 +132,10 @@
 	import ApprovalRequestCard from './ApprovalRequestCard.svelte';
 	import ApprovalOutcome from './ApprovalOutcome.svelte';
 
+	// Only this subtree can read a frozen outgoing transcript. Mutations and
+	// persistence still address the real incoming session below.
+	const activeSession = getContext<TranscriptPresentation>(TRANSCRIPT_PRESENTATION) ?? liveActiveSession;
+
 	/** Exhaustive keyed identity for every presentation-model variant. */
 	function displayItemKey(item: DisplayItem): string {
 		switch (item.kind) {
@@ -162,22 +168,22 @@
 	function handleRewindComplete(warning?: string, rewoundPrompt?: string, uploadPaths?: string[]) {
 		// If there's a warning (partial success), show it as a system message
 		if (warning) {
-			activeSession.addSystemMessage(warning, 'rewind_warning');
+			liveActiveSession.addSystemMessage(warning, 'rewind_warning');
 		}
 
 		// A rewind to a user message removed that very message — queue its text
 		// so ChatInput refills the composer after the reload settles, letting the
 		// user edit or resend what they rewound away.
 		if (rewoundPrompt || uploadPaths?.length) {
-			activeSession.setPendingRestorePrompt(rewoundPrompt ?? '', uploadPaths);
+			liveActiveSession.setPendingRestorePrompt(rewoundPrompt ?? '', uploadPaths);
 		}
 
 		// Clear stale messages from the store before reloading.
 		// Without this, the defensive check in the history handler would
 		// preserve old (broken) messages when the reload returns fewer/zero.
-		activeSession.clearMessages();
+		liveActiveSession.clearMessages();
 
-		activeSession.reloadSession(true);
+		liveActiveSession.reloadSession(true);
 	}
 
 	let containerRef = $state<HTMLDivElement | null>(null);
@@ -1212,8 +1218,8 @@
 	// into its own saved snapshot, never into the store of the one entered.
 	const scrollTopPersist = createScrollTopPersist({
 		delayMs: 250,
-		currentKey: () => $activeSession.sessionId ?? 'new',
-		writeCurrent: (position) => activeSession.setScrollTop(position),
+		currentKey: () => $liveActiveSession.sessionId ?? 'new',
+		writeCurrent: (position) => liveActiveSession.setScrollTop(position),
 		writeLeft: (key, position) => sessionEphemeralCache.patchScrollTop(key, position)
 	});
 
@@ -1941,20 +1947,7 @@
 		     it just has not arrived yet. The blocks mirror the transcript's own
 		     rhythm (prompt, then a taller response), so the switch to real
 		     content is a fill rather than a jump. -->
-		<div class="chat-column" aria-busy="true" aria-live="polite">
-			<span class="sr-only">Loading conversation…</span>
-			{#each [0, 1, 2] as group (group)}
-				<div class="sk-turn" aria-hidden="true">
-					<div class="sk-line sk-prompt"></div>
-					<div class="sk-response">
-						<div class="sk-line sk-name"></div>
-						<div class="sk-line"></div>
-						<div class="sk-line"></div>
-						<div class="sk-line sk-short"></div>
-					</div>
-				</div>
-			{/each}
-		</div>
+			<TranscriptLoadingSkeleton />
 	{:else if transcriptRender === 'empty'}
 		<!-- Empty State -->
 		<div class="h-full flex flex-col">
@@ -2055,8 +2048,8 @@
 					messages={pendingMessages}
 					stale={!!$activeSession.queueStale}
 					ownerName={$activeSession.isRemote ? $activeSession.ownerDeviceName : null}
-					onRemove={(id) => activeSession.unsendQueuedMessage(id)}
-					onInterrupt={() => activeSession.interruptForQueuedMessages()}
+					onRemove={(id) => liveActiveSession.unsendQueuedMessage(id)}
+					onInterrupt={() => liveActiveSession.interruptForQueuedMessages()}
 				/>
 			{/if}
 
@@ -2132,7 +2125,7 @@
 			{#if forkOfferSessionId}
 				<button type="button" onclick={() => forkOfferedSessionHere(forkOfferSessionId)} class="text-sm font-medium underline underline-offset-2 hover:opacity-80 px-1.5">Fork here</button>
 			{/if}
-			<button type="button" onclick={() => activeSession.clearError()} class="chat-error-dismiss" aria-label="Dismiss error" title="Dismiss">
+			<button type="button" onclick={() => liveActiveSession.clearError()} class="chat-error-dismiss" aria-label="Dismiss error" title="Dismiss">
 				<X size={16} strokeWidth={2} aria-hidden="true" />
 			</button>
 		</span>
@@ -2401,60 +2394,7 @@
 		.has-turn-nav .chat-column { padding-left: 28px; }
 	}
 
-	/* ── Hydration skeleton (S3) ──────────────────────────────────────────
-	   Shaped like the transcript it is standing in for: a short prompt line,
-	   then a taller response block. Same column, same 22px rhythm, so the real
-	   content lands into the same layout instead of replacing a centred hero. */
-	.sk-turn {
-		display: flex;
-		flex-direction: column;
-		gap: 12px;
-	}
 
-	.sk-response {
-		display: flex;
-		flex-direction: column;
-		gap: 9px;
-	}
-
-	.sk-line {
-		height: 12px;
-		border-radius: 6px;
-		background: color-mix(in oklch, var(--foreground) 9%, transparent);
-		animation: sk-pulse 1.6s ease-in-out infinite;
-	}
-
-	.sk-prompt {
-		height: 34px;
-		width: 46%;
-		align-self: flex-end;
-		border-radius: 14px;
-		background: color-mix(in oklch, var(--foreground) 12%, transparent);
-	}
-
-	.sk-name {
-		width: 118px;
-		height: 10px;
-	}
-
-	.sk-short { width: 62%; }
-
-	.sk-turn:nth-child(2) .sk-prompt { width: 34%; }
-	.sk-turn:nth-child(3) .sk-prompt { width: 52%; }
-	.sk-turn:nth-child(2) .sk-short { width: 44%; }
-
-	/* Stagger so the column reads as one surface waking up, not three. */
-	.sk-turn:nth-child(2) .sk-line { animation-delay: 120ms; }
-	.sk-turn:nth-child(3) .sk-line { animation-delay: 240ms; }
-
-	@keyframes sk-pulse {
-		0%, 100% { opacity: 1; }
-		50% { opacity: 0.45; }
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.sk-line { animation: none; }
-	}
 
 	/* Explicit, keyboard-accessible paging mirrors the bounded scroll edges. */
 	.earlier-row {
