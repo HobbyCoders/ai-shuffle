@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { initScript, collect, loadPlaywright, windowCounters, PLATFORMS, authenticate } from './browser-helpers.mjs';
+import { initScript, collect, loadPlaywright, windowCounters, PLATFORMS, authenticate, validateOutput } from './browser-helpers.mjs';
 import { summarize } from './stats.mjs';
 import { switchJourney } from './switch-journey.mjs';
 import { scrollJourney } from './long-transcript-scroll-journey.mjs';
@@ -84,15 +84,20 @@ export function parseArgs(argv) {
 export async function newChatPage(browser, storageState, platform) {
 	const { route, cpu, ...options } = PLATFORMS[platform];
 	const context = await browser.newContext({ ...options, storageState, serviceWorkers: 'block' });
-	await context.addInitScript(initScript, CHAT_SEL);
-	await context.addInitScript(chatInstrumentation, CHAT_SEL);
-	const page = await context.newPage();
-	const cdp = await context.newCDPSession(page);
-	await cdp.send('Emulation.setCPUThrottlingRate', { rate: cpu });
-	const p = { context, page, platform, route, apiRequests: 0, requestBaseline: 0, errors: 0 };
-	page.on('request', (request) => { if (new URL(request.url()).pathname.startsWith('/api/')) p.apiRequests++; });
-	page.on('pageerror', () => { p.errors++; });
-	return p;
+	try {
+		await context.addInitScript(initScript, CHAT_SEL);
+		await context.addInitScript(chatInstrumentation, CHAT_SEL);
+		const page = await context.newPage();
+		const cdp = await context.newCDPSession(page);
+		await cdp.send('Emulation.setCPUThrottlingRate', { rate: cpu });
+		const p = { context, page, platform, route, apiRequests: 0, requestBaseline: 0, errors: 0 };
+		page.on('request', (request) => { if (new URL(request.url()).pathname.startsWith('/api/')) p.apiRequests++; });
+		page.on('pageerror', () => { p.errors++; });
+		return p;
+	} catch (error) {
+		await context.close();
+		throw error;
+	}
 }
 
 export async function arm(p, kind) {
@@ -148,6 +153,7 @@ export async function main(argv = process.argv.slice(2)) {
 	const args = parseArgs(argv), access = process.env.PERF_ACCESS_URL;
 	if (!access) throw new Error('Set PERF_ACCESS_URL in the environment');
 	const origin = new URL(access).origin;
+	validateOutput(args.out);
 	const { chromium } = loadPlaywright();
 	const browser = await chromium.launch({ executablePath: process.env.PERF_CHROME || '/usr/bin/chromium',
 		args: ['--no-sandbox', '--disable-dev-shm-usage'] });
@@ -168,8 +174,9 @@ export async function main(argv = process.argv.slice(2)) {
 		for (const platform of args.platform === 'both' ? ['desktop', 'mobile'] : [args.platform]) {
 			for (let run = 0; run < args.runs; run++) {
 				for (const journey of args.journeys.split(',')) {
-					const p = await newChatPage(browser, storage, platform);
+					let p;
 					try {
+						p = await newChatPage(browser, storage, platform);
 						if (journey === 'cold') {
 							await record(`${platform}.cold.large`, () => coldOpen(p, origin, args.large));
 						} else if (journey === 'warm') {
@@ -198,13 +205,26 @@ export async function main(argv = process.argv.slice(2)) {
 								await record(`${platform}.remote.${index + 1}.warm`, () => switchJourney(p, id, { sidebar: false }));
 							}
 						}
-					} catch { failed = true; console.error(`${platform}.${journey} setup FAILED (no URLs logged)`); }
-					finally { await p.context.close(); }
+					} catch {
+						failed = true;
+						const name = `${platform}.${journey}.setup`;
+						(output.cells[name] ??= []).push({ failed: true, phase: 'setup', run: run + 1 });
+						console.error(`${name} FAILED (no URLs logged)`);
+						save();
+					} finally { await p?.context.close(); }
 				}
 			}
 		}
+	} catch {
+		failed = true;
+		(output.cells['setup'] ??= []).push({ failed: true, phase: 'setup' });
+		console.error('Global setup FAILED (no URLs logged)');
 	} finally {
-		output.meta.loadEnd = os.loadavg(); save(); await browser.close();
+		try {
+			output.failed = failed;
+			output.meta.loadEnd = os.loadavg();
+			save();
+		} finally { await browser.close(); }
 	}
 	if (failed) process.exitCode = 1;
 	return output;

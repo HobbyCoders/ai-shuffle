@@ -79,7 +79,12 @@ node scripts/perf/chat-journeys.mjs --platform both --runs 1 --journeys scroll \
 Desktop is **1280x800, 1x CPU**; phone is **390x844, touch, `/mobile/`, 4x CPU**.
 No artificial network shaping; report topology separately. Each cell has raw
 runs and nearest-rank p75/min/max/n (via `stats.mjs`). Failed runs are counted,
-not folded into zero latency; any failure makes the process fail.
+not folded into zero latency; any failure makes the process fail. Setup failures
+are persisted as failed samples in `<platform>.<journey>.setup` cells (or `setup`
+for global authentication/setup), with no timing sample. This keeps failed
+attempts visible even when no journey reaches its milestone. Output destinations
+are opened without truncation before resources start; a later write failure still
+closes the browser and makes the command fail.
 
 The chat milestone matches Phase 1: new non-skeleton rows + enabled visible
 composer + 120 ms of unchanged scroll geometry. The quiet observation is not
@@ -119,6 +124,9 @@ the same byte/DOM/request counters. It includes prior-process teardown; browser
 launch and the initial schema/seed warmup are excluded from the summary.
 `--seed none` omits chats for comparison with the original empty-start baseline.
 The supervisor bounds failures and tears down its own PostgreSQL on exit.
+Startup succeeds only if the supervisor exits normally with code zero; nonzero,
+signalled or timed-out shutdowns set `failed`, leave `cleanedUp=false`, retain
+`previewExitCode`/`previewExitSignal` and fail the command.
 Imports use fresh interpreters and an isolated environment, report `-X importtime`
 self/cumulative costs, elapsed p75/min/max and `sys.modules` count/list for
 module-count ratchets. Neither rig touches the live app or calls a model.
