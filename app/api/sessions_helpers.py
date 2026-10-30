@@ -1251,6 +1251,64 @@ def finalize_transcript(
     return page, pagination
 
 
+def load_event_message_window(
+    session_id: str, *, limit: Optional[int] = None, before_seq: Optional[int] = None,
+) -> Optional[tuple[list[dict], dict, bool]]:
+    """Try a proven event-only window; None preserves full replay for every other source.
+
+    Local Fluid/store transcripts still take their richer, unchanged full path.
+    The dark canonical TS records are intentionally not a serving capability.
+    """
+    from collections import Counter, deque
+    from app.core.cost_utils import attach_cost_metadata
+    from app.db.session_message_windows import (
+        read_event_message_window, read_window_usage, read_window_user_metadata,
+    )
+
+    page_limit = resolve_message_page_limit(limit)
+    before = before_seq if isinstance(before_seq, int) and not isinstance(before_seq, bool) else None
+    try:
+        window = read_event_message_window(session_id, page_limit, before)
+        if window is None or window.epoch is None:
+            return None
+        messages = project_event_messages(session_id, window.rows, epoch=window.epoch)
+        # Check the entire suffix's ordered identities, not only a count that
+        # could hide one dropped and one duplicated boundary. Fail closed.
+        if [m['id'] for m in messages] != window.ids or len(messages) + window.offset != window.total:
+            return None
+        usage = read_window_usage(session_id, window.turn_offset,
+                                  window.total_turns - window.turn_offset)
+        attach_cost_metadata(messages, session_id, turn_offset=window.turn_offset,
+                             total_turns=window.total_turns, usage_entries=usage,
+                             usage_offset=window.turn_offset)
+        contents = Counter(m.get('content', '') for m in messages if m.get('role') == 'user')
+        metadata = {key: deque(values) for key, values in
+                    read_window_user_metadata(session_id, window.source_start, contents).items()}
+        for message in messages:
+            if message.get('role') != 'user':
+                continue
+            queue = metadata.get(message.get('content', ''))
+            item = queue.popleft() if queue else None
+            if item:
+                message['metadata'] = {**item, **(message.get('metadata') or {})}
+        page = messages[window.start - window.offset:window.end - window.offset]
+        pagination = {
+            'total': window.total, 'returned': len(page), 'limit': page_limit,
+            'first_seq': window.start if page else None,
+            'last_seq': window.end - 1 if page else None,
+            'has_more': window.start > 0,
+            'next_before_seq': window.start if window.start > 0 else None,
+            'has_more_after': window.end < window.total,
+        }
+        compact_messages_for_display(page)
+        return page, pagination, True
+    except Exception:
+        # Unsupported database/old schema or an unsafe shape must never change
+        # what the caller sees. The full reader remains the compatibility path.
+        logger.debug('Event message window unavailable for %s', session_id, exc_info=True)
+        return None
+
+
 def attach_event_positions(messages: list[dict], session_id: str) -> None:
     """Reconcile rich local transcripts with the authoritative event projection.
 
@@ -1389,11 +1447,27 @@ def load_event_messages(session_id: str) -> tuple[list[dict], bool]:
     execution/task/retry presentation remains the event feed's responsibility.
     The envelope and harness-reminder filtering are shared with SSE via _wire.
     """
+    from itertools import chain
+    from app.db import session_events
+
+    def rows():
+        cursor = 0
+        while page := session_events.get_events(session_id, cursor, limit=500):
+            yield from page
+            cursor = page[-1]["seq"]
+
+    source = iter(rows())
+    first = next(source, None)
+    if first is None:
+        return [], False
+    return project_event_messages(session_id, chain((first,), source)), True
+
+
+def project_event_messages(session_id: str, rows, *, epoch=None) -> list[dict]:
+    """The REST fold, shared by full replay and proven complete source windows."""
     import re
     from urllib.parse import quote
-
     from app.api.events import _wire
-    from app.db import session_events
 
     messages: list[dict] = []
     tools: dict[str, dict] = {}
@@ -1402,9 +1476,6 @@ def load_event_messages(session_id: str) -> tuple[list[dict], bool]:
     origins: dict[str, int] = {}
     open_message = None
     current_profile = None
-    cursor = 0
-    has_events = False
-    epoch = None
 
     def append(event: dict, **fields) -> dict:
         msg = {
@@ -1425,128 +1496,122 @@ def load_event_messages(session_id: str) -> tuple[list[dict], bool]:
         origins[msg["id"]] = event["seq"]
         return msg
 
-    while True:
-        rows = session_events.get_events(session_id, cursor, limit=500)
-        if not rows:
-            break
-        if not has_events:
-            epoch = str(rows[0]["id"])
-        has_events = True
-        for row in rows:
-            # Exactly the envelope/reminder projection used by SSE replay.
-            event = _wire(row)
-            kind = event["type"]
-            if kind == "turn.started":
-                open_message = None
+    for row in rows:
+        if epoch is None:
+            epoch = str(row["id"])
+        # Exactly the envelope/reminder projection used by SSE replay.
+        event = _wire(row)
+        kind = event["type"]
+        if kind == "turn.started":
+            open_message = None
+            current_profile = event.get("profile_id")
+        elif kind == "message.user":
+            open_message = None
+            # A steered user message can have a different sender; it must
+            # not relabel the assistant already executing this turn.
+            if current_profile is None or event.get("turn_id") in (None, "backfill"):
                 current_profile = event.get("profile_id")
-            elif kind == "message.user":
+            append(event, role="user", content=event.get("content") or "")
+        elif kind in ("assistant.text_delta", "assistant.thinking_delta"):
+            msg_type = "thinking" if kind == "assistant.thinking_delta" else "text"
+            subtype = (event.get("subtype") or None) if msg_type == "thinking" else None
+            if (
+                open_message is None
+                or open_message["type"] != msg_type
+                or open_message.get("thinkingSubtype") != subtype
+            ):
+                open_message = append(event, id=f"{msg_type}-{event['id']}", type=msg_type)
+                if subtype:
+                    open_message["thinkingSubtype"] = subtype
+            open_message["seq"] = event["seq"]
+            previous, piece = open_message["content"], event.get("text") or ""
+            if msg_type == "thinking" and previous.rstrip().endswith("**") and piece.lstrip().startswith("**"):
+                open_message["content"] = previous.rstrip() + "\n\n" + piece.lstrip()
+            else:
+                open_message["content"] += piece
+        elif kind == "message.assistant":
+            open_message = None
+            msg_type = "thinking" if event.get("kind") == "thinking" else "text"
+            msg = append(event, type=msg_type, content=event.get("content") or "")
+            if msg_type == "thinking" and event.get("subtype"):
+                msg["thinkingSubtype"] = event["subtype"]
+        elif kind in ("tool.use", "tool.input_delta"):
+            tool_id = event.get("tool_use_id")
+            if not tool_id:
+                continue
+            tool = tools.get(tool_id)
+            # Updating arguments on an existing card does not interrupt
+            # text streamed later in the log; opening a new card does.
+            if kind == "tool.use" or tool is None:
                 open_message = None
-                # A steered user message can have a different sender; it must
-                # not relabel the assistant already executing this turn.
-                if current_profile is None or event.get("turn_id") in (None, "backfill"):
-                    current_profile = event.get("profile_id")
-                append(event, role="user", content=event.get("content") or "")
-            elif kind in ("assistant.text_delta", "assistant.thinking_delta"):
-                msg_type = "thinking" if kind == "assistant.thinking_delta" else "text"
-                subtype = (event.get("subtype") or None) if msg_type == "thinking" else None
-                if (
-                    open_message is None
-                    or open_message["type"] != msg_type
-                    or open_message.get("thinkingSubtype") != subtype
-                ):
-                    open_message = append(event, id=f"{msg_type}-{event['id']}", type=msg_type)
-                    if subtype:
-                        open_message["thinkingSubtype"] = subtype
-                open_message["seq"] = event["seq"]
-                previous, piece = open_message["content"], event.get("text") or ""
-                if msg_type == "thinking" and previous.rstrip().endswith("**") and piece.lstrip().startswith("**"):
-                    open_message["content"] = previous.rstrip() + "\n\n" + piece.lstrip()
-                else:
-                    open_message["content"] += piece
-            elif kind == "message.assistant":
-                open_message = None
-                msg_type = "thinking" if event.get("kind") == "thinking" else "text"
-                msg = append(event, type=msg_type, content=event.get("content") or "")
-                if msg_type == "thinking" and event.get("subtype"):
-                    msg["thinkingSubtype"] = event["subtype"]
-            elif kind in ("tool.use", "tool.input_delta"):
-                tool_id = event.get("tool_use_id")
-                if not tool_id:
-                    continue
-                tool = tools.get(tool_id)
-                # Updating arguments on an existing card does not interrupt
-                # text streamed later in the log; opening a new card does.
-                if kind == "tool.use" or tool is None:
-                    open_message = None
-                if tool is None:
-                    tool = append(event, id=f"tooluse-{tool_id}", type="tool_use", toolId=tool_id, toolStatus="running")
-                    tools[tool_id] = tool
-                tool["seq"] = event["seq"]
-                if kind == "tool.use":
+            if tool is None:
+                tool = append(event, id=f"tooluse-{tool_id}", type="tool_use", toolId=tool_id, toolStatus="running")
+                tools[tool_id] = tool
+            tool["seq"] = event["seq"]
+            if kind == "tool.use":
+                tool["toolName"] = event.get("name") or ""
+                tool["toolInput"] = event.get("input") or {}
+                screenshot = event.get("screenshot")
+                if screenshot:
+                    artifact = re.fullmatch(r"/api/v1/artifacts/([0-9a-f]{64})(?:\?[^#]*)?", screenshot)
+                    tool["toolScreenshot"] = (
+                        f"/api/v1/artifacts/{artifact[1]}?session_id={quote(session_id, safe='')}"
+                        if artifact else screenshot
+                    )
+            else:
+                tool["partialToolInput"] = tool.get("partialToolInput", "") + (event.get("partial_json") or "")
+                if not tool.get("toolName"):
                     tool["toolName"] = event.get("name") or ""
-                    tool["toolInput"] = event.get("input") or {}
-                    screenshot = event.get("screenshot")
-                    if screenshot:
-                        artifact = re.fullmatch(r"/api/v1/artifacts/([0-9a-f]{64})(?:\?[^#]*)?", screenshot)
-                        tool["toolScreenshot"] = (
-                            f"/api/v1/artifacts/{artifact[1]}?session_id={quote(session_id, safe='')}"
-                            if artifact else screenshot
-                        )
-                else:
-                    tool["partialToolInput"] = tool.get("partialToolInput", "") + (event.get("partial_json") or "")
-                    if not tool.get("toolName"):
-                        tool["toolName"] = event.get("name") or ""
-            elif kind == "tool.result":
-                tool = tools.get(event.get("tool_use_id"))
-                if tool is not None:
-                    tool["seq"] = event["seq"]
-                    tool["toolResult"] = event.get("content_preview") or ""
-                    tool["toolStatus"] = "error" if event.get("is_error") else "complete"
-                    hashes = event.get("artifact_hashes") or []
-                    digest = next((h for h in hashes if isinstance(h, str) and re.fullmatch(r"[0-9a-f]{64}", h)), None)
-                    if digest and not tool.get("toolScreenshot"):
-                        tool["toolScreenshot"] = f"/api/v1/artifacts/{digest}?session_id={quote(session_id, safe='')}"
-            elif kind == "system.note":
-                if event.get("subtype") in ("background_tasks_changed", "model_info"):
-                    continue
-                open_message = None
-                data = event.get("data") or {}
-                append(event, role="system", type="system", content=data.get("content") or data.get("text") or "",
-                       systemSubtype=event.get("subtype"), systemData=data)
-            elif kind == "system.compaction_boundary":
-                open_message = None
-                data = event.get("data") or {}
-                subtype = "compact_boundary" if event.get("subtype") == "compact_boundary" and data.get("compact_metadata") else "compaction_boundary"
-                append(event, role="system", type="system", systemSubtype=subtype, systemData=data)
-            elif kind == "interaction.requested":
-                card = _approval_card(event, messages)
-                if card is None:
-                    continue
-                existing = approvals.get(card["id"])
-                if existing is not None:
-                    # A deferred request re-asked under the same id.
-                    existing["systemData"]["status"] = "pending"
-                    continue
-                open_message = None
-                approvals[card["id"]] = append(event, **card)
-            elif kind in ("interaction.answered", "interaction.expired"):
-                existing = approvals.get(_approval_card_id(event.get("request_id")))
-                status = _approval_status(event) if existing is not None else None
-                if status:
-                    existing["systemData"]["status"] = status
-            elif kind == "transcript.rewound":
-                from_seq = event.get("from_seq")
-                if isinstance(from_seq, int) and not isinstance(from_seq, bool):
-                    messages = [m for m in messages if origins[m["id"]] < from_seq]
-                    origins = {m["id"]: origins[m["id"]] for m in messages}
-                    tools = {m["toolId"]: m for m in messages if m.get("toolId")}
-                    approvals = {k: m for k, m in approvals.items() if k in origins}
-                    if open_message is not None and open_message["id"] not in origins:
-                        open_message = None
-            elif kind in ("turn.completed", "turn.aborted", "turn.parked"):
-                open_message = None
-        cursor = rows[-1]["seq"]
-    return messages, has_events
+        elif kind == "tool.result":
+            tool = tools.get(event.get("tool_use_id"))
+            if tool is not None:
+                tool["seq"] = event["seq"]
+                tool["toolResult"] = event.get("content_preview") or ""
+                tool["toolStatus"] = "error" if event.get("is_error") else "complete"
+                hashes = event.get("artifact_hashes") or []
+                digest = next((h for h in hashes if isinstance(h, str) and re.fullmatch(r"[0-9a-f]{64}", h)), None)
+                if digest and not tool.get("toolScreenshot"):
+                    tool["toolScreenshot"] = f"/api/v1/artifacts/{digest}?session_id={quote(session_id, safe='')}"
+        elif kind == "system.note":
+            if event.get("subtype") in ("background_tasks_changed", "model_info"):
+                continue
+            open_message = None
+            data = event.get("data") or {}
+            append(event, role="system", type="system", content=data.get("content") or data.get("text") or "",
+                   systemSubtype=event.get("subtype"), systemData=data)
+        elif kind == "system.compaction_boundary":
+            open_message = None
+            data = event.get("data") or {}
+            subtype = "compact_boundary" if event.get("subtype") == "compact_boundary" and data.get("compact_metadata") else "compaction_boundary"
+            append(event, role="system", type="system", systemSubtype=subtype, systemData=data)
+        elif kind == "interaction.requested":
+            card = _approval_card(event, messages)
+            if card is None:
+                continue
+            existing = approvals.get(card["id"])
+            if existing is not None:
+                # A deferred request re-asked under the same id.
+                existing["systemData"]["status"] = "pending"
+                continue
+            open_message = None
+            approvals[card["id"]] = append(event, **card)
+        elif kind in ("interaction.answered", "interaction.expired"):
+            existing = approvals.get(_approval_card_id(event.get("request_id")))
+            status = _approval_status(event) if existing is not None else None
+            if status:
+                existing["systemData"]["status"] = status
+        elif kind == "transcript.rewound":
+            from_seq = event.get("from_seq")
+            if isinstance(from_seq, int) and not isinstance(from_seq, bool):
+                messages = [m for m in messages if origins[m["id"]] < from_seq]
+                origins = {m["id"]: origins[m["id"]] for m in messages}
+                tools = {m["toolId"]: m for m in messages if m.get("toolId")}
+                approvals = {k: m for k, m in approvals.items() if k in origins}
+                if open_message is not None and open_message["id"] not in origins:
+                    open_message = None
+        elif kind in ("turn.completed", "turn.aborted", "turn.parked"):
+            open_message = None
+    return messages
 
 
 def build_detail_messages(session_id: str, jsonl_messages: List[dict]) -> List[dict]:

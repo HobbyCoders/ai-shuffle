@@ -68,6 +68,7 @@ from app.api.sessions_helpers import (  # noqa: F401 — re-exports
     build_detail_messages,
     build_live_messages,
     load_event_messages,
+    load_event_message_window,
     local_store_is_stale,
     finalize_transcript,
     paginate_messages,
@@ -1018,9 +1019,18 @@ async def get_session(
     # mirror. Only a confirmed EMPTY event history permits the legacy rescue;
     # unreadable or bubble-less event history must not resurrect user-only rows.
     has_events = False
+    event_window = None
     if not messages:
         try:
-            messages, has_events = await run_sync(load_event_messages, session["id"])
+            # SDK-ID aliases retain their existing metadata lookup semantics.
+            if session_id == session["id"]:
+                event_window = await run_sync(
+                    load_event_message_window, session["id"], limit=message_limit, before_seq=before_seq,
+                )
+            if event_window is not None:
+                messages, message_pagination, has_events = event_window
+            else:
+                messages, has_events = await run_sync(load_event_messages, session["id"])
         except Exception:
             logger.exception("Failed to read event transcript for %s", session["id"])
             has_events = await run_sync(_event_history_blocks_legacy_rescue, session["id"])
@@ -1037,13 +1047,14 @@ async def get_session(
     # Cost/duration + user-row metadata attach, then the keyset window and the
     # display caps (tool inputs, inline screenshots) — all synchronous DB/CPU
     # work, done in ONE thread hop instead of on the event loop.
-    messages, message_pagination = await run_sync(
-        finalize_transcript,
-        session_id,
-        messages,
-        limit=message_limit,
-        before_seq=before_seq,
-    )
+    if event_window is None:
+        messages, message_pagination = await run_sync(
+            finalize_transcript,
+            session_id,
+            messages,
+            limit=message_limit,
+            before_seq=before_seq,
+        )
     if response is not None:
         _set_message_pagination_headers(response, message_pagination)
 
