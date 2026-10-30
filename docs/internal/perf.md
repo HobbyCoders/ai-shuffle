@@ -181,7 +181,8 @@ not the database work of every aggregate independently of history size.
 
 This does **not** enable the default-off canonical TypeScript transcript view.
 Local Fluid/store, legacy readers and SDK-ID aliases remain unchanged. Rewinds, approval retry
-cards, reminder-bearing user matching, cross-boundary tool reopens, and suffixes
+cards, reminder-bearing user matching, cross-boundary tool reopens, malformed
+fold payloads (including note/compaction data and tool fragments/results), and suffixes
 over 8,192 relevant source rows fall back to full replay. Long histories without
 a usable turn barrier and deep older pages can exceed that cap too. Differential
 checks compare complete messages and pagination headers against the full path,

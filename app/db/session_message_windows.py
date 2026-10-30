@@ -66,7 +66,12 @@ def read_event_message_window(session_id: str, limit: int, before: int | None) -
                          WHEN event_type = 'assistant.text_delta'
                          THEN LENGTH(BTRIM(COALESCE(payload->>'text',''), %s)) > 0
                          ELSE FALSE END AS has_text,
-                    event_type = 'transcript.rewound'
+                    -- Prefix rows are not folded in Python. Decline every shape
+                    -- that can fail its .get/concat/regex/hash/iteration operations.
+                    -- A JSON string can also decode to an object in _parse_payload,
+                    -- which is not the SQL extraction's interpretation.
+                    jsonb_typeof(payload) IS DISTINCT FROM 'object'
+                        OR event_type = 'transcript.rewound'
                         OR (event_type = 'interaction.requested'
                             AND payload->>'kind' = 'permission'
                             AND jsonb_typeof(payload->'request'->'assistant_confirm') = 'object')
@@ -76,8 +81,16 @@ def read_event_message_window(session_id: str, limit: int, before: int | None) -
                             AND jsonb_typeof(payload->'content') NOT IN ('string','null'))
                         OR (event_type IN ('assistant.text_delta','assistant.thinking_delta')
                             AND jsonb_typeof(payload->'text') NOT IN ('string','null'))
-                        OR (event_type IN ('tool.use','tool.input_delta')
+                        OR (event_type IN ('tool.use','tool.input_delta','tool.result')
                             AND jsonb_typeof(payload->'tool_use_id') NOT IN ('string','null'))
+                        OR (event_type IN ('system.note','system.compaction_boundary')
+                            AND jsonb_typeof(payload->'data') NOT IN ('object','null'))
+                        OR (event_type = 'tool.use'
+                            AND jsonb_typeof(payload->'screenshot') NOT IN ('string','null'))
+                        OR (event_type = 'tool.input_delta'
+                            AND jsonb_typeof(payload->'partial_json') NOT IN ('string','null'))
+                        OR (event_type = 'tool.result'
+                            AND jsonb_typeof(payload->'artifact_hashes') NOT IN ('array','null'))
                         OR (event_type = 'assistant.thinking_delta'
                             AND jsonb_typeof(payload->'subtype') NOT IN ('string','null'))
                         AS unsafe

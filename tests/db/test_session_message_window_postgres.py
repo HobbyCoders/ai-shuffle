@@ -311,3 +311,81 @@ def test_differential_adversarial_boundary_grammar(chat, api):
             assert load_event_message_window(chat, limit=limit, before_seq=before) is not None
             assert_route_parity(client, chat, limit, before)
 
+
+# Each event is outside the selected suffix: checking only its identities must
+# not hide a full-fold failure (or a different _parse_payload interpretation).
+_MALFORMED_PREFIXES = [
+    pytest.param(kind, {"subtype": "notice" if kind == "system.note" else "compact_boundary", "data": value},
+                 id=f"{kind}-data-{label}")
+    for kind in ("system.note", "system.compaction_boundary")
+    for label, value in (("string", "scalar-not-an-object"), ("array", ["item"]),
+                         ("number", 7), ("boolean", True), ("empty-array", []))
+] + [
+    pytest.param(kind, {"tool_use_id": "prefix-tool", field: value}, id=f"{kind}-{field}-{label}")
+    for kind, field, values in (
+        ("tool.use", "screenshot", (("number", 7), ("array", ["image"]), ("object", {"image": "x"}))),
+        ("tool.input_delta", "partial_json", (("number", 7), ("array", ["json"]), ("object", {"a": 1}))),
+        ("tool.result", "artifact_hashes", (("number", 7), ("boolean", True),
+                                           ("string", "not-an-array"), ("object", {"hash": "x"}))),
+    )
+    for label, value in values
+] + [
+    pytest.param("tool.result", {"tool_use_id": value}, id=f"tool.result-id-{label}")
+    for label, value in (("array", ["prefix-tool"]), ("object", {"id": "prefix-tool"}), ("number", 7))
+] + [
+    pytest.param("system.note", payload, id=f"payload-{label}")
+    for label, payload in (("encoded-object", '{"subtype":"model_info"}'),
+                           ("string", "not-an-object"), ("array", ["item"]),
+                           ("number", 7), ("boolean", True), ("null", None))
+] + [
+    # The existing scalar guards get prefix differentials too, not just suffix
+    # tests where a fold error would already force the compatibility path.
+    pytest.param(kind, payload, id=f"existing-{kind}-{field}")
+    for kind, field, payload in (
+        ("message.user", "content", {"content": {"text": "not text"}}),
+        ("message.assistant", "content", {"content": ["not text"]}),
+        ("assistant.text_delta", "text", {"text": 7}),
+        ("assistant.thinking_delta", "text", {"text": {"thought": "x"}}),
+        ("assistant.thinking_delta", "subtype", {"text": "x", "subtype": ["reasoning"]}),
+        ("tool.use", "tool_use_id", {"tool_use_id": ["prefix-tool"]}),
+        ("tool.input_delta", "tool_use_id", {"tool_use_id": {"id": "prefix-tool"}}),
+    )
+]
+
+
+@pytest.mark.parametrize("kind,payload", _MALFORMED_PREFIXES)
+def test_malformed_prefix_uses_full_path_and_preserves_http_result(chat, api, kind, payload):
+    from app.api.sessions_helpers import load_event_message_window
+    rows = [("turn.started", {}, "a"), ("message.user", {"content": "old"}, "a")]
+    if kind.startswith("tool."):
+        rows.append(("tool.use", {"tool_use_id": "prefix-tool", "name": "Read", "input": {}}, "a"))
+    rows += [(kind, payload, "a"), ("turn.completed", {}, "a"),
+             ("turn.started", {}, "b"), ("message.user", {"content": "new"}, "b"),
+             ("message.assistant", {"content": "new answer"}, "b")]
+    append(chat, rows)
+    with TestClient(api) as client:
+        assert_route_parity(client, chat, 1)
+        assert load_event_message_window(chat, limit=1) is None
+
+
+@pytest.mark.parametrize("kind,payload", [
+    ("system.note", {"subtype": "model_info", "data": "ignored"}),
+    ("system.note", {"subtype": "background_tasks_changed", "data": ["ignored"]}),
+    ("interaction.requested", {"kind": "permission", "request": "not an object"}),
+    ("interaction.requested", {"kind": "permission", "request": {"assistant_confirm": "not an object"}}),
+    ("interaction.answered", {"request_id": ["invalid"], "answer": {"decision": {"invalid": True}}}),
+    ("interaction.expired", {"request_id": {"invalid": True}}),
+    ("tool.result", {"tool_use_id": "prefix-tool", "artifact_hashes": [7, {"ignored": True}, "bad"]}),
+    ("tool.use", {"tool_use_id": "prefix-tool", "input": ["opaque", "input"]}),
+])
+def test_checked_or_ignored_prefix_shapes_still_match_full_path(chat, api, kind, payload):
+    from app.api.sessions_helpers import load_event_message_window
+    append(chat, [("turn.started", {}, "a"), ("message.user", {"content": "old"}, "a"),
+                  ("tool.use", {"tool_use_id": "prefix-tool", "name": "Read", "input": {}}, "a"),
+                  (kind, payload, "a"), ("turn.completed", {}, "a"),
+                  ("turn.started", {}, "b"), ("message.user", {"content": "new"}, "b"),
+                  ("message.assistant", {"content": "new answer"}, "b")])
+    with TestClient(api) as client:
+        assert_route_parity(client, chat, 1)
+        assert load_event_message_window(chat, limit=1) is not None
+
