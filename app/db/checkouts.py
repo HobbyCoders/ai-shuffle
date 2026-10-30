@@ -174,11 +174,44 @@ def get_checkout(
     return _row(row)
 
 
-def get_checkout_by_path(path: str, *, project_id: Optional[str] = None,
-                         runner_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Resolve a physical path only on its runner; reject ambiguous projects."""
-    if not path:
+def _canonical_of_family(cursor: Any, project_ids: List[str]) -> Optional[str]:
+    """The remote identity when ``project_ids`` are one project linked late, else None.
+
+    A project linked to its remote after its first chat keeps its placeholder
+    ``local:<legacy id>`` identity beside the remote one, and both have a base
+    checkout of the same folder (#802). They are one project when exactly one
+    identity is not a placeholder and every placeholder's legacy project is
+    now linked to that identity's origin.
+    """
+    cursor.execute(
+        f"SELECT id, origin FROM projects_v2 WHERE id IN ({', '.join(['%s'] * len(project_ids))})",
+        tuple(project_ids),
+    )
+    origins = {row["id"]: row["origin"] or "" for row in cursor.fetchall()}
+    if len(origins) != len(project_ids):
         return None
+    placeholders = {pid: o[len("local:"):] for pid, o in origins.items() if o.startswith("local:")}
+    canonical = [pid for pid in origins if pid not in placeholders]
+    if len(canonical) != 1:
+        return None
+    for legacy_id in placeholders.values():
+        cursor.execute("SELECT link_group_id FROM projects WHERE id = %s", (legacy_id,))
+        legacy = cursor.fetchone()
+        if not legacy or legacy["link_group_id"] != origins[canonical[0]]:
+            return None
+    return canonical[0]
+
+
+def get_checkouts_by_path(path: str, *, project_id: Optional[str] = None,
+                          runner_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Every checkout row of one project at a physical path on its runner.
+
+    Usually one row. A late-linked project has one per identity
+    (:func:`_canonical_of_family`); the remote identity's row comes first.
+    Rows of genuinely different projects are ambiguous: returns ``[]``.
+    """
+    if not path:
+        return []
     if runner_id is None:
         from app.core.config import settings
         runner_id = settings.effective_instance_id
@@ -190,10 +223,25 @@ def get_checkout_by_path(path: str, *, project_id: Optional[str] = None,
                            (runner_id, project_id))
         else:
             cursor.execute("SELECT * FROM checkouts WHERE runner_id = %s", (runner_id,))
-        rows = cursor.fetchall()
-    matches = [row for row in _rows(rows)
-               if os.path.normcase(os.path.normpath(row.get("path") or "")) == target]
-    return matches[0] if len(matches) == 1 else None
+        matches = [row for row in _rows(cursor.fetchall())
+                   if os.path.normcase(os.path.normpath(row.get("path") or "")) == target]
+        if len(matches) <= 1:
+            return matches
+        ids = [row["project_id"] for row in matches]
+        canonical = _canonical_of_family(cursor, ids) if len(set(ids)) == len(ids) else None
+    if canonical is None:
+        return []
+    return sorted(matches, key=lambda row: row["project_id"] != canonical)
+
+
+def get_checkout_by_path(path: str, *, project_id: Optional[str] = None,
+                         runner_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Resolve a physical path only on its runner; reject ambiguous projects.
+
+    A late-linked project's folder resolves to its remote identity's row
+    (see :func:`get_checkouts_by_path`)."""
+    rows = get_checkouts_by_path(path, project_id=project_id, runner_id=runner_id)
+    return rows[0] if rows else None
 
 
 def set_head_sha_for_path(path: str, head_sha: str, *, project_id: Optional[str] = None,

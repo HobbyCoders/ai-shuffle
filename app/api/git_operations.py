@@ -318,15 +318,16 @@ def _checkout_busy_session_ids(project_id: str, working_dir: str) -> Optional[Li
     stopped.
     """
     from app.core.project_resolver import resolve_existing_cwd
-    from app.db.checkouts import get_checkout_by_path
+    from app.db.checkouts import get_checkouts_by_path
     from app.db.sessions import list_sessions_for_cleanup
     from app.db import database
 
     busy: List[str] = []
     try:
-        checkout = get_checkout_by_path(working_dir)
+        # Every identity of the folder: a late-linked project's chats may be
+        # on its placeholder or its remote identity (#802).
         sessions = list_sessions_for_cleanup(
-            project_id, checkout["project_id"] if checkout else None
+            project_id, [row["project_id"] for row in get_checkouts_by_path(working_dir)]
         )
         target = Path(working_dir).resolve()
         for session in sessions:
@@ -524,7 +525,7 @@ async def _release_checkout_sessions(
     from app.core.project_resolver import resolve_existing_cwd
     from app.core.session_pool import get_session_pool
     from app.db import database
-    from app.db.checkouts import get_checkout_by_path
+    from app.db.checkouts import get_checkouts_by_path
     from app.db.sessions import list_sessions_for_cleanup
 
     target = Path(working_dir).resolve()
@@ -533,10 +534,9 @@ async def _release_checkout_sessions(
         return bool(cwd) and Path(cwd).resolve().is_relative_to(target)
 
     def persisted_users():
-        checkout = get_checkout_by_path(working_dir)
         result = set()
         for session in list_sessions_for_cleanup(
-            project_id, checkout["project_id"] if checkout else None
+            project_id, [row["project_id"] for row in get_checkouts_by_path(working_dir)]
         ):
             if session.get("worktree_id"):
                 from app.core.project_utils import get_worktree_working_dir
@@ -596,23 +596,25 @@ async def _cleanup_linked_worktree(
         return False
 
     # The operation's route may use a legacy project id, while checkouts are
-    # keyed by project_v2_id. Resolve the unique local row before deletion.
-    checkout_project_id = op.project_id
+    # keyed by project_v2_id. Resolve the folder's local rows before deletion:
+    # one, or one per identity of a project linked late (#802).
+    checkout_project_ids = [op.project_id]
     # Record the tip before the worktree (and then the branch) go away so the
     # next send can restore the branch and rematerialize the checkout.
     try:
         from app.db import checkouts as checkouts_db
         from app.db.async_database import run_sync
 
-        checkout = await run_sync(checkouts_db.get_checkout_by_path, working_dir)
-        if checkout:
-            checkout_project_id = checkout["project_id"]
+        rows = await run_sync(checkouts_db.get_checkouts_by_path, working_dir)
+        if rows:
+            checkout_project_ids = [row["project_id"] for row in rows]
         rev = git_service._run_git(working_dir, ["rev-parse", "HEAD"], timeout=10)
         if rev.returncode == 0 and (rev.stdout or "").strip():
-            await run_sync(
-                checkouts_db.set_head_sha_for_path,
-                working_dir, rev.stdout.strip(), project_id=checkout_project_id,
-            )
+            for checkout_project_id in checkout_project_ids:
+                await run_sync(
+                    checkouts_db.set_head_sha_for_path,
+                    working_dir, rev.stdout.strip(), project_id=checkout_project_id,
+                )
     except Exception:
         logger.debug("cleanup: could not stamp head_sha for %s", working_dir, exc_info=True)
 
@@ -630,7 +632,8 @@ async def _cleanup_linked_worktree(
         from app.db.checkouts import archive_checkout_by_path
         from app.db.async_database import run_sync
 
-        await run_sync(archive_checkout_by_path, checkout_project_id, working_dir)
+        for checkout_project_id in checkout_project_ids:
+            await run_sync(archive_checkout_by_path, checkout_project_id, working_dir)
     except Exception:
         logger.debug("Could not archive checkout at %s", working_dir, exc_info=True)
 

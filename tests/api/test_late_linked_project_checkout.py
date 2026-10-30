@@ -74,3 +74,39 @@ def test_chat_after_late_link_resolves_its_checkout(repo):
     _chat("third")
     project_resolver._seed_pv2_from_legacy(database.get_project(PROJECT_ID), second["origin"])
     assert len(checkouts.list_checkouts_with_legacy_fallback(second["id"], ME)) == before == 1
+
+
+def _late_link(repo):
+    """The two-row state: the folder's base checkout under the placeholder and
+    under the remote identity. Returns ``(placeholder, remote)``."""
+    first = _chat("first")
+    git_helpers.ensure_git_repository_record(PROJECT_ID, str(repo))
+    return first, _chat("second")
+
+
+def test_path_lookup_treats_a_late_linked_folder_as_one_project(repo):
+    placeholder, remote = _late_link(repo)
+    rows = checkouts.get_checkouts_by_path(str(repo))
+    assert [r["project_id"] for r in rows] == [remote["id"], placeholder["id"]]
+    assert checkouts.get_checkout_by_path(str(repo))["project_id"] == remote["id"]
+
+
+def test_path_lookup_stays_ambiguous_for_different_projects(repo):
+    _late_link(repo)
+    from app.db import projects_v2
+
+    other = projects_v2.upsert_project("git:github.com/acme/other", "Other")
+    checkouts.upsert_checkout(other["id"], ME, str(repo))
+    assert checkouts.get_checkouts_by_path(str(repo)) == []
+    assert checkouts.get_checkout_by_path(str(repo)) is None
+
+
+def test_cleanup_busy_check_sees_chats_on_either_identity(repo, monkeypatch):
+    from app.api import git_operations
+
+    placeholder, remote = _late_link(repo)
+    # A busy chat bound only to the placeholder identity, checked from a route
+    # that names the remote identity.
+    database.create_session("busy", "default", project_v2_id=placeholder["id"])
+    monkeypatch.setattr(git_operations, "_session_is_busy", lambda sid: sid == "busy")
+    assert git_operations._checkout_busy_session_ids(remote["id"], str(repo)) == ["busy"]
