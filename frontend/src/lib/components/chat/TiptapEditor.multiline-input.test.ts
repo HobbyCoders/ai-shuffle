@@ -24,10 +24,20 @@ async function mount(props: Record<string, unknown> = {}) {
 	return { component, editor, dom: editor.view.dom as HTMLElement, onTextChange, transactions };
 }
 
-function typedInput(dom: HTMLElement, data: string, init: Partial<InputEventInit> = {}) {
+type Target = { startContainer: Node; startOffset: number; endContainer: Node; endOffset: number };
+
+function typedInput(dom: HTMLElement, data: string, init: Partial<InputEventInit> = {}, targets?: Target[]) {
 	const event = new InputEvent('beforeinput', { inputType: 'insertText', data, bubbles: true, cancelable: true, ...init });
+	if (targets) Object.defineProperty(event, 'getTargetRanges', { value: () => targets });
 	dom.dispatchEvent(event);
 	return event;
+}
+
+/** The editor's first text node and the offsets of `word` in it. */
+function wordIn(dom: HTMLElement, word: string): Target {
+	const node = dom.querySelector('p')!.firstChild!;
+	const start = node.textContent!.indexOf(word);
+	return { startContainer: node, startOffset: start, endContainer: node, endOffset: start + word.length };
 }
 
 function paste(dom: HTMLElement, text: string) {
@@ -83,6 +93,39 @@ describe('multi-line text input in the composer (#912)', () => {
 		expect(onLargePaste).toHaveBeenCalledWith(big);
 		expect(transactions).toHaveLength(0);
 		expect(component.getText()).toBe('');
+	});
+
+	it('replaces the target range of a multi-line replacement, not the collapsed caret', async () => {
+		const { component, editor, dom, transactions } = await mount();
+		component.setContent('Please addr here');
+		editor.commands.setTextSelection(editor.state.doc.content.size - 1); // caret at the end, collapsed
+		transactions.length = 0;
+		const event = typedInput(dom, '123 Main St\nTown', { inputType: 'insertReplacementText' }, [wordIn(dom, 'addr')]);
+		expect(event.defaultPrevented).toBe(true);
+		expect(component.getText()).toBe('Please 123 Main St\nTown here');
+		expect(transactions).toHaveLength(1);
+	});
+
+	it('edits the target range of typed text too', async () => {
+		const { component, editor, dom } = await mount();
+		component.setContent('keep REPLACE keep');
+		editor.commands.setTextSelection(1);
+		typedInput(dom, 'one\ntwo', {}, [wordIn(dom, 'REPLACE')]);
+		expect(component.getText()).toBe('keep one\ntwo keep');
+	});
+
+	it('leaves a replacement with no usable target range to the browser', async () => {
+		const { component, dom, transactions } = await mount();
+		component.setContent('Please addr here');
+		transactions.length = 0;
+		expect(typedInput(dom, 'a\nb', { inputType: 'insertReplacementText' }, []).defaultPrevented).toBe(false);
+		const outside = document.createTextNode('elsewhere');
+		document.body.append(outside);
+		const foreign = { startContainer: outside, startOffset: 0, endContainer: outside, endOffset: 4 };
+		expect(typedInput(dom, 'a\nb', { inputType: 'insertReplacementText' }, [foreign]).defaultPrevented).toBe(false);
+		expect(typedInput(dom, 'a\nb', {}, [foreign]).defaultPrevented).toBe(false);
+		expect(transactions).toHaveLength(0);
+		expect(component.getText()).toBe('Please addr here');
 	});
 
 	it('scrolls the caret into view after a newline-heavy paste', async () => {
