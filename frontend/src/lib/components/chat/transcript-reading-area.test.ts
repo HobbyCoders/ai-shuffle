@@ -26,6 +26,27 @@ describe('exposed transcript reading area', () => {
 		window.setItemCount(2); costs = [6000, 13000];
 		expect(window.setItemCount(2, { followTail: false })).toEqual({ start: 0, end: 1 });
 	});
+	it('reserves settled fixed bounds and retains the exposed row during the opening animation', () => {
+		const sheet = overlay(850, 8, 382, false);
+		sheet.node.style.position = 'fixed';
+		Object.defineProperties(sheet.node, {
+			offsetTop: { value: 400 }, offsetLeft: { value: 8 },
+			offsetHeight: { value: 444 }, offsetWidth: { value: 374 }
+		});
+		sheet.action.update(true);
+		expect(exposedReadingViewport(viewport).bottom).toBe(400);
+		// The transform moves into view without resizing or ending. Coverage
+		// must already reserve the final position, not the first offscreen rect.
+		sheet.measure.mockReturnValue({ top: 442, bottom: 886, left: 8, right: 382 } as DOMRect);
+		const rows = [{ index: 0, getBoundingClientRect: () => ({ top: 56, bottom: 300 }) },
+			{ index: 1, getBoundingClientRect: () => ({ top: 300, bottom: 3000 }) }];
+		const reading = () => dominantReadingIndex(rows, exposedReadingViewport(viewport), row => row.index);
+		let costs = [6000, 2000];
+		const window = createTranscriptWindow({ cost: index => costs[index], budget: 12000, getReadingIndex: reading });
+		window.onStreamingChange(true); window.setItemCount(2); costs = [6000, 13000];
+		expect(window.setItemCount(2, { followTail: false })).toEqual({ start: 0, end: 1 });
+		expect(sheet.measure).not.toHaveBeenCalled();
+	});
 	it('captures the previous exposed area before a full cover is published', () => {
 		overlay(400);
 		let captured: unknown;

@@ -210,7 +210,7 @@ const cases = [{
 				const sample = () => {
 					if (!window.__sampleGrowingReader) return;
 					window.__growingSamples.push({
-						connected: row.isConnected, chars: row.textContent.length,
+						at: performance.now(), scrollTop: container.scrollTop, connected: row.isConnected, chars: row.textContent.length,
 						top: row.getBoundingClientRect().top - container.getBoundingClientRect().top,
 						indices: [...container.querySelectorAll('[data-transcript-index]')].map(row => Number(row.dataset.transcriptIndex))
 					});
@@ -230,6 +230,7 @@ const cases = [{
 					return { connected: window.__growingReader.isConnected, chars: window.__growingReader.textContent.length,
 						frames: samples.length, disconnected: samples.filter(sample => !sample.connected).length,
 						maxDrift: Math.max(...samples.map(sample => Math.abs(sample.top - samples[0].top))),
+						driftSteps: samples.filter((sample, index) => index === 0 || sample.top !== samples[index - 1].top),
 						sameCount: samples.every(sample => sample.indices.at(-1) === Number(window.__growingReader.dataset.transcriptIndex)),
 						start: Number(document.querySelector(`${selector} [data-transcript-index]`).dataset.transcriptIndex),
 						rows: document.querySelectorAll('[data-transcript-index]').length,
@@ -434,10 +435,13 @@ cases.push({ ...oversizeCase, viewports: ['phone'], allow: [{ kind: 'layout_shif
 
 // Fixed mobile sheets do not resize the transcript. Read the real native
 // prefix above the sheet while a later reply grows past the same budget.
-if (mobileShell) for (const sheet of ['usage', 'controls', 'workers', 'navigation', 'actions', 'attach', 'git']) cases.push({
-	name: `overlay-${sheet}-reading-growth`,
+if (mobileShell) for (const { sheet, opening = false } of [
+	...['usage', 'controls', 'workers', 'navigation', 'actions', 'attach', 'git'].map(sheet => ({ sheet })),
+	{ sheet: 'usage', opening: true }
+]) cases.push({
+	name: `overlay-${sheet}${opening ? '-opening' : ''}-reading-growth`,
 	viewports: ['phone'],
-	setup: context => growingReply.setup({ ...context, replyScenario: 'reader-growth tps=3', project: sheet === 'git' ? 'dev-sandbox' : null }),
+	setup: context => growingReply.setup({ ...context, replyScenario: 'reader-growth tps=3', project: sheet === 'git' ? 'Dev sandbox' : null }),
 	async act({ page, mark, log, variant }) {
 		await mark(`preserve the exposed reading key under the real ${sheet} sheet`);
 		const fullCover = sheet === 'controls' || sheet === 'navigation' || sheet === 'attach';
@@ -475,28 +479,62 @@ if (mobileShell) for (const sheet of ['usage', 'controls', 'workers', 'navigatio
 			: sheet === 'attach' ? page.getByRole('button', { name: /^No project\. Attach a project/ })
 			: sheet === 'git' ? page.getByRole('button', { name: /^Git actions:/ })
 			: page.getByRole('button', { name: 'Open menu', exact: true });
+		if (opening) await page.evaluate(() => {
+			// Hold the REAL CSS opening animation at origin through the initial
+			// ResizeObserver delivery, then advance it without a resize/end event.
+			// The real provider keeps streaming across the budget while it is held.
+			const observer = new MutationObserver(() => {
+				const node = document.querySelector('[role="dialog"][aria-label="Context and usage"]');
+				const animation = node?.getAnimations().find(animation => animation.animationName?.includes('mcc-sheet'));
+				if (!animation) return;
+				animation.pause(); animation.currentTime = 0;
+				window.__overlayOpening = animation;
+				observer.disconnect();
+			});
+			observer.observe(document.body, { childList: true, subtree: true });
+		});
 		await opener.click();
 		const overlay = sheet === 'navigation' ? page.locator('#mobile-nav-drawer')
 			: page.getByRole('dialog', { name: { usage: 'Context and usage', controls: 'Chat controls', workers: 'Connected to', actions: 'Chat actions', attach: 'Attach a project', git: 'Git actions' }[sheet], exact: true });
 		try {
 			await overlay.waitFor();
-			await overlay.evaluate(async node => { await Promise.all(node.getAnimations().map(animation => animation.finished)); });
-			await page.waitForFunction(() => !window.__overlayPrefix.isConnected || !window.__overlayReply.isConnected, null, { timeout: 45000 });
-			await twoFrames(page);
-			const state = await overlay.evaluate((sheet, { selector, layer }) => {
+			if (opening) {
+				await twoFrames(page);
+				expect(await overlay.evaluate(node => window.__overlayOpening?.effect.target === node), 'the real usage-sheet opening animation was captured before it finished');
+				await page.evaluate(() => { window.__overlayOpening.currentTime = 100; });
+				await twoFrames(page);
+			} else await overlay.evaluate(async node => { await Promise.all(node.getAnimations().map(animation => animation.finished)); });
+			const measure = (sheet, { selector, layer }) => {
 				const container = document.querySelector(selector), prefix = window.__overlayPrefix;
 				const viewport = container.getBoundingClientRect(), overlay = (layer ? sheet.closest('.attach-layer') : sheet).getBoundingClientRect();
 				const exposedBottom = Math.max(viewport.top, Math.min(viewport.bottom, overlay.top));
-				const box = prefix.getBoundingClientRect();
+				const pixels = row => { const box = row.getBoundingClientRect(); return Math.max(0, Math.min(box.bottom, exposedBottom) - Math.max(box.top, viewport.top)); };
+				const others = [...container.querySelectorAll('[data-transcript-index]')].filter(row => row !== prefix);
 				return { retained: prefix.isConnected, replyRetained: window.__overlayReply.isConnected,
-					drift: Math.abs(box.top - window.__overlayPrefixTop), maxDrift: window.__overlayMaxDrift, shifts: window.__overlayShifts, exposedHeight: exposedBottom - viewport.top,
-					visiblePixels: Math.max(0, Math.min(box.bottom, exposedBottom) - Math.max(box.top, viewport.top)),
+					drift: Math.abs(prefix.getBoundingClientRect().top - window.__overlayPrefixTop), maxDrift: window.__overlayMaxDrift, shifts: window.__overlayShifts, exposedHeight: exposedBottom - viewport.top,
+					visiblePixels: pixels(prefix), otherVisiblePixels: Math.max(0, ...others.map(pixels)),
 					rows: container.querySelectorAll('[data-transcript-index]').length, nodes: container.querySelectorAll('*').length };
-			}, { selector: LOG, layer: sheet === 'attach' });
-			log(`real ${sheet} overlay ${JSON.stringify(state)}`);
+			};
+			const bounds = { selector: LOG, layer: sheet === 'attach' };
+			const before = await overlay.evaluate(measure, bounds);
+			// Dominant means more exposed pixels than EACH other row, not more
+			// than half the viewport: a visible prompt can occupy the remainder.
+			expect(fullCover ? before.exposedHeight === 0 : before.visiblePixels > before.otherVisiblePixels,
+				'the prefix is the dominant exposed row before eviction (or was captured before full cover)');
+			await page.waitForFunction(() => !window.__overlayPrefix.isConnected || !window.__overlayReply.isConnected, null, { timeout: 45000 });
+			await twoFrames(page);
+			const state = await overlay.evaluate(measure, bounds);
+			if (opening) {
+				const phase = await page.evaluate(() => ({ playState: window.__overlayOpening.playState,
+					at: window.__overlayOpening.currentTime, duration: window.__overlayOpening.effect.getTiming().duration }));
+				log(`budget crossed during the real opening animation ${JSON.stringify(phase)}`);
+				expect(phase.playState === 'paused' && phase.at === 100 && phase.at < phase.duration && state.rows < before.rows,
+					'the same-count budget crossing happened DURING opening, with no animation-end event');
+			}
+			log(`real ${sheet}${opening ? ' opening' : ''} overlay ${JSON.stringify(state)}`);
 			expect(state.retained && !state.replyRetained, 'repricing preserves the exposed/previous reading prefix, not the covered growing reply');
 			expect(state.drift <= 1 && state.maxDrift <= 1, 'opening a sheet must not lose the reading key during repricing, even for a frame');
-			expect(fullCover ? state.exposedHeight === 0 : state.visiblePixels > state.exposedHeight / 2, 'the key covers the exposed transcript or is preserved while fully obscured');
+			expect(fullCover ? state.exposedHeight === 0 : state.visiblePixels > state.otherVisiblePixels, 'the key stays the dominant exposed row or is preserved while fully obscured');
 			expect(state.rows <= 120 && state.nodes <= 12000, 'overlay preservation keeps the same mounted-content budget');
 			await privateScreenshot(page, variant, `overlay-${sheet}`);
 		} finally {

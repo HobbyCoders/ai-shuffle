@@ -756,6 +756,7 @@
 	let windowShiftVersion = 0;
 	let windowShifting = false;
 	let revealedTurnId = $state<string | null>(null);
+	let anchorRounding: { scrollTop: number; error: number } | null = null;
 
 	function applyMountedRange(next: TranscriptRange, preserveAnchor = true) {
 		// Once the budget was reached, keep the clear affordance stable until
@@ -763,6 +764,7 @@
 		selectionBlocksNavigation = transcriptWindow.selectionLimited ||
 			(selectionBlocksNavigation && !!pinnedTranscriptRange());
 		if (selectionBlocksNavigation) shouldAutoScroll = false;
+		if (!preserveAnchor) anchorRounding = null;
 		if (next.start === mountedStart && next.end === mountedEnd) return;
 		const container = containerRef;
 		const top = container?.getBoundingClientRect().top ?? 0;
@@ -775,6 +777,11 @@
 			: [];
 		const anchor = candidates.find(node => node.getBoundingClientRect().bottom > top) ?? candidates.at(-1);
 		const anchorTop = anchor?.getBoundingClientRect().top;
+		// Browsers quantize scrollTop. Separate evictions must not accumulate
+		// three <0.5px errors into a >1px reading jump. Carry one subpixel debt
+		// only while the scroll position is untouched; user movement resets it.
+		const roundingError = anchor && anchorRounding && container?.scrollTop === anchorRounding.scrollTop
+			? anchorRounding.error : 0;
 		// Oversize adjacent bodies may genuinely have no overlap. In that case
 		// absolute scrollTop belongs to the evicted DOM, not the incoming reply.
 		const boundaryAtStart = next.start >= mountedEnd;
@@ -813,7 +820,14 @@
 				}
 				if (delta !== undefined) {
 					markProgrammaticScrollSettling();
-					container.scrollTop += delta;
+					const previousScrollTop = container.scrollTop;
+					const scrollDelta = delta + roundingError;
+					container.scrollTop += scrollDelta;
+					const error = scrollDelta - (container.scrollTop - previousScrollTop);
+					// Never carry a real clamp/navigation boundary, including the
+					// accepted phone-origin singleton settle, into a later shift.
+					anchorRounding = anchor?.isConnected && Math.abs(error) < 1
+						? { scrollTop: container.scrollTop, error } : null;
 					lastKnownScrollTop = container.scrollTop;
 					lastScrollMetrics = readScrollMetrics();
 				}
@@ -1309,6 +1323,7 @@
 
 	function handleScroll() {
 		if (!containerRef) return;
+		if (anchorRounding && containerRef.scrollTop !== anchorRounding.scrollTop) anchorRounding = null;
 		if (programmaticScrollDepth > 0) {
 			// Scroll event triggered by (or racing with) a programmatic scroll or a
 			// resize-induced scrollTop clamp. Make no auto-scroll decision, but keep
