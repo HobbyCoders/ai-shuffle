@@ -625,14 +625,18 @@
 	}
 
 	.message-area-wrapper {
+		/* Keep the mirror/reconnect overlays anchored here before, during and
+		   after messageAreaReveal. Its temporary transform must not create then
+		   remove their containing block while off-catalog identity is pending. */
+		position: relative;
 		flex: 1;
 		min-height: 0;
 		display: flex;
 		flex-direction: column;
 	}
 
-	/* Floats over the top of the chat column (positioned against .chat-column)
-	   in the mirror sync pill's visual language; empty while connected. */
+	/* Floats over the top of .message-area-wrapper in the mirror sync pill's
+	   visual language; empty while connected. */
 	.reconnect-status-slot {
 		position: absolute;
 		top: 0.5rem;

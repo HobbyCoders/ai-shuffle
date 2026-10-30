@@ -73,7 +73,8 @@
 	.mirror-sync { position: absolute; inset: 0; z-index: 1; overflow: auto; display: flex; flex-direction: column; align-items: center; gap: 12px; padding: calc(2rem + var(--chat-status-offset, 0px)) 1.25rem 2rem; text-align: center; color: var(--muted-foreground); }
 	.mirror-sync strong { color: var(--foreground); font-size: 1rem; }
 	.mirror-sync p { margin: 0; max-width: 42ch; font-size: 0.875rem; }
-	/* Positioned against ChatView's .chat-column; spans the column top; empty when current.
+	/* Anchored to ChatView's stable .message-area-wrapper, including during its
+	   reveal transform; spans the column top; empty when current.
 	   ChatView sets --chat-status-offset while its reconnect pill holds this spot. */
 	.mirror-status-slot {
 		position: absolute;
