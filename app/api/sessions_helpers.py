@@ -1356,7 +1356,8 @@ def local_store_is_stale(session: dict) -> bool:
     the owner's later turns reach this worker only through the event mirror.
     So a chat another network device owns renders from the mirror once the
     mirror holds events (a chat with no mirrored events yet keeps its store).
-    An unreadable event counter fails closed to the mirror chain.
+    An unreadable event counter keeps the store: a stale transcript beats a
+    blank one, and the mirror read would hit the same failing database.
     """
     owner = session.get("owner_device_id")
     if not owner:
@@ -1372,7 +1373,7 @@ def local_store_is_stale(session: dict) -> bool:
         return get_max_seq(session["id"]) != 0
     except Exception:
         logger.exception("Failed to check event history for %s", session.get("id"))
-        return True
+        return False
 
 
 def load_event_messages(session_id: str) -> tuple[list[dict], bool]:
