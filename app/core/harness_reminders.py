@@ -26,7 +26,6 @@ Whitespace around the message is trimmed only when a block was removed.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -70,11 +69,8 @@ HARNESS_REMINDER_OPENERS = (
 
 _OPEN = "<system-reminder>"
 
-_BLOCK_RE = re.compile(
-    r"(?:\n+|^)<system-reminder>\n(?:"
-    + "|".join(re.escape(o) for o in HARNESS_REMINDER_OPENERS)
-    + r")[\s\S]*?\n</system-reminder>(?=\n|\Z)"
-)
+_OPEN_LINE = _OPEN + "\n"
+_CLOSE_LINE = "\n</system-reminder>"
 
 
 def strip_harness_reminders(text: Any) -> Any:
@@ -85,8 +81,36 @@ def strip_harness_reminders(text: Any) -> Any:
     """
     if not isinstance(text, str) or _OPEN not in text:
         return text
-    stripped = _BLOCK_RE.sub("", text)
-    return stripped.strip() if stripped != text else text
+    kept: list[str] = []
+    cursor = search = 0
+    while (opener := text.find(_OPEN_LINE, search)) != -1:
+        search = opener + len(_OPEN_LINE)
+        if opener and text[opener - 1] != "\n":
+            continue
+        header = next((h for h in HARNESS_REMINDER_OPENERS if text.startswith(h, search)), None)
+        if header is None:
+            continue
+        # Never rescan the suffix for every opener when no eligible close
+        # remains. Both searches advance monotonically, including malformed
+        # closes and nested openers; the old backtracking regex did not.
+        closer = text.find(_CLOSE_LINE, search + len(header))
+        while closer != -1:
+            end = closer + len(_CLOSE_LINE)
+            if end == len(text) or text[end] == "\n":
+                break
+            closer = text.find(_CLOSE_LINE, end)
+        if closer == -1:
+            break
+        # Match the old removal of the preceding newline run, but walk it
+        # only for accepted, disjoint blocks (not every failed match).
+        while opener > cursor and text[opener - 1] == "\n":
+            opener -= 1
+        kept.append(text[cursor:opener])
+        cursor = search = end
+    if not kept:
+        return text
+    kept.append(text[cursor:])
+    return "".join(kept).strip()
 
 
 def strip_harness_reminders_from_content(content: Any) -> Any:
