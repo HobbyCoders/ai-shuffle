@@ -452,6 +452,21 @@ if (mobileShell) for (const sheet of ['usage', 'controls', 'workers', 'navigatio
 			window.__overlayPrefix = prefix;
 			window.__overlayReply = reply;
 			window.__overlayPrefixTop = prefix.getBoundingClientRect().top;
+			window.__overlayMaxDrift = 0;
+			window.__overlaySampling = true;
+			const sample = () => {
+				if (!window.__overlaySampling) return;
+				window.__overlayMaxDrift = Math.max(window.__overlayMaxDrift, Math.abs(prefix.getBoundingClientRect().top - window.__overlayPrefixTop));
+				requestAnimationFrame(sample);
+			}; requestAnimationFrame(sample);
+			window.__overlayShifts = [];
+			window.__overlayShiftObserver = new PerformanceObserver(list => {
+				for (const entry of list.getEntries()) if (!entry.hadRecentInput) window.__overlayShifts.push({
+					value: entry.value, at: entry.startTime, sources: entry.sources.map(source => ({
+						node: `${source.node?.tagName}.${source.node?.className}`, index: source.node?.closest?.('[data-transcript-index]')?.dataset.transcriptIndex,
+						previous: source.previousRect.toJSON(), current: source.currentRect.toJSON() })) });
+			});
+			window.__overlayShiftObserver.observe({ type: 'layout-shift' });
 		}, fullCover);
 		const opener = sheet === 'usage' ? page.getByRole('button', { name: /^Context and usage/ })
 			: sheet === 'controls' ? page.getByRole('button', { name: /^All chat controls/ })
@@ -474,17 +489,18 @@ if (mobileShell) for (const sheet of ['usage', 'controls', 'workers', 'navigatio
 				const exposedBottom = Math.max(viewport.top, Math.min(viewport.bottom, overlay.top));
 				const box = prefix.getBoundingClientRect();
 				return { retained: prefix.isConnected, replyRetained: window.__overlayReply.isConnected,
-					drift: Math.abs(box.top - window.__overlayPrefixTop), exposedHeight: exposedBottom - viewport.top,
+					drift: Math.abs(box.top - window.__overlayPrefixTop), maxDrift: window.__overlayMaxDrift, shifts: window.__overlayShifts, exposedHeight: exposedBottom - viewport.top,
 					visiblePixels: Math.max(0, Math.min(box.bottom, exposedBottom) - Math.max(box.top, viewport.top)),
 					rows: container.querySelectorAll('[data-transcript-index]').length, nodes: container.querySelectorAll('*').length };
 			}, { selector: LOG, layer: sheet === 'attach' });
 			log(`real ${sheet} overlay ${JSON.stringify(state)}`);
 			expect(state.retained && !state.replyRetained, 'repricing preserves the exposed/previous reading prefix, not the covered growing reply');
-			expect(state.drift <= 1, 'opening a sheet must not lose the reading key during repricing');
+			expect(state.drift <= 1 && state.maxDrift <= 1, 'opening a sheet must not lose the reading key during repricing, even for a frame');
 			expect(fullCover ? state.exposedHeight === 0 : state.visiblePixels > state.exposedHeight / 2, 'the key covers the exposed transcript or is preserved while fully obscured');
 			expect(state.rows <= 120 && state.nodes <= 12000, 'overlay preservation keeps the same mounted-content budget');
 			await privateScreenshot(page, variant, `overlay-${sheet}`);
 		} finally {
+			await page.evaluate(() => { window.__overlaySampling = false; window.__overlayShiftObserver?.disconnect(); });
 			await page.keyboard.press('Escape');
 			await twoFrames(page);
 			const stop = page.getByRole('button', { name: /^Stop/ });

@@ -788,9 +788,18 @@
 			mountedRangeCache.set(windowSessionKey, next);
 			evictOldest(mountedRangeCache, SCROLL_CACHE_MAX);
 		}
-		void tick().then(() => {
+		void tick().then(async () => {
 			if (version !== windowShiftVersion) return;
 			if (container && container === containerRef) {
+				if (preserveAnchor) {
+					// Evicting a covered tail can shorten the scroll extent. Publish
+					// the EXISTING latest-turn reserve before restoring the key, not
+					// in the column ResizeObserver's next animation frame: otherwise
+					// scrollTop clamps for a painted frame and the reader jumps back.
+					refreshLatestTurnTailReserve();
+					await tick();
+					if (version !== windowShiftVersion || container !== containerRef) return;
+				}
 				let delta: number | undefined;
 				if (anchor?.isConnected && anchorTop !== undefined) {
 					delta = anchor.getBoundingClientRect().top - anchorTop;

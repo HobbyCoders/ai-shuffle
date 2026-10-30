@@ -36,19 +36,59 @@ describe('exposed transcript reading area', () => {
 		cover.action.destroy();
 		expect(exposedReadingViewport(viewport)).toEqual({ top: 56, bottom: 400 });
 	});
-	it('measures lazily, captures once per open and releases a closed publisher', () => {
+	it('publishes only on open/resize, captures once per open and releases a closed publisher', () => {
 		const capture = vi.fn(); cleanups.push(beforeTranscriptCovered(capture));
 		const sheet = overlay(400, 8, 382, false);
 		for (let i = 0; i < 20; i++) sheet.action.update(false);
 		expect(capture).not.toHaveBeenCalled(); expect(sheet.measure).not.toHaveBeenCalled();
 		sheet.action.update(true);
 		for (let i = 0; i < 20; i++) sheet.action.update(true);
-		expect(capture).toHaveBeenCalledTimes(1); expect(sheet.measure).not.toHaveBeenCalled();
-		expect(exposedReadingViewport(viewport).bottom).toBe(400);
+		expect(capture).toHaveBeenCalledTimes(1); expect(sheet.measure).toHaveBeenCalledTimes(1);
+		for (let i = 0; i < 20; i++) expect(exposedReadingViewport(viewport).bottom).toBe(400);
 		expect(sheet.measure).toHaveBeenCalledTimes(1);
+		sheet.measure.mockReturnValue({ top: 450, bottom: 844, left: 8, right: 382 } as DOMRect);
+		window.dispatchEvent(new Event('resize'));
+		expect(exposedReadingViewport(viewport).bottom).toBe(450);
+		expect(sheet.measure).toHaveBeenCalledTimes(2);
 		sheet.action.update(false);
+		window.dispatchEvent(new Event('resize'));
 		expect(exposedReadingViewport(viewport).bottom).toBe(697);
+		expect(sheet.measure).toHaveBeenCalledTimes(2);
+	});
+	it('cannot retain coverage after unmount or route removal, including delayed events', () => {
+		const sheet = overlay(400);
+		expect(exposedReadingViewport(viewport).bottom).toBe(400);
+		sheet.action.destroy();
+		window.dispatchEvent(new Event('resize'));
+		sheet.node.dispatchEvent(new Event('animationend'));
+		expect(exposedReadingViewport(viewport)).toEqual({ top: 56, bottom: 697 });
 		expect(sheet.measure).toHaveBeenCalledTimes(1);
+		const routeCover = overlay(0);
+		expect(exposedReadingViewport(viewport).bottom).toBe(56);
+		routeCover.node.remove();
+		window.dispatchEvent(new Event('resize'));
+		routeCover.node.dispatchEvent(new Event('transitionend'));
+		expect(exposedReadingViewport(viewport)).toEqual({ top: 56, bottom: 697 });
+		expect(routeCover.measure).toHaveBeenCalledTimes(1);
+	});
+	it('disconnects the resize publisher and rejects a queued callback after unmount', () => {
+		let notify = () => {};
+		const disconnect = vi.fn(), observe = vi.fn();
+		vi.stubGlobal('ResizeObserver', class {
+			constructor(callback: () => void) { notify = callback; }
+			observe = observe;
+			disconnect = disconnect;
+		});
+		try {
+			const sheet = overlay(400);
+			expect(observe).toHaveBeenCalledWith(sheet.node);
+			notify(); expect(sheet.measure).toHaveBeenCalledTimes(2);
+			sheet.action.destroy();
+			expect(disconnect).toHaveBeenCalledTimes(1);
+			notify();
+			expect(sheet.measure).toHaveBeenCalledTimes(2);
+			expect(exposedReadingViewport(viewport).bottom).toBe(697);
+		} finally { vi.unstubAllGlobals(); }
 	});
 	it('uses the highest overlapping sheet and ignores disconnected/other-column publishers', () => {
 		const first = overlay(500); overlay(400); overlay(0, 500, 800);
