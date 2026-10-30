@@ -9,6 +9,32 @@
   },
   "suites": [
     {
+      "name": "transcript-shadow",
+      "intro": "Shadow producer only: no derived read route or capability is enabled. Use approved disposable candidate installs, synthetic histories and throwaway chats; never alter or restart production workers. The separate durable rewrite-witness PR and backfill acceptance remain hard read-enable prerequisites.",
+      "rows": [
+        {
+          "id": "transcript-shadow.local-and-mirrored-durability",
+          "check": "Real source events produce private exact records without changing serving or ingest latency",
+          "kind": "browser",
+          "needs": ["install", "device", "provider"],
+          "two_worker": true,
+          "how": "On an approved disposable candidate pair, create synthetic 10k and 100k event histories through the real producing paths, including live text/thinking, partial arguments later completed by tool.use, real tool and background-task completion, retry/dismissal, rewind and fork. Let the receiver really replicate; do not seed derived fields or mock replication. Record cold SSE envelopes and the resulting full reducer state, then compare with the producer's lossless records/carry, including ordered origin maps, seq and epoch, without normalizing differences away. Kill/restart only the candidate producer during index, fold and commit; drop a wake and let the bounded scanner recover. Check stable keysets, generation/revision rejection, bounded queries/bytes and ingest p95 against the same candidate with background production off. Verify desktop 1280x800 and the real /mobile/ shell 390x844 with the flight recorder. Keep reads absent/off throughout and archive the throwaway chats.",
+          "pass_when": "Local and genuinely mirrored records match full cold serving exactly, crashes resume without omissions/duplicates or mixed generations, unsupported/over-budget logs stay on full replay, and measured ingest stays within the ratchet. Browser traffic still uses the existing event feed and never reads these private records. Record real paired-worker and performance receipts; fixture goldens and a green build alone do not pass. Silent mid-log replacement with unchanged first/last IDs and lost NOTIFY remains explicitly blocked until the separate durable witness is accepted; do not treat this shadow row as read-enable approval.",
+          "past_bug": "Repeated full replay made long-chat opening expensive; a derived cache without exact cold preprocessing, bounded work and durable rewrite witnesses could silently change transcript data or contend with ingestion."
+        },
+        {
+          "id": "transcript-shadow.runtime-fallback",
+          "check": "All supported installs own the Node runtime and fail safely when it is unavailable or stale",
+          "kind": "owner",
+          "needs": ["install", "device"],
+          "two_worker": false,
+          "how": "On disposable Docker, in-app source-update, Windows desktop and local/dev candidates, verify the shipped reducer and manifest are included and the supervisor actually starts the install's Node 22+ runtime. Withhold or make only the candidate reducer's executable unsupported, corrupt only a copied candidate bundle, and exercise a hung/killed child. Restore/restart the disposable candidate and inspect bounded process/queue cleanup. Never remove or alter a shared/production Node runtime. Check an older worker still uses full replay and receives no new read capability.",
+          "pass_when": "Supported candidates run the same verified server-owned bundle without provider credentials in its environment. Missing/old Node, stale source/bundle, timeout and crash cannot affect authoritative serving or source data; owned children/listeners stop cleanly and no pending waiter queue grows. Node is supplied by each supported install/update path. No new capability or wire field appears, and the kill switch stops production only. Record each real runtime separately; a Linux fixture does not verify Windows or source-update packaging.",
+          "past_bug": "A server-side TypeScript producer must not silently depend on a developer's Node installation, leak worker credentials to its child, or become a prerequisite for reading an existing chat."
+        }
+      ]
+    },
+    {
       "name": "mirror-cache",
       "intro": "Use an approved disposable candidate worker pair, synthetic long history and throwaway chats only. Never restart a production worker.",
       "rows": [
@@ -582,6 +608,15 @@
             {"op": "peer_delivery", "sender": "b", "session": "a", "within_s": 240,
              "message": "Live smoke {run}: delivery probe; no reply required.", "request_id": "{run}-9"}
           ]
+        },
+        {
+          "id": "two-worker-smoke.android-edge-to-edge-and-qr-rotation",
+          "check": "Android 15+ edge-to-edge keeps every screen clear of system bars and the keyboard, and QR pairing survives rotation",
+          "kind": "owner",
+          "needs": ["install", "device"],
+          "how": "Install the candidate Play build on a real Android 15 or 16 phone (and an Android 13 or 14 phone if available). In light and dark mode, open the welcome, account, workers, chat, offline demo and worker repair screens in portrait and landscape; check nothing sits under the status bar, navigation bar or display cutout and that bar icons stay readable. In a chat, open the keyboard and confirm the composer stays above it. Scan a disposable worker's pairing QR from Add worker, and an account pairing QR from a signed-in throwaway account's Add a trusted device flow from the phone's account sign-in scanner, rotating the phone mid-scan in each; repeat once after denying, then granting, camera permission. Use only disposable workers and throwaway accounts.",
+          "pass_when": "No content or control is hidden under system bars, cutouts or the keyboard on any checked screen, orientation or theme, and bar icons stay legible. Both scanners keep scanning through rotation, release the camera when closed and accept their own QR type. Emulator screenshots alone do not pass this row.",
+          "past_bug": "Play flagged deprecated edge-to-edge APIs and the ZXing scanner's landscape orientation lock; the fix moved to enableEdgeToEdge() and unlocked scanner rotation, verified only on emulators."
         },
         {
           "id": "two-worker-smoke.machine-settings",
