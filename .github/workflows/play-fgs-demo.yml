@@ -1,12 +1,7 @@
 name: Play microphone FGS recording (temporary)
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - '.github/workflows/play-fgs-demo.yml'
-      - 'android/ci/record-play-fgs.py'
-      - 'android/app/src/androidTest/java/com/hobbycoders/aishuffle/PlayFgsRecordingTest.kt'
+  # Deliberate one-off dispatch only: do not add an automatic emulator workload.
   workflow_dispatch:
 
 permissions:
