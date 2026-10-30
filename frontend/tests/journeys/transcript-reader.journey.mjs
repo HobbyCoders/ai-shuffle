@@ -161,6 +161,21 @@ const cases = [{
 		},
 		async act({ page, mark, log, variant, minimumChars = 17000 }) {
 			await mark('read the live reply while same-count growth reprices the window');
+			let oversizeSettle;
+			if (minimumChars > 48000) await page.evaluate(selector => {
+				window.__oversizeShifts = [];
+				window.__captureOversizeShifts = entries => {
+					for (const entry of entries) {
+						if (entry.hadRecentInput) continue;
+						const rows = [...document.querySelectorAll(`${selector} [data-transcript-index]`)];
+						window.__oversizeShifts.push({ value: entry.value,
+							singleton: rows.length === 1 && rows[0] === window.__growingReader,
+							virtualizedOnly: entry.sources.length > 0 && entry.sources.every(source => source.node?.classList?.contains('msg-virtualized')) });
+					}
+				};
+				window.__oversizeObserver = new PerformanceObserver(list => window.__captureOversizeShifts(list.getEntries()));
+				window.__oversizeObserver.observe({ type: 'layout-shift' });
+			}, LOG);
 			const before = await page.evaluate(selector => {
 				const container = document.querySelector(selector);
 				const row = [...container.querySelectorAll('[data-transcript-index]')].filter(row => row.textContent.includes('GROWING_READER_START')).at(-1);
@@ -205,7 +220,7 @@ const cases = [{
 				if (minimumChars > 48000) {
 					const reply = viewport.rows.find(row => row.index === before.index);
 					expect(after.rows === 1 && reply.visiblePixels > viewport.height / 2, 'the dominant oversize reply remains readable as the permitted singleton');
-					expect(reply.top >= -1 && reply.top <= before.top + 1 && after.maxDrift <= Math.max(1, before.top), 'oversize fallback only clamps the removed space above the reply, never jumping past its start');
+					expect(reply.top >= -1 && reply.top <= before.top + 1 && after.maxDrift <= Math.min(20, Math.max(1, before.top)), 'oversize fallback clamps at most 20px of removed space, never jumping past the reply start');
 					await privateScreenshot(page, variant, 'oversize-reading');
 				} else expect(after.maxDrift <= 1, 'the same reading key keeps its viewport offset during repricing');
 				expect(after.rows <= 120 && after.nodes <= 12000, 'reading preservation keeps the row and nested DOM budgets');
@@ -213,6 +228,21 @@ const cases = [{
 				await page.evaluate(() => { window.__sampleGrowingReader = false; });
 				const stop = page.getByRole('button', { name: /^Stop/ });
 				if (await stop.isVisible()) await stop.click();
+				if (minimumChars > 48000) {
+					await twoFrames(page);
+					oversizeSettle = await page.evaluate(() => {
+						window.__captureOversizeShifts(window.__oversizeObserver.takeRecords());
+						window.__oversizeObserver.disconnect();
+						return { total: window.__oversizeShifts.reduce((sum, entry) => sum + entry.value, 0),
+							entries: window.__oversizeShifts.filter(entry => entry.value >= 0.05) };
+					});
+				}
+			}
+			if (minimumChars > 48000) {
+				log(`oversize singleton settle ${JSON.stringify(oversizeSettle)}`);
+				expect(oversizeSettle.total < 0.1 && oversizeSettle.entries.length <= 1 &&
+					oversizeSettle.entries.every(entry => entry.singleton && entry.virtualizedOnly),
+					'only one oversize-singleton origin settle is permitted, with exact CLS below 0.1');
 			}
 		}
 	}];
@@ -280,6 +310,11 @@ cases.push({
 cases.push({
 	...growingReply,
 	name: 'same-count-visible-boundary-oversize',
+	// Only this new capacity-edge case permits the one-time origin clamp. The
+	// exact CLS, affected source, singleton state and <=20px drift are asserted.
+	allow: [{ kind: 'layout_shift',
+		message: /^layout shifted 0\.0\d{2} in total; biggest 0\.0\d{2} at \d+ms \(moved: div\.msg-virtualized in MessageArea\)$/,
+		reason: 'Oversize singleton removes the short prompt at scrollTop=0: measured 16.703125px settle and CLS 0.085; exact CLS<0.1, <=20px position, one singleton transition and readable reply remain mandatory.' }],
 	setup: context => growingReply.setup({ ...context, readingBoundary: true, replyScenario: 'reader-oversize' }),
 	act: context => growingReply.act({ ...context, minimumChars: 52000 })
 });
