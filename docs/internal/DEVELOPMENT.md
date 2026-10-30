@@ -317,7 +317,10 @@ step, after measuring a large real database; do not start a fleet-wide backfill
 with this change. **Reads are not implemented or negotiated:** opening chat
 still uses the existing event feed and full replay. Unset the switch (or set it
 to `0`) and restart to stop production. Neither setting changes serving, mutates
-the source log or deletes chat content.
+the source log or deletes chat content. For an isolated dev-loop check, use
+`python -m scripts.devloop up --transcript-producer`: the launcher intentionally
+does not inherit this or other worker settings from the shell. Without that
+explicit option, disposable previews also leave production off.
 Missing/old Node, stale assets, unsupported legacy compaction and exceeded
 budgets fail closed to the existing serving path.
 
