@@ -57,8 +57,14 @@ def snapshot() -> Availability:
 
 def save(always_on: bool | None) -> Availability:
     """Null restores launch-kind defaults; ordinary settings sync carries the row."""
-    if always_on is None:
-        database.delete_system_setting(setting_key())
-    else:
-        database.set_system_setting(setting_key(), "true" if always_on else "false")
+    save_for_instance(settings.effective_instance_id, always_on)
     return snapshot()
+
+
+def save_for_instance(instance_id: str, always_on: bool | None) -> None:
+    """The caller must resolve an authorized active worker before editing its row."""
+    key = SETTING_PREFIX + instance_id
+    if always_on is None:
+        database.delete_system_setting(key)
+    else:
+        database.set_system_setting(key, "true" if always_on else "false")

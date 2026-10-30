@@ -146,11 +146,21 @@
     "target_pr": 2,
     "base_settings": true
   },
+  "AI_SHUFFLE_PERF_LAZY_CONNECTORS": {
+    "kind": "internal",
+    "reason": "Temporary process-start rollback switch for SDK-free connector discovery; restores eager connector and optional SDK imports while the startup optimization is validated",
+    "base_settings": false
+  },
   "AI_SHUFFLE_PERF_PROVIDER_HTTP_REUSE": {
     "kind": "internal",
     "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Reuse native HTTP clients instead of rebuilding them per operation",
     "target_pr": 2,
     "base_settings": true
+  },
+  "AI_SHUFFLE_PERF_SCAN_WAKE": {
+    "kind": "internal",
+    "reason": "Temporary default-on rollback switch for interruptible network scanner rest and bounded urgent-wake coalescing",
+    "base_settings": false
   },
   "AI_SHUFFLE_PERF_SLIM_USAGE_REPLAY": {
     "kind": "internal",

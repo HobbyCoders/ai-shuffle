@@ -452,7 +452,7 @@ describe('agent deliveries in settled work', () => {
 	it.each([
 		['live', 'idle_single'], ['parked', 'idle_single'],
 		['live', 'promotion'], ['parked', 'promotion']
-	] as const)('keeps a %s peer wake (%s) in the ongoing logical turn', (lifecycle, form) => {
+	] as const)('groups a %s peer wake (%s) according to recipient activity', (lifecycle, form) => {
 		let state = initialState();
 		let seq = 0;
 		const apply = (type: string, fields: Record<string, unknown> = {}) => {
@@ -471,8 +471,15 @@ describe('agent deliveries in settled work', () => {
 		apply('message.assistant', { content: 'Final answer' });
 		apply('turn.completed');
 		const model = buildTranscriptModel(state.messages, SETTLED);
-		expect(model.items.filter(item => item.kind === 'work_log')).toHaveLength(1);
-		expect(collapsedVisibleMessages(model.items).map(m => m.content)).toEqual(['Review', 'Final answer']);
+		if (lifecycle === 'parked') {
+			expect(model.items.filter(item => item.kind === 'work_log')).toHaveLength(2);
+			expect(collapsedVisibleMessages(model.items).map(m => m.content)).toEqual([
+				'Review', 'Waiting for agents', 'Final answer'
+			]);
+		} else {
+			expect(model.items.filter(item => item.kind === 'work_log')).toHaveLength(1);
+			expect(collapsedVisibleMessages(model.items).map(m => m.content)).toEqual(['Review', 'Final answer']);
+		}
 	});
 
 	it('counts delivery-only work with singular and plural labels', () => {

@@ -23,14 +23,9 @@ from app.core.connectors import telegram_actions
 
 logger = logging.getLogger(__name__)
 
-try:
-    from aiogram import Bot, Dispatcher, types
-    from aiogram.enums import ParseMode
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from importlib.util import find_spec
 
-    AIOGRAM_AVAILABLE = True
-except ImportError:
-    AIOGRAM_AVAILABLE = False
+AIOGRAM_AVAILABLE = find_spec("aiogram") is not None
 
 
 class TelegramConnector(BaseConnector):
@@ -122,6 +117,8 @@ class TelegramConnector(BaseConnector):
 
     async def _do_connect(self) -> None:
         """Start the Telegram bot and begin polling for updates."""
+        from aiogram import Bot, Dispatcher
+
         self._stopping = False
         token = self.config["bot_token"]
 
@@ -302,6 +299,9 @@ class TelegramConnector(BaseConnector):
             return False
 
         try:
+            from aiogram.enums import ParseMode
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
             parse_mode = None
             if message.parse_mode == "markdown":
                 parse_mode = ParseMode.MARKDOWN_V2
@@ -354,6 +354,8 @@ class TelegramConnector(BaseConnector):
         """React with an eyes emoji to acknowledge receipt."""
         if self._bot and AIOGRAM_AVAILABLE:
             try:
+                from aiogram import types
+
                 await self._bot.set_message_reaction(
                     chat_id=int(platform_chat_id),
                     message_id=int(platform_message_id),
@@ -372,6 +374,8 @@ class TelegramConnector(BaseConnector):
             return False
 
         try:
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
             # Store session mapping so we can look it up in the callback
             self._permission_sessions[prompt.request_id] = prompt.session_id
 
@@ -510,6 +514,8 @@ class TelegramConnector(BaseConnector):
         self._pending_action_approvals[request_id] = fut
 
         try:
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
             params_preview = json.dumps(params, default=str)[:900]
             text = (
                 f"Destructive Action Approval\n\n"
@@ -557,6 +563,8 @@ class TelegramConnector(BaseConnector):
             return {"success": False, "message": "aiogram is not installed"}
 
         try:
+            from aiogram import Bot
+
             bot = Bot(token=self.config["bot_token"])
             try:
                 me = await bot.get_me()

@@ -198,6 +198,33 @@ def _target(caller, session_id, *, allow_stopped=False, owner=None):
     return row
 
 
+def recheck_message_scope(payload, receiver_id):
+    """Revalidate a queued MessageSession without turning a mirror into a caller.
+
+    A remote row was admitted by the authenticated control action, whose worker
+    checked the sender and chain budget. Recheck that worker's membership and
+    the local receiver's current owner/scope; it is not a local sender chat.
+    """
+    sender_id = payload["orchestration_sender"]
+    # Transport describes this message, not the inherited chain ancestry.
+    # Only producers stamp it; _context_payload never inherits it.
+    transport = payload.get("orchestration_message_transport")
+    origin = payload.get("orchestration_remote_origin")
+    forwarded = payload.get("forwarded_by_device")
+    if transport not in (None, "local", "remote"):
+        raise PermissionError("Peer message has invalid transport provenance.")
+    # Already-queued messages predate the transport stamp. Their forwarding
+    # identity still selects the remote check; local rows validate the caller.
+    if transport == "remote" or "forwarded_by_device" in payload:
+        if (transport == "local" or not isinstance(forwarded, str)
+                or not forwarded or origin != forwarded):
+            raise PermissionError("Remote peer message has inconsistent authenticated provenance.")
+        _calling_worker(forwarded, "message chats here")
+        _target({"id": sender_id}, receiver_id, owner=_OWNER_CHAT)
+    else:
+        _target(_caller(sender_id), receiver_id)
+
+
 def list_sessions(session_id, data):
     from app.db import sessions
     from app.core.task_registry import task_registry
@@ -1210,7 +1237,7 @@ def accept_remote_message(body, from_device):
                    orchestration_fingerprint=fingerprint, orchestration_remote_origin=from_device,
                    peer_message_content=content,
                    peer_sender_label=f"{sender_label} (on {member.name or from_device})",
-                   forwarded_by_device=from_device)
+                   orchestration_message_transport="remote", forwarded_by_device=from_device)
     if body.get("reply_to") is not None:
         payload["orchestration_reply_to"] = _remote_text(body, "reply_to", 200)
     principals = {session_id: _principal(session_id)}
@@ -1436,6 +1463,8 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
                    orchestration_sender=sender_id, orchestration_fingerprint=fingerprint,
                    peer_message_content=defang_harness_markers(text),
                    peer_sender_label=sender.get("title") or sender_id)
+    if action == "message":
+        payload["orchestration_message_transport"] = "local"
     if remote_origin:
         payload["orchestration_remote_origin"] = remote_origin
     if target.get("api_user_id"):

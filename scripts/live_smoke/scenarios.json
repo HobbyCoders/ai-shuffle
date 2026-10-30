@@ -9,6 +9,22 @@
   },
   "suites": [
     {
+      "name": "account-phones",
+      "intro": "Requires the account hub with hobbycoders-cloud PR #24 deployed, a new Android build containing stable installation identity and install proofs, a real phone, and disposable account-linked candidate workers. The dev instance has neither the hub nor Android sign-in.",
+      "rows": [
+        {
+          "id": "account-phones.sign-in-renewal-and-duplicate-cleanup",
+          "check": "Phone re-sign-in renews one entry, keeps running chats, and cleanup spares active installations",
+          "kind": "owner",
+          "needs": ["provider", "install", "device"],
+          "two_worker": true,
+          "how": "Use a throwaway account on two disposable candidate workers, the hub with hobbycoders-cloud PR #24 deployed, the new Android build and a real phone; never revoke production devices. Approve the phone on both workers and start a long-running chat. Expire only its account session, sign in again without explicit sign-out, reopen each worker and mint both native and WebView sessions. Compare device IDs, record IDs, approvals and chat controller hashes before and after. Repeat an exchange with a transient 5xx or network interruption on a disposable test connection, retry, and check the installation ID and per-worker proof did not change. Save old bearer tokens and socket principals privately and confirm they are refused after renewal. Repeat after explicit logout, owner revocation and denial; an older-app enrollment without a stored proof must return pending. For cleanup, upgrade disposable workers containing old weekly same-name/platform copies, the newest used phone, a second still-active installation and an unused newer enrollment. Keep the second installation authenticating or renewing while earlier hub revocations are in flight. Inspect account and worker records, then restart only the candidates to check the done marker. If the interleaving cannot be observed, leave that part unverified.",
+          "pass_when": "Repeated account sign-in keeps one row and approval per worker only for the same proof-matched, non-revoked installation. Transient exchange failures keep identity and proof; 401/409 may rotate them. The next session mint advances matching running-chat controller hashes without making old tokens or socket principals valid. Logout, owner revocation, denial and missing prior proof never carry chat continuity; revoked returns pending for manual approval, denied is refused. Cleanup revokes only stale copies, on the hub before locally, skips a candidate that became active or changed credentials after its snapshot, keeps concurrent and newer unused installs, and completes once. Evidence must come from the real phone and candidate workers, not fixtures.",
+          "past_bug": "Weekly account expiry minted duplicate approved phone entries; transient 5xx rotated identity, renewal lost running-chat controller continuity, and cleanup could revoke a newly active candidate from its stale snapshot."
+        }
+      ]
+    },
+    {
       "name": "approval-scopes",
       "intro": "Use two disposable candidate workers and throwaway agents and chats.",
       "rows": [
@@ -552,6 +568,19 @@
           ]
         },
         {
+          "id": "two-worker-smoke.machine-settings",
+          "check": "Manage a peer worker’s real machine settings without leaving this worker’s UI",
+          "kind": "browser",
+          "needs": [
+            "install",
+            "provider"
+          ],
+          "two_worker": true,
+          "how": "Use an isolated test network containing only two paired disposable candidate workers A and B, never production installs. This needs a real worker pair, machine-local CLI accounts, an app-managed Claude CLI on B and supported release channel controls, which the dev instance and fake peers cannot verify. Arrange distinguishable CLI versions or sign-in states on A and B. Record B’s own CLI version and CLI-produced Claude sign-in status (email/plan when available), GitHub CLI status, and both workers’ original always-on overrides, release channels and keep-installed flags; never capture tokens or credential files. From A’s Settings > Devices select B and compare those statuses without opening B’s UI. Run Update Claude CLI on B, wait for its job to finish, refresh, and compare B’s real CLI version again. From A change B’s always-on override and release channel, checking the saved state on B and that A stays unchanged; do not install an app release or bypass platform/downgrade checks. Stop only candidate B, then from A confirm an all-workers keep-installed action whose value differs from B’s recorded flag. Reconnect B and refresh both targets. Restore the original overrides, permitted channels and keep-installed flags. Record revision-tagged private evidence, not credentials.",
+          "pass_when": "A shows B’s actual Claude CLI version, Claude sign-in/email/plan and GitHub status, not A’s cached values. Update Claude CLI runs only on B and completes successfully (already current is valid); the refreshed version matches B’s CLI and A’s CLI is unchanged. The always-on override and supported release channel change on B only, with any restart requirement shown and all existing safety checks retained. The all-workers action reports A accepted and B offline, explicitly not queued, without treating the whole operation as failed. After reconnection B’s keep-installed flag is still its original value: the offline action was not replayed. No CLI login, logout or credential transfer occurs. A fake-peer test or the single-worker UI journey alone does not pass this row.",
+          "past_bug": "Machine-bound settings required switching to the target worker’s own UI; cross-worker action delivery was initially tested only with fake peers."
+        },
+        {
           "id": "two-worker-smoke.no-project-chat-move",
           "check": "A no-project chat moves to the other worker and back",
           "kind": "owner",
@@ -590,6 +619,19 @@
           "how": "Use a real Android phone with the candidate APK and two disposable candidate workers A and B; never interrupt production workers. Authorize this phone on both, use B then A, close and relaunch the app: it must open A. Make A unreachable and relaunch: it must open B. Restore A, manually select it and repeat an outage after its chat opens, once during session bootstrap (Refresh chat) and once during a main-frame page load. Record the selected worker and notice. Bring A back while B is working: the phone must stay on B. Drop B within A's cooldown and confirm no immediate bounce to A; repeat outages and record retry timing/backoff. With neither reachable, confirm connection errors and native Workers still permit retrying or adding a worker. On a separate throwaway phone profile, sync the account while B is offline so its listing is saved without a phone key. Bring B online, make A unreachable and trigger reconnect: automatic failover must still skip keyless B. Restore A and open it again, then manually choose B in the chip, follow the native Workers authorization prompt, and tap B to run account enrollment. Confirm chat opens only after the phone key is saved; never inspect or publish the key. Restore the disposable candidates and remove the throwaway phone profile afterwards.",
           "pass_when": "Startup opens the last-used reachable authorized worker, otherwise the next reachable authorized worker in recent-use order. Both bootstrap and main-frame failures switch automatically with one short offline/connected notice after the replacement loads. Healthy connections never move merely because A returns. Failed origins cannot immediately ping-pong; retries back off from 60 seconds up to five minutes across activity hand-offs. No reachable authorized worker leaves a usable connection/setup fallback. A keyless account listing is never an automatic target and cannot open chat before enrollment. Manual selection opens native Workers with an authorize-this-phone prompt; tapping the worker obtains its one-use enrollment ticket, saves this phone's per-worker key and opens chat. No credential appears in a URL or crosses to another worker. Record actual phone and candidate-worker evidence, not fixture-only results.",
           "past_bug": "The phone required manual switching after an outage; a manually selected keyless account worker could only show a toast, leaving native enrollment unreachable."
+        },
+        {
+          "id": "two-worker-smoke.shared-settings-rollout",
+          "check": "Shared secrets, provider replacements and plugin intent survive independently keyed and mixed-version workers",
+          "kind": "owner",
+          "needs": [
+            "install",
+            "provider"
+          ],
+          "two_worker": true,
+          "how": "Use two fresh, independently keyed disposable workers A/B and a disposable relay C; never copy data keys or change production workers. Start A on the candidate and B on the pre-capability release. Create a throwaway secret-bearing connector (including OAuth client-secret leaves) and webhook automation on A. Exercise incremental and first-copy delivery, inspect ciphertext-at-rest markers on B without logging values, then upgrade B last. Without editing the records or forcing publication, use the connector and webhook on B. With both upgraded, replace a throwaway provider key on A and time its arrival on B; reject an invalid test key on B, replace it with a privately configured usable key on A, and make one tiny provider probe on B. Install a disposable user-scope marketplace plugin, uninstall it on A, and wait for B to remove it. Reinstall through an agent while pending, then approve it as owner and check B reinstalls. Remove a project-only copy on B while A retains a user copy. For rollout safety, withdraw B support by running the older release, then let C deliver previously unseen positive B presence through both ops and a snapshot; try B exchange, op and state GETs. Cache a ciphertext transfer for B, delay a plaintext-form op from C behind more than one batch of harmless ops, then release it and request state again before cache expiry. Restore the candidates, remove throwaway resources and record only revisions, opaque IDs, timings and success/ciphertext booleans, never credentials or decrypted payloads.",
+          "pass_when": "B never stores plaintext nested secrets while any member lacks support, and delayed or snapshotted presence cannot undo a direct withdrawal. Once every active worker has upgraded and confirmed support in normal peer contact, an automatic rescan makes the connector/OAuth and webhook secrets usable on the independently keyed peer without a record edit. A provider replacement reaches the connected peer within 10 seconds and clears the old local rejection, so its tiny probe succeeds. Shared uninstall propagates without stale-inventory resurrection; a pending agent install remains unshared until owner approval, which reinstalls it across workers; project-only removal leaves the peer user installation intact. Unservable signed tails produce one fresh ciphertext transfer with an advanced frontier before TTL, for both memory and disk caches, and catch-up completes rather than looping. Require real-worker receipts for the candidate; unit tests alone do not pass this row.",
+          "past_bug": "PR #847: foreign data-key ciphertext was unreadable, provider updates missed immediate publication, stale rejections survived replacements, plugin inventory revived removals, and rolling upgrades could leak plaintext or loop on cached state."
         }
       ]
     },
@@ -1217,6 +1259,16 @@
           "past_bug": "The shared MCP builder assumed NativeLoop discovered plugin servers, but neither layer connected them."
         },
         {
+          "id": "harness-basics.network-scanner-urgent-wakes",
+          "check": "Urgent publication wakes interrupt quiet rest without one scan per write or backlog starvation",
+          "kind": "owner",
+          "needs": ["install"],
+          "two_worker": true,
+          "how": "On two disposable paired candidates, collect monotonic source-commit and scan-start receipts without recording payloads. Let candidate A's scanner become quiet, then edit a throwaway agent through its normal authenticated writer; repeat with a rapid burst of agent edits and with an owned chat that has transcript backlog. Watch the final agent state and new chat events arrive on B. Keep writes arriving across a full-reconciliation deadline and confirm the full pass still runs. Repeat with AI_SHUFFLE_PERF_SCAN_WAKE=off on A, restarting only that disposable candidate, then restore the default. Never change production workers or publish private receipts.",
+          "pass_when": "With the default flag, the urgent targeted pass starts after one fixed approximately 100 ms coalescing window instead of waiting out the two-second idle rest; later writes do not extend that window or create a pass per write. B gets the final shared state and ordered transcript, backlog makes progress, and periodic full reconciliation still occurs during repeated wakes. The off flag restores the legacy rest. Real paired-transport receipts are required; fake-clock tests alone do not pass this row.",
+          "past_bug": "The scanner slept for two seconds before inspecting an already-set publication wake."
+        },
+        {
           "id": "harness-basics.neutral-owner-service-aliases",
           "check": "Neutral owner routes preserve installed-client aliases and stored history",
           "kind": "owner",
@@ -1270,6 +1322,15 @@
           "how": "Disposable candidate only: finish 45 real sessions under >2s pool pressure.",
           "pass_when": "All finish; leases renew; UI stays live; one pool stats log per burst.",
           "past_bug": "#580: a 2s acquisition timeout became a failed worker ResultMessage."
+        },
+        {
+          "id": "harness-basics.pr844-update-snapshot-timing",
+          "check": "Container source updates expose snapshot and child-spawn timing without changing rollback",
+          "kind": "owner",
+          "needs": ["install"],
+          "how": "Use a disposable candidate container with only synthetic data, never a live worker or database. Activate a staged source update and capture the supervisor log across old-app stop and replacement startup. Compare source_database_bytes and copied_database_bytes with read-only pg_database_size queries. Repeat with a candidate that fails after a schema/data migration and verify rollback restores the exact pre-update rows and schema. A dev-instance UI journey cannot activate this container-supervisor update path; the producing-path lab and unit tests cover it separately.",
+          "pass_when": "Snapshot start and one terminal complete/failed record bracket copying, with total seconds, cumulative copy seconds, attempts and database-file bytes (not device-write or WAL bytes). Successful copy precedes child-spawn start and PID/elapsed logging. Failed copies never claim completed bytes. No arguments, environments or connection details appear in the new records. FILE_COPY, process deadlines and rollback protection remain unchanged, and failed-update rollback restores the synthetic data exactly. The next installed-container update remains unverified until these real producing-path receipts exist.",
+          "past_bug": "An uninstrumented shutdown-to-startup gap made database-copy time indistinguishable from application startup."
         },
         {
           "id": "harness-basics.rewind-file-restore-retired",
