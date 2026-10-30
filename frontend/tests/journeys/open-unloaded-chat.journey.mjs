@@ -94,13 +94,14 @@ async function holdIncomingHistory(page, target, delayMs) {
 		// must act "within the grace" arms this gate: grace-length timers created
 		// while armed still run their real clock, but a callback that comes due
 		// before release() waits for it. The deadline therefore cannot pass
-		// before the case's own action, however slow the runner; the product's
-		// cancellation (clearTimeout/epoch) still decides what the late callback
-		// does. Other delays, and every timer while disarmed, are untouched.
+		// before the case's own action, however slow the runner. Each gated
+		// timer records whether the product cleared it, so the case can check
+		// the product cancelled it. Other delays, and every timer while disarmed,
+		// are untouched.
 		const realSetTimeout = window.setTimeout.bind(window);
 		const realClearTimeout = window.clearTimeout.bind(window);
 		const gate = window.__switchGraceGate = {
-			armed: false, registered: [], deferred: new Map(), cleared: 0, ran: 0,
+			armed: false, registered: [], deferred: new Map(),
 			arm() { this.armed = true; this.registered = []; },
 			release() {
 				this.armed = false;
@@ -115,17 +116,19 @@ async function holdIncomingHistory(page, target, delayMs) {
 				return realSetTimeout(handler, delay, ...args);
 			}
 			const entry = { at: performance.now() };
-			const run = () => { gate.ran++; handler(...args); };
+			const run = () => handler(...args);
 			const id = realSetTimeout(() => {
 				if (gate.armed) gate.deferred.set(id, run);
 				else run();
 			}, delay);
 			entry.id = id;
+			entry.cleared = false;
 			gate.registered.push(entry);
 			return id;
 		};
 		window.clearTimeout = function (id) {
-			if (gate.deferred.delete(id) || gate.registered.some(entry => entry.id === id)) gate.cleared++;
+			gate.deferred.delete(id);
+			for (const entry of gate.registered) if (entry.id === id) entry.cleared = true;
 			return realClearTimeout(id);
 		};
 		const fetchOriginal = window.fetch.bind(window);
@@ -709,33 +712,40 @@ await runJourney({
 					const graceTimers = gate.registered.length;
 					const graceStart = gate.registered[0]?.at ?? null;
 					const deferredBeforeReturn = gate.deferred.size;
-					const ranBeforeReturn = gate.ran;
+					// B's own grace timer is still pending (neither cleared by a
+					// finished load nor run: the gate holds a due callback).
+					const pendingBeforeReturn = gate.registered.filter(entry => !entry.cleared).length;
 					const historyPending = window.__switchHydrationHold.released === null;
 					window.__flightRecorder.mark('return to A before B has hydrated');
 					const returned = performance.now();
 					returnButton.click();
 					return {
 						first, returned, elapsed: returned - first, graceTimers, historyPending,
-						deferredBeforeReturn, ranBeforeReturn,
+						deferredBeforeReturn, pendingBeforeReturn,
 						sinceGraceStart: graceStart === null ? null : returned - graceStart
 					};
 				}, { incoming: incomingButton, outgoing: SEEDED.no_project });
 				log(`rapid-dispatch ${JSON.stringify(dispatched)}`);
 				// Preconditions, on the product's own clock: B entered its grace (its
-				// notice timer exists), its history was still in flight, and no
-				// notice deadline had run when the user went back to A.
+				// notice timer exists), its history was still in flight, and that
+				// timer was still pending when the user went back to A.
 				expect(dispatched.graceTimers > 0, 'invalid rapid-switch run: B never started its notice grace timer');
 				expect(dispatched.historyPending, 'invalid rapid-switch run: B history settled before the return');
-				expect(dispatched.ranBeforeReturn === 0, 'invalid rapid-switch run: a notice deadline ran before the return');
+				expect(dispatched.pendingBeforeReturn > 0, 'invalid rapid-switch run: B notice timer was not pending at the return');
 				await page.waitForFunction(tag => {
 					const chat = document.querySelector('[data-ui-state="chat"]');
 					return chat?.dataset.uiSession === tag && chat?.dataset.uiTargetSession === tag && chat?.dataset.uiLoading === 'false';
 				}, outgoing);
 				const readyAt = await page.evaluate(() => performance.now());
-				// Now let B's deadline run (at once if it is already due). The
-				// product must have cancelled B's notice when the user returned: a
-				// surviving timer would paint the overlay in the frames sampled below.
-				const released = await page.evaluate(() => window.__switchGraceGate.release());
+				// The return must cancel B's pending notice: every grace timer started
+				// during the switch is cleared, so none can come due over A. Then let
+				// anything left run (at once if due) while the frames are still sampled.
+				const gateState = await page.evaluate(() => ({
+					uncleared: window.__switchGraceGate.registered.filter(entry => !entry.cleared).length,
+					released: window.__switchGraceGate.release()
+				}));
+				expect(gateState.uncleared === 0, `returning to A cancels B's notice timer (${gateState.uncleared} still pending)`);
+				const { released } = gateState;
 				log(`grace gate released ${released} due callback(s) after A was ready`);
 				await page.waitForFunction(() => window.__switchHydrationHold.released !== null, undefined, { timeout: 6000 });
 				await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
