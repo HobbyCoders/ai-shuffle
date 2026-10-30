@@ -126,6 +126,9 @@
 			if (skipped[i]) skippedKeys.push(key);
 			else answers[key] = answer(i);
 		});
+		// Report the final state now: sending can unmount this form in the same
+		// tick (the phone dock hides a sent question), before the effect above runs.
+		if (onDraft && requestId) onDraft(requestId, $state.snapshot({ active, selections, written, skipped }));
 		onRespond?.({ request_id: data.request_id, tool_use_id: data.tool_use_id, answers, skipped: skippedKeys });
 	}
 </script>

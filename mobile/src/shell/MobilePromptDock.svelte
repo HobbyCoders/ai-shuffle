@@ -94,9 +94,11 @@
 	function keep(id: string, patch: Partial<Draft>) {
 		drafts.set(id, { typing: false, typed: '', ...drafts.get(id), ...patch });
 	}
-	// Forget a draft once its question is neither open nor on its way. Runs
-	// when the open list changes, never on a sent mark alone, so a mark
-	// dropped a moment before the question returns cannot lose the draft.
+	// Forget a draft once its question is neither open nor on its way. The
+	// open list is rebuilt whenever the sent marks change, so a relay_offline
+	// return is safe because the mark drops and the question reappears in the
+	// same update. Only this chat's questions count as open, so a draft for
+	// another chat's question is dropped on a switch (as before this dock kept drafts).
 	$effect(() => {
 		const open = new Set(questions.map((request) => request.request_id));
 		untrack(() => {
