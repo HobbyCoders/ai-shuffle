@@ -36,7 +36,7 @@
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { createdChatToFollow } from './follow-created-chat';
 	import { chatChangedDuringBoot } from './boot-landing';
-	import { finishBootReconciliation, getInitGeneration, hasBootSendClaim } from '$lib/stores/session/session-init';
+	import { finishBootReconciliation, getInitGeneration, hasBootProjectPick, hasBootSendClaim } from '$lib/stores/session/session-init';
 	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
 	import { registerSearchShortcut } from '$lib/services/search-shortcut';
 	import { settingsNav, encodeTarget } from '$lib/settings/navigation.svelte';
@@ -289,9 +289,10 @@
 			if (restoredSessionId) {
 				followRestoredLane();
 				layout.openChat(restoredSessionId);
-			} else if (hasDraft || changedDuringLoads) {
-				// Do not clear a surviving draft, or a first send still creating
-				// its chat, just because the layout snapshot is absent.
+			} else if (hasDraft || changedDuringLoads || hasBootProjectPick(initGeneration)) {
+				// Do not clear a surviving draft, a first send still creating its
+				// chat, or a project picked on the new-session screen during the
+				// loads (#930), just because the layout snapshot is absent.
 				layout.openChat(null);
 			} else {
 				handleNewSession();

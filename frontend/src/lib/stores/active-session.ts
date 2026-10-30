@@ -37,7 +37,7 @@ import {
 } from './session/session-switcher';
 
 // Extracted sub-modules
-import { createSessionInit, setSkipRestore, bumpInitGeneration, tabWillRestoreChat } from './session/session-init';
+import { createSessionInit, setSkipRestore, bumpInitGeneration, tabWillRestoreChat, noteBootProjectPick } from './session/session-init';
 // V2 Phase 1: SSE-fed reducer store for v2_stream sessions (single writer).
 import { markChatUnavailable, clearUnavailableChat } from './unavailable-chat';
 import { feedController } from './session/v2/feed-controller';
@@ -1155,7 +1155,8 @@ export const activeSession = {
 		return mode;
 	},
 
-	setProject(projectId: string, projectV2Id?: string | null) {
+	/** `user`: the owner picked it in the UI (not a catalog or default fix-up). */
+	setProject(projectId: string, projectV2Id?: string | null, { user = false }: { user?: boolean } = {}) {
 		if (_state.worktreeIntent === 'local' && _state.messages.length > 0) {
 			console.warn('[ActiveSession] Cannot change project after session has started');
 			return;
@@ -1171,6 +1172,8 @@ export const activeSession = {
 		if (_state.project === projectId && _state.projectV2Id === nextV2 && _state.mode === nextMode) {
 			return;
 		}
+		// Boot's landing reconcile must keep this new chat's project (#930).
+		if (user && !_state.sessionId) noteBootProjectPick();
 		_update(s => ({
 			...s,
 			mode: nextMode,
@@ -1190,9 +1193,9 @@ export const activeSession = {
 	},
 
 	/** Leave a new session without a project (the strip's ✕). */
-	clearProject() {
+	clearProject({ user = false }: { user?: boolean } = {}) {
 		if (_state.sessionId) return;
-		activeSession.setProject('', null);
+		activeSession.setProject('', null, { user });
 	},
 
 	/**

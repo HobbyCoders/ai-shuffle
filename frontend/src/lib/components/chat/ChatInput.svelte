@@ -1526,7 +1526,7 @@
 				message={$activeSession.project
 					? `This looks like it's about ${projectMismatch.name}. Start it there instead?`
 					: `This looks like it's about ${projectMismatch.name}. Add it as this session's project?`}
-				action={{ label: $activeSession.project ? `Switch to ${projectMismatch.name}` : `Add ${projectMismatch.name} as project`, onClick: () => activeSession.setProject(projectMismatch.id) }}
+				action={{ label: $activeSession.project ? `Switch to ${projectMismatch.name}` : `Add ${projectMismatch.name} as project`, onClick: () => activeSession.setProject(projectMismatch.id, undefined, { user: true }) }}
 				dismissible
 				onDismiss={() => (dismissedMismatch = projectMismatch?.id ?? null)}
 			/>

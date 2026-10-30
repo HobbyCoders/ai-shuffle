@@ -119,7 +119,7 @@ export function bumpInitGeneration(): number {
 // this claim separate from the navigation epoch: adopting one's own new chat
 // is NOT navigation (ChatInput uses that distinction for draft recovery and
 // collapsing the phone composer). AppPage retires it after both boot reconciles.
-let bootSend: { generation: number; pendingSends: Set<symbol> } | null = null;
+let bootSend: { generation: number; pendingSends: Set<symbol>; projectPicked: boolean } | null = null;
 
 export function claimBootSend(): symbol | null {
 	if (bootSend?.generation !== getInitGeneration()) return null;
@@ -134,6 +134,28 @@ export function releaseBootSend(claim: symbol | null): void {
 
 export function hasBootSendClaim(generation: number): boolean {
 	return bootSend?.generation === generation && bootSend.pendingSends.size > 0;
+}
+
+/**
+ * The user picked (or cleared) the new chat's project while boot's first loads
+ * ran (#930). A slow boot shows the new-session screen well before AppPage's
+ * landing reconcile; resetting that compose to a fresh chat there threw the
+ * pick away, and the first send went out with no project.
+ */
+export function noteBootProjectPick(): void {
+	if (bootSend?.generation === getInitGeneration()) bootSend.projectPicked = true;
+}
+
+export function hasBootProjectPick(generation: number): boolean {
+	return bootSend?.generation === generation && bootSend.projectPicked;
+}
+
+/** The lane, project and checkout a boot project pick set on the compose. */
+function pickedCheckout(s: ActiveSessionState) {
+	const { mode, project, projectV2Id, workspaceProjectIds, worktreeIntent, worktreeBranch, worktreeBaseBranch,
+		worktreeId, worktreeMode, selectedWorktreeBranch, worktreeDeleted } = s;
+	return { mode, project, projectV2Id, workspaceProjectIds, worktreeIntent, worktreeBranch, worktreeBaseBranch,
+		worktreeId, worktreeMode, selectedWorktreeBranch, worktreeDeleted };
 }
 
 export function finishBootReconciliation(generation: number): void {
@@ -160,7 +182,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 	 */
 	async function init(options: { deepLinkSessionId?: string | null } = {}) {
 		const initGen = bumpInitGeneration();
-		bootSend = { generation: initGen, pendingSends: new Set() };
+		bootSend = { generation: initGen, pendingSends: new Set(), projectPicked: false };
 
 		const deepLinkSessionId = options.deepLinkSessionId || null;
 		const skipRestore = getSkipRestore() || deepLinkSessionId !== null;
@@ -247,6 +269,10 @@ export function createSessionInit(deps: SessionInitDeps) {
 					// real values, else placeholders /live fills (#418). A snapshot
 					// written before that record existed may hold fabricated ones.
 					const binding = persisted.sessionId ? restoreComposerBinding(persisted, null) : null;
+					// A saved unbound compose must not overwrite the project the
+					// user picked while this loaded (#930): keep that pick's lane
+					// and checkout. An existing session restores as before.
+					const keepPick = !persisted.sessionId && hasBootProjectPick(initGen);
 					update(s => ({
 						...s,
 						sessionId: persisted.sessionId ?? null,
@@ -313,6 +339,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 						worktreeMode: persisted.worktreeMode || 'new',
 						selectedWorktreeBranch: persisted.selectedWorktreeBranch ?? null,
 						worktreeDeleted: persisted.worktreeDeleted ?? false,
+						...(keepPick ? pickedCheckout(s) : {}),
 					}));
 
 					// Start the transcript feed the moment the session id is known
@@ -332,7 +359,9 @@ export function createSessionInit(deps: SessionInitDeps) {
 					}
 				} else {
 					// No saved compose: a new session starts without a project.
-					update(s => ({ ...s, isRestoringSession: false, profile: defaultProfile, ...(s.mode === 'chat' ? {} : { project: defaultProject }) }));
+					// One the user picked while this loaded is theirs (#930).
+					update(s => ({ ...s, isRestoringSession: false, profile: defaultProfile,
+						...(s.mode === 'chat' || hasBootProjectPick(initGen) ? {} : { project: defaultProject }) }));
 				}
 			}
 

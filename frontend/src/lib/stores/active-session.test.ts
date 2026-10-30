@@ -58,6 +58,7 @@ import { sessionEphemeralCache } from './session-cache';
 import { selectedContextWindow, standardContextCap } from './session/context-window';
 import { appMode } from './sessionMode.svelte';
 import { bindSessionOwner } from './session-owner';
+import { finishBootReconciliation, getInitGeneration, hasBootProjectPick } from './session/session-init';
 
 describe('chat authentication close recovery', () => {
 	afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
@@ -329,6 +330,45 @@ describe('attaching a project (#371)', () => {
 		expect(sessionEphemeralCache.restore('attach-me')?.permissionModeOverride).toBe('default');
 		expect(activeSession.current.permissionModeOverride).toBe('bypassPermissions');
 		expect(activeSession.current.project).toBe('');
+	});
+});
+
+describe('a project picked while boot loads (#930)', () => {
+	afterEach(() => { activeSession.destroy(); vi.restoreAllMocks(); });
+
+	it('is noted for the landing reconcile and survives init', async () => {
+		sessionStorage.removeItem('__aihub_skipSessionRestore');
+		sessionStorage.removeItem('ai-shuffle-active-session');
+		vi.spyOn(api, 'get').mockRejectedValue(new Error('offline'));
+		const catalog = { ...appData.current, projects: [{ id: 'proj-picked' }] } as typeof appData.current;
+		vi.spyOn(appData, 'current', 'get').mockReturnValue(catalog);
+		activeSession.current.sessionId = null;
+		const initializing = activeSession.init();
+		const generation = getInitGeneration();
+		expect(hasBootProjectPick(generation)).toBe(false);
+		// A system fix-up (dropMissingProject's clear) and a no-op are not picks.
+		activeSession.clearProject();
+		activeSession.setProject('', null, { user: true });
+		expect(hasBootProjectPick(generation)).toBe(false);
+		activeSession.setProject('proj-picked', null);
+		expect(hasBootProjectPick(generation)).toBe(false);
+		activeSession.setProject('', null);
+		activeSession.setProject('proj-picked', null, { user: true });
+		expect(hasBootProjectPick(generation)).toBe(true);
+		await initializing;
+		expect(activeSession.current).toMatchObject({ sessionId: null, mode: 'code', project: 'proj-picked' });
+		finishBootReconciliation(generation);
+		expect(hasBootProjectPick(generation)).toBe(false);
+	});
+
+	it('is not noted once boot has reconciled', async () => {
+		vi.spyOn(api, 'get').mockRejectedValue(new Error('offline'));
+		activeSession.current.sessionId = null;
+		await activeSession.init();
+		const generation = getInitGeneration();
+		finishBootReconciliation(generation);
+		activeSession.setProject('proj-later', null, { user: true });
+		expect(hasBootProjectPick(generation)).toBe(false);
 	});
 });
 

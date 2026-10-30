@@ -55,7 +55,7 @@ import AppPage from './AppPage.svelte';
 import { api } from '$lib/api/client';
 import { activeSession } from '$lib/stores/active-session';
 import { activeView } from '$lib/stores/layout.svelte';
-import { bumpInitGeneration, createSessionInit, getInitGeneration, hasBootSendClaim } from '$lib/stores/session/session-init';
+import { bumpInitGeneration, createSessionInit, getInitGeneration, hasBootProjectPick, hasBootSendClaim, noteBootProjectPick } from '$lib/stores/session/session-init';
 import { createMessageSender } from '$lib/stores/session/message-sender';
 import { createSessionSwitcher } from '$lib/stores/session/session-switcher';
 import { createMessageHandlers } from '$lib/stores/session/ws-message-handlers';
@@ -275,6 +275,47 @@ it('does not dispatch into a different session adopted during the connection wai
 	ctx.preferences.resolve(null);
 	await initializing;
 	expect(get(state).sessionId).toBe('different');
+});
+
+// #930: a fresh browser (no saved layout view) shows the new-session screen
+// long before a slow boot reconciles; the project picked there must survive it.
+it.each([true, false])('keeps a project picked on the new-session screen during the loads (picked=%s)', async picked => {
+	mocks.get.mockResolvedValue(null);
+	views.set(null);
+	const ctx = setup();
+	render(AppPage, { shell });
+	await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
+	if (picked) {
+		// What activeSession.setProject does on a new compose.
+		noteBootProjectPick();
+		state.update(s => ({ ...s, mode: 'code', project: 'picked-project' }));
+	}
+	ctx.preferences.resolve(null);
+	await waitFor(() => expect(mocks.resolveComposerDefaultsAfterCatalog).toHaveBeenCalledOnce());
+	await waitFor(() => expect(mocks.openChat).toHaveBeenCalledWith(null));
+	if (picked) {
+		expect(mocks.newChat).not.toHaveBeenCalled();
+		expect(get(state)).toMatchObject({ sessionId: null, mode: 'code', project: 'picked-project' });
+	} else {
+		// An untouched landing still opens a fresh new chat.
+		expect(mocks.newChat).toHaveBeenCalledOnce();
+	}
+	expect(hasBootProjectPick(getInitGeneration())).toBe(false);
+});
+
+it.each([true, false])('a saved unbound compose does not overwrite a project picked during init (picked=%s)', async picked => {
+	mocks.get.mockResolvedValue({ value: { sessionId: null, title: 'Saved compose', profile: 'saved-agent', project: 'stale-project', worktreeBranch: 'stale-branch' } });
+	const ctx = setup();
+	const initializing = ctx.init.init();
+	if (picked) {
+		noteBootProjectPick();
+		state.update(s => ({ ...s, mode: 'code', project: 'picked-project', projectV2Id: null, worktreeBranch: '' }));
+	}
+	ctx.preferences.resolve(null);
+	await initializing;
+	expect(get(state)).toMatchObject(picked
+		? { sessionId: null, mode: 'code', project: 'picked-project', worktreeBranch: '' }
+		: { sessionId: null, mode: 'code', project: 'stale-project', worktreeBranch: 'stale-branch' });
 });
 
 it.each(['explicit', 'auto'])('keeps a %s worktree adopted before its inner send is refused', async kind => {
