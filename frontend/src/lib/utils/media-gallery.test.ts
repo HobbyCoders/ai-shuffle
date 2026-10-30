@@ -172,6 +172,38 @@ describe('generated media in the turn gallery (#784)', () => {
 		expect(html).toContain(`![Other](${art('z')})`);
 	});
 
+	it.each([
+		['a title', (u: string) => `![A](${u} "The A")`],
+		['a single-quoted title', (u: string) => `![A](${u} 'The A')`],
+		['an angle-bracket URL', (u: string) => `![A](<${u}>)`],
+		['an angle-bracket URL and title', (u: string) => `![A]( <${u}> "The A" )`]
+	])('drops a gallery image embedded with %s (#792)', (_label, embed) => {
+		const html = rewriteWithGallery(`Pick:\n\n${embed(art('a'))}\n\n${embed(art('z'))}`, new Set([art('a')]));
+		expect(html).toContain('Pick:');
+		expect(html).not.toContain(art('a'));
+		expect(html).toContain(art('z'));
+	});
+
+	it('never drops an image written inside code (#792)', () => {
+		const fenced = `\`\`\`md\n![A](${art('a')})\n\`\`\``;
+		const inline = `Use \`![A](${art('a')})\` to embed.`;
+		const html = rewriteWithGallery(`${fenced}\n\n${inline}\n\n![A](${art('a')})`, new Set([art('a')]));
+		expect(html.split(art('a')).length - 1).toBe(2);
+		expect(html).toContain(fenced);
+		expect(html).toContain(inline);
+	});
+
+	it('skips the parse for a result that cannot name media (#792)', () => {
+		const parse = vi.spyOn(JSON, 'parse');
+		const plain = made('plain', '{"stdout": "total 0", "exit_code": 0}');
+		const noKey = made('nokey', JSON.stringify({ success: true, text: 'done' }));
+		galleryMediaForTurn([plain, noKey, made('ok', unified({ image_url: art('p') })), made('ok2', unified({ image_url: art('q') }))]);
+		const parsed = parse.mock.calls.map(([text]) => text);
+		parse.mockRestore();
+		expect(parsed).not.toContain(plain.toolResult);
+		expect(parsed).not.toContain(noKey.toolResult);
+	});
+
 	it('keeps the safe-source check', () => {
 		expect(galleryMediaForTurn([
 			made('bad', unified({ image_url: 'javascript:alert(1)' })),

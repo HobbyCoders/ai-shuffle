@@ -95,10 +95,17 @@
 	 * Generated media a tool row must not draw because something on screen
 	 * already shows it (#784): the gallery while the turn is collapsed, and the
 	 * prose that embeds the same picture. Only rows that made media carry it.
+	 * In a live turn, folded prose shows its pictures once the reader opens its
+	 * run, so the row leaves those to it while the run is open (#792).
 	 */
 	function mediaShownElsewhere(entry: WorkLogSequenceEntry): ReadonlySet<string> | undefined {
 		const collapsed = !(mode === 'settled' && open);
-		const prose = entry.mediaInProse ? (collapsed ? entry.mediaInProse.collapsed : entry.mediaInProse.open) : [];
+		let prose = entry.mediaInProse ? (collapsed ? entry.mediaInProse.collapsed : entry.mediaInProse.open) : [];
+		const byRun = mode === 'live' ? entry.mediaInProse?.runs : undefined;
+		if (byRun) {
+			const opened = runs.filter((run) => byRun[run.index] && runOpen(run)).flatMap((run) => byRun[run.index]);
+			if (opened.length) prose = [...prose, ...opened];
+		}
 		const fromGallery = collapsed && mode === 'settled' && entry.inGallery === true;
 		if (!prose.length) return fromGallery ? gallerySources : undefined;
 		return new Set([...prose, ...(fromGallery ? gallerySources : [])]);

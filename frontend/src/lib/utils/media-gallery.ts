@@ -90,6 +90,10 @@ export function proseMediaSources(messages: readonly ChatMessage[], sessionId?: 
 
 // Parsed per result string, like prose embeds: a transcript rebuild re-reads
 // every settled tool row, and most results are not generations at all.
+// `toolResultMedia` reads only a JSON object with `success: true` and one of
+// these keys, so a result naming neither skips the parse AND the cache: plain
+// shell output and file reads must not evict the entries that matter (#792).
+const MEDIA_RESULT_KEY = /"(?:(?:video|audio|image|file|model|output)_url|(?:image|audio)_base64|images|outputs)"/;
 const toolMediaCache = new Map<string, readonly ToolResultMediaItem[]>();
 const NO_MEDIA: readonly ToolResultMediaItem[] = [];
 
@@ -105,6 +109,7 @@ export function completedToolMedia(message: ChatMessage): readonly ToolResultMed
 	const status = message.toolStatus as string | undefined;
 	if (status !== 'complete' && status !== 'completed') return NO_MEDIA;
 	const result = message.toolResult;
+	if (!result.includes('"success"') || !MEDIA_RESULT_KEY.test(result)) return NO_MEDIA;
 	const cached = toolMediaCache.get(result);
 	if (cached) return cached;
 	const items = toolResultMedia(stripUntrustedFence(result));
@@ -135,14 +140,30 @@ export function galleryMediaForTurn(messages: ChatMessage[], sessionId?: string 
 	return found.size > 1 ? [...found.values()] : [];
 }
 
-// A markdown image the media rewrite left alone (its URL names no kind).
-const PLAIN_IMAGE_MD = /!\[[^\]]*\]\(([^)\s]+)\)/g;
+// A markdown image the media rewrite left alone (its URL names no kind), in
+// every destination form the lexer accepts: bare or `<angle-bracketed>`, with
+// an optional "title", 'title' or (title) (#792).
+const PLAIN_IMAGE_MD = /!\[[^\]]*\]\(\s*(?:<([^>\n]*)>|([^)\s]+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)/g;
+// Fenced blocks and inline code spans: their text is code, never an embed.
+const CODE_SPAN = /(^|\n)( {0,3})(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n {0,3}\3[`~]*[ \t]*(?=\n|$)|$)|`+[^`\n]*?`+/g;
 
 /** Suppress only media represented by the gallery; keep prose, audio and links. */
 export function rewriteWithGallery(text: string, sources: ReadonlySet<string>, sessionId?: string | null): string {
-	return rewriteMediaMarkdown(text, (kind, src, label) =>
-		sources.has(resolveMediaUrl(src, sessionId)) ? '' : mediaHtml(kind, src, label)
-	// A generated picture the reply embeds by its artifact URL is the same
-	// picture the gallery shows from the tool row (#784).
-	).replace(PLAIN_IMAGE_MD, (match, src: string) => (sources.has(resolveMediaUrl(src, sessionId)) ? '' : match));
+	const shown = (src: string) => sources.has(resolveMediaUrl(src, sessionId));
+	const prose = (part: string) =>
+		rewriteMediaMarkdown(part, (kind, src, label) => (shown(src) ? '' : mediaHtml(kind, src, label)))
+			// A generated picture the reply embeds by its artifact URL is the
+			// same picture the gallery shows from the tool row (#784).
+			.replace(PLAIN_IMAGE_MD, (match, bracketed: string | undefined, bare: string | undefined) =>
+				shown(bracketed ?? bare ?? '') ? '' : match
+			);
+	// Code renders exactly as it does without a gallery: nothing is dropped
+	// from it, since the lexer never counted it as an embed.
+	let out = '';
+	let at = 0;
+	for (const code of text.matchAll(CODE_SPAN)) {
+		out += prose(text.slice(at, code.index)) + rewriteMediaMarkdown(code[0]);
+		at = code.index + code[0].length;
+	}
+	return out + prose(text.slice(at));
 }

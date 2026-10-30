@@ -2287,6 +2287,62 @@ describe('generated media outside the fold (#784)', () => {
 		expect(live.some((item) => item.kind === 'work_log' && item.gallery?.length)).toBe(false);
 	});
 
+	it('leaves the picture to the reply on a flat row when grouping is off (#792)', () => {
+		const made = generation(unified({ image_url: art('one') }));
+		const answer = text(`Here it is: ![Lighthouse](${art('one')} "Lighthouse")`);
+		const items = buildDisplayItems([user('draw it'), made, answer], { ...SETTLED, groupingEnabled: false });
+		const row = items.find((item) => item.kind === 'message' && item.message.id === made.id);
+		expect(row?.kind === 'message' && [...(row.hiddenMedia ?? [])]).toEqual([art('one')]);
+		// The reply is the one copy, and it renders flat (always visible).
+		expect(items.some((item) => item.kind === 'message' && item.message.id === answer.id)).toBe(true);
+	});
+
+	it('keeps the picture on a flat row when no finished prose shows it (#792)', () => {
+		const made = generation(unified({ image_url: art('one') }));
+		const streaming = { ...text(`![x](${art('one')})`), streaming: true };
+		for (const rows of [[user('draw it'), made, text('Done.')], [user('draw it'), made, streaming]]) {
+			const items = buildDisplayItems(rows, { ...SETTLED, groupingEnabled: false });
+			const row = items.find((item) => item.kind === 'message' && item.message.id === made.id);
+			expect(row?.kind === 'message' && row.hiddenMedia).toBeFalsy();
+		}
+	});
+
+	it('leaves the picture to the reply in a turn with no prompt (#792)', () => {
+		const made = generation(unified({ image_url: art('one') }));
+		const answer = text(`![Lighthouse](<${art('one')}>)`);
+		for (const options of [SETTLED, LIVE]) {
+			const items = buildDisplayItems([made, answer], options);
+			const row = items.find((item) => item.kind === 'message' && item.message.id === made.id);
+			expect(row?.kind === 'message' && [...(row.hiddenMedia ?? [])]).toEqual([art('one')]);
+		}
+	});
+
+	it('does not reuse a flat row whose hidden media changed on rebuild (#792)', () => {
+		const build = createTranscriptModelBuilder();
+		const flat = { ...SETTLED, groupingEnabled: false };
+		const made = generation(unified({ image_url: art('one') }));
+		const first = build([user('draw it'), made], flat);
+		const second = build([user('draw it'), made, text(`![x](${art('one')})`)], flat);
+		const rowOf = (items: DisplayItem[]) => items.find((item) => item.kind === 'message' && item.message.id === made.id);
+		expect(rowOf(first.items)).not.toBe(rowOf(second.items));
+		const row = rowOf(second.items);
+		expect(row?.kind === 'message' && row.hiddenMedia?.has(art('one'))).toBe(true);
+	});
+
+	it('hands a live picture to folded prose only through the run that folds it (#792)', () => {
+		const made = generation(unified({ image_url: art('one') }));
+		const narration = text(`Made it: ![x](${art('one')})`);
+		const log = liveLog(buildDisplayItems([user('draw it'), made, narration, tool(), text('Next step.'), tool()], LIVE))!;
+		const narrated = log.sequence.find((entry) => entry.message.id === narration.id)!;
+		expect(narrated.foldsInRun).toBe(true);
+		const entry = log.sequence.find((e) => e.message.id === made.id)!;
+		// Folded, nothing else shows it: the row keeps it. Opened, the run's prose does.
+		expect(entry.foldsInRun).toBeFalsy();
+		expect(entry.mediaInProse?.collapsed).toEqual([]);
+		expect(entry.mediaInProse?.runs).toEqual({ [narrated.run!]: [art('one')] });
+		expect(log.runs?.some((run) => run.index === narrated.run)).toBe(true);
+	});
+
 	it('keeps a finished generated image out of a live run fold', () => {
 		const made = generation(unified({ image_url: art('one') }));
 		const items = buildDisplayItems([user('draw it'), tool(), made, text('Here it is.\n\nAnd more.'), tool()], LIVE);
