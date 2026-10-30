@@ -774,7 +774,7 @@ def main(argv: list[str] | None = None) -> int:
     start.add_argument("--vite-port", type=int, help="Vite dev port (default: free)")
     start.add_argument("--no-vite", action="store_true",
                        help="Serve the stamped frontend build instead of Vite dev")
-    start.add_argument("--seed", default="default", help="Seed name, or none")
+    start.add_argument("--seed", default="default", help="Seed name: default, long (performance), or none")
     start.add_argument("--latency-ms", type=float, default=0.0,
                        help="Fake AI delay before each reply")
     start.add_argument("--tps", type=float, default=0.0,

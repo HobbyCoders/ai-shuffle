@@ -1296,6 +1296,16 @@
           "past_bug": "#556: account detection did not feed ordinary owner memory."
         },
         {
+          "id": "harness-basics.perf-remote-open-rig",
+          "check": "The read-only performance rig measures a genuinely remote-owned chat",
+          "kind": "owner",
+          "needs": ["install"],
+          "two_worker": true,
+          "how": "On two paired disposable candidate workers, create a throwaway chat owned by the peer and a small chat owned by the viewing worker. Verify ownership and peer connectivity first. Supply only their ids to scripts/perf/chat-journeys.mjs --journeys remote --remote ID --small ID --runs 1 --platform both --out OUTSIDE_CHECKOUT; provide approved preview access only through PERF_ACCESS_URL in the environment. Keep raw private receipts outside the checkout. Main currently has no paired two-worker dev fixture, so a one-worker seeded chat cannot pass this row. Do not send prompts through this read-only rig, edit settings, restart production workers or export owner transcripts.",
+          "pass_when": "Desktop 1280x800 and the actual /mobile/ shell at 390x844 with 4x CPU each produce a cold-open and cached-return sample with p75/min/max, SSE bytes, exact from_seq=0 replay count, API requests, long-task time and nested live element count. Record every replay, including any known replacement replay associated with #813; the rig must expose it rather than hide it. Access URLs, cookies, worker addresses and session ids are absent from output artifacts. Both targets retain their original ownership and transcript; no message is sent. A local-id substitution, only unit tests or an unpaired preview is not remote verification.",
+          "past_bug": "Phase-1 remote-open measurement lived in a private scratch rig; an unpaired preview could exercise the runner without proving the remote mirror/open path."
+        },
+        {
           "id": "harness-basics.pg-fast-shutdown-pressure",
           "check": "PostgreSQL finishes a dirty FAST shutdown under bounded write pressure",
           "kind": "owner",
