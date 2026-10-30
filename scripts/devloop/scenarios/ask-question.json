@@ -1,0 +1,27 @@
+{
+  "description": "Turn 1 asks one question in the question tray (AskUser, with two options) and ends its turn waiting; the answer (or 'User skipped this question.') wakes it and it replies with what it received.",
+  "steps": [
+    {
+      "text": "I need one decision from you first.",
+      "tool_calls": [
+        {
+          "name": "AskUser",
+          "input": {
+            "questions": [
+              {
+                "question": "Which colour should the banner use?",
+                "header": "Colour",
+                "options": [
+                  {"label": "Teal", "description": "The current accent colour."},
+                  {"label": "Amber", "description": "A warmer accent."}
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {"text": "I've asked in the question tray. I'll wait for your answer."},
+    {"text": "Thanks. I received:\n\n{answer}\n\nDone."}
+  ]
+}

@@ -233,6 +233,8 @@
 	// mid-load). Previously an open, titled session with no messages fell through
 	// to "New Chat", which read as "clearing deleted my session" (see #558 +
 	// chat-empty-state.ts). Only a genuinely unbound, empty chat shows "New Chat".
+	// ChatView reports whether the open mirrored chat still waits for its first sync.
+	let chatMirrorSyncPending = $state(false);
 	const headerTitle = $derived.by(() => {
 		if (!$activeView) return '';
 		if ($activeView.type === 'session') {
@@ -241,11 +243,15 @@
 				title: activeTab?.title,
 				messageCount: activeTab?.messages.length ?? 0,
 				// A deep-linked chat can finish its history before /live names it.
+				// A mirrored chat's first sync is part of its open, as in ChatView's
+				// hero, so the two always show the same title (#812).
 				loading: !!(
 					activeTab?.isRestoringSession ||
 					activeTab?.isLoadingSession ||
-					(activeTab?.sessionId && $pendingDeepLink === activeTab.sessionId)
-				)
+					(activeTab?.sessionId && $pendingDeepLink === activeTab.sessionId) ||
+					(activeTab?.sessionId && chatMirrorSyncPending)
+				),
+				listTitle: activeSessionRow?.title
 			});
 		}
 		return viewTitles[$activeView.type] || '';
@@ -433,9 +439,19 @@
 				// An existing chat's transcript comes first: the PR lookup (and the
 				// remote fetch after it) waits until the transcript has loaded, or
 				// the user has moved on, or GIT_OPEN_GATE_MAX_MS has passed.
-				const options: GitLoadOptions | undefined = sessionId && deferGitOnOpen()
-					? { afterCriticalPath: whenTranscriptSettled(activeSession, sessionId, GIT_OPEN_GATE_MAX_MS) }
-					: undefined;
+				// No remote fetch for a load that starts or ends while a turn runs:
+				// the owner refuses it with 409 then (a new chat's first load runs
+				// as its first reply starts, #803). The status refresh at stream end
+				// still runs; only the optional fetch of remote refs is skipped.
+				// Read live: a reply that is still streaming when the fetch would go
+				// out blocks it (the store retries at stream end); one that already
+				// ended does not, so no deferral waits for a stream end that passed.
+				const options: GitLoadOptions = {
+					fetchBlocked: () => gitControlsStreaming.current,
+					...(sessionId && deferGitOnOpen()
+						? { afterCriticalPath: whenTranscriptSettled(activeSession, sessionId, GIT_OPEN_GATE_MAX_MS) }
+						: {})
+				};
 				if (worktreeId) {
 					git.loadForWorktree(project, worktreeId, false, sessionId, options);
 				} else {
@@ -1014,21 +1030,28 @@
 
 	<div class="main-content">
 		<div class="main-surface" inert={!!activeSidePanel.active && (activeSidePanel.expanded || panelOverlay)} bind:clientWidth={chatColumnWidth}>
-		{#if $activeView}
-			{#if showChatSurface}
-				<div class="chat-row">
-					<div class="chat-browser-underlay">
-					<ChatView
-						onBrowserToggle={$activeView?.type === 'session' && activeTab?.sessionId
-							? () => browserPanel.toggle(activeTab?.sessionId ?? null)
-							: undefined}
-						onBrowserPreload={() => BrowserSidePanel.preload()}
-						browserOpen={sessionBrowser.open}
-						terminal={terminalToggle}
-					/>
-					</div>
+		<!--
+			One mount site for the chat, whether it is the default landing (no
+			saved view yet: a fresh chat) or an open chat view. Boot opens New Chat
+			explicitly on a first visit; two sites remounted the composer then and
+			lost text typed in the moment before (#811).
+		-->
+		{#if showChatSurface}
+			<div class="chat-row">
+				<div class="chat-browser-underlay">
+				<ChatView
+					onBrowserToggle={$activeView?.type === 'session' && activeTab?.sessionId
+						? () => browserPanel.toggle(activeTab?.sessionId ?? null)
+						: undefined}
+					onBrowserPreload={() => BrowserSidePanel.preload()}
+					browserOpen={sessionBrowser.open}
+					terminal={terminalToggle}
+					bind:mirrorSyncPending={chatMirrorSyncPending}
+				/>
 				</div>
-			{/if}
+			</div>
+		{/if}
+		{#if $activeView}
 			<!--
 				Feature panels are lazily imported AND kept alive: the active one plus
 				the previous one stay mounted, the inactive one hidden. Revisiting a
@@ -1073,11 +1096,6 @@
 					</FeaturePanelHost>
 				</div>
 			{/each}
-		{:else}
-			<!-- Default landing: a fresh chat (the Sessions board is retired) -->
-			<div class="chat-row">
-				<ChatView />
-			</div>
 		{/if}
 		</div>
 		{#if activeSidePanel.active && !(activeSidePanel.active === 'changes' && !activeWorktreeId && !activeWorktreeBranch && !$git.error && $git.hydrated && ($gitStatus?.is_git_repo === false || !!$gitStatus?.enclosing_repository_root))}

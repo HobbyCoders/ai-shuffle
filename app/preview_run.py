@@ -130,7 +130,10 @@ def _saved_access() -> dict | None:
 def _write_private_json(path: Path, data: dict) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.unlink(missing_ok=True)
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    # Windows has no O_NOFOLLOW; O_CREAT | O_EXCL already refuses any
+    # existing entry at tmp (a planted link included) on every platform.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp, flags, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
         json.dump(data, stream)
     os.replace(tmp, path)

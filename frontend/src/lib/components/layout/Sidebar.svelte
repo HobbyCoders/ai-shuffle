@@ -48,6 +48,7 @@
 		sessions,
 		projects,
 		clusterProjects,
+		projectCatalogReady,
 		sessionsHasMore
 	} from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
@@ -160,7 +161,9 @@
 	// ---------------------------------------------------------------- data
 	const activeId = $derived($activeSession.sessionId);
 	const projectsById = $derived(new Map($projects.map((p) => [p.id, p])));
-	const liveKeys = $derived(liveProjectKeys($projects, $clusterProjects));
+	// Null until the catalog has answered: no project can be proven removed
+	// before then, so the first paint already lists every row it will (#804).
+	const liveKeys = $derived($projectCatalogReady ? liveProjectKeys($projects, $clusterProjects) : null);
 	// Every session, with or without a project, is listed together. This is
 	// the one place rows are excluded (hidden rows): the
 	// filter options, `rows`, the three groups and the PR-branch fetch set all

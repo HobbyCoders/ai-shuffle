@@ -964,6 +964,19 @@ async def event_stream(
                     yield ": keepalive\n\n"
                 continue
 
+            # The shared reader closed under us: its log was replaced (a clear,
+            # a mirror rewrite) while this client was already on the new log,
+            # so the epoch check had nothing to reset here. Staying on a dead
+            # reader would leave only the keepalive poll, so move to a fresh
+            # one first, attached BEFORE the read below like on connect, and
+            # seed it from this client's cursor after.
+            rejoined = False
+            if tail.closed:
+                tail.detach(sub)
+                tail = _acquire_tail(session_id)
+                sub = tail.attach()
+                rejoined = True
+
             # Correctness fallback if a mirror replacement's NOTIFY was lost,
             # or a slow consumer dropped its identity marker. Never reconcile
             # from an old cursor into a different log, even if the new head grew.
@@ -982,6 +995,8 @@ async def event_stream(
                 yield frame
                 cursor = seq
                 wrote = True
+            if rejoined:
+                tail.note_cursor(cursor, log_epoch)
             resync_at = time.monotonic() + LIVE_RESYNC_SECONDS
             if timed_out and not wrote:
                 yield ": keepalive\n\n"

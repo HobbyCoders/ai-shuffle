@@ -54,7 +54,9 @@ describe('MessageArea reading position', () => {
 		expect(sw).not.toContain('containerRef.scrollTop');
 		expect(sw).toContain('const leftAt = scrollTopPersist.leave(prevId, scrollPositionCache.get(prevId));');
 		expect(sw).toContain('if (leftAt !== undefined) scrollPositionCache.set(prevId, leftAt);');
-		expect(sw).toContain('autoScrollCache.set(prevId, shouldAutoScroll)');
+		// A mistakenly flipped flag with the last frame at the bottom still counts
+		// as following, so it cannot strand the chat above its bottom (#805).
+		expect(sw).toContain('autoScrollCache.set(prevId, shouldAutoScroll || (lastScrollMetrics !== null && isNearBottom(lastScrollMetrics)))');
 		expect(sw).toContain('evictOldest(scrollPositionCache, SCROLL_CACHE_MAX)');
 		expect(sw).toContain('evictOldest(autoScrollCache, SCROLL_CACHE_MAX)');
 	});
@@ -95,7 +97,32 @@ describe('MessageArea reading position', () => {
 		// Estimated heights must not change after keyed-anchor compensation.
 		expect(source).not.toContain('content-visibility: auto;');
 		expect(source).toContain('anchor.getBoundingClientRect().top - anchorTop');
-		expect(mount).toContain('shouldAutoScroll = false;');
-		expect(mount).toContain('containerRef.scrollTop = storedPosition;');
+		expect(mount).toContain('restoreReadingPosition(storedPosition);');
+		const restore = block('function restoreReadingPosition(position: number) {', '// Restore scroll position only on mount');
+		expect(restore).toContain('shouldAutoScroll = false;');
+		expect(restore).toContain('containerRef.scrollTop = position;');
+	});
+
+	it('brings a reader who scrolled up back to the same spot after a switch (#805)', () => {
+		const sw = block('prevTrackedSessionId = currentId;', '// Observe container size changes');
+		const restoreAt = sw.indexOf('restoreReadingPosition(returnTo);');
+		const bottomAt = sw.indexOf('pendingScrollToBottom = true;');
+		expect(sw).toContain("autoScrollCache.get(currentId ?? 'new') === false");
+		expect(sw).toContain('scrollPositionCache.get(currentId)');
+		// Only with the transcript already here: its restored slice matches the offset.
+		expect(sw).toContain('switchedState.messages.length > 0 && !switchedState.isLoadingSession');
+		expect(restoreAt).toBeGreaterThan(-1);
+		// The restore returns before the bottom path; the rest still open at the bottom.
+		expect(bottomAt).toBeGreaterThan(restoreAt);
+		expect(sw.slice(restoreAt, bottomAt)).toContain('return;');
+		// The shown tail counts as seen, or the change effect would follow it.
+		expect(sw.slice(0, restoreAt)).toContain('prevMessagesLength = switchedState.messages.length;');
+	});
+
+	it('does not follow a queued prompt whose turn starts while the reader is scrolled up (#863)', () => {
+		expect(instanceScript).toContain('queuedPromptsSeen.add(entry.content)');
+		const change = block('// Watch for message changes and streaming content updates', '// Update previous values');
+		expect(change).toContain("queuedPromptsSeen.delete(newestMessage.content ?? '')");
+		expect(change).toContain('isNavigableUserTurn(newestMessage) && (!fromQueue || shouldAutoScroll)');
 	});
 });

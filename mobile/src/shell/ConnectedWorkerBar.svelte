@@ -13,6 +13,7 @@
 	 * fallback, so pairing remains available without a reachable worker.
 	 */
 	import { onMount, tick } from 'svelte';
+	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
 	import { Check, Info, LoaderCircle, Server, Settings, X } from 'lucide-svelte';
 	import { listInstalls, type Install } from '$lib/api/installs';
 	import { isBundledMobile, nativeCapability } from '$lib/api/runtime';
@@ -197,7 +198,7 @@
 		<!-- svelte-ignore a11y_click_events_have_key_events -->
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<div class="scrim" onclick={closeSheet}></div>
-		<div bind:this={sheetRef} class="sheet" role="dialog" aria-modal="true" aria-labelledby="conn-title" aria-describedby="conn-description" data-no-drawer-swipe>
+		<div bind:this={sheetRef} use:obscuresTranscript class="sheet" role="dialog" aria-modal="true" aria-labelledby="conn-title" aria-describedby="conn-description" data-no-drawer-swipe>
 			<div class="sheet-h">
 				<h4 id="conn-title">Connected to</h4>
 				<button type="button" class="icon-btn" aria-label="Close" onclick={closeSheet}><X size={18} aria-hidden="true" /></button>

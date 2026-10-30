@@ -9,6 +9,10 @@
 //   clear-then-send    a chat this run made: the server clears it while it is
 //                      open (POST /sessions/<id>/clear, the clear the app's
 //                      `user_session_cleared` broadcast reports), then a send
+//                      must get its reply on screen. A second viewer (another
+//                      device) keeps the chat's event feed open through the
+//                      clear, so the page's reconnect always lands on the
+//                      server's already-running shared reader (#797).
 import { fakeAiTag, runJourney } from './runner.mjs';
 import {
 	SEEDED,
@@ -58,13 +62,6 @@ await runJourney({
 		},
 		{
 			name: 'clear-then-send',
-			knownBug: {
-				issue: 797,
-				// A race between the old and the new event connection: most runs hit it.
-				intermittent: true,
-				error: /^Error: reply never arrived: "You said: “after clearing"/,
-				reason: 'after an in-place clear the server event stream skips the restarted log, so the reply never reaches the open chat'
-			},
 			expectShift: [
 				{
 					step: 'the server clears the open chat',
@@ -84,6 +81,12 @@ await runJourney({
 				await waitTurnSettled(page, { text: 'Fake AI here', messagesAtLeast: 2, hold: 500 });
 				ctx.chatId = await chatIdByToken(page, ctx.old);
 				ctx.sessionTag = await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-session');
+				// Another device with this chat open: its feed holds the server's
+				// shared reader for the chat across the page's own reconnect.
+				await page.evaluate((id) => {
+					window.__otherViewer = new EventSource(`/api/v1/sessions/${encodeURIComponent(id)}/events`, { withCredentials: true });
+				}, ctx.chatId);
+				await page.waitForFunction(() => window.__otherViewer?.readyState === EventSource.OPEN);
 			},
 			async act(ctx) {
 				const { page, mark, variant, log } = ctx;
@@ -105,6 +108,7 @@ await runJourney({
 				expect((await countUserRows(page, ctx.old)) === 0, 'no message from before the clear came back');
 				expect((await countUserRows(page, fresh)) === 1, 'the new message shows once');
 				expect(await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-session') === ctx.sessionTag, 'the first send after clearing keeps the existing chat');
+				await page.evaluate(() => window.__otherViewer?.close());
 			}
 		}
 	],

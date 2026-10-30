@@ -149,11 +149,21 @@ def _build_cluster_catalog(
 
     # Prefer instance_id = me over a NULL-instance legacy row.
     local_by_origin: Dict[str, Dict[str, Any]] = {}
+    # A project's first chat catalogues it under ``local:<id>`` while it has no
+    # remote; linking it to its remote later changes its origin but leaves that
+    # identity and its base checkout. Listing THIS worker's checkout of it
+    # would offer a remote-only duplicate of the project in every picker
+    # (#802). Project ids are per-worker slugs, so a peer's own remote-less
+    # project with the same id keeps its checkouts listed.
+    relinked: set[str] = set()
     for project in local_projects:
         origin = origin_for_legacy_project(project)
         existing = local_by_origin.get(origin)
         if existing is None or project.get("instance_id") == me:
             local_by_origin[origin] = project
+        synthesized = "local:" + str(project.get("id"))
+        if origin != synthesized:
+            relinked.add(synthesized)
 
     install_map = {row.get("id"): row for row in installs if row.get("id")}
 
@@ -164,12 +174,15 @@ def _build_cluster_catalog(
         if not rows:
             continue
         origin = pv2.get("origin") or ""
+        superseded_here = origin in relinked
         local_id = _local_project_id_for_origin(origin, local_by_origin)
         seen: set[str] = set()
         eligible = []
         for ck in rows:
             runner_id = ck.get("runner_id") or ""
             if not runner_id or runner_id in seen:
+                continue
+            if superseded_here and runner_id == me:
                 continue
             install = install_map.get(runner_id)
             if (

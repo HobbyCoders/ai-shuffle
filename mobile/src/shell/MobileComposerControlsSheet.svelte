@@ -44,6 +44,7 @@
 	 * this component only renders and reports intent.
 	 */
 	import { tick, untrack } from 'svelte';
+	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
 	import { pushState } from '$app/navigation';
 	import { page } from '$app/state';
 	import {
@@ -855,7 +856,7 @@
 			style:--usage-drag={usageDragOffset !== null ? `${usageDragOffset}px` : undefined}
 			style:--usage-fade={usageFade ?? undefined}
 		>
-			<ContextUsageBar bind:this={usageBar} bind:percent={usagePercent} bind:overLimit={usageOverLimit} bind:unknownWindowUsed={usageUnknownUsed} bind:usedTokens={usageUsedTokens} bind:windowTokens={usageWindowTokens} onOpenChange={handleUsageOpenChange} showPercent>
+			<ContextUsageBar bottomSheet bind:this={usageBar} bind:percent={usagePercent} bind:overLimit={usageOverLimit} bind:unknownWindowUsed={usageUnknownUsed} bind:usedTokens={usageUsedTokens} bind:windowTokens={usageWindowTokens} onOpenChange={handleUsageOpenChange} showPercent>
 				{#snippet grip()}
 					<!-- Pointer-only: Escape and a tap outside close the sheet for everyone. -->
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -936,6 +937,7 @@
 	<div
 		id={panelId}
 		bind:this={panelRef}
+		use:obscuresTranscript={panelVisible || rendered}
 		class="mcp"
 		class:dragging={dragOffset !== null}
 		class:shown={panelVisible}

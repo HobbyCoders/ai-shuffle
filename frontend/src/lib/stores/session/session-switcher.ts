@@ -695,12 +695,20 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			rowPermissionWins: attachedSinceSaved(ephemeral, row),
 		});
 
+		// Who owns the chat. Without a loaded row (a deep link, a row outside the
+		// loaded page) a re-open of the chat on screen keeps what /live already
+		// said: unknown reads as mirrored, which hides the shown transcript behind
+		// a first-sync check until /live answers again (#890).
+		const keepOwner = !row && state.sessionId === sessionId;
+		const isRemote = keepOwner ? state.isRemote : row?.is_remote;
+		const ownerDeviceName = keepOwner ? state.ownerDeviceName : row?.device_name;
+
 		update(s => ({
 			...s,
 			sessionId,
 			createdFromComposer: false,
-			isRemote: row?.is_remote,
-			ownerDeviceName: row?.device_name,
+			isRemote,
+			ownerDeviceName,
 			title: resolvedTitle,
 			project: targetProject,
 			projectV2Id: targetV2,

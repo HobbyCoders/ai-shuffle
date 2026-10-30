@@ -116,10 +116,18 @@ It is chosen by the request alone, so it behaves the same after restarts:
 * Plain messages get a short streamed echo of what you wrote.
 * `[script:NAME]` anywhere in your message plays `scripts/devloop/scenarios/NAME.json`:
   `default`, `long`, `slow`, `tool-bash`, `tool-multi`, `error-500`,
-  `rate-limit-429`, `cut`, and for voice calls `voice-reply` (a
-  three-paragraph reply) and `voice-wait` (an update, a background job and a
-  wait; the job's output tags its wake turn `voice-wait-done`). Unknown names
-  reply with the list.
+  `rate-limit-429`, `cut`, `ask-question` and `ask-questions` (below), and
+  for voice calls `voice-reply` (a three-paragraph reply) and `voice-wait`
+  (an update, a background job and a wait; the job's output tags its wake
+  turn `voice-wait-done`). Unknown names reply with the list.
+* `[script:ask-question]` asks one question in the question tray (`AskUser`,
+  two options) and ends its turn; `[script:ask-questions]` asks two in one
+  request. The app queues the answer as a user message (`Answer to your
+  question:` …), which the fake AI treats as the next round of the scenario
+  that asked, not a new prompt: the reply quotes what it received, `User
+  skipped this question.` for a skip. Native (Dev agent) chats only: the fake
+  `claude` CLI does not play `AskUserQuestion`. `question-tray.journey.mjs`
+  plays both.
 * Options ride in the tag: `[script:slow tps=2 latency_ms=1500]`.
 
 A scenario is a list of `steps`. The step played is the number of tool rounds
@@ -133,7 +141,8 @@ step 2 (whose request contains the tool result) can answer:
 ]}
 ```
 
-A step has `text` (with `{summary}`, `{round}` and `{scenarios}` filled in),
+A step has `text` (with `{summary}`, `{round}`, `{scenarios}` and `{answer}`,
+the latest question-tray answer, filled in),
 optional `tool_calls`, or `error` (`{"status": 429, "message": "...",
 "retry_after": "1"}`); `cut_after_chars` drops the stream mid-reply. Top-level
 `tps` and `latency_ms` set its pace. When the request offers the tool directly

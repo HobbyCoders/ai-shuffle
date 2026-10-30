@@ -59,6 +59,28 @@ export function writeDraft(sessionId: string | null, text: string): void {
 	}
 }
 
+/**
+ * The composer's save still waiting in its draft debounce, if any. A composer
+ * mounting in its place runs it before seeding itself: Svelte can mount the
+ * replacement before the old composer's onDestroy saves (#811).
+ */
+let pendingSave: (() => void) | null = null;
+
+export function holdPendingDraft(save: () => void): void {
+	pendingSave = save;
+}
+
+export function releasePendingDraft(save: () => void): void {
+	if (pendingSave === save) pendingSave = null;
+}
+
+/** Save a composer's debounced text now (no-op when nothing is waiting). */
+export function flushPendingDraft(): void {
+	const save = pendingSave;
+	pendingSave = null;
+	save?.();
+}
+
 /** Remove a persisted draft (message sent, or draft intentionally cleared). */
 export function clearDraft(sessionId: string | null): void {
 	try {

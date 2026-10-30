@@ -106,6 +106,14 @@
 			]
 		},
 		{
+			"why": "typing before boot finishes: the composer draft survives boot's New Chat",
+			"journeys": ["type-at-boot"],
+			"globs": [
+				"frontend/tests/journeys/type-at-boot.journey.mjs",
+				"frontend/src/lib/components/chat/composer-*"
+			]
+		},
+		{
 			"why": "sending, streaming and rendering a reply",
 			"journeys": ["chat-send-stream", "send-during-init", "stop-midstream", "queue-while-busy", "reload-midstream"],
 			"globs": [
@@ -117,6 +125,17 @@
 				"frontend/src/lib/components/chat/stoppable-work*",
 				"frontend/src/lib/utils/chat-markdown*",
 				"frontend/src/lib/components/ui/**"
+			]
+		},
+		{
+			"why": "the question tray: answer, Skip, undo and sending while disconnected",
+			"journeys": ["question-tray"],
+			"globs": [
+				"frontend/src/lib/components/UserQuestion.svelte",
+				"frontend/src/lib/components/chat/QuestionTray.svelte",
+				"mobile/src/shell/MobilePromptDock.svelte",
+				"app/core/user_question_handler.py",
+				"frontend/tests/journeys/question-tray.journey.mjs"
 			]
 		},
 		{
@@ -152,6 +171,15 @@
 				"frontend/src/lib/services/error-*",
 				"app/core/provider/**",
 				"app/api/model_providers*.py"
+			]
+		},
+		{
+			"why": "the service worker and the app-update monitor: a first visit must not reload (#908)",
+			"journeys": ["first-visit"],
+			"globs": [
+				"frontend/static/sw.js",
+				"frontend/src/lib/stores/pwa.svelte.ts",
+				"frontend/src/lib/services/app-update*"
 			]
 		},
 		{

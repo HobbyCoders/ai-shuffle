@@ -1,7 +1,114 @@
 import { describe, expect, it } from 'vitest';
-import { createTranscriptWindow, type TranscriptRange } from './transcript-window';
+import { createTranscriptWindow, dominantReadingIndex, type TranscriptRange } from './transcript-window';
 
 describe('nested transcript mount budget', () => {
+ it('keeps the trailing mounted reply through same-count streaming growth when no viewport is available', () => {
+  let costs = [6000, 2000, 2000];
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000 });
+  window.onStreamingChange(true);
+  expect(window.setItemCount(3)).toEqual({ start: 0, end: 3 });
+  window.setItemCount(3, { followTail: false });
+  costs = [6000, 2000, 6000];
+  expect(window.setItemCount(3, { followTail: false })).toEqual({ start: 1, end: 3 });
+  expect(window.selectionLimited).toBe(false);
+ });
+ it.each([0, 1, 2])('keeps visible reading row %i, not an arbitrary range edge, when content is repriced', reading => {
+  let costs = [6000, 2000, 2000];
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000, getReadingIndex: () => reading });
+  window.setItemCount(3);
+  window.setItemCount(3, { followTail: false });
+  costs = [6000, 2000, 6000];
+  const range = window.setItemCount(3, { followTail: false });
+  expect(range.start).toBeLessThanOrEqual(reading);
+  expect(range.end).toBeGreaterThan(reading);
+  expect(costs.slice(range.start, range.end).reduce((sum, cost) => sum + cost, 0)).toBeLessThanOrEqual(12000);
+  expect(window.selectionLimited).toBe(false);
+ });
+ it('evicts the offscreen prefix before a visible reply below the first reading row', () => {
+  let costs = [6000, 2000, 2000];
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000, getReadingIndex: () => 1 });
+  window.setItemCount(3);
+  window.setItemCount(3, { followTail: false });
+  costs = [6000, 2000, 6000];
+  expect(window.setItemCount(3, { followTail: false })).toEqual({ start: 1, end: 3 });
+ });
+ it('resolves a reading key against the new vector after a prepend and allows explicit navigation away', () => {
+  let costs = [6000, 2000, 2000], reading = 2;
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000, getReadingIndex: () => reading });
+  window.setItemCount(3);
+  window.setItemCount(3, { followTail: false });
+  costs = [2000, 6000, 2000, 6000]; reading = 3;
+  expect(window.setItemCount(4, { followTail: false })).toEqual({ start: 2, end: 4 });
+  expect(window.windowAround(0)).toEqual({ start: 0, end: 3 });
+ });
+ it('reads viewport geometry only when repricing would evict an already-mounted row', () => {
+  let costs = [6000, 2000, 2000], reads = 0;
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000, getReadingIndex: () => { reads++; return 2; } });
+  window.setItemCount(3);
+  for (let i = 0; i < 20; i++) window.setItemCount(3, { followTail: false });
+  expect(reads).toBe(0);
+  costs = [6000, 2000, 6000];
+  window.setItemCount(3, { followTail: false });
+  expect(reads).toBe(1);
+  for (let i = 0; i < 20; i++) window.setItemCount(3, { followTail: false });
+  expect(reads).toBe(1);
+ });
+ it('keeps an oversize reading reply intact on its own instead of truncating or evicting it', () => {
+  let costs = [6000, 2000, 2000];
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000, getReadingIndex: () => 2 });
+  window.setItemCount(3);
+  window.setItemCount(3, { followTail: false });
+  costs = [6000, 2000, 13000];
+  expect(window.setItemCount(3, { followTail: false })).toEqual({ start: 2, end: 3 });
+  expect(window.selectionLimited).toBe(false);
+ });
+ it('uses dominant clipped viewport coverage to retain an oversize reply below a short prompt', () => {
+  const rows = [
+   { index: 0, getBoundingClientRect: () => ({ top: -2000, bottom: -20 }) },
+   { index: 1, getBoundingClientRect: () => ({ top: -20, bottom: 80 }) },
+   { index: 2, getBoundingClientRect: () => ({ top: 80, bottom: 4000 }) }
+  ];
+  const reading = () => dominantReadingIndex(rows, { top: 0, bottom: 800 }, row => row.index);
+  expect(reading()).toBe(2);
+  let costs = [6000, 2000, 2000];
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000, getReadingIndex: reading });
+  window.setItemCount(3);
+  window.setItemCount(3, { followTail: false });
+  costs = [6000, 2000, 13000];
+  expect(window.setItemCount(3, { followTail: false })).toEqual({ start: 2, end: 3 });
+  expect(window.selectionLimited).toBe(false);
+ });
+ it('uses clipped coverage, ignores unresolved/offscreen rows, and keeps the first equal candidate', () => {
+  const row = (index: number, top: number, bottom: number) => ({ index, getBoundingClientRect: () => ({ top, bottom }) });
+  const rows = [row(0, -2000, -1), row(1, -2000, 10), row(2, 10, 600), row(-1, 0, 800), row(3, 10, 600)];
+  expect(dominantReadingIndex(rows, { top: 0, bottom: 800 }, row => row.index)).toBe(2);
+  expect(dominantReadingIndex(rows, { top: 0, bottom: 0 }, row => row.index)).toBeNull();
+  expect(dominantReadingIndex([], { top: 0, bottom: 800 }, () => 0)).toBeNull();
+ });
+ it('keeps native selection priority over a dominant oversize reply until explicit recovery', () => {
+  let costs = [6000, 2000, 2000], pinned: TranscriptRange | null = null;
+  const rows = [{ index: 1, getBoundingClientRect: () => ({ top: -20, bottom: 80 }) },
+   { index: 2, getBoundingClientRect: () => ({ top: 80, bottom: 4000 }) }];
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000, getPinnedRange: () => pinned,
+   getReadingIndex: () => dominantReadingIndex(rows, { top: 0, bottom: 800 }, row => row.index) });
+  window.setItemCount(3);
+  pinned = { start: 0, end: 1 };
+  costs = [6000, 2000, 13000];
+  expect(window.setItemCount(3, { followTail: false })).toEqual({ start: 0, end: 2 });
+  expect(window.selectionLimited).toBe(true);
+  pinned = null;
+  expect(window.extendNewer()).toEqual({ start: 2, end: 3 });
+  expect(window.selectionLimited).toBe(false);
+ });
+ it('protects the reading key when a hidden view resumes after content growth', () => {
+  let costs = [6000, 2000, 2000];
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000, getReadingIndex: () => 2 });
+  window.setItemCount(3);
+  window.setItemCount(3, { followTail: false, hidden: true });
+  costs = [6000, 2000, 6000];
+  expect(window.setItemCount(3, { followTail: false, hidden: true })).toEqual({ start: 0, end: 3 });
+  expect(window.pauseWhenHidden(false)).toEqual({ start: 1, end: 3 });
+ });
  it.each([
   { costs: [64, 6000, 64, 9000], previous: { start: 0, end: 3 }, expected: { start: 2, end: 4 }, direction: 'newer' },
   { costs: [9000, 64, 6000, 64], previous: { start: 1, end: 4 }, expected: { start: 0, end: 2 }, direction: 'older' }
@@ -95,6 +202,20 @@ describe('nested transcript mount budget', () => {
   pinned = null;
   expect(window.loadOlder()).toEqual({ start: 1920, end: 1980 });
   expect(window.selectionLimited).toBe(false);
+ });
+ it('keeps a native selection within budget before preserving a separate reading key', () => {
+  let costs = [4000, 1000, 4000], pinned: TranscriptRange | null = null;
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000,
+   getPinnedRange: () => pinned, getReadingIndex: () => 2 });
+  window.setItemCount(3);
+  pinned = { start: 0, end: 1 };
+  costs = [6000, 1000, 6000];
+  const range = window.setItemCount(3, { followTail: false });
+  expect(range).toEqual({ start: 0, end: 2 });
+  expect(costs.slice(range.start, range.end).reduce((sum, cost) => sum + cost, 0)).toBeLessThanOrEqual(12000);
+  expect(window.selectionLimited).toBe(true);
+  pinned = null;
+  expect(window.windowAround(2)).toEqual({ start: 1, end: 3 });
  });
  it('admits no unselected rows if already-selected content grows beyond the content budget', () => {
   let cost = 20, pinned: TranscriptRange | null = null;

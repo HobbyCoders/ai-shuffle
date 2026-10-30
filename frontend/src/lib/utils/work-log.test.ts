@@ -1149,20 +1149,37 @@ describe('work action summaries', () => {
 		expect(summarizeWork(failedCell)).toBe('Used 1 tool and ran 1 command, 1 failed');
 	});
 
+	const made = (toolName: string, output: Record<string, unknown>, over: Partial<ChatMessage> = {}) =>
+		tool({ toolName, toolResult: JSON.stringify({ success: true, ...output }), ...over });
+
 	it('names media generation instead of lumping it into used-tools', () => {
 		const entries = workEntries([
-			tool({ toolName: 'generateImage' }),
-			tool({ toolName: 'generateImage' }),
-			tool({ toolName: 'editImage' }),
-			tool({ toolName: 'generateVideo' }),
-			tool({ toolName: 'generateAudio' }),
-			tool({ toolName: 'textTo3D' }),
-			tool({ toolName: 'mcp__builtins__generateImage' })
+			made('generateImage', { image_url: '/a.png' }),
+			made('generateImage', { image_url: '/b.png' }),
+			made('editImage', { image_url: '/c.png' }),
+			made('generateVideo', { video_url: '/d.mp4' }),
+			made('generateAudio', { audio_url: '/e.mp3' }),
+			made('textTo3D', { model_url: '/f.glb' }),
+			made('mcp__builtins__generateImage', { image_url: '/g.png' })
 		]);
 		expect(summarizeWork(entries)).toBe(
 			'Generated 3 images, edited 1 image, generated 1 video, generated 1 audio track, and built 1 3D model'
 		);
 		expect(summarizeWorkCompact(entries)).toBe('Images 3 · ImgEdits 1 · Videos 1 · Audio 1 · 3D 1');
+	});
+
+	it('counts only generation calls that produced media (#786)', () => {
+		const entries = workEntries([
+			made('generateImage', { image_url: '/a.png' }),
+			made('generateImage', { image_url: '/b.png' }),
+			made('generateImage', { status: 'refused', message: 'over budget' }),
+			made('generateImage', { status: 'skipped' }),
+			made('generateImage', { status: 'needs-confirmation' }),
+			made('generateImage', { image_url: '/c.png' }, { toolStatus: 'error' }),
+			made('generateVideo', {}, { toolStatus: 'running', toolResult: undefined })
+		]);
+		expect(summarizeWork(entries)).toBe('Generated 2 images and used 5 tools, 1 failed');
+		expect(summarizeWorkCompact(entries)).toBe('Images 2 · Tools 5 · 1 failed');
 	});
 
 	it('mentions folded thinking as part of the work', () => {
