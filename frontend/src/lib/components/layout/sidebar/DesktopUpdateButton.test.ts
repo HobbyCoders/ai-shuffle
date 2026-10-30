@@ -901,14 +901,20 @@ describe('review fixes (#355)', () => {
   expect(screen.getByRole('tooltip').textContent).toContain('Running work details are unavailable.');
  });
  it('formats this worker’s server epochs against its own clock', async () => {
-  // The server is 1 h ahead of this browser: its 1 h-from-its-now expiry is "now" here.
-  const serverNow = Date.now() / 1000 + 3600;
-  api.get.mockResolvedValue({...state,server_time:serverNow,workers:[{...worker,is_self:true,phase:'ready',install_state:'waiting_for_idle',wait_reason:'running_work',
-   blocked_by:[svc],restart_expires_at:serverNow + 60}]});
-  render(DesktopUpdateButton);
-  const button = await screen.findByRole('button',{name:'Restarts when work finishes'});
-  const local = new Date(Date.now() + 60_000).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
-  expect(button.title).toContain(`Waits until ${local} at most`);
+  // Pin the browser clock to local noon (#867): near midnight the 60 s expiry
+  // lands on the next day and is rightly shown with its date.
+  vi.useFakeTimers({toFake:['Date']});
+  vi.setSystemTime(new Date(2026,9,29,12,0,0));
+  try {
+   // The server is 1 h ahead of this browser: its 1 h-from-its-now expiry is "now" here.
+   const serverNow = Date.now() / 1000 + 3600;
+   api.get.mockResolvedValue({...state,server_time:serverNow,workers:[{...worker,is_self:true,phase:'ready',install_state:'waiting_for_idle',wait_reason:'running_work',
+    blocked_by:[svc],restart_expires_at:serverNow + 60}]});
+   render(DesktopUpdateButton);
+   const button = await screen.findByRole('button',{name:'Restarts when work finishes'});
+   const local = new Date(Date.now() + 60_000).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
+   expect(button.title).toContain(`Waits until ${local} at most`);
+  } finally { vi.useRealTimers(); }
  });
 });
 
