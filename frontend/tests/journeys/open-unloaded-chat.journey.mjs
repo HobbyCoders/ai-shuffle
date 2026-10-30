@@ -69,9 +69,10 @@ const viaSidebar = (target) => async ({ page, mark }) => {
 	await OPENED[target](page);
 };
 
-const viaDeepLink = (target) => async ({ page, status, mark }) => {
+const viaDeepLink = (target) => async ({ page, status, mark, variant }) => {
 	await mark(`load a link to the ${target} chat`);
-	await page.goto(new URL(`/?session=${encodeURIComponent(seededChatId(status, target))}`, status.urls.ui).toString());
+	const prefix = mobileShell && variant.viewport === 'phone' ? '/mobile/' : '/';
+	await page.goto(new URL(`${prefix}?session=${encodeURIComponent(seededChatId(status, target))}`, status.urls.ui).toString());
 	await OPENED[target](page);
 };
 
@@ -227,6 +228,73 @@ const offCatalogLong = async (ctx) => {
 		};
 	}, seededChatId(ctx.status, 'long'));
 	await fromNew(ctx);
+};
+
+// #916: an unknown owner shows the mirror pane on a cold deep link. Keep
+// actual identity/sync/catalog responses pending across the column's reveal
+// animation: its transform must not be the pane's only containing block.
+const offCatalogLateIdentity = async (ctx) => {
+	await offCatalogLong(ctx);
+	await ctx.page.addInitScript((id) => {
+		const original = window.fetch.bind(window);
+		const released = new Promise(resolve => { window.__releaseOpeningIdentity = resolve; });
+		const probe = window.__openingIdentity = { metadata: false, sync: false, frames: [], released: false };
+		window.fetch = async (input, init) => {
+			const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+			const response = await original(input, init);
+			const metadata = url.pathname === `/api/v1/sessions/${id}/live` && url.searchParams.get('owner_fields') === 'true';
+			const sync = url.pathname === `/api/v1/sessions/${id}/sync-status`;
+			if (metadata || sync || url.pathname === '/api/v1/projects') {
+				if (metadata) probe.metadata = true;
+				if (sync) probe.sync = true;
+				await released;
+			}
+			return response;
+		};
+		const sample = () => {
+			if (probe.released) return;
+			const pane = document.querySelector('.mirror-sync');
+			const wrapper = document.querySelector('.message-area-wrapper');
+			if (pane && wrapper) probe.frames.push({
+				transitioning: document.querySelector('.chat-view').classList.contains('transitioning-from-empty'),
+				wrapperParent: pane.offsetParent === wrapper
+			});
+			requestAnimationFrame(sample);
+		};
+		requestAnimationFrame(sample);
+	}, seededChatId(ctx.status, 'long'));
+};
+
+const deepLinkLateIdentity = async ({ page, status, mark, variant, log }) => {
+	await mark('load an off-catalog link with identity pending across the column reveal');
+	const prefix = mobileShell && variant.viewport === 'phone' ? '/mobile/' : '/';
+	await page.goto(new URL(`${prefix}?session=${encodeURIComponent(seededChatId(status, 'long'))}`, status.urls.ui).toString());
+	await page.waitForFunction(() => {
+		const probe = window.__openingIdentity;
+		return probe.metadata && probe.sync && probe.frames.some(frame => frame.transitioning)
+			&& probe.frames.slice(-2).length === 2 && probe.frames.slice(-2).every(frame => !frame.transitioning);
+	});
+	const frames = await page.evaluate(() => {
+		const probe = window.__openingIdentity;
+		probe.released = true;
+		window.__releaseOpeningIdentity();
+		return probe.frames;
+	});
+	await OPENED.long(page);
+	log(`mirror pane: ${frames.length} painted frames across the reveal; ${frames.filter(frame => frame.transitioning).length} during its animation`);
+	expect(frames.every(frame => frame.wrapperParent), 'the mirror pane must keep the message wrapper as its containing block before and after the reveal');
+};
+
+const offCatalogIdentity = async ({ page, variant }) => {
+	if (mobileShell && variant.viewport === 'phone') {
+		expect(new URL(page.url()).pathname === '/mobile/', 'the opt-in case must exercise the real mobile shell');
+		await page.locator('header').getByText(SEEDED.long, { exact: true }).waitFor();
+	} else {
+		await page.getByRole('navigation', { name: 'Breadcrumb' }).getByRole('button', { name: SEEDED.long }).waitFor();
+	}
+	const reads = await page.evaluate(() => window.__breadcrumbReads);
+	expect(reads.includes('metadata'), 'an off-catalog breadcrumb must use transcript-free metadata');
+	expect(!reads.includes('transcript'), 'breadcrumb identity must not fetch the full session transcript');
 };
 
 // #804: on a full load the sidebar's session cards must paint in place. The
@@ -487,12 +555,13 @@ await runJourney({
 			name: 'long-deep-link-off-catalog-metadata',
 			setup: offCatalogLong,
 			act: viaDeepLink('long'),
-			verify: async ({ page }) => {
-				await page.getByRole('navigation', { name: 'Breadcrumb' }).getByRole('button', { name: SEEDED.long }).waitFor();
-				const reads = await page.evaluate(() => window.__breadcrumbReads);
-				expect(reads.includes('metadata'), 'an off-catalog breadcrumb must use transcript-free metadata');
-				expect(!reads.includes('transcript'), 'breadcrumb identity must not fetch the full session transcript');
-			}
+			verify: offCatalogIdentity
+		},
+		{
+			name: 'long-deep-link-off-catalog-late-identity',
+			setup: offCatalogLateIdentity,
+			act: deepLinkLateIdentity,
+			verify: offCatalogIdentity
 		},
 		{
 			name: 'cleared-deep-link',
