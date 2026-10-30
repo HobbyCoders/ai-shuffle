@@ -42,6 +42,7 @@
 	import { pendingDeepLink, deepLinkLoading } from '$lib/stores/pending-deep-link';
 	// The phone shell docks prompts above its composer; the web build has none.
 	import { composerShell } from '$lib/components/chat/composer-shell';
+	import { sentQuestions, markQuestionSent } from '$lib/stores/session/sent-questions';
 	// Flight-recorder signature (attribute-only; see ui-signature.ts).
 	import { UI_MOUNT, UI_STATE_CHAT, uiComposer, uiFlag, uiSessionTag } from '$lib/utils/ui-signature';
 
@@ -318,7 +319,14 @@
 			skipped
 		});
 		if (!sent) notify.error('Your answer was not sent. Reconnect and try again.');
+		// Close it on the tap, not on the server's ack (#891); a failed delivery reopens it.
+		else markQuestionSent(request_id);
 	}
+
+	// Questions still waiting for an answer from this user: not the ones just sent.
+	const openQuestions = $derived(
+		($activeSession.pendingQuestions ?? []).filter((q) => !$sentQuestions.has(q.request_id))
+	);
 
 	// Manually re-establish the WebSocket (the Reconnect button on the
 	// disconnection banner). Replace a suspect socket and reset retry backoff.
@@ -507,7 +515,7 @@
 						<PromptDock
 							sessionId={$activeSession.sessionId}
 							permissions={showPermissionModal ? dialogPermissions : []}
-							questions={$activeSession.pendingQuestions ?? []}
+							questions={openQuestions}
 							working={$activeSession.isStreaming}
 							connected={$activeWsConnected}
 							onPermission={handlePermissionResponse}
@@ -515,7 +523,7 @@
 						/>
 					{:else}
 						<PrivateAccessPrompt sessionId={$activeSession.sessionId} />
-						<QuestionTray requests={$activeSession.pendingQuestions ?? []} working={$activeSession.isStreaming} connected={$activeWsConnected} onRespond={handleQuestionResponse} />
+						<QuestionTray requests={$activeSession.pendingQuestions ?? []} sent={$sentQuestions} working={$activeSession.isStreaming} connected={$activeWsConnected} onRespond={handleQuestionResponse} />
 					{/if}
 					<ChatInput compact={!showEmptyHero} newSession={showNewSessionHero} {onBrowserToggle} {onBrowserPreload} {browserOpen} {terminal} />
 				{/key}

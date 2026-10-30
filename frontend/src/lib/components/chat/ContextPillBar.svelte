@@ -733,12 +733,17 @@
 <style>
 	/* The chip row floats above the composer box with a visible gap (mockup
 	   `.ctx`). Its dropdowns open upward; the stacking level keeps them below
-	   the input area's @/slash autocomplete panels. */
+	   the input area's @/slash autocomplete panels.
+
+	   One line at every width: on a phone the repository and branch names
+	   shrink to an ellipsis instead of wrapping. The chips fill in after the
+	   first paint (the restored session, then the projects list), so a row
+	   that wrapped grew a second line then and moved the composer (#818). */
 	.context-pill-bar {
 		position: relative;
 		z-index: 10;
 		display: flex;
-		flex-wrap: wrap;
+		flex-wrap: nowrap;
 		align-items: center;
 		gap: 6px;
 		margin: 0 0 10px 2px;
@@ -759,12 +764,49 @@
 		display: none;
 	}
 
+	/* Who shrinks on a narrow row: the repository and branch names first, the
+	   agent's name less, the runner ("Local" or the worker's name) and the
+	   worktree box not at all. */
+	.context-pill-bar:not(.sheet-mode) > .ctx-sep,
+	.context-pill-bar:not(.sheet-mode) > .runner-badge-wrap,
+	.context-pill-bar:not(.sheet-mode) .wt-indicator {
+		flex-shrink: 0;
+	}
+
+	.context-pill-bar:not(.sheet-mode) > :global(.selector-wrapper) {
+		flex-shrink: 0.4;
+		min-width: 0;
+	}
+
+	/* A phone-width row keeps room for the names: the menu chevrons go and the
+	   worktree chip is its tick box alone (its title and label still name it). */
+	@media (max-width: 480px) {
+		.context-pill-bar:not(.sheet-mode) :global(.ctx-chip .ctx-chip-chev),
+		.context-pill-bar:not(.sheet-mode) :global(.ctx-chip svg.lucide-chevron-down) {
+			display: none;
+		}
+
+		.context-pill-bar:not(.sheet-mode) .wt-indicator .ctx-chip-label {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			overflow: hidden;
+			clip: rect(0 0 0 0);
+			white-space: nowrap;
+		}
+	}
+
 	.runner-badge-wrap {
 		position: relative;
 		min-width: 0;
 		display: flex;
-		flex-wrap: wrap;
+		flex-wrap: nowrap;
 		align-items: center;
+	}
+
+	/* The sheet's move menu flows below the chip, on its own line. */
+	.sheet-mode .runner-badge-wrap {
+		flex-wrap: wrap;
 	}
 
 	.sheet-mode .runner-badge-wrap > .ctx-chip.runner {
