@@ -32,6 +32,7 @@ const mocks = vi.hoisted(() => {
 		loadMoreSessions: vi.fn(),
 		projects: store<unknown[]>([]),
 		clusterProjects: store<unknown[]>([]),
+		projectCatalogReady: store(true),
 		activeSession: store<{ sessionId: string | null; isStreaming: boolean; optimisticStreaming?: boolean; activeTasks: { status: string }[] }>({ sessionId: null, isStreaming: false, activeTasks: [] }),
 		streamingSessions: store(new Set<string>()),
 		backgroundPermissions: store(new Map<string, { count: number; kind: 'permission' | 'question' }>()),
@@ -53,6 +54,7 @@ vi.mock('$lib/stores/app-data.svelte', () => ({
 	sessions: mocks.sessions,
 	projects: mocks.projects,
 	clusterProjects: mocks.clusterProjects,
+	projectCatalogReady: mocks.projectCatalogReady,
 	sessionsHasMore: mocks.sessionsHasMore,
 	sessionsLoadingMore: mocks.sessionsLoadingMore,
 	appData: {
@@ -264,6 +266,7 @@ beforeEach(() => {
 	mocks.getPullRequests.mockReset();
 	mocks.getPullRequests.mockResolvedValue([]);
 	mocks.clusterProjects.set([]);
+	mocks.projectCatalogReady.set(true);
 	panelSpies.preloadCalls.length = 0;
 	panelSpies.chunkFetches.length = 0;
 	// Handles cache their resolved chunk forever by design; a fresh map per test
@@ -379,6 +382,30 @@ describe('Sidebar session groups', () => {
 		await openFilter();
 		expect(filterLabels()).toContain('Visible Project');
 		expect(filterLabels().join('|')).not.toMatch(/deleted/i);
+	});
+
+	// #804: before the project catalog answers, an empty catalog proves no
+	// project was deleted. Hiding project chats until it landed made them pop
+	// in above the first paint's rows on a full load, shifting every card.
+	it('lists project chats in their final order before the project catalog answers', async () => {
+		mocks.projectCatalogReady.set(false);
+		mocks.projects.set([]);
+		mocks.sessions.set([
+			session('newer', 'Project chat', 'late-project', true),
+			session('older', 'Loose chat', null, true),
+		]);
+
+		render(Sidebar, { props: sidebarProps });
+
+		const titles = () => [...document.querySelectorAll('.scard-frame')].map((el) => el.textContent ?? '');
+		const before = titles();
+		expect(before.findIndex((t) => t.includes('Project chat'))).toBe(0);
+		expect(before.findIndex((t) => t.includes('Loose chat'))).toBe(1);
+
+		mocks.projects.set([{ id: 'late-project', name: 'Late project' }]);
+		mocks.projectCatalogReady.set(true);
+		await tick();
+		expect(titles()).toEqual(before);
 	});
 
 	it('keeps a remote-only catalog project in the list and filter', async () => {

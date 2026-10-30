@@ -92,6 +92,43 @@ const offCatalogLong = async (ctx) => {
 	await fromNew(ctx);
 };
 
+// #804: on a full load the sidebar's session cards must paint in place. The
+// project catalog used to gate every project chat (an empty catalog read as
+// "every project deleted"), so with a long list — whose load let the catalog
+// answer last — project chats popped in above the loose chats about a second
+// later and pushed every card down (layout shift 0.13 from div.scard-frame).
+// Holding the catalog until the cards have painted makes that ordering
+// deterministic on the seeded list.
+const cardTitles = (page) =>
+	page.evaluate(() => [...document.querySelectorAll('.scard-frame')].map((el) => (el.textContent || '').replace(/\s+/g, ' ').trim()));
+
+const deepLinkLateCatalog = async ({ page, status, mark }) => {
+	let release;
+	const painted = new Promise((resolve) => (release = resolve));
+	let answered = false;
+	await page.route(
+		(url) => url.pathname === '/api/v1/projects',
+		async (route) => {
+			await painted;
+			await route.continue();
+			answered = true;
+		}
+	);
+	await mark('load a link with the project catalog answering after the sidebar paints');
+	await page.goto(new URL(`/?session=${encodeURIComponent(seededChatId(status, 'no_project'))}`, status.urls.ui).toString());
+	await page.locator('.scard-frame').first().waitFor();
+	await page.waitForTimeout(300);
+	const firstPaint = await cardTitles(page);
+	release();
+	await page.waitForTimeout(2500);
+	expect(answered, 'the held project catalog answered');
+	const settled = await cardTitles(page);
+	expect(
+		JSON.stringify(settled) === JSON.stringify(firstPaint),
+		`sidebar cards changed after the catalog answered:\n  first paint: ${firstPaint.slice(0, 6).join(' | ')}\n  settled:     ${settled.slice(0, 6).join(' | ')}`
+	);
+};
+
 await runJourney({
 	name: 'open-unloaded-chat',
 	cases: [
@@ -101,6 +138,8 @@ await runJourney({
 		{ name: 'cleared-from-chat', setup: fromChat('no_project'), act: viaSidebar('cleared'), verify: composer('bottom', 'centre') },
 		{ name: 'long-from-cleared', setup: fromChat('cleared'), act: viaSidebar('long'), verify: composer('centre', 'bottom') },
 		{ name: 'long-deep-link', setup: fromNew, act: viaDeepLink('long'), verify: composer('centre', 'bottom') },
+		// Desktop only: the phone shell keeps the sidebar closed on load.
+		{ name: 'deep-link-late-catalog', viewports: ['desktop'], setup: fromNew, act: deepLinkLateCatalog },
 		{
 			name: 'long-deep-link-off-catalog-metadata',
 			setup: offCatalogLong,
