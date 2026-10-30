@@ -1030,22 +1030,28 @@
 
 	<div class="main-content">
 		<div class="main-surface" inert={!!activeSidePanel.active && (activeSidePanel.expanded || panelOverlay)} bind:clientWidth={chatColumnWidth}>
-		{#if $activeView}
-			{#if showChatSurface}
-				<div class="chat-row">
-					<div class="chat-browser-underlay">
-					<ChatView
-						onBrowserToggle={$activeView?.type === 'session' && activeTab?.sessionId
-							? () => browserPanel.toggle(activeTab?.sessionId ?? null)
-							: undefined}
-						onBrowserPreload={() => BrowserSidePanel.preload()}
-						browserOpen={sessionBrowser.open}
-						terminal={terminalToggle}
-						bind:mirrorSyncPending={chatMirrorSyncPending}
-					/>
-					</div>
+		<!--
+			One mount site for the chat, whether it is the default landing (no
+			saved view yet: a fresh chat) or an open chat view. Boot opens New Chat
+			explicitly on a first visit; two sites remounted the composer then and
+			lost text typed in the moment before (#811).
+		-->
+		{#if showChatSurface}
+			<div class="chat-row">
+				<div class="chat-browser-underlay">
+				<ChatView
+					onBrowserToggle={$activeView?.type === 'session' && activeTab?.sessionId
+						? () => browserPanel.toggle(activeTab?.sessionId ?? null)
+						: undefined}
+					onBrowserPreload={() => BrowserSidePanel.preload()}
+					browserOpen={sessionBrowser.open}
+					terminal={terminalToggle}
+					bind:mirrorSyncPending={chatMirrorSyncPending}
+				/>
 				</div>
-			{/if}
+			</div>
+		{/if}
+		{#if $activeView}
 			<!--
 				Feature panels are lazily imported AND kept alive: the active one plus
 				the previous one stay mounted, the inactive one hidden. Revisiting a
@@ -1090,11 +1096,6 @@
 					</FeaturePanelHost>
 				</div>
 			{/each}
-		{:else}
-			<!-- Default landing: a fresh chat (the Sessions board is retired) -->
-			<div class="chat-row">
-				<ChatView />
-			</div>
 		{/if}
 		</div>
 		{#if activeSidePanel.active && !(activeSidePanel.active === 'changes' && !activeWorktreeId && !activeWorktreeBranch && !$git.error && $git.hydrated && ($gitStatus?.is_git_repo === false || !!$gitStatus?.enclosing_repository_root))}

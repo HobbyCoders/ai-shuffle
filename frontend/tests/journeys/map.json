@@ -106,6 +106,14 @@
 			]
 		},
 		{
+			"why": "typing before boot finishes: the composer draft survives boot's New Chat",
+			"journeys": ["type-at-boot"],
+			"globs": [
+				"frontend/tests/journeys/type-at-boot.journey.mjs",
+				"frontend/src/lib/components/chat/composer-*"
+			]
+		},
+		{
 			"why": "sending, streaming and rendering a reply",
 			"journeys": ["chat-send-stream", "send-during-init", "stop-midstream", "queue-while-busy", "reload-midstream"],
 			"globs": [
