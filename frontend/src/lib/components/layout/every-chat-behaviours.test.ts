@@ -68,7 +68,7 @@ describe('background work beside the composer, in every chat', () => {
 		// Its own tasks stay in the transcript's running-tasks list, never twice.
 		const build = chatView.slice(chatView.indexOf('const backgroundJobs'), chatView.indexOf('function openJob'));
 		expect(build).toContain('tasks: []');
-		expect(messageArea).toMatch(/<RunningTasksList sessionId=\{\$activeSession\.sessionId\} variant="inline" \/>/);
+		expect(messageArea).toMatch(/<RunningTasksList sessionId=\{\$activeSession\.sessionId\} presentation=\{\$activeSession\} variant="inline" \/>/);
 		expect(messageArea).not.toMatch(/\{#if [^}]*\}\s*<RunningTasksList/);
 	});
 });
