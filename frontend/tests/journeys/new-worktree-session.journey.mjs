@@ -352,18 +352,6 @@ await runJourney({
 		},
 		{
 			kind: 'failed_requests',
-			status: 409,
-			url: /\/git\/(fetch|status)(\?|$)/,
-			reason:
-				'known bug #803: the git header asks for a brand-new worktree chat\'s Git state before its checkout exists; a background request, nothing on screen'
-		},
-		{
-			kind: 'errors',
-			message: /Failed to load git repository: No matching Git checkout exists/,
-			reason: 'known bug #803: the same early git/status request, logged as a console error'
-		},
-		{
-			kind: 'failed_requests',
 			status: 401,
 			url: /\/github\/pulls(\?|$)/,
 			reason: 'the dev instance has no GitHub sign-in'
