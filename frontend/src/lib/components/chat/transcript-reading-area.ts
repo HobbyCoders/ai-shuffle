@@ -20,9 +20,22 @@ export function obscuresTranscript(node: HTMLElement, enabled = true) {
 		// their layout box. Reserve the final open coverage from the first
 		// frame, conservatively, instead of caching an offscreen animated rect.
 		// All viewport-fixed publishers have no positioned offset parent.
-		if (getComputedStyle(node).position === 'fixed' && node.offsetParent === null) {
-			const top = node.offsetTop, left = node.offsetLeft;
-			overlays.set(node, { top, left, bottom: top + node.offsetHeight, right: left + node.offsetWidth });
+		const style = getComputedStyle(node);
+		if (style.position === 'fixed' && node.offsetParent === null) {
+			// Resolved insets preserve fractions and exclude animated transforms.
+			// Round coverage OUTWARD: even a subpixel exposure overstatement can
+			// choose the wrong reading row. Offset-only fallbacks include their
+			// rounding uncertainty (one coordinate, or two summed metrics).
+			const top = Number.parseFloat(style.top) + (Number.parseFloat(style.marginTop) || 0);
+			const left = Number.parseFloat(style.left) + (Number.parseFloat(style.marginLeft) || 0);
+			const bottom = window.innerHeight - Number.parseFloat(style.bottom) - (Number.parseFloat(style.marginBottom) || 0);
+			const right = window.innerWidth - Number.parseFloat(style.right) - (Number.parseFloat(style.marginRight) || 0);
+			overlays.set(node, {
+				top: Math.floor(Number.isFinite(top) ? top : node.offsetTop - 1),
+				left: Math.floor(Number.isFinite(left) ? left : node.offsetLeft - 1),
+				bottom: Math.ceil(Number.isFinite(bottom) ? bottom : node.offsetTop + node.offsetHeight + 1),
+				right: Math.ceil(Number.isFinite(right) ? right : node.offsetLeft + node.offsetWidth + 1)
+			});
 		} else overlays.set(node, node.getBoundingClientRect());
 	}
 	function update(next: boolean) {

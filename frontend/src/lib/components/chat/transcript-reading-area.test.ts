@@ -28,7 +28,7 @@ describe('exposed transcript reading area', () => {
 	});
 	it('reserves settled fixed bounds and retains the exposed row during the opening animation', () => {
 		const sheet = overlay(850, 8, 382, false);
-		sheet.node.style.position = 'fixed';
+		sheet.node.style.cssText = 'position: fixed; top: 400px; left: 8px; right: 8px; bottom: 0';
 		Object.defineProperties(sheet.node, {
 			offsetTop: { value: 400 }, offsetLeft: { value: 8 },
 			offsetHeight: { value: 444 }, offsetWidth: { value: 374 }
@@ -45,6 +45,42 @@ describe('exposed transcript reading area', () => {
 		const window = createTranscriptWindow({ cost: index => costs[index], budget: 12000, getReadingIndex: reading });
 		window.onStreamingChange(true); window.setItemCount(2); costs = [6000, 13000];
 		expect(window.setItemCount(2, { followTail: false })).toEqual({ start: 0, end: 1 });
+		expect(sheet.measure).not.toHaveBeenCalled();
+	});
+	it('rounds fractional fixed-sheet coverage outward on opening and resize without repricing reads', () => {
+		vi.stubGlobal('innerHeight', 844); vi.stubGlobal('innerWidth', 390);
+		cleanups.push(() => { vi.unstubAllGlobals(); });
+		const sheet = overlay(850, 8.125, 381.875, false);
+		sheet.node.style.cssText = 'position: fixed; top: 399.75px; left: 8.125px; right: 8.125px; bottom: 12px; height: 432.25px; transform: translateY(500px)';
+		Object.defineProperties(sheet.node, {
+			offsetTop: { get: () => Math.round(Number.parseFloat(sheet.node.style.top)) },
+			offsetLeft: { value: 8 }, offsetHeight: { value: 432 }, offsetWidth: { value: 374 }
+		});
+		const computed = vi.spyOn(window, 'getComputedStyle');
+		cleanups.push(() => { computed.mockRestore(); });
+		sheet.action.update(true);
+		let boundary = 227.9375;
+		const rows = [{ index: 0, getBoundingClientRect: () => ({ top: 56, bottom: boundary }) },
+			{ index: 1, getBoundingClientRect: () => ({ top: boundary, bottom: 3000 }) }];
+		const reading = () => dominantReadingIndex(rows, exposedReadingViewport(viewport), row => row.index);
+		const reprice = () => {
+			let costs = [6000, 2000];
+			const window = createTranscriptWindow({ cost: index => costs[index], budget: 12000, getReadingIndex: reading });
+			window.onStreamingChange(true); window.setItemCount(2); costs = [6000, 13000];
+			for (let i = 0; i < 20; i++) expect(window.setItemCount(2, { followTail: false })).toEqual({ start: 0, end: 1 });
+		};
+		expect(exposedReadingViewport(viewport).bottom).toBe(399);
+		expect(reading()).toBe(0); reprice();
+		expect(computed).toHaveBeenCalledTimes(1);
+		// Resize while the opening transform is still applied. A second near tie
+		// must use the new fractional layout, never the rounded offset metrics.
+		sheet.node.style.top = '351.625px'; sheet.node.style.bottom = '11.75px';
+		sheet.node.style.height = '480.625px'; boundary = 203.9375;
+		window.dispatchEvent(new Event('resize'));
+		expect(exposedReadingViewport(viewport).bottom).toBe(351);
+		expect(reading()).toBe(0); reprice();
+		expect(exposedReadingViewport({ ...viewport, top: 832.125, bottom: 900 }).bottom).toBe(832.125);
+		expect(computed).toHaveBeenCalledTimes(2);
 		expect(sheet.measure).not.toHaveBeenCalled();
 	});
 	it('captures the previous exposed area before a full cover is published', () => {
