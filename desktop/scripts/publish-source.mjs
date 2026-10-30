@@ -1,6 +1,7 @@
 // Publish a signed, runtime-only source revision for in-app updates.
 // Archives live in a private GitHub release; signed metadata lives in the
-// account hub's D1. No R2 and no application or installer build.
+// account hub's D1. Optional UI assets are built in a separate, unprivileged
+// CI job; the signing process only inspects their bytes as data. No installer build.
 //
 // SOURCE_CHANNEL=nightly (desktop-source.yml, daily after a local full pass):
 //   newest attested first-parent main revision, served at /nightly and /edge.
@@ -130,6 +131,34 @@ for (let page = 1; ; page++) {
  asset = assets.find(item => item.name === assetName);
  if (asset || assets.length < 100) break;
 }
+
+async function publishUIBundle() {
+ const file = process.env.SOURCE_UI_BUNDLE_FILE;
+ if (!file) return undefined; // Older publication workflows remain compatible.
+ const ui = JSON.parse(execFileSync('python', ['-I', controlPath('scripts/source_archive.py'), revision, file, '--inspect-ui', '--version', version],
+  { encoding: 'utf8', cwd: controlRoot, env: readEnv }));
+ if (ui.revision !== revision || ui.version !== version || ui.format !== 1) throw Error('UI build does not match the signed source revision/version');
+ const name = `${revision}-${ui.sha256}-ui.zip`;
+ let found;
+ for (let page = 1; ; page++) {
+  const response = await api(`releases/${release.id}/assets?per_page=100&page=${page}`);
+  if (!response.ok) throw Error(`UI asset lookup failed (${response.status})`);
+  const assets = await response.json();
+  found = assets.find(item => item.name === name);
+  if (found || assets.length < 100) break;
+ }
+ if (!found) {
+  const response = await fetch(`https://uploads.github.com/repos/${repo}/releases/${release.id}/assets?name=${name}`, {
+   method: 'POST', headers: { ...headers, 'Content-Type': 'application/zip', 'Content-Length': String(ui.size) },
+   body: createReadStream(file), duplex: 'half', signal: AbortSignal.timeout(120000),
+  });
+  if (!response.ok) throw Error(`UI asset upload failed (${response.status})`);
+  found = await response.json();
+ }
+ if (!Number.isSafeInteger(found.id) || found.id <= 0 || found.state !== 'uploaded' || found.size !== ui.size || found.digest !== `sha256:${ui.sha256}`) throw Error('GitHub UI asset checksum or size did not match');
+ return ui;
+}
+
 const archive = path.join(process.env.RUNNER_TEMP, assetName);
 const configFile = path.join(process.env.RUNNER_TEMP, 'desktop-source-d1.json');
 try {
@@ -186,8 +215,9 @@ try {
   // Read the locked runtime at the published revision, not this control checkout.
   const electron = JSON.parse(git('show', `${revision}:desktop/package-lock.json`)).packages?.['node_modules/electron']?.version;
   if (typeof electron !== 'string' || !/^\d+\.\d+\.\d+$/.test(electron)) throw Error('Invalid locked desktop Electron version');
+  const ui = await publishUIBundle();
   const payload = Buffer.from(JSON.stringify({ format: 2, revision, sequence, sha256, size, container: { sequence: containerSequence, runtime, requires, recommends, ...(overlays === undefined ? {} : { overlays }) },
-   desktop: { launcher, ...(start === undefined ? {} : { start }), electron }, channel, version, notes, tree }));
+   desktop: { launcher, ...(start === undefined ? {} : { start }), electron }, channel, version, notes, tree, ...(ui ? { ui } : {}) }));
   const signature = sign(null, payload, key);
   if (!trustedKeys(await readFile(new URL('../build/application-update-key.pem', import.meta.url), 'utf8')).some(key => verify(null, payload, key, signature))) throw new Error('Signing key does not match launcher trust key');
   const signed = JSON.stringify({ payload: payload.toString('base64'), signature: signature.toString('base64') });

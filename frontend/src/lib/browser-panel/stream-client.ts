@@ -52,9 +52,7 @@ export interface FrameMessageMetadata {
 
 export interface BrowserStreamConfig {
 	/** Session whose browser page is being streamed. */
-	sessionId?: string;
-	/** Dedicated provider credit-login stream, independent of chat sessions. */
-	providerId?: string;
+	sessionId: string;
 	/** Auth token from cookies (mirrors the chat WS client), or null if none. */
 	getAuthToken: () => string | null;
 	/** A `status` frame arrived. */
@@ -99,12 +97,9 @@ export interface BrowserStreamClient {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function buildUrl(sessionId: string | undefined, token: string | null, providerId?: string): string {
-	if (!providerId && !sessionId) throw new Error('A browser session or provider is required');
-	const path = providerId
-		? `/api/v1/model-providers/${encodeURIComponent(providerId)}/openai-billing/browser`
-		: `/api/v1/ws/browser/${encodeURIComponent(sessionId!)}`;
-	return wsUrl(path, { token });
+function buildUrl(sessionId: string, token: string | null): string {
+	if (!sessionId) throw new Error('A browser session is required');
+	return wsUrl(`/api/v1/ws/browser/${encodeURIComponent(sessionId)}`, { token });
 }
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
@@ -120,10 +115,6 @@ export function createBrowserStreamClient(
 	let accessDenied = false;
 	let stopped = false;
 	let lastMessageAt = 0;
-	// A provider endpoint is a login-only legacy stream, never a workspace.
-	if (config.providerId && config.sessionId)
-		throw new Error('Choose a browser session or provider, not both');
-	const providerLogin = Boolean(config.providerId);
 	let protocolReady = false;
 	let workspace: BrowserWorkspaceState | null = null;
 	const pending = new Map<string, ReturnType<typeof setTimeout>>();
@@ -174,7 +165,7 @@ export function createBrowserStreamClient(
 
 		intentionalDisconnect = false;
 		stopped = false;
-		const url = buildUrl(config.sessionId, config.getAuthToken(), config.providerId);
+		const url = buildUrl(config.sessionId, config.getAuthToken());
 		ws = new WebSocket(url);
 
 		ws.onopen = () => {
@@ -229,19 +220,15 @@ export function createBrowserStreamClient(
 	function handleMessage(msg: Record<string, unknown>) {
 		if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return;
 		if (msg.type === 'hello') {
-			const valid = providerLogin
-				? msg.protocol === 1
-				: msg.protocol === 2 && typeof msg.viewer_id === 'string' && Boolean(msg.viewer_id.trim());
+			const valid = msg.protocol === 2 && typeof msg.viewer_id === 'string' && Boolean(msg.viewer_id.trim());
 			if (!valid) {
 				reset();
 				return;
 			}
 			protocolReady = true;
-			if (!providerLogin) config.onHello?.(msg.viewer_id as string);
+			config.onHello?.(msg.viewer_id as string);
 			return;
 		}
-		// Login streams cannot deliver workspace state, inspection, or workspace URLs.
-		if (providerLogin && !['status', 'page', 'frame', 'error', 'ping'].includes(String(msg.type))) return;
 		if (['workspace', 'frame', 'inspect-hit'].includes(String(msg.type)) && !protocolReady) return;
 		switch (msg.type) {
 			case 'workspace': {
@@ -284,12 +271,12 @@ export function createBrowserStreamClient(
 			case 'status':
 				config.onStatus(
 					(msg.state as StreamStatus) ?? 'disconnected',
-					!providerLogin && typeof msg.url === 'string' ? msg.url : null,
+					typeof msg.url === 'string' ? msg.url : null,
 				);
 				break;
 			case 'page':
 				config.onPage?.(
-					!providerLogin && typeof msg.url === 'string' ? msg.url : null,
+					typeof msg.url === 'string' ? msg.url : null,
 					msg.loading === true,
 				);
 				break;
@@ -422,12 +409,6 @@ export function createBrowserStreamClient(
 		let pendingId: string | null = null;
 		try {
 			const payload = data as Record<string, unknown>;
-			if (providerLogin) {
-				if (!payload || !['pong', 'input', 'command', 'viewport'].includes(String(payload.type))) return false;
-				if (payload.type !== 'pong' && !protocolReady) return false;
-				ws.send(JSON.stringify(data));
-				return true;
-			}
 			if (
 				!payload ||
 				!['pong', 'workspace-command', 'input', 'inspect'].includes(

@@ -1,10 +1,8 @@
-"""Peer messages to a parked session are held, never lost.
+"""Peer messages wake parked sessions; pre-upgrade held rows still drain once.
 
-The end-to-end paths (hold, unpark delivery, urgent, durable promotion) run
-against a real Task worker in ``test_agent_messaging_producer.py``. These
-cover the scheduler's edges: a message that arrives while the unpark wake is
-already queued, a wake whose tasks the user cancels, and a user message
-arriving while messages are held.
+The end-to-end Task producer runs in ``test_agent_messaging_producer.py``.
+The legacy fixtures here retain coverage for unpark delivery, cancellation,
+promotion and restart recovery of messages held before the policy changed.
 """
 
 import pytest
@@ -53,19 +51,28 @@ def _held(session_id):
     return wakeups_db.get_session_wakeups(session_id, wakeup_service.HELD_PEER_SOURCE)
 
 
-async def test_a_message_while_the_unpark_is_queued_rides_it(mock_db, _quiet):
+async def _legacy_hold(session_id, sender, text):
+    """Create a durable message held by the previous release while parked."""
+    from fluid.context.peer import format_peer_message
+
+    return await turn_scheduler._hold_peer_message(
+        session_id, format_peer_message(sender, text).strip(),
+    )
+
+
+async def test_a_message_while_the_unpark_is_queued_wakes_immediately(mock_db, _quiet):
     _parked("s1")
     wake = _queued_unpark("s1", "w1")
 
-    assert await turn_scheduler.on_agent_message("s1", "w2", "halfway") == turn_scheduler.HELD
+    message_id = await turn_scheduler.on_agent_message("s1", "w2", "halfway")
 
-    (row,) = turns_db.get_queued_turns("s1")
-    assert row["id"] == wake["id"]
-    assert "w1 done" in row["prompt"]
-    assert "halfway" in row["prompt"][row["prompt"].index("<system-reminder>"):]
-    assert "halfway" in row["payload"]["held_peer_messages"]
+    first, message = turns_db.get_queued_turns("s1")
+    assert first["id"] == wake["id"] and "w1 done" in first["prompt"]
+    assert message["id"] == message_id and message["source"] == "agent_message"
+    assert message["prompt"].count("halfway") == 1
+    assert message["payload"]["task_peer_sender"] == "w2"
     assert _held("s1") == []
-    assert _quiet == []
+    assert _quiet == ["s1"]
 
 
 async def test_a_message_to_a_session_that_is_not_parked_still_queues_a_turn(mock_db, _quiet):
@@ -85,7 +92,7 @@ async def test_an_urgent_message_carrying_held_ones_is_not_a_single_peer_steer(m
     """The peer channel carries one message; a row that also delivers held
     messages must run whole, never be steered as its newest message only."""
     _parked("s9")
-    assert await turn_scheduler.on_agent_message("s9", "w1", "note") == turn_scheduler.HELD
+    assert await _legacy_hold("s9", "w1", "note") == turn_scheduler.HELD
     await turn_scheduler.on_agent_message("s9", "w2", "blocked", urgent=True)
 
     (row,) = turns_db.get_queued_turns("s9")
@@ -111,7 +118,7 @@ def test_held_peer_deliveries_attribute_each_message_once():
 async def test_cancelling_some_tasks_keeps_the_held_message_in_the_wake(mock_db):
     _parked("s3")
     _queued_unpark("s3", "w1", "w2")
-    assert await turn_scheduler.on_agent_message("s3", "w9", "note") == turn_scheduler.HELD
+    assert await _legacy_hold("s3", "w9", "note") == turn_scheduler.HELD
 
     assert turn_scheduler.discard_queued_task_wakes("s3", ["w1"]) == 1
 
@@ -123,7 +130,7 @@ async def test_cancelling_some_tasks_keeps_the_held_message_in_the_wake(mock_db)
 async def test_cancelling_every_task_puts_the_held_message_back(mock_db):
     _parked("s4")
     _queued_unpark("s4", "w1")
-    assert await turn_scheduler.on_agent_message("s4", "w9", "note") == turn_scheduler.HELD
+    assert await _legacy_hold("s4", "w9", "note") == turn_scheduler.HELD
 
     assert turn_scheduler.discard_queued_task_wakes("s4", ["w1"]) == 1
 
@@ -136,7 +143,7 @@ async def test_a_user_message_supersedes_armed_wakes_but_keeps_held_messages(moc
     from app.core import turn_manager
 
     _parked("s5")
-    assert await turn_scheduler.on_agent_message("s5", "w1", "note") == turn_scheduler.HELD
+    assert await _legacy_hold("s5", "w1", "note") == turn_scheduler.HELD
     await wakeup_service.schedule(
         session_id="s5", profile_id="profile", project_id=None,
         prompt="check back", delay_seconds=600,
@@ -156,7 +163,7 @@ async def test_a_promotion_that_fires_while_a_message_is_held_is_not_delivered_t
     A message held at that moment must not copy the claimed text into the
     new row, or the promotion delivers it and the next wake does again."""
     _parked("s6")
-    assert await turn_scheduler.on_agent_message("s6", "w1", "first") == turn_scheduler.HELD
+    assert await _legacy_hold("s6", "w1", "first") == turn_scheduler.HELD
     (row,) = _held("s6")
 
     real = turn_scheduler._latest_context_turn
@@ -167,7 +174,7 @@ async def test_a_promotion_that_fires_while_a_message_is_held_is_not_delivered_t
         return real(session_id)
 
     monkeypatch.setattr(turn_scheduler, "_latest_context_turn", claim_then_read)
-    assert await turn_scheduler.on_agent_message("s6", "w1", "second") == turn_scheduler.HELD
+    assert await _legacy_hold("s6", "w1", "second") == turn_scheduler.HELD
 
     (held,) = _held("s6")
     assert "second" in held["prompt"]
@@ -180,7 +187,7 @@ def _fail_enqueue(*args, **kwargs):
 
 async def test_held_messages_survive_an_unpark_that_fails_to_enqueue(mock_db, monkeypatch):
     _parked("s7")
-    assert await turn_scheduler.on_agent_message("s7", "w1", "note") == turn_scheduler.HELD
+    assert await _legacy_hold("s7", "w1", "note") == turn_scheduler.HELD
 
     monkeypatch.setattr(turn_scheduler, "_enqueue", _fail_enqueue)
     frame = _frame("w1")
@@ -198,7 +205,7 @@ async def test_held_messages_survive_an_urgent_message_that_fails_to_enqueue(
     mock_db, monkeypatch,
 ):
     _parked("s8")
-    assert await turn_scheduler.on_agent_message("s8", "w1", "note") == turn_scheduler.HELD
+    assert await _legacy_hold("s8", "w1", "note") == turn_scheduler.HELD
 
     monkeypatch.setattr(turn_scheduler, "_enqueue", _fail_enqueue)
     with pytest.raises(RuntimeError):
@@ -237,6 +244,42 @@ async def _run_turn(turn, notes=None):
     return seen.get("prompt") or ""
 
 
+
+
+@pytest.mark.parametrize("urgent", [False, True])
+async def test_parked_peer_message_wakes_without_waiting_for_background_completion(
+    mock_db, _quiet, _clean_delivered, urgent,
+):
+    _seed("wake-now")
+    _parked("wake-now")
+    turn_id = await turn_scheduler.on_agent_message("wake-now", "w1", "please check", urgent=urgent)
+    assert turn_id not in (None, turn_scheduler.HELD)
+    (row,) = turns_db.get_queued_turns("wake-now")
+    assert row["id"] == turn_id
+    assert _held("wake-now") == []
+    assert _quiet == ["wake-now"]
+    prompt = await _run_turn(row)
+    assert prompt.count("please check") == 1
+    assert turns_db.get_queued_turns("wake-now") == []
+
+
+@pytest.mark.parametrize("blocked", ["stop", "archive"])
+async def test_parked_message_cannot_override_stop_or_archive(mock_db, _quiet, blocked):
+    from app.core.task_registry import task_registry
+    from app.db import sessions
+
+    _seed("blocked-park")
+    _parked("blocked-park")
+    if blocked == "stop":
+        task_registry.mark_user_stopped("blocked-park")
+    else:
+        sessions.update_session("blocked-park", status="archived")
+    assert await turn_scheduler.on_agent_message("blocked-park", "w1", "wake up") is None
+    assert turns_db.get_queued_turns("blocked-park") == []
+    assert _held("blocked-park") == []
+    assert _quiet == []
+
+
 def _seed(session_id):
     from app.db import database
 
@@ -253,7 +296,7 @@ def _clean_delivered():
 async def test_a_user_turn_carries_held_messages_once(mock_db, _clean_delivered):
     _seed("g1")
     _parked("g1")
-    assert await turn_scheduler.on_agent_message("g1", "w1", "halfway") == turn_scheduler.HELD
+    assert await _legacy_hold("g1", "w1", "halfway") == turn_scheduler.HELD
 
     first = turns_db.enqueue_turn("g1", "user", prompt="how is it going?")
     notes = []
@@ -360,7 +403,7 @@ async def test_held_message_notes_name_the_worker_by_its_task(mock_db, _clean_de
 async def test_an_unpark_wake_carries_held_messages_once(mock_db, _clean_delivered):
     _seed("g2")
     _parked("g2")
-    assert await turn_scheduler.on_agent_message("g2", "w1", "halfway") == turn_scheduler.HELD
+    assert await _legacy_hold("g2", "w1", "halfway") == turn_scheduler.HELD
     (held_row,) = _held("g2")
 
     frame = _frame("w1")
@@ -389,7 +432,7 @@ async def test_a_steered_completion_carries_held_messages_once(
     from app.core.task_registry import task_registry
 
     _parked("g3")
-    assert await turn_scheduler.on_agent_message("g3", "w1", "halfway") == turn_scheduler.HELD
+    assert await _legacy_hold("g3", "w1", "halfway") == turn_scheduler.HELD
 
     steered = []
 
@@ -420,7 +463,7 @@ async def test_a_steer_the_turn_never_delivers_hands_held_messages_to_the_wake(
     mock_db, _clean_delivered,
 ):
     _parked("g4")
-    assert await turn_scheduler.on_agent_message("g4", "w1", "halfway") == turn_scheduler.HELD
+    assert await _legacy_hold("g4", "w1", "halfway") == turn_scheduler.HELD
     async with turn_scheduler._terminal_delivery_lock("g4"):
         held = await turn_scheduler._take_held_peer_messages("g4")
     turn_scheduler._mark_held_delivered("g4", turn_scheduler._held_ids(held))
@@ -471,12 +514,12 @@ async def test_held_message_defaults(mock_db, monkeypatch, _clean_delivered):
     now = [1_000_000.0]
     monkeypatch.setattr(wakeup_service, "_now_epoch", lambda: now[0])
 
-    assert await turn_scheduler.on_agent_message("g7", "w1", "one") == turn_scheduler.HELD
+    assert await _legacy_hold("g7", "w1", "one") == turn_scheduler.HELD
     (row,) = _held("g7")
     assert float(row["fire_at"]) == 1_000_600.0
     # A later message does not extend the deadline.
     now[0] += 300
-    assert await turn_scheduler.on_agent_message("g7", "w1", "two") == turn_scheduler.HELD
+    assert await _legacy_hold("g7", "w1", "two") == turn_scheduler.HELD
     (row,) = _held("g7")
     assert float(row["fire_at"]) == 1_000_600.0
 

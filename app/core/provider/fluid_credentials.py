@@ -83,6 +83,9 @@ class ProviderCredentials:
     auth: Optional[Any] = None
     use_codex_backend: bool = False
     base_url: Optional[str] = None
+    # The exact account supplying these credentials (a durable pin may follow
+    # a sibling). Consumers must attribute usage to this row, not the old pin.
+    provider_id: Optional[str] = None
 
 
 # ``auth_mode`` values that mean "this row carries a subscription OAuth login,
@@ -312,7 +315,7 @@ async def resolve_provider_credentials(
     from app.db import database as db
     from app.db.async_database import run_sync
 
-    row = await run_sync(db.get_model_provider, provider_id, True)
+    row = await run_sync(db.resolve_model_provider, provider_id, True)
     if not row:
         raise ProviderCredentialError(
             f"Model provider {provider_id!r} was not found; the session is bound "
@@ -324,6 +327,7 @@ async def resolve_provider_credentials(
             "re-enable it or pick another provider for this session."
         )
 
+    provider_id = row.get("id") or provider_id
     label = _provider_label(row, provider_id)
 
     if kind == "openai_responses" and _is_codex_subscription(row):
@@ -331,14 +335,14 @@ async def resolve_provider_credentials(
         # Eagerly resolve once so a missing/needs-reauth account surfaces as a
         # clear config error at connect time rather than a 401 mid-turn.
         await auth.get_access_token()
-        return ProviderCredentials(auth=auth, use_codex_backend=True)
+        return ProviderCredentials(auth=auth, use_codex_backend=True, provider_id=provider_id)
 
     if kind == "openai_responses" and _is_grok_subscription(row):
         auth = GrokSubscriptionAuth(provider_id)
         await auth.get_access_token()
         base_url = (row.get("base_url") or "").strip() or "https://api.x.ai/v1"
         return ProviderCredentials(
-            auth=auth, base_url=base_url, use_codex_backend=False
+            auth=auth, base_url=base_url, use_codex_backend=False, provider_id=provider_id
         )
 
     if kind == "anthropic":
@@ -366,4 +370,4 @@ async def resolve_provider_credentials(
     base_url = (row.get("base_url") or "").strip() or None
     if kind == "openai_responses" and _is_xai_api(row) and not base_url:
         base_url = "https://api.x.ai/v1"
-    return ProviderCredentials(api_key=api_key, base_url=base_url)
+    return ProviderCredentials(api_key=api_key, base_url=base_url, provider_id=provider_id)

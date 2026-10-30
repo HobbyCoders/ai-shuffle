@@ -23,13 +23,9 @@ from app.core.connectors import gmail_actions
 
 logger = logging.getLogger(__name__)
 
-try:
-    from google.oauth2.credentials import Credentials
-    from googleapiclient.discovery import build
+from importlib.util import find_spec
 
-    GMAIL_AVAILABLE = True
-except ImportError:
-    GMAIL_AVAILABLE = False
+GMAIL_AVAILABLE = find_spec("google") is not None and find_spec("googleapiclient") is not None
 
 
 class GmailConnector(BaseConnector):
@@ -116,6 +112,8 @@ class GmailConnector(BaseConnector):
 
     def _build_credentials(self) -> Any:
         """Build Google OAuth2 credentials from config."""
+        from google.oauth2.credentials import Credentials
+
         return Credentials(
             token=None,
             refresh_token=self.config["refresh_token"],
@@ -126,6 +124,8 @@ class GmailConnector(BaseConnector):
 
     def _build_service(self, creds: Any) -> Any:
         """Build the Gmail API service client."""
+        from googleapiclient.discovery import build
+
         return build("gmail", "v1", credentials=creds)
 
     async def poll_watch(

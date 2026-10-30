@@ -19,7 +19,7 @@ from app.db import database as db, provider_balances
 from app.db.async_database import run_sync
 
 PREFIX = "provider_observation:"
-BALANCES = {"openai_platform_balance", "xai_management"}
+BALANCES = {"xai_management"}
 CREDIT_NUMBERS = frozenset({
     "balance_remaining", "total_credits", "total_usage", "spend_month", "spending_limit",
     "usage", "usage_daily", "usage_weekly", "usage_monthly", "limit", "limit_remaining",
@@ -101,18 +101,13 @@ def _binding(source, row):
     guards = {}
     if row:
         parts.extend(row.get(k) for k in ("id", "provider_type", "base_url", "auth_mode",
-                                         "openai_billing_org_id", "codex_account_id"))
+                                         "codex_account_id"))
         parts.extend(encryption.decrypt_value(row.get(k) or "") for k in
-                     ("auth_token", "balance_key", "openai_admin_key", "codex_access_token"))
+                     ("auth_token", "balance_key", "codex_access_token"))
         guards["expected_provider_revision"] = (row["id"], row.get("revision"))
     if source.id in BALANCES:
         if not row.get("balance_key") or row.get("balance_instance_id") != settings.effective_instance_id:
             return None
-    if source.id == "openai_admin":
-        if not row.get("openai_admin_key") or row.get("openai_billing_instance_id") != settings.effective_instance_id:
-            return None
-        guards.update(expected_binding=(row.get("openai_billing_org_id"), settings.effective_instance_id),
-                      expected_admin_key=row["openai_admin_key"])
     if source.id in {"fal_billing", "openrouter_credits"}:
         setting = "fal_api_key" if source.id == "fal_billing" else "openrouter_billing_key:" + row["id"]
         generation = db.get_system_setting_revision(setting)
@@ -168,8 +163,6 @@ def _read(source, row):
                                                         **provenance})
             else:
                 raw = {"source": source.id, **provenance}
-                if source.id == "openai_admin":
-                    raw["organization_id"] = binding[1].get("openai_billing_org_id")
                 plan = shared.get("plan_type")
                 db.upsert_provider_usage_snapshot(binding[2], source.snapshot_type,
                                                   plan if plan in PLANS else None, windows,

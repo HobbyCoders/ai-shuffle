@@ -163,6 +163,33 @@ const heldSwitch = (delayMs, slow = false) => ({
 	verify: composer('bottom')
 });
 
+// Keep a real seeded chat outside this tab's sidebar page. Only the catalog
+// response is filtered: /live identity, transcript and navigation stay real.
+const offCatalogLong = async (ctx) => {
+	await ctx.page.addInitScript((id) => {
+		const original = window.fetch.bind(window);
+		window.__breadcrumbReads = [];
+		window.fetch = async (input, init) => {
+			const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+			const method = (init?.method || input?.method || 'GET').toUpperCase();
+			if (method === 'GET' && url.pathname === `/api/v1/sessions/${id}`) {
+				window.__breadcrumbReads.push('transcript');
+			}
+			if (method === 'GET' && url.pathname === `/api/v1/sessions/${id}/live`
+				&& url.searchParams.get('include_messages') === 'false'
+				&& url.searchParams.get('owner_fields') === 'true') {
+				window.__breadcrumbReads.push('metadata');
+			}
+			const response = await original(input, init);
+			if (method !== 'GET' || url.pathname !== '/api/v1/sessions/cursor' || !response.ok) return response;
+			const body = await response.json();
+			body.items = body.items.filter(row => row.id !== id);
+			return new Response(JSON.stringify(body), { status: response.status, headers: response.headers });
+		};
+	}, seededChatId(ctx.status, 'long'));
+	await fromNew(ctx);
+};
+
 await runJourney({
 	name: 'open-unloaded-chat',
 	cases: [
@@ -203,6 +230,17 @@ await runJourney({
 		{ name: 'cleared-from-chat', setup: fromChat('no_project'), act: viaSidebar('cleared'), verify: composer('bottom', 'centre') },
 		{ name: 'long-from-cleared', setup: fromChat('cleared'), act: viaSidebar('long'), verify: composer('centre', 'bottom') },
 		{ name: 'long-deep-link', setup: fromNew, act: viaDeepLink('long'), verify: composer('centre', 'bottom') },
+		{
+			name: 'long-deep-link-off-catalog-metadata',
+			setup: offCatalogLong,
+			act: viaDeepLink('long'),
+			verify: async ({ page }) => {
+				await page.getByRole('navigation', { name: 'Breadcrumb' }).getByRole('button', { name: SEEDED.long }).waitFor();
+				const reads = await page.evaluate(() => window.__breadcrumbReads);
+				expect(reads.includes('metadata'), 'an off-catalog breadcrumb must use transcript-free metadata');
+				expect(!reads.includes('transcript'), 'breadcrumb identity must not fetch the full session transcript');
+			}
+		},
 		{
 			name: 'cleared-deep-link',
 			setup: fromNew,

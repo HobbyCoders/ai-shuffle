@@ -380,8 +380,11 @@ def test_default_release_graph_contract():
     opt_in = next(s for s in steps if s.get("name") == "Validate opt-in two-phase request")
     assert opt_in["if"] == "inputs.stage_only || inputs.promote != ''"
     steps.remove(opt_in)
-    # #533 changes only the generated release notes' Docker stop grace to 120s.
-    assert p.sha256(p.canonical(wf)) == "b3d3480f00a12c808ce30ea63cd94dcb967f18eaf189be901ce75de908259509"
+    # Prebuilt UI adds a credential-free producer and its artifact dependency to
+    # stable source publication, without changing any release activation guards.
+    assert jobs["ui-stable"]["permissions"] == {"contents": "read"}
+    assert "ui-stable" in jobs["source-stable"]["needs"]
+    assert p.sha256(p.canonical(wf)) == "090794b1a4a901fa67c1c0a30afb144386372949d31a848163c930dc22f0a67b"
 
 
 def test_real_stage_producer_round_trip_uses_immutable_uploads(candidate, tmp_path, monkeypatch):

@@ -136,7 +136,7 @@ describe('the list', () => {
 			'Claude Max subscription, Active for Claude',
 			'Anthropic API key, Standby'
 		]);
-		expect(credentialNames('OpenAI')).toEqual(['OpenAI Plus subscription, On', 'OpenAI API key, On']);
+		expect(credentialNames('OpenAI')).toEqual(['OpenAI Plus subscription, Active', 'OpenAI API key, Active']);
 		expect(within(group('OpenAI')).getByText('owner@example.com, Plus plan')).toBeTruthy();
 		expect(credentialNames('xAI Grok')).toEqual(['SuperGrok subscription, Reconnect needed']);
 		expect(credentialNames('fal.ai')).toEqual(['Media key, On']);
@@ -158,9 +158,11 @@ describe('the list', () => {
 
 	it('opens a credential’s detail from its row', async () => {
 		await show();
-		await fireEvent.click(screen.getByRole('button', { name: 'OpenAI API key, On' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'OpenAI API key, Active' }));
 		expect(settingsNav.selectedItem('providers')).toBe('mp:p1');
-		expect(await screen.findByRole('tab', { name: /Usage/ })).toBeTruthy();
+		expect(await screen.findByRole('tab', { name: 'Overview' })).toBeTruthy();
+		expect(screen.getByRole('tab', { name: 'Models' })).toBeTruthy();
+		expect(screen.queryByRole('tab', { name: 'Usage' })).toBeNull();
 	});
 });
 
@@ -177,10 +179,7 @@ describe('switches', () => {
 		});
 		await waitFor(() => expect(sw.getAttribute('aria-checked')).toBe('false'));
 		await fireEvent.click(sw);
-		await waitFor(() => expect(worker.sent('PATCH', '/model-providers/p1')).toHaveLength(2));
-		expect(worker.sent('PATCH', '/model-providers/p1')[1].body).toEqual({
-			enabled: true
-		});
+		await waitFor(() => expect(worker.sent('POST', '/model-providers/p1/activate')).toHaveLength(1));
 		expect(worker.calls.some((c) => c.path.includes('/toggle'))).toBe(false);
 	});
 
@@ -270,8 +269,8 @@ describe('adding', () => {
 			within(menu)
 				.getAllByRole('menuitem')
 				.map((m) => m.firstElementChild?.textContent)
-		).toEqual(['Another API key']);
-		await fireEvent.click(within(menu).getByRole('menuitem'));
+		).toEqual(['Another Subscription', 'Another API key']);
+		await fireEvent.click(within(menu).getByRole('menuitem', { name: /Another API key/ }));
 		expect(screen.queryByRole('menu')).toBeNull();
 
 		expect(providerDrafts.list).toHaveLength(1);
@@ -283,13 +282,13 @@ describe('adding', () => {
 		});
 		expect(settingsNav.selectedItem('providers')).toBe(draft.item);
 		await waitFor(() =>
-			expect(credentialNames('OpenAI')).toEqual(['OpenAI Plus subscription, On', 'OpenAI API key, On', 'OpenAI API key 2, Setting up'])
+			expect(credentialNames('OpenAI')).toEqual(['OpenAI Plus subscription, Active', 'OpenAI API key, Active', 'OpenAI API key 2, Setting up'])
 		);
 		expect(screen.getByLabelText('API key')).toBeTruthy();
 		expect(worker.sent('POST', '/model-providers')).toHaveLength(0);
 	});
 
-	it('"+" leaves out a subscription that is already added', async () => {
+	it('"+" offers another subscription when one is already added', async () => {
 		start({ rows: [chatgptRow()] });
 		await show();
 		await fireEvent.click(screen.getByRole('button', { name: 'Add credential to OpenAI' }));
@@ -298,7 +297,7 @@ describe('adding', () => {
 			within(menu)
 				.getAllByRole('menuitem')
 				.map((m) => m.firstElementChild?.textContent)
-		).toEqual(['API key']);
+		).toEqual(['Another Subscription', 'API key']);
 	});
 
 	it('"Add provider" makes a new gateway draft', async () => {

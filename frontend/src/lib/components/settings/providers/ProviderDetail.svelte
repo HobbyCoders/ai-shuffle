@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
-	 * A connected provider: its credentials (each with its own switch, or the
-	 * Claude mode), the kinds it can still add, and removing everything.
+	 * A connected provider: its saved accounts and slot controls, the separate
+	 * Claude mode, the kinds it can still add, and removing everything.
 	 */
 	import { ChevronRight, Plus } from 'lucide-svelte';
 	import { getModels } from '$lib/constants/models.svelte';
@@ -15,7 +15,7 @@
 	import RowGroup from '../rows/RowGroup.svelte';
 	import SettingRow from '../rows/SettingRow.svelte';
 	import Segmented from '../rows/Segmented.svelte';
-	import Switch from '../rows/Switch.svelte';
+	import CredentialControl from './CredentialControl.svelte';
 	import ValueText from '../rows/ValueText.svelte';
 	import LinkValue from '../rows/LinkValue.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
@@ -32,7 +32,7 @@
 		type CredentialView,
 		type ProviderView
 	} from './providers-model';
-	import { pickClaudeMode, setCredentialEnabled, startSetup } from './provider-actions';
+	import { pickClaudeMode, startSetup } from './provider-actions';
 
 	interface Props {
 		provider: ProviderView;
@@ -57,7 +57,7 @@
 
 	const badge = $derived(provider.gateway ? 'Custom gateway' : provider.media ? 'Media provider' : 'Provider');
 	const subtitle = $derived(
-		provider.claude ? 'One credential per worker' : provider.media ? 'Used by media tools' : 'Each is a picker group'
+		provider.claude ? 'Saved keys, one selected for API key mode' : provider.media ? 'Used by media tools' : provider.gateway ? 'Independent model source' : 'One active account per kind'
 	);
 
 	const facts = $derived(
@@ -154,11 +154,14 @@
 		<ClaudeCompaction />
 	{/if}
 
+	{#if !provider.claude && !provider.media && !provider.gateway}
+		<p class="pv-note">Switching accounts keeps existing chats and automations on the active account. API keys and subscriptions can be active together.</p>
+	{/if}
 	<RowGroup title="Credentials" count={credsCount} id="providers-credentials">
 		{#each provider.credentials as c (c.item)}
 			<SettingRow label={c.name} hint={hintFor(c)}>
 				{#if c.switchable}
-					<Switch checked={c.enabled} label="{c.name} on" onchange={(v) => setCredentialEnabled(c, v)} />
+					<CredentialControl credential={c} showState />
 				{:else}
 					<ValueText status={c.status} value={c.statusText} />
 				{/if}

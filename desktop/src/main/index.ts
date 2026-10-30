@@ -335,7 +335,8 @@ async function main(): Promise<void> {
 
 	updater.setPolicy(() => supervisor?.updatesAllowed() ?? Promise.resolve(false));
 	updater.setBridge(state => supervisor?.exchangeUpdateState(state) ?? Promise.resolve({}),
-		async () => !!supervisor && await supervisor.activeSessionCount() === 0);
+		async () => !!supervisor && await supervisor.activeSessionCount() === 0,
+		wake => supervisor?.watchUpdateRequests(wake) ?? (() => {}));
 	// macOS and legacy unstamped Linux installs keep signed installer offers
 	// (D22: checked on launch and daily). Stamped Linux uses source updates.
 	const platform = installerPlatform();

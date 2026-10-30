@@ -671,13 +671,16 @@ async def test_mirror_waits_for_unpublished_transcript_not_just_op_watermarks(wo
             assert len(session_events.get_events("backlogged-chat")) == 3
 
 
+@pytest.mark.parametrize("legacy_pruned_head", [False, True])
 @pytest.mark.parametrize("replace_all", [False, True])
-async def test_rollback_proof_after_cross_origin_head_pruning(workers, replace_all):
+async def test_rollback_proof_after_cross_origin_head_pruning(workers, replace_all, legacy_pruned_head):
     from tests.core.network.harness import exchange, join
     a, b = workers("proof-holder"), workers("restored-writer")
     with a.active():
         engine.create_network("Home")
     join(a, b)
+    # Both variants have a superseded non-head op to prune.
+    set_owner_pref(b, "record-x", "b0")
     set_owner_pref(b, "record-x", "b1")
     set_owner_pref(b, "record-y", "b2")
     exchange(b, a)
@@ -691,9 +694,19 @@ async def test_rollback_proof_after_cross_origin_head_pruning(workers, replace_a
         assert store.prune_ops(keep_days=-1) > 0
         assert store.local_watermarks()[b.device_id]["1"] == head
         with store.get_db() as conn:
-            assert store.get_op(conn.cursor(), b.device_id, 1, head) is None
-        retained = a.sql("SELECT seq FROM sync_ops WHERE origin_device_id = ?", (b.device_id,))
-        assert bool(retained) is not replace_all
+            assert store.get_op(conn.cursor(), b.device_id, 1, head) is not None
+        retained = a.sql("SELECT seq FROM sync_ops WHERE origin_device_id = ? ORDER BY seq", (b.device_id,))
+        assert [row["seq"] for row in retained] == ([head] if replace_all else [head - 1, head])
+        if legacy_pruned_head:
+            # Simulate only the test-owned head loss an older worker could
+            # already have committed; current retention must never cause it.
+            a.sql("DELETE FROM sync_ops WHERE origin_device_id = ? AND incarnation = 1 AND seq = ?",
+                  (b.device_id, head))
+            with store.get_db() as conn:
+                assert store.get_op(conn.cursor(), b.device_id, 1, head) is None
+            retained = a.sql("SELECT seq FROM sync_ops WHERE origin_device_id = ?", (b.device_id,))
+        restore_detected = not (legacy_pruned_head and replace_all)
+        assert bool(retained) == restore_detected
     with b.active():
         b.sql("DELETE FROM sync_ops WHERE origin_device_id = ?", (b.device_id,))
     served = ServedBy(a, "https://proof-holder.example.com")
@@ -705,14 +718,14 @@ async def test_rollback_proof_after_cross_origin_head_pruning(workers, replace_a
         with b.active():
             link = transport.PeerLink(a.device_id, [served.base_url])
             await asyncio.wait_for(link.sync_once(client, engine.context(), catch_up=True), timeout=5)
-            assert engine.context().identity.incarnation == (1 if replace_all else 2)
+            assert engine.context().identity.incarnation == (2 if restore_detected else 1)
             proofs = [r for r in served.requests if r[0] == "GET" and "/peer/ops/" in r[1]]
             assert len(proofs) == 1
             served.requests.clear()
             await asyncio.wait_for(link.sync_once(client, engine.context(), catch_up=True), timeout=5)
             proofs = [r for r in served.requests if r[0] == "GET" and "/peer/ops/" in r[1]]
-            assert len(proofs) == (1 if replace_all else 0)
-        if not replace_all:
+            assert len(proofs) == (0 if restore_detected else 1)
+        if restore_detected:
             set_owner_pref(b, "after-restore", True)
             with b.active():
                 await link.sync_once(client, engine.context())

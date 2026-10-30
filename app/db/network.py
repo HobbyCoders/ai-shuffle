@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -832,14 +834,42 @@ def count_ops(_conn=None) -> int:
         return _query(conn.cursor())
 
 
-def prune_ops(*, keep_days: int = 30, _conn=None, stop=None) -> int:
-    """Drop old ops but never a record's latest op (snapshots still need it)."""
+def retention_heads(_conn=None) -> List[dict]:
+    """Capture signed stream anchors once for both retention passes."""
+    from app.db import retention
+
+    with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
+        cur = conn.cursor()
+        retention.set_timeout(cur)
+        return _log_heads(cur)
+
+
+def prune_ops(*, keep_days: int = 30, _conn=None, stop=None, _heads: Optional[List[dict]] = None) -> int:
+    """Legacy retention for superseded ops; latest transcript ops are pruned separately.
+
+    Snapshots read sync_records + materialized rows, not these envelopes. Keep
+    this conservative rule for other collections; see prune_transcript_ops.
+    Every stream-head anchor survives both passes, whatever its collection and
+    even if a different origin later superseded the same record.
+    """
+    if stop is not None and stop.is_set():
+        return 0
+    heads = retention_heads(_conn) if _heads is None else _heads
+    if not heads:
+        return 0
     cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).isoformat()
     from app.db.retention import BATCH_SIZE, delete_batches
 
+    protected = ", ".join("(%s, %s, %s)" for _ in heads)
+    anchors = tuple(value for h in heads for value in (h["origin_device_id"], h["incarnation"], h["s"]))
     sql = """DELETE FROM sync_ops WHERE ingest_id IN (
                  SELECT o.ingest_id FROM sync_ops o
-                 WHERE o.created_at < %s AND o.ingest_id > %s AND EXISTS (
+                 WHERE o.created_at < %s AND o.ingest_id > %s
+                   AND (o.origin_device_id, o.incarnation, o.seq) NOT IN (""" + protected + """)
+                   AND EXISTS (
+                       SELECT 1 FROM sync_ops h WHERE h.origin_device_id = o.origin_device_id
+                         AND h.incarnation = o.incarnation AND h.seq > o.seq)
+                   AND EXISTS (
                      SELECT 1 FROM sync_ops n
                      WHERE n.collection = o.collection AND n.record_id = o.record_id
                        AND n.ingest_id > o.ingest_id)
@@ -847,10 +877,109 @@ def prune_ops(*, keep_days: int = 30, _conn=None, stop=None) -> int:
 
     def advance(cursor):
         rows = cursor.fetchall()
-        return cutoff, max((r["ingest_id"] for r in rows), default=0), BATCH_SIZE
+        return cutoff, max((r["ingest_id"] for r in rows), default=0), *anchors, BATCH_SIZE
 
-    return delete_batches(sql, (cutoff, 0, BATCH_SIZE), advance=advance, stop=stop,
+    return delete_batches(sql, (cutoff, 0, *anchors, BATCH_SIZE), advance=advance, stop=stop,
                           cursor=_conn.cursor() if _conn is not None else None)
+
+
+TRANSCRIPT_OP_RETENTION_ENV = "AI_SHUFFLE_PERF_TRANSCRIPT_OP_RETENTION"
+PEER_GRACE_DAYS_ENV = "AI_SHUFFLE_SYNC_OP_PEER_GRACE_DAYS"
+
+
+def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
+                         keep_days: int = 30, _conn=None, stop=None, _heads: Optional[List[dict]] = None) -> int:
+    """Retire redundant transcript envelopes, never transcript/record rows.
+
+    Recent active workers pin at their last authenticated committed frontier;
+    a missing frontier (including after restart) pins at zero. After a bounded
+    contact grace they recover through exchange's existing state-copy path.
+    Only maintenance persists contact times, avoiding SQL on every exchange.
+    Keep each stream's head: sequence allocation and rollback proof need it.
+    """
+    if os.environ.get(TRANSCRIPT_OP_RETENTION_ENV, "").strip().lower() in ("0", "false", "off"):
+        return 0
+    from app.db.retention import BATCH_SIZE, delete_batches, set_timeout
+
+    if stop is not None and stop.is_set():
+        return 0
+    try:
+        grace_days = int(os.environ.get(PEER_GRACE_DAYS_ENV, "30"))
+        if grace_days < 1:
+            raise ValueError("peer grace must be positive")
+    except ValueError:
+        logger.warning("Skipping transcript op retention: invalid %s", PEER_GRACE_DAYS_ENV)
+        return 0
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(days=keep_days)).isoformat()
+    peer_cutoff = now - timedelta(days=grace_days)
+    peers, expired = {}, []
+    with nullcontext(_conn) if _conn is not None else get_db() as conn:
+        cur = conn.cursor()
+        set_timeout(cur)
+        cur.execute("SELECT device_id FROM network_members WHERE status = 'active' "
+                    "AND kind = 'worker' AND device_id <> %s", (local_device_id,))
+        members = [row["device_id"] for row in cur.fetchall()]
+        for device_id in members:
+            observation = peer_observations.get(device_id) or {}
+            seen_at = observation.get("seen_at")
+            seen = datetime.fromtimestamp(seen_at, timezone.utc).isoformat() if seen_at is not None else None
+            # updated_at is a one-time grace baseline for a never-contacted peer,
+            # NOT network_members.last_seen (directory refreshes change that).
+            cur.execute("""INSERT INTO sync_peers (device_id, last_contact, updated_at)
+                           VALUES (%s, %s, %s) ON CONFLICT (device_id) DO UPDATE SET
+                           last_contact = EXCLUDED.last_contact
+                           WHERE sync_peers.last_contact IS NULL OR sync_peers.last_contact < EXCLUDED.last_contact""",
+                        (device_id, seen, now.isoformat()))
+            cur.execute("SELECT last_contact, updated_at FROM sync_peers WHERE device_id = %s", (device_id,))
+            row = cur.fetchone()
+            contact = row["last_contact"] or row["updated_at"]
+            if isinstance(contact, str):
+                contact = datetime.fromisoformat(contact)
+            if contact >= peer_cutoff:
+                peers[device_id] = observation.get("watermarks") or {}
+            else:
+                expired.append(device_id)
+        heads = _log_heads(cur) if _heads is None else _heads
+
+    total = bytes_estimate = 0
+    frontiers = {}
+    for stream in heads:
+        origin, incarnation, head = stream["origin_device_id"], int(stream["incarnation"]), int(stream["s"])
+        frontier = min([head, *(int((marks.get(origin) or {}).get(str(incarnation), 0))
+                                for marks in peers.values())])
+        frontiers.setdefault(origin, {})[str(incarnation)] = frontier
+        if frontier <= 0:
+            continue
+        # Keyset-page the stream's UNIQUE(origin, incarnation, seq) index. Never
+        # repeatedly sort/rescan the whole retained log. A materialized version
+        # (or tombstone) must still exist for the ordinary snapshot path.
+        sql = """DELETE FROM sync_ops WHERE ingest_id IN (
+                     SELECT o.ingest_id FROM sync_ops o
+                     WHERE o.origin_device_id = %s AND o.incarnation = %s
+                       AND o.created_at < %s AND o.seq > %s AND o.seq < %s AND o.seq <= %s
+                       AND o.collection = 'session_events' AND EXISTS (
+                           SELECT 1 FROM sync_records r WHERE r.collection = o.collection
+                             AND r.record_id = o.record_id AND r.clock >= o.clock
+                             AND (r.deleted OR EXISTS (
+                                 SELECT 1 FROM session_events e
+                                 WHERE e.session_id = split_part(r.record_id, '|', 1) AND e.seq = r.order_seq)))
+                     ORDER BY o.seq LIMIT %s)
+                 RETURNING seq, pg_column_size(envelope) AS bytes_estimate"""
+
+        def advance(cursor):
+            nonlocal bytes_estimate
+            rows = cursor.fetchall()
+            bytes_estimate += sum(int(row["bytes_estimate"]) for row in rows)
+            return origin, incarnation, cutoff, max((row["seq"] for row in rows), default=0), head, frontier, BATCH_SIZE
+
+        total += delete_batches(sql, (origin, incarnation, cutoff, 0, head, frontier, BATCH_SIZE),
+                                advance=advance, stop=stop, cursor=_conn.cursor() if _conn is not None else None)
+    logger.info("Transcript sync operation retention %s", _json({
+        "deleted_ops": total, "bytes_estimate": bytes_estimate,
+        "peer_grace_days": grace_days, "peer_frontiers": peers,
+        "expired_peers": expired, "retained_frontiers": frontiers}))
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -1008,6 +1137,15 @@ def stash_pending(cursor, env: dict) -> None:
            VALUES (%s, %s, %s, %s, %s)
            ON CONFLICT (origin_device_id, incarnation, seq) DO NOTHING""",
         (env["origin_device_id"], env["origin_incarnation"], env["origin_seq"], _json(env), _now()))
+
+
+def stash_pending_batch(cursor, envelopes: List[dict]) -> None:
+    """Stash a bounded, validated wire chunk under the caller's state lock."""
+    now = _now()
+    _insert_rows(cursor, "sync_pending", ("origin_device_id", "incarnation", "seq", "envelope", "received_at"),
+                 [(env["origin_device_id"], env["origin_incarnation"], env["origin_seq"], _json(env), now)
+                  for env in envelopes],
+                 "ON CONFLICT (origin_device_id, incarnation, seq) DO NOTHING")
 
 
 def pending_ready(cursor, origin: str, incarnation: int) -> bool:
@@ -1523,6 +1661,11 @@ def exchange_batch(watermarks: dict, *, limit: int = 500, lane: Optional[str] = 
         snapshot = requires_snapshot(watermarks, exclude_origin=exclude_origin, _conn=conn, _heads=heads)
         ops = ops_since(watermarks, limit=limit, lane=lane, exclude_origin=exclude_origin,
                         _conn=conn, _heads=heads)
+        from app.network import nested_secret_sync
+        if not nested_secret_sync.ops_compatible(ops, exclude_origin, conn.cursor()):
+            # Signed history cannot be rewritten or filtered without stream
+            # holes. An old peer must adopt a ciphertext-form state copy.
+            return [], heads, True
         return ops, heads, snapshot
 
 
@@ -1539,9 +1682,13 @@ def preserved_builtin_ids(_conn=None) -> List[str]:
         return _query(conn)
 
 
-def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None, _conn=None,
+def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None,
+                      check_tail_compatibility: bool = False, _conn=None,
                       _heads: Optional[Dict[str, Dict[str, int]]] = None) -> bool:
-    """A state-copy recipient can forward state even without original log rows."""
+    """Detect log gaps; only cached snapshots need whole-tail compatibility.
+
+    Normal exchanges validate just the bounded batch they are about to send.
+    """
     def _query(conn):
         cursor = conn.cursor()
         heads = local_watermarks(conn) if _heads is None else _heads
@@ -1551,6 +1698,8 @@ def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None, _c
         # retired its unchanged copy needs a state copy, not an endless FK retry.
         # Use the existing signed snapshot protocol; never mint a winning clock.
         permission_only_projection = None
+        legacy_recipient = None
+        protected = ()
         for origin, streams in heads.items():
             if origin == exclude_origin:
                 continue
@@ -1563,6 +1712,24 @@ def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None, _c
                                (origin, int(incarnation), last, head))
                 if int(cursor.fetchone()["n"]) != head - last:
                     return True
+                if check_tail_compatibility and legacy_recipient is None:
+                    from app.network import nested_secret_sync, policy
+                    legacy_recipient = exclude_origin is not None and not nested_secret_sync.enabled(cursor, recipient=exclude_origin)
+                    if legacy_recipient:
+                        protected = tuple(c.name for c in policy.COLLECTIONS.values() if c.map_secrets is not None)
+                if legacy_recipient and protected:
+                    # A retained tail can still be unservable to this receiver.
+                    # Inspect the entire protected tail, not just the next batch:
+                    # otherwise both state caches can repeatedly return a frontier
+                    # that exchange will always refuse further along the stream.
+                    placeholders = ", ".join(["%s"] * len(protected))
+                    cursor.execute("SELECT envelope FROM sync_ops WHERE origin_device_id=%s "
+                                   "AND incarnation=%s AND seq>%s AND seq<=%s "
+                                   f"AND collection IN ({placeholders})",
+                                   (origin, int(incarnation), last, head, *protected))
+                    ops = [_load(row["envelope"], {}) for row in cursor.fetchall()]
+                    if not nested_secret_sync.ops_compatible(ops, exclude_origin, cursor):
+                        return True
                 if permission_only_projection is None:
                     cursor.execute("SELECT * FROM agents WHERE id IN (%s, %s) AND is_builtin = FALSE",
                                    ("general-purpose", "frontend-designer"))

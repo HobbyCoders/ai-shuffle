@@ -3,7 +3,7 @@
 	 * Settings > Providers: providers and the credentials connected to them.
 	 *
 	 * The list shows only connected credentials, each on its provider's
-	 * connector line with its own switch (Claude: the mode control instead);
+	 * connector line with a slot switch (Claude keys: a selection action);
 	 * providers with nothing connected sit under "Not connected". "+" on a
 	 * provider and "Add provider" (a custom gateway) make one draft row whose
 	 * setup runs in the detail. See providers-model.ts for the rules.
@@ -23,7 +23,7 @@
 	import CredentialDetail from './CredentialDetail.svelte';
 	import DraftDetail from './DraftDetail.svelte';
 	import { providerDrafts } from './drafts.svelte';
-	import { buildProviders, claudeUsageRecorded, isConnected, parseProviderItem } from './providers-model';
+	import { buildProviders, CLAUDE_KEY_ITEM, claudeUsageRecorded, isConnected, parseProviderItem } from './providers-model';
 	import { startGateway } from './provider-actions';
 
 	let filter = $state('');
@@ -57,6 +57,13 @@
 		if (providerId) {
 			const provider = views.find((p) => p.id === providerId);
 			return provider ? ({ kind: 'provider', provider } as const) : null;
+		}
+		// Registry/search links use the stable kind id; open the selected saved key.
+		if (selected === CLAUDE_KEY_ITEM) {
+			const provider = views.find((p) => p.claude);
+			const keys = provider?.credentials.filter((c) => c.flavor === 'anthropic') ?? [];
+			const credential = keys.find((c) => c.active) ?? keys[0];
+			if (provider && credential) return { kind: 'credential', credential, provider } as const;
 		}
 		for (const provider of views) {
 			const credential = provider.credentials.find((c) => c.item === selected);

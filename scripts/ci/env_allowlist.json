@@ -140,11 +140,37 @@
     "target_pr": 2,
     "base_settings": true
   },
+  "AI_SHUFFLE_PERF_BULK_PENDING": {
+    "kind": "internal",
+    "reason": "Temporary default-on rollback switch for validated chunked buffering of out-of-order network operations",
+    "base_settings": false
+  },
   "AI_SHUFFLE_PERF_COALESCE_SUBAGENT_PROGRESS": {
     "kind": "internal",
     "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Combine subagent progress updates",
     "target_pr": 2,
     "base_settings": true
+  },
+  "AI_SHUFFLE_PERF_DESKTOP_BUILD_REUSE": {
+    "kind": "internal",
+    "reason": "Desktop builder rollback to compiling Node outputs; dependency and content hashes plus current app/Fluid installation stay mandatory."
+  },
+  "AI_SHUFFLE_PERF_DESKTOP_UPDATE_PUSH": {
+    "kind": "internal",
+    "reason": "Desktop updater rollback to the existing 30-second bridge heartbeat; command expiry, atomic consumption and authenticated control access are unchanged."
+  },
+  "AI_SHUFFLE_PERF_DOCKER_DEPENDENCY_REUSE": {
+    "kind": "internal",
+    "reason": "Supervisor-only dependency-cache rollback switch; source signatures, runtime checks and per-revision app code remain mandatory."
+  },
+  "AI_SHUFFLE_PERF_LAZY_CONNECTORS": {
+    "kind": "internal",
+    "reason": "Temporary process-start rollback switch for SDK-free connector discovery; restores eager connector and optional SDK imports while the startup optimization is validated",
+    "base_settings": false
+  },
+  "AI_SHUFFLE_PERF_PREBUILT_UI": {
+    "kind": "internal",
+    "reason": "Updater-only rollback to verified-source UI compilation; bundle integrity and independent source verification remain mandatory."
   },
   "AI_SHUFFLE_PERF_PROVIDER_HTTP_REUSE": {
     "kind": "internal",
@@ -152,11 +178,26 @@
     "target_pr": 2,
     "base_settings": true
   },
+  "AI_SHUFFLE_PERF_RESOURCE_WAKE": {
+    "kind": "internal",
+    "reason": "Temporary default-on rollback switch for post-commit publication of replicated preferences and audited shared writers",
+    "base_settings": false
+  },
+  "AI_SHUFFLE_PERF_SCAN_WAKE": {
+    "kind": "internal",
+    "reason": "Temporary default-on rollback switch for interruptible network scanner rest and bounded urgent-wake coalescing",
+    "base_settings": false
+  },
   "AI_SHUFFLE_PERF_SLIM_USAGE_REPLAY": {
     "kind": "internal",
     "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Slim usage replay payloads",
     "target_pr": 2,
     "base_settings": true
+  },
+  "AI_SHUFFLE_PERF_TRANSCRIPT_OP_RETENTION": {
+    "kind": "internal",
+    "reason": "Rollout kill switch for bounded duplicate transcript-operation retention; disables the new maintenance pass without deleting chat content",
+    "base_settings": false
   },
   "AI_SHUFFLE_PREVIEW": {
     "kind": "infra",
@@ -193,6 +234,11 @@
   "AI_SHUFFLE_SMOKE_DIR": {
     "kind": "internal",
     "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "AI_SHUFFLE_SYNC_OP_PEER_GRACE_DAYS": {
+    "kind": "infra",
+    "reason": "Database-maintenance acknowledgement grace for offline worker replicas; only duplicate sync-log retention changes and returning peers use state-copy recovery",
     "base_settings": false
   },
   "AI_SHUFFLE_TEST_SCRATCH_ROOT": {
@@ -2640,6 +2686,10 @@
     "kind": "internal",
     "reason": "Internal build-time performance kill switch for the finished assistant markdown cache; defaults enabled, with disable reserved for measured ablations and rollback",
     "base_settings": false
+  },
+  "VITE_PERF_KEEP_MIRROR_CACHE": {
+    "kind": "internal",
+    "reason": "Temporary default-on performance kill switch for preserving the mirrored transcript and cursor through freshness; 0 restores the legacy opening replay and unmount."
   },
   "VITE_PERF_PARALLEL_AUTH_PROBES": {
     "kind": "internal",

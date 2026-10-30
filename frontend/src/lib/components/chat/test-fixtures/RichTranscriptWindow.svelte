@@ -13,7 +13,7 @@
  {:else if message.type === 'tool_use'}<ToolUseMessage name={message.toolName ?? 'Read'} result={message.toolResult} status="complete" />{/if}
 {/snippet}
 {#each items.slice(range.start, range.end) as item, index (range.start + index)}
- <div class="msg-virtualized">
+ <div class="msg-virtualized" data-transcript-index={range.start + index}>
  {#if item.kind === 'work_log'}
   <WorkLogGroup mode={item.mode} folded={item.folded} tail={item.tail} sequence={item.sequence} runs={item.runs}
    gallery={item.gallery} durationLabel={item.durationLabel} summary={item.summary} {row} pagingEnabled={false} />

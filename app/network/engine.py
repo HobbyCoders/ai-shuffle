@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import secrets
 import threading
 import time
@@ -45,7 +46,7 @@ from app.core import encryption
 from app.db import network as store
 from app.db.base import get_db
 from app.db.profiles import RETIRED_BUILTIN_IDS
-from app.network import crypto, envelope as envelope_mod, identity as identity_mod, membership, policy
+from app.network import crypto, envelope as envelope_mod, identity as identity_mod, membership, policy, nested_secret_sync
 from app.network.envelope import Envelope, OP_DELETE, OP_UPSERT
 from app.network.membership import Member
 
@@ -498,7 +499,46 @@ def _normalize_value(value: Any) -> Any:
     return value
 
 
-def serialize_row(coll: policy.Collection, row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+def _map_nested_secrets(coll: policy.Collection, record: Dict[str, Any], *, storing: bool = False,
+                        nested_rekey: bool = True) -> Tuple[str, ...]:
+    if coll.map_secrets is None:
+        return ()
+
+    def transform(value: str) -> str:
+        original, encrypted = value, encryption.is_encrypted(value)
+        if encrypted:
+            if not encryption.is_encryption_ready():
+                raise TransientApplyError("Credential storage is locked for " + coll.name)
+            try:
+                value = encryption.decrypt_value(value)
+            except (RuntimeError, ValueError):
+                if storing:
+                    # A legacy peer sent a leaf under its own data key. Keep
+                    # our row, consume the op, and allow the repaired successor.
+                    raise _KeepObservation from None
+                # An unreadable mirror must never republish garbage over the
+                # original worker's good value. Its next scan repairs the row:
+                # decrypted leaf hashes differ from the old ciphertext hashes.
+                raise TransientApplyError("Cannot read credential storage for " + coll.name) from None
+        if storing or (not nested_rekey and not encrypted):
+            if not encryption.is_encryption_ready():
+                raise TransientApplyError("Credential storage is locked for " + coll.name)
+            return encryption.encrypt_value(value)
+        return value if nested_rekey else original
+
+    try:
+        columns = coll.map_secrets(record, transform)
+        return columns if storing or nested_rekey else ()
+    except (ApplyError, _KeepObservation):
+        raise
+    except (ValueError, TypeError):
+        if storing:
+            raise _KeepObservation from None
+        raise TransientApplyError("Cannot read nested credentials for " + coll.name) from None
+
+
+def serialize_row(coll: policy.Collection, row: Mapping[str, Any], *, cursor=None,
+                  nested_rekey: Optional[bool] = None) -> Optional[Dict[str, Any]]:
     """Plaintext record for a row, or None when the row is not shared."""
     if coll.shared_row is not None and not coll.shared_row(row):
         return None
@@ -509,11 +549,8 @@ def serialize_row(coll: policy.Collection, row: Mapping[str, Any]) -> Optional[D
         # Filter backup-only credentials before decryption: an unreadable key
         # trusted by another install must not prevent unrelated row sync or
         # hold back the collection's tombstones. Keep explicit local clears.
-        for secret, binding, companions in (
-                ("balance_key", "balance_instance_id", ()),
-                ("openai_admin_key", "openai_billing_instance_id", ("openai_billing_org_id",))):
-            if row.get(binding) != _my_instance_id():
-                excluded.update((secret, *companions))
+        if row.get("provider_type") != "xai" or row.get("balance_instance_id") != _my_instance_id():
+            excluded.add("balance_key")
     for name in coll.fields:
         if name in excluded:
             continue
@@ -529,8 +566,18 @@ def serialize_row(coll: policy.Collection, row: Mapping[str, Any]) -> Optional[D
                 raise TransientApplyError("Cannot read credential storage for " + coll.name) from None
             encrypted_columns.append(name)
         record[name] = _normalize_value(value)
+    if coll.map_secrets is not None:
+        quorum = nested_secret_sync.quorum(cursor) if nested_rekey is not False else None
+        nested_rekey = bool(quorum)
+        nested_columns = _map_nested_secrets(coll, record, nested_rekey=nested_rekey)
+        encrypted_columns.extend(nested_columns)
+        if nested_columns:
+            record["_nested_rekey"] = quorum
+        if not nested_rekey and coll.name == "automations" and isinstance(record.get("triggers"), list):
+            # The legacy materializer expects TEXT here, not a wire JSON array.
+            record["triggers"] = json.dumps(record["triggers"])
     if encrypted_columns:
-        record["_enc"] = sorted(encrypted_columns)
+        record["_enc"] = sorted(set(encrypted_columns))
     if coll.serialize_hook is not None:
         record = coll.serialize_hook(record)
     return record
@@ -541,11 +588,13 @@ def content_hash(coll: policy.Collection, record: Mapping[str, Any]) -> str:
     if coll.name == "model_providers":
         # An explicit local disconnect is an update even when the previously
         # published row omitted an untrusted/restored billing credential.
-        billing = [name for name in ("balance_key", "openai_admin_key", "openai_billing_org_id")
+        billing = [name for name in ("balance_key",)
                    if name in coll.hash_fields and name not in coll.local_fields]
         if billing:
             subset["_billing_present"] = [name for name in billing if name in record]
     subset["_enc"] = record.get("_enc") or []
+    if "_nested_rekey" in record:
+        subset["_nested_rekey"] = record["_nested_rekey"]
     return crypto.sha256_hex(envelope_mod.record_bytes(subset))
 
 
@@ -617,11 +666,10 @@ def _billing_refresh_needed(cursor, coll, record_id, record):
     if coll.name != "model_providers" or not record:
         return False
     previous = _read_row(cursor, coll, record_id) or {}
-    return any(record.get(secret) and (
-        previous.get(binding) != _my_instance_id()
-        or _provider_value_changed(coll, previous, secret, record[secret]))
-        for secret, binding in (("balance_key", "balance_instance_id"),
-                                ("openai_admin_key", "openai_billing_instance_id")))
+    return (record.get("provider_type", previous.get("provider_type")) == "xai"
+            and bool(record.get("balance_key")) and (
+                previous.get("balance_instance_id") != _my_instance_id()
+                or _provider_value_changed(coll, previous, "balance_key", record["balance_key"])))
 
 
 def materialize(
@@ -634,6 +682,14 @@ def materialize(
     """
     keys = _local_keys(coll, record_id)
     where = " AND ".join(f"{k} = %s" for k in coll.keys)
+    from app.db.model_provider_slots import (
+        SLOT_SETTING_PREFIX, lock_model_provider_slots, reconcile_model_provider_slots,
+    )
+    provider_selection = coll.name == "model_providers" or (
+        coll.name == "system_settings" and record_id.startswith(SLOT_SETTING_PREFIX)
+    )
+    if provider_selection:
+        lock_model_provider_slots(cursor)
     if record is not None:
         record = _project_legacy_agent(coll, record_id, record)
         if record is None:
@@ -708,39 +764,57 @@ def materialize(
                 retired_automation = retired_id
     if coll.materialize_hook is not None:
         record = coll.materialize_hook(record)
-    encrypted_columns = list(record.get("_enc") or [])
+    nested_columns = _map_nested_secrets(coll, record, storing=True)
+    encrypted_columns = [name for name in record.get("_enc") or [] if name not in nested_columns]
     previous = _read_row(cursor, coll, record_id) if coll.name == "model_providers" else None
     columns: List[str] = []
     values: List[Any] = []
     for name in coll.fields:
         if name in coll.local_fields or name not in record:
             continue
+        if (coll.name == "model_providers" and name == "balance_key"
+                and record.get("provider_type", (previous or {}).get("provider_type")) != "xai"):
+            continue  # Do not decrypt or store retired Platform session keys.
         columns.append(name)
-        if (previous and name in ("openai_admin_key", "balance_key")
+        if (previous and name == "balance_key"
                 and not _provider_value_changed(coll, previous, name, record.get(name))):
-            # Stable ciphertext preserves Admin refusal fingerprints and the
-            # captured key guard of an in-flight Admin poll on unrelated edits.
+            # Unrelated edits must not invalidate an in-flight balance poll.
             values.append(previous.get(name))
         else:
             values.append(_column_value(coll, name, record.get(name), encrypted_columns))
     if coll.name == "model_providers":
         # Presence, not truthiness: explicit NULL clears propagate. Old peers
         # omit these fields entirely; their edits must preserve local access.
-        for secret, binding in (("balance_key", "balance_instance_id"),
-                                ("openai_admin_key", "openai_billing_instance_id")):
-            if secret in columns:
-                columns.append(binding)
-                values.append(_my_instance_id())
-        if previous and any(name in columns and _provider_value_changed(coll, previous, name, record.get(name))
-                            for name in ("auth_token", "provider_type", "base_url", "auth_mode", "enabled", "balance_key")):
+        if record.get("provider_type", (previous or {}).get("provider_type")) != "xai":
+            # An older peer may still send a Platform session key. Never store it.
+            if "balance_key" in columns:
+                values[columns.index("balance_key")] = None
+            else:
+                columns.append("balance_key")
+                values.append(None)
+            columns.extend(("balance_instance_id", "balance_snapshot"))
+            values.extend((None, None))
+        elif "balance_key" in columns:
+            columns.append("balance_instance_id")
+            values.append(_my_instance_id())
+        if previous and "balance_snapshot" not in columns and any(
+                name in columns and _provider_value_changed(coll, previous, name, record.get(name))
+                for name in ("auth_token", "provider_type", "base_url", "auth_mode", "enabled", "balance_key")):
             columns.append("balance_snapshot")
             values.append(None)
         if previous and any(name in columns and _provider_value_changed(coll, previous, name, record.get(name))
-                            for name in ("auth_token", "provider_type", "base_url", "auth_mode", "enabled",
-                                         "openai_admin_key", "openai_billing_org_id")):
-            # Admin usage is worker-local too. A late poll is guarded by its
-            # captured key/binding; never display a pre-rotation reading.
+                            for name in ("auth_token", "provider_type", "base_url", "auth_mode", "enabled")):
+            # Never display a pre-rotation usage reading.
             cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", keys)
+    if previous:
+        from app.db.model_providers import _same_secret
+        # The verdict is worker-local and belongs to this credential/endpoint,
+        # just as on update_model_provider. Re-encryption is not a new key.
+        if ("auth_token" in record and not _same_secret(previous.get("auth_token"), record["auth_token"])) or any(
+                name in record and (previous.get(name) or None) != (record[name] or None)
+                for name in ("base_url", "provider_type", "auth_mode")):
+            columns.append("credential_status")
+            values.append(None)
     # Key columns always come from the record id so a hook cannot move a row.
     for name, value in zip(coll.keys, keys):
         if name in columns:
@@ -774,6 +848,9 @@ def materialize(
     sql = (f"INSERT INTO {coll.table} ({', '.join(insert_columns)}) VALUES ({', '.join(['%s'] * len(insert_columns))}) "
            f"ON CONFLICT ({conflict}) DO UPDATE SET {updates}")
     cursor.execute(sql, tuple(insert_values))
+    if provider_selection:
+        # The shared slot register, not row arrival order, selects the account.
+        reconcile_model_provider_slots(cursor)
     if new_agent:
         # As for a local create: a deleted agent's API-key assignments must not
         # attach to a new agent with its id. Covers bootstrap snapshots too.
@@ -870,12 +947,12 @@ def record(cursor, collection: str, record_id: str, row: Optional[Mapping[str, A
     coll = policy.collection(collection)
     if row is None and not _incoming_row_is_shared(coll, record_id, None):
         return None  # do not retract an already-synced copy of a now-local row
-    plaintext = serialize_row(coll, row) if row is not None else None
+    plaintext = serialize_row(coll, row, cursor=cursor) if row is not None else None
     if row is not None and plaintext is None:
         return None  # not a shared row
     existing = store.get_record(cursor, collection, record_id)
     if plaintext is None:
-        if existing is None or bool(existing["deleted"]):
+        if not force and (existing is None or bool(existing["deleted"])):
             return None
         new_hash = ""
     else:
@@ -920,11 +997,11 @@ def keep_local_rewrite(cursor, collection: str, record_id: str, before_row: Mapp
     existing = store.get_record(cursor, collection, record_id)
     if existing is None or bool(existing["deleted"]):
         return False
-    before = serialize_row(coll, before_row)
+    before = serialize_row(coll, before_row, cursor=cursor)
     if before is None or content_hash(coll, before) != existing["content_hash"]:
         return False
     after_row = _read_row(cursor, coll, record_id)
-    after = serialize_row(coll, after_row) if after_row is not None else None
+    after = serialize_row(coll, after_row, cursor=cursor) if after_row is not None else None
     if after is None:
         return False
     store.put_record(cursor, collection, record_id, clock=int(existing["clock"]),
@@ -1125,6 +1202,10 @@ def scan_all(*, ctx: Optional[NetworkContext] = None, include_catalog: bool = Tr
             logger.warning("Catalog publish failed", exc_info=True)
             if strict:
                 raise
+    if include_catalog and selected is not None and "plugins_desired" in selected:
+        # Plugin mutations request a narrow pass too, not just periodic scans.
+        from app.network import plugins_sync
+        total += plugins_sync.publish(ctx=ctx)
     if include_catalog and selected is None:
         for module_name in ("memory_records", "plugins_sync"):
             try:
@@ -1456,8 +1537,7 @@ def _provider_credentials_kept(coll: policy.Collection, incoming: Mapping[str, A
     # its key-bearing local hash as acknowledged by a peer that never saw it.
     if any(secret in coll.fields and secret not in coll.local_fields
            and secret not in incoming and row.get(binding) == _my_instance_id()
-           for secret, binding in (("balance_key", "balance_instance_id"),
-                                   ("openai_admin_key", "openai_billing_instance_id"))):
+           for secret, binding in (("balance_key", "balance_instance_id"),)):
         return True
     if row.get("codex_last_refresh") is None:
         return False
@@ -1485,6 +1565,8 @@ def _merge_losing_provider_credentials(cursor, coll: policy.Collection, record_i
     # record must not advance its timestamp while leaving old token columns.
     if not all(name in incoming for name in _PROVIDER_CREDENTIAL_FIELDS):
         return False
+    from app.db.model_provider_slots import lock_model_provider_slots, reconcile_model_provider_slots
+    lock_model_provider_slots(cursor)
     encrypted = list(incoming.get("_enc") or [])
     values = [_column_value(coll, name, incoming[name], encrypted)
               for name in _PROVIDER_CREDENTIAL_FIELDS]
@@ -1493,7 +1575,10 @@ def _merge_losing_provider_credentials(cursor, coll: policy.Collection, record_i
         f"UPDATE model_providers SET {updates}, revision = %s WHERE id = %s "
         "AND (codex_last_refresh IS NULL OR codex_last_refresh < %s)",
         (*values, str(uuid4()), record_id, incoming["codex_last_refresh"]))
-    return bool(cursor.rowcount)
+    changed = bool(cursor.rowcount)
+    if changed:
+        reconcile_model_provider_slots(cursor)
+    return changed
 
 
 def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, result: ApplyResult) -> str:
@@ -1597,7 +1682,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         local_row = _read_row(cursor, coll, env.record_id)
         if local_row is not None:
             try:
-                local_plain = serialize_row(coll, local_row)
+                local_plain = serialize_row(coll, local_row, cursor=cursor)
             except ApplyError:
                 local_plain = None
             incoming_hash = content_hash(coll, plaintext) if env.op == OP_UPSERT else ""
@@ -1630,7 +1715,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         local_hash = env.content_hash
         if row is not None:
             try:
-                reserialized = serialize_row(coll, row)
+                reserialized = serialize_row(coll, row, cursor=cursor)
                 if reserialized is not None:
                     local_hash = content_hash(coll, reserialized)
             except ApplyError:
@@ -2023,8 +2108,72 @@ def _apply_one(data: Mapping[str, Any], ctx: NetworkContext, result: ApplyResult
     _count_outcome(result, outcome)
 
 
+@dataclass(frozen=True)
+class _WireStream:
+    origin: str
+    incarnation: int
+    first_seq: int
+    highest: int
+    watermark: int
+    pending: int
+
+
+def _wire_stream(cursor, chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext) -> Optional[_WireStream]:
+    """Read the first stream once for the buffer and ordered-append fast paths.
+
+    The caller already holds network_state. This is only a candidate: each fast
+    path still validates every envelope before writing anything.
+    """
+    try:
+        first = Envelope.from_dict(chunk[0])
+    except (ValueError, TypeError, KeyError):
+        return None
+    member = ctx.member(first.origin_device_id)
+    if (first.network_id != ctx.network_id or first.origin_device_id == ctx.device_id
+            or member is None or member.status != membership.STATUS_ACTIVE):
+        return None
+    return _WireStream(first.origin_device_id, first.origin_incarnation, first.origin_seq,
+                       store.highest_incarnation(cursor, first.origin_device_id),
+                       store.get_watermark(cursor, first.origin_device_id, first.origin_incarnation),
+                       store.count_pending(cursor, first.origin_device_id, first.origin_incarnation))
+
+
+def _buffer_pending_chunk(cursor, chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext,
+                          result: ApplyResult, stream: _WireStream) -> bool:
+    """Bulk-stash only a contiguous, fully validated run beyond a real gap.
+
+    Revoked/unknown/own origins, mixed streams, malformed envelopes and chunks
+    crossing the sequence/cap budgets retain the per-envelope path. In
+    particular cap-boundary chunks must preserve partial acceptance and the
+    existing duplicate-at-cap behavior. Payload validation still happens when
+    the missing head arrives, exactly as for single-row buffering.
+    """
+    if (stream.first_seq <= stream.watermark + 1 or stream.incarnation < stream.highest
+            or stream.pending + len(chunk) > PENDING_CAP_PER_STREAM):
+        return False  # Ordered appends must not parse the entire chunk twice.
+    member = ctx.member(stream.origin)
+    if member is None or member.status != membership.STATUS_ACTIVE:
+        return False
+    try:
+        envs = [Envelope.from_dict(data) for data in chunk]
+        first_seq = envs[0].origin_seq
+        if first_seq <= stream.watermark + 1 or envs[-1].origin_seq > stream.watermark + PENDING_WINDOW:
+            return False
+        for index, env in enumerate(envs):
+            if (env.network_id != ctx.network_id or env.origin_device_id != stream.origin
+                    or env.origin_incarnation != stream.incarnation or env.origin_seq != first_seq + index
+                    or env.key_version not in ctx.keyring or not env.verify_signature(member.signing_public)):
+                return False
+    except (ValueError, TypeError, KeyError, crypto.CryptoError):
+        return False
+    store.stash_pending_batch(cursor, [env.to_dict() for env in envs])
+    result.pending += len(envs)
+    return True
+
+
 def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext,
-                        result: ApplyResult, *, _from_pending: bool = False) -> bool:
+                        result: ApplyResult, *, _from_pending: bool = False,
+                        _stream: Optional[_WireStream] = None) -> bool:
     """Batch only fresh, contiguous events from a known remote session owner.
 
     Rewrites, holes, revocations, conflicts and malformed input use the normal
@@ -2045,9 +2194,15 @@ def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Network
         member = ctx.member(origin)
         if origin == ctx.device_id or member is None or member.status != membership.STATUS_ACTIVE:
             return False
-        highest = store.highest_incarnation(cursor, origin)
-        watermark = store.get_watermark(cursor, origin, incarnation)
-        if incarnation < highest or (not _from_pending and store.count_pending(cursor, origin, incarnation)):
+        if _stream is None:
+            highest = store.highest_incarnation(cursor, origin)
+            watermark = store.get_watermark(cursor, origin, incarnation)
+            pending = 0 if _from_pending else store.count_pending(cursor, origin, incarnation)
+        else:
+            if (_stream.origin, _stream.incarnation) != (origin, incarnation):
+                return False
+            highest, watermark, pending = _stream.highest, _stream.watermark, _stream.pending
+        if incarnation < highest or (not _from_pending and pending):
             return False
         rows = []
         for index, env in enumerate(envs):
@@ -2092,7 +2247,7 @@ def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Network
 
 
 def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result: ApplyResult) -> bool:
-    """Apply fresh transcript appends in bulk; otherwise use per-op savepoints.
+    """Bulk-apply fresh appends or buffer gaps; otherwise use per-op savepoints.
 
     A refused envelope rolls back to its savepoint and the rest of the chunk
     goes on, as if each had its own transaction. Without savepoints (the
@@ -2121,7 +2276,14 @@ def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result
             savepoints = type(cursor).__module__.startswith("psycopg2")
             if seen:
                 store.observe_clock(cursor, seen)
-            appended = _apply_event_append(cursor, chunk, ctx, part)
+            else:
+                store.lock_state(cursor)
+            bulk_pending = os.environ.get("AI_SHUFFLE_PERF_BULK_PENDING", "").strip().lower() not in (
+                "0", "false", "off", "no")
+            stream = _wire_stream(cursor, chunk, ctx) if bulk_pending else None
+            appended = (stream is not None and _buffer_pending_chunk(cursor, chunk, ctx, part, stream))
+            if not appended:
+                appended = _apply_event_append(cursor, chunk, ctx, part, _stream=stream)
             for data in (() if appended else chunk):
                 if savepoints:
                     cursor.execute("SAVEPOINT apply_envelope")
@@ -2346,15 +2508,15 @@ def snapshot_manifest(*, ctx: Optional[NetworkContext] = None) -> dict:
 
 
 def snapshot_chunk(collection: str, offset: int = 0, *, ctx: Optional[NetworkContext] = None,
-                   limit: int = SNAPSHOT_CHUNK, _conn=None) -> dict:
+                   limit: int = SNAPSHOT_CHUNK, _conn=None, recipient: Optional[str] = None) -> dict:
     """Legacy offset-addressed snapshot page, with the existing wire format."""
-    chunk, _ = _snapshot_page(collection, offset, ctx=ctx, limit=limit, _conn=_conn)
+    chunk, _ = _snapshot_page(collection, offset, ctx=ctx, limit=limit, _conn=_conn, recipient=recipient)
     return chunk
 
 
 def snapshot_page(collection: str, offset: int = 0, *, after_record_id: Optional[str] = None,
                   ctx: Optional[NetworkContext] = None, limit: int = SNAPSHOT_CHUNK, _conn=None,
-                  encoding: Optional[str] = None):
+                  encoding: Optional[str] = None, recipient: Optional[str] = None):
     """Seek through one repeatable-read export without rescanning earlier pages.
 
     The record cursor stays local; the signed/encrypted page still uses the
@@ -2363,7 +2525,7 @@ def snapshot_page(collection: str, offset: int = 0, *, after_record_id: Optional
     that asked for it: an older worker cannot open such a page).
     """
     return _snapshot_page(collection, offset, ctx=ctx, limit=limit, _conn=_conn,
-                          keyset=True, after_record_id=after_record_id, encoding=encoding)
+                          keyset=True, after_record_id=after_record_id, encoding=encoding, recipient=recipient)
 
 
 #: Largest page body accepted after decompression.
@@ -2405,7 +2567,8 @@ def seal_snapshot_chunk(collection: str, offset: int, items: list, more: bool, *
 
 
 def snapshot_item(cursor, coll: policy.Collection, version: Mapping[str, Any], *,
-                  row: Optional[Mapping[str, Any]] = None, row_known: bool = False) -> dict:
+                  row: Optional[Mapping[str, Any]] = None, row_known: bool = False,
+                  nested_rekey: Optional[bool] = None) -> dict:
     """One record as a snapshot carries it: its sync version and its row (None when deleted)."""
     item = {"record_id": version["record_id"], "clock": int(version["clock"]),
             "origin_device_id": version["origin_device_id"], "deleted": bool(version["deleted"]),
@@ -2413,13 +2576,14 @@ def snapshot_item(cursor, coll: policy.Collection, version: Mapping[str, Any], *
     if not item["deleted"]:
         if not row_known:
             row = _read_row(cursor, coll, version["record_id"])
-        item["record"] = serialize_row(coll, row) if row is not None else None
+        item["record"] = serialize_row(coll, row, cursor=cursor, nested_rekey=nested_rekey) if row is not None else None
         if item["record"] is None:
             item["deleted"] = True
     return item
 
 
-def _snapshot_page(collection, offset, *, ctx, limit, _conn, keyset=False, after_record_id=None, encoding=None):
+def _snapshot_page(collection, offset, *, ctx, limit, _conn, keyset=False, after_record_id=None, encoding=None,
+                   recipient=None):
     """Build a page and return its private continuation cursor."""
     ctx = ctx or require_context()
     retired = collection in policy.RETIRED_COLLECTIONS
@@ -2442,7 +2606,11 @@ def _snapshot_page(collection, offset, *, ctx, limit, _conn, keyset=False, after
             versions = [dict(r) for r in cursor.fetchall()]
         more = len(versions) > limit
         versions = versions[:limit]
-        items = [snapshot_item(cursor, coll, version) for version in versions]
+        nested_rekey = None
+        if coll is not None and coll.map_secrets is not None:
+            nested_rekey = nested_secret_sync.enabled(cursor) and (
+                recipient is None or nested_secret_sync.enabled(cursor, recipient=recipient))
+        items = [snapshot_item(cursor, coll, version, nested_rekey=nested_rekey) for version in versions]
     signed = seal_snapshot_chunk(collection, offset, items, more, ctx=ctx, encoding=encoding)
     return signed, versions[-1]["record_id"] if versions else after_record_id
 
@@ -2558,7 +2726,10 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                     losing_record = {"_deleted": True}
                 elif comparison > 0:
                     local_row = _read_row(cursor, coll, item["record_id"])
-                    losing_record = serialize_row(coll, local_row) if local_row else {}
+                    try:
+                        losing_record = serialize_row(coll, local_row, cursor=cursor) if local_row else {}
+                    except ApplyError:
+                        losing_record = {}  # a repaired snapshot may replace an unreadable legacy mirror
                 else:
                     losing_record = dict(item["record"] or {})
                 losing_record = redact_secrets(losing_record)
@@ -2608,7 +2779,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             local_hash = content_hash(coll, item["record"])
             if row is not None:
                 try:
-                    reserialized = serialize_row(coll, row)
+                    reserialized = serialize_row(coll, row, cursor=cursor)
                     if reserialized is not None:
                         local_hash = content_hash(coll, reserialized)
                 except ApplyError:
@@ -2927,9 +3098,9 @@ def enroll_from_response(response: Mapping[str, Any], *, device_name: str,
                                 legacy_instance_id=legacy_by_device.get(member.device_id), _conn=conn)
         for public in response.get("members") or []:
             if public.get("device_id") in members and (public.get("endpoints") or public.get("capabilities")):
+                # Forwarded descriptors are routing hints, not direct-contact evidence.
                 store.touch_member(public["device_id"], endpoints=public.get("endpoints") or [],
-                                   capabilities=public.get("capabilities") or {}, version=public.get("version"),
-                                   platform=public.get("platform"), _conn=conn)
+                                   version=public.get("version"), platform=public.get("platform"), _conn=conn)
         issuer = response.get("issuer") or {}
         if issuer.get("device_id") in members and issuer.get("endpoints"):
             store.touch_member(issuer["device_id"], endpoints=issuer["endpoints"], _conn=conn)
@@ -3017,7 +3188,7 @@ def publish_presence(*, capabilities: Optional[dict] = None, version: Optional[s
     row = {
         "device_id": ctx.device_id,
         "endpoints": endpoints if endpoints is not None else _own_endpoints(),
-        "capabilities": capabilities or {},
+        "capabilities": {nested_secret_sync.CAPABILITY: 1, **(capabilities or {})},
         "version": version,
         "source_revision": running_revision(),
         "platform": identity_mod.platform_name(),
@@ -3041,6 +3212,8 @@ def publish_presence(*, capabilities: Optional[dict] = None, version: Optional[s
                    updated_at = EXCLUDED.updated_at""",
             (row["device_id"], json.dumps(row["endpoints"]), json.dumps(row["capabilities"]), row["version"],
              row["source_revision"], row["platform"], row["incarnation"], row["instance_id"], row["updated_at"]))
+        cursor.execute("UPDATE network_members SET capabilities = %s WHERE device_id = %s",
+                       (json.dumps(row["capabilities"]), ctx.device_id))
         changed = record(cursor, "presence", ctx.device_id, row, ctx=ctx) is not None
         # Upgrade old local-only renames without asking the user to rename again.
         # Only seed our own name: a peer's cached hostname is not authoritative.

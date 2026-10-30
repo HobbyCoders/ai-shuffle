@@ -36,6 +36,14 @@ def fake_http(monkeypatch, bodies):
     return calls
 
 
+def xai_bodies():
+    return {
+        balances.XAI_KEY_URL: {"team_id": "team-test"},
+        balances.XAI_BILLING_BASE + "team-test/prepaid/balance": {"total": {"val": "-4200"}, "token": "do-not-copy"},
+        balances.XAI_BILLING_BASE + "team-test/postpaid/invoice/preview": {},
+    }
+
+
 def shared_authority(monkeypatch, founder):
     async def remote(ctx, action, key, body=None):
         with founder.active():
@@ -56,17 +64,11 @@ def poll(worker, source):
                                                      getattr(monitor, SOURCES[source].poller)))
 
 
-@pytest.mark.parametrize("kind", ["openai", "xai"])
-def test_shared_budget_delivers_one_observation_to_both_workers(workers, monkeypatch, kind):
-    a, b = pair(workers, kind)
+def test_shared_budget_delivers_one_observation_to_both_workers(workers, monkeypatch):
+    a, b = pair(workers)
     shared_authority(monkeypatch, a)
-    calls = fake_http(monkeypatch, {
-        balances.OPENAI_CREDIT_URL: {"total_available": 42, "total_granted": 50, "total_used": 8},
-        balances.XAI_KEY_URL: {"team_id": "team-test"},
-        balances.XAI_BILLING_BASE + "team-test/prepaid/balance": {"total": {"val": "-4200"}},
-        balances.XAI_BILLING_BASE + "team-test/postpaid/invoice/preview": {},
-    })
-    source = "openai_platform_balance" if kind == "openai" else "xai_management"
+    calls = fake_http(monkeypatch, xai_bodies())
+    source = "xai_management"
     poll(a, source)
     # The loser is actually denied by the shared coordinator before sync.
     poll(b, source)
@@ -88,7 +90,7 @@ def test_shared_budget_delivers_one_observation_to_both_workers(workers, monkeyp
         assert second["observed_at"] == first["observed_at"]
         assert second["source_worker"] == source_worker
         assert second["last_deferred_reason"] is None
-    assert len(calls) == (1 if kind == "openai" else 3)
+    assert len(calls) == 3
 
 
 def test_xai_preserves_discovery_progress_when_balance_is_deferred(workers, monkeypatch):
@@ -106,16 +108,13 @@ def test_xai_preserves_discovery_progress_when_balance_is_deferred(workers, monk
         assert len(calls) == 1
 
 
-@pytest.mark.parametrize("source", ["openrouter_key", "openrouter_credits", "openai_admin", "fal_billing",
+@pytest.mark.parametrize("source", ["openrouter_key", "openrouter_credits", "fal_billing",
                                      "codex_usage", "grok_subscription"])
 def test_other_polled_snapshots_share_without_additional_requests(workers, monkeypatch, source):
     a, b = pair(workers, "openai", configured=False)
     with a.active():
         if source.startswith("openrouter"):
             db.update_model_provider(PROVIDER, provider_type="openrouter", base_url="https://openrouter.ai/api/v1")
-        elif source == "openai_admin":
-            db.set_openai_billing_binding(PROVIDER, "org-test", settings.effective_instance_id,
-                                         encryption.encrypt_value("admin-test"))
         elif source in {"codex_usage", "grok_subscription"}:
             kind = "chatgpt" if source == "codex_usage" else "grok"
             db.update_model_provider(PROVIDER, provider_type=kind, auth_mode=kind)
@@ -141,9 +140,6 @@ def test_other_polled_snapshots_share_without_additional_requests(workers, monke
             body = {"creditUsagePercent": 8, "onDemandUsed": 0, "onDemandCap": 42}
         elif "/v1/settings" in str(request.url):
             body = {"subscription_tier_display": "SuperGrok"}
-        elif "/organization/" in str(request.url):
-            value = {"amount": {"value": 8, "currency": "usd"}} if "/costs" in str(request.url) else {"input_tokens": 10}
-            body = {"data": [{"results": [value]}]}
         elif "/credits" in str(request.url):
             body = {"data": {"total_credits": 50, "total_usage": 8}}
         elif "openrouter" in str(request.url):
@@ -192,19 +188,17 @@ def test_other_polled_snapshots_share_without_additional_requests(workers, monke
         assert len(calls) == count
 
 
-@pytest.mark.parametrize("secret", ["balance_key", "openai_admin_key"])
 @pytest.mark.parametrize("bootstrap", [False, True])
-def test_sync_arrival_schedules_refresh_after_commit(workers, monkeypatch, secret, bootstrap):
+def test_sync_arrival_schedules_refresh_after_commit(workers, monkeypatch, bootstrap):
     from app.core.global_events import global_events
 
-    a, b = pair(workers, "openai" if secret == "openai_admin_key" else "xai", configured=False)
+    a, b = pair(workers, configured=False)
     requests = []
 
     def refresh(**kwargs):
         assert not b.raw.in_transaction
-        binding = "balance_instance_id" if secret == "balance_key" else "openai_billing_instance_id"
-        assert row()[binding] == settings.effective_instance_id
-        assert row()[secret]
+        assert row()["balance_instance_id"] == settings.effective_instance_id
+        assert row()["balance_key"]
         requests.append(kwargs)
 
     loop = SimpleNamespace(is_closed=lambda: False, call_soon_threadsafe=lambda fn, *args: fn(*args))
@@ -216,11 +210,7 @@ def test_sync_arrival_schedules_refresh_after_commit(workers, monkeypatch, secre
     engine.on_applied(lambda touched: startup._on_applied([t for t in touched if t[0] == "provider_billing"]))
     def change(value):
         with a.active():
-            if secret == "balance_key":
-                bind(value)
-            else:
-                db.set_openai_billing_binding(PROVIDER, "org-test", settings.effective_instance_id,
-                                             encryption.encrypt_value(value))
+            bind(value)
             scan()
 
     change("first-test")
@@ -241,19 +231,18 @@ def test_sync_arrival_schedules_refresh_after_commit(workers, monkeypatch, secre
 
 
 def test_projection_does_not_publish_secret_or_trust_fields(workers, monkeypatch):
-    a, _ = pair(workers, "openai")
-    calls = fake_http(monkeypatch, {balances.OPENAI_CREDIT_URL: {
-        "total_available": 42, "total_granted": 50, "total_used": 8, "token": "do-not-copy"}})
-    poll(a, "openai_platform_balance")
+    a, _ = pair(workers)
+    calls = fake_http(monkeypatch, xai_bodies())
+    poll(a, "xai_management")
     with a.active():
-        source = SOURCES["openai_platform_balance"]
+        source = SOURCES["xai_management"]
         key = provider_observations._binding(source, row())[0]
         value = json.loads(db.get_system_setting(key))
         assert set(value) == {"credits", "windows", "observed_at", "source_worker", "credential_revision"}
         assert len(value["credential_revision"]) == 64
-        assert set(value["credits"]) == {"balance_remaining", "total_credits", "total_usage", "currency"}
+        assert set(value["credits"]) == {"balance_remaining", "spend_month", "currency"}
         assert "do-not-copy" not in json.dumps(value)
-    assert len(calls) == 1
+    assert len(calls) == 3
 
 
 def test_failed_materialization_does_not_schedule_a_refresh(workers, monkeypatch):

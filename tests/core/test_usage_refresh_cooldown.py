@@ -276,7 +276,7 @@ async def test_timeouts_back_off_and_keep_last_good_values(provider, clock, upst
 
 
 # ---------------------------------------------------------------------------
-# Duplicate rows: rows that share a credential share one observation
+# Saved accounts: only the enabled sibling is polled and displayed
 # ---------------------------------------------------------------------------
 
 def _duplicate_rows(*ids):
@@ -288,9 +288,8 @@ def _duplicate_rows(*ids):
 
 
 @pytest.mark.asyncio
-async def test_duplicate_rows_share_one_request_and_all_refresh(clock, counts, upstream):
-    """Before: the first row spent the budget and the others were deferred on
-    every pass, so they stayed stale forever while the provider was asked once."""
+async def test_saved_accounts_refresh_only_the_enabled_sibling(clock, counts, upstream):
+    """Saved OpenRouter accounts cannot multiply polling or show inactive usage."""
     from app.api.usage import _load_provider_usage
 
     ids = ("dup-a", "dup-b", "dup-c", "dup-d", "dup-e", "dup-f")
@@ -301,17 +300,18 @@ async def test_duplicate_rows_share_one_request_and_all_refresh(clock, counts, u
         await monitor.request_refresh(force=True, cooldown=30)
         assert upstream.await_count == passes
         entries = {p.provider_id: p for p in await _load_provider_usage()}
-        assert {entries[i].fetched_at for i in ids} == {int(clock.now * 1000)}
-        assert all(entries[i].status == "fresh" for i in ids)
+        assert set(entries) == {ids[-1]}
+        assert entries[ids[-1]].fetched_at == int(clock.now * 1000)
+        assert entries[ids[-1]].status == "fresh"
+        assert [r["provider_id"] for r in db.get_all_provider_usage_snapshots()] == [ids[-1]]
         clock.now += 301
-    # One budget claim per pass: the other rows reuse the observation.
+    # One budget claim per pass: inactive accounts are never polled.
     assert counts["claims"] == 4
 
 
 @pytest.mark.asyncio
-async def test_duplicate_rows_share_a_compressed_response(clock, upstream):
-    """Real providers answer gzip-encoded. The shared copy must not be decoded
-    twice, or every row after the first fails instead of refreshing."""
+async def test_enabled_saved_account_decodes_a_compressed_response(clock, upstream):
+    """A provider's gzip-encoded reading reaches only the enabled account."""
     import gzip
     import json
 
@@ -326,12 +326,13 @@ async def test_duplicate_rows_share_a_compressed_response(clock, upstream):
     await provider_usage.ProviderUsageMonitor().request_refresh(force=True, cooldown=30)
     assert upstream.await_count == 1
     entries = {p.provider_id: p for p in await _load_provider_usage()}
-    assert all(entries[i].status == "fresh" and entries[i].credits["usage"] == 2.0 for i in ids)
+    assert set(entries) == {ids[-1]}
+    assert entries[ids[-1]].status == "fresh" and entries[ids[-1]].credits["usage"] == 2.0
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [403, 429, 503])
-async def test_duplicate_rows_do_not_multiply_failed_requests(clock, upstream, status):
+async def test_saved_accounts_do_not_multiply_failed_requests(clock, upstream, status):
     _duplicate_rows("dup-a", "dup-b", "dup-c")
     respond(upstream, status)
     await popover_opens(provider_usage.ProviderUsageMonitor(), clock, every=60, until=600, cooldown=30)
@@ -368,6 +369,26 @@ async def test_shared_pass_coalesces_only_identical_requests(monkeypatch, clock)
     with pytest.raises(polling.UsageDeferred):
         await fetch("one")
     assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_shared_pass_reuses_compressed_response_without_decoding_twice(clock, upstream):
+    """Coalescing remains safe independently of saved-account exclusivity."""
+    import gzip
+    import json
+
+    url = "https://router.example.test/api/v1/key"
+    body = {"data": {"usage": 2.0, "limit": 10.0}}
+    upstream.return_value = httpx.Response(
+        200, headers={"Content-Encoding": "gzip"},
+        content=gzip.compress(json.dumps(body).encode()), request=httpx.Request("GET", url))
+    with polling.shared_pass():
+        responses = await asyncio.gather(*[
+            polling.usage_get(url, headers={"Authorization": "Bearer shared-model-key"})
+            for _ in range(3)
+        ])
+    assert upstream.await_count == 1
+    assert [response.json() for response in responses] == [body] * 3
 
 
 @pytest.mark.asyncio

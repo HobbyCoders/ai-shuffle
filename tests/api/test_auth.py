@@ -78,13 +78,13 @@ class TestPasswordHashing:
 # GET /auth/status — has_any_credential (PA10, docs/PROVIDER_AGNOSTIC_PLAN.md)
 # =============================================================================
 
-def _make_provider(provider_id: str, *, auth_token=None, enabled: bool = True):
+def _make_provider(provider_id: str, *, auth_token=None, enabled: bool = True, provider_type="openrouter"):
     """Insert a ``model_providers`` row through the real db layer."""
     from app.db import database as db
     return db.create_model_provider(
         provider_id=provider_id,
         name=f"Provider {provider_id}",
-        provider_type="openrouter",
+        provider_type=provider_type,
         base_url="https://openrouter.ai/api",
         auth_token=auth_token,
         enabled=enabled,
@@ -258,10 +258,12 @@ class TestCountConfiguredModelProviders:
 
     def test_counts_only_enabled_rows_with_a_credential(self, mock_db):
         from app.db import database as db
-        _make_provider("a", auth_token="enc:one")
-        _make_provider("b", auth_token=None)
-        _make_provider("c", auth_token="enc:three", enabled=False)
-        _make_provider("d", auth_token="")
+        # Independent gateways keep the count test about credential filtering,
+        # rather than selecting one account in the OpenRouter slot.
+        _make_provider("a", auth_token="enc:one", provider_type="custom")
+        _make_provider("b", auth_token=None, provider_type="custom")
+        _make_provider("c", auth_token="enc:three", enabled=False, provider_type="custom")
+        _make_provider("d", auth_token="", provider_type="custom")
         assert db.count_configured_model_providers() == 1
 
     def test_codex_access_token_counts(self, mock_db):

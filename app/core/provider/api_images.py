@@ -25,7 +25,7 @@ async def generate(
         native.validate(source, options)
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 32000:
             return [], "A nonempty image prompt of at most 32000 characters is required."
-        row = await run_sync(database.get_model_provider, account, include_token=True)
+        row = await run_sync(database.resolve_model_provider, account, include_token=True)
         if not row or not row.get("enabled", True) or native.provider_kind(row) != source:
             return [], error
         # Never send credentials to a custom/redirected host, nor use a plan login.

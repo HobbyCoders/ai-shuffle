@@ -198,6 +198,33 @@ def _target(caller, session_id, *, allow_stopped=False, owner=None):
     return row
 
 
+def recheck_message_scope(payload, receiver_id):
+    """Revalidate a queued MessageSession without turning a mirror into a caller.
+
+    A remote row was admitted by the authenticated control action, whose worker
+    checked the sender and chain budget. Recheck that worker's membership and
+    the local receiver's current owner/scope; it is not a local sender chat.
+    """
+    sender_id = payload["orchestration_sender"]
+    # Transport describes this message, not the inherited chain ancestry.
+    # Only producers stamp it; _context_payload never inherits it.
+    transport = payload.get("orchestration_message_transport")
+    origin = payload.get("orchestration_remote_origin")
+    forwarded = payload.get("forwarded_by_device")
+    if transport not in (None, "local", "remote"):
+        raise PermissionError("Peer message has invalid transport provenance.")
+    # Already-queued messages predate the transport stamp. Their forwarding
+    # identity still selects the remote check; local rows validate the caller.
+    if transport == "remote" or "forwarded_by_device" in payload:
+        if (transport == "local" or not isinstance(forwarded, str)
+                or not forwarded or origin != forwarded):
+            raise PermissionError("Remote peer message has inconsistent authenticated provenance.")
+        _calling_worker(forwarded, "message chats here")
+        _target({"id": sender_id}, receiver_id, owner=_OWNER_CHAT)
+    else:
+        _target(_caller(sender_id), receiver_id)
+
+
 def list_sessions(session_id, data):
     from app.db import sessions
     from app.core.task_registry import task_registry
@@ -645,8 +672,8 @@ def _inherited_model(sender, overrides):
         # A native Claude pick on a provider chat runs natively unless that
         # provider itself serves the id (query_options' rebind rule).
         from app.core.provider_agent import curated_model_ids
-        from app.db.model_providers import get_model_provider
-        if value not in curated_model_ids(get_model_provider(provider_id)):
+        from app.db.model_providers import resolve_model_provider
+        if value not in curated_model_ids(resolve_model_provider(provider_id)):
             provider_id = None
     return model_override.app_id(provider_id, value)
 
@@ -915,7 +942,7 @@ def accept_remote_start(body, from_device):
             picked = model_override.resolve(choice.get("model"), runs_here=True)
         except ValueError as exc:
             raise ValueError(f"{exc} Nothing was started.") from None
-        if picked.model != choice.get("model"):
+        if picked.model != model_override.active_account_model(choice.get("model")):
             # The sender already resolved and authorized this canonical id.
             # A receiver's similar id/display name cannot authorize a substitute.
             raise ValueError(f"The exact model id {choice.get('model')!r} cannot run on this worker. "
@@ -924,7 +951,7 @@ def accept_remote_start(body, from_device):
         mapped = model_override.settings_for_model(model, provider_id, effort=effort,
                                                    context_window=context_window, fast=fast)
         effort, context_window, fast = mapped["effort"], mapped["context_window"], mapped["fast"]
-    elif provider_id and model_providers.get_model_provider(provider_id) is None:
+    elif provider_id and model_providers.resolve_model_provider(provider_id) is None:
         provider_id = None
     from app.core.model_effort import resolve_child_effort
     effort_explicit = body.get("effort_explicit", False)
@@ -1210,7 +1237,7 @@ def accept_remote_message(body, from_device):
                    orchestration_fingerprint=fingerprint, orchestration_remote_origin=from_device,
                    peer_message_content=content,
                    peer_sender_label=f"{sender_label} (on {member.name or from_device})",
-                   forwarded_by_device=from_device)
+                   orchestration_message_transport="remote", forwarded_by_device=from_device)
     if body.get("reply_to") is not None:
         payload["orchestration_reply_to"] = _remote_text(body, "reply_to", 200)
     principals = {session_id: _principal(session_id)}
@@ -1436,6 +1463,8 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
                    orchestration_sender=sender_id, orchestration_fingerprint=fingerprint,
                    peer_message_content=defang_harness_markers(text),
                    peer_sender_label=sender.get("title") or sender_id)
+    if action == "message":
+        payload["orchestration_message_transport"] = "local"
     if remote_origin:
         payload["orchestration_remote_origin"] = remote_origin
     if target.get("api_user_id"):

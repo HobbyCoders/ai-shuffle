@@ -27,6 +27,7 @@ import { api, getErrorMessage, getUsageLimits, type UsageLimitsSnapshot } from '
 import {
 	listModelProviders,
 	createModelProvider,
+	activateModelProvider,
 	updateModelProvider,
 	deleteModelProvider,
 	fetchProviderModels as apiFetchProviderModels,
@@ -35,6 +36,11 @@ import {
 	type FetchModelsResult
 } from '$lib/api/model-providers';
 import {
+	addClaudeKey,
+	renameClaudeKey,
+	activateClaudeKey,
+	deleteClaudeKey,
+	type ClaudeAccounts,
 	clearClaudeCloud as apiClearClaudeCloud,
 	getClaudeAuth,
 	saveClaudeCloud as apiSaveClaudeCloud,
@@ -56,6 +62,7 @@ interface ProvidersState {
 	providersError: string;
 	/** Id whose enabled flag is being saved, or null. */
 	togglingProviderId: string | null;
+	claudeAccountBusy: string | null;
 
 	// ----- Integrations (from /settings/integrations) -----
 	/** True when an Anthropic API key is stored. */
@@ -93,6 +100,7 @@ const initialState: ProvidersState = {
 	providersLoading: false,
 	providersError: '',
 	togglingProviderId: null,
+	claudeAccountBusy: null,
 
 	anthropicKeySet: false,
 	falKeySet: false,
@@ -321,6 +329,39 @@ export const providers = {
 		}
 	},
 
+	/** Account mutations keep the selected key separate from the Claude Code mode. */
+	async refreshClaudeAccounts(accounts: ClaudeAccounts) {
+		_update((s) => ({ ...s, claude: s.claude ? { ...s.claude, accounts } : null }));
+		await Promise.all([providers.loadClaude(), providers.loadIntegrations(), hydrateModelRegistry()]);
+	},
+
+	async addAnthropicAccount(key: string, label?: string) {
+		const result = await addClaudeKey(key.trim(), label?.trim() || undefined);
+		await providers.refreshClaudeAccounts(result.accounts);
+		return result.account_id;
+	},
+
+	async renameAnthropicAccount(id: string, label: string) {
+		const result = await renameClaudeKey(id, label.trim());
+		await providers.refreshClaudeAccounts(result.accounts);
+	},
+
+	async activateAnthropicAccount(id: string) {
+		if (_state.claudeAccountBusy) return;
+		_update((s) => ({ ...s, claudeAccountBusy: id }));
+		try {
+			const result = await activateClaudeKey(id);
+			await providers.refreshClaudeAccounts(result.accounts);
+		} finally {
+			_update((s) => ({ ...s, claudeAccountBusy: null }));
+		}
+	},
+
+	async deleteAnthropicAccount(id: string) {
+		const result = await deleteClaudeKey(id);
+		await providers.refreshClaudeAccounts(result.accounts);
+	},
+
 	/**
 	 * Store the mode (owner only): subscription, API key, or off. The model
 	 * registry is re-read so the pickers add or drop Claude. Throws.
@@ -383,27 +424,14 @@ export const providers = {
 		await providers.refreshProviders();
 	},
 
-	/**
-	 * Turn one credential row on or off. Idempotent (PATCH `{enabled}`), never
-	 * the flipping `/toggle`, so a double click or a stale view cannot invert
-	 * it. Optimistic; throws with the server's message after rolling back.
-	 */
+	/** Select an account idempotently, then refetch siblings. Off never selects a replacement. */
 	async setProviderEnabled(id: string, enabled: boolean) {
-		_update((s) => ({
-			...s,
-			togglingProviderId: id,
-			providersError: '',
-			providers: s.providers.map((p) => (p.id === id ? { ...p, enabled } : p))
-		}));
+		if (_state.togglingProviderId) return;
+		_update((s) => ({ ...s, togglingProviderId: id, providersError: '' }));
 		try {
-			await updateModelProvider(id, { enabled });
+			if (enabled) await activateModelProvider(id);
+			else await updateModelProvider(id, { enabled: false });
 			await providers.refreshProviders();
-		} catch (e) {
-			_update((s) => ({
-				...s,
-				providers: s.providers.map((p) => (p.id === id ? { ...p, enabled: !enabled } : p))
-			}));
-			throw e;
 		} finally {
 			_update((s) => ({ ...s, togglingProviderId: null }));
 		}
@@ -443,8 +471,8 @@ export const providers = {
 	},
 
 	/**
-	 * Fetch a provider's model catalog (upstream `/models`, or the built-in
-	 * preset roster). Persists nothing; throws on failure.
+	 * Fetch the provider's live catalog and share a bounded discovery snapshot.
+	 * Curation is unchanged; throws only when discovery itself fails.
 	 */
 	async fetchProviderModels(id: string): Promise<FetchModelsResult> {
 		return apiFetchProviderModels(id);

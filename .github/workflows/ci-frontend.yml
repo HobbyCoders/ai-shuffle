@@ -88,7 +88,7 @@ jobs:
           npx -y npm@11 audit --audit-level=high
       - name: Performance rig counter contracts
         working-directory: .
-        run: node --test scripts/perf/stats.test.mjs
+        run: node --test scripts/perf/*.test.mjs
       - name: Docs copies match
         working-directory: .
         run: diff -r docs/content frontend/src/lib/docs/content

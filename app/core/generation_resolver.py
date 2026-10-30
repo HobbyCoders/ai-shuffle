@@ -299,6 +299,15 @@ class Resolver:
         remembered = context.remembered_for(kind)
         job = context.job_choice or (context.job_choices or {}).get(kind)
         stored = job or remembered
+        follow_account = getattr(self.backend, "follow_account_choice", None)
+        if follow_account:
+            try:
+                args = await follow_account(args)
+                if stored:
+                    stored = await follow_account(stored)
+            except Exception:  # account identity must fail closed before catalog access
+                return result("skipped" if context.unattended else "refused",
+                              reason="choices_unreadable", kind=kind, message=UNREADABLE_SKIP_MESSAGE)
         from_memory = bool(remembered) and not job
         if context.unattended and not stored and context.choices_unreadable:
             return result("skipped", reason="choices_unreadable", kind=kind, message=UNREADABLE_SKIP_MESSAGE)
@@ -365,6 +374,8 @@ class Resolver:
                               message="Generation skipped: the stored choice does not identify one account/model binding.")
             if (not stored and not explicit) or len(candidates) != 1:
                 last = context.last_for(kind)
+                if last and follow_account:
+                    last = await follow_account(last)
                 if last:
                     if not explicit and not any(matches(c, last) for c in candidates):
                         prior = await self.backend.catalog(kind, source=last.get("account") or last.get("source"), model=last.get("model"), limit=1, prompt=prompt)

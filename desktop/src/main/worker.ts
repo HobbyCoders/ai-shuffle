@@ -344,16 +344,16 @@ export function requestBrowserHandoff(port: number, listener: string | null): Pr
 }
 
 /** Authenticated, loopback-only control of the child we launched. Never a renderer API. */
-export type LifecycleAction = 'active-sessions' | 'stop-sessions' | 'update-policy' | 'update-bridge' | 'source-lease';
-const LIFECYCLE_POSTS: ReadonlySet<LifecycleAction> = new Set(['stop-sessions', 'update-bridge']);
-export function requestLifecycle(port: number, token: string, action: LifecycleAction, state?: object, listener: string | null = null): Promise<Record<string, unknown>> {
+export type LifecycleAction = 'active-sessions' | 'stop-sessions' | 'update-policy' | 'update-bridge' | 'update-wake' | 'source-lease';
+const LIFECYCLE_POSTS: ReadonlySet<LifecycleAction> = new Set(['stop-sessions', 'update-bridge', 'update-wake']);
+export function requestLifecycle(port: number, token: string, action: LifecycleAction, state?: object, listener: string | null = null, signal?: AbortSignal): Promise<Record<string, unknown>> {
 	// A lease envelope is up to 4 KiB on its own (the hub's header limit).
 	const limit = action === 'source-lease' ? 16_384 : 4096;
 	return new Promise((resolve, reject) => {
 		const req = http.request({
 			host: '127.0.0.1', port, path: `/api/v1/internal/desktop/${action}`,
 			method: LIFECYCLE_POSTS.has(action) ? 'POST' : 'GET',
-			timeout: action === 'active-sessions' ? 3000 : 30_000,
+			timeout: action === 'active-sessions' ? 3000 : action === 'update-wake' ? 65_000 : 30_000, signal,
 			headers: { authorization: `Bearer ${token}`, accept: 'application/json', 'content-type': 'application/json', ...listenerHeaders(listener) }
 		}, (res) => {
 			let body = '';
@@ -370,7 +370,7 @@ export function requestLifecycle(port: number, token: string, action: LifecycleA
 					try { detail = String(JSON.parse(body).detail ?? ''); } catch { /* Fall through to the status. */ }
 					return reject(new Error(detail || 'Worker refused the request (409)'));
 				}
-				if (res.statusCode !== 200) return reject(new Error(`Worker lifecycle request failed (${res.statusCode})`));
+				if (res.statusCode !== 200) return reject(Object.assign(new Error(`Worker lifecycle request failed (${res.statusCode})`), { status: res.statusCode }));
 				try { resolve(JSON.parse(body)); } catch { reject(new Error('Invalid worker response')); }
 			});
 		});
@@ -378,6 +378,32 @@ export function requestLifecycle(port: number, token: string, action: LifecycleA
 		req.on('error', reject);
 		req.end(state ? JSON.stringify(state) : undefined);
 	});
+}
+
+/** One long-held authenticated hint request. Old workers fall back to the
+ * unchanged heartbeat; failures back off instead of spinning or replaying. */
+export function followUpdateRequests(request: (generation: number, signal: AbortSignal) => Promise<Record<string, unknown>>, wake: () => void): () => void {
+	const controller = new AbortController();
+	let retryTimer: ReturnType<typeof setTimeout> | null = null, retryDone: (() => void) | null = null;
+	const pause = () => new Promise<void>(resolve => {
+		retryDone = resolve;
+		retryTimer = setTimeout(() => { retryTimer = null; retryDone = null; resolve(); }, 30_000);
+	});
+	void (async () => {
+		let generation = 0;
+		while (!controller.signal.aborted) {
+			try {
+				const reply = await request(generation, controller.signal);
+				if (controller.signal.aborted) return;
+				if (!Number.isSafeInteger(reply.generation) || (reply.generation as number) < 0) throw new Error('Invalid update wake generation');
+				if (reply.generation !== generation) { generation = reply.generation as number; wake(); }
+			} catch (error) {
+				if (controller.signal.aborted || (error as { status?: number }).status === 404) return;
+				await pause();
+			}
+		}
+	})();
+	return () => { controller.abort(); if (retryTimer) clearTimeout(retryTimer); retryTimer = null; retryDone?.(); retryDone = null; };
 }
 
 export interface SupervisorOptions {
@@ -671,6 +697,20 @@ export class WorkerSupervisor extends EventEmitter {
 		return this.lifecycleRequest('update-bridge', state);
 	}
 
+	/** Owned worker only; detach on restart/shutdown so no wait outlives it. */
+	watchUpdateRequests(wake: () => void): () => void {
+		let key: string | null = null, stop = () => {};
+		const changed = () => {
+			const next = !this._state.external && this._state.phase === 'ready'
+				? `${this._state.pid}:${this._state.startedAt}:${this._state.port}` : null;
+			if (next === key) return;
+			stop(); stop = () => {}; key = next;
+			if (next) stop = followUpdateRequests((generation, signal) => this.lifecycleRequest('update-wake', { generation }, signal), wake);
+		};
+		this.on('state', changed); changed();
+		return () => { this.off('state', changed); stop(); };
+	}
+
 	async updatesAllowed(): Promise<boolean> {
 		if (this._state.external || this._state.phase !== 'ready') return false;
 		const reply = await this.lifecycleRequest('update-policy');
@@ -712,8 +752,8 @@ export class WorkerSupervisor extends EventEmitter {
 		return requestBrowserHandoff(this._state.port, this.listener);
 	}
 
-	private lifecycleRequest(action: LifecycleAction, state?: object): Promise<Record<string, unknown>> {
-		return requestLifecycle(this._state.port, this.lifecycleToken, action, state, this.listener);
+	private lifecycleRequest(action: LifecycleAction, state?: object, signal?: AbortSignal): Promise<Record<string, unknown>> {
+		return requestLifecycle(this._state.port, this.lifecycleToken, action, state, this.listener, signal);
 	}
 
 	/**

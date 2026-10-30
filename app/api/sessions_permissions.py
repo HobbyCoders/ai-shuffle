@@ -133,7 +133,7 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
     from app.core.model_effort import normalize_effort
     from app.core.provider.harness_adapter import _decide_provider_kind
     from app.core.provider.types import SessionOptions
-    from app.db.model_providers import get_model_provider
+    from app.db.model_providers import resolve_model_provider
 
     changes = body.model_dump(exclude_unset=True)
     if not changes or ("fast" in changes and changes["fast"] is None):
@@ -178,7 +178,7 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
             provider_id = session.get("provider_id")
             if model and model.startswith("prov:"):
                 _, provider_id, model = model.split(":", 2)
-            provider = await run_sync(get_model_provider, provider_id) if provider_id else None
+            provider = await run_sync(resolve_model_provider, provider_id) if provider_id else None
             route = await run_sync(_decide_provider_kind, SessionOptions(
                 model=model, extra={"provider_id": provider_id} if provider_id else {}))
             effort = normalize_effort(selected["effort"], model, provider, route=route)

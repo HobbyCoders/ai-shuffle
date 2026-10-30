@@ -2,7 +2,7 @@ import { cleanup, render } from '@testing-library/svelte';
 import { afterEach, describe, expect, it } from 'vitest';
 import { initialState, reduce, releaseMessages, type WireEvent } from '$lib/stores/session/v2/reducer';
 import { buildTranscriptModel } from '$lib/utils/work-log';
-import { createTranscriptWindow, transcriptItemCost, TRANSCRIPT_CONTENT_BUDGET } from './transcript-window';
+import { createTranscriptWindow, selectedRowRange, transcriptItemCost, TRANSCRIPT_CONTENT_BUDGET } from './transcript-window';
 import RichTranscriptWindow from './test-fixtures/RichTranscriptWindow.svelte';
 
 // Real native producer path, real grouping and real AssistantMessage markdown /
@@ -28,7 +28,7 @@ ${section.repeat(8)}` });
  return releaseMessages(state);
 }
 
-afterEach(cleanup);
+afterEach(() => { window.getSelection()?.removeAllRanges(); cleanup(); });
 describe('rich nested DOM ratchet', () => {
  it('keeps fewer than 12,000 elements with no growth after twenty bidirectional shifts', async () => {
   const items = buildTranscriptModel(richHistory(), { sessionId: 'rich-budget', isStreaming: false, groupingEnabled: true }).items;
@@ -47,5 +47,39 @@ describe('rich nested DOM ratchet', () => {
   }
   await view.rerender({ range: window.toTail() });
   expect(view.container.querySelectorAll('*').length).toBe(initial);
+ }, 60000);
+
+ it.each([false, true])('retains native selected text nodes through twenty navigation attempts (reverse=%s)', async reverse => {
+  const items = buildTranscriptModel(richHistory(), { sessionId: 'rich-budget', isStreaming: false, groupingEnabled: true }).items;
+  let root: HTMLElement | null = null;
+  const windowed = createTranscriptWindow({
+   cost: i => transcriptItemCost(items[i]), budget: TRANSCRIPT_CONTENT_BUDGET,
+   getPinnedRange: () => selectedRowRange(root, ':scope > [data-transcript-index]', row => Number(row.dataset.transcriptIndex))
+  });
+  const view = render(RichTranscriptWindow, { items, range: windowed.setItemCount(items.length) });
+  root = view.container;
+  const rows = root.querySelectorAll('[data-transcript-index]');
+  const start = document.createTreeWalker(rows[rows.length - 3], NodeFilter.SHOW_TEXT).nextNode()!;
+  const endWalker = document.createTreeWalker(rows[rows.length - 1], NodeFilter.SHOW_TEXT);
+  let end: Node = endWalker.nextNode()!, next: Node | null;
+  while ((next = endWalker.nextNode())) end = next;
+  const selection = document.getSelection()!;
+  if (reverse) selection.setBaseAndExtent(end, end.textContent!.length, start, 0);
+  else selection.setBaseAndExtent(start, 0, end, end.textContent!.length);
+  const selected = selection.toString();
+  expect(selected.length).toBeGreaterThan(800);
+  for (let i = 0; i < 20; i++) {
+   const range = i < 10 ? windowed.loadOlder() : windowed.extendNewer();
+   await view.rerender({ range });
+   expect(start.isConnected && end.isConnected).toBe(true);
+   expect(selection.toString()).toBe(selected);
+   expect(root.querySelectorAll('.msg-virtualized').length).toBeLessThanOrEqual(120);
+   expect(root.querySelectorAll('*').length).toBeLessThan(12000);
+  }
+  const before = windowed.visibleRange;
+  selection.collapseToStart();
+  const released = windowed.loadOlder();
+  expect(released.start).toBeLessThan(before.start);
+  await view.rerender({ range: released });
  }, 60000);
 });

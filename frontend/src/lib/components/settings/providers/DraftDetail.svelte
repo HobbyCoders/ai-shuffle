@@ -82,7 +82,7 @@
 			<RowGroup title="Sign in">
 				<SettingRow
 					label={provider.id === 'openai' ? 'Sign in with ChatGPT' : 'Sign in with SuperGrok'}
-					hint="No key needed"
+					hint="Becomes active after sign-in; other subscriptions turn off"
 				>
 					<button
 						type="button"
@@ -104,6 +104,6 @@
 	{:else if draft.flavor === 'fal'}
 		<FalKeySetup onFinish={finish} onCancel={cancel} />
 	{:else}
-		<KeySetup {draft} makeActive={claudeFirst} onFinish={finish} onCancel={cancel} />
+		<KeySetup {draft} onFinish={finish} onCancel={cancel} />
 	{/if}
 </DetailPane>

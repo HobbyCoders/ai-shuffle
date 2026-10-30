@@ -177,7 +177,7 @@ async def test_spoken_model_ambiguity_refuses_before_dispatch(world, explicit):
                                                 {"id": "b", "name": "Shared-Model"}])
         wording = "prov:lane:SHARED MODEL"
     else:
-        db.create_model_provider("other", "Other", "openai", "https://example.invalid/v1",
+        db.create_model_provider("other", "Other", "custom", "https://example.invalid/v1",
                                  models=[{"id": "astra", "label": "GPT 6 Astra"}])
         wording = "gpt 6 astra"
     _turn("parent", "user", f"use {wording}")
@@ -188,7 +188,7 @@ async def test_spoken_model_ambiguity_refuses_before_dispatch(world, explicit):
 
 
 def test_spoken_composite_stays_on_explicit_provider(world):
-    world[0].create_model_provider("other", "Other", "openai", "https://example.invalid/v1",
+    world[0].create_model_provider("other", "Other", "custom", "https://example.invalid/v1",
                                    models=[{"id": "astra", "label": "GPT 6 Astra"}])
     assert mo.resolve("prov:lane:GPT 6 ASTRA").model == "prov:lane:astra"
     assert mo.resolve("prov:other:astra").model == "prov:other:astra"
@@ -1004,7 +1004,7 @@ async def test_startsession_reads_model_preference_for_inherited_and_spoken_mode
 
 
 async def test_spoken_model_startsession_ambiguity_creates_no_chat(chats):
-    chats[0].create_model_provider("other", "Other", "openai", "https://example.invalid/v1",
+    chats[0].create_model_provider("other", "Other", "custom", "https://example.invalid/v1",
                                    models=[{"id": "different", "label": "GPT 6 Astra"}])
     _turn("caller", "user", "start it on gpt 6 astra", profile="agent")
     before = len(sessions.get_sessions(limit=100))

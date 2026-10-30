@@ -40,7 +40,7 @@ def pending_chunk_delay(request, monkeypatch):
     monkeypatch.setattr(engine, "_apply_pending_chunk", chunk)
 
 
-def backlog(workers, count, *, withhold=()):
+def backlog(workers, count, *, withhold=(), buffer=True):
     a, b = workers("publisher"), workers("receiver")
     with a.active():
         engine.create_network("Pending budget")
@@ -58,11 +58,12 @@ def backlog(workers, count, *, withhold=()):
         catalog.hydrate("chat")
         ops = store.ops_since(marks, limit=count + 10, exclude_origin=b.device_id)
     assert len(ops) >= count
-    with b.active():
-        # Real producer envelopes and real out-of-order receive, not seeded mirrors.
-        delivered = [op for index, op in enumerate(ops) if index > 0 and index not in withhold]
-        result = engine.apply_batch(delivered)
-        assert result.pending == len(delivered)
+    if buffer:
+        with b.active():
+            # Real producer envelopes and out-of-order receive, not seeded mirrors.
+            delivered = [op for index, op in enumerate(ops) if index > 0 and index not in withhold]
+            result = engine.apply_batch(delivered)
+            assert result.pending == len(delivered)
     return a, b, ops
 
 
@@ -72,6 +73,8 @@ def measured_apply(monkeypatch, worker):
     active = []
     real_db, real_apply = engine.get_db, engine._apply_next
     real_append = engine._apply_event_append
+    real_stash = store.stash_pending
+    real_stash_batch = getattr(store, "stash_pending_batch", None)
     real_lock, real_observe = store.lock_state, store.observe_clock
 
     def lock_call(fn, *args, **kwargs):
@@ -105,6 +108,16 @@ def measured_apply(monkeypatch, worker):
             active[-1]["ops"] += len(chunk)
         return appended
 
+    def stash(cursor, envelope):
+        value = real_stash(cursor, envelope)
+        active[-1]["ops"] += 1
+        return value
+
+    def stash_batch(cursor, envelopes):
+        value = real_stash_batch(cursor, envelopes)
+        active[-1]["ops"] += len(envelopes)
+        return value
+
     statements = []
     trace = getattr(worker.raw, "set_trace_callback", None)
     previous_wait = None
@@ -126,6 +139,9 @@ def measured_apply(monkeypatch, worker):
         patch.setattr(engine, "get_db", transaction)
         patch.setattr(engine, "_apply_next", apply)
         patch.setattr(engine, "_apply_event_append", append)
+        patch.setattr(store, "stash_pending", stash)
+        if real_stash_batch is not None:
+            patch.setattr(store, "stash_pending_batch", stash_batch)
         patch.setattr(store, "lock_state", lambda *a, **kw: lock_call(real_lock, *a, **kw))
         patch.setattr(store, "observe_clock", lambda *a, **kw: lock_call(real_observe, *a, **kw))
         start = perf_counter()
@@ -147,6 +163,21 @@ def measured_apply(monkeypatch, worker):
                 "db_operations": len(statements),
                 "db_metric": "sqlite_statements" if trace else "libpq_round_trips",
             }))
+
+
+@pytest.mark.parametrize("use_postgres", [False, True], ids=["shim", "postgres"])
+def test_buffer_phase_has_a_transaction_work_and_round_trip_budget(request, use_postgres, monkeypatch):
+    factory = request.getfixturevalue("pg_workers" if use_postgres else "workers")
+    a, b, ops = backlog(factory, 193, buffer=False)
+    chunks = (len(ops) - 2) // engine.APPLY_CHUNK + 1
+    with b.active(), measured_apply(monkeypatch, b) as (transactions, statements):
+        result = engine.apply_batch(ops[1:])
+    assert result.pending == len(ops) - 1 and result.applied == result.retry == result.rejected == 0
+    assert len(transactions) == chunks
+    assert sum(t["ops"] for t in transactions) == len(ops) - 1
+    assert max(t["ops"] for t in transactions) <= engine.APPLY_CHUNK
+    # Five statements plus commit/release per bounded buffering transaction.
+    assert len(statements) <= chunks * 7
 
 
 def test_pending_backlog_has_a_transaction_work_budget(workers, monkeypatch):

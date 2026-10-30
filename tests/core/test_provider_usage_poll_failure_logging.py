@@ -10,6 +10,7 @@ minutes, so the escalation is paired with time-based de-duplication.
 from __future__ import annotations
 
 import logging
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -105,8 +106,15 @@ class _Resp:
         return {}
 
 
-async def test_unconfigured_openai_does_not_log_repeated_billing_failures(caplog):
+async def test_openai_api_rows_never_poll_or_log_billing_failures(caplog, monkeypatch):
     monitor = pu.ProviderUsageMonitor()
+    monkeypatch.setattr("app.db.database.get_enabled_model_providers", lambda **kw: [
+        {"id": "not-configured", "provider_type": "openai", "base_url": "https://api.openai.com/v1"},
+    ])
+    monkeypatch.setattr(monitor, "_poll_fal", AsyncMock())
+    get = AsyncMock(side_effect=AssertionError("OpenAI API billing must not be polled"))
+    monkeypatch.setattr(pu, "usage_get", get)
     with caplog.at_level(logging.DEBUG, logger=pu.__name__):
-        await monitor._poll_openai_provider({"id": "not-configured"})
+        await monitor.poll_once()
+    get.assert_not_awaited()
     assert not [r for r in caplog.records if r.levelno == logging.ERROR]

@@ -31,9 +31,16 @@ export async function authenticate(browser, access, options = {}) {
 	}
 }
 
+import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+
+/** Check/create the destination without truncating an earlier report, before resources start. */
+export function validateOutput(file) {
+	const descriptor = fs.openSync(file, 'a');
+	fs.closeSync(descriptor);
+}
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 export function loadPlaywright() {

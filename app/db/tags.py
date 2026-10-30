@@ -198,10 +198,12 @@ def get_tags_for_sessions(session_ids: list[str]) -> dict[str, list[TagSummary]]
     return result
 
 
-from app.core.resource_sync import install_database_mutations as _install_resource_sync
+from app.core.resource_sync import install_database_mutations as _install_resource_sync, replicated_wakes_enabled
 
-_install_resource_sync(
-    globals(), 'tags',
-    'create_tag update_tag delete_tag add_session_tag remove_session_tag set_session_tags',
-    scope='shared',
-)
+_tag_writers = 'create_tag update_tag delete_tag'
+_session_tag_writers = 'add_session_tag remove_session_tag set_session_tags'
+if replicated_wakes_enabled():
+    _install_resource_sync(globals(), 'sessions', _session_tag_writers, scope='session')
+else:
+    _tag_writers += ' ' + _session_tag_writers
+_install_resource_sync(globals(), 'tags', _tag_writers, scope='shared')

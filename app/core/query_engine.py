@@ -676,6 +676,9 @@ async def execute_query(
 
     try:
         await adapter.connect_with_sdk_options(options)
+        # Headless metadata is created before connect, unlike the pooled paths.
+        # Book the credential account actually bound by lazy client construction.
+        metadata[USAGE_PROVIDER_KEY] = getattr(options, "aih_provider_id", None)
         await adapter.send_query(prompt)
 
         async for message in adapter.receive_events():

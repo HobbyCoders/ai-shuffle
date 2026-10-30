@@ -59,8 +59,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python scripts/ci/edge_publication_gate.py --select
 
-  publish:
+  ui:
     needs: gate
+    if: needs.gate.outputs.ready == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/source-ui-bundle.yml
+    with:
+      source-ref: ${{ needs.gate.outputs.revision }}
+
+  publish:
+    needs: [gate, ui]
     if: needs.gate.outputs.ready == 'true'
     # A manual retry must not interrupt a scheduled signing/database write.
     concurrency:
@@ -116,10 +125,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python -I scripts/ci/edge_publication_gate.py --source-root "$GITHUB_WORKSPACE"
+      - uses: actions/download-artifact@v4
+        if: steps.ci.outputs.ready == 'true'
+        with:
+          name: source-ui
+          path: ${{ runner.temp }}/source-ui
       - name: Publish signed source revision
         if: steps.ci.outputs.ready == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE_UI_BUNDLE_FILE: ${{ runner.temp }}/source-ui/ui.zip
           DESKTOP_APPLICATION_SIGNING_KEY: ${{ secrets.DESKTOP_APPLICATION_SIGNING_KEY }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
