@@ -5,10 +5,11 @@ name: Android minified release smoke
 on:
   pull_request:
   workflow_dispatch:
+  workflow_call:
 permissions:
   contents: read
 concurrency:
-  group: android-minified-${{ github.event.pull_request.number || github.ref }}
+  group: ci-android-minified-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

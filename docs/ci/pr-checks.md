@@ -47,6 +47,11 @@ These workflows retain manual dispatch and also run on unfiltered
 - `container-postgres.yml`: candidate image lifecycle, isolation and install checks,
   without publishing or signing. This is broader than a small policy check but
   covers the production container path without requiring secrets.
+- `ci-android-minified.yml`: build the R8/resource-shrunk Play release bundle and
+  test the non-debuggable `releaseSmoke` variant on API 34/36. Its fixture launcher
+  and disposable signing are test-only; release keep rules are unchanged. The
+  existing manual `android.yml` still runs the broader **debug** instrumentation
+  suite. Neither workflow publishes on a PR or needs publisher credentials.
 
 `ci-folder-confinement.yml` stays manual because it is macOS-only; Linux folder
 confinement is already covered by CI Backend. Stable release authorization is unchanged.
