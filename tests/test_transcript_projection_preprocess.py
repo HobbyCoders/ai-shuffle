@@ -1,12 +1,22 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
+from datetime import datetime, timezone
 
 import pytest
 
 from app.api import events as serving
 from app.core.transcript_views import preprocess
+
+
+def test_serving_and_recording_share_the_pure_canonical_helpers():
+    from app.core import transcript_replay, turn_recorder
+
+    assert serving._wire is transcript_replay._wire
+    assert serving._coalesce_deltas is transcript_replay._coalesce_deltas
+    assert serving._coalesce_progress is transcript_replay._coalesce_progress
+    assert turn_recorder.slim_turn_usage_payload is transcript_replay.slim_turn_usage_payload
+    assert turn_recorder.compact_context_usage is transcript_replay.compact_context_usage
 
 
 def rows_for_corpus():

@@ -1,20 +1,25 @@
-"""One bounded, cancellation-joined CPU worker for the dark producer.
+"""One admitted CPU operation in a supervised, credential-free Python child.
 
-Admission happens before executor submission. No request or shutdown can leave
-an unbounded queue of preprocessing or JSON jobs behind the serving loop.
+Private bounded stdio, not multiprocessing: no inherited application entrypoint,
+OS environment or resource tracker. Pickle carries only server-owned calls and
+values over owned pipes, never bytes from an HTTP/worker/client transport.
 """
 from __future__ import annotations
 
 import asyncio
-import multiprocessing
-import os
+import pickle
+import struct
+import sys
 from collections.abc import Callable
-from concurrent.futures import ProcessPoolExecutor
-from concurrent.futures.process import BrokenProcessPool
-from functools import partial
+from pathlib import Path
 from typing import TypeVar
 
+from app.core import transcript_replay as replay
+
+from .child_process import launch, stop
+
 T = TypeVar("T")
+MAX_PREPARATION_BYTES = 32 * 1024 * 1024
 
 
 class PreparationBusy(RuntimeError):
@@ -25,19 +30,8 @@ class PreparationUnavailable(RuntimeError):
     pass
 
 
-def _invoke(call, args, kwargs, environment):
-    # The canonical preprocessor reads these live switches. A spawned worker
-    # must see the current values, not just those inherited at first startup.
-    for name, value in environment.items():
-        if value is None:
-            os.environ.pop(name, None)
-        else:
-            os.environ[name] = value
-    return call(*args, **kwargs)
-
-
 async def join_worker(future: asyncio.Future):
-    """Defer every cancellation until owned executor work has actually finished."""
+    """Defer every cancellation until owned work has actually finished."""
     cancelled = False
     while not future.done():
         try:
@@ -45,57 +39,86 @@ async def join_worker(future: asyncio.Future):
         except asyncio.CancelledError:
             cancelled = True
         except Exception:
-            # The worker has finished; propagate its result below, unless an
-            # earlier cancellation must remain the caller's terminal outcome.
             break
     if cancelled:
         if not future.cancelled():
-            future.exception()  # Consume a worker failure without losing cancellation.
+            future.exception()
         raise asyncio.CancelledError
     return future.result()
 
 
+def _packet(value) -> bytes:
+    data = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+    if len(data) > MAX_PREPARATION_BYTES:
+        raise PreparationUnavailable("preparation_unavailable")
+    return struct.pack("!I", len(data)) + data
+
+
 class PreparationWorker:
     def __init__(self) -> None:
-        self._executor: ProcessPoolExecutor | None = None
-        self._future: asyncio.Future | None = None
+        self._process: asyncio.subprocess.Process | None = None
+        self._future: asyncio.Task | None = None
         self._closing: asyncio.Task | None = None
+        self._sequence = 0
+
+    async def _stop(self) -> None:
+        process, self._process = self._process, None
+        await stop(process)
+
+    async def _exchange(self, request):
+        if self._process is None or self._process.returncode is not None:
+            await self._stop()
+            # -I ignores PYTHON* injection. The entrypoint adds only its own
+            # checked-in root, never a caller/environment-provided import path.
+            self._process = await launch(
+                sys.executable, "-I", str(Path(__file__).with_name("preparation_child.py")),
+                limit=MAX_PREPARATION_BYTES + 1)
+        process = self._process
+        assert process.stdin is not None and process.stdout is not None
+        # Large marshaling remains off the serving loop, with cancellation
+        # joined before the one admitted operation can release its slot.
+        packet = await join_worker(asyncio.create_task(asyncio.to_thread(_packet, request)))
+        process.stdin.write(packet)
+        await process.stdin.drain()
+        size, = struct.unpack("!I", await process.stdout.readexactly(4))
+        if not 0 < size <= MAX_PREPARATION_BYTES:
+            raise PreparationUnavailable("preparation_unavailable")
+        data = await process.stdout.readexactly(size)
+        value = await join_worker(asyncio.create_task(asyncio.to_thread(pickle.loads, data)))
+        if (not isinstance(value, tuple) or len(value) != 3 or value[0] != self._sequence
+                or type(value[1]) is not bool or (not value[1] and not isinstance(value[2], Exception))):
+            raise PreparationUnavailable("preparation_unavailable")
+        return value
+
+    async def _execute(self, request):
+        try:
+            response = await asyncio.wait_for(self._exchange(request), 30.0)
+        except (OSError, EOFError, ValueError, TypeError, pickle.PickleError,
+                struct.error, asyncio.IncompleteReadError, asyncio.TimeoutError,
+                PreparationUnavailable) as error:
+            await self._stop()
+            raise PreparationUnavailable("preparation_unavailable") from error
+        if not response[1]:
+            raise response[2]
+        return response[2]
 
     async def run(self, call: Callable[..., T], *args, **kwargs) -> T:
-        # One process and one admitted job, never an executor submission queue.
-        # Spawn on every platform: forking the multithreaded server would inherit
-        # DB sockets and locks. Calls/arguments are private, server-owned values.
         if self._closing is not None or (self._future is not None and not self._future.done()):
             raise PreparationBusy("preparation_busy")
-        from app.api import events
-        environment = {name: os.environ.get(name) for name in
-                       (events._COALESCE_PROGRESS_ENV, events._SLIM_USAGE_ENV)}
-        try:
-            if self._executor is None:
-                self._executor = ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"))
-            future = asyncio.get_running_loop().run_in_executor(
-                self._executor, partial(_invoke, call, args, kwargs, environment))
-            self._future = future
-            return await join_worker(future)
-        except BrokenProcessPool as error:
-            executor, self._executor = self._executor, None
-            if executor is not None:
-                await join_worker(asyncio.create_task(asyncio.to_thread(executor.shutdown, wait=True)))
-            raise PreparationUnavailable("preparation_unavailable") from error
+        # Exactly two normalized switches cross the protocol, not raw env text.
+        environment = {name: "1" if replay._perf_switch_on(name) else "0"
+                       for name in (replay._COALESCE_PROGRESS_ENV, replay._SLIM_USAGE_ENV)}
+        self._sequence += 1
+        request = (self._sequence, call, args, kwargs, environment)
+        self._future = asyncio.create_task(self._execute(request))
+        return await join_worker(self._future)
 
     async def _shutdown(self) -> None:
-        if self._future is not None and not self._future.done():
-            # Wait for completion without re-raising the run owner's failure.
-            # This private shutdown task is itself cancellation-shielded.
-            await asyncio.wait((self._future,))
-        executor, self._executor = self._executor, None
-        self._future = None
-        if executor is not None:
-            await asyncio.to_thread(executor.shutdown, wait=True, cancel_futures=True)
+        if self._future is not None:
+            await asyncio.gather(self._future, return_exceptions=True)
+        await self._stop()
 
     async def close(self) -> None:
-        # Concurrent/repeatedly cancelled stop calls join ONE shutdown task.
-        # Returning means the owned child has exited, not merely been signalled.
         if self._closing is None:
             self._closing = asyncio.create_task(self._shutdown())
         await join_worker(self._closing)

@@ -339,12 +339,18 @@ loop scheduling; bounded source and derived-state keyset scans repair dropped
 hints, including deletion while the producer was offline. Retired generations
 are collected in finite batches even during ongoing live traffic. CPU-heavy
 restore, coalescing, frame construction and IPC JSON preparation use one
-admission-bounded, cancellation-joined **spawned process**, not a Python thread
-sharing the serving loop's GIL. It admits one job, reuses one child, refreshes
-canonical replay switches per call and joins the child on shutdown. Database
-operations stay on the existing asynchronous thread path; no pool/socket is
-forked into the CPU child. The warm-runtime ingest ratchet runs repeatedly in
-CI on both the SQLite shim and native PostgreSQL.
+admission-bounded, cancellation-joined **private Python subprocess**, not a
+Python thread sharing the serving loop's GIL. Both it and Node use the same
+minimal environment allowlist and supervised stdio boundary. The lightweight
+`-I` entrypoint imports pure canonical replay helpers, not `app.main`, API,
+settings or provider modules; no multiprocessing resource tracker is created.
+A stdin-EOF watchdog ends CPU work on parent death on Linux and Windows. It
+admits one job, reuses one child, refreshes two normalized replay switches per
+call and joins the child on shutdown. Database operations stay on the existing
+asynchronous thread path; no pool/socket is forked into the CPU child. Both
+SQLite and native PostgreSQL have an unconditional CI measurement on PRs;
+main-suite repeats each five times. Cold application-import and abrupt-death
+regressions cover the child boundary separately from warm contention limits.
 Implicit interrupt prose and its user barrier stay in carry regardless of
 window distance; a deep rewind without a known barrier fails closed rather
 than inventing an older target. No source append or replication writer awaits

@@ -48,7 +48,7 @@ jobs:
           import subprocess
           import sys
 
-          wanted = {"pydantic", "pydantic-settings", "pytest", "pytest-timeout"}
+          wanted = {"pydantic", "pydantic-settings", "pytest", "pytest-timeout", "pytest-asyncio", "psutil"}
           selected = {}
           for filename in ("requirements.txt", "requirements-dev.txt"):
               for line in Path(filename).read_text(encoding="utf-8").splitlines():
@@ -69,3 +69,13 @@ jobs:
         run: >-
           python -m pytest tests/core/test_instance_identity.py
           --confcutdir=tests/core -o addopts="" -p no:cacheprovider --timeout=60 -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Exercise native projection child ownership and startup
+        # Same opt-in boundary tests on native Windows, not only Linux shards.
+        # They import pure replay modules and need no backend/database fixtures.
+        run: >-
+          python -m pytest tests/test_transcript_projection_child_boundary.py
+          tests/test_transcript_projection_preparation.py
+          --confcutdir=tests/core -o addopts="" -p no:cacheprovider --timeout=45 -q

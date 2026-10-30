@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import multiprocessing
 import os
 import time
 from pathlib import Path
 
+import psutil
 import pytest
 
 from app.core.transcript_views.preparation import (
@@ -54,7 +54,7 @@ async def test_cpu_work_is_off_process_and_overlap_is_rejected_before_submission
         release.touch()
         await task
         await worker.close()
-    assert pid not in {process.pid for process in multiprocessing.active_children()}
+    assert not psutil.pid_exists(pid)
 
 
 @pytest.mark.asyncio
@@ -80,7 +80,7 @@ async def test_cancellation_joins_owned_work_before_restart(tmp_path, worker_fai
         release.touch()
         await asyncio.gather(task, return_exceptions=True)
         await worker.close()
-    assert pid not in {process.pid for process in multiprocessing.active_children()}
+    assert not psutil.pid_exists(pid)
 
 
 def fail():
@@ -115,7 +115,7 @@ async def test_concurrent_cancelled_closes_join_child_exit(tmp_path):
         with pytest.raises(asyncio.CancelledError):
             await first
         await second
-        assert pid not in {process.pid for process in multiprocessing.active_children()}
+        assert not psutil.pid_exists(pid)
     finally:
         release.touch()
         await asyncio.gather(*(t for t in (task, first, second) if t is not None), return_exceptions=True)

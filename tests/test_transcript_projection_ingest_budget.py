@@ -82,12 +82,6 @@ async def test_background_projection_preserves_ingest_p95(monkeypatch):
         await bridge.close()
 
 
-def _off_process_frames(owner_pid, *args):
-    from app.core.transcript_views.producer import _prepare_frames
-    assert os.getpid() != owner_pid
-    return _prepare_frames(*args)
-
-
 @pytest.mark.asyncio
 async def test_large_admissible_folds_preserve_loop_lag_and_ingest_p95(monkeypatch):
     from app.core.transcript_views import producer as implementation
@@ -112,7 +106,10 @@ async def test_large_admissible_folds_preserve_loop_lag_and_ingest_p95(monkeypat
     async def off_process(call, *args, **kwargs):
         nonlocal preparations
         if call is implementation._prepare_frames:
-            result = await prepare(_off_process_frames, owner, *args, **kwargs)
+            sequence = bridge._preparation._sequence
+            result = await prepare(call, *args, **kwargs)
+            assert bridge._preparation._sequence == sequence + 1
+            assert bridge._preparation._process.pid != owner
             preparations += 1
             return result
         return await prepare(call, *args, **kwargs)

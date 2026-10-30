@@ -9,16 +9,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
+from .child_process import SAFE_ENV_KEYS as SAFE_ENV_KEYS
+from .child_process import launch, stop
 from .preparation import PreparationBusy, PreparationUnavailable, PreparationWorker
 
 MAX_PACKET_BYTES = 24 * 1024 * 1024
-SAFE_ENV_KEYS = frozenset({"PATH", "Path", "SystemRoot", "SYSTEMROOT", "WINDIR", "TMP", "TEMP"})
 
 
 class ReducerUnavailable(RuntimeError):
@@ -88,23 +87,7 @@ class ReducerBridge:
 
     async def _stop(self) -> None:
         process, self._process = self._process, None
-        if process is None:
-            return
-        if process.stdin is not None:
-            process.stdin.close()
-        if process.returncode is None:
-            try:
-                process.terminate()
-            except ProcessLookupError:
-                pass
-        try:
-            await asyncio.wait_for(process.wait(), 1.0)
-        except asyncio.TimeoutError:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-            await process.wait()
+        await stop(process)
 
     async def close(self) -> None:
         async with self._lock:
@@ -121,22 +104,10 @@ class ReducerBridge:
         if not self.node:
             raise ReducerUnavailable("node_missing")
         manifest = await self.prepare(verified_manifest, self.directory)
-        environment = {key: value for key, value in os.environ.items() if key in SAFE_ENV_KEYS}
-        options: dict[str, Any] = {}
-        if os.name == "nt":
-            options["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS
         try:
-            self._process = await asyncio.create_subprocess_exec(
+            self._process = await launch(
                 self.node, "--max-old-space-size=192", str(self.directory / "reducer.cjs"),
-                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL, env=environment,
-                limit=MAX_PACKET_BYTES + 1, **options,
-            )
-            if os.name == "posix":
-                try:
-                    os.setpriority(os.PRIO_PROCESS, self._process.pid, 10)
-                except OSError:
-                    pass  # Windows and restricted runtimes still retain all bounds.
+                limit=MAX_PACKET_BYTES + 1)
             assert self._process.stdout is not None
             line = await asyncio.wait_for(self._process.stdout.readline(), self.timeout)
             ready = json.loads(line)

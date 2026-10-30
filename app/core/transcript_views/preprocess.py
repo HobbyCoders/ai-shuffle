@@ -6,11 +6,11 @@ No clipping, alternate progress rules or Python message reducer lives here.
 """
 from __future__ import annotations
 
-from copy import deepcopy
 import json
+from copy import deepcopy
 from typing import Any, Iterable
 
-from app.api import events as serving
+from app.core import transcript_replay as serving
 
 MAX_RAW_ROWS = 8192
 MAX_WIRE_FRAMES = 1024
@@ -138,3 +138,26 @@ class ReplayTail:
         if len(self.raw) > MAX_RAW_ROWS or len(self.closed) > MAX_WIRE_FRAMES:
             raise TailUnavailable("mutable_tail_limit")
         self.dump()
+
+
+def _prepare_frames(tail: ReplayTail, rows, lookup):
+    tail.reevaluate(lookup)
+    if rows:
+        tail.append(rows, lookup)
+    # Preparation owns a separate process; explicitly return the modified tail
+    # rather than relying on thread-shared mutations before checkpointing it.
+    return tail, tail.frames()
+
+
+def _checkpoint_tail(tail: ReplayTail, seq: int | None, lookup):
+    emitted = []
+    if seq is not None:
+        # Only unsuperseded input deltas actually committed at this boundary
+        # may later need a rebuild when a full tool.use arrives.
+        for row in tail.raw:
+            if row['event_type'] == serving._TOOL_INPUT_DELTA and int(row['seq']) <= seq:
+                key = lookup_key(row.get('turn_id'), (row.get('payload') or {}).get('tool_use_id'))
+                if key is not None and lookup.get(key, 0) <= int(row['seq']):
+                    emitted.append((key, int(row['seq'])))
+        tail.acknowledge(seq)
+    return emitted, tail.dump()
