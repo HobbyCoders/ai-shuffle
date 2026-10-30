@@ -46,6 +46,7 @@ python3 ci/check-instrumentation.py "$out/cold-chat.txt"
 # the old 600s suite deadline killed a healthy test, not a hung refresh.
 # Give the full suite room while bounding each test independently (milliseconds).
 # Keep the host deadline as a backstop for an unresponsive instrumentation process.
+# Consent coverage also exercises a separate APK so the bundled WebView is not the target.
 timeout --kill-after=15s 1200s adb -s emulator-5554 shell am instrument -w -r \
   -e timeout_msec 180000 \
   -e notClass 'com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#realSystemSaveDialogReturnsToChatAndCompletesTransfer' \
