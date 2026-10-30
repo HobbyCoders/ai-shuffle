@@ -69,6 +69,7 @@
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
 	import { UI_MOUNT } from '$lib/utils/ui-signature';
 	import TiptapEditor from './TiptapEditor.svelte';
+	import type { Editor } from '@tiptap/core';
 	import VoiceRecorder from './VoiceRecorder.svelte';
 	import VoiceCallButton from './VoiceCallButton.svelte';
 	import StopButton from './StopButton.svelte';
@@ -316,10 +317,22 @@
 		const currentSessionId = get(activeSession).sessionId;
 		if (currentSessionId !== initialSessionId) return; // session switched
 		saveDraftImmediately();
-		const selection = editorRef?.getEditor()?.state.selection;
-		if (selection) composerSelections.set(currentSessionId, { from: selection.from, to: selection.to });
 	});
-	onMount(() => restoreComposerSelection(initialSessionId, initialComposerDraft));
+	// A remounted composer (a chat archived and restored, a layout change)
+	// puts back the caret its chat had, once the editor is bound (#864).
+	let mountSelectionRestored = false;
+	$effect(() => {
+		if (mountSelectionRestored || !editorRef?.getEditor()) return;
+		mountSelectionRestored = true;
+		if (get(activeSession).sessionId === initialSessionId) restoreComposerSelection(initialSessionId, initialComposerDraft);
+	});
+	/** The editor is going away: keep its caret with the chat whose draft it holds. */
+	function beforeEditorDestroy(editor: Editor) {
+		detachComposerDictation(editor);
+		if (!ownsComposer() || messageSent) return;
+		const { from, to } = editor.state.selection;
+		composerSelections.set(prevSessionId, { from, to });
+	}
 
 	let isUploading = $state(false);
 	let isRecording = $state(false);
@@ -1614,7 +1627,7 @@
 
 						<TiptapEditor
 							bind:this={editorRef}
-							onBeforeDestroy={detachComposerDictation}
+							onBeforeDestroy={beforeEditorDestroy}
 							placeholder={composerPlaceholder}
 							suggestion={ghostReply}
 							onAcceptSuggestion={acceptSuggestion}

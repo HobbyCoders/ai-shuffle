@@ -133,4 +133,19 @@ describe('composer selection follows the chat', () => {
 		expect(editor.getText()).toBe('other');
 		expect([editor.state.selection.from, editor.state.selection.to]).toEqual([2, 4]);
 	});
+
+	it('restores the caret when the composer remounts on the same chat', async () => {
+		activeSession.setDraft('ABCDEFGHIJ');
+		const first = render(ChatInput);
+		const firstEl = first.container.querySelector<HTMLElement>('.tiptap')!;
+		await waitFor(() => expect(firstEl.textContent).toBe('ABCDEFGHIJ'));
+		(firstEl as HTMLElement & { editor: import('@tiptap/core').Editor }).editor.commands.setTextSelection({ from: 3, to: 7 });
+		first.unmount();
+
+		const second = render(ChatInput);
+		const secondEl = second.container.querySelector<HTMLElement>('.tiptap')!;
+		await waitFor(() => expect(secondEl.textContent).toBe('ABCDEFGHIJ'));
+		const editor = (secondEl as HTMLElement & { editor: import('@tiptap/core').Editor }).editor;
+		await waitFor(() => expect([editor.state.selection.from, editor.state.selection.to]).toEqual([3, 7]));
+	});
 });
