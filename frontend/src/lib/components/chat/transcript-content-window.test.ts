@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createTranscriptWindow } from './transcript-window';
+import { createTranscriptWindow, type TranscriptRange } from './transcript-window';
 
 describe('nested transcript mount budget', () => {
  it('atomically resumes with the incoming item vector, including an empty hydration reset', () => {
@@ -46,5 +46,45 @@ describe('nested transcript mount budget', () => {
   expect(seen.has(50)).toBe(true);
   expect(window.visibleRange.start).toBe(0);
   expect(window.windowAround(50)).toEqual({ start: 50, end: 51 });
+ });
+
+ it('pins the selected span in either direction without accumulating mounted history', () => {
+  let pinned: TranscriptRange | null = { start: 94, end: 96 };
+  const window = createTranscriptWindow({ cap: 8, cost: () => 100, budget: 800, getPinnedRange: () => pinned });
+  window.setItemCount(100);
+  for (let i = 0; i < 20; i++) {
+   const range = i < 10 ? window.loadOlder() : window.extendNewer();
+   expect(range.start).toBeLessThanOrEqual(94);
+   expect(range.end).toBeGreaterThanOrEqual(96);
+   expect(range.end - range.start).toBeLessThanOrEqual(8);
+   expect((range.end - range.start) * 100).toBeLessThanOrEqual(800);
+  }
+  window.windowAround(0);
+  expect(window.selectionLimited).toBe(true);
+  pinned = null;
+  expect(window.windowAround(0)).toEqual({ start: 0, end: 8 });
+  expect(window.selectionLimited).toBe(false);
+ });
+ it('also pins unweighted nested windows and releases on the next navigation after collapse', () => {
+  let pinned: TranscriptRange | null = null;
+  const window = createTranscriptWindow({ cap: 60, step: 20, getPinnedRange: () => pinned });
+  const original = window.setItemCount(2000);
+  pinned = { start: 1998, end: 2000 };
+  expect(window.loadOlder()).toEqual(original);
+  expect(window.selectionLimited).toBe(true);
+  pinned = null;
+  expect(window.loadOlder()).toEqual({ start: 1920, end: 1980 });
+  expect(window.selectionLimited).toBe(false);
+ });
+ it('admits no unselected rows if already-selected content grows beyond the content budget', () => {
+  let cost = 20, pinned: TranscriptRange | null = null;
+  const window = createTranscriptWindow({ cap: 8, cost: () => cost, budget: 100, getPinnedRange: () => pinned });
+  expect(window.setItemCount(20)).toEqual({ start: 15, end: 20 });
+  pinned = { start: 17, end: 20 };
+  cost = 50;
+  expect(window.loadOlder()).toEqual(pinned);
+  expect(window.selectionLimited).toBe(true);
+  pinned = null;
+  expect(window.toTail()).toEqual({ start: 18, end: 20 });
  });
 });

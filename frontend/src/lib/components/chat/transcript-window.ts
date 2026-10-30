@@ -20,6 +20,28 @@
  * when a shift also unmounts rows at the opposite edge. */
 export interface TranscriptRange { readonly start: number; readonly end: number }
 
+/** Read the actual native selection before a range shift, including reverse
+ * selections and endpoints outside the list. Resolve row keys against the
+ * current model: a prepend must not pin the old numerical indices. */
+export function selectedRowRange(
+	root: HTMLElement | null | undefined,
+	selector: string,
+	indexOf: (row: HTMLElement) => number
+): TranscriptRange | null {
+	const selection = root?.ownerDocument.getSelection();
+	if (!root || !selection || selection.isCollapsed || !selection.rangeCount) return null;
+	const selected = selection.getRangeAt(0);
+	let start = Infinity, end = -1;
+	for (const row of root.querySelectorAll<HTMLElement>(selector)) {
+		if (!selected.intersectsNode(row)) continue;
+		const index = indexOf(row);
+		if (index < 0) continue;
+		start = Math.min(start, index);
+		end = Math.max(end, index + 1);
+	}
+	return end < 0 ? null : { start, end };
+}
+
 /** Hard limit for outer items; nested row windows need their own bound. */
 export const TRANSCRIPT_WINDOW_CAP = 120;
 /** Approximate nested markup work, in addition to the outer-row cap. A single
@@ -57,11 +79,13 @@ function rangeAt(start: number, count: number, cap: number, previous?: Transcrip
 	return previous?.start === start && previous.end === end ? previous : { start, end };
 }
 
-/** Pure per-view range controller. No timers or idle expansion: only explicit
+/** Per-view range controller. No timers or idle expansion: only explicit
  * navigation moves into history. Apply the same controller to rows inside a
  * large group: an outer-item cap alone cannot bound nested mounted rows. */
-export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30, cost, budget = Infinity }: {
-	cap?: number; step?: number; cost?: (index: number) => number; budget?: number
+export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30, cost, budget = Infinity, getPinnedRange }: {
+	cap?: number; step?: number; cost?: (index: number) => number; budget?: number;
+	/** Only currently mounted, selected rows may be pinned; never retained DOM trees. */
+	getPinnedRange?: () => TranscriptRange | null
 } = {}) {
 	if (!Number.isInteger(cap) || cap < 1 || !Number.isInteger(step) || step < 1 || !(budget > 0)) {
 		throw new RangeError('Transcript cap, step and content budget must be positive');
@@ -74,12 +98,48 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 	let streaming = false;
 	const weighted = !!cost && Number.isFinite(budget);
 	const charge = (index: number) => Math.max(1, cost?.(index) ?? 1);
+	let selectionLimited = false;
 	function commit(start: number, end: number): TranscriptRange {
+		selectionLimited = false;
+		const pinned = getPinnedRange?.();
+		if (count && pinned && pinned.end > pinned.start) {
+			const first = Math.max(0, pinned.start), last = Math.min(count, pinned.end);
+			const requestedStart = start, requestedEnd = end;
+			// A native selection can only cover the already-mounted (<= cap) rows.
+			// If a model rewrite moves those keys further apart, freeze navigation
+			// rather than admitting an unbounded new range.
+			if (last - first > cap) { selectionLimited = true; return range; }
+			start = Math.min(start, first);
+			end = Math.max(end, last);
+			const older = requestedStart < range.start;
+			const trim = () => {
+				if (older && end > last) return --end;
+				if (start < first) return start++;
+				if (end > last) return --end;
+				return null;
+			};
+			while (end - start > cap && trim() !== null) { /* retain the selected span */ }
+			if (weighted) {
+				let used = 0;
+				for (let i = start; i < end; i++) used += charge(i);
+				while (used > budget) {
+					const removed = trim();
+					if (removed === null) break;
+					used -= charge(removed);
+				}
+				// If selected bodies themselves grow beyond the content budget, keep
+				// only that span until collapse; admit no additional unselected rows.
+			}
+			selectionLimited = start !== requestedStart || end !== requestedEnd;
+		}
 		if (range.start !== start || range.end !== end) range = { start, end };
 		return range;
 	}
 	function move(start: number): TranscriptRange {
-		if (!weighted) { range = rangeAt(start, count, cap, range); return range; }
+		if (!weighted) {
+			const next = rangeAt(start, count, cap, range);
+			return commit(next.start, next.end);
+		}
 		start = Math.max(0, Math.min(Math.floor(start), Math.max(0, count - 1)));
 		let end = start, used = 0;
 		while (end < count && end - start < cap) {
@@ -115,6 +175,7 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 	return {
 		cap,
 		get visibleRange() { return range; },
+		get selectionLimited() { return selectionLimited; },
 		get followsTail() { return followsTail; },
 		get isStreaming() { return streaming; },
 		setItemCount(next: number, options: { followTail?: boolean; hidden?: boolean } = {}): TranscriptRange {

@@ -1,6 +1,6 @@
 <script lang="ts" generics="T">
 	import { onMount, tick, untrack, type Snippet } from 'svelte';
-	import { createTranscriptWindow, type TranscriptRange } from './transcript-window';
+	import { createTranscriptWindow, selectedRowRange, type TranscriptRange } from './transcript-window';
 
 	/** Bounded nested rows: a single huge work log must not bypass the outer cap. */
 	let { items, keyOf, rowId, children, revealKey = null, startAtTail = false, pagingEnabled = true, label = 'log entries' }: {
@@ -15,9 +15,18 @@
 		pagingEnabled?: boolean;
 		label?: string;
 	} = $props();
-	const window = createTranscriptWindow({ cap: 60, step: 20 });
+	function pinnedRange() {
+		return selectedRowRange(root, ':scope > [data-slice-key]', row => {
+			const key = row.dataset.sliceKey;
+			const index = Number(row.dataset.sliceIndex);
+			return index >= 0 && index < items.length && keyOf(items[index]) === key ? index
+				: items.findIndex(item => keyOf(item) === key);
+		});
+	}
+	const window = createTranscriptWindow({ cap: 60, step: 20, getPinnedRange: pinnedRange });
 	let range = $state<TranscriptRange>({ start: 0, end: 0 });
 	let root = $state<HTMLDivElement>();
+	let selectionLimited = $state(false);
 	let scroller: HTMLElement | null = null;
 	let browsing = false;
 	let shifting = false;
@@ -26,6 +35,7 @@
 	const visible = $derived(items.slice(range.start, range.end));
 
 	function apply(next: TranscriptRange, preserve = true) {
+		selectionLimited = window.selectionLimited;
 		if (next.start === range.start && next.end === range.end) return;
 		const top = scroller?.getBoundingClientRect().top ?? 0;
 		const candidates = preserve && root
@@ -90,6 +100,8 @@
 			});
 		}
 		function visibility() { apply(window.pauseWhenHidden(document.hidden), false); }
+		function selectionChanged() { if (selectionLimited && !pinnedRange()) selectionLimited = false; }
+		document.addEventListener('selectionchange', selectionChanged);
 		visibility();
 		scroller?.addEventListener('scroll', scroll, { passive: true });
 		document.addEventListener('visibilitychange', visibility);
@@ -98,11 +110,18 @@
 			cancelAnimationFrame(frame);
 			scroller?.removeEventListener('scroll', scroll);
 			document.removeEventListener('visibilitychange', visibility);
+			document.removeEventListener('selectionchange', selectionChanged);
 		};
 	});
 </script>
 
 <div class="bounded-rows" bind:this={root}>
+	{#if selectionLimited}
+		<div class="slice-selection" role="status">
+			<span>Clear text selection to browse further.</span>
+			<button type="button" class="slice-page" onclick={() => { root?.ownerDocument.getSelection()?.removeAllRanges(); selectionLimited = false; }}>Clear selection</button>
+		</div>
+	{/if}
 	{#if range.start > 0}
 		<button type="button" class="slice-page" onclick={older}>Show earlier {label}</button>
 	{/if}
@@ -118,6 +137,7 @@
 
 <style>
 	.bounded-rows, .slice-entry { display: contents; }
+	.slice-selection { display: flex; align-items: center; gap: 8px; color: var(--muted-foreground); font-size: 12px; }
 	.slice-page {
 		min-height: 44px; padding: 8px 12px; margin-block: 8px;
 		border: 1px solid var(--border); border-radius: 8px;

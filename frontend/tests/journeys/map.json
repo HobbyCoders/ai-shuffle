@@ -65,6 +65,16 @@
 	],
 	"rules": [
 		{
+			"why": "bounded transcript windows and live text selection",
+			"journeys": ["transcript-reader"],
+			"globs": [
+				"frontend/src/lib/components/chat/transcript-window*",
+				"frontend/src/lib/components/chat/MessageArea.svelte",
+				"frontend/src/lib/components/chat/BoundedTranscriptRows.svelte",
+				"frontend/tests/journeys/transcript-reader.journey.mjs"
+			]
+		},
+		{
 			"why": "mirrored chats: the sync check ChatView runs and the gate that shows it",
 			"journeys": ["mirrored-chat", "open-unloaded-chat"],
 			"globs": [

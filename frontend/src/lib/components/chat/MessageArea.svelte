@@ -83,6 +83,7 @@
 	import { createSettleHold, createTurnHandoffHold } from '$lib/utils/settle-hold';
 	import {
 		createTranscriptWindow,
+		selectedRowRange,
 		transcriptItemCost,
 		TRANSCRIPT_CONTENT_BUDGET,
 		classifyTurnEntry,
@@ -685,14 +686,35 @@
 	// A bounded slice, not an idle queue that eventually mounts all history.
 	// Explicit navigation remains available while streaming; hidden views do no
 	// optional mounting. A keyed DOM anchor survives eviction at either edge.
+	function pinnedTranscriptRange(): TranscriptRange | null {
+		return selectedRowRange(chatColumnRef, ':scope > [data-transcript-key]', row => {
+			const key = row.dataset.transcriptKey;
+			const index = Number(row.dataset.transcriptIndex);
+			return displayItems[index] && displayItemKey(displayItems[index]) === key ? index
+				: displayItems.findIndex(item => displayItemKey(item) === key);
+		});
+	}
 	const transcriptWindow = createTranscriptWindow({
 		// Real row geometry is kept: no estimated-height placeholders that move
 		// the reader after anchor restoration. Dense code/table replies consume
 		// more of the bounded range than a short prompt or a collapsed tool.
 		cost: import.meta.env.VITE_PERF_TRANSCRIPT_CONTENT_WINDOW !== '0'
 			? (index) => transcriptItemCost(displayItems[index]) : undefined,
-		budget: TRANSCRIPT_CONTENT_BUDGET
+		budget: TRANSCRIPT_CONTENT_BUDGET,
+		getPinnedRange: pinnedTranscriptRange
 	});
+	let selectionBlocksNavigation = $state(false);
+	$effect(() => {
+		if (!selectionBlocksNavigation) return;
+		const changed = () => { if (!pinnedTranscriptRange()) selectionBlocksNavigation = false; };
+		document.addEventListener('selectionchange', changed);
+		return () => document.removeEventListener('selectionchange', changed);
+	});
+	function clearTranscriptSelection() {
+		document.getSelection()?.removeAllRanges();
+		selectionBlocksNavigation = false;
+		void tick().then(() => chatColumnRef?.querySelector<HTMLButtonElement>('.earlier-button')?.focus({ preventScroll: true }));
+	}
 	let mountedRange = $state<TranscriptRange>({ start: 0, end: 0 });
 	const mountedStart = $derived(mountedRange.start);
 	const mountedEnd = $derived(mountedRange.end);
@@ -703,6 +725,8 @@
 	let revealedTurnId = $state<string | null>(null);
 
 	function applyMountedRange(next: TranscriptRange, preserveAnchor = true) {
+		selectionBlocksNavigation = transcriptWindow.selectionLimited;
+		if (selectionBlocksNavigation) shouldAutoScroll = false;
 		if (next.start === mountedStart && next.end === mountedEnd) return;
 		const container = containerRef;
 		const top = container?.getBoundingClientRect().top ?? 0;
@@ -1164,6 +1188,7 @@
 
 	function jumpToLatest() {
 		applyMountedRange(transcriptWindow.toTail(), false);
+		if (transcriptWindow.selectionLimited) return;
 		revealedTurnId = null;
 		clearJumpRevealTimer();
 		showJumpToLatest = false;
@@ -1179,7 +1204,7 @@
 
 	function scrollToBottom() {
 		// Deferred mount/resize/settle callbacks may outlive the user's release.
-		if (!shouldAutoScroll && !pendingScrollToBottom) return;
+		if (selectionBlocksNavigation || (!shouldAutoScroll && !pendingScrollToBottom)) return;
 		if (containerRef) {
 			clearJumpRevealTimer();
 			showJumpToLatest = false;
@@ -1276,7 +1301,9 @@
 				const next = nextStickToBottom(shouldAutoScroll, prev, currentMetrics);
 				// Smooth turn navigation must not accidentally re-arm follow mode merely
 				// because its destination happens to be near the live edge.
-				const resolvedNext = Date.now() < manualNavigationReleaseUntil || mountedEnd < displayItems.length ? false : next;
+				// Reaching the live edge while text is selected must not re-arm
+				// follow mode and re-fill the pinned reading window underneath it.
+				const resolvedNext = Date.now() < manualNavigationReleaseUntil || mountedEnd < displayItems.length || pinnedTranscriptRange() !== null ? false : next;
 				// eslint-disable-next-line no-console
 				if (STREAM_DEBUG && resolvedNext !== shouldAutoScroll) console.log(`[AS] handleScroll ${resolvedNext ? 'ENABLE' : 'DISABLE'} currST=${currentScrollTop} prevST=${prev.scrollTop} SH=${currentMetrics.scrollHeight} CH=${currentMetrics.clientHeight}`);
 				shouldAutoScroll = resolvedNext;
@@ -2003,6 +2030,7 @@
 				<div
 					class="msg-virtualized"
 					data-transcript-index={mountedStart + i}
+					data-transcript-key={displayItemKey(item)}
 					data-ui-row={item.kind === 'message' ? item.message.id || undefined : displayItemKey(item)}
 					use:observeTurnAnchor
 					id={item.kind === 'message' && item.message.id && isNavigableUserTurn(item.message) ? turnAnchorId(item.message.id) : undefined}
@@ -2093,7 +2121,14 @@
 	{/if}
 </div>
 
-	{#if showJumpToLatest}
+	{#if selectionBlocksNavigation}
+		<div class="selection-limit-layer">
+			<div class="selection-limit-note" role="status">
+				<span>Text selection is keeping these messages on screen.</span>
+				<button type="button" class="earlier-button" onclick={clearTranscriptSelection} aria-label="Clear transcript text selection">Clear selection</button>
+			</div>
+		</div>
+	{:else if showJumpToLatest}
 		<div class="jump-latest-layer">
 			<button
 				type="button"
@@ -2497,7 +2532,7 @@
 		pointer-events: none;
 	}
 
-	.jump-latest-layer {
+	.jump-latest-layer, .selection-limit-layer {
 		position: absolute;
 		z-index: 20;
 		left: 50%;
@@ -2505,6 +2540,19 @@
 		transform: translateX(-50%);
 		pointer-events: none;
 	}
+
+	.selection-limit-layer { width: max-content; max-width: calc(100% - 32px); }
+	.selection-limit-note {
+		display: flex; align-items: center; gap: 12px;
+		padding: 6px 6px 6px 12px;
+		border: 1px solid var(--border); border-radius: 12px;
+		background: color-mix(in oklch, var(--background) 94%, transparent);
+		color: var(--muted-foreground); font-size: 12px; line-height: 1.4;
+		box-shadow: var(--shadow-m); pointer-events: auto;
+	}
+	.selection-limit-note .earlier-button { flex-shrink: 0; }
+	.earlier-button:active { background: var(--muted); }
+	.earlier-button:disabled { opacity: 0.45; pointer-events: none; }
 
 	.jump-latest {
 		width: 40px;
