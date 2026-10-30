@@ -9,6 +9,7 @@ from typing import Any, List, Optional
 from fastapi import HTTPException, Request, status
 from pydantic import BaseModel, Field
 
+import threading
 import time
 
 from app.db import database
@@ -207,7 +208,8 @@ class WorktreeSessionResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 def parse_session_history_via_store(
-    sdk_session_id: str, working_dir: str, *, use_cache: bool = True
+    sdk_session_id: str, working_dir: str, *, use_cache: bool = True,
+    heal_from_jsonl: bool = True,
 ) -> tuple[list, dict]:
     """Parse a session transcript from the Postgres session store (postgres_only).
 
@@ -224,6 +226,7 @@ def parse_session_history_via_store(
     bypassing ``_store_parse_cache``. Used by the post-turn reseed to obtain an
     authoritative, ``uuid``-bearing transcript (the in-memory live-store
     messages carry no JSONL uuid, which breaks rewind anchoring).
+    ``heal_from_jsonl=False`` skips the store-miss JSONL backfill.
     """
     from app.core.pg_session_store import (
         _load_entries_by_session_id_sync,
@@ -238,7 +241,7 @@ def parse_session_history_via_store(
     # empty. Guarded inside (count, summary tombstone, JSONL idle-mtime,
     # advisory lock) so it is a cheap no-op for new/live/stored sessions.
     count, _ = _store_version_by_session_id_sync(sdk_session_id)
-    if count == 0:
+    if count == 0 and heal_from_jsonl:
         lazy_backfill_session_from_jsonl(sdk_session_id, working_dir)
 
     def _store_loader(session_id: str, subpath: Optional[str] = None) -> list:
@@ -1432,6 +1435,133 @@ def local_store_is_stale(session: dict) -> bool:
     except Exception:
         logger.exception("Failed to check event history for %s", session.get("id"))
         return False
+
+
+def _message_time(message: dict) -> Optional[float]:
+    """A transcript message's timestamp as epoch seconds (naive means UTC)."""
+    from datetime import datetime, timezone
+
+    metadata = message.get("metadata")
+    value = (metadata.get("timestamp") if isinstance(metadata, dict) else None) or message.get("timestamp")
+    if isinstance(value, str) and value:
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.timestamp()
+
+
+def _first_user_content(messages: List[dict]) -> Optional[str]:
+    return next((m.get("content") for m in messages if m.get("role") == "user"), None)
+
+
+def history_before_mirror(store_messages: List[dict], mirror_messages: List[dict]) -> List[dict]:
+    """The local store's turns that predate everything the event mirror holds.
+
+    A chat whose early turns ran here before the event log existed (or were
+    never mirrored) has them only in this worker's store; after a move the
+    mirror starts at the owner's later turns (#917). Only store messages
+    older than the mirror's first timestamped message qualify, and none at
+    all when the mirror opens with the store's first prompt: either way the
+    mirror already covers that history and repeating it would duplicate turns.
+    Untimestamped store messages go with the timestamped ones around them;
+    a store with no older timestamp contributes nothing.
+    """
+    start, first_prompt = _mirror_seam(mirror_messages)
+    if start is None or not store_messages:
+        return []
+    if first_prompt and first_prompt == _first_user_content(store_messages):
+        return []
+    end = 0
+    for index, message in enumerate(store_messages):
+        stamp = _message_time(message)
+        if stamp is None:
+            continue
+        if stamp >= start:
+            break
+        end = index + 1
+    else:
+        end = len(store_messages) if end else 0
+    lead = store_messages[:end]
+    # Clock skew at the seam: the store's copy of the mirror's first prompt
+    # may stamp slightly earlier. Only the lead's LAST prompt, stamped within
+    # the skew window, can be that copy; an earlier repeat is real history.
+    last = next((i for i in range(len(lead) - 1, -1, -1) if lead[i].get("role") == "user"), None)
+    if first_prompt and last is not None and lead[last].get("content") == first_prompt:
+        stamp = _message_time(lead[last])
+        if stamp is not None and start - stamp <= _SEAM_SKEW_SECONDS:
+            return lead[:last]
+    return lead
+
+
+def _mirror_seam(mirror_messages: List[dict]) -> tuple[Optional[float], Optional[str]]:
+    """The mirror's first timestamp and first prompt: where store history ends."""
+    start = next((t for m in mirror_messages if (t := _message_time(m)) is not None), None)
+    return start, _first_user_content(mirror_messages)
+
+
+_SEAM_SKEW_SECONDS = 5.0
+
+# (session id, transform, store version, mirror seam) -> built lead rows. A
+# moved chat's store no longer changes, so polls reuse one answer instead of
+# re-parsing. Reads run in the thread pool: the lock guards eviction.
+_PRE_MOVE_CACHE_MAX = 256
+_pre_move_cache: dict[tuple, List[dict]] = {}
+_pre_move_cache_lock = threading.Lock()
+
+
+def prepend_pre_move_history(session: dict, mirror_messages: List[dict], build) -> List[dict]:
+    """Lead a moved chat's mirror transcript with store-only earlier turns.
+
+    ``build`` is the endpoint's transform (``build_detail_messages`` or
+    ``build_live_messages``). A failed store read keeps the mirror alone.
+    An empty store returns at once (no JSONL heal on this read path), and a
+    store answer is cached per store version and mirror seam. Message
+    positions stay stable for ``paginate_messages``: the lead is fixed for a
+    given store version and sits before the mirror, which only grows at
+    the end.
+    """
+    import copy
+
+    sdk_session_id = session.get("sdk_session_id")
+    if not mirror_messages or not sdk_session_id:
+        return mirror_messages
+    try:
+        from app.core.message_resolver import resolve_working_dir
+        from app.core.pg_session_store import _store_version_by_session_id_sync
+        from app.core.provider.fluid_transcript import fluid_live_messages, is_fluid_session
+
+        key = None
+        if is_fluid_session(sdk_session_id):
+            parsed, _usage = fluid_live_messages(sdk_session_id, resolve_working_dir(dict(session)))
+        else:
+            version = _store_version_by_session_id_sync(sdk_session_id)
+            if not version[0]:
+                return mirror_messages
+            head = mirror_messages[0]
+            key = (session["id"], build.__name__, tuple(version), head.get("epoch"),
+                   head.get("id"), *_mirror_seam(mirror_messages))
+            with _pre_move_cache_lock:
+                cached = _pre_move_cache.get(key)
+            if cached is not None:
+                return copy.deepcopy(cached) + mirror_messages
+            parsed, _usage = parse_session_history_via_store(
+                sdk_session_id, resolve_working_dir(dict(session)), heal_from_jsonl=False)
+        lead = history_before_mirror(parsed or [], mirror_messages)
+        built = build(session["id"], lead) if lead else []
+        if key is not None:
+            with _pre_move_cache_lock:
+                if key not in _pre_move_cache and len(_pre_move_cache) >= _PRE_MOVE_CACHE_MAX:
+                    _pre_move_cache.pop(next(iter(_pre_move_cache)))
+                _pre_move_cache[key] = copy.deepcopy(built)
+        return built + mirror_messages
+    except Exception:
+        logger.exception("Failed to read pre-move history for %s", session.get("id"))
+        return mirror_messages
 
 
 def load_event_messages(session_id: str) -> tuple[list[dict], bool]:
