@@ -5,6 +5,8 @@
 	 * heroes share one persistent editor. A live voice call adds compact
 	 * controls alongside it. */
 	import { onDestroy, tick, untrack } from 'svelte';
+	import { MediaQuery } from 'svelte/reactivity';
+	import { NO_CALL_ROOM, nextCallRoom, type CallRoom } from './callDockRoom';
 	import { finishJourneyAfterPaint } from '$lib/services/journey-timing';
 	import { activeSession, activeWsConnected, streamingSessions } from '$lib/stores/active-session';
 	import { sessions } from '$lib/stores/app-data.svelte';
@@ -239,22 +241,21 @@
 	// #816: on a phone the call dock floats over the transcript's foot instead of
 	// stacking on the composer, so neither the composer nor the transcript moves
 	// when a call starts or ends. The transcript's tail spacer gets the dock's
-	// height (--call-dock-reserve, applied by the phone media query only) so its
-	// last lines can still scroll clear of the dock. The room is held after the
-	// call ends (the call's closing row lands in it) until the chat changes or
-	// the next reply starts: dropping it with the dock would clamp a bottomed-out
-	// transcript down by the dock's height, the very jump this avoids.
+	// height (--call-dock-reserve) so its last lines can still scroll clear of
+	// the dock; when that room is held and released is callDockRoom.ts.
+	const phoneWidth = new MediaQuery('max-width: 639px');
 	let callDockHeight = $state(0);
-	let heldCallRoom = $state(0);
-	let heldRoomSession: string | null = null;
+	let callRoom = $state<CallRoom>(NO_CALL_ROOM);
 	$effect(() => {
-		const sessionId = $activeSession.sessionId ?? null;
-		if (voiceCallActive) {
-			if (callDockHeight > 0) heldCallRoom = callDockHeight;
-			heldRoomSession = sessionId;
-		} else if (heldCallRoom && (sessionId !== heldRoomSession || $activeSession.isStreaming)) {
-			heldCallRoom = 0;
-		}
+		const input = {
+			callActive: voiceCallActive,
+			dockHeight: callDockHeight,
+			session: $activeSession.sessionId ?? null,
+			streaming: $activeSession.isStreaming,
+			phone: phoneWidth.current
+		};
+		const next = nextCallRoom(untrack(() => callRoom), input);
+		if (next !== untrack(() => callRoom)) callRoom = next;
 	});
 	$effect(() => {
 		if (showEmptyHero && surfaceHeight > 0 && composerHeight > surfaceHeight && platform.isMobile) {
@@ -417,7 +418,7 @@
 </script>
 
 <div class="chat-view" bind:clientHeight={surfaceHeight} style:--chat-surface-height={surfaceHeight ? `${surfaceHeight}px` : undefined}
-	style:--call-dock-room={heldCallRoom ? `${heldCallRoom}px` : undefined} style:--call-dock-height={voiceCallActive && callDockHeight ? `${callDockHeight}px` : undefined} class:transitioning-from-empty={transitioningFromEmpty} class:is-empty={showEmptyHero}
+	style:--call-dock-room={callRoom.room ? `${callRoom.room}px` : undefined} style:--call-dock-height={voiceCallActive && callDockHeight ? `${callDockHeight}px` : undefined} class:transitioning-from-empty={transitioningFromEmpty} class:is-empty={showEmptyHero}
 	data-ui-state={UI_STATE_CHAT}
 	data-ui-mount={UI_MOUNT.chatView}
 	data-ui-surface={paintedSurface}
@@ -758,7 +759,7 @@
 	   a call began or ended (the provider ending it included). There the dock
 	   floats just above the composer, over the transcript's foot, on a fade of
 	   the chat background; the transcript reserves its height (see
-	   heldCallRoom) and the jump-to-latest pill rises above it. Wider screens
+	   callDockRoom.ts) and the jump-to-latest pill rises above it. Wider screens
 	   keep it in the composer's flow. */
 	@media (max-width: 639px) {
 		.chat-view {
@@ -775,11 +776,11 @@
 			z-index: 2;
 			padding-top: 1.5rem;
 			background: linear-gradient(to bottom, transparent, var(--background) 1.5rem);
-			/* Only the controls catch touches: the rest of the band still scrolls
-			   the transcript beneath it. */
+			/* The see-through fade lets touches reach the transcript; the
+			   opaque dock takes them, so nothing hidden under it is tappable. */
 			pointer-events: none;
 		}
-		.call-dock-slot :global(button) {
+		.call-dock-slot > :global(*) {
 			pointer-events: auto;
 		}
 	}
