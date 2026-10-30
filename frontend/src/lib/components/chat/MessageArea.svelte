@@ -782,7 +782,7 @@
 	// the reader moves up. Measured per shift; every later shift re-anchors.
 	let leadingGap = $state(0);
 
-	function applyMountedRange(next: TranscriptRange, preserveAnchor = true) {
+	function applyMountedRange(next: TranscriptRange, preserveAnchor = true, keepLeadingSpace = false) {
 		// Once the budget was reached, keep the clear affordance stable until
 		// the native selection ends, even if this reprice itself fits the window.
 		selectionBlocksNavigation = transcriptWindow.selectionLimited ||
@@ -844,24 +844,23 @@
 					}
 				}
 				if (delta !== undefined) {
-					markProgrammaticScrollSettling();
-					const previousScrollTop = container.scrollTop;
-					const scrollDelta = delta + roundingError;
-					// Keep a dropped leading row's space instead of clamping at 0.
-					const shortfall = -(previousScrollTop + scrollDelta);
-					if (preserveAnchor && next.start > 0 && shortfall >= 0.5) {
+					// Reading preservation (not explicit paging) keeps a dropped
+					// leading row's space instead of clamping at scroll origin.
+					const shortfall = -(container.scrollTop + delta + roundingError);
+					if (keepLeadingSpace && anchor && next.start > 0 && shortfall >= 0.5) {
 						leadingGap = shortfall;
 						await tick();
 						if (version !== windowShiftVersion || container !== containerRef) return;
-						container.scrollTop = 0;
-						anchorRounding = null;
-					} else {
-						container.scrollTop += scrollDelta;
-						const error = scrollDelta - (container.scrollTop - previousScrollTop);
-						// Never carry a real clamp/navigation boundary into a later shift.
-						anchorRounding = anchor?.isConnected && Math.abs(error) < 1
-							? { scrollTop: container.scrollTop, error } : null;
+						delta = -container.scrollTop - roundingError;
 					}
+					markProgrammaticScrollSettling();
+					const previousScrollTop = container.scrollTop;
+					const scrollDelta = delta + roundingError;
+					container.scrollTop += scrollDelta;
+					const error = scrollDelta - (container.scrollTop - previousScrollTop);
+					// Never carry a real clamp/navigation boundary into a later shift.
+					anchorRounding = anchor?.isConnected && Math.abs(error) < 1
+						? { scrollTop: container.scrollTop, error } : null;
 					lastKnownScrollTop = container.scrollTop;
 					lastScrollMetrics = readScrollMetrics();
 				}
@@ -903,7 +902,8 @@
 			if (isNewSession && saved && autoScrollCache.get(sessionKey) === false && count > 0) {
 				next = transcriptWindow.restoreRange(saved);
 			}
-			applyMountedRange(next, !isNewSession && !shouldAutoScroll);
+			const reading = !isNewSession && !shouldAutoScroll;
+			applyMountedRange(next, reading, reading);
 		});
 	});
 	let currentTurnIndex = $state(0);
