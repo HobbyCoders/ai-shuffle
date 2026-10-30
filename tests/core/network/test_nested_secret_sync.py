@@ -12,7 +12,7 @@ from app.api import connector_oauth, connector_plaid, network as network_api
 from app.core import automation_service, connector_service, encryption
 from app.db import database as db, network as store
 from app.network import engine, policy
-from tests.core.network.harness import Worker, exchange, join as bootstrap
+from tests.core.network.harness import Worker, exchange, exchange_with_gap, join as bootstrap
 
 COLLECTIONS = ("connectors", "automations", "system_settings")
 SECRET = "nested-test-credential"
@@ -156,7 +156,8 @@ def test_rescan_repairs_previously_synced_unreadable_leaves(workers, monkeypatch
         assert scan() == 0
 
 
-def test_legacy_peer_cannot_overwrite_good_secrets_or_block_repair(workers, monkeypatch):
+@pytest.mark.parametrize("delivery", ["ordered", "gap"])
+def test_legacy_peer_cannot_overwrite_good_secrets_or_block_repair(workers, monkeypatch, delivery):
     a, b = workers("a"), workers("b")
     with a.active():
         engine.create_network("Mixed versions")
@@ -165,12 +166,17 @@ def test_legacy_peer_cannot_overwrite_good_secrets_or_block_repair(workers, monk
     join(a, b)
     with b.active():
         before = check_secrets(aid)
+    if delivery == "gap":
+        with a.active():
+            db.set_system_setting("gap_buffer_probe", "held-prefix")
+            engine.scan_collection("system_settings")
     with monkeypatch.context() as old:
         legacy_collections(old)
         with a.active():
             db.update_connector("connector", name="Legacy edit")
             scan()
-    exchange(a, b)
+    deliver = exchange_with_gap if delivery == "gap" else exchange
+    deliver(a, b)
     with b.active():
         assert check_secrets(aid) == before
         assert db.get_connector("connector")["name"] == "Mail"

@@ -1259,6 +1259,16 @@
           "past_bug": "The shared MCP builder assumed NativeLoop discovered plugin servers, but neither layer connected them."
         },
         {
+          "id": "harness-basics.network-pending-gap-buffer",
+          "check": "A delayed signed prefix buffers in bounded chunks and then catches up without lost or duplicate events",
+          "kind": "owner",
+          "needs": ["install"],
+          "two_worker": true,
+          "how": "Use only a disposable paired candidate installation and a fault-controlled test transport. Produce a 193-operation throwaway transcript through the candidate's normal write path. Hold its first signed operation, then deliver the remaining original envelopes to B in 64-operation chunks without modifying their signatures. Scope SQL receipts to B's buffering transactions, excluding health/presence traffic and BEGIN/COMMIT. Release the prefix, replay the chunks, and compare both transcripts and stream frontiers. Repeat with a bad-signature copy and with AI_SHUFFLE_PERF_BULK_PENDING=off on B, restarting only the candidate. Remove only the disposable test state; never intercept production traffic or publish private receipts.",
+          "pass_when": "The default path buffers each eligible 64-envelope chunk with at most five SQL statements and bounded transaction work while leaving its watermark below the gap. Releasing the prefix applies all 193 operations exactly once in source order; replay does not duplicate events, and the bad-signature copy is refused without losing neighboring valid operations. The off flag preserves the same final state through per-envelope buffering. Component SQL tests alone do not pass this real-transport fault row.",
+          "past_bug": "Buffering 192 operations above a missing prefix used 1,164 SQL calls even though ordered apply was already chunked."
+        },
+        {
           "id": "harness-basics.network-scanner-urgent-wakes",
           "check": "Urgent publication wakes interrupt quiet rest without one scan per write or backlog starvation",
           "kind": "owner",
