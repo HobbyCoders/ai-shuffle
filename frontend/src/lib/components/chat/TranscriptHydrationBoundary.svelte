@@ -4,7 +4,9 @@
 
 	/** Only transcript descendants read this; the composer/permission trays stay live. */
 	export const TRANSCRIPT_PRESENTATION = Symbol('transcript-presentation');
-	export const TRANSCRIPT_LOADING_GRACE_MS = 180;
+	// Leave headroom above measured 4× short-history hydration. A ready target
+	// is published immediately; this delays only the slow-load notice.
+	export const TRANSCRIPT_LOADING_GRACE_MS = 350;
 	export type TranscriptPresentation = Readable<ActiveSessionState>;
 </script>
 

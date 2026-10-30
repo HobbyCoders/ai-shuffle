@@ -3,7 +3,7 @@
 	import type { ChatSurface } from '$lib/components/layout/chat-empty-state';
 	import TranscriptHydrationBoundary from '../TranscriptHydrationBoundary.svelte';
 	import TranscriptPresentationProbe from './TranscriptPresentationProbe.svelte';
-	let { graceMs = 200, mirrorPending = false, onSurface }: {
+	let { graceMs, mirrorPending = false, onSurface }: {
 		graceMs?: number; mirrorPending?: boolean; onSurface?: (surface: ChatSurface, messageCount: number, sessionId: string | null | undefined) => void;
 	} = $props();
 </script>

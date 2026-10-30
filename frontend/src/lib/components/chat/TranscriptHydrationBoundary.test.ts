@@ -4,6 +4,7 @@ import { tick } from 'svelte';
 import type { Writable } from 'svelte/store';
 import { activeSession, type ActiveSessionState } from '$lib/stores/active-session';
 import Harness from './test-fixtures/TranscriptHydrationHarness.svelte';
+import { TRANSCRIPT_LOADING_GRACE_MS as GRACE_MS } from './TranscriptHydrationBoundary.svelte';
 
 vi.mock('$lib/stores/active-session', async () => {
 	const { writable } = await import('svelte/store');
@@ -86,14 +87,15 @@ describe('transcript hydration presentation', () => {
 		expect(vi.getTimerCount()).toBe(0);
 	});
 
-	it('keeps the outgoing rows inert under grace while the composer and permissions bind to the real target', async () => {
+	it('keeps outgoing rows inert for a 300 ms short load while the composer and permissions bind to the real target', async () => {
 		const surfaces: string[] = [];
 		const view = render(Harness, { onSurface: surface => surfaces.push(surface) });
 		const composer = view.getByRole('textbox') as HTMLInputElement;
 		composer.focus(); composer.setSelectionRange(2, 2);
 		const outgoing = view.getByText('Previous conversation');
 		live.set(state('incoming', '', true)); await tick();
-		await vi.advanceTimersByTimeAsync(120); await tick();
+		// The real 4× short-history fixture takes up to 284 ms to hydrate.
+		await vi.advanceTimersByTimeAsync(300); await tick();
 		expect(outgoing.isConnected).toBe(true);
 		expect(outgoing.closest('[inert]')).not.toBeNull();
 		expect(view.queryByText('Loading conversation…')).toBeNull();
@@ -111,7 +113,7 @@ describe('transcript hydration presentation', () => {
 		const view = render(Harness);
 		const outgoing = view.getByText('Previous conversation');
 		live.set(state('incoming', '', true)); await tick();
-		await vi.advanceTimersByTimeAsync(199); await tick();
+		await vi.advanceTimersByTimeAsync(GRACE_MS - 1); await tick();
 		expect(view.queryByText('Loading conversation…')).toBeNull();
 		await vi.advanceTimersByTimeAsync(1); await tick();
 		expect(view.getByText('Loading conversation…')).toBeTruthy();
@@ -125,7 +127,7 @@ describe('transcript hydration presentation', () => {
 	it('restarts grace for a newer target and ignores the obsolete timer after readiness', async () => {
 		const view = render(Harness);
 		live.set(state('middle', '', true)); await tick();
-		await vi.advanceTimersByTimeAsync(120);
+		await vi.advanceTimersByTimeAsync(GRACE_MS - 50);
 		live.set(state('latest', '', true)); await tick();
 		await vi.advanceTimersByTimeAsync(150); await tick();
 		expect(view.queryByText('Loading conversation…')).toBeNull();
@@ -139,7 +141,7 @@ describe('transcript hydration presentation', () => {
 	it('delegates inertness and the loading notice to the remote gate while it is blocking', async () => {
 		const view = render(Harness, { mirrorPending: true });
 		live.set(state('incoming', '', true)); await tick();
-		await vi.advanceTimersByTimeAsync(250); await tick();
+		await vi.advanceTimersByTimeAsync(GRACE_MS + 50); await tick();
 		expect(view.queryByText('Loading conversation…')).toBeNull();
 		expect(view.container.querySelectorAll('[inert]')).toHaveLength(1);
 		expect(view.getByText('Previous conversation').closest('[inert]')).toBe(view.getByTestId('mirror-owner'));
@@ -148,7 +150,7 @@ describe('transcript hydration presentation', () => {
 	it('does not flash old rows back in when an already-visible loader is superseded', async () => {
 		const view = render(Harness);
 		live.set(state('middle', '', true)); await tick();
-		await vi.advanceTimersByTimeAsync(220); await tick();
+		await vi.advanceTimersByTimeAsync(GRACE_MS + 20); await tick();
 		expect(view.getByText('Loading conversation…')).toBeTruthy();
 		live.set(state('latest', '', true)); await tick();
 		expect(view.getByText('Loading conversation…')).toBeTruthy();
@@ -163,7 +165,7 @@ describe('transcript hydration presentation', () => {
 		render(Harness, { onSurface: (surface, count, id) => { frames.push({ surface, count, id }); } });
 		live.set(state('incoming', '', true)); await tick();
 		expect(frames.at(-1)).toEqual({ surface: 'active', count: 1, id: 'outgoing' });
-		await vi.advanceTimersByTimeAsync(200); await tick();
+		await vi.advanceTimersByTimeAsync(GRACE_MS); await tick();
 		expect(frames.at(-1)).toEqual({ surface: 'loading', count: 0, id: 'incoming' });
 		live.set(state('incoming', 'Incoming conversation')); await tick();
 		expect(frames.at(-1)).toEqual({ surface: 'active', count: 1, id: 'incoming' });
