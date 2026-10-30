@@ -1097,6 +1097,66 @@ describe('work folds from wire events', () => {
 		// settled one does, with the reads folded into their runs.
 		expect(collapsedVisibleMessages(parked)).toEqual(collapsedVisibleMessages(settled));
 	});
+
+	// #835: when a wake reply ended, the parked note and the "Task completed"
+	// row above it folded away and the reply jumped up the screen.
+	it('keeps a background-task wake and the prose either side of it on screen', () => {
+		let state = initialState();
+		let seq = 0;
+		const apply = (type: string, fields: Record<string, unknown> = {}) => {
+			state = reduce(state, {
+				type, id: `wake-${++seq}`, seq, session_id: 'task-wake-test',
+				created_at: '2026-10-30T10:00:00Z', ...fields
+			} as WireEvent);
+			return buildDisplayItems(state.messages, {
+				isStreaming: state.isStreaming,
+				latestTurnUnsettled: state.isStreaming || Boolean(state.liveTurnId),
+				groupingEnabled: true
+			});
+		};
+		apply('message.user', { content: 'Run the build', turn_id: 'turn-1' });
+		apply('turn.started', { turn_id: 'turn-1' });
+		apply('assistant.text_delta', { text: 'Starting the build.' });
+		apply('tool.use', { tool_use_id: 'bash-1', name: 'Bash', input: { command: 'make' } });
+		apply('tool.result', { tool_use_id: 'bash-1', content_preview: 'started', is_error: false });
+		apply('assistant.text_delta', { text: 'The build is running in the background.' });
+		apply('turn.completed', { turn_id: 'turn-1' });
+		// The wake: its own provider turn, inside the logical turn it resumes.
+		apply('turn.started', { turn_id: 'turn-2' });
+		apply('message.user', {
+			turn_id: 'turn-2',
+			content: '<task-notification><kind>own</kind><task-id>b1</task-id><status>completed</status><summary>Build passed</summary></task-notification>'
+		});
+		apply('tool.use', { tool_use_id: 'read-1', name: 'Read', input: { file_path: 'build.log' } });
+		apply('tool.result', { tool_use_id: 'read-1', content_preview: 'ok', is_error: false });
+		const live = apply('assistant.text_delta', { text: 'The build passed.' });
+		const settled = apply('turn.completed', { turn_id: 'turn-2' });
+
+		const wake = state.messages.find((m) => m.systemSubtype === 'task_notification')!;
+		expect(wake.metadata?.task_wake).toBe(true);
+		const shown = ['Run the build', 'The build is running in the background.', '', 'The build passed.'];
+		expect(collapsedVisibleMessages(settled).map((m) => m.content)).toEqual(shown);
+		expect(collapsedVisibleMessages(settled)).toContain(wake);
+		// Everything above the wake shows the same rows live and settled, so the
+		// reply ending folds nothing above it away.
+		expect(collapsedVisibleMessages(live).slice(0, 3)).toEqual(collapsedVisibleMessages(settled).slice(0, 3));
+		// The routine work on both sides of the wake still folds.
+		const log = settled.find((item) => item.kind === 'work_log') as Extract<DisplayItem, { kind: 'work_log' }>;
+		expect(log.summary).toBe('Ran 1 command and read 1 file');
+		expect(log.folded.map((entry) => entry.message.content)).not.toContain('The build is running in the background.');
+		expect(log.folded.map((entry) => entry.message)).not.toContain(wake);
+	});
+
+	it('still folds a task notice that is not a wake, and the prose before it', () => {
+		const prompt = user('Run the build', undefined, 't1');
+		const note = text('Waiting for the build.');
+		const notice = msg({ role: 'system', type: 'system', systemSubtype: 'task_notification', systemData: { status: 'completed' } });
+		const answer = text('The build passed.');
+		const items = buildDisplayItems([prompt, tool(), note, notice, tool(), answer], SETTLED);
+		expect(collapsedVisibleMessages(items)).toEqual([prompt, answer]);
+		const log = items.find((item) => item.kind === 'work_log') as Extract<DisplayItem, { kind: 'work_log' }>;
+		expect(log.summary).toBe('Ran 2 commands and got 1 task result');
+	});
 });
 
 describe('work action summaries', () => {
