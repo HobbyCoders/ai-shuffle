@@ -1,0 +1,35 @@
+{
+  "description": "Like ask-question, but asks two questions in one request (two tabs in the tray: Skip moves to the next open question), then replies with every answer it received.",
+  "steps": [
+    {
+      "text": "I need two decisions from you first.",
+      "tool_calls": [
+        {
+          "name": "AskUser",
+          "input": {
+            "questions": [
+              {
+                "question": "Which colour should the banner use?",
+                "header": "Colour",
+                "options": [
+                  {"label": "Teal", "description": "The current accent colour."},
+                  {"label": "Amber", "description": "A warmer accent."}
+                ]
+              },
+              {
+                "question": "Where should the banner go?",
+                "header": "Position",
+                "options": [
+                  {"label": "Top", "description": "Above the page title."},
+                  {"label": "Bottom", "description": "Above the footer."}
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {"text": "I've asked in the question tray. I'll wait for your answers."},
+    {"text": "Thanks. I received:\n\n{answer}\n\nDone."}
+  ]
+}
