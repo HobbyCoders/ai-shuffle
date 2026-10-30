@@ -1204,15 +1204,16 @@ class ContainerUpdates:
         """Fingerprint all file metadata and critical executable contents.
 
         Full-file hashing cost 23s with cold-data hints on a realistic NVMe
-        installation. Check every path/size/mode/mtime/inode/link; hash entrypoints,
-        installation metadata and native code. This is local damage detection,
+        installation. Check paths/stat/link metadata, including mtime and ctime.
+        Hash all Python sources, entrypoints, installation metadata and native
+        code. This is local damage detection,
         not a security boundary against an owner forging cache files/metadata.
         """
         payload = directory / ("venv" if group == "python" else "node_modules")
         if payload.is_symlink() or not payload.is_dir():
             raise ValueError("Missing dependency payload")
         resolved = payload.resolve()
-        digest = hashlib.sha256(b"dependency-contents-2\0")
+        digest = hashlib.sha256(b"dependency-contents-3\0")
         critical, directory_modes, nonempty = set(), {}, set()
 
         def unreadable(error):
@@ -1244,7 +1245,7 @@ class ContainerUpdates:
                 info = entry.lstat()
                 link = os.readlink(entry) if stat.S_ISLNK(info.st_mode) else None
                 record = [relative.as_posix(), info.st_mode, info.st_size, info.st_mtime_ns,
-                          info.st_ino, info.st_dev, link]
+                          info.st_ctime_ns, info.st_ino, info.st_dev, link]
                 digest.update(json.dumps(record, separators=(",", ":")).encode() + b"\n")
                 if link is not None:
                     target = entry.resolve(strict=True)
@@ -1262,16 +1263,18 @@ class ContainerUpdates:
                 if native or info.st_mode & 0o111:
                     critical.add(relative)
                 if group == "python":
+                    # A stale timestamp-valid .pyc can hide a changed nested
+                    # source from the import probe. Check every installed .py.
+                    if name.endswith(".py"):
+                        critical.add(relative)
                     parts = relative.parts
                     if "site-packages" in parts:
                         parts = parts[parts.index("site-packages") + 1:]
-                        top_module = len(parts) == 1 and name.endswith(".py")
-                        package_init = len(parts) == 2 and name in ("__init__.py", "__main__.py")
                         top_bytecode = name.endswith(".pyc") and (
                             len(parts) == 2 and parts[0] == "__pycache__" or
                             len(parts) == 3 and parts[1] == "__pycache__" and name.startswith(("__init__.", "__main__.")))
                         metadata = any(part.endswith(".dist-info") for part in parts)
-                        if top_module or package_init or top_bytecode or metadata:
+                        if top_bytecode or metadata:
                             critical.add(relative)
                     if name.endswith(".pth") or name == "pyvenv.cfg":
                         critical.add(relative)
