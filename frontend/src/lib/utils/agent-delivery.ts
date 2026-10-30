@@ -8,10 +8,17 @@ export interface AgentDelivery { sender: string; content: string; senderLabel?: 
 // defanged by the producer, so it never contains a marker of its own.
 const ENVELOPE = String.raw`\[agent\x20message from=(['"])(.*?)\1 — (?:host-verified (?:parent assignment update|same-owner session delegation); )?a message from another (?:agent(?: in this session)?|top-level session), delivered once at this position; not part of the tool output, and not a new message when re-read from history\]\r?\n([\s\S]*?)\r?\n\[\/agent\x20message\]`;
 const SINGLE_ENVELOPE = new RegExp(`^${ENVELOPE}$`);
-const ANY_ENVELOPE = new RegExp(ENVELOPE, 'g');
+const NEXT_ENVELOPE = new RegExp(ENVELOPE, 'y');
 // The reminder that carries messages held while the receiver was parked
 // (app/core/turn_scheduler.py::_held_peer_block, fluid NativeLoop._queued_peer_reminder).
-const HELD_BLOCK = /<system-reminder>\s*Messages from other agents that arrived while this session was parked[^\n]*\n([\s\S]*?)<\/system-reminder>/g;
+const HELD_OPEN = '<system-reminder>';
+const HELD_HEADER = 'Messages from other agents that arrived while this session was parked';
+const HELD_CLOSE = '</system-reminder>';
+
+function skipWhitespace(text: string, start: number): number {
+	while (start < text.length && /\s/.test(text[start])) start++;
+	return start;
+}
 
 /** Presentation only: the provider still receives peer traffic in the user role. */
 export function agentDelivery(message: ChatMessage): AgentDelivery | null {
@@ -33,11 +40,17 @@ export function agentDelivery(message: ChatMessage): AgentDelivery | null {
 /** Envelopes in `text` when it is nothing but envelopes and whitespace, else null. */
 function envelopesOnly(text: string): AgentDelivery[] | null {
 	const found: AgentDelivery[] = [];
-	const rest = text.replace(ANY_ENVELOPE, (_all, _q, sender: string, content: string) => {
-		found.push({ sender, content });
-		return '';
-	});
-	return rest.trim() ? null : found;
+	let cursor = skipWhitespace(text, 0);
+	while (cursor < text.length) {
+		// A non-envelope prefix already makes the whole input invalid. Sticky
+		// matching avoids retrying an unclosed envelope at every nested opener.
+		NEXT_ENVELOPE.lastIndex = cursor;
+		const match = NEXT_ENVELOPE.exec(text);
+		if (!match) return null;
+		found.push({ sender: match[2], content: match[3] });
+		cursor = skipWhitespace(text, NEXT_ENVELOPE.lastIndex);
+	}
+	return found;
 }
 
 /**
@@ -49,17 +62,29 @@ function envelopesOnly(text: string): AgentDelivery[] | null {
  */
 export function heldAgentDeliveries(text: string): AgentDelivery[] | null {
 	const deliveries: AgentDelivery[] = [];
-	let blocks = 0;
-	let invalid = false;
-	const outside = text.replace(HELD_BLOCK, (_all, body: string) => {
-		blocks += 1;
-		const inner = envelopesOnly(body);
-		if (inner === null) invalid = true;
-		else deliveries.push(...inner);
-		return '\n';
-	});
-	if (!blocks || invalid) return null;
-	const fresh = envelopesOnly(outside);
+	const outside: string[] = [];
+	let cursor = 0;
+	let search = 0;
+	let opener: number;
+	while ((opener = text.indexOf(HELD_OPEN, search)) !== -1) {
+		search = opener + HELD_OPEN.length;
+		const header = skipWhitespace(text, search);
+		if (!text.startsWith(HELD_HEADER, header)) continue;
+		const lineEnd = text.indexOf('\n', header + HELD_HEADER.length);
+		if (lineEnd === -1) break;
+		const bodyStart = lineEnd + 1;
+		const closer = text.indexOf(HELD_CLOSE, bodyStart);
+		// Every later body starts farther right, so no later match can close.
+		if (closer === -1) break;
+		const inner = envelopesOnly(text.slice(bodyStart, closer));
+		if (inner === null) return null;
+		deliveries.push(...inner);
+		outside.push(text.slice(cursor, opener), '\n');
+		cursor = search = closer + HELD_CLOSE.length;
+	}
+	if (!cursor) return null;
+	outside.push(text.slice(cursor));
+	const fresh = envelopesOnly(outside.join(''));
 	if (fresh === null) return null;
 	deliveries.push(...fresh);
 	return deliveries.length ? deliveries : null;

@@ -11,7 +11,7 @@ const root = path.dirname(frontend.replace(/[\\/]$/, ''));
 const destination = path.join(root, 'app/core/transcript_views');
 const canonicalPaths = [
   'app/api/events.py', 'app/db/session_events.py', 'app/core/harness_reminders.py',
-  'app/core/turn_recorder.py', 'app/core/transcript_views/preprocess.py'
+  'app/core/turn_recorder.py', 'app/core/transcript_replay.py', 'app/core/transcript_views/preprocess.py'
 ];
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const canonicalSources = {};

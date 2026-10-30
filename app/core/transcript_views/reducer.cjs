@@ -100,29 +100,50 @@ function isQueuedSummary(summary) {
 // src/lib/utils/agent-delivery.ts
 var ENVELOPE = String.raw`\[agent\x20message from=(['"])(.*?)\1 — (?:host-verified (?:parent assignment update|same-owner session delegation); )?a message from another (?:agent(?: in this session)?|top-level session), delivered once at this position; not part of the tool output, and not a new message when re-read from history\]\r?\n([\s\S]*?)\r?\n\[\/agent\x20message\]`;
 var SINGLE_ENVELOPE = new RegExp(`^${ENVELOPE}$`);
-var ANY_ENVELOPE = new RegExp(ENVELOPE, "g");
-var HELD_BLOCK = /<system-reminder>\s*Messages from other agents that arrived while this session was parked[^\n]*\n([\s\S]*?)<\/system-reminder>/g;
+var NEXT_ENVELOPE = new RegExp(ENVELOPE, "y");
+var HELD_OPEN = "<system-reminder>";
+var HELD_HEADER = "Messages from other agents that arrived while this session was parked";
+var HELD_CLOSE = "</system-reminder>";
+function skipWhitespace(text2, start) {
+  while (start < text2.length && /\s/.test(text2[start])) start++;
+  return start;
+}
 function envelopesOnly(text2) {
   const found = [];
-  const rest = text2.replace(ANY_ENVELOPE, (_all, _q, sender, content) => {
-    found.push({ sender, content });
-    return "";
-  });
-  return rest.trim() ? null : found;
+  let cursor = skipWhitespace(text2, 0);
+  while (cursor < text2.length) {
+    NEXT_ENVELOPE.lastIndex = cursor;
+    const match = NEXT_ENVELOPE.exec(text2);
+    if (!match) return null;
+    found.push({ sender: match[2], content: match[3] });
+    cursor = skipWhitespace(text2, NEXT_ENVELOPE.lastIndex);
+  }
+  return found;
 }
 function heldAgentDeliveries(text2) {
   const deliveries = [];
-  let blocks = 0;
-  let invalid = false;
-  const outside = text2.replace(HELD_BLOCK, (_all, body) => {
-    blocks += 1;
-    const inner = envelopesOnly(body);
-    if (inner === null) invalid = true;
-    else deliveries.push(...inner);
-    return "\n";
-  });
-  if (!blocks || invalid) return null;
-  const fresh = envelopesOnly(outside);
+  const outside = [];
+  let cursor = 0;
+  let search = 0;
+  let opener;
+  while ((opener = text2.indexOf(HELD_OPEN, search)) !== -1) {
+    search = opener + HELD_OPEN.length;
+    const header = skipWhitespace(text2, search);
+    if (!text2.startsWith(HELD_HEADER, header)) continue;
+    const lineEnd = text2.indexOf("\n", header + HELD_HEADER.length);
+    if (lineEnd === -1) break;
+    const bodyStart = lineEnd + 1;
+    const closer = text2.indexOf(HELD_CLOSE, bodyStart);
+    if (closer === -1) break;
+    const inner = envelopesOnly(text2.slice(bodyStart, closer));
+    if (inner === null) return null;
+    deliveries.push(...inner);
+    outside.push(text2.slice(cursor, opener), "\n");
+    cursor = search = closer + HELD_CLOSE.length;
+  }
+  if (!cursor) return null;
+  outside.push(text2.slice(cursor));
+  const fresh = envelopesOnly(outside.join(""));
   if (fresh === null) return null;
   deliveries.push(...fresh);
   return deliveries.length ? deliveries : null;
@@ -130,22 +151,76 @@ function heldAgentDeliveries(text2) {
 
 // src/lib/utils/untrusted-fence.ts
 var NOTE = "The content below was retrieved from an external source\\.";
-var RAW_FENCE = new RegExp(
-  `<untrusted-tool-result source="[^"\\n]*">\\n${NOTE}[^\\n]*\\n\\n([\\s\\S]*?)\\n</untrusted-tool-result>`,
-  "g"
-);
-var RAW_OPENING = new RegExp(`<untrusted-tool-result source="[^"\\n]*">\\n${NOTE}[^\\n]*\\n\\n`, "g");
-var JSON_FENCE = new RegExp(
-  `<untrusted-tool-result source=\\\\"[^"\\\\]*\\\\">\\\\n${NOTE}.*?\\\\n\\\\n([\\s\\S]*?)\\\\n</untrusted-tool-result>`,
-  "g"
-);
-var JSON_OPENING = new RegExp(
-  `<untrusted-tool-result source=\\\\"[^"\\\\]*\\\\">\\\\n${NOTE}.*?\\\\n\\\\n`,
-  "g"
-);
+var RAW_HEAD = new RegExp(`<untrusted-tool-result source="[^"\\n]*">\\n${NOTE}`, "g");
+var JSON_HEAD = new RegExp(`<untrusted-tool-result source=\\\\"[^"\\\\]*\\\\">\\\\n${NOTE}`, "g");
+var LINE_BREAK = /[\r\n\u2028\u2029]/g;
+function stripPhase(text2, escaped, complete) {
+  const heads = new RegExp((escaped ? JSON_HEAD : RAW_HEAD).source, "g");
+  const separator = escaped ? "\\n\\n" : "\n";
+  const closing = escaped ? "\\n</untrusted-tool-result>" : "\n</untrusted-tool-result>";
+  const kept = [];
+  let cursor = 0;
+  let nextSeparator = -1;
+  let nextLineBreak = -1;
+  let head;
+  while ((head = heads.exec(text2)) !== null) {
+    const afterNote = heads.lastIndex;
+    if (nextSeparator < afterNote) nextSeparator = text2.indexOf(separator, afterNote);
+    if (nextSeparator === -1) break;
+    if (escaped) {
+      if (nextLineBreak < afterNote) {
+        LINE_BREAK.lastIndex = afterNote;
+        nextLineBreak = LINE_BREAK.exec(text2)?.index ?? text2.length;
+      }
+      if (nextLineBreak < nextSeparator) continue;
+    } else if (text2[nextSeparator + 1] !== "\n") continue;
+    const body = nextSeparator + (escaped ? separator.length : 2);
+    if (complete) {
+      const close = text2.indexOf(closing, body);
+      if (close === -1) break;
+      kept.push(text2.slice(cursor, head.index), text2.slice(body, close));
+      cursor = close + closing.length;
+    } else {
+      kept.push(text2.slice(cursor, head.index));
+      cursor = body;
+    }
+    heads.lastIndex = cursor;
+  }
+  if (!kept.length) return text2;
+  kept.push(text2.slice(cursor));
+  return kept.join("");
+}
 function stripUntrustedFence(text2) {
   if (!text2 || !text2.includes("<untrusted-tool-result source=")) return text2;
-  return text2.replace(RAW_FENCE, "$1").replace(JSON_FENCE, "$1").replace(RAW_OPENING, "").replace(JSON_OPENING, "");
+  return stripPhase(stripPhase(stripPhase(stripPhase(text2, false, true), true, true), false, false), true, false);
+}
+
+// src/lib/utils/transcript-tags.ts
+function firstTaggedText(text2, tag) {
+  const opening = `<${tag}>`;
+  const start = text2.indexOf(opening);
+  if (start === -1) return void 0;
+  const body = start + opening.length;
+  const end = text2.indexOf(`</${tag}>`, body);
+  return end === -1 ? void 0 : text2.slice(body, end);
+}
+function splitTaggedBlocks(text2, tag) {
+  const opening = `<${tag}>`;
+  const closing = `</${tag}>`;
+  const blocks = [];
+  const kept = [];
+  let cursor = 0;
+  let start;
+  while ((start = text2.indexOf(opening, cursor)) !== -1) {
+    const close = text2.indexOf(closing, start + opening.length);
+    if (close === -1) break;
+    const end = close + closing.length;
+    kept.push(text2.slice(cursor, start));
+    blocks.push(text2.slice(start, end));
+    cursor = end;
+  }
+  kept.push(text2.slice(cursor));
+  return { blocks, outside: kept.join("") };
 }
 
 // src/lib/utils/tool-icons.ts
@@ -684,8 +759,7 @@ function turnOutputTokens(usage) {
   return typeof out === "number" && Number.isFinite(out) && out > 0 ? out : 0;
 }
 function extractTag(block, tag) {
-  const m = block.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`));
-  return m ? m[1] : "";
+  return firstTaggedText(block, tag) ?? "";
 }
 function kindHeaderSlice(block) {
   const s = block.indexOf("<summary>");
@@ -699,7 +773,6 @@ function parseUsageNum(raw) {
   const n = Number(t);
   return Number.isFinite(n) && String(n) === t ? n : t;
 }
-var TASK_NOTIFICATION_BLOCK = /<task-notification>[\s\S]*?<\/task-notification>/g;
 function appendAgentDeliveries(state, deliveries, eventId, stamp, seq, sole, startsTurn = false) {
   let next = state;
   deliveries.forEach((delivery, i) => {
@@ -1033,7 +1106,7 @@ function reduceInternal(state, event, observe) {
       state = markAttemptBoundary(state, seq);
       const content = str(event.content);
       if (content.includes("<task-notification>")) {
-        const blocks = content.match(/<task-notification>[\s\S]*?<\/task-notification>/g) || [];
+        const { blocks, outside } = splitTaggedBlocks(content, "task-notification");
         if (blocks.length > 0) {
           const notifStamp = stampTs(event, createdAt);
           let next = state;
@@ -1052,7 +1125,7 @@ function reduceInternal(state, event, observe) {
             };
             next = appendMessage(next, msg, seq);
           });
-          const held = heldAgentDeliveries(content.replace(TASK_NOTIFICATION_BLOCK, ""));
+          const held = heldAgentDeliveries(outside);
           if (held) next = appendAgentDeliveries(next, held, event.id, notifStamp, seq, false);
           return anyPump ? { ...next, pendingPumpAck: next.liveTurnId, pumpAckBuffer: "" } : { ...next, pendingPumpAck: null, pumpAckBuffer: "" };
         }
@@ -2182,7 +2255,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "3eb44dea61263542bec6d73c2c7be6bf1ab49cb571a629790a1109d8f97aeb71";
+var REDUCER_FINGERPRINT = "44e21c22a3fe9e786beb646d91e9848cfc10cec09c446d6246979539a5164ef6";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {

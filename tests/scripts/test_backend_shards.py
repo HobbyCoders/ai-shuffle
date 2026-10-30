@@ -1,11 +1,11 @@
 """Partition invariants, actual xdist collection and workflow security contracts."""
-from collections import Counter
 import json
 import os
-from pathlib import Path
 import random
 import subprocess
 import sys
+from collections import Counter
+from pathlib import Path
 
 import pytest
 import yaml
@@ -191,6 +191,32 @@ def test_all_security_commands_flags_and_timing_artifacts_remain_unconditional()
                 assert "--durations=50" in run and "--junitxml=" in run
         uploads = [s for s in jobs[name]["steps"] if s.get("uses", "").startswith("actions/upload-artifact@")]
         assert len(uploads) == 1 and uploads[0]["if"] == "always()"
+
+
+def test_large_fold_ratchets_run_once_per_pr_and_repeat_only_on_main():
+    steps = workflow()["jobs"]["backend-security"]["steps"]
+    step = next(s for s in steps if s.get("name") == "Measure large-fold contention on both databases")
+    assert "if" not in step and "continue-on-error" not in step
+    assert step["env"]["AI_SHUFFLE_TRANSCRIPT_PRODUCER"] == "1"
+    assert step["env"]["CONTENTION_ATTEMPTS"] == "${{ github.ref == 'refs/heads/main' && '5' || '1' }}"
+    run = step["run"]
+    assert 'for attempt in $(seq 1 "$CONTENTION_ATTEMPTS"); do' in run
+    assert "tests/test_transcript_projection_ingest_budget.py" in run
+    assert "tests/db/test_transcript_projection_ingest_postgres.py" in run
+    assert "ALLOW_REAL_PG=1 TEST_POSTGRES_DSN=" in run
+    assert run.count("--durations=50") == 2
+    assert 'reports/large-fold-shim-${attempt}.xml' in run
+    assert 'reports/large-fold-pg-${attempt}.xml' in run
+
+
+def test_native_projection_child_regressions_run_on_the_windows_identity_job():
+    native = yaml.safe_load((ROOT / ".github/workflows/ci-instance-identity.yml").read_text())
+    steps = native["jobs"]["identity"]["steps"]
+    step = next(s for s in steps if s.get("name") == "Exercise native projection child ownership and startup")
+    assert "if" not in step and "continue-on-error" not in step
+    assert "tests/test_transcript_projection_child_boundary.py" in step["run"]
+    assert "tests/test_transcript_projection_preparation.py" in step["run"]
+    assert any(s.get("uses") == "actions/setup-node@v4" and s["with"]["node-version"] == "22" for s in steps)
 
 
 @pytest.mark.parametrize("field,value", [("conclusion", "failure"), ("headBranch", "feature"), ("event", "pull_request"), ("workflowName", "Other")])

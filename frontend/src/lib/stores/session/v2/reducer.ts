@@ -22,6 +22,7 @@ import { isSwarmTool } from '$lib/utils/swarm';
 import { isQueuedSummary } from '$lib/utils/subagent-status';
 import { heldAgentDeliveries, type AgentDelivery } from '$lib/utils/agent-delivery';
 import { stripUntrustedFence } from '$lib/utils/untrusted-fence';
+import { firstTaggedText, splitTaggedBlocks } from '$lib/utils/transcript-tags';
 import {
 	APPROVAL_CARD_SUBTYPE,
 	approvalCardFromRequest,
@@ -1038,8 +1039,7 @@ function turnOutputTokens(usage: unknown): number {
  *  does not XML-escape field values (app/core/turn_scheduler.py::_esc is a
  *  plain str() passthrough), so the raw inner text is returned as-is. */
 function extractTag(block: string, tag: string): string {
-	const m = block.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`));
-	return m ? m[1] : '';
+	return firstTaggedText(block, tag) ?? '';
 }
 
 /** The block's header slice — the text before the first `<summary>` or
@@ -1063,8 +1063,6 @@ function parseUsageNum(raw: string): number | string | undefined {
 	const n = Number(t);
 	return Number.isFinite(n) && String(n) === t ? n : t;
 }
-
-const TASK_NOTIFICATION_BLOCK = /<task-notification>[\s\S]*?<\/task-notification>/g;
 
 /** One `agent_message` item per delivered peer message, rendered the same way
  *  as a live delivery receipt. `sole`: these are the event's only items, so a
@@ -1621,7 +1619,7 @@ function reduceInternal(
 			// than a raw user chat bubble. If the marker substring is present but
 			// NOTHING parses, fall through to the normal user-bubble path below.
 			if (content.includes('<task-notification>')) {
-				const blocks = content.match(/<task-notification>[\s\S]*?<\/task-notification>/g) || [];
+				const { blocks, outside } = splitTaggedBlocks(content, 'task-notification');
 				if (blocks.length > 0) {
 					const notifStamp = stampTs(event, createdAt);
 					let next = state;
@@ -1642,7 +1640,7 @@ function reduceInternal(
 					});
 					// Peer messages held while parked ride the same wake, after its
 					// notifications (turn_scheduler::_unpark_prompt).
-					const held = heldAgentDeliveries(content.replace(TASK_NOTIFICATION_BLOCK, ''));
+					const held = heldAgentDeliveries(outside);
 					if (held) next = appendAgentDeliveries(next, held, event.id, notifStamp, seq, false);
 					// A pump card arms "ok"-ack suppression for the live turn; a purely
 					// own notification (or nothing pumped) clears any stale watch.
