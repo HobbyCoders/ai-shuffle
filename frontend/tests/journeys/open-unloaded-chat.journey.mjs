@@ -80,7 +80,45 @@ const viaDeepLink = (target) => async ({ page, status, mark, variant }) => {
 // --mobile-shell they open the REAL /mobile/ app instead. Hold only delivery of
 // an actual native SSE response: no reducer, content or loading flag is fabricated.
 async function holdIncomingHistory(page, target, delayMs) {
-	await page.addInitScript(({ target, delayMs }) => {
+	await page.addInitScript(({ target, delayMs, graceMs }) => {
+		// The product's notice deadline is a real setTimeout(graceMs). A case that
+		// must act "within the grace" arms this gate: grace-length timers created
+		// while armed still run their real clock, but a callback that comes due
+		// before release() waits for it. The deadline therefore cannot pass
+		// before the case's own action, however slow the runner; the product's
+		// cancellation (clearTimeout/epoch) still decides what the late callback
+		// does. Other delays, and every timer while disarmed, are untouched.
+		const realSetTimeout = window.setTimeout.bind(window);
+		const realClearTimeout = window.clearTimeout.bind(window);
+		const gate = window.__switchGraceGate = {
+			armed: false, registered: [], deferred: new Map(), cleared: 0, ran: 0,
+			arm() { this.armed = true; this.registered = []; },
+			release() {
+				this.armed = false;
+				const due = [...this.deferred.values()];
+				this.deferred.clear();
+				for (const run of due) realSetTimeout(run, 0);
+				return due.length;
+			}
+		};
+		window.setTimeout = function (handler, delay, ...args) {
+			if (!gate.armed || typeof handler !== 'function' || Number(delay) !== graceMs) {
+				return realSetTimeout(handler, delay, ...args);
+			}
+			const entry = { at: performance.now() };
+			const run = () => { gate.ran++; handler(...args); };
+			const id = realSetTimeout(() => {
+				if (gate.armed) gate.deferred.set(id, run);
+				else run();
+			}, delay);
+			entry.id = id;
+			gate.registered.push(entry);
+			return id;
+		};
+		window.clearTimeout = function (id) {
+			if (gate.deferred.delete(id) || gate.registered.some(entry => entry.id === id)) gate.cleared++;
+			return realClearTimeout(id);
+		};
 		const fetchOriginal = window.fetch.bind(window);
 		const hold = window.__switchHydrationHold = { started: null, released: null };
 		window.fetch = async (input, init) => {
@@ -93,7 +131,7 @@ async function holdIncomingHistory(page, target, delayMs) {
 			}
 			return response;
 		};
-	}, { target, delayMs });
+	}, { target, delayMs, graceMs: SWITCH_GRACE_MS });
 }
 
 async function prepareHeldSwitch(ctx, delayMs, source = 'no_project') {
@@ -490,22 +528,25 @@ await runJourney({
 				const incomingButton = await incomingRow.elementHandle();
 				await sampleSwitchFrames(page);
 				await mark('start B then return to A before its history settles');
-				// One browser-side sequence: driver round-trips must not turn this
-				// rapid switch into a legitimate load past the notice deadline.
-				const dispatched = await page.evaluate(async ({ incoming, outgoing, graceMs }) => {
+				// One browser-side sequence. B's notice deadline is the product's own
+				// grace timer, gated (see holdIncomingHistory) so it cannot come due
+				// before the return is dispatched: a slow hosted runner can stretch
+				// the real rAF/drawer/network sequence past 350 ms of wall clock
+				// (#927) without turning this into a legitimate past-deadline load.
+				const dispatched = await page.evaluate(async ({ incoming, outgoing }) => {
 					const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+					const gate = window.__switchGraceGate;
 					if (!incoming?.isConnected) throw new Error('missing rapid-switch row');
+					gate.arm();
 					const first = performance.now();
 					incoming.click();
 					await frame();
-					// Reopen/paint the real drawer while B's native headers are in flight,
-					// not afterwards: serializing network and drawer rendering can use
-					// the whole grace interval on hosted runners. Both remain real.
+					// Reopen/paint the real drawer while B's native headers are in flight.
 					const menu = document.querySelector('button[aria-label^="Open menu"], button[aria-label="Show sidebar"]');
 					if (menu) { menu.click(); await frame(); }
 					while (window.__switchHydrationHold.started === null) {
-						if (performance.now() - first >= graceMs) {
-							throw new Error('invalid rapid-switch run: B did not start its held history before the notice deadline');
+						if (performance.now() - first >= 15_000) {
+							throw new Error('invalid rapid-switch run: B never requested its history');
 						}
 						await frame();
 					}
@@ -515,19 +556,37 @@ await runJourney({
 						.find(node => node.getAttribute('aria-label') === `${outgoing} session`);
 					const returnButton = group?.querySelector('[role="button"]');
 					if (!returnButton) throw new Error('missing rapid-return session card');
+					const graceTimers = gate.registered.length;
+					const graceStart = gate.registered[0]?.at ?? null;
+					const deferredBeforeReturn = gate.deferred.size;
+					const ranBeforeReturn = gate.ran;
+					const historyPending = window.__switchHydrationHold.released === null;
 					window.__flightRecorder.mark('return to A before B has hydrated');
 					const returned = performance.now();
 					returnButton.click();
-					return { first, returned, elapsed: returned - first, graceMs };
-				}, { incoming: incomingButton, outgoing: SEEDED.no_project, graceMs: SWITCH_GRACE_MS });
+					return {
+						first, returned, elapsed: returned - first, graceTimers, historyPending,
+						deferredBeforeReturn, ranBeforeReturn,
+						sinceGraceStart: graceStart === null ? null : returned - graceStart
+					};
+				}, { incoming: incomingButton, outgoing: SEEDED.no_project });
 				log(`rapid-dispatch ${JSON.stringify(dispatched)}`);
-				expect(dispatched.elapsed < dispatched.graceMs,
-					`invalid rapid-switch run: return dispatched at ${dispatched.elapsed.toFixed(1)} ms, not before ${dispatched.graceMs} ms`);
+				// Preconditions, on the product's own clock: B entered its grace (its
+				// notice timer exists), its history was still in flight, and no
+				// notice deadline had run when the user went back to A.
+				expect(dispatched.graceTimers > 0, 'invalid rapid-switch run: B never started its notice grace timer');
+				expect(dispatched.historyPending, 'invalid rapid-switch run: B history settled before the return');
+				expect(dispatched.ranBeforeReturn === 0, 'invalid rapid-switch run: a notice deadline ran before the return');
 				await page.waitForFunction(tag => {
 					const chat = document.querySelector('[data-ui-state="chat"]');
 					return chat?.dataset.uiSession === tag && chat?.dataset.uiTargetSession === tag && chat?.dataset.uiLoading === 'false';
 				}, outgoing);
 				const readyAt = await page.evaluate(() => performance.now());
+				// Now let B's deadline run (at once if it is already due). The
+				// product must have cancelled B's notice when the user returned: a
+				// surviving timer would paint the overlay in the frames sampled below.
+				const released = await page.evaluate(() => window.__switchGraceGate.release());
+				log(`grace gate released ${released} due callback(s) after A was ready`);
 				await page.waitForFunction(() => window.__switchHydrationHold.released !== null, undefined, { timeout: 6000 });
 				await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 				const frames = await page.evaluate(() => {
