@@ -745,7 +745,7 @@ export class SourceUpdates {
           try {
             const retained = (await fs.readdir(path.join(this.options.root, 'versions'), { withFileTypes: true }))
               .filter(entry => (entry.isDirectory() || entry.isSymbolicLink()) && REVISION.test(entry.name)).map(entry => this.directory(entry.name));
-            await pruneNodeDependencies(path.join(this.options.root, 'dependencies'), [...retained, path.join(this.options.root, 'staging')]);
+            await pruneNodeDependencies(path.join(this.options.root, 'dependencies'), retained, path.join(this.options.root, 'staging'));
           } catch (error) { console.warn('Dependency cache cleanup deferred:', error); }
         }
       } finally { try { if (unlock) await unlock(); } finally { this.checking = false; } }

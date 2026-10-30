@@ -300,31 +300,53 @@ async function nodeInstallLocked(directory: string): Promise<boolean> {
 }
 /** Caller holds update.lock. Inventory every retained version before deleting
  * anything; unknown/unreadable references defer cleanup, never guess unused. */
-export async function pruneNodeDependencies(root: string, revisions: string[]): Promise<void> {
-  const references = new Set<string>();
+export async function pruneNodeDependencies(root: string, revisions: string[], staging?: string): Promise<void> {
+  const references = new Set<string>(), inspected = new Set<string>();
   const normalize = (file: string) => process.platform === 'win32' ? path.toNamespacedPath(path.resolve(file)).toLowerCase() : path.resolve(file);
   async function reference(file: string) {
-    // Keep lexical AND physical ancestors: even a missing module or a replaced
-    // node_modules link must not hide its retained generation from this inventory.
-    for (let at = path.resolve(file);;) {
-      references.add(normalize(at));
-      try { references.add(normalize(await fs.realpath(at))); }
-      catch (error) { if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
+    // Chained junctions can put the physical generation outside every lexical
+    // ancestor. Inventory BOTH ancestor chains, and never ignore resolution errors.
+    for (const start of [file, await fs.realpath(file)]) for (let at = path.resolve(start);;) {
+      const key = normalize(at); references.add(key);
+      if (!inspected.has(key)) {
+        inspected.add(key);
+        // Intermediate aliases may themselves live inside collectable generations.
+        if ((await fs.lstat(at)).isSymbolicLink()) await reference(path.resolve(path.dirname(at), await fs.readlink(at)));
+      }
       const parent = path.dirname(at); if (parent === at) break; at = parent;
     }
   }
-  for (const revision of revisions) {
-    for (const base of ['source', 'server']) for (const name of ['frontend', 'mobile', 'tools', 'browser-mcp', 'desktop']) {
-      const link = path.join(revision, base, name, 'node_modules');
-      try { await reference(path.resolve(path.dirname(link), await fs.readlink(link))); }
-      catch (error) { if (!['ENOENT', 'EINVAL'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
-    }
-    try {
-      const built = JSON.parse(await fs.readFile(path.join(revision, 'build.json'), 'utf8'));
-      if (typeof built.electron !== 'string') throw new Error('Unknown retained dependency references');
-      await reference(built.electron);
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  async function directory(file: string, optional = false): Promise<boolean> {
+    let stat;
+    try { stat = await fs.lstat(file); }
+    catch (error) { if (optional && (error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
+    // lstat distinguishes an absent optional path from a dangling junction. Check
+    // each parent before its optional children, so ENOENT cannot hide a junction.
+    if (stat.isSymbolicLink()) stat = await fs.stat(file);
+    if (!stat.isDirectory()) throw new Error('Unknown retained dependency directory');
+    await reference(file);
+    return true;
   }
+  async function inventory(revision: string, optional = false) {
+    if (!await directory(revision, optional)) return;
+    for (const base of ['source', 'server']) {
+      const parent = path.join(revision, base);
+      if (!await directory(parent, true)) continue;
+      for (const name of ['frontend', 'mobile', 'tools', 'browser-mcp', 'desktop']) {
+        const project = path.join(parent, name);
+        if (await directory(project, true)) await directory(path.join(project, 'node_modules'), true);
+      }
+    }
+    let built;
+    try { built = JSON.parse(await fs.readFile(path.join(revision, 'build.json'), 'utf8')); }
+    catch (error) { if (optional && (error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+    if (typeof built?.electron !== 'string') throw new Error('Unknown retained dependency references');
+    await reference(built.electron);
+  }
+  // Finish the entire reference inventory BEFORE any deletion. Only staging can
+  // legitimately be absent or lack build.json after an interrupted build.
+  for (const revision of revisions) await inventory(revision);
+  if (staging) await inventory(staging, true);
   const roots = [path.join(root, 'node')];
   const unused = new Map<string, { file: string; entry: string; time: number; discard: () => Promise<void> }[]>();
   for (const entry of await nodeCacheDirectories(root)) {
@@ -372,9 +394,10 @@ async function cachedNodeDependencies(root: string, key: string): Promise<string
     if (await exists(invalid)) continue;
     try {
       const marker = JSON.parse(await fs.readFile(path.join(cache, '.complete'), 'utf8'));
-      if (marker.key !== key) continue;
+      if (marker.key !== key || typeof marker.integrity !== 'string') continue;
       if (marker.integrity === await nodeDependencyTree(path.join(cache, 'node_modules'))) return cache;
-    } catch { /* Missing, legacy or damaged entries are misses, not repair targets. */ }
+    } catch { continue; } // Inconclusive (possibly transient I/O): skip only this lookup.
+    // Only a completed integrity mismatch may permanently reject a generation.
     // Sibling tombstones leave retained entries/markers untouched and prevent a
     // later recovery from hashing every already-rejected predecessor again.
     await fs.writeFile(invalid, '', { flag: 'wx' }).catch(error => { if (error.code !== 'EEXIST') throw error; });
