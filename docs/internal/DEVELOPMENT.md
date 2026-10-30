@@ -316,9 +316,9 @@ installation-local settled-message records. Enabling production is its own later
 step, after measuring a large real database; do not start a fleet-wide backfill
 with this change. Enabling it is also blocked by
 [the large-fold ingest regression](https://github.com/HobbyCoders/ai-shuffle/issues/902).
-The large-record CI scenario still runs its correctness checks, but its two
-latency budgets are temporarily expected failures with their original limits;
-fix the contention and restore gating before enabling production.
+The large-record CI scenario gates both ingest and loop-lag budgets at their
+original limits against the SQLite shim and native PostgreSQL; the contention
+fix does not authorize enabling production without the large-database check.
 **Reads are not implemented or negotiated:** opening chat
 still uses the existing event feed and full replay. Unset the switch (or set it
 to `0`) and restart to stop production. Neither setting changes serving, mutates
@@ -339,7 +339,32 @@ loop scheduling; bounded source and derived-state keyset scans repair dropped
 hints, including deletion while the producer was offline. Retired generations
 are collected in finite batches even during ongoing live traffic. CPU-heavy
 restore, coalescing, frame construction and IPC JSON preparation use one
-admission-bounded, cancellation-joined worker, not the serving event loop.
+admission-bounded, cancellation-joined **private Python subprocess**, not a
+Python thread sharing the serving loop's GIL. Both it and Node use the same
+minimal environment allowlist and supervised stdio boundary. The lightweight
+`-I` entrypoint imports pure canonical replay helpers, not `app.main`, API,
+settings or provider modules; no multiprocessing resource tracker is created.
+OS ownership ends both projection children on parent death even while CPU work
+holds the GIL: a Linux exec shim arms `PR_SET_PDEATHSIG` and checks the expected
+parent PID after arming; Windows uses Fluid's parent-owned kill-on-close Job
+Object. Site-free Python (`-I -S`) and builtin-only Node gates block before
+startup hooks/entrypoints. The gate first reports its actual PID (a Windows
+venv may redirect through another process); the parent owns each distinct PID
+with a separate Job before sending one go byte. This accommodates CPython's
+existing nested/silent-breakaway Job; startup descendants inherit the runtime's
+new innermost Job, which does not allow breakaway. Before any attachment, open
+and pin both process handles, validate the runtime's parent PID and creation
+time against the launcher, and verify the launcher is still running. Assign
+those same handles (never reopen a reported PID) so recycling cannot enroll an
+unrelated process. Failed validation/attachment closes stdin and kills/reaps
+the gated child without running startup code. The bounded stdin reader still
+handles ordinary EOF. Neither mechanism adds a supervisor process or tracker.
+Preparation admits one job, reuses one child, refreshes two normalized replay switches per
+call and joins the child on shutdown. Database operations stay on the existing
+asynchronous thread path; no pool/socket is forked into the CPU child. Both
+SQLite and native PostgreSQL have an unconditional CI measurement on PRs;
+main-suite repeats each five times. Cold application-import and abrupt-death
+regressions cover the child boundary separately from warm contention limits.
 Implicit interrupt prose and its user barrier stay in carry regardless of
 window distance; a deep rewind without a known barrier fails closed rather
 than inventing an older target. No source append or replication writer awaits

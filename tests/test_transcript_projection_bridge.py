@@ -3,15 +3,18 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from pathlib import Path
+import os
 import shutil
+from pathlib import Path
 
 import pytest
 
 from app.core.transcript_views.bridge import (
-    ReducerBridge, ReducerUnavailable, SAFE_ENV_KEYS, verified_manifest,
+    SAFE_ENV_KEYS,
+    ReducerBridge,
+    ReducerUnavailable,
+    verified_manifest,
 )
-
 
 BUNDLE = Path(__file__).resolve().parents[1] / "app/core/transcript_views"
 
@@ -87,6 +90,20 @@ async def test_real_node_round_trip_and_credential_free_environment(monkeypatch)
     finally:
         await bridge.close()
     assert bridge._process is None
+
+
+@pytest.mark.asyncio
+async def test_crashed_preparation_fails_closed_then_restarts_its_own_child():
+    bridge = ReducerBridge()
+    try:
+        assert await bridge.request('plan', carry=None, frames=[]) == []
+        node = bridge._process
+        with pytest.raises(ReducerUnavailable, match='preparation_unavailable'):
+            await bridge.prepare(os._exit, 1)
+        assert await bridge.request('plan', carry=None, frames=[]) == []
+        assert bridge._process is node
+    finally:
+        await bridge.close()
 
 
 @pytest.mark.asyncio

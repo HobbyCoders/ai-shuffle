@@ -52,6 +52,29 @@ def assign_kill_on_close_job(pid: int | None) -> int | None:
     if sys.platform != "win32" or not isinstance(pid, int) or pid <= 0:
         return None
     try:  # pragma: no cover - win32 only
+        _ctypes, _wintypes, kernel32 = _kernel32()
+        process = kernel32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid)
+        if not process:
+            return None
+        try:
+            return assign_kill_on_close_job_handle(int(process))
+        finally:
+            kernel32.CloseHandle(process)
+    except Exception:  # noqa: BLE001
+        log.debug("could not put process %s in a kill-on-close job", pid, exc_info=True)
+        return None
+
+
+def assign_kill_on_close_job_handle(process: int | None) -> int | None:
+    """Assign a caller-pinned handle; the caller retains and closes that handle.
+
+    No PID is reopened. The returned non-inheritable Job handle has the same
+    ownership/lifetime contract as :func:`assign_kill_on_close_job`.
+    """
+    if sys.platform != "win32" or not isinstance(process, int) or process <= 0:
+        return None
+    job = None
+    try:  # pragma: no cover - win32 only
         ctypes, wintypes, kernel32 = _kernel32()
 
         class IO_COUNTERS(ctypes.Structure):
@@ -96,20 +119,13 @@ def assign_kill_on_close_job(pid: int | None) -> int | None:
         ):
             kernel32.CloseHandle(job)
             return None
-        process = kernel32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid)
-        if not process:
-            kernel32.CloseHandle(job)
-            return None
-        try:
-            assigned = kernel32.AssignProcessToJobObject(job, process)
-        finally:
-            kernel32.CloseHandle(process)
-        if not assigned:
+        if not kernel32.AssignProcessToJobObject(job, process):
             kernel32.CloseHandle(job)
             return None
         return int(job)
     except Exception:  # noqa: BLE001
-        log.debug("could not put process %s in a kill-on-close job", pid, exc_info=True)
+        close_job(job)
+        log.debug("could not put pinned process in a kill-on-close job", exc_info=True)
         return None
 
 
