@@ -1403,8 +1403,12 @@
 				const resolvedNext = Date.now() < manualNavigationReleaseUntil || mountedEnd < displayItems.length || pinnedTranscriptRange() !== null ? false : next;
 				// eslint-disable-next-line no-console
 				if (STREAM_DEBUG && resolvedNext !== shouldAutoScroll) console.log(`[AS] handleScroll ${resolvedNext ? 'ENABLE' : 'DISABLE'} currST=${currentScrollTop} prevST=${prev.scrollTop} SH=${currentMetrics.scrollHeight} CH=${currentMetrics.clientHeight}`);
+				const leftBottom = shouldAutoScroll && !resolvedNext;
 				shouldAutoScroll = resolvedNext;
 				lastScrollMetrics = currentMetrics;
+				// #865: the capture queued by this scroll ran while still following
+				// the bottom; take the reading row now that the reader has left it.
+				if (leftBottom) scheduleReadingAnchorCapture();
 				// Scrollbar, keyboard, and accessibility scrolling do not emit our
 				// wheel/touch intent hooks. Release the controlled prompt anchor as
 				// soon as ordinary scroll geometry says the reader left the live edge.
