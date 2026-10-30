@@ -135,11 +135,8 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 		if (range.start !== start || range.end !== end) range = { start, end };
 		return range;
 	}
-	function move(start: number): TranscriptRange {
-		if (!weighted) {
-			const next = rangeAt(start, count, cap, range);
-			return commit(next.start, next.end);
-		}
+	function startingRange(start: number): TranscriptRange {
+		if (!weighted) return rangeAt(start, count, cap, range);
 		start = Math.max(0, Math.min(Math.floor(start), Math.max(0, count - 1)));
 		let end = start, used = 0;
 		while (end < count && end - start < cap) {
@@ -147,10 +144,10 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 			if (end > start && used + next > budget) break;
 			used += next; end++;
 		}
-		return commit(start, end);
+		return { start, end };
 	}
-	function endingAt(end: number): TranscriptRange {
-		if (!weighted) return move(end - cap);
+	function endingRange(end: number): TranscriptRange {
+		if (!weighted) return startingRange(end - cap);
 		end = Math.max(0, Math.min(count, end));
 		let start = end, used = 0;
 		while (start > 0 && end - start < cap) {
@@ -158,7 +155,15 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 			if (start < end && used + next > budget) break;
 			used += next; start--;
 		}
-		return commit(start, end);
+		return { start, end };
+	}
+	function move(start: number): TranscriptRange {
+		const next = startingRange(start);
+		return commit(next.start, next.end);
+	}
+	function endingAt(end: number): TranscriptRange {
+		const next = endingRange(end);
+		return commit(next.start, next.end);
 	}
 	const shift = () => weighted ? Math.min(step, Math.max(1, Math.floor((range.end - range.start) / 4))) : step;
 	function toTail(): TranscriptRange { followsTail = true; return endingAt(count); }
@@ -167,10 +172,13 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 		if (!weighted) return move(range.start - step);
 		if (!range.start) return range;
 		const previous = range;
-		const next = endingAt(range.end - shift());
-		// A sudden oversize row can exceed the remaining overlap budget. Still
-		// make progress and show it in full, rather than making history unreachable.
-		return next.start < previous.start ? next : move(previous.start - 1);
+		let next = endingRange(range.end - shift());
+		if (next.start >= previous.start || next.end <= previous.start) {
+			// Include the first older row, then keep the largest overlapping prefix
+			// that fits. Compute candidates without committing/pinning twice.
+			next = endingRange(startingRange(previous.start - 1).end);
+		}
+		return commit(next.start, next.end);
 	}
 	return {
 		cap,
@@ -192,10 +200,16 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 		loadOlder: extendOlder,
 		extendNewer(): TranscriptRange {
 			const previous = range;
-			let next = move(range.start + shift());
-			if (weighted && next.end <= previous.end && previous.end < count) next = move(previous.end);
-			followsTail = next.end === count;
-			return next;
+			let next = startingRange(range.start + shift());
+			if (weighted && previous.end < count && (next.end <= previous.end || next.start >= previous.end)) {
+				// A heterogeneous body can block the usual step while a smaller
+				// suffix still fits beside the first new row. Retain that keyed
+				// overlap before accepting an unavoidable disjoint window.
+				next = startingRange(endingRange(previous.end + 1).start);
+			}
+			const committed = commit(next.start, next.end);
+			followsTail = committed.end === count;
+			return committed;
 		},
 		windowAround(index: number): TranscriptRange {
 			if (!Number.isInteger(index) || index < 0 || index >= count) return range;

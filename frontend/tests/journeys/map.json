@@ -66,12 +66,13 @@
 	"rules": [
 		{
 			"why": "bounded transcript windows and live text selection",
-			"journeys": ["transcript-reader"],
+			"journeys": ["transcript-reader", "transcript-boundary"],
 			"globs": [
 				"frontend/src/lib/components/chat/transcript-window*",
 				"frontend/src/lib/components/chat/MessageArea.svelte",
 				"frontend/src/lib/components/chat/BoundedTranscriptRows.svelte",
-				"frontend/tests/journeys/transcript-reader.journey.mjs"
+				"frontend/tests/journeys/transcript-reader.journey.mjs",
+				"frontend/tests/journeys/transcript-boundary.journey.mjs"
 			]
 		},
 		{

@@ -2,6 +2,26 @@ import { describe, expect, it } from 'vitest';
 import { createTranscriptWindow, type TranscriptRange } from './transcript-window';
 
 describe('nested transcript mount budget', () => {
+ it.each([
+  { costs: [64, 6000, 64, 9000], previous: { start: 0, end: 3 }, expected: { start: 2, end: 4 }, direction: 'newer' },
+  { costs: [9000, 64, 6000, 64], previous: { start: 1, end: 4 }, expected: { start: 0, end: 2 }, direction: 'older' }
+ ] as const)('retains the largest affordable overlap when $direction is blocked by a heterogeneous body', ({ costs, previous, expected, direction }) => {
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000 });
+  window.setItemCount(costs.length);
+  expect(window.restoreRange(previous)).toEqual(previous);
+  const next = direction === 'newer' ? window.extendNewer() : window.extendOlder();
+  expect(next).toEqual(expected);
+  expect(Math.min(previous.end, next.end)).toBeGreaterThan(Math.max(previous.start, next.start));
+  expect(costs.slice(next.start, next.end).reduce<number>((sum, cost) => sum + cost, 0)).toBeLessThanOrEqual(12000);
+ });
+ it('makes progress at an unavoidable disjoint boundary without exceeding the budget', () => {
+  const costs = [64, 9000, 9000, 64];
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000 });
+  window.setItemCount(costs.length);
+  expect(window.restoreRange({ start: 0, end: 2 })).toEqual({ start: 0, end: 2 });
+  expect(window.extendNewer()).toEqual({ start: 2, end: 4 });
+  expect(window.extendOlder()).toEqual({ start: 0, end: 2 });
+ });
  it('atomically resumes with the incoming item vector, including an empty hydration reset', () => {
   let costs = Array(20).fill(1000);
   const window = createTranscriptWindow({ budget: 12000, cost: (i: number) => {

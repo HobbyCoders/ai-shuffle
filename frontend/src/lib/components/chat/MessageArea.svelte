@@ -751,6 +751,12 @@
 			: [];
 		const anchor = candidates.find(node => node.getBoundingClientRect().bottom > top) ?? candidates.at(-1);
 		const anchorTop = anchor?.getBoundingClientRect().top;
+		// Oversize adjacent bodies may genuinely have no overlap. In that case
+		// absolute scrollTop belongs to the evicted DOM, not the incoming reply.
+		const boundaryAtStart = next.start >= mountedEnd;
+		const boundaryIndex = preserveAnchor && !anchor
+			? boundaryAtStart ? next.start : next.end <= mountedStart ? next.end - 1 : null
+			: null;
 		const version = ++windowShiftVersion;
 		windowShifting = true;
 		mountedRange = next;
@@ -760,11 +766,24 @@
 		}
 		void tick().then(() => {
 			if (version !== windowShiftVersion) return;
-			if (container && container === containerRef && anchor?.isConnected && anchorTop !== undefined) {
-				markProgrammaticScrollSettling();
-				container.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
-				lastKnownScrollTop = container.scrollTop;
-				lastScrollMetrics = readScrollMetrics();
+			if (container && container === containerRef) {
+				let delta: number | undefined;
+				if (anchor?.isConnected && anchorTop !== undefined) {
+					delta = anchor.getBoundingClientRect().top - anchorTop;
+				} else if (boundaryIndex !== null) {
+					const boundary = container.querySelector<HTMLElement>(`[data-transcript-index="${boundaryIndex}"]`);
+					if (boundary) {
+						const row = boundary.getBoundingClientRect();
+						const top = container.getBoundingClientRect().top + container.clientTop;
+						delta = boundaryAtStart ? row.top - top : row.bottom - top - container.clientHeight;
+					}
+				}
+				if (delta !== undefined) {
+					markProgrammaticScrollSettling();
+					container.scrollTop += delta;
+					lastKnownScrollTop = container.scrollTop;
+					lastScrollMetrics = readScrollMetrics();
+				}
 			}
 			windowShifting = false;
 		});
