@@ -430,16 +430,17 @@ await runJourney({
 					const first = performance.now();
 					incoming.click();
 					await frame();
+					// Reopen/paint the real drawer while B's native headers are in flight,
+					// not afterwards: serializing network and drawer rendering can use
+					// the whole grace interval on hosted runners. Both remain real.
+					const menu = document.querySelector('button[aria-label^="Open menu"], button[aria-label="Show sidebar"]');
+					if (menu) { menu.click(); await frame(); }
 					while (window.__switchHydrationHold.started === null) {
 						if (performance.now() - first >= graceMs) {
 							throw new Error('invalid rapid-switch run: B did not start its held history before the notice deadline');
 						}
 						await frame();
 					}
-					// Reopen the real drawer on phone shells; use the native row action,
-					// not a store write or a second off-screen transcript.
-					const menu = document.querySelector('button[aria-label^="Open menu"], button[aria-label="Show sidebar"]');
-					if (menu) { menu.click(); await frame(); }
 					// Responsive desktop unmounts its closed sidebar; find the freshly
 					// opened card rather than dispatching on a detached old handle.
 					const group = [...document.querySelectorAll('[role="group"]')]
