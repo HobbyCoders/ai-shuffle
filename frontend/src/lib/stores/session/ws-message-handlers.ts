@@ -34,6 +34,7 @@ import { markChatUnavailable } from '../unavailable-chat';
 import { dismissSettledSessionPrompts } from './settle-prompts';
 import { sessionEphemeralCache } from '../session-cache';
 import { markBindingHydrated } from './composer-binding';
+import { unmarkQuestionSent } from './sent-questions';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -1446,6 +1447,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					data.success === false &&
 					data.reason === 'relay_offline'
 				) {
+					// The tray closed on the tap (#891); bring it back, draft intact.
+					unmarkQuestionSent(requestId);
 					notify.error(
 						"Couldn't deliver your answer — the owning device is unreachable. Try again.",
 						{ category: 'user-question-relay-error', session_id: responseSessionId }
@@ -1456,6 +1459,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					...s,
 					pendingQuestions: s.pendingQuestions.filter(q => q.request_id !== requestId),
 				}));
+				unmarkQuestionSent(requestId);
 				break;
 			}
 

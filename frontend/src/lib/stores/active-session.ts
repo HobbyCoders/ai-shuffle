@@ -65,6 +65,7 @@ import { createStore, createSubscribers, shallowEqual } from './store-utils';
 import { ensureModelRegistryHydrated } from '$lib/constants/models.svelte';
 import { clampStandardCap, contextWindowForChoice, contextChoiceFromWindow, getModelContextControl, type ContextWindowChoice } from '$lib/constants/model-context';
 import { standardContextCap } from './session/context-window';
+import { clearSentQuestions } from './session/sent-questions';
 import { getDefaultModel, isFastModeCapable } from '$lib/constants/models';
 // Shared types
 import type {
@@ -575,6 +576,8 @@ const wsConn: WsConnection = createWsConnection({
 			// a session paused awaiting a permission/question reports
 			// isStreaming=false.
 			wsConn.send({ type: 'get_pending_permissions' });
+			// An answer sent on the old socket may be lost: show what is still open (#891).
+			clearSentQuestions();
 			wsConn.send({ type: 'get_pending_questions' });
 
 			// The feed controller owns the transcript + streaming state (fed from

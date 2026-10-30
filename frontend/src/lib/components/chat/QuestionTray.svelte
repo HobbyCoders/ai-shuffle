@@ -7,18 +7,25 @@
 		working?: boolean;
 		connected?: boolean;
 		onRespond: (detail: QuestionResponse) => void;
+		/**
+		 * Requests just answered, awaiting the server's ack (#891). They are
+		 * hidden, not unmounted: a failed delivery shows them again with the
+		 * user's draft.
+		 */
+		sent?: ReadonlySet<string>;
 	}
-	let { requests, working = false, connected = true, onRespond }: Props = $props();
+	let { requests, working = false, connected = true, onRespond, sent }: Props = $props();
+	const open = $derived(sent?.size ? requests.filter(request => !sent.has(request.request_id)) : requests);
 	const id = $props.id();
 	let expanded = $state(true);
 	let selectedId = $state<string | null>(null);
-	const selected = $derived(requests.find(request => request.request_id === selectedId) ?? requests[0]);
-	const count = $derived(requests.reduce((total, request) => total + request.questions.length, 0));
+	const selected = $derived(open.find(request => request.request_id === selectedId) ?? open[0]);
+	const count = $derived(open.reduce((total, request) => total + request.questions.length, 0));
 	const status = $derived(!connected ? 'Reconnect to answer' : selected?.nonblocking && working ? 'Still working' : selected?.nonblocking ? 'Answer to continue' : 'Waiting for your answer');
 </script>
 
 {#if requests.length > 0}
-	<div class="question-tray-dock">
+	<div class="question-tray-dock" hidden={open.length === 0}>
 		<section class="question-tray" aria-label="Questions for you">
 			<button type="button" class="tray-toggle" aria-expanded={expanded} aria-controls={`${id}-content`} onclick={() => expanded = !expanded}>
 				<CircleHelp size={14} /><span class="title">Questions for you</span><span class="count">{count}</span>
@@ -26,9 +33,9 @@
 			</button>
 			<!-- Hide rather than unmount: collapse and request switching retain drafts. -->
 			<div id={`${id}-content`} hidden={!expanded} class="tray-content">
-				{#if requests.length > 1}
+				{#if open.length > 1}
 					<div class="request-tabs" role="group" aria-label="Pending requests">
-						{#each requests as request, index (request.request_id)}
+						{#each open as request, index (request.request_id)}
 							<button type="button" aria-pressed={selected?.request_id === request.request_id} onclick={() => selectedId = request.request_id}>
 								{request.questions[0]?.header || `Request ${index + 1}`}{request.questions.length > 1 ? ` · ${request.questions.length}` : ''}
 							</button>

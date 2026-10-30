@@ -186,17 +186,8 @@ function compactionCase(name, spec) {
 function reloadCase(name, spec) {
 	return {
 		name,
-		allow: [
-			{
-				kind: 'layout_shift',
-				// Only a small move whose biggest frame is the composer (its chip row may be
-				// attributed in the same frame or the next, so it is optional here); a total
-				// of 0.1 or more is not #818 and still fails.
-				message: /shifted 0\.0\d+ in total; biggest [^(]*\(moved: div\.input-slot in ChatView(, span\.ctx-chip in ChatInput)?\)/,
-				reason:
-					'known bug #818: on a phone a reloaded project chat moves the composer as its context chips load (not compaction: a no-project chat does not)'
-			}
-		],
+		// No layout-shift allowance: the reloaded project chat's composer and its
+		// one-line chip row stay put while the chips fill in (#818).
 		async setup(ctx) {
 			await openClaudeChat(ctx);
 			ctx.built = await compactAndFollow(ctx.page, spec, { mark: async () => {}, log: () => {} });
