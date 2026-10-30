@@ -172,6 +172,7 @@ async function finishSwitchFrames(page, log, { slow = false } = {}) {
 		readyMs: ready ? ready.t - ready.loadingStarted : null
 	})}`);
 	expect(underGrace.length > 0, 'observed the real incoming history while under grace');
+	expect(ready && ready.session === ready.target, 'the incoming target is painted ready before sampling stops');
 	expect(underGrace.every(frame => !frame.loader && frame.visibleRows > 0 && frame.outgoingConnected), 'no empty/skeleton frame under grace');
 	expect(frames.every(frame => frame.composerSame && frame.logSame), 'composer and MessageArea retain their identity');
 	expect(pending.every(frame => !frame.outgoingDraft), 'the incoming composer never displays the outgoing draft');
@@ -186,6 +187,9 @@ const heldSwitch = (delayMs, slow = false) => ({
 		await sampleSwitchFrames(page);
 		await mark('open an unvisited short chat');
 		await openSwitchChat(page, 'other_project');
+		// Sidebar selection can run in the next rAF. Do not mistake the still-
+		// painted outgoing ready state for the incoming chat's completion.
+		await page.waitForFunction(() => window.__switchHydrationHold.started !== null);
 		await waitChatOpen(page, { messagesAtLeast: 2, hold: 250 });
 		await finishSwitchFrames(page, log, { slow });
 	},
@@ -327,12 +331,12 @@ await runJourney({
 				// then a real standalone shell task; never seed activeTasks by hand.
 				await typeAndSend(page, `task-retention-${uniq()} ${scriptTag(variant, 'long', { tps: 0, latency_ms: 0 })}`);
 				await waitTurnSettled(page, { text: 'About the request path', hold: 250 });
-				await typeAndSend(page, `Keep a real shell task visible ${scriptTag(variant, 'park-wait', { tps: 1, latency_ms: 0 })}`);
+				await typeAndSend(page, `Keep a real shell task visible ${scriptTag(variant, 'tool-background-stream', { tps: 2, latency_ms: 0 })}`);
 				const toggle = page.locator('[data-ui-mount="MessageArea"]').getByTestId('tasks-toggle');
 				await toggle.waitFor({ timeout: 60_000 });
 				if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
 				await page.waitForFunction(() => document.querySelector('[data-ui-mount="MessageArea"] [data-testid="tasks-toggle"]')
-					?.closest('.inline')?.querySelector('.inline-body')?.textContent.includes('sleep 20'));
+					?.closest('.inline')?.querySelector('.inline-body')?.textContent.includes('sleep 120'));
 				await waitChat(page, { streaming: 'true' });
 				await scrollTranscriptTo(page, 1);
 				expect((await transcriptScroll(page)).max > 200, 'A has a genuine bottom reading position to protect');
@@ -351,7 +355,7 @@ await runJourney({
 				const kept = await page.evaluate(() => {
 					const old = window.__taskRetention;
 					return { connected: old.panel.isConnected, height: old.panel.getBoundingClientRect().height,
-						heightBefore: old.height, shell: old.panel.querySelector('.inline-body')?.textContent.includes('sleep 20'),
+						heightBefore: old.height, shell: old.panel.querySelector('.inline-body')?.textContent.includes('sleep 120'),
 						scrollTop: old.log.scrollTop, scrollBefore: old.scrollTop,
 						composerSame: old.composer === document.querySelector('[role="textbox"][aria-label="Message"]'),
 						logSame: old.log === document.querySelector('[role="log"][aria-label="Conversation messages"]') };
