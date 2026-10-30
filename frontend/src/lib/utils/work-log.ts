@@ -956,6 +956,21 @@ function swarmOwnedMessages(messages: ChatMessage[], options: BuildOptions): Set
 const isPromptRow = (entry: Positioned) => entry.message.role === 'user' && !agentDelivery(entry.message);
 
 /**
+ * The "Task completed" row a background-task wake opens with (the reducer marks
+ * the wake prompt's cards). The wake stays in the turn it resumes, but it reads
+ * like a mid-turn user message (#835): the row keeps its place, the prose
+ * before it (the "running in the background" note) and the reply after it stay
+ * on screen, so nothing above the reply folds away when the wake ends. A task
+ * notice streamed inside a live turn is not a wake and folds as before.
+ */
+function isTaskWake(message: ChatMessage): boolean {
+	return isTaskResult(message) && message.metadata?.task_wake === true;
+}
+
+/** A row the turn's prose answers to: a steer, or a background-task wake. */
+const isSteerLike = (entry: Positioned) => isPromptRow(entry) || isTaskWake(entry.message);
+
+/**
  * Prose the reader must see while it is the latest word, or because it asks:
  * a lead-in followed by a question tool (before the next prose or steer) asks
  * too. Shared by the live runs and the settled turn so both keep the same rows.
@@ -964,7 +979,7 @@ function askingLeadIns(response: Positioned[]): Set<Positioned> {
 	const asking = new Set<Positioned>();
 	let pendingLeadIn: Positioned | null = null;
 	for (const entry of response) {
-		if (isPromptRow(entry)) pendingLeadIn = null;
+		if (isSteerLike(entry)) pendingLeadIn = null;
 		else if (isAssistantText(entry.message)) pendingLeadIn = entry;
 		else if (pendingLeadIn && isAskingTool(entry.message)) asking.add(pendingLeadIn);
 	}
@@ -985,14 +1000,14 @@ function askingLeadIns(response: Positioned[]): Set<Positioned> {
  * first prose after each steer is the reply to the steer, and the last prose
  * of the turn is its answer: all stay on screen, live and settled. When a
  * steer is followed only by tools and then the turn's last prose, that prose
- * is both, so it is kept once.
+ * is both, so it is kept once. A background-task wake counts as a steer.
  */
 function terminalProse(response: Positioned[]): Set<Positioned> {
 	const terminal = new Set<Positioned>();
 	let lastProse: Positioned | null = null;
 	let awaitingReply = false;
 	for (const entry of response) {
-		if (entry.message.role === 'user' && !agentDelivery(entry.message)) {
+		if (isSteerLike(entry)) {
 			if (lastProse) terminal.add(lastProse);
 			lastProse = null;
 			awaitingReply = true;
@@ -1059,8 +1074,9 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[], sessionId?: stri
 		));
 	// Rows a folded run hides; anything else (a tool still running, a
 	// screenshot, streaming thinking) keeps its place between the folds.
+	// A wake's "Task completed" row stays in place, as a steer does.
 	const foldsWithRun = (entry: Positioned) =>
-		!terminal.has(entry) && (
+		!terminal.has(entry) && !isTaskWake(entry.message) && (
 			isCompletedRoutineWork(entry.message) ||
 			isGroupableSystem(entry.message) ||
 			entry.message.type === 'tool_result' ||
@@ -1497,7 +1513,9 @@ export function buildTranscriptModel(
 		const durationLabel = turnFoldLabel(turnMessages, turnWasInterrupted(turnMessages));
 		const prefix = userIndex < 0 ? [] : turn.slice(0, 1);
 		const response = turn.slice(prefix.length);
-		const isSteer = (entry: Positioned) => entry.message.role === 'user' && !agentDelivery(entry.message);
+		// A background-task wake reads as a steer here too (#835): its row and
+		// the prose either side of it stay on screen.
+		const isSteer = isSteerLike;
 		// The fold renders its gallery above the rows it keeps, so only media from
 		// before the first steer may join it; later media stays in its own rows,
 		// in time order below the steer.

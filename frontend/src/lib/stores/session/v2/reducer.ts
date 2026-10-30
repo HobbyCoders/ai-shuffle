@@ -1634,6 +1634,9 @@ function reduceInternal(
 							content: '',
 							systemSubtype: 'task_notification',
 							systemData: data,
+							// The wake prompt itself (not a notice streamed mid-turn):
+							// the transcript keeps it on screen like a steer (#835).
+							metadata: { task_wake: true },
 							timestamp: notifStamp || undefined,
 						};
 						next = appendMessage(next, msg, seq);

@@ -1121,6 +1121,9 @@ function reduceInternal(state, event, observe) {
               content: "",
               systemSubtype: "task_notification",
               systemData: data,
+              // The wake prompt itself (not a notice streamed mid-turn):
+              // the transcript keeps it on screen like a steer (#835).
+              metadata: { task_wake: true },
               timestamp: notifStamp || void 0
             };
             next = appendMessage(next, msg, seq);
@@ -2255,7 +2258,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "44e21c22a3fe9e786beb646d91e9848cfc10cec09c446d6246979539a5164ef6";
+var REDUCER_FINGERPRINT = "f56825557998006facd2a0d77f5cd039777bb0857c80a098044fec14a45d4752";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {

@@ -30,17 +30,6 @@ function readCard(page) {
 	}, ACTIVE_CARD);
 }
 
-/**
- * Known bug #835: on a phone a wake turn's reply moves the transcript and the
- * composer's send buttons when it ends (no input). Only that shift: under 0.2
- * in total, biggest frame those three elements.
- */
-const WAKE_REPLY_SHIFT = {
-	kind: 'layout_shift',
-	message: /^layout shifted 0\.[01]\d+ in total; biggest 0\.0\d+ at \d+ms \(moved: div\.w-full in MessageArea, div\.send-cluster in ChatInput, span\.aname-text in MessageArea\)$/,
-	reason: "known bug #835: on a phone a wake turn's reply moves the transcript and send buttons when it ends"
-};
-
 await runJourney({
 	name: 'parked-timer',
 	recorder: { selectors: [`timer=${ACTIVE_CARD} .timer`, `status=${ACTIVE_CARD} .st`] },
@@ -92,5 +81,5 @@ await runJourney({
 			}
 		}
 	],
-	allow: [...DEV_INSTANCE_NOISE, WAKE_REPLY_SHIFT]
+	allow: [...DEV_INSTANCE_NOISE]
 });
