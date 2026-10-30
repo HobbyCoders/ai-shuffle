@@ -714,6 +714,7 @@ Direct app and test dependencies declared in `android/app/build.gradle.kts` are 
 
 | Package | Version | License | URL |
 | --- | --- | --- | --- |
+| androidx.activity:activity-ktx | 1.10.1 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/activity/activity-ktx/1.10.1/activity-ktx-1.10.1.pom |
 | androidx.appcompat:appcompat | 1.7.0 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/appcompat/appcompat/1.7.0/appcompat-1.7.0.pom |
 | androidx.constraintlayout:constraintlayout | 2.1.4 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/constraintlayout/constraintlayout/2.1.4/constraintlayout-2.1.4.pom |
 | androidx.core:core-ktx | 1.13.1 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/core/core-ktx/1.13.1/core-ktx-1.13.1.pom |

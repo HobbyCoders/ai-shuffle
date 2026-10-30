@@ -105,6 +105,32 @@ describe('opening an existing chat', () => {
 		expect(mocks.fetchRemote).not.toHaveBeenCalled();
 	});
 
+	it('does not auto-fetch while a turn may be using the checkout (#803)', async () => {
+		// A new chat's first load runs as its first reply starts: its status can
+		// still say idle, but the owner refuses the fetch (409) once the turn runs.
+		let busy = true;
+		await git.loadRepository('p', false, 's1', { fetchBlocked: () => busy });
+		await settle();
+		expect(mocks.fetchRemote).not.toHaveBeenCalled();
+		busy = false;
+		await git.loadRepository('p', true, 's1', { fetchBlocked: () => busy });
+		await settle();
+		expect(mocks.fetchRemote).toHaveBeenCalledTimes(1);
+	});
+
+	it('runs the skipped fetch once the turn ends (stream-end refresh)', async () => {
+		await git.loadRepository('p', false, 's1', { fetchBlocked: () => true });
+		await settle();
+		expect(mocks.fetchRemote).not.toHaveBeenCalled();
+		git.forceRefresh();
+		await settle();
+		expect(mocks.fetchRemote).toHaveBeenCalledTimes(1);
+		// Only once: a later stream end does not fetch again.
+		git.forceRefresh();
+		await settle();
+		expect(mocks.fetchRemote).toHaveBeenCalledTimes(1);
+	});
+
 	it.each([409, 503])('does not auto-fetch an unavailable checkout (%s)', async (status) => {
 		mocks.getGitStatus.mockRejectedValue({ status, detail: 'Checkout unavailable' });
 		vi.spyOn(console, 'error').mockImplementation(() => {});

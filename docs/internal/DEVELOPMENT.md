@@ -314,7 +314,12 @@ Background production is **default-off**. On an approved worker with Node 22 or
 newer, set `AI_SHUFFLE_TRANSCRIPT_PRODUCER=1` and restart to build
 installation-local settled-message records. Enabling production is its own later
 step, after measuring a large real database; do not start a fleet-wide backfill
-with this change. **Reads are not implemented or negotiated:** opening chat
+with this change. Enabling it is also blocked by
+[the large-fold ingest regression](https://github.com/HobbyCoders/ai-shuffle/issues/902).
+The large-record CI scenario still runs its correctness checks, but its two
+latency budgets are temporarily expected failures with their original limits;
+fix the contention and restore gating before enabling production.
+**Reads are not implemented or negotiated:** opening chat
 still uses the existing event feed and full replay. Unset the switch (or set it
 to `0`) and restart to stop production. Neither setting changes serving, mutates
 the source log or deletes chat content. For an isolated dev-loop check, use
