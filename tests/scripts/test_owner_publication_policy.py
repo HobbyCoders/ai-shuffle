@@ -214,7 +214,7 @@ def test_pr_triggers_are_only_for_read_only_secret_free_checks():
         "ci-backend.yml", "ci-fluid.yml", "ci-frontend.yml", "desktop.yml",
         "desktop-source-checks.yml", "windows-suite.yml", "ci-instance-identity.yml",
         "ci-artifact-policy.yml", "ci-browser-workspace.yml", "container-postgres.yml",
-        "ci-android-minified.yml",
+        "ci-android-minified.yml", "android.yml",
     }
     found = set()
     for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
@@ -223,7 +223,15 @@ def test_pr_triggers_are_only_for_read_only_secret_free_checks():
         if "pull_request" in config["on"]:
             found.add(path.name)
             assert config["permissions"] == {"contents": "read"}, path.name
-            assert "secrets." not in path.read_text(), path.name
+            if path.name != "android.yml":
+                assert "secrets." not in path.read_text(), path.name
+            else:
+                # Android keeps release steps in the same workflow. Every secret
+                # reference must be in a step whose actual predicate rejects PRs.
+                for job in config["jobs"].values():
+                    for step in job.get("steps", []):
+                        if "secrets." in str(step):
+                            assert not permits(step["if"], event="pull_request"), step["name"]
     assert found == allowed
 
 
@@ -241,6 +249,26 @@ def test_nightly_hosted_completion_is_guarded_but_stable_stays_owner_only():
         assert not permits(condition, **context)
     assert not permits(condition, actor_id="7")  # Manual dispatch remains owner-only.
     assert permits(condition, event="schedule")
+
+
+@pytest.mark.parametrize("ref", [MAIN, TAG, "refs/pull/123/merge"])
+def test_android_prs_cannot_sign_or_publish_even_as_owner_with_publish_requested(ref):
+    config = workflow("android.yml")
+    assert set(config["jobs"]) == {"build", "android-ui", "publish"}
+    for name in ("build", "android-ui"):
+        assert "if" not in config["jobs"][name]
+        assert config["jobs"][name].get("permissions", config["permissions"]) == {"contents": "read"}
+    build = config["jobs"]["build"]
+    release_steps = [step for step in build["steps"] if "if" in step]
+    assert {step["name"] for step in release_steps} == {
+        "Configure Firebase client (optional)", "Decode release keystore", "Build release APK",
+        "Verify APK is signed with the release key", "Prepare public APK download", "Upload public download files",
+    }
+    # Evaluate the checked-in guards with the most permissive actor and inputs;
+    # event isolation, not absent PR secrets or a failed dependency, must deny it.
+    for step in release_steps:
+        assert not permits(step["if"], event="pull_request", ref=ref), step["name"]
+    assert not permits(config["jobs"]["publish"]["if"], event="pull_request", ref=ref)
 
 
 def test_android_signing_steps_are_owner_gated_without_gating_unsigned_ci():
