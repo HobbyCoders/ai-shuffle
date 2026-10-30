@@ -32,7 +32,7 @@ place where the code currently differs.
 | SuperGrok row | Subscription window remaining | Windows and plan |
 | OpenRouter row | Account credit left (key spend limit only when there is no account balance) | Same, plus the dashboard link |
 | fal.ai row | Credit balance left | Same, plus the dashboard link |
-| OpenAI API row | "Credit balance not available for this key" | Same; no Platform billing link |
+| OpenAI API | Not shown | Not shown |
 
 The collapsed value of a multi-window row is the window a session most often
 hits first (5-hour for Claude), **not** the minimum of all windows (fixed in

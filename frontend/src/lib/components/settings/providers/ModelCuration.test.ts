@@ -13,7 +13,7 @@ const mocks = vi.hoisted(() => ({
 	patch: vi.fn(),
 	refresh: vi.fn(),
 	notify: vi.fn(),
-	setAnthropicKey: vi.fn(),
+	addAnthropicAccount: vi.fn(),
 	loadClaude: vi.fn()
 }));
 vi.mock('$lib/api/client', () => ({
@@ -29,7 +29,7 @@ vi.mock('$lib/stores/providers.svelte', async () => {
 			saveProvider: (data: Parameters<typeof api.updateModelProvider>[1], id: string) =>
 				api.updateModelProvider(id, data),
 			refreshProviders: mocks.refresh,
-			setAnthropicKey: mocks.setAnthropicKey,
+			addAnthropicAccount: mocks.addAnthropicAccount,
 			loadClaude: mocks.loadClaude
 		}
 	};
@@ -455,14 +455,14 @@ describe('adding an API key', () => {
 		expect(settingsNav.selectedItem('providers')).toBe('provider:openai');
 	});
 
-	it('an Anthropic key becomes the active credential when Claude has none', async () => {
-		mocks.setAnthropicKey.mockResolvedValue(undefined);
+	it('an Anthropic key is saved and selected without changing the Claude Code mode', async () => {
+		mocks.addAnthropicAccount.mockResolvedValue('saved-key');
 		const draft = providerDrafts.add('claude', 'anthropic', []);
 		render(DraftHarness, { item: draft.item });
 		await fireEvent.input(screen.getByLabelText('API key'), { target: { value: ' sk-ant-x ' } });
 		await fireEvent.click(screen.getByRole('button', { name: 'Use this key' }));
 		await screen.findByTestId('draft-gone');
-		expect(mocks.setAnthropicKey).toHaveBeenCalledWith('sk-ant-x', { useForClaudeCode: true });
-		expect(settingsNav.selectedItem('providers')).toBe('claude:api-key');
+		expect(mocks.addAnthropicAccount).toHaveBeenCalledWith('sk-ant-x', '');
+		expect(settingsNav.selectedItem('providers')).toBe('claude:api-key:saved-key');
 	});
 });

@@ -672,8 +672,8 @@ def _inherited_model(sender, overrides):
         # A native Claude pick on a provider chat runs natively unless that
         # provider itself serves the id (query_options' rebind rule).
         from app.core.provider_agent import curated_model_ids
-        from app.db.model_providers import get_model_provider
-        if value not in curated_model_ids(get_model_provider(provider_id)):
+        from app.db.model_providers import resolve_model_provider
+        if value not in curated_model_ids(resolve_model_provider(provider_id)):
             provider_id = None
     return model_override.app_id(provider_id, value)
 
@@ -942,7 +942,7 @@ def accept_remote_start(body, from_device):
             picked = model_override.resolve(choice.get("model"), runs_here=True)
         except ValueError as exc:
             raise ValueError(f"{exc} Nothing was started.") from None
-        if picked.model != choice.get("model"):
+        if picked.model != model_override.active_account_model(choice.get("model")):
             # The sender already resolved and authorized this canonical id.
             # A receiver's similar id/display name cannot authorize a substitute.
             raise ValueError(f"The exact model id {choice.get('model')!r} cannot run on this worker. "
@@ -951,7 +951,7 @@ def accept_remote_start(body, from_device):
         mapped = model_override.settings_for_model(model, provider_id, effort=effort,
                                                    context_window=context_window, fast=fast)
         effort, context_window, fast = mapped["effort"], mapped["context_window"], mapped["fast"]
-    elif provider_id and model_providers.get_model_provider(provider_id) is None:
+    elif provider_id and model_providers.resolve_model_provider(provider_id) is None:
         provider_id = None
     from app.core.model_effort import resolve_child_effort
     effort_explicit = body.get("effort_explicit", False)

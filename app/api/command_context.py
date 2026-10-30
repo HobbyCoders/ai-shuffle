@@ -126,12 +126,12 @@ def command_provider_kind(
     if decoded:
         provider_id, raw_model = decoded
     elif selected and provider_id and is_native_claude_model(selected):
-        row = database.get_model_provider(provider_id, include_token=False)
+        row = database.resolve_model_provider(provider_id, include_token=False)
         if selected not in curated_model_ids(row):
             provider_id = None
     options = SessionOptions(model=raw_model)
     if provider_id:
-        row = database.get_model_provider(provider_id, include_token=False)
+        row = database.resolve_model_provider(provider_id, include_token=False)
         if not row or not row.get("enabled", True):
             return "unavailable"
         options.extra["provider_id"] = provider_id

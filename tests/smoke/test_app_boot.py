@@ -76,16 +76,6 @@ OWNER_PASSWORD = "smoke-boot-owner-password"
 # CRITICAL record or a Python warning fails the test.
 ALLOWED_PROBLEMS = [
     (
-        r"UserWarning: Duplicate Operation ID retired_billing_",
-        "FastAPI warns while building /openapi.json: app/api/openai_billing.py's "
-        "retired_billing is one api_route for GET and POST, so both operations share "
-        "an id. Harmless for serving; allowed until that route is split or hidden.",
-    ),
-    (
-        r"^\s*warnings\.warn\(message, stacklevel=1\)$",
-        "The source line Python prints under the allowed FastAPI UserWarning above.",
-    ),
-    (
         r"app\.services\.fal_catalog - ERROR - Failed to refresh fal\.ai catalog",
         "GET /api/v1/catalog/models refreshes a stale catalog from api.fal.ai; the "
         "test's proxy refuses it (offline by design) and the route still answers.",

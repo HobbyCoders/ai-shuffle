@@ -86,7 +86,8 @@ def normalize_model(value: Any) -> Tuple[Optional[str], Optional[str]]:
         validation = validate_provider_model(decoded[0], decoded[1], require_servable=False)
         if not validation.ok:
             return None, validation.reason or f"Model '{text}' is not available."
-        return f"prov:{decoded[0]}:{decoded[1]}", None
+        provider_id = (validation.provider or {}).get("id") or decoded[0]
+        return f"prov:{provider_id}:{decoded[1]}", None
     if text.startswith("prov:"):
         return None, f"'{text}' is not a valid prov:<providerId>:<modelId> id."
     if is_native_claude_model(text):

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { verifyProviderLogin, verifyProviderPollingCanary } from './verify-provider-login.mjs';
+import { verifyProviderBalance, verifyProviderPollingCanary } from './verify-provider-balance.mjs';
 import { verifyColdStart } from './verify-browser-cold-start.mjs';
 import { createRequire } from 'node:module';
 const require = createRequire(
@@ -218,7 +218,7 @@ try {
 
 	}
 	for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
-		await verifyProviderLogin(browser, url, viewport);
+		await verifyProviderBalance(browser, url, viewport);
 		await verifyProviderPollingCanary(browser, url, viewport);
 		await verifyColdStart(browser, url, viewport);
 	}

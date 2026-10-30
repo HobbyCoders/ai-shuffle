@@ -65,6 +65,17 @@
 	],
 	"rules": [
 		{
+			"why": "saved provider accounts: selecting a sibling refreshes the slot and moves its active marker",
+			"journeys": ["provider-account-switch"],
+			"globs": [
+				"frontend/tests/journeys/provider-account-switch.journey.mjs",
+				"frontend/src/lib/components/settings/providers/**",
+				"frontend/src/lib/stores/providers.svelte.ts",
+				"app/api/model_providers.py",
+				"app/db/model_provider_slots.py"
+			]
+		},
+		{
 			"why": "typed per-worker machine settings and the Devices detail panel",
 			"journeys": ["worker-machine-settings"],
 			"globs": [

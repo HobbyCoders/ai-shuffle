@@ -19,6 +19,7 @@ import type { ModelProvider } from '$lib/api/model-providers';
 const mocks = vi.hoisted(() => ({
 	listModelProviders: vi.fn(),
 	updateModelProvider: vi.fn(),
+	activateModelProvider: vi.fn(),
 	hydrateModelRegistry: vi.fn(),
 	getAuthStatus: vi.fn()
 }));
@@ -28,7 +29,8 @@ vi.mock('$lib/api/model-providers', async (importOriginal) => {
 	return {
 		...actual,
 		listModelProviders: mocks.listModelProviders,
-		updateModelProvider: mocks.updateModelProvider
+		updateModelProvider: mocks.updateModelProvider,
+		activateModelProvider: mocks.activateModelProvider
 	};
 });
 
@@ -71,6 +73,7 @@ function provider(partial: Partial<ModelProvider>): ModelProvider {
 beforeEach(() => {
 	mocks.listModelProviders.mockReset();
 	mocks.updateModelProvider.mockReset();
+	mocks.activateModelProvider.mockReset();
 	mocks.hydrateModelRegistry.mockReset();
 	mocks.getAuthStatus.mockReset();
 	mocks.hydrateModelRegistry.mockResolvedValue(undefined);
@@ -114,6 +117,30 @@ describe('providers store — model_providers registry', () => {
 
 		expect(providers.current.providers[0].enabled).toBe(true);
 		expect(providers.current.togglingProviderId).toBe(null);
+	});
+
+	it('activates idempotently and refetches siblings rather than merging the target-only response', async () => {
+		const before = [provider({ id: 'old', slot: 'openrouter:key' }), provider({ id: 'new', slot: 'openrouter:key', enabled: false })];
+		mocks.listModelProviders.mockResolvedValueOnce({ providers: before });
+		await providers.loadProviders();
+		mocks.activateModelProvider.mockResolvedValue({ ...before[1], enabled: true });
+		const after = before.map((p) => ({ ...p, enabled: p.id === 'new' }));
+		mocks.listModelProviders.mockResolvedValueOnce({ providers: after });
+		await providers.setProviderEnabled('new', true);
+		expect(mocks.activateModelProvider).toHaveBeenCalledExactlyOnceWith('new');
+		expect(mocks.updateModelProvider).not.toHaveBeenCalled();
+		expect(providers.current.providers).toEqual(after);
+		expect(mocks.hydrateModelRegistry).toHaveBeenCalledOnce();
+	});
+
+	it('keeps the old selection on an activation error and releases the busy state', async () => {
+		const rows = [provider({ id: 'old' }), provider({ id: 'new', enabled: false })];
+		mocks.listModelProviders.mockResolvedValue({ providers: rows });
+		await providers.loadProviders();
+		mocks.activateModelProvider.mockRejectedValue(new Error('Try again'));
+		await expect(providers.setProviderEnabled('new', true)).rejects.toThrow('Try again');
+		expect(providers.current.providers).toEqual(rows);
+		expect(providers.current.togglingProviderId).toBeNull();
 	});
 
 	it('refreshProviders invokes hydrateModelRegistry (landmine L4)', async () => {

@@ -36,7 +36,13 @@ def test_problem_context_is_bounded_and_keeps_later_problems():
 
 
 def test_allowlisted_lines_do_not_create_problems():
-    assert _problem_lines("UserWarning: Duplicate Operation ID retired_billing_test") == []
+    assert _problem_lines("app.services.fal_catalog - ERROR - Failed to refresh fal.ai catalog") == []
+
+
+def test_duplicate_operation_warnings_are_not_allowlisted():
+    # The retired OpenAI billing route is gone; a duplicate id is unexpected now.
+    warning = "UserWarning: Duplicate Operation ID retired_billing_test"
+    assert _problem_lines(warning) == [warning]
 
 
 def test_logs_survive_pruning_and_refresh_after_shutdown(tmp_path):

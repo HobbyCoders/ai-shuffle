@@ -110,7 +110,7 @@ async def test_removed_choice_is_revalidated_after_schema_creation(lane):
 
 async def test_owner_named_override_may_move_away_from_pinned_provider(lane):
     db, seen = lane
-    db.create_model_provider("other", "Other", "openai", "https://example.invalid/v1",
+    db.create_model_provider("other", "Other", "custom", "https://example.invalid/v1",
                              models=[{"id": "other-default"}, {"id": "other-choice"}])
     db.create_profile("pinned", "Pinned", None,
                       {"provider_models": {"lane": "prov:other:other-default"}})

@@ -10,7 +10,6 @@ on page load, before any live ``usage_snapshot`` WS event arrives.
 import logging
 import math
 import time
-from datetime import datetime, timezone
 from typing import Any, Callable, List, Literal, Optional
 
 from fastapi import APIRouter, Depends
@@ -23,26 +22,6 @@ from app.core.usage_limits import usage_limits_monitor
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/usage", tags=["Usage"])
-
-
-def _credits_are_displayable(credits: object) -> bool:
-    """True when a provider credits blob has a figure the popover can render."""
-    if not isinstance(credits, dict):
-        return False
-    if credits.get("unlimited") is True:
-        return True
-    for key in (
-        "balance_remaining",
-        "limit_remaining",
-        "usage",
-        "balance",
-        "total_available",
-        "spend_month",
-    ):
-        value = credits.get(key)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return True
-    return False
 
 
 def _coerce_epoch_resets_at(v: object) -> object:
@@ -234,7 +213,7 @@ class UsageSnapshot(BaseModel):
     # Installs sharing a Claude account, merged (additive; see
     # ``app.core.usage_limits.merge_account_snapshots``).
     accounts: List[AccountUsageSnapshot] = []
-    # Non-Claude provider usage (Codex/ChatGPT, OpenRouter, OpenAI credits,
+    # Non-Claude provider usage (Codex/ChatGPT, OpenRouter, xAI balances,
     # fal.ai credits, SuperGrok, ...). Additive. Null when the cached rows could
     # not be read, so clients keep their last-good rows instead of blanking.
     providers: list[ProviderUsageEntry] | None = []
@@ -271,13 +250,10 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
         from app.core.provider_usage import (
             FAL_USAGE_PROVIDER_ID,
             FAL_USAGE_PROVIDER_NAME,
-            OPENAI_API_USAGE_PROVIDER_ID,
         )
 
         entries: List[ProviderUsageEntry] = []
         now_ms = time.time() * 1000
-        month_start_ms = datetime.fromtimestamp(now_ms / 1000, timezone.utc).replace(
-            day=1, hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000
         for row in rows:
             try:
                 # Usage history can outlive a provider (including an in-flight poll
@@ -285,17 +261,11 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
                 # fal.ai is configured separately and has no model-provider row.
                 if row["provider_id"] not in names and row["provider_id"] != FAL_USAGE_PROVIDER_ID:
                     continue
-                # Retired OAuth fallback snapshots are not Platform billing accounts.
-                if row["provider_id"] == OPENAI_API_USAGE_PROVIDER_ID:
-                    continue
-                # The registry decides visibility. Rate-limit-only sources (xAI and
-                # other OpenAI-compatible hosts, Anthropic headers) stay hidden:
-                # their only content is per-minute headroom (~always 0%). OpenAI
-                # rows are included once Admin usage has a figure or an explicit
-                # failure status; their per-minute windows are stripped so the
-                # popover headlines reported spend instead of a ~0% requests bar.
-                # Capture itself stays; it doubles as the 429 breaker seam.
+                # Rate-limit-only sources stay hidden; capture itself remains
+                # for the 429 breaker. OpenAI API credit/spend is not collected.
                 ptype = row.get("provider_type")
+                if ptype in {"openai", "openai_balance"}:
+                    continue  # Suppress retired readings even before migration/cleanup.
                 credits = row.get("credits")
                 windows = row.get("windows") or []
                 raw = row.get("raw") or {}
@@ -306,15 +276,6 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
                 if source_def is not None and not source_def.shown:
                     continue
                 fetched_at = row.get("fetched_at")
-                if ptype == "openai":
-                    if raw.get("source") != "openai_admin":
-                        # Rate-limit/header and retired billing snapshots are not
-                        # balances. A local estimate is attached below, if set.
-                        continue
-                    if not _credits_are_displayable(credits) and error is None:
-                        continue
-                    fetched_at = raw.get("billing_fetched_at", fetched_at if _credits_are_displayable(credits) else None)
-                    windows = []
                 # Codex reports extra subscription credits, not USD or an OpenAI
                 # Platform balance. Only a positive, finite balance is useful here.
                 if ptype == "chatgpt":
@@ -368,36 +329,6 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
             except Exception:  # noqa: BLE001 — one unreadable row never hides the others
                 logger.debug("provider usage row %s skipped", row.get("provider_id"), exc_info=True)
 
-        from app.db.analytics import get_manual_balance_credits
-
-        by_id = {entry.provider_id: entry for entry in entries}
-        for provider in providers:
-            if (not provider.get("enabled", True)
-                    or not usage_sources.is_openai_platform_row(provider)
-                    or provider.get("auth_mode") in {"codex", "chatgpt"}):
-                continue
-            manual = await run_sync(get_manual_balance_credits, provider)
-            existing = by_id.get(provider["id"])
-            if existing is not None:
-                if manual is not None:
-                    existing.credits = {**manual, **(existing.credits or {})}
-                continue
-            if manual is not None:
-                source_def = usage_sources.SOURCES["openai_manual"]
-                entries.append(ProviderUsageEntry(
-                    provider_id=provider["id"], provider_name=provider.get("name"),
-                    provider_type="openai", status="fresh", credits=manual,
-                    fetched_at=int(now_ms), source=source_def.label,
-                    scope=source_def.scope_label, source_info=_source_info(source_def),
-                ))
-            elif provider.get("openai_billing_org_id"):
-                source_def = usage_sources.SOURCES["openai_admin"]
-                entries.append(ProviderUsageEntry(
-                    provider_id=provider["id"], provider_name=provider.get("name"),
-                    provider_type="openai", status="unavailable",
-                    source=source_def.label, scope=source_def.scope_label,
-                    source_info=_source_info(source_def), last_error_kind="unsupported",
-                ))
         from app.core import api_key_balances
 
         for provider in providers:
@@ -406,21 +337,9 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
             private = await run_sync(db.get_model_provider, provider["id"], include_token=True)
             balance = api_key_balances.status(private or {})
             if not balance["configured"]:
-                continue  # Manual balance is a fallback only without a real-balance binding.
+                continue
             source_def = usage_sources.SOURCES[balance["source_id"]]
-            # Admin access reports organization spend, not remaining credit.
-            # Preserve only its spend fields; never resurrect a manual balance.
-            admin_spend = {}
-            for entry in entries:
-                if (entry.provider_id == provider["id"] and entry.source_info
-                        and entry.source_info.id == "openai_admin"
-                        and entry.status == "fresh" and not entry.last_error_kind
-                        and entry.fetched_at and month_start_ms <= entry.fetched_at <= now_ms):
-                    # Do not relabel an old/failed or prior-month Admin total
-                    # with the balance's newer timestamp and current-month label.
-                    admin_spend = {k: v for k, v in (entry.credits or {}).items()
-                                   if k in {"spend_month", "input_tokens", "output_tokens", "num_model_requests"}}
-            credits = {**admin_spend, **(balance["credits"] or {})} or None
+            credits = balance["credits"]
             entries = [e for e in entries if e.provider_id != provider["id"]]
             entries.append(ProviderUsageEntry(
                 provider_id=provider["id"], provider_name=provider.get("name"),

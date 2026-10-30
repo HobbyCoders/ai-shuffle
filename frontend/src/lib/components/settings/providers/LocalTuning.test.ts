@@ -100,7 +100,8 @@ describe('which credentials get a Tuning tab', () => {
 	it('an OpenAI API key does not', async () => {
 		start([row({ api_dialect: 'openai' })]);
 		await open('mp:p1');
-		expect(screen.getByRole('tab', { name: 'Usage' })).toBeTruthy();
+		expect(screen.getByRole('tab', { name: 'Overview' })).toBeTruthy();
+		expect(screen.queryByRole('tab', { name: 'Usage' })).toBeNull();
 		expect(screen.queryByRole('tab', { name: 'Tuning' })).toBeNull();
 	});
 });

@@ -6,6 +6,7 @@
 	 */
 	import { onMount, untrack } from 'svelte';
 	import { RefreshCw } from 'lucide-svelte';
+	import { getErrorMessage } from '$lib/api/client';
 	import { providers } from '$lib/stores/providers.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { flashSaved } from '$lib/settings/save-status.svelte';
@@ -15,14 +16,14 @@
 	import RowGroup from '../rows/RowGroup.svelte';
 	import SettingRow from '../rows/SettingRow.svelte';
 	import ValueText from '../rows/ValueText.svelte';
-	import Switch from '../rows/Switch.svelte';
+	import TextField from '../rows/TextField.svelte';
 	import ProviderTile from './ProviderTile.svelte';
 	import ModelCuration from './ModelCuration.svelte';
 	import DeviceCodeSetup from './setup/DeviceCodeSetup.svelte';
 	import SubscriptionUsage from './tabs/SubscriptionUsage.svelte';
 	import { BankedResets, isGrokSubscription } from './banked-resets.svelte';
 	import { planLabel, supportsNativeImages, type CredentialView, type ProviderView } from './providers-model';
-	import { setCredentialEnabled } from './provider-actions';
+	import CredentialControl from './CredentialControl.svelte';
 
 	interface Props {
 		credential: CredentialView;
@@ -36,6 +37,19 @@
 	const signedIn = $derived(!!row.codex_access_token_set && !row.needs_reauth);
 	const banked = untrack(() => new BankedResets(() => credential.row!));
 	let reconnecting = $state(false);
+	let saving = $state(false);
+	let error = $state('');
+
+	async function rename(name: string) {
+		if (saving || !name.trim() || name.trim() === row.name) return;
+		saving = true;
+		error = '';
+		try {
+			await providers.saveProvider({ name: name.trim(), provider_type: row.provider_type, base_url: row.base_url }, row.id);
+			flashSaved();
+		} catch (e) { error = getErrorMessage(e, 'Could not rename this account'); }
+		finally { saving = false; }
+	}
 
 	const usageEntry = $derived(providers.current.usage?.providers?.find((p) => p.provider_id === row.id) ?? null);
 	const weekly = $derived(usageEntry?.windows?.find((w) => w.type === 'seven_day') ?? null);
@@ -101,14 +115,7 @@
 		{#if !signedIn && !reconnecting}
 			<button type="button" class="st-btn warn" onclick={reconnect}><RefreshCw />Reconnect</button>
 		{/if}
-		<span class="onoff">
-			{row.enabled ? 'On' : 'Off'}
-			<Switch
-				checked={row.enabled}
-				label="{credential.name} on"
-				onchange={(v) => setCredentialEnabled(credential, v)}
-			/>
-		</span>
+		<CredentialControl {credential} showState />
 	{/snippet}
 	{#snippet children(tab: string | null)}
 		{#if tab === 'Models'}
@@ -129,7 +136,9 @@
 				/>
 			</RowGroup>
 		{:else}
+			{#if error}<p class="pv-msg err" role="alert">{error}</p>{/if}
 			<RowGroup title="Account">
+				<SettingRow label="Name"><TextField value={row.name} width={220} maxlength={120} disabled={saving} onchange={rename} /></SettingRow>
 				<SettingRow label="Sign-in">
 					<ValueText
 						status={signedIn ? 'ok' : 'warn'}
@@ -150,13 +159,3 @@
 		{/if}
 	{/snippet}
 </DetailPane>
-
-<style>
-	.onoff {
-		display: inline-flex;
-		align-items: center;
-		gap: 8px;
-		font-size: 13px;
-		color: var(--st-mfg);
-	}
-</style>

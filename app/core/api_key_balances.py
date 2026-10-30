@@ -1,4 +1,4 @@
-"""Provider-reported API credit, never inferred from Admin spend or local costs."""
+"""Provider-reported xAI API credit, never inferred from local costs."""
 import hashlib
 import json
 import math
@@ -16,11 +16,10 @@ from app.core.usage_sources import SOURCES
 from app.db import database as db, provider_balances
 from app.db.async_database import run_sync
 
-OPENAI_CREDIT_URL = "https://api.openai.com/v1/dashboard/billing/credit_grants"
 XAI_KEY_URL = "https://api.x.ai/v1/api-key"
 XAI_BILLING_BASE = "https://management-api.x.ai/v1/billing/teams/"
-INTERVAL = SOURCES["openai_platform_balance"].min_interval
-FRESHNESS_SECONDS = SOURCES["openai_platform_balance"].public()["freshness_seconds"]
+INTERVAL = SOURCES["xai_management"].min_interval
+FRESHNESS_SECONDS = SOURCES["xai_management"].public()["freshness_seconds"]
 
 
 def credential_fingerprint(row):
@@ -34,7 +33,7 @@ def credential_fingerprint(row):
 def supported(row):
     try:
         url = urlsplit(row.get("base_url") or "")
-        host = {"openai": "api.openai.com", "xai": "api.x.ai"}.get(row.get("provider_type"))
+        host = "api.x.ai" if row.get("provider_type") == "xai" else None
         return bool(host and url.scheme == "https" and url.hostname == host
                     and url.port in (None, 443) and not url.username and not url.password
                     and row.get("auth_mode") not in {"codex", "chatgpt", "grok"})
@@ -64,12 +63,6 @@ def usd_cents(value):
     return float(number(value) / 100)
 
 
-def parse_openai(body):
-    return {"balance_remaining": float(number(body["total_available"])),
-            "total_credits": float(number(body["total_granted"])),
-            "total_usage": float(number(body["total_used"])), "currency": "USD"}
-
-
 def parse_xai(balance, invoice=None):
     # Proto JSON omits zero values. Purchases are negative; spend is positive.
     result = {"balance_remaining": -usd_cents(balance.get("total", 0)), "currency": "USD"}
@@ -85,7 +78,7 @@ def parse_xai(balance, invoice=None):
 
 
 def source_id(row):
-    return "openai_platform_balance" if row.get("provider_type") == "openai" else "xai_management"
+    return "xai_management"
 
 
 def status(row):
@@ -116,8 +109,7 @@ def status(row):
 
 async def get(url, key):
     from app.core.usage_sources import interval_for
-    source = "openai_platform_balance" if url == OPENAI_CREDIT_URL else "xai_management"
-    response = await usage_get(url, headers={"Authorization": "Bearer " + key}, interval=interval_for(source, url))
+    response = await usage_get(url, headers={"Authorization": "Bearer " + key}, interval=interval_for("xai_management", url))
     response.raise_for_status()
     return response.json()
 
@@ -137,39 +129,36 @@ async def poll(row):
             cached = {}
         team = cached.get("team_id")
         key = encryption.decrypt_value(row["balance_key"])
-        if row["provider_type"] == "openai":
-            credits = parse_openai(await get(OPENAI_CREDIT_URL, key))
-        else:
-            # Resolve with the inference key, never send a management key here.
-            if not team:
-                error_scope = "inference"
-                info = await get(XAI_KEY_URL, encryption.decrypt_value(row["auth_token"]))
-                team = info["team_id"]
-                error_scope = "balance"
-            if not isinstance(team, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,180}", team):
-                raise ValueError("Invalid team ID")
-            base = XAI_BILLING_BASE + team
-            balance = await get(base + "/prepaid/balance", key)
-            credits = parse_xai(balance)
-            try:
-                invoice = await get(base + "/postpaid/invoice/preview", key)
-                credits.update(parse_xai(balance, {"coreInvoice": invoice.get("coreInvoice")}))
-                if "effectiveSpendingLimit" in invoice:
-                    try:
-                        credits["spending_limit"] = usd_cents(invoice["effectiveSpendingLimit"])
-                    except (ValueError, TypeError, KeyError, AttributeError):
-                        limit_error = "unavailable"
-            except UsageDeferred:
-                # Invoice and prepaid endpoints have independent budget jitter.
-                # No observation is not an error: retain the optional endpoint's
-                # last values and refusal state (including a paused 401/403).
-                credits.update({k: v for k, v in (cached.get("credits") or {}).items()
-                                if k in {"spend_month", "spending_limit"}})
-                invoice_error = cached.get("invoice_error_kind")
-                limit_error = cached.get("spending_limit_error_kind")
-            except Exception as error:
-                code = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
-                invoice_error = "billing_access_denied" if code in (401, 403) else "unavailable"
+        # Resolve with the inference key, never send a management key here.
+        if not team:
+            error_scope = "inference"
+            info = await get(XAI_KEY_URL, encryption.decrypt_value(row["auth_token"]))
+            team = info["team_id"]
+            error_scope = "balance"
+        if not isinstance(team, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,180}", team):
+            raise ValueError("Invalid team ID")
+        base = XAI_BILLING_BASE + team
+        balance = await get(base + "/prepaid/balance", key)
+        credits = parse_xai(balance)
+        try:
+            invoice = await get(base + "/postpaid/invoice/preview", key)
+            credits.update(parse_xai(balance, {"coreInvoice": invoice.get("coreInvoice")}))
+            if "effectiveSpendingLimit" in invoice:
+                try:
+                    credits["spending_limit"] = usd_cents(invoice["effectiveSpendingLimit"])
+                except (ValueError, TypeError, KeyError, AttributeError):
+                    limit_error = "unavailable"
+        except UsageDeferred:
+            # Invoice and prepaid endpoints have independent budget jitter.
+            # No observation is not an error: retain the optional endpoint's
+            # last values and refusal state (including a paused 401/403).
+            credits.update({k: v for k, v in (cached.get("credits") or {}).items()
+                            if k in {"spend_month", "spending_limit"}})
+            invoice_error = cached.get("invoice_error_kind")
+            limit_error = cached.get("spending_limit_error_kind")
+        except Exception as error:
+            code = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
+            invoice_error = "billing_access_denied" if code in (401, 403) else "unavailable"
         await run_sync(provider_balances.snapshot, row, {"credits": credits, "team_id": team,
             "invoice_error_kind": invoice_error, "spending_limit_error_kind": limit_error,
             "fetched_at": int(time.time() * 1000)})

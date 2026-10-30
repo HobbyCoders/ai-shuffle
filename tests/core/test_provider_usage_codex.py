@@ -533,7 +533,7 @@ class TestPollOnceDispatch:
         with patch("app.db.database.get_enabled_model_providers", return_value=rows), \
              patch.object(monitor, "_poll_provider", new=AsyncMock()), \
              patch.object(monitor, "_poll_grok_provider", new=AsyncMock()) as poll_grok, \
-             patch.object(monitor, "_poll_openai_provider", new=AsyncMock()), \
+\
              patch.object(monitor, "_poll_codex_provider", new=AsyncMock()) as poll_codex, \
              patch.object(monitor, "_poll_fal", new=AsyncMock()):
             await monitor.poll_once()
