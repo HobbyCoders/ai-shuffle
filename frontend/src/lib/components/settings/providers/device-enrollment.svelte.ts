@@ -175,7 +175,8 @@ export class DeviceEnrollment {
 		this.errorMessage = '';
 		this.#setBusy(true);
 		try {
-			const row = await createModelProvider({ ...this.#config.draft });
+			// Keep the current subscription active until the new sign-in completes.
+			const row = await createModelProvider({ ...this.#config.draft, enabled: false });
 			if (this.#disposed) return;
 			this.providerId = row.id;
 			await this.#startDevice();

@@ -185,11 +185,12 @@ async def test_subagent_readouts_preserve_task_assignments(
         "provider-2": "prov:provider-1:gpt-worker",
         VOICE_PROVIDER_KEY: "prov:provider-2:gpt-voice",
     }
+    # Independent gateways, not two saved accounts competing for openai:key.
     for provider_id, model in [
         ("provider-1", "gpt-worker"), ("provider-2", "gpt-voice")
     ]:
         database.create_model_provider(
-            provider_id, provider_id, "openai", "https://example.invalid",
+            provider_id, provider_id, "custom", "https://example.invalid",
             auth_token="enc:test-provider-secret",
             models=[{"id": model}],
         )

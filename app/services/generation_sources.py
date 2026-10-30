@@ -50,6 +50,26 @@ class Sources:
         from app.network import runners
         return runners.self_device_id() or "local"
 
+    async def follow_account_choice(self, choice):
+        """Saved media account pins follow the same shared slot as chat pins.
+
+        Provider rows sync across holders; an unknown/deleted account stays
+        unchanged, including accounts known only to a remote worker.
+        """
+        from app.core.generation_resolver import SOURCE_NAMES
+        from app.db import database
+        choice = dict(choice)
+        if not self.context.owner:
+            return choice
+        for field in ("source", "account"):
+            value = choice.get(field)
+            if not isinstance(value, str) or not value or value in SOURCE_NAMES:
+                continue
+            row = await run_sync(database.resolve_model_provider, value)
+            if row:
+                choice[field] = row["id"]
+        return choice
+
     async def source_for_account(self, account):
         """Resolve an account's public metadata without catalog or provider I/O."""
         if not self.context.owner:
@@ -57,7 +77,7 @@ class Sources:
         from app.core import native_generation_settings as native
         from app.core.generation_resolver import normalize_source
         from app.db import database
-        row = await run_sync(database.get_model_provider, account, include_token=False)
+        row = await run_sync(database.resolve_model_provider, account, include_token=False)
         if row is None:
             return None
         try:
@@ -333,7 +353,7 @@ class Sources:
             from fluid.messages import Message, Text
             from fluid.providers.base import ProviderRequest
             from app.db import database
-            row = await run_sync(database.get_model_provider, candidate.account, False)
+            row = await run_sync(database.resolve_model_provider, candidate.account, False)
             text_model = subscription_images._text_model(row)
             client, http = await subscription_images._open_client(candidate.account)
             tool = {"type": "image_generation", "output_format": options["format"], "partial_images": 0}

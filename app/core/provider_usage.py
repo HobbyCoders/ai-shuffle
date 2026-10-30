@@ -3,9 +3,8 @@
 Every source read here is defined in :mod:`app.core.usage_sources`; the
 poller takes its jobs from that registry and every upstream read goes through
 :func:`_registered_get`, which refuses endpoints the registry does not list.
-OpenAI account spend and completions usage use a separate local Admin API key.
-No dashboard endpoints, browser sign-ins or ChatGPT OAuth credentials are used
-for OpenAI Platform billing. Upstream reads share durable cooldowns; UI refresh
+OpenAI API billing is not collected. Subscription usage and other provider
+balances remain separate. Upstream reads share durable cooldowns; UI refresh
 requests cannot bypass those budgets. Raw snapshots never contain credentials.
 """
 
@@ -998,13 +997,6 @@ async def _capability_denied(snapshot_id: str, fingerprint: str) -> bool:
     return isinstance(raw, dict) and raw.get("denied_fingerprint") == fingerprint
 
 
-# Row classification lives in the source registry; these names stay importable.
-_is_openai_platform_row = usage_sources.is_openai_platform_row
-
-# Retained only to exclude persisted snapshots from the retired OAuth fallback.
-OPENAI_API_USAGE_PROVIDER_ID = "openai-api"
-
-
 # ---------------------------------------------------------------------------
 # fal.ai account billing poller
 # ---------------------------------------------------------------------------
@@ -1105,18 +1097,14 @@ def normalize_fal_user_balance(payload: Any) -> Optional[Dict[str, Any]]:
 # (DB reads, decryption, budget claims and coordinator round trips).
 FORCED_REFRESH_COOLDOWN_SECONDS = 30
 _POLLED_SNAPSHOT_TYPES = frozenset(
-    s.snapshot_type for s in usage_sources.SOURCES.values() if s.poller and s.snapshot_type != "openai"
+    s.snapshot_type for s in usage_sources.SOURCES.values() if s.poller
 )
 
 
 def last_touch_ms(snapshot: Mapping[str, Any]) -> int | None:
-    """Epoch ms of a snapshot's last polled success or failed attempt, if any.
-
-    OpenAI rows also take passive header captures, which move ``fetched_at``
-    on every inference; their polled reading is ``billing_fetched_at``.
-    """
+    """Epoch ms of a snapshot's last polled success or failed attempt, if any."""
     raw = snapshot.get("raw") if isinstance(snapshot.get("raw"), dict) else {}
-    times = [raw.get("usage_attempted_at"), raw.get("billing_fetched_at")]
+    times = [raw.get("usage_attempted_at")]
     if snapshot.get("provider_type") in _POLLED_SNAPSHOT_TYPES:
         times.append(snapshot.get("fetched_at"))
     times = [t for t in times if isinstance(t, (int, float)) and not isinstance(t, bool)]
@@ -1125,7 +1113,7 @@ def last_touch_ms(snapshot: Mapping[str, Any]) -> int | None:
 
 def _snapshot_id(source: usage_sources.UsageSource, row: Mapping[str, Any] | None) -> str | None:
     """The ``provider_usage_snapshots`` row a source's poller writes."""
-    if source.id in {"openai_platform_balance", "xai_management"}:
+    if source.id == "xai_management":
         return "balance:" + str((row or {}).get("id"))
     if source.id == "fal_billing":
         return FAL_USAGE_PROVIDER_ID
@@ -1559,68 +1547,6 @@ class ProviderUsageMonitor:
             return None, None
         access = _decrypt_subscription_access_token(stored.get("codex_access_token"))
         return (access, stored.get("codex_account_id")) if access else (None, None)
-
-    async def _poll_openai_provider(self, row: Dict[str, Any]) -> bool:
-        from app.core.config import settings
-        from app.core.openai_admin_usage import fetch
-        from app.core.usage_polling import UsageDeferred
-        from app.db import database as db
-
-        provider_id = row.get("id")
-        if not provider_id:
-            return False
-        # Browser bindings from older versions never authorize Admin API access.
-        current = await run_sync(db.get_model_provider, provider_id, include_token=True)
-        if not current or not current.get("enabled", True) or not _is_openai_platform_row(current):
-            return False
-        encrypted = current.get("openai_admin_key")
-        org = current.get("openai_billing_org_id")
-        if not encrypted or not org or current.get("openai_billing_instance_id") != settings.effective_instance_id:
-            return False
-        binding = (org, settings.effective_instance_id)
-        fingerprint = None
-        try:
-            key = encryption.decrypt_value(encrypted)
-            # Re-saving the key re-encrypts it, so a deliberate re-save retries.
-            fingerprint = capability_fingerprint(
-                "openai_admin", {"Authorization": f"Bearer {key}", "OpenAI-Organization": org}, encrypted,
-            )
-            if await _capability_denied(provider_id, fingerprint):
-                return False
-            results = await asyncio.gather(fetch(key, org, costs=True), fetch(key, org), return_exceptions=True)
-            failures = [r for r in results if isinstance(r, BaseException) and not isinstance(r, UsageDeferred)]
-            if failures:
-                raise failures[0]
-            fetched = [r for r in results if isinstance(r, dict)]
-            if not fetched:
-                return False
-            credits = {**fetched[0], **fetched[-1]}
-            if len(fetched) == 1:
-                # The two endpoints' budgets drift out of phase; merge the half
-                # that was fetched into the stored reading instead of discarding it.
-                stored = next((r for r in await run_sync(db.get_all_provider_usage_snapshots)
-                               if r.get("provider_id") == provider_id), None) or {}
-                previous = stored.get("credits") or {}
-                if ((stored.get("raw") or {}).get("organization_id") != org
-                        or previous.get("period_start") != credits.get("period_start")):
-                    previous = {}
-                credits = {**previous, **credits}
-                if "spend_month" not in credits:
-                    return False
-            return await run_sync(
-                db.upsert_provider_usage_snapshot, provider_id, "openai", None, [], credits,
-                {"source": "openai_admin", "organization_id": org}, int(time.time() * 1000),
-                expected_binding=binding, expected_admin_key=encrypted,
-            )
-        except Exception as error:
-            status = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
-            kind = _failure_kind(status)
-            # Never log an exception with provider response text or credentials.
-            _log_poll_failure(f"openai-admin:{provider_id}", "OpenAI Admin usage failed for %s (%s)", provider_id, kind)
-            await run_sync(db.record_provider_usage_failure, provider_id, "openai", kind,
-                           expected_binding=binding, expected_admin_key=encrypted,
-                           denied_fingerprint=fingerprint if _is_capability_refusal(status) else None)
-            return False
 
     async def _poll_fal(self) -> None:
         """Fetch fal.ai account credits and upsert the synthetic snapshot. Never raises.

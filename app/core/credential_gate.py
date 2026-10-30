@@ -284,7 +284,7 @@ def selection_uses_subscription(model: Optional[str], provider_id: Optional[str]
     if provider_id:
         from app.db import database
 
-        row = database.get_model_provider(provider_id, include_token=False)
+        row = database.resolve_model_provider(provider_id, include_token=False)
         if not row:
             return False
         if provider_row_is_subscription(row.get("provider_type"), row.get("auth_mode")):

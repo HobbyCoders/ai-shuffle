@@ -630,13 +630,11 @@
 	}
 
 	function reportedBalanceSource(pb: ProviderUsageBucket): boolean {
-		return pb.sourceInfo?.id === 'openai_platform_balance' || pb.sourceInfo?.id === 'xai_management';
+		return pb.sourceInfo?.id === 'xai_management';
 	}
 	function providerCredits(pb: ProviderUsageBucket) {
 		if (reportedBalanceSource(pb) && (providerStatusAt(pb, now) !== 'fresh' || pb.lastErrorKind)) {
-			// Admin spend has its own source; only the unconfirmed balance is hidden.
-			return pb.providerType === 'openai' && pb.credits?.spend_month != null
-				? { spend_month: pb.credits.spend_month } : null;
+			return null;
 		}
 		return pb.credits;
 	}
@@ -645,11 +643,8 @@
 	function providerGuidance(pb: ProviderUsageBucket): string | null {
 		if (reportedBalanceSource(pb) && pb.lastErrorKind === 'billing_access_denied') {
 			if (pb.providerType === 'xai' && pb.lastErrorScope === 'inference') return 'Replace or fix the xAI API key';
-			return pb.providerType === 'openai' ? 'Sign in again to OpenAI Platform' : 'Replace xAI management key';
+			return 'Replace xAI management key';
 		}
-		// Legacy Admin-spend rows have no balance credential to repair here.
-		// Platform sessions above have their own explicit re-sign-in guidance.
-		if (pb.providerType === 'openai' && creditsNum(pb.credits, 'balance_remaining') == null) return null;
 		// OpenRouter and fal.ai read the balance with the key already saved; no
 		// extra billing access exists to add, so a refusal is about that key
 		// and the always-present credits line already says so.
@@ -816,6 +811,8 @@
 	function sortedProviderBuckets() {
 		const buckets = Object.values($rateLimit.providerBuckets ?? {});
 		return buckets.filter(pb => {
+			// Also hide retired readings cached locally or sent by an older worker.
+			if (pb.providerType === 'openai' || pb.providerType === 'openai_balance') return false;
 			if (pb.providerType === 'openrouter') {
 				return !buckets.some(account => account.providerId === `openrouter-account:${pb.providerId}` && creditsNum(account.credits, 'balance_remaining') != null);
 			}
@@ -1085,10 +1082,6 @@
 		{#if credits}
 			<div class="row-reset usage-credits">{credits}</div>
 		{/if}
-		<!-- Only the OpenAI Platform reading names its source, so it is not
-		     mistaken for ChatGPT credits. The xAI row shows its figures without
-		     the "xAI Management API" source line (owner call). -->
-		{#if pb.sourceInfo?.id === 'openai_platform_balance'}<div class="row-reset usage-credits">{pb.source}</div>{/if}
 		{@render metaLine(providerMeta(pb, now), pb.sourceInfo?.dashboard_url, 'Dashboard', 'Compare on the provider dashboard')}
 	{/if}
 {/snippet}

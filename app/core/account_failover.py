@@ -109,7 +109,7 @@ def _is_subscription_session(session_id: Optional[str]) -> bool:
         if provider_id:
             from app.core.provider.fluid_credentials import _SUBSCRIPTION_AUTH_MODES
 
-            provider = database.get_model_provider(provider_id, include_token=False) or {}
+            provider = database.resolve_model_provider(provider_id, include_token=False) or {}
             ptype = (provider.get("provider_type") or "").strip().lower()
             mode = (provider.get("auth_mode") or "").strip().lower()
             return ptype in ("chatgpt", "grok") or mode in _SUBSCRIPTION_AUTH_MODES

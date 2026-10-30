@@ -830,6 +830,9 @@ class HarnessAdapter(ProviderAdapter):
             self._engine.deny_carries_steers = deny_carries_steers
         else:
             provider_client, provider_http = await _build_provider_client(kind, options)
+            # Credential resolution may follow a switch after the SDK snapshot.
+            # Turn settlement reads these options; the original Task pin stays put.
+            self._record_applied("aih_provider_id", options.extra.get("provider_id"))
             self._provider_http = provider_http
             # fluid's bare Task builtin needs the app's dispatcher injected
             # (fluid owns the shape, the app owns the spawning).
@@ -876,7 +879,7 @@ class HarnessAdapter(ProviderAdapter):
                 native_ctx.extra["task_dispatch"] = make_fluid_dispatcher(
                     self._resolve_app_session_id,
                     profile_id=(options.extra or {}).get("profile_id"),
-                    provider_id=(options.extra or {}).get("provider_id"),
+                    provider_id=(options.extra or {}).get("provider_pin_id", (options.extra or {}).get("provider_id")),
                 )
             except Exception:  # noqa: BLE001 — Task degrades to "unavailable"
                 logger.warning(
@@ -1340,6 +1343,7 @@ class HarnessAdapter(ProviderAdapter):
         provider_id = getattr(sdk_options, "aih_provider_id", None)
         if provider_id:
             opts.extra["provider_id"] = provider_id
+            opts.extra["provider_pin_id"] = getattr(sdk_options, "aih_provider_pin_id", provider_id)
             # The bound row's SHAPE, stamped alongside the id by query_options
             # so ``_decide_provider_kind`` can pick the leg from the provider
             # row instead of sniffing the model string. Only forwarded
@@ -6647,7 +6651,7 @@ def _lookup_provider_row(provider_id: str) -> Optional[ModelProviderRow]:
     try:
         from app.db import database as db
 
-        return db.get_model_provider(provider_id, include_token=False) or None
+        return db.resolve_model_provider(provider_id, include_token=False) or None
     except Exception:  # noqa: BLE001 — a lookup failure reads as "no row"
         logger.debug(
             "[HarnessAdapter] provider row lookup failed for %s.",
@@ -8073,7 +8077,7 @@ def _native_task_contract(options: SessionOptions) -> Any:
     None when it cannot be built; never raises.
     """
     try:
-        provider_id = (options.extra or {}).get("provider_id")
+        provider_id = (options.extra or {}).get("provider_pin_id", (options.extra or {}).get("provider_id"))
         profile_id = (options.extra or {}).get("profile_id")
         from app.core.agent_provider_models import (
             build_task_contract,
@@ -8698,6 +8702,10 @@ async def _build_provider_client(
     creds = None
     if provider_id:
         creds = await resolve_provider_credentials(kind, str(provider_id))
+        provider_id = creds.provider_id or provider_id
+        # A switch may happen after SDK options were built but before the lazy
+        # HTTP client connects. Headers and usage must name the credential row.
+        options.extra["provider_id"] = provider_id
     # Read timeout, whole-call deadline and first-byte bound from PROVIDER_*
     # settings; provider rows carry no timeout override, but a row on a local
     # server gets the local first-byte bound (off by default).

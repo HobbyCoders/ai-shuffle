@@ -7,7 +7,7 @@ from app.api import plugins as api
 from app.core.plugin_service import PluginService
 from app.db import network as store
 from app.network import engine, plugins_sync
-from tests.core.network.harness import exchange, join
+from tests.core.network.harness import exchange, exchange_with_gap, join
 from tests.core.network.test_plugins_sync_edges import FakePlugin, FakeService
 
 PID = "tools@official"
@@ -44,7 +44,8 @@ def deleted(worker):
         return store.get_record(worker.shim.cursor(), "plugins_desired", PID)
 
 
-def test_api_uninstall_tombstone_cannot_be_resurrected_by_stale_inventory(workers, monkeypatch):
+@pytest.mark.parametrize("delivery", ["ordered", "gap"])
+def test_api_uninstall_tombstone_cannot_be_resurrected_by_stale_inventory(workers, monkeypatch, delivery):
     a, b = workers("a"), workers("b")
     inventories, current = services(monkeypatch)
     with a.active():
@@ -52,11 +53,17 @@ def test_api_uninstall_tombstone_cannot_be_resurrected_by_stale_inventory(worker
         assert plugins_sync.publish() == 1
     join(a, b)
     with a.active():
+        if delivery == "gap":
+            from app.db import database as db
+            for index in range(2):
+                db.set_system_setting(f"gap_buffer_probe_{index}", "held-prefix")
+            engine.scan_collection("system_settings")
         asyncio.run(api.uninstall_plugin(PID, token="test"))
         # The same selected pass requested by the post-commit hook publishes it.
         assert engine.scan_all(collections=["plugins_desired"]) == 1
     assert deleted(a)["deleted"]
-    exchange(a, b)
+    deliver = exchange_with_gap if delivery == "gap" else exchange
+    deliver(a, b)
     current["name"] = "b"
     with b.active():
         assert PID in inventories["b"].installed  # reconcile has not run yet

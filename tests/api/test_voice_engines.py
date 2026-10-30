@@ -177,11 +177,14 @@ class TestLive11Gate:
         from app.api import voice
         from app.db import database
         pinned = _api_key_provider(mock_db)
-        other = _make_provider("other-key", auth_token=encryption.encrypt_value("other-test-key"))
+        other = _make_provider("other-key", auth_token=encryption.encrypt_value("other-test-key"), enabled=False)
         _models_answer(monkeypatch, 200)
         c = authenticated_client
         saved = c.put(VOICE_SETTINGS, json={"voice_model": LIVE_11_MODEL, "voice_provider_id": pinned, "voice_voice": "cedar"})
         assert saved.status_code == 200, saved.text
+        # Switch accounts after saving: the new account must get its own probe,
+        # not reuse the availability cached for the previously enabled key.
+        database.set_model_provider_enabled(other, True)
         _enable_voice()
         probes = []
 

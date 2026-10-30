@@ -31,6 +31,8 @@ Invites are meant for your home network or a VPN such as Tailscale. Workers sign
 
 **Kept on each worker:** folders and project checkouts, ports and addresses, logs, usage numbers, and the work currently running there.
 
+Saving or clearing a preference asks the network to publish the committed change, just like other shared settings. Permission rules, chat tag membership and new attachment metadata also wake their publishers. Periodic reconciliation still catches changes made outside these writers, and offline workers catch up when they reconnect.
+
 ## Use a chat on another worker
 
 The composer's worker picker lists every online worker. Pick one, and the chat runs there.
@@ -51,6 +53,13 @@ If the owning worker is offline, the chat is read-only and offers **Fork here**,
 An agent can also run a subagent on another worker while the chat stays here. See [Running a subagent on another worker](/docs/features/subagents#running-a-subagent-on-another-worker).
 
 Automations and connectors run on one worker each. Your other workers show them but do not run them.
+
+Workers keep recent transcript sync operations for at least 30 days, not a second
+permanent copy of every message. A worker that has not exchanged sync frontiers
+for 30 days no longer holds that cleanup back. When it returns, it automatically
+copies the current settings and catches up its chat history in the background;
+new messages then sync normally. This only cleans the duplicate sync log: it
+never deletes chats, messages or their search/history records.
 
 ## Conflicts
 

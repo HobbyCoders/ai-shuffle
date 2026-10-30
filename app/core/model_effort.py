@@ -264,12 +264,12 @@ def resolve_child_effort(model: str | None, provider_id: str | None, *,
     from app.core.provider.harness_adapter import _decide_provider_kind
     from app.core.provider.types import SessionOptions
     from app.db import database
-    from app.db.model_providers import get_model_provider
+    from app.db.model_providers import resolve_model_provider
 
     decoded = decode_provider_model(model) if model else None
     bare = decoded[1] if decoded else model
     provider_id = decoded[0] if decoded else provider_id
-    provider = get_model_provider(provider_id) if provider_id else None
+    provider = resolve_model_provider(provider_id) if provider_id else None
     route = _decide_provider_kind(SessionOptions(
         model=bare, extra={"provider_id": provider_id} if provider_id else {}))
     saved = None

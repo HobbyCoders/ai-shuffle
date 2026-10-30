@@ -32,6 +32,7 @@ Every endpoint that returns a provider returns this shape. Stored secrets are ne
   "context_window": null,
   "max_output_tokens": null,
   "enabled": true,
+  "slot": "openrouter:key",
   "auth_mode": null,
   "codex_account_id": null,
   "needs_reauth": false,
@@ -39,14 +40,45 @@ Every endpoint that returns a provider returns this shape. Stored secrets are ne
   "codex_refresh_token_set": false,
   "account_email": null,
   "account_plan": null,
-  "openai_billing_org_id": null,
-  "openai_billing_instance_id": null,
   "created_at": "2026-09-01T10:00:00+00:00",
   "updated_at": "2026-09-01T10:00:00+00:00"
 }
 ```
 
 `auth_mode` cannot be set through the API. It becomes `chatgpt` after a [ChatGPT sign-in](#post-apiv1model-providersprovider_idcodexdevicestart) and `grok` after a [Grok sign-in](#post-apiv1model-providersprovider_idxaidevicestart). `needs_reauth` is `true` when a stored sign-in has stopped working and must be done again. `account_email` and `account_plan` are the email and plan id (such as `plus` or `pro`) read from a stored ChatGPT sign-in, for display; each is `null` when the sign-in does not carry it, and the token itself is never returned.
+
+### Saved accounts and active slots
+
+Save any number of accounts, including multiple ChatGPT or SuperGrok sign-ins.
+`slot` is read-only: `openai:key`, `openai:subscription`, `grok:key`,
+`grok:subscription`, `openrouter:key`, or `null` for an independent custom gateway.
+Subscription `auth_mode` wins over `provider_type` (including a `custom` row with
+`auth_mode: "chatgpt"`). API keys and subscriptions occupy separate slots.
+
+At most one account is enabled per slot; a slot may also be entirely off.
+Creating with `enabled: true`, PATCHing `enabled: true`, toggling on, activating,
+or completing a device sign-in selects that account and disables its siblings
+in the same transaction. Turning an account off does not activate another one.
+An idempotent activate call is preferable to toggle for an account switch.
+Re-fetch the provider list after switching: the response contains only the
+selected row, not the siblings whose `enabled` changed. No secret is returned.
+
+Existing `prov:<row_id>:<model>` chat, automation and subagent pins follow an
+enabled sibling in the same slot when their saved account is disabled, keeping
+the same model ID. Model availability and credential checks still apply to the
+active account. No fallback crosses slots or independent gateways. Deleted pins
+keep the missing-provider error; their slot is not guessed. Usage records retain
+the account captured for the turn, even if the owner switches before settlement.
+
+Selections sync as shared `model_provider_slot:<slot>` settings, using the
+network's last-writer-wins ordering on one selection record per slot. Provider
+row `enabled` flags are reconciled to that selection after row or setting sync,
+including snapshots and out-of-order account arrival. Older peers that only send
+row flags cannot override an existing shared selection; upgrade them to switch
+accounts across workers. Credentials remain encrypted in transit. On upgrade,
+v93 keeps the earliest-created enabled row per slot (ID breaks creation-time
+ties), disables duplicates without deleting them, and preserves existing off
+selections on subsequent startups.
 
 ### Per-model local sampling and reasoning (backend/API)
 
@@ -178,10 +210,9 @@ Update a provider. Takes the same fields as create, all optional, with the same 
 
 **Auth:** Owner only
 
-- Omitting `auth_token` or sending it blank keeps the stored key.
+- Omitting `auth_token` or sending it blank keeps the stored key. Replacing the key or changing the endpoint invalidates its shared discovery snapshot; setup always checks the current key live, never from a cached catalog.
 - Sending `context_window` or `max_output_tokens` as `null` clears it; omitting it leaves it unchanged.
-- `models` replaces the whole list.
-- Disabling the provider or rotating its inference key invalidates readings but keeps its [OpenAI usage key](#openai-usage-key). Admin requests require an enabled, official OpenAI API provider; only explicit disconnect removes the shared Admin key.
+- `models` replaces the whole list. Send `expected_revision` from the provider response to guard a curation save. A stale revision returns `409` without changing the provider; reload its current selection before editing again.
 
 ```bash
 curl -X PATCH http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9a61-2d4f7b9e0c11 \
@@ -194,7 +225,7 @@ Returns `404` if the provider does not exist.
 
 ### DELETE /api/v1/model-providers/{provider_id}
 
-Delete a provider. A stored ChatGPT sign-in is revoked first when possible; a failed revoke does not block the delete. Any OpenAI usage key on the provider is removed too.
+Delete a provider. A stored ChatGPT sign-in is revoked first when possible; a failed revoke does not block the delete. The shared discovery snapshot for the provider is removed too.
 
 **Auth:** Owner only
 
@@ -205,9 +236,20 @@ curl -X DELETE http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9
 
 **Response:** `{"success": true}`. Returns `404` if the provider does not exist.
 
+### POST /api/v1/model-providers/{provider_id}/activate
+
+Select this saved account. No body. Returns the provider object (`200`) with
+`enabled: true` and its `slot`. Any enabled sibling in that slot is disabled
+atomically; custom gateways are enabled independently. Calling it again keeps
+the same account active. It does not sign in, refresh models, or verify a key.
+
+**Auth:** Owner only (`401` without owner access; API-user keys get `403`).
+Returns `404` with `{"detail":"Model provider not found"}` for an unknown ID.
+The existing create/PATCH and device enrollment validation errors are unchanged.
+
 ### POST /api/v1/model-providers/{provider_id}/toggle
 
-Flip `enabled`. No body. Returns the updated provider object. Disabling invalidates readings but keeps billing access, including the OpenAI Admin key, for re-enabling.
+Flip `enabled`. No body. Returns the updated provider object. Turning on disables other accounts in the same slot atomically. Turning off leaves that slot off. Disabling invalidates readings but keeps billing access for re-enabling.
 
 **Auth:** Owner only
 
@@ -232,6 +274,18 @@ Sessions on these providers call the provider directly. These settings bound tho
 A provider error carries the HTTP status and the provider's own short message (`provider returned HTTP 429: ...`), and a `429` shows the rate-limited notice. Billing errors that providers send as `429` (for example `insufficient_quota`) are reported as `402` and are not retried. A reply cut off mid-stream keeps its partial text, marked interrupted; [Resume](/docs/api-reference/sessions#post-apiv1sessionssession_idresume) re-sends the turn. When no tool call finished before the error, it starts again from the user's message and the partial reply stays on a side branch; when one did, the partial reply and its tool calls stay on the re-sent path, and the model reads them and the calls' error results before it continues.
 
 ## Model catalog
+
+### GET /api/v1/model-providers/{provider_id}/model-catalog
+
+**Auth:** Owner only
+
+Read the last successful discovery snapshot without contacting upstream, or `null` if none matches the current credential and endpoint (`404` if the provider does not exist). The snapshot contains `source`, `models`, `hidden`, `recommended`, `binding`, `fetched_at` (UTC), `fetched_by_device` and `fetched_by_name`. It is separate from the curated `models` selection.
+
+`binding` is an opaque, domain-separated HMAC of the provider type, endpoint, dialect/auth mode and decrypted credential identity. Paired workers derive its secret from their network key; unpaired workers use a local-only secret and skip sharing. It is not a public hash that can verify guesses of a weak gateway token. No credential or endpoint is stored in the snapshot. Provider responses expose the current fingerprint as `catalog_binding`, and live discovery includes `binding` even when sharing is skipped. Different ciphertexts for the same key do not change it. Subscription account IDs also keep it stable across routine token renewals; a legacy sign-in without an account ID conservatively binds to the access token of the request that actually succeeded, including a successful retry after token renewal. Legacy snapshots without a binding are ignored.
+
+Saving re-checks the binding used for the upstream request, and reading re-checks it against the current provider. An in-flight old-key refresh or a delayed sync record therefore cannot make an old-key catalog usable after a credential change. The panel hides mismatched results, including oversized catalogs that were never shared. When catalog sync arrives before the matching provider row, its candidate remains hidden until the provider binding catches up; ordinary echoes of the same proven binding keep the full local metadata.
+
+Settings > Providers shows this shared snapshot and its **Last refreshed** time and worker. Refreshing on one worker publishes it to the others through settings sync; open Models tabs update without a page reload and newly discovered models stay unchecked. Concurrent selection edits are reconciled from the current provider revision.
 
 ### POST /api/v1/model-providers/{provider_id}/fetch-models
 
@@ -262,7 +316,9 @@ curl -X POST http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9a6
 
 `models` holds text models only, at most 2000. Each has `id` and `label`, plus `context_window`, `pricing` (OpenRouter prices) and `reasoning_capabilities` when upstream reports them. `hidden` lists the audio, voice, image and video models that were held back, each with a `media_kind`.
 
-**Errors:** `404` provider not found. `409` when a ChatGPT or Grok sign-in is missing or expired (sign in again). `400` when credential storage is unavailable. `502` when the upstream request fails.
+A successful fetch returns the complete live catalog and tries to save a compact, token-free snapshot in the shared `model_catalog:<provider_id>` system setting (maximum 512 KiB). If needed, the shared copy omits pricing first, then context/reasoning metadata and recommendations; it never truncates model IDs or labels. If even that cannot fit, sharing is skipped with one warning and the previous snapshot is kept. Successful sharing adds `fetched_at`, `fetched_by_device` and `fetched_by_name` to the live response; these are `null` if sharing was skipped. The panel keeps the complete live result even when the shared copy is compacted or not saved. Failed upstream fetches leave the previous snapshot intact. Snapshots contain public model metadata and worker attribution, never credentials or endpoints.
+
+**Errors:** `404` provider not found. `409` when a ChatGPT or Grok sign-in is missing or expired (sign in again). `400` when credential storage is unavailable. `502` when the upstream request fails. Sharing or size-limit failures do not fail successful discovery.
 
 ### POST /api/v1/model-providers/refresh-capabilities
 
@@ -374,162 +430,59 @@ Optional admin keys that let the app read account spend for a provider. Each key
 
 ### Provider-reported API balances
 
-In **Settings > Providers > the OpenAI or xAI API key > Usage**, configure balance
-access separately from the inference key. Keys are write-only, encrypted at rest
-and under the network key during sync, and included in secret re-encryption.
-Balance keys (including Platform session keys), OpenAI Admin keys and organization
-IDs sync across network workers. This gives every trusted worker the same billing
-access, including higher-privilege Admin access. Each worker keeps its own readings
-and errors and can fetch credit while the network's shared usage budget is
-reachable. Keys become usable after the next sync; readings arrive on the next
-poll. The network founder coordinates that budget: other workers defer new
-requests while it is offline, even if they already have the synced key.
-Disconnecting access syncs the removal. Older versions keep their local billing
-configuration until upgraded. An upgraded worker that lacks the key gets it once
-the worker holding the key is online and running this build.
-Restoring another installation's database alone
-does not authorize using or publishing its billing keys; authenticated sync does.
+In **Settings > Providers > the xAI API key > Usage**, configure balance access
+separately from the inference key. The management key is write-only, encrypted at
+rest and under the network key during sync, and included in secret re-encryption.
+Trusted workers share this access, but keep their own readings and errors.
+Disconnecting access syncs the removal. Restoring another installation's database
+alone does not authorize using or publishing its billing key; authenticated sync does.
 
-- **xAI (official):** create a management key in console.x.ai → Settings →
-  Management Keys, with billing read permission. The normal API key resolves
-  `team_id` through `GET https://api.x.ai/v1/api-key`; the management key reads
-  `GET https://management-api.x.ai/v1/billing/teams/{team_id}/prepaid/balance`
-  and `/postpaid/invoice/preview`. The UI shows prepaid remaining, cycle usage
-  and postpaid spending limit. The documented `val` fields are **USD cents**;
-  purchases are negative ledger entries, so remaining is `-total.val / 100`.
-  Unknown units/currencies or non-finite amounts are rejected, never guessed.
-  Invoice preview is optional: a refused/missing invoice does not hide prepaid
-  credit; `invoice_error_kind` reports that failure separately. A malformed
-  limit is omitted with `spending_limit_error_kind`, preserving cycle usage.
-  A budget-deferred invoice keeps its previous cycle/limit values and optional
-  error states; it is not a new failure. Proto JSON's
-  omitted zero fields are treated as zero; an omitted spending limit is unknown.
-  Cycle usage adds the absolute prepaid usage because its sign is undocumented;
-  the sign and cycle totals still need comparison with a live account.
-- **OpenAI Platform:** choose **Sign in to OpenAI Platform** and
-  sign in yourself in the app-owned, isolated browser screen. The supervised
-  browser must be enabled and owned by this worker's native or Docker supervisor;
-  startup waits for Chrome and refuses an external CDP listener. It keeps its
-  existing egress proxy; no agent tools or network transcript
-  get this context. The app captures a dashboard `sess-` key server-side from
-  the login response or dashboard Authorization header, then destroys the
-  temporary cookies/context. If sign-in is refused (including CAPTCHA or popup
-  limitations), paste your own Platform session key in the write-only fallback.
-  The key reads `GET https://api.openai.com/v1/dashboard/billing/credit_grants`;
-  `total_available` is remaining USD, not `total_granted` minus local spend.
-  This undocumented endpoint can change and sessions expire. An inference key
-  or ChatGPT/Codex OAuth token cannot replace a Platform session key.
+Create a management key in console.x.ai → Settings → Management Keys, with
+billing read permission. The normal API key resolves `team_id` through
+`GET https://api.x.ai/v1/api-key`; the management key reads
+`GET https://management-api.x.ai/v1/billing/teams/{team_id}/prepaid/balance`
+and `/postpaid/invoice/preview`. The UI shows prepaid remaining, cycle usage
+and postpaid spending limit. The documented `val` fields are **USD cents**;
+purchases are negative ledger entries, so remaining is `-total.val / 100`.
+Unknown units/currencies or non-finite amounts are rejected, never guessed.
+Invoice preview is optional: a refused/missing invoice does not hide prepaid
+credit; `invoice_error_kind` reports that failure separately. A malformed
+limit is omitted with `spending_limit_error_kind`, preserving cycle usage.
+A budget-deferred invoice keeps its previous cycle/limit values and optional
+error states. Proto JSON's omitted zero fields are treated as zero; an omitted
+spending limit is unknown. Cycle usage adds the absolute prepaid usage because
+its sign is undocumented; the sign and cycle totals still need comparison with
+a live account.
 
 Polling is demand-driven, with roughly one request per credential/endpoint every
-300–330 seconds network-wide under the shared usage budget. With demand and the
-budget reachable, readings refresh about every five minutes, not once per worker. Opening balance status or choosing
+300–330 seconds network-wide under the shared usage budget. Workers defer new
+requests while the network founder is offline. Opening balance status or choosing
 **Refresh balance status** requests a poll (30-second forced-refresh cooldown;
 per-endpoint budgets still apply). The UI re-reads while that poll runs. Readings
-remain fresh for ten minutes, twice the poll interval, to cover budget jitter;
-`fresh_until` is supplied by the server. Status includes the source and last
-successful fetched time. A newly synchronized billing key schedules a refresh
-only after commit. Workers share successful normalized readings without adding
-upstream calls; `observed_at` and `source_worker` retain the original time and
-source. Configured access with no reading or error is `pending`; a shared-budget
-wait is `deferred`, with a fixed `last_deferred_reason` (no retry deadline is
-advertised). A failed first reading remains `unavailable`. Failed/expired readings never expose old credit as
-current; 401/403 asks for renewed access and pauses requests until the credential
-changes or is deliberately re-saved. Disconnecting balance access does not remove
-inference/Admin credentials. Changes of inference or billing key invalidate old
-readings and reject in-flight snapshots. Inference-key rotation, provider changes,
-and disabling the provider (including the enable toggle) invalidate readings but
-retain billing access, including the OpenAI Admin key. Only explicitly
-disconnecting the relevant billing access removes that key across the network. Fresh, error-free Admin organization-spend fields
-from the current UTC month remain alongside real remaining credit in the usage
-popover. Stale, failed or prior-month Admin totals are withheld when a balance
-is bound, rather than borrowing its newer timestamp. Balance freshness/error
-state stays owned by the balance source. A failed WebSocket hello releases its ticket so an
-immediate sign-in retry is possible.
-Balance snapshots are stored independently from Admin spend and passive headers
-so those readers cannot overwrite provider-reported credit.
+remain fresh for ten minutes to cover budget jitter; `fresh_until` is supplied
+by the server. A newly synchronized key schedules a refresh only after commit.
+Workers share normalized readings without extra upstream calls; `observed_at`
+and `source_worker` retain the original time and source.
 
-Owner-only endpoints under `/api/v1/model-providers/{provider_id}`:
+Configured access with no reading or error is `pending`; a shared-budget wait
+is `deferred`. A failed first reading remains `unavailable`. Failed/expired
+readings never expose old credit as current. A 401/403 pauses requests until
+the credential changes or is deliberately re-saved. Inference-key rotation,
+provider changes and disabling the provider invalidate readings but retain
+billing access. Only explicitly disconnecting balance access removes that key.
+In-flight snapshots from an older binding are rejected.
+
+Owner-only endpoints for official xAI API providers under
+`/api/v1/model-providers/{provider_id}` (other providers get `400`):
 
 | Method | Path | Body / result |
 | --- | --- | --- |
 | GET | `/balance-access` | Configuration, source, freshness, credits, re-auth state; never the key |
-| PUT | `/balance-access` | `{"key": "…"}` management key or Platform `sess-` key |
+| PUT | `/balance-access` | `{"key": "…"}` management key |
 | DELETE | `/balance-access` | Remove balance binding and snapshot |
-| POST | `/balance-access/sign-in` | OpenAI only; single-use 60-second browser ticket |
-| WS | `/balance-access/browser` | Owner-authenticated screen/input; first frame supplies the ticket; ten-minute limit |
 
-The Admin-key API below remains available for organization spend. The entered
-balance below is a **fallback only when no real-balance binding exists**; it does
-not mask an expired Platform session. Re-sign in or disconnect that binding to
-use a manual estimate.
-
-### OpenAI usage key
-
-For an official OpenAI API provider only: `provider_type` `openai`, `base_url` on `https://api.openai.com`, not signed in with ChatGPT. Other providers get `400`. The key is an OpenAI organization Admin API key; the reading covers organization spend and completions token and request counts for the current month (UTC).
-
-| Method | Path | Body | Notes |
-|--------|------|------|-------|
-| `GET` | `/api/v1/model-providers/{provider_id}/openai-usage` | | Status |
-| `PUT` | `/api/v1/model-providers/{provider_id}/openai-usage` | `admin_key`, `organization_id` | Save the key and start polling |
-| `DELETE` | `/api/v1/model-providers/{provider_id}/openai-usage` | | Remove the key |
-
-PUT body (JSON, both required): `admin_key` (no whitespace, at most 4096 characters, `400` otherwise) and `organization_id` (must match `org-` followed by 1 to 180 letters, digits, `_` or `-`, `422` otherwise).
-
-```bash
-curl -X PUT http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9a61-2d4f7b9e0c11/openai-usage \
-  -H "Authorization: Bearer $OWNER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"admin_key": "sk-admin-your-key", "organization_id": "org-abc123"}'
-```
-
-**Response** (all three endpoints):
-```json
-{
-  "configured": true,
-  "organization_id": "org-abc123",
-  "source": "OpenAI organization Admin API",
-  "scope": "Organization spend; completions token/request usage; current month (UTC)",
-  "spend": null,
-  "last_error_kind": null,
-  "fetched_at": null
-}
-```
-
-`spend` holds the latest reading (`spend_month` in USD with `input_tokens`, `output_tokens` and `num_model_requests`), or `null` until one arrives.
-
-A restored installation's Admin key is not configured until saved here or received
-through authenticated sync. Explicit save or disconnect replaces a restored
-installation marker; it does not require that installation to come back online.
-
-**Errors:** `404` provider not found. `409` on PUT when the provider is disabled or changes during the operation. `503` on PUT when secret storage is locked, or when the key was saved but polling could not resume yet (the detail says what to do; then save again).
-
-### Entered OpenAI prepaid balance
-
-An official OpenAI API key with neither Admin usage nor an entered balance is
-omitted from the usage popover. In Settings > Providers > the key > Usage,
-enter the current balance in USD (two decimals) and Save; Clear removes only
-this estimate. Open billing links to the actual provider balance.
-
-Owner-only `PUT /api/v1/model-providers/{provider_id}/openai-usage/balance`
-accepts `{"balance_usd": 20.50}` (finite, 0–1,000,000,000 USD). The server rounds
-to cents and records the current millisecond timestamp. `DELETE` at the same
-path clears it; neither operation changes the inference or Admin key.
-The existing `GET .../openai-usage` response also includes `manual_balance`:
-`balance_remaining`, `manual_balance`, `estimated_spend`, `set_at` (epoch ms),
-and `unpriced_turns`, or null when not set.
-
-The popover shows **~$N left (estimated)**, not a provider reading. The app
-subtracts Analytics' recorded `usage_log.cost_usd` for the exact provider ID
-since Save. Reported and guessed token counts use the existing pricing path;
-unpriced turns, unattributed calls and spending outside this app are omitted.
-Prices and booking times may differ from billing; an in-flight turn booked
-after Save is deducted in full. Top-ups/refunds are not detected, and the
-estimate can go negative. Save again to reset the baseline. Changing the API
-key clears the baseline; resaving or re-encrypting the same key preserves it.
-Baselines sync with providers, but deductions cover only this worker's tracked
-spend: paired workers' spend is not included, as both UI surfaces state. If Admin
-usage is available, its organization spend stays primary with the manual
-estimate alongside it.
+OpenAI API credit and organization spend are not collected or displayed.
+ChatGPT/Codex subscription usage and banked resets are separate and unchanged.
 
 ### OpenRouter usage key
 

@@ -12,14 +12,17 @@ import { providerDrafts } from './drafts.svelte';
 import { CLAUDE_CLOUD_ITEM, type CredentialFlavor, type CredentialView, type ProviderView } from './providers-model';
 
 /** A credential row's switch: PATCH `{enabled}` for model_providers rows, the fal flag for fal.ai. */
-export async function setCredentialEnabled(c: CredentialView, enabled: boolean): Promise<void> {
+export async function setCredentialEnabled(c: CredentialView, enabled: boolean): Promise<boolean> {
 	try {
-		if (c.flavor === 'fal') await providers.setFalEnabled(enabled);
+		if (c.account && enabled) await providers.activateAnthropicAccount(c.account.id);
+		else if (c.flavor === 'fal') await providers.setFalEnabled(enabled);
 		else if (c.row) await providers.setProviderEnabled(c.row.id, enabled);
-		else return;
+		else return false;
 		flashSaved();
+		return true;
 	} catch (e) {
 		notify(getErrorMessage(e, `Could not turn ${c.name} ${enabled ? 'on' : 'off'}`), { severity: 'error' });
+		return false;
 	}
 }
 

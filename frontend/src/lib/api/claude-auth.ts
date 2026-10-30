@@ -29,7 +29,50 @@ export interface ClaudeCloudStatus {
 	storage_locked: boolean;
 }
 
+export interface ClaudeKeyAccount {
+	id: string;
+	label: string;
+	active: boolean;
+	masked_key: string;
+	last4: string | null;
+}
+
+export interface ClaudeAccounts {
+	api_key: ClaudeKeyAccount[];
+	subscription: never[];
+	subscription_support: { supported: boolean; reason: string };
+	storage_locked: boolean;
+	error: string | null;
+	login_pending: boolean;
+	recovery_required: boolean;
+}
+
+export interface ClaudeAccountsResponse {
+	accounts: ClaudeAccounts;
+	account_id?: string;
+}
+
+export function addClaudeKey(api_key: string, label?: string): Promise<ClaudeAccountsResponse> {
+	return api.post('/settings/claude-auth/accounts/api-keys', { api_key, label, activate: true });
+}
+
+export function renameClaudeKey(id: string, label: string): Promise<ClaudeAccountsResponse> {
+	return api.patch(`/settings/claude-auth/accounts/api_key/${id}`, { label });
+}
+
+export function activateClaudeKey(id: string): Promise<ClaudeAccountsResponse> {
+	return api.post(`/settings/claude-auth/accounts/api_key/${id}/activate`);
+}
+
+export async function deleteClaudeKey(id: string): Promise<ClaudeAccountsResponse> {
+	const result = await api.delete<ClaudeAccountsResponse>(`/settings/claude-auth/accounts/api_key/${id}`);
+	if (!result) throw new Error('Could not reload saved accounts');
+	return result;
+}
+
 export interface ClaudeAuthSummary {
+	/** Saved API keys; absent on older workers. Independent of the Claude Code mode. */
+	accounts?: ClaudeAccounts;
 	mode: ClaudeAuthMode;
 	mode_label: string;
 	/** False only before the server has recorded the default mode. */

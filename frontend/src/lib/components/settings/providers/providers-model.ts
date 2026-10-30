@@ -5,17 +5,18 @@
  * Rules (docs/settings-redesign.md, "Providers"):
  * - A provider lists only the credentials the user connected. Providers with
  *   nothing connected sit in a "Not connected" group.
- * - Credentials are independent. Every enabled OpenAI, Grok, OpenRouter and
- *   gateway row is its own group in the model picker; there is no fallback.
- *   Each connected row has its own switch; providers have none.
- * - Claude is the exception: one credential per worker, chosen by the Claude
- *   Code mode (Subscription | API key | Off). Its rows have no switches.
+ * - Built-in accounts share a provider + kind slot: one API key and one
+ *   subscription may be active together, never two of the same kind. Switching
+ *   refetches siblings; existing chats follow the active account. Gateways are independent.
+ * - Claude saves multiple Anthropic keys with one selected. The Claude Code
+ *   mode (Subscription | API key | Cloud | Off) remains a separate choice;
+ *   its single CLI sign-in and cloud configuration are unchanged.
  * - fal.ai has one credential, the media key, with its own on/off flag.
  *
  * Pure functions only: the components and the tests feed it plain data.
  */
 import type { ModelProvider } from '$lib/api/model-providers';
-import type { ClaudeAuthMode, ClaudeAuthSummary } from '$lib/api/claude-auth';
+import type { ClaudeAuthMode, ClaudeAuthSummary, ClaudeKeyAccount } from '$lib/api/claude-auth';
 import type { ProviderGlyphKind } from '$lib/components/settings/ProviderGlyph.svelte';
 import type { StatusTone } from '$lib/settings/types';
 
@@ -35,6 +36,7 @@ export const rowItem = (rowId: string): string => `mp:${rowId}`;
 /** Stable item ids of the credentials that are not model_providers rows. */
 export const CLAUDE_SUB_ITEM = 'claude:subscription';
 export const CLAUDE_KEY_ITEM = 'claude:api-key';
+export const claudeKeyItem = (id: string): string => `${CLAUDE_KEY_ITEM}:${id}`;
 export const CLAUDE_CLOUD_ITEM = 'claude:cloud';
 export const FAL_KEY_ITEM = 'fal:key';
 export const CLAUDE_PROVIDER_ITEM = 'provider:claude';
@@ -66,7 +68,7 @@ export interface CredentialKindDef {
 	/** Menu and row label: "Subscription", "API key". */
 	label: string;
 	flavor: CredentialFlavor;
-	/** Several of this kind may exist (API keys). */
+	/** Several saved accounts of this kind may exist. */
 	multiple: boolean;
 	/** At most 5 words. */
 	hint: string;
@@ -75,15 +77,15 @@ export interface CredentialKindDef {
 const KINDS: Record<BuiltInProviderId | 'gateway', CredentialKindDef[]> = {
 	claude: [
 		{ label: 'Subscription', flavor: 'cli', multiple: false, hint: 'Claude Code CLI sign-in' },
-		{ label: 'API key', flavor: 'anthropic', multiple: false, hint: 'Pay per use' },
+		{ label: 'API key', flavor: 'anthropic', multiple: true, hint: 'Pay per use' },
 		{ label: 'Cloud provider or gateway', flavor: 'cloud', multiple: false, hint: 'Bedrock, Vertex, Foundry, gateway' }
 	],
 	openai: [
-		{ label: 'Subscription', flavor: 'device', multiple: false, hint: 'ChatGPT sign-in, no key' },
+		{ label: 'Subscription', flavor: 'device', multiple: true, hint: 'ChatGPT sign-in, no key' },
 		{ label: 'API key', flavor: 'key', multiple: true, hint: 'Paste a key' }
 	],
 	grok: [
-		{ label: 'Subscription', flavor: 'device', multiple: false, hint: 'SuperGrok sign-in, no key' },
+		{ label: 'Subscription', flavor: 'device', multiple: true, hint: 'SuperGrok sign-in, no key' },
 		{ label: 'API key', flavor: 'key', multiple: true, hint: 'Paste a key' }
 	],
 	openrouter: [{ label: 'API key', flavor: 'key', multiple: true, hint: 'One key, many models' }],
@@ -163,7 +165,11 @@ export interface CredentialView {
 	statusText: string;
 	/** Live: its models are in the picker (Claude: the active credential). */
 	on: boolean;
-	/** Has its own switch (every connected credential except Claude's). */
+	/** Saved Anthropic account; selection is independent of the Claude Code mode. */
+	account?: ClaudeKeyAccount;
+	/** Selected account in a built-in provider + kind slot. */
+	active?: boolean;
+	/** Has a switch or a saved-account activation action. */
 	switchable: boolean;
 	/** Switch position, when switchable. */
 	enabled: boolean;
@@ -265,7 +271,7 @@ function plural(n: number, one: string, many = `${one}s`): string {
  */
 export function claudeInUse(claude: ClaudeAuthSummary | null, usageRecorded = false): boolean {
 	if (!claude) return false;
-	if (claude.cli?.signed_in || claude.api_key?.set || claude.cloud?.configured || claude.mode === 'cloud') return true;
+	if (claude.cli?.signed_in || claude.api_key?.set || claude.accounts?.api_key.length || claude.cloud?.configured || claude.mode === 'cloud') return true;
 	return claude.mode !== 'off' && usageRecorded;
 }
 
@@ -332,7 +338,27 @@ function claudeCredentials(claude: ClaudeAuthSummary | null, keyMasked?: string 
 		});
 	}
 	const keyActive = mode === 'api_key';
-	if (claude.api_key.set || keyActive) {
+	for (const account of claude.accounts?.api_key ?? []) {
+		const on = keyActive && account.active;
+		out.push({
+			item: claudeKeyItem(account.id),
+			providerId: 'claude',
+			flavor: 'anthropic',
+			name: account.label || 'Anthropic API key',
+			kind: 'API key',
+			summary: `${account.masked_key}${account.active && !keyActive ? ', selected for API key mode' : ''}`,
+			status: on ? 'ok' : 'standby',
+			statusText: account.active ? (keyActive ? 'Active for Claude' : 'Selected for API key mode') : 'Saved',
+			on,
+			active: account.active,
+			switchable: true,
+			enabled: account.active,
+			attention: false,
+			account
+		});
+	}
+	// Compatibility with older workers, plus the missing-key row for the selected mode.
+	if ((!claude.accounts && claude.api_key.set) || (keyActive && !(claude.accounts?.api_key.length) && !claude.api_key.set)) {
 		const ready = claude.api_key.set;
 		const masked = keyMasked || (claude.api_key.last4 ? `sk-ant-…${claude.api_key.last4}` : 'Key stored');
 		const status: StatusTone = !ready ? 'warn' : mode === 'off' ? 'off' : keyActive ? 'ok' : 'standby';
@@ -441,7 +467,7 @@ export function rowCredential(row: ModelProvider, usagePlan?: string | null): Cr
 			item: rowItem(row.id),
 			providerId,
 			flavor,
-			name: subscriptionName(cls, plan),
+			name: row.name && !['chatgpt', 'grok', 'supergrok'].includes(row.name.toLowerCase()) ? row.name : subscriptionName(cls, plan),
 			kind: 'Subscription',
 			summary: !signedIn
 				? statusText
@@ -451,7 +477,8 @@ export function rowCredential(row: ModelProvider, usagePlan?: string | null): Cr
 						? plural(models, 'model')
 						: 'Off',
 			status,
-			statusText: !signedIn ? statusText : row.enabled ? 'On' : 'Off',
+			statusText: !signedIn ? statusText : row.enabled ? 'Active' : 'Saved',
+			active: row.enabled,
 			on: row.enabled && signedIn,
 			switchable: true,
 			enabled: row.enabled,
@@ -468,7 +495,8 @@ export function rowCredential(row: ModelProvider, usagePlan?: string | null): Cr
 		kind: flavor === 'gateway' ? 'Gateway' : 'API key',
 		summary: row.enabled ? `${host}, ${plural(models, 'model')}${row.auth_token_set ? '' : ', no token'}` : 'Off',
 		status: row.enabled ? 'ok' : 'off',
-		statusText: row.enabled ? 'On' : 'Off',
+		statusText: flavor === 'gateway' ? (row.enabled ? 'On' : 'Off') : row.enabled ? 'Active' : 'Saved',
+		active: flavor !== 'gateway' && row.enabled,
 		on: row.enabled,
 		switchable: true,
 		enabled: row.enabled,
@@ -568,6 +596,9 @@ function view(
 	letter: string,
 	credentials: CredentialView[]
 ): ProviderView {
+	// Keep saved accounts and their setup draft together by kind, preserving server order.
+	const kinds = kindsOf(id).map((kind) => kind.flavor);
+	credentials = [...credentials].sort((a, b) => kinds.indexOf(a.flavor) - kinds.indexOf(b.flavor));
 	return {
 		id,
 		item: providerItem(id),
@@ -650,11 +681,15 @@ export function addableKinds(p: Pick<ProviderView, 'id' | 'credentials'>): Addab
 	const present = new Set(p.credentials.map((c) => c.flavor));
 	return kindsOf(p.id)
 		.filter((k) => k.multiple || !present.has(k.flavor))
-		.map((k) => ({ ...k, menuLabel: k.multiple && present.has(k.flavor) ? `Another ${k.label}` : k.label }));
+		.map((k) => ({
+			...k,
+			menuLabel: k.multiple && present.has(k.flavor) ? `Another ${k.label}` : k.label,
+			hint: k.multiple && present.has(k.flavor) ? (k.flavor === 'device' ? 'Becomes active after sign-in' : 'New key becomes active') : k.hint
+		}));
 }
 
-/** The "+" button is shown on every provider except Claude (it has the mode control). */
-export const hasPlusMenu = (p: Pick<ProviderView, 'claude'>): boolean => !p.claude;
+/** Claude keeps its mode control and also offers saved-key setup. */
+export const hasPlusMenu = (_p: Pick<ProviderView, 'claude'>): boolean => true;
 
 const DRAFT_BASE: Record<CredentialFlavor, (p: ProviderId) => string> = {
 	cli: () => 'Claude subscription',

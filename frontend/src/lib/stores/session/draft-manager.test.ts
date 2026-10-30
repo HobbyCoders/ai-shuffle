@@ -95,6 +95,26 @@ describe('draft manager — system messages', () => {
 });
 
 describe('draft manager — reload and takeover', () => {
+	it('mirror freshness leaves the existing reducer and reader untouched', () => {
+		const h = harness();
+		h.dm.reloadSession(false, 'mirror-caught-up');
+		expect(h.deps.feedRestart).not.toHaveBeenCalled();
+		expect(h.deps.feedRevive).not.toHaveBeenCalled();
+		expect(h.deps.update).not.toHaveBeenCalled();
+	});
+
+	it('the kill switch restores the opening replay without changing explicit reloads', () => {
+		vi.stubEnv('VITE_PERF_KEEP_MIRROR_CACHE', '0');
+		try {
+			const h = harness();
+			h.dm.reloadSession(false, 'mirror-caught-up');
+			h.dm.reloadSession();
+			expect(h.deps.feedRestart).toHaveBeenCalledTimes(2);
+		} finally {
+			vi.unstubAllEnvs();
+		}
+	});
+
 	it('reloadSession restarts the feed only when a session is bound', () => {
 		const h = harness();
 		h.dm.reloadSession();

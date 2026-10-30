@@ -110,7 +110,7 @@ describe.each(KINDS)('$name sign-in', ({ kind, start, poll, type, base, name }) 
 		const onRow = vi.fn();
 		const { findByText } = render(DeviceCodeSetup, { kind, onRow });
 		await waitFor(() => expect(mocks[start]).toHaveBeenCalledWith('draft-1'));
-		expect(mocks.createModelProvider).toHaveBeenCalledWith({ provider_type: type, name, base_url: base });
+		expect(mocks.createModelProvider).toHaveBeenCalledWith({ provider_type: type, name, base_url: base, enabled: false });
 		expect(await findByText('ABCD-1234')).toBeTruthy();
 		await waitFor(() => expect(onRow).toHaveBeenLastCalledWith('draft-1'));
 	});

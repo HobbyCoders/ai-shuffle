@@ -67,10 +67,13 @@ export function createDraftManager(deps: DraftManagerDeps) {
 			update(s => ({ ...s, messages: [] }));
 		},
 
-		/** Reload the current session from backend (e.g. after rewind).
-		 * Restarts the SSE feed, which replays the event log from_seq=0 — a full
-		 * reset that picks up truncated/changed data. */
-		reloadSession(_forceJsonl = false) {
+		/** A rewrite invalidates the transcript; mirror freshness does not.
+		 * The existing SSE reader already follows every replicated event. Keep
+		 * its reducer and cursor through the opening checkpoint; an epoch change
+		 * still arrives independently as a feed `reset`.
+		 * VITE_PERF_KEEP_MIRROR_CACHE=0 restores the legacy opening replay. */
+		reloadSession(_forceJsonl = false, reason: 'rewrite' | 'mirror-caught-up' = 'rewrite') {
+			if (reason === 'mirror-caught-up' && import.meta.env.VITE_PERF_KEEP_MIRROR_CACHE !== '0') return;
 			const state = getState();
 			if (state.sessionId) {
 				feedRestart(state.sessionId);

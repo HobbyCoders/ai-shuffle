@@ -86,15 +86,11 @@ def upsert_provider_usage_snapshot(
     credits: Optional[Dict[str, Any]],
     raw: Optional[Dict[str, Any]],
     fetched_at: Optional[int],
-    expected_binding: Optional[tuple[str, str]] = None,
     expected_credential_generation: Optional[str] = None,
-    expected_admin_key: Optional[str] = None,
     expected_provider_revision: Optional[tuple[str, str]] = None,
 ) -> bool:
     """Insert or replace a snapshot, rejecting observations of an old binding."""
     now = datetime.now(timezone.utc).isoformat()
-    if provider_type == "openai" and credits is not None:
-        raw = {**(raw or {}), "billing_fetched_at": fetched_at}
     with get_db() as conn:
         cursor = conn.cursor()
         if expected_provider_revision is not None:
@@ -108,21 +104,6 @@ def upsert_provider_usage_snapshot(
             if not _lock_usage_generation(cursor, provider_id, provider_type, expected_credential_generation):
                 return False
             raw = {**(raw or {}), "credential_generation": expected_credential_generation}
-        if provider_type == "openai":
-            cursor.execute(
-                "SELECT enabled, openai_billing_org_id, openai_billing_instance_id, openai_admin_key FROM model_providers WHERE id = %s FOR UPDATE",
-                (provider_id,),
-            )
-            binding = cursor.fetchone() or {}
-            if expected_admin_key is not None and (
-                not binding.get("enabled") or binding.get("openai_admin_key") != expected_admin_key
-            ):
-                return False
-            current = (binding.get("openai_billing_org_id"), binding.get("openai_billing_instance_id"))
-            if expected_binding is not None and current != expected_binding:
-                return False
-            if credits is not None and current[0] and expected_binding is None:
-                return False
         cursor.execute(
             """
             INSERT INTO provider_usage_snapshots
@@ -134,8 +115,7 @@ def upsert_provider_usage_snapshot(
                 plan_type = EXCLUDED.plan_type,
                 windows = EXCLUDED.windows,
                 credits = COALESCE(EXCLUDED.credits, provider_usage_snapshots.credits),
-                raw = CASE WHEN EXCLUDED.provider_type = 'openai' AND EXCLUDED.credits IS NULL
-                    THEN provider_usage_snapshots.raw ELSE EXCLUDED.raw END,
+                raw = EXCLUDED.raw,
                 fetched_at = EXCLUDED.fetched_at,
                 updated_at = EXCLUDED.updated_at
             WHERE provider_usage_snapshots.provider_type <> EXCLUDED.provider_type
@@ -161,9 +141,7 @@ def upsert_provider_usage_snapshot(
 
 def record_provider_usage_failure(
     provider_id: str, provider_type: str, error_kind: str,
-    expected_binding: Optional[tuple[str, str]] = None,
     expected_credential_generation: Optional[str] = None,
-    expected_admin_key: Optional[str] = None,
     denied_fingerprint: str | None = None,
 ) -> None:
     """Record a failed observation, keeping the last successful reading.
@@ -173,8 +151,6 @@ def record_provider_usage_failure(
     """
     if error_kind not in {
         "billing_access_denied", "missing_credentials", "timeout", "unavailable", "unsupported",
-        "billing_browser_unavailable", "billing_sign_in_required", "billing_organization_mismatch",
-        "billing_organization_required", "billing_invalid_response", "billing_timeout",
     }:
         error_kind = "unavailable"
     now = datetime.now(timezone.utc)
@@ -182,21 +158,6 @@ def record_provider_usage_failure(
         cursor = conn.cursor()
         if provider_type in {"fal", "openrouter_account"} and not _lock_usage_generation(cursor, provider_id, provider_type, expected_credential_generation):
             return
-        if provider_type == "openai":
-            cursor.execute(
-                "SELECT enabled, openai_billing_org_id, openai_billing_instance_id, openai_admin_key FROM model_providers WHERE id = %s FOR UPDATE",
-                (provider_id,),
-            )
-            binding = cursor.fetchone() or {}
-            if expected_admin_key is not None and (
-                not binding.get("enabled") or binding.get("openai_admin_key") != expected_admin_key
-            ):
-                return False
-            current = (binding.get("openai_billing_org_id"), binding.get("openai_billing_instance_id"))
-            if expected_binding is not None and current != expected_binding:
-                return
-            if current[0] and expected_binding is None:
-                return
         cursor.execute(
             "SELECT raw, credits, fetched_at FROM provider_usage_snapshots WHERE provider_id = %s",
             (provider_id,),
@@ -208,20 +169,10 @@ def record_provider_usage_failure(
             cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
             previous = {}
             previous_raw = {}
-        billing_fetched_at = previous_raw.get(
-            "billing_fetched_at", previous.get("fetched_at") if previous.get("credits") else None
-        )
-        metadata = {}
-        if previous_raw.get("source") in {"browser_platform", "openai_admin", "openrouter_management"}:
-            metadata = {key: previous_raw.get(key) for key in ("source", "organization_id")}
-        if provider_type == "openai" and expected_admin_key is not None:
-            metadata.update(source="openai_admin", organization_id=current[0])
         raw = json.dumps({
-            **metadata,
             **({"credential_generation": expected_credential_generation} if provider_type in {"fal", "openrouter_account"} else {}),
             "usage_error": error_kind,
             "usage_attempted_at": int(now.timestamp() * 1000),
-            "billing_fetched_at": billing_fetched_at,
             **({"denied_fingerprint": denied_fingerprint} if denied_fingerprint else {}),
         })
         cursor.execute(

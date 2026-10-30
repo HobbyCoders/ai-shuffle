@@ -9,6 +9,7 @@ from contextvars import ContextVar
 from functools import wraps
 import inspect
 import logging
+import os
 import re
 
 _active = ContextVar("resource_mutation", default=None)
@@ -72,6 +73,11 @@ class _Connection:
 
 
 def observe_transactions(get_db):
+    # A store can register several resource groups. One physical transaction
+    # needs only one observer, including for after_commit's connection lookup.
+    if getattr(get_db, "_resource_sync_observed", False) is True:
+        return get_db
+
     @wraps(get_db)
     @contextmanager
     def observed(*args, **kwargs):
@@ -82,6 +88,7 @@ def observe_transactions(get_db):
         # Unreachable on body failure OR commit failure.
         if frame is not None and transaction[0]:
             frame["committed"] = True
+    observed._resource_sync_observed = True
     return observed
 
 
@@ -196,6 +203,12 @@ def mutation(resource, *, scope="admin", database=True):
         wrapper.resource_sync = (resource, scope)
         return wrapper
     return decorate
+
+
+def replicated_wakes_enabled():
+    """Startup kill switch for the additional replicated writer boundaries."""
+    return os.environ.get("AI_SHUFFLE_PERF_RESOURCE_WAKE", "").strip().lower() not in (
+        "0", "false", "off", "no")
 
 
 def install_database_mutations(namespace, resource, names, *, scope="admin"):

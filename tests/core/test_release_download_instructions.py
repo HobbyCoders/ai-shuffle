@@ -341,7 +341,15 @@ def test_stable_release_registers_every_platform_from_its_own_artifacts():
 def test_stable_update_is_signed_only_after_verification_in_a_protected_environment():
     release = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
     job = release["jobs"]["source-stable"]
-    assert set(job["needs"]) == {"create-release", "docker", "buyer-install"}
+    assert set(job["needs"]) == {"create-release", "docker", "buyer-install", "ui-stable"}
+    ui = release["jobs"]["ui-stable"]
+    assert ui["needs"] == "preflight"
+    assert ui["if"] == "inputs.promote == ''"
+    assert ui["permissions"] == {"contents": "read"}
+    assert "secrets" not in ui and "environment" not in ui
+    assert ui["uses"] == "./.github/workflows/source-ui-bundle.yml"
+    assert ui["with"]["source-ref"] == "refs/tags/${{ needs.preflight.outputs.release_tag }}"
+    assert ui["with"]["version"] == "${{ needs.preflight.outputs.release_version }}"
     assert job["environment"] == "release-signing"
     assert "needs.create-release.outputs.promote_latest == 'true'" in job["if"]
     assert "github.actor_id == '76577322'" in job["if"]

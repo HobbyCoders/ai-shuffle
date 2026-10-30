@@ -425,7 +425,6 @@ def build_reencryption_plan(old_key: bytes, new_key: bytes, db_module):
         ("auth_token", "model_provider", ""),
         ("codex_access_token", "model_provider_codex_access", ":codex_access_token"),
         ("codex_refresh_token", "model_provider_codex_refresh", ":codex_refresh_token"),
-        ("openai_admin_key", "model_provider_openai_admin", ":openai_admin_key"),
         ("balance_key", "model_provider_balance", ":balance_key"),
     )
     for prov in providers:
@@ -488,8 +487,6 @@ def apply_reencryption_plan(plan, db_module) -> None:
             db_module.update_model_provider(item.ref, codex_refresh_token=item.new_value)
         elif item.kind == "model_provider_balance":
             db_module.update_model_provider(item.ref, balance_key=item.new_value)
-        elif item.kind == "model_provider_openai_admin":
-            db_module.update_model_provider(item.ref, openai_admin_key=item.new_value)
         else:  # pragma: no cover — defensive
             raise ValueError(f"Unknown re-encryption plan item kind: {item.kind}")
         logger.debug("Re-encrypted %s", item.label)

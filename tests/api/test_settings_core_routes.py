@@ -321,7 +321,10 @@ def test_anthropic_key_switches_mode_only_when_asked(c, monkeypatch):
     assert database.get_system_setting(claude_auth_mode.setting_key()) == "api_key"
     assert c.post(f"{BASE}/integrations/anthropic", json={"api_key": " "}).status_code == 400
     assert c.delete(f"{BASE}/integrations/anthropic").json() == {"success": True}
-    assert database.get_system_setting("anthropic_api_key") is None
+    assert get_decrypted_api_key("anthropic_api_key") is None
+    from app.core import claude_accounts
+    assert len(claude_accounts.accounts_payload()["api_key"]) == 1
+    assert not claude_accounts.accounts_payload()["api_key"][0]["active"]
     # Removing the key leaves the mode alone.
     assert database.get_system_setting(claude_auth_mode.setting_key()) == "api_key"
 

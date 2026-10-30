@@ -14,6 +14,14 @@ from app.core.native_generation_settings import NativeImageSettings, capabilitie
 from app.core.provider import native_images, supergrok_images
 
 
+@pytest.fixture
+def grok_account(mock_db):
+    """Use a stored subscription so account-following runs before the HTTP seam."""
+    from app.db import database
+    database.create_model_provider("row", "SuperGrok", "grok", "https://api.x.ai/v1")
+    database.update_model_provider("row", auth_mode="grok", codex_access_token="enc:test-login")
+
+
 def jpeg():
     out = io.BytesIO()
     Image.new("RGB", (16, 16), "blue").save(out, format="JPEG")
@@ -44,10 +52,9 @@ def test_reject_unproven_options(field, value):
 
 
 @pytest.mark.parametrize("output", ["jpeg", "png"])
-async def test_grok_handler_exact_http_body_image_bytes_and_no_fallback(monkeypatch, tmp_path, output):
+async def test_grok_handler_exact_http_body_image_bytes_and_no_fallback(monkeypatch, tmp_path, output, grok_account):
     from app.core.provider import fluid_credentials
     monkeypatch.setattr(fluid_credentials, "_load_grok_access_token", AsyncMock(return_value="test-private-token"))
-    monkeypatch.setattr(supergrok_images, "subscription_kind", AsyncMock(return_value="grok"))
     monkeypatch.setattr(native_images, "load_native_settings", AsyncMock(return_value=NativeImageSettings(model="grok-imagine-image", size="1k", quality=None, format="jpeg")))
     from tests.core.test_native_image_tool import png
     data, requests = (jpeg() if output == "jpeg" else png()), []
@@ -57,7 +64,7 @@ async def test_grok_handler_exact_http_body_image_bytes_and_no_fallback(monkeypa
     async with httpx.AsyncClient(transport=httpx.MockTransport(boundary)) as http:
         monkeypatch.setattr(supergrok_images, "http_client", lambda: http)
         engine = SimpleNamespace(provider=SimpleNamespace(name="openai_responses"), model="grok-chat", record_auxiliary_usage=AsyncMock())
-        result = await native_images.make_handler(lambda: engine, lambda: "s", provider_id_supplier=lambda: "grok-row")({"prompt": "A tree"}, ToolCtx(cwd=str(tmp_path)))
+        result = await native_images.make_handler(lambda: engine, lambda: "s", provider_id_supplier=lambda: "row")({"prompt": "A tree"}, ToolCtx(cwd=str(tmp_path)))
     assert not result.is_error, result.text
     assert len(requests) == 1
     assert str(requests[0].url) == "https://api.x.ai/v1/images/generations"
@@ -72,10 +79,9 @@ async def test_grok_handler_exact_http_body_image_bytes_and_no_fallback(monkeypa
 
 
 @pytest.mark.parametrize("status,label", [(401, "expired"), (403, "entitled"), (429, "rate limit"), (400, "refused"), (500, "unavailable")])
-async def test_sanitized_errors_no_retries(monkeypatch, caplog, status, label):
+async def test_sanitized_errors_no_retries(monkeypatch, caplog, status, label, grok_account):
     from app.core.provider import fluid_credentials
     monkeypatch.setattr(fluid_credentials, "_load_grok_access_token", AsyncMock(return_value="test-private-token"))
-    monkeypatch.setattr(supergrok_images, "subscription_kind", AsyncMock(return_value="grok"))
     from app.core import xai_token_refresh
     monkeypatch.setattr(xai_token_refresh, "refresh_on_401_once", AsyncMock(return_value=False))
     calls = []
@@ -185,10 +191,9 @@ def test_jpeg_and_png_artifacts_detect_bytes_not_claimed_format(monkeypatch):
             native_images._decode_image({"result": base64.b64encode(data).decode()})
 
 
-async def test_expired_resolver_and_transport_errors_are_redacted(monkeypatch, caplog):
+async def test_expired_resolver_and_transport_errors_are_redacted(monkeypatch, caplog, grok_account):
     from app.core.provider import fluid_credentials
     from app.core.provider.fluid_credentials import ProviderCredentialError
-    monkeypatch.setattr(supergrok_images, "subscription_kind", AsyncMock(return_value="grok"))
     options = NativeImageSettings(model="grok-imagine-image", size="1k", quality=None, format="jpeg")
     for error in (ProviderCredentialError("test-private-token"), RuntimeError("test-private-token")):
         monkeypatch.setattr(fluid_credentials, "_load_grok_access_token", AsyncMock(side_effect=error))
@@ -204,10 +209,9 @@ def test_supergrok_is_not_a_direct_image_model():
     assert sub.is_subscription_model("chatgpt-subscription/gpt-image-1")
 
 
-async def test_content_refusal_and_cancellation_never_retry(monkeypatch):
+async def test_content_refusal_and_cancellation_never_retry(monkeypatch, grok_account):
     import asyncio
     from app.core.provider import fluid_credentials
-    monkeypatch.setattr(supergrok_images, "subscription_kind", AsyncMock(return_value="grok"))
     monkeypatch.setattr(fluid_credentials, "_load_grok_access_token", AsyncMock(return_value="test-private-token"))
     options = NativeImageSettings(model="grok-imagine-image", size="1k", quality=None, format="jpeg")
     requests = []

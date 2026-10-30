@@ -5,8 +5,8 @@
 	 *    provider's fixed endpoint, then the models step picks what to offer. A
 	 *    created row is reused on retry, never created twice; the retry's key
 	 *    replaces the stored one (the provider may have rejected the first).
-	 *  - Anthropic (`anthropic`): "Use this key" stores it for Claude Code. When
-	 *    Claude has no other credential it also becomes the active one.
+	 *  - Anthropic (`anthropic`): saves a named account and selects it for API key
+	 *    mode, without changing the Claude Code mode.
 	 */
 	import { getErrorMessage } from '$lib/api/client';
 	import { createModelProvider, updateModelProvider } from '$lib/api/model-providers';
@@ -16,19 +16,17 @@
 	import TextField from '../../rows/TextField.svelte';
 	import ModelCuration from '../ModelCuration.svelte';
 	import { providerDrafts, type Draft } from '../drafts.svelte';
-	import { CLAUDE_KEY_ITEM, KEY_CONFIG, rowItem } from '../providers-model';
+	import { claudeKeyItem, KEY_CONFIG, rowItem } from '../providers-model';
 
 	interface Props {
 		draft: Draft;
-		/** Claude has no other credential: the new key becomes the active one. */
-		makeActive?: boolean;
 		/** Label of the submit button for a non-Anthropic key (the setup wizard says "Save key"). */
 		submitLabel?: string;
 		onFinish: (item: string) => void;
 		onCancel: () => void;
 	}
 
-	let { draft, makeActive = false, submitLabel = 'Continue', onFinish, onCancel }: Props = $props();
+	let { draft, submitLabel = 'Continue', onFinish, onCancel }: Props = $props();
 
 	const config = $derived(
 		draft.providerId === 'openai' || draft.providerId === 'grok' || draft.providerId === 'openrouter'
@@ -38,6 +36,7 @@
 	const placeholder = $derived(draft.flavor === 'anthropic' ? 'sk-ant-…' : (config?.placeholder ?? ''));
 
 	let key = $state('');
+	let label = $state('');
 	let busy = $state(false);
 	let error = $state('');
 
@@ -48,10 +47,10 @@
 		error = '';
 		try {
 			if (draft.flavor === 'anthropic') {
-				await providers.setAnthropicKey(value, { useForClaudeCode: makeActive });
-				await providers.loadClaude();
+				const id = await providers.addAnthropicAccount(value, label);
 				key = '';
-				onFinish(CLAUDE_KEY_ITEM);
+				if (!id) throw new Error('Saved account could not be selected. Reopen Providers to try again.');
+				onFinish(claudeKeyItem(id));
 				return;
 			}
 			if (!config) return;
@@ -87,7 +86,15 @@
 {#if draft.step === 'models' && draft.rowId}
 	<ModelCuration mode="setup" providerId={draft.rowId} onDone={() => onFinish(rowItem(draft.rowId!))} />
 {:else}
+	<p class="pv-note">{draft.flavor === 'anthropic'
+		? 'This becomes the selected Anthropic key. The Claude Code mode stays unchanged.'
+		: 'This key becomes active. Other saved API keys for this provider turn off; subscriptions stay as they are.'}</p>
 	<RowGroup title="Key">
+		{#if draft.flavor === 'anthropic'}
+			<SettingRow label="Name" hint="Optional, to tell your accounts apart">
+				<TextField bind:value={label} placeholder="e.g. Work" maxlength={120} width={240} disabled={busy} />
+			</SettingRow>
+		{/if}
 		<SettingRow label="API key" hint={draft.flavor === 'anthropic' ? 'Pay per use' : undefined}>
 			<TextField bind:value={key} type="password" mono {placeholder} width={240} disabled={busy} />
 		</SettingRow>

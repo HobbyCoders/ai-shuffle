@@ -34,6 +34,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list
+from app.db.model_provider_slots import (
+    clear_model_provider_slot, lock_model_provider_slots, model_provider_slot,
+    reconcile_model_provider_slots, select_model_provider_slot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,10 +70,6 @@ class ModelProviderRow(TypedDict, total=False):
     codex_id_token_expires_at: Optional[str]
     codex_last_refresh: Optional[str]
     needs_reauth: bool
-    manual_balance_usd: Optional[float]
-    manual_balance_set_at: Optional[int]
-    openai_billing_org_id: Optional[str]
-    openai_billing_instance_id: Optional[str]
     created_at: str
     updated_at: str
     revision: Optional[str]
@@ -85,8 +85,6 @@ _PUBLIC_COLUMNS = (
     "default_model, small_fast_model, extra_env_json, context_window, "
     "max_output_tokens, enabled, auth_mode, codex_account_id, "
     "codex_id_token_expires_at, codex_last_refresh, needs_reauth, "
-    "openai_billing_org_id, openai_billing_instance_id, "
-    "manual_balance_usd, manual_balance_set_at, "
     "created_at, updated_at, revision"
 )
 
@@ -94,7 +92,7 @@ _PUBLIC_COLUMNS = (
 # passes ``include_token=True`` (server-side use: env overlay / re-encryption /
 # the Codex refresh worker). Kept off ``_PUBLIC_COLUMNS`` so they never travel on
 # a normal read.
-_TOKEN_COLUMNS = "auth_token, codex_access_token, codex_refresh_token, openai_admin_key, balance_key, balance_instance_id, balance_snapshot"
+_TOKEN_COLUMNS = "auth_token, codex_access_token, codex_refresh_token, balance_key, balance_instance_id, balance_snapshot"
 
 # Columns that update_model_provider accepts as direct partial updates. JSON
 # columns are handled specially (see _dump_json_value); auth_token and the two
@@ -117,14 +115,11 @@ _UPDATABLE_COLUMNS = (
     "auth_mode",
     "codex_access_token",
     "codex_refresh_token",
-    "openai_admin_key",
     "balance_key",
     "codex_account_id",
     "codex_id_token_expires_at",
     "codex_last_refresh",
     "needs_reauth",
-    "manual_balance_usd",
-    "manual_balance_set_at",
 )
 
 
@@ -180,6 +175,7 @@ def create_model_provider(
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
+        lock_model_provider_slots(cursor)
         cursor.execute(
             """
             INSERT INTO model_providers
@@ -208,7 +204,30 @@ def create_model_provider(
                 str(uuid4()),
             ),
         )
+        slot = model_provider_slot({"provider_type": provider_type})
+        if slot and enabled:
+            select_model_provider_slot(cursor, slot, provider_id)
+        reconcile_model_provider_slots(cursor)
     return get_model_provider(provider_id)
+
+
+def resolve_model_provider(provider_id: str, include_token: bool = False) -> Optional[ModelProviderRow]:
+    """Runtime pin lookup: disabled accounts follow their active slot sibling.
+
+    Management, credential refresh and historical billing use the exact reader
+    below. Deleted rows retain the existing missing-provider behavior: their
+    slot cannot be inferred safely from an opaque id.
+    """
+    from app.db import database
+
+    row = (database.get_model_provider(provider_id, include_token=True) if include_token
+           else database.get_model_provider(provider_id))
+    slot = model_provider_slot(row) if row else None
+    if row and not row.get("enabled") and slot:
+        for sibling in database.get_enabled_model_providers():
+            if model_provider_slot(sibling) == slot:
+                return database.get_model_provider(sibling["id"], include_token=include_token)
+    return row
 
 
 def get_model_provider(
@@ -449,11 +468,6 @@ def update_model_provider(
             k in kwargs and (kwargs[k] or None) != (current.get(k) or None)
             for k in ("base_url", "provider_type", "auth_mode")
         )
-        if key_changed:
-            # A balance belongs to the credential's account, not this row ID.
-            # Re-encrypting the same key must not reset the owner's baseline.
-            kwargs["manual_balance_usd"] = None
-            kwargs["manual_balance_set_at"] = None
 
     updates: List[str] = []
     values: List[Any] = []
@@ -480,6 +494,10 @@ def update_model_provider(
 
     with get_db() as conn:
         cursor = conn.cursor()
+        lock_model_provider_slots(cursor)
+        cursor.execute("SELECT provider_type, auth_mode FROM model_providers WHERE id = %s", (provider_id,))
+        previous = cursor.fetchone()
+        previous_slot = model_provider_slot(previous) if previous else None
         cursor.execute(
             f"UPDATE model_providers SET {', '.join(updates)} WHERE id = %s{condition} RETURNING {_PUBLIC_COLUMNS}",
             values,
@@ -489,79 +507,20 @@ def update_model_provider(
         saved = _parse_json_columns(row_to_dict(cursor.fetchone()))
         if saved and (changed or kwargs.get("enabled") is False):
             cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
-        if saved and (changed or any(k in kwargs for k in ("balance_key", "openai_admin_key", "codex_access_token", "codex_account_id"))):
+        if saved and (changed or any(k in kwargs for k in ("balance_key", "codex_access_token", "codex_account_id"))):
             from app.db.provider_usage_snapshots import delete_shared_observations
             delete_shared_observations(conn, provider_id)
+        if saved and any(k in kwargs for k in ("enabled", "provider_type", "auth_mode")):
+            slot = model_provider_slot(saved)
+            if previous_slot and previous_slot != slot:
+                clear_model_provider_slot(cursor, previous_slot, provider_id)
+            if slot:
+                if saved["enabled"]:
+                    select_model_provider_slot(cursor, slot, provider_id)
+                elif "enabled" in kwargs:
+                    clear_model_provider_slot(cursor, slot, provider_id)
+            reconcile_model_provider_slots(cursor)
         return saved
-
-
-def set_openai_billing_binding(provider_id: str, organization_id: str, instance_id: str, admin_key: Optional[str] = None) -> Optional[ModelProviderRow]:
-    """Explicitly save shared Admin access without changing inference credentials.
-
-    The row lock protects validation and replacement, including takeover of a
-    restored installation's trust marker.
-    """
-    from urllib.parse import urlsplit
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT provider_type, base_url, auth_mode, enabled, openai_billing_instance_id FROM model_providers WHERE id = %s FOR UPDATE",
-            (provider_id,),
-        )
-        row = cursor.fetchone()
-        if not row or row["provider_type"] != "openai" or not row["enabled"]:
-            return None
-        try:
-            url = urlsplit(row["base_url"])
-            if (
-                url.scheme != "https" or url.hostname != "api.openai.com"
-                or url.port not in (None, 443) or url.username or url.password
-                or row.get("auth_mode") in {"codex", "chatgpt"}
-            ):
-                return None
-        except ValueError:
-            return None
-        cursor.execute(
-            "UPDATE model_providers SET openai_billing_org_id = %s, openai_billing_instance_id = %s, openai_admin_key = %s, updated_at = %s, revision = %s WHERE id = %s",
-            (organization_id, instance_id, admin_key, datetime.now(timezone.utc).isoformat(), str(uuid4()), provider_id),
-        )
-        cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
-        from app.db.provider_usage_snapshots import delete_shared_observations
-        delete_shared_observations(conn, provider_id)
-    return get_model_provider(provider_id)
-
-
-def clear_openai_billing_binding(
-    provider_id: str, instance_id: Optional[str] = None,
-) -> Optional[ModelProviderRow]:
-    """Remove shared Admin API access and its local snapshot, not the model key."""
-    from app.core.config import settings
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT id, openai_billing_instance_id FROM model_providers WHERE id = %s FOR UPDATE", (provider_id,)
-        )
-        row = cursor.fetchone()
-        if not row:
-            return None
-        cursor.execute(
-            "UPDATE model_providers SET openai_billing_org_id = NULL, openai_billing_instance_id = %s, openai_admin_key = NULL, updated_at = %s, revision = %s WHERE id = %s",
-            (instance_id or settings.effective_instance_id, datetime.now(timezone.utc).isoformat(), str(uuid4()), provider_id),
-        )
-        cursor.execute("SELECT raw FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
-        snapshot = cursor.fetchone()
-        raw = snapshot.get("raw") if snapshot else None
-        if isinstance(raw, str):
-            try:
-                raw = json.loads(raw)
-            except (ValueError, TypeError):
-                raw = None
-        if isinstance(raw, dict) and raw.get("source") in {"browser_platform", "openai_admin"}:
-            cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
-        from app.db.provider_usage_snapshots import delete_shared_observations
-        delete_shared_observations(conn, provider_id)
-    return get_model_provider(provider_id)
 
 
 def delete_model_provider(provider_id: str) -> bool:
@@ -579,21 +538,8 @@ def delete_model_provider(provider_id: str) -> bool:
 
 
 def set_model_provider_enabled(provider_id: str, enabled: bool) -> Optional[ModelProviderRow]:
-    """Toggle a provider's ``enabled`` flag and return the fresh row."""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        clear_balance = ", balance_snapshot = NULL" if not enabled else ""
-        values = [enabled, now, str(uuid4())]
-        cursor.execute(
-            f"UPDATE model_providers SET enabled = %s, updated_at = %s, revision = %s{clear_balance} WHERE id = %s",
-            (*values, provider_id),
-        )
-        if cursor.rowcount == 0:
-            return None
-        if not enabled:
-            cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
-    return get_model_provider(provider_id)
+    """Enable exclusively within a slot, or turn just this account off."""
+    return update_model_provider(provider_id, enabled=enabled)
 
 
 # ---------------------------------------------------------------------------
@@ -618,6 +564,7 @@ def set_codex_token_bundle(
     needs_reauth: bool = False,
     auth_mode: str = "chatgpt",
     preserve_refresh_stamp: bool = False,
+    activate: bool = False,
 ) -> Optional[ModelProviderRow]:
     """Atomically persist an OAuth token bundle on a provider row.
 
@@ -641,6 +588,10 @@ def set_codex_token_bundle(
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
+        lock_model_provider_slots(cursor)
+        cursor.execute("SELECT provider_type, auth_mode FROM model_providers WHERE id = %s", (provider_id,))
+        previous = cursor.fetchone()
+        previous_slot = model_provider_slot(previous) if previous else None
         if not preserve_refresh_stamp:
             # Serialize with sync's guarded UPSERT as well as other writers.
             cursor.execute("SELECT codex_last_refresh FROM model_providers WHERE id = %s FOR UPDATE", (provider_id,))
@@ -686,6 +637,12 @@ def set_codex_token_bundle(
         if not preserve_refresh_stamp:
             from app.db.provider_usage_snapshots import delete_shared_observations
             delete_shared_observations(conn, provider_id)
+        slot = model_provider_slot({**(previous or {}), "auth_mode": auth_mode})
+        if previous_slot and previous_slot != slot:
+            clear_model_provider_slot(cursor, previous_slot, provider_id)
+        if activate and slot:
+            select_model_provider_slot(cursor, slot, provider_id)
+        reconcile_model_provider_slots(cursor)
     return get_model_provider(provider_id)
 
 

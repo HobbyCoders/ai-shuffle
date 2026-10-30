@@ -134,7 +134,7 @@ Which providers get a row:
 - **ChatGPT (Codex) sign-in:** the subscription windows, read from the provider's own replies. Nothing extra is requested.
 - **OpenRouter:** the model key's spend and limit. With an [OpenRouter usage key](/docs/api-reference/model-providers#openrouter-usage-key), a second row (`<provider name> account`) shows the account credit balance.
 - **SuperGrok sign-in:** the subscription allowance.
-- **OpenAI API:** real remaining credit with a network-synced, encrypted Platform session key, organization spend with an Admin key, or a clearly labeled manual estimate only without a Platform balance binding. See [API balances](/docs/api-reference/model-providers#provider-reported-api-balances).
+- **OpenAI API:** no credit or spend row is shown. ChatGPT/Codex subscription usage is separate and unchanged.
 - **xAI API:** real prepaid remaining, cycle usage and spending limit with a separate management key (official); the inference key resolves the team.
 - **fal.ai:** the account credit balance, read with the [fal.ai API key](#post-apiv1settingsintegrationsfal-ai) the media tools use. No extra billing key is needed.
 
@@ -612,7 +612,7 @@ The key is checked with a one-token request to Anthropic first. A key Anthropic 
 
 ### DELETE /api/v1/settings/integrations/anthropic
 
-Remove the Anthropic API key.
+Deactivate the Anthropic API key, retaining saved entries. To forget a saved key, use `DELETE /api/v1/settings/claude-auth/accounts/api_key/{id}`.
 
 **Auth:** Owner only
 
@@ -1083,6 +1083,75 @@ Which credential Claude Code agents run on: your Claude subscription (the signed
 ```
 
 `gate.ready` says whether new agent runs can start; `gate.reason` says why not. The CLI account fields are filled only when signed in.
+
+### Saved Claude accounts: /api/v1/settings/claude-auth/accounts
+
+**Auth:** Owner only. `GET` returns the following envelope; the existing
+`GET /settings/claude-auth` also includes the same `accounts` object:
+
+```json
+{
+  "accounts": {
+    "api_key": [{"id": "uuid", "label": "Work", "active": true, "masked_key": "sk-ant-...1234", "last4": "1234"}],
+    "subscription": [],
+    "subscription_support": {"supported": false, "reason": "Safe CLI state isolation is not verified across supported platforms."},
+    "storage_locked": false,
+    "error": null,
+    "login_pending": false,
+    "recovery_required": false
+  }
+}
+```
+
+| Method and suffix (below `/claude-auth/accounts`) | Body | Effect |
+| --- | --- | --- |
+| `GET` | none | List saved accounts; never returns a credential. |
+| `POST /api-keys` | `{"api_key":"…","label":"Work","activate":true}` | Validate and save a key. Label is optional; `activate` defaults to `true`. Re-saving the same key updates its entry. |
+| `PATCH /api_key/{id}` | `{"label":"New label"}` | Rename; at most 120 characters. |
+| `POST /api_key/{id}/activate` | none | Activate this entry and deactivate its sibling. |
+| `DELETE /api_key/{id}` | none | Delete the entry; deleting the active entry leaves no key active. |
+
+Mutations return `{"accounts":{…}}`; add-key also returns `account_id`. These
+operations do not change the Claude Code mode (`subscription`, `api_key`,
+`cloud`, `off`). Cloud stays single; the existing single CLI sign-in is unchanged.
+Existing chats use the current active key on their next turn. An in-flight CLI
+turn retains its original environment; normal credential-fingerprint reconnect
+logic applies the new key at the next turn.
+
+Both key settings sync encrypted under the existing system-settings policy.
+The active key remains a scalar in `anthropic_api_key`, preserving every
+existing injection path and older-worker compatibility. The shared saved list
+is `claude_saved_api_keys`; active flags are derived from the real active scalar,
+not a separately replicated pointer. If the scalar arrives before the list, a
+masked legacy entry is shown until the list arrives, never another key's active
+label. Concurrent edits use normal settings sync conflict handling.
+
+`subscription_support.supported` is deliberately `false` on Linux, Windows and
+macOS for now. The reserved subscription routes (`PATCH /subscription/{id}`,
+`POST /subscription/{id}/activate`, `DELETE /subscription/{id}`,
+`POST /subscription/save-current`, `POST /subscription/add-another`, and
+`POST /subscription/cancel-login`) return `501 unsupported`, without accessing
+CLI sign-in files. The app does not read, copy, store or refresh CLI tokens.
+
+Subscription follow-up must isolate CLI-owned identity and credentials while
+sharing transcripts and customizations reliably across platforms. Claude Code
+2.1.312 honors `CLAUDE_SECURESTORAGE_CONFIG_DIR` for secure storage, but its status
+email/org come from the global `oauthAccount`, so that override alone can
+mislabel accounts. A real installed CLI probe on Linux accepted a per-account
+`CLAUDE_CONFIG_DIR` with linked `projects/` and `settings.json` and resolved the
+shared transcript directory correctly. Cross-platform junction/file-link rewrite
+and resume behavior remain unverified; no multi-login claim is made here.
+
+Service errors use `detail: {"code":"…","message":"…"}`: `400` invalid key or
+label, `404 not_found`, `501 unsupported`, and `503 storage_locked`,
+`storage_unreadable` or `storage_unavailable`. Key validation keeps the legacy
+error strings: `400` authentication/API error, `429` rate limit; a transient
+network error still saves the key. Invalid request shapes return `422`.
+
+The legacy `POST /settings/integrations/anthropic` saves and activates a key in
+the same list (mode changes only with `use_for_claude_code:true`). Its `DELETE`
+deactivates the key without deleting saved entries; use account `DELETE` to
+forget a saved key permanently.
 
 ### PUT /api/v1/settings/claude-auth
 

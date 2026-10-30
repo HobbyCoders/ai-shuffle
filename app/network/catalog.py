@@ -538,7 +538,10 @@ def after_event_mirrored(cursor, record: Dict[str, Any]) -> None:
             store.set_catalog_cursor(cursor, session_id, seq)
     try:
         from app.db.session_events import NOTIFY_CHANNEL
-        cursor.execute("SELECT pg_notify(%s, %s)", (NOTIFY_CHANNEL, json.dumps({"session_id": session_id, "max_seq": seq})))
+        # Mirroring can replace old seqs, not just append above a reader's cursor.
+        # The shared SSE reader must validate its epoch even when max_seq falls.
+        cursor.execute("SELECT pg_notify(%s, %s)", (NOTIFY_CHANNEL, json.dumps({
+            "session_id": session_id, "max_seq": seq, "recheck_log": True})))
     except Exception:  # noqa: BLE001 — absent on the SQLite shim; the gateway also polls
         pass
 

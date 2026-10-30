@@ -1296,6 +1296,7 @@ def build_options_from_profile(
     # native Claude id would otherwise silently drop back to the native leg.
     _override_model = _selected_model
     _decoded_model = decode_provider_model(_override_model)
+    provider_pin_id = _decoded_model[0] if _decoded_model else provider_id
     _bound_provider_row = None
     if _decoded_model is not None:
         _decoded_pid, _decoded_mid = _decoded_model
@@ -1315,11 +1316,11 @@ def build_options_from_profile(
                 or f"Model '{_decoded_mid}' is not available on provider "
                    f"'{_decoded_pid}'."
             )
-        provider_id = _decoded_pid
-        model_to_use = _decoded_mid
         _bound_provider_row = _validation.provider
+        provider_id = (_bound_provider_row or {}).get("id") or _decoded_pid
+        model_to_use = _decoded_mid
     elif _override_model and provider_id and not overrides.get("provider"):
-        _bound_provider_row = database.get_model_provider(
+        _bound_provider_row = database.resolve_model_provider(
             provider_id, include_token=False
         )
         if is_native_claude_model(_override_model):
@@ -1354,6 +1355,8 @@ def build_options_from_profile(
         )
         if _fallback_default is not None:
             provider_id, model_to_use = _fallback_default
+            if provider_pin_id is None:
+                provider_pin_id = provider_id
             logger.info(
                 "[Provider] No model named; using default model %r (provider %r).",
                 model_to_use, provider_id,
@@ -1391,9 +1394,12 @@ def build_options_from_profile(
         # composite / binding-clear check) rather than hitting the DB twice.
         main_provider_row = _bound_provider_row
         if main_provider_row is None:
-            main_provider_row = database.get_model_provider(
+            main_provider_row = database.resolve_model_provider(
                 provider_id, include_token=False
             )
+        # Persisted pins keep their original account id; the run and its usage
+        # carry the active account actually selected for this turn.
+        provider_id = (main_provider_row or {}).get("id") or provider_id
         is_non_claude_provider_session = (
             (main_provider_row or {}).get("provider_type") != "anthropic"
         )
@@ -1999,6 +2005,9 @@ def build_options_from_profile(
     # instead of failing with a missing-credential 401. Always stamped (None for
     # a native Anthropic session) so the attribute's presence is not a signal.
     options.aih_provider_id = provider_id
+    # Account switching changes credentials, not which saved Task model map
+    # this chat uses. Keep its original binding separate from the runtime row.
+    options.aih_provider_pin_id = provider_pin_id if provider_id else None
     options.aih_generation_context = generation_context
     options.aih_automatic_workflows = True
     # A user-selected input window is fixed when the provider loop connects.
@@ -2153,7 +2162,7 @@ def build_options_from_profile(
                 "name": target.name,
                 "description": target.description,
             }
-            for target in available_subagents(profile.get("id"), provider_id)
+            for target in available_subagents(profile.get("id"), options.aih_provider_pin_id)
         ] or None
     except Exception:  # noqa: BLE001 — context declaration is best-effort
         logger.warning("could not resolve declared agents for context", exc_info=True)
