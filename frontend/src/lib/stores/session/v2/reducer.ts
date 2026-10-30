@@ -221,12 +221,37 @@ const COMPACTION_CLEARING_EVENTS = new Set([
 	'transcript.rewound',
 ]);
 
+/** Shared by replay and derived-page hydration; never dismiss explicit cards. */
+export function dismissCapturedProse(
+	message: ChatMessage,
+	origin: number | undefined,
+	through: number,
+	at = through
+): ChatMessage {
+	return message.role === 'assistant' && (!message.type || message.type === 'text') &&
+		(origin ?? message.seq ?? Infinity) <= through
+		? { ...message, proseQuestionDismissedAt: message.proseQuestionDismissedAt ?? at }
+		: message;
+}
+
+/** Rewind a captured row, including dismissals that happened after the cut. */
+export function rewindCapturedMessage(
+	message: ChatMessage,
+	origin: number | undefined,
+	fromSeq: number
+): ChatMessage | null {
+	if (origin !== undefined && !(origin < fromSeq)) return null;
+	if (message.proseQuestionDismissedAt == null || message.proseQuestionDismissedAt < fromSeq) {
+		return message;
+	}
+	const { proseQuestionDismissedAt: _dismissed, ...rest } = message;
+	return rest;
+}
+
 /** Dismiss only captured prose; later messages and explicit cards stay intact. */
 function dismissProseThrough(state: V2SessionState, through: number, at = through): V2SessionState {
 	return { ...state, messages: state.messages.map((m) =>
-		m.role === 'assistant' && (!m.type || m.type === 'text') &&
-		(state.messageOriginSeq.get(m.id) ?? m.seq ?? Infinity) <= through
-			? { ...m, proseQuestionDismissedAt: m.proseQuestionDismissedAt ?? at } : m) };
+		dismissCapturedProse(m, state.messageOriginSeq.get(m.id), through, at)) };
 }
 
 export function initialState(): V2SessionState {
@@ -2518,13 +2543,9 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// messages (absent from messageOriginSeq) are exempt. Reducing the
 			// full log from seq 0 reproduces the same truncation → determinism.
 			const keptMessages = own(
-				state.messages.filter((m) => {
-					const origin = state.messageOriginSeq.get(m.id);
-					return origin === undefined || origin < fromSeq;
-				}).map((m) => {
-					if (m.proseQuestionDismissedAt == null || m.proseQuestionDismissedAt < fromSeq) return m;
-					const { proseQuestionDismissedAt: _dismissed, ...rest } = m;
-					return rest;
+				state.messages.flatMap((m) => {
+					const kept = rewindCapturedMessage(m, state.messageOriginSeq.get(m.id), fromSeq);
+					return kept ? [kept] : [];
 				})
 			);
 			const messageOriginSeq = own(new Map<string, number>());
