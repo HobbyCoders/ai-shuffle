@@ -1,3 +1,9 @@
+<script lang="ts" module>
+	/** Each chat's composer caret/selection, kept with its draft across chat
+	 *  switches and composer remounts (#864). Editor positions, this page only. */
+	const composerSelections = new Map<string | null, { from: number; to: number }>();
+</script>
+
 <script lang="ts">
 	import type { TerminalToggle } from './composer-shell';
 	/**
@@ -310,7 +316,10 @@
 		const currentSessionId = get(activeSession).sessionId;
 		if (currentSessionId !== initialSessionId) return; // session switched
 		saveDraftImmediately();
+		const selection = editorRef?.getEditor()?.state.selection;
+		if (selection) composerSelections.set(currentSessionId, { from: selection.from, to: selection.to });
 	});
+	onMount(() => restoreComposerSelection(initialSessionId, initialComposerDraft));
 
 	let isUploading = $state(false);
 	let isRecording = $state(false);
@@ -365,6 +374,16 @@
 		if (text) { editorRef.setPlainText(text); editorRef.focus(); }
 	}
 
+	/** Put back the caret or selection this chat's draft had when it was left
+	 *  (#864); a selection past the end of a changed draft is clamped. */
+	function restoreComposerSelection(sessionId: string | null, draft: string) {
+		const saved = composerSelections.get(sessionId);
+		const editor = editorRef?.getEditor();
+		if (!saved || !editor || !hasComposerDraft(draft)) return;
+		const end = editor.state.doc.content.size;
+		editor.commands.setTextSelection({ from: Math.min(saved.from, end), to: Math.min(saved.to, end) });
+	}
+
 	// Sync editor content when session changes (ChatInput is NOT keyed by sessionId).
 	// Because this single component is reused across sessions, it is solely
 	// responsible for moving draft text between the editor and the correct
@@ -385,6 +404,9 @@
 				// Keep the persisted mirror aligned with the ephemeral cache so the
 				// leaving session's draft also survives a reload.
 				writeDraft(prevSessionId, leavingDraft);
+				// The caret and selection go with the draft (#864).
+				const selection = editorRef.getEditor()?.state.selection;
+				if (selection) composerSelections.set(prevSessionId, { from: selection.from, to: selection.to });
 			}
 			prevSessionId = newSessionId;
 			recall.reset();
@@ -395,6 +417,7 @@
 			inputValue = newDraft;
 			plainTextValue = '';
 			editorRef?.setContent(newDraft);
+			restoreComposerSelection(newSessionId, newDraft);
 		}
 		attachComposerDictation(editorRef?.getEditor(), newSessionId);
 	});
@@ -890,8 +913,24 @@
 		notify.banner(message, { severity, persist: false, duration_ms: 6000 });
 	}
 
-	// Handle form submission
+	// One send per user action (#858). Every send path (Send, Enter, a
+	// submitted slash command, Send anyway, Compact first) comes through here,
+	// and the checks below await before the composer is cleared; a second
+	// click or tap in that window would read the same text and send it again.
+	// Held until the composer is cleared, so a new message may go at once.
+	let submitPending = false;
+
 	async function handleSubmit(compactBeforeSend = false) {
+		if (submitPending) return;
+		submitPending = true;
+		try {
+			await submitComposer(compactBeforeSend, () => { submitPending = false; });
+		} finally {
+			submitPending = false;
+		}
+	}
+
+	async function submitComposer(compactBeforeSend: boolean, composerCleared: () => void) {
 		if (!ownsComposer() || heldForCatalog || (compacting && !compactBeforeSend)) return;
 		if (projectLane !== 'chat' && !catalogHoldWaived && activeSession.composerAwaitingProjectCatalog) {
 			if (!(await holdForProjectCatalog())) return;
@@ -934,7 +973,10 @@
 		}
 
 		// Send the message, optionally queued behind a server-owned compaction.
-		await sendMessage(messageToSend, compactBeforeSend);
+		// sendMessage clears the composer before its first await.
+		const sending = sendMessage(messageToSend, compactBeforeSend);
+		composerCleared();
+		await sending;
 	}
 
 	/**
