@@ -1737,12 +1737,15 @@ def build_options_from_profile(
     # Add app-config MCP server for admin sessions whose picker permits it
     if app_config_enabled:
         try:
+            from app.core.generation_resolver import turn_context
             from app.mcp.app_config_sdk import create_app_config_server
             app_config_srv = create_app_config_server(
                 is_admin=True,
                 project_id=project.get("id") if project else None,
                 project_dir=working_dir,
-                generation_preferences_writable=not generation_context.unattended,
+                generation_preferences_writable=lambda: not (
+                    turn_context(session_id) or generation_context
+                ).unattended,
             )
             if app_config_srv:
                 mcp_servers_dict["app-config"] = app_config_srv
