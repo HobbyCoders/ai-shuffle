@@ -25,6 +25,9 @@
 //                      "Loading…" during the sync, never "New Chat" (#812)
 //   long-from-chat     from another chat: no transcript remount (#813)
 //   cleared-from-new   an empty mirror: checked too, then "Conversation cleared"
+//   unreachable-from-new  the sync check keeps failing (#814): after a few
+//                      failures the chat shows what it has with a "Can't
+//                      reach" notice, and Retry clears it once the owner answers
 import { runJourney } from './runner.mjs';
 import { SEEDED, expect, gotoApp, openFromSidebar, seededChatId, waitChat, waitChatOpen } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
@@ -41,11 +44,13 @@ const SYNCING_POLLS = 2;
  * makes the requests page.route would see (see withoutSavedAgentPick). Call
  * before the page loads; `syncPolls(page)` reads how often it was polled.
  */
-async function simulateMirroredChat(page, status, key, { untitled = false } = {}) {
+async function simulateMirroredChat(page, status, key, { untitled = false, failing = false } = {}) {
 	await page.addInitScript(
-		({ id, peer, syncingPolls, untitled }) => {
+		({ id, peer, syncingPolls, untitled, failing }) => {
 			const original = window.fetch.bind(window);
 			window.__mirrorSyncPolls = 0;
+			// A failing check answers 503 until the journey sets this.
+			window.__mirrorSyncHealthy = !failing;
 			window.__mirrorReaders = [];
 			const pathOf = (input) => {
 				try {
@@ -71,6 +76,7 @@ async function simulateMirroredChat(page, status, key, { untitled = false } = {}
 				}
 				if (path === `/api/v1/sessions/${id}/sync-status`) {
 					window.__mirrorSyncPolls += 1;
+					if (!window.__mirrorSyncHealthy) return new Response('unavailable', { status: 503 });
 					const target = { seq: 1, epoch: 'simulated', tail_id: 'simulated' };
 					return json(
 						window.__mirrorSyncPolls <= syncingPolls
@@ -87,7 +93,7 @@ async function simulateMirroredChat(page, status, key, { untitled = false } = {}
 				return new Response(JSON.stringify(markRemote(body)), { status: response.status, headers: response.headers });
 			};
 		},
-		{ id: seededChatId(status, key), peer: PEER, syncingPolls: SYNCING_POLLS, untitled }
+		{ id: seededChatId(status, key), peer: PEER, syncingPolls: failing ? 0 : SYNCING_POLLS, untitled, failing }
 	);
 }
 
@@ -225,6 +231,30 @@ await runJourney({
 			},
 			verify({ recording }) {
 				expectComposerPositions(recording, ['centre']);
+				expectSyncedInTheHero(recording);
+			}
+		},
+		{
+			// #814: a sync check that keeps failing used to wait in the hero
+			// forever. Now the chat opens with what it has and says why.
+			name: 'unreachable-from-new',
+			setup: fromNew('long', { failing: true }),
+			allow: [{ kind: 'failed_requests', status: 503, url: /\/sync-status(\?|$)/, reason: 'this case scripts the failing sync check it tests' }],
+			async act({ page, mark }) {
+				await mark(OPEN);
+				await openFromSidebar(page, SEEDED.long);
+				await page.locator('.cleared-hero').getByText(`Checking sync with ${PEER}…`).waitFor({ timeout: 30_000 });
+				await waitChatOpen(page, { messagesAtLeast: 50 });
+				const notice = page.locator('.mirror-pill.offline', { hasText: `Can't reach ${PEER} right now` });
+				await notice.waitFor({ timeout: 5_000 });
+				const polls = await syncPolls(page);
+				expect(polls >= 3 && polls <= 4, `the chat opened after a bounded number of failed checks (${polls} polls)`);
+				await page.evaluate(() => { window.__mirrorSyncHealthy = true; });
+				await notice.getByRole('button', { name: 'Retry' }).click();
+				await notice.waitFor({ state: 'detached', timeout: 5_000 });
+			},
+			verify({ recording }) {
+				expectComposerPositions(recording, ['centre', 'bottom']);
 				expectSyncedInTheHero(recording);
 			}
 		}

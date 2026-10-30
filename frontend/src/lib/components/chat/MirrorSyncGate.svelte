@@ -49,7 +49,11 @@
 		     drain never moves the conversation. The live region stays mounted so
 		     screen readers announce its text changes. -->
 		<div class="mirror-status-slot" role="status" aria-live="polite">
-			{#if syncState === 'offline'}
+			{#if sync.unreachable}
+				<!-- The sync check kept failing (#814): say so and offer a retry;
+				     the check keeps retrying in the background with backoff. -->
+				<span class="mirror-pill offline"><CloudOff size={14} aria-hidden="true" /><span>Can't reach {deviceLabel} right now. Showing the last saved conversation.</span><button type="button" class="mirror-retry" onclick={() => sync.retry()} disabled={sync.retrying}>{sync.retrying ? 'Retrying…' : 'Retry'}</button></span>
+			{:else if syncState === 'offline'}
 				<span class="mirror-pill offline"><CloudOff size={14} aria-hidden="true" />Owning worker offline. Showing the last saved conversation.</span>
 			{:else if behind && syncNoticeVisible}
 				<span class="mirror-pill"><LoaderCircle size={14} aria-hidden="true" class="mirror-spin" />Syncing updates from {deviceLabel}…{#if pending > 0}{' '}{pending} updates remaining{/if}</span>
@@ -102,6 +106,25 @@
 	}
 	.mirror-pill :global(svg) { flex-shrink: 0; }
 	.mirror-pill.offline { white-space: normal; border-radius: var(--radius); }
+	.mirror-retry {
+		flex-shrink: 0;
+		pointer-events: auto;
+		min-height: 1.75rem;
+		padding: 0.125rem 0.625rem;
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		background: transparent;
+		color: var(--foreground);
+		font: inherit;
+		font-weight: 500;
+		cursor: pointer;
+		transition: background-color 120ms ease-out;
+	}
+	.mirror-retry:hover:not(:disabled) { background: var(--accent); }
+	.mirror-retry:active:not(:disabled) { transform: translateY(1px); }
+	.mirror-retry:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.mirror-retry:disabled { opacity: 0.6; cursor: default; }
+	@media (pointer: coarse) { .mirror-retry { min-height: 2.75rem; padding-inline: 0.875rem; } }
 	.mirror-pill :global(.mirror-spin) { animation: mirror-spin 1s linear infinite; }
 	@keyframes mirror-spin { to { transform: rotate(360deg); } }
 	@keyframes mirror-pill-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }

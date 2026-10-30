@@ -11,7 +11,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { flushSync, createRawSnippet } from 'svelte';
 import { cleanup, render, screen } from '@testing-library/svelte';
-import { createMirrorSync, mirrorSyncHeadline, type MirrorSync } from './mirror-sync.svelte';
+import { createMirrorSync, mirrorSyncHeadline, mirrorSyncRetryDelay, MIRROR_SYNC_FAILURE_LIMIT, MIRROR_SYNC_MAX_BACKOFF_MS, MIRROR_SYNC_POLL_MS, MIRROR_SYNC_REQUEST_TIMEOUT_MS, type MirrorSync } from './mirror-sync.svelte';
 import MirrorSyncGate from './MirrorSyncGate.svelte';
 
 const reply = (body: Record<string, unknown>) => new Response(JSON.stringify(body));
@@ -132,6 +132,82 @@ describe('createMirrorSync (the check ChatView runs whatever its layout)', () =>
 		// One poll per interval: the controller's, not one per mounted gate.
 		expect(fetch).toHaveBeenCalledTimes(2);
 		destroy();
+	});
+});
+
+describe('a sync check that keeps failing (#814)', () => {
+	it('stops waiting after a few failures, says it cannot reach the owner, and keeps retrying with backoff', async () => {
+		vi.useFakeTimers();
+		let healthy = false;
+		const fetch = vi.fn().mockImplementation(() => healthy
+			? Promise.resolve(reply({ state: 'current' }))
+			: Promise.reject(new TypeError('Failed to fetch')));
+		vi.stubGlobal('fetch', fetch);
+		const { sync, onCaughtUp, destroy } = startSync({ sessionId: 'remote-3', remote: true });
+		render(MirrorSyncGate, { sync, deviceName: 'Unraid', children });
+		await vi.advanceTimersByTimeAsync(0);
+		await vi.advanceTimersByTimeAsync(MIRROR_SYNC_POLL_MS);
+		expect(fetch).toHaveBeenCalledTimes(MIRROR_SYNC_FAILURE_LIMIT - 1);
+		expect(sync.waiting).toBe(true);
+		await vi.advanceTimersByTimeAsync(MIRROR_SYNC_POLL_MS);
+		expect(fetch).toHaveBeenCalledTimes(MIRROR_SYNC_FAILURE_LIMIT);
+		// Revealed with what it has, and a calm notice with a way out.
+		expect(sync.waiting).toBe(false);
+		expect(sync.unreachable).toBe(true);
+		expect(screen.getByText('transcript').closest('[aria-hidden="true"]')).toBeNull();
+		expect(screen.getByText(/Can't reach Unraid right now/)).toBeTruthy();
+		// Background retries back off: 4s, then 8s.
+		await vi.advanceTimersByTimeAsync(3999);
+		expect(fetch).toHaveBeenCalledTimes(MIRROR_SYNC_FAILURE_LIMIT);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(fetch).toHaveBeenCalledTimes(MIRROR_SYNC_FAILURE_LIMIT + 1);
+		// Retry checks now; once the owner answers the notice goes away.
+		healthy = true;
+		screen.getByRole('button', { name: 'Retry' }).click();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(fetch).toHaveBeenCalledTimes(MIRROR_SYNC_FAILURE_LIMIT + 2);
+		expect(sync.unreachable).toBe(false);
+		expect(sync.syncState).toBe('current');
+		expect(screen.queryByText(/Can't reach/)).toBeNull();
+		expect(onCaughtUp).toHaveBeenCalledOnce();
+		destroy();
+	});
+
+	it('counts a check that never answers as a failure (no endless wait)', async () => {
+		vi.useFakeTimers();
+		const fetch = vi.fn().mockImplementation((_url: string, init?: RequestInit) => new Promise((_resolve, reject) => {
+			init?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+		}));
+		vi.stubGlobal('fetch', fetch);
+		const { sync, destroy } = startSync({ sessionId: 'remote-hang', remote: true });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(sync.waiting).toBe(true);
+		await vi.advanceTimersByTimeAsync(
+			MIRROR_SYNC_FAILURE_LIMIT * MIRROR_SYNC_REQUEST_TIMEOUT_MS + (MIRROR_SYNC_FAILURE_LIMIT - 1) * MIRROR_SYNC_POLL_MS);
+		expect(fetch).toHaveBeenCalledTimes(MIRROR_SYNC_FAILURE_LIMIT);
+		expect(sync.unreachable).toBe(true);
+		expect(sync.waiting).toBe(false);
+		destroy();
+	});
+
+	it('counts non-OK and invalid answers as failures too', async () => {
+		vi.useFakeTimers();
+		const fetch = vi.fn()
+			.mockResolvedValueOnce(new Response('nope', { status: 503 }))
+			.mockImplementation(() => Promise.resolve(reply({ state: 'bogus' })));
+		vi.stubGlobal('fetch', fetch);
+		const { sync, destroy } = startSync({ sessionId: 'remote-4', remote: true });
+		await vi.advanceTimersByTimeAsync(MIRROR_SYNC_POLL_MS * (MIRROR_SYNC_FAILURE_LIMIT - 1));
+		expect(sync.unreachable).toBe(true);
+		expect(sync.waiting).toBe(false);
+		destroy();
+	});
+
+	it('backs off up to a cap', () => {
+		expect(mirrorSyncRetryDelay(0)).toBe(MIRROR_SYNC_POLL_MS);
+		expect(mirrorSyncRetryDelay(MIRROR_SYNC_FAILURE_LIMIT - 1)).toBe(MIRROR_SYNC_POLL_MS);
+		expect(mirrorSyncRetryDelay(MIRROR_SYNC_FAILURE_LIMIT)).toBe(MIRROR_SYNC_POLL_MS * 2);
+		expect(mirrorSyncRetryDelay(50)).toBe(MIRROR_SYNC_MAX_BACKOFF_MS);
 	});
 });
 
