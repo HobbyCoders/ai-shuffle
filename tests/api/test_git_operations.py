@@ -604,7 +604,7 @@ class TestExecuteFinish:
         (tmp_path / ".git").write_text("gitdir: /repo/.git/worktrees/feature\n")
         op = _finish_op()
         with patch.object(gitops, "git_service", mock_git_service), patch(
-            "app.db.checkouts.get_checkout_by_path", return_value=None,
+            "app.db.checkouts.get_checkouts_by_path", return_value=[],
         ), patch(
             "app.db.sessions.list_sessions_for_cleanup",
             side_effect=RuntimeError("lookup failed") if failure == "query" else None,
@@ -1118,7 +1118,7 @@ async def test_release_checkout_closes_idle_siblings_and_runtime_cwds(monkeypatc
     from app.db import checkouts, sessions
     target = tmp_path / "checkout"
     target.mkdir()
-    monkeypatch.setattr(checkouts, "get_checkout_by_path", lambda p: {"project_id": "v2"})
+    monkeypatch.setattr(checkouts, "get_checkouts_by_path", lambda p: [{"project_id": "v2"}])
     monkeypatch.setattr(sessions, "list_sessions_for_cleanup", lambda *a: [
         {"id": "idle"}, {"id": "unrelated"},
     ])

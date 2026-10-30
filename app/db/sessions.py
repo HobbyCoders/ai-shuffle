@@ -1615,18 +1615,24 @@ def list_sessions_listing_pr(pr_number: int, pr_url: Optional[str] = None) -> li
     ]
 
 
-def list_sessions_for_cleanup(project_id: str, project_v2_id: Optional[str] = None,
+def list_sessions_for_cleanup(project_id: str,
+                              project_v2_id: Optional[str | Iterable[str]] = None,
                               session_ids: Optional[Iterable[str]] = None) -> list:
     """All potential checkout users, including hidden workers and older sessions.
 
     Unlike the sidebar list, this safety query has no page or install filter.
     V2 sessions may have no legacy project_id, or a different legacy alias.
+    ``project_v2_id`` may list several identities of one folder (a project
+    linked late keeps its placeholder, #802).
     ``session_ids`` narrows it to those sessions (an activity check that
     already knows which sessions can be active); empty reads nothing.
     """
     _ph = ph()
-    sql = f"SELECT * FROM sessions WHERE (project_id = {_ph} OR project_v2_id = {_ph})"
-    params: list = [project_id, project_v2_id or project_id]
+    v2_ids = ([project_v2_id] if isinstance(project_v2_id, str)
+              else sorted(set(project_v2_id or ()))) or [project_id]
+    sql = (f"SELECT * FROM sessions WHERE (project_id = {_ph} "
+           f"OR project_v2_id IN ({', '.join([_ph] * len(v2_ids))}))")
+    params: list = [project_id, *v2_ids]
     if session_ids is not None:
         ids = sorted(set(session_ids))
         if not ids:

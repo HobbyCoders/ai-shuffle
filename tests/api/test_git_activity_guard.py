@@ -16,7 +16,7 @@ def target(monkeypatch, tmp_path):
     other = tmp_path / 'other'
     other.mkdir()
     sessions = [{'id': 'busy', 'project_id': 'legacy', 'project_v2_id': 'pv2', 'branch': 'feature'}]
-    monkeypatch.setattr(activity, 'get_checkout_by_path', lambda _: {'project_id': 'pv2'})
+    monkeypatch.setattr(activity, 'get_checkouts_by_path', lambda _: [{'project_id': 'pv2'}])
     monkeypatch.setattr(activity, 'resolve_project_v2', lambda _: {'id': 'pv2'})
     listing = Mock(side_effect=lambda *args: sessions)
     monkeypatch.setattr(activity, 'list_sessions_for_cleanup', listing)
@@ -32,6 +32,15 @@ def test_same_branch_different_directory_is_busy(target):
     assert activity.busy_git_target_sessions('legacy', here) == ['busy']
     # Only sessions that can be active are read, never the whole project.
     listing.assert_called_with('legacy', 'pv2', {'busy'})
+
+def test_late_linked_folder_reads_sessions_of_both_identities(target, monkeypatch):
+    here, _, _, listing = target
+    # #802: a late-linked folder has the remote identity's row and the
+    # placeholder's; a busy chat on the placeholder must still count.
+    monkeypatch.setattr(activity, 'get_checkouts_by_path',
+                        lambda _: [{'project_id': 'pv2'}, {'project_id': 'local:legacy'}])
+    assert activity.busy_git_target_sessions('legacy', here) == ['busy']
+    listing.assert_called_with('legacy', ['pv2', 'local:legacy'], {'busy'})
 
 def test_same_directory_different_branch_metadata_is_busy(target, monkeypatch):
     here, _, sessions, _ = target
