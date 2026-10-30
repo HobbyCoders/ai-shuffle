@@ -42,6 +42,32 @@ def _windows_command(command: tuple[str, ...], runtime: Literal["python", "node"
     return (*command[:-1], *flags, str(gate), command[-1])
 
 
+async def _admit_windows(process: asyncio.subprocess.Process) -> None:
+    jobs: list[int] = []
+    setattr(process, "_projection_jobs", jobs)
+    try:
+        # A venv PE redirector may already have started the actual interpreter.
+        # Both are inert until G; this is a finite identity handshake, not an
+        # open-ended process-tree snapshot. A separate Job per PID is required:
+        # CPython's redirector can already own a different nested/silent-breakaway
+        # Job, whose hierarchy cannot be merged into the redirector's new Job.
+        identity = await asyncio.wait_for(process.stdout.readexactly(4), 5.0)
+        runtime_pid = int.from_bytes(identity, "big")
+        if runtime_pid <= 0:
+            raise OSError("projection_invalid_runtime_identity")
+        setattr(process, "_projection_runtime_pid", runtime_pid)
+        for pid in dict.fromkeys((process.pid, runtime_pid)):
+            job = _job_object().assign_kill_on_close_job(pid)
+            if job is None:
+                raise OSError("projection_parent_ownership_failed")
+            jobs.append(job)  # Parent-only, non-inheritable; retain before G.
+        process.stdin.write(b"G")
+        await process.stdin.drain()
+    except BaseException:
+        await stop(process)  # EOF + kill/reap, closing every attached Job once.
+        raise
+
+
 async def launch(*command: str, limit: int, runtime: Literal["python", "node"]) -> asyncio.subprocess.Process:
     environment = {key: value for key, value in os.environ.items() if key in SAFE_ENV_KEYS}
     options = {}
@@ -58,28 +84,7 @@ async def launch(*command: str, limit: int, runtime: Literal["python", "node"]) 
         stderr=asyncio.subprocess.DEVNULL, env=environment, close_fds=True,
         limit=limit, **options)
     if os.name == "nt":
-        try:
-            # The Windows venv executable can be a redirector that already
-            # started a real interpreter. Both are inert until G; enroll both
-            # known PIDs, not a racy snapshot of an arbitrarily growing tree.
-            identity = await asyncio.wait_for(process.stdout.readexactly(4), 5.0)
-            runtime_pid = int.from_bytes(identity, "big")
-            if runtime_pid <= 0:
-                raise OSError("projection_invalid_runtime_identity")
-            extra = (runtime_pid,) if runtime_pid != process.pid else ()
-            job = _job_object().assign_kill_on_close_job(process.pid, *extra)
-            if job is None:
-                raise OSError("projection_parent_ownership_failed")
-            # The handle is parent-only/non-inheritable. Abrupt parent death
-            # closes it in the kernel even if the child holds the Python GIL.
-            setattr(process, "_projection_job", job)
-            # Only now may site hooks/entrypoint create descendants. Raw gates
-            # consume exactly this byte, leaving framed protocol bytes intact.
-            process.stdin.write(b"G")
-            await process.stdin.drain()
-        except BaseException:
-            await stop(process)  # EOF + kill/reap, closing an attached job once.
-            raise
+        await _admit_windows(process)
     elif os.name == "posix":
         try:
             os.setpriority(os.PRIO_PROCESS, process.pid, 10)
@@ -108,7 +113,7 @@ async def stop(process: asyncio.subprocess.Process | None) -> None:
                 pass
             await process.wait()
     finally:
-        job = getattr(process, "_projection_job", None)
-        if job is not None:
-            setattr(process, "_projection_job", None)
+        jobs = getattr(process, "_projection_jobs", ())
+        setattr(process, "_projection_jobs", [])
+        for job in jobs:
             _job_object().close_job(job)

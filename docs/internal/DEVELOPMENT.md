@@ -349,9 +349,10 @@ holds the GIL: a Linux exec shim arms `PR_SET_PDEATHSIG` and checks the expected
 parent PID after arming; Windows uses Fluid's parent-owned kill-on-close Job
 Object. Site-free Python (`-I -S`) and builtin-only Node gates block before
 startup hooks/entrypoints. The gate first reports its actual PID (a Windows
-venv may redirect through another process); the parent admits both transport
-and runtime PIDs to the same Job before sending one go byte. Immediate
-startup descendants then inherit the job. Failed attachment closes stdin and
+venv may redirect through another process); the parent owns each distinct PID
+with a separate Job before sending one go byte. This accommodates CPython's
+existing nested/silent-breakaway Job; startup descendants inherit the runtime's
+new innermost Job, which does not allow breakaway. Failed attachment closes stdin and
 kills/reaps the gated child without running startup code. The bounded stdin reader still
 handles ordinary EOF. Neither mechanism adds a supervisor process or tracker.
 Preparation admits one job, reuses one child, refreshes two normalized replay switches per

@@ -300,54 +300,65 @@ async def test_windows_startup_gates_do_not_execute_or_consume_protocol(tmp_path
             await process.wait()
 
 
-@pytest.mark.parametrize("failure", ["none", "open", "assign", "exception"])
-def test_job_admits_known_redirector_and_runtime_or_closes_all(monkeypatch, failure):
-    import ctypes
-    from ctypes import wintypes
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode,runtime_pid", [
+    ("success", 202), ("same", 101), ("first-failure", 202), ("second-failure", 202),
+    ("exception", 202), ("drain", 202), ("cancelled", 202), ("invalid", 0),
+])
+async def test_windows_gate_admission_owns_every_pid_and_closes_once(monkeypatch, mode, runtime_pid):
+    from types import SimpleNamespace
 
-    from app.core.transcript_views.child_process import _job_object
+    from app.core.transcript_views import child_process
 
-    module = _job_object()
-    calls = []
+    calls, handles = [], []
 
-    class Kernel:
-        def CreateJobObjectW(self, security, name):
-            return 900
+    class Input:
+        def write(self, data):
+            assert data == b"G"
+            assert [pid for op, pid in calls if op == "assign"] == list(dict.fromkeys((101, runtime_pid)))
+            calls.append(("write", data))
 
-        def SetInformationJobObject(self, *args):
-            return True
+        async def drain(self):
+            if mode == "drain":
+                raise OSError("synthetic broken gate pipe")
+            if mode == "cancelled":
+                raise asyncio.CancelledError
 
-        def OpenProcess(self, access, inherit, pid):
-            assert not inherit
-            calls.append(("open", pid))
-            if pid == 202 and failure == "exception":
-                raise OSError("synthetic admission failure")
-            return 0 if pid == 202 and failure == "open" else pid + 1000
+        def close(self):
+            calls.append(("close-input", None))
 
-        def AssignProcessToJobObject(self, job, process):
-            assert job == 900
-            calls.append(("assign", process))
-            return not (process == 1202 and failure == "assign")
+    class Output:
+        async def readexactly(self, amount):
+            assert amount == 4
+            return runtime_pid.to_bytes(4, "big")
 
-        def CloseHandle(self, handle):
-            calls.append(("close", handle))
-            return True
+    def assign(pid):
+        calls.append(("assign", pid))
+        if (mode == "first-failure" and pid == 101) or (mode == "second-failure" and pid == 202):
+            return None
+        if mode == "exception" and pid == 202:
+            raise OSError("synthetic second assignment error")
+        handle = pid + 1000
+        handles.append(handle)
+        return handle
 
-    with monkeypatch.context() as scoped:
-        scoped.setattr(module.sys, "platform", "win32")
-        scoped.setattr(module, "_kernel32", lambda: (ctypes, wintypes, Kernel()))
-        result = module.assign_kill_on_close_job(101, 202, 101)
-        assert result == (900 if failure == "none" else None)
-        if result is not None:
-            module.close_job(result)
-        before = list(calls)
-        assert module.assign_kill_on_close_job(101, 0) is None
-        assert calls == before, "invalid extra PID must not create a partial job"
-    assert [pid for op, pid in calls if op == "open"] == [101, 202]
-    assert calls.count(("close", 900)) == 1
-    assert calls.count(("close", 1101)) == 1
-    if failure in ("none", "assign"):
-        assert calls.count(("close", 1202)) == 1
+    async def wait():
+        return 0
+
+    process = SimpleNamespace(pid=101, stdin=Input(), stdout=Output(), returncode=0, wait=wait)
+    monkeypatch.setattr(child_process, "_job_object", lambda: SimpleNamespace(
+        assign_kill_on_close_job=assign, close_job=lambda handle: calls.append(("close-job", handle))))
+    if mode in ("success", "same"):
+        await child_process._admit_windows(process)
+        await child_process.stop(process)
+    else:
+        error = asyncio.CancelledError if mode == "cancelled" else OSError
+        with pytest.raises(error):
+            await child_process._admit_windows(process)
+    assert [handle for op, handle in calls if op == "close-job"] == handles
+    assert any(op == "write" for op, value in calls) == (mode in ("success", "same", "drain", "cancelled"))
+    await child_process.stop(process)
+    assert [handle for op, handle in calls if op == "close-job"] == handles
 
 
 @pytest.fixture(scope="module")
@@ -428,13 +439,20 @@ async def main():
     assert os.read(0, 1) == b"B"
     jobs = child_process._job_object()
     original = jobs.assign_kill_on_close_job
-    def assign(pid, *additional_pids):
-        seen["pid"] = pid
-        seen["runtime_pid"] = additional_pids[0] if additional_pids else pid
+    original_admit = child_process._admit_windows
+    current = None
+    async def admit(process):
+        nonlocal current
+        current = process
+        await original_admit(process)
+    child_process._admit_windows = admit
+    def assign(pid):
+        seen["pid"] = current.pid
+        seen["runtime_pid"] = current._projection_runtime_pid
         if runtime == "python":
             # EnvBuilder on Windows uses a real PE redirector. Keep this a
             # two-PID regression rather than silently testing the base exe.
-            assert additional_pids, "private venv must exercise runtime redirection"
+            assert seen["pid"] != seen["runtime_pid"], "private venv must exercise runtime redirection"
         if mode == "launch-death":
             print(json.dumps(seen), flush=True)
             os.read(0, 1)  # The test kills us in this pre-assignment window.
@@ -442,8 +460,9 @@ async def main():
         # Enlarge the creation/assignment window. An ungated script/site hook
         # can create an escaping descendant here, before retroactive assignment.
         time.sleep(.4)
-        job = None if mode == "failure" else original(pid, *additional_pids)
-        if mode == "assigned-death":
+        fail = mode == "failure" or (mode == "partial-failure" and pid == seen["runtime_pid"])
+        job = None if fail else original(pid)
+        if mode == "assigned-death" and pid == seen["runtime_pid"]:
             assert job is not None, "cannot attach launch-death fixture"
             print(json.dumps(seen), flush=True)
             os.read(0, 1)  # Attached, but no go byte has been returned/written.
@@ -478,7 +497,7 @@ asyncio.run(main())
 @pytest.mark.skipif(sys.platform != "win32", reason="native Windows startup/Job ownership")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("runtime", ["python", "node"])
-@pytest.mark.parametrize("mode", ["success", "failure", "launch-death", "assigned-death", "nested"])
+@pytest.mark.parametrize("mode", ["success", "failure", "partial-failure", "launch-death", "assigned-death", "nested"])
 async def test_windows_owns_startup_descendants_and_launch_window(tmp_path, startup_python, runtime, mode):
     from app.core.transcript_views.child_process import _job_object
 
@@ -527,7 +546,7 @@ async def test_windows_owns_startup_descendants_and_launch_window(tmp_path, star
             assert not stats["failed"] and grandchild.exists() and entry.exists(), stats
             owned.add(stats["grandchild"])
             assert all(alive(pid) for pid in owned), stats
-        elif mode == "failure":
+        elif mode in ("failure", "partial-failure"):
             assert stats["failed"] and not alive(stats["pid"]), stats
             assert not grandchild.exists() and not entry.exists()
         process.kill()
