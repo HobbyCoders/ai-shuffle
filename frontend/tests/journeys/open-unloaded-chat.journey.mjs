@@ -92,12 +92,22 @@ async function prepareHeldSwitch(ctx, delayMs, source = 'no_project') {
 	await page.getByRole('textbox', { name: 'Message' }).fill('Draft for the outgoing chat');
 }
 
-async function openSwitchChat(page, key) {
+async function openSwitchChat(page, key, beforeNavigate) {
 	if (new URL(page.url()).pathname.startsWith('/mobile/')) {
 		await page.getByRole('button', { name: /^Open menu/ }).click();
 		const group = page.getByRole('group', { name: `${SEEDED[key]} session`, exact: true });
-		await group.getByRole('button').first().click();
-	} else await openFromSidebar(page, SEEDED[key]);
+		const button = group.getByRole('button').first();
+		if (beforeNavigate) {
+			// Opening the drawer still belongs to the previous pending load.
+			// Mark the new navigation only when its actual row is actionable.
+			await button.click({ trial: true });
+			await beforeNavigate();
+		}
+		await button.click();
+	} else {
+		await beforeNavigate?.();
+		await openFromSidebar(page, SEEDED[key]);
+	}
 }
 
 async function sampleSwitchFrames(page) {
@@ -292,8 +302,7 @@ await runJourney({
 				await mark('start B then return to A before its history settles');
 				await openSwitchChat(page, 'other_project');
 				await page.waitForFunction(() => window.__switchHydrationHold.started !== null);
-				await mark('return to A before B has hydrated');
-				await openSwitchChat(page, 'no_project');
+				await openSwitchChat(page, 'no_project', () => mark('return to A before B has hydrated'));
 				await page.waitForFunction(tag => {
 					const chat = document.querySelector('[data-ui-state="chat"]');
 					return chat?.dataset.uiSession === tag && chat?.dataset.uiTargetSession === tag && chat?.dataset.uiLoading === 'false';
