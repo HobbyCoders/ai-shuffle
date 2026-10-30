@@ -103,25 +103,30 @@ const cardTitles = (page) =>
 	page.evaluate(() => [...document.querySelectorAll('.scard-frame')].map((el) => (el.textContent || '').replace(/\s+/g, ' ').trim()));
 
 const deepLinkLateCatalog = async ({ page, status, mark }) => {
-	let release;
-	const painted = new Promise((resolve) => (release = resolve));
-	let answered = false;
-	await page.route(
-		(url) => url.pathname === '/api/v1/projects',
-		async (route) => {
+	// Wrap fetch rather than page.route: the app's service worker serves its
+	// API calls, and page.route never sees requests a service worker handles.
+	await page.addInitScript(() => {
+		const original = window.fetch.bind(window);
+		const painted = new Promise((resolve) => (window.__releaseCatalog = resolve));
+		window.__catalogAnswered = false;
+		window.fetch = async (input, init) => {
+			const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+			const method = (init?.method || input?.method || 'GET').toUpperCase();
+			if (method !== 'GET' || url.pathname !== '/api/v1/projects') return original(input, init);
 			await painted;
-			await route.continue();
-			answered = true;
-		}
-	);
+			const response = await original(input, init);
+			window.__catalogAnswered = true;
+			return response;
+		};
+	});
 	await mark('load a link with the project catalog answering after the sidebar paints');
 	await page.goto(new URL(`/?session=${encodeURIComponent(seededChatId(status, 'no_project'))}`, status.urls.ui).toString());
 	await page.locator('.scard-frame').first().waitFor();
 	await page.waitForTimeout(300);
 	const firstPaint = await cardTitles(page);
-	release();
+	await page.evaluate(() => window.__releaseCatalog());
 	await page.waitForTimeout(2500);
-	expect(answered, 'the held project catalog answered');
+	expect(await page.evaluate(() => window.__catalogAnswered), 'the held project catalog answered');
 	const settled = await cardTitles(page);
 	expect(
 		JSON.stringify(settled) === JSON.stringify(firstPaint),
