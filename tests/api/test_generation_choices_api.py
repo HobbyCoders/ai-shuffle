@@ -1,5 +1,6 @@
 """Choice-card API: remembered picks per account, Settings options and live quotes."""
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -148,7 +149,13 @@ def test_job_writer_binds_real_session_to_unattended_tool(
         t for t in ai_tools_sdk._create_unified_tools(None, context) if t.name == "generateImage"
     )
     # Tool arguments cannot replace the trusted job binding in unattended runs.
-    output = asyncio.run(tool.handler({"prompt": "tree", "model": "other", "source": "xai"}))
+    # Like the query engine, claim a current turn before calling pooled tools.
+    from app.core.generation_resolver import bind_turn_context, clear_turn_context
+    bind_turn_context(SimpleNamespace(aih_generation_context=context))
+    try:
+        output = asyncio.run(tool.handler({"prompt": "tree", "model": "other", "source": "xai"}))
+    finally:
+        clear_turn_context(context.session_id, expected=context)
     assert json.loads(output["content"][0]["text"])["status"] == "completed"
     assert backend.calls[-2:] == [("reserve", entry.account), ("execute", entry.account)]
     assert client.delete(route).status_code == 200

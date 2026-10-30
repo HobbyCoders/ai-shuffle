@@ -1,12 +1,15 @@
 """Conversational picks use the same store/binding as the card and scheduled runs."""
 
 import json
+from collections import OrderedDict
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 
 from app.core import generation_choices as choices
+from app.core import generation_resolver as gr
 from app.core import preference_identity, query_options
 from app.db import database
 from app.mcp.app_config_sdk import collect_app_config_tools, get_app_config_tool_names
@@ -24,6 +27,7 @@ PICK = {
 
 @pytest.fixture(autouse=True)
 def setup(mock_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gr, "_TURN_CONTEXTS", OrderedDict())
     monkeypatch.setattr(preference_identity, "local_owner_account", lambda: "owner")
     monkeypatch.setattr(
         preference_identity, "account_identity", lambda account: ("account", "origin#" + account)
@@ -65,16 +69,13 @@ async def test_unattended_cannot_save_its_own_choice_even_with_confirmation() ->
     assert result["success"] is False
 
 
-@pytest.mark.parametrize("unattended_source", ["automation", "wakeup"])
+@pytest.mark.parametrize("unattended_source", [
+    "automation", "wakeup", "auto_continue", "unpark", "resume", "agent_message", "voice", "connector", None,
+])
 @pytest.mark.asyncio
 async def test_pooled_interactive_server_checks_current_turn_before_writing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any, unattended_source: str,
 ) -> None:
-    from collections import OrderedDict
-
-    from app.core import generation_resolver as gr
-
-    monkeypatch.setattr(gr, "_TURN_CONTEXTS", OrderedDict())
     profile_id, session_id = "generation-preferences", "generation-preferences-pooled"
     database.create_profile(profile_id, "Generation preferences", None, {"model": "sonnet"})
     database.create_session(session_id, profile_id)
@@ -115,13 +116,19 @@ async def test_pooled_interactive_server_checks_current_turn_before_writing(
     assert (await invoke(action="get"))["choices"] == {"image": saved}
     assert choices.load(OWNER, run_migration=False)["remembered"] == {"image": saved}
 
-    turn("user")
+    current = turn("user")
     assert (await invoke(action="remember", kind="image", choice=changed, confirm=True))["success"]
     assert (await invoke(action="get"))["choices"] == {
         "image": {**changed, "origin": "conversation"},
     }
     assert (await invoke(action="forget", kind="image", confirm=True))["success"]
     assert choices.load(OWNER, run_migration=False)["remembered"] == {}
+
+    # A late write after this pooled client's turn has ended cannot fall back
+    # to the interactive context it connected with. Reads remain available.
+    gr.clear_turn_context(session_id, expected=current.aih_generation_context)
+    assert (await invoke(action="remember", kind="image", choice=PICK, confirm=True))["success"] is False
+    assert (await invoke(action="get"))["choices"] == {}
 
 
 @pytest.mark.parametrize("action", ["get", "remember", "forget", "other", None])
@@ -305,11 +312,16 @@ async def test_pick_saved_then_forgotten_applies_to_the_next_turn_of_the_same_se
     monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: backend)
     # ONE tool server for the whole session, bound before any pick existed:
     # the Claude CLI keeps its MCP servers across turns.
-    tools = {t.name: t for t in sdk._create_unified_tools(None, session_context(unattended=unattended))}
+    connected = session_context(unattended=unattended)
+    tools = {t.name: t for t in sdk._create_unified_tools(None, connected)}
 
     async def next_turn() -> dict:
-        response = await tools["generateImage"].handler({"prompt": "a tree"})
-        return json.loads(response["content"][0]["text"])
+        gr.bind_turn_context(SimpleNamespace(aih_generation_context=connected))
+        try:
+            response = await tools["generateImage"].handler({"prompt": "a tree"})
+            return json.loads(response["content"][0]["text"])
+        finally:
+            gr.clear_turn_context(connected.session_id, expected=connected)
 
     first = await next_turn()
     assert first["status"] == ("skipped" if unattended else "choose")
@@ -340,7 +352,9 @@ async def test_unreadable_choices_on_a_later_turn_fail_closed(monkeypatch: pytes
     await call({"action": "remember", "kind": "image", "choice": PICK, "confirm": True})
     backend = FakeBackend([candidate(account=PICK["account"], model=PICK["model"])])
     monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: backend)
-    tools = {t.name: t for t in sdk._create_unified_tools(None, session_context(unattended=True))}
+    connected = session_context(unattended=True)
+    tools = {t.name: t for t in sdk._create_unified_tools(None, connected)}
+    gr.bind_turn_context(SimpleNamespace(aih_generation_context=connected))
 
     def fail(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("store offline")
@@ -364,10 +378,15 @@ async def test_native_alias_reads_the_current_pick_each_call(monkeypatch: pytest
     backend = FakeBackend([candidate(source="chatgpt", account="plan-a", model="default"),
                            candidate(source="chatgpt", account="plan-b", model="default")])
     monkeypatch.setattr(aliases, "Sources", lambda *args, **kw: backend)
-    _, handler = aliases.make_alias("image", session_context(unattended=False))
+    connected = session_context(unattended=False)
+    _, handler = aliases.make_alias("image", connected)
 
     async def next_turn() -> dict:
-        return json.loads((await handler({"prompt": "a tree"}, ToolCtx())).text)
+        gr.bind_turn_context(SimpleNamespace(aih_generation_context=connected))
+        try:
+            return json.loads((await handler({"prompt": "a tree"}, ToolCtx())).text)
+        finally:
+            gr.clear_turn_context(connected.session_id, expected=connected)
 
     assert (await next_turn())["status"] == "choose"
     assert (await call({"action": "remember", "kind": "image", "choice": plan, "confirm": True}))["success"]

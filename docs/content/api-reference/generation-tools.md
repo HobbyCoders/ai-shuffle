@@ -47,12 +47,20 @@ submitted, including unattended calls.
   account's remembered choice for that kind (see below) without asking, in
   interactive and unattended runs alike. With none, an interactive run returns
   `choose` and the chat shows a choice card; an unattended run is skipped and
-  reported, never guessed. In an automation or scheduled wake-up turn these
-  tools, `searchModels` and the native aliases never wait on a permission
-  prompt, since nobody is there to answer one: the guard decides, and a saved
-  Deny rule still applies. Voice, connector and other turns keep Ask mode's
-  prompt. The prompt decision and the guard read the same per-turn context,
-  also when a chat's tool server outlives the turn it was built for.
+  reported, never guessed. Ask mode keeps its permission prompt for the
+  person-present sources `user`, `queue`, `worktree`, `api`, `resume` and
+  `connector`, and for any voice-mode session, even when model routing calls
+  the run unattended. Every other unattended source goes straight to admission
+  for these tools, `searchModels` and the native aliases, including unknown or
+  new sources. This covers automation/wake-up turns, automatic continuation,
+  unpark/unpark-pump, promotion and provider-agent work without maintaining a
+  background-source allowlist. A saved Deny rule and all stored-choice,
+  pricing, confirmation and spending guards still apply. The prompt decision and the guard
+  read the same active-turn context, even on a reused tool server. Turn and
+  client cleanup release only the binding they own, never a newer turn's.
+  With no active turn, a late call is denied/skipped immediately with
+  `no_active_turn`, not left waiting for an unanswered prompt; it cannot reuse
+  connect-time choices or interactive preference-write permission.
 - **Saved Settings defaults.** A fal.ai model explicitly saved for image,
   video, audio or 3D generation in the previous Default models page is copied
   into the account's remembered choices once, with its saved options, before

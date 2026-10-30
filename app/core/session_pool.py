@@ -36,6 +36,7 @@ from app.core.provider.protocol import ProviderAdapter
 from app.core.provider.types import mcp_servers_equivalent
 
 logger = logging.getLogger(__name__)
+_ANY_GENERATION_CONTEXT = object()
 
 # Env keys that carry provider identity/config (base URL, auth, model overlays).
 # A change to any of these means the subprocess is talking to a different
@@ -218,6 +219,10 @@ class SessionState:
         "config": {},
         "session_id": None,
     })
+
+    # Exact active binding this client owns, refreshed on every turn. Removal
+    # may clear only this context, never another client's/newer turn's entry.
+    generation_context: object | None = None
 
     # Options snapshot from connect() time — for reconnect detection
     connect_options: Optional[AgentOptions] = None
@@ -1142,7 +1147,7 @@ class SessionPool:
             # Remove the entry while still holding the lock so concurrent
             # evict_if_needed callers immediately see the freed slot.
             session_id, state, reason = victim
-            self._pool.pop(session_id, None)
+            self._pop_session(session_id)
 
         # Slow work (subprocess teardown, eviction callback) happens OUTSIDE the
         # critical section. The evicted id is still returned only after teardown
@@ -1165,7 +1170,8 @@ class SessionPool:
         is a single sync dict op (atomic on the event loop). evict_if_needed does
         its own locked removal and calls _finish_evict directly.
         """
-        self._pool.pop(session_id, None)
+        if self._pop_session(session_id, expected_state=state) is None:
+            return session_id
         return await self._finish_evict(session_id, state, reason)
 
     async def _finish_evict(
@@ -1206,6 +1212,24 @@ class SessionPool:
                 )
         return session_id
 
+    def _pop_session(
+        self, session_id: str, *, expected_state=None,
+        expected_context=_ANY_GENERATION_CONTEXT,
+    ) -> Optional[SessionState]:
+        # Check ownership and clear synchronously, before teardown can yield.
+        # A late removal must not pop a replacement client or erase its turn.
+        from app.core.generation_resolver import clear_turn_context
+
+        state = self._pool.get(session_id)
+        if state is None or (expected_state is not None and state is not expected_state):
+            return None
+        context = getattr(state, "generation_context", None)
+        if expected_context is not _ANY_GENERATION_CONTEXT and context is not expected_context:
+            return None
+        self._pool.pop(session_id)
+        clear_turn_context(session_id, expected=context)
+        return state
+
     async def remove(
         self, session_id: str, *, preserve_session: bool = False,
     ) -> Optional[SessionState]:
@@ -1213,7 +1237,7 @@ class SessionPool:
 
         Explicit close, clear and delete retain destructive teardown by default.
         """
-        state = self._pool.pop(session_id, None)
+        state = self._pop_session(session_id)
         if state is None:
             return None
         was_connected = state.is_connected
@@ -1233,19 +1257,24 @@ class SessionPool:
         logger.info(f"[Pool] Removed session {session_id} (pool size: {len(self._pool)})")
         return state
 
-    async def remove_dead(self, session_id: str) -> Optional[SessionState]:
+    async def remove_dead(
+        self, session_id: str, *, expected_context=_ANY_GENERATION_CONTEXT,
+    ) -> Optional[SessionState]:
         """Remove a dead session entry without attempting disconnect.
 
         Used when the subprocess has already died and we just need to clean up the entry.
+        Turn-owned cleanup can supply its binding to leave a reused client alone.
         """
-        state = self._pool.pop(session_id, None)
+        state = self._pop_session(session_id, expected_context=expected_context)
         if state is None:
             return None
         state.is_connected = False
         logger.info(f"[Pool] Removed dead session {session_id} (pool size: {len(self._pool)})")
         return state
 
-    async def remove_broken(self, session_id: str) -> Optional[SessionState]:
+    async def remove_broken(
+        self, session_id: str, *, expected_context=_ANY_GENERATION_CONTEXT,
+    ) -> Optional[SessionState]:
         """Evict a session whose subprocess is alive but in an unknown state.
 
         Used by the two-phase interrupt when the streaming task had to be
@@ -1258,7 +1287,7 @@ class SessionPool:
         background so the interrupt confirmation is not delayed past the
         frontend's window.
         """
-        state = self._pool.pop(session_id, None)
+        state = self._pop_session(session_id, expected_context=expected_context)
         if state is None:
             return None
         state.is_connected = False
@@ -1651,7 +1680,7 @@ class SessionPool:
             if state.is_connected and not is_subprocess_alive(state):
                 was_streaming = state.is_streaming
                 pid = subprocess_pid(state)
-                del self._pool[session_id]
+                self._pop_session(session_id)
                 # Subprocess is already dead, so its descendants are already
                 # orphaned (reparented to init). Best-effort record so the
                 # reaper still tries; descendants may be empty here.

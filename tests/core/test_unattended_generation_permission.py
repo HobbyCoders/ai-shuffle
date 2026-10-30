@@ -2,10 +2,10 @@
 
 An automation in Ask mode put ``generateImage`` to a permission prompt nobody
 could answer, so the run hung until its timeout and the tool's own unattended
-skip (``skipped/no_stored_choice``) never happened (#776). In automation and
-wake-up turns the guarded generation tools now go straight to admission;
-every other turn source (voice, connector, a person typing) and every other
-tool still asks.
+skip (``skipped/no_stored_choice``) never happened (#776). Every unattended
+source without a person-present source or voice-mode session goes straight to
+admission, including unknown/new sources. API, Resume and connectors retain Ask
+alongside composer sources and voice calls. Idle generation denies immediately.
 
 The permission callback and the generation tools read ONE per-turn context
 (``generation_resolver.turn_context``), stamped when the turn claims its
@@ -40,7 +40,7 @@ SID = "qe-unattended-generation"
 CLI_NAME = "mcp__fluid_bundled__mcp__ai-tools__generateImage"
 AUTOMATION = RunContext(session_id=SID, unattended=True, owner=True, turn_source="automation")
 WAKEUP = RunContext(session_id=SID, unattended=True, owner=True, turn_source="wakeup")
-VOICE = RunContext(session_id=SID, unattended=True, owner=True, turn_source="voice")
+VOICE = RunContext(session_id=SID, unattended=True, owner=True, turn_source="voice", voice_mode=True)
 CONNECTOR = RunContext(session_id=SID, unattended=True, owner=True, turn_source="connector")
 TYPED = RunContext(session_id=SID, unattended=False, owner=True, turn_source="user")
 
@@ -104,13 +104,23 @@ async def _asks(cb, broadcast, name):
 # ─── the permission callback ────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("turn", [AUTOMATION, WAKEUP])
+@pytest.mark.parametrize("source", [
+    "automation", "wakeup", "auto_continue", "unpark", "failover", "agent_message",
+    "unpark_pump", "promotion", "provider_agent", "future_unattended_source", None,
+])
 @pytest.mark.parametrize("name", [CLI_NAME, "mcp__ai-tools__generateVideo", "mcp__ai-tools__runFalModel",
                                   "mcp__ai-tools__searchModels", "GenerateNativeImage"])
-async def test_automation_and_wakeup_turns_go_to_admission_without_a_prompt(tmp_path, turn, name):
+async def test_unattended_sources_go_to_admission_without_a_prompt(tmp_path, source, name):
+    from app.core.query_options import _is_interactive_run
+
     cb, broadcast = await _callback(tmp_path)
-    _bind(turn)
-    result = await asyncio.wait_for(cb(name, {"prompt": "a tree"}, _ctx()), 5)
+    unattended = not _is_interactive_run({"turn_source": source}, {"id": SID})
+    assert unattended
+    _bind(replace(AUTOMATION, turn_source=source, unattended=unattended))
+    with patch.object(permission_handler, "request_permission", new=AsyncMock(
+        side_effect=AssertionError("Unattended generation must not ask a person"),
+    )):
+        result = await asyncio.wait_for(cb(name, {"prompt": "a tree"}, _ctx()), 5)
     assert _allowed(result) and result.updated_input == {"prompt": "a tree"}
     assert _prompts(broadcast) == []
 
@@ -124,12 +134,9 @@ async def test_a_saved_deny_rule_still_wins_unattended(tmp_path):
 
 
 @pytest.mark.parametrize("turn,name", [
-    (VOICE, CLI_NAME),  # a person on a voice call can answer Ask mode's prompt
-    (CONNECTOR, CLI_NAME),  # a person messaged in through a connector
     (TYPED, CLI_NAME),  # the owner is here to answer
     (AUTOMATION, "mcp__ai-tools__editImage"),  # not admission-gated
     (AUTOMATION, "mcp__other__generateImage"),  # not our server
-    (None, CLI_NAME),  # no turn bound: nothing is known, so it asks
 ])
 async def test_every_other_turn_and_tool_still_asks(tmp_path, turn, name):
     cb, broadcast = await _callback(tmp_path)
@@ -143,6 +150,64 @@ async def test_the_callback_reads_the_current_turn_not_an_earlier_one(tmp_path):
     _bind(AUTOMATION)
     _bind(TYPED)  # the next turn on the same pooled client is typed by the owner
     await _asks(cb, broadcast, CLI_NAME)
+
+
+@pytest.mark.parametrize("source,mode", [
+    ("user", None), ("queue", None), ("worktree", None),
+    ("api", None), ("resume", None), ("connector", None),
+    ("voice", "voice"), ("automation", "voice"), ("wakeup", "voice"),
+    ("future_unattended_source", "voice"),
+])
+async def test_person_present_sources_and_voice_sessions_keep_the_ask_prompt(tmp_path, source, mode):
+    from app.core.agent_types import PermissionResultDeny
+    from app.core.query_options import _generation_context, _is_interactive_run
+
+    cb, broadcast = await _callback(tmp_path)
+    # Even an owner source excluded from model-routing interactivity by a
+    # hidden/worker row may have someone present to answer a permission card.
+    row = {"id": SID, "mode": mode, "hidden": True}
+    unattended = not _is_interactive_run({"turn_source": source}, row)
+    assert unattended  # model-routing attendance alone cannot suppress Ask
+    _bind(_generation_context({}, row, None, session_id=SID,
+                              unattended=unattended, turn_source=source))
+    with patch.object(permission_handler, "request_permission", new=AsyncMock(
+        return_value=PermissionResultDeny(message="fixture owner's reply"),
+    )) as request:
+        result = await asyncio.wait_for(cb(CLI_NAME, {"prompt": "a tree"}, _ctx()), 5)
+    request.assert_awaited_once()
+    assert not _allowed(result)
+
+
+@pytest.mark.parametrize("name", [CLI_NAME, "GenerateNativeImage", "mcp__ai-tools__runFalModel",
+                                  "mcp__ai-tools__searchModels"])
+@pytest.mark.parametrize("mode", ["default", "bypassPermissions"])
+async def test_a_late_permission_call_denies_without_an_unanswerable_prompt(tmp_path, name, mode):
+    cb, broadcast = await _callback(tmp_path, mode=mode)
+    _bind(AUTOMATION)
+    gr.clear_turn_context(SID, expected=AUTOMATION)
+    with patch.object(permission_handler, "request_permission", new=AsyncMock(
+        side_effect=AssertionError("Idle generation must not open an Ask prompt"),
+    )):
+        result = await asyncio.wait_for(cb(name, {"prompt": "a tree"}, _ctx()), 5)
+    assert not _allowed(result)
+    assert "no active turn" in result.message.lower()
+    assert _prompts(broadcast) == []
+
+
+def test_person_present_definition_covers_real_owner_sources_and_loop_guard_exceptions():
+    from app.core import loop_guard, query_options, turn_scheduler
+    from app.db.turns import HUMAN_INPUT_SOURCES
+
+    person_present = gr.PERSON_PRESENT_TURN_SOURCES
+    assert person_present == frozenset(query_options._INTERACTIVE_TURN_SOURCES) | {"api", "resume", "connector"}
+    assert set(HUMAN_INPUT_SOURCES) <= person_present
+    assert set(turn_scheduler._OWNER_SOURCES) <= person_present
+    # Loop detection calls connectors unattended for its own accounting. They
+    # still may have a person to answer Ask; the other origins/relays do not.
+    for source in (*loop_guard.UNATTENDED_SOURCES, *loop_guard.RELAY_SOURCES):
+        assert admission_gates_unattended(
+            CLI_NAME, replace(AUTOMATION, turn_source=source), session_id=SID,
+        ) is (source not in person_present)
 
 
 def test_predicate_needs_this_sessions_unattended_turn():
@@ -160,13 +225,18 @@ async def test_a_reused_pooled_client_stamps_this_turns_context(tmp_path):
     from tests.core.test_query_engine_turn_lifecycle import _pooled_state, _result
 
     state = _pooled_state([_result()])
+    async def during_turn(*args, **kwargs):
+        assert gr.turn_context(SID) is WAKEUP
+
+    state.adapter.send_query.side_effect = during_turn
     with ExitStack() as stack:
         bounds = engine_patches(stack, pool=RecordingPool(state), cwd=str(tmp_path))
         bounds.options.aih_generation_context = WAKEUP
         events = await collect(qe._stream_to_websocket_impl("hi", SID, "claude-code"))
     assert frames_of(events, "done")
     bounds.make_adapter.assert_not_called()  # the pooled client was reused
-    assert gr.turn_context(SID) is WAKEUP
+    state.adapter.send_query.assert_awaited_once()
+    assert gr.turn_context(SID) is None
 
 
 # ─── one long-lived tool server across turns ────────────────────────────────
@@ -262,3 +332,23 @@ async def test_a_failed_choices_read_is_unreadable_not_empty():
                       choices_loader=broken)
     current = await gr.with_current_choices(context)
     assert current.choices_unreadable is True and current.remembered_choices == {}
+
+
+@pytest.mark.parametrize("connected,turn,status", [
+    (TYPED, WAKEUP, "skipped"),
+    (WAKEUP, TYPED, "refused"),
+])
+async def test_run_fal_invalid_request_label_uses_the_current_turn(monkeypatch, connected, turn, status):
+    from app.services import generation_sources
+    from app.services.fal_schema import schema_service
+
+    backend = FakeBackend([])
+    backend.fal_key = AsyncMock(return_value=None)
+    monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: backend)
+    monkeypatch.setattr(schema_service, "get_schema", AsyncMock(return_value=None))
+    tool = next(t for t in sdk._create_unified_tools(None, connected) if t.name == "runFalModel")
+    _bind(turn)
+    response = await tool.handler({"endpoint_id": "fixture-model", "input": {}})
+    output = json.loads(response["content"][0]["text"])
+    assert output["reason"] == "invalid_request" and output["status"] == status
+    assert backend.calls == []

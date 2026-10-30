@@ -2,15 +2,17 @@
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from dataclasses import dataclass, replace
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fluid.tools.registry import ToolCtx, ToolRegistry
 
-from app.core import generation_budget, generation_choices, model_effort, query_options
+from app.core import generation_budget, generation_choices, generation_resolver, model_effort, query_options
 from app.core.generation_resolver import (
     INCLUDED_PRICE,
     UNKNOWN_PRICE,
@@ -36,6 +38,10 @@ class Probe:
     events: list[str]
 
     async def registry(self, context: RunContext | None) -> ToolRegistry:
+        # Match the engine's active-turn claim before dispatching pooled tools.
+        generation_resolver.bind_turn_context(
+            SimpleNamespace(aih_generation_context=context), session_id="session-a",
+        )
         adapter = ha.HarnessAdapter()
         adapter._provider_kind = "openai_responses"
         options = SessionOptions(model="test-chat", extra={
@@ -65,6 +71,7 @@ def probe(monkeypatch: pytest.MonkeyPatch) -> Probe:
     from app.core import artifact_store
     from app.network import generation, runners
 
+    monkeypatch.setattr(generation_resolver, "_TURN_CONTEXTS", OrderedDict())
     row = {"id": "plan-a", "provider_type": "grok", "enabled": True}
     monkeypatch.setattr(ha, "_lookup_provider_row", Mock(return_value=row))
     monkeypatch.setattr(database, "get_model_provider", Mock(return_value=row))
@@ -156,6 +163,7 @@ async def test_no_implicit_account_before_admission(
     if unattended:
         assert output["reason"] == "no_stored_choice"
     else:
+        assert output["options"], output
         assert output["options"][0]["price"] == (
             INCLUDED_PRICE if kind == "image" else native_video.estimate_price(load("plan-a").video)
         )
@@ -169,7 +177,7 @@ async def test_real_saved_choice_reaches_budget_then_same_adapter(
 ) -> None:
     registry = await probe.registry(context(unattended=unattended, kind=kind))
     output = await call(registry, name)
-    assert output["status"] == "completed" and output["remembered"]
+    assert output["status"] == "completed" and output["remembered"], output
     assert output["price"]["status"] == ("included" if kind == "image" else "estimated")
     probe.submitted_once(kind)
     assert probe.reserve.call_args.args[0] == Decimal("0" if kind == "image" else "0.02")
@@ -183,7 +191,7 @@ async def test_unattended_job_choice_submits_once(
         context(unattended=True, kind=kind, job_id=automation_id),
     )
     output = await call(registry, name)
-    assert output["status"] == "completed" and not output.get("remembered")
+    assert output["status"] == "completed" and not output.get("remembered"), output
     probe.submitted_once(kind)
 
 
@@ -207,7 +215,7 @@ async def test_exhausted_cap_refuses_even_included_images(
 ) -> None:
     generation_budget.record_overrun("20.01")
     output = await call(await probe.registry(context(unattended=unattended, kind=kind)), name)
-    assert output["status"] == "refused" and output["reason"] == "daily_cap"
+    assert output["status"] == "refused" and output["reason"] == "daily_cap", output
     probe.reserve.assert_called_once()
     probe.image.assert_not_awaited()
     probe.video.assert_not_awaited()
@@ -248,7 +256,7 @@ async def test_above_threshold_requires_admission_before_reserve_or_transport(
     current = context(unattended=unattended, kind=kind if unattended else None)
     args = {} if unattended else {"source": "plan-a"}
     output = await call(await probe.registry(current), name, args)
-    assert output["status"] == ("skipped" if unattended else "needs-confirmation")
+    assert output["status"] == ("skipped" if unattended else "needs-confirmation"), output
     probe.no_submission()
     if unattended:
         assert output["reason"] == "needs_confirmation" and "confirmation_token" not in output

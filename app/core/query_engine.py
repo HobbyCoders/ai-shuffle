@@ -1307,8 +1307,8 @@ async def stream_query(
 
     # This turn's generation context, read by the permission callback AND by
     # the (possibly reused) client's generation tools (generation_resolver).
-    from app.core.generation_resolver import bind_turn_context
-    bind_turn_context(options)
+    from app.core.generation_resolver import bind_turn_context, clear_turn_context
+    bound_generation_context = bind_turn_context(options, session_id=session_id, client=state)
 
     # Mark as streaming
     state.is_streaming = True
@@ -1349,6 +1349,7 @@ async def stream_query(
         # terminal frame and no `done` follows (same as the WS path).
         crashed = False
     except BaseException:
+        clear_turn_context(session_id, expected=bound_generation_context)
         state.is_streaming = False
         state.streaming_started_at = None
         raise
@@ -1599,13 +1600,15 @@ async def stream_query(
         yield {"type": "error", "message": str(actual)}
 
     finally:
+        clear_turn_context(session_id, expected=bound_generation_context)
         # Mark as not streaming — keep in pool for reuse
         state.is_streaming = False
         state.streaming_started_at = None
         state.last_activity = datetime.now(timezone.utc)
 
-        # Remove dead clients from pool
-        if not state.is_connected:
+        # A delayed old turn must not remove a reused/replacement client.
+        if (not state.is_connected and pool.peek(session_id) is state
+                and state.generation_context is bound_generation_context):
             await pool.remove_dead(session_id)
 
     # Persist session data to database in a batched write (single transaction
@@ -2502,17 +2505,23 @@ async def _stream_to_websocket_impl(
                     # All other computer-use actions: access is gated by request_access.
                     return PermissionResultAllow()
 
-                # A guarded generation tool in an automation or wake-up turn:
-                # nobody can answer a prompt, so it would hang the run until
-                # its timeout. The tool's admission is the gate instead, read
-                # from the SAME per-turn context the tool runs under: no stored
-                # choice skips, an unknown price skips, a quote above the
-                # threshold never confirms itself and the daily cap applies
-                # (app.core.generation_resolver). A saved Deny still wins short
-                # of Bypass; voice, connector and other turns keep the prompt.
-                from app.core.generation_resolver import admission_gates_unattended, turn_context
+                # No active turn means no principal or broadcast target for a
+                # late generation call. Deny before Ask (even in Bypass), rather
+                # than waiting for a permission timeout nobody can answer.
+                from app.core.generation_resolver import (
+                    NO_ACTIVE_TURN_MESSAGE, admission_gates_unattended,
+                    is_generation_tool, turn_context,
+                )
 
-                if admission_gates_unattended(tool_name, turn_context(_sid), session_id=_sid):
+                generation_context = turn_context(_sid)
+                if is_generation_tool(tool_name) and generation_context is None:
+                    return PermissionResultDeny(message=NO_ACTIVE_TURN_MESSAGE)
+
+                # Only background-only sources replace Ask with generation
+                # admission. API, Resume, connectors and voice may have a
+                # person present. The shared classifier also checks unattended;
+                # saved Deny, stored choice, price and spending guards remain.
+                if admission_gates_unattended(tool_name, generation_context, session_id=_sid):
                     if _perm_mode != "bypassPermissions":
                         rule = await asyncio.to_thread(
                             permission_handler.saved_rule, _sid, _profile_id, tool_name, tool_input,
@@ -2673,8 +2682,8 @@ async def _stream_to_websocket_impl(
 
     # This turn's generation context, read by the permission callback AND by
     # the (possibly reused) client's generation tools (generation_resolver).
-    from app.core.generation_resolver import bind_turn_context
-    bind_turn_context(options)
+    from app.core.generation_resolver import bind_turn_context, clear_turn_context
+    bound_generation_context = bind_turn_context(options, session_id=session_id, client=state)
 
     # Mark as streaming (both reuse and create paths)
     state.is_streaming = True
@@ -2806,6 +2815,7 @@ async def _stream_to_websocket_impl(
                 logger.debug(f"[WS] Drained {len(messages)} plugin message(s) from stderr queue")
             return messages
     except BaseException:
+        clear_turn_context(session_id, expected=bound_generation_context)
         state.is_streaming = False
         state.streaming_started_at = None
         raise
@@ -4011,6 +4021,7 @@ async def _stream_to_websocket_impl(
         # frame since we've already emitted an `error`.
 
     finally:
+        clear_turn_context(session_id, expected=bound_generation_context)
         # Mark as not streaming and reset interrupt flag
         state.is_streaming = False
         state.streaming_started_at = None
@@ -4033,8 +4044,9 @@ async def _stream_to_websocket_impl(
 
         # Session pool lifecycle: KEEP the client alive for reuse.
         # Only remove from pool if the client died.
-        if not state.is_connected:
-            # Client died during query — remove dead entry
+        if (not state.is_connected and pool.peek(session_id) is state
+                and state.generation_context is bound_generation_context):
+            # Client died during this turn, not a reused/replacement client.
             await pool.remove_dead(session_id)
             logger.debug(f"[WS] Removed dead session {session_id} from pool")
         else:

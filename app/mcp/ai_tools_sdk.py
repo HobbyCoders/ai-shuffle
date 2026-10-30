@@ -753,7 +753,7 @@ def _bounded_choose(output):
 
 def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
     from app.core.generation_resolver import (
-        Resolver, RunContext, current_context, normalize_source, same_backend_identity,
+        Resolver, RunContext, current_context, no_active_turn_result, normalize_source, same_backend_identity,
     )
     from app.services.generation_sources import Sources
 
@@ -849,13 +849,16 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
     async def search_models(args):
         import asyncio
         from app.core.generation_resolver import KINDS, result
+        current, call_resolver = await for_this_call()
+        if not current.active_turn:
+            return _tool_result(no_active_turn_result())
         limit = max(1, min(args.get("limit") or 15, 50))
         query, model = args.get("query") or "", args.get("model")
         kinds = [args["output_type"]] if args.get("output_type") else list(KINDS)
         source = normalize_source(args.get("source"))
         # Quote only the top few fal models per kind: every quote is a schema
         # and pricing fetch. The full fal catalog search follows, unpriced.
-        catalogs = await asyncio.gather(*(resolver.catalog(kind, source, model, query=query or None,
+        catalogs = await asyncio.gather(*(call_resolver.catalog(kind, source, model, query=query or None,
                                                            limit=3 if len(kinds) == 1 else 1) for kind in kinds),
                                         return_exceptions=True)
         failed = next((c for c in catalogs if isinstance(c, BaseException)), None)
@@ -873,7 +876,7 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
                         options=options[:limit], total_matches=len(options))
         if failed is not None:
             output["priced_lookup_error"] = "Some accounts or workers could not be listed."
-        if source in (None, "fal") and (query or not model) and await backend.fal_key():
+        if source in (None, "fal") and (query or not model) and await call_resolver.backend.fal_key():
             # Main's discovery, unchanged: every category, description and tag
             # matches, endpoint_id fields. Price one with source "fal" + model.
             fal = await _search_catalog(query, args.get("output_type"), limit)
@@ -909,19 +912,21 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
         refused = _fal_image_refusal(args) if image_restricted else None
         if refused:
             return _tool_result({"success": False, "error": refused})
+        current, call_resolver = await for_this_call()
+        if not current.active_turn:
+            return _tool_result(no_active_turn_result())
         endpoint = args.get("endpoint_id")
         kind = args.get("output_type") or (
             (_catalog_output_type(endpoint) or _infer_fal_output_type(endpoint)) if isinstance(endpoint, str) else None)
-        schema = await schema_service.get_schema(endpoint, await backend.fal_key()) if isinstance(endpoint, str) else None
+        schema = await schema_service.get_schema(endpoint, await call_resolver.backend.fal_key()) if isinstance(endpoint, str) else None
         values = dict(args["input"]) if isinstance(args.get("input"), dict) else None
         prompt = values.pop(schema.primary_text_field, None) if schema and values is not None and schema.primary_text_field else None
         if kind not in KINDS or schema is None or values is None or not isinstance(prompt, str) or not prompt.strip():
             message = "A declared input schema with a text prompt and a known output type is required. Nothing was submitted."
-            return _tool_result(result("skipped" if context.unattended else "refused",
+            return _tool_result(result("skipped" if current.unattended else "refused",
                                        reason="invalid_request", error=message, message=message))
         request = {"prompt": prompt, "source": "fal", "model": endpoint, "options": values,
                    "confirmed": args.get("confirmed"), "confirmation_token": args.get("confirmation_token")}
-        current, call_resolver = await for_this_call()
         local_lane = bool(all_lanes.get("runFalModel")) and not current.chat_mode
         if local_lane and not current.unattended and not (current.job_choice or current.remembered_for(kind)):
             request["worker"] = backend.local_worker()
