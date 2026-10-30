@@ -42,7 +42,7 @@ internal class WorkerPresenceMonitor(
     private fun authorized(expected: AccountSession?) = if (expected == null)
         !accountStore.hasStoredSession() else accountStore.matches(expected)
 
-    fun start(servers: List<Server>, session: AccountSession?) {
+    fun start(servers: List<Server>, session: AccountSession?, onFirstSweep: (Map<Server, ProbeResult>) -> Unit = {}) {
         cancel()
         val previous = entries.takeIf { sameAccount(account, session) }.orEmpty()
         entries = servers.map { server -> previous.firstOrNull { it.server == server } ?: Entry(server) }
@@ -50,11 +50,13 @@ internal class WorkerPresenceMonitor(
         val epoch = generation
         val current = entries
         current.forEach { it.presence.expire(SystemClock.elapsedRealtime()); publish(it.server, it.presence) }
-        if (current.isEmpty()) return
+        if (current.isEmpty()) { onFirstSweep(emptyMap()); return }
         var lastNetwork = network()
         val semaphore = Semaphore(3)
         polling = scope.launch {
+            var firstSweep = true
             while (isActive) {
+                val observations = mutableMapOf<Server, ProbeResult>()
                 coroutineScope {
                     current.forEach { entry -> launch {
                         semaphore.withPermit {
@@ -68,9 +70,14 @@ internal class WorkerPresenceMonitor(
                                 // Success is evidence even on a LAN that Android cannot validate.
                                 entry.presence.record(result, SystemClock.elapsedRealtime(), stableValidatedNetwork)
                             }
+                            observations[entry.server] = if (before.id == after.id) result else ProbeResult.UNAVAILABLE
                             publish(entry.server, entry.presence)
                         }
                     } }
+                }
+                if (firstSweep && epoch == generation && authorized(session)) {
+                    firstSweep = false
+                    onFirstSweep(observations.toMap())
                 }
                 delay(30_000)
             }
