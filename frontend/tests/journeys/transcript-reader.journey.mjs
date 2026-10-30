@@ -192,4 +192,47 @@ cases.push({
 	setup: context => growingReply.setup({ ...context, readingBoundary: true })
 });
 
+cases.push({
+	...growingReply,
+	name: 'native-selection-budget-during-streaming',
+	async act({ page, mark, log }) {
+		await mark('keep an offscreen native selection without enlarging its budget');
+		const selected = await page.evaluate(() => {
+			const row = document.querySelector('[data-transcript-index="0"]');
+			if (!row) throw new Error('The native prefix must still be mounted before cost growth.');
+			const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+			let node; while ((node = walker.nextNode()) && !node.textContent.trim()) {}
+			if (!node) throw new Error('The prefix has no selectable text.');
+			const range = document.createRange(); range.selectNodeContents(node);
+			const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+			window.__pinnedBudgetNode = node;
+			return range.toString();
+		});
+		try {
+			const clear = page.getByRole('button', { name: 'Clear selection in transcript', exact: true });
+			await clear.waitFor({ timeout: 25000 });
+			const state = await page.locator(LOG).evaluate(log => ({
+				connected: window.__pinnedBudgetNode.isConnected,
+				selected: window.getSelection().getRangeAt(0).toString(),
+				indices: [...log.querySelectorAll('[data-transcript-index]')].map(row => Number(row.dataset.transcriptIndex)),
+				nodes: log.querySelectorAll('*').length
+			}));
+			log(`native selection priority ${JSON.stringify(state)}`);
+			expect(state.connected && state.selected === selected, 'cost growth retains the native selected endpoint and text');
+			expect(state.indices.at(-1) === 2, 'a separate reading key cannot retain an unselected reply over the selection budget');
+			expect(state.indices.length <= 120 && state.nodes <= 12000, 'the native selection keeps the bounded DOM contract');
+			await clear.click();
+			await twoFrames(page);
+			expect(await page.evaluate(() => window.getSelection().isCollapsed), 'the accessible clear control releases selection priority');
+			await page.locator(LOG).hover();
+			await page.mouse.wheel(0, 1_000_000);
+			await page.waitForFunction(() => document.querySelector('[data-transcript-index="3"]')?.textContent.includes('GROWING_READER_START'));
+			log('clearing selection permits the still-streaming reply to remount');
+		} finally {
+			const stop = page.getByRole('button', { name: /^Stop/ });
+			if (await stop.isVisible()) await stop.click();
+		}
+	}
+});
+
 await runJourney({ name: 'transcript-reader', cases, allow: [...DEV_INSTANCE_NOISE] });

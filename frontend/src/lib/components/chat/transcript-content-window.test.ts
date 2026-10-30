@@ -165,6 +165,20 @@ describe('nested transcript mount budget', () => {
   expect(window.loadOlder()).toEqual({ start: 1920, end: 1980 });
   expect(window.selectionLimited).toBe(false);
  });
+ it('keeps a native selection within budget before preserving a separate reading key', () => {
+  let costs = [4000, 1000, 4000], pinned: TranscriptRange | null = null;
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000,
+   getPinnedRange: () => pinned, getReadingIndex: () => 2 });
+  window.setItemCount(3);
+  pinned = { start: 0, end: 1 };
+  costs = [6000, 1000, 6000];
+  const range = window.setItemCount(3, { followTail: false });
+  expect(range).toEqual({ start: 0, end: 2 });
+  expect(costs.slice(range.start, range.end).reduce((sum, cost) => sum + cost, 0)).toBeLessThanOrEqual(12000);
+  expect(window.selectionLimited).toBe(true);
+  pinned = null;
+  expect(window.windowAround(2)).toEqual({ start: 1, end: 3 });
+ });
  it('admits no unselected rows if already-selected content grows beyond the content budget', () => {
   let cost = 20, pinned: TranscriptRange | null = null;
   const window = createTranscriptWindow({ cap: 8, cost: () => cost, budget: 100, getPinnedRange: () => pinned });

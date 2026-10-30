@@ -105,9 +105,10 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 		selectionLimited = false;
 		const selected = getPinnedRange?.();
 		let pinned = selected;
-		if (readingIndex != null && Number.isInteger(readingIndex) && readingIndex >= 0 && readingIndex < count) {
-			pinned = selected ? { start: Math.min(selected.start, readingIndex), end: Math.max(selected.end, readingIndex + 1) }
-				: { start: readingIndex, end: readingIndex + 1 };
+		// Explicit selection keeps its existing stronger budget priority. A soft
+		// viewport key must not enlarge that span and admit unselected content.
+		if (!selected && readingIndex != null && Number.isInteger(readingIndex) && readingIndex >= 0 && readingIndex < count) {
+			pinned = { start: readingIndex, end: readingIndex + 1 };
 		}
 		if (count && pinned && pinned.end > pinned.start) {
 			const first = Math.max(0, pinned.start), last = Math.min(count, pinned.end);
