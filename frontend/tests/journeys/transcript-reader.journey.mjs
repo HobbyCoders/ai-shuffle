@@ -4,6 +4,7 @@
 import { runJourney, VIEWPORTS } from './runner.mjs';
 import { expect, openNewChat, typeAndSend, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
+import { permitsOversizeOriginSettle } from './lib/transcript-settle.mjs';
 
 // Hosted journeys build only the shared desktop UI and exercise it at both
 // widths. Opt in to the separately built production mobile shell for local QA:
@@ -122,18 +123,22 @@ const cases = [{
 		}
 	}, {
 		name: 'same-count-streaming-growth',
-		async setup({ page, status, variant, readingBoundary = false, replyScenario = 'reader-growth' }) {
+		async setup({ page, status, variant, readingBoundary = false, replyScenario = 'reader-growth', project = null }) {
 			// Produce a fresh native prefix through the real composer/provider, then
 			// replay it into the affected shell. No synthetic feed/state or SDK-only
 			// fork endpoint: default native seed sessions have no SDK session id.
-			await openNewChat({ page, status, variant });
+			await openNewChat({ page, status, variant }, { project });
 			await typeAndSend(page, 'Prepare a rich reading prefix. [script:reader-growth tps=0 latency_ms=0]');
 			await waitTurnSettled(page, { messagesAtLeast: 2, text: 'GROWING_READER_END', hold: 250 });
+			// First-send binding persists after the rendered turn settles. Wait for
+			// that real producer identity; never retry the send or invent a feed.
+			await page.waitForFunction(() => typeof JSON.parse(sessionStorage.getItem('ai-shuffle-active-session') || 'null')?.sessionId === 'string', null, { timeout: 15000 });
 			const id = await page.evaluate(() => JSON.parse(sessionStorage.getItem('ai-shuffle-active-session') || 'null')?.sessionId);
 			expect(typeof id === 'string', 'the real producer bound a fresh native session');
 			const prefix = mobileShell && variant.viewport === 'phone' ? '/mobile/' : '/';
 			await page.goto(new URL(`${prefix}?session=${encodeURIComponent(id)}`, status.urls.ui).toString());
 			await waitChatOpen(page, { messagesAtLeast: 2, hold: 250 });
+			if (project) await page.getByRole('button', { name: /^Git actions:/ }).waitFor();
 			await typeAndSend(page, `Grow the reply while I read it. [script:${replyScenario} latency_ms=0]`);
 			await page.waitForFunction(() => {
 				const row = [...document.querySelectorAll('[data-transcript-index]')].at(-1);
@@ -153,22 +158,41 @@ const cases = [{
 			await twoFrames(page);
 			const visible = await page.locator(LOG).evaluate(log => {
 				const top = log.getBoundingClientRect().top, bottom = log.getBoundingClientRect().bottom;
-				return [...log.querySelectorAll('[data-transcript-index]')].filter(row => {
+				const rows = [...log.querySelectorAll('[data-transcript-index]')];
+				return { indices: rows.filter(row => {
 					const box = row.getBoundingClientRect(); return box.bottom > top && box.top < bottom;
-				}).map(row => Number(row.dataset.transcriptIndex));
+				}).map(row => Number(row.dataset.transcriptIndex)),
+					reply: Number(rows.filter(row => row.textContent.includes('GROWING_READER_START')).at(-1).dataset.transcriptIndex) };
 			});
-			expect(visible[0] === (readingBoundary ? 2 : 3) && visible.includes(3), `read the growing reply at the intended viewport position (boundary=${readingBoundary}, visible=${visible.join(',')})`);
+			expect(visible.indices[0] === visible.reply - (readingBoundary ? 1 : 0) && visible.indices.includes(visible.reply), `read the growing reply at the intended viewport position (boundary=${readingBoundary}, visible=${visible.indices.join(',')})`);
 		},
 		async act({ page, mark, log, variant, minimumChars = 17000 }) {
 			await mark('read the live reply while same-count growth reprices the window');
-			let oversizeSettle;
+			let oversizeSettle, after;
 			if (minimumChars > 48000) await page.evaluate(selector => {
+				const container = document.querySelector(selector);
 				window.__oversizeShifts = [];
+				window.__oversizeTransitions = [];
+				let previousRows = container.querySelectorAll('[data-transcript-index]').length;
+				window.__oversizeMutation = new MutationObserver(() => {
+					const rows = [...container.querySelectorAll('[data-transcript-index]')];
+					if (previousRows > 1 && rows.length === 1 && rows[0] === window.__growingReader) {
+						const transition = { id: window.__oversizeTransitions.length, fromRows: previousRows,
+							toRows: rows.length, reader: true, began: performance.now(), scrollTop: null, frameEnd: null };
+						window.__oversizeTransitions.push(transition);
+						requestAnimationFrame(() => {
+							transition.scrollTop = container.scrollTop;
+							requestAnimationFrame(() => { transition.frameEnd = performance.now(); });
+						});
+					}
+					previousRows = rows.length;
+				});
+				window.__oversizeMutation.observe(container.querySelector('[data-transcript-index]').parentElement, { childList: true });
 				window.__captureOversizeShifts = entries => {
 					for (const entry of entries) {
-						if (entry.hadRecentInput) continue;
-						const rows = [...document.querySelectorAll(`${selector} [data-transcript-index]`)];
-						window.__oversizeShifts.push({ value: entry.value,
+						if (entry.hadRecentInput || entry.value === 0) continue;
+						const rows = [...container.querySelectorAll('[data-transcript-index]')];
+						window.__oversizeShifts.push({ value: entry.value, at: entry.startTime, scrollTop: container.scrollTop,
 							singleton: rows.length === 1 && rows[0] === window.__growingReader,
 							virtualizedOnly: entry.sources.length > 0 && entry.sources.every(source => source.node?.classList?.contains('msg-virtualized')) });
 					}
@@ -200,7 +224,7 @@ const cases = [{
 			try {
 				await page.waitForFunction(minimum => !window.__growingReader.isConnected || window.__growingReader.textContent.length > minimum, minimumChars, { timeout: 45000 });
 				await twoFrames(page);
-				const after = await page.evaluate(selector => {
+				after = await page.evaluate(selector => {
 					window.__sampleGrowingReader = false;
 					const samples = window.__growingSamples;
 					return { connected: window.__growingReader.isConnected, chars: window.__growingReader.textContent.length,
@@ -220,7 +244,7 @@ const cases = [{
 				if (minimumChars > 48000) {
 					const reply = viewport.rows.find(row => row.index === before.index);
 					expect(after.rows === 1 && reply.visiblePixels > viewport.height / 2, 'the dominant oversize reply remains readable as the permitted singleton');
-					expect(reply.top >= -1 && reply.top <= before.top + 1 && after.maxDrift <= Math.min(20, Math.max(1, before.top)), 'oversize fallback clamps at most 20px of removed space, never jumping past the reply start');
+					expect(reply.top >= -1 && reply.top <= before.top + 1, 'the oversize fallback never jumps past the reply start');
 					await privateScreenshot(page, variant, 'oversize-reading');
 				} else expect(after.maxDrift <= 1, 'the same reading key keeps its viewport offset during repricing');
 				expect(after.rows <= 120 && after.nodes <= 12000, 'reading preservation keeps the row and nested DOM budgets');
@@ -233,16 +257,20 @@ const cases = [{
 					oversizeSettle = await page.evaluate(() => {
 						window.__captureOversizeShifts(window.__oversizeObserver.takeRecords());
 						window.__oversizeObserver.disconnect();
+						window.__oversizeMutation.disconnect();
 						return { total: window.__oversizeShifts.reduce((sum, entry) => sum + entry.value, 0),
-							entries: window.__oversizeShifts.filter(entry => entry.value >= 0.05) };
+							entries: window.__oversizeShifts.map(entry => ({ ...entry,
+								transition: window.__oversizeTransitions.find(event => event.frameEnd !== null &&
+									entry.at >= event.began - 1 && entry.at <= event.frameEnd + 1)?.id ?? null })),
+							transitions: window.__oversizeTransitions };
 					});
 				}
 			}
 			if (minimumChars > 48000) {
 				log(`oversize singleton settle ${JSON.stringify(oversizeSettle)}`);
-				expect(oversizeSettle.total < 0.1 && oversizeSettle.entries.length <= 1 &&
-					oversizeSettle.entries.every(entry => entry.singleton && entry.virtualizedOnly),
-					'only one oversize-singleton origin settle is permitted, with exact CLS below 0.1');
+				const originSettle = permitsOversizeOriginSettle({ phone: variant.viewport === 'phone', before, after, settle: oversizeSettle });
+				expect(after.maxDrift <= 1 || originSettle, 'the <=1px reading limit only permits the single phone singleton transition at scroll origin');
+				expect(oversizeSettle.total < 0.05 || originSettle, 'strict CLS applies except to that same single phone-origin transition');
 			}
 		}
 	}];
@@ -307,16 +335,79 @@ cases.push({
 	}
 });
 
-cases.push({
+const oversizeCase = {
 	...growingReply,
 	name: 'same-count-visible-boundary-oversize',
-	// Only this new capacity-edge case permits the one-time origin clamp. The
-	// exact CLS, affected source, singleton state and <=20px drift are asserted.
-	allow: [{ kind: 'layout_shift',
-		message: /^layout shifted 0\.0\d{2} in total; biggest 0\.0\d{2} at \d+ms \(moved: div\.msg-virtualized in MessageArea\)$/,
-		reason: 'Oversize singleton removes the short prompt at scrollTop=0: measured 16.703125px settle and CLS 0.085; exact CLS<0.1, <=20px position, one singleton transition and readable reply remain mandatory.' }],
 	setup: context => growingReply.setup({ ...context, readingBoundary: true, replyScenario: 'reader-oversize' }),
 	act: context => growingReply.act({ ...context, minimumChars: 52000 })
+};
+// Desktop retains the original recorder and <=1px reading limits. Only the
+// phone definition has a recorder allowance; the measured transition predicate
+// above must independently accept its exact event before that rule can apply.
+cases.push({ ...oversizeCase, viewports: ['desktop'] });
+cases.push({ ...oversizeCase, viewports: ['phone'], allow: [{ kind: 'layout_shift',
+	message: /^layout shifted 0\.0\d{2} in total; biggest 0\.0\d{2} at \d+ms \(moved: div\.msg-virtualized in MessageArea\)$/,
+	reason: 'Only the measured phone singleton TRANSITION at scrollTop=0: exactly one associated non-input shift, exact CLS<0.1, <=20px position and a readable reply. Desktop and every other event retain strict limits.' }] });
+
+// Fixed mobile sheets do not resize the transcript. Read the real native
+// prefix above the sheet while a later reply grows past the same budget.
+if (mobileShell) for (const sheet of ['usage', 'controls', 'workers', 'navigation', 'actions', 'attach', 'git']) cases.push({
+	name: `overlay-${sheet}-reading-growth`,
+	viewports: ['phone'],
+	setup: context => growingReply.setup({ ...context, replyScenario: 'reader-growth tps=3', project: sheet === 'git' ? 'dev-sandbox' : null }),
+	async act({ page, mark, log, variant }) {
+		await mark(`preserve the exposed reading key under the real ${sheet} sheet`);
+		const fullCover = sheet === 'controls' || sheet === 'navigation' || sheet === 'attach';
+		await page.locator(LOG).evaluate((container, fullCover) => {
+			const replies = [...container.querySelectorAll('[data-transcript-index]')].filter(row => row.textContent.includes('GROWING_READER_START'));
+			const prefix = replies[0], reply = replies.at(-1);
+			if (!prefix || !reply) throw new Error('Both native replies must still be mounted before opening the sheet.');
+			const gap = reply.getBoundingClientRect().top - prefix.getBoundingClientRect().bottom;
+			const height = container.clientHeight;
+			const coverage = fullCover ? height * 0.7 : Math.floor((height - gap) / 2) - 8;
+			container.scrollTop += prefix.getBoundingClientRect().bottom - container.getBoundingClientRect().top - coverage;
+			window.__overlayPrefix = prefix;
+			window.__overlayReply = reply;
+			window.__overlayPrefixTop = prefix.getBoundingClientRect().top;
+		}, fullCover);
+		const opener = sheet === 'usage' ? page.getByRole('button', { name: /^Context and usage/ })
+			: sheet === 'controls' ? page.getByRole('button', { name: /^All chat controls/ })
+			: sheet === 'workers' ? page.getByRole('button', { name: /^Connected to .*Switch worker/ })
+			: sheet === 'actions' ? page.getByRole('button', { name: 'Chat actions', exact: true })
+			: sheet === 'attach' ? page.getByRole('button', { name: /^No project\. Attach a project/ })
+			: sheet === 'git' ? page.getByRole('button', { name: /^Git actions:/ })
+			: page.getByRole('button', { name: 'Open menu', exact: true });
+		await opener.click();
+		const overlay = sheet === 'navigation' ? page.locator('#mobile-nav-drawer')
+			: page.getByRole('dialog', { name: { usage: 'Context and usage', controls: 'Chat controls', workers: 'Connected to', actions: 'Chat actions', attach: 'Attach a project', git: 'Git actions' }[sheet], exact: true });
+		try {
+			await overlay.waitFor();
+			await overlay.evaluate(async node => { await Promise.all(node.getAnimations().map(animation => animation.finished)); });
+			await page.waitForFunction(() => !window.__overlayPrefix.isConnected || !window.__overlayReply.isConnected, null, { timeout: 45000 });
+			await twoFrames(page);
+			const state = await overlay.evaluate((sheet, { selector, layer }) => {
+				const container = document.querySelector(selector), prefix = window.__overlayPrefix;
+				const viewport = container.getBoundingClientRect(), overlay = (layer ? sheet.closest('.attach-layer') : sheet).getBoundingClientRect();
+				const exposedBottom = Math.max(viewport.top, Math.min(viewport.bottom, overlay.top));
+				const box = prefix.getBoundingClientRect();
+				return { retained: prefix.isConnected, replyRetained: window.__overlayReply.isConnected,
+					drift: Math.abs(box.top - window.__overlayPrefixTop), exposedHeight: exposedBottom - viewport.top,
+					visiblePixels: Math.max(0, Math.min(box.bottom, exposedBottom) - Math.max(box.top, viewport.top)),
+					rows: container.querySelectorAll('[data-transcript-index]').length, nodes: container.querySelectorAll('*').length };
+			}, { selector: LOG, layer: sheet === 'attach' });
+			log(`real ${sheet} overlay ${JSON.stringify(state)}`);
+			expect(state.retained && !state.replyRetained, 'repricing preserves the exposed/previous reading prefix, not the covered growing reply');
+			expect(state.drift <= 1, 'opening a sheet must not lose the reading key during repricing');
+			expect(fullCover ? state.exposedHeight === 0 : state.visiblePixels > state.exposedHeight / 2, 'the key covers the exposed transcript or is preserved while fully obscured');
+			expect(state.rows <= 120 && state.nodes <= 12000, 'overlay preservation keeps the same mounted-content budget');
+			await privateScreenshot(page, variant, `overlay-${sheet}`);
+		} finally {
+			await page.keyboard.press('Escape');
+			await twoFrames(page);
+			const stop = page.getByRole('button', { name: /^Stop/ });
+			if (await stop.isVisible()) await stop.click();
+		}
+	}
 });
 
 await runJourney({ name: 'transcript-reader', cases, allow: [...DEV_INSTANCE_NOISE] });

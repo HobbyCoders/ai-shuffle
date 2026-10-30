@@ -25,6 +25,7 @@
 		type SheetDrag
 	} from '$lib/components/ui/sheet-drag';
 	import { platform } from '$lib/stores/platform.svelte';
+	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
 	import { buildWorkspacePickerItems } from './workspace-catalog';
 	import { ATTACH_GAINS, attachWarning } from '$lib/components/chat/session-scope';
 
@@ -245,7 +246,7 @@
 <svelte:window onkeydown={onKeydown} />
 
 {#if open}
-	<div class="attach-layer" use:portal>
+	<div class="attach-layer" use:portal use:obscuresTranscript>
 		<button type="button" class="attach-scrim" aria-label="Close" tabindex="-1" style:opacity={scrimOpacity} onclick={() => !attaching && onClose()}></button>
 		<div
 			bind:this={sheetRef}

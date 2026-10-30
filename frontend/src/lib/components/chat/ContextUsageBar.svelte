@@ -45,6 +45,7 @@
 	 * click and mobile tap (tap-away closes).
 	 */
 	import { onMount, tick, untrack, type Snippet } from 'svelte';
+	import { obscuresTranscript } from './transcript-reading-area';
 	import { contextBreakdown, usageSections, hiddenUsageProviders } from '$lib/stores/expansion-preferences';
 	import { EyeOff, Eye, ExternalLink } from 'lucide-svelte';
 	import { AGENT_PROVIDER_ORDER } from '$lib/components/settings/providers/providers-model';
@@ -111,6 +112,8 @@
 
 	interface Props {
 		onOpenChange?: (open: boolean) => void;
+		/** The phone renders this popover as a transcript-covering bottom sheet. */
+		bottomSheet?: boolean;
 		/** Print the percentage under the ring (the phone's quick bar). */
 		showPercent?: boolean;
 		/** Context used, rounded, for a caller that shows it elsewhere. */
@@ -147,7 +150,8 @@
 		unknownWindowUsed = $bindable(null),
 		usedTokens = $bindable(''),
 		windowTokens = $bindable(null),
-		inline = false
+		inline = false,
+		bottomSheet = false
 	}: Props = $props();
 
 	/** Where a model's context length is set, for the unknown-window hint. */
@@ -1122,7 +1126,7 @@
 	{/if}
 
 	{#if shown}
-		<div class="usage-popover" class:inline bind:this={popoverEl} style:transform={inline ? undefined : `translateX(${popShift}px)`} role={inline ? 'region' : 'dialog'} aria-label="Context and usage">
+		<div class="usage-popover" class:inline use:obscuresTranscript={bottomSheet && !inline} bind:this={popoverEl} style:transform={inline ? undefined : `translateX(${popShift}px)`} role={inline ? 'region' : 'dialog'} aria-label="Context and usage">
 			{#if grip && !inline}{@render grip()}{/if}
 			<!-- ═══ Context window ═══ -->
 			<div class="ctx-section">

@@ -95,6 +95,7 @@
 		type TranscriptRange,
 		type TurnVisibility
 	} from './transcript-window';
+	import { beforeTranscriptCovered, exposedReadingViewport } from './transcript-reading-area';
 	import { classifyTranscriptRender } from '$lib/components/layout/chat-empty-state';
 	import { pendingDeepLink, deepLinkLoading } from '$lib/stores/pending-deep-link';
 	import { applyPerformanceProfile } from '$lib/utils/perf-profile';
@@ -705,13 +706,26 @@
 	function pinnedTranscriptRange(): TranscriptRange | null {
 		return selectedRowRange(chatColumnRef, ':scope > [data-transcript-key]', transcriptIndexOfRow);
 	}
+	let readingTranscriptKey: string | null = null;
 	function readingTranscriptIndex(): number | null {
 		if (!containerRef || !chatColumnRef) return null;
-		return dominantReadingIndex(
+		const viewport = exposedReadingViewport(containerRef.getBoundingClientRect());
+		if (viewport.bottom <= viewport.top) {
+			const previous = displayItems.findIndex(item => displayItemKey(item) === readingTranscriptKey);
+			return previous < 0 ? null : previous;
+		}
+		const reading = dominantReadingIndex(
 			chatColumnRef.querySelectorAll<HTMLElement>(':scope > [data-transcript-key]'),
-			containerRef.getBoundingClientRect(), transcriptIndexOfRow
+			viewport, transcriptIndexOfRow
 		);
+		if (reading !== null) readingTranscriptKey = displayItemKey(displayItems[reading]);
+		return reading;
 	}
+	// One lazy capture when a sheet opens, before its coverage is registered.
+	// Full-screen covers reuse this stable key; no scroll/token observer is added.
+	onMount(() => beforeTranscriptCovered(() => {
+		if (!document.hidden) untrack(readingTranscriptIndex);
+	}));
 	const transcriptWindow = createTranscriptWindow({
 		// Real row geometry is kept: no estimated-height placeholders that move
 		// the reader after anchor restoration. Dense code/table replies consume
@@ -819,6 +833,7 @@
 		const streaming = $activeSession.isStreaming;
 		untrack(() => {
 			const isNewSession = sessionKey !== windowSessionKey;
+			if (isNewSession) readingTranscriptKey = null;
 			const saved = isNewSession ? mountedRangeCache.get(sessionKey) : undefined;
 			windowSessionKey = sessionKey;
 			transcriptWindow.onStreamingChange(streaming);
