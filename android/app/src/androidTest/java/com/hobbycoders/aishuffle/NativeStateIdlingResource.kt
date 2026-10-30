@@ -16,7 +16,7 @@ internal class NativeStateIdlingResource(
     private val ready: () -> Boolean,
     private val requireFocusedFrame: Boolean = false,
 ) : IdlingResource, ViewTreeObserver.OnGlobalLayoutListener,
-    ViewTreeObserver.OnWindowFocusChangeListener, AutoCloseable {
+    ViewTreeObserver.OnWindowFocusChangeListener, ViewTreeObserver.OnDrawListener, AutoCloseable {
     private var callback: IdlingResource.ResourceCallback? = null
     private var focusedFrame = !requireFocusedFrame
     private var framePending = false
@@ -25,6 +25,7 @@ internal class NativeStateIdlingResource(
     init {
         root.viewTreeObserver.addOnGlobalLayoutListener(this)
         root.viewTreeObserver.addOnWindowFocusChangeListener(this)
+        root.viewTreeObserver.addOnDrawListener(this)
         requestFrame()
     }
     override fun getName() = description
@@ -38,6 +39,8 @@ internal class NativeStateIdlingResource(
         if (isIdleNow()) callback?.onTransitionToIdle() else requestFrame()
     }
     override fun onGlobalLayout() = changed()
+    // Same-sized TextView changes invalidate a frame without requesting layout.
+    override fun onDraw() = changed()
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         if (requireFocusedFrame) focusedFrame = false
         changed()
@@ -62,6 +65,7 @@ internal class NativeStateIdlingResource(
         root.viewTreeObserver.takeIf { it.isAlive }?.apply {
             removeOnGlobalLayoutListener(this@NativeStateIdlingResource)
             removeOnWindowFocusChangeListener(this@NativeStateIdlingResource)
+            removeOnDrawListener(this@NativeStateIdlingResource)
         }
     }
 }
