@@ -119,6 +119,8 @@ export interface ModelProvider {
 	context_window: number | null;
 	max_output_tokens: number | null;
 	enabled: boolean;
+	/** One active account per built-in provider and kind; gateways are independent. */
+	slot?: 'openai:key' | 'openai:subscription' | 'grok:key' | 'grok:subscription' | 'openrouter:key' | null;
 	// ----- Codex / ChatGPT-subscription OAuth surface -----
 	// The secret access/refresh blobs are NEVER returned — only the boolean
 	// `codex_*_token_set` flags. The non-secret Codex fields (`auth_mode`,
@@ -126,9 +128,6 @@ export interface ModelProvider {
 	// `app/api/model_providers.py::ModelProviderResponse` — `auth_mode` and
 	// `codex_account_id` are `Optional[str] = None`; the three booleans default
 	// to `false` in the response model, so they are always present on the wire.
-	/** Non-secret credit tracking binding; managed only by the billing endpoints. */
-	openai_billing_org_id?: string | null;
-	openai_billing_instance_id?: string | null;
 	auth_mode?: string | null;
 	codex_account_id?: string | null;
 	needs_reauth?: boolean;
@@ -188,6 +187,11 @@ export async function updateModelProvider(
 
 export async function deleteModelProvider(id: string): Promise<{ success: boolean } | void> {
 	return api.delete<{ success: boolean }>(`/model-providers/${id}`);
+}
+
+/** Select this account. Refetch the list: the response does not include disabled siblings. */
+export async function activateModelProvider(id: string): Promise<ModelProvider> {
+	return api.post(`/model-providers/${id}/activate`);
 }
 
 /** Flip a provider's `enabled` flag; returns the updated row. */

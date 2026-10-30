@@ -86,7 +86,7 @@ Real remaining credit for API keys, Grok Voice calls, tighter compaction, and fi
 ### Usage and credit
 
 - xAI API keys show your remaining prepaid credit, this month's usage and your spending limit. Add an xAI management key (console.x.ai → Settings → Management Keys) on the provider's Usage tab.
-- OpenAI API keys can show your real remaining credit. Sign in to OpenAI Platform from the provider's Usage tab, in a private browser window only you control, or paste a session key. OpenAI has no public balance API, so this reads the same figure the Platform dashboard shows. A typed-in balance is now only a fallback.
+- OpenAI API credit and spend readings have been removed. ChatGPT/Codex subscription usage is unchanged.
 - When access expires or is refused, the amount is hidden and you are asked to sign in again or replace the key, instead of seeing old numbers.
 - Usage panel numbers no longer flip like a clock when they change.
 
@@ -506,7 +506,7 @@ AI Shuffle is now open source under AGPL-3.0. Local use is free and needs no lic
 - Saving a remembered fact works when the agent also sends a revision.
 - The usage panel keeps Claude usage after a restart and on every device. Unchanged readings no longer look stale, a window that has rolled over reads "awaiting next report" instead of "resets in now", and stale sections show when they last updated.
 - The usage panel re-reads usage at most every 30 seconds however often you open it, keeps its last readings when a read fails, and a stale provider shows when it last updated and when it checks next.
-- OpenAI spend keeps updating, background API queries update the rate-limit readings, and the 7- and 30-day analytics ranges cover exactly 7 and 30 days.
+- Background API queries update the rate-limit readings, and the 7- and 30-day analytics ranges cover exactly 7 and 30 days.
 - Access requests in a chat update when something changes instead of asking the server every two seconds, and **Saved connections** refresh in every open session.
 - Links between documentation pages open inside the Docs panel instead of a missing page. The docs were checked against the app and corrected, including hooks, connector setup, menu paths and the API reference, which now covers the endpoints it left out.
 - Menus and messages name the right settings pages (**Settings → Providers → Devices**, **Settings → Account**, **Settings → API**).

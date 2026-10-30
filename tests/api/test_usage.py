@@ -343,38 +343,6 @@ class TestUsageLimitsProviders:
             response = await usage.get_usage_limits(False, "admin")
         assert response.provider_refreshing is True
 
-    @pytest.mark.parametrize("balance", [None, 0.0, 12.5])
-    def test_billing_failure_preserves_balance_and_reports_safe_status(self, balance):
-        from app.db import database as db
-        from app.db.provider_usage_snapshots import record_provider_usage_failure
-
-        db.create_model_provider(
-            provider_id="prov-openai", name="openai", provider_type="openai",
-            base_url="https://example.test",
-        )
-
-        fetched = int(time.time() * 1000)
-        if balance is not None:
-            db.upsert_provider_usage_snapshot(
-                "prov-openai", "openai", None, [], {"spend_month": balance}, {"source": "openai_admin"}, fetched
-            )
-        record_provider_usage_failure("prov-openai", "openai", "billing_access_denied")
-        db.upsert_provider_usage_snapshot(
-            "prov-openai", "openai", None, [], None, {"x-ratelimit-limit-requests": "500"}, fetched + 9999
-        )
-        with patch("app.api.usage.usage_limits_monitor") as mon:
-            mon.get_cluster_snapshot = AsyncMock(return_value=dict(_CLAUDE_SNAPSHOT))
-            body = _client().get("/api/v1/usage/limits").json()
-        if balance is None:
-            assert body["providers"] == []  # No Admin reading or entered balance.
-            return
-        entry = body["providers"][0]
-        assert entry["status"] == "stale"
-        assert entry["last_error_kind"] == "billing_access_denied"
-        assert entry["fetched_at"] == (fetched if balance is not None else None)
-        assert entry["credits"] == ({"spend_month": balance} if balance is not None else None)
-        assert "raw" not in entry
-
     def test_entries_carry_registry_source_and_separate_success_from_attempt(self):
         from app.db import database as db
         from app.db.provider_usage_snapshots import record_provider_usage_failure
@@ -458,13 +426,12 @@ class TestUsageLimitsProviders:
         body = response.json()
         _assert_claude_fields_unchanged(body)
         entries = {entry["provider_id"]: entry for entry in body["providers"]}
-        expected = {"prov-chatgpt", "prov-openai-2"} if configured else {"prov-chatgpt"}
+        expected = {"prov-chatgpt"}
         assert set(entries) == expected
         assert entries["prov-chatgpt"]["credits"] == {"balance": 99}
         assert entries["prov-chatgpt"]["windows"][0]["utilization"] == 12
-        if configured:
-            assert "prov-openai" not in entries  # no Admin reading or entered balance
-            assert entries["prov-openai-2"]["credits"] == {"spend_month": 0}
+        assert "prov-openai" not in entries
+        assert "prov-openai-2" not in entries
         assert any(row["provider_id"] == "openai-api" for row in db.get_all_provider_usage_snapshots())
 
     def test_seeded_rows_returned_with_joined_name(self):
@@ -518,7 +485,7 @@ class TestUsageLimitsProviders:
         body = resp.json()
         _assert_claude_fields_unchanged(body)
         assert body["providers"] == []
-    @pytest.mark.parametrize("provider_type", ["grok", "chatgpt", "openrouter", "openai"])
+    @pytest.mark.parametrize("provider_type", ["grok", "chatgpt", "openrouter"])
     def test_account_deletion_removes_usage_and_hides_late_poll(self, provider_type):
         from app.api.model_providers import router as providers_router
         from app.api.auth import require_admin
@@ -533,8 +500,7 @@ class TestUsageLimitsProviders:
             db.upsert_provider_usage_snapshot(
                 "removed-account", provider_type, "SuperGrok",
                 [{"type": "seven_day", "utilization": 0}],
-                {"spend_month": 20} if provider_type == "openai" else {"balance_remaining": 20},
-                {"source": "openai_admin"} if provider_type == "openai" else {}, int(time.time() * 1000),
+                {"balance_remaining": 20}, {}, int(time.time() * 1000),
             )
 
         save_snapshot()
@@ -650,8 +616,9 @@ class TestUsageLimitsProviders:
         assert grok["provider_type"] == "grok"
         assert grok["plan_type"] == "SuperGrok"
 
-    def test_openai_credits_surface_without_rate_limit_windows(self):
-        """Official organization spend is not a prepaid balance or RPM window."""
+    @pytest.mark.parametrize("snapshot_type", ["openai", "openai_balance"])
+    def test_retired_openai_spend_is_not_shown(self, snapshot_type):
+        """Older workers' Admin and Platform readings never appear in Usage."""
         from app.db import database as db
 
         db.create_model_provider(
@@ -660,7 +627,7 @@ class TestUsageLimitsProviders:
         )
 
         db.upsert_provider_usage_snapshot(
-            provider_id="prov-openai", provider_type="openai", plan_type=None,
+            provider_id="prov-openai", provider_type=snapshot_type, plan_type=None,
             windows=[{"type": "requests", "utilization": 0.2, "resets_at": None}],
             credits={"spend_month": 4.25},
             raw={"source": "openai_admin"}, fetched_at=8,
@@ -672,13 +639,7 @@ class TestUsageLimitsProviders:
 
         assert resp.status_code == 200
         providers = resp.json()["providers"]
-        assert len(providers) == 1
-        entry = providers[0]
-        assert entry["provider_id"] == "prov-openai"
-        assert entry["provider_type"] == "openai"
-        assert entry["windows"] == []
-        assert entry["credits"]["spend_month"] == 4.25
-        assert "balance_remaining" not in entry["credits"]
+        assert providers == []
 
     def test_fal_credits_surface_with_brand_name(self):
         """fal.ai is an integration key, not a model-provider row; the API

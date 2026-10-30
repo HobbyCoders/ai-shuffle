@@ -9,15 +9,14 @@ import pytest
 
 from app.core import api_key_balances as balances, encryption
 from app.core.config import settings
-from app.core.provider_usage import ProviderUsageMonitor
 from app.db import database as db, provider_balances
 from app.db import network as store
 from app.network import engine, policy
 from tests.core.network.harness import Worker, exchange, join
 
 PROVIDER = "billing-provider"
-SECRETS = ("balance_key", "openai_admin_key")
-BILLING = (*SECRETS, "openai_billing_org_id")
+SECRETS = ("balance_key",)
+BILLING = SECRETS
 
 
 @pytest.fixture(autouse=True)
@@ -67,21 +66,19 @@ def test_billing_policy():
     assert set(BILLING) <= set(coll.fields)
     assert set(SECRETS) <= set(coll.encrypted)
     assert not set(BILLING) & set(coll.local_fields)
-    assert {"balance_snapshot", "balance_instance_id", "openai_billing_instance_id",
+    assert {"balance_snapshot", "balance_instance_id",
             "codex_refresh_lease_owner", "codex_refresh_lease_expires_at"} <= set(coll.local_fields)
 
 
-@pytest.mark.parametrize("kind", ["xai", "openai"])
-def test_network_sync_balance_poll_rotate_and_clear(workers, monkeypatch, kind):
-    a, b = pair(workers, kind)
+def test_network_sync_balance_poll_rotate_and_clear(workers, monkeypatch):
+    a, b = pair(workers)
     calls = []
 
     async def get(url, **kwargs):
         calls.append((url, kwargs["headers"]["Authorization"]))
         body = ({"team_id": "team-test"} if url == balances.XAI_KEY_URL else
                 {"total": {"val": "-4200"}} if url.endswith("/prepaid/balance") else
-                {} if url.endswith("/preview") else
-                {"total_available": 42, "total_granted": 50, "total_used": 8})
+                {})
         return httpx.Response(200, json=body, request=httpx.Request("GET", url))
 
     monkeypatch.setattr(balances, "usage_get", get)
@@ -97,8 +94,7 @@ def test_network_sync_balance_poll_rotate_and_clear(workers, monkeypatch, kind):
         assert balances.status(row())["credits"]["balance_remaining"] == 42
         old = row()
     assert any(auth == "Bearer billing-test" for _, auth in calls)
-    if kind == "xai":
-        assert (balances.XAI_KEY_URL, "Bearer inference-test") in calls
+    assert (balances.XAI_KEY_URL, "Bearer inference-test") in calls
     with a.active():
         # Rotate through the real producer: billing access remains valid,
         # but the cached reading and xAI team resolution must be replaced.
@@ -131,57 +127,14 @@ def test_network_sync_balance_poll_rotate_and_clear(workers, monkeypatch, kind):
         assert not calls
 
 
-def test_network_sync_openai_admin_poll_and_clear(workers, monkeypatch):
-    a, b = pair(workers, "openai", configured=False)
-    with a.active():
-        assert db.set_openai_billing_binding(PROVIDER, "org-test", "a",
-                                            encryption.encrypt_value("admin-test"))
-        scan()
-    exchange(a, b)
-    calls = []
-
-    async def get(url, **kwargs):
-        calls.append((url, kwargs["headers"]))
-        result = {"amount": {"value": "3.5", "currency": "usd"}} if url.endswith("/costs") else {
-            "input_tokens": 10, "output_tokens": 5, "num_model_requests": 1}
-        return httpx.Response(200, json={"data": [{"results": [result]}]},
-                              request=httpx.Request("GET", url))
-
-    monkeypatch.setattr("app.core.openai_admin_usage.usage_get", get)
-    with b.active():
-        assert row()["openai_billing_instance_id"] == "b"
-        assert asyncio.run(ProviderUsageMonitor()._poll_openai_provider(row()))
-        assert db.get_all_provider_usage_snapshots()[0]["credits"]["spend_month"] == 3.5
-    assert len(calls) == 2
-    assert all(headers == {"Authorization": "Bearer admin-test", "OpenAI-Organization": "org-test"}
-               for _, headers in calls)
-    with a.active():
-        db.set_openai_billing_binding(PROVIDER, "org-new", "a", encryption.encrypt_value("admin-new"))
-        scan()
-    exchange(a, b)
-    with b.active():
-        assert not db.get_all_provider_usage_snapshots()
-        assert asyncio.run(ProviderUsageMonitor()._poll_openai_provider(row()))
-    with a.active():
-        db.clear_openai_billing_binding(PROVIDER, "a")
-        scan()
-    exchange(a, b)
-    with b.active():
-        assert row()["openai_admin_key"] is None
-        assert row()["openai_billing_org_id"] is None
-        assert not db.get_all_provider_usage_snapshots()
-        assert not asyncio.run(ProviderUsageMonitor()._poll_openai_provider(row()))
-
-
 def test_mixed_version_allowlists_and_upgrade_do_not_wipe_keys(workers, monkeypatch):
-    a, b = pair(workers, "openai", configured=False)
+    a, b = pair(workers, configured=False)
     modern = policy.collection("model_providers")
     legacy = replace(modern, fields=tuple(f for f in modern.fields if f not in BILLING),
                      encrypted=tuple(f for f in modern.encrypted if f not in SECRETS),
                      local_fields=(*modern.local_fields, *BILLING))
     with a.active():
         bind()
-        db.set_openai_billing_binding(PROVIDER, "org-test", "a", encryption.encrypt_value("admin-test"))
         scan()
         wire = engine.serialize_row(modern, row())
         assert set(SECRETS) <= set(wire["_enc"])
@@ -200,8 +153,6 @@ def test_mixed_version_allowlists_and_upgrade_do_not_wipe_keys(workers, monkeypa
     exchange(b, a)
     with a.active():
         assert encryption.decrypt_value(row()["balance_key"]) == "billing-test"
-        assert encryption.decrypt_value(row()["openai_admin_key"]) == "admin-test"
-        assert row()["openai_billing_org_id"] == "org-test"
     # Upgrade the legacy peer before it has received a modern record: missing
     # local keys must not suddenly serialize as a clear on its first scan.
     with b.active():
@@ -244,11 +195,9 @@ def test_inference_edits_keep_billing_key_and_invalidate_reading(workers, change
 
 
 def test_backup_binding_is_not_used_or_published(workers):
-    a, _ = pair(workers, "openai")
+    a, _ = pair(workers)
     with a.active():
-        db.set_openai_billing_binding(PROVIDER, "org-test", "a", encryption.encrypt_value("admin-test"))
-        restored = {**row(), "balance_instance_id": "another-installation",
-                    "openai_billing_instance_id": "another-installation"}
+        restored = {**row(), "balance_instance_id": "another-installation"}
         assert not balances.status(restored)["configured"]
         outgoing = engine.serialize_row(policy.collection("model_providers"), restored)
         assert not set(BILLING) & outgoing.keys()
@@ -256,87 +205,41 @@ def test_backup_binding_is_not_used_or_published(workers):
 
 
 @pytest.mark.parametrize("replacement", ["replacement-billing", None], ids=["save", "disconnect"])
-@pytest.mark.parametrize("kind", ["xai", "openai_admin"])
-def test_explicit_bind_reclaims_restored_installation_marker(workers, replacement, kind):
-    a, b = pair(workers, "openai" if kind == "openai_admin" else "xai", configured=False)
-    secret, marker = (("openai_admin_key", "openai_billing_instance_id") if kind == "openai_admin"
-                      else ("balance_key", "balance_instance_id"))
+def test_explicit_bind_reclaims_restored_installation_marker(workers, replacement):
+    a, b = pair(workers, configured=False)
     with a.active():
         with db.get_db() as conn:
             conn.cursor().execute(
-                f"UPDATE model_providers SET {secret} = %s, {marker} = %s WHERE id = %s",
+                "UPDATE model_providers SET balance_key = %s, balance_instance_id = %s WHERE id = %s",
                 ("enc:unreadable-backup", "another-installation", PROVIDER))
         restored = row()
         encrypted = encryption.encrypt_value(replacement) if replacement else None
-        if kind == "openai_admin":
-            if replacement:
-                assert db.set_openai_billing_binding(PROVIDER, "org-test", "a", encrypted)
-            else:
-                assert db.clear_openai_billing_binding(PROVIDER, "a")
-        else:
-            assert provider_balances.bind(restored, "a", encrypted)
-            # Reject delayed writes after an explicit takeover.
-            assert not provider_balances.bind(restored, "a", None)
-        assert row()[marker] == "a"
+        assert provider_balances.bind(restored, "a", encrypted)
+        assert not provider_balances.bind(restored, "a", None)
+        assert row()["balance_instance_id"] == "a"
         assert scan() == 1
     exchange(a, b)
     with b.active():
-        assert row()[marker] == "b"
-        if kind == "openai_admin":
-            from app.api.openai_billing import _status
-            assert asyncio.run(_status(row()))["configured"] is bool(replacement)
-        else:
-            assert balances.status(row())["configured"] is bool(replacement)
+        assert row()["balance_instance_id"] == "b"
+        assert balances.status(row())["configured"] is bool(replacement)
         if replacement:
-            assert encryption.decrypt_value(row()[secret]) == replacement
+            assert encryption.decrypt_value(row()["balance_key"]) == replacement
         else:
-            assert row()[secret] is None
-
-
-@pytest.mark.parametrize("change", ["disable_patch", "disable_toggle", "rotate"])
-def test_admin_access_survives_shared_disable_and_rotation(workers, change):
-    a, b = pair(workers, "openai")
-    with a.active():
-        db.set_openai_billing_binding(PROVIDER, "org-test", "a", encryption.encrypt_value("admin-test"))
-        scan()
-    exchange(a, b)
-    originals = {}
-    for worker in (a, b):
-        with worker.active():
-            originals[worker.name] = row()["openai_admin_key"]
-            assert db.upsert_provider_usage_snapshot(
-                PROVIDER, "openai", None, [], {"spend_month": 7}, {"source": "openai_admin"}, 123,
-                expected_binding=("org-test", worker.name), expected_admin_key=row()["openai_admin_key"])
-    with a.active():
-        if change == "disable_toggle":
-            db.set_model_provider_enabled(PROVIDER, False)
-        else:
-            db.update_model_provider(PROVIDER, **({"enabled": False} if change == "disable_patch"
-                                                 else {"auth_token": encryption.encrypt_value("inference-new")}))
-        assert scan() == 1
-    exchange(a, b)
-    for worker in (a, b):
-        with worker.active():
-            assert row()["openai_admin_key"] == originals[worker.name]
-            assert row()["openai_billing_org_id"] == "org-test"
-            assert row()["openai_billing_instance_id"] == worker.name
-            assert encryption.decrypt_value(row()["balance_key"]) == "billing-test"
-            assert not any(s["provider_id"] == PROVIDER for s in db.get_all_provider_usage_snapshots())
+            assert row()["balance_key"] is None
 
 
 def test_untrusted_unreadable_billing_does_not_block_scan_or_tombstones(workers, monkeypatch):
-    a, b = pair(workers, "openai", configured=False)
+    a, b = pair(workers, configured=False)
     with a.active():
         db.create_model_provider("removed-provider", "Remove me", "openai", "https://api.openai.com/v1")
         scan()
     exchange(a, b)
     with a.active():
-        corrupt = ("enc:unreadable-balance", "enc:unreadable-admin")
+        corrupt = ("enc:unreadable-balance",)
         with db.get_db() as conn:
             conn.cursor().execute(
-                "UPDATE model_providers SET balance_key = %s, balance_instance_id = %s, "
-                "openai_admin_key = %s, openai_billing_instance_id = %s, openai_billing_org_id = %s WHERE id = %s",
-                (corrupt[0], "another-installation", corrupt[1], "another-installation", "org-backup", PROVIDER))
+                "UPDATE model_providers SET balance_key = %s, balance_instance_id = %s WHERE id = %s",
+                (corrupt[0], "another-installation", PROVIDER))
         db.update_model_provider(PROVIDER, name="Unrelated shared edit")
         db.delete_model_provider("removed-provider")
         real_decrypt = encryption.decrypt_value
@@ -354,7 +257,6 @@ def test_untrusted_unreadable_billing_does_not_block_scan_or_tombstones(workers,
     with b.active():
         assert row()["name"] == "Unrelated shared edit"
         assert row()["balance_key"] is None
-        assert row()["openai_admin_key"] is None
         assert db.get_model_provider("removed-provider") is None
 
 
@@ -377,16 +279,14 @@ def test_preupgrade_keys_republish_without_manual_edits(workers, order, winner, 
     modern = policy.collection("model_providers")
     legacy = old_policy(modern)
     with version(legacy):
-        a, b = pair(workers, "openai", configured=False)
+        a, b = pair(workers, configured=False)
         with a.active():
             bind()
-            db.set_openai_billing_binding(PROVIDER, "org-test", "a", encryption.encrypt_value("admin-test"))
             scan()  # these keys were local-only before either worker upgraded
         exchange(a, b)
         exchange(b, a)
         with b.active():
             assert row()["balance_key"] is None
-            assert row()["openai_admin_key"] is None
 
     def upgrade_scan(worker):
         with version(modern), worker.active():
@@ -429,34 +329,27 @@ def test_preupgrade_keys_republish_without_manual_edits(workers, order, winner, 
         for worker in (a, b):
             with worker.active():
                 assert encryption.decrypt_value(row()["balance_key"]) == "billing-test"
-                assert encryption.decrypt_value(row()["openai_admin_key"]) == "admin-test"
                 assert row()["balance_instance_id"] == worker.name
-                assert row()["openai_billing_instance_id"] == worker.name
                 assert scan() == 0  # the merged rows converge, not an echo loop
 
 
 @pytest.mark.parametrize("storage", ["locked", "corrupt"])
 def test_explicit_clear_advances_stream_with_unreadable_local_secrets(workers, storage):
-    a, b = pair(workers, "openai")
+    a, b = pair(workers)
     modern = policy.collection("model_providers")
     with a.active():
-        db.set_openai_billing_binding(PROVIDER, "org-test", "a", encryption.encrypt_value("admin-test"))
         scan()
     exchange(a, b)
     with b.active():
         assert provider_balances.snapshot(row(), {"credits": {"balance_remaining": 42}})
-        db.record_provider_usage_failure(PROVIDER, "openai", "billing_access_denied",
-                                         expected_binding=("org-test", "b"),
-                                         expected_admin_key=row()["openai_admin_key"])
         if storage == "corrupt":
             with db.get_db() as conn:
-                conn.cursor().execute("UPDATE model_providers SET balance_key = %s, openai_admin_key = %s WHERE id = %s",
-                                      ("enc:invalid-balance", "enc:invalid-admin", PROVIDER))
+                conn.cursor().execute("UPDATE model_providers SET balance_key = %s WHERE id = %s",
+                                      ("enc:invalid-balance", PROVIDER))
     # A legacy/partial writer need not resend inference credentials along with
     # an explicit billing clear. The receiving store must not block that clear.
     with version(replace(modern, fields=tuple(f for f in modern.fields if f != "auth_token"))), a.active():
         bind(None)
-        db.clear_openai_billing_binding(PROVIDER, "a")
         scan()
         db.update_model_provider(PROVIDER, name="After clear")
         scan()
@@ -469,30 +362,17 @@ def test_explicit_clear_advances_stream_with_unreadable_local_secrets(workers, s
         assert result.retry == result.rejected == result.pending == 0
         assert result.applied >= 2
         assert row()["balance_key"] is None
-        assert row()["openai_admin_key"] is None
         assert row()["balance_snapshot"] is None
         assert row()["name"] == "After clear"
         assert not db.get_all_provider_usage_snapshots()
 
 
 @pytest.mark.parametrize("delivery", ["envelope", "snapshot"])
-def test_unrelated_sync_preserves_billing_ciphertexts_and_admin_refusal(workers, delivery):
-    from app.core.provider_usage import _capability_denied, capability_fingerprint
-
-    a, b = pair(workers, "openai")
-    with a.active():
-        db.set_openai_billing_binding(PROVIDER, "org-test", "a", encryption.encrypt_value("admin-test"))
-        scan()
-    exchange(a, b)
+def test_unrelated_sync_preserves_xai_billing_ciphertext_and_reading(workers, delivery):
+    a, b = pair(workers)
     with b.active():
+        assert provider_balances.snapshot(row(), {"credits": {"balance_remaining": 42}, "fetched_at": 1000})
         before = row()
-        headers = {"Authorization": "Bearer admin-test", "OpenAI-Organization": "org-test"}
-        fingerprint = capability_fingerprint("openai_admin", headers, before["openai_admin_key"])
-        db.record_provider_usage_failure(PROVIDER, "openai", "billing_access_denied",
-                                         expected_binding=("org-test", "b"),
-                                         expected_admin_key=before["openai_admin_key"],
-                                         denied_fingerprint=fingerprint)
-        assert asyncio.run(_capability_denied(PROVIDER, fingerprint))
     with a.active():
         db.update_model_provider(PROVIDER, name="Unrelated edit")
         scan()
@@ -504,11 +384,4 @@ def test_unrelated_sync_preserves_billing_ciphertexts_and_admin_refusal(workers,
         exchange(a, b)
     with b.active():
         assert row()["balance_key"] == before["balance_key"]
-        assert row()["openai_admin_key"] == before["openai_admin_key"]
-        assert asyncio.run(_capability_denied(PROVIDER, fingerprint))
-        # An in-flight Admin result captured before the unrelated edit still
-        # passes its existing ciphertext/binding guard.
-        assert db.upsert_provider_usage_snapshot(
-            PROVIDER, "openai", None, [], {"spend_month": 3.5},
-            {"source": "openai_admin", "organization_id": "org-test"}, 1000,
-            expected_binding=("org-test", "b"), expected_admin_key=before["openai_admin_key"])
+        assert row()["balance_snapshot"] == before["balance_snapshot"]

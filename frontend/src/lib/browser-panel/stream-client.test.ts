@@ -79,12 +79,6 @@ describe('browser stream client revive path', () => {
 		globalThis.WebSocket = originalWebSocket;
 	});
 
-	it('uses an encoded provider endpoint without requiring a chat session', () => {
-		client = createBrowserStreamClient({ providerId: 'provider/one', getAuthToken: () => 'tok', onStatus: () => {}, onFrame: () => {} });
-		client.connect();
-		expect(latest().url).toContain('/api/v1/model-providers/provider%2Fone/openai-billing/browser?token=tok');
-	});
-
 	it('keeps the existing chat endpoint unchanged', () => {
 		client = newClient(); client.connect();
 		expect(latest().url).toContain('/api/v1/ws/browser/s1?token=tok');
@@ -265,44 +259,6 @@ describe('workspace protocol', () => {
 		latest().receive({ type: 'hello', protocol: 1 });
 		expect(client.send({ ...payload, id: 'c2' })).toBe(false);
 	});
-	it.each(['input', 'command', 'viewport'])('allows provider protocol 1 %s without workspace identity', type => {
-		client = createBrowserStreamClient({ providerId: 'p1', getAuthToken: () => null, onStatus: () => {}, onFrame: () => {} });
-		client.connect();
-		expect(client.send({ type })).toBe(false);
-		latest().receive({ type: 'hello', protocol: 1 });
-		expect(client.send({ type })).toBe(true);
-		expect(latest().sent.map(value => JSON.parse(value))).toEqual([{ type }]);
-	});
-	it('never grants provider workspace access or exposes workspace URLs', () => {
-		const onWorkspace = vi.fn(), onHello = vi.fn(), onInspectHit = vi.fn(), onStatus = vi.fn(), onPage = vi.fn(), onFrame = vi.fn();
-		client = createBrowserStreamClient({ providerId: 'p1', getAuthToken: () => null, onStatus, onPage, onFrame, onWorkspace, onHello, onInspectHit });
-		client.connect();
-		latest().receive({ type: 'hello', protocol: 1 });
-		latest().receive({ type: 'workspace', state });
-		latest().receive({ type: 'inspect-hit', mode: 'select', element: {} });
-		latest().receive({ type: 'status', state: 'live', url: 'https://private.test' });
-		latest().receive({ type: 'page', url: 'https://private.test' });
-		for (const type of ['navigate', 'inspect', 'workspace-command', 'unknown']) {
-			expect(client.send({ type, id: 'c1', runtime_id: 'r1', tab_id: 'tab', op: 'tabs', args: {} })).toBe(false);
-		}
-		expect(onWorkspace).not.toHaveBeenCalled();
-		expect(onHello).not.toHaveBeenCalled();
-		expect(onInspectHit).not.toHaveBeenCalled();
-		expect(onStatus).toHaveBeenCalledWith('live', null);
-		expect(onPage).toHaveBeenCalledWith(null, false);
-		latest().receive({ type: 'frame', data: 'jpeg', metadata: { deviceWidth: 800, deviceHeight: 600 } });
-		latest().receive({ type: 'frame', data: 'workspace', metadata: { runtime_id: 'r1', tab_id: 'tab' } });
-		expect(onFrame).toHaveBeenCalledExactlyOnceWith('jpeg', { deviceWidth: 800, deviceHeight: 600 });
-		expect(latest().sent).toEqual([]);
-	});
-	it.each([null, [], {}, { protocol: '1' }, { protocol: 2, viewer_id: 'viewer' }].map(hello => ({ hello })))('rejects malformed or workspace hellos on provider streams: $hello', ({ hello }) => {
-		client = createBrowserStreamClient({ providerId: 'p1', getAuthToken: () => null, onStatus: () => {}, onFrame: () => {} });
-		client.connect();
-		latest().receive(hello && !Array.isArray(hello) ? { type: 'hello', ...hello } : hello);
-		latest().receive({ type: 'workspace', state });
-		expect(client.send({ type: 'input' })).toBe(false);
-		expect(client.send({ type: 'workspace-command', id: 'c1', runtime_id: 'r1', tab_id: 'tab' })).toBe(false);
-	});
 	it.each([{ protocol: 1 }, { protocol: 2 }, { protocol: 2, viewer_id: '' }, { protocol: 2, viewer_id: 42 }, { protocol: '2', viewer_id: 'viewer' }])('never downgrades normal agent streams: %j', hello => {
 		client = newClient(); client.connect();
 		latest().receive({ type: 'hello', ...hello });
@@ -311,21 +267,6 @@ describe('workspace protocol', () => {
 			expect(client.send({ type, id: 'c1', runtime_id: 'r1', tab_id: 'tab' })).toBe(false);
 		}
 	});
-	it('revokes provider authority after a wrong hello or reconnect', () => {
-		client = createBrowserStreamClient({ providerId: 'p1', getAuthToken: () => null, onStatus: () => {}, onFrame: () => {} });
-		client.connect();
-		latest().receive({ type: 'hello', protocol: 1 });
-		expect(client.send({ type: 'input' })).toBe(true);
-		latest().receive({ type: 'hello', protocol: 2, viewer_id: 'viewer' });
-		expect(client.send({ type: 'input' })).toBe(false);
-		latest().receive({ type: 'hello', protocol: 1 });
-		client.disconnect(); client.connect();
-		expect(client.send({ type: 'viewport', width: 800, height: 600 })).toBe(false);
-	});
-	it('rejects an ambiguous session and provider configuration', () => {
-		expect(() => createBrowserStreamClient({ sessionId: 's1', providerId: 'p1', getAuthToken: () => null, onStatus: () => {}, onFrame: () => {} })).toThrow('not both');
-	});
-
 	it('rejects malformed state without replacing the last valid workspace', () => {
 		const onWorkspace = vi.fn();
 		client = createBrowserStreamClient({

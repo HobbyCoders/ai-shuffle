@@ -434,15 +434,17 @@ def test_fingerprint_is_stable_and_non_empty():
     assert fp == database.migrations_fingerprint()
 
 
-def test_fingerprint_includes_network_schema(monkeypatch):
-    from app.db import network
+@pytest.mark.parametrize("module_name", ["database", "schema_postgres", "network"])
+def test_fingerprint_includes_migration_sources(monkeypatch, module_name):
+    from app.db import network, schema_postgres
 
+    source = {"database": database, "schema_postgres": schema_postgres, "network": network}[module_name]
     before = database.migrations_fingerprint()
     original = database.Path.read_bytes
 
     def changed(path):
         content = original(path)
-        return content + b"\n# network schema change" if path == database.Path(network.__file__) else content
+        return content + b"\n# migration source change" if path == database.Path(source.__file__) else content
 
     monkeypatch.setattr(database.Path, "read_bytes", changed)
     assert database.migrations_fingerprint() != before

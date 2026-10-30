@@ -30,6 +30,7 @@ vi.mock('$lib/stores/session/v2/sse-feed', () => ({
 
 import MirrorSyncGate from './MirrorSyncGate.svelte';
 import { feedController } from '$lib/stores/session/v2/feed-controller';
+import { createDraftManager } from '$lib/stores/session/draft-manager';
 import type { ActiveSessionState } from '$lib/stores/active-session';
 
 const children = createRawSnippet(() => ({ render: () => '<div>transcript</div>' }));
@@ -74,6 +75,33 @@ afterEach(() => {
 });
 
 describe('mirrored chat sync drains (#2227)', () => {
+	it('warm unchanged mirror resumes one reader without replacing history at its opening checkpoint', async () => {
+		const deps = attachRecordingDeps();
+		vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(status('current'))));
+		feedController.start('s1');
+		for (const seq of [1, 2, 3]) feeds.onEvent!(userMessage(seq));
+		feeds.onEvent!({ type: 'caught_up', seq: 3, epoch: 'e1' });
+		feedController.stop();
+		const dm = createDraftManager({
+			update: () => {}, getState: () => deps.state,
+			wsSend: () => true, wsIsConnected: () => true,
+			feedRestart: id => feedController.restart(id), feedRevive: id => feedController.revive(id),
+		});
+		feedController.start('s1');
+		const before = deps.state.messages;
+		const publications = deps.published.length;
+		render(MirrorSyncGate, { sessionId: 's1', remote: true,
+			onCaughtUp: () => dm.reloadSession(false, 'mirror-caught-up'), children });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(feeds.opened).toEqual([0, 3]);
+		expect(deps.state.messages).toBe(before);
+		expect(deps.published.slice(publications).every(s => s.messages === before && !s.isLoadingSession)).toBe(true);
+		// A genuine rewrite still invalidates the cached view and cursor.
+		feeds.onEvent!({ type: 'reset', epoch: 'e2' });
+		expect(feeds.opened).toEqual([0, 3, 0]);
+		expect(deps.state.messages).toHaveLength(0);
+	});
+
 	it.each(['current', 'opening-checkpoint'])('keeps the transcript and feed cursor after %s', async (initial) => {
 		const deps = attachRecordingDeps();
 		const fetch = vi.fn()

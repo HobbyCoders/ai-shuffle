@@ -379,11 +379,17 @@ class ModelLookups:
         return row
 
     def provider(self, provider_id: str) -> Optional[Dict[str, Any]]:
-        if self._complete or provider_id in self._providers:
-            return self._providers.get(provider_id)
-        row = database.get_model_provider(provider_id, include_token=False)
-        self._providers[provider_id] = row
-        return row
+        if self._complete:
+            from app.db.model_provider_slots import model_provider_slot
+            row = self._providers.get(provider_id)
+            slot = model_provider_slot(row) if row else None
+            if row and not row.get("enabled") and slot:
+                return next((r for r in self._providers.values()
+                             if r.get("enabled") and model_provider_slot(r) == slot), row)
+            return row
+        if provider_id not in self._providers:
+            self._providers[provider_id] = database.resolve_model_provider(provider_id)
+        return self._providers[provider_id]
 
 
 def model_choice_problem(
@@ -467,6 +473,9 @@ def resolve_automation_model(
     if selection:
         model_id, provider_id = split_model_selection(selection)
         problem = model_choice_problem(selection, lookups)
+        if provider_id:
+            active = lookups.provider(provider_id)
+            provider_id = (active or {}).get("id") or provider_id
         return {
             "selection": selection,
             "model": model_id,
@@ -492,6 +501,9 @@ def resolve_automation_model(
             logger.debug("Could not read agent %s for model reporting", profile_id, exc_info=True)
     provider_id = (config.get("provider") or "").strip() or None
     model_id = (config.get("model") or "").strip() or None
+    if provider_id:
+        active = lookups.provider(provider_id)
+        provider_id = (active or {}).get("id") or provider_id
     if model_id:
         return {"selection": None, "model": model_id, "provider_id": provider_id,
                 "source": MODEL_SOURCE_AGENT, "error": None}

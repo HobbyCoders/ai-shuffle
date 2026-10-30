@@ -151,10 +151,26 @@
     "target_pr": 2,
     "base_settings": true
   },
+  "AI_SHUFFLE_PERF_DESKTOP_BUILD_REUSE": {
+    "kind": "internal",
+    "reason": "Desktop builder rollback to compiling Node outputs; dependency and content hashes plus current app/Fluid installation stay mandatory."
+  },
+  "AI_SHUFFLE_PERF_DESKTOP_UPDATE_PUSH": {
+    "kind": "internal",
+    "reason": "Desktop updater rollback to the existing 30-second bridge heartbeat; command expiry, atomic consumption and authenticated control access are unchanged."
+  },
+  "AI_SHUFFLE_PERF_DOCKER_DEPENDENCY_REUSE": {
+    "kind": "internal",
+    "reason": "Supervisor-only dependency-cache rollback switch; source signatures, runtime checks and per-revision app code remain mandatory."
+  },
   "AI_SHUFFLE_PERF_LAZY_CONNECTORS": {
     "kind": "internal",
     "reason": "Temporary process-start rollback switch for SDK-free connector discovery; restores eager connector and optional SDK imports while the startup optimization is validated",
     "base_settings": false
+  },
+  "AI_SHUFFLE_PERF_PREBUILT_UI": {
+    "kind": "internal",
+    "reason": "Updater-only rollback to verified-source UI compilation; bundle integrity and independent source verification remain mandatory."
   },
   "AI_SHUFFLE_PERF_PROVIDER_HTTP_REUSE": {
     "kind": "internal",
@@ -2665,6 +2681,10 @@
     "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Enable early session list startup optimization",
     "target_pr": 6,
     "base_settings": true
+  },
+  "VITE_PERF_KEEP_MIRROR_CACHE": {
+    "kind": "internal",
+    "reason": "Temporary default-on performance kill switch for preserving the mirrored transcript and cursor through freshness; 0 restores the legacy opening replay and unmount."
   },
   "VITE_PERF_PARALLEL_AUTH_PROBES": {
     "kind": "internal",

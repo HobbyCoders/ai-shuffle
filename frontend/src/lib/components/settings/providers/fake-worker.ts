@@ -8,6 +8,7 @@ import type { ClaudeAuthMode, ClaudeAuthSummary } from '$lib/api/claude-auth';
 import type { ClaudeCliStatus } from '$lib/api/claude-cli';
 import type { LoopGuardStatus } from '$lib/api/loop-guard';
 import { claudeSummary } from './fixtures';
+import { classifyRow } from './providers-model';
 
 export interface WorkerCall {
 	method: string;
@@ -108,11 +109,46 @@ export function fakeWorker(init: Partial<FakeWorkerState> = {}, routes: Record<s
 	};
 	const calls: WorkerCall[] = [];
 
+	const slot = (r: ModelProvider) => classifyRow(r) === 'custom' ? r.id : classifyRow(r);
+	function select(id: string) {
+		const target = state.rows.find((r) => r.id === id)!;
+		state.rows = state.rows.map((r) => slot(r) === slot(target) ? { ...r, enabled: r.id === id } : r);
+		return state.rows.find((r) => r.id === id);
+	}
+	function selectClaude(id: string | null) {
+		const accounts = state.claude.accounts!;
+		accounts.api_key = accounts.api_key.map((a) => ({ ...a, active: a.id === id }));
+		const active = accounts.api_key.find((a) => a.active);
+		state.claude.api_key = { set: !!active, last4: active?.last4 ?? null };
+		state.integrations.anthropic_api_key_set = !!active;
+		state.integrations.anthropic_api_key_masked = active?.masked_key ?? null;
+		return { accounts };
+	}
+
 	const defaults: Record<string, RouteHandler> = {
 		'GET /model-providers': () => ({ providers: state.rows }),
+		'POST /model-providers/:id/activate': (_body, path) => select(decodeURIComponent(path.split('/')[2])),
+		'POST /settings/claude-auth/accounts/api-keys': (body) => {
+			const { api_key, label } = body as { api_key: string; label?: string };
+			const id = `key-${state.claude.accounts!.api_key.length + 1}`;
+			state.claude.accounts!.api_key.push({ id, label: label || 'Anthropic API key', active: false, masked_key: `sk-ant-…${api_key.slice(-4)}`, last4: api_key.slice(-4) });
+			return { ...selectClaude(id), account_id: id };
+		},
+		'POST /settings/claude-auth/accounts/api_key/:id/activate': (_body, path) => selectClaude(path.split('/')[5]),
+		'PATCH /settings/claude-auth/accounts/api_key/:id': (body, path) => {
+			const a = state.claude.accounts!.api_key.find((a) => a.id === path.split('/')[5])!;
+			a.label = (body as { label: string }).label;
+			return { accounts: state.claude.accounts };
+		},
+		'DELETE /settings/claude-auth/accounts/api_key/:id': (_body, path) => {
+			const active = state.claude.accounts!.api_key.find((a) => a.active)?.id ?? null;
+			state.claude.accounts!.api_key = state.claude.accounts!.api_key.filter((a) => a.id !== path.split('/')[5]);
+			return selectClaude(active);
+		},
 		'PATCH /model-providers/:id': (body, path) => {
 			const id = decodeURIComponent(path.split('/')[2]);
 			state.rows = state.rows.map((r) => (r.id === id ? { ...r, ...(body as object) } : r));
+			if ((body as { enabled?: boolean }).enabled) return select(id);
 			return state.rows.find((r) => r.id === id);
 		},
 		'GET /settings/claude-cli': () => ({ installed: state.cli.installed, version: state.cli.cli_version,

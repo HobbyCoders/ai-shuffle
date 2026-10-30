@@ -193,7 +193,7 @@ describe('Claude', () => {
 			[CLAUDE_KEY_ITEM, 'standby', false, false]
 		]);
 		expect(claude.credentials[0].name).toBe('Claude Max subscription');
-		expect(hasPlusMenu(claude)).toBe(false);
+		expect(hasPlusMenu(claude)).toBe(true);
 	});
 
 	it('API key mode: the key is active', () => {
@@ -360,7 +360,7 @@ describe('connector line', () => {
 describe('"+" menu', () => {
 	it('offers the kinds not added yet and another of a kind that allows several', () => {
 		const views = buildProviders(input({ rows: [chatgptRow(), row()] }));
-		expect(addableKinds(byId(views, 'openai')).map((k) => k.menuLabel)).toEqual(['Another API key']);
+		expect(addableKinds(byId(views, 'openai')).map((k) => k.menuLabel)).toEqual(['Another Subscription', 'Another API key']);
 		expect(addableKinds(byId(views, 'grok')).map((k) => k.menuLabel)).toEqual(['Subscription', 'API key']);
 	});
 
@@ -406,6 +406,39 @@ describe('claudeGateNotice', () => {
 		expect(claudeGateNotice(summary)).toBe('Claude cannot run: no Anthropic API key is stored on this worker.');
 	});
 
+});
+
+
+describe('saved accounts and active slots', () => {
+	it('groups multiple subscriptions and keys by kind, including a second sign-in draft', () => {
+		const openai = byId(buildProviders(input({
+			rows: [row({ id: 'work', enabled: false }), chatgptRow({ id: 'sub-personal' }), row({ id: 'personal' }), chatgptRow({ id: 'sub-work', enabled: false })],
+			drafts: [{ item: 'draft:sub', providerId: 'openai', flavor: 'device', name: 'New subscription' }]
+		})), 'openai');
+		expect(openai.credentials.map((c) => c.flavor)).toEqual(['device', 'device', 'device', 'key', 'key']);
+		expect(openai.credentials.filter((c) => c.active).map((c) => c.item)).toEqual(['mp:sub-personal', 'mp:personal']);
+		expect(openai.onCount).toBe(2);
+		expect(addableKinds(openai).map((k) => k.hint)).toEqual(['Becomes active after sign-in', 'New key becomes active']);
+	});
+
+	it.each(['subscription', 'api_key', 'off'] as const)('lists saved Anthropic keys separately from %s mode', (mode) => {
+		const accounts = {
+			api_key: [
+				{ id: 'personal', label: 'Personal', active: false, masked_key: 'sk-ant-…1111', last4: '1111' },
+				{ id: 'work', label: 'Work', active: true, masked_key: 'sk-ant-…2222', last4: '2222' }
+			],
+			subscription: [] as never[], subscription_support: { supported: false, reason: 'Single sign-in' },
+			storage_locked: false, error: null, login_pending: false, recovery_required: false
+		};
+		const claude = byId(buildProviders(input({ claude: claudeSummary({ mode, accounts }) })), 'claude');
+		const keys = claude.credentials.filter((c) => c.flavor === 'anthropic');
+		expect(keys.map((c) => [c.item, c.name, c.active, c.on])).toEqual([
+			['claude:api-key:personal', 'Personal', false, false],
+			['claude:api-key:work', 'Work', true, mode === 'api_key']
+		]);
+		expect(addableKinds(claude).map((k) => k.menuLabel)).toContain('Another API key');
+		expect(addableKinds(claude).map((k) => k.flavor)).not.toContain('cli');
+	});
 });
 
 describe('Claude before its summary answers', () => {

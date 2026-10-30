@@ -33,9 +33,9 @@ export interface MirrorSyncInput {
 	 *  open. Keep its local echo visible and follow the live feed, not a reset. */
 	createdFromComposer?: boolean;
 	/** Fires ONCE per opened session: its opening checkpoint is materialized.
-	 *  Later drains of a live backlog must not reload the transcript —
-	 *  the live SSE feed already delivers every replicated event, and an
-	 *  explicit log rewrite reaches the feed as its own `reset` (#2227). */
+	 *  Freshness is not invalidation: neither this first catch-up nor later
+	 *  backlog drains should discard the reducer or cursor. The live feed
+	 *  delivers every replicated event; a rewrite has its own `reset`. */
 	onCaughtUp: () => void;
 	graceMs?: number;
 }

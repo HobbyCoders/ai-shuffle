@@ -9,6 +9,22 @@
   },
   "suites": [
     {
+      "name": "mirror-cache",
+      "intro": "Use an approved disposable candidate worker pair, synthetic long history and throwaway chats only. Never restart a production worker.",
+      "rows": [
+        {
+          "id": "mirror-cache.warm-peer-catch-up",
+          "check": "A warm mirrored chat keeps its cursor and mounted transcript through real owner catch-up",
+          "kind": "browser",
+          "needs": ["install", "device", "provider"],
+          "two_worker": true,
+          "how": "On paired disposable candidate workers, open a long mirrored chat on the receiver, switch away, then reopen it with an unchanged owner. Record SSE start cursors, MessageArea mounts and the real sync-status responses. Repeat while the owner appends a real streaming reply and while the receiver reconnects after a half-open stream. On the disposable owner perform an actual epoch-changing rewind and reopen the mirror. Also replace the receiver's mirrored log after its old-epoch SSE reader connects but before its opening freshness barrier clears; repeat with shorter, equal and longer replacement logs. Repeat on desktop at 1280x800 and the real /mobile/ shell at 390x844 with the flight recorder. Archive the throwaway chats and retain the exact candidate builds and private recordings. Do not simulate peer metadata, sync-status or replication for this row.",
+          "pass_when": "An unchanged warm return opens one positive-cursor reader, with zero sequence-zero replacements and no transcript remount through the freshness checkpoint. Stale content stays hidden, inaccessible and inert until caught up; the same mounted subtree is then revealed. New owner events and reconnects arrive without omissions or duplicate rows. A genuine epoch rewrite invalidates the old cached view and cursor, including a replacement committed after SSE connected while freshness was still waiting; it resets and reloads the replacement without requiring a manual reconnect. Seeded preview, mocked sync-status, unit tests and a green build alone do not pass this paired-worker row.",
+          "past_bug": "Opening freshness was treated as invalidation: every warm mirrored chat discarded its cached reducer, replayed from sequence zero and remounted the transcript."
+        }
+      ]
+    },
+    {
       "name": "account-phones",
       "intro": "Requires the account hub with hobbycoders-cloud PR #24 deployed, a new Android build containing stable installation identity and install proofs, a real phone, and disposable account-linked candidate workers. The dev instance has neither the hub nor Android sign-in.",
       "rows": [
@@ -1364,6 +1380,24 @@
           "past_bug": "#580: a 2s acquisition timeout became a failed worker ResultMessage."
         },
         {
+          "id": "harness-basics.pr840-runtime-pin-follow",
+          "check": "Existing chats and automation pins follow the newly active saved account",
+          "kind": "owner",
+          "needs": ["provider", "install"],
+          "how": "On a disposable candidate worker with two real saved accounts A and B in one provider/kind slot, select A, start a throwaway chat and a paused automation pinned to A, and give a Task worker a provider-specific model assignment different from its native-Claude assignment. Send a short turn, activate B in Settings > Providers, and send a follow-up in the same chat and one automation run. Dispatch the Task worker. Inspect the serving account and usage ledger without exposing credentials. Repeat a fresh chat with no model/provider binding. Switch back and archive the throwaway sessions. Real credential acceptance and per-account usage cannot be proved by the dev instance's fake provider or its public-response Settings fixture.",
+          "pass_when": "Each slot has exactly one active account. The existing chat and automation keep their model and original durable pin, but the next turn authenticates and books usage to B. Task keeps the original provider's model-map assignment, including a first default-provider turn. Turning B off does not silently select A. No provider or model fallback occurs.",
+          "past_bug": "PR #840: first default turns lost the Task pin, and a late account switch sent B's credentials while usage settled against A."
+        },
+        {
+          "id": "harness-basics.pr840-second-subscription-sign-in",
+          "check": "A second ChatGPT or SuperGrok sign-in saves a distinct account and selects its slot",
+          "kind": "owner",
+          "needs": ["provider", "install"],
+          "how": "On a disposable candidate worker, use Settings > Providers to sign in to ChatGPT account A, then Add another subscription and complete sign-in as a different ChatGPT account B. Repeat for two SuperGrok accounts. Use private input/sign-in controls; never put tokens or codes in evidence. Reopen Providers, activate each saved sibling in turn, and send a short follow-up in a throwaway chat originally pinned to A. Cancel an additional sign-in and confirm the saved accounts remain. Real browser/device OAuth and provider account identity require real accounts; the seeded Settings journey covers only switching public account rows, not enrollment.",
+          "pass_when": "Both distinct accounts remain saved under each subscription slot; only the newly activated sibling is on and marked Active. Switching subscriptions does not disable an API-key account in the other kind. A follow-up uses the selected subscription with no history loss, duplicate saved row or overwritten sibling login. Cancelled enrollment leaves the prior selection and credentials intact. Claude Code's single existing sign-in is unchanged.",
+          "past_bug": "PR #840 added saved ChatGPT/SuperGrok accounts without real-worker second-sign-in acceptance coverage."
+        },
+        {
           "id": "harness-basics.pr844-update-snapshot-timing",
           "check": "Container source updates expose snapshot and child-spawn timing without changing rollback",
           "kind": "owner",
@@ -1380,6 +1414,33 @@
           "how": "On a disposable candidate worker, store a disposable agent row with enable_file_checkpointing true the way an older build did, start a chat on it, send two prompts and open Rewind on the first. Then call the rewind execute endpoint for a second disposable chat with restore_files true. Edit and save the disposable agent, then read its stored config. Archive only the disposable chats and agent.",
           "pass_when": "The rewind dialog shows only the confirm text and Cancel/Rewind, with no Chat & Code option. The API call rewinds the chat and its warning says file restore isn't supported, not that a checkpoint is missing. The saved agent row no longer carries enable_file_checkpointing and every other field is unchanged.",
           "past_bug": "An old agent flag made the rewind dialog offer a file restore the backend always refused, with a warning that blamed a missing checkpoint."
+        },
+        {
+          "id": "harness-basics.source-update-dependency-reuse",
+          "check": "Docker source revisions reuse only complete compatible dependencies and run current Fluid",
+          "kind": "owner",
+          "needs": ["install"],
+          "how": "Use only a disposable candidate container, synthetic data and an ephemeral signed-source acceptance feed; this cannot be proved by a normal dev preview. Stage two source revisions with identical Python/Node dependency closures, changing a harmless Fluid probe in the second. Record third-party pip downloads/install commands and npm ci by package, excluding the separately installed current Fluid code. Import the changed Fluid probe in a fresh interpreter. Change one Python lock, then one Node package lock in separate signed fixtures. Interrupt only the candidate during an incomplete dependency installation and retry. Under a valid completion record, delete an installed Python module and a Node entry point, then make same-size edits to critical code while restoring its modification time; also add damaged bytecode. Warm a nested Python module's bytecode, then change its source while preserving size, inode and mtime. Confirm ctime changes, the old probe can still read the warmed value, and the fresh candidate rebuilds instead of importing the edited source. Confirm only the affected dependency installation is rebuilt at a new path and the retained tree is untouched. Change the signed optional-dependency installer, installation recipe and selected pip/ensurepip identity in separate disposable fixtures. Check fresh imports in both current and rollback revisions after reuse. Stage enough revisions to exercise cleanup, then restart each retained revision. Repeat once with AI_SHUFFLE_PERF_DOCKER_DEPENDENCY_REUSE=0. Never stop a production updater or use production signing keys.",
+          "pass_when": "The second identical-closure revision makes zero third-party pip downloads/installs and zero npm ci calls, yet executes the new Fluid code. Each lock change misses only its relevant dependency cache. Interrupted/partial environments are never reused; active and retained revisions remain startable at the original venv paths, and no more than two unused complete environments per package remain. The rollback flag restores per-revision dependency preparation without weakening signatures or runtime checks. These are real-candidate acceptance checks, not a pass from the offline wheel lab.",
+          "past_bug": "Every container source update created a fresh Python environment and reinstalled byte-identical dependencies, while reusing an entire old app environment would run stale Fluid code."
+        },
+        {
+          "id": "harness-basics.source-update-desktop-wake-build",
+          "check": "Installed desktop builds reuse unchanged outputs and consume web update commands once",
+          "kind": "owner",
+          "needs": ["device", "install"],
+          "how": "Use only disposable installed desktop and older-worker candidates, synthetic data and signed acceptance fixtures; this needs the installed control connection rather than a normal preview. Stage two revisions changing app/Fluid only, then separate revisions changing a tool source, a browser build script and one package lock. Record build/npm subprocesses and run the new app/Fluid code. From the real web Updates action just after an authenticated bridge heartbeat, record command enqueue/consume receipts without waiting for another timer tick; duplicate a wake and let another heartbeat pass. Expire a queued request, disconnect/reconnect the candidate, and stop/restart only its app while a wake request is held. Test old-worker 404 fallback and each of AI_SHUFFLE_PERF_DESKTOP_BUILD_REUSE=0 and AI_SHUFFLE_PERF_DESKTOP_UPDATE_PUSH=0. Refuse invalid-token, wrong-listener and nonlocal wake access. Never upgrade or stop production workers.",
+          "pass_when": "Unchanged packages run zero builds and npm ci while current app/Fluid code runs. A source edit rebuilds only its package; a script-only edit does not reinstall dependencies, and a lock change installs only its package. The actual web command is consumed promptly and executes exactly once across duplicate hints/heartbeats; expired commands never run. A held request closes on disconnect, stop or restart, and never leaks another waiter. Old workers and the push rollback switch keep the unchanged 30-second polling path; the build rollback switch recompiles normally. Authentication, command expiry and atomic consumption stay enforced. Fake-clock or socket unit tests alone do not pass this installed-worker row.",
+          "past_bug": "Source updates rebuilt unchanged tools/browser/desktop packages and a build-script-only manifest edit invalidated npm reuse; web Update commands could wait for the next 30-second control poll."
+        },
+        {
+          "id": "harness-basics.source-update-prebuilt-ui",
+          "check": "Signed desktop and phone UI bundles skip local compilation and fail safely",
+          "kind": "owner",
+          "needs": ["device", "install"],
+          "how": "Use a disposable desktop install and candidate container with synthetic data and an ephemeral acceptance signing key; publication and an installed-launcher handover cannot be proved by a dev preview. Upgrade the desktop candidate from an older launcher to launcher 9, exercising the documented launcher-swap acceptance flow, then offer another signed source revision with its matching CI-produced desktop/phone UI asset. Record frontend npm ci/build invocations and the served revision/version stamp on / at 1280x800 and /mobile/ at 390x844. Repeat with an unreachable asset, corrupt asset bytes and a validly signed descriptor naming a wrong revision/version/tree; keep the independent source signature valid for those UI-fallback cases. Separately offer an invalid source signature. Repeat with AI_SHUFFLE_PERF_PREBUILT_UI=0 and with an older updater that ignores the optional UI field. Never publish test keys or update a production install.",
+          "pass_when": "A valid bundle skips every local frontend install/build and both actual shells serve the matching new revision/version. Invalid or missing UI falls back to verified-source compilation without changing runtime, first-boot or rollback checks; an invalid source signature still refuses the source update. The flag and older updater build locally. The installed swap, profile preservation, restart confirmation and rollback acceptance checks pass before release; an in-memory download fixture or preview alone does not pass this row.",
+          "past_bug": "Each source update reinstalled frontend dependencies and rebuilt identical desktop/phone UI; sharing unsigned or mismatched build output would risk stale or untrusted application assets."
         },
         {
           "id": "harness-basics.swarm-restart-settle",

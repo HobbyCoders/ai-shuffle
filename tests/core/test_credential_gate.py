@@ -127,13 +127,20 @@ def test_ready_providers_lists_each_usable_provider_once(mock_db):
     _provider_row("sg", "grok", auth_mode="grok", codex_access_token="enc:tok")
     _provider_row("or", "openrouter", auth_token="enc:key", checked=True)
     _provider_row("gw1", "custom")  # a keyless gateway still counts
+    providers = credential_gate.status_payload(_cli(signed_in=False))["ready_providers"]
+    assert providers[0] == "claude"
+    assert sorted(providers[1:]) == sorted(["openai", "grok", "openrouter", "gw:gw1"])
+
     _provider_row("off", "xai", auth_token="enc:key", enabled=False)
     _provider_row("nokey", "openrouter")
     _provider_row("stale", "grok", auth_mode="grok", codex_access_token="enc:tok", needs_reauth=True)
     _provider_row("half", "chatgpt", auth_mode="chatgpt")  # sign-in never finished
+    # Selecting an unusable sibling cannot fall back to the old usable login.
+    assert all(database.get_model_provider(pid)["enabled"] for pid in ("nokey", "stale", "half"))
+    assert all(not database.get_model_provider(pid)["enabled"] for pid in ("or", "sg", "codex"))
     providers = credential_gate.status_payload(_cli(signed_in=False))["ready_providers"]
     assert providers[0] == "claude"
-    assert sorted(providers[1:]) == sorted(["openai", "grok", "openrouter", "gw:gw1"])
+    assert sorted(providers[1:]) == sorted(["openai", "gw:gw1"])
 
 
 def test_a_provider_row_read_failure_never_breaks_the_payload(mock_db, monkeypatch):

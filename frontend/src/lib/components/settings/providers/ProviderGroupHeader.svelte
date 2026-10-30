@@ -52,6 +52,7 @@
 				onchange={(v: ClaudeAuthMode) => pickClaudeMode(provider, v)}
 			/>
 		</span>
+		<AddKindMenu providerName={provider.name} {kinds} onpick={(k) => startSetup(provider, k.flavor)} />
 	{:else}
 		<span class="cnt">{provider.draft ? 'Setting up' : `${provider.onCount} on`}</span>
 		<AddKindMenu
@@ -138,11 +139,14 @@
 	   the switch moves under the name, the connector runs past it. */
 	@container st-list (max-width: 359px) {
 		.pgh.claude:has(.mode) {
-			grid-template-columns: minmax(0, 1fr);
+			grid-template-columns: minmax(0, 1fr) auto;
 			height: auto;
 			padding-bottom: 6px;
 		}
+		.pgh.claude .pgn { grid-column: 1; }
+		.pgh.claude :global(.plus) { grid-column: 2; grid-row: 1; }
 		.pgh.claude .mode {
+			grid-column: 1 / -1;
 			justify-self: start;
 			padding-left: 46px;
 		}

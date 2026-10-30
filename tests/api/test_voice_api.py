@@ -752,13 +752,15 @@ class TestCreateVoiceSession:
         assert resp.status_code == 400, resp.text
         assert "OpenAI provider" in resp.json()["detail"]
 
-    def test_multiple_providers_choose_stable_automatic_default(self, authenticated_client, mock_db):
+    def test_automatic_default_follows_the_enabled_account(self, authenticated_client, mock_db):
         _enable_voice()
         _make_provider("prov-a", name="A")
         _make_provider("prov-b", name="B")
-        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={"model": "sonnet"})
-        assert resp.status_code == 200, resp.text
-        assert json.loads(db.get_session(resp.json()["session_id"])["voice_config"])["provider_id"] == "prov-a"
+        assert not db.get_model_provider("prov-a")["enabled"]
+        for _ in range(2):
+            resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={"model": "sonnet"})
+            assert resp.status_code == 200, resp.text
+            assert json.loads(db.get_session(resp.json()["session_id"])["voice_config"])["provider_id"] == "prov-b"
 
     def test_explicit_provider_disambiguates(self, authenticated_client, mock_db, monkeypatch):
         _enable_voice()

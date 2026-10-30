@@ -60,13 +60,10 @@ class TestReencryptModelProviders:
         assert encryption.decrypt_value(after["auth_token"]) == "gw-secret"
 
     @pytest.mark.parametrize("active_key", ["old", "new", "locked"])
-    def test_master_key_rotation_preserves_manual_balance(self, mock_db, monkeypatch, active_key):
+    def test_master_key_rotation_preserves_credential_status(self, mock_db, monkeypatch, active_key):
         _seed_provider()
         db.update_model_provider(
             "prov-1", provider_type="openai", base_url="https://api.openai.com/v1",
-        )
-        db.update_model_provider(
-            "prov-1", manual_balance_usd=37.25, manual_balance_set_at=1700000000123,
         )
         db.record_credential_check("prov-1", accepted=True)
         before = db.get_model_provider("prov-1", include_token=True)
@@ -85,8 +82,6 @@ class TestReencryptModelProviders:
         encryption.apply_reencryption_plan(plan, db)
 
         after = db.get_model_provider("prov-1", include_token=True)
-        assert after["manual_balance_usd"] == before["manual_balance_usd"] == 37.25
-        assert after["manual_balance_set_at"] == before["manual_balance_set_at"] == 1700000000123
         status = mock_db.execute(
             "SELECT credential_status FROM model_providers WHERE id = 'prov-1'",
         ).fetchone()
@@ -94,16 +89,6 @@ class TestReencryptModelProviders:
         assert after["auth_token"] != before["auth_token"]
         monkeypatch.setattr(encryption, "_encryption_key", new_key)
         assert encryption.decrypt_value(after["auth_token"]) == "gw-secret"
-
-    def test_undecryptable_ordinary_key_edit_still_clears_balance(self, mock_db):
-        _seed_provider()
-        db.update_model_provider(
-            "prov-1", manual_balance_usd=37.25, manual_balance_set_at=1700000000123,
-        )
-        db.update_model_provider("prov-1", auth_token="enc:invalid")
-        row = db.get_model_provider("prov-1")
-        assert row["manual_balance_usd"] is None
-        assert row["manual_balance_set_at"] is None
 
     def test_password_change_round_trip(self, mock_db):
         """End-to-end: re_encrypt_all_secrets under a new password, provider token
@@ -234,20 +219,3 @@ class TestReencryptCodexTokens:
             "model_providers:prov-bad-codex:codex_access_token" in label
             for label, _ in failures
         )
-
-
-def test_admin_credential_rotates_with_password_without_becoming_an_inference_key(mock_db):
-    _seed_provider()
-    db.update_model_provider("prov-1", provider_type="openai", base_url="https://api.openai.com/v1")
-    admin = encryption.encrypt_value("admin-only")
-    db.set_openai_billing_binding("prov-1", "org-test", "worker-test", admin)
-    old_key = encryption.derive_key_from_password("old-pw", encryption.get_or_create_salt(db))
-    new_key = encryption.derive_key_from_password("new-pw", encryption.get_or_create_salt(db))
-    plan, failures = encryption.build_reencryption_plan(old_key, new_key, db)
-    assert not failures
-    assert any(item.kind == "model_provider_openai_admin" for item in plan)
-    encryption.apply_reencryption_plan(plan, db)
-    encryption.set_encryption_key("new-pw", db)
-    row = db.get_model_provider("prov-1", include_token=True)
-    assert encryption.decrypt_value(row["openai_admin_key"]) == "admin-only"
-    assert encryption.decrypt_value(row["auth_token"]) == "gw-secret"

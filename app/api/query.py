@@ -160,7 +160,7 @@ def _request_leg(profile_id: str, overrides: dict | None, session_id: str | None
             and is_native_claude_model(selected):
         from app.core.provider_agent import curated_model_ids
 
-        row = database.get_model_provider(provider_id, include_token=False)
+        row = database.resolve_model_provider(provider_id, include_token=False)
         if selected not in curated_model_ids(row):
             provider_id = None
     if not model and not provider_id:

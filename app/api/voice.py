@@ -195,7 +195,7 @@ def _eligible_provider_row(
         if api_user is not None or fal_credential.key_stored():
             return {"id": FAL_PROVIDER_ID, "name": "fal.ai", "provider_type": "fal"}
         return None
-    row = database.get_model_provider(provider_id, include_token=True)
+    row = database.resolve_model_provider(provider_id, include_token=True)
     if row and _is_eligible_voice_provider(row):
         if api_user is not None and _is_personal_subscription(row):
             return None  # Personal subscription voice is owner/paired-device only.
@@ -365,9 +365,9 @@ def list_voice_agents() -> List[Dict[str, Any]]:
         provider_id = target.provider_id
         if provider_id and provider_id not in names:
             try:
-                row = database.get_model_provider(provider_id, include_token=False)
+                row = database.resolve_model_provider(provider_id, include_token=False)
             except TypeError:
-                row = database.get_model_provider(provider_id)
+                row = database.resolve_model_provider(provider_id)
             except Exception:
                 row = None
             names[provider_id] = (row or {}).get("name") or provider_id

@@ -256,15 +256,14 @@ _register(Collection(
             "default_model", "small_fast_model", "extra_env_json", "context_window", "max_output_tokens",
             "enabled", "auth_mode", "codex_access_token", "codex_refresh_token", "codex_account_id",
             "codex_id_token_expires_at", "codex_last_refresh", "needs_reauth", "created_at", "updated_at",
-            "manual_balance_usd", "manual_balance_set_at",
-            "openai_admin_key", "openai_billing_org_id", "balance_key"),
-    encrypted=("auth_token", "codex_access_token", "codex_refresh_token",
-               "openai_admin_key", "balance_key"),
+            "balance_key"),
+    encrypted=("auth_token", "codex_access_token", "codex_refresh_token", "balance_key"),
     local_fields=("codex_refresh_lease_owner", "codex_refresh_lease_expires_at",
-                  "openai_billing_instance_id", "balance_instance_id", "balance_snapshot"),
+                  "balance_instance_id", "balance_snapshot"),
     resource="settings", priority=30,
     notes="API keys travel encrypted under the network key. Subscription bundles merge by codex_last_refresh; "
-          "other fields use row LWW. Billing keys sync; install trust markers, snapshots and refresh leases stay local."))
+          "other fields use row LWW. Slotted enabled flags project the shared model_provider_slot:* selection. "
+          "Billing keys sync; install trust markers, snapshots and refresh leases stay local."))
 
 _register(Collection(
     name="api_users", table="api_users", keys=("id",),

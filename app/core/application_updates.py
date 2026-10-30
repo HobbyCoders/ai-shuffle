@@ -73,6 +73,48 @@ def _epoch(value):
         return None
 
 
+_desktop_wake_generation = 0
+_desktop_wake_waiter = None
+
+
+def _signal_desktop_request():
+    """Called under _bridge_lock, after the existing queue was written."""
+    global _desktop_wake_generation
+    _desktop_wake_generation += 1
+    if _desktop_wake_waiter is not None:
+        loop, future = _desktop_wake_waiter
+        def wake():
+            if not future.done():
+                future.set_result(None)
+        if not loop.is_closed():
+            loop.call_soon_threadsafe(wake)
+
+
+async def desktop_update_wake(generation, *, timeout=60):
+    """One bounded, cancellable hint subscriber. Never consumes a command."""
+    import asyncio
+
+    global _desktop_wake_waiter
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    with _bridge_lock:
+        if generation != _desktop_wake_generation:
+            return {"generation": _desktop_wake_generation}
+        if _desktop_wake_waiter is not None:
+            raise ValueError("A desktop update wake is already waiting")
+        _desktop_wake_waiter = (loop, future)
+    try:
+        await asyncio.wait_for(future, timeout=timeout)
+    except TimeoutError:
+        pass
+    finally:
+        with _bridge_lock:
+            if _desktop_wake_waiter is not None and _desktop_wake_waiter[1] is future:
+                _desktop_wake_waiter = None
+    with _bridge_lock:
+        return {"generation": _desktop_wake_generation}
+
+
 def desktop_exchange(state):
     """Only called by the token-authenticated local launcher, never a browser."""
     global _desktop_state, _desktop_seen, _desktop_request, _desktop_followup, _desktop_channel_request
@@ -278,6 +320,7 @@ def _set_channel(value):
         _desktop_stable_manifest = signed
         if signed:
             _desktop_channel_attempt += 1
+        _signal_desktop_request()
     # Desktop reports the old value until its next authenticated heartbeat
     # acknowledges the write. The picker must poll GET, not assume it persisted.
     return channel_status()
@@ -388,3 +431,4 @@ def enqueue(action):
             request["action"] = "check"
             _desktop_followup = {"action": "download", "expires_at": request["expires_at"] + DESKTOP_FOLLOWUP_SECONDS}
         _desktop_request = request
+        _signal_desktop_request()

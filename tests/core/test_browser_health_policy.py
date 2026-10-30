@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, Mock
 import psutil
 import pytest
 from app.core import native_chrome as chrome, browser_runtime as runtime, browser_control as control
-from app.core import openai_platform_signin as signin
 
 
 @pytest.fixture(autouse=True)
@@ -91,20 +90,6 @@ async def test_probing_does_not_hold_admission_and_new_activity_cancels_repair(m
     finish.set()
     await job
     stop.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_platform_capture_holds_owner_counter_until_cleanup_even_on_failure(monkeypatch):
-    async def capture(*args, **kwargs):
-        assert chrome._browser_in_use()
-        assert chrome._external_users == 1
-        raise RuntimeError("test disconnect")
-
-    monkeypatch.setattr(signin, "_capture", capture)
-    with pytest.raises(RuntimeError, match="test disconnect"):
-        await signin.capture(object(), authorize=AsyncMock())
-    assert chrome._external_users == 0
-
 
 @pytest.mark.asyncio
 async def test_billing_tab_is_protected_until_closed(monkeypatch):

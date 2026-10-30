@@ -364,7 +364,7 @@ def offered_context_window(session: Optional[Dict[str, Any]], window: Any) -> Op
     if value is None or value <= 0:
         return None
     from app.db import database
-    from app.db.model_providers import get_model_provider
+    from app.db.model_providers import resolve_model_provider
 
     row = session or {}
     model = row.get("model") or row.get("launched_model")
@@ -374,7 +374,7 @@ def offered_context_window(session: Optional[Dict[str, Any]], window: Any) -> Op
     provider_id = row.get("provider_id") if row.get("mode") != "voice" else None
     if model.startswith("prov:"):
         _, provider_id, model = model.split(":", 2)
-    provider = get_model_provider(provider_id) if provider_id else None
+    provider = resolve_model_provider(provider_id) if provider_id else None
     if is_offered_context_window(value, model, provider):
         return value
     logger.debug("Ignoring context window %s: model %r does not offer it", value, model)

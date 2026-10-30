@@ -90,6 +90,40 @@ async def desktop_update_bridge(body: DesktopUpdateState, request: Request):
     return await run_sync(desktop_exchange, body.model_dump())
 
 
+class DesktopUpdateWake(BaseModel):
+    generation: int = Field(ge=0, lt=2**53)
+
+
+@router.post("/desktop/update-wake")
+async def desktop_update_wake(body: DesktopUpdateWake, request: Request):
+    """A read-only hint on the existing authenticated local control path."""
+    require_desktop(request)
+    import asyncio
+    from fastapi import HTTPException, Response
+    from app.core.application_updates import desktop_update_wake as wait
+
+    async def disconnected():
+        while (await request.receive())["type"] != "http.disconnect":
+            pass
+
+    waiter = asyncio.create_task(wait(body.generation))
+    disconnect = asyncio.create_task(disconnected())
+    try:
+        done, _ = await asyncio.wait({waiter, disconnect}, return_when=asyncio.FIRST_COMPLETED)
+        if disconnect in done:
+            return Response(status_code=204)
+        try:
+            return await waiter
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+    finally:
+        # ASGI cancellation, client disconnect and worker shutdown release the
+        # single slot immediately; no blocked thread survives for the hold time.
+        waiter.cancel()
+        disconnect.cancel()
+        await asyncio.gather(waiter, disconnect, return_exceptions=True)
+
+
 class DesktopUpdateAction(BaseModel):
     action: Literal["check", "download", "install"]
 

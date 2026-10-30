@@ -12,6 +12,37 @@ afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 const statusText = () => screen.queryByRole('status')?.textContent?.trim() ?? '';
 
 describe('mirrored session freshness', () => {
+	it('withholds stale content without unmounting it at an opening freshness barrier', async () => {
+		vi.useFakeTimers();
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(status('syncing', 4)).mockImplementation(() => Promise.resolve(status('current'))));
+		const view = render(MirrorSyncGate, { sessionId: 'chat', remote: false, children });
+		const transcript = screen.getByText('2 running tasks, 2 agents');
+		await view.rerender({ sessionId: 'chat', remote: true, children });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(transcript.isConnected).toBe(true);
+		const withheld = transcript.closest('[aria-hidden="true"]') as HTMLElement;
+		expect(withheld).not.toBeNull();
+		expect(withheld.style.visibility).toBe('hidden');
+		expect(withheld.inert).toBe(true);
+		await vi.advanceTimersByTimeAsync(2000);
+		expect(screen.getByText('2 running tasks, 2 agents')).toBe(transcript);
+		expect(withheld.inert).toBe(false);
+		expect(withheld.hasAttribute('aria-hidden')).toBe(false);
+	});
+
+	it('the kill switch restores withholding by unmounting', async () => {
+		vi.useFakeTimers();
+		vi.stubEnv('VITE_PERF_KEEP_MIRROR_CACHE', '0');
+		try {
+			vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(status('syncing', 4))));
+			render(MirrorSyncGate, { sessionId: 'chat', remote: true, children });
+			await vi.advanceTimersByTimeAsync(0);
+			expect(screen.queryByText('2 running tasks, 2 agents')).toBeNull();
+		} finally {
+			vi.unstubAllEnvs();
+		}
+	});
+
 	it('reveals a fixed opening checkpoint while live updates keep arriving', async () => {
 		vi.useFakeTimers();
 		const target = { seq: 10, epoch: 'first/event', tail_id: 'tail&event' };
@@ -28,7 +59,7 @@ describe('mirrored session freshness', () => {
 		render(MirrorSyncGate, { sessionId: 'busy', onCaughtUp, children });
 		await vi.advanceTimersByTimeAsync(0);
 		expect(screen.getByText('4 updates remaining')).toBeTruthy();
-		expect(screen.queryByText('2 running tasks, 2 agents')).toBeNull();
+		expect(screen.getByText('2 running tasks, 2 agents').closest('[aria-hidden="true"]')).not.toBeNull();
 		await vi.advanceTimersByTimeAsync(4000);
 		expect(screen.getByText('2 updates remaining')).toBeTruthy();
 		expect(onCaughtUp).not.toHaveBeenCalled();
@@ -75,7 +106,7 @@ describe('mirrored session freshness', () => {
 		render(MirrorSyncGate, { sessionId: 'new', onCaughtUp: vi.fn(), children });
 		await vi.advanceTimersByTimeAsync(0);
 		expect(screen.queryByText('900 updates remaining')).toBeNull();
-		expect(screen.queryByText('2 running tasks, 2 agents')).toBeNull();
+		expect(screen.getByText('2 running tasks, 2 agents').closest('[aria-hidden="true"]')).not.toBeNull();
 	});
 
 
@@ -89,7 +120,7 @@ describe('mirrored session freshness', () => {
 		await vi.advanceTimersByTimeAsync(0);
 		expect(screen.getByRole('status').textContent).toContain('Syncing from ServerWorker');
 		expect(screen.getByText('40 updates remaining')).toBeTruthy();
-		expect(screen.queryByText('2 running tasks, 2 agents')).toBeNull();
+		expect(screen.getByText('2 running tasks, 2 agents').closest('[aria-hidden="true"]')).not.toBeNull();
 		await vi.advanceTimersByTimeAsync(2000);
 		expect(screen.getByText('40 updates remaining')).toBeTruthy();
 		expect(onCaughtUp).not.toHaveBeenCalled();
@@ -246,7 +277,7 @@ describe('mirrored session freshness', () => {
 		render(MirrorSyncGate, { sessionId: 'not-in-sidebar', onCaughtUp: vi.fn(), children });
 		await vi.advanceTimersByTimeAsync(0);
 		expect(screen.getByText('7 updates remaining')).toBeTruthy();
-		expect(screen.queryByText('2 running tasks, 2 agents')).toBeNull();
+		expect(screen.getByText('2 running tasks, 2 agents').closest('[aria-hidden="true"]')).not.toBeNull();
 	});
 
 	it('does not gate a new conversation before it has a session id', () => {

@@ -17,6 +17,7 @@ from app.db.async_database import run_sync
 from app.api.auth import require_admin, require_auth
 from app.api.settings_updates import updates_router
 from app.api.settings_worker_availability import router as worker_availability_router
+from app.api.settings_claude_accounts import router as claude_accounts_router
 from app.api.settings_workers import router as worker_settings_router
 from app.api.settings_native_generation import router as native_generation_router
 from app.core import encryption
@@ -51,6 +52,7 @@ router.include_router(credentials_router)
 router.include_router(updates_router)
 router.include_router(native_generation_router)
 router.include_router(worker_availability_router)
+router.include_router(claude_accounts_router)
 router.include_router(worker_settings_router)
 
 
@@ -368,22 +370,7 @@ async def set_fal_enabled(request: FalEnabledRequest, token: str = Depends(requi
     return await run_sync(_apply)
 
 
-@router.post("/integrations/anthropic", response_model=AnthropicKeyResponse)
-async def set_anthropic_api_key(
-    request: AnthropicKeyRequest,
-    token: str = Depends(require_admin)
-):
-    """
-    Set the Anthropic API key (admin only).
-
-    The key is a Claude Code credential used only in ``api_key`` auth mode,
-    where it is injected as ANTHROPIC_API_KEY into the CLI processes this
-    worker starts. Saving it does not change the mode unless
-    ``use_for_claude_code`` is true. It is stored encrypted on this worker
-    only. Validated here before storage.
-
-    Get your API key from: https://console.anthropic.com/settings/keys
-    """
+async def validate_anthropic_key(api_key: str) -> None:
     from app.core.anthropic_generation import (
         validate_api_key,
         AnthropicAuthError,
@@ -392,7 +379,6 @@ async def set_anthropic_api_key(
         AnthropicApiError,
     )
 
-    api_key = request.api_key.strip()
     if not api_key:
         raise HTTPException(status_code=400, detail="API key cannot be empty")
     # Before the paid validation call: a locked store cannot save the key.
@@ -414,15 +400,43 @@ async def set_anthropic_api_key(
             status_code=429,
             detail="Anthropic rate-limited the validation call. Try again in a moment."
         )
-    except AnthropicNetworkError as e:
-        logger.warning(f"Anthropic validation network error, saving key anyway: {e}")
-    except AnthropicApiError as e:
-        # Malformed / unexpected response — surface so the user can investigate
-        raise HTTPException(status_code=400, detail=f"Anthropic API error: {e}")
+    except AnthropicNetworkError:
+        logger.warning("Anthropic validation network error; saving key anyway")
+    except AnthropicApiError:
+        raise HTTPException(status_code=400, detail="Anthropic could not validate the API key.")
+
+
+@router.post("/integrations/anthropic", response_model=AnthropicKeyResponse)
+async def set_anthropic_api_key(
+    request: AnthropicKeyRequest,
+    token: str = Depends(require_admin)
+):
+    """
+    Set the Anthropic API key (admin only).
+
+    The key is a Claude Code credential used only in ``api_key`` auth mode,
+    where it is injected as ANTHROPIC_API_KEY into the CLI processes this
+    worker starts. Saving it does not change the mode unless
+    ``use_for_claude_code`` is true. It is stored encrypted on this worker
+    and synced encrypted with saved API-key accounts. Validated here before storage.
+
+    Get your API key from: https://console.anthropic.com/settings/keys
+    """
+    api_key = request.api_key.strip()
+    await validate_anthropic_key(api_key)
 
     # Save to database, always encrypted. One hop: the Anthropic validation
     # above is a real network await.
-    await run_sync(_store_api_key, "anthropic_api_key", api_key)
+    from app.core import claude_accounts
+    try:
+        await run_sync(claude_accounts.add_api_key, api_key)
+    except claude_accounts.AccountError as exc:
+        raise HTTPException(status_code=409 if exc.code == "storage_locked" else exc.status,
+                            detail=encryption.credential_storage_error() if exc.code == "storage_locked" else str(exc)) from None
+    except RuntimeError:
+        if encryption.is_encryption_ready():
+            raise
+        raise HTTPException(status_code=409, detail=encryption.credential_storage_error()) from None
     if request.use_for_claude_code:
         from app.core import claude_auth_mode
         await run_sync(claude_auth_mode.set_mode, claude_auth_mode.MODE_API_KEY)
@@ -436,13 +450,14 @@ async def set_anthropic_api_key(
 @router.delete("/integrations/anthropic")
 async def remove_anthropic_api_key(token: str = Depends(require_admin)):
     """
-    Remove the Anthropic API key (admin only).
+    Deactivate the Anthropic API key (admin only); saved keys remain available.
 
     The auth mode is left as it is: in ``api_key`` mode new agent runs then
     wait for a key (or for the user to choose subscription mode) instead of
     falling back to the CLI's sign-in.
     """
-    await run_sync(database.delete_system_setting, "anthropic_api_key")
+    from app.core import claude_accounts
+    await run_sync(claude_accounts.deactivate_api_key)
     return {"success": True}
 
 
@@ -492,7 +507,9 @@ async def claude_auth_payload(refresh: bool = False) -> dict:
             claude_reason = credential_gate.claude_credential_ready(cli)[1]
         except Exception:  # noqa: BLE001 — display text only
             claude_reason = credential_gate.CHECK_FAILED_MESSAGE
-        return {**claude_auth_mode.summary(cli), "gate": credential_gate.status_payload(cli),
+        from app.core import claude_accounts
+        return {**claude_auth_mode.summary(cli), "accounts": claude_accounts.accounts_payload(),
+                "gate": credential_gate.status_payload(cli),
                 # Why Claude itself cannot run (None when it can). ``gate.reason``
                 # is about the worker as a whole.
                 "claude_reason": claude_reason}
