@@ -1,6 +1,7 @@
 package com.hobbycoders.aishuffle
 
 import android.content.Intent
+import android.os.SystemClock
 import android.widget.TextView
 import android.view.View
 import android.view.ViewGroup
@@ -31,8 +32,8 @@ class WorkerPresenceSmokeTest {
     private val context get() = ApplicationProvider.getApplicationContext<android.content.Context>()
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private fun views(view: View): List<View> = listOf(view) + if (view is ViewGroup) (0 until view.childCount).flatMap { views(view.getChildAt(it)) } else emptyList()
-    private fun waitFor(message: String, condition: () -> Boolean) = runBlocking {
-        try { kotlinx.coroutines.withTimeout(8_000) { while (!condition()) kotlinx.coroutines.delay(50) } }
+    private fun waitFor(message: String, timeoutMs: Long = 8_000, condition: () -> Boolean) = runBlocking {
+        try { kotlinx.coroutines.withTimeout(timeoutMs) { while (!condition()) kotlinx.coroutines.delay(50) } }
         catch (error: kotlinx.coroutines.TimeoutCancellationException) { throw AssertionError(message, error) }
     }
     private fun clean() = instrumentation.runOnMainSync {
@@ -89,12 +90,17 @@ class WorkerPresenceSmokeTest {
         }
     }
 
-    @Test fun launcherOpensAnOnlineWorkerWithoutASecondProbeSweep() {
+    @Test fun launcherOpensAnOnlineWorkerWithoutASecondProbeSweep() = launcherOnlineWorker(stalledProbe = false)
+    @Test fun launcherSelectsOnlineWorkerByDeadlineEvenWhenAnotherProbeNeverCompletes() = launcherOnlineWorker(stalledProbe = true)
+
+    private fun launcherOnlineWorker(stalledProbe: Boolean) {
         clean()
         val first = Server("startup-offline", "Unavailable startup fixture", "https://startup-offline-presence.example", "aim_fixture", "viewing-phone")
         val second = first.copy(id = "startup-online", name = "Online startup fixture", baseUrl = "https://startup-online-presence.example")
         ServerStore.get(context).apply { add(first); add(second) }
         val requests = AtomicInteger()
+        val pending = CountDownLatch(1)
+        val release = CountDownLatch(1)
         val opened = java.util.concurrent.CopyOnWriteArrayList<Intent>()
         // Exercise the actual launcher selection and hand-off, but keep this
         // presence test out of Chat's separate authenticated bootstrap flow.
@@ -110,40 +116,72 @@ class WorkerPresenceSmokeTest {
             requests.incrementAndGet()
             if (request.url.host == "startup-online-presence.example")
                 PresenceFixture.response(request, 200, """{"status":"healthy","service":"Shuffle","version":"fixture","authenticated":false}""")
-            else PresenceFixture.response(request, 503, "{}")
+            else {
+                if (stalledProbe) {
+                    pending.countDown()
+                    // Deliberately never complete while selection is under test,
+                    // like a system DNS lookup that ignores OkHttp's timeout.
+                    release.await()
+                }
+                PresenceFixture.response(request, 503, "{}")
+            }
         }.use {
             try {
+                val startedAt = SystemClock.elapsedRealtime()
                 launchWorkers(launcher = true).use { scenario ->
-                    waitFor("Launcher did not hand off to the checked online worker") { opened.isNotEmpty() }
+                    if (stalledProbe) assertTrue(pending.await(5, TimeUnit.SECONDS))
+                    waitFor("Launcher did not hand off to the checked online worker", if (stalledProbe) 12_000 else 8_000) { opened.isNotEmpty() }
+                    if (stalledProbe) assertTrue("Startup selection exceeded its deadline", SystemClock.elapsedRealtime() - startedAt < 12_000)
                     assertEquals(listOf(second.id), opened.map { it.getStringExtra("server_id") })
                     assertEquals("Startup selection must reuse row probes", 2, requests.get())
                     waitFor("Launcher did not finish after hand-off") { scenario.state == Lifecycle.State.DESTROYED }
                 }
-            } finally { instrumentation.removeMonitor(monitor); clean() }
+            } finally { release.countDown(); instrumentation.removeMonitor(monitor); clean() }
         }
     }
 
-    @Test fun launcherChecksEachWorkerOnceAndKeepsTheUnavailableList() {
+    @Test fun launcherChecksEachWorkerOnceAndKeepsTheUnavailableList() = launcherUnavailableList(stalledProbe = false)
+    @Test fun launcherFallsBackByDeadlineAndLateProbeOnlyUpdatesItsRow() = launcherUnavailableList(stalledProbe = true)
+
+    private fun launcherUnavailableList(stalledProbe: Boolean) {
         clean()
         val first = Server("launcher-one", "First startup fixture", "https://startup-one-presence.example", "aim_fixture", "viewing-phone")
         val second = first.copy(id = "launcher-two", name = "Second startup fixture", baseUrl = "https://startup-two-presence.example")
         ServerStore.get(context).apply { add(first); add(second) }
         val requests = AtomicInteger()
+        val pending = CountDownLatch(1)
+        val release = CountDownLatch(1)
         PresenceFixture { request ->
             requests.incrementAndGet()
-            PresenceFixture.response(request, 503, "{}")
+            if (stalledProbe && request.url.host == "startup-two-presence.example") {
+                pending.countDown()
+                release.await()
+                PresenceFixture.response(request, 200, """{"status":"healthy","service":"Shuffle","version":"fixture","authenticated":false}""")
+            } else PresenceFixture.response(request, 503, "{}")
         }.use {
             try {
+                val startedAt = SystemClock.elapsedRealtime()
                 launchWorkers(launcher = true).use { scenario ->
-                    waitFor("Launcher fallback did not keep the checked worker rows") {
+                    if (stalledProbe) assertTrue(pending.await(5, TimeUnit.SECONDS))
+                    waitFor("Launcher fallback did not keep the checked worker rows", if (stalledProbe) 12_000 else 8_000) {
                         var fallback = false
                         scenario.onActivity { activity -> fallback = views(activity.findViewById(android.R.id.content)).filterIsInstance<TextView>()
                             .any { it.text.startsWith("No authorized worker is reachable.") && it.isShown } }
-                        fallback && description(scenario, first.name, "Status unavailable") && description(scenario, second.name, "Status unavailable")
+                        fallback && description(scenario, first.name, "Status unavailable") &&
+                            description(scenario, second.name, if (stalledProbe) "Unknown" else "Status unavailable")
                     }
+                    if (stalledProbe) assertTrue("Startup fallback exceeded its deadline", SystemClock.elapsedRealtime() - startedAt < 12_000)
                     assertEquals("Startup selection must reuse row probes", 2, requests.get())
+                    if (stalledProbe) {
+                        // Selection must not cancel a still-visible row's probe or
+                        // run again when it eventually completes.
+                        release.countDown()
+                        waitFor("The late probe did not update its row") { description(scenario, second.name, "Online") }
+                        assertEquals(Lifecycle.State.RESUMED, scenario.state)
+                        assertEquals("Late results must not start another sweep", 2, requests.get())
+                    }
                 }
-            } finally { clean() }
+            } finally { release.countDown(); clean() }
         }
     }
 

@@ -13,7 +13,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 
@@ -58,7 +60,7 @@ internal class WorkerPresenceMonitor(
             while (isActive) {
                 val observations = mutableMapOf<Server, ProbeResult>()
                 coroutineScope {
-                    current.forEach { entry -> launch {
+                    val probes = current.map { entry -> launch {
                         semaphore.withPermit {
                             if (epoch != generation || !authorized(session) || serverStore.getById(entry.server.id) != entry.server) return@withPermit
                             val before = network()
@@ -74,10 +76,15 @@ internal class WorkerPresenceMonitor(
                             publish(entry.server, entry.presence)
                         }
                     } }
-                }
-                if (firstSweep && epoch == generation && authorized(session)) {
-                    firstSweep = false
-                    onFirstSweep(observations.toMap())
+                    if (firstSweep) {
+                        // Bound startup selection, not the probes: DNS can outlive
+                        // OkHttp's timeout, and late results must still update rows.
+                        withTimeoutOrNull(8_000) { probes.joinAll() }
+                        if (epoch == generation && authorized(session)) {
+                            firstSweep = false
+                            onFirstSweep(observations.toMap())
+                        }
+                    }
                 }
                 delay(30_000)
             }
