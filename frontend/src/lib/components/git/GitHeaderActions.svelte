@@ -23,6 +23,7 @@
 	 * direct "Git unavailable" retry. Confirmed non-repositories render nothing.
 	 */
 	import { onDestroy, onMount, tick, untrack } from 'svelte';
+	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
 	import GitProgressPopover from './GitProgressPopover.svelte';
 	import { gitOperationState } from '$lib/stores/gitOperations.svelte';
 	import ChatExportActions from '../layout/ChatExportActions.svelte';
@@ -582,7 +583,7 @@
 	{#if panelOpen}
 		<!-- Scrim only takes effect in the bottom-sheet layout (see CSS). -->
 		<div class="git-scrim" aria-hidden="true"></div>
-		<div class="git-panel" class:dragging-sheet={draggingSheet} style:--sheet-offset={`${sheetOffset}px`} bind:this={panelRef} role="dialog" aria-label="Git actions">
+		<div class="git-panel" use:obscuresTranscript={sheetLayout} class:dragging-sheet={draggingSheet} style:--sheet-offset={`${sheetOffset}px`} bind:this={panelRef} role="dialog" aria-label="Git actions">
 			<button
 				class="sheet-handle"
 				aria-label="Close Git panel (drag down or tap)"

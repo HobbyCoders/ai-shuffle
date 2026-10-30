@@ -26,6 +26,7 @@
 	 * panel's StudioTopBar carries the breadcrumbs and actions.
 	 */
 	import { tick, untrack, type Snippet } from 'svelte';
+	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
 	import { pushState } from '$app/navigation';
 	import { page } from '$app/state';
 	import { Menu, Mic, X } from 'lucide-svelte';
@@ -375,6 +376,7 @@
 		inert={!drawerOpen}
 		style:transform="translateX({drawerShift})"
 		bind:this={drawerRef}
+		use:obscuresTranscript={drawerOpen || dragX !== null}
 	>
 		<Sidebar
 			{isAdmin}

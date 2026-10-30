@@ -41,6 +41,7 @@ PARENT = r'''
 import asyncio, importlib.util, json, os, sys, time
 import psutil
 from app.core.transcript_views.bridge import ReducerBridge
+from app.core.transcript_views.child_process import _job_object
 from tests.test_transcript_projection_child_boundary import child_stats, blocked, gil_blocked
 
 async def main():
@@ -53,6 +54,8 @@ async def main():
     stats["cold_seconds"] = time.perf_counter() - start
     await bridge.request("plan", carry=None, frames=[])
     stats["node"] = bridge._process.pid
+    _job_object()  # Also verify the portable helper lookup on Linux, without Win32 calls.
+    stats["no_tool_registry"] = "fluid.tools.registry" not in sys.modules
     # Inspect actual helpers rather than multiprocessing's private attributes,
     # so the assertion covers every extra process on Linux and Windows.
     stats["tracker"] = next((child.pid for child in psutil.Process().children()
@@ -146,6 +149,7 @@ async def test_lightweight_cold_child_does_not_reconstruct_production_main(tmp_p
     try:
         assert not stats["main_imported"]
         assert stats["api_modules"] == []
+        assert stats["no_tool_registry"]
         assert stats["tracker"] is None
         # Structural import assertions remain portable; this Linux cold budget
         # also catches accidental site/application startup outside app.api.

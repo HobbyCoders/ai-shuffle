@@ -71,7 +71,8 @@ self.addEventListener('activate', (event) => {
       })
       .then(() => self.clients.claim())
       .then(() => {
-        // Notify all clients that a new version is active - trigger reload
+        // Tell the pages a worker took over. Also sent on the first install, so
+        // a page only reloads once it confirms the server serves another build (#908).
         return self.clients.matchAll({ type: 'window' }).then((clients) => {
           clients.forEach((client) => {
             client.postMessage({
