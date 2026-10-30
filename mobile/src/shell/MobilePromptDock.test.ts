@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import MobilePromptDock from './MobilePromptDock.svelte';
 import { chatAccessSummary } from '$lib/stores/chat-access';
+import { clearSentQuestions, markQuestionSent, unmarkQuestionSent } from '$lib/stores/session/sent-questions';
 
 afterEach(() => {
 	cleanup();
@@ -262,6 +263,90 @@ describe('agent question', () => {
 	it('uses the shared question form for a multi-part request', () => {
 		renderDock({ permissions: [], questions: [{ ...question, questions: [question.questions[0], { ...question.questions[0], question: 'Second?' }] }] });
 		expect(screen.getByRole('form', { name: 'Answer questions' })).toBeTruthy();
+	});
+
+	// #899: the dock hides an answered question on the tap (#891). ChatView
+	// drops it from `questions` while its id is marked sent; a relay_offline
+	// ack un-marks it and it comes back. The draft must come back with it.
+	describe('a failed delivery brings the draft back', () => {
+		afterEach(() => clearSentQuestions());
+
+		it('restores a typed answer', async () => {
+			const view = renderDock({ permissions: [], questions: [question] });
+			await fireEvent.click(screen.getByRole('button', { name: 'Type an answer' }));
+			await fireEvent.input(screen.getByRole('textbox', { name: 'Your answer' }), { target: { value: 'Both, AppImage first' } });
+			await fireEvent.click(screen.getByRole('button', { name: 'Send answer' }));
+			expect(view.onQuestion).toHaveBeenCalledOnce();
+
+			markQuestionSent('q1');
+			await view.rerender({ permissions: [], questions: [] });
+			expect(screen.queryByRole('region', { name: 'Waiting on you' })).toBeNull();
+
+			unmarkQuestionSent('q1');
+			await view.rerender({ permissions: [], questions: [{ ...question }] });
+			const input = screen.getByRole('textbox', { name: 'Your answer' }) as HTMLInputElement;
+			expect(input.value).toBe('Both, AppImage first');
+			const send = screen.getByRole('button', { name: 'Send answer' }) as HTMLButtonElement;
+			expect(send.disabled).toBe(false);
+			await fireEvent.click(send);
+			expect(view.onQuestion).toHaveBeenCalledTimes(2);
+		});
+
+		it('restores selections, written answers and skips in a multi-part request', async () => {
+			const multi = {
+				...question,
+				questions: [question.questions[0], { question: 'Which distro first?', header: 'Distro', multiSelect: true,
+					options: [{ label: 'Ubuntu', description: '' }, { label: 'Fedora', description: '' }, { label: 'Arch', description: '' }] },
+				{ question: 'Anything else?', header: 'Notes', multiSelect: false, options: [] }]
+			};
+			const view = renderDock({ permissions: [], questions: [multi] });
+			await fireEvent.click(screen.getByRole('radio', { name: /\.deb package/ }));
+			await fireEvent.click(screen.getByRole('button', { name: /^Distro/ }));
+			await fireEvent.click(screen.getByRole('checkbox', { name: /Ubuntu/ }));
+			await fireEvent.click(screen.getByRole('checkbox', { name: /Arch/ }));
+			await fireEvent.click(screen.getByRole('button', { name: /^Notes/ }));
+			await fireEvent.click(screen.getByRole('button', { name: /Skip this question/ }));
+			// Every part answered or skipped: the skip sent the request.
+			expect(view.onQuestion).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+				answers: { 'Which install format should the guide lead with?': '.deb package', 'Which distro first?': 'Ubuntu, Arch' },
+				skipped: ['Anything else?']
+			}));
+
+			markQuestionSent('q1');
+			await view.rerender({ permissions: [], questions: [] });
+			unmarkQuestionSent('q1');
+			await view.rerender({ permissions: [], questions: [{ ...multi }] });
+
+			// The skipped part is still the one on show, and still skipped.
+			expect(screen.getByRole('button', { name: /Skipped — undo/ }).getAttribute('aria-pressed')).toBe('true');
+			await fireEvent.click(screen.getByRole('button', { name: /^Distro/ }));
+			expect((screen.getByRole('checkbox', { name: /Ubuntu/ }) as HTMLInputElement).checked).toBe(true);
+			expect((screen.getByRole('checkbox', { name: /Fedora/ }) as HTMLInputElement).checked).toBe(false);
+			expect((screen.getByRole('checkbox', { name: /Arch/ }) as HTMLInputElement).checked).toBe(true);
+			await fireEvent.click(screen.getByRole('button', { name: /^Format/ }));
+			expect((screen.getByRole('radio', { name: /\.deb package/ }) as HTMLInputElement).checked).toBe(true);
+			await fireEvent.click(screen.getByRole('button', { name: 'Send answers' }));
+			expect(view.onQuestion).toHaveBeenCalledTimes(2);
+			expect(view.onQuestion).toHaveBeenLastCalledWith(view.onQuestion.mock.calls[0][0]);
+		});
+
+		it('drops the draft once the question is answered for good', async () => {
+			const view = renderDock({ permissions: [], questions: [question] });
+			await fireEvent.click(screen.getByRole('button', { name: 'Type an answer' }));
+			await fireEvent.input(screen.getByRole('textbox', { name: 'Your answer' }), { target: { value: 'Both' } });
+			await fireEvent.click(screen.getByRole('button', { name: 'Send answer' }));
+			markQuestionSent('q1');
+			await view.rerender({ permissions: [], questions: [] });
+			// The ack removes the question and its sent mark.
+			unmarkQuestionSent('q1');
+			await view.rerender({ permissions: [], questions: [] });
+			// The same id asked again (a server resync) starts clean, once the
+			// "Answer sent" flash has run out.
+			await new Promise((resolve) => setTimeout(resolve, 1100));
+			await view.rerender({ permissions: [], questions: [{ ...question }] });
+			expect(screen.queryByRole('textbox', { name: 'Your answer' })).toBeNull();
+			expect(screen.getByRole('button', { name: 'Type an answer' })).toBeTruthy();
+		});
 	});
 
 	it('says to reconnect and disables answers while disconnected', async () => {
