@@ -12,6 +12,8 @@
 	// Leave headroom above measured 4× short-history hydration. A ready target
 	// is published immediately; this delays only the slow-load notice.
 	export const TRANSCRIPT_LOADING_GRACE_MS = 350;
+	// The recorder's cross-chat flash window is 150 ms; leave 100 ms of margin.
+	export const TRANSCRIPT_LOADING_MIN_VISIBLE_MS = 250;
 	export type TranscriptPresentation = Readable<ActiveSessionState>;
 </script>
 
@@ -42,18 +44,19 @@
 	let settled = initial.isLoadingSession || initial.isRestoringSession ? null : { ...initial };
 	let shown = initial;
 	let retaining = $state(false);
+	let holdingNotice = $state(false);
 	const actionsAllowed = writable(false);
 	setContext<TranscriptActions>(TRANSCRIPT_ACTIONS, {
 		subscribe: actionsAllowed.subscribe,
 		isCurrent(sessionId) {
 			const live = get(activeSession);
-			return !retaining && !mirrorPending && live.sessionId === sessionId
+			return !retaining && !holdingNotice && !mirrorPending && live.sessionId === sessionId
 				&& !live.isLoadingSession && !live.isRestoringSession;
 		}
 	});
 	// DOM inertness cannot reach body portals. Descendants close their transient
 	// UI from this context; dispatch/completion guards also read the live target.
-	$effect(() => actionsAllowed.set(!retaining && !mirrorPending
+	$effect(() => actionsAllowed.set(!retaining && !holdingNotice && !mirrorPending
 		&& !$presented.isLoadingSession && !$presented.isRestoringSession));
 	let targetSessionId = $state(initial.sessionId);
 	let graceElapsed = $state(false);
@@ -70,21 +73,48 @@
 	let pendingTarget: string | null = null;
 	let epoch = 0;
 	let timer: ReturnType<typeof setTimeout> | undefined;
+	let removalTimer: ReturnType<typeof setTimeout> | undefined;
+	let noticePaintedAt: number | null = null;
 
 	function cancelGrace() {
 		epoch++;
 		if (timer !== undefined) clearTimeout(timer);
-		timer = undefined;
+		if (removalTimer !== undefined) clearTimeout(removalTimer);
+		timer = removalTimer = undefined;
 		pendingTarget = null;
 		graceElapsed = false;
 		noticeHasShown = false;
+		noticePaintedAt = null;
+		holdingNotice = false;
+	}
+
+	function finishNotice() {
+		// Readiness publishes the real transcript immediately. Only a notice
+		// already observed on a frame may outlive it, never the old transcript.
+		const remaining = noticePaintedAt === null ? 0
+			: TRANSCRIPT_LOADING_MIN_VISIBLE_MS - (performance.now() - noticePaintedAt);
+		if (remaining <= 0) { cancelGrace(); return; }
+		if (timer !== undefined) clearTimeout(timer);
+		timer = undefined;
+		holdingNotice = true;
+		if (removalTimer !== undefined) return;
+		const mine = epoch;
+		removalTimer = setTimeout(() => {
+			if (mine !== epoch) return;
+			removalTimer = undefined;
+			cancelGrace();
+		}, remaining);
 	}
 
 	onMount(() => activeSession.subscribe(current => {
+		// Navigation is not a load completing: even a just-painted notice must
+		// disappear immediately for a cached return, or restart grace for C.
+		if (current.sessionId !== targetSessionId) cancelGrace();
 		targetSessionId = current.sessionId;
 		const loading = current.isLoadingSession || current.isRestoringSession;
 		if (!enabled || !loading) {
-			cancelGrace();
+			if (enabled) finishNotice();
+			else cancelGrace();
 			retaining = false;
 			settled = current.sessionId ? { ...current } : null;
 			shown = current;
@@ -92,25 +122,22 @@
 			return;
 		}
 
+		if (removalTimer !== undefined) clearTimeout(removalTimer);
+		removalTimer = undefined;
+		holdingNotice = false;
+
 		// A rapid A → B → C navigation gets C's own grace; B's timer cannot
 		// reveal a skeleton over C, nor fire after C has already been painted.
 		const target = current.sessionId ?? 'restoring';
 		if (pendingTarget !== target) {
-			// Once a genuine slow load has shown the notice, keep it continuous
-			// across another navigation instead of flashing the old rows back in.
-			const alreadyShown = noticeHasShown;
 			cancelGrace();
 			pendingTarget = target;
-			graceElapsed = alreadyShown;
-			noticeHasShown = alreadyShown;
-			if (!alreadyShown) {
-				const mine = epoch;
-				timer = setTimeout(() => {
-					if (mine !== epoch || pendingTarget !== target) return;
-					timer = undefined;
-					graceElapsed = true;
-				}, Math.max(0, graceMs));
-			}
+			const mine = epoch;
+			timer = setTimeout(() => {
+				if (mine !== epoch || pendingTarget !== target) return;
+				timer = undefined;
+				graceElapsed = true;
+			}, Math.max(0, graceMs));
 		}
 
 		retaining = settled !== null;
@@ -125,9 +152,17 @@
 	}));
 	onDestroy(cancelGrace);
 
-	const overlay = $derived(retaining && graceElapsed && !mirrorPending
+	const overlay = $derived((retaining || holdingNotice) && graceElapsed && !mirrorPending
 		&& (noticeHasShown || (!navigationOverlayOpen && !overlayHandoff)));
-	$effect(() => { if (overlay) noticeHasShown = true; });
+	$effect(() => {
+		if (!overlay) return;
+		noticeHasShown = true;
+		if (noticePaintedAt !== null) return;
+		// Start from the notice's first frame, not the possibly long-delayed
+		// grace callback. A target ready before this frame needs no minimum hold.
+		const frame = requestAnimationFrame(() => { noticePaintedAt = performance.now(); });
+		return () => cancelAnimationFrame(frame);
+	});
 	const messageCount = $derived($presented.messages.length + ($presented.pendingPeerMessages?.length ?? 0));
 	$effect(() => onSurface?.(overlay ? 'loading' : classifyChatSurface({
 		sessionId: $presented.sessionId,
@@ -138,7 +173,7 @@
 </script>
 
 <div class="transcript-hydration" data-transcript-pending={retaining ? 'true' : undefined}>
-	<div class="transcript-presentation" inert={retaining && !mirrorPending} class:is-concealed={overlay}>
+	<div class="transcript-presentation" inert={(retaining || holdingNotice) && !mirrorPending} class:is-concealed={overlay}>
 		{@render children()}
 	</div>
 	{#if overlay}

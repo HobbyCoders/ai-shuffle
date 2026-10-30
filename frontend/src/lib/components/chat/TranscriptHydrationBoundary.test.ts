@@ -4,7 +4,7 @@ import { tick } from 'svelte';
 import type { Writable } from 'svelte/store';
 import { activeSession, type ActiveSessionState } from '$lib/stores/active-session';
 import Harness from './test-fixtures/TranscriptHydrationHarness.svelte';
-import { TRANSCRIPT_LOADING_GRACE_MS as GRACE_MS } from './TranscriptHydrationBoundary.svelte';
+import { TRANSCRIPT_LOADING_GRACE_MS as GRACE_MS, TRANSCRIPT_LOADING_MIN_VISIBLE_MS as MIN_VISIBLE_MS } from './TranscriptHydrationBoundary.svelte';
 
 vi.mock('$lib/stores/active-session', async () => {
 	const { writable } = await import('svelte/store');
@@ -179,17 +179,113 @@ describe('transcript hydration presentation', () => {
 		expect(view.getByText('Previous conversation').closest('[inert]')).toBe(view.getByTestId('mirror-owner'));
 	});
 
-	it('does not flash old rows back in when an already-visible loader is superseded', async () => {
+	it('cancels a shown notice on navigation and gives an unloaded new target its own grace', async () => {
 		const view = render(Harness);
 		live.set(state('middle', '', true)); await tick();
 		await vi.advanceTimersByTimeAsync(GRACE_MS + 20); await tick();
 		expect(view.getByText('Loading conversation…')).toBeTruthy();
 		live.set(state('latest', '', true)); await tick();
+		expect(view.queryByText('Loading conversation…')).toBeNull();
+		expect(view.getByText('Previous conversation').closest('.transcript-presentation')?.classList.contains('is-concealed')).toBe(false);
+		await vi.advanceTimersByTimeAsync(GRACE_MS - 1); await tick();
+		expect(view.queryByText('Loading conversation…')).toBeNull();
+		await vi.advanceTimersByTimeAsync(1); await tick();
 		expect(view.getByText('Loading conversation…')).toBeTruthy();
-		expect(view.getByText('Previous conversation').closest('.transcript-presentation')?.classList.contains('is-concealed')).toBe(true);
 		live.set(state('latest', 'Latest conversation')); await tick();
 		expect(view.queryByText('Loading conversation…')).toBeNull();
 		expect(view.getByText('Latest conversation')).toBeTruthy();
+	});
+
+	it('publishes and renders ready messages immediately but holds a painted notice for its minimum', async () => {
+		const surfaces: string[] = [];
+		const view = render(Harness, { onSurface: surface => surfaces.push(surface) });
+		live.set(state('incoming', '', true)); await tick();
+		await vi.advanceTimersByTimeAsync(GRACE_MS); await tick();
+		vi.advanceTimersToNextFrame(); await tick();
+		live.set(state('incoming', 'Incoming conversation')); await tick();
+		expect(view.getByText('Incoming conversation')).toBeTruthy();
+		expect(view.queryByText('Previous conversation')).toBeNull();
+		expect(view.getByRole('textbox').dataset.session).toBe('incoming');
+		expect(view.getByText('Loading conversation…')).toBeTruthy();
+		expect(view.getByText('Incoming conversation').closest('[inert]')).not.toBeNull();
+		expect(surfaces.at(-1)).toBe('loading');
+		await vi.advanceTimersByTimeAsync(50); await tick();
+		live.set(state('incoming', 'Incoming conversation updated')); await tick();
+		// Neither streaming/native publications nor their DOM work reset the minimum.
+		await vi.advanceTimersByTimeAsync(MIN_VISIBLE_MS - 51); await tick();
+		expect(view.getByText('Loading conversation…')).toBeTruthy();
+		await vi.advanceTimersByTimeAsync(1); await tick();
+		expect(view.queryByText('Loading conversation…')).toBeNull();
+		expect(view.getByText('Incoming conversation updated').closest('[inert]')).toBeNull();
+		expect(surfaces.at(-1)).toBe('active');
+	});
+
+	it('does not impose a minimum if ready before the notice reaches a frame', async () => {
+		const view = render(Harness);
+		live.set(state('incoming', '', true)); await tick();
+		await vi.advanceTimersByTimeAsync(GRACE_MS); await tick();
+		live.set(state('incoming', 'Incoming conversation')); await tick();
+		expect(view.queryByText('Loading conversation…')).toBeNull();
+		expect(view.getByText('Incoming conversation').closest('[inert]')).toBeNull();
+		await vi.advanceTimersByTimeAsync(MIN_VISIBLE_MS); await tick();
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it('cancels the minimum immediately for a cached return and ignores the obsolete removal timer', async () => {
+		const view = render(Harness);
+		live.set(state('incoming', '', true)); await tick();
+		await vi.advanceTimersByTimeAsync(GRACE_MS); await tick();
+		vi.advanceTimersToNextFrame(); await tick();
+		live.set(state('incoming', 'Incoming conversation')); await tick();
+		expect(view.getByText('Loading conversation…')).toBeTruthy();
+		live.set(state('outgoing', 'Previous conversation')); await tick();
+		expect(view.queryByText('Loading conversation…')).toBeNull();
+		expect(view.getByText('Previous conversation').closest('[inert]')).toBeNull();
+		await vi.advanceTimersByTimeAsync(MIN_VISIBLE_MS); await tick();
+		expect(view.getByTestId('presented').dataset.session).toBe('outgoing');
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it('keeps the notice minimum for an empty outcome without retaining the old messages', async () => {
+		const surfaces: string[] = [];
+		const view = render(Harness, { onSurface: surface => surfaces.push(surface) });
+		live.set(state('incoming', '', true)); await tick();
+		await vi.advanceTimersByTimeAsync(GRACE_MS); await tick();
+		vi.advanceTimersToNextFrame(); await tick();
+		live.set(state('incoming')); await tick();
+		expect(view.queryByText('Previous conversation')).toBeNull();
+		expect(view.getByText('No messages')).toBeTruthy();
+		expect(view.getByText('Loading conversation…')).toBeTruthy();
+		await vi.advanceTimersByTimeAsync(MIN_VISIBLE_MS); await tick();
+		expect(view.queryByText('Loading conversation…')).toBeNull();
+		expect(surfaces.at(-1)).toBe('cleared');
+	});
+
+	it('does not let a completed-load removal timer hide a restarted same-chat load', async () => {
+		const view = render(Harness);
+		live.set(state('incoming', '', true)); await tick();
+		await vi.advanceTimersByTimeAsync(GRACE_MS); await tick();
+		vi.advanceTimersToNextFrame(); await tick();
+		live.set(state('incoming', 'Incoming conversation')); await tick();
+		await vi.advanceTimersByTimeAsync(50); await tick();
+		live.set(state('incoming', '', true)); await tick();
+		await vi.advanceTimersByTimeAsync(MIN_VISIBLE_MS); await tick();
+		expect(view.getByText('Loading conversation…')).toBeTruthy();
+		expect(view.getByText('Incoming conversation')).toBeTruthy();
+		live.set(state('incoming', 'Reloaded conversation')); await tick();
+		expect(view.queryByText('Loading conversation…')).toBeNull();
+		expect(view.getByText('Reloaded conversation')).toBeTruthy();
+	});
+
+	it('cleans up a pending minimum on destruction', async () => {
+		const view = render(Harness);
+		live.set(state('incoming', '', true)); await tick();
+		await vi.advanceTimersByTimeAsync(GRACE_MS); await tick();
+		vi.advanceTimersToNextFrame(); await tick();
+		live.set(state('incoming', 'Incoming conversation')); await tick();
+		expect(view.getByText('Loading conversation…')).toBeTruthy();
+		await view.unmount(); await tick();
+		expect(vi.getTimerCount()).toBe(0);
 	});
 
 	it('reports the session and count actually painted, not the incoming empty vector', async () => {

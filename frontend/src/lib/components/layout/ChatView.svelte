@@ -119,12 +119,15 @@
 	// shows no transcript yet (the hero or the gate's pane), so it reads as
 	// loading, like the history load it is part of.
 	const presentedSurface = $derived(chatLayoutSurface(chatSurface, { mirrorSyncPending: mirrorSync.waiting }));
-	const isEmptyState = $derived(chatLayout(presentedSurface) === 'hero');
 	// Diagnostics follow the painted transcript, not the incoming empty store.
 	// Layout/composer binding still follow the live target and existing tracker.
 	let transcriptSurface = $state<typeof presentedSurface | null>(null);
 	let transcriptMessageCount = $state<number | null>(null);
 	let transcriptSessionId = $state<string | null | undefined>(undefined);
+	// A shown notice also survives an empty outcome until its minimum ends.
+	// The mirror gate still owns its own layout and visibility barrier.
+	const isEmptyState = $derived(chatLayout(presentedSurface) === 'hero'
+		&& (mirrorSync.waiting || transcriptSurface !== 'loading'));
 	const paintedSurface = $derived(isEmptyState || mirrorSync.waiting
 		? presentedSurface : transcriptSurface ?? presentedSurface);
 	// Which hero the hero layout shows: the new-session hero, a cleared chat,

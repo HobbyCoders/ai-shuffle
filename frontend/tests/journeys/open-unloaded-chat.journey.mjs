@@ -24,6 +24,7 @@
 // a move there and back, fails even when it is too small or too quick to
 // count as a layout shift.
 import { runJourney } from './runner.mjs';
+import { readFileSync } from 'node:fs';
 import { SEEDED, PROJECT, expect, gotoApp, openFromSidebar, showSidebar, seededChatId, waitChat, waitChatOpen, pickAgent, pickProject, pickAccess, typeAndSend, scriptTag, waitTurnSettled, scrollTranscriptTo, transcriptScroll, uniq } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { expectComposerPositions } from './lib/timeline.mjs';
@@ -31,6 +32,11 @@ import { expectComposerPositions } from './lib/timeline.mjs';
 // Hosted journeys build shared desktop UI only. Explicitly opt into the native
 // phone shell locally, matching transcript-reader's --mobile-shell convention.
 const mobileShell = process.argv.includes('--mobile-shell');
+
+// Read the production deadline instead of giving this timing ratchet its own policy.
+const boundarySource = readFileSync(new URL('../../src/lib/components/chat/TranscriptHydrationBoundary.svelte', import.meta.url), 'utf8');
+const SWITCH_GRACE_MS = Number(boundarySource.match(/export const TRANSCRIPT_LOADING_GRACE_MS = (\d+);/)?.[1]);
+expect(Number.isFinite(SWITCH_GRACE_MS), 'read the production switch-notice deadline');
 
 /** The composer takes exactly these positions over the case. */
 const composer = (...positions) => ({ recording }) => expectComposerPositions(recording, positions);
@@ -408,11 +414,46 @@ await runJourney({
 			async act({ page, mark, log }) {
 				const outgoing = await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-session');
 				expect(typeof outgoing === 'string', 'outgoing session has a safe diagnostic tag');
+				if (new URL(page.url()).pathname.startsWith('/mobile/')) {
+					await page.getByRole('button', { name: /^Open menu/ }).click();
+				} else await showSidebar(page);
+				const incomingRow = page.getByRole('group', { name: `${SEEDED.other_project} session`, exact: true }).getByRole('button').first();
+				await incomingRow.click({ trial: true });
+				const incomingButton = await incomingRow.elementHandle();
 				await sampleSwitchFrames(page);
 				await mark('start B then return to A before its history settles');
-				await openSwitchChat(page, 'other_project');
-				await page.waitForFunction(() => window.__switchHydrationHold.started !== null);
-				await openSwitchChat(page, 'no_project', () => mark('return to A before B has hydrated'));
+				// One browser-side sequence: driver round-trips must not turn this
+				// rapid switch into a legitimate load past the notice deadline.
+				const dispatched = await page.evaluate(async ({ incoming, outgoing, graceMs }) => {
+					const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+					if (!incoming?.isConnected) throw new Error('missing rapid-switch row');
+					const first = performance.now();
+					incoming.click();
+					await frame();
+					while (window.__switchHydrationHold.started === null) {
+						if (performance.now() - first >= graceMs) {
+							throw new Error('invalid rapid-switch run: B did not start its held history before the notice deadline');
+						}
+						await frame();
+					}
+					// Reopen the real drawer on phone shells; use the native row action,
+					// not a store write or a second off-screen transcript.
+					const menu = document.querySelector('button[aria-label^="Open menu"], button[aria-label="Show sidebar"]');
+					if (menu) { menu.click(); await frame(); }
+					// Responsive desktop unmounts its closed sidebar; find the freshly
+					// opened card rather than dispatching on a detached old handle.
+					const group = [...document.querySelectorAll('[role="group"]')]
+						.find(node => node.getAttribute('aria-label') === `${outgoing} session`);
+					const returnButton = group?.querySelector('[role="button"]');
+					if (!returnButton) throw new Error('missing rapid-return session card');
+					window.__flightRecorder.mark('return to A before B has hydrated');
+					const returned = performance.now();
+					returnButton.click();
+					return { first, returned, elapsed: returned - first, graceMs };
+				}, { incoming: incomingButton, outgoing: SEEDED.no_project, graceMs: SWITCH_GRACE_MS });
+				log(`rapid-dispatch ${JSON.stringify(dispatched)}`);
+				expect(dispatched.elapsed < dispatched.graceMs,
+					`invalid rapid-switch run: return dispatched at ${dispatched.elapsed.toFixed(1)} ms, not before ${dispatched.graceMs} ms`);
 				await page.waitForFunction(tag => {
 					const chat = document.querySelector('[data-ui-state="chat"]');
 					return chat?.dataset.uiSession === tag && chat?.dataset.uiTargetSession === tag && chat?.dataset.uiLoading === 'false';
@@ -427,6 +468,7 @@ await runJourney({
 				const settled = frames.filter(frame => frame.t >= readyAt);
 				expect(settled.length > 0, 'sampled the late stale response');
 				expect(settled.every(frame => frame.session === outgoing && frame.target === outgoing && !frame.loader && frame.visibleRows > 0), 'no stale rows/overlay after returning to A');
+				expect(frames.every(frame => frame.session === outgoing && !frame.loader && frame.visibleRows > 0), 'A never passes through a loading/empty frame during the rapid switch');
 				expect(frames.every(frame => frame.composerSame && frame.logSame), 'rapid navigation preserves the composer/transcript shell');
 				log(`rapid switch: ${frames.length} frames, ${settled.length} after A settled; stale response ignored`);
 			},
