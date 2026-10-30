@@ -90,6 +90,7 @@
 	import {
 		createTranscriptWindow,
 		selectedRowRange,
+		dominantReadingIndex,
 		transcriptItemCost,
 		TRANSCRIPT_CONTENT_BUDGET,
 		classifyTurnEntry,
@@ -98,6 +99,7 @@
 		type TranscriptRange,
 		type TurnVisibility
 	} from './transcript-window';
+	import { beforeTranscriptCovered, exposedReadingViewport } from './transcript-reading-area';
 	import { classifyTranscriptRender } from '$lib/components/layout/chat-empty-state';
 	import { pendingDeepLink, deepLinkLoading } from '$lib/stores/pending-deep-link';
 	import { applyPerformanceProfile } from '$lib/utils/perf-profile';
@@ -699,14 +701,35 @@
 	// A bounded slice, not an idle queue that eventually mounts all history.
 	// Explicit navigation remains available while streaming; hidden views do no
 	// optional mounting. A keyed DOM anchor survives eviction at either edge.
-	function pinnedTranscriptRange(): TranscriptRange | null {
-		return selectedRowRange(chatColumnRef, ':scope > [data-transcript-key]', row => {
-			const key = row.dataset.transcriptKey;
-			const index = Number(row.dataset.transcriptIndex);
-			return displayItems[index] && displayItemKey(displayItems[index]) === key ? index
-				: displayItems.findIndex(item => displayItemKey(item) === key);
-		});
+	function transcriptIndexOfRow(row: HTMLElement): number {
+		const key = row.dataset.transcriptKey;
+		const index = Number(row.dataset.transcriptIndex);
+		return displayItems[index] && displayItemKey(displayItems[index]) === key ? index
+			: displayItems.findIndex(item => displayItemKey(item) === key);
 	}
+	function pinnedTranscriptRange(): TranscriptRange | null {
+		return selectedRowRange(chatColumnRef, ':scope > [data-transcript-key]', transcriptIndexOfRow);
+	}
+	let readingTranscriptKey: string | null = null;
+	function readingTranscriptIndex(): number | null {
+		if (!containerRef || !chatColumnRef) return null;
+		const viewport = exposedReadingViewport(containerRef.getBoundingClientRect());
+		if (viewport.bottom <= viewport.top) {
+			const previous = displayItems.findIndex(item => displayItemKey(item) === readingTranscriptKey);
+			return previous < 0 ? null : previous;
+		}
+		const reading = dominantReadingIndex(
+			chatColumnRef.querySelectorAll<HTMLElement>(':scope > [data-transcript-key]'),
+			viewport, transcriptIndexOfRow
+		);
+		if (reading !== null) readingTranscriptKey = displayItemKey(displayItems[reading]);
+		return reading;
+	}
+	// One lazy capture when a sheet opens, before its coverage is registered.
+	// Full-screen covers reuse this stable key; no scroll/token observer is added.
+	onMount(() => beforeTranscriptCovered(() => {
+		if (!document.hidden) untrack(readingTranscriptIndex);
+	}));
 	const transcriptWindow = createTranscriptWindow({
 		// Real row geometry is kept: no estimated-height placeholders that move
 		// the reader after anchor restoration. Dense code/table replies consume
@@ -714,7 +737,8 @@
 		cost: import.meta.env.VITE_PERF_TRANSCRIPT_CONTENT_WINDOW !== '0'
 			? (index) => transcriptItemCost(displayItems[index]) : undefined,
 		budget: TRANSCRIPT_CONTENT_BUDGET,
-		getPinnedRange: pinnedTranscriptRange
+		getPinnedRange: pinnedTranscriptRange,
+		getReadingIndex: readingTranscriptIndex
 	});
 	let selectionBlocksNavigation = $state(false);
 	$effect(() => {
@@ -736,6 +760,7 @@
 	let windowShiftVersion = 0;
 	let windowShifting = false;
 	let revealedTurnId = $state<string | null>(null);
+	let anchorRounding: { scrollTop: number; error: number } | null = null;
 
 	function applyMountedRange(next: TranscriptRange, preserveAnchor = true) {
 		// Once the budget was reached, keep the clear affordance stable until
@@ -743,6 +768,7 @@
 		selectionBlocksNavigation = transcriptWindow.selectionLimited ||
 			(selectionBlocksNavigation && !!pinnedTranscriptRange());
 		if (selectionBlocksNavigation) shouldAutoScroll = false;
+		if (!preserveAnchor) anchorRounding = null;
 		if (next.start === mountedStart && next.end === mountedEnd) return;
 		const container = containerRef;
 		const top = container?.getBoundingClientRect().top ?? 0;
@@ -755,6 +781,11 @@
 			: [];
 		const anchor = candidates.find(node => node.getBoundingClientRect().bottom > top) ?? candidates.at(-1);
 		const anchorTop = anchor?.getBoundingClientRect().top;
+		// Browsers quantize scrollTop. Separate evictions must not accumulate
+		// three <0.5px errors into a >1px reading jump. Carry one subpixel debt
+		// only while the scroll position is untouched; user movement resets it.
+		const roundingError = anchor && anchorRounding && container?.scrollTop === anchorRounding.scrollTop
+			? anchorRounding.error : 0;
 		// Oversize adjacent bodies may genuinely have no overlap. In that case
 		// absolute scrollTop belongs to the evicted DOM, not the incoming reply.
 		const boundaryAtStart = next.start >= mountedEnd;
@@ -768,9 +799,18 @@
 			mountedRangeCache.set(windowSessionKey, next);
 			evictOldest(mountedRangeCache, SCROLL_CACHE_MAX);
 		}
-		void tick().then(() => {
+		void tick().then(async () => {
 			if (version !== windowShiftVersion) return;
 			if (container && container === containerRef) {
+				if (preserveAnchor) {
+					// Evicting a covered tail can shorten the scroll extent. Publish
+					// the EXISTING latest-turn reserve before restoring the key, not
+					// in the column ResizeObserver's next animation frame: otherwise
+					// scrollTop clamps for a painted frame and the reader jumps back.
+					refreshLatestTurnTailReserve();
+					await tick();
+					if (version !== windowShiftVersion || container !== containerRef) return;
+				}
 				let delta: number | undefined;
 				if (anchor?.isConnected && anchorTop !== undefined) {
 					delta = anchor.getBoundingClientRect().top - anchorTop;
@@ -784,7 +824,14 @@
 				}
 				if (delta !== undefined) {
 					markProgrammaticScrollSettling();
-					container.scrollTop += delta;
+					const previousScrollTop = container.scrollTop;
+					const scrollDelta = delta + roundingError;
+					container.scrollTop += scrollDelta;
+					const error = scrollDelta - (container.scrollTop - previousScrollTop);
+					// Never carry a real clamp/navigation boundary, including the
+					// accepted phone-origin singleton settle, into a later shift.
+					anchorRounding = anchor?.isConnected && Math.abs(error) < 1
+						? { scrollTop: container.scrollTop, error } : null;
 					lastKnownScrollTop = container.scrollTop;
 					lastScrollMetrics = readScrollMetrics();
 				}
@@ -813,6 +860,7 @@
 		const streaming = $activeSession.isStreaming;
 		untrack(() => {
 			const isNewSession = sessionKey !== windowSessionKey;
+			if (isNewSession) readingTranscriptKey = null;
 			const saved = isNewSession ? mountedRangeCache.get(sessionKey) : undefined;
 			windowSessionKey = sessionKey;
 			transcriptWindow.onStreamingChange(streaming);
@@ -1340,6 +1388,7 @@
 
 	function handleScroll() {
 		if (!containerRef) return;
+		if (anchorRounding && containerRef.scrollTop !== anchorRounding.scrollTop) anchorRounding = null;
 		scheduleReadingAnchorCapture();
 		if (programmaticScrollDepth > 0) {
 			// Scroll event triggered by (or racing with) a programmatic scroll or a
