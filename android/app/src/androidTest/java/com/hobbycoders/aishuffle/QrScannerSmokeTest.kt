@@ -130,7 +130,7 @@ class QrScannerSmokeTest {
     @Test fun workerScannerBackReturnsToWorkerFormAndClosesCamera() {
         ActivityScenario.launch(AddServerActivity::class.java).use { scenario ->
             awaitNativeWindow(scenario.nativeActivity())
-            onView(withText("Scan QR code")).perform(scrollTo(), click())
+            tapNative(onView(withText("Scan QR code")).perform(scrollTo()))
             cancelScanner("Pairing code")
             onView(withText("Add worker")).check(matches(isDisplayed()))
         }
@@ -138,7 +138,7 @@ class QrScannerSmokeTest {
     @Test fun accountScannerBackReturnsToAccountPairingAndClosesCamera() {
         ActivityScenario.launch<AccountActivity>(Intent(context, AccountActivity::class.java).putExtra("mode", "pair")).use { scenario ->
             awaitNativeWindow(scenario.nativeActivity())
-            onView(withText("Scan account QR")).perform(scrollTo(), click())
+            tapNative(onView(withText("Scan account QR")).perform(scrollTo()))
             cancelScanner("Account pairing code")
             onView(withText("Use another device")).check(matches(isDisplayed()))
         }

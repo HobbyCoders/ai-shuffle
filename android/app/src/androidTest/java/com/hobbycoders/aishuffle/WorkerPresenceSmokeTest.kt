@@ -257,8 +257,8 @@ class WorkerPresenceSmokeTest {
                     }
                     awaitStatus("Online")
                     for (expected in listOf("Unknown", "Offline", "Online")) {
-                        androidx.test.espresso.Espresso.onView(androidx.test.espresso.matcher.ViewMatchers.withContentDescription("Refresh workers"))
-                            .perform(androidx.test.espresso.action.ViewActions.click())
+                        tapNative(androidx.test.espresso.Espresso.onView(
+                            androidx.test.espresso.matcher.ViewMatchers.withContentDescription("Refresh workers")))
                         awaitStatus(expected)
                         if (expected == "Offline") scenario.onActivity { activity ->
                             assertTrue(views(activity.findViewById(android.R.id.content)).any { it.contentDescription?.toString()?.contains("Not reachable from this phone") == true })

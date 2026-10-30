@@ -37,24 +37,20 @@ class CrossAppOverlayTest {
     }
     private var screenshotNumber = 0
     private var lastResult: AtomicReference<JSONObject>? = null
-    /** Read-only evidence from the external fixture, never a substitute root or consent bypass. */
-    private fun screenTrace(): JSONObject {
-        val service = ShuffleAccessibilityService.current ?: return JSONObject().put("service", false)
-        val revision = ShuffleAccessibilityService::class.java.getDeclaredField("revision").apply { isAccessible = true }
-        val snapshot = ShuffleAccessibilityService::class.java.getDeclaredField("snapshot").apply { isAccessible = true }.get(service)
-        val captured = snapshot?.javaClass?.getDeclaredField("fingerprint")?.apply { isAccessible = true }?.get(snapshot)
-        val fingerprint = ShuffleAccessibilityService::class.java.getDeclaredMethod("fingerprint", AccessibilityNodeInfo::class.java).apply { isAccessible = true }
-        val windows = service.windows
+    /** Observe the same accessibility consumer used by the tool, not UiAutomation's separate cache. */
+    private fun serviceShows(text: String): Boolean {
+        val windows = ShuffleAccessibilityService.current?.windows ?: return false
+        val root = windows.singleOrNull {
+            it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive
+        }?.root
         return try {
-            val target = windows.singleOrNull { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive }
-            val root = target?.root
-            try {
-                JSONObject().put("revision", revision.getLong(service))
-                    .put("snapshot", captured ?: JSONObject.NULL)
-                    .put("target", if (root?.packageName?.toString() == instrumentation.context.packageName) fingerprint.invoke(service, root) else JSONObject.NULL)
-                    .put("windows", windows.map { "${it.id}:${it.type}:active=${it.isActive}:focused=${it.isFocused}" })
-            } finally { root?.recycle() }
-        } finally { windows.forEach { it.recycle() } }
+            if (root == null || root.packageName?.toString() != instrumentation.context.packageName) false
+            else {
+                val nodes = root.findAccessibilityNodeInfosByText(text)
+                try { nodes.any { it.text?.toString() == text && it.isVisibleToUser } }
+                finally { nodes.forEach { it.recycle() } }
+            }
+        } finally { root?.recycle(); windows.forEach { it.recycle() } }
     }
     private fun localPress(automation: UiAutomation, text: String) {
         var target: AccessibilityNodeInfo? = null
@@ -97,13 +93,10 @@ class CrossAppOverlayTest {
                 val elapsedStarted = android.os.SystemClock.elapsedRealtime()
                 val deadline = started + ttl
                 val reply = DeviceToolExecutor(context).execute(name, args, deadline)
-                listOf("reply" to reply, "after" to screenTrace()).forEach { (stage, state) ->
-                    state.toString().chunked(3_000).forEachIndexed { index, part ->
-                        android.util.Log.i("AppControlTiming", "$name.$stage[$index]: $part")
-                    }
-                }
                 val finished = System.currentTimeMillis()
                 val elapsed = android.os.SystemClock.elapsedRealtime() - elapsedStarted
+                android.util.Log.i("AppControlTiming", "$name status=${reply.optString("status")} " +
+                    "ok=${reply.optBoolean("ok")} wall_elapsed_ms=${finished - started} monotonic_elapsed_ms=$elapsed")
                 trace?.set(JSONObject().put("deadline_ms", deadline).put("finished_ms", finished)
                     .put("wall_elapsed_ms", finished - started)
                     .put("monotonic_elapsed_ms", elapsed)
@@ -156,8 +149,11 @@ class CrossAppOverlayTest {
                 awaitCondition("Test launcher surface did not become the active application") {
                     automation.windows.any { it.isActive && it.root?.packageName?.toString() == fixturePackage }
                 }
-                // Active-window visibility can precede the service's final layout events.
-                automation.waitForIdle(500, 5_000)
+                // Active/focused accessibility windows can precede the starting-window
+                // exit. A real local input round trip crosses UiAutomation's OS input/
+                // animation barrier; then observe its result in the tool's own cache.
+                localPress(automation, "Prepare local player")
+                awaitCondition("Shuffle did not observe the input-ready external player") { serviceShows("Playlist ready") }
                 val reading = request("read_screen", JSONObject())
                 localPress(automation, "Allow once")
                 val screen = result(reading)
@@ -171,7 +167,7 @@ class CrossAppOverlayTest {
                 localPress(automation, "Allow once")
                 assertEquals("performed", result(tapping).getString("status"))
                 awaitCondition("Target button did not run") { automation.rootInActiveWindow?.findAccessibilityNodeInfosByText("Local track playing")?.isNotEmpty() == true }
-                automation.waitForIdle(500, 5_000)
+                awaitCondition("Shuffle did not observe the performed target action") { serviceShows("Local track playing") }
                 assertEquals("stale_ref", result(request("tap_node", JSONObject().put("ref", play.getString("ref")))).getString("status"))
                 val denied = request("read_screen", JSONObject()); localPress(automation, "Deny")
                 assertEquals("denied", result(denied).getString("status"))
@@ -192,9 +188,8 @@ class CrossAppOverlayTest {
                     completion.getLong("finished_ms") >= completion.getLong("deadline_ms"))
                 localPress(automation, "Show protected content")
                 awaitCondition("Protected screen fixture did not update") { automation.rootInActiveWindow?.findAccessibilityNodeInfosByText("Payment method")?.isNotEmpty() == true }
-                // Let both accessibility consumers observe the changed target before
-                // asserting its stable protected-screen classification.
-                automation.waitForIdle(500, 5_000)
+                // The service and UiAutomation have independent accessibility caches.
+                awaitCondition("Shuffle did not observe the protected target") { serviceShows("Payment method") }
                 assertEquals("protected_screen", result(request("read_screen", JSONObject())).getString("status"))
                 instrumentation.runOnMainSync { ToolsPreferences(context).setCrossAppEnabled(false) }
                 assertFalse(ToolsPreferences(context).crossAppEnabled)

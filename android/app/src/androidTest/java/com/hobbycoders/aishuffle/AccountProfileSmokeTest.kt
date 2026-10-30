@@ -253,7 +253,7 @@ class AccountProfileSmokeTest {
             ActivityScenario.launch<AccountActivity>(Intent(context, AccountActivity::class.java).putExtra("mode", "manage")).use { scenario ->
                 val activity = scenario.nativeActivity()
                 awaitNativeWindow(activity)
-                onView(withText("Edit username")).perform(scrollTo(), click())
+                tapNative(onView(withText("Edit username")).perform(scrollTo()))
                 try { awaitNativeState(activity, "Profile form after one Edit username tap") {
                     activity.findViewById<android.view.ViewGroup>(R.id.screenContent).let { content ->
                         (0 until content.childCount).any { index ->

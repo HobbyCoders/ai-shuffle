@@ -111,6 +111,38 @@ internal fun awaitNativeWindow(activity: Activity) {
     }
 }
 
+/**
+ * One real tap through UiAutomation's WindowManager input/animation barrier.
+ * Espresso injects directly through InputManager: a focused app frame can still
+ * be covered by Android's starting window, so guarded views correctly reject it.
+ * Keep Espresso's 90%-visible constraint and never repeat a lost tap.
+ */
+internal fun tapNative(target: androidx.test.espresso.ViewInteraction) {
+    lateinit var point: FloatArray
+    target.perform(object : androidx.test.espresso.ViewAction {
+        override fun getDescription() = "Locate one native tap after scrolling"
+        override fun getConstraints(): org.hamcrest.Matcher<View> = org.hamcrest.Matchers.allOf(
+            androidx.test.espresso.matcher.ViewMatchers.isDisplayingAtLeast(90),
+            androidx.test.espresso.matcher.ViewMatchers.isEnabled())
+        override fun perform(uiController: androidx.test.espresso.UiController, view: View) {
+            point = androidx.test.espresso.action.GeneralLocation.CENTER.calculateCoordinates(view)
+        }
+    })
+    val automation = InstrumentationRegistry.getInstrumentation()
+        .getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
+    val now = android.os.SystemClock.uptimeMillis()
+    val down = android.view.MotionEvent.obtain(now, now, android.view.MotionEvent.ACTION_DOWN, point[0], point[1], 0)
+    down.source = android.view.InputDevice.SOURCE_TOUCHSCREEN
+    try {
+        org.junit.Assert.assertTrue("Native tap DOWN was not delivered", automation.injectInputEvent(down, true))
+        val up = android.view.MotionEvent.obtain(now, android.os.SystemClock.uptimeMillis(),
+            android.view.MotionEvent.ACTION_UP, point[0], point[1], 0)
+        up.source = android.view.InputDevice.SOURCE_TOUCHSCREEN
+        try { org.junit.Assert.assertTrue("Native tap UP was not delivered", automation.injectInputEvent(up, true)) }
+        finally { up.recycle() }
+    } finally { down.recycle() }
+}
+
 internal fun <A : Activity> ActivityScenario<A>.nativeActivity(): A {
     lateinit var activity: A
     onActivity { activity = it }

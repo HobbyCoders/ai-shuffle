@@ -41,6 +41,44 @@ class NativeStateIdlingResourceTest {
         }
     }
 
+    @Test fun oneNativeTapTraversesTheInputDispatcherAndTheRealObscuredTouchGuard() {
+        launch().use { scenario ->
+            val activity = scenario.nativeActivity()
+            awaitNativeWindow(activity)
+            val events = mutableListOf<Pair<Int, Int>>()
+            var clicks = 0
+            lateinit var previous: android.view.Window.Callback
+            scenario.onActivity {
+                val button = android.widget.Button(it).apply {
+                    text = "Native input fixture"
+                    com.hobbycoders.aishuffle.tools.guardConsentTouch(this)
+                    setOnClickListener { clicks++ }
+                }
+                it.findViewById<android.view.ViewGroup>(R.id.screenContent).addView(button, 0)
+                previous = it.window.callback
+                it.window.callback = object : android.view.Window.Callback by previous {
+                    override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
+                        events.add(event.actionMasked to event.flags)
+                        return previous.dispatchTouchEvent(event)
+                    }
+                }
+            }
+            try {
+                tapNative(androidx.test.espresso.Espresso.onView(
+                    androidx.test.espresso.matcher.ViewMatchers.withText("Native input fixture"))
+                    .perform(androidx.test.espresso.action.ViewActions.scrollTo()))
+                scenario.onActivity {
+                    assertEquals("One real DOWN/UP, never performClick or a retry", listOf(
+                        android.view.MotionEvent.ACTION_DOWN, android.view.MotionEvent.ACTION_UP), events.map { event -> event.first })
+                    val obscured = android.view.MotionEvent.FLAG_WINDOW_IS_OBSCURED or
+                        android.view.MotionEvent.FLAG_WINDOW_IS_PARTIALLY_OBSCURED
+                    assertTrue("Native input was still obscured: $events", events.none { event -> event.second and obscured != 0 })
+                    assertEquals("The real guarded listener must run exactly once", 1, clicks)
+                }
+            } finally { scenario.onActivity { it.window.callback = previous } }
+        }
+    }
+
     @Test fun resumedScreenWaitsForAFocusedCommittedFrame() {
         launch().use { scenario ->
             lateinit var resource: NativeStateIdlingResource
