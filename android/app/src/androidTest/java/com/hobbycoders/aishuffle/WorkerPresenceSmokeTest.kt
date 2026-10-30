@@ -63,7 +63,7 @@ class WorkerPresenceSmokeTest {
         val second = first.copy(id = "account:worker-two", name = "Desk fixture", baseUrl = "https://two-presence.example", hubServerId = "worker-two")
         ServerStore.get(context).apply { add(first); add(second) }
         val requests = AtomicInteger()
-        PresenceFixture { request ->
+        PresenceFixture(validatedNetwork = true) { request ->
             requests.incrementAndGet()
             check(request.header("Authorization") == null && request.header("Cookie") == null)
             check(request.url.encodedPath == "/api/v1/mobile/hub/endpoint")
@@ -72,9 +72,19 @@ class WorkerPresenceSmokeTest {
         }.use {
             try {
                 launchWorkers().use { scenario ->
+                    val activity = scenario.nativeActivity()
+                    awaitNativeWindow(activity)
                     var originalRow: View? = null
                     scenario.onActivity { activity -> originalRow = views(activity.findViewById(android.R.id.content)).first { it.contentDescription == "Options for Home fixture" } }
-                    waitFor("Per-worker statuses did not settle") { description(scenario, first.name, "Online") && description(scenario, second.name, "Status unavailable") }
+                    awaitNativeState(activity, "Independent account-worker observations") {
+                        listOf(first.name to "Online", second.name to "Status unavailable").all { (name, state) ->
+                            views(activity.findViewById(android.R.id.content)).filterIsInstance<TextView>().any {
+                                it.contentDescription?.toString()?.contains("$name. $state.") == true && it.isShown
+                            }
+                        }
+                    }
+                    assertTrue(description(scenario, first.name, "Online"))
+                    assertTrue(description(scenario, second.name, "Status unavailable"))
                     scenario.onActivity { activity ->
                         assertSame(originalRow, views(activity.findViewById(android.R.id.content)).first { it.contentDescription == "Options for Home fixture" })
                         assertTrue(originalRow!!.performClick())
@@ -235,17 +245,21 @@ class WorkerPresenceSmokeTest {
         }.use { fixture ->
             try {
                 launchWorkers().use { scenario ->
-                    waitFor("Initial direct probe was not online") { description(scenario, server.name, "Online") }
-                    waitFor("Worker screen did not become resumed and focused") {
-                        var ready = false
-                        scenario.onActivity { ready = it.lifecycle.currentState == Lifecycle.State.RESUMED && it.hasWindowFocus() }
-                        ready
+                    val activity = scenario.nativeActivity()
+                    awaitNativeWindow(activity)
+                    fun awaitStatus(expected: String) {
+                        awaitNativeState(activity, "Direct worker observation: $expected") {
+                            views(activity.findViewById(android.R.id.content)).filterIsInstance<TextView>().any {
+                                it.contentDescription?.toString()?.contains("${server.name}. $expected.") == true && it.isShown
+                            }
+                        }
+                        assertTrue("Direct worker did not show $expected", description(scenario, server.name, expected))
                     }
-                    instrumentation.uiAutomation.waitForIdle(500, 5_000)
+                    awaitStatus("Online")
                     for (expected in listOf("Unknown", "Offline", "Online")) {
                         androidx.test.espresso.Espresso.onView(androidx.test.espresso.matcher.ViewMatchers.withContentDescription("Refresh workers"))
                             .perform(androidx.test.espresso.action.ViewActions.click())
-                        waitFor("Manual refresh did not show $expected") { description(scenario, server.name, expected) }
+                        awaitStatus(expected)
                         if (expected == "Offline") scenario.onActivity { activity ->
                             assertTrue(views(activity.findViewById(android.R.id.content)).any { it.contentDescription?.toString()?.contains("Not reachable from this phone") == true })
                         }
@@ -257,7 +271,7 @@ class WorkerPresenceSmokeTest {
                     assertTrue(resumedProbe.await(5, TimeUnit.SECONDS))
                     assertTrue("Resume on another network must not republish cached green", description(scenario, server.name, "Unknown"))
                     releaseResume.countDown()
-                    waitFor("The resumed direct probe did not recover") { description(scenario, server.name, "Online") }
+                    awaitStatus("Online")
                     assertEquals(5, requests.get())
                 }
             } finally { releaseResume.countDown(); clean() }

@@ -251,8 +251,16 @@ class AccountProfileSmokeTest {
             }
         }) {
             ActivityScenario.launch<AccountActivity>(Intent(context, AccountActivity::class.java).putExtra("mode", "manage")).use { scenario ->
+                val activity = scenario.nativeActivity()
+                awaitNativeWindow(activity)
                 onView(withText("Edit username")).perform(scrollTo(), click())
-                try { awaitText("Save username") }
+                try { awaitNativeState(activity, "Profile form after one Edit username tap") {
+                    activity.findViewById<android.view.ViewGroup>(R.id.screenContent).let { content ->
+                        (0 until content.childCount).any { index ->
+                            (content.getChildAt(index) as? android.widget.TextView)?.text == "Save username"
+                        }
+                    }
+                } }
                 catch (failure: AssertionError) {
                     var focused = false
                     scenario.onActivity { focused = it.hasWindowFocus() }
@@ -262,15 +270,22 @@ class AccountProfileSmokeTest {
                 android.util.Log.i("ProfileTiming", "Single Edit username tap reached Save username: " +
                     "profileGets=${profileGets.get()}, state=${scenario.state}")
                 assertEquals("One tap must produce one profile refresh", 1, profileGets.get())
+                onView(withText("Save username")).check(matches(isDisplayed()))
                 onView(withHint("Username")).check(matches(withText(""))).perform(replaceText("my.name"), closeSoftKeyboard())
+                fun awaitStatus(expected: String) {
+                    awaitNativeState(activity, "Username result: $expected") {
+                        activity.findViewById<android.widget.TextView>(R.id.screenStatus).text.toString() == expected
+                    }
+                    onView(withText(expected)).check(matches(isDisplayed()))
+                }
                 onView(withText("Save username")).perform(scrollTo(), click())
-                awaitText("That username is already taken. Choose another.")
+                awaitStatus("That username is already taken. Choose another.")
                 assertEquals(session.username, store.session()!!.username)
                 onView(withText("Save username")).perform(scrollTo(), click())
-                awaitText("Could not save your username. Check your connection and try again.")
+                awaitStatus("Could not save your username. Check your connection and try again.")
                 assertEquals(session.token, store.session()!!.token)
                 onView(withText("Save username")).perform(scrollTo(), click())
-                awaitText("Username updated.")
+                awaitStatus("Username updated.")
                 assertEquals("my.name", store.session()!!.username)
                 assertEquals(session.token, store.session()!!.token)
                 assertEquals(session.deviceId, store.session()!!.deviceId)
