@@ -47,13 +47,15 @@ submitted, including unattended calls.
   account's remembered choice for that kind (see below) without asking, in
   interactive and unattended runs alike. With none, an interactive run returns
   `choose` and the chat shows a choice card; an unattended run is skipped and
-  reported, never guessed. Replacing Ask mode's permission prompt is narrower
-  than this unattended classification: only `automation`, `wakeup`,
-  `auto_continue`, `unpark`, `failover` and `agent_message` sources, when
-  unattended and not in a voice-mode session, go straight to admission for
-  these tools, `searchModels` and the native aliases. A saved Deny rule still
-  applies. API, Resume, connector, voice and unknown sources keep Ask mode's
-  prompt because a person may be present. The prompt decision and the guard
+  reported, never guessed. Ask mode keeps its permission prompt for the
+  person-present sources `user`, `queue`, `worktree`, `api`, `resume` and
+  `connector`, and for any voice-mode session, even when model routing calls
+  the run unattended. Every other unattended source goes straight to admission
+  for these tools, `searchModels` and the native aliases, including unknown or
+  new sources. This covers automation/wake-up turns, automatic continuation,
+  unpark/unpark-pump, promotion and provider-agent work without maintaining a
+  background-source allowlist. A saved Deny rule and all stored-choice,
+  pricing, confirmation and spending guards still apply. The prompt decision and the guard
   read the same active-turn context, even on a reused tool server. Turn and
   client cleanup release only the binding they own, never a newer turn's.
   With no active turn, a late call is denied/skipped immediately with

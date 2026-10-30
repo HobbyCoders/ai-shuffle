@@ -14,6 +14,8 @@ from dataclasses import dataclass, field, replace
 from decimal import Decimal, InvalidOperation
 from typing import Callable, Protocol
 
+from app.core.turn_sources import PERSON_PRESENT_TURN_SOURCES
+
 KINDS = ("image", "video", "audio", "3d")
 # Owner-tunable ceiling for an unconfirmed item OR batch; never round floats here.
 CONFIRM_ABOVE_USD = Decimal("0.10")
@@ -54,11 +56,6 @@ ADMISSION_GATED_TOOLS = frozenset({
     "GenerateNativeImage", "GenerateNativeVideo",
 })
 READ_ONLY_GENERATION_TOOLS = frozenset({"mcp__ai-tools__searchModels"})
-# Model-routing attendance is broader than "nobody can answer Ask". API,
-# Resume, connectors, voice and unknown sources may have a person present.
-NO_PERSON_TURN_SOURCES = frozenset({
-    "automation", "wakeup", "auto_continue", "unpark", "failover", "agent_message",
-})
 NO_ACTIVE_TURN_MESSAGE = ("Generation skipped: no active turn is available to authorize this call. "
                           "Nothing was submitted; start a new turn to request generation.")
 
@@ -70,16 +67,16 @@ def is_generation_tool(tool_name) -> bool:
 
 
 def admission_gates_unattended(tool_name, context, *, session_id=None) -> bool:
-    """Whether admission replaces Ask: an unattended, background-only source,
-    never a voice-mode session. This is the single no-person classifier.
+    """Whether admission replaces Ask: unattended with no person-present source
+    or voice-mode session. Unknown/new sources default to admission, not a wait.
 
     ``context`` must be the current turn's own ``RunContext``
     (:func:`turn_context`), the one the generation tools run under too, and
-    belong to ``session_id``. Other sources do not replace Ask; the caller
+    belong to ``session_id``. Person-present sources keep Ask; the caller
     separately denies generation when there is no active binding at all.
     """
     return (isinstance(context, RunContext) and context.unattended and not context.voice_mode
-            and context.turn_source in NO_PERSON_TURN_SOURCES
+            and context.turn_source not in PERSON_PRESENT_TURN_SOURCES
             and bool(context.session_id) and context.session_id == session_id
             and is_generation_tool(tool_name))
 

@@ -2,10 +2,10 @@
 
 An automation in Ask mode put ``generateImage`` to a permission prompt nobody
 could answer, so the run hung until its timeout and the tool's own unattended
-skip (``skipped/no_stored_choice``) never happened (#776). Only unattended,
-background-only sources go straight to generation admission. Model-routing
-attendance is broader: API, Resume, connectors, voice and unknown sources may
-have a person present, so they retain Ask. Idle generation denies immediately.
+skip (``skipped/no_stored_choice``) never happened (#776). Every unattended
+source without a person-present source or voice-mode session goes straight to
+admission, including unknown/new sources. API, Resume and connectors retain Ask
+alongside composer sources and voice calls. Idle generation denies immediately.
 
 The permission callback and the generation tools read ONE per-turn context
 (``generation_resolver.turn_context``), stamped when the turn claims its
@@ -40,7 +40,7 @@ SID = "qe-unattended-generation"
 CLI_NAME = "mcp__fluid_bundled__mcp__ai-tools__generateImage"
 AUTOMATION = RunContext(session_id=SID, unattended=True, owner=True, turn_source="automation")
 WAKEUP = RunContext(session_id=SID, unattended=True, owner=True, turn_source="wakeup")
-VOICE = RunContext(session_id=SID, unattended=True, owner=True, turn_source="voice")
+VOICE = RunContext(session_id=SID, unattended=True, owner=True, turn_source="voice", voice_mode=True)
 CONNECTOR = RunContext(session_id=SID, unattended=True, owner=True, turn_source="connector")
 TYPED = RunContext(session_id=SID, unattended=False, owner=True, turn_source="user")
 
@@ -106,6 +106,7 @@ async def _asks(cb, broadcast, name):
 
 @pytest.mark.parametrize("source", [
     "automation", "wakeup", "auto_continue", "unpark", "failover", "agent_message",
+    "unpark_pump", "promotion", "provider_agent", "future_unattended_source", None,
 ])
 @pytest.mark.parametrize("name", [CLI_NAME, "mcp__ai-tools__generateVideo", "mcp__ai-tools__runFalModel",
                                   "mcp__ai-tools__searchModels", "GenerateNativeImage"])
@@ -152,16 +153,19 @@ async def test_the_callback_reads_the_current_turn_not_an_earlier_one(tmp_path):
 
 
 @pytest.mark.parametrize("source,mode", [
-    ("api", None), ("resume", None), ("connector", None), ("voice", None),
-    ("user", "voice"), ("automation", "voice"), ("wakeup", "voice"),
-    ("unknown", None), (None, None),
+    ("user", None), ("queue", None), ("worktree", None),
+    ("api", None), ("resume", None), ("connector", None),
+    ("voice", "voice"), ("automation", "voice"), ("wakeup", "voice"),
+    ("future_unattended_source", "voice"),
 ])
-async def test_person_attended_and_unknown_sources_keep_the_ask_prompt(tmp_path, source, mode):
+async def test_person_present_sources_and_voice_sessions_keep_the_ask_prompt(tmp_path, source, mode):
     from app.core.agent_types import PermissionResultDeny
     from app.core.query_options import _generation_context, _is_interactive_run
 
     cb, broadcast = await _callback(tmp_path)
-    row = {"id": SID, "mode": mode}
+    # Even an owner source excluded from model-routing interactivity by a
+    # hidden/worker row may have someone present to answer a permission card.
+    row = {"id": SID, "mode": mode, "hidden": True}
     unattended = not _is_interactive_run({"turn_source": source}, row)
     assert unattended  # model-routing attendance alone cannot suppress Ask
     _bind(_generation_context({}, row, None, session_id=SID,
@@ -188,6 +192,22 @@ async def test_a_late_permission_call_denies_without_an_unanswerable_prompt(tmp_
     assert not _allowed(result)
     assert "no active turn" in result.message.lower()
     assert _prompts(broadcast) == []
+
+
+def test_person_present_definition_covers_real_owner_sources_and_loop_guard_exceptions():
+    from app.core import loop_guard, query_options, turn_scheduler
+    from app.db.turns import HUMAN_INPUT_SOURCES
+
+    person_present = gr.PERSON_PRESENT_TURN_SOURCES
+    assert person_present == frozenset(query_options._INTERACTIVE_TURN_SOURCES) | {"api", "resume", "connector"}
+    assert set(HUMAN_INPUT_SOURCES) <= person_present
+    assert set(turn_scheduler._OWNER_SOURCES) <= person_present
+    # Loop detection calls connectors unattended for its own accounting. They
+    # still may have a person to answer Ask; the other origins/relays do not.
+    for source in (*loop_guard.UNATTENDED_SOURCES, *loop_guard.RELAY_SOURCES):
+        assert admission_gates_unattended(
+            CLI_NAME, replace(AUTOMATION, turn_source=source), session_id=SID,
+        ) is (source not in person_present)
 
 
 def test_predicate_needs_this_sessions_unattended_turn():

@@ -28,6 +28,7 @@ from app.core.platform import detect_deployment_mode, DeploymentMode
 
 from app.core.project_utils import get_project_working_dir
 from app.core.model_registry import is_offered_context_window
+from app.core.turn_sources import INTERACTIVE_TURN_SOURCES as _INTERACTIVE_TURN_SOURCES
 
 # --- Re-exports for backward compatibility ---
 # All symbols that were previously defined here are re-exported so that
@@ -719,13 +720,6 @@ def _resolve_thinking_display(
     if value in ('summarized', 'omitted'):
         return value
     return None
-
-
-#: Turn sources a person typed into the composer. Only these may start on the
-#: owner's most used model; every other source (automation, wakeup,
-#: connector, api, failover of an unattended turn, ...) keeps the earlier
-#: order, so unattended work never inherits an expensive chat model.
-_INTERACTIVE_TURN_SOURCES = ("user", "queue", "worktree")
 
 
 def _is_interactive_run(
