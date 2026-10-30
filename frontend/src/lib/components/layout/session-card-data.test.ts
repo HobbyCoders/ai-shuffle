@@ -130,6 +130,11 @@ describe('isRemovedProjectSession', () => {
 		expect(isRemovedProjectSession(session({ project_id: null }), live)).toBe(false);
 	});
 
+	it('proves nothing removed before the catalog has answered (#804)', () => {
+		expect(isRemovedProjectSession(session({ project_id: 'gone' }), null)).toBe(false);
+		expect(isRemovedProjectSession(session({ project_id: 'gone' }), live)).toBe(true);
+	});
+
 	it('keeps a chat whose local project still exists', () => {
 		expect(isRemovedProjectSession(session({ project_id: 'local-1' }), live)).toBe(false);
 	});

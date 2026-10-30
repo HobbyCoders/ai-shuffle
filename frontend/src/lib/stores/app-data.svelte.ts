@@ -27,6 +27,11 @@ interface AppDataState {
 	projects: Project[];
 	/** Origin-keyed catalog of projects available on approved online installs. */
 	clusterProjects: ClusterProject[];
+	/** Both catalog halves have loaded successfully at least once, so a project
+	 *  missing from them is really gone. Until then an empty catalog means "not
+	 *  loaded yet". Unlike `projectCatalogLoaded`, a failed answer doesn't count,
+	 *  and a later failed refresh doesn't clear it. */
+	projectCatalogReady: boolean;
 	sessions: Session[];
 	// Loading state
 	sessionsLoading: boolean;
@@ -95,6 +100,7 @@ let _state = $state<AppDataState>({
 	profilesLoaded: false,
 	projects: [],
 	clusterProjects: [],
+	projectCatalogReady: false,
 	sessions: [],
 	sessionsLoading: false,
 	sessionsTagFilter: null,
@@ -639,6 +645,11 @@ function trackCatalogRequest(half: 'projects' | 'cluster', load: () => Promise<b
 function settleCatalogHalf(half: 'projects' | 'cluster', ok: boolean) {
 	_catalogAnswered[half] = true;
 	_catalogFailures[half] = !ok;
+	// Latches: once both halves have loaded, a later failed refresh keeps the
+	// last good lists, so chats of a deleted project stay hidden (no jump back).
+	const ready = _state.projectCatalogReady || (_catalogAnswered.projects && _catalogAnswered.cluster
+		&& !_catalogFailures.projects && !_catalogFailures.cluster);
+	if (_state.projectCatalogReady !== ready) _update(s => ({ ...s, projectCatalogReady: ready }));
 	if (!_catalogAnswered.projects || !_catalogAnswered.cluster) return;
 	const waiters = _catalogWaiters;
 	_catalogWaiters = [];
@@ -1052,6 +1063,7 @@ export const profiles = createDerived(() => _state.profiles);
 export const profilesLoaded = createDerived(() => _state.profilesLoaded);
 export const projects = createDerived(() => _state.projects);
 export const clusterProjects = createDerived(() => _state.clusterProjects);
+export const projectCatalogReady = createDerived(() => _state.projectCatalogReady);
 export const sessions = createDerived(() => _state.sessions);
 export const sessionsTagFilter = createDerived(() => _state.sessionsTagFilter);
 /** True when the server has more session pages behind the loaded ones — drives
