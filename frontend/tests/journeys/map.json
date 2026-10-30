@@ -218,6 +218,15 @@
 			]
 		},
 		{
+			"why": "the composer's text editor: typed, filled and pasted text, large and newline-heavy input",
+			"journeys": ["composer-large-input", "phone-composer", "chat-send-stream"],
+			"globs": [
+				"frontend/tests/journeys/composer-large-input.journey.mjs",
+				"frontend/src/lib/components/chat/TiptapEditor.svelte",
+				"frontend/src/lib/components/chat/tiptap/**"
+			]
+		},
+		{
 			"why": "the composer's controls and sheets on a phone",
 			"journeys": ["phone-composer"],
 			"globs": [

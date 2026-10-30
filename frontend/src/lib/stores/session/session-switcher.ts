@@ -607,7 +607,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		if (!state.sessionId) return;
 		// An empty or partial transcript mid-hydration says nothing about the
 		// question: keep whatever was remembered until history has loaded.
-		if (state.isLoadingSession || state.isRestoringSession) return;
+		// A stalled load (#913) is the same: its history was never confirmed.
+		if (state.isLoadingSession || state.isRestoringSession || state.historyStall) return;
 		// The row's user-message revision as of now: a later one in the
 		// question's log clears the remembered question without reopening.
 		const row = appData.current.sessions.find((s) => s.id === state.sessionId);
@@ -825,6 +826,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// A send in flight belongs to the session being LEFT (S6).
 			optimisticStreaming: false,
 			isHydrationSlow: false,
+			historyStall: null,
 			// LAST: on a cache hit this replaces messages / isStreaming / usage /
 			// the loading flags above with the cached session's own exact values.
 			// On a miss it is null and the reset stands unchanged.
@@ -1129,6 +1131,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// fresh compose has no hydration to be slow about (S1).
 			optimisticStreaming: false,
 			isHydrationSlow: false,
+			historyStall: null,
 			// #585: reset the live turn id on newChat (mirrors defaultState).
 			liveTurnId: null,
 			turnParked: false,

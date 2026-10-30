@@ -18,6 +18,9 @@
 //   <target>-from-chat     another open chat  → sidebar row
 //   long-from-cleared      an empty chat      → sidebar row (hero → column)
 //   <target>-deep-link     a full load of /?session=<id>
+//   past-ceiling-*         #913: the history outlives the hydration ceiling
+//                          (from a chat, the new-session screen or a link;
+//                          held, or answered with a server error then Retry)
 //
 // Each case's `verify` names the composer positions it is designed to take,
 // read on every painted frame: one entry per position, so a second move, or
@@ -27,7 +30,7 @@ import { runJourney } from './runner.mjs';
 import { readFileSync } from 'node:fs';
 import { SEEDED, PROJECT, expect, gotoApp, openFromSidebar, showSidebar, seededChatId, waitChat, waitChatOpen, pickAgent, pickProject, pickAccess, typeAndSend, scriptTag, waitTurnSettled, scrollTranscriptTo, transcriptScroll, uniq } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
-import { expectComposerPositions } from './lib/timeline.mjs';
+import { anyFrame, expectComposerPositions } from './lib/timeline.mjs';
 
 // Hosted journeys build shared desktop UI only. Explicitly opt into the native
 // phone shell locally, matching transcript-reader's --mobile-shell convention.
@@ -37,6 +40,12 @@ const mobileShell = process.argv.includes('--mobile-shell');
 const boundarySource = readFileSync(new URL('../../src/lib/components/chat/TranscriptHydrationBoundary.svelte', import.meta.url), 'utf8');
 const SWITCH_GRACE_MS = Number(boundarySource.match(/export const TRANSCRIPT_LOADING_GRACE_MS = (\d+);/)?.[1]);
 expect(Number.isFinite(SWITCH_GRACE_MS), 'read the production switch-notice deadline');
+// #913: the feed's hydration ceiling, and the shortened one these cases ask
+// for through the app's test hook (window.__SHUFFLE_HYDRATION_CEILING_MS__).
+const feedSource = readFileSync(new URL('../../src/lib/stores/session/v2/feed-controller.ts', import.meta.url), 'utf8');
+const HYDRATION_CEILING_MS = Number(feedSource.match(/export const HYDRATION_CEILING_MS = ([\d_]+);/)?.[1].replaceAll('_', ''));
+expect(Number.isFinite(HYDRATION_CEILING_MS), 'read the production hydration ceiling');
+const SHORT_CEILING_MS = 2_000;
 
 /** The composer takes exactly these positions over the case. */
 const composer = (...positions) => ({ recording }) => expectComposerPositions(recording, positions);
@@ -134,9 +143,40 @@ async function holdIncomingHistory(page, target, delayMs) {
 	}, { target, delayMs, graceMs: SWITCH_GRACE_MS });
 }
 
+// #913: hold B's first native history response until the case releases it, or
+// answer it with a real server error status (`fail`), and shorten the feed's
+// hydration ceiling through the app's test hook so the case runs in seconds.
+// Requests after the release pass through untouched (a Retry, a reconnect).
+async function holdHistoryPastCeiling(page, target, { fail = false } = {}) {
+	await page.addInitScript(({ target, fail, ceilingMs }) => {
+		window.__SHUFFLE_HYDRATION_CEILING_MS__ = ceilingMs;
+		const fetchOriginal = window.fetch.bind(window);
+		let open;
+		const gate = new Promise(resolve => { open = resolve; });
+		const hold = window.__switchHydrationHold = {
+			started: null, released: null, requests: 0,
+			release() { if (hold.released === null) hold.released = performance.now(); open(); }
+		};
+		window.fetch = async (input, init) => {
+			const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+			if (url.pathname !== `/api/v1/sessions/${target}/events` || hold.released !== null) return fetchOriginal(input, init);
+			hold.requests++;
+			if (hold.started === null) hold.started = performance.now();
+			if (fail) return new Response('history unavailable', { status: 503 });
+			const response = await fetchOriginal(input, init);
+			await gate;
+			return response;
+		};
+	}, { target, fail, ceilingMs: SHORT_CEILING_MS });
+}
+
 async function prepareHeldSwitch(ctx, delayMs, source = 'no_project') {
+	await holdIncomingHistory(ctx.page, seededChatId(ctx.status, 'other_project'), delayMs);
+	await openHeldSource(ctx, source);
+}
+
+async function openHeldSource(ctx, source = 'no_project') {
 	const { page, status, variant } = ctx;
-	await holdIncomingHistory(page, seededChatId(status, 'other_project'), delayMs);
 	const prefix = mobileShell && variant.viewport === 'phone' ? '/mobile/' : '/';
 	await page.goto(new URL(`${prefix}?session=${encodeURIComponent(seededChatId(status, source))}`, status.urls.ui).toString());
 	await page.getByRole('textbox', { name: 'Message' }).waitFor({ timeout: 60_000 });
@@ -184,6 +224,8 @@ async function sampleSwitchFrames(page) {
 				composerSame: composer === document.querySelector('[role="textbox"][aria-label="Message"]'),
 				logSame: log === document.querySelector('[role="log"][aria-label="Conversation messages"]'),
 				outgoingDraft: composer?.textContent?.includes('Draft for the outgoing chat'),
+				stall: document.querySelector('[data-history-stall]')?.getAttribute('data-history-stall') ?? null,
+				composer: chat?.dataset.uiComposer,
 				surface: chat?.dataset.uiSurface,
 				session: chat?.dataset.uiSession,
 				target: chat?.dataset.uiTargetSession,
@@ -377,6 +419,110 @@ const deepLinkLateCatalog = async ({ page, status, mark }) => {
 	);
 };
 
+// #913: a populated chat whose first history response outlives the feed's
+// hydration ceiling. Running out of time is not evidence the chat is empty: it
+// must never read as cleared (centred composer, "Conversation cleared"), only
+// as a load that is taking longer (or failed) with Retry, and the late history
+// must paint in place. Before the fix the ceiling published an empty settled
+// chat; this wait then ends on that cleared surface (after the real ceiling,
+// the hook being unknown) and the checks below fail on it.
+async function waitPastCeiling(page, kind) {
+	await page.waitForFunction((kind) => {
+		const chat = document.querySelector('[data-ui-state="chat"]');
+		return document.querySelector(`[data-history-stall="${kind}"]`)
+			|| chat?.dataset.uiSurface === 'cleared' || chat?.dataset.uiSurface === 'new';
+	}, kind, { timeout: HYDRATION_CEILING_MS + 20_000, polling: 'raf' });
+	// Hold past it: a flip back to an empty chat would come right after.
+	await page.waitForTimeout(600);
+}
+
+const neverCleared = (...positions) => ({ recording }) => {
+	// A case may start on the new-session screen; from the open on, the chat
+	// must never read as new, and never as cleared at all.
+	const opened = (recording?.timeline || []).find(entry => entry.kind === 'mark')?.t ?? 0;
+	expect(!anyFrame(recording, s => s.surface === 'cleared'), 'an unconfirmed history never painted as a cleared chat');
+	expect(!anyFrame(recording, s => s.surface === 'new', { from: opened }), 'an opened chat never painted as a new chat');
+	expectComposerPositions(recording, positions);
+};
+
+const pastCeilingSwitch = ({ fail = false } = {}) => ({
+	async setup(ctx) {
+		await holdHistoryPastCeiling(ctx.page, seededChatId(ctx.status, 'other_project'), { fail });
+		await openHeldSource(ctx);
+	},
+	async act({ page, mark, log }) {
+		const kind = fail ? 'error' : 'timeout';
+		await sampleSwitchFrames(page);
+		await mark('open a chat whose history outlives the hydration ceiling');
+		await openSwitchChat(page, 'other_project');
+		await page.waitForFunction(() => window.__switchHydrationHold.started !== null);
+		await waitPastCeiling(page, kind);
+		if (fail) {
+			await mark('retry once the server answers again');
+			await page.evaluate(() => window.__switchHydrationHold.release());
+			await page.getByRole('button', { name: 'Retry loading the conversation' }).click();
+		} else {
+			await mark('the held history arrives after the ceiling');
+			await page.evaluate(() => window.__switchHydrationHold.release());
+		}
+		await waitChatOpen(page, { messagesAtLeast: 2, hold: 250 });
+		const frames = await page.evaluate(() => {
+			window.__switchHydrationSampling = false;
+			return window.__switchHydrationFrames;
+		});
+		const hold = await page.evaluate(() => ({ ...window.__switchHydrationHold }));
+		const held = frames.filter(frame => frame.t >= hold.started && frame.t < hold.released);
+		const stalled = held.filter(frame => frame.stall === kind);
+		const firstStall = stalled[0]?.t;
+		const ready = frames.find(frame => frame.t >= hold.released && frame.loading === 'false' && frame.session === frame.target);
+		log(`past-ceiling ${JSON.stringify({
+			kind, frames: frames.length, held: held.length, stalled: stalled.length, requests: hold.requests,
+			stallAfterMs: firstStall === undefined ? null : Math.round(firstStall - hold.started),
+			readyAfterReleaseMs: ready ? Math.round(ready.t - hold.released) : null,
+			surfaces: [...new Set(frames.map(frame => frame.surface))], composers: [...new Set(frames.map(frame => frame.composer))]
+		})}`);
+		expect(frames.every(frame => frame.surface !== 'cleared' && frame.surface !== 'new'), 'the chat never painted as cleared or new');
+		expect(frames.every(frame => frame.composer === 'bottom'), 'the composer stays at the bottom');
+		expect(stalled.length > 0, `the past-ceiling notice (${kind}) showed while the history was held`);
+		expect(stalled.every(frame => frame.loader && frame.outgoingConnected), 'the notice keeps the transcript slot and the retained rows');
+		expect(frames.every(frame => frame.composerSame && frame.logSame), 'composer and MessageArea retain their identity');
+		expect(ready, 'the late history painted the incoming chat');
+		expect(frames.filter(frame => frame.t >= ready.t).every(frame => !frame.stall && frame.visibleRows > 0), 'no notice left once the history painted');
+	},
+	verify: neverCleared('bottom'),
+	...(fail ? { allow: [{ kind: 'failed_requests', status: 503, url: /\/events(\?|$)/, reason: 'the case answers the held history with a server error on purpose (#913)' }] } : {})
+});
+
+const pastCeilingOpen = (how) => ({
+	async setup(ctx) {
+		await holdHistoryPastCeiling(ctx.page, seededChatId(ctx.status, 'other_project'));
+		await fromNew(ctx);
+	},
+	async act({ page, status, mark, variant, log }) {
+		await mark(`open a chat by ${how} whose history outlives the hydration ceiling`);
+		if (how === 'sidebar') await openFromSidebar(page, SEEDED.other_project);
+		else {
+			const prefix = mobileShell && variant.viewport === 'phone' ? '/mobile/' : '/';
+			await page.goto(new URL(`${prefix}?session=${encodeURIComponent(seededChatId(status, 'other_project'))}`, status.urls.ui).toString());
+		}
+		await page.waitForFunction(() => window.__switchHydrationHold.started !== null);
+		await waitPastCeiling(page, 'timeout');
+		const shown = await page.evaluate(() => {
+			const chat = document.querySelector('[data-ui-state="chat"]');
+			return { surface: chat?.dataset.uiSurface, composer: chat?.dataset.uiComposer,
+				retry: !!document.querySelector('[data-history-stall] button') };
+		});
+		log(`past-ceiling ${how}: ${JSON.stringify(shown)}`);
+		expect(shown.surface === 'loading' && shown.retry, `a stalled load with Retry, not ${JSON.stringify(shown)}`);
+		await mark('the held history arrives after the ceiling');
+		await page.evaluate(() => window.__switchHydrationHold.release());
+		await waitChatOpen(page, { messagesAtLeast: 2, hold: 500 });
+	},
+	// From the new-session screen the hero holds (centre) until the history
+	// arrives; a link's page docks the composer for its load. One move each.
+	verify: neverCleared('centre', 'bottom')
+});
+
 await runJourney({
 	name: 'open-unloaded-chat',
 	cases: [
@@ -484,6 +630,10 @@ await runJourney({
 		},
 		{ name: 'short-switch-under-grace', ...heldSwitch(80) },
 		{ name: 'short-switch-slow-overlay', ...heldSwitch(800, true) },
+		{ name: 'past-ceiling-late-history', ...pastCeilingSwitch() },
+		{ name: 'past-ceiling-error-retry', ...pastCeilingSwitch({ fail: true }) },
+		{ name: 'past-ceiling-from-new', ...pastCeilingOpen('sidebar') },
+		{ name: 'past-ceiling-deep-link', ...pastCeilingOpen('link') },
 		{ name: 'reading-anchor-survives-hydration',
 			async setup(ctx) {
 				await prepareHeldSwitch(ctx, 800, 'long');

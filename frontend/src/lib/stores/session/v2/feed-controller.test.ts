@@ -461,6 +461,100 @@ describe('feedController history-batch hydration', () => {
 		expect(deps.state.isRestoringSession).toBe(false);
 	});
 
+	// #913: running out of time is not evidence of emptiness. The ceiling still
+	// releases sends, but publishes the outcome instead of a settled empty chat
+	// (which the surface read as `cleared`: the transcript unmounted and the
+	// composer centred, then jumped back when the history arrived).
+	it('(#913) the ceiling releases sends at exactly the ceiling with the history unconfirmed', () => {
+		const deps = makeDeps({ isLoadingSession: true, isRestoringSession: true });
+		feedController.attach(deps);
+		feedController.start('s1');
+
+		// Checking only every FIRST_FRAME_BUDGET_MS used to overshoot to 32 s.
+		vi.advanceTimersByTime(HYDRATION_CEILING_MS - 1);
+		expect(deps.state.isRestoringSession).toBe(true);
+		expect(deps.state.historyStall ?? null).toBeNull();
+		vi.advanceTimersByTime(1);
+		expect(deps.state.isLoadingSession).toBe(false);
+		expect(deps.state.isRestoringSession).toBe(false);
+		expect(deps.state.historyStall).toBe('timeout');
+		expect(deps.state.messages).toHaveLength(0);
+	});
+
+	it('(#913) late history after the ceiling clears the stall and paints once', () => {
+		const deps = makeDeps({ isLoadingSession: true });
+		feedController.attach(deps);
+		feedController.start('s1');
+		vi.advanceTimersByTime(HYDRATION_CEILING_MS);
+		expect(deps.state.historyStall).toBe('timeout');
+		const callsAtStall = deps.update.mock.calls.length;
+
+		hoisted.onEvent!(textDelta('late-1', 'late '));
+		hoisted.onEvent!(textDelta('late-1', 'history'));
+		flushRaf();
+		vi.advanceTimersByTime(CATCHUP_FALLBACK_MS - 1);
+		expect(deps.update.mock.calls.length).toBe(callsAtStall);
+		expect(deps.state.historyStall).toBe('timeout');
+
+		hoisted.onEvent!(caughtUp(2));
+		expect(deps.update.mock.calls.length).toBe(callsAtStall + 1);
+		expect(deps.state.historyStall).toBeNull();
+		expect((deps.state.messages as Array<{ content: string }>)[0].content).toBe('late history');
+	});
+
+	it('(#913) a failed history request is an error stall, never an empty chat', () => {
+		const deps = makeDeps({ isLoadingSession: true });
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onError!(new Error('SSE feed HTTP 503'));
+		expect(deps.state.isLoadingSession).toBe(true);
+		vi.advanceTimersByTime(FIRST_FRAME_BUDGET_MS);
+		hoisted.onError!(new Error('SSE feed HTTP 503'));
+		expect(deps.state.isLoadingSession).toBe(false);
+		expect(deps.state.historyStall).toBe('error');
+
+		// Retry re-requests the history from seq 0 and is a load again.
+		const created = hoisted.creates;
+		feedController.restart('s1');
+		expect(hoisted.creates).toBe(created + 1);
+		expect(hoisted.fromSeq).toBe(0);
+		expect(deps.state.isLoadingSession).toBe(true);
+		expect(deps.state.historyStall).toBeNull();
+	});
+
+	it('(#913) errors after a timeout stall turn it into an error stall', () => {
+		const deps = makeDeps({ isLoadingSession: true });
+		feedController.attach(deps);
+		feedController.start('s1');
+		vi.advanceTimersByTime(HYDRATION_CEILING_MS);
+		expect(deps.state.historyStall).toBe('timeout');
+		hoisted.onError!(new Error('SSE feed HTTP 503'));
+		expect(deps.state.historyStall).toBe('error');
+	});
+
+	it('(#913) the journey hook shortens the ceiling but never lengthens it', () => {
+		const hook = window as { __SHUFFLE_HYDRATION_CEILING_MS__?: number };
+		try {
+			hook.__SHUFFLE_HYDRATION_CEILING_MS__ = 2_000;
+			const deps = makeDeps({ isLoadingSession: true });
+			feedController.attach(deps);
+			feedController.start('s1');
+			vi.advanceTimersByTime(1_999);
+			expect(deps.state.isLoadingSession).toBe(true);
+			vi.advanceTimersByTime(1);
+			expect(deps.state.historyStall).toBe('timeout');
+
+			hook.__SHUFFLE_HYDRATION_CEILING_MS__ = HYDRATION_CEILING_MS * 10;
+			const later = makeDeps({ sessionId: 's2', isLoadingSession: true });
+			feedController.attach(later);
+			feedController.start('s2');
+			vi.advanceTimersByTime(HYDRATION_CEILING_MS);
+			expect(later.state.historyStall).toBe('timeout');
+		} finally {
+			delete hook.__SHUFFLE_HYDRATION_CEILING_MS__;
+		}
+	});
+
 	it('(S1) a frame arriving after a premature flip re-enters batch mode', () => {
 		const deps = makeDeps({ isLoadingSession: true, isRestoringSession: true });
 		feedController.attach(deps);
@@ -1584,6 +1678,49 @@ function hydrate(sessionId: string, seqs: number[]): void {
 	for (const seq of seqs) hoisted.onEvent!(userMessageAt(seq, `m${seq}`));
 	hoisted.onEvent!(caughtUp(seqs[seqs.length - 1] ?? 0));
 }
+
+describe('feedController silent cached resume (#913 review)', () => {
+	it('keeps the cached rows and never spins the pre-first-frame timer when nothing arrives', () => {
+		vi.useFakeTimers();
+		try {
+			const deps = makeDeps();
+			feedController.attach(deps);
+			hydrate('s1', [1, 2, 3]);
+			flushRaf();
+			feedController.stop();
+
+			// Reopen: the cached transcript publishes settled at once, then the
+			// resumed feed stays silent (no event, no caught_up) past the ceiling.
+			const callbacks = { count: 0 };
+			const realSetTimeout = globalThis.setTimeout;
+			const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) =>
+				realSetTimeout(() => { callbacks.count++; fn(); }, ms)) as typeof setTimeout);
+			try {
+				feedController.start('s1');
+				expect(deps.state.messages).toHaveLength(3);
+				expect(deps.state.isLoadingSession).toBeFalsy();
+				vi.advanceTimersByTime(HYDRATION_CEILING_MS * 2);
+				// The first-frame check may fire once; it must not re-arm itself
+				// (it used to re-arm at 0 ms forever once the ceiling passed).
+				expect(callbacks.count).toBeLessThanOrEqual(2);
+				expect(vi.getTimerCount()).toBe(0);
+			} finally {
+				spy.mockRestore();
+			}
+			expect(deps.state.messages).toHaveLength(3);
+			expect(deps.state.isLoadingSession).toBeFalsy();
+			expect(deps.state.historyStall ?? null).toBeNull();
+			expect(deps.state.isHydrationSlow).toBeFalsy();
+
+			// A frame that arrives later still folds through the idle floor.
+			hoisted.onEvent!(userMessageAt(4, 'm4'));
+			vi.advanceTimersByTime(CATCHUP_FALLBACK_MS);
+			expect(deps.state.messages).toHaveLength(4);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
 
 describe('feedController parked turn', () => {
 	it('publishes turnParked from turn.parked until the wake turn starts', () => {

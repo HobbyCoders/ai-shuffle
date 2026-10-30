@@ -1,6 +1,8 @@
 import { Editor } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
 import Placeholder from '@tiptap/extension-placeholder';
+import { TextSelection } from '@tiptap/pm/state';
+import type { EditorView } from '@tiptap/pm/view';
 import { FileChipNode } from './FileChipNode';
 import { isLargePaste } from './large-paste';
 
@@ -42,6 +44,53 @@ export function setEditorPlaceholder(editor: Editor, text: string): void {
 	if (!box || box.text === text) return;
 	box.text = text;
 	editor.view.dispatch(editor.state.tr);
+}
+
+/** A document range, in ProseMirror positions. */
+export interface DocRange { from: number; to: number }
+
+/**
+ * Insert text as plain text in one transaction and keep the caret in view,
+ * replacing `range` (default: the selection). Line breaks stay `\n` in the
+ * paragraph (the editor renders them pre-wrap).
+ */
+export function insertPlainText(view: EditorView, text: string, range?: DocRange): void {
+	const normalized = text.replace(/\r\n?/g, '\n');
+	const tr = range ? view.state.tr.insertText(normalized, range.from, range.to) : view.state.tr.insertText(normalized);
+	view.dispatch(tr.scrollIntoView());
+}
+
+/**
+ * The document range a `beforeinput` edits: its target range mapped into the
+ * document. A replacement (autocorrect, a spelling fix, an address expansion)
+ * targets a word while the caret stays where it was, so the selection is not
+ * a stand-in for it. Typed text without a target range edits the selection.
+ * Null when the target cannot be mapped: leave that edit to the browser.
+ */
+export function inputTargetRange(view: EditorView, event: InputEvent): DocRange | null {
+	const target = typeof event.getTargetRanges === 'function' ? event.getTargetRanges()[0] : undefined;
+	if (!target) {
+		if (event.inputType !== 'insertText') return null;
+		const { from, to } = view.state.selection;
+		return { from, to };
+	}
+	const dom = view.dom;
+	if (!dom.contains(target.startContainer) || !dom.contains(target.endContainer)) return null;
+	try {
+		const start = view.posAtDOM(target.startContainer, target.startOffset);
+		const end = view.posAtDOM(target.endContainer, target.endOffset);
+		return { from: Math.min(start, end), to: Math.max(start, end) };
+	} catch {
+		return null;
+	}
+}
+
+/** The text of a non-composing `beforeinput` that inserts more than one line, else null. */
+export function multiLineTextInput(event: InputEvent): string | null {
+	if (event.isComposing) return null;
+	if (event.inputType !== 'insertText' && event.inputType !== 'insertReplacementText') return null;
+	const text = event.data ?? event.dataTransfer?.getData('text/plain') ?? '';
+	return /[\r\n]/.test(text) ? text : null;
 }
 
 export interface EditorOptions {
@@ -118,14 +167,39 @@ export function createChatEditor(options: EditorOptions): Editor {
 			// Handle paste to strip formatting
 			handlePaste: (view, event) => {
 				const text = event.clipboardData?.getData('text/plain');
+				if (!text) return false;
 				const plain = consumePlainPaste?.() ?? false;
-				if (text && !plain && onLargePaste && isLargePaste(text) && onLargePaste(text)) return true;
-				if (text) {
-					// Insert as plain text
-					view.dispatch(view.state.tr.insertText(text));
+				if (!plain && onLargePaste && isLargePaste(text) && onLargePaste(text)) return true;
+				insertPlainText(view, text);
+				return true;
+			},
+			handleDOMEvents: {
+				// Multi-line text that arrives as typed input rather than a paste
+				// event: an IME commit (Gboard's clipboard chip), dictation or an
+				// automation fill. Chrome's native editing would apply it as one
+				// paragraph split per line, each re-laying out the growing editor
+				// and firing its own `input` (about 1,000 for a 1 KB fill of blank
+				// lines: an 11.7 s freeze at 4x CPU, #912). Take it as one plain-text
+				// transaction instead, under the same large-text rule as a paste.
+				// Only these two input types are taken; drops, deletions and
+				// paragraph breaks stay with ProseMirror's own handling.
+				beforeinput: (view, event) => {
+					const text = multiLineTextInput(event);
+					if (text === null || view.composing || !event.cancelable) return false;
+					const range = inputTargetRange(view, event);
+					if (!range) return false;
+					event.preventDefault();
+					if (onLargePaste && isLargePaste(text)) {
+						// The attachment chip lands at the selection: aim it at the target first.
+						const { from, to } = view.state.selection;
+						if (from !== range.from || to !== range.to) {
+							view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, range.from, range.to)));
+						}
+						if (onLargePaste(text)) return true;
+					}
+					insertPlainText(view, text, range);
 					return true;
 				}
-				return false;
 			}
 		},
 		onUpdate: () => {

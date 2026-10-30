@@ -73,6 +73,13 @@ export function singleLineTextWidth(base: SingleLineBase, now: { island: number;
 	return base.text + (now.island - base.island) - (now.circles - base.circles);
 }
 
+/**
+ * Characters of a single line laid out to see whether it wraps: far more than
+ * fit on one line of any composer, so a line that does not fit within them
+ * wraps without measuring the rest.
+ */
+export const MEASURED_CHARS = 2000;
+
 const COPIED_STYLES = [
 	'fontFamily',
 	'fontSize',
@@ -157,9 +164,26 @@ export function createWrapWatcher(options: WrapWatcherOptions) {
 			width = singleLineTextWidth(base, now);
 		}
 		const text = options.getText();
-		const count = options.countLines ?? lineCount;
-		const wrap = needsWrap(text, text.trim() ? count(text.replace(/\s+$/, ''), editor, width) : 1);
+		const wrap = needsWrap(text, measuredLines(text, editor, width));
 		if (wrap !== wrapped) options.setWrapped(wrap);
+	}
+
+	/**
+	 * Lines at the single-line width, laid out only when they decide the
+	 * layout: empty text and text with a line break are settled without a
+	 * measurement (needsWrap), and a long line is measured by its start. The
+	 * hidden copy re-lays out everything it holds, so copying a whole 200 KB
+	 * paste on every change cost a long task per keystroke (#912).
+	 */
+	function measuredLines(text: string, editor: HTMLElement, width: number): number {
+		if (!text.trim() || text.includes('\n')) return 1;
+		const count = options.countLines ?? lineCount;
+		const line = text.trimEnd();
+		const head = line.slice(0, MEASURED_CHARS);
+		const lines = count(head, editor, width);
+		// A start that already wraps settles it; one that fits (zero-width
+		// characters, a very wide box) falls back to the whole line.
+		return lines > 1 || head.length === line.length ? lines : count(line, editor, width);
 	}
 
 	function schedule() {

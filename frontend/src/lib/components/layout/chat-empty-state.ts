@@ -20,7 +20,9 @@
  *   - loading  → bound, but history is still being fetched (boot restore or an
  *                openChat navigation). messages=[] is transient here, so we must
  *                NOT flash the cleared-empty hint for a session that will turn
- *                out to have messages.
+ *                out to have messages. A load released without any history
+ *                (`historyStalled`, #913) stays here too: running out of time
+ *                is not evidence the chat is empty.
  *   - active   → has messages
  *
  * Layout rule: a load keeps the layout the view already had (the centred hero
@@ -43,6 +45,9 @@ export interface ChatSurfaceInput {
 	isRestoringSession: boolean;
 	/** openChat navigation window: history fetch for the target session in flight. */
 	isLoadingSession: boolean;
+	/** Loading ended without the server confirming any history (the feed's
+	 *  ceiling or a failed request; ActiveSessionState.historyStall). */
+	historyStalled?: boolean;
 }
 
 /**
@@ -52,9 +57,10 @@ export interface ChatSurfaceInput {
  * unbound empty session is a genuine 'new' chat.
  */
 export function classifyChatSurface(input: ChatSurfaceInput): ChatSurface {
-	const { sessionId, messageCount, isRestoringSession, isLoadingSession } = input;
+	const { sessionId, messageCount, isRestoringSession, isLoadingSession, historyStalled } = input;
 	if (messageCount > 0) return 'active';
-	if (isRestoringSession || isLoadingSession) return 'loading';
+	// Only a completed response or a clear proves a chat empty (#913).
+	if (isRestoringSession || isLoadingSession || historyStalled) return 'loading';
 	if (sessionId) return 'cleared';
 	return 'new';
 }
@@ -130,6 +136,16 @@ export function chatHeroKind(input: { surface: ChatSurface; mirrorSyncPending: b
 	// 'loading', or 'active' held in the hero by a load (chatLayoutSurface).
 	return 'loading';
 }
+
+/** Why a stalled load (ActiveSessionState.historyStall) shows instead of history. */
+export type HistoryStallKind = 'timeout' | 'error';
+
+/** One short line per stall, shared by the transcript notice and the bound
+ *  hero (a hint that wraps would move the centred composer). */
+export const HISTORY_STALL_MESSAGE: Record<HistoryStallKind, string> = {
+	timeout: 'This is taking longer than usual.',
+	error: 'Could not load the conversation.'
+};
 
 /** True only for a bound session, settled and empty — i.e. a cleared conversation. */
 export function isClearedSession(input: ChatSurfaceInput): boolean {

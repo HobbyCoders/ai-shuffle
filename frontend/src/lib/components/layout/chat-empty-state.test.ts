@@ -45,6 +45,15 @@ function clearedSession(overrides: Partial<ChatSurfaceInput> = {}): ChatSurfaceI
 }
 
 describe('classifyChatSurface', () => {
+	it('(#913) keeps a load released without any history "loading", never "cleared"', () => {
+		// Running out of time is not evidence of emptiness: only a completed
+		// response or a clear may present a bound chat as cleared.
+		expect(classifyChatSurface(clearedSession({ historyStalled: true }))).toBe('loading');
+		expect(classifyTranscriptRender(clearedSession({ historyStalled: true }))).toBe('skeleton');
+		// A send made meanwhile is the chat's own row: it is shown.
+		expect(classifyChatSurface(clearedSession({ historyStalled: true, messageCount: 1 }))).toBe('active');
+	});
+
 	it('classifies an unbound, empty chat as "new"', () => {
 		expect(classifyChatSurface(newChat())).toBe('new');
 	});

@@ -4,7 +4,7 @@
  * line.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { composerCircles, createWrapWatcher, needsWrap, singleLineTextWidth } from './composer-wrap';
+import { composerCircles, createWrapWatcher, MEASURED_CHARS, needsWrap, singleLineTextWidth } from './composer-wrap';
 
 const idle = { callAvailable: true, hasContent: false, working: false, busy: false };
 
@@ -92,7 +92,7 @@ describe('createWrapWatcher', () => {
 			Object.defineProperty(node, 'clientWidth', { configurable: true, get: () => width });
 			return node;
 		};
-		const state = { text, wrapped: false, island: 672, circles: 70, editorWidth: 500, widths: [] as number[] };
+		const state = { text, wrapped: false, island: 672, circles: 70, editorWidth: 500, widths: [] as number[], measured: [] as number[] };
 		const editor = el(0);
 		Object.defineProperty(editor, 'clientWidth', { configurable: true, get: () => state.editorWidth });
 		const island = el(0);
@@ -106,11 +106,34 @@ describe('createWrapWatcher', () => {
 			getCircles: () => circles,
 			isWrapped: () => state.wrapped,
 			setWrapped: (w) => { state.wrapped = w; },
-			countLines: (t, _e, width) => { state.widths.push(width); return Math.ceil((t.length * 10) / width); }
+			countLines: (t, _e, width) => { state.widths.push(width); state.measured.push(t.length); return Math.ceil((t.length * 10) / width); }
 		});
 		const run = () => { watcher.schedule(); frames.splice(0).forEach((cb) => cb(0)); };
 		return { state, run, watcher };
 	}
+
+	// #912: the hidden copy re-lays out all it holds, so a 200 KB paste copied
+	// whole on every change cost a long task per keystroke.
+	it('wraps text with a line break without laying out any of it', () => {
+		const { state, run } = composer(`Pasted log${'\n'.repeat(1000)}end`);
+		run();
+		expect(state.wrapped).toBe(true);
+		expect(state.measured).toEqual([]);
+	});
+
+	it('measures only the start of a very long single line', () => {
+		const { state, run } = composer('word '.repeat(40_000));
+		run();
+		expect(state.wrapped).toBe(true);
+		expect(state.measured).toEqual([MEASURED_CHARS]);
+	});
+
+	it('measures a short line whole, without its trailing spaces', () => {
+		const { state, run } = composer(`fits${' '.repeat(5000)}`);
+		run();
+		expect(state.wrapped).toBe(false);
+		expect(state.measured).toEqual([4]);
+	});
 
 	it('stays wrapped when Stop arrives, measuring at the narrower single-line width', () => {
 		// 52 characters: 520px of text, past the 500px single-line width.
