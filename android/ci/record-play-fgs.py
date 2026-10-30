@@ -56,7 +56,11 @@ async def record(args, instance: DevInstance) -> None:
                 return web.json_response({"ok": True})
             if request.path == "/demo/evidence":
                 return web.json_response(dict(frames))
-            target = base + request.raw_path
+            # The native pairing token is a fixture. As with HTTP Authorization,
+            # replace only that transport credential with our own preview cookie.
+            # A dummy query token would otherwise (correctly) override cookie auth.
+            path = request.rel_url.with_query([(name, value) for name, value in request.query.items() if name != "token"])
+            target = base + str(path)
             if request.headers.get("Upgrade", "").lower() == "websocket":
                 downstream = web.WebSocketResponse()
                 await downstream.prepare(request)

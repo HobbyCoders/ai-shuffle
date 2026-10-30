@@ -129,7 +129,7 @@ class PlayFgsRecordingTest {
                 }
                 scenario.onActivity { web(it).loadUrl("https://localhost:8443/mobile/?session=$session") }
                 waitFor("Seeded chat and real call button did not appear", 60_000) {
-                    js(scenario, "!!document.querySelector('button[aria-label=\"Start a call in this conversation\"]')") == "true"
+                    js(scenario, "document.body.innerText.includes('What is 2 + 2?') && !!document.querySelector('button[aria-label=\"Start a call in this conversation\"]')") == "true"
                 }
                 device.takeScreenshot(File(out, "01-chat.png"))
                 phase("chat")
