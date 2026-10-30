@@ -41,6 +41,165 @@ def query_profile(worker):
         worker.raw.cursor_factory = previous
 
 
+def test_buffer_phase_uses_one_stream_read_and_insert_per_chunk(pg_workers, monkeypatch):
+    a, b, ops = backlog(pg_workers, 193, buffer=False)
+    chunks = (len(ops) - 2) // engine.APPLY_CHUNK + 1
+    with b.active(), query_profile(b) as profile, measured_apply(monkeypatch, b) as (transactions, statements):
+        result = engine.apply_batch(ops[1:])
+    assert result.pending == len(ops) - 1 and result.retry == result.rejected == 0
+    assert result.applied == 0 and not result.touched
+    assert len(transactions) == chunks
+    assert sum(t["ops"] for t in transactions) == len(ops) - 1
+    assert max(t["ops"] for t in transactions) <= engine.APPLY_CHUNK
+    # One clock lock/update, highest incarnation, watermark, pending count and
+    # multi-row insert per chunk. No per-row SQL or savepoints in this phase.
+    assert sum(profile.values()) <= chunks * 5
+    assert profile["SELECT/sync_watermarks"] == chunks * 2
+    assert profile["SELECT/sync_pending"] == profile["INSERT/sync_pending"] == chunks
+    assert profile["SAVEPOINT/transaction"] == profile["RELEASE/transaction"] == 0
+    with b.active(), store.get_db() as conn:
+        cur = conn.cursor()
+        assert store.count_pending(cur, a.device_id, 1) == len(ops) - 1
+        assert store.get_watermark(cur, a.device_id, 1) == ops[0]["origin_seq"] - 1
+
+
+@pytest.mark.parametrize("corruption", ["signature", "network", "key", "counter"])
+def test_buffer_phase_invalid_envelope_keeps_valid_rows_and_existing_outcomes(workers, corruption):
+    from app.network.envelope import Envelope
+
+    a, b, ops = backlog(workers, 193, buffer=False)
+    bad = Envelope.from_dict(ops[70])
+    if corruption == "signature":
+        bad.signature = "bad"
+    else:
+        if corruption == "network":
+            bad.network_id = "another-network"
+        elif corruption == "key":
+            bad.key_version += 100
+        else:
+            bad.origin_seq = 0
+        bad.sign(a.identity.signing_private)
+    wire = list(ops[1:])
+    wire[69] = bad.to_dict()
+    with b.active():
+        result = engine.apply_batch(wire)
+        assert result.pending == len(wire) - 1
+        assert result.retry == int(corruption == "key")
+        assert result.rejected == int(corruption != "key")
+        assert result.applied == 0 and not result.touched
+        with store.get_db() as conn:
+            cur = conn.cursor()
+            assert store.count_pending(cur, a.device_id, 1) == len(wire) - 1
+            assert store.get_watermark(cur, a.device_id, 1) == ops[0]["origin_seq"] - 1
+
+
+@pytest.mark.parametrize("budget,limit,accepted", [("cap", 80, 80), ("window", 80, 79)])
+def test_buffer_phase_preserves_partial_acceptance_at_stream_limits(workers, monkeypatch, budget, limit, accepted):
+    a, b, ops = backlog(workers, 193, buffer=False)
+    monkeypatch.setattr(engine, "PENDING_CAP_PER_STREAM" if budget == "cap" else "PENDING_WINDOW", limit)
+    with b.active():
+        result = engine.apply_batch(ops[1:])
+        assert result.pending == accepted and result.rejected == len(ops) - 1 - accepted
+        assert result.retry == 0
+        with store.get_db() as conn:
+            assert store.count_pending(conn.cursor(), a.device_id, 1) == accepted
+        if budget == "cap":
+            # Legacy semantics refuse even buffered duplicates once at the cap.
+            replay = engine.apply_batch(ops[1:])
+            assert replay.rejected == len(ops) - 1 and replay.pending == 0
+
+
+@pytest.mark.parametrize("refusal", ["revoked", "stale"])
+def test_buffer_phase_refuses_revoked_and_stale_streams(workers, refusal):
+    from dataclasses import replace
+    from app.network import membership
+
+    a, b, ops = backlog(workers, 193, buffer=False)
+    with b.active():
+        if refusal == "revoked":
+            ctx = engine.require_context()
+            ctx.members[a.device_id] = replace(ctx.member(a.device_id), status=membership.STATUS_REVOKED,
+                last_seq_accepted=ops[0]["origin_seq"] - 1, last_incarnation_accepted=1)
+        else:
+            with store.get_db() as conn:
+                store.set_watermark(conn.cursor(), a.device_id, 2, 0)
+        result = engine.apply_batch(ops[1:])
+        assert result.rejected == len(ops) - 1 and result.pending == result.retry == 0
+        with store.get_db() as conn:
+            assert store.count_pending(conn.cursor(), a.device_id, 1) == 0
+
+
+@pytest.mark.parametrize("use_postgres,failure", [(False, "runtime"), (True, "sql")])
+def test_buffer_phase_failed_bulk_insert_rolls_back_before_per_row_fallback(
+        request, use_postgres, failure, monkeypatch):
+    factory = request.getfixturevalue("pg_workers" if use_postgres else "workers")
+    a, b, ops = backlog(factory, 193, buffer=False)
+    real_stash = store.stash_pending_batch
+    attempts = []
+
+    def failed_stash(cursor, envelopes):
+        real_stash(cursor, envelopes)
+        attempts.append(len(envelopes))
+        if failure == "sql":
+            cursor.execute("SELECT 1/0")
+        raise RuntimeError("buffer insert failed after writing rows")
+
+    monkeypatch.setattr(store, "stash_pending_batch", failed_stash)
+    with b.active():
+        result = engine.apply_batch(ops[1:])
+        assert attempts == [engine.APPLY_CHUNK] * 3
+        assert result.pending == len(ops) - 1 and result.retry == result.rejected == 0
+        with store.get_db() as conn:
+            cur = conn.cursor()
+            assert store.count_pending(cur, a.device_id, 1) == len(ops) - 1
+            assert store.get_watermark(cur, a.device_id, 1) == ops[0]["origin_seq"] - 1
+
+
+@pytest.mark.parametrize("value", ["0", "false", " OFF ", "no"])
+def test_buffer_phase_kill_switch_retains_per_row_path(workers, monkeypatch, value):
+    from unittest.mock import Mock
+
+    monkeypatch.setenv("AI_SHUFFLE_PERF_BULK_PENDING", value)
+    a, b, ops = backlog(workers, 193, buffer=False)
+    bulk = Mock(wraps=store.stash_pending_batch)
+    monkeypatch.setattr(store, "stash_pending_batch", bulk)
+    with b.active():
+        assert engine.apply_batch(ops[1:]).pending == len(ops) - 1
+        bulk.assert_not_called()
+        result = engine.apply_batch(ops[:1])
+        assert result.applied == len(ops) and result.retry == result.rejected == 0
+
+
+def test_buffer_phase_duplicates_and_metadata_use_the_same_bulk_path(workers, monkeypatch):
+    from unittest.mock import Mock
+    from app.db import tags
+    from tests.core.network.harness import join
+
+    a, b = workers("tag-source"), workers("tag-peer")
+    with a.active():
+        engine.create_network("Shared metadata buffer")
+    join(a, b)
+    with b.active():
+        marks = store.local_watermarks()
+    with a.active():
+        for index in range(193):
+            tags.create_tag(f"tag-{index}", f"Tag {index}")
+        engine.scan_collection("tags")
+        ops = store.ops_since(marks, limit=1000, exclude_origin=b.device_id)
+    assert len(ops) == 193
+    bulk = Mock(wraps=store.stash_pending_batch)
+    monkeypatch.setattr(store, "stash_pending_batch", bulk)
+    with b.active():
+        for _ in range(2):
+            assert engine.apply_batch(ops[1:]).pending == len(ops) - 1
+        assert bulk.call_count == 6
+        with store.get_db() as conn:
+            assert store.count_pending(conn.cursor(), a.device_id, 1) == len(ops) - 1
+        result = engine.apply_batch(ops[:1])
+        assert result.applied == len(ops) and result.retry == result.rejected == 0
+        assert len(tags.get_all_tags()) == len(ops)
+
+
 def test_postgres_buffered_query_profile(pg_workers, monkeypatch):
     count = int(os.environ.get("SYNC_LAB_OPS", "193"))
     a, b, ops = backlog(pg_workers, count)

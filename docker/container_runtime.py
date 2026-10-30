@@ -129,6 +129,15 @@ def log(message):
     print(f"{stamp} container runtime: {message}", file=sys.stderr, flush=True)
 
 
+def _telemetry_log(message):
+    # Optional diagnostics must never change snapshot/spawn control flow. In
+    # particular, a successful Popen must still return its now-running child.
+    try:
+        log(message)
+    except Exception:
+        pass
+
+
 def load_startup_settings():
     """Only mount paths, from image-installed dependencies; no app imports.
 
@@ -438,21 +447,44 @@ class Database:
         size = int(self.query(f"SELECT pg_database_size('{APP_DB}')", admin=True))
         return shutil.disk_usage(self.data).free, size + max(size // 10, SNAPSHOT_MARGIN)
 
+    def _snapshot_bytes(self, name):
+        # Size telemetry must never prevent a copy or invalidate a good one.
+        # pg_database_size measures the database's files, not WAL/device I/O.
+        try:
+            return int(self.query(f"SELECT pg_database_size('{name}')", admin=True))
+        except Exception:
+            return "unknown"
+
     def snapshot(self, name):
         """Copy APP_DB to ``name`` while the application is stopped."""
         _rollback_name(name, "rollback")
-        self.admin_script(f"DROP DATABASE IF EXISTS {name}")
-        for attempt in range(3):
-            try:
-                # CREATE DATABASE waits up to 5 s for terminated sessions to end.
-                self.admin_script(f"SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity "
-                                  f"WHERE datname = '{APP_DB}' AND pid <> pg_backend_pid();\n"
-                                  f"CREATE DATABASE {name} TEMPLATE {APP_DB} OWNER {APP_USER} STRATEGY FILE_COPY",
-                                  timeout=SNAPSHOT_TIMEOUT)
-                return
-            except RuntimeFailure:
-                if attempt == 2 or STOP.is_set():
-                    raise
+        started = time.monotonic()
+        _telemetry_log("database snapshot starting strategy=FILE_COPY")
+        _telemetry_log(f"database snapshot source_database_bytes={self._snapshot_bytes(APP_DB)}")
+        complete, attempts, copy_seconds = False, 0, 0.0
+        try:
+            self.admin_script(f"DROP DATABASE IF EXISTS {name}")
+            for attempt in range(3):
+                attempts += 1
+                copy_started = time.monotonic()
+                try:
+                    # CREATE DATABASE waits up to 5 s for terminated sessions to end.
+                    self.admin_script(f"SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity "
+                                      f"WHERE datname = '{APP_DB}' AND pid <> pg_backend_pid();\n"
+                                      f"CREATE DATABASE {name} TEMPLATE {APP_DB} OWNER {APP_USER} STRATEGY FILE_COPY",
+                                      timeout=SNAPSHOT_TIMEOUT)
+                    complete = True
+                    return
+                except RuntimeFailure:
+                    if attempt == 2 or STOP.is_set():
+                        raise
+                finally:
+                    copy_seconds += time.monotonic() - copy_started
+        finally:
+            copied = self._snapshot_bytes(name) if complete else "unknown"
+            _telemetry_log(f"database snapshot {'complete' if complete else 'failed'} "
+                f"duration_seconds={time.monotonic() - started:.3f} copy_seconds={copy_seconds:.3f} "
+                f"attempts={attempts} copied_database_bytes={copied}")
 
     def restore_snapshot(self, name, discard):
         """Put copy ``name`` back as APP_DB; the replaced database is renamed
@@ -780,7 +812,16 @@ def start_app(command, cwd, env, updates_root=None):
         if updates_root is not None:
             module.ensure_traversable(updates_root, log)
         command = module.app_command(command)
-    return subprocess.Popen(command, cwd=cwd, env=env, start_new_session=True)
+    started = time.monotonic()
+    _telemetry_log("application child spawn starting")
+    try:
+        child = subprocess.Popen(command, cwd=cwd, env=env, start_new_session=True)
+    except Exception as exc:
+        _telemetry_log(f"application child spawn failed ({type(exc).__name__}) "
+            f"duration_seconds={time.monotonic() - started:.3f}")
+        raise
+    _telemetry_log(f"application child spawned pid={child.pid} duration_seconds={time.monotonic() - started:.3f}")
+    return child
 
 
 def load_updater():

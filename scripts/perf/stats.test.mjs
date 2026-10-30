@@ -3,6 +3,55 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { nearestRank, summarize } from './stats.mjs';
 import { normalizePath, sidebarFull } from './journeys.mjs';
+import { initScript, collect, windowCounters, PLATFORMS } from './browser-helpers.mjs';
+import { parseArgs, summarizeCells } from './chat-journeys.mjs';
+import { main as startupMain } from './startup-repeat.mjs';
+
+
+test('startup rejects unsafe configuration before spawning anything', async () => {
+	await assert.rejects(startupMain(['--runs', '0']), /Invalid startup flags/);
+	await assert.rejects(startupMain(['--out', '/tmp/x.json', '--session', 'https://secret']), /session/);
+});
+
+test('chat and original rig share the serializable instrumentation', () => {
+	assert.equal(typeof initScript, 'function');
+	assert.equal(typeof collect, 'function');
+	assert.equal(PLATFORMS.mobile.route, '/mobile/');
+	assert.deepEqual(PLATFORMS.mobile.viewport, { width: 390, height: 844 });
+	assert.equal(PLATFORMS.mobile.cpu, 4);
+	assert.equal(PLATFORMS.desktop.cpu, 1);
+});
+
+test('window counters subtract ongoing SSE bytes and count exact zero replays', () => {
+	const result = windowCounters({ feeds: [
+		{ start: 0, url: '/events?from_seq=0', bytes: 150 },
+		{ start: 20, url: '/events?from_seq=0&live=1', bytes: 200 },
+		{ start: 25, url: '/events?live=1&from_seq=01', bytes: 10 },
+		{ start: 30, url: '/events?from_seq=42', bytes: 5 }
+	], longtasks: [[0, 25], [30, 70], [150, 20]], dom: 50000 }, [100], 20, 80, 7);
+	assert.deepEqual(result, { sseBytes: 265, fromSeqZeroReplays: 1, apiRequests: 7,
+		longTaskMs: 55, liveDomNodes: 50000 });
+});
+
+test('CLI cannot accept access URLs/files and rejects invalid measurement counts', () => {
+	assert.throws(() => parseArgs(['--access', 'secret']), /Unknown flag/);
+	assert.throws(() => parseArgs(['--accessFile', 'file']), /Unknown flag/);
+	assert.throws(() => parseArgs(['--runs', '0']), /positive integer/);
+	assert.throws(() => parseArgs(['--platform', 'phone-size']), /platform must/);
+	const args = parseArgs(['--journeys', 'remote', '--remote', 'remote-1,remote-2',
+		'--small', 'local-1', '--runs', '1', '--out', '/tmp/result.json', '--field']);
+	assert.equal(args.field, true);
+	assert.equal(args.remote, 'remote-1,remote-2');
+});
+
+test('failed runs are reported, not coerced into zero-latency successes', () => {
+	const summary = summarizeCells({ cold: [{ usableMs: 8, sseBytes: 128 }, { failed: true }] });
+	assert.equal(summary.cold.failed, 1);
+	assert.equal(summary.cold.usableMs.n, 1);
+	assert.equal(summary.cold.usableMs.p75, 8);
+	assert.equal(summary.cold.apiRequests.p75, null);
+});
+
 
 test('nearest-rank p75 picks an observed sample, rank = ceil(0.75 n)', () => {
 	// n=20 -> rank 15

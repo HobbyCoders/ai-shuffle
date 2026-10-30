@@ -24,13 +24,9 @@ from app.core.connectors.base import ActionDef, chunk_text
 
 logger = logging.getLogger(__name__)
 
-try:
-    from aiogram.exceptions import TelegramAPIError
-    from aiogram.types import InputPollOption, ReactionTypeEmoji
+from importlib.util import find_spec
 
-    AIOGRAM_TYPES_AVAILABLE = True
-except ImportError:  # pragma: no cover - exercised only without aiogram
-    AIOGRAM_TYPES_AVAILABLE = False
+AIOGRAM_TYPES_AVAILABLE = find_spec("aiogram") is not None
 
 
 _CHAT_PROP = {
@@ -357,6 +353,7 @@ async def _forward_message(conn, params, ctx):
 async def _add_reaction(conn, params, ctx):
     if not AIOGRAM_TYPES_AVAILABLE:
         return _err("aiogram is not installed.")
+    from aiogram.types import ReactionTypeEmoji
     emoji = str(params.get("emoji") or "").strip()
     if not emoji:
         return _err("emoji is required.")
@@ -414,6 +411,7 @@ async def _unpin_all_messages(conn, params, ctx):
 async def _send_poll(conn, params, ctx):
     if not AIOGRAM_TYPES_AVAILABLE:
         return _err("aiogram is not installed.")
+    from aiogram.types import InputPollOption
     question = str(params.get("question") or "")
     options = params.get("options")
     if not question.strip():

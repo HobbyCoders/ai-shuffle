@@ -52,6 +52,13 @@ An agent can also run a subagent on another worker while the chat stays here. Se
 
 Automations and connectors run on one worker each. Your other workers show them but do not run them.
 
+Workers keep recent transcript sync operations for at least 30 days, not a second
+permanent copy of every message. A worker that has not exchanged sync frontiers
+for 30 days no longer holds that cleanup back. When it returns, it automatically
+copies the current settings and catches up its chat history in the background;
+new messages then sync normally. This only cleans the duplicate sync log: it
+never deletes chats, messages or their search/history records.
+
 ## Conflicts
 
 If two workers change the same setting while they cannot reach each other, the later change wins. The other version is kept for 30 days, so nothing is lost without a trace.

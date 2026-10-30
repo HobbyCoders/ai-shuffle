@@ -418,7 +418,7 @@ function isAssistantPhantom(msg: ChatMessage): boolean {
 
 /** Only work known to be closed may disappear in a settled disclosure. */
 function isCompletedRoutineWork(msg: ChatMessage, gallery = false, mediaShown = false): boolean {
-	if (agentDelivery(msg)) return true;
+	if (agentDelivery(msg)) return msg.systemData?.delivery !== 'queued';
 	if (msg.type === 'thinking') return !msg.streaming;
 	// A worker card is the delegation itself: it keeps its row in every status
 	// and carries the head of the worker's report (spec §3, §4).

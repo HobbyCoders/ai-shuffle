@@ -47,7 +47,8 @@ async def test_owned_event_append_wakes_a_narrow_catalog_pass(workers, session_h
         monkeypatch.setattr(engine, "scan_all", scan)
         clock.actions = [(1, lambda: _append("mine"))]
         await clock.run()
-    assert clock.scans == [0, 2]
+    # The write at t=1 interrupts rest; one fixed 100 ms window coalesces it.
+    assert clock.scans == pytest.approx([0, 1.1])
     assert scan.call_args_list[1].kwargs == {
         "collections": {"session_events"}, "include_catalog": True, "strict": True, "session_ids": ["mine"]}
 
@@ -64,7 +65,7 @@ async def test_mirrored_session_write_does_not_widen_or_run_a_catalog_pass(worke
         await clock.run()
     # The wake still ran a pass (its owner check), but published nothing:
     # no whole-catalog reconcile for a session another device owns.
-    assert clock.scans == [0, 2]
+    assert clock.scans == pytest.approx([0, 1.1])
     assert [call.kwargs for call in scan.call_args_list] == [{}]
 
 
@@ -107,7 +108,7 @@ async def test_stored_screenshot_publishes_with_the_event_that_names_it(workers,
         clock.actions = [(1, lambda: holder.update(row=read_image()))]
         await clock.run()
     digest = holder["row"]["hash"]
-    assert clock.scans == [0, 2]  # the wake pass, not the next full scan
+    assert clock.scans == pytest.approx([0, 1.1])  # the wake pass, not the next full scan
     ops = published[1]
     assert ("artifacts", digest) in ops
     event_ops = [i for i, (coll, rid) in enumerate(ops) if coll == "session_events" and rid.startswith("chat|")]

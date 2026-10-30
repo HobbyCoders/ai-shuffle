@@ -764,13 +764,15 @@ def runtime():
     return _load("shuffle_container_runtime_isolation_test", DOCKER / "container_runtime.py")
 
 
-def test_start_app_off_is_the_plain_popen(runtime, monkeypatch):
+def test_start_app_off_is_the_plain_popen(runtime, monkeypatch, capsys):
     calls = []
-    monkeypatch.setattr(runtime.subprocess, "Popen", lambda *a, **k: calls.append((a, k)) or "proc")
+    process = SimpleNamespace(pid=123)
+    monkeypatch.setattr(runtime.subprocess, "Popen", lambda *a, **k: calls.append((a, k)) or process)
     command = [sys.executable, "-m", "app.main"]
-    assert runtime.start_app(command, "/cwd", {"A": "1"}, Path("/data/application-updates")) == "proc"
+    assert runtime.start_app(command, "/cwd", {"A": "1"}, Path("/data/application-updates")) is process
     assert calls == [((command,), {"cwd": "/cwd", "env": {"A": "1"}, "start_new_session": True})]
     assert calls[0][0][0] is command
+    assert "application child spawned pid=123" in capsys.readouterr().err
 
 
 def test_supervisor_helpers_are_empty_when_off(runtime):
@@ -825,15 +827,17 @@ def test_no_handover_while_isolated(runtime, monkeypatch):
     assert runtime.handover(SimpleNamespace(effective_data_dir="/nonexistent")) is False
 
 
-def test_start_app_on_uses_the_launcher(runtime, monkeypatch, tmp_path):
+def test_start_app_on_uses_the_launcher(runtime, monkeypatch, tmp_path, capsys):
     module = runtime.isolation()
     monkeypatch.setattr(module, "ACTIVE", IDENT)
     seen = []
     monkeypatch.setattr(module, "ensure_traversable", lambda root, log: seen.append(root))
     calls = []
-    monkeypatch.setattr(runtime.subprocess, "Popen", lambda *a, **k: calls.append((a, k)))
-    runtime.start_app(["/py", "-m", "app.main"], None, {}, tmp_path)
+    process = SimpleNamespace(pid=123)
+    monkeypatch.setattr(runtime.subprocess, "Popen", lambda *a, **k: calls.append((a, k)) or process)
+    assert runtime.start_app(["/py", "-m", "app.main"], None, {}, tmp_path) is process
     assert calls[0][0][0] == ["/py", "-s", "-c", module.APP_SHIM] and seen == [tmp_path]
+    assert "application child spawned pid=123" in capsys.readouterr().err
 
 
 # --- the app's side ----------------------------------------------------------------

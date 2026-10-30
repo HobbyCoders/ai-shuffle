@@ -8,6 +8,7 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/sve
 import type { Install } from '$lib/api/installs';
 import type { PairedClient } from '$lib/api/pairing';
 import type { NetworkMember, NetworkStatus } from '$lib/api/network';
+import type { WorkerDeviceConfirmation } from '$lib/api/worker-device-confirmations';
 
 const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() }));
 const banner = vi.hoisted(() => vi.fn());
@@ -93,7 +94,7 @@ const enrolled = (): NetworkStatus => ({
 	pending_joins: [],
 	hub: { linked: false }
 });
-const request = {
+const request: WorkerDeviceConfirmation = {
 	device_id: 'dev-a',
 	hub_device_id: 'dv_7f3a91c2e4',
 	paired_client_id: 'pc-a',
@@ -112,6 +113,7 @@ const profile = {
 let status: NetworkStatus;
 let availability = { worker_id: 'self', desktop: true, always_on: false, always_on_override: null as boolean | null };
 let connection: unknown;
+let confirmations: WorkerDeviceConfirmation[] | null = null;
 function reads(path: string): unknown {
 	if (path === '/network/status') return status;
 	if (path === '/cluster/installs')
@@ -137,9 +139,18 @@ function reads(path: string): unknown {
 	if (path === '/network/advertised-addresses') return { addresses: [], advertised: ['https://desk.example.com'] };
 	if (path === '/network/lan') return { enabled: true, addresses: [], advertised: ['https://desk.example.com', 'http://10.0.0.5:8000'] };
 	if (path === '/settings/worker-availability') return { ...availability };
+	if (path === '/settings/worker-settings') return {
+		workers: (status.members ?? [member('self', { name: 'Desk', is_self: true })])
+			.filter((m) => m.kind === 'worker' && m.status === 'active')
+			.map((m) => ({
+				device_id: m.device_id, device_name: m.name, is_self: m.is_self, online: m.online,
+				outcome: 'ok', reason: 'done', status: null,
+				availability: { editable: true, always_on: availability.always_on, always_on_override: availability.always_on_override }
+			}))
+	};
 	if (path === '/mobile/hub/connection') return connection;
 	if (path === '/mobile/hub/account') return structuredClone(profile);
-	if (path === '/mobile/hub/devices/confirmations') return [{ ...request }];
+	if (path === '/mobile/hub/devices/confirmations') return confirmations ?? [{ ...request }];
 	throw new Error('Unexpected GET ' + path);
 }
 
@@ -149,6 +160,7 @@ let keepAlive: () => void;
 beforeEach(async () => {
 	vi.resetAllMocks();
 	settingsNav.reset();
+	confirmations = null;
 	status = enrolled();
 	availability = { worker_id: 'self', desktop: true, always_on: false, always_on_override: null };
 	connection = { signed_in: true, status: 'connected', code: null, qr_svg: null, error: null };
@@ -228,6 +240,33 @@ describe('Devices list', () => {
 		expect(screen.getByRole('button', { name: /Pixel 9 Pro/ }).textContent).toContain('Wants to be approved');
 		expect(screen.getByRole('button', { name: /Desk/ }).textContent).toContain('1.0, linux, ready');
 		expect(screen.queryByText(/admin/i)).toBeNull();
+	});
+
+	it('lists only requests that still need a decision', async () => {
+		const decided = (n: string, extra: Partial<WorkerDeviceConfirmation>): WorkerDeviceConfirmation => ({
+			...request,
+			device_id: `dev-${n}`,
+			paired_client_id: `pc-${n}`,
+			device_name: `Phone ${n}`,
+			...extra
+		});
+		confirmations = [
+			decided('pending', {}),
+			decided('approved', { confirmation: 'approved' }),
+			decided('denied', { confirmation: 'denied' }),
+			decided('revoked', { confirmation: 'approved', revoked_at: '2026-10-01T00:00:00Z' }),
+			decided('expired', { api_key_expires_at: '2020-01-01T00:00:00Z' })
+		];
+		await model.requests.refresh();
+		show();
+		expect(screen.getByRole('button', { name: /Phone pending/ }).textContent).toContain('Wants to be approved');
+		for (const n of ['approved', 'denied', 'revoked', 'expired']) {
+			expect(screen.queryByRole('button', { name: new RegExp(`Phone ${n}`) })).toBeNull();
+		}
+		// A decided item still opens by id (e.g. right after approving it).
+		cleanup();
+		show('req:dev-approved:pc-approved');
+		expect(screen.getAllByText('Approved').length).toBeGreaterThan(0);
 	});
 
 	it('approves a request only after "IDs match?"', async () => {
@@ -403,6 +442,26 @@ describe('Devices list', () => {
 		expect(api.put).toHaveBeenLastCalledWith('/settings/worker-availability', { always_on: null });
 		await vi.waitFor(() => expect(screen.getByText('Default for a desktop')).toBeTruthy());
 		expect(screen.getByRole('switch', { name: /Always on/ }).getAttribute('aria-checked')).toBe('false');
+	});
+
+	it('refreshes the existing local stays-on row after applying availability to all workers', async () => {
+		availability = { worker_id: 'self', desktop: false, always_on: true, always_on_override: null };
+		api.post.mockImplementation(async (path: string, body: { action: { always_on: boolean } }) => {
+			expect(path).toBe('/settings/worker-settings/action');
+			availability = { ...availability, always_on: body.action.always_on, always_on_override: body.action.always_on };
+			return { request_id: 'request', workers: [{ device_id: 'self', device_name: 'Desk', outcome: 'accepted', reason: 'saved', status: null }] };
+		});
+		show('self', 'Overview');
+		expect((await screen.findByRole('switch', { name: /Always on/ })).getAttribute('aria-checked')).toBe('true');
+		await vi.waitFor(() => expect(screen.getByRole('combobox', { name: 'All workers action' }).hasAttribute('disabled')).toBe(false));
+		await fireEvent.change(screen.getByRole('combobox', { name: 'All workers action' }), { target: { value: 'off' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Apply…' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Apply to all workers' }));
+		await vi.waitFor(() => expect(screen.getByRole('switch', { name: /Always on/ }).getAttribute('aria-checked')).toBe('false'));
+		expect(screen.getByText('Set by you')).toBeTruthy();
+		expect(api.post).toHaveBeenCalledWith('/settings/worker-settings/action', {
+			target: 'all', action: { operation: 'always-on', always_on: false }
+		});
 	});
 
 	it('flips the always-on switch back when the save is refused', async () => {
