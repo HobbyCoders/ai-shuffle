@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CAMERA" />
@@ -37,6 +38,9 @@
         <activity android:name=".ui.AccountActivity" android:exported="false" />
         <activity android:name=".ui.AddServerActivity" android:exported="false" />
         <activity android:name=".ui.QrCaptureActivity" android:exported="false" android:stateNotNeeded="true" />
+        <!-- ZXing 4.3.0 declares an unused sensorLandscape CaptureActivity.
+             Both pairing flows use our resizable AndroidX activity instead. -->
+        <activity android:name="com.journeyapps.barcodescanner.CaptureActivity" tools:node="remove" />
         <activity android:name=".ui.ToolSettingsActivity" android:exported="false" />
         <activity android:name=".ui.SettingsActivity" android:exported="false" />
         <!-- Keep the live document (including voice sockets) when unlocking changes

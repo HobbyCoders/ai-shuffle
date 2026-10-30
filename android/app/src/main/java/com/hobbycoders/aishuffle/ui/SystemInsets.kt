@@ -1,22 +1,20 @@
 package com.hobbycoders.aishuffle.ui
 
-import android.app.Activity
 import android.content.res.Configuration
-import android.os.Build
 import android.view.View
+import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.doOnAttach
 
-/** Android 15+ forces edge-to-edge at target 36. Keep native controls and the
- * WebView outside bars, cutouts and the IME instead of relying on decor fitting.
- * Install once on the stable content container: ChatActivity replaces its child.
- * Older Android releases retain their existing decor/adjustResize behavior.
+/** Use AndroidX edge-to-edge on every supported Android version. Keep native
+ * controls and the WebView outside bars, cutouts and the IME. Install once on
+ * the stable content container: ChatActivity replaces its child.
  */
-internal fun Activity.protectSystemInsets() {
-    if (Build.VERSION.SDK_INT < 35) return
-    WindowCompat.setDecorFitsSystemWindows(window, false)
+internal fun ComponentActivity.protectSystemInsets() {
+    enableEdgeToEdge()
     // Enforced transparent bars no longer inherit the themed bar background.
     fun updateBarContrast() {
         val light = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK != Configuration.UI_MODE_NIGHT_YES

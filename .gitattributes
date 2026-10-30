@@ -21,3 +21,6 @@ frontend/scripts/*.mjs text eol=lf
 .githooks/* text eol=lf
 # The effort benchmark evidence records the SHA-256 of the task file's bytes.
 scripts/effort_benchmark_tasks.json text eol=lf
+# The server reducer manifest verifies the exact checked-in bundle bytes.
+app/core/transcript_views/reducer.cjs text eol=lf
+app/core/transcript_views/manifest.json text eol=lf
