@@ -5,6 +5,9 @@ import { layout } from '$lib/stores/layout.svelte';
 import { archivedChats } from '$lib/stores/archived-chats';
 import { subagentChats } from '$lib/stores/subagent-chats';
 import type { Session } from '$lib/api/client';
+import { pushState, replaceState } from '$app/navigation';
+import { page } from '$app/state';
+import { get } from 'svelte/store';
 
 /** A same-origin deep link whose fallback stays in the current desktop or phone UI. */
 export function sessionHref(sessionId: string, pathname: string = typeof window === 'undefined' ? '/' : window.location.pathname): string {
@@ -54,9 +57,41 @@ export function openSubagentLink(event: MouseEvent, sessionId: string): void {
 	openSessionLink(event, sessionId);
 }
 
+/** What a chat link's history entry carries in `page.state`. */
+type ChatHistoryState = { chatSession?: string };
+/** The chat the current history entry stands for, as this module last set or followed it. */
+let historyChat: string | null = null;
+
+/** Make a chat link one Back step: mark the current entry with the chat being left, then push the target. */
+function pushChatHistory(sessionId: string): void {
+	const from = get(activeSession).sessionId;
+	if (!from || from === sessionId) return;
+	const base = (page.state ?? {}) as App.PageState & ChatHistoryState;
+	try {
+		if (base.chatSession !== from) replaceState('', { ...base, chatSession: from } as App.PageState);
+		pushState('', { ...base, chatSession: sessionId } as App.PageState);
+		historyChat = sessionId;
+	} catch {
+		// Router not ready (tests, early boot): the link still opens the chat.
+	}
+}
+
+/**
+ * Called by AppPage whenever `page.state` changes: a Back/Forward step onto
+ * a chat link's entry opens that chat. Other entries (Settings, the phone
+ * drawer) carry the same chat along or none at all, so they open nothing.
+ */
+export function followChatHistory(state: unknown): void {
+	const id = (state as ChatHistoryState | undefined)?.chatSession;
+	if (!id || id === historyChat) return;
+	historyChat = id;
+	if (get(activeSession).sessionId !== id) openSession(id);
+}
+
 /** Consume ordinary link clicks in the current app; retain native new-tab gestures. */
 export function openSessionLink(event: MouseEvent, sessionId: string): void {
 	if (!ordinarySessionClick(event)) return;
 	event.preventDefault();
+	pushChatHistory(sessionId);
 	openSession(sessionId);
 }

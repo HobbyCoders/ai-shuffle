@@ -16,6 +16,23 @@ vi.mock('$lib/stores/session/v2/feed-controller', () => ({
 vi.mock('$lib/stores/auth.svelte', () => ({
 	isAuthenticated: writable(true), isAdmin: writable(true),
 }));
+// A browser history model for shallow-routing entries (Back/Forward, #859).
+const chatHistory = vi.hoisted(() => ({ entries: [{}] as Record<string, unknown>[], index: 0 }));
+vi.mock('$app/navigation', async (importOriginal) => {
+	const { page } = await import('$app/state');
+	return {
+		...(await importOriginal<object>()),
+		pushState: (_url: string, state: Record<string, unknown>) => {
+			chatHistory.entries.splice(chatHistory.index + 1, Infinity, state);
+			chatHistory.index += 1;
+			page.state = state;
+		},
+		replaceState: (_url: string, state: Record<string, unknown>) => {
+			chatHistory.entries[chatHistory.index] = state;
+			page.state = state;
+		},
+	};
+});
 vi.mock('$lib/services/watch-resources', () => ({ watchResources: vi.fn() }));
 vi.mock('$lib/services/globalStt', () => ({ initGlobalStt: () => () => {} }));
 // Keep the page's real initialization/navigation, without unrelated UI trees.
@@ -40,6 +57,7 @@ import { openSession, openSessionLink, openSubagentLink, sessionHref } from '$li
 import { resourceSync } from '$lib/services/resource-sync';
 import { subagentChats } from '$lib/stores/subagent-chats';
 import { get } from 'svelte/store';
+import { page } from '$app/state';
 
 beforeEach(() => {
 	activeSession.destroy();
@@ -218,5 +236,53 @@ describe('Swarm session navigation through the actual active-session store', () 
 		openSubagentLink(event, 'already-consumed');
 		expect(activeSession.current.sessionId).toBe('parent');
 		expect(get(subagentChats).has('already-consumed')).toBe(false);
+	});
+});
+
+describe('chat link history (#859)', () => {
+	const click = () => new MouseEvent('click', { cancelable: true, button: 0 });
+	const step = (delta: number) => {
+		chatHistory.index += delta;
+		page.state = chatHistory.entries[chatHistory.index];
+	};
+	beforeEach(() => {
+		chatHistory.entries = [{}];
+		chatHistory.index = 0;
+		page.state = {};
+	});
+
+	it('makes each in-app chat link (the parent crumb) one Back step, and Forward returns', async () => {
+		render(Page);
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
+		openSessionLink(click(), 'worker-child');
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('worker-child'));
+		// The child's parent crumb.
+		openSessionLink(click(), 'parent');
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
+		expect(chatHistory.entries.map((entry) => entry.chatSession)).toEqual(['parent', 'worker-child', 'parent']);
+
+		step(-1);
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('worker-child'));
+		expect(layout.current.activeView).toEqual({ type: 'session', sessionId: 'worker-child' });
+		step(-1);
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
+		step(1);
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('worker-child'));
+		step(1);
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
+	});
+
+	it('opens nothing for an entry that carries the same chat along (the phone drawer, Settings)', async () => {
+		render(Page);
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
+		openSessionLink(click(), 'worker-child');
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('worker-child'));
+		// The user picks another chat from the sidebar (no history entry), then
+		// the phone drawer pushes an entry spreading the link's state.
+		openSession('worker-summary');
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('worker-summary'));
+		page.state = { ...page.state, mobileDrawer: true };
+		await Promise.resolve();
+		expect(activeSession.current.sessionId).toBe('worker-summary');
 	});
 });
