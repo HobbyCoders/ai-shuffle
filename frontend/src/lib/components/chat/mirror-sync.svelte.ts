@@ -22,6 +22,18 @@ import { createConnectionBannerGrace } from '$lib/stores/session/connection-bann
 export const MIRROR_SYNC_NOTICE_GRACE_MS = 3000;
 /** Poll interval of the sync status. */
 export const MIRROR_SYNC_POLL_MS = 2000;
+/** Failed sync checks in a row before a waiting chat stops waiting and says
+ *  it cannot reach its owner (#814). */
+export const MIRROR_SYNC_FAILURE_LIMIT = 3;
+/** Longest gap between background retries once the owner is unreachable. */
+export const MIRROR_SYNC_MAX_BACKOFF_MS = 30_000;
+
+/** Delay before the next poll after `failures` failed checks in a row:
+ *  the normal interval, then doubling up to the cap once unreachable. */
+export function mirrorSyncRetryDelay(failures: number): number {
+	if (failures < MIRROR_SYNC_FAILURE_LIMIT) return MIRROR_SYNC_POLL_MS;
+	return Math.min(MIRROR_SYNC_POLL_MS * 2 ** (failures - MIRROR_SYNC_FAILURE_LIMIT + 1), MIRROR_SYNC_MAX_BACKOFF_MS);
+}
 
 export type MirrorSyncState = 'checking' | 'syncing' | 'current' | 'offline';
 
@@ -53,6 +65,13 @@ export interface MirrorSync {
 	readonly behind: boolean;
 	/** The "Syncing updates" pill is due (behind for the grace period). */
 	readonly noticeVisible: boolean;
+	/** The sync check failed MIRROR_SYNC_FAILURE_LIMIT times in a row: the
+	 *  chat shows what it has (syncState 'offline') and retries with backoff. */
+	readonly unreachable: boolean;
+	/** A retry asked for with `retry()` is in flight. */
+	readonly retrying: boolean;
+	/** Check again now instead of waiting for the next backoff step. */
+	retry(): void;
 }
 
 export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
@@ -60,6 +79,9 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 	let pending = $state(0);
 	let revealedSession = $state<string | null>(null);
 	let noticeVisible = $state(false);
+	let unreachable = $state(false);
+	let retrying = $state(false);
+	let retryNow: (() => void) | null = null;
 	// The input may read whole stores (ChatView's $activeSession/$sessions).
 	// Equal primitive values must not restart polling when those stores update.
 	const sessionId = $derived(input().sessionId);
@@ -75,6 +97,8 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 		if (!id || !remote) return;
 		const controller = new AbortController();
 		let timer: ReturnType<typeof setTimeout>;
+		let failures = 0;
+		let inFlight = false;
 		// A fresh compose already shows the outgoing message; there is no
 		// earlier transcript to reveal or reload at the opening checkpoint.
 		let caughtUpOnce = createdFromComposer;
@@ -88,7 +112,10 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 		noticeVisible = false;
 		syncState = 'checking';
 		pending = 0;
+		unreachable = false;
+		retrying = false;
 		async function poll() {
+			inFlight = true;
 			try {
 				const query = new URLSearchParams();
 				if (initialTarget && !caughtUpOnce) {
@@ -113,15 +140,35 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 					: status.pending_updates ?? 0);
 				if (firstCatchUp || status.state === 'current' || status.state === 'offline') revealedSession = id;
 				notice.setConnected(status.state !== 'syncing' && status.state !== 'checking');
+				failures = 0;
+				unreachable = false;
 				if (firstCatchUp) untrack(() => input().onCaughtUp());
 			} catch {
 				// Keep a known backlog visible on a failed poll; never call it current.
+				if (controller.signal.aborted) return;
+				failures += 1;
+				if (failures >= MIRROR_SYNC_FAILURE_LIMIT) {
+					// Stop waiting: show what this worker has, like an offline
+					// owner, and keep retrying in the background with backoff.
+					unreachable = true;
+					syncState = 'offline';
+					revealedSession = id;
+					notice.setConnected(true);
+				}
 			} finally {
-				if (!controller.signal.aborted) timer = setTimeout(poll, MIRROR_SYNC_POLL_MS);
+				inFlight = false;
+				retrying = false;
+				if (!controller.signal.aborted) timer = setTimeout(poll, mirrorSyncRetryDelay(failures));
 			}
 		}
+		retryNow = () => {
+			if (inFlight || controller.signal.aborted) return;
+			clearTimeout(timer);
+			retrying = true;
+			void poll();
+		};
 		void poll();
-		return () => { controller.abort(); clearTimeout(timer); notice.destroy(); };
+		return () => { controller.abort(); clearTimeout(timer); notice.destroy(); retryNow = null; };
 	});
 
 	return {
@@ -131,6 +178,9 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 		get waiting() { return waiting; },
 		get behind() { return behind; },
 		get noticeVisible() { return noticeVisible; },
+		get unreachable() { return unreachable; },
+		get retrying() { return retrying; },
+		retry() { retryNow?.(); },
 	};
 }
 
