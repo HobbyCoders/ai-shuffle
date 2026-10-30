@@ -1,5 +1,7 @@
 package com.hobbycoders.aishuffle
 
+import android.content.Intent
+import android.os.SystemClock
 import android.widget.TextView
 import android.view.View
 import android.view.ViewGroup
@@ -30,14 +32,20 @@ class WorkerPresenceSmokeTest {
     private val context get() = ApplicationProvider.getApplicationContext<android.content.Context>()
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private fun views(view: View): List<View> = listOf(view) + if (view is ViewGroup) (0 until view.childCount).flatMap { views(view.getChildAt(it)) } else emptyList()
-    private fun waitFor(message: String, condition: () -> Boolean) = runBlocking {
-        try { kotlinx.coroutines.withTimeout(8_000) { while (!condition()) kotlinx.coroutines.delay(50) } }
+    private fun waitFor(message: String, timeoutMs: Long = 8_000, condition: () -> Boolean) = runBlocking {
+        try { kotlinx.coroutines.withTimeout(timeoutMs) { while (!condition()) kotlinx.coroutines.delay(50) } }
         catch (error: kotlinx.coroutines.TimeoutCancellationException) { throw AssertionError(message, error) }
     }
     private fun clean() = instrumentation.runOnMainSync {
         DeviceToolsRuntime.stop(); ToolsPreferences(context).setEnabled(false); AccountStore(context).clear()
         ServerStore.get(context).apply { getAll().forEach { remove(it.id) }; selectedToolsServerId = null }
     }
+    // Class-based ActivityScenario.launch sends ACTION_MAIN, which intentionally
+    // auto-connects since #838. Management/status tests must open the list instead.
+    private fun launchWorkers(launcher: Boolean = false): ActivityScenario<ServerListActivity> =
+        ActivityScenario.launch(Intent(context, ServerListActivity::class.java).apply {
+            if (launcher) action = Intent.ACTION_MAIN
+        })
     private fun description(scenario: ActivityScenario<ServerListActivity>, name: String, state: String): Boolean {
         var found = false
         scenario.onActivity { activity -> found = views(activity.findViewById(android.R.id.content)).filterIsInstance<TextView>().any {
@@ -63,7 +71,7 @@ class WorkerPresenceSmokeTest {
             PresenceFixture.response(request, 200, """{"ready":true,"protected_ingress":true,"server_id":"worker-one"}""")
         }.use {
             try {
-                ActivityScenario.launch(ServerListActivity::class.java).use { scenario ->
+                launchWorkers().use { scenario ->
                     var originalRow: View? = null
                     scenario.onActivity { activity -> originalRow = views(activity.findViewById(android.R.id.content)).first { it.contentDescription == "Options for Home fixture" } }
                     waitFor("Per-worker statuses did not settle") { description(scenario, first.name, "Online") && description(scenario, second.name, "Status unavailable") }
@@ -82,7 +90,105 @@ class WorkerPresenceSmokeTest {
         }
     }
 
-    @Test fun stoppedScreenCancelsPendingProbeAndChangedWorkerCannotInheritGreen() {
+    @Test fun launcherOpensAnOnlineWorkerWithoutASecondProbeSweep() = launcherOnlineWorker(stalledProbe = false)
+    @Test fun launcherSelectsOnlineWorkerByDeadlineEvenWhenAnotherProbeNeverCompletes() = launcherOnlineWorker(stalledProbe = true)
+
+    private fun launcherOnlineWorker(stalledProbe: Boolean) {
+        clean()
+        val first = Server("startup-offline", "Unavailable startup fixture", "https://startup-offline-presence.example", "aim_fixture", "viewing-phone")
+        val second = first.copy(id = "startup-online", name = "Online startup fixture", baseUrl = "https://startup-online-presence.example")
+        ServerStore.get(context).apply { add(first); add(second) }
+        val requests = AtomicInteger()
+        val pending = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val opened = java.util.concurrent.CopyOnWriteArrayList<Intent>()
+        // Exercise the actual launcher selection and hand-off, but keep this
+        // presence test out of Chat's separate authenticated bootstrap flow.
+        val monitor = object : android.app.Instrumentation.ActivityMonitor() {
+            override fun onStartActivity(intent: Intent): android.app.Instrumentation.ActivityResult? {
+                if (intent.component?.className != "com.hobbycoders.aishuffle.ui.ChatActivity") return null
+                opened.add(intent)
+                return android.app.Instrumentation.ActivityResult(android.app.Activity.RESULT_CANCELED, null)
+            }
+        }
+        instrumentation.addMonitor(monitor)
+        PresenceFixture { request ->
+            requests.incrementAndGet()
+            if (request.url.host == "startup-online-presence.example")
+                PresenceFixture.response(request, 200, """{"status":"healthy","service":"Shuffle","version":"fixture","authenticated":false}""")
+            else {
+                if (stalledProbe) {
+                    pending.countDown()
+                    // Deliberately never complete while selection is under test,
+                    // like a system DNS lookup that ignores OkHttp's timeout.
+                    release.await()
+                }
+                PresenceFixture.response(request, 503, "{}")
+            }
+        }.use {
+            try {
+                val startedAt = SystemClock.elapsedRealtime()
+                launchWorkers(launcher = true).use { scenario ->
+                    if (stalledProbe) assertTrue(pending.await(5, TimeUnit.SECONDS))
+                    waitFor("Launcher did not hand off to the checked online worker", if (stalledProbe) 12_000 else 8_000) { opened.isNotEmpty() }
+                    if (stalledProbe) assertTrue("Startup selection exceeded its deadline", SystemClock.elapsedRealtime() - startedAt < 12_000)
+                    assertEquals(listOf(second.id), opened.map { it.getStringExtra("server_id") })
+                    assertEquals("Startup selection must reuse row probes", 2, requests.get())
+                    waitFor("Launcher did not finish after hand-off") { scenario.state == Lifecycle.State.DESTROYED }
+                }
+            } finally { release.countDown(); instrumentation.removeMonitor(monitor); clean() }
+        }
+    }
+
+    @Test fun launcherChecksEachWorkerOnceAndKeepsTheUnavailableList() = launcherUnavailableList(stalledProbe = false)
+    @Test fun launcherFallsBackByDeadlineAndLateProbeOnlyUpdatesItsRow() = launcherUnavailableList(stalledProbe = true)
+
+    private fun launcherUnavailableList(stalledProbe: Boolean) {
+        clean()
+        val first = Server("launcher-one", "First startup fixture", "https://startup-one-presence.example", "aim_fixture", "viewing-phone")
+        val second = first.copy(id = "launcher-two", name = "Second startup fixture", baseUrl = "https://startup-two-presence.example")
+        ServerStore.get(context).apply { add(first); add(second) }
+        val requests = AtomicInteger()
+        val pending = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        PresenceFixture { request ->
+            requests.incrementAndGet()
+            if (stalledProbe && request.url.host == "startup-two-presence.example") {
+                pending.countDown()
+                release.await()
+                PresenceFixture.response(request, 200, """{"status":"healthy","service":"Shuffle","version":"fixture","authenticated":false}""")
+            } else PresenceFixture.response(request, 503, "{}")
+        }.use {
+            try {
+                val startedAt = SystemClock.elapsedRealtime()
+                launchWorkers(launcher = true).use { scenario ->
+                    if (stalledProbe) assertTrue(pending.await(5, TimeUnit.SECONDS))
+                    waitFor("Launcher fallback did not keep the checked worker rows", if (stalledProbe) 12_000 else 8_000) {
+                        var fallback = false
+                        scenario.onActivity { activity -> fallback = views(activity.findViewById(android.R.id.content)).filterIsInstance<TextView>()
+                            .any { it.text.startsWith("No authorized worker is reachable.") && it.isShown } }
+                        fallback && description(scenario, first.name, "Status unavailable") &&
+                            description(scenario, second.name, if (stalledProbe) "Unknown" else "Status unavailable")
+                    }
+                    if (stalledProbe) assertTrue("Startup fallback exceeded its deadline", SystemClock.elapsedRealtime() - startedAt < 12_000)
+                    assertEquals("Startup selection must reuse row probes", 2, requests.get())
+                    if (stalledProbe) {
+                        // Selection must not cancel a still-visible row's probe or
+                        // run again when it eventually completes.
+                        release.countDown()
+                        waitFor("The late probe did not update its row") { description(scenario, second.name, "Online") }
+                        assertEquals(Lifecycle.State.RESUMED, scenario.state)
+                        assertEquals("Late results must not start another sweep", 2, requests.get())
+                    }
+                }
+            } finally { release.countDown(); clean() }
+        }
+    }
+
+    @Test fun stoppedScreenCancelsPendingProbeAndChangedWorkerCannotInheritGreen() = stoppedProbe(launcher = false)
+    @Test fun stoppedLauncherCancelsPendingProbeAndChangedWorkerCannotInheritGreen() = stoppedProbe(launcher = true)
+
+    private fun stoppedProbe(launcher: Boolean) {
         clean()
         val original = Server("direct-worker", "Direct fixture", "https://direct-presence.example", "aim_fixture", "viewing-phone")
         ServerStore.get(context).add(original)
@@ -98,7 +204,7 @@ class WorkerPresenceSmokeTest {
             } else PresenceFixture.response(request, 503, "{}")
         }.use {
             try {
-                ActivityScenario.launch(ServerListActivity::class.java).use { scenario ->
+                launchWorkers(launcher).use { scenario ->
                     assertTrue(started.await(5, TimeUnit.SECONDS))
                     scenario.moveToState(Lifecycle.State.CREATED)
                     ServerStore.get(context).update(original.copy(baseUrl = "https://changed-presence.example", apiKey = "aim_replaced"))
@@ -128,7 +234,7 @@ class WorkerPresenceSmokeTest {
             else PresenceFixture.response(request, 200, """{"status":"healthy","service":"Shuffle","version":"fixture","authenticated":false}""")
         }.use { fixture ->
             try {
-                ActivityScenario.launch(ServerListActivity::class.java).use { scenario ->
+                launchWorkers().use { scenario ->
                     waitFor("Initial direct probe was not online") { description(scenario, server.name, "Online") }
                     waitFor("Worker screen did not become resumed and focused") {
                         var ready = false

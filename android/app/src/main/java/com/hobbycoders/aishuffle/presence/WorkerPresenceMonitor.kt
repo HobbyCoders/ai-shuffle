@@ -13,7 +13,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 
@@ -42,7 +44,7 @@ internal class WorkerPresenceMonitor(
     private fun authorized(expected: AccountSession?) = if (expected == null)
         !accountStore.hasStoredSession() else accountStore.matches(expected)
 
-    fun start(servers: List<Server>, session: AccountSession?) {
+    fun start(servers: List<Server>, session: AccountSession?, onFirstSweep: (Map<Server, ProbeResult>) -> Unit = {}) {
         cancel()
         val previous = entries.takeIf { sameAccount(account, session) }.orEmpty()
         entries = servers.map { server -> previous.firstOrNull { it.server == server } ?: Entry(server) }
@@ -50,13 +52,15 @@ internal class WorkerPresenceMonitor(
         val epoch = generation
         val current = entries
         current.forEach { it.presence.expire(SystemClock.elapsedRealtime()); publish(it.server, it.presence) }
-        if (current.isEmpty()) return
+        if (current.isEmpty()) { onFirstSweep(emptyMap()); return }
         var lastNetwork = network()
         val semaphore = Semaphore(3)
         polling = scope.launch {
+            var firstSweep = true
             while (isActive) {
+                val observations = mutableMapOf<Server, ProbeResult>()
                 coroutineScope {
-                    current.forEach { entry -> launch {
+                    val probes = current.map { entry -> launch {
                         semaphore.withPermit {
                             if (epoch != generation || !authorized(session) || serverStore.getById(entry.server.id) != entry.server) return@withPermit
                             val before = network()
@@ -68,9 +72,19 @@ internal class WorkerPresenceMonitor(
                                 // Success is evidence even on a LAN that Android cannot validate.
                                 entry.presence.record(result, SystemClock.elapsedRealtime(), stableValidatedNetwork)
                             }
+                            observations[entry.server] = if (before.id == after.id) result else ProbeResult.UNAVAILABLE
                             publish(entry.server, entry.presence)
                         }
                     } }
+                    if (firstSweep) {
+                        // Bound startup selection, not the probes: DNS can outlive
+                        // OkHttp's timeout, and late results must still update rows.
+                        withTimeoutOrNull(8_000) { probes.joinAll() }
+                        if (epoch == generation && authorized(session)) {
+                            firstSweep = false
+                            onFirstSweep(observations.toMap())
+                        }
+                    }
                 }
                 delay(30_000)
             }
