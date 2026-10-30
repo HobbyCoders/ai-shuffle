@@ -555,6 +555,19 @@ def test_real_scenarios_validate_and_markdown_is_generated():
         "scenarios.md is stale: run python -m scripts.live_smoke render")
 
 
+def test_worker_machine_settings_smoke_requires_real_peer_and_accounts():
+    row = next(row for row in scenarios.rows(scenarios.load())
+               if row["id"] == "two-worker-smoke.machine-settings")
+    assert row["kind"] == "browser"
+    assert row["two_worker"] is True
+    assert set(row["needs"]) == {"install", "provider"}
+    # The hand-checked row must retain the real-peer gaps the dev journey cannot cover.
+    text = row["how"] + " " + row["pass_when"]
+    for requirement in ("disposable", "Update Claude CLI", "GitHub", "always-on",
+                        "release channel", "all-workers", "offline", "not queued", "not replayed"):
+        assert requirement in text
+
+
 @pytest.mark.parametrize("row, msg", [
     ({"id": "t.bad-row", "check": "x", "kind": "robot"}, "kind"),
     ({"id": "t.bad-row", "check": "x", "kind": "script", "steps": [{"op": "jump"}]}, "unknown op"),

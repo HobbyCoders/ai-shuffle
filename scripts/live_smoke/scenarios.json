@@ -568,6 +568,19 @@
           ]
         },
         {
+          "id": "two-worker-smoke.machine-settings",
+          "check": "Manage a peer worker’s real machine settings without leaving this worker’s UI",
+          "kind": "browser",
+          "needs": [
+            "install",
+            "provider"
+          ],
+          "two_worker": true,
+          "how": "Use an isolated test network containing only two paired disposable candidate workers A and B, never production installs. This needs a real worker pair, machine-local CLI accounts, an app-managed Claude CLI on B and supported release channel controls, which the dev instance and fake peers cannot verify. Arrange distinguishable CLI versions or sign-in states on A and B. Record B’s own CLI version and CLI-produced Claude sign-in status (email/plan when available), GitHub CLI status, and both workers’ original always-on overrides, release channels and keep-installed flags; never capture tokens or credential files. From A’s Settings > Devices select B and compare those statuses without opening B’s UI. Run Update Claude CLI on B, wait for its job to finish, refresh, and compare B’s real CLI version again. From A change B’s always-on override and release channel, checking the saved state on B and that A stays unchanged; do not install an app release or bypass platform/downgrade checks. Stop only candidate B, then from A confirm an all-workers keep-installed action whose value differs from B’s recorded flag. Reconnect B and refresh both targets. Restore the original overrides, permitted channels and keep-installed flags. Record revision-tagged private evidence, not credentials.",
+          "pass_when": "A shows B’s actual Claude CLI version, Claude sign-in/email/plan and GitHub status, not A’s cached values. Update Claude CLI runs only on B and completes successfully (already current is valid); the refreshed version matches B’s CLI and A’s CLI is unchanged. The always-on override and supported release channel change on B only, with any restart requirement shown and all existing safety checks retained. The all-workers action reports A accepted and B offline, explicitly not queued, without treating the whole operation as failed. After reconnection B’s keep-installed flag is still its original value: the offline action was not replayed. No CLI login, logout or credential transfer occurs. A fake-peer test or the single-worker UI journey alone does not pass this row.",
+          "past_bug": "Machine-bound settings required switching to the target worker’s own UI; cross-worker action delivery was initially tested only with fake peers."
+        },
+        {
           "id": "two-worker-smoke.no-project-chat-move",
           "check": "A no-project chat moves to the other worker and back",
           "kind": "owner",
@@ -1281,6 +1294,16 @@
           "how": "Disposable worker: detect Ada; Recall in fresh chats; Remember Grace; redetect.",
           "pass_when": "Grace wins; no duplicates or addresses; Git author stays unchanged.",
           "past_bug": "#556: account detection did not feed ordinary owner memory."
+        },
+        {
+          "id": "harness-basics.perf-remote-open-rig",
+          "check": "The read-only performance rig measures a genuinely remote-owned chat",
+          "kind": "owner",
+          "needs": ["install"],
+          "two_worker": true,
+          "how": "On two paired disposable candidate workers, create a throwaway chat owned by the peer and a small chat owned by the viewing worker. Verify ownership and peer connectivity first. Supply only their ids to scripts/perf/chat-journeys.mjs --journeys remote --remote ID --small ID --runs 1 --platform both --out OUTSIDE_CHECKOUT; provide approved preview access only through PERF_ACCESS_URL in the environment. Keep raw private receipts outside the checkout. Main currently has no paired two-worker dev fixture, so a one-worker seeded chat cannot pass this row. Do not send prompts through this read-only rig, edit settings, restart production workers or export owner transcripts.",
+          "pass_when": "Desktop 1280x800 and the actual /mobile/ shell at 390x844 with 4x CPU each produce a cold-open and cached-return sample with p75/min/max, SSE bytes, exact from_seq=0 replay count, API requests, long-task time and nested live element count. Record every replay, including any known replacement replay associated with #813; the rig must expose it rather than hide it. Access URLs, cookies, worker addresses and session ids are absent from output artifacts. Both targets retain their original ownership and transcript; no message is sent. A local-id substitution, only unit tests or an unpaired preview is not remote verification.",
+          "past_bug": "Phase-1 remote-open measurement lived in a private scratch rig; an unpaired preview could exercise the runner without proving the remote mirror/open path."
         },
         {
           "id": "harness-basics.pg-fast-shutdown-pressure",

@@ -18,6 +18,7 @@ from app.api.auth import require_admin, require_auth
 from app.api.settings_updates import updates_router
 from app.api.settings_worker_availability import router as worker_availability_router
 from app.api.settings_claude_accounts import router as claude_accounts_router
+from app.api.settings_workers import router as worker_settings_router
 from app.api.settings_native_generation import router as native_generation_router
 from app.core import encryption
 from app.core.query_engine import DEFAULT_SECURITY_INSTRUCTIONS
@@ -52,6 +53,7 @@ router.include_router(updates_router)
 router.include_router(native_generation_router)
 router.include_router(worker_availability_router)
 router.include_router(claude_accounts_router)
+router.include_router(worker_settings_router)
 
 
 # ============================================================================

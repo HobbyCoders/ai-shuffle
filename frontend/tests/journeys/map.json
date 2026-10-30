@@ -76,6 +76,17 @@
 			]
 		},
 		{
+			"why": "typed per-worker machine settings and the Devices detail panel",
+			"journeys": ["worker-machine-settings"],
+			"globs": [
+				"frontend/src/lib/components/settings/devices/WorkerMachineSettings.svelte",
+				"frontend/src/lib/components/settings/devices/machine-settings.svelte.ts",
+				"frontend/src/lib/api/worker-settings.ts",
+				"app/core/worker_settings.py",
+				"app/api/settings_workers.py"
+			]
+		},
+		{
 			"why": "mirrored chats: the sync check ChatView runs and the gate that shows it",
 			"journeys": ["mirrored-chat", "open-unloaded-chat"],
 			"globs": [
