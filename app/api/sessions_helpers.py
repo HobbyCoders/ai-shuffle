@@ -9,6 +9,7 @@ from typing import Any, List, Optional
 from fastapi import HTTPException, Request, status
 from pydantic import BaseModel, Field
 
+import threading
 import time
 
 from app.db import database
@@ -1412,11 +1413,10 @@ def history_before_mirror(store_messages: List[dict], mirror_messages: List[dict
     Untimestamped store messages go with the timestamped ones around them;
     a store with no older timestamp contributes nothing.
     """
-    start = next((t for m in mirror_messages if (t := _message_time(m)) is not None), None)
+    start, first_prompt = _mirror_seam(mirror_messages)
     if start is None or not store_messages:
         return []
-    first_prompt = _first_user_content(mirror_messages)
-    if first_prompt is not None and first_prompt == _first_user_content(store_messages):
+    if first_prompt and first_prompt == _first_user_content(store_messages):
         return []
     end = 0
     for index, message in enumerate(store_messages):
@@ -1430,17 +1430,30 @@ def history_before_mirror(store_messages: List[dict], mirror_messages: List[dict
         end = len(store_messages) if end else 0
     lead = store_messages[:end]
     # Clock skew at the seam: the store's copy of the mirror's first prompt
-    # may stamp a few ms earlier. The mirror carries that turn; cut before it.
-    for index in range(len(lead) - 1, -1, -1):
-        if lead[index].get("role") == "user" and lead[index].get("content") == first_prompt:
-            return lead[:index]
+    # may stamp slightly earlier. Only the lead's LAST prompt, stamped within
+    # the skew window, can be that copy; an earlier repeat is real history.
+    last = next((i for i in range(len(lead) - 1, -1, -1) if lead[i].get("role") == "user"), None)
+    if first_prompt and last is not None and lead[last].get("content") == first_prompt:
+        stamp = _message_time(lead[last])
+        if stamp is not None and start - stamp <= _SEAM_SKEW_SECONDS:
+            return lead[:last]
     return lead
 
 
-# (session id, store version, mirror head) -> built lead rows. A moved chat's
-# store no longer changes, so polls reuse one answer instead of re-parsing.
+def _mirror_seam(mirror_messages: List[dict]) -> tuple[Optional[float], Optional[str]]:
+    """The mirror's first timestamp and first prompt: where store history ends."""
+    start = next((t for m in mirror_messages if (t := _message_time(m)) is not None), None)
+    return start, _first_user_content(mirror_messages)
+
+
+_SEAM_SKEW_SECONDS = 5.0
+
+# (session id, transform, store version, mirror seam) -> built lead rows. A
+# moved chat's store no longer changes, so polls reuse one answer instead of
+# re-parsing. Reads run in the thread pool: the lock guards eviction.
 _PRE_MOVE_CACHE_MAX = 256
 _pre_move_cache: dict[tuple, List[dict]] = {}
+_pre_move_cache_lock = threading.Lock()
 
 
 def prepend_pre_move_history(session: dict, mirror_messages: List[dict], build) -> List[dict]:
@@ -1449,7 +1462,7 @@ def prepend_pre_move_history(session: dict, mirror_messages: List[dict], build) 
     ``build`` is the endpoint's transform (``build_detail_messages`` or
     ``build_live_messages``). A failed store read keeps the mirror alone.
     An empty store returns at once (no JSONL heal on this read path), and a
-    store answer is cached per store version and mirror head. Message
+    store answer is cached per store version and mirror seam. Message
     positions stay stable for ``paginate_messages``: the lead is fixed for a
     given store version and sits before the mirror, which only grows at
     the end.
@@ -1472,17 +1485,21 @@ def prepend_pre_move_history(session: dict, mirror_messages: List[dict], build) 
             if not version[0]:
                 return mirror_messages
             head = mirror_messages[0]
-            key = (session["id"], build.__name__, tuple(version), head.get("epoch"), head.get("id"))
-            if key in _pre_move_cache:
-                return copy.deepcopy(_pre_move_cache[key]) + mirror_messages
+            key = (session["id"], build.__name__, tuple(version), head.get("epoch"),
+                   head.get("id"), *_mirror_seam(mirror_messages))
+            with _pre_move_cache_lock:
+                cached = _pre_move_cache.get(key)
+            if cached is not None:
+                return copy.deepcopy(cached) + mirror_messages
             parsed, _usage = parse_session_history_via_store(
                 sdk_session_id, resolve_working_dir(dict(session)), heal_from_jsonl=False)
         lead = history_before_mirror(parsed or [], mirror_messages)
         built = build(session["id"], lead) if lead else []
         if key is not None:
-            if len(_pre_move_cache) >= _PRE_MOVE_CACHE_MAX:
-                _pre_move_cache.pop(next(iter(_pre_move_cache)))
-            _pre_move_cache[key] = copy.deepcopy(built)
+            with _pre_move_cache_lock:
+                if key not in _pre_move_cache and len(_pre_move_cache) >= _PRE_MOVE_CACHE_MAX:
+                    _pre_move_cache.pop(next(iter(_pre_move_cache)))
+                _pre_move_cache[key] = copy.deepcopy(built)
         return built + mirror_messages
     except Exception:
         logger.exception("Failed to read pre-move history for %s", session.get("id"))

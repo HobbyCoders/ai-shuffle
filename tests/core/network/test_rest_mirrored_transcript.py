@@ -333,6 +333,17 @@ def _store_turn(prompt, reply, timestamp):
     # carries only the owner's post-move turn, so the earlier turns lead.
     (_store_turn("Before the move", "Early reply", "2020-01-01T00:00:00Z"),
      ["Before the move", "Early reply", "Say OK", "OK"]),
+    # The mirror's first prompt repeats an earlier store prompt ("continue"):
+    # that is real pre-move history, not the seam, so nothing is cut.
+    (_store_turn("Fix Y", "Y fixed", "2020-01-01T00:00:00Z")
+     + _store_turn("Say OK", "Early OK", "2020-01-01T00:01:00Z")
+     + _store_turn("Fix X", "X fixed", "2020-01-01T00:02:00Z"),
+     ["Fix Y", "Y fixed", "Say OK", "Early OK", "Fix X", "X fixed", "Say OK", "OK"]),
+    # Even as the store's last prompt, a repeat stamped long before the
+    # mirror is a real earlier turn.
+    (_store_turn("Before the move", "Early reply", "2020-01-01T00:00:00Z")
+     + _store_turn("Say OK", "Early OK", "2020-01-01T00:01:00Z"),
+     ["Before the move", "Early reply", "Say OK", "Early OK", "Say OK", "OK"]),
     # The mirror already holds the store's first turn: nothing is repeated.
     (_store_turn("Say OK", "OK", "2020-01-01T00:00:00Z"), ["Say OK", "OK"]),
     # Store turns newer than the mirror's start overlap it: the mirror alone.
