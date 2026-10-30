@@ -358,7 +358,7 @@ jobs:
             tests/core/test_pg_session_store.py tests/core/test_pg_session_store_rewind.py \
             tests/db/test_explore_retirement_postgres.py tests/db/test_builtin_refresh_postgres.py \
             tests/db/test_turn_context_postgres.py tests/db/test_git_repository_record_postgres.py \
-            tests/db/test_transcript_projection_postgres.py \
+            tests/db/test_transcript_projection_postgres.py tests/db/test_handoff_bulk_postgres.py \
             -o addopts="" -p no:cacheprovider --timeout=120 -v
 
       # One unconditional measurement per database on PRs; five on main-suite.

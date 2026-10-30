@@ -868,12 +868,27 @@ PostgreSQL 16 from the runner's `/usr/lib/postgresql/16/bin`, seed data, the
 scripted fake AI, loopback only), waits for its ready line and `status`, runs
 the shard's `frontend/tests/journeys/*.journey.mjs` files in Chromium, then
 `down`. The plan step splits the journey files across the four shards by
-case count, each file exactly once (`python -m scripts.devloop.ci plan
---shards 4`); a shard with no file stops after the plan, and a plan with no
-journey file at all fails. With one journey file (16 cases) its shard takes
-about 4 minutes of journeys plus setup. When the journeys outgrow four
-shards (a shard over about 10 minutes), raise the shard count in the matrix,
-the plan step and `--shard` together (a guard test checks they agree).
+measured hosted runtime, longest first, each file exactly once
+(`python -m scripts.devloop.ci plan --shards 4`). The checked-in medians are
+in `scripts/devloop/journey_weights.json`; an unmeasured journey uses its
+`--list` case count times the measured median seconds per case. Adding short
+cases to a measured journey therefore cannot reshuffle all the slow journeys
+based on case count alone. Planned loads in estimated minutes appear in the
+job log and step summary (excluding instance setup/teardown); stdout remains
+the JSON partition consumed by the workflow. A shard with no file stops after
+the plan, and a plan with no journey file at all fails.
+
+Refresh after journey runtime changes, using a few recent completed green
+`main-suite.yml` and `ci-frontend.yml` run IDs with authenticated `gh`:
+`python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...]`. This reads
+timestamped whole-job logs from the runs' logs archives, measures each
+`[ci] running <file>` through its own passing case-count footer (including
+the last journey, excluding instance teardown), and stores median seconds per
+journey. The fallback is the median of each sample's seconds divided by its
+case count. Failed, incomplete or duplicate measurements are refused before
+replacing the file. Estimates are not time limits: keep measurements current
+and check headroom against the unchanged 25-minute journey step on the four
+standard hosted runners.
 
 Every case's text timeline (marks, state changes, anomalies) is printed in
 the job log; failing ones also go to the job summary. On failure the shard

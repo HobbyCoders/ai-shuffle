@@ -36,18 +36,6 @@ async function chatWithScenario(ctx, scenario) {
 	await callButton(ctx.page).first().waitFor({ timeout: 30_000 });
 }
 
-/**
- * Known bug #816: on a phone the call dock is not the composer's height, so a
- * call the provider ends (no input) moves the transcript as the composer comes
- * back. Only that one shift: a layout shift under 0.1 in total, of the
- * composer slot alone.
- */
-const DOCK_SWAP_SHIFT = {
-	kind: 'layout_shift',
-	message: /^layout shifted 0\.0\d+ in total; biggest 0\.0\d+ at \d+ms \(moved: div\.input-slot in ChatView\)$/,
-	reason: 'known bug #816: on a phone the call dock and the composer differ in height, so a provider-ended call moves the transcript'
-};
-
 const greetings = (entries, session) => entries.filter((e) => e.kind === 'speech' && e.trigger === 'greeting' && e.session === session);
 
 /** The call is over with nothing of it left on screen: no dock, the call button back. */
@@ -69,7 +57,6 @@ async function retryCall(page, voice, mark) {
 
 const inactivity = {
 	name: 'inactivity',
-	allow: [DOCK_SWAP_SHIFT],
 	async setup(ctx) {
 		await chatWithScenario(ctx, 'inactivity');
 	},
@@ -102,7 +89,6 @@ const inactivity = {
 
 const error = {
 	name: 'error',
-	allow: [DOCK_SWAP_SHIFT],
 	async setup(ctx) {
 		await chatWithScenario(ctx, 'error');
 	},

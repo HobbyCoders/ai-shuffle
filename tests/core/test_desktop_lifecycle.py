@@ -169,43 +169,81 @@ async def test_failed_stop_returns_for_retry_without_cancelling_execution():
 
 @pytest.mark.parametrize("blocked_stage", ["stop", "flush"])
 async def test_shutdown_budget_includes_stop_and_flush(monkeypatch, blocked_stage):
-    release = asyncio.Event()
-    calls = []
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls, waits = [], []
 
     async def block(*args, **kwargs):
         calls.append(asyncio.current_task())
+        entered.set()
         await release.wait()
 
-    monkeypatch.setattr(desktop_lifecycle, "SHUTDOWN_SETTLE_SECONDS", 0.05)
+    async def wait_at_deadline(tasks, *, timeout):
+        stage = "stop" if not waits else "flush"
+        waits.append(timeout)
+        if stage == blocked_stage:
+            await entered.wait()
+            assert set(tasks) == set(calls)
+            return set(), set(tasks)  # Deadline expires; the stop stays alive.
+        await asyncio.gather(*tasks)
+        return set(tasks), set()
+
+    # Only the product clock advances: stop consumes the whole shutdown budget.
+    # No 50ms timer or 0.5s outer race with a descheduled runner (#794).
+    budget = desktop_lifecycle.SHUTDOWN_SETTLE_SECONDS
+    clock = Mock(side_effect=[100.0, 100.0, 100.0 + budget])
+    monkeypatch.setattr(desktop_lifecycle, "asyncio", SimpleNamespace(
+        get_running_loop=lambda: SimpleNamespace(time=clock),
+        create_task=asyncio.create_task,
+        wait=wait_at_deadline,
+    ))
     monkeypatch.setattr(desktop_lifecycle, "active_session_ids", lambda: {"busy"})
+    monkeypatch.setattr(session_runtime, "active_executions", lambda: {})
     with patch.object(desktop_lifecycle, "stop_session_work", new=block if blocked_stage == "stop" else AsyncMock()), \
          patch("app.core.task_persistence.flush", new=block if blocked_stage == "flush" else AsyncMock()):
         try:
-            await asyncio.wait_for(desktop_lifecycle.stop_running_sessions(), 0.5)
-            assert calls and not calls[0].done()
+            await desktop_lifecycle.stop_running_sessions()
+            assert waits == [budget, 0]
+            assert len(calls) == 1 and not calls[0].done()
             assert calls[0].cancelling() == 0
         finally:
             release.set()
             await asyncio.gather(*calls)
 
 
-async def test_shutdown_execution_wait_uses_budget_left_after_stop(monkeypatch):
+@pytest.mark.parametrize("stop_seconds", [40.0, 80.0], ids=["budget-left", "expired"])
+async def test_shutdown_execution_wait_uses_budget_left_after_stop(monkeypatch, stop_seconds):
     execution = asyncio.create_task(asyncio.Event().wait())
+    now, waits = 100.0, []
 
     async def slow_stop(*args, **kwargs):
-        await asyncio.sleep(0.04)
+        nonlocal now
+        now += stop_seconds
 
-    monkeypatch.setattr(desktop_lifecycle, "SHUTDOWN_SETTLE_SECONDS", 0.06)
+    async def wait_at_deadline(tasks, *, timeout):
+        waits.append((set(tasks), timeout))
+        if execution in tasks:
+            return set(), set(tasks)
+        await asyncio.gather(*tasks)
+        return set(tasks), set()
+
+    monkeypatch.setattr(desktop_lifecycle, "SHUTDOWN_SETTLE_SECONDS", 60.0)
+    monkeypatch.setattr(desktop_lifecycle, "asyncio", SimpleNamespace(
+        get_running_loop=lambda: SimpleNamespace(time=lambda: now),
+        create_task=asyncio.create_task,
+        wait=wait_at_deadline,
+    ))
     with patch.object(desktop_lifecycle, "active_session_ids", return_value={"busy"}), \
          patch.object(session_runtime, "active_executions", return_value={execution: "busy"}), \
          patch.object(desktop_lifecycle, "stop_session_work", new=slow_stop), \
-         patch("app.core.task_persistence.flush", new=AsyncMock()), \
-         patch.object(desktop_lifecycle.asyncio, "wait", wraps=asyncio.wait) as wait:
+         patch("app.core.task_persistence.flush", new=AsyncMock()):
         try:
-            await asyncio.wait_for(desktop_lifecycle.stop_running_sessions(), 0.5)
-            execution_wait = next(call for call in wait.call_args_list if call.args[0] == {execution})
-            assert 0 <= execution_wait.kwargs["timeout"] < 0.03
-            assert not execution.done()
+            await desktop_lifecycle.stop_running_sessions()
+            remaining = max(0, 60.0 - stop_seconds)
+            assert len(waits) == 3
+            assert waits[0][1] == 60.0
+            assert waits[1] == ({execution}, remaining)
+            assert waits[2][1] == remaining
+            assert not execution.done() and execution.cancelling() == 0
         finally:
             execution.cancel()
             await asyncio.gather(execution, return_exceptions=True)

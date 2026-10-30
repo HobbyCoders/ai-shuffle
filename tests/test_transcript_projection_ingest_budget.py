@@ -2,7 +2,8 @@
 
 Real-PG CI/probes use the same test; the ordinary isolated SQLite job also
 catches accidental event-loop stalls. No source append hook calls the actor.
-The large-record timing case additionally measures same-process GIL contention.
+The large-record case proves preparation and ingestion are independent by order,
+not a millisecond deadline on a shared runner; p95 remains diagnostic telemetry.
 """
 from __future__ import annotations
 
@@ -20,6 +21,19 @@ from app.db import session_events as source
 from app.db import transcript_projections as store
 from app.db.profiles import create_profile
 from app.db.sessions import create_session
+
+
+def _held_prepare_frames(owner, entered, release, *args, **kwargs):
+    """Hold the real CPU operation in its child until live ingestion finishes."""
+    from app.core.transcript_views.producer import _prepare_frames
+
+    assert os.getpid() != owner, "large preparation must not share the serving process/GIL"
+    entered.touch()
+    deadline = time.monotonic() + 30  # Broken-test guard, not a performance budget.
+    while not release.exists():
+        assert time.monotonic() < deadline, "ingestion never released preparation"
+        time.sleep(.005)
+    return _prepare_frames(*args, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -83,7 +97,7 @@ async def test_background_projection_preserves_ingest_p95(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_large_admissible_folds_preserve_loop_lag_and_ingest_p95(monkeypatch):
+async def test_large_admissible_folds_preserve_loop_lag_and_ingest_p95(monkeypatch, tmp_path):
     from app.core.transcript_views import producer as implementation
 
     monkeypatch.setenv('AI_SHUFFLE_TRANSCRIPT_PRODUCER', '1')
@@ -102,17 +116,26 @@ async def test_large_admissible_folds_preserve_loop_lag_and_ingest_p95(monkeypat
     # restore/re-evaluate/append/frame construction may never run on this loop.
     owner, preparations = os.getpid(), 0
     bridge, stop = ReducerBridge(), asyncio.Event()
+    entered, release = tmp_path / "preparation-entered", tmp_path / "preparation-release"
+    hold_preparation, held = False, False
+    operations = set()
     prepare = bridge.prepare
     async def off_process(call, *args, **kwargs):
-        nonlocal preparations
-        if call is implementation._prepare_frames:
-            sequence = bridge._preparation._sequence
+        nonlocal preparations, held
+        sequence = bridge._preparation._sequence
+        if call is implementation._prepare_frames and hold_preparation and not held:
+            held = True
+            result = await prepare(_held_prepare_frames, owner, entered, release, *args, **kwargs)
+        else:
             result = await prepare(call, *args, **kwargs)
-            assert bridge._preparation._sequence == sequence + 1
-            assert bridge._preparation._process.pid != owner
+        # Cover every expensive boundary, including replay restore, input lookup,
+        # checkpointing and IPC JSON encoding/decoding, not only frame building.
+        assert bridge._preparation._sequence == sequence + 1
+        assert bridge._preparation._process.pid != owner
+        operations.add(call.__name__)
+        if call is implementation._prepare_frames:
             preparations += 1
-            return result
-        return await prepare(call, *args, **kwargs)
+        return result
     monkeypatch.setattr(bridge, 'prepare', off_process)
     actor = ProjectionActor(bridge)
     ticker, background_task = None, None
@@ -135,8 +158,6 @@ async def test_large_admissible_folds_preserve_loop_lag_and_ingest_p95(monkeypat
     async def background():
         nonlocal completed
         for _ in range(8):
-            if stop.is_set():
-                return
             await actor.process(large, recheck=True)
             for _ in range(20):
                 if not await actor.process(large):
@@ -160,27 +181,46 @@ async def test_large_admissible_folds_preserve_loop_lag_and_ingest_p95(monkeypat
         stop.set()
         await ticker
         stop.clear()
+        hold_preparation = True
+        operations.clear()
+        background_task = asyncio.create_task(background())
+
+        async def until_preparation_entered():
+            while not entered.exists():
+                if background_task.done():
+                    await background_task  # Surface a failed fold, not a timeout.
+                    pytest.fail("fold never reached off-process preparation")
+                await asyncio.sleep(.001)
+
+        await asyncio.wait_for(until_preparation_entered(), 30)
         concurrent_lag = []
         ticker = asyncio.create_task(heartbeat(concurrent_lag))
-        background_task = asyncio.create_task(background())
-        concurrent = await ingest()
+        # A read/append that waits on preparation cannot finish: only this test
+        # releases the child, after all 150 real appends and heartbeats complete.
+        # The 30s bound detects that deadlock; it is not a latency allowance.
+        concurrent = await asyncio.wait_for(ingest(), 30)
+        assert len(concurrent) == 150 and concurrent_lag
+        assert await database(source.get_max_seq, ingest_sid) == 300
+        assert held and not release.exists() and not background_task.done()
+        assert completed == 0 and preparations == 0
         stop.set()
-        await background_task
         await ticker
-        assert completed >= 2 and preparations >= 4
+        release.touch()
+        await background_task
+        assert completed == 8 and preparations >= 8
+        assert {'restore', 'input_lookup_keys', '_prepare_frames', '_checkpoint_tail',
+                '_encode_packet', 'loads'} <= operations
+        # Keep same-run measurements for diagnosis, but do not turn unrelated
+        # runner scheduling/GIL noise into a product failure (#794).
         p95 = lambda values: sorted(values)[math.ceil(len(values) * .95) - 1]
         before, during = p95(baseline), p95(concurrent)
         before_lag, during_lag = p95(baseline_lag), p95(concurrent_lag)
-        ingest_limit = max(before * 1.35, before + .006)
-        lag_limit = max(before_lag * 1.35, before_lag + .004)
         print(f'large projection: 1MiB records={completed} preparations={preparations} '
               f'ingest p95={before * 1000:.3f}->{during * 1000:.3f}ms '
-              f'limit={ingest_limit * 1000:.3f}ms '
               f'loop-lag p95={before_lag * 1000:.3f}->{during_lag * 1000:.3f}ms '
-              f'limit={lag_limit * 1000:.3f}ms max={max(concurrent_lag) * 1000:.3f}ms')
-        assert during <= ingest_limit
-        assert during_lag <= lag_limit
+              f'max={max(concurrent_lag) * 1000:.3f}ms; 150 appends while child held')
     finally:
+        release.touch()
         stop.set()
         try:
             await asyncio.gather(*(task for task in (background_task, ticker) if task is not None),

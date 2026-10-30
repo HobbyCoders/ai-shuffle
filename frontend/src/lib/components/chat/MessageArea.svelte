@@ -2314,7 +2314,7 @@
 			<div
 				bind:this={tailSpacerRef}
 				class="transcript-tail-spacer"
-				style:height={`calc(${Math.max(tailReservePx, latestTurnTailPx)}px + env(safe-area-inset-bottom, 0px))`}
+				style:height={`calc(${Math.max(tailReservePx, latestTurnTailPx)}px + env(safe-area-inset-bottom, 0px) + var(--call-dock-reserve, 0px))`}
 				aria-hidden="true"
 			></div>
 		</div>
@@ -2683,7 +2683,8 @@
 		position: absolute;
 		z-index: 20;
 		left: 50%;
-		bottom: 12px;
+		/* A phone call dock floats over the transcript's foot (ChatView, #816). */
+		bottom: calc(12px + var(--call-dock-lift, 0px));
 		transform: translateX(-50%);
 		pointer-events: none;
 	}
