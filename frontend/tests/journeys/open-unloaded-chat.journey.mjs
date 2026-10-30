@@ -24,7 +24,7 @@
 // a move there and back, fails even when it is too small or too quick to
 // count as a layout shift.
 import { runJourney } from './runner.mjs';
-import { SEEDED, expect, gotoApp, openFromSidebar, seededChatId, waitChat, waitChatOpen } from './lib/app.mjs';
+import { SEEDED, PROJECT, expect, gotoApp, openFromSidebar, seededChatId, waitChat, waitChatOpen, pickAgent, pickProject, pickAccess, typeAndSend, scriptTag, waitTurnSettled, scrollTranscriptTo, transcriptScroll, uniq } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { expectComposerPositions } from './lib/timeline.mjs';
 
@@ -68,9 +68,7 @@ const viaDeepLink = (target) => async ({ page, status, mark }) => {
 // The switch-flash cases use the REAL mobile shell, unlike a narrow desktop
 // viewport. Hold only delivery of an actual native SSE response: no reducer,
 // content or loading flag is fabricated.
-async function prepareHeldSwitch(ctx, delayMs, source = 'no_project') {
-	const { page, status, variant } = ctx;
-	const target = seededChatId(status, 'other_project');
+async function holdIncomingHistory(page, target, delayMs) {
 	await page.addInitScript(({ target, delayMs }) => {
 		const fetchOriginal = window.fetch.bind(window);
 		const hold = window.__switchHydrationHold = { started: null, released: null };
@@ -85,6 +83,11 @@ async function prepareHeldSwitch(ctx, delayMs, source = 'no_project') {
 			return response;
 		};
 	}, { target, delayMs });
+}
+
+async function prepareHeldSwitch(ctx, delayMs, source = 'no_project') {
+	const { page, status, variant } = ctx;
+	await holdIncomingHistory(page, seededChatId(status, 'other_project'), delayMs);
 	const prefix = variant.viewport === 'phone' ? '/mobile/' : '/';
 	await page.goto(new URL(`${prefix}?session=${encodeURIComponent(seededChatId(status, source))}`, status.urls.ui).toString());
 	await page.getByRole('textbox', { name: 'Message' }).waitFor({ timeout: 60_000 });
@@ -293,6 +296,68 @@ await runJourney({
 				await waitChatOpen(page, { messagesAtLeast: 2, hold: 250 });
 				expect(await page.getByRole('heading', { name: 'Rewind Conversation?', exact: true }).count() === 0, 'the old confirmation never reopens over B');
 				log('rewind portal closed on target divergence; no cross-session mutation');
+			},
+			verify: composer('bottom')
+		},
+		{ name: 'streaming-task-panel-retained',
+			async setup(ctx) {
+				const { page, status, variant } = ctx;
+				await holdIncomingHistory(page, seededChatId(status, 'other_project'), 1500);
+				await gotoApp(page, status, variant.viewport === 'phone' ? '/mobile/' : '/');
+				await waitChat(page, { surface: 'new' });
+				const hero = page.getByRole('region', { name: 'New session' });
+				await hero.waitFor();
+				await pickAgent(page, hero);
+				await pickProject(page, hero, PROJECT);
+				if (variant.viewport === 'phone') {
+					// The production phone shell has a quick access picker, not the
+					// desktop Permission mode menu used by pickAccess.
+					await page.getByRole('button', { name: /^Tool access:/ }).click();
+					await page.getByRole('radiogroup', { name: 'Tool access', exact: true })
+						.getByRole('radio', { name: 'Bypass', exact: true }).click();
+					await page.getByRole('button', { name: 'Tool access: Bypass', exact: true }).waitFor();
+					await page.keyboard.press('Escape');
+				} else await pickAccess(page, 'Bypass');
+				// Produce a scrollable history through the real provider pipeline,
+				// then a real standalone shell task; never seed activeTasks by hand.
+				await typeAndSend(page, `task-retention-${uniq()} ${scriptTag(variant, 'long', { tps: 0, latency_ms: 0 })}`);
+				await waitTurnSettled(page, { text: 'About the request path', hold: 250 });
+				await typeAndSend(page, `Keep a real shell task visible ${scriptTag(variant, 'park-wait', { tps: 1, latency_ms: 0 })}`);
+				const toggle = page.locator('[data-ui-mount="MessageArea"]').getByTestId('tasks-toggle');
+				await toggle.waitFor({ timeout: 60_000 });
+				if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
+				await page.waitForFunction(() => document.querySelector('[data-ui-mount="MessageArea"] [data-testid="tasks-toggle"]')
+					?.closest('.inline')?.querySelector('.inline-body')?.textContent.includes('sleep 20'));
+				await waitChat(page, { streaming: 'true' });
+				await scrollTranscriptTo(page, 1);
+				expect((await transcriptScroll(page)).max > 200, 'A has a genuine bottom reading position to protect');
+				await page.evaluate(() => {
+					const log = document.querySelector('[role="log"][aria-label="Conversation messages"]');
+					const panel = log.querySelector('[data-testid="tasks-toggle"]').closest('.inline');
+					window.__taskRetention = { panel, log, composer: document.querySelector('[role="textbox"][aria-label="Message"]'),
+						height: panel.getBoundingClientRect().height, scrollTop: log.scrollTop };
+				});
+			},
+			async act({ page, mark, log }) {
+				await mark('switch away from streaming A with its real shell row visible');
+				await openSwitchChat(page, 'other_project');
+				await page.waitForFunction(() => window.__switchHydrationHold.started !== null
+					&& document.querySelector('[data-transcript-pending="true"]'));
+				const kept = await page.evaluate(() => {
+					const old = window.__taskRetention;
+					return { connected: old.panel.isConnected, height: old.panel.getBoundingClientRect().height,
+						heightBefore: old.height, shell: old.panel.querySelector('.inline-body')?.textContent.includes('sleep 20'),
+						scrollTop: old.log.scrollTop, scrollBefore: old.scrollTop,
+						composerSame: old.composer === document.querySelector('[role="textbox"][aria-label="Message"]'),
+						logSame: old.log === document.querySelector('[role="log"][aria-label="Conversation messages"]') };
+				});
+				expect(kept.connected && kept.shell, 'the real outgoing shell row remains connected during B’s held history');
+				expect(Math.abs(kept.height - kept.heightBefore) <= 1, `task-panel height is frozen: ${JSON.stringify(kept)}`);
+				expect(kept.scrollTop >= kept.scrollBefore - 1, `the bottom reading position is not clamped by missing task rows: ${JSON.stringify(kept)}`);
+				expect(kept.composerSame && kept.logSame, 'composer and transcript nodes survive the running-task switch');
+				await waitChatOpen(page, { messagesAtLeast: 2, hold: 250 });
+				expect(await page.evaluate(() => !window.__taskRetention.panel.isConnected), 'A’s task panel leaves only when B is ready');
+				log(`native Monitor task retained through the grace: ${JSON.stringify(kept)}`);
 			},
 			verify: composer('bottom')
 		},
