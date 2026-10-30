@@ -536,6 +536,20 @@ function toolAction(message: ChatMessage): ToolAction {
 	return 'other';
 }
 
+const GENERATION_ACTIONS = new Set<ToolAction>(['image-gen', 'image-edit', 'video-gen', 'audio-gen', 'threed-gen']);
+
+/**
+ * The action a fold's summary counts a row under. A generation call only
+ * counts as "Generated …" when its result actually names media (#786): a
+ * refused, skipped, needs-confirmation, failed or still-running call made
+ * nothing, so it is just a tool call.
+ */
+function summaryAction(message: ChatMessage): ToolAction {
+	const action = toolAction(message);
+	if (GENERATION_ACTIONS.has(action) && completedToolMedia(message).length === 0) return 'other';
+	return action;
+}
+
 function actionLabel(action: ToolAction, count: number): string {
 	switch (action) {
 		case 'read':
@@ -620,7 +634,7 @@ export function summarizeWorkCompact(rows: WorkLogEntry[]): string | null {
 	const counts = new Map<ToolAction, number>();
 	let failed = 0;
 	for (const entry of tools) {
-		const action = toolAction(entry.message);
+		const action = summaryAction(entry.message);
 		counts.set(action, (counts.get(action) ?? 0) + 1);
 		if (entry.message.toolStatus === 'error') failed++;
 	}
@@ -676,7 +690,7 @@ export function summarizeWork(rows: WorkLogEntry[]): string | null {
 	const counts = new Map<ToolAction, number>();
 	let failed = 0;
 	for (const entry of tools) {
-		const action = toolAction(entry.message);
+		const action = summaryAction(entry.message);
 		counts.set(action, (counts.get(action) ?? 0) + 1);
 		if (entry.message.toolStatus === 'error') failed++;
 	}
