@@ -16,10 +16,15 @@
 // owner's sync status is scripted (two "syncing" answers, then caught up).
 // Everything else (history, cursor resume, layout) is the real app.
 //
-// Cases (from the new-session screen, through the sidebar):
-//   long-from-new     a mirrored transcript: the hero says it is syncing,
-//                     then the transcript opens in one composer move
-//   cleared-from-new  an empty mirror: checked too, then "Conversation cleared"
+// Cases (through the sidebar):
+//   long-from-new      a mirrored transcript from the new-session screen: the
+//                      hero says it is syncing, the header names the chat as
+//                      the hero does (#812), then the transcript opens in one
+//                      composer move
+//   untitled-from-new  a mirror with no title yet: header and hero both say
+//                      "Loading…" during the sync, never "New Chat" (#812)
+//   long-from-chat     from another chat: no transcript remount (#813)
+//   cleared-from-new   an empty mirror: checked too, then "Conversation cleared"
 import { runJourney } from './runner.mjs';
 import { SEEDED, expect, gotoApp, openFromSidebar, seededChatId, waitChat, waitChatOpen } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
@@ -36,9 +41,9 @@ const SYNCING_POLLS = 2;
  * makes the requests page.route would see (see withoutSavedAgentPick). Call
  * before the page loads; `syncPolls(page)` reads how often it was polled.
  */
-async function simulateMirroredChat(page, status, key) {
+async function simulateMirroredChat(page, status, key, { untitled = false } = {}) {
 	await page.addInitScript(
-		({ id, peer, syncingPolls }) => {
+		({ id, peer, syncingPolls, untitled }) => {
 			const original = window.fetch.bind(window);
 			window.__mirrorSyncPolls = 0;
 			window.__mirrorReaders = [];
@@ -54,7 +59,7 @@ async function simulateMirroredChat(page, status, key) {
 				if (!value || typeof value !== 'object') return value;
 				const out = {};
 				for (const [k, v] of Object.entries(value)) out[k] = markRemote(v);
-				if (out.id === id) Object.assign(out, { is_remote: true, device_name: peer });
+				if (out.id === id) Object.assign(out, { is_remote: true, device_name: peer }, untitled ? { title: null } : {});
 				return out;
 			};
 			const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -82,15 +87,15 @@ async function simulateMirroredChat(page, status, key) {
 				return new Response(JSON.stringify(markRemote(body)), { status: response.status, headers: response.headers });
 			};
 		},
-		{ id: seededChatId(status, key), peer: PEER, syncingPolls: SYNCING_POLLS }
+		{ id: seededChatId(status, key), peer: PEER, syncingPolls: SYNCING_POLLS, untitled }
 	);
 }
 
 const syncPolls = (page) => page.evaluate(() => window.__mirrorSyncPolls ?? 0);
 
-const fromNew = (key) => async (ctx) => {
+const fromNew = (key, opts) => async (ctx) => {
 	const { page, status } = ctx;
-	await simulateMirroredChat(page, status, key);
+	await simulateMirroredChat(page, status, key, opts);
 	await gotoApp(page, status);
 	await waitChat(page, { surface: 'new' });
 	await page.waitForTimeout(1000);
@@ -100,6 +105,14 @@ const fromNew = (key) => async (ctx) => {
 async function expectSyncingHero(page) {
 	await page.locator('.cleared-hero').getByText(`Syncing from ${PEER}…`).waitFor({ timeout: 30_000 });
 	await waitChat(page, { composer: 'centre', session: /^s:/ });
+}
+
+/** The header names the syncing chat as the hero does, never "New Chat" (#812). */
+async function expectHeaderMatchesHero(page, expected) {
+	const hero = (await page.locator('.cleared-hero .cleared-title').first().textContent())?.trim();
+	const header = (await page.locator('.title-trigger:visible').first().textContent())?.trim();
+	expect(hero === expected, `the syncing hero is titled ${JSON.stringify(expected)}, got ${JSON.stringify(hero)}`);
+	expect(header === expected, `the header is titled ${JSON.stringify(expected)} while the hero syncs, got ${JSON.stringify(header)}`);
 }
 
 /** No frame ever showed the column's full-pane sync check, or rows under the syncing hero. */
@@ -146,6 +159,7 @@ await runJourney({
 				await mark(OPEN);
 				await openFromSidebar(page, SEEDED.long);
 				await expectSyncingHero(page);
+				await expectHeaderMatchesHero(page, SEEDED.long);
 				await waitChatOpen(page, { messagesAtLeast: 50 });
 				const polls = await syncPolls(page);
 				expect(polls > SYNCING_POLLS, `the owner's sync status was polled until caught up (${polls} polls)`);
@@ -155,6 +169,45 @@ await runJourney({
 				expectSyncedInTheHero(recording);
 				// The transcript arrives once and never empties again.
 				expectNeverDecreases(recording, 'rows', { from: markTime(recording, OPEN) });
+			}
+		},
+		{
+			// An untitled mirror (its row and /live carry no title yet): the
+			// header and the hero both say "Loading…" until it is revealed.
+			name: 'untitled-from-new',
+			setup: fromNew('long', { untitled: true }),
+			async act({ page, mark }) {
+				await mark(OPEN);
+				// The sidebar lists an untitled chat as "Untitled".
+				await openFromSidebar(page, 'Untitled');
+				await expectSyncingHero(page);
+				await expectHeaderMatchesHero(page, 'Loading…');
+				await waitChatOpen(page, { messagesAtLeast: 50 });
+			},
+			verify({ recording }) {
+				expectComposerPositions(recording, ['centre', 'bottom']);
+				expectSyncedInTheHero(recording);
+			}
+		},
+		{
+			// From another chat (the message column), #813: the transcript
+			// stays mounted under the sync pane (no remount anomaly, no allow
+			// rule) and the composer never leaves the bottom.
+			name: 'long-from-chat',
+			async setup(ctx) {
+				await fromNew('long')(ctx);
+				await openFromSidebar(ctx.page, SEEDED.no_project);
+				await waitChatOpen(ctx.page);
+			},
+			async act({ page, mark }) {
+				await mark(OPEN);
+				await openFromSidebar(page, SEEDED.long);
+				await waitChatOpen(page, { messagesAtLeast: 50 });
+				const polls = await syncPolls(page);
+				expect(polls > SYNCING_POLLS, `the owner's sync status was polled until caught up (${polls} polls)`);
+			},
+			verify({ recording }) {
+				expectComposerPositions(recording, ['bottom']);
 			}
 		},
 		{

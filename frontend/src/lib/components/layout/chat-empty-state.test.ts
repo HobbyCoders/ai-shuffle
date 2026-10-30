@@ -153,6 +153,20 @@ describe('chatHeaderTitle', () => {
 	it('shows the title once an unbound chat has messages (first-send window)', () => {
 		expect(chatHeaderTitle({ sessionId: null, title: 'My task', messageCount: 2 })).toBe('My task');
 	});
+
+	it('names a placeholder-titled chat from the session list (#812)', () => {
+		// A mirrored chat in its first sync: the store still says 'New Chat'.
+		const syncing = { sessionId: 'sess-1', title: 'New Chat', messageCount: 0, loading: true };
+		expect(chatHeaderTitle({ ...syncing, listTitle: 'Fix the poller' })).toBe('Fix the poller');
+		expect(chatHeaderTitle({ ...syncing, listTitle: null })).toBe('Loading…');
+		expect(chatHeaderTitle({ ...syncing, listTitle: 'New Chat' })).toBe('Loading…');
+		// The store's own title wins once it has one.
+		expect(chatHeaderTitle({ ...syncing, title: 'Renamed', listTitle: 'Fix the poller' })).toBe('Renamed');
+		// Settled: the list's title still beats the placeholder.
+		expect(chatHeaderTitle({ ...syncing, loading: false, listTitle: 'Fix the poller' })).toBe('Fix the poller');
+		// An unbound compose never borrows a list title.
+		expect(chatHeaderTitle({ sessionId: null, title: 'New Chat', messageCount: 0, listTitle: 'Other' })).toBe('New Chat');
+	});
 });
 
 
