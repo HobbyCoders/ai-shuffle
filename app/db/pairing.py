@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, TypedDict
 
@@ -466,8 +467,8 @@ def get_paired_client(client_id: str) -> Optional[PairedClientRow]:
         return _client(cursor.fetchone())
 
 
-def revoke_paired_client(client_id: str) -> bool:
-    with get_db() as conn:
+def revoke_paired_client(client_id: str, *, _conn=None) -> bool:
+    with (get_db() if _conn is None else nullcontext(_conn)) as conn:
         cursor = conn.cursor()
         cursor.execute(
             """
@@ -681,6 +682,29 @@ def _renew_chat_controllers(cursor, client_id, old_hash, new_hash):
         cursor.execute('''UPDATE mobile_tool_identity SET credential_hash=%s
             WHERE kind='paired' AND principal_id=%s AND credential_hash=%s''',
             (new_hash, client_id, old_hash))
+
+
+def clear_expired_paired_client_session(token_hash: str) -> None:
+    """Forget logout's expired continuity proof without authenticating it."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Serialize with renewal/mint on the parent, just like live logout.
+        cursor.execute("""SELECT p.id FROM paired_clients p
+            WHERE p.session_token_hash=%s OR EXISTS (
+                SELECT 1 FROM paired_client_native_sessions n
+                WHERE n.client_id=p.id AND n.token_hash=%s) FOR UPDATE""",
+            (token_hash, token_hash))
+        for client in cursor.fetchall():
+            cursor.execute("""DELETE FROM paired_client_native_sessions
+                WHERE client_id=%s AND token_hash=%s AND expires_at<=NOW()""",
+                (client['id'], token_hash))
+            cursor.execute("""UPDATE paired_clients
+                SET session_token_hash=NULL, session_expires_at=NULL, updated_at=NOW()
+                WHERE id=%s AND session_token_hash=%s
+                AND (session_expires_at IS NULL OR session_expires_at<=NOW())""",
+                (client['id'], token_hash))
+            if cursor.rowcount:
+                cursor.execute('DELETE FROM paired_client_web_reservations WHERE client_id=%s', (client['id'],))
 
 
 def clear_paired_client_session(client_id: str, token_hash: Optional[str] = None) -> bool:

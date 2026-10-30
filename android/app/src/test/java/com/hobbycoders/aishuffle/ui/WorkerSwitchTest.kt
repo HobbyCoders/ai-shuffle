@@ -81,6 +81,22 @@ class WorkerSwitchTest {
         assertEquals(WorkerSwitch.Decision.Open(keyed), WorkerSwitch.decide(base, request("https://desk.example"), listOf(registryOnly, keyed)))
     }
 
+    @Test fun aKeylessAccountWorkerNeedsNativeAuthorizationBeforeItCanOpenOrFailOver() {
+        val pending = worker("pending", "https://pending.example", key = "", accountId = "account")
+            .copy(hubUrl = "https://hub.example", hubServerId = "pending")
+        val url = request(pending.baseUrl)
+        val decision = WorkerSwitch.decide(base, url, paired + pending)
+        assertEquals(WorkerSwitch.Decision.NeedsAuthorization(pending), decision)
+        assertEquals("Tap ${pending.name} to authorize it on this phone, then open chat.",
+            (decision as WorkerSwitch.Decision.NeedsAuthorization).message)
+        assertTrue(WorkerFailover().candidates(listOf(pending), 0).isEmpty())
+
+        // Native Workers saves this phone's per-worker key before retrying openWorker.
+        val authorized = pending.copy(apiKey = "aim_phone_authorized")
+        assertEquals(WorkerSwitch.Decision.Open(authorized), WorkerSwitch.decide(base, url, paired + authorized))
+        assertEquals(listOf(authorized), WorkerFailover().candidates(listOf(authorized), 0))
+    }
+
     @Test fun mostRecentlyUsedEntryWinsForTheSameOrigin() {
         val again = worker("laptop-2", "https://laptop.example")
         assertEquals(WorkerSwitch.Decision.Open(again), WorkerSwitch.decide(base, request("https://laptop.example"), listOf(again, laptop)))

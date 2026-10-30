@@ -112,6 +112,8 @@ def state(recipient: str, *, prepare: bool = False, fmt: int = FORMAT_FULL) -> d
         _refuse_partial()
         if member is None or member.status != "active":
             raise ValueError("Peer is no longer a member")
+        from app.network import nested_secret_sync
+        mode = nested_secret_sync.enabled() and nested_secret_sync.enabled(recipient=recipient)
         key = (str(settings.data_dir), recipient, ctx.network_id, ctx.generation, fmt)
         with _jobs_lock:
             for saved_key, job in list(_jobs.items()):
@@ -130,7 +132,8 @@ def state(recipient: str, *, prepare: bool = False, fmt: int = FORMAT_FULL) -> d
         if prepare and not job.done():
             return {"status": "preparing"}
         manifest = job.result()
-        needs_snapshot = store.requires_snapshot(manifest["watermarks"], exclude_origin=recipient)
+        needs_snapshot = store.requires_snapshot(
+            manifest["watermarks"], exclude_origin=recipient, check_tail_compatibility=not mode)
         # Both capture and the tail query can wait while membership changes.
         # Reacquire the live context AFTER those waits, immediately before
         # returning a wrapped keyring; do not hold membership/job locks over DB.
@@ -142,7 +145,8 @@ def state(recipient: str, *, prepare: bool = False, fmt: int = FORMAT_FULL) -> d
         if (manifest["network_id"] != current.network_id or manifest["generation"] != current.generation
                 or manifest["recipient"] != recipient):
             raise ValueError("Membership changed during peer capture; retry")
-        if not needs_snapshot:
+        if (not needs_snapshot and manifest.get("nested_secret_rekey") == mode
+                and nested_secret_sync.transfer_compatible(manifest, recipient)):
             return manifest
         # Pruning or adopting another worker's snapshot can advance our head
         # without retaining its ops. In that case this frontier cannot catch up
@@ -215,6 +219,8 @@ def capture(recipient: str, fmt: int = FORMAT_FULL) -> dict:
         member = ctx.member(recipient)
         if member is None or member.status != "active":
             raise ValueError("Peer is no longer a member")
+        from app.network import nested_secret_sync
+        mode = nested_secret_sync.enabled() and nested_secret_sync.enabled(recipient=recipient)
         # Expired transfers contain only encrypted pages. Never touch user files.
         for entry in _transfer_dirs():
             manifest = _saved_manifest(entry)
@@ -224,7 +230,9 @@ def capture(recipient: str, fmt: int = FORMAT_FULL) -> dict:
                     and manifest.get("format", FORMAT_FULL) == fmt
                     and manifest["network_id"] == ctx.network_id
                     and manifest["generation"] == ctx.generation and _reusable(manifest)
-                    and not store.requires_snapshot(manifest["watermarks"], exclude_origin=recipient)):
+                    and manifest.get("nested_secret_rekey") == mode
+                    and not store.requires_snapshot(
+                        manifest["watermarks"], exclude_origin=recipient, check_tail_compatibility=not mode)):
                 # Ordinary writes may advance the frontier: reuse it while its
                 # tail is retained. Snapshot adoption or pruning can leave gaps
                 # that require recapture.
@@ -251,7 +259,9 @@ def capture(recipient: str, fmt: int = FORMAT_FULL) -> dict:
                             "publisher": ctx.device_id, "recipient": recipient, "generation": ctx.generation,
                             "expires_at": int(time.time()) + TTL, "watermarks": store.local_watermarks(conn),
                             "keyring": keyring.for_recipient(ctx, member.encryption_public), "pages": [],
-                            "preserved_builtin_ids": store.preserved_builtin_ids(_conn=conn)}
+                            "preserved_builtin_ids": store.preserved_builtin_ids(_conn=conn),
+                            "nested_secret_rekey": nested_secret_sync.enabled(cursor) and
+                                nested_secret_sync.enabled(cursor, recipient=recipient)}
                 if fmt >= FORMAT_DEFERRED:
                     # Left out here; the recipient fetches them once it is ready.
                     manifest["deferred"] = deferred
@@ -266,7 +276,7 @@ def capture(recipient: str, fmt: int = FORMAT_FULL) -> dict:
                         try:
                             chunk, next_record_id = engine.snapshot_page(
                                 name, offset, after_record_id=after_record_id, ctx=ctx, limit=limit, _conn=conn,
-                                encoding=encoding)
+                                encoding=encoding, recipient=recipient)
                         except engine.SnapshotBodyTooLarge:
                             # Compresses under MAX_PAGE, but the recipient also
                             # caps what a page expands to.
@@ -304,7 +314,9 @@ def capture(recipient: str, fmt: int = FORMAT_FULL) -> dict:
 def page(recipient: str, transfer: str, index: int) -> bytes:
     directory = _directory(transfer)
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
-    if (manifest["recipient"] != recipient or manifest["expires_at"] <= time.time()
+    from app.network import nested_secret_sync
+    if (not nested_secret_sync.transfer_compatible(manifest, recipient)
+            or manifest["recipient"] != recipient or manifest["expires_at"] <= time.time()
             or manifest["network_id"] != engine.require_context().network_id
             or manifest["generation"] != engine.require_context().generation
             or not 0 <= index < len(manifest["pages"])):

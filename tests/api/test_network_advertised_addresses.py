@@ -56,7 +56,7 @@ def test_public_alias_with_tunnel_repairs_binding_and_is_signed_into_presence(se
     assert not applied.rejected
     with peer.active():
         assert alias in engine.presence_of(server.device_id)["endpoints"]
-        assert engine.presence_of(server.device_id)["capabilities"] == capabilities
+        assert engine.presence_of(server.device_id)["capabilities"] == {**capabilities, "nested-secret-rekey": 1}
         assert advertisements.owner_urls() == []  # another worker's local config is not imported
     with server.active():
         assert client.get("/api/v1/network/advertised-addresses").json()["addresses"] == [alias]

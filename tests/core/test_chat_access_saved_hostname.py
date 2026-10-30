@@ -5,6 +5,7 @@ import socket
 from unittest.mock import AsyncMock
 
 import pytest
+import asyncssh
 from pydantic import ValidationError
 
 from app.core import chat_access, chat_vault
@@ -68,7 +69,7 @@ async def test_hostname_is_resolved_once_before_key_probe_and_pinned_for_connect
         return Connection()
 
     monkeypatch.setattr(broker, "pin_host_key", pin)
-    monkeypatch.setattr(chat_access.asyncssh, "connect", connect)
+    monkeypatch.setattr(asyncssh, "connect", connect)
     spec = GrantInput(kind="machine", label="Build", host="BUILD.example.", username="deploy", password="test-only")
     result = await broker.create("chat", spec)
     grant = broker.grants[result["id"]]

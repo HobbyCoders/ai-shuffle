@@ -150,17 +150,20 @@ class Transcript:
 
         self.events.append(_build_event(cls, self.session_id, turn_id=turn_id, **fields))
 
+    def _id(self, kind: str) -> uuid.UUID:
+        return seed_id(kind)
+
     def turn(self, prompt: str, *, reply: str = "", tools: list[tuple] = (),
              answer: str = "", finished: bool = True) -> None:
         from app.contract import events as contract
 
-        turn_id = str(seed_id("turn"))
+        turn_id = str(self._id("turn"))
         self._event(contract.TurnStarted, turn_id, profile_id=self.profile_id, source="user")
         self._event(contract.MessageUser, turn_id, content=prompt, profile_id=self.profile_id)
         if reply:
             self._event(contract.MessageAssistant, turn_id, content=reply, model=self.model)
         for name, tool_input, result, is_error in tools:
-            call_id = "toolu_seed_" + seed_id("tool").hex[:16]
+            call_id = "toolu_seed_" + self._id("tool").hex[:16]
             self._event(contract.ToolUse, turn_id, tool_use_id=call_id, name=name,
                         input=tool_input)
             if result is not None:
@@ -488,7 +491,13 @@ def _project_v2_row(project_v2_id: str | None) -> dict | None:
     return projects_v2.get_project_v2(project_v2_id)
 
 
-SEEDS = {"default": seed_default}
+async def seed_long() -> dict:
+    from scripts.devloop.seed_long import seed_long as apply_long
+
+    return await apply_long()
+
+
+SEEDS = {"default": seed_default, "long": seed_long}
 
 
 def _write_result(result: dict) -> None:
