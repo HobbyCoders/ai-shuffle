@@ -2283,7 +2283,7 @@
 					<!-- Grouped system/hook messages (2+ consecutive low-signal events) -->
 					<SystemMessageGroup messages={item.messages} pagingEnabled={!shouldAutoScroll} />
 				{:else}
-					{@render messageBody(item.message, item.index)}
+					{@render messageBody(item.message, item.index, undefined, item.hiddenMedia)}
 				{/if}
 			</div>
 			{/each}

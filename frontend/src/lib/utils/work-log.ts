@@ -55,8 +55,14 @@ export interface WorkLogSequenceEntry extends WorkLogEntry {
 	 * already shows (the agent often embeds its picture in the reply), so the
 	 * row leaves them to the prose and a picture never shows twice.
 	 * `collapsed`: prose visible while the turn is collapsed; `open`: all of it.
+	 * `runs` (live turn only): sources that only folded prose shows, by the run
+	 * that folds it, so opening that run hands them to the prose (#792).
 	 */
-	mediaInProse?: { collapsed: readonly string[]; open: readonly string[] };
+	mediaInProse?: {
+		collapsed: readonly string[];
+		open: readonly string[];
+		runs?: Readonly<Record<number, readonly string[]>>;
+	};
 }
 
 /**
@@ -69,13 +75,16 @@ function generatedMediaPlacement(
 	response: readonly Positioned[],
 	sessionId: string | null | undefined,
 	proseVisible: (entry: Positioned) => boolean,
-	gallery: { sources: ReadonlySet<string>; entries: ReadonlySet<Positioned> } | null
+	gallery: { sources: ReadonlySet<string>; entries: ReadonlySet<Positioned> } | null,
+	runOf?: ReadonlyMap<Positioned, number>
 ): Map<Positioned, { shown: boolean; mediaInProse?: WorkLogSequenceEntry['mediaInProse'] }> {
 	const placement = new Map<Positioned, { shown: boolean; mediaInProse?: WorkLogSequenceEntry['mediaInProse'] }>();
 	const makers = response.filter((entry) => completedToolMedia(entry.message).length > 0);
 	if (makers.length === 0) return placement;
 	const collapsed = new Set<string>();
 	const open = new Set<string>();
+	// Live turn: source -> runs whose folded prose embeds it.
+	const inRuns = new Map<string, Set<number>>();
 	for (const entry of response) {
 		if (!isAssistantText(entry.message) || entry.message.streaming) continue;
 		const sources = proseMediaSources([entry.message], sessionId);
@@ -84,6 +93,11 @@ function generatedMediaPlacement(
 		for (const src of sources) {
 			open.add(src);
 			if (proseVisible(entry) && !suppressed?.has(src)) collapsed.add(src);
+			else if (runOf?.has(entry)) {
+				const runs = inRuns.get(src) ?? new Set<number>();
+				runs.add(runOf.get(entry)!);
+				inRuns.set(src, runs);
+			}
 		}
 	}
 	for (const entry of makers) {
@@ -92,9 +106,15 @@ function generatedMediaPlacement(
 		const shown = sources.every((src) => collapsed.has(src) || (inGallery && gallery!.sources.has(src)));
 		const inCollapsed = sources.filter((src) => collapsed.has(src));
 		const inOpen = sources.filter((src) => open.has(src));
+		const runs: Record<number, string[]> = {};
+		for (const src of sources) {
+			if (collapsed.has(src)) continue;
+			for (const run of inRuns.get(src) ?? []) (runs[run] ??= []).push(src);
+		}
+		const byRun = Object.keys(runs).length ? { runs } : {};
 		placement.set(entry, {
 			shown,
-			...(inCollapsed.length || inOpen.length ? { mediaInProse: { collapsed: inCollapsed, open: inOpen } } : {})
+			...(inCollapsed.length || inOpen.length ? { mediaInProse: { collapsed: inCollapsed, open: inOpen, ...byRun } } : {})
 		});
 	}
 	return placement;
@@ -126,7 +146,13 @@ export interface WorkLogRun {
 }
 
 export type DisplayItem =
-	| { kind: 'message'; message: ChatMessage; index: number }
+	| {
+			kind: 'message';
+			message: ChatMessage;
+			index: number;
+			/** Generated media this flat tool row leaves to the turn's prose (#792). */
+			hiddenMedia?: ReadonlySet<string>;
+	  }
 	| { kind: 'system_group'; messages: ChatMessage[]; indices: number[] }
 	| {
 			kind: 'work_log';
@@ -879,6 +905,32 @@ function emitWithSystemGroups(entries: Positioned[], out: DisplayItem[]) {
 	}
 }
 
+/**
+ * A flat turn (grouping off, or no prompt to fold under) shows every row, so a
+ * tool row whose generated picture the turn's finished prose also embeds
+ * leaves it to the prose: one copy, in the reply (#792). Annotates the plain
+ * rows pushed since `start`.
+ */
+function leaveMediaToProse(entries: readonly Positioned[], out: DisplayItem[], start: number, sessionId?: string | null): void {
+	if (!entries.some((entry) => completedToolMedia(entry.message).length > 0)) return;
+	const prose = proseMediaSources(entries.filter((entry) => isAssistantText(entry.message)).map((entry) => entry.message), sessionId);
+	if (prose.size === 0) return;
+	for (let i = start; i < out.length; i++) {
+		const item = out[i];
+		if (item.kind !== 'message') continue;
+		const hidden = completedToolMedia(item.message)
+			.map((media) => resolveMediaUrl(media.src, sessionId))
+			.filter((src) => prose.has(src));
+		if (hidden.length) out[i] = { ...item, hiddenMedia: new Set(hidden) };
+	}
+}
+
+function emitFlat(entries: Positioned[], out: DisplayItem[], sessionId?: string | null): void {
+	const start = out.length;
+	emitWithSystemGroups(entries, out);
+	leaveMediaToProse(entries, out, start, sessionId);
+}
+
 export interface BuildOptions {
 	/** Main-lane streaming state; live turns render without work folds. */
 	isStreaming: boolean;
@@ -1040,7 +1092,9 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[], sessionId?: stri
 	// Same opening-row rule as the settled turn, so both pick the same anchor.
 	const userIndex = turn.findIndex(isPromptRow);
 	if (userIndex < 0 && !turn.some((entry) => agentDelivery(entry.message))) {
+		const start = items.length;
 		for (const entry of shown) items.push({ kind: 'message', message: entry.message, index: entry.index });
+		leaveMediaToProse(shown, items, start, sessionId);
 		return;
 	}
 	const prefix = userIndex < 0 ? [] : turn.slice(0, 1);
@@ -1106,8 +1160,9 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[], sessionId?: stri
 
 	const folded = response.filter((entry) => hidden.has(entry)).map(({ message, index }) => ({ message, index }));
 	// A generated picture never folds here (it is the result), but the reply
-	// may embed it as it arrives: the row leaves it to prose on screen.
-	const media = generatedMediaPlacement(response, sessionId, (entry) => !hidden.has(entry), null);
+	// may embed it as it arrives: the row leaves it to prose on screen, and to
+	// folded prose while the reader has that prose's run open.
+	const media = generatedMediaPlacement(response, sessionId, (entry) => !hidden.has(entry), null, runOf);
 	items.push({
 		kind: 'work_log',
 		...workLogKeys(prefix[0] ?? response[0]),
@@ -1122,7 +1177,8 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[], sessionId?: stri
 			hiddenWhenCollapsed: false,
 			run: runOf.get(entry),
 			...(hidden.has(entry) ? { foldsInRun: true } : {}),
-			// A live turn has no settled "open" state: WorkLogGroup reads `collapsed`.
+			// A live turn has no settled "open" state: WorkLogGroup reads
+			// `collapsed`, plus `runs` for each run the reader opened.
 			...(media.get(entry)?.mediaInProse ? { mediaInProse: media.get(entry)!.mediaInProse } : {})
 		})),
 		runs,
@@ -1348,12 +1404,21 @@ export function createTurnCache(): TurnCache {
 
 /** Plain rows only: a work log's derived fields are not worth comparing. */
 function sameItem(a: DisplayItem, b: DisplayItem): boolean {
-	if (a.kind === 'message' && b.kind === 'message') return a.message === b.message && a.index === b.index;
+	if (a.kind === 'message' && b.kind === 'message') {
+		return a.message === b.message && a.index === b.index && sameSet(a.hiddenMedia, b.hiddenMedia);
+	}
 	if (a.kind === 'system_group' && b.kind === 'system_group') {
 		return a.indices.length === b.indices.length
 			&& a.indices.every((index, i) => index === b.indices[i] && a.messages[i] === b.messages[i]);
 	}
 	return false;
+}
+
+function sameSet(a: ReadonlySet<string> | undefined, b: ReadonlySet<string> | undefined): boolean {
+	if (a === b) return true;
+	if (!a || !b || a.size !== b.size) return false;
+	for (const value of a) if (!b.has(value)) return false;
+	return true;
 }
 
 /** Raw index a plain row item starts at; null for work logs (never reused). */
@@ -1489,7 +1554,7 @@ export function buildTranscriptModel(
 
 	function emitTurn(turn: Positioned[], unsettledTurn: boolean): void {
 		if (!groupingEnabled) {
-			emitWithSystemGroups(turn, items);
+			emitFlat(turn, items, options.sessionId);
 			return;
 		}
 
@@ -1502,7 +1567,7 @@ export function buildTranscriptModel(
 		// a human prompt; its delivery belongs inside that turn's disclosure.
 		const userIndex = turn.findIndex((entry) => entry.message.role === 'user' && !agentDelivery(entry.message));
 		if (userIndex < 0 && !turn.some((entry) => agentDelivery(entry.message))) {
-			emitWithSystemGroups(turn, items);
+			emitFlat(turn, items, options.sessionId);
 			return;
 		}
 
