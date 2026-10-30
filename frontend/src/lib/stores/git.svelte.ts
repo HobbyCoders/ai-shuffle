@@ -448,6 +448,11 @@ export interface GitLoadOptions {
 	/** Settles once the chat's transcript is on screen (or a cap elapsed). The
 	 *  PR lookup, and the remote fetch that follows the load, wait for it. */
 	afterCriticalPath?: Promise<unknown>;
+	/** True while a turn may be using the checkout. The owner refuses a fetch
+	 *  (409) while a session on it is active, and the load's status can predate
+	 *  the turn: a new chat's first load runs as its first reply starts (#803).
+	 *  Asked right before the background fetch; true skips it. */
+	fetchBlocked?: () => boolean;
 }
 
 type TranscriptSource = {
@@ -597,7 +602,7 @@ async function _loadCore(
 
 			// Fetch updates refs, so the same safety guard as an explicit mutation
 			// applies. Do not knowingly send a background request that must fail.
-			if (!status.mutations_blocked) _backgroundFetch(key, projectId, worktreeId, requestScope);
+			if (!status.mutations_blocked && !options?.fetchBlocked?.()) _backgroundFetch(key, projectId, worktreeId, requestScope);
 		} else {
 			// Not a git repo — a POSITIVE answer, so clear ALL git state (stale
 			// cached diffStats/prState/branches from a previous load must not

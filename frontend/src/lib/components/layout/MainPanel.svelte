@@ -433,9 +433,17 @@
 				// An existing chat's transcript comes first: the PR lookup (and the
 				// remote fetch after it) waits until the transcript has loaded, or
 				// the user has moved on, or GIT_OPEN_GATE_MAX_MS has passed.
-				const options: GitLoadOptions | undefined = sessionId && deferGitOnOpen()
-					? { afterCriticalPath: whenTranscriptSettled(activeSession, sessionId, GIT_OPEN_GATE_MAX_MS) }
-					: undefined;
+				// No remote fetch for a load that starts or ends while a turn runs:
+				// the owner refuses it with 409 then (a new chat's first load runs
+				// as its first reply starts, #803). The status refresh at stream end
+				// still runs; only the optional fetch of remote refs is skipped.
+				const busyAtLoad = gitControlsStreaming.current;
+				const options: GitLoadOptions = {
+					fetchBlocked: () => busyAtLoad || gitControlsStreaming.current,
+					...(sessionId && deferGitOnOpen()
+						? { afterCriticalPath: whenTranscriptSettled(activeSession, sessionId, GIT_OPEN_GATE_MAX_MS) }
+						: {})
+				};
 				if (worktreeId) {
 					git.loadForWorktree(project, worktreeId, false, sessionId, options);
 				} else {
