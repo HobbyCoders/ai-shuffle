@@ -238,6 +238,15 @@ async def test_empty_log_adopts_first_delivered_identity(mock_db, gw, monkeypatc
         return result
 
     monkeypatch.setattr(events_mod._SessionTail, "_seed", controlled_seed)
+    initial_read_done = asyncio.Event()
+    if delivery == "mirror-notified-race":
+        real_read = events_mod._SessionTail._read_and_publish
+
+        async def observe_initial_read(tail):
+            await real_read(tail)
+            initial_read_done.set()
+
+        monkeypatch.setattr(events_mod._SessionTail, "_read_and_publish", observe_initial_read)
     sid = "first-" + delivery
     database.create_session(sid, "default", title="New empty conversation")
     stream = event_stream(sid)
@@ -272,6 +281,10 @@ async def test_empty_log_adopts_first_delivered_identity(mock_db, gw, monkeypatc
             "event": "caught_up", "data": {"seq": 0, "epoch": events_mod.EMPTY_LOG_EPOCH}}
         if delivery != "mirror-missed-before-seed":
             await asyncio.wait_for(seeded.wait(), 1)
+        if delivery == "mirror-notified-race":
+            # Seeding alone leaves an empty-log read in flight. Finish it before
+            # A commits, so only the notified probe can start the A -> B race.
+            await asyncio.wait_for(initial_read_done.wait(), 1)
         if delivery == "local-push":
             se.append_events(sid, [{"type": "message.user", "payload": {"content": "Local first"}}])
             gw._handle_payload(json.dumps({"session_id": sid, "max_seq": 1}))

@@ -56,6 +56,7 @@
 	import {
 		JUMP_TO_LATEST_DELAY_MS,
 		MIN_TRANSCRIPT_TAIL_RESERVE,
+		isNearBottom,
 		isUserScrollUpGesture,
 		nextStickToBottom,
 		resolveAnchoredRevealDelta,
@@ -1455,6 +1456,30 @@
 		}
 	}
 
+	/**
+	 * Put a reader who had scrolled up back at their saved offset. The range
+	 * effect has already restored the same bounded slice the offset was measured
+	 * in. Never mount all history to restore a reading position.
+	 */
+	function restoreReadingPosition(position: number) {
+		shouldAutoScroll = false;
+		programmaticScrollDepth++;
+		void tick().then(() => {
+			if (!containerRef) {
+				programmaticScrollDepth = Math.max(0, programmaticScrollDepth - 1);
+				return;
+			}
+			containerRef.scrollTop = position;
+			lastKnownScrollTop = containerRef.scrollTop;
+			lastScrollMetrics = readScrollMetrics();
+			requestAnimationFrame(() => {
+				programmaticScrollDepth = Math.max(0, programmaticScrollDepth - 1);
+				updateJumpToLatestVisibility();
+				updateCurrentTurnIndex();
+			});
+		});
+	}
+
 	// Restore scroll position only on mount - not on every reactive update
 	onMount(() => {
 		isMounted = true;
@@ -1486,22 +1511,7 @@
 				const storedPosition = cachedPosition ?? $activeSession.scrollTop;
 
 				if (storedPosition > 0) {
-					// The range effect restores the same bounded slice as the saved
-					// offset. Never mount all history to restore a reading position.
-					shouldAutoScroll = false;
-					programmaticScrollDepth++;
-					void tick().then(() => {
-						if (!containerRef) {
-							programmaticScrollDepth = Math.max(0, programmaticScrollDepth - 1);
-							return;
-						}
-						containerRef.scrollTop = storedPosition;
-						lastKnownScrollTop = containerRef.scrollTop;
-						lastScrollMetrics = readScrollMetrics();
-						requestAnimationFrame(() => {
-							programmaticScrollDepth = Math.max(0, programmaticScrollDepth - 1);
-						});
-					});
+					restoreReadingPosition(storedPosition);
 				} else {
 					// No saved position even though they scrolled up - scroll to bottom
 					shouldAutoScroll = true;
@@ -1628,7 +1638,10 @@
 			// into the snapshot the switcher saved for the leaving session.
 			const leftAt = scrollTopPersist.leave(prevId, scrollPositionCache.get(prevId));
 			if (leftAt !== undefined) scrollPositionCache.set(prevId, leftAt);
-			autoScrollCache.set(prevId, shouldAutoScroll);
+			// "Scrolled up" only when the reader's last scroll frame was away from
+			// the bottom too, so a flag a loading layout shift flipped by mistake
+			// cannot strand the chat above its bottom on the way back (#805).
+			autoScrollCache.set(prevId, shouldAutoScroll || (lastScrollMetrics !== null && isNearBottom(lastScrollMetrics)));
 			// Prevent unbounded growth over long usage
 			evictOldest(scrollPositionCache, SCROLL_CACHE_MAX);
 			evictOldest(autoScrollCache, SCROLL_CACHE_MAX);
@@ -1647,10 +1660,25 @@
 			return;
 		}
 
-		// Always scroll to bottom on session switch. The autoScrollCache can
-		// have stale false entries from race conditions (DOM shifts during async
-		// message loading caused handleScroll to wrongly set shouldAutoScroll=false).
-		// Users expect to see the latest messages when switching sessions.
+		// A chat the reader left scrolled up comes back at the same spot (#805),
+		// when its transcript is already here: the range effect restored the
+		// slice that offset was measured in. Anything else opens at the bottom.
+		// The message tracking takes the current tail as seen, so the change
+		// effect does not read the shown transcript as a new prompt to follow.
+		const switchedState = $activeSession;
+		const returnTo = autoScrollCache.get(currentId ?? 'new') === false && currentId
+			? scrollPositionCache.get(currentId) ?? switchedState.scrollTop
+			: 0;
+		if (returnTo > 0 && switchedState.messages.length > 0 && !switchedState.isLoadingSession && !switchedState.isRestoringSession) {
+			pendingScrollToBottom = false;
+			prevMessagesLength = switchedState.messages.length;
+			prevLastContent = untrack(() => lastMessageContent);
+			prevLastMetadata = untrack(() => lastMessageMetadata);
+			restoreReadingPosition(returnTo);
+			return;
+		}
+
+		// Otherwise scroll to bottom on session switch.
 		pendingScrollToBottom = true;
 		shouldAutoScroll = true;
 		// Reset message tracking so the message-change effect fires even if
@@ -1899,6 +1927,20 @@
 		});
 	});
 
+	// Prompts seen waiting in this session's queue, by text, until their row
+	// lands in the transcript (#863). Cleared on a session switch.
+	const queuedPromptsSeen = new Set<string>();
+	let queuedPromptsSession: string | null | undefined;
+	$effect.pre(() => {
+		const sessionId = $activeSession.sessionId;
+		const queued = $activeSession.queuedMessages;
+		if (sessionId !== queuedPromptsSession) {
+			queuedPromptsSeen.clear();
+			queuedPromptsSession = sessionId;
+		}
+		for (const entry of queued) queuedPromptsSeen.add(entry.content);
+	});
+
 	// Watch for message changes and streaming content updates
 	$effect(() => {
 		// Only run after mount and when there's actual content change
@@ -1923,7 +1965,10 @@
 		const newestMessage = currentLength > 0
 			? $activeSession.messages[currentLength - 1]
 			: null;
-		const newUserMessage = hasNewMessage && !!newestMessage && isNavigableUserTurn(newestMessage);
+		// A prompt queued earlier lands here when its turn starts, long after the
+		// send (#863): it follows only a reader already at the bottom.
+		const fromQueue = hasNewMessage && newestMessage?.role === 'user' && queuedPromptsSeen.delete(newestMessage.content ?? '');
+		const newUserMessage = hasNewMessage && !!newestMessage && isNavigableUserTurn(newestMessage) && (!fromQueue || shouldAutoScroll);
 		const newUserCommand = hasNewMessage && newestMessage?.role === 'user' && newestMessage.type === 'command';
 		if (newUserMessage) {
 			shouldAutoScroll = true;

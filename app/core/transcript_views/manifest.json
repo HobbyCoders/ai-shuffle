@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "fingerprint": "3ecf26109300b012c05a2d7fb6ef3d5fa294065c01f7ac85db54df618c0752d9",
+  "bundle_sha256": "a70aae9c58c253d46a8100809101f30bbc0e78f8344e6d934dcd6b5f0b71b5d4",
+  "minimum_node_major": 22,
+  "canonical_sources": {
+    "app/api/events.py": "1ffb313d9c85283446504f5004fc3add96bd1b860d87b148ba45c5a80966863b",
+    "app/core/harness_reminders.py": "11e4de7628f96e6b73ce5ab47705605f8fa28a63dd31f394dbd26420a180c1dc",
+    "app/core/transcript_views/preprocess.py": "65bdb05b7c194d1b691f0aa970f053ad6863f26d0d066a54f82a1ea8b412ec50",
+    "app/core/turn_recorder.py": "8b1595348420470edf5388b04bb9433c27524f0887406f0c9a7b2a299c99d8c4",
+    "app/db/session_events.py": "71c9be3381e999ef9fb7654e683abdc71d9e4c1acac044a5045019c2ae8febc3"
+  }
+}

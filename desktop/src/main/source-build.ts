@@ -11,7 +11,11 @@ export interface SourceRuntime {
   npm: string;
   pythonDependencies: string | null;
 }
-export interface BuiltSource { revision: string; pythonKey: string | null; electron: string }
+export interface BuiltSource {
+  revision: string; pythonKey: string | null; electron: string;
+  /** Selected cache-root-relative IDs; legacy builds may omit them. Metadata only, not deletion authority. */
+  nodeGenerations?: string[];
+}
 export interface BuildOptions {
   source: string;
   server: string;
@@ -249,24 +253,100 @@ async function publishNodeOutput(root: string, key: string, output: string): Pro
   } finally { await fs.rm(temporary, { recursive: true, force: true }); }
 }
 
+/** Local damage detection, not a signature: check every installed path/stat and
+ * hash executable JS/TS/JSON sources. Ignore only npm's root build-cache dirs;
+ * they are not installed dependencies. A retained entry is never repaired. */
+async function nodeDependencyTree(directory: string): Promise<string> {
+  const root = await fs.lstat(directory);
+  if (!root.isDirectory() || root.isSymbolicLink()) throw new Error('Invalid dependency directory');
+  const hash = createHash('sha256').update('node-installed-1\0');
+  async function visit(relative: string): Promise<void> {
+    for (const entry of (await fs.readdir(path.join(directory, relative), { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (!relative && ['.cache', '.vite', '.vite-temp'].includes(entry.name)) continue;
+      const name = relative ? relative + '/' + entry.name : entry.name;
+      const file = path.join(directory, name), stat = await fs.lstat(file, { bigint: true });
+      if (stat.isDirectory()) {
+        hash.update(JSON.stringify([name, 'directory', stat.mode.toString()]) + '\n');
+        await visit(name);
+      } else {
+        const record = [name, stat.mode.toString(), stat.size.toString(), stat.mtimeNs.toString(), stat.ctimeNs.toString(), stat.ino.toString(), stat.dev.toString()];
+        if (stat.isSymbolicLink()) {
+          const target = await fs.readlink(file), resolved = path.relative(directory, path.resolve(path.dirname(file), target));
+          if (path.isAbsolute(resolved) || resolved === '..' || resolved.startsWith('..' + path.sep)) throw new Error('Dependency link leaves its cache');
+          record.push(target);
+        } else if (stat.isFile()) {
+          if (/\.(?:[cm]?[jt]sx?|json)$/i.test(name)) record.push(createHash('sha256').update(await fs.readFile(file)).digest('hex'));
+        } else throw new Error('Non-regular installed dependency');
+        hash.update(JSON.stringify(record) + '\n');
+      }
+    }
+  }
+  await visit('');
+  return hash.digest('hex');
+}
+// Portable, cache-root-relative IDs cover shared and legacy runtime namespaces.
+const NODE_GENERATION_ID = /^(?:[a-f0-9]{24}(?:[a-f0-9]{40})?\/)?node\/(?:frontend|tools|browser-mcp|desktop)\/[a-f0-9]{24}(?:-[a-z0-9]+-[a-f0-9]{8})?$/;
+function nodeGenerationID(root: string, directory: string): string {
+  const id = path.relative(root, directory).split(path.sep).join('/');
+  if (id.trim() !== id || !NODE_GENERATION_ID.test(id)) throw new Error('Dependency generation is outside the managed cache');
+  return id;
+}
+async function cachedNodeDependencies(root: string, key: string): Promise<string | null> {
+  const prefix = key.slice(0, 24);
+  const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+  // New permanent generations sort before the legacy fixed-path entry. Ignore
+  // partial installs; retained generations may still be linked by old revisions.
+  for (const entry of entries.sort((a, b) => b.name.localeCompare(a.name))) {
+    if (!entry.isDirectory() || entry.isSymbolicLink() || !(entry.name === prefix || new RegExp(`^${prefix}-[a-z0-9]+-[a-f0-9]{8}$`).test(entry.name))) continue;
+    const cache = path.join(root, entry.name), invalid = path.join(root, '.invalid-' + entry.name);
+    if (await exists(invalid)) continue;
+    try {
+      const marker = JSON.parse(await fs.readFile(path.join(cache, '.complete'), 'utf8'));
+      if (marker.key !== key || typeof marker.integrity !== 'string') continue;
+      if (marker.integrity === await nodeDependencyTree(path.join(cache, 'node_modules'))) return cache;
+    } catch { continue; } // Inconclusive (possibly transient I/O): skip only this lookup.
+    // Only a completed integrity mismatch may permanently reject a generation.
+    // Sibling tombstones leave retained entries/markers untouched and prevent a
+    // later recovery from hashing every already-rejected predecessor again.
+    await fs.writeFile(invalid, '', { flag: 'wx' }).catch(error => { if (error.code !== 'EEXIST') throw error; });
+  }
+  return null;
+}
+
 async function nodePackage(name: string, opts: BuildOptions, python: string, identity: string | null): Promise<string> {
   const source = path.join(opts.source, name);
   const files = await fingerprint(source, ['package.json', 'package-lock.json'], reuseNodeBuilds() ? nodeDependencyInputText : undefined);
   // A shared cache is used only for a known Node/npm build; the key covers it and the package files.
   const shared = opts.sharedCache && identity;
   const key = shared ? createHash('sha256').update(`node-dependencies-1\0${identity}\0${files}`).digest('hex') : files;
-  const cache = path.join(shared ? opts.sharedCache! : opts.cache, 'node', name, key.slice(0, 24));
-  if (!(await exists(path.join(cache, '.complete')))) {
+  const root = path.join(shared ? opts.sharedCache! : opts.cache, 'node', name);
+  let cache = await cachedNodeDependencies(root, key);
+  if (!cache) {
     opts.progress(`Installing ${name} dependencies. They will be reused for later updates.`);
+    cache = path.join(root, `${key.slice(0, 24)}-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`);
     const temporary = `${cache}.tmp-${randomUUID().slice(0, 8)}`;
     await fs.mkdir(temporary, { recursive: true });
     try {
+      await fs.writeFile(path.join(temporary, '.install.lock'), String(process.pid), { flag: 'wx' });
       for (const file of ['package.json', 'package-lock.json']) await fs.copyFile(path.join(source, file), path.join(temporary, file));
       await run(opts.runtime.node, [opts.runtime.npm, 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], temporary, opts, python);
-      await fs.writeFile(path.join(temporary, '.complete'), key);
+      if (name === 'desktop') {
+        const electronPackage = path.join(temporary, 'node_modules/electron');
+        const electron = path.join(electronPackage, 'dist', process.platform === 'win32' ? 'electron.exe' : 'electron');
+        if (!(await exists(electron))) {
+          opts.progress('Downloading the desktop runtime from Electron…');
+          await run(opts.runtime.node, [path.join(electronPackage, 'install.js')], electronPackage, opts, python, true);
+          if (!(await exists(electron))) throw new Error('Electron installation did not produce its runtime');
+        }
+      }
+      await fs.writeFile(path.join(temporary, '.complete'), JSON.stringify({ key, integrity: await nodeDependencyTree(path.join(temporary, 'node_modules')) }));
+      await fs.unlink(path.join(temporary, '.install.lock'));
       await fs.mkdir(path.dirname(cache), { recursive: true });
       await fs.rename(temporary, cache);
-    } finally { await fs.rm(temporary, { recursive: true, force: true }); }
+    } finally {
+      await fs.rm(path.join(temporary, '.install.lock'), { force: true });
+      await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
   }
   const dependencies = path.join(cache, 'node_modules');
   await fs.symlink(dependencies, path.join(source, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
@@ -295,10 +375,6 @@ export async function buildSource(opts: BuildOptions): Promise<BuiltSource> {
   for (const name of [...(opts.prebuiltUI ? [] : ['frontend']), 'tools', 'browser-mcp', 'desktop']) dependencies.set(name, await nodePackage(name, opts, python, identity));
   const electronPackage = path.join(dependencies.get('desktop')!, 'electron');
   const electron = path.join(electronPackage, 'dist', process.platform === 'win32' ? 'electron.exe' : 'electron');
-  if (!(await exists(electron))) {
-    opts.progress('Downloading the desktop runtime from Electron…');
-    await run(opts.runtime.node, [path.join(electronPackage, 'install.js')], electronPackage, opts, python, true);
-  }
   opts.progress('Preparing application files…');
   await fs.mkdir(opts.server, { recursive: true });
   const clean = (src: string) => !src.split(path.sep).includes('__pycache__') && !src.endsWith('.pyc');
@@ -320,7 +396,8 @@ export async function buildSource(opts: BuildOptions): Promise<BuiltSource> {
   opts.progress('Preparing the verified remote-access runtime…');
   await run(python, ['-B', '-m', 'app.core.cloudflared', '--bundle', '--reuse-verified'], opts.server, opts, python);
   await fs.cp(path.join(opts.server, 'downloads'), cloudCache, { recursive: true });
-  return { revision: opts.revision, pythonKey, electron };
+  const nodeGenerations = [...dependencies.values()].map(modules => nodeGenerationID(opts.sharedCache ?? opts.cache, path.dirname(modules)));
+  return { revision: opts.revision, pythonKey, electron, nodeGenerations };
 }
 
 /** Detach our dependency junctions before deleting a staged/old version. */

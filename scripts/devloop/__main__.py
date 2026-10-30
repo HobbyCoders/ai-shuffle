@@ -467,6 +467,21 @@ def _vite_command(host: str, port: int) -> list[str]:
             "--port", str(port), "--strictPort"]
 
 
+def application_environment(args: argparse.Namespace, directory: Path, port: int,
+                            protected: int, *, extra: dict) -> dict:
+    """Keep the preview isolated; optional background work needs an explicit CLI opt-in."""
+    from app.preview_run import preview_environment
+
+    env = preview_environment(
+        directory, port, protected, host=str(args.host),
+        browser_host=str(args.browser_host or args.host), ttl_seconds=args.ttl_seconds,
+        extra=extra,
+    )
+    if args.transcript_producer:
+        env["AI_SHUFFLE_TRANSCRIPT_PRODUCER"] = "1"
+    return env
+
+
 def vite_environment(env: dict, api: str) -> dict:
     """Vite needs no credentials either: the app's controlled PATH/LANG/HOME."""
     keep = {key: env[key] for key in ("PATH", "LANG", "LD_LIBRARY_PATH", "HOME") if key in env}
@@ -546,7 +561,7 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         parser.error(f"A dev instance for this checkout is already running (pid "
                      f"{existing['pid']}): python -m scripts.devloop down")
     from app.core.temp_scratch import scratch_directory
-    from app.preview_run import free_port, preview_environment, supervise
+    from app.preview_run import free_port, supervise
     from docker import container_runtime as runtime
     from docker.container_runtime import stop_group
     from scripts.devloop.fake_ai import FakeAI
@@ -597,11 +612,7 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                 extra["SHUFFLE_DEV_SEED"] = args.seed
             if vite_port:
                 extra["SHUFFLE_DEV_UI"] = "vite"
-            env = preview_environment(
-                directory, port, protected, host=str(args.host),
-                browser_host=str(args.browser_host or args.host), ttl_seconds=args.ttl_seconds,
-                extra=extra,
-            )
+            env = application_environment(args, directory, port, protected, extra=extra)
             claude_cli = None
             if args.claude_cli == "fake":
                 from scripts.devloop import fake_claude
@@ -774,6 +785,8 @@ def main(argv: list[str] | None = None) -> int:
     start.add_argument("--vite-port", type=int, help="Vite dev port (default: free)")
     start.add_argument("--no-vite", action="store_true",
                        help="Serve the stamped frontend build instead of Vite dev")
+    start.add_argument("--transcript-producer", action="store_true",
+                       help="Opt into dark transcript production in this disposable instance only")
     start.add_argument("--seed", default="default", help="Seed name: default, long (performance), or none")
     start.add_argument("--latency-ms", type=float, default=0.0,
                        help="Fake AI delay before each reply")

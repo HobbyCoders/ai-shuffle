@@ -87,12 +87,8 @@ await runJourney({
 			}
 		},
 		{
+			// #805: the reading position survives a switch away and back.
 			name: 'scrolled-up',
-			knownBug: {
-				issue: 805,
-				error: /^Error: expectation failed: came back scrolled up, not at the bottom/,
-				reason: 'a switch back always scrolls to the bottom, though the leaving position is saved for it'
-			},
 			async setup(ctx) {
 				const { page, status } = ctx;
 				await warmOtherChat(page, status);

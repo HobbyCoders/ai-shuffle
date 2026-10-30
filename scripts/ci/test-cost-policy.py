@@ -14,6 +14,7 @@ PR_CHECKS = {
     "ci-backend.yml", "ci-fluid.yml", "ci-frontend.yml", "desktop.yml",
     "desktop-source-checks.yml", "windows-suite.yml", "ci-instance-identity.yml",
     "ci-artifact-policy.yml", "ci-browser-workspace.yml", "container-postgres.yml",
+    "ci-android-minified.yml",
 }
 # The only workflows that may start without a person dispatching them.
 AUTOMATIC = {

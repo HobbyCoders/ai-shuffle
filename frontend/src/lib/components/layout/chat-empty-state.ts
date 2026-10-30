@@ -146,8 +146,13 @@ export interface ChatHeaderTitleInput {
 	title: string | null | undefined;
 	/** Number of messages currently in the active session store. */
 	messageCount: number;
-	/** The bound session's history is still loading (boot restore or deep link). */
+	/** The bound session's history is still loading (boot restore or deep link),
+	 *  or a mirrored chat's first sync with its owner is still pending. */
 	loading?: boolean;
+	/** The chat's title in the session list. Names the chat while the store
+	 *  still holds the 'New Chat' placeholder (a mirror whose /live has not
+	 *  named it yet, a restore before the row arrived). */
+	listTitle?: string | null;
 }
 
 /**
@@ -160,12 +165,17 @@ export interface ChatHeaderTitleInput {
  * While a bound chat loads, a blank title and the 'New Chat' placeholder both
  * mean "not known yet" (the switcher and boot restore fall back to the
  * placeholder until the row or /live names the chat), so it reads 'Loading…':
- * an existing chat is never called "New Chat" while it opens.
+ * an existing chat is never called "New Chat" while it opens. The session
+ * list's title, when it has one, names the chat before the store does. The
+ * header and ChatView's bound hero both use this rule with the same inputs,
+ * so they never disagree (#812).
  */
 export function chatHeaderTitle(input: ChatHeaderTitleInput): string {
-	const { sessionId, title, messageCount, loading = false } = input;
+	const { sessionId, title, messageCount, loading = false, listTitle } = input;
 	if (sessionId || messageCount > 0) {
-		const known = title?.trim() || '';
+		const own = title?.trim() || '';
+		const listed = listTitle?.trim() || '';
+		const known = (!own || own === NEW_CHAT_TITLE) && sessionId && listed && listed !== NEW_CHAT_TITLE ? listed : own;
 		if (loading && sessionId && (!known || known === NEW_CHAT_TITLE)) return 'Loading…';
 		// A deep link binds before its title is known: say it is loading rather
 		// than call the chat Untitled for the moment before /live answers.

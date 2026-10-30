@@ -739,8 +739,14 @@ export function liveProjectKeys(
  * True when the session is attached to a project that is gone from both the
  * local list and the cluster catalog (deleted, or no checkout left anywhere).
  * Ungrouped chats (no project) stay visible.
+ *
+ * `liveKeys` is null until both catalogs have answered: an empty catalog then
+ * means "not loaded yet", not "every project was deleted". Hiding project
+ * chats until it lands made them pop in above the first paint's rows on a
+ * full load, pushing the whole list down (#804).
  */
-export function isRemovedProjectSession(s: Session, liveKeys: Set<string>): boolean {
+export function isRemovedProjectSession(s: Session, liveKeys: Set<string> | null): boolean {
+	if (!liveKeys) return false;
 	// Remote checkouts stay on their owner. A missing local checkout catalog
 	// entry cannot prove deletion of a named, replicated shared project.
 	if (s.is_remote && s.project_v2_id && s.project_name) return false;
@@ -769,7 +775,7 @@ function isSidebarSession(s: Session): boolean {
 }
 
 /** Sessions the sidebar may list: not hidden, and not from a removed project or device. */
-export function isVisibleSidebarSession(s: Session, liveKeys: Set<string>): boolean {
+export function isVisibleSidebarSession(s: Session, liveKeys: Set<string> | null): boolean {
 	return isSidebarSession(s) && !isRemovedProjectSession(s, liveKeys) && !isRemovedDeviceSession(s);
 }
 

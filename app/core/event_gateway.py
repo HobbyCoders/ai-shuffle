@@ -120,6 +120,12 @@ class EventGateway:
                 self._global_listeners.append(fn)
         self._ensure_listener()
 
+    def remove_global_listener(self, fn: Callable[[str], None]) -> None:
+        """Release an owned background consumer during app shutdown."""
+        with self._lock:
+            if fn in self._global_listeners:
+                self._global_listeners.remove(fn)
+
     def add_message_listener(self, message_type: str, fn: Callable[[dict], None]) -> None:
         """Subscribe to a small typed peer message on the existing DB channel.
 
