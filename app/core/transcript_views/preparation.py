@@ -72,7 +72,7 @@ class PreparationWorker:
             # checked-in root, never a caller/environment-provided import path.
             self._process = await launch(
                 sys.executable, "-I", str(Path(__file__).with_name("preparation_child.py")),
-                limit=MAX_PREPARATION_BYTES + 1)
+                limit=MAX_PREPARATION_BYTES + 1, runtime="python")
         process = self._process
         assert process.stdin is not None and process.stdout is not None
         # Large marshaling remains off the serving loop, with cancellation

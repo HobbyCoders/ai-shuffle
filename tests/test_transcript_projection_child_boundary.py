@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import signal
 import sys
 import time
@@ -233,7 +234,8 @@ async def test_windows_job_failure_kills_the_unowned_child(monkeypatch):
     monkeypatch.setattr(child_process, "_job_object", lambda: SimpleNamespace(
         assign_kill_on_close_job=cannot_assign))
     with pytest.raises(OSError, match="projection_parent_ownership_failed"):
-        await child_process.launch(sys.executable, "-I", "-c", "import time; time.sleep(30)", limit=4096)
+        await child_process.launch(sys.executable, "-I", str(ROOT / "app/core/transcript_views/preparation_child.py"),
+                                   limit=4096, runtime="python")
     assert pids and not alive(pids[0])
 
 
@@ -251,3 +253,243 @@ def test_job_helper_also_resolves_root_only_source_namespace(monkeypatch):
         assert callable(module.assign_kill_on_close_job)
     finally:
         child_process._job_object.cache_clear()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime", ["python", "node"])
+@pytest.mark.parametrize("admission", ["go", "eof", "invalid"])
+async def test_windows_startup_gates_do_not_execute_or_consume_protocol(tmp_path, runtime, admission):
+    from app.core.transcript_views.child_process import _windows_command
+
+    marker = tmp_path / "entry"
+    target = tmp_path / ("protocol.py" if runtime == "python" else "protocol.cjs")
+    if runtime == "python":
+        target.write_text("from pathlib import Path; import sys; Path(" + repr(str(marker)) +
+                          ").touch(); assert sys.stdin.buffer.read(3) == b'rpc'; print('ready')")
+        command = (sys.executable, "-I", str(target))
+    else:
+        target.write_text("if(require.main!==module)process.exit(72);const fs=require('node:fs');fs.writeFileSync(" + json.dumps(str(marker)) +
+                          ",'');const p=Buffer.alloc(3);let n=0;while(n<3)n+=fs.readSync(0,p,n,3-n,null);"
+                          "if(p.toString()!=='rpc')process.exit(71);console.log('ready');")
+        node = shutil.which("node")
+        assert node, "Node is a required projection runtime"
+        command = (node, "--max-old-space-size=192", str(target))
+    process = await asyncio.create_subprocess_exec(
+        *_windows_command(command, runtime), env=parent_environment(tmp_path),
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        await asyncio.sleep(.15)
+        assert process.returncode is None and not marker.exists()
+        if admission == "go":
+            process.stdin.write(b"Grpc")  # One write tests that only the gate byte is consumed.
+            await process.stdin.drain()
+        elif admission == "invalid":
+            process.stdin.write(b"Xrpc")
+            await process.stdin.drain()
+        else:
+            process.stdin.close()
+        output, error = await asyncio.wait_for(process.communicate(), 5)
+        assert process.returncode == (0 if admission == "go" else 70), error.decode(errors="replace")
+        assert marker.exists() == (admission == "go")
+        assert output.strip() == (b"ready" if admission == "go" else b"")
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+
+
+@pytest.fixture(scope="module")
+def startup_python(tmp_path_factory):
+    # A fresh private venv, not the worker's environment: its installed .pth hook
+    # creates a real descendant before the script's first line, unless -S gates it.
+    import venv
+
+    directory = tmp_path_factory.mktemp("projection-startup-python")
+    venv.EnvBuilder(with_pip=False).create(directory)
+    packages = directory / ("Lib/site-packages" if os.name == "nt" else
+                            f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages")
+    packages.mkdir(parents=True, exist_ok=True)
+    hook = r"""
+import os, subprocess, sys
+from pathlib import Path
+if Path(sys.argv[-1]).name == "startup_python.py":
+    child = subprocess.Popen([sys.executable, "-I", "-S", "-c", "import time;time.sleep(30)"],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, close_fds=True)
+    marker = Path(sys.argv[-1]).parent / "grandchild-pid"
+    marker.with_suffix(".tmp").write_text(str(child.pid))
+    marker.with_suffix(".tmp").replace(marker)
+"""
+    (packages / "projection_startup_fixture.py").write_text(hook)
+    (packages / "projection_startup_fixture.pth").write_text("import projection_startup_fixture\n")
+    return directory / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
+@pytest.mark.asyncio
+async def test_python_gate_defers_installed_site_hook_until_admission(tmp_path, startup_python):
+    from app.core.transcript_views.child_process import _windows_command
+
+    target, entry, marker = (tmp_path / name for name in ("startup_python.py", "entry", "grandchild-pid"))
+    target.write_text("from pathlib import Path;Path(" + repr(str(entry)) + ").touch();print('ready')")
+    process = await asyncio.create_subprocess_exec(
+        *_windows_command((str(startup_python), "-I", str(target)), "python"),
+        env=parent_environment(tmp_path), stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        await asyncio.sleep(.15)
+        assert process.returncode is None and not entry.exists() and not marker.exists()
+        process.stdin.write(b"G")
+        await process.stdin.drain()
+        output, error = await asyncio.wait_for(process.communicate(), 5)
+        assert process.returncode == 0, error.decode(errors="replace")
+        assert output.strip() == b"ready" and entry.exists() and marker.exists()
+        assert alive(int(marker.read_text())), "the installed startup hook must actually have run"
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        if marker.exists() and alive(int(marker.read_text())):
+            psutil.Process(int(marker.read_text())).kill()
+
+
+STARTUP_PARENT = r'''
+import asyncio, json, os, sys, time
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path[:0] = [str(root), str(root / "fluid")]
+from app.core.transcript_views import child_process
+runtime, executable, target, mode = sys.argv[2:]
+marker = Path(target).parent / "grandchild-pid"
+entry = Path(target).parent / "entry"
+seen = {}
+
+async def main():
+    # The supervising test attaches its externally held outer job before B.
+    assert os.read(0, 1) == b"B"
+    jobs = child_process._job_object()
+    original = jobs.assign_kill_on_close_job
+    def assign(pid):
+        seen["pid"] = pid
+        if mode == "launch-death":
+            print(json.dumps(seen), flush=True)
+            os.read(0, 1)  # The test kills us in this pre-assignment window.
+            raise AssertionError("launch-death parent unexpectedly released")
+        # Enlarge the creation/assignment window. An ungated script/site hook
+        # can create an escaping descendant here, before retroactive assignment.
+        time.sleep(.4)
+        job = None if mode == "failure" else original(pid)
+        if mode == "assigned-death":
+            assert job is not None, "cannot attach launch-death fixture"
+            print(json.dumps(seen), flush=True)
+            os.read(0, 1)  # Attached, but no go byte has been returned/written.
+            raise AssertionError("assigned-death parent unexpectedly released")
+        return job
+    jobs.assign_kill_on_close_job = assign
+    command = (executable, "-I", target) if runtime == "python" else (
+        executable, "--max-old-space-size=192", target)
+    child = None
+    try:
+        try:
+            child = await child_process.launch(*command, limit=4096, runtime=runtime)
+        except OSError:
+            seen["failed"] = True
+        else:
+            deadline = time.monotonic() + 5
+            while not (marker.exists() and entry.exists()):
+                assert child.returncode is None, "startup child exited"
+                assert time.monotonic() < deadline, "startup descendant not observed"
+                await asyncio.sleep(.01)
+            seen["grandchild"] = int(marker.read_text())
+            seen["failed"] = False
+        print(json.dumps(seen), flush=True)
+        os.read(0, 1)
+    finally:
+        await child_process.stop(child)
+
+asyncio.run(main())
+'''
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows startup/Job ownership")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime", ["python", "node"])
+@pytest.mark.parametrize("mode", ["success", "failure", "launch-death", "assigned-death", "nested"])
+async def test_windows_owns_startup_descendants_and_launch_window(tmp_path, startup_python, runtime, mode):
+    from app.core.transcript_views.child_process import _job_object
+
+    target = tmp_path / ("startup_python.py" if runtime == "python" else "startup_node.cjs")
+    grandchild = tmp_path / "grandchild-pid"
+    entry = tmp_path / "entry"
+    if runtime == "python":
+        # The .pth site hook, not this entrypoint, creates the descendant.
+        target.write_text("from pathlib import Path;import time;Path(" + repr(str(entry)) +
+                          ").touch();time.sleep(30)")
+        executable = str(startup_python)
+    else:
+        target.write_text("if(require.main!==module)process.exit(72);const fs=require('node:fs');const child=require('node:child_process').spawn("
+                          "process.execPath,['-e','setTimeout(()=>{},30000)'],{stdio:'ignore',windowsHide:true});"
+                          "const marker=" + json.dumps(str(grandchild)) + ";fs.writeFileSync(marker+'.tmp',"
+                          "String(child.pid));fs.renameSync(marker+'.tmp',marker);fs.writeFileSync(" +
+                          json.dumps(str(entry)) + ",'');setInterval(()=>{},1000);")
+        executable = shutil.which("node")
+        assert executable, "Node is a required projection runtime"
+    output = tmp_path / "startup-parent-output"
+    with output.open("wb") as stream:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-I", "-S", "-c", STARTUP_PARENT, str(ROOT), runtime, executable, str(target), mode,
+            cwd=ROOT, env=parent_environment(tmp_path), stdin=asyncio.subprocess.PIPE, stdout=stream, stderr=stream)
+    outer, owned = None, set()
+    try:
+        if mode == "nested":
+            # Keep the outer handle in THIS supervisor, not the killed parent:
+            # outer-job closure must not mask a failed inner ownership boundary.
+            outer = _job_object().assign_kill_on_close_job(process.pid)
+            assert outer is not None, "cannot create explicit nested-job fixture"
+        process.stdin.write(b"B")
+        await process.stdin.drain()
+
+        async def ready():
+            while True:
+                text = output.read_text(encoding="utf-8", errors="replace")
+                for line in text.splitlines():
+                    if line.startswith("{"):
+                        return json.loads(line)
+                assert process.returncode is None, text
+                await asyncio.sleep(.01)
+        stats = await asyncio.wait_for(ready(), 15)
+        owned.add(stats["pid"])
+        if mode in ("success", "nested"):
+            assert not stats["failed"] and grandchild.exists() and entry.exists(), stats
+            owned.add(stats["grandchild"])
+            assert all(alive(pid) for pid in owned), stats
+        elif mode == "failure":
+            assert stats["failed"] and not alive(stats["pid"]), stats
+            assert not grandchild.exists() and not entry.exists()
+        process.kill()
+        await process.wait()
+        deadline = time.monotonic() + 3
+        while any(alive(pid) for pid in owned) and time.monotonic() < deadline:
+            await asyncio.sleep(.02)
+        assert not any(alive(pid) for pid in owned), stats
+        if mode in ("launch-death", "assigned-death"):
+            assert not grandchild.exists() and not entry.exists()
+    finally:
+        if grandchild.exists():
+            owned.add(int(grandchild.read_text()))
+        if process.returncode is None:
+            try:
+                owned.update(child.pid for child in psutil.Process(process.pid).children(recursive=True))
+            except psutil.NoSuchProcess:
+                pass
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+        await process.wait()
+        # These are solely this fixture's known descendants; never shared workers.
+        for pid in owned:
+            if alive(pid):
+                psutil.Process(pid).kill()
+        if outer is not None:
+            _job_object().close_job(outer)

@@ -8,6 +8,7 @@ import subprocess
 import sys
 from functools import cache
 from pathlib import Path
+from typing import Literal
 
 SAFE_ENV_KEYS = frozenset({"PATH", "Path", "SystemRoot", "SYSTEMROOT", "WINDIR", "TMP", "TEMP"})
 
@@ -33,11 +34,20 @@ def _job_object():
     return module
 
 
-async def launch(*command: str, limit: int) -> asyncio.subprocess.Process:
+def _windows_command(command: tuple[str, ...], runtime: Literal["python", "node"]) -> tuple[str, ...]:
+    # The final argument is the checked-in script, with interpreter flags before
+    # it. Neither gate imports startup/site/application code before admission.
+    gate = Path(__file__).with_name(f"windows_{runtime}_child." + ("py" if runtime == "python" else "cjs"))
+    flags = ("-S",) if runtime == "python" else ()
+    return (*command[:-1], *flags, str(gate), command[-1])
+
+
+async def launch(*command: str, limit: int, runtime: Literal["python", "node"]) -> asyncio.subprocess.Process:
     environment = {key: value for key, value in os.environ.items() if key in SAFE_ENV_KEYS}
     options = {}
     if os.name == "nt":
         options["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS
+        command = _windows_command(command, runtime)
     elif sys.platform == "linux":
         # exec preserves PID, pipes and the kernel parent-death signal. Unlike
         # preexec_fn, this is safe in the multithreaded serving process.
@@ -55,11 +65,12 @@ async def launch(*command: str, limit: int) -> asyncio.subprocess.Process:
             # The handle is parent-only/non-inheritable. Abrupt parent death
             # closes it in the kernel even if the child holds the Python GIL.
             setattr(process, "_projection_job", job)
+            # Only now may site hooks/entrypoint create descendants. Raw gates
+            # consume exactly this byte, leaving framed protocol bytes intact.
+            process.stdin.write(b"G")
+            await process.stdin.drain()
         except BaseException:
-            process.stdin.close()
-            if process.returncode is None:
-                process.kill()
-            await process.wait()
+            await stop(process)  # EOF + kill/reap, closing an attached job once.
             raise
     elif os.name == "posix":
         try:

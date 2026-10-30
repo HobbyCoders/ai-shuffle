@@ -347,7 +347,10 @@ settings or provider modules; no multiprocessing resource tracker is created.
 OS ownership ends both projection children on parent death even while CPU work
 holds the GIL: a Linux exec shim arms `PR_SET_PDEATHSIG` and checks the expected
 parent PID after arming; Windows uses Fluid's parent-owned kill-on-close Job
-Object and rejects launch if assignment fails. The bounded stdin reader still
+Object. Site-free Python (`-I -S`) and builtin-only Node gates block before
+startup hooks/entrypoints; the parent sends one go byte only after attachment,
+so immediate descendants inherit the job. Failed attachment closes stdin and
+kills/reaps the gated child without running startup code. The bounded stdin reader still
 handles ordinary EOF. Neither mechanism adds a supervisor process or tracker.
 Preparation admits one job, reuses one child, refreshes two normalized replay switches per
 call and joins the child on shutdown. Database operations stay on the existing

@@ -107,7 +107,7 @@ class ReducerBridge:
         try:
             self._process = await launch(
                 self.node, "--max-old-space-size=192", str(self.directory / "reducer.cjs"),
-                limit=MAX_PACKET_BYTES + 1)
+                limit=MAX_PACKET_BYTES + 1, runtime="node")
             assert self._process.stdout is not None
             line = await asyncio.wait_for(self._process.stdout.readline(), self.timeout)
             ready = json.loads(line)
