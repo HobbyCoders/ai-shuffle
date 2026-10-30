@@ -122,6 +122,8 @@ snapshot corruption, so launcher 8 is added to `RESTORE_POINT_VALIDATING_LAUNCHE
 
 Launcher 9 audit: signed UI bundle download/staging and the shared build/archive helpers are in the installed import closure, so the version is raised without raising either floor. Against launcher 8, all of `installed-entry.ts` and `database-restore.ts` are byte-for-byte unchanged. Of 63 `SourceUpdates` methods, only `stage` changes; `prepareRollback`, `requireRestorePoint`, `recoverRollback` and `select` are byte-for-byte unchanged. The source-tree digest function moves to the shared archive module without changing its bytes or ordering. The installed-factory same-size-corruption test and the ready-journal byte-count test exercise the unchanged full validator for launcher 9. Version 10 remains explicitly untrusted; platform, handoff and migration-risk rejection rules are unchanged. This test audit is not a Windows installed-app acceptance run.
 
+The content-keyed tools/browser/desktop build reuse and cancellable update-wake control hint also ship in the same, still-unreleased launcher 9. Against the prebuilt-UI branch, the entire `installed-entry.ts`, `database-restore.ts`, `source-updates.ts` and `source-archive.ts` files remain byte-for-byte unchanged, so this adds no factory/journal exception. The existing factory corruption and version-10 rejection tests are retained.
+
 The acceptance run is `desktop-installer.yml` with `launcher_acceptance`
 checked and `release_tag` set to a published installer with an older launcher.
 It runs from any branch and publishes nothing

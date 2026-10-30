@@ -180,9 +180,78 @@ async function nodeIdentity(opts: BuildOptions): Promise<string | null> {
   } catch { return null; }
 }
 
+/** npm ci uses --ignore-scripts. Keep all installation-affecting/unknown fields. */
+export function nodeDependencyInputText(name: string, text: string): string {
+  if (name !== 'package.json') return text;
+  const manifest = JSON.parse(text);
+  for (const field of ['scripts', 'description', 'keywords', 'homepage', 'bugs', 'repository', 'license', 'author', 'contributors', 'funding']) delete manifest[field];
+  return JSON.stringify(Object.fromEntries(Object.keys(manifest).sort().map(key => [key, manifest[key]])));
+}
+function reuseNodeBuilds(): boolean {
+  return !['0', 'false', 'off'].includes((process.env.AI_SHUFFLE_PERF_DESKTOP_BUILD_REUSE ?? '').trim().toLowerCase());
+}
+
+/** These three builds consume their own package tree and root JSON configs,
+ * not the app revision/version. Hash bytes, scripts, compiler config, lock and
+ * Node/npm/ABI together. Do not apply this contract to the version-stamped UI. */
+async function nodeTree(directory: string, inputs = false): Promise<string> {
+  const hash = createHash('sha256'); let count = 0;
+  async function visit(relative: string): Promise<void> {
+    for (const entry of (await fs.readdir(path.join(directory, relative), { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (inputs && ['node_modules', 'dist', '.git'].includes(entry.name)) continue;
+      const name = relative ? relative + '/' + entry.name : entry.name;
+      if (entry.isSymbolicLink() || (!entry.isFile() && !entry.isDirectory())) throw new Error('Non-regular build input/output');
+      if (entry.isDirectory()) await visit(name);
+      else { hash.update(name + '\0' + createHash('sha256').update(await fs.readFile(path.join(directory, name))).digest('hex') + '\n'); count++; }
+    }
+  }
+  await visit('');
+  if (!count) throw new Error('Empty build input/output');
+  return hash.digest('hex');
+}
+async function nodeOutputKey(name: string, opts: BuildOptions, identity: string, dependencies: string): Promise<string> {
+  const hash = createHash('sha256').update(`node-build-1\0${name}\0${identity}\0${dependencies}\0`);
+  hash.update(await nodeTree(path.join(opts.source, name), true));
+  for (const entry of (await fs.readdir(opts.source, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+    if (entry.isFile() && (entry.name.endsWith('.json') || entry.name === '.npmrc')) hash.update(entry.name + '\0' + createHash('sha256').update(await fs.readFile(path.join(opts.source, entry.name))).digest('hex') + '\n');
+  }
+  return hash.digest('hex');
+}
+async function reuseNodeOutput(cache: string, key: string, output: string): Promise<boolean> {
+  try {
+    const marker = JSON.parse(await fs.readFile(path.join(cache, '.complete'), 'utf8'));
+    if (marker.key !== key || marker.tree !== await nodeTree(path.join(cache, 'dist'))) return false;
+    await fs.rm(output, { recursive: true, force: true });
+    await fs.cp(path.join(cache, 'dist'), output, { recursive: true });
+    if (await nodeTree(output) !== marker.tree) throw new Error('Build output changed during reuse');
+    return true;
+  } catch { return false; }
+}
+async function publishNodeOutput(root: string, key: string, output: string): Promise<void> {
+  const temporary = path.join(root, `${key}.tmp-${randomUUID()}`), target = path.join(root, key);
+  await fs.mkdir(temporary, { recursive: true });
+  try {
+    await fs.cp(output, path.join(temporary, 'dist'), { recursive: true });
+    const tree = await nodeTree(path.join(temporary, 'dist'));
+    await fs.writeFile(path.join(temporary, '.complete'), JSON.stringify({ key, tree }));
+    // A corrupt/incomplete entry cannot be reused, even if it has this key.
+    await fs.rm(target, { recursive: true, force: true });
+    await fs.rename(temporary, target);
+    const entries = [];
+    for (const entry of await fs.readdir(root, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.isSymbolicLink() || !/^[a-f0-9]{64}$/.test(entry.name)) continue;
+      const file = path.join(root, entry.name);
+      entries.push({ file, time: (await fs.stat(file)).mtimeMs });
+    }
+    entries.sort((a, b) => b.time - a.time);
+    // Staged/running outputs are copies, never links into this bounded cache.
+    for (const entry of entries.slice(2)) await fs.rm(entry.file, { recursive: true, force: true });
+  } finally { await fs.rm(temporary, { recursive: true, force: true }); }
+}
+
 async function nodePackage(name: string, opts: BuildOptions, python: string, identity: string | null): Promise<string> {
   const source = path.join(opts.source, name);
-  const files = await fingerprint(source, ['package.json', 'package-lock.json']);
+  const files = await fingerprint(source, ['package.json', 'package-lock.json'], reuseNodeBuilds() ? nodeDependencyInputText : undefined);
   // A shared cache is used only for a known Node/npm build; the key covers it and the package files.
   const shared = opts.sharedCache && identity;
   const key = shared ? createHash('sha256').update(`node-dependencies-1\0${identity}\0${files}`).digest('hex') : files;
@@ -201,8 +270,20 @@ async function nodePackage(name: string, opts: BuildOptions, python: string, ide
   }
   const dependencies = path.join(cache, 'node_modules');
   await fs.symlink(dependencies, path.join(source, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
-  opts.progress(`Building ${name} from source…`);
-  await run(opts.runtime.node, [opts.runtime.npm, 'run', 'build'], source, opts, python);
+  const output = path.join(source, 'dist');
+  const outputRoot = path.join(opts.sharedCache ?? opts.cache, 'builds', name);
+  const outputKey = reuseNodeBuilds() && identity && ['tools', 'browser-mcp', 'desktop'].includes(name)
+    ? await nodeOutputKey(name, opts, identity, files) : null;
+  if (outputKey && await reuseNodeOutput(path.join(outputRoot, outputKey), outputKey, output)) {
+    opts.progress(`Reusing verified ${name} build output.`);
+  } else {
+    opts.progress(`Building ${name} from source…`);
+    await run(opts.runtime.node, [opts.runtime.npm, 'run', 'build'], source, opts, python);
+    if (outputKey && outputKey === await nodeOutputKey(name, opts, identity!, files)) {
+      try { await publishNodeOutput(outputRoot, outputKey, output); }
+      catch { opts.progress(`Built ${name}; its output could not be cached.`); }
+    }
+  }
   return dependencies;
 }
 

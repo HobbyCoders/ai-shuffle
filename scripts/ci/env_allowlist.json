@@ -151,6 +151,14 @@
     "target_pr": 2,
     "base_settings": true
   },
+  "AI_SHUFFLE_PERF_DESKTOP_BUILD_REUSE": {
+    "kind": "internal",
+    "reason": "Desktop builder rollback to compiling Node outputs; dependency and content hashes plus current app/Fluid installation stay mandatory."
+  },
+  "AI_SHUFFLE_PERF_DESKTOP_UPDATE_PUSH": {
+    "kind": "internal",
+    "reason": "Desktop updater rollback to the existing 30-second bridge heartbeat; command expiry, atomic consumption and authenticated control access are unchanged."
+  },
   "AI_SHUFFLE_PERF_DOCKER_DEPENDENCY_REUSE": {
     "kind": "internal",
     "reason": "Supervisor-only dependency-cache rollback switch; source signatures, runtime checks and per-revision app code remain mandatory."

@@ -55,9 +55,9 @@ export interface FailedStartRecovery {
  * 90 s (DESKTOP_PRESENCE_SECONDS and DESKTOP_REQUEST_SECONDS in
  * app/core/application_updates.py), so two intervals must stay under 75 s:
  * one missed report must not make the updater vanish. Phase
- * changes are pushed at once, so the button still follows a check or
- * download without waiting for a tick; a request queued from the web UI waits
- * up to one interval.
+ * changes are pushed at once. A cancellable local control subscription wakes
+ * queued web actions immediately; older workers and the rollback flag retain
+ * the same one-interval fallback. Hints never carry or consume commands.
  */
 export const BRIDGE_INTERVAL_MS = 30_000;
 
@@ -86,12 +86,14 @@ export class Updater {
   private bridge: ((state: UpdateState) => Promise<Record<string, unknown>>) | null = null;
   private safeToRestart: () => Promise<boolean> = async () => false;
   private bridgeTimer: ReturnType<typeof setInterval> | null = null;
+  private watchBridge: ((wake: () => void) => () => void) | null = null;
+  private stopBridgeWatch: (() => void) | null = null;
   private exchanging = false;
   private exchangeAgain = false;
   private installed: InstalledRelease | null = null;
   private channelError: { message: string; attempt: number } | null = null;
-  setBridge(exchange: (state: UpdateState) => Promise<Record<string, unknown>>, safeToRestart: () => Promise<boolean>): void {
-    this.bridge = exchange; this.safeToRestart = safeToRestart;
+  setBridge(exchange: (state: UpdateState) => Promise<Record<string, unknown>>, safeToRestart: () => Promise<boolean>, watch?: (wake: () => void) => () => void): void {
+    this.bridge = exchange; this.safeToRestart = safeToRestart; this.watchBridge = watch ?? null;
   }
   async exchange(): Promise<void> {
     if (!this.bridge) return;
@@ -249,6 +251,9 @@ export class Updater {
     this.stop();
     if (this.bridge) {
       this.bridgeTimer = setInterval(() => void this.exchange(), BRIDGE_INTERVAL_MS);
+      if (!['0', 'false', 'off'].includes((process.env.AI_SHUFFLE_PERF_DESKTOP_UPDATE_PUSH ?? '').trim().toLowerCase())) {
+        this.stopBridgeWatch = this.watchBridge?.(() => { if (this.bridgeTimer) void this.exchange(); }) ?? null;
+      }
       void this.exchange();
     }
     if ((!this.applications && !this.installers) || this.timer) return;
@@ -256,7 +261,7 @@ export class Updater {
     // Once on launch (above), then daily; users can still check from the app.
     this.timer = setInterval(() => void this.check(), 24 * 60 * 60 * 1000);
   }
-  stop(): void { if (this.bridgeTimer) clearInterval(this.bridgeTimer); this.bridgeTimer = null; if (this.initialCheck) clearTimeout(this.initialCheck); this.initialCheck = null; if (this.timer) clearInterval(this.timer); this.timer = null; }
+  stop(): void { this.stopBridgeWatch?.(); this.stopBridgeWatch = null; if (this.bridgeTimer) clearInterval(this.bridgeTimer); this.bridgeTimer = null; if (this.initialCheck) clearTimeout(this.initialCheck); this.initialCheck = null; if (this.timer) clearInterval(this.timer); this.timer = null; }
   async check(interactive = false): Promise<void> {
     if ((!this.applications && !this.installers) || this.checking || this.downloading || this.installing || (this.state.phase === 'ready' && !this.applications?.retryCleanup)) return;
     this.checking = true; this.set({ phase: 'checking', error: null, percent: null, message: 'Checking for updates…', installer: null });
