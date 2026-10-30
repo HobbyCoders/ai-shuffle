@@ -158,6 +158,8 @@ export function openSessionNeeds(
 		pendingQuestions?: readonly unknown[] | null;
 		messages?: readonly ChatMessage[] | null;
 		isLoadingSession?: boolean;
+		/** A load released without history (#913) is not an empty transcript. */
+		historyStall?: 'timeout' | 'error' | null;
 		isStreaming?: boolean;
 		optimisticStreaming?: boolean;
 		turnParked?: boolean;
@@ -172,7 +174,7 @@ export function openSessionNeeds(
 	const questions = state.pendingQuestions?.length ?? 0;
 	const liveWork = state.isStreaming || state.optimisticStreaming || state.turnParked || !!state.activeTasks?.length;
 	const proseQuestion = groupToolCalls && !proseDismissed && !liveWork && (
-		state.isLoadingSession
+		state.isLoadingSession || (!!state.historyStall && !state.messages?.length)
 			? rememberedProse
 			: !!state.messages && scanProseQuestion(state.messages)
 	);

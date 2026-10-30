@@ -608,7 +608,8 @@
 			// An empty recipient can still have a peer waiting for its first turn.
 			messageCount: $activeSession.messages.length + ($activeSession.pendingPeerMessages?.length ?? 0),
 			isRestoringSession: $activeSession.isRestoringSession,
-			isLoadingSession: $activeSession.isLoadingSession || deepLinkLoading($pendingDeepLink, $activeSession.sessionId)
+			isLoadingSession: $activeSession.isLoadingSession || deepLinkLoading($pendingDeepLink, $activeSession.sessionId),
+			historyStalled: !!$activeSession.historyStall
 		})
 	);
 
@@ -2183,7 +2184,7 @@
 		     it just has not arrived yet. The blocks mirror the transcript's own
 		     rhythm (prompt, then a taller response), so the switch to real
 		     content is a fill rather than a jump. -->
-			<TranscriptLoadingSkeleton />
+			<TranscriptLoadingSkeleton stall={$activeSession.historyStall} onRetry={() => liveActiveSession.reloadSession()} />
 	{:else if transcriptRender === 'empty'}
 		<!-- Empty State -->
 		<div class="h-full flex flex-col">

@@ -21,7 +21,7 @@
 	import { onMount, onDestroy, setContext, type Snippet } from 'svelte';
 	import { get, writable } from 'svelte/store';
 	import { activeSession } from '$lib/stores/active-session';
-	import { classifyChatSurface, type ChatSurface } from '$lib/components/layout/chat-empty-state';
+	import { classifyChatSurface, type ChatSurface, type HistoryStallKind } from '$lib/components/layout/chat-empty-state';
 	import TranscriptLoadingSkeleton from './TranscriptLoadingSkeleton.svelte';
 
 	let { children, graceMs = TRANSCRIPT_LOADING_GRACE_MS, mirrorPending = false, navigationOverlayOpen = false, onSurface }: {
@@ -70,6 +70,8 @@
 		const frame = requestAnimationFrame(() => { overlayHandoff = false; });
 		return () => cancelAnimationFrame(frame);
 	});
+	// Why the target's history has not arrived once the feed stopped waiting.
+	let stall = $state<HistoryStallKind | null>(null);
 	let pendingTarget: string | null = null;
 	let epoch = 0;
 	let timer: ReturnType<typeof setTimeout> | undefined;
@@ -111,7 +113,13 @@
 		// disappear immediately for a cached return, or restart grace for C.
 		if (current.sessionId !== targetSessionId) cancelGrace();
 		targetSessionId = current.sessionId;
-		const loading = current.isLoadingSession || current.isRestoringSession;
+		// A load released without any history is still a load (#913): it keeps
+		// the retained rows and the notice, never an empty target. Rows of the
+		// target's own (a send made meanwhile) are shown as usual.
+		const unconfirmed = !!current.historyStall
+			&& current.messages.length + (current.pendingPeerMessages?.length ?? 0) === 0;
+		stall = unconfirmed ? current.historyStall ?? null : null;
+		const loading = current.isLoadingSession || current.isRestoringSession || unconfirmed;
 		if (!enabled || !loading) {
 			if (enabled) finishNotice();
 			else cancelGrace();
@@ -168,7 +176,8 @@
 		sessionId: $presented.sessionId,
 		messageCount,
 		isLoadingSession: $presented.isLoadingSession,
-		isRestoringSession: $presented.isRestoringSession
+		isRestoringSession: $presented.isRestoringSession,
+		historyStalled: !!$presented.historyStall
 	}), overlay ? 0 : messageCount, overlay ? targetSessionId : $presented.sessionId));
 </script>
 
@@ -177,7 +186,7 @@
 		{@render children()}
 	</div>
 	{#if overlay}
-		<div class="hydration-overlay"><TranscriptLoadingSkeleton /></div>
+		<div class="hydration-overlay"><TranscriptLoadingSkeleton {stall} onRetry={() => activeSession.reloadSession()} /></div>
 	{/if}
 </div>
 

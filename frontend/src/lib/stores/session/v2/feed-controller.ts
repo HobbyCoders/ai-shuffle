@@ -188,6 +188,12 @@ let pendingRegistryTasks: readonly Task[] | null = null;
 // for that long is dead rather than slow, and holding `isRestoringSession`
 // forever would block sends. Hydration is released then, but `sentinelPending`
 // stays set so a late backfill re-enters batch mode instead of repainting.
+//
+// Releasing is NOT evidence that the chat is empty (#913). Only a completed
+// response (`caught_up`) or a clear says that. A release without a single
+// event therefore publishes `historyStall` ('timeout', or 'error' once the
+// history request has failed), which the surface shows as a stalled load with
+// Retry, never as a cleared chat. Any later hydration with data clears it.
 let hydrationTimer: ReturnType<typeof setTimeout> | null = null;
 /** Idle budget once frames are flowing (a stalled mid-backfill stream). */
 export const CATCHUP_FALLBACK_MS = 1_000;
@@ -195,6 +201,26 @@ export const CATCHUP_FALLBACK_MS = 1_000;
 export const FIRST_FRAME_BUDGET_MS = 8_000;
 /** Absolute ceiling on a hydration that never produced a single event. */
 export const HYDRATION_CEILING_MS = 30_000;
+
+/** Why a hydration was released without the server confirming any history. */
+export type HistoryStall = 'timeout' | 'error';
+// The outcome the next hydration-complete fold publishes (null: confirmed).
+let historyStall: HistoryStall | null = null;
+
+/**
+ * The ceiling in effect for one hydration. UI journeys shorten it (never
+ * lengthen it) with `window.__SHUFFLE_HYDRATION_CEILING_MS__` from an init
+ * script, so the past-ceiling path runs in seconds instead of half a minute.
+ */
+function hydrationCeilingMs(): number {
+	const override = typeof window === 'undefined'
+		? undefined
+		: (window as { __SHUFFLE_HYDRATION_CEILING_MS__?: unknown }).__SHUFFLE_HYDRATION_CEILING_MS__;
+	return typeof override === 'number' && Number.isFinite(override)
+		? Math.min(HYDRATION_CEILING_MS, Math.max(1_000, override))
+		: HYDRATION_CEILING_MS;
+}
+let hydrationCeiling = HYDRATION_CEILING_MS;
 
 function clearCatchupFallback(): void {
 	if (hydrationTimer !== null) {
@@ -205,7 +231,11 @@ function clearCatchupFallback(): void {
 
 function armCatchupFallback(generation: number): void {
 	clearCatchupFallback();
-	const budget = eventsReduced === 0 ? FIRST_FRAME_BUDGET_MS : CATCHUP_FALLBACK_MS;
+	// Before the first frame, never sleep past the ceiling: checking only every
+	// FIRST_FRAME_BUDGET_MS reached a 30 s ceiling at 32 s.
+	const budget = eventsReduced === 0
+		? Math.min(FIRST_FRAME_BUDGET_MS, Math.max(0, hydrationStartedAt + hydrationCeiling - Date.now()))
+		: CATCHUP_FALLBACK_MS;
 	hydrationTimer = setTimeout(() => {
 		hydrationTimer = null;
 		// A stop() or a replacement start() since arming owns the view now.
@@ -216,10 +246,11 @@ function armCatchupFallback(generation: number): void {
 			// Nothing has been reduced: there is no transcript to publish, only an
 			// empty one to mis-render. Stay in the loading state and say "slow".
 			markHydrationSlow();
-			if (!transcriptPublished && Date.now() - hydrationStartedAt >= HYDRATION_CEILING_MS) {
-				// Dead, not slow. Release so sends stop waiting; a frame arriving
-				// later re-enters batch mode via `sentinelPending`.
-				completeHydration(true);
+			if (!transcriptPublished && Date.now() - hydrationStartedAt >= hydrationCeiling) {
+				// Dead, not slow. Release so sends stop waiting, saying the history
+				// is unconfirmed; a frame arriving later re-enters batch mode via
+				// `sentinelPending`.
+				completeHydration(true, 'timeout');
 				return;
 			}
 			armCatchupFallback(generation);
@@ -262,8 +293,10 @@ function markHydrationSlow(): void {
  * Declare hydration finished and publish. `premature` marks a floor-driven
  * completion (no `caught_up` seen): the sentinel is still owed, so any further
  * frame re-enters batch mode rather than repainting history one frame at a time.
+ * `stall` says the release came with no event at all (see HistoryStall).
  */
-function completeHydration(premature: boolean): void {
+function completeHydration(premature: boolean, stall: HistoryStall | null = null): void {
+	historyStall = stall;
 	caughtUp = true;
 	everCaughtUp = true;
 	sentinelPending = premature;
@@ -422,6 +455,8 @@ function presentsSettled(entry: CachedTranscript, sessionId: string): boolean {
 		app.sessionId === sessionId &&
 		!app.isLoadingSession &&
 		!app.isRestoringSession &&
+		// A stalled view is not a settled empty one (#913).
+		!app.historyStall &&
 		app.messages.length === 0
 	);
 }
@@ -540,7 +575,7 @@ function reconcileQueuedMessages(queued: QueuedMessage[]): QueuedMessage[] {
  */
 function transcriptPatch(
 	rs: V2SessionState,
-	opts: { hydrationComplete: boolean; appOptimistic: boolean }
+	opts: { hydrationComplete: boolean; appOptimistic: boolean; historyStall?: HistoryStall | null }
 ): Partial<ActiveSessionState> {
 	const optimistic = optimisticStreaming || opts.appOptimistic;
 	const usagePatch = deriveUsageFields(rs.usage);
@@ -566,7 +601,12 @@ function transcriptPatch(
 		// /context-usage fetch uses; the mapper is what validates it.
 		liveContextUsage: (rs.contextUsage as SdkContextUsage | null) ?? null,
 		...(opts.hydrationComplete
-			? { isLoadingSession: false, isRestoringSession: false, isHydrationSlow: false }
+			? {
+					isLoadingSession: false,
+					isRestoringSession: false,
+					isHydrationSlow: false,
+					historyStall: opts.historyStall ?? null,
+				}
 			: {}),
 		...usagePatch,
 	};
@@ -580,6 +620,7 @@ function fold(hydrationComplete = false): void {
 	const patch = transcriptPatch(reducerState, {
 		hydrationComplete,
 		appOptimistic: deps.getState().optimisticStreaming === true,
+		historyStall,
 	});
 	// The reducer confirmed a live turn — the optimistic flip has served its
 	// purpose and must not survive into the next turn boundary.
@@ -820,6 +861,7 @@ function resetFeedFlags(): void {
 	eventsReduced = 0;
 	transcriptPublished = false;
 	hydrationSlow = false;
+	historyStall = null;
 	usageApplied = false;
 	resumeFromSeq = 0;
 	pendingRegistryTasks = null;
@@ -898,6 +940,7 @@ export const feedController: FeedController = {
 		}
 		resetFeedFlags();
 		hydrationStartedAt = Date.now();
+		hydrationCeiling = hydrationCeilingMs();
 
 		// S2: resume from the cached transcript when we hold one. Read whether it
 		// may be shown as settled BEFORE anything below touches the app state.
@@ -938,6 +981,9 @@ export const feedController: FeedController = {
 				// batch, then switch to the per-frame live cadence below.
 				if (type === 'caught_up') {
 					adoptLogEpoch();
+					// The server answered in full: whatever it holds (even nothing)
+					// is now confirmed, so any earlier stall is over.
+					historyStall = null;
 					caughtUp = true;
 					everCaughtUp = true;
 					sentinelPending = false;
@@ -1102,13 +1148,20 @@ export const feedController: FeedController = {
 				// reduced and nothing published, release hydration so sends stop
 				// waiting behind isRestoringSession — but keep the sentinel owed, so
 				// a successful reconnect re-enters batch mode instead of repainting.
+				// The history is still unknown, never empty: say it failed (#913).
 				if (
 					!caughtUp &&
 					eventsReduced === 0 &&
 					!transcriptPublished &&
-					Date.now() - hydrationStartedAt >= FIRST_FRAME_BUDGET_MS
+					Date.now() - hydrationStartedAt >= Math.min(FIRST_FRAME_BUDGET_MS, hydrationCeiling)
 				) {
-					completeHydration(true);
+					completeHydration(true, 'error');
+				} else if (historyStall === 'timeout' && eventsReduced === 0) {
+					// Released at the ceiling and the retries now fail outright.
+					historyStall = 'error';
+					deps?.update((s) =>
+						s.sessionId === sessionId && s.historyStall === 'timeout' ? { ...s, historyStall: 'error' } : s
+					);
 				}
 			},
 		});
@@ -1146,7 +1199,7 @@ export const feedController: FeedController = {
 		transcriptCache.delete(sessionId);
 		deps.update((s) =>
 			s.sessionId === sessionId
-				? { ...s, messages: pending, isLoadingSession: true, isHydrationSlow: false }
+				? { ...s, messages: pending, isLoadingSession: true, isHydrationSlow: false, historyStall: null }
 				: s
 		);
 		teardown(false);

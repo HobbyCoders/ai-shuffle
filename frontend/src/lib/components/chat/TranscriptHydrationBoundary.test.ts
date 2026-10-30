@@ -310,4 +310,35 @@ describe('transcript hydration presentation', () => {
 		expect(view.getByTestId('presented').dataset.session).toBeUndefined();
 		expect(view.queryByText('Loading conversation…')).toBeNull();
 	});
+
+	it('(#913) keeps the retained rows and offers Retry when the load is released without any history', async () => {
+		const reloadSession = vi.fn();
+		Object.assign(live, { reloadSession });
+		const surfaces: string[] = [];
+		const view = render(Harness, { onSurface: surface => surfaces.push(surface) });
+		const outgoing = view.getByText('Previous conversation');
+		live.set(state('incoming', '', true)); await tick();
+		await vi.advanceTimersByTimeAsync(GRACE_MS); await tick();
+		vi.advanceTimersToNextFrame(); await tick();
+		// The feed's ceiling: loading ends (sends stop waiting), nothing arrived.
+		live.set({ ...state('incoming'), historyStall: 'timeout' }); await tick();
+		await vi.advanceTimersByTimeAsync(MIN_VISIBLE_MS * 4); await tick();
+		expect(outgoing.isConnected).toBe(true);
+		expect(view.queryByText('No messages')).toBeNull();
+		expect(view.getByText('This is taking longer than usual.')).toBeTruthy();
+		expect(surfaces).not.toContain('cleared');
+		expect(surfaces.at(-1)).toBe('loading');
+		view.getByRole('button', { name: 'Retry loading the conversation' }).click();
+		expect(reloadSession).toHaveBeenCalledTimes(1);
+		// A failed request says so instead, in the same slot.
+		live.set({ ...state('incoming'), historyStall: 'error' }); await tick();
+		expect(view.getByText('Could not load the conversation.')).toBeTruthy();
+		// The late history paints in place of the retained rows.
+		live.set(state('incoming', 'Incoming conversation')); await tick();
+		expect(view.getByText('Incoming conversation').closest('[inert]')).toBeNull();
+		expect(view.queryByText('Previous conversation')).toBeNull();
+		expect(view.queryByText('Could not load the conversation.')).toBeNull();
+		expect(surfaces).not.toContain('cleared');
+		expect(surfaces.at(-1)).toBe('active');
+	});
 });
