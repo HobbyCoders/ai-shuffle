@@ -116,8 +116,16 @@ class PlayFgsRecordingTest {
         try {
             ActivityScenario.launch<ChatActivity>(Intent(context, ChatActivity::class.java)
                 .putExtra(ChatActivity.EXTRA_SERVER_ID, server.id)).use { scenario ->
-                waitFor("Real phone UI did not bootstrap", 60_000) {
-                    js(scenario, "document.readyState === 'complete' && typeof window.shuffleMobileSetToken === 'function'") == "true"
+                try {
+                    waitFor("Real phone UI did not bootstrap", 60_000) {
+                        js(scenario, "document.readyState === 'complete' && typeof window.shuffleMobileSetToken === 'function'") == "true"
+                    }
+                } catch (error: AssertionError) {
+                    device.takeScreenshot(File(out, "bootstrap-failure.png"))
+                    Log.i("PlayFgsDemo", "bootstrap diagnostic: " + js(scenario,
+                        "JSON.stringify({url:location.href,ready:document.readyState,title:document.title,text:document.body.innerText.slice(0,2000),runtime:!!window.__SHUFFLE_MOBILE__,setter:typeof window.shuffleMobileSetToken})"))
+                    scenario.onActivity { Log.i("PlayFgsDemo", "native status: " + it.findViewById<android.widget.TextView>(R.id.screenStatus).text) }
+                    throw error
                 }
                 scenario.onActivity { web(it).loadUrl("https://localhost:8443/mobile/?session=$session") }
                 waitFor("Seeded chat and real call button did not appear", 60_000) {

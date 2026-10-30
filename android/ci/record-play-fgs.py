@@ -39,6 +39,7 @@ async def record(args, instance: DevInstance) -> None:
     phase = "setup"
     frames = defaultdict(lambda: {"frames": 0, "bytes": 0})
     timeline = []
+    requests = []
     start = time.monotonic()
     async with ClientSession(timeout=ClientTimeout(total=None)) as client:
         async with client.get(status["access_link"], allow_redirects=False) as access:
@@ -93,6 +94,7 @@ async def record(args, instance: DevInstance) -> None:
                 response_headers = {name: value for name, value in upstream.headers.items()
                                     if name.lower() not in {"content-length", "content-encoding", "transfer-encoding",
                                                             "connection", "set-cookie"}}
+                requests.append({"method": request.method, "path": request.path, "status": upstream.status})
                 response = web.StreamResponse(status=upstream.status, headers=response_headers)
                 await response.prepare(request)
                 async for chunk in upstream.content.iter_any():
@@ -133,7 +135,7 @@ async def record(args, instance: DevInstance) -> None:
             (args.out / "microphone-evidence.json").write_text(json.dumps({
                 "source": "Real WebView getUserMedia microphone PCM; emulator input may be silent",
                 "backend": "Actual dev-loop worker with repository fake voice provider (not a real AI call)",
-                "uploaded_pcm": dict(frames), "timeline": timeline,
+                "uploaded_pcm": dict(frames), "timeline": timeline, "http_requests": requests,
             }, indent=2))
             await runner.cleanup()
 
@@ -172,7 +174,7 @@ def main() -> None:
             adb("shell", "pkill", "-2", "screenrecord", check=False)
             pulled = adb("pull", REMOTE, str(args.out), check=False)
             print(pulled.stdout, pulled.stderr, flush=True)
-            log = adb("logcat", "-d", "-v", "brief", "PlayFgsDemo:I", "VoiceCallService:I", "*:S", check=False)
+            log = adb("logcat", "-d", "-v", "brief", "PlayFgsDemo:I", "VoiceCallService:I", "chromium:I", "*:S", check=False)
             (args.out / "android-verification.txt").write_text(log.stdout)
             instance.down()
 
