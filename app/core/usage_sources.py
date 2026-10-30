@@ -29,10 +29,8 @@ RATE_LIMIT = "rate_limit"  # short-term request/token headroom
 SUBSCRIPTION_ALLOWANCE = "subscription_allowance"  # plan usage windows
 REPORTED_SPEND = "reported_spend"  # spend the provider reports for an account/org/key
 MONETARY_CREDIT = "monetary_credit"  # remaining purchased/prepaid credit
-LOCAL_ESTIMATE = "local_estimate"  # entered balance minus app-recorded costs
 
 MEASURE_LABELS = {
-    LOCAL_ESTIMATE: "Estimated credit balance",
     RATE_LIMIT: "Request/token rate limits",
     SUBSCRIPTION_ALLOWANCE: "Subscription allowance",
     REPORTED_SPEND: "Provider-reported spend",
@@ -46,7 +44,6 @@ UNOFFICIAL_SUBSCRIPTION = "unofficial_subscription"
 UNDOCUMENTED = "undocumented"
 
 SUPPORT_LABELS = {
-    LOCAL_ESTIMATE: "Local estimate, not a provider reading",
     DOCUMENTED: "Documented API",
     RESPONSE_METADATA: "Metadata on inference responses",
     UNOFFICIAL_SUBSCRIPTION: "Unofficial, subscription-specific endpoint",
@@ -134,7 +131,7 @@ class UsageSource:
             "support_label": SUPPORT_LABELS[self.support],
             "endpoints": [e.url for e in self.endpoints],
             "min_interval_seconds": self.min_interval or None,
-            "freshness_seconds": self.min_interval * 2 if self.id in {"openai_platform_balance", "xai_management"} else self.min_interval or None,
+            "freshness_seconds": self.min_interval * 2 if self.id == "xai_management" else self.min_interval or None,
             "failure_policy": self.failure_policy,
             "dashboard_url": self.dashboard_url,
             "unavailable": list(self.unavailable),
@@ -188,7 +185,6 @@ def _is_openrouter_row(row: Mapping[str, Any] | None) -> bool:
 # ---------------------------------------------------------------------------
 
 OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits"
-OPENAI_ADMIN_BASE = "https://api.openai.com/v1/organization"
 # fal's documented billing API needs an Admin key; this endpoint answers the
 # ordinary API key the media tools already use.
 FAL_BALANCE_URL = "https://rest.alpha.fal.ai/billing/user_balance"
@@ -197,16 +193,6 @@ GROK_SETTINGS_URL = "https://cli-chat-proxy.grok.com/v1/settings"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 
 _SOURCES: tuple[UsageSource, ...] = (
-    UsageSource(
-        id="openai_platform_balance", snapshot_type="openai_balance",
-        label="OpenAI Platform balance",
-        credential="OpenAI Platform dashboard sign-in (session key encrypted across network workers)",
-        scope="account", scope_label="Platform account API credit, not ChatGPT credits",
-        measure=MONETARY_CREDIT, collection=POLLED, support=UNDOCUMENTED,
-        dashboard_url="https://platform.openai.com/settings/organization/billing/overview",
-        endpoints=(Endpoint("https://api.openai.com/v1/dashboard/billing/credit_grants", 300),),
-        poller="_poll_api_balance", applies=is_openai_platform_row,
-    ),
     UsageSource(
         id="xai_management", snapshot_type="xai_balance", label="xAI Management API",
         credential="Separate xAI management key encrypted across network workers; inference key resolves team ID",
@@ -247,7 +233,7 @@ _SOURCES: tuple[UsageSource, ...] = (
         dashboard_url="https://platform.openai.com/settings/organization/limits",
         failure_policy=PASSIVE_FAILURE_POLICY,
         unavailable=("spend", "credit balance"),
-        # Stored on the OpenAI row but hidden; the row headlines Admin usage.
+        # Captured for rate-limit handling only, never API billing or usage UI.
         shown=False,
     ),
     UsageSource(
@@ -297,39 +283,6 @@ _SOURCES: tuple[UsageSource, ...] = (
         unavailable=("OpenAI API spend", "OpenAI API credit balance"),
         poller="_poll_codex_provider",
         applies=is_codex_subscription_row,
-    ),
-    UsageSource(
-        id="openai_manual",
-        snapshot_type="openai_manual",
-        label="Entered balance minus estimated spend",
-        credential="User-entered balance (no billing credential)",
-        scope="api_key",
-        scope_label="Costs recorded by this app for this provider since the balance was entered",
-        measure=LOCAL_ESTIMATE,
-        collection=LOCAL_ESTIMATE,
-        support=LOCAL_ESTIMATE,
-        dashboard_url="https://platform.openai.com/settings/organization/billing/overview",
-        failure_policy="No provider request. Unpriced turns and spending outside this app are not deducted.",
-        unavailable=("provider-reported prepaid balance", "spending outside this app"),
-    ),
-    UsageSource(
-        id="openai_admin",
-        snapshot_type="openai",
-        label="OpenAI organization Admin API",
-        credential="Separate OpenAI Admin key and organization ID (encrypted across network workers)",
-        scope="organization",
-        scope_label="Organization spend and completions usage this month (UTC)",
-        measure=REPORTED_SPEND,
-        collection=POLLED,
-        support=DOCUMENTED,
-        dashboard_url="https://platform.openai.com/usage",
-        endpoints=(
-            Endpoint(OPENAI_ADMIN_BASE + "/costs", 900),
-            Endpoint(OPENAI_ADMIN_BASE + "/usage/completions", 900),
-        ),
-        unavailable=("prepaid credit balance", "ChatGPT subscription allowance"),
-        poller="_poll_openai_provider",
-        applies=is_openai_platform_row,
     ),
     UsageSource(
         id="openrouter_key",
@@ -410,14 +363,11 @@ _SOURCES: tuple[UsageSource, ...] = (
 
 SOURCES: dict[str, UsageSource] = {s.id: s for s in _SOURCES}
 
-# Snapshot rows -> the source that labels them in the usage API. Two snapshot
-# types are written by both a passive and a polled source; the polled one is
-# the label, because it is what bounds how stale the row can get. OpenAI rows
-# headline Admin usage over rate-limit headers, ChatGPT rows the usage endpoint
-# over Codex quota headers.
+# Snapshot rows -> the source that labels them in the usage API. ChatGPT rows
+# headline the polled usage endpoint over passive Codex quota headers.
 _SNAPSHOT_SOURCES = {
     "anthropic": "anthropic_headers",
-    "openai": "openai_admin",
+    "openai": "openai_headers",
     "xai": "compatible_headers",
     "openai_compatible": "compatible_headers",
     "chatgpt": "codex_usage",

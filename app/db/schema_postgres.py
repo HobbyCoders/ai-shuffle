@@ -22,7 +22,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 92
+SCHEMA_VERSION = 94
 
 
 def create_session_events_recall_index(cursor) -> None:

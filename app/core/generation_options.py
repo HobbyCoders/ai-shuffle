@@ -410,10 +410,11 @@ def build_generation_options(
     if provider_id:
         from app.db import database
 
-        main_provider_row = database.get_model_provider(
+        main_provider_row = database.resolve_model_provider(
             provider_id, include_token=False
         )
 
+    provider_id = (main_provider_row or {}).get("id") or provider_id
     options.aih_provider_id = provider_id
     options.aih_provider_type = (main_provider_row or {}).get("provider_type")
     options.aih_provider_auth_mode = (main_provider_row or {}).get("auth_mode")

@@ -819,7 +819,7 @@ def _check_model(start: _Start) -> None:
     from app.db import database
 
     if start.provider_id:
-        provider = database.get_model_provider(start.provider_id, include_token=False)
+        provider = database.resolve_model_provider(start.provider_id, include_token=False)
         if not provider:
             raise ValueError(f"This worker has no model provider {start.provider_id!r}; nothing was started.")
         gap = _credential_gap(start.provider_id)
@@ -2565,7 +2565,7 @@ async def send_to_child(sender_session_id: str, row: Mapping[str, Any], text: st
     """SendMessage from this worker to a Task child it sent to another worker.
 
     Same meaning as for a local child: a running child takes it at its next
-    tool result, a parked one when it next wakes (``urgent`` wakes it), and a
+    tool result, a parked one wakes immediately, and a
     finished one is resumed over its own transcript, its new report coming
     back through ``task-report``. A stopped child refuses. A child whose
     worker the caller was told is away (:func:`notice_offline`) is still

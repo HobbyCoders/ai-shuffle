@@ -147,8 +147,8 @@ beforeEach(() => {
 
 describe('newSessionWorker', () => {
 	it('is this worker unless the composer picked another one', () => {
-		expect(newSessionWorker({ sessionId: null, deviceIntent: null })).toEqual({ isRemote: false, ownerDeviceName: null });
-		expect(newSessionWorker({ sessionId: null, deviceIntent: PICK })).toEqual({ isRemote: true, ownerDeviceName: 'Other worker' });
+		expect(newSessionWorker({ sessionId: null, deviceIntent: null })).toEqual({ isRemote: false, ownerDeviceName: null, createdFromComposer: true });
+		expect(newSessionWorker({ sessionId: null, deviceIntent: PICK })).toEqual({ isRemote: true, ownerDeviceName: 'Other worker', createdFromComposer: true });
 	});
 
 	it('says nothing about a bound session (its row and /live own that)', () => {
@@ -161,14 +161,14 @@ describe('every path binds a new session with a known owner', () => {
 		post.mockResolvedValueOnce(created('wt-auto', { query_started: true }));
 		const { sender, history } = setup();
 		expect(await sender.autoCreateWorktree('hello')).toBe(true);
-		expect(boundAt(history).state).toMatchObject({ sessionId: 'wt-auto', isRemote: false });
+		expect(boundAt(history).state).toMatchObject({ sessionId: 'wt-auto', isRemote: false, createdFromComposer: true });
 	});
 
 	it('explicit branch (POST, then the first query)', async () => {
 		post.mockResolvedValueOnce(created('wt-branch'));
 		const { sender, history } = setup({ worktreeBranch: 'feat/picked' });
 		expect(await sender.createWorktree('hello')).toBe('wt-branch');
-		expect(boundAt(history).state).toMatchObject({ sessionId: 'wt-branch', isRemote: false });
+		expect(boundAt(history).state).toMatchObject({ sessionId: 'wt-branch', isRemote: false, createdFromComposer: true });
 	});
 
 	it('explicit branch opens the new session\'s feed itself, once its first row exists', async () => {
@@ -190,32 +190,32 @@ describe('every path binds a new session with a known owner', () => {
 		const { sender, state, wsConn } = setup({ worktreeIntent: 'local' });
 		expect(await sender.sendMessage('hello')).toBe(true);
 		expect(wsConn.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'query', session_id: null }));
-		expect(state()).toMatchObject({ sessionId: null, isRemote: false, ownerDeviceName: null });
+		expect(state()).toMatchObject({ sessionId: null, isRemote: false, ownerDeviceName: null, createdFromComposer: true });
 	});
 
 	it('existing worktree (the WebSocket query with its worktree id)', async () => {
 		const { sender, state, wsConn } = setup({ worktreeMode: 'existing', worktreeId: 'wt-legacy' });
 		expect(await sender.sendMessage('hello')).toBe(true);
 		expect(wsConn.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'query', worktree_id: 'wt-legacy' }));
-		expect(state()).toMatchObject({ isRemote: false });
+		expect(state()).toMatchObject({ isRemote: false, createdFromComposer: true });
 	});
 
 	it('a call started before any message (POST /sessions)', async () => {
 		post.mockResolvedValueOnce({ session_id: 'call-1' });
 		const { sender, history } = setup({ worktreeIntent: 'local' });
 		expect(await sender.startSessionWithoutPrompt()).toBe('call-1');
-		expect(boundAt(history).state).toMatchObject({ sessionId: 'call-1', isRemote: false });
+		expect(boundAt(history).state).toMatchObject({ sessionId: 'call-1', isRemote: false, createdFromComposer: true });
 	});
 
 	it('a "Runs on" pick binds as that worker\'s session, after the pick is spent', async () => {
 		post.mockResolvedValueOnce(created('wt-remote', { query_started: true }));
 		const { sender, state } = setup({ deviceIntent: PICK });
 		await sender.autoCreateWorktree('hello');
-		expect(state()).toMatchObject({ sessionId: 'wt-remote', deviceIntent: null, isRemote: true, ownerDeviceName: 'Other worker' });
+		expect(state()).toMatchObject({ sessionId: 'wt-remote', deviceIntent: null, isRemote: true, ownerDeviceName: 'Other worker', createdFromComposer: true });
 
 		const ws = setup({ worktreeIntent: 'local', deviceIntent: PICK });
 		await ws.sender.sendMessage('hello');
-		expect(ws.state()).toMatchObject({ deviceIntent: null, isRemote: true, ownerDeviceName: 'Other worker' });
+		expect(ws.state()).toMatchObject({ deviceIntent: null, isRemote: true, ownerDeviceName: 'Other worker', createdFromComposer: true });
 	});
 });
 

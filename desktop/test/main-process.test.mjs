@@ -76,6 +76,10 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		async activeSessionCount() { return 0; }
 		async clearConnectionFile() {}
 		async updatesAllowed() { return true; }
+		watchUpdateRequests(wake) {
+			this.updateWake = wake;
+			return () => { if (this.updateWake === wake) this.updateWake = null; };
+		}
 	}
 	let postgres;
 	class PostgresSupervisor extends EventEmitter {
@@ -207,7 +211,7 @@ test('direct source relaunch clears the previous launcher handoff proof', async 
   assert.equal(f.app.quits, 1);
 });
 
-for (const launcher of ['9', '999']) test(`installed launcher ${launcher} keeps the full hash and does not pre-create a point`, async () => {
+for (const launcher of ['10', '999']) test(`installed launcher ${launcher} keeps the full hash and does not pre-create a point`, async () => {
   const updates = { options: { root: '/isolated/no-root' }, hasMigrationRisk: false,
     async requireRestorePoint(database) { await database.validate(); }, async databaseStarting() {}, async healthy() {}, async finishRollback() {}, async failed() {} };
   const managed = { root: '/isolated/no-root', updates, host: { executable: 'C:/AI Shuffle.exe' },
@@ -330,6 +334,14 @@ function failingInstall(updater) {
 	});
 	assert.equal(updater.current.phase, 'ready');
 }
+
+test('the main process wires the owned worker wake subscription and removes it on updater stop', async () => {
+	const main = await launch({ realUpdater: true });
+	assert.deepEqual(main.errors, []);
+	assert.equal(typeof main.worker.updateWake, 'function');
+	main.updater.stop();
+	assert.equal(main.worker.updateWake, null);
+});
 
 test('a failed update install restarts the stack it stopped and reports why', async () => {
 	const main = await launch({ realUpdater: true });

@@ -78,6 +78,7 @@ def test_pruning_rollback_and_snapshot_watermarks_stay_authoritative(pg):
     with connect() as conn:
         cur = conn.cursor()
         insert(store, cur, "old-owner", 1, 1)
+        insert(store, cur, "old-owner", 1, 2)
         insert(store, cur, "new-owner", 1, 2)
         cur.execute("UPDATE sync_ops SET created_at='2000-01-01'")
         store.set_watermark(cur, "old-owner", 1, 5)
@@ -87,6 +88,9 @@ def test_pruning_rollback_and_snapshot_watermarks_stay_authoritative(pg):
     assert store.requires_snapshot({"new-owner": {"1": 2}})
     with connect() as conn:
         cur = conn.cursor()
+        # Superseded non-transcript heads remain signed sequence/proof anchors.
+        assert store.get_op(cur, "old-owner", 1, 2)["origin_seq"] == 2
+        assert store.next_origin_seq(cur, "old-owner", 1) == 3
         # Simulate an atomic restore/maintenance transaction; no durable head
         # or cache may continue to advertise the removed log tail.
         cur.execute("DELETE FROM sync_ops WHERE origin_device_id='new-owner'")

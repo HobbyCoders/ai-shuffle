@@ -24,11 +24,11 @@ afterEach(() => {
 });
 
 /** A controller in its own effect root, the way ChatView's init creates it. */
-function startSync(input: { sessionId: string | null; remote: boolean }, onCaughtUp = vi.fn()) {
+function startSync(input: { sessionId: string | null; remote: boolean; createdFromComposer?: boolean }, onCaughtUp = vi.fn()) {
 	const props = $state({ ...input });
 	let sync!: MirrorSync;
 	const destroy = $effect.root(() => {
-		sync = createMirrorSync(() => ({ sessionId: props.sessionId, remote: props.remote, onCaughtUp }));
+		sync = createMirrorSync(() => ({ ...props, onCaughtUp }));
 	});
 	flushSync();
 	return { sync, props, onCaughtUp, destroy };
@@ -56,6 +56,31 @@ describe('createMirrorSync (the check ChatView runs whatever its layout)', () =>
 		expect(onCaughtUp).toHaveBeenCalledOnce();
 		// Later polls never reload again.
 		await vi.advanceTimersByTimeAsync(4000);
+		expect(onCaughtUp).toHaveBeenCalledOnce();
+		destroy();
+	});
+
+	it('keeps a fresh compose visible without an opening reload, but checks a later navigation', async () => {
+		vi.useFakeTimers();
+		const fetch = vi.fn().mockResolvedValueOnce(reply({ state: 'syncing', pending_updates: 3 }))
+			.mockImplementation(() => Promise.resolve(reply({ state: 'current' })));
+		vi.stubGlobal('fetch', fetch);
+		const { sync, props, onCaughtUp, destroy } = startSync({ sessionId: 'new', remote: true, createdFromComposer: true });
+		expect(sync.waiting).toBe(false);
+		render(MirrorSyncGate, { sync, children });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(screen.getByText('transcript')).toBeTruthy();
+		expect(sync.syncState).toBe('syncing');
+		await vi.advanceTimersByTimeAsync(2000);
+		expect(fetch).toHaveBeenCalledTimes(2);
+		expect(sync.waiting).toBe(false);
+		expect(onCaughtUp).not.toHaveBeenCalled();
+
+		props.sessionId = 'existing';
+		props.createdFromComposer = false;
+		flushSync();
+		expect(sync.waiting).toBe(true);
+		await vi.advanceTimersByTimeAsync(0);
 		expect(onCaughtUp).toHaveBeenCalledOnce();
 		destroy();
 	});
@@ -102,7 +127,7 @@ describe('createMirrorSync (the check ChatView runs whatever its layout)', () =>
 		render(MirrorSyncGate, { sync, deviceName: 'Unraid', children });
 		await vi.advanceTimersByTimeAsync(0);
 		expect(screen.getByText('Syncing from Unraid…')).toBeTruthy();
-		expect(screen.queryByText('transcript')).toBeNull();
+		expect(screen.getByText('transcript').closest('[aria-hidden="true"]')).not.toBeNull();
 		await vi.advanceTimersByTimeAsync(2000);
 		// One poll per interval: the controller's, not one per mounted gate.
 		expect(fetch).toHaveBeenCalledTimes(2);

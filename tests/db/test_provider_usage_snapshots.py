@@ -83,11 +83,10 @@ class TestUpsertProviderUsageSnapshot:
         assert row["raw"] == raw
 
     def test_null_credits_on_conflict_preserves_existing(self, mock_db):
-        """OpenAI header capture writes credits=None; that must not wipe a
-        credit-grants balance the poller already stored."""
+        """A partial snapshot must not wipe OpenRouter's last credit reading."""
         db.upsert_provider_usage_snapshot(
-            provider_id="prov-openai",
-            provider_type="openai",
+            provider_id="prov-router",
+            provider_type="openrouter",
             plan_type=None,
             windows=[],
             credits={"balance_remaining": 20.75},
@@ -95,8 +94,8 @@ class TestUpsertProviderUsageSnapshot:
             fetched_at=1,
         )
         db.upsert_provider_usage_snapshot(
-            provider_id="prov-openai",
-            provider_type="openai",
+            provider_id="prov-router",
+            provider_type="openrouter",
             plan_type=None,
             windows=[{"type": "requests", "utilization": 1.0, "resets_at": None}],
             credits=None,
@@ -105,37 +104,37 @@ class TestUpsertProviderUsageSnapshot:
         )
         row = next(
             r for r in db.get_all_provider_usage_snapshots()
-            if r["provider_id"] == "prov-openai"
+            if r["provider_id"] == "prov-router"
         )
         assert row["credits"] == {"balance_remaining": 20.75}
         assert row["windows"][0]["type"] == "requests"
         assert row["fetched_at"] == 2
-        assert row["raw"]["billing_fetched_at"] == 1
+        assert row["raw"] == {"x-ratelimit-limit-requests": "60"}
 
-    def test_billing_failure_and_capture_have_independent_freshness(self, mock_db):
+    def test_failure_preserves_last_reading_until_success(self, mock_db):
         from app.db.provider_usage_snapshots import record_provider_usage_failure
 
-        db.upsert_provider_usage_snapshot("api", "openai", None, [], {"balance_remaining": 5}, {}, 1)
-        record_provider_usage_failure("api", "openai", "billing_access_denied")
-        db.upsert_provider_usage_snapshot("api", "openai", None, [], None, {}, 2)
-        row = next(r for r in db.get_all_provider_usage_snapshots() if r["provider_id"] == "api")
-        assert row["fetched_at"] == 2
-        assert row["raw"]["billing_fetched_at"] == 1
-        assert row["raw"]["usage_error"] == "billing_access_denied"
-        db.upsert_provider_usage_snapshot("api", "openai", None, [], {"balance_remaining": 4}, {}, 3)
-        row = next(r for r in db.get_all_provider_usage_snapshots() if r["provider_id"] == "api")
-        assert row["raw"]["billing_fetched_at"] == 3
-        assert "usage_error" not in row["raw"]
+        windows = [{"type": "credit_limit", "utilization": 50}]
+        db.upsert_provider_usage_snapshot("router", "openrouter", None, windows, {"usage": 5, "limit": 10}, {}, 1)
+        record_provider_usage_failure("router", "openrouter", "timeout")
+        row = next(r for r in db.get_all_provider_usage_snapshots() if r["provider_id"] == "router")
+        assert row["fetched_at"] == 1
+        assert row["windows"] == windows and row["credits"] == {"usage": 5, "limit": 10}
+        assert row["raw"]["usage_error"] == "timeout"
+        assert row["raw"]["usage_attempted_at"] > 1
+        db.upsert_provider_usage_snapshot("router", "openrouter", None, windows, {"usage": 6, "limit": 10}, {}, 3)
+        row = next(r for r in db.get_all_provider_usage_snapshots() if r["provider_id"] == "router")
+        assert row["fetched_at"] == 3 and row["credits"] == {"usage": 6, "limit": 10}
+        assert row["raw"] == {}
 
-    def test_capture_then_billing_failure_has_no_successful_billing_timestamp(self, mock_db):
+    def test_failure_sanitizes_unknown_error_without_inventing_a_success(self, mock_db):
         from app.db.provider_usage_snapshots import record_provider_usage_failure
 
-        db.upsert_provider_usage_snapshot("api", "openai", None, [], None, {}, 2)
-        record_provider_usage_failure("api", "openai", "private upstream text")
-        row = next(r for r in db.get_all_provider_usage_snapshots() if r["provider_id"] == "api")
-        assert row["fetched_at"] == 2
-        assert row["raw"]["billing_fetched_at"] is None
+        record_provider_usage_failure("router", "openrouter", "private upstream text")
+        row = next(r for r in db.get_all_provider_usage_snapshots() if r["provider_id"] == "router")
+        assert row["fetched_at"] is None and row["credits"] is None
         assert row["raw"]["usage_error"] == "unavailable"
+        assert "private upstream text" not in str(row)
 
     def test_none_credits_and_raw_round_trip_as_none(self, mock_db):
         db.upsert_provider_usage_snapshot(

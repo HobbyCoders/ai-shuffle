@@ -1,11 +1,9 @@
 /**
- * An API key's Usage tab. Ported from OpenRouterCredits.test.ts and
- * OpenAICredits.test.ts: OpenRouter reads credits with the saved key (no
- * separate key, legacy management keys kept); OpenAI tracks an entered balance
- * and points at Platform billing; neither asks for another key.
+ * API-key Usage: OpenRouter credits and xAI management access remain;
+ * OpenAI API keys have no billing surface or Usage tab.
  */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
+import { cleanup, render, screen, within } from '@testing-library/svelte';
 
 const mocks = vi.hoisted(() => ({ hydrate: vi.fn(), checkAuth: vi.fn() }));
 vi.mock('$lib/constants/models.svelte', async (importOriginal) => ({
@@ -57,7 +55,6 @@ function start(configured = false) {
 	worker = fakeWorker(
 		{ rows: [router, row()] },
 		{ 'GET /model-providers/:id/openrouter-usage': () => credits(configured),
-			'GET /model-providers/:id/openai-usage': () => ({ configured: false, manual_balance: null }),
 			'GET /model-providers/:id/balance-access': () => ({ configured: false, credits: null }) }
 	);
 	vi.stubGlobal('fetch', worker.fetch);
@@ -98,62 +95,11 @@ it.each([false, true])(
 	}
 );
 
-it('OpenAI: offers real Platform sign-in first and an entered balance only as fallback', async () => {
-	const panel = await usageOf('mp:p1');
-	expect(within(panel).getByRole('button', { name: 'Sign in to OpenAI Platform' })).toBeTruthy();
-	expect(panel.textContent).toContain('Manual balance (fallback only)');
-	expect(within(panel).getByRole('textbox', { name: 'Current balance (USD)' })).toBeTruthy();
-	expect(within(panel).getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
-	expect(worker.sent('GET', '/model-providers/p1/openai-usage')).toHaveLength(1);
-	await fireEvent.click(within(panel).getByRole('button', { name: 'About Balance' }));
-	const tip = screen.getByRole('tooltip').textContent ?? '';
-	expect(tip).toMatch(/does not expose a prepaid balance through the model API key/);
-	expect(tip).toMatch(/Admin key reports organization spending, not credit left/);
-	expect(tip).toMatch(/ChatGPT credits are separate from API billing/);
-	const billing = within(panel).getByRole('link', { name: 'Open billing' });
-	expect(billing.getAttribute('href')).toBe('https://platform.openai.com/settings/organization/billing/overview');
-	expect(billing.getAttribute('target')).toBe('_blank');
-	expect(billing.getAttribute('rel')).toContain('noopener');
-	expect(worker.sent('GET', '/model-providers/p1/openai-usage')).toHaveLength(1);
-	expect(within(panel).queryByText('Not available for this key')).toBeNull();
-	expect(panel.textContent).toContain("this worker's estimated spend only");
-	expect(panel.textContent).toContain("Paired workers' spend is not included");
-});
-
-it('OpenAI: saves, reloads and clears a two-decimal balance, including zero', async () => {
-	let manual: Record<string, number> | null = null;
-	worker = fakeWorker({ rows: [row()] }, {
-		'GET /model-providers/:id/openai-usage': () => ({ configured: false, manual_balance: manual }),
-		'GET /model-providers/:id/balance-access': () => ({ configured: false, credits: null }),
-		'PUT /model-providers/:id/openai-usage/balance': (body) => {
-			const balance = (body as { balance_usd: number }).balance_usd;
-			manual = { manual_balance: balance, balance_remaining: balance - 1.25, estimated_spend: 1.25, set_at: 1750000000000, unpriced_turns: 0 };
-			return { configured: false, manual_balance: manual };
-		},
-		'DELETE /model-providers/:id/openai-usage/balance': () => { manual = null; return {}; }
-	});
-	vi.stubGlobal('fetch', worker.fetch);
-	const panel = await usageOf('mp:p1');
-	const input = within(panel).getByRole('textbox', { name: 'Current balance (USD)' });
-	const save = within(panel).getByRole('button', { name: 'Save' });
-	for (const invalid of ['-1', 'NaN', '1.234']) {
-		await fireEvent.input(input, { target: { value: invalid } });
-		expect(save.hasAttribute('disabled')).toBe(true);
-	}
-	for (const amount of ['20.50', '0']) {
-		await fireEvent.input(input, { target: { value: amount } });
-
-		await fireEvent.click(save);
-		await flush();
-		expect(worker.sent('PUT', '/model-providers/p1/openai-usage/balance').at(-1)?.body).toEqual({ balance_usd: Number(amount) });
-		expect(panel.textContent).toContain("Only this worker's tracked spend is deducted; paired workers' spend");
-		expect(within(panel).getByText(/Tracked by this worker's cost estimates since/).textContent).toContain('~$1.25 estimated spend so far');
-	}
-	await fireEvent.click(within(panel).getByRole('button', { name: 'Clear' }));
-	await flush();
-	expect(worker.sent('DELETE', '/model-providers/p1/openai-usage/balance')).toHaveLength(1);
-	expect((input as HTMLInputElement).value).toBe('');
-	expect(within(panel).queryByText(/Tracked by this worker/)).toBeNull();
+it('OpenAI: has no Usage tab or billing requests, even from an old Usage deep link', async () => {
+	await usageOf('mp:p1');
+	expect(screen.getAllByRole('tab').map((t) => t.textContent?.trim())).toEqual(['Overview', 'Models']);
+	expect(screen.queryByText(/credits|balance|spent this month|Admin key/i)).toBeNull();
+	expect(worker.calls.filter((c) => /openai-usage|openai-billing|balance-access/.test(c.path))).toEqual([]);
 });
 
 it.each(['https://api.x.ai/v1', 'https://custom.example/v1', 'http://api.x.ai/v1', 'https://api.x.ai.evil.test/v1'])(

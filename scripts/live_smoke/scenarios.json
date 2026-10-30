@@ -9,6 +9,38 @@
   },
   "suites": [
     {
+      "name": "mirror-cache",
+      "intro": "Use an approved disposable candidate worker pair, synthetic long history and throwaway chats only. Never restart a production worker.",
+      "rows": [
+        {
+          "id": "mirror-cache.warm-peer-catch-up",
+          "check": "A warm mirrored chat keeps its cursor and mounted transcript through real owner catch-up",
+          "kind": "browser",
+          "needs": ["install", "device", "provider"],
+          "two_worker": true,
+          "how": "On paired disposable candidate workers, open a long mirrored chat on the receiver, switch away, then reopen it with an unchanged owner. Record SSE start cursors, MessageArea mounts and the real sync-status responses. Repeat while the owner appends a real streaming reply and while the receiver reconnects after a half-open stream. On the disposable owner perform an actual epoch-changing rewind and reopen the mirror. Also replace the receiver's mirrored log after its old-epoch SSE reader connects but before its opening freshness barrier clears; repeat with shorter, equal and longer replacement logs. Repeat on desktop at 1280x800 and the real /mobile/ shell at 390x844 with the flight recorder. Archive the throwaway chats and retain the exact candidate builds and private recordings. Do not simulate peer metadata, sync-status or replication for this row.",
+          "pass_when": "An unchanged warm return opens one positive-cursor reader, with zero sequence-zero replacements and no transcript remount through the freshness checkpoint. Stale content stays hidden, inaccessible and inert until caught up; the same mounted subtree is then revealed. New owner events and reconnects arrive without omissions or duplicate rows. A genuine epoch rewrite invalidates the old cached view and cursor, including a replacement committed after SSE connected while freshness was still waiting; it resets and reloads the replacement without requiring a manual reconnect. Seeded preview, mocked sync-status, unit tests and a green build alone do not pass this paired-worker row.",
+          "past_bug": "Opening freshness was treated as invalidation: every warm mirrored chat discarded its cached reducer, replayed from sequence zero and remounted the transcript."
+        }
+      ]
+    },
+    {
+      "name": "account-phones",
+      "intro": "Requires the account hub with hobbycoders-cloud PR #24 deployed, a new Android build containing stable installation identity and install proofs, a real phone, and disposable account-linked candidate workers. The dev instance has neither the hub nor Android sign-in.",
+      "rows": [
+        {
+          "id": "account-phones.sign-in-renewal-and-duplicate-cleanup",
+          "check": "Phone re-sign-in renews one entry, keeps running chats, and cleanup spares active installations",
+          "kind": "owner",
+          "needs": ["provider", "install", "device"],
+          "two_worker": true,
+          "how": "Use a throwaway account on two disposable candidate workers, the hub with hobbycoders-cloud PR #24 deployed, the new Android build and a real phone; never revoke production devices. Approve the phone on both workers and start a long-running chat. Expire only its account session, sign in again without explicit sign-out, reopen each worker and mint both native and WebView sessions. Compare device IDs, record IDs, approvals and chat controller hashes before and after. Repeat an exchange with a transient 5xx or network interruption on a disposable test connection, retry, and check the installation ID and per-worker proof did not change. Save old bearer tokens and socket principals privately and confirm they are refused after renewal. Repeat after explicit logout, owner revocation and denial; an older-app enrollment without a stored proof must return pending. For cleanup, upgrade disposable workers containing old weekly same-name/platform copies, the newest used phone, a second still-active installation and an unused newer enrollment. Keep the second installation authenticating or renewing while earlier hub revocations are in flight. Inspect account and worker records, then restart only the candidates to check the done marker. If the interleaving cannot be observed, leave that part unverified.",
+          "pass_when": "Repeated account sign-in keeps one row and approval per worker only for the same proof-matched, non-revoked installation. Transient exchange failures keep identity and proof; 401/409 may rotate them. The next session mint advances matching running-chat controller hashes without making old tokens or socket principals valid. Logout, owner revocation, denial and missing prior proof never carry chat continuity; revoked returns pending for manual approval, denied is refused. Cleanup revokes only stale copies, on the hub before locally, skips a candidate that became active or changed credentials after its snapshot, keeps concurrent and newer unused installs, and completes once. Evidence must come from the real phone and candidate workers, not fixtures.",
+          "past_bug": "Weekly account expiry minted duplicate approved phone entries; transient 5xx rotated identity, renewal lost running-chat controller continuity, and cleanup could revoke a newly active candidate from its stale snapshot."
+        }
+      ]
+    },
+    {
       "name": "approval-scopes",
       "intro": "Use two disposable candidate workers and throwaway agents and chats.",
       "rows": [
@@ -552,6 +584,19 @@
           ]
         },
         {
+          "id": "two-worker-smoke.machine-settings",
+          "check": "Manage a peer worker’s real machine settings without leaving this worker’s UI",
+          "kind": "browser",
+          "needs": [
+            "install",
+            "provider"
+          ],
+          "two_worker": true,
+          "how": "Use an isolated test network containing only two paired disposable candidate workers A and B, never production installs. This needs a real worker pair, machine-local CLI accounts, an app-managed Claude CLI on B and supported release channel controls, which the dev instance and fake peers cannot verify. Arrange distinguishable CLI versions or sign-in states on A and B. Record B’s own CLI version and CLI-produced Claude sign-in status (email/plan when available), GitHub CLI status, and both workers’ original always-on overrides, release channels and keep-installed flags; never capture tokens or credential files. From A’s Settings > Devices select B and compare those statuses without opening B’s UI. Run Update Claude CLI on B, wait for its job to finish, refresh, and compare B’s real CLI version again. From A change B’s always-on override and release channel, checking the saved state on B and that A stays unchanged; do not install an app release or bypass platform/downgrade checks. Stop only candidate B, then from A confirm an all-workers keep-installed action whose value differs from B’s recorded flag. Reconnect B and refresh both targets. Restore the original overrides, permitted channels and keep-installed flags. Record revision-tagged private evidence, not credentials.",
+          "pass_when": "A shows B’s actual Claude CLI version, Claude sign-in/email/plan and GitHub status, not A’s cached values. Update Claude CLI runs only on B and completes successfully (already current is valid); the refreshed version matches B’s CLI and A’s CLI is unchanged. The always-on override and supported release channel change on B only, with any restart requirement shown and all existing safety checks retained. The all-workers action reports A accepted and B offline, explicitly not queued, without treating the whole operation as failed. After reconnection B’s keep-installed flag is still its original value: the offline action was not replayed. No CLI login, logout or credential transfer occurs. A fake-peer test or the single-worker UI journey alone does not pass this row.",
+          "past_bug": "Machine-bound settings required switching to the target worker’s own UI; cross-worker action delivery was initially tested only with fake peers."
+        },
+        {
           "id": "two-worker-smoke.no-project-chat-move",
           "check": "A no-project chat moves to the other worker and back",
           "kind": "owner",
@@ -580,6 +625,39 @@
           "how": "On two paired workers that both reach each other over HTTPS, turn on network_peer_terminals in owner policy. On worker A open the Terminal panel, choose + > Target and check each peer row's reason (offline, older version, turned off on the peer, no HTTPS). Request approval for worker B, compare the six-character code with B's Terminal requests list, tick the match box and approve one shell on B while signed in there as the owner. Open it on A; run a command, resize the panel, reload the page and reconnect, then close the tab. Repeat with a revoke on B, a sign-out on B and a two-minute unapproved request. Attempt the routes with an API key and a preview link. Read both workers' app logs.",
           "pass_when": "Output and resize reach B's real shell, and reload reconnects to the same shell with its recent output. Close, revoke, sign-out and expiry end the shell on both workers and reopening needs a new approval. Unusable peers show their reason and cannot be requested. API keys and preview links are refused. Both workers log request, open and close, with no lease, credential or terminal text. Record the tested revision on #196.",
           "past_bug": "#196: peer terminals were only verified in-process; no real two-worker run had been recorded."
+        },
+        {
+          "id": "two-worker-smoke.phone-worker-connection",
+          "check": "Android prefers a reachable recent worker, fails over without bouncing, and authorizes a manually chosen keyless account worker",
+          "kind": "owner",
+          "needs": ["device", "install"],
+          "two_worker": true,
+          "how": "Use a real Android phone with the candidate APK and two disposable candidate workers A and B; never interrupt production workers. Authorize this phone on both, use B then A, close and relaunch the app: it must open A. Make A unreachable and relaunch: it must open B. Restore A, manually select it and repeat an outage after its chat opens, once during session bootstrap (Refresh chat) and once during a main-frame page load. Record the selected worker and notice. Bring A back while B is working: the phone must stay on B. Drop B within A's cooldown and confirm no immediate bounce to A; repeat outages and record retry timing/backoff. With neither reachable, confirm connection errors and native Workers still permit retrying or adding a worker. On a separate throwaway phone profile, sync the account while B is offline so its listing is saved without a phone key. Bring B online, make A unreachable and trigger reconnect: automatic failover must still skip keyless B. Restore A and open it again, then manually choose B in the chip, follow the native Workers authorization prompt, and tap B to run account enrollment. Confirm chat opens only after the phone key is saved; never inspect or publish the key. Restore the disposable candidates and remove the throwaway phone profile afterwards.",
+          "pass_when": "Startup opens the last-used reachable authorized worker, otherwise the next reachable authorized worker in recent-use order. Both bootstrap and main-frame failures switch automatically with one short offline/connected notice after the replacement loads. Healthy connections never move merely because A returns. Failed origins cannot immediately ping-pong; retries back off from 60 seconds up to five minutes across activity hand-offs. No reachable authorized worker leaves a usable connection/setup fallback. A keyless account listing is never an automatic target and cannot open chat before enrollment. Manual selection opens native Workers with an authorize-this-phone prompt; tapping the worker obtains its one-use enrollment ticket, saves this phone's per-worker key and opens chat. No credential appears in a URL or crosses to another worker. Record actual phone and candidate-worker evidence, not fixture-only results.",
+          "past_bug": "The phone required manual switching after an outage; a manually selected keyless account worker could only show a toast, leaving native enrollment unreachable."
+        },
+        {
+          "id": "two-worker-smoke.shared-settings-rollout",
+          "check": "Shared secrets, provider replacements and plugin intent survive independently keyed and mixed-version workers",
+          "kind": "owner",
+          "needs": [
+            "install",
+            "provider"
+          ],
+          "two_worker": true,
+          "how": "Use two fresh, independently keyed disposable workers A/B and a disposable relay C; never copy data keys or change production workers. Start A on the candidate and B on the pre-capability release. Create a throwaway secret-bearing connector (including OAuth client-secret leaves) and webhook automation on A. Exercise incremental and first-copy delivery, inspect ciphertext-at-rest markers on B without logging values, then upgrade B last. Without editing the records or forcing publication, use the connector and webhook on B. With both upgraded, replace a throwaway provider key on A and time its arrival on B; reject an invalid test key on B, replace it with a privately configured usable key on A, and make one tiny provider probe on B. Install a disposable user-scope marketplace plugin, uninstall it on A, and wait for B to remove it. Reinstall through an agent while pending, then approve it as owner and check B reinstalls. Remove a project-only copy on B while A retains a user copy. For rollout safety, withdraw B support by running the older release, then let C deliver previously unseen positive B presence through both ops and a snapshot; try B exchange, op and state GETs. Cache a ciphertext transfer for B, delay a plaintext-form op from C behind more than one batch of harmless ops, then release it and request state again before cache expiry. Restore the candidates, remove throwaway resources and record only revisions, opaque IDs, timings and success/ciphertext booleans, never credentials or decrypted payloads.",
+          "pass_when": "B never stores plaintext nested secrets while any member lacks support, and delayed or snapshotted presence cannot undo a direct withdrawal. Once every active worker has upgraded and confirmed support in normal peer contact, an automatic rescan makes the connector/OAuth and webhook secrets usable on the independently keyed peer without a record edit. A provider replacement reaches the connected peer within 10 seconds and clears the old local rejection, so its tiny probe succeeds. Shared uninstall propagates without stale-inventory resurrection; a pending agent install remains unshared until owner approval, which reinstalls it across workers; project-only removal leaves the peer user installation intact. Unservable signed tails produce one fresh ciphertext transfer with an advanced frontier before TTL, for both memory and disk caches, and catch-up completes rather than looping. Require real-worker receipts for the candidate; unit tests alone do not pass this row.",
+          "past_bug": "PR #847: foreign data-key ciphertext was unreadable, provider updates missed immediate publication, stale rejections survived replacements, plugin inventory revived removals, and rolling upgrades could leak plaintext or loop on cached state."
+        },
+        {
+          "id": "two-worker-smoke.transcript-op-retention",
+          "check": "A long-offline worker recovers complete history after duplicate sync-log cleanup",
+          "kind": "owner",
+          "needs": ["install"],
+          "two_worker": true,
+          "how": "Use three disposable candidate workers, never production data. Create a throwaway chat on A and sync its prefix to B and C. Disconnect C, append more events on A, and let B exchange again to acknowledge them. In the disposable databases only, age A's event operations and C's persisted sync_peers contact beyond the configured grace (default 30 days); restart only the candidates to clear in-memory observations, then run the scheduled maintenance pass. Keep A/B exchanging. Reconnect C through ordinary sync and wait for the automatic state copy and transcript backfill, then append another message. Repeat enrollment with a recipient requesting state-copy format 1. Read the retention metrics and compare canonical transcript ids, seqs and payloads before and after. Leave physical space reclamation to a separately approved maintenance window.",
+          "pass_when": "Aged duplicate operations are bounded by recent peer frontiers and stream-head anchors; recent unknown peers pin until contact or grace expiry, and signed revocation unpins immediately. Canonical transcript/Fluid rows are unchanged. B keeps receiving new events. C receives every transcript event exactly once without re-pairing or a manual copy, then resumes ordinary operation sync. Format-1 enrollment receives the full transcript. The disable flag prevents the new pruning pass. Real installed-worker timing and mixed-binary behavior need this receipt; the deterministic PostgreSQL/HTTP lab is not an installed-worker pass.",
+          "past_bug": "The latest-op exception kept one signed payload forever for every append-only transcript event."
         }
       ]
     },
@@ -1158,6 +1236,16 @@
           "past_bug": "#580 review: short server defaults could cancel every boot migration."
         },
         {
+          "id": "harness-basics.model-catalog-worker-sync",
+          "check": "Refreshing models shares discovery without losing concurrent curation",
+          "kind": "owner",
+          "needs": ["install"],
+          "two_worker": true,
+          "how": "Use two disposable candidate workers A and B paired through normal settings sync and a controlled local OpenAI-compatible endpoint (label it as a fixture). On B keep Settings > Providers > Models open. Add a model to the endpoint and press Refresh model list on A. Without reloading B, inspect the new model and Last refreshed time and worker. While a delayed refresh is running, change the curated selection on the other worker, then toggle a different model in the first panel. Also submit a PATCH with the previous provider expected_revision. Delete the disposable provider and inspect both workers after sync. Never use the installed workers' provider credentials or data.",
+          "pass_when": "B shows the newly discovered model unchecked, the refresh timestamp and A's name without reload or an upstream fetch on B. The concurrent selected models remain checked and a later toggle preserves them. The stale PATCH returns 409 without changing curation, the panel reloads current selection on conflict, and deleting the provider removes its model_catalog:<provider_id> setting on both workers. Real two-worker delivery remains unverified until this row is exercised.",
+          "past_bug": "Refresh models only returned a local catalog; concurrent resource subscribers rebuilt curation from an older provider revision and saved the stale whole selection."
+        },
+        {
           "id": "harness-basics.named-id-result-round-trip",
           "check": "Named scenario ID survives a real worker run and persisted result",
           "kind": "script",
@@ -1207,6 +1295,36 @@
           "past_bug": "The shared MCP builder assumed NativeLoop discovered plugin servers, but neither layer connected them."
         },
         {
+          "id": "harness-basics.network-pending-gap-buffer",
+          "check": "A delayed signed prefix buffers in bounded chunks and then catches up without lost or duplicate events",
+          "kind": "owner",
+          "needs": ["install"],
+          "two_worker": true,
+          "how": "Use only a disposable paired candidate installation and a fault-controlled test transport. Produce a 193-operation throwaway transcript through the candidate's normal write path. Hold its first signed operation, then deliver the remaining original envelopes to B in 64-operation chunks without modifying their signatures. Scope SQL receipts to B's buffering transactions, excluding health/presence traffic and BEGIN/COMMIT. Release the prefix, replay the chunks, and compare both transcripts and stream frontiers. Repeat with a bad-signature copy and with AI_SHUFFLE_PERF_BULK_PENDING=off on B, restarting only the candidate. Remove only the disposable test state; never intercept production traffic or publish private receipts.",
+          "pass_when": "The default path buffers each eligible 64-envelope chunk with at most five SQL statements and bounded transaction work while leaving its watermark below the gap. Releasing the prefix applies all 193 operations exactly once in source order; replay does not duplicate events, and the bad-signature copy is refused without losing neighboring valid operations. The off flag preserves the same final state through per-envelope buffering. Component SQL tests alone do not pass this real-transport fault row.",
+          "past_bug": "Buffering 192 operations above a missing prefix used 1,164 SQL calls even though ordered apply was already chunked."
+        },
+        {
+          "id": "harness-basics.network-preference-publication",
+          "check": "Committed owner preference writes and deletes publish promptly through their normal API paths",
+          "kind": "owner",
+          "needs": ["install"],
+          "two_worker": true,
+          "how": "On two disposable paired candidates, collect publication/receive timing and operation counts without preference contents. Through A's normal authenticated preference API, change a throwaway shared owner preference with PUT, then exercise the beacon POST path and DELETE. Through each chat-instructions and security-instructions DELETE alias, reset customized instructions and repeat the reset of the now-missing key. Confirm B's owner read/UI follows each committed preference revision and instruction reset before periodic reconciliation; repeat from B. Submit a stale-revision update, an insert-if-missing no-op and a missing-key delete, and check they create no publication. Check a machine-local system-setting control stays local. Repeat the preference change with AI_SHUFFLE_PERF_RESOURCE_WAKE=off on A, restarting only that candidate, then restore the default. Never mutate installed workers or publish private values.",
+          "pass_when": "Each real preference write, existing-row delete or instruction reset creates one targeted publication wake and exactly one signed operation, which the peer applies without a forced full scan. Repeating either instruction-reset alias after its key is absent creates no wake or tombstone. Both owner views use the same normalized principal; optimistic conflicts and no-ops produce no extra operation, and local system-setting keys do not leak. The off flag restores periodic-fallback publication without breaking ordinary system-setting hooks. Real paired HTTP receipts are required; producing-path component tests alone do not pass this row.",
+          "past_bug": "Preference writers notified the local UI but skipped the network resource boundary, leaving peers dependent on periodic scans."
+        },
+        {
+          "id": "harness-basics.network-scanner-urgent-wakes",
+          "check": "Urgent publication wakes interrupt quiet rest without one scan per write or backlog starvation",
+          "kind": "owner",
+          "needs": ["install"],
+          "two_worker": true,
+          "how": "On two disposable paired candidates, collect monotonic source-commit and scan-start receipts without recording payloads. Let candidate A's scanner become quiet, then edit a throwaway agent through its normal authenticated writer; repeat with a rapid burst of agent edits and with an owned chat that has transcript backlog. Watch the final agent state and new chat events arrive on B. Keep writes arriving across a full-reconciliation deadline and confirm the full pass still runs. Repeat with AI_SHUFFLE_PERF_SCAN_WAKE=off on A, restarting only that disposable candidate, then restore the default. Never change production workers or publish private receipts.",
+          "pass_when": "With the default flag, the urgent targeted pass starts after one fixed approximately 100 ms coalescing window instead of waiting out the two-second idle rest; later writes do not extend that window or create a pass per write. B gets the final shared state and ordered transcript, backlog makes progress, and periodic full reconciliation still occurs during repeated wakes. The off flag restores the legacy rest. Real paired-transport receipts are required; fake-clock tests alone do not pass this row.",
+          "past_bug": "The scanner slept for two seconds before inspecting an already-set publication wake."
+        },
+        {
           "id": "harness-basics.neutral-owner-service-aliases",
           "check": "Neutral owner routes preserve installed-client aliases and stored history",
           "kind": "owner",
@@ -1234,6 +1352,16 @@
           "past_bug": "#556: account detection did not feed ordinary owner memory."
         },
         {
+          "id": "harness-basics.perf-remote-open-rig",
+          "check": "The read-only performance rig measures a genuinely remote-owned chat",
+          "kind": "owner",
+          "needs": ["install"],
+          "two_worker": true,
+          "how": "On two paired disposable candidate workers, create a throwaway chat owned by the peer and a small chat owned by the viewing worker. Verify ownership and peer connectivity first. Supply only their ids to scripts/perf/chat-journeys.mjs --journeys remote --remote ID --small ID --runs 1 --platform both --out OUTSIDE_CHECKOUT; provide approved preview access only through PERF_ACCESS_URL in the environment. Keep raw private receipts outside the checkout. Main currently has no paired two-worker dev fixture, so a one-worker seeded chat cannot pass this row. Do not send prompts through this read-only rig, edit settings, restart production workers or export owner transcripts.",
+          "pass_when": "Desktop 1280x800 and the actual /mobile/ shell at 390x844 with 4x CPU each produce a cold-open and cached-return sample with p75/min/max, SSE bytes, exact from_seq=0 replay count, API requests, long-task time and nested live element count. Record every replay, including any known replacement replay associated with #813; the rig must expose it rather than hide it. Access URLs, cookies, worker addresses and session ids are absent from output artifacts. Both targets retain their original ownership and transcript; no message is sent. A local-id substitution, only unit tests or an unpaired preview is not remote verification.",
+          "past_bug": "Phase-1 remote-open measurement lived in a private scratch rig; an unpaired preview could exercise the runner without proving the remote mirror/open path."
+        },
+        {
           "id": "harness-basics.pg-fast-shutdown-pressure",
           "check": "PostgreSQL finishes a dirty FAST shutdown under bounded write pressure",
           "kind": "owner",
@@ -1252,6 +1380,33 @@
           "past_bug": "#580: a 2s acquisition timeout became a failed worker ResultMessage."
         },
         {
+          "id": "harness-basics.pr840-runtime-pin-follow",
+          "check": "Existing chats and automation pins follow the newly active saved account",
+          "kind": "owner",
+          "needs": ["provider", "install"],
+          "how": "On a disposable candidate worker with two real saved accounts A and B in one provider/kind slot, select A, start a throwaway chat and a paused automation pinned to A, and give a Task worker a provider-specific model assignment different from its native-Claude assignment. Send a short turn, activate B in Settings > Providers, and send a follow-up in the same chat and one automation run. Dispatch the Task worker. Inspect the serving account and usage ledger without exposing credentials. Repeat a fresh chat with no model/provider binding. Switch back and archive the throwaway sessions. Real credential acceptance and per-account usage cannot be proved by the dev instance's fake provider or its public-response Settings fixture.",
+          "pass_when": "Each slot has exactly one active account. The existing chat and automation keep their model and original durable pin, but the next turn authenticates and books usage to B. Task keeps the original provider's model-map assignment, including a first default-provider turn. Turning B off does not silently select A. No provider or model fallback occurs.",
+          "past_bug": "PR #840: first default turns lost the Task pin, and a late account switch sent B's credentials while usage settled against A."
+        },
+        {
+          "id": "harness-basics.pr840-second-subscription-sign-in",
+          "check": "A second ChatGPT or SuperGrok sign-in saves a distinct account and selects its slot",
+          "kind": "owner",
+          "needs": ["provider", "install"],
+          "how": "On a disposable candidate worker, use Settings > Providers to sign in to ChatGPT account A, then Add another subscription and complete sign-in as a different ChatGPT account B. Repeat for two SuperGrok accounts. Use private input/sign-in controls; never put tokens or codes in evidence. Reopen Providers, activate each saved sibling in turn, and send a short follow-up in a throwaway chat originally pinned to A. Cancel an additional sign-in and confirm the saved accounts remain. Real browser/device OAuth and provider account identity require real accounts; the seeded Settings journey covers only switching public account rows, not enrollment.",
+          "pass_when": "Both distinct accounts remain saved under each subscription slot; only the newly activated sibling is on and marked Active. Switching subscriptions does not disable an API-key account in the other kind. A follow-up uses the selected subscription with no history loss, duplicate saved row or overwritten sibling login. Cancelled enrollment leaves the prior selection and credentials intact. Claude Code's single existing sign-in is unchanged.",
+          "past_bug": "PR #840 added saved ChatGPT/SuperGrok accounts without real-worker second-sign-in acceptance coverage."
+        },
+        {
+          "id": "harness-basics.pr844-update-snapshot-timing",
+          "check": "Container source updates expose snapshot and child-spawn timing without changing rollback",
+          "kind": "owner",
+          "needs": ["install"],
+          "how": "Use a disposable candidate container with only synthetic data, never a live worker or database. Activate a staged source update and capture the supervisor log across old-app stop and replacement startup. Compare source_database_bytes and copied_database_bytes with read-only pg_database_size queries. Repeat with a candidate that fails after a schema/data migration and verify rollback restores the exact pre-update rows and schema. A dev-instance UI journey cannot activate this container-supervisor update path; the producing-path lab and unit tests cover it separately.",
+          "pass_when": "Snapshot start and one terminal complete/failed record bracket copying, with total seconds, cumulative copy seconds, attempts and database-file bytes (not device-write or WAL bytes). Successful copy precedes child-spawn start and PID/elapsed logging. Failed copies never claim completed bytes. No arguments, environments or connection details appear in the new records. FILE_COPY, process deadlines and rollback protection remain unchanged, and failed-update rollback restores the synthetic data exactly. The next installed-container update remains unverified until these real producing-path receipts exist.",
+          "past_bug": "An uninstrumented shutdown-to-startup gap made database-copy time indistinguishable from application startup."
+        },
+        {
           "id": "harness-basics.rewind-file-restore-retired",
           "check": "Rewind never offers file restore and old agents lose the retired flag",
           "kind": "owner",
@@ -1259,6 +1414,33 @@
           "how": "On a disposable candidate worker, store a disposable agent row with enable_file_checkpointing true the way an older build did, start a chat on it, send two prompts and open Rewind on the first. Then call the rewind execute endpoint for a second disposable chat with restore_files true. Edit and save the disposable agent, then read its stored config. Archive only the disposable chats and agent.",
           "pass_when": "The rewind dialog shows only the confirm text and Cancel/Rewind, with no Chat & Code option. The API call rewinds the chat and its warning says file restore isn't supported, not that a checkpoint is missing. The saved agent row no longer carries enable_file_checkpointing and every other field is unchanged.",
           "past_bug": "An old agent flag made the rewind dialog offer a file restore the backend always refused, with a warning that blamed a missing checkpoint."
+        },
+        {
+          "id": "harness-basics.source-update-dependency-reuse",
+          "check": "Docker source revisions reuse only complete compatible dependencies and run current Fluid",
+          "kind": "owner",
+          "needs": ["install"],
+          "how": "Use only a disposable candidate container, synthetic data and an ephemeral signed-source acceptance feed; this cannot be proved by a normal dev preview. Stage two source revisions with identical Python/Node dependency closures, changing a harmless Fluid probe in the second. Record third-party pip downloads/install commands and npm ci by package, excluding the separately installed current Fluid code. Import the changed Fluid probe in a fresh interpreter. Change one Python lock, then one Node package lock in separate signed fixtures. Interrupt only the candidate during an incomplete dependency installation and retry. Under a valid completion record, delete an installed Python module and a Node entry point, then make same-size edits to critical code while restoring its modification time; also add damaged bytecode. Warm a nested Python module's bytecode, then change its source while preserving size, inode and mtime. Confirm ctime changes, the old probe can still read the warmed value, and the fresh candidate rebuilds instead of importing the edited source. Confirm only the affected dependency installation is rebuilt at a new path and the retained tree is untouched. Change the signed optional-dependency installer, installation recipe and selected pip/ensurepip identity in separate disposable fixtures. Check fresh imports in both current and rollback revisions after reuse. Stage enough revisions to exercise cleanup, then restart each retained revision. Repeat once with AI_SHUFFLE_PERF_DOCKER_DEPENDENCY_REUSE=0. Never stop a production updater or use production signing keys.",
+          "pass_when": "The second identical-closure revision makes zero third-party pip downloads/installs and zero npm ci calls, yet executes the new Fluid code. Each lock change misses only its relevant dependency cache. Interrupted/partial environments are never reused; active and retained revisions remain startable at the original venv paths, and no more than two unused complete environments per package remain. The rollback flag restores per-revision dependency preparation without weakening signatures or runtime checks. These are real-candidate acceptance checks, not a pass from the offline wheel lab.",
+          "past_bug": "Every container source update created a fresh Python environment and reinstalled byte-identical dependencies, while reusing an entire old app environment would run stale Fluid code."
+        },
+        {
+          "id": "harness-basics.source-update-desktop-wake-build",
+          "check": "Installed desktop builds reuse unchanged outputs and consume web update commands once",
+          "kind": "owner",
+          "needs": ["device", "install"],
+          "how": "Use only disposable installed desktop and older-worker candidates, synthetic data and signed acceptance fixtures; this needs the installed control connection rather than a normal preview. Stage two revisions changing app/Fluid only, then separate revisions changing a tool source, a browser build script and one package lock. Record build/npm subprocesses and run the new app/Fluid code. From the real web Updates action just after an authenticated bridge heartbeat, record command enqueue/consume receipts without waiting for another timer tick; duplicate a wake and let another heartbeat pass. Expire a queued request, disconnect/reconnect the candidate, and stop/restart only its app while a wake request is held. Test old-worker 404 fallback and each of AI_SHUFFLE_PERF_DESKTOP_BUILD_REUSE=0 and AI_SHUFFLE_PERF_DESKTOP_UPDATE_PUSH=0. Refuse invalid-token, wrong-listener and nonlocal wake access. Never upgrade or stop production workers.",
+          "pass_when": "Unchanged packages run zero builds and npm ci while current app/Fluid code runs. A source edit rebuilds only its package; a script-only edit does not reinstall dependencies, and a lock change installs only its package. The actual web command is consumed promptly and executes exactly once across duplicate hints/heartbeats; expired commands never run. A held request closes on disconnect, stop or restart, and never leaks another waiter. Old workers and the push rollback switch keep the unchanged 30-second polling path; the build rollback switch recompiles normally. Authentication, command expiry and atomic consumption stay enforced. Fake-clock or socket unit tests alone do not pass this installed-worker row.",
+          "past_bug": "Source updates rebuilt unchanged tools/browser/desktop packages and a build-script-only manifest edit invalidated npm reuse; web Update commands could wait for the next 30-second control poll."
+        },
+        {
+          "id": "harness-basics.source-update-prebuilt-ui",
+          "check": "Signed desktop and phone UI bundles skip local compilation and fail safely",
+          "kind": "owner",
+          "needs": ["device", "install"],
+          "how": "Use a disposable desktop install and candidate container with synthetic data and an ephemeral acceptance signing key; publication and an installed-launcher handover cannot be proved by a dev preview. Upgrade the desktop candidate from an older launcher to launcher 9, exercising the documented launcher-swap acceptance flow, then offer another signed source revision with its matching CI-produced desktop/phone UI asset. Record frontend npm ci/build invocations and the served revision/version stamp on / at 1280x800 and /mobile/ at 390x844. Repeat with an unreachable asset, corrupt asset bytes and a validly signed descriptor naming a wrong revision/version/tree; keep the independent source signature valid for those UI-fallback cases. Separately offer an invalid source signature. Repeat with AI_SHUFFLE_PERF_PREBUILT_UI=0 and with an older updater that ignores the optional UI field. Never publish test keys or update a production install.",
+          "pass_when": "A valid bundle skips every local frontend install/build and both actual shells serve the matching new revision/version. Invalid or missing UI falls back to verified-source compilation without changing runtime, first-boot or rollback checks; an invalid source signature still refuses the source update. The flag and older updater build locally. The installed swap, profile preservation, restart confirmation and rollback acceptance checks pass before release; an in-memory download fixture or preview alone does not pass this row.",
+          "past_bug": "Each source update reinstalled frontend dependencies and rebuilt identical desktop/phone UI; sharing unsigned or mismatched build output would risk stale or untrusted application assets."
         },
         {
           "id": "harness-basics.swarm-restart-settle",

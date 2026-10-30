@@ -119,6 +119,8 @@ export interface ModelProvider {
 	context_window: number | null;
 	max_output_tokens: number | null;
 	enabled: boolean;
+	/** One active account per built-in provider and kind; gateways are independent. */
+	slot?: 'openai:key' | 'openai:subscription' | 'grok:key' | 'grok:subscription' | 'openrouter:key' | null;
 	// ----- Codex / ChatGPT-subscription OAuth surface -----
 	// The secret access/refresh blobs are NEVER returned — only the boolean
 	// `codex_*_token_set` flags. The non-secret Codex fields (`auth_mode`,
@@ -126,9 +128,6 @@ export interface ModelProvider {
 	// `app/api/model_providers.py::ModelProviderResponse` — `auth_mode` and
 	// `codex_account_id` are `Optional[str] = None`; the three booleans default
 	// to `false` in the response model, so they are always present on the wire.
-	/** Non-secret credit tracking binding; managed only by the billing endpoints. */
-	openai_billing_org_id?: string | null;
-	openai_billing_instance_id?: string | null;
 	auth_mode?: string | null;
 	codex_account_id?: string | null;
 	needs_reauth?: boolean;
@@ -140,6 +139,10 @@ export interface ModelProvider {
 	account_plan?: string | null;
 	created_at: string | null;
 	updated_at: string | null;
+	/** Fingerprint of the current endpoint/credential, not curation or token ciphertext. */
+	catalog_binding?: string | null;
+	/** Opaque generation used to reject stale whole-selection saves. */
+	revision?: string | null;
 }
 
 export interface ModelProvidersResponse {
@@ -165,7 +168,7 @@ export interface ModelProviderCreate {
 }
 
 /** Partial update — every field optional. Blank/omitted `auth_token` = unchanged. */
-export type ModelProviderUpdate = Partial<ModelProviderCreate>;
+export type ModelProviderUpdate = Partial<ModelProviderCreate> & { expected_revision?: string | null };
 
 export async function listModelProviders(): Promise<ModelProvidersResponse> {
 	return api.get('/model-providers');
@@ -186,6 +189,11 @@ export async function deleteModelProvider(id: string): Promise<{ success: boolea
 	return api.delete<{ success: boolean }>(`/model-providers/${id}`);
 }
 
+/** Select this account. Refetch the list: the response does not include disabled siblings. */
+export async function activateModelProvider(id: string): Promise<ModelProvider> {
+	return api.post(`/model-providers/${id}/activate`);
+}
+
 /** Flip a provider's `enabled` flag; returns the updated row. */
 export async function toggleModelProvider(id: string): Promise<ModelProvider> {
 	return api.post(`/model-providers/${id}/toggle`);
@@ -198,7 +206,8 @@ export async function toggleModelProvider(id: string): Promise<ModelProvider> {
  * the provider's OpenAI-compatible `/models`). `"preset"` remains in the union
  * for older payloads. The caller
  * check-selects from `models` and persists the curated subset via
- * `updateModelProvider(id, { models })` — this call itself persists nothing.
+ * `updateModelProvider(id, { models, expected_revision })`. Discovery saves a
+ * separate shared catalog, never a selection.
  */
 export interface FetchModelsResult {
 	source: 'preset' | 'upstream';
@@ -211,6 +220,19 @@ export interface FetchModelsResult {
 	/** Ids from the provider's built-in chat roster that `models` holds, in
 	 *  roster order. Empty for a provider with no roster; absent on older payloads. */
 	recommended?: string[];
+	/** Credential binding that produced this discovery, including unshared live results. */
+	binding?: string | null;
+	/** Attribution of a successfully shared refresh; null when sharing was skipped. */
+	fetched_at?: string | null;
+	fetched_by_device?: string | null;
+	fetched_by_name?: string | null;
+}
+
+export type ModelCatalogSnapshot = FetchModelsResult;
+
+/** Read the last shared discovery snapshot without an upstream request. */
+export async function getModelCatalog(id: string): Promise<ModelCatalogSnapshot | null> {
+	return api.get(`/model-providers/${id}/model-catalog`);
 }
 
 export async function fetchProviderModels(id: string): Promise<FetchModelsResult> {

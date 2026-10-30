@@ -74,7 +74,7 @@ next update on, the launcher makes the restore point again. Before a release,
 run the acceptance run below against the oldest installer whose launcher meets
 `start` (the newest stable installer is enough while `start` is 4).
 
-Current version is **8**, with **minimum 4** and **start 4** (raised from 3 for 1.1.0). It starts
+Current version is **9**, with **minimum 4** and **start 4** (raised from 3 for 1.1.0). Launcher 9 adds verified desktop+phone UI bundle staging with local-build fallback; see its audit below. Like launcher 8, it starts
 the managed PostgreSQL server with `statement_timeout=30s`, `lock_timeout=5s` and
 `idle_in_transaction_session_timeout=30s` (#591), and its Windows process-identity
 probe no longer compiles a helper with `Add-Type` (#597). It keeps launcher 7's
@@ -119,6 +119,10 @@ packs none of them, and the Electron change is the `linux-electron` group.
 `installed-entry.ts`, `prepareRollback` and `ColdClusterCopy` are untouched. The
 installed-factory test runs against launcher 8 and still rejects same-size
 snapshot corruption, so launcher 8 is added to `RESTORE_POINT_VALIDATING_LAUNCHERS`.
+
+Launcher 9 audit: signed UI bundle download/staging and the shared build/archive helpers are in the installed import closure, so the version is raised without raising either floor. Against launcher 8, all of `installed-entry.ts` and `database-restore.ts` are byte-for-byte unchanged. Of 63 `SourceUpdates` methods, only `stage` changes; `prepareRollback`, `requireRestorePoint`, `recoverRollback` and `select` are byte-for-byte unchanged. The source-tree digest function moves to the shared archive module without changing its bytes or ordering. The installed-factory same-size-corruption test and the ready-journal byte-count test exercise the unchanged full validator for launcher 9. Version 10 remains explicitly untrusted; platform, handoff and migration-risk rejection rules are unchanged. This test audit is not a Windows installed-app acceptance run.
+
+The content-keyed tools/browser/desktop build reuse and cancellable update-wake control hint also ship in the same, still-unreleased launcher 9. Against the prebuilt-UI branch, the entire `installed-entry.ts`, `database-restore.ts`, `source-updates.ts` and `source-archive.ts` files remain byte-for-byte unchanged, so this adds no factory/journal exception. The existing factory corruption and version-10 rejection tests are retained.
 
 The acceptance run is `desktop-installer.yml` with `launcher_acceptance`
 checked and `release_tag` set to a published installer with an older launcher.

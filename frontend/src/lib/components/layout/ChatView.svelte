@@ -88,8 +88,10 @@
 	// A mirrored chat (owned by another worker) is checked against its owner
 	// before it is shown, whatever the layout: a chat opened from the hero keeps
 	// the hero while it loads, so the check must not wait for the message
-	// column to mount MirrorSyncGate. Its first catch-up reloads the transcript
-	// (#2227). An unknown owner reads as mirrored, as the gate always did.
+	// column to mount MirrorSyncGate. Its first catch-up reveals the existing
+	// live transcript, not a new replay. A conversation composed here has no old
+	// transcript to reveal: keep its local echo and live feed through that checkpoint.
+	// An unknown owner reads as mirrored, as the gate always did.
 	const mirrorRemote = $derived(
 		$sessions.find(s => s.id === $activeSession.sessionId)?.is_remote ?? $activeSession.isRemote ?? true
 	);
@@ -99,7 +101,8 @@
 	const mirrorSync = createMirrorSync(() => ({
 		sessionId: $activeSession.sessionId,
 		remote: mirrorRemote,
-		onCaughtUp: () => activeSession.reloadSession()
+		createdFromComposer: $activeSession.createdFromComposer,
+		onCaughtUp: () => activeSession.reloadSession(false, 'mirror-caught-up')
 	}));
 	// The centred hero layout (new or cleared chat) versus the message column.
 	// A load keeps the layout the view already had until its outcome is known,

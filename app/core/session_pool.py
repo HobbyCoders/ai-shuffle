@@ -1846,6 +1846,10 @@ def reconnect_option_names(state: SessionState, new_options: AgentOptions) -> li
         new_options, "aih_provider_id", None
     ):
         changed.append("aih_provider_id")
+    if getattr(old, "aih_provider_pin_id", None) != getattr(new_options, "aih_provider_pin_id", None):
+        # Same active account, different original binding: rebuild Task's model
+        # assignments too, rather than reusing the previous chat's map key.
+        changed.append("aih_provider_pin_id")
 
     # Context limits are fixed into both delegated CLI env and native-loop
     # compaction state at connect time, so a picker change must rebuild the leg.

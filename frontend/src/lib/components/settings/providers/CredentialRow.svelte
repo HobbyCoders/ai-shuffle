@@ -1,15 +1,14 @@
 <script lang="ts">
 	/**
 	 * One connected credential under its provider, on the connector line. The
-	 * line segment into a credential that is on is teal (`--primary`); every
-	 * row but Claude's (and drafts) has its own switch.
+	 * line segment into a credential that is on is teal (`--primary`). Built-in
+	 * switches select a provider/kind slot; saved Claude keys have a Use action.
 	 */
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { moveListFocus } from '../rows/ListItem.svelte';
 	import StatusDot from '../rows/StatusDot.svelte';
-	import Switch from '../rows/Switch.svelte';
+	import CredentialControl from './CredentialControl.svelte';
 	import type { CredentialView } from './providers-model';
-	import { setCredentialEnabled } from './provider-actions';
 
 	interface Props {
 		credential: CredentialView;
@@ -50,18 +49,13 @@
 		}}
 		onkeydown={moveListFocus}
 	>
-		<span class="nm">{credential.name}</span>
+		<span class="name-line"><span class="nm">{credential.name}</span>{#if credential.active && !credential.account}<span class="active">Active</span>{/if}</span>
 		<span class="sm">{credential.summary}</span>
 	</button>
 	{#if credential.switchable}
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<span class="sw" onclick={(e) => e.stopPropagation()}>
-			<Switch
-				size="sm"
-				checked={credential.enabled}
-				label="{credential.name} on"
-				onchange={(v) => setCredentialEnabled(credential, v)}
-			/>
+<CredentialControl {credential} size="sm" />
 		</span>
 	{:else}
 		<span></span>
@@ -142,6 +136,8 @@
 	.main:focus-visible {
 		outline-offset: 2px;
 	}
+	.name-line { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+	.active { color: var(--st-primary); font-size: 10px; font-weight: 600; flex: none; }
 	.nm {
 		font-size: 13.5px;
 		font-weight: 500;

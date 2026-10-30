@@ -3,10 +3,11 @@ import { createHash, randomUUID, verify } from 'node:crypto';
 import { trustedKeys } from './trusted-keys';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { extractSource, type ExtractedFile } from './source-archive';
+import { extractSource, treeDigest } from './source-archive';
 import { publicSourceFetch, SOURCE_ORIGIN } from './source-auth';
 import { buildSource, removeSourceDirectory, type BuiltSource } from './source-build';
 import { prepareNativeRuntime } from './source-runtime';
+import { prepareUIBundle, type UIBundle } from './source-ui-bundle';
 import { durableJson, syncDirectory, type RollbackDatabase } from './database-restore';
 
 const REVISION = /^[a-f0-9]{40}$/;
@@ -38,6 +39,7 @@ export interface SourceManifest {
   format: 2; revision: string; sequence: number; sha256: string; size: number;
   /** Added after format 2 shipped; older signed manifests (and installed release.json files) lack them. */
   channel?: UpdateChannel | 'edge'; version?: string; notes?: string; tree?: string;
+  ui?: UIBundle;
   /**
    * launcher: launchers below it are replaced after the release's first healthy start (#1821 D5).
    * start: the oldest installed launcher (app.asar) that can start the release at all, before any
@@ -144,13 +146,7 @@ export function requireRelease(manifest: SourceManifest, channel: UpdateChannel)
  * "path NUL sha256 LF" line per regular file below the archive root, sorted by
  * path. Python compares str by code point, which UTF-8 byte order preserves.
  */
-export function treeDigest(files: ExtractedFile[]): string {
-  const sorted = files.map(([file, digest]) => [Buffer.from(file, 'utf8'), digest] as const)
-    .sort((a, b) => Buffer.compare(a[0], b[0]) || (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
-  const hash = createHash('sha256');
-  for (const [file, digest] of sorted) hash.update(Buffer.concat([file, Buffer.from(`\0${digest}\n`, 'utf8')]));
-  return hash.digest('hex');
-}
+export { treeDigest } from './source-archive';
 
 interface RestoreJournal {
   schemaVersion: 1;
@@ -779,7 +775,8 @@ export class SourceUpdates {
       if (this.options.build) built = await this.options.build(source, stage, manifest.revision, message);
       else {
         const native = await prepareNativeRuntime(source, this.options.root, this.options.bootstrapNode, message);
-        built = { ...await buildSource({ source, server: path.join(stage, 'server'), cache: path.join(this.options.root, 'dependencies', native.key.slice(0, 24)), sharedCache: path.join(this.options.root, 'dependencies'), runtime: native.runtime, revision: manifest.revision, log: path.join(this.options.root, 'build.log'), progress: message }), runtimeKey: native.key, layout: 2 };
+        const prebuiltUI = await prepareUIBundle(stage, manifest, this.options.fetch);
+        built = { ...await buildSource({ source, server: path.join(stage, 'server'), cache: path.join(this.options.root, 'dependencies', native.key.slice(0, 24)), sharedCache: path.join(this.options.root, 'dependencies'), runtime: native.runtime, revision: manifest.revision, version: manifest.version, prebuiltUI, log: path.join(this.options.root, 'build.log'), progress: message }), runtimeKey: native.key, layout: 2 };
       }
       await fs.writeFile(path.join(stage, 'build.json'), JSON.stringify(built));
       await fs.writeFile(path.join(stage, 'release.json'), signed);

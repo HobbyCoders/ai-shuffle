@@ -14,7 +14,7 @@ ENDPOINT = "https://api.x.ai/v1/images/generations"
 async def subscription_kind(provider_id):
     if not provider_id:
         return None
-    row = await run_sync(database.get_model_provider, provider_id, include_token=False)
+    row = await run_sync(database.resolve_model_provider, provider_id, include_token=False)
     if row is None:
         raise ProviderCredentialError("The session's provider no longer exists.")
     from app.core.provider.fluid_credentials import _is_codex_subscription
@@ -26,9 +26,10 @@ async def subscription_kind(provider_id):
 
 
 async def resolve_credential(provider_id):
-    """Shared image/video resolver: no paid API keys or environment fallback."""
+    """Reload the bound account, never an active sibling, including after a 401."""
     from app.core.provider.fluid_credentials import _load_grok_access_token
-    if await subscription_kind(provider_id) != "grok":
+    row = await run_sync(database.get_model_provider, provider_id, include_token=False)
+    if row is None or not _is_grok_subscription(row):
         raise ProviderCredentialError("A connected SuperGrok subscription is required.")
     return await _load_grok_access_token(provider_id)
 
@@ -48,6 +49,8 @@ class SubscriptionRequests:
         from app.core import xai_token_refresh
 
         if self.token is None:
+            row = await run_sync(database.resolve_model_provider, self.provider_id)
+            self.provider_id = (row or {}).get("id") or self.provider_id
             self.token = await resolve_credential(self.provider_id)
         for attempt in range(2):
             headers = {"Authorization": "Bearer " + self.token, "X-XAI-Token-Auth": "xai-grok-cli"}

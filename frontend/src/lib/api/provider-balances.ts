@@ -29,4 +29,3 @@ export const removeProviderBalance = async (id: string): Promise<ProviderBalance
  await api.delete(balancePath(id));
  return getProviderBalance(id);
 };
-export const startPlatformSignIn = (id: string): Promise<{ ticket: string }> => api.post(`${balancePath(id)}/sign-in`, {});

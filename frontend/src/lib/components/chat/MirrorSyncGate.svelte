@@ -8,9 +8,9 @@
 		remote?: boolean;
 		deviceName?: string | null;
 		/** Fires ONCE per opened session: its opening checkpoint is materialized.
-		 *  Later drains of a live backlog must not reload the transcript —
-		 *  the live SSE feed already delivers every replicated event, and an
-		 *  explicit log rewrite reaches the feed as its own `reset` (#2227).
+		 *  Freshness reveals the live transcript, without discarding its reducer
+		 *  or cursor. The live SSE feed delivers replicated events; a real log
+		 *  rewrite reaches it independently as `reset`.
 		 *  Unused when `sync` is given (its owner wired it). */
 		onCaughtUp?: () => void;
 		graceMs?: number;
@@ -28,6 +28,7 @@
 		onCaughtUp: () => onCaughtUp?.(),
 	}));
 	const waiting = $derived(sync.waiting);
+	const keepMounted = import.meta.env.VITE_PERF_KEEP_MIRROR_CACHE !== '0';
 	const syncState = $derived(sync.syncState);
 	const pending = $derived(sync.pending);
 	const behind = $derived(sync.behind);
@@ -55,11 +56,17 @@
 			{/if}
 		</div>
 	{/if}
-	{@render children()}
+{/if}
+<!-- Freshness withholds stale state, not the component tree or its geometry. -->
+{#if keepMounted || !waiting}
+	<div class="mirror-content" inert={waiting} aria-hidden={waiting || undefined} style:visibility={waiting ? 'hidden' : undefined}>
+		{@render children()}
+	</div>
 {/if}
 
 <style>
-	.mirror-sync { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: calc(2rem + var(--chat-status-offset, 0px)) 1.25rem 2rem; text-align: center; color: var(--muted-foreground); }
+	.mirror-content { display: contents; }
+	.mirror-sync { position: absolute; inset: 0; z-index: 1; overflow: auto; display: flex; flex-direction: column; align-items: center; gap: 12px; padding: calc(2rem + var(--chat-status-offset, 0px)) 1.25rem 2rem; text-align: center; color: var(--muted-foreground); }
 	.mirror-sync strong { color: var(--foreground); font-size: 1rem; }
 	.mirror-sync p { margin: 0; max-width: 42ch; font-size: 0.875rem; }
 	/* Positioned against ChatView's .chat-column; spans the column top; empty when current.

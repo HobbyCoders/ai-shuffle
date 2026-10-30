@@ -155,6 +155,19 @@ def app_id(provider_id: Optional[str], model_id: Optional[str]) -> Optional[str]
     return text
 
 
+def active_account_model(model: str) -> str:
+    """Follow only the account of a composite, never change its model id."""
+    from app.core.query_options import decode_provider_model
+    from app.db.model_providers import resolve_model_provider
+
+    decoded = decode_provider_model(model)
+    if decoded:
+        row = resolve_model_provider(decoded[0])
+        if row:
+            return f"prov:{row['id']}:{decoded[1]}"
+    return model
+
+
 def canonical(value: str, leg: Optional[str] = None) -> str:
     """``value`` in app-format, without asking whether it runs here.
 
@@ -1080,11 +1093,11 @@ def settings_for_model(model: str, provider_id: Optional[str], *, effort: Any = 
     from app.core.provider.harness_adapter import _decide_provider_kind
     from app.core.provider.types import SessionOptions
     from app.core.query_options import decode_provider_model
-    from app.db.model_providers import get_model_provider
+    from app.db.model_providers import resolve_model_provider
 
     decoded = decode_provider_model(model)
     bare = decoded[1] if decoded else model
-    provider = get_model_provider(provider_id) if provider_id else None
+    provider = resolve_model_provider(provider_id) if provider_id else None
     route = _decide_provider_kind(SessionOptions(
         model=bare, extra={"provider_id": provider_id} if provider_id else {}))
     window = worker_context_window(context_window, provider_id, bare)

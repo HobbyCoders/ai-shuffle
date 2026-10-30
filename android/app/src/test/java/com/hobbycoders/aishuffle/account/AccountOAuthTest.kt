@@ -3,6 +3,7 @@ package com.hobbycoders.aishuffle.account
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import kotlinx.coroutines.runBlocking
 import net.openid.appauth.AuthorizationException
 import net.openid.appauth.AuthorizationRequest
 import net.openid.appauth.AuthorizationResponse
@@ -15,6 +16,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import java.io.IOException
 import java.util.UUID
 
 @RunWith(RobolectricTestRunner::class)
@@ -37,6 +39,39 @@ class AccountOAuthTest {
             client, "code", Uri.parse(redirect)).setNonce(nonce).setState("expected-state").build()
         return AuthorizationResponse.Builder(request).setState(state).setAuthorizationCode(code).build().toIntent()
     }
+    @Test fun retryableExchangeFailuresKeepInstallationIdentityAndProof() {
+        val errors = listOf(0, 400, 403, 429, 500, 503).map { HubFailure(it, "exchange failed") } +
+            IOException("connection interrupted")
+        for (error in errors) {
+            val id = store.beginSignIn()
+            val proof = store.installProof("worker-one")
+            arm(System.currentTimeMillis())
+            val caught = assertThrows(IOException::class.java) {
+                runBlocking { AccountOAuth.finish(store, response()) { throw error } }
+            }
+            assertSame(error, caught)
+            assertNull(store.pendingOAuth)
+            assertEquals(id, store.beginSignIn())
+            assertEquals(proof, store.installProof("worker-one"))
+        }
+    }
+
+    @Test fun definitiveExchangeRejectionRotatesInstallationIdentityAndProof() {
+        for (status in listOf(401, 409)) {
+            val id = store.beginSignIn()
+            val proof = store.installProof("worker-one")
+            val error = HubFailure(status, "identity rejected")
+            arm(System.currentTimeMillis())
+            val caught = assertThrows(HubFailure::class.java) {
+                runBlocking { AccountOAuth.finish(store, response()) { throw error } }
+            }
+            assertSame(error, caught)
+            assertNull(store.pendingOAuth)
+            assertNotEquals(id, store.beginSignIn())
+            assertNotEquals(proof, store.installProof("worker-one"))
+        }
+    }
+
     @Test fun verifiedResponseUsesStoredProofAndCanOnlyBeConsumedOnce() {
         arm()
         val body = AccountOAuth.consumeResponse(store, response(), now)

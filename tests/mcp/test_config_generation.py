@@ -194,7 +194,7 @@ async def test_read_does_not_migrate_and_identity_errors_are_private(
 
 @pytest.mark.asyncio
 async def test_saved_pick_still_needs_daily_cap_admission(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.core.generation_resolver import Candidate, Resolver
+    from app.core.generation_resolver import Backend, Candidate, Resolver
 
     await call({"action": "remember", "kind": "image", "choice": PICK, "confirm": True})
     price = {
@@ -214,7 +214,8 @@ async def test_saved_pick_still_needs_daily_cap_admission(monkeypatch: pytest.Mo
         options=PICK["options"],
         price=price,
     )
-    backend = AsyncMock()
+    # Optional account-following hooks must not be invented by an unspecced mock.
+    backend = AsyncMock(spec=Backend)
     backend.catalog.return_value = [candidate]
     backend.prepare.return_value = candidate
     backend.reserve.return_value = None

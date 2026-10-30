@@ -1320,7 +1320,7 @@ def _credential_gap(provider_id: Optional[str]) -> Optional[str]:
     from app.db import database
 
     try:
-        row = database.get_model_provider(provider_id, include_token=True)
+        row = database.resolve_model_provider(provider_id, include_token=True)
     except Exception:  # noqa: BLE001 — fail open
         logger.debug(
             "task_dispatch: credential pre-flight lookup failed for %s",
@@ -1454,7 +1454,7 @@ def _file_agent_model_id(
     from app.db import database
 
     try:
-        row = database.get_model_provider(provider_id, include_token=False)
+        row = database.resolve_model_provider(provider_id, include_token=False)
     except Exception:  # noqa: BLE001 — a lookup failure reads as "missing"
         logger.debug(
             "task_dispatch: provider lookup failed for %s", provider_id, exc_info=True

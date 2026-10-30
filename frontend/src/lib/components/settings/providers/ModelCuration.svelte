@@ -3,7 +3,7 @@
 	 * ModelCuration: which of a credential's models the pickers offer.
 	 *
 	 * Two uses:
-	 *  - `manage` (a credential's Models tab): loads the catalog, pre-checks the
+	 *  - `manage` (a credential's Models tab): reads the shared catalog, pre-checks the
 	 *    saved curation and saves every toggle on the spot. A failed fetch keeps
 	 *    the saved list checked so nothing can be wiped.
 	 *  - `setup` (right after a key or sign-in is added): nothing is checked;
@@ -28,7 +28,7 @@
 	import { onMount, untrack } from 'svelte';
 	import { RefreshCw } from 'lucide-svelte';
 	import { getErrorMessage } from '$lib/api/client';
-	import { updateModelProvider, type ModelProvider } from '$lib/api/model-providers';
+	import { getModelCatalog, updateModelProvider, type ModelCatalogSnapshot, type ModelProvider } from '$lib/api/model-providers';
 	import { providers } from '$lib/stores/providers.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { watchResources } from '$lib/services/watch-resources';
@@ -82,6 +82,18 @@
 	let failure = $state<FetchFailure | null>(null);
 
 	const id = $derived(row?.id ?? providerId ?? '');
+	const current = $derived(row ?? providers.current.providers?.find((p) => p.id === id));
+	/** A catalog may beat its provider row over sync; keep it hidden until matched. */
+	let candidate = $state<ModelCatalogSnapshot | null>(null);
+	const catalog = $derived(candidate?.binding &&
+		(candidate.binding === current?.catalog_binding || (mode === 'setup' && !current))
+		? candidate : null);
+	/** Revision that produced the displayed selection, not a later store read. */
+	let selectionRevision = $state<string | null | undefined>();
+	let reloadPending = false;
+	/** Keep richer local discovery across echoes of the same shared generation. */
+	let liveCatalog: ModelCatalogSnapshot | null = null;
+	let sharedFetchedAt: string | null = null;
 
 	let rows = $state<CurationRow[]>([]);
 	let loading = $state(false);
@@ -102,24 +114,80 @@
 		return hiddenMedia.find((m) => m.id.toLowerCase().includes(q)) ?? null;
 	});
 
-	async function load() {
-		if (!id || loading) return;
+	function reconcile() {
+		const stored = current?.models ?? [];
+		rows = catalog ? rowsFromFetch(stored, catalog) : rowsFromStored(stored);
+		selectionRevision = current?.revision;
+		hiddenMedia = catalog?.hidden ?? [];
+		if (candidate) typeable = !!catalog && catalog.models.length === 0;
+		source = catalog?.source ?? '';
+	}
+
+	// Resource subscribers run concurrently. Reconcile again when the provider
+	// prop catches up, even if the catalog request finished first.
+	$effect(() => {
+		if (mode === 'manage' || (selectionRevision && current?.revision !== selectionRevision)) reconcile();
+	});
+
+	async function load(refresh = true, fetchMissing = false) {
+		if (!id) return;
+		if (loading) { reloadPending = true; return; }
 		loading = true;
 		error = '';
 		failure = null;
-		source = '';
-		const stored = untrack(() => row?.models ?? []);
-		const selected = new Set(rows.filter((r) => r.checked).map((r) => r.id));
 		try {
-			const res = await providers.fetchProviderModels(id);
+			// Setup validates the current key: an old snapshot is not auth evidence.
+			const live = refresh || mode === 'setup' || wizard;
+			let res = live ? null : await getModelCatalog(id);
+			if (!live) {
+				const sameBinding = !!liveCatalog?.binding && liveCatalog.binding === current?.catalog_binding;
+				const sameSnapshot = !!res?.fetched_at && res.binding === liveCatalog?.binding && res.fetched_at === sharedFetchedAt;
+				// No snapshot is not a generation: keep an unshared live result only
+				// when the provider still proves the non-null binding that produced it.
+				if (sameBinding && (sameSnapshot || (!res && !sharedFetchedAt))) {
+					res = liveCatalog;
+				} else {
+					sharedFetchedAt = res?.fetched_at ?? null;
+					liveCatalog = null;
+				}
+			}
+			if (!res && (live || fetchMissing)) {
+				res = await providers.fetchProviderModels(id);
+				liveCatalog = res;
+				sharedFetchedAt = res.fetched_at ?? sharedFetchedAt;
+				// Discovery can backfill metadata and bump the provider revision.
+				await providers.refreshProviders();
+				// Keep the full live result; the shared copy may omit optional metadata.
+				if (mode === 'setup' && current && (!res.binding || res.binding !== current.catalog_binding)) res = null;
+			}
+			candidate = res;
+			if (!res) {
+				liveCatalog = null;
+				sharedFetchedAt = null;
+				hiddenMedia = [];
+				typeable = false;
+				reconcile();
+				return;
+			}
+			if (!catalog) { reconcile(); return; }
 			source = res.source;
-			rows = mode === 'setup' ? rowsForSetup(res, selected) : rowsFromFetch(stored, res);
-			// The wizard needs a model: pre-check a known chat model, if any.
-			if (wizard) rows = precheckRecommended(rows, res.recommended);
+			if (mode === 'setup') {
+				const selected = new Set(rows.filter((r) => r.checked).map((r) => r.id));
+				rows = rowsForSetup(res, selected);
+				selectionRevision ??= current?.revision;
+				if (wizard) rows = precheckRecommended(rows, res.recommended);
+			} else {
+				reconcile();
+				if (!catalog) return;
+			}
 			hiddenMedia = res.hidden ?? [];
 			typeable = (res.models?.length ?? 0) === 0;
 		} catch (e) {
 			const detail = getErrorMessage(e, 'Could not fetch models');
+			if (mode === 'setup' && describeFetchFailure(detail, providerName).kind === 'rejected') {
+				rows = [];
+				candidate = null;
+			}
 			// A rejected key needs a new key, not typed model names.
 			typeable = describeFetchFailure(detail, providerName).kind !== 'rejected';
 			if (wizard) {
@@ -128,10 +196,17 @@
 			} else {
 				error = detail;
 			}
-			if (mode === 'manage') rows = rowsFromStored(stored);
+			if (mode === 'manage') reconcile();
 		} finally {
 			loading = false;
+			if (reloadPending) { reloadPending = false; void load(false); }
 		}
+	}
+
+	async function reloadConflict() {
+		await providers.refreshProviders();
+		await load(false);
+		reconcile();
 	}
 
 	async function toggle(modelId: string) {
@@ -159,15 +234,15 @@
 			return;
 		}
 		if (!id || saving) return;
-		const previous = rows;
 		rows = next;
 		saving = true;
 		try {
-			await updateModelProvider(id, { models: curatedEntries(next) });
+			await updateModelProvider(id, { models: curatedEntries(next), expected_revision: selectionRevision });
 			await providers.refreshProviders();
 			flashSaved();
 		} catch (e) {
-			rows = previous;
+			if ((e as { status?: number })?.status === 409) await reloadConflict();
+			else reconcile();
 			notify(getErrorMessage(e, 'Could not save models'), { severity: 'error' });
 		} finally {
 			saving = false;
@@ -186,10 +261,11 @@
 			const current = untrack(() => providers.current.providers?.find((p) => p.id === id));
 			const keepDefault = !!current?.default_model && models.some((m) => m.id === current.default_model);
 			const setDefault = wizard && models.length > 0 && !keepDefault;
-			await updateModelProvider(id, { models, ...(setDefault ? { default_model: models[0].id } : {}) });
+			await updateModelProvider(id, { models, expected_revision: selectionRevision, ...(setDefault ? { default_model: models[0].id } : {}) });
 			await providers.refreshProviders();
 			onDone?.();
 		} catch (e) {
+			if ((e as { status?: number })?.status === 409) await reloadConflict();
 			error = getErrorMessage(e, 'Could not save models');
 		} finally {
 			saving = false;
@@ -197,11 +273,11 @@
 	}
 
 	onMount(() => {
-		void load();
+		void load(false, true);
 	});
 
 	watchResources(['settings'], async () => {
-		if (mode === 'manage' && !saving) await load();
+		if (mode === 'manage') await load(false);
 	});
 
 	const title = $derived(mode === 'setup' ? 'Models' : 'Offered in pickers');
@@ -223,12 +299,15 @@
 			aria-label="Refresh model list"
 			title="Refresh model list"
 			disabled={loading || saving}
-			onclick={load}
+			onclick={() => load()}
 		>
 			<RefreshCw />
 		</button>
 	{/snippet}
 	{#if mode === 'setup' && !failure}<p class="pv-msg" aria-live="polite">{setupHint}</p>{/if}
+	{#if catalog?.fetched_at}
+		<p class="pv-msg">Last refreshed <time datetime={catalog.fetched_at}>{new Date(catalog.fetched_at).toLocaleString()}</time> on {catalog.fetched_by_name ?? catalog.fetched_by_device}</p>
+	{/if}
 	{#if error}<p class="pv-msg err" role="alert">{error}</p>{/if}
 	{#if failure}
 		<div class="pv-fail" role="alert" data-testid="curation-failure" data-kind={failure.kind}>
@@ -238,7 +317,7 @@
 					{#if failure.kind === 'no-list' && onRemove}
 						<button type="button" class="st-btn ghost" onclick={() => onRemove?.()}>Remove</button>
 					{/if}
-					<button type="button" class="st-btn primary" disabled={loading} onclick={load}>
+					<button type="button" class="st-btn primary" disabled={loading} onclick={() => load()}>
 						{loading ? 'Retrying' : 'Retry'}
 					</button>
 				</div>

@@ -246,14 +246,14 @@ def test_child_effort_unknown_and_unsupported(mock_db, monkeypatch, model, paren
 def test_child_effort_uses_bare_model_across_providers_and_keeps_api_users_separate(mock_db, monkeypatch):
     from app.core import preference_identity
     from app.core.model_effort import resolve_child_effort
-    from app.db import database, model_providers
+    from app.db import database
     monkeypatch.setattr(preference_identity, "principal_preference_identity",
                         lambda p: ("api_user", p["principal_id"]) if p["kind"] == "api_user" else ("account", "owner"))
-    provider = {"provider_type": "openai", "models_json": [{"id": "shared-model",
-                "reasoning_capabilities": {"version": 1, "effort_levels": ["low", "medium", "high"], "default_effort": "low"}}]}
-    monkeypatch.setattr(model_providers, "get_model_provider", lambda _: provider)
-    from app.core.provider import harness_adapter
-    monkeypatch.setattr(harness_adapter, "_lookup_provider_row", lambda _: provider)
+    # Persist independent gateways so runtime account resolution reads real rows.
+    for pid in ("first", "second"):
+        database.create_model_provider(pid, pid, "custom", "https://example.invalid/v1",
+            models=[{"id": "shared-model", "reasoning_capabilities": {
+                "version": 1, "effort_levels": ["low", "medium", "high"], "default_effort": "low"}}])
     database.set_user_preference("account", "owner", "composer.modelEfforts", {"shared-model": "xhigh"})
     for pid in ("first", "second"):
         assert resolve_child_effort(f"prov:{pid}:shared-model", pid, parent="low") == "high"

@@ -232,13 +232,13 @@ async def test_telegram_durable_ingress_retries_before_offset_advance(
 async def test_telegram_approval_and_other_chat_dispatch_while_turn_is_running(
     messaging: tuple[dict[str, Any], Any, Any], monkeypatch: MonkeyPatch, decision: str
 ) -> None:
-    from app.core.connectors import telegram
+    from aiogram import types as telegram_types
     from app.core.connectors.base import ActionDef, IncomingMessage
 
     _, instance, sdk = messaging
     instance.config["allowed_chat_ids"] = ["123", "456"]
-    monkeypatch.setattr(telegram, "InlineKeyboardMarkup", SimpleNamespace, raising=False)
-    monkeypatch.setattr(telegram, "InlineKeyboardButton", SimpleNamespace, raising=False)
+    monkeypatch.setattr(telegram_types, "InlineKeyboardMarkup", SimpleNamespace, raising=True)
+    monkeypatch.setattr(telegram_types, "InlineKeyboardButton", SimpleNamespace, raising=True)
     prompted = asyncio.Event()
     answered = asyncio.Event()
     other_chat = asyncio.Event()
@@ -247,7 +247,9 @@ async def test_telegram_approval_and_other_chat_dispatch_while_turn_is_running(
     buttons: list[Any] = []
 
     async def send_message(**kwargs: Any) -> None:
+        assert isinstance(kwargs["reply_markup"], SimpleNamespace)
         buttons.extend(kwargs["reply_markup"].inline_keyboard[0])
+        assert all(isinstance(button, SimpleNamespace) for button in buttons)
         prompted.set()
 
     async def turn(message: IncomingMessage) -> None:

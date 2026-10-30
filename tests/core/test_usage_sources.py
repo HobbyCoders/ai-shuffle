@@ -74,7 +74,7 @@ def test_every_source_has_a_complete_capability_definition():
         assert source.scope in {"api_key", "project", "organization", "account", "subscription"}
         assert source.measure in usage_sources.MEASURE_LABELS
         assert source.support in usage_sources.SUPPORT_LABELS
-        assert source.collection in {usage_sources.PASSIVE, usage_sources.POLLED, usage_sources.LOCAL_ESTIMATE}
+        assert source.collection in {usage_sources.PASSIVE, usage_sources.POLLED}
         assert source.credential and source.failure_policy and source.scope_label
         if source.collection == usage_sources.POLLED:
             assert source.endpoints and all(e.min_interval >= 300 for e in source.endpoints)
@@ -89,7 +89,7 @@ def test_subscription_endpoints_are_labeled_unofficial():
         source = usage_sources.SOURCES[source_id]
         assert source.subscription_specific
         assert source.public()["support_label"] == "Unofficial, subscription-specific endpoint"
-    for source_id in ("openai_admin", "openrouter_key", "openrouter_credits"):
+    for source_id in ("openrouter_key", "openrouter_credits"):
         assert usage_sources.SOURCES[source_id].support == usage_sources.DOCUMENTED
 
 
@@ -103,7 +103,6 @@ def test_fal_balance_uses_the_ordinary_key_endpoint_and_says_it_is_undocumented(
 
 def test_measures_distinguish_spend_credit_allowance_and_rate_limits():
     measure = {s.id: s.measure for s in usage_sources.SOURCES.values()}
-    assert measure["openai_admin"] == usage_sources.REPORTED_SPEND
     assert measure["openrouter_key"] == usage_sources.REPORTED_SPEND
     assert measure["openrouter_credits"] == usage_sources.MONETARY_CREDIT
     assert measure["fal_billing"] == usage_sources.MONETARY_CREDIT
@@ -111,14 +110,14 @@ def test_measures_distinguish_spend_credit_allowance_and_rate_limits():
     assert measure["grok_subscription"] == usage_sources.SUBSCRIPTION_ALLOWANCE
     assert measure["codex_usage"] == usage_sources.SUBSCRIPTION_ALLOWANCE
     assert measure["openai_headers"] == usage_sources.RATE_LIMIT
-    assert "prepaid credit balance" in usage_sources.SOURCES["openai_admin"].unavailable
+    assert not {"openai_admin", "openai_manual", "openai_platform_balance"} & usage_sources.SOURCES.keys()
 
 
 @pytest.mark.parametrize("row, expected", [
     ({"provider_type": "openrouter", "base_url": "https://openrouter.ai/api/v1"},
      {"openrouter_key", "openrouter_credits"}),
     ({"provider_type": "openrouter", "base_url": "https://proxy.example/api/v1"}, {"openrouter_key"}),
-    ({"provider_type": "openai", "base_url": "https://api.openai.com/v1"}, {"openai_admin", "openai_platform_balance"}),
+    ({"provider_type": "openai", "base_url": "https://api.openai.com/v1"}, set()),
     ({"provider_type": "openai", "base_url": "https://proxy.example/v1"}, set()),
     ({"provider_type": "grok"}, {"grok_subscription"}),
     ({"provider_type": "custom", "auth_mode": "grok"}, {"grok_subscription"}),
@@ -138,7 +137,7 @@ def test_polled_sources_follow_the_registry(row, expected):
     "https://api.fal.ai/v1/account/billing",
 ])
 def test_unregistered_endpoints_are_refused(url):
-    source = "fal_billing" if "fal" in url else "openai_admin"
+    source = "fal_billing" if "fal" in url else "openai_headers"
     with pytest.raises(ValueError):
         usage_sources.endpoint_for(source, url)
 
@@ -153,7 +152,7 @@ def test_template_endpoint_matches_the_configured_host_only():
 async def test_unregistered_url_never_reaches_the_network(upstream):
     with pytest.raises(ValueError):
         await provider_usage._registered_get(
-            "openai_admin", "https://api.openai.com/v1/dashboard/billing/credit_grants",
+            "openai_headers", "https://api.openai.com/v1/dashboard/billing/credit_grants",
             headers={"Authorization": "Bearer k"},
         )
     assert not upstream["requests"] and upstream["claims"] == 0
@@ -276,37 +275,6 @@ async def test_refused_grok_token_is_negative_cached_until_token_changes(upstrea
     await monitor._poll_grok_provider(row)
     assert [r.url.path for r in upstream["requests"][1:]] == ["/v1/billing", "/v1/settings"]
 
-
-@pytest.mark.asyncio
-async def test_refused_openai_admin_key_is_negative_cached_until_resaved(authenticated_client, upstream):
-    row = db.create_model_provider(provider_id="test-openai", name="OpenAI", provider_type="openai",
-                                   base_url="https://api.openai.com", auth_token="inference-key")
-    db.set_openai_billing_binding(row["id"], "org-test", settings.effective_instance_id,
-                                  encryption.encrypt_value("admin-key"))
-    upstream["status"]["api.openai.com"] = 403
-    monitor = ProviderUsageMonitor()
-    assert not await monitor._poll_openai_provider(row)
-    first = len(upstream["requests"])
-    assert first == 2  # costs + completions, once each
-    assert not await monitor._poll_openai_provider(row)
-    assert len(upstream["requests"]) == first and upstream["claims"] == 2
-
-    # Re-saving re-encrypts the key: a new revision is probed again.
-    db.set_openai_billing_binding(row["id"], "org-test", settings.effective_instance_id,
-                                  encryption.encrypt_value("admin-key"))
-    for endpoint in ("costs", "usage/completions"):
-        await usage_budget.resume_authentication(
-            f"{usage_sources.OPENAI_ADMIN_BASE}/{endpoint}",
-            {"Authorization": "Bearer admin-key", "OpenAI-Organization": "org-test"},
-        )
-    upstream["status"]["api.openai.com"] = 200
-    assert await monitor._poll_openai_provider(row)
-    assert len(upstream["requests"]) == first + 2
-
-
-# ---------------------------------------------------------------------------
-# Passive capture classification
-# ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider_type, base_url, expected", [

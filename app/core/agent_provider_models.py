@@ -46,12 +46,12 @@ def _load_provider_row(provider_id: str) -> Any:
     from app.db import database
 
     try:
-        return database.get_model_provider(provider_id, include_token=False)
+        return database.resolve_model_provider(provider_id, include_token=False)
     except TypeError:
         # Test doubles and older database adapters may not accept the
         # include_token keyword.
         try:
-            return database.get_model_provider(provider_id)
+            return database.resolve_model_provider(provider_id)
         except Exception:
             logger.debug("Could not load subagent provider", exc_info=True)
             return None
@@ -117,7 +117,11 @@ def normalized_provider_models(config: Mapping[str, Any]) -> dict[str, str]:
 def model_for_provider(
     config: Mapping[str, Any], provider_id: str | None
 ) -> str | None:
-    """Resolve an agent's subagent model on exactly ``provider_id``."""
+    """Resolve an agent's saved assignment on the caller's original binding.
+
+    Runtime row reads follow the active slot, but map keys stay pinned: switching
+    credentials must not choose a different subagent model saved under a sibling.
+    """
     return normalized_provider_models(config).get(provider_key(provider_id))
 
 
