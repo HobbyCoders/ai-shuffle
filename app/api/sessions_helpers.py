@@ -207,7 +207,8 @@ class WorktreeSessionResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 def parse_session_history_via_store(
-    sdk_session_id: str, working_dir: str, *, use_cache: bool = True
+    sdk_session_id: str, working_dir: str, *, use_cache: bool = True,
+    heal_from_jsonl: bool = True,
 ) -> tuple[list, dict]:
     """Parse a session transcript from the Postgres session store (postgres_only).
 
@@ -224,6 +225,7 @@ def parse_session_history_via_store(
     bypassing ``_store_parse_cache``. Used by the post-turn reseed to obtain an
     authoritative, ``uuid``-bearing transcript (the in-memory live-store
     messages carry no JSONL uuid, which breaks rewind anchoring).
+    ``heal_from_jsonl=False`` skips the store-miss JSONL backfill.
     """
     from app.core.pg_session_store import (
         _load_entries_by_session_id_sync,
@@ -238,7 +240,7 @@ def parse_session_history_via_store(
     # empty. Guarded inside (count, summary tombstone, JSONL idle-mtime,
     # advisory lock) so it is a cheap no-op for new/live/stored sessions.
     count, _ = _store_version_by_session_id_sync(sdk_session_id)
-    if count == 0:
+    if count == 0 and heal_from_jsonl:
         lazy_backfill_session_from_jsonl(sdk_session_id, working_dir)
 
     def _store_loader(session_id: str, subpath: Optional[str] = None) -> list:
@@ -1422,9 +1424,23 @@ def history_before_mirror(store_messages: List[dict], mirror_messages: List[dict
         if stamp is None:
             continue
         if stamp >= start:
-            return store_messages[:end]
+            break
         end = index + 1
-    return store_messages if end else []
+    else:
+        end = len(store_messages) if end else 0
+    lead = store_messages[:end]
+    # Clock skew at the seam: the store's copy of the mirror's first prompt
+    # may stamp a few ms earlier. The mirror carries that turn; cut before it.
+    for index in range(len(lead) - 1, -1, -1):
+        if lead[index].get("role") == "user" and lead[index].get("content") == first_prompt:
+            return lead[:index]
+    return lead
+
+
+# (session id, store version, mirror head) -> built lead rows. A moved chat's
+# store no longer changes, so polls reuse one answer instead of re-parsing.
+_PRE_MOVE_CACHE_MAX = 256
+_pre_move_cache: dict[tuple, List[dict]] = {}
 
 
 def prepend_pre_move_history(session: dict, mirror_messages: List[dict], build) -> List[dict]:
@@ -1432,23 +1448,42 @@ def prepend_pre_move_history(session: dict, mirror_messages: List[dict], build) 
 
     ``build`` is the endpoint's transform (``build_detail_messages`` or
     ``build_live_messages``). A failed store read keeps the mirror alone.
+    An empty store returns at once (no JSONL heal on this read path), and a
+    store answer is cached per store version and mirror head. Message
+    positions stay stable for ``paginate_messages``: the lead is fixed for a
+    given store version and sits before the mirror, which only grows at
+    the end.
     """
+    import copy
+
     sdk_session_id = session.get("sdk_session_id")
     if not mirror_messages or not sdk_session_id:
         return mirror_messages
     try:
         from app.core.message_resolver import resolve_working_dir
+        from app.core.pg_session_store import _store_version_by_session_id_sync
         from app.core.provider.fluid_transcript import fluid_live_messages, is_fluid_session
 
-        working_dir = resolve_working_dir(dict(session))
+        key = None
         if is_fluid_session(sdk_session_id):
-            parsed, _usage = fluid_live_messages(sdk_session_id, working_dir)
+            parsed, _usage = fluid_live_messages(sdk_session_id, resolve_working_dir(dict(session)))
         else:
-            parsed, _usage = parse_session_history_via_store(sdk_session_id, working_dir)
+            version = _store_version_by_session_id_sync(sdk_session_id)
+            if not version[0]:
+                return mirror_messages
+            head = mirror_messages[0]
+            key = (session["id"], build.__name__, tuple(version), head.get("epoch"), head.get("id"))
+            if key in _pre_move_cache:
+                return copy.deepcopy(_pre_move_cache[key]) + mirror_messages
+            parsed, _usage = parse_session_history_via_store(
+                sdk_session_id, resolve_working_dir(dict(session)), heal_from_jsonl=False)
         lead = history_before_mirror(parsed or [], mirror_messages)
-        if not lead:
-            return mirror_messages
-        return build(session["id"], lead) + mirror_messages
+        built = build(session["id"], lead) if lead else []
+        if key is not None:
+            if len(_pre_move_cache) >= _PRE_MOVE_CACHE_MAX:
+                _pre_move_cache.pop(next(iter(_pre_move_cache)))
+            _pre_move_cache[key] = copy.deepcopy(built)
+        return built + mirror_messages
     except Exception:
         logger.exception("Failed to read pre-move history for %s", session.get("id"))
         return mirror_messages
