@@ -37,7 +37,7 @@
 	import { composerSuggestion, suggestionKey, hasComposerDraft } from '$lib/stores/session/composer-suggestion';
 	import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
 	import { attachComposerDictation, detachComposerDictation, startComposerDictation } from '$lib/services/composerDictation';
-	import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
+	import { flushPendingDraft, holdPendingDraft, readDraft, releasePendingDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 	import { promptStash } from '$lib/stores/session/prompt-stash';
 	import { promptHistory, createPromptRecall } from '$lib/stores/session/prompt-recall';
 	import { pastedTextFile } from './tiptap/large-paste';
@@ -169,7 +169,11 @@
 	// authoritative, but it's wiped by a full page reload (e.g. a PWA update), so
 	// fall back to the per-tab sessionStorage mirror when the store is empty.
 	function resolveInitialDraft(): string {
-		const storeDraft = $activeSession.draft;
+		// A composer this one replaces may still hold text inside its draft
+		// debounce; Svelte can mount the replacement before the old one's
+		// onDestroy saves it, so save it now or this editor opens empty (#811).
+		flushPendingDraft();
+		const storeDraft = get(activeSession).draft;
 		if (storeDraft) return storeDraft;
 		return readDraft($activeSession.sessionId) || '';
 	}
@@ -282,23 +286,29 @@
 		if (draftSaveTimeout) {
 			clearTimeout(draftSaveTimeout);
 		}
-		draftSaveTimeout = setTimeout(() => {
+		const save = () => {
+			if (draftSaveTimeout) clearTimeout(draftSaveTimeout);
+			draftSaveTimeout = null;
+			releasePendingDraft(save);
 			if (!ownsComposer()) return;
 			// Guard: only save if we're still on the same session
 			if (get(activeSession).sessionId !== capturedSessionId) return;
 			const draftValue = getDraftJSON();
-			if (draftValue !== $activeSession.draft) {
+			if (draftValue !== get(activeSession).draft) {
 				activeSession.setDraft(draftValue);
 			}
 			// Mirror to sessionStorage so the draft survives a full page reload
 			// (e.g. a silent PWA update). Empty text clears the entry.
 			writeDraft(capturedSessionId, draftValue);
-			draftSaveTimeout = null;
-		}, 100);
+		};
+		draftSaveTimeout = setTimeout(save, 100);
+		// A composer mounting in this one's place saves it first (#811).
+		holdPendingDraft(save);
 
 		// Clear the pending save on re-run/unmount so a stale timer can't fire
 		// after the editor is torn down (or after a session switch).
 		return () => {
+			releasePendingDraft(save);
 			if (draftSaveTimeout) {
 				clearTimeout(draftSaveTimeout);
 				draftSaveTimeout = null;
