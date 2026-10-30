@@ -162,6 +162,11 @@
     "target_pr": 2,
     "base_settings": true
   },
+  "AI_SHUFFLE_PERF_RESOURCE_WAKE": {
+    "kind": "internal",
+    "reason": "Temporary default-on rollback switch for post-commit publication of replicated preferences and audited shared writers",
+    "base_settings": false
+  },
   "AI_SHUFFLE_PERF_SCAN_WAKE": {
     "kind": "internal",
     "reason": "Temporary default-on rollback switch for interruptible network scanner rest and bounded urgent-wake coalescing",
@@ -172,6 +177,11 @@
     "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Slim usage replay payloads",
     "target_pr": 2,
     "base_settings": true
+  },
+  "AI_SHUFFLE_PERF_TRANSCRIPT_OP_RETENTION": {
+    "kind": "internal",
+    "reason": "Rollout kill switch for bounded duplicate transcript-operation retention; disables the new maintenance pass without deleting chat content",
+    "base_settings": false
   },
   "AI_SHUFFLE_PREVIEW": {
     "kind": "infra",
@@ -208,6 +218,11 @@
   "AI_SHUFFLE_SMOKE_DIR": {
     "kind": "internal",
     "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "AI_SHUFFLE_SYNC_OP_PEER_GRACE_DAYS": {
+    "kind": "infra",
+    "reason": "Database-maintenance acknowledgement grace for offline worker replicas; only duplicate sync-log retention changes and returning peers use state-copy recovery",
     "base_settings": false
   },
   "AI_SHUFFLE_TEST_SCRATCH_ROOT": {

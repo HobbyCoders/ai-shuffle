@@ -50,3 +50,9 @@ def get_artifact(hash: str) -> Optional[Dict[str, Any]]:
         cursor.execute("SELECT * FROM artifacts WHERE hash=%s", (hash,))
         row = cursor.fetchone()
     return dict(row) if row else None
+
+
+from app.core.resource_sync import install_database_mutations as _install_resource_sync, replicated_wakes_enabled
+
+if replicated_wakes_enabled():
+    _install_resource_sync(globals(), "artifacts", "upsert_artifact")
