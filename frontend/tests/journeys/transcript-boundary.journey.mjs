@@ -9,7 +9,11 @@ const LOG = '[role="log"][aria-label="Conversation messages"]';
 const mobileShell = process.argv.includes('--mobile-shell');
 const twoFrames = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 async function navigate(page, direction) {
-	await page.getByRole('button', { name: `Show ${direction} messages`, exact: true }).evaluate(button => button.click());
+	// A trusted key activates the actual control without Playwright scrolling
+	// an offscreen button into auto-paging. Unlike synthetic .click(), this
+	// correctly classifies the intentional navigation as recent user input.
+	await page.getByRole('button', { name: `Show ${direction} messages`, exact: true }).evaluate(button => button.focus({ preventScroll: true }));
+	await page.keyboard.press('Enter');
 	await twoFrames(page);
 }
 async function middle(page) {
