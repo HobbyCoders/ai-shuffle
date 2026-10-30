@@ -24,9 +24,13 @@
 // a move there and back, fails even when it is too small or too quick to
 // count as a layout shift.
 import { runJourney } from './runner.mjs';
-import { SEEDED, PROJECT, expect, gotoApp, openFromSidebar, seededChatId, waitChat, waitChatOpen, pickAgent, pickProject, pickAccess, typeAndSend, scriptTag, waitTurnSettled, scrollTranscriptTo, transcriptScroll, uniq } from './lib/app.mjs';
+import { SEEDED, PROJECT, expect, gotoApp, openFromSidebar, showSidebar, seededChatId, waitChat, waitChatOpen, pickAgent, pickProject, pickAccess, typeAndSend, scriptTag, waitTurnSettled, scrollTranscriptTo, transcriptScroll, uniq } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { expectComposerPositions } from './lib/timeline.mjs';
+
+// Hosted journeys build shared desktop UI only. Explicitly opt into the native
+// phone shell locally, matching transcript-reader's --mobile-shell convention.
+const mobileShell = process.argv.includes('--mobile-shell');
 
 /** The composer takes exactly these positions over the case. */
 const composer = (...positions) => ({ recording }) => expectComposerPositions(recording, positions);
@@ -65,9 +69,9 @@ const viaDeepLink = (target) => async ({ page, status, mark }) => {
 	await OPENED[target](page);
 };
 
-// The switch-flash cases use the REAL mobile shell, unlike a narrow desktop
-// viewport. Hold only delivery of an actual native SSE response: no reducer,
-// content or loading flag is fabricated.
+// Default phone variants exercise the shared UI at a narrow viewport. With
+// --mobile-shell they open the REAL /mobile/ app instead. Hold only delivery of
+// an actual native SSE response: no reducer, content or loading flag is fabricated.
 async function holdIncomingHistory(page, target, delayMs) {
 	await page.addInitScript(({ target, delayMs }) => {
 		const fetchOriginal = window.fetch.bind(window);
@@ -88,7 +92,7 @@ async function holdIncomingHistory(page, target, delayMs) {
 async function prepareHeldSwitch(ctx, delayMs, source = 'no_project') {
 	const { page, status, variant } = ctx;
 	await holdIncomingHistory(page, seededChatId(status, 'other_project'), delayMs);
-	const prefix = variant.viewport === 'phone' ? '/mobile/' : '/';
+	const prefix = mobileShell && variant.viewport === 'phone' ? '/mobile/' : '/';
 	await page.goto(new URL(`${prefix}?session=${encodeURIComponent(seededChatId(status, source))}`, status.urls.ui).toString());
 	await page.getByRole('textbox', { name: 'Message' }).waitFor({ timeout: 60_000 });
 	await waitChatOpen(page, { messagesAtLeast: 2, hold: 500 });
@@ -98,7 +102,7 @@ async function prepareHeldSwitch(ctx, delayMs, source = 'no_project') {
 async function openSwitchChat(page, key, beforeNavigate) {
 	if (new URL(page.url()).pathname.startsWith('/mobile/')) {
 		await page.getByRole('button', { name: /^Open menu/ }).click();
-	}
+	} else await showSidebar(page);
 	const group = page.getByRole('group', { name: `${SEEDED[key]} session`, exact: true });
 	const button = group.getByRole('button').first();
 	if (beforeNavigate) {
@@ -267,7 +271,8 @@ await runJourney({
 				// Keyboard navigation can reach the sidebar while this body portal is
 				// open. On phones open the drawer first; do not force a pointer click
 				// through the confirmation scrim.
-				if (ctx.variant.viewport === 'phone') await page.getByRole('button', { name: /^Open menu/ }).click();
+				if (mobileShell && ctx.variant.viewport === 'phone') await page.getByRole('button', { name: /^Open menu/ }).click();
+				else await showSidebar(page);
 				await page.getByTitle('Rewind to before this message', { exact: true }).first().focus();
 				await page.keyboard.press('Enter');
 				await page.getByRole('heading', { name: 'Rewind Conversation?', exact: true }).waitFor();
@@ -303,13 +308,13 @@ await runJourney({
 			async setup(ctx) {
 				const { page, status, variant } = ctx;
 				await holdIncomingHistory(page, seededChatId(status, 'other_project'), 1500);
-				await gotoApp(page, status, variant.viewport === 'phone' ? '/mobile/' : '/');
+				await gotoApp(page, status, mobileShell && variant.viewport === 'phone' ? '/mobile/' : '/');
 				await waitChat(page, { surface: 'new' });
 				const hero = page.getByRole('region', { name: 'New session' });
 				await hero.waitFor();
 				await pickAgent(page, hero);
 				await pickProject(page, hero, PROJECT);
-				if (variant.viewport === 'phone') {
+				if (mobileShell && variant.viewport === 'phone') {
 					// The production phone shell has a quick access picker, not the
 					// desktop Permission mode menu used by pickAccess.
 					await page.getByRole('button', { name: /^Tool access:/ }).click();
