@@ -227,8 +227,11 @@ def test_pr_triggers_are_only_for_read_only_secret_free_checks():
                 assert "secrets." not in path.read_text(), path.name
             else:
                 # Android keeps release steps in the same workflow. Every secret
-                # reference must be in a step whose actual predicate rejects PRs.
+                # reference must be in a step whose actual predicate rejects PRs,
+                # never in a workflow/job env inherited by unsigned PR commands.
+                assert "secrets." not in str({key: value for key, value in config.items() if key != "jobs"})
                 for job in config["jobs"].values():
+                    assert "secrets." not in str({key: value for key, value in job.items() if key != "steps"})
                     for step in job.get("steps", []):
                         if "secrets." in str(step):
                             assert not permits(step["if"], event="pull_request"), step["name"]
