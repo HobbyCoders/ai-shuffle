@@ -540,6 +540,36 @@ def legacy_seed_is_redundant(cursor: Any, project_id: str, runner_id: str,
     )
 
 
+def seed_legacy_base_checkout(cursor: Any, legacy_id: str, project_id: str,
+                              runner_id: str, path: Optional[str]) -> bool:
+    """Seed a legacy ``projects`` row's base checkout under ``project_id``.
+
+    The row id is ``'ck-' + legacy_id``. A project linked to its remote after
+    its first chat moves to a new origin, and that id already names the base
+    checkout of its remote-less ``local:<id>`` identity, so the new identity
+    would get no checkout and its chats' Git panel would answer 409 (#802).
+    Then the new row takes :func:`checkout_id_for`'s id instead: both
+    identities reach the folder, and chats bound to the old one keep its row.
+    Bare ``ON CONFLICT DO NOTHING``, so re-runs insert nothing. Returns whether
+    a row was inserted.
+    """
+    if legacy_seed_is_redundant(cursor, project_id, runner_id, path):
+        return False
+    checkout_id = "ck-" + str(legacy_id)
+    cursor.execute("SELECT project_id FROM checkouts WHERE id = %s", (checkout_id,))
+    taken = cursor.fetchone()
+    if taken and taken["project_id"] != project_id:
+        checkout_id = checkout_id_for(project_id, runner_id, path or "")
+    cursor.execute(
+        "INSERT INTO checkouts "
+        "(id, project_id, runner_id, path, branch, status) "
+        "VALUES (%s, %s, %s, %s, NULL, 'active') "
+        "ON CONFLICT DO NOTHING",
+        (checkout_id, project_id, runner_id, path),
+    )
+    return bool(cursor.rowcount and cursor.rowcount > 0)
+
+
 def _folder_key(path: str) -> str:
     return os.path.normcase(os.path.realpath(path))
 
