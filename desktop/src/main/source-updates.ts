@@ -5,7 +5,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { extractSource, treeDigest } from './source-archive';
 import { publicSourceFetch, SOURCE_ORIGIN } from './source-auth';
-import { buildSource, removeSourceDirectory, type BuiltSource } from './source-build';
+import { buildSource, pruneNodeDependencies, removeSourceDirectory, type BuiltSource } from './source-build';
 import { prepareNativeRuntime } from './source-runtime';
 import { prepareUIBundle, type UIBundle } from './source-ui-bundle';
 import { durableJson, syncDirectory, type RollbackDatabase } from './database-restore';
@@ -739,7 +739,17 @@ export class SourceUpdates {
       await this.stage(manifest, signed, progress, staged ?? undefined);
       if (staged) await this.dropReplaced(staged);
       return { kind: 'ready', version: manifest.revision.slice(0, 12), ...releaseOf(manifest) };
-    } finally { try { if (unlock) await unlock(); } finally { this.checking = false; } }
+    } finally {
+      try {
+        if (unlock) {
+          try {
+            const retained = (await fs.readdir(path.join(this.options.root, 'versions'), { withFileTypes: true }))
+              .filter(entry => (entry.isDirectory() || entry.isSymbolicLink()) && REVISION.test(entry.name)).map(entry => this.directory(entry.name));
+            await pruneNodeDependencies(path.join(this.options.root, 'dependencies'), [...retained, path.join(this.options.root, 'staging')]);
+          } catch (error) { console.warn('Dependency cache cleanup deferred:', error); }
+        }
+      } finally { try { if (unlock) await unlock(); } finally { this.checking = false; } }
+    }
   }
   /** `replaces`: the staged download this one takes the place of; it stays staged until this one is. */
   private async stage(manifest: SourceManifest, signed: string, progress: SourceProgress, replaces?: string): Promise<void> {

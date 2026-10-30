@@ -280,6 +280,87 @@ async function nodeDependencyTree(directory: string): Promise<string> {
   await visit('');
   return hash.digest('hex');
 }
+const NODE_GENERATION = /^[a-f0-9]{24}(?:-[a-z0-9]+-[a-f0-9]{8})?$/;
+const NODE_TEMPORARY = /^[a-f0-9]{24}(?:-[a-z0-9]+-[a-f0-9]{8})?\.tmp-[a-f0-9]{8}$/;
+const NODE_INSTALL_STALE_MS = 24 * 60 * 60_000;
+async function nodeCacheDirectories(directory: string) {
+  try {
+    const stat = await fs.lstat(directory);
+    return stat.isDirectory() && !stat.isSymbolicLink() ? await fs.readdir(directory, { withFileTypes: true }) : [];
+  } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
+}
+async function nodeInstallLocked(directory: string): Promise<boolean> {
+  try {
+    const text = await fs.readFile(path.join(directory, '.install.lock'), 'utf8');
+    const pid = /^\s*\d+\s*$/.test(text) ? Number(text) : NaN;
+    if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+    try { process.kill(pid, 0); return true; }
+    catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
+  } catch (error) { return (error as NodeJS.ErrnoException).code !== 'ENOENT'; }
+}
+/** Caller holds update.lock. Inventory every retained version before deleting
+ * anything; unknown/unreadable references defer cleanup, never guess unused. */
+export async function pruneNodeDependencies(root: string, revisions: string[]): Promise<void> {
+  const references = new Set<string>();
+  const normalize = (file: string) => process.platform === 'win32' ? path.toNamespacedPath(path.resolve(file)).toLowerCase() : path.resolve(file);
+  async function reference(file: string) {
+    // Keep lexical AND physical ancestors: even a missing module or a replaced
+    // node_modules link must not hide its retained generation from this inventory.
+    for (let at = path.resolve(file);;) {
+      references.add(normalize(at));
+      try { references.add(normalize(await fs.realpath(at))); }
+      catch (error) { if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
+      const parent = path.dirname(at); if (parent === at) break; at = parent;
+    }
+  }
+  for (const revision of revisions) {
+    for (const base of ['source', 'server']) for (const name of ['frontend', 'mobile', 'tools', 'browser-mcp', 'desktop']) {
+      const link = path.join(revision, base, name, 'node_modules');
+      try { await reference(path.resolve(path.dirname(link), await fs.readlink(link))); }
+      catch (error) { if (!['ENOENT', 'EINVAL'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
+    }
+    try {
+      const built = JSON.parse(await fs.readFile(path.join(revision, 'build.json'), 'utf8'));
+      if (typeof built.electron !== 'string') throw new Error('Unknown retained dependency references');
+      await reference(built.electron);
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  }
+  const roots = [path.join(root, 'node')];
+  const unused = new Map<string, { file: string; entry: string; time: number; discard: () => Promise<void> }[]>();
+  for (const entry of await nodeCacheDirectories(root)) {
+    if (entry.isDirectory() && !entry.isSymbolicLink() && /^[a-f0-9]{24}(?:[a-f0-9]{40})?$/.test(entry.name)) roots.push(path.join(root, entry.name, 'node'));
+  }
+  for (const base of roots) {
+    if (!(await nodeCacheDirectories(base)).length) continue;
+    for (const name of ['frontend', 'tools', 'browser-mcp', 'desktop']) {
+      const directory = path.join(base, name), entries = await nodeCacheDirectories(directory), spares = unused.get(name) ?? [];
+      unused.set(name, spares);
+      async function discard(file: string, entry: string) {
+        await fs.rm(file, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        await fs.rm(path.join(directory, '.invalid-' + entry), { force: true });
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.isSymbolicLink() || !(NODE_GENERATION.test(entry.name) || NODE_TEMPORARY.test(entry.name))) continue;
+        const file = path.join(directory, entry.name), paths = [normalize(file), normalize(await fs.realpath(file))];
+        if (paths.some(at => references.has(at))) continue;
+        const time = (await fs.stat(file)).mtimeMs;
+        if (NODE_TEMPORARY.test(entry.name) || !(await exists(path.join(file, '.complete')))) {
+          if (Date.now() - time >= NODE_INSTALL_STALE_MS && !await nodeInstallLocked(file)) await discard(file, entry.name);
+        } else if (await exists(path.join(directory, '.invalid-' + entry.name))) await discard(file, entry.name);
+        else spares.push({ file, entry: entry.name, time, discard: () => discard(file, entry.name) });
+      }
+      for (const entry of entries) {
+        const target = entry.name.slice('.invalid-'.length);
+        if (entry.name.startsWith('.invalid-') && NODE_GENERATION.test(target) && !await exists(path.join(directory, target))) await fs.rm(path.join(directory, entry.name), { force: true });
+      }
+    }
+  }
+  for (const entries of unused.values()) {
+    entries.sort((a, b) => b.time - a.time || b.entry.localeCompare(a.entry));
+    for (const entry of entries.slice(2)) await entry.discard();
+  }
+}
+
 async function cachedNodeDependencies(root: string, key: string): Promise<string | null> {
   const prefix = key.slice(0, 24);
   const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
@@ -287,11 +368,16 @@ async function cachedNodeDependencies(root: string, key: string): Promise<string
   // partial installs; retained generations may still be linked by old revisions.
   for (const entry of entries.sort((a, b) => b.name.localeCompare(a.name))) {
     if (!entry.isDirectory() || entry.isSymbolicLink() || !(entry.name === prefix || new RegExp(`^${prefix}-[a-z0-9]+-[a-f0-9]{8}$`).test(entry.name))) continue;
-    const cache = path.join(root, entry.name);
+    const cache = path.join(root, entry.name), invalid = path.join(root, '.invalid-' + entry.name);
+    if (await exists(invalid)) continue;
     try {
       const marker = JSON.parse(await fs.readFile(path.join(cache, '.complete'), 'utf8'));
-      if (marker.key === key && marker.integrity === await nodeDependencyTree(path.join(cache, 'node_modules'))) return cache;
+      if (marker.key !== key) continue;
+      if (marker.integrity === await nodeDependencyTree(path.join(cache, 'node_modules'))) return cache;
     } catch { /* Missing, legacy or damaged entries are misses, not repair targets. */ }
+    // Sibling tombstones leave retained entries/markers untouched and prevent a
+    // later recovery from hashing every already-rejected predecessor again.
+    await fs.writeFile(invalid, '', { flag: 'wx' }).catch(error => { if (error.code !== 'EEXIST') throw error; });
   }
   return null;
 }
@@ -310,6 +396,7 @@ async function nodePackage(name: string, opts: BuildOptions, python: string, ide
     const temporary = `${cache}.tmp-${randomUUID().slice(0, 8)}`;
     await fs.mkdir(temporary, { recursive: true });
     try {
+      await fs.writeFile(path.join(temporary, '.install.lock'), String(process.pid), { flag: 'wx' });
       for (const file of ['package.json', 'package-lock.json']) await fs.copyFile(path.join(source, file), path.join(temporary, file));
       await run(opts.runtime.node, [opts.runtime.npm, 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], temporary, opts, python);
       if (name === 'desktop') {
@@ -322,9 +409,13 @@ async function nodePackage(name: string, opts: BuildOptions, python: string, ide
         }
       }
       await fs.writeFile(path.join(temporary, '.complete'), JSON.stringify({ key, integrity: await nodeDependencyTree(path.join(temporary, 'node_modules')) }));
+      await fs.unlink(path.join(temporary, '.install.lock'));
       await fs.mkdir(path.dirname(cache), { recursive: true });
       await fs.rename(temporary, cache);
-    } finally { await fs.rm(temporary, { recursive: true, force: true }); }
+    } finally {
+      await fs.rm(path.join(temporary, '.install.lock'), { force: true });
+      await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
   }
   const dependencies = path.join(cache, 'node_modules');
   await fs.symlink(dependencies, path.join(source, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
