@@ -68,6 +68,7 @@ from app.api.sessions_helpers import (  # noqa: F401 — re-exports
     build_detail_messages,
     build_live_messages,
     load_event_messages,
+    local_store_is_stale,
     finalize_transcript,
     paginate_messages,
     DEFAULT_MESSAGE_PAGE_LIMIT,
@@ -928,7 +929,14 @@ async def get_session(
     working_dir = "/workspace"
     store_parse_failed = False
 
-    if sdk_session_id:
+    # A chat another worker owns: the local store stops at the move (#820).
+    if sdk_session_id and await run_sync(local_store_is_stale, session):
+        # Token usage: the store here is stale, so use the per-turn DB columns.
+        session["context_tokens"] = sum(
+            session.get(key, 0) or 0
+            for key in ("last_input_tokens", "cache_creation_tokens", "cache_read_tokens")
+        )
+    elif sdk_session_id:
         try:
             from app.core.message_resolver import resolve_working_dir
 
@@ -1322,7 +1330,9 @@ async def get_live_session(
 
     # Primary read: the Postgres session store.
     store_parse_failed = False
-    if include_messages and sdk_session_id:
+    # A chat another worker owns: the local store stops at the move (#820).
+    if (include_messages and sdk_session_id
+            and not await run_sync(local_store_is_stale, session)):
         try:
             from app.core.message_resolver import resolve_working_dir
 

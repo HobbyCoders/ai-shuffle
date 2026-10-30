@@ -269,8 +269,8 @@ def test_failed_mirror_read_does_not_resurrect_legacy(
     assert len(calls) == (2 if fail_after_page else 1)
 
 
-@pytest.mark.parametrize("suffix", ["", "/live"])
-def test_populated_store_precedes_mirror_and_legacy(mirrored_chat, monkeypatch, suffix):
+def _populate_local_store(monkeypatch, suffix, text):
+    """Give the viewer's chat a real harness-store transcript of one reply."""
     from app.core import pg_session_store as pss
     from tests import pg_shim
     from tests.pg_shim import ShimCursor
@@ -310,9 +310,45 @@ def test_populated_store_precedes_mirror_and_legacy(mirrored_chat, monkeypatch, 
     asyncio.run(pss.PgSessionStore().append(
         {"project_key": "-missing", "session_id": sdk_id},
         [{"type": "assistant", "uuid": "store-reply", "message": {
-            "role": "assistant", "content": [{"type": "text", "text": "Store reply"}],
+            "role": "assistant", "content": [{"type": "text", "text": text}],
         }}],
     ))
+
+
+@pytest.mark.parametrize("suffix", ["", "/live"])
+def test_moved_chat_serves_mirror_over_stale_local_store(mirrored_chat, monkeypatch, suffix):
+    # This worker once ran the chat (its store holds the turn before the
+    # move); the owner has since run another turn that only the mirror holds.
+    _populate_local_store(monkeypatch, suffix, "Stale reply")
+    session_events.append_events("remote-chat", [
+        {"type": "message.user", "payload": {"content": "After the move"}},
+        {"type": "message.assistant", "payload": {"content": "Owner reply"}},
+    ])
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("a chat owned elsewhere read its stale local store")
+
+    monkeypatch.setattr("app.api.sessions.parse_session_history_via_store", unexpected)
+    response = mirrored_chat.get("/api/v1/sessions/remote-chat" + suffix)
+    assert response.status_code == 200, response.text
+    assert [m["content"] for m in response.json()["messages"]] == [
+        "Say OK", "OK", "After the move", "Owner reply",
+    ]
+
+
+@pytest.mark.parametrize("suffix", ["", "/live"])
+def test_populated_store_precedes_mirror_and_legacy(mirrored_chat, monkeypatch, suffix):
+    from app.db import network as store
+    from app.network.runners import self_device_id
+
+    # The chat moved back here: this worker owns it again, so its own store
+    # is current and remains the rendered source.
+    with store.get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET owner_device_id = %s WHERE id = %s",
+                              (self_device_id(), "remote-chat"))
+    assert database.get_session("remote-chat")["owner_device_id"] == self_device_id()
+    _populate_local_store(monkeypatch, suffix, "Store reply")
+
     def unexpected(*args, **kwargs):
         pytest.fail("populated store consulted the mirror/legacy rescue")
 

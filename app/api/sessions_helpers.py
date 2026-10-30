@@ -1349,6 +1349,33 @@ def _approval_status(event: dict) -> Optional[str]:
     return {"allow": "approved", "deny": "declined"}.get(decision)
 
 
+def local_store_is_stale(session: dict) -> bool:
+    """Whether this worker's harness store must not render the chat.
+
+    A worker a chat moved away from keeps its store, which stops at the move;
+    the owner's later turns reach this worker only through the event mirror.
+    So a chat another network device owns renders from the mirror once the
+    mirror holds events (a chat with no mirrored events yet keeps its store).
+    An unreadable event counter keeps the store: a stale transcript beats a
+    blank one, and the mirror read would hit the same failing database.
+    """
+    owner = session.get("owner_device_id")
+    if not owner:
+        return False
+    from app.network.runners import self_device_id
+
+    me = self_device_id()
+    if not me or owner == me:
+        return False
+    from app.db.session_events import get_max_seq
+
+    try:
+        return get_max_seq(session["id"]) != 0
+    except Exception:
+        logger.exception("Failed to check event history for %s", session.get("id"))
+        return False
+
+
 def load_event_messages(session_id: str) -> tuple[list[dict], bool]:
     """Project the persisted event mirror when no local transcript is available.
 
