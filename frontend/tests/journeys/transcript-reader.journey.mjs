@@ -68,13 +68,22 @@ await runJourney({
 				expect(state.sameText && state.sameBounds && state.connected, 'window eviction must not destroy the active selection');
 				expect(state.outer <= 120 && state.nested <= 12_000, 'selection pinning must not grow the mounted DOM budget');
 			}
-			await mark('collapse the selection and continue browsing');
+			await mark('clear the selection through its accessible control and continue browsing');
+			const clear = page.getByRole('button', { name: 'Clear selection in transcript', exact: true });
+			// The selected rows can begin anywhere in the mounted slice. Reach
+			// its protected edge without assuming a particular row cost/density.
+			for (let attempt = 0; attempt < 6 && !(await clear.count()); attempt++) {
+				await page.getByRole('button', { name: 'Show earlier messages', exact: true }).click();
+				await twoFrames(page);
+			}
+			expect(await clear.count() === 1, 'the selection budget exposes a named clear control');
 			const oldStart = await page.locator('[data-transcript-index]').first().getAttribute('data-transcript-index');
-			await page.evaluate(() => window.getSelection().collapseToStart());
+			await clear.click();
 			await twoFrames(page);
+			expect(await page.evaluate(() => window.getSelection().isCollapsed), 'the visible clear control collapses the native selection');
 			await page.getByRole('button', { name: 'Show earlier messages', exact: true }).click();
 			await page.waitForFunction(start => Number(document.querySelector('[data-transcript-index]')?.dataset.transcriptIndex) < Number(start), oldStart);
-			log('collapsing the selection released its rows for eviction');
+			log('the accessible clear control released selected rows for eviction');
 		}
 	}],
 	allow: [...DEV_INSTANCE_NOISE]
