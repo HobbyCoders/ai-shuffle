@@ -329,9 +329,16 @@
 	/** The editor is going away: keep its caret with the chat whose draft it holds. */
 	function beforeEditorDestroy(editor: Editor) {
 		detachComposerDictation(editor);
-		if (!ownsComposer() || messageSent) return;
+		if (!ownsComposer()) return;
+		rememberComposerSelection(prevSessionId, editor);
+	}
+	/** Keep a chat's caret with its draft; an empty composer (sent or cleared)
+	 *  forgets it so a later draft never gets a stale offset. Not gated on
+	 *  messageSent, which stays set after a send while this composer lives. */
+	function rememberComposerSelection(sessionId: string | null, editor: Editor | null | undefined) {
+		if (!editor || editor.isEmpty) { composerSelections.delete(sessionId); return; }
 		const { from, to } = editor.state.selection;
-		composerSelections.set(prevSessionId, { from, to });
+		composerSelections.set(sessionId, { from, to });
 	}
 
 	let isUploading = $state(false);
@@ -417,10 +424,9 @@
 				// Keep the persisted mirror aligned with the ephemeral cache so the
 				// leaving session's draft also survives a reload.
 				writeDraft(prevSessionId, leavingDraft);
-				// The caret and selection go with the draft (#864).
-				const selection = editorRef.getEditor()?.state.selection;
-				if (selection) composerSelections.set(prevSessionId, { from: selection.from, to: selection.to });
 			}
+			// The caret and selection go with the draft (#864).
+			rememberComposerSelection(prevSessionId, editorRef?.getEditor());
 			prevSessionId = newSessionId;
 			recall.reset();
 			stashOpen = false;

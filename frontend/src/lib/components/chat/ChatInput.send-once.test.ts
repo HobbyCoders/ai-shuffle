@@ -134,6 +134,32 @@ describe('composer selection follows the chat', () => {
 		expect([editor.state.selection.from, editor.state.selection.to]).toEqual([2, 4]);
 	});
 
+	it('still restores the caret after this composer has sent a message', async () => {
+		Object.assign(activeSession.current, { sessionId: 'chat-c' });
+		activeSession.setDraft('sent first');
+		const view = render(ChatInput);
+		const editorEl = view.container.querySelector<HTMLElement>('.tiptap')!;
+		await waitFor(() => expect(editorEl.textContent).toBe('sent first'));
+		await fireEvent.submit(view.container.querySelector('form')!);
+		await waitFor(() => expect(answerCacheState).not.toBeNull());
+		answerCacheState!();
+		await waitFor(() => expect(sends).toHaveBeenCalledOnce());
+		expect(editorEl.textContent).toBe('');
+
+		const editor = (editorEl as HTMLElement & { editor: import('@tiptap/core').Editor }).editor;
+		editor.commands.insertContent('ABCDEFGHIJ');
+		editor.commands.setTextSelection(6);
+		// Let the debounced draft save land, as a person pausing before switching would.
+		await new Promise((resolve) => setTimeout(resolve, 200));
+
+		openChat('chat-d');
+		await tick();
+		openChat('chat-c');
+		await tick();
+		expect(editor.getText()).toBe('ABCDEFGHIJ');
+		expect([editor.state.selection.from, editor.state.selection.to]).toEqual([6, 6]);
+	});
+
 	it('restores the caret when the composer remounts on the same chat', async () => {
 		activeSession.setDraft('ABCDEFGHIJ');
 		const first = render(ChatInput);
