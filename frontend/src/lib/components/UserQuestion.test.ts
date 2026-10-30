@@ -126,6 +126,17 @@ describe('UserQuestion — nonmodal answer form', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Send answer' }));
 		expect(onRespond.mock.calls[0][0].answers['Which database should we use?']).toBe('Postgres, SQLite');
 	});
+	it('reports the final draft (with the closing skip) before it sends (#899)', async () => {
+		// The phone dock hides a sent question in the same tick, so the effect
+		// that normally reports drafts never sees the last change.
+		let draftAtSend: unknown;
+		const onDraft = vi.fn();
+		const onRespond = vi.fn(() => { draftAtSend = onDraft.mock.calls.at(-1)?.[1]; });
+		render(UserQuestion, { data: data(), onRespond, onDraft });
+		await fireEvent.click(screen.getByRole('button', { name: 'Skip this question' }));
+		expect(onRespond).toHaveBeenCalledTimes(1);
+		expect(draftAtSend).toMatchObject({ skipped: { 0: true } });
+	});
 	it('skipping the only question sends the skip right away', async () => {
 		const onRespond = vi.fn(); render(UserQuestion, { data: data(), onRespond });
 		await fireEvent.click(screen.getByLabelText('SQLite', { exact: false }));

@@ -3,7 +3,9 @@
 // `[script:ask-question]` asks one question and `[script:ask-questions]` two in
 // one request; the answer the app queues for the agent wakes the scenario,
 // whose reply quotes exactly what it received ("User skipped this question."
-// for a skip). Every case ends with the tray gone and the turn settled.
+// for a skip). Every case ends with the tray gone and the turn settled, and
+// every send closes the tray on the tap, while the server's ack is held back
+// (#891).
 //
 // Cases:
 //   answer         one question: pick an option and send it
@@ -12,6 +14,11 @@
 //                  works, and skipping the last open one sends the batch
 //   skip-offline   while the socket is down Skip is disabled and sends
 //                  nothing; once it is back Skip sends
+//   relay-offline  two questions: a pick and a written answer are sent, the
+//                  delivery fails (relay_offline ack) and the question comes
+//                  back with both; sending again reaches the agent (#899)
+//   relay-offline-typed  mobile shell only: the dock's typed answer comes
+//                  back the same way (#899)
 //
 // Hosted journeys build only the shared desktop UI and run it at desktop and
 // phone widths. `--mobile-shell` opens the phone variants in the separately
@@ -33,8 +40,13 @@ const REPLY = 'Thanks. I received:';
 
 // Counts the user_question_response frames the page sends, and can drop the
 // socket and hold reconnects off (the app's own retry then fails until let go).
+// `holdAcks` keeps the server's user_question_response_ack frames from the app
+// until released, so a case can see the tray close on the tap alone (#891).
+// `failAnswers` swallows that many answer frames and replies to each with the
+// ack a relay delivery failure sends (`relay_offline`): the owning install is
+// unreachable, so the question must come back with the user's draft (#899).
 const SOCKET_PROBE = () => {
-	const probe = (window.__journeySocket = { sockets: [], blocked: false, responses: 0 });
+	const probe = (window.__journeySocket = { sockets: [], blocked: false, responses: 0, holdAcks: false, held: [], failAnswers: 0, failed: 0 });
 	const Real = window.WebSocket;
 	class Probed extends Real {
 		constructor(url, protocols) {
@@ -44,13 +56,36 @@ const SOCKET_PROBE = () => {
 			if (!hmr) probe.sockets.push(this);
 		}
 		send(data) {
-			if (typeof data === 'string' && data.includes('"user_question_response"')) probe.responses++;
+			if (typeof data === 'string' && data.includes('"user_question_response"')) {
+				if (probe.failAnswers > 0) {
+					probe.failAnswers--;
+					probe.failed++;
+					const frame = JSON.parse(data);
+					const ack = { type: 'user_question_response_ack', success: false, reason: 'relay_offline', request_id: frame.request_id, session_id: frame.session_id };
+					setTimeout(() => this.onmessage?.(new MessageEvent('message', { data: JSON.stringify(ack) })), 400);
+					return;
+				}
+				probe.responses++;
+			}
 			return super.send(data);
+		}
+		get onmessage() {
+			return super.onmessage;
+		}
+		set onmessage(handler) {
+			super.onmessage = handler && ((event) => {
+				if (probe.holdAcks && typeof event.data === 'string' && event.data.includes('"user_question_response_ack"')) {
+					probe.held.push(() => handler.call(this, event));
+					return;
+				}
+				return handler.call(this, event);
+			});
 		}
 	}
 	window.WebSocket = Probed;
 };
 const responsesSent = (page) => page.evaluate(() => window.__journeySocket?.responses ?? 0);
+const holdAcks = (page) => page.evaluate(() => { window.__journeySocket.holdAcks = true; });
 
 const form = (page) => page.getByRole('form', { name: 'Answer questions' });
 const tray = (page) => page.getByRole('region', { name: 'Questions for you' });
@@ -90,6 +125,24 @@ async function finalReply(page) {
 	}, REPLY);
 }
 
+/**
+ * Sending closed the tray (desktop UI) or the prompt dock (mobile shell) at
+ * once, while the server's ack was still held back: it must not wait for the
+ * ack, which comes after the answer's follow-up work, so the composer moves
+ * with the tap and not up to a second later (#891). Then let the ack through.
+ */
+async function expectClosedOnTap(page) {
+	const open = [form(page), tray(page), page.getByRole('region', { name: 'Waiting on you' })];
+	const closed = await Promise.all(open.map((l) => l.waitFor({ state: 'hidden', timeout: 2_000 }).then(() => true, () => false)));
+	const held = await page.evaluate(() => window.__journeySocket.held.length);
+	await page.evaluate(() => {
+		const probe = window.__journeySocket;
+		probe.holdAcks = false;
+		for (const deliver of probe.held.splice(0)) deliver();
+	});
+	expect(closed.every(Boolean), `the question closed on the tap, before the server's ack (${held} ack(s) held)`);
+}
+
 /** The tray (and any answer form) is gone and stays gone. */
 async function expectTrayClosed(page) {
 	await form(page).waitFor({ state: 'detached', timeout: 15_000 });
@@ -102,14 +155,15 @@ const answerCase = {
 	setup: (ctx) => ask(ctx, 'ask-question'),
 	async act({ page, mark, variant, log }) {
 		await mark('pick an option and send');
+		await holdAcks(page);
 		if (inMobileShell(variant)) {
 			// One single-choice question: the mobile dock answers with a tap.
 			await page.getByRole('button', { name: /^Amber/ }).click();
-			await page.getByRole('button', { name: /^Amber/ }).waitFor({ state: 'detached', timeout: 15_000 });
 		} else {
 			await form(page).getByRole('radio', { name: /^Amber/ }).check();
 			await form(page).getByRole('button', { name: 'Send answer', exact: true }).click();
 		}
+		await expectClosedOnTap(page);
 		await expectTrayClosed(page);
 		const reply = await finalReply(page);
 		log(`reply: ${JSON.stringify(reply.slice(0, 200))}`);
@@ -124,7 +178,9 @@ const skipCase = {
 	async act({ page, mark, log }) {
 		expect((await responsesSent(page)) === 0, 'nothing answered before the skip');
 		await mark('skip the only question');
+		await holdAcks(page);
 		await skipButton(page).click();
+		await expectClosedOnTap(page);
 		await expectTrayClosed(page);
 		const reply = await finalReply(page);
 		log(`reply: ${JSON.stringify(reply.slice(0, 200))}`);
@@ -156,7 +212,9 @@ const skipTwoCase = {
 		await mark('skip the last open question');
 		await form(page).getByRole('button', { name: /^Position/ }).click();
 		await heading(page).getByText(POSITION, { exact: true }).waitFor();
+		await holdAcks(page);
 		await skipButton(page).click();
+		await expectClosedOnTap(page);
 		await expectTrayClosed(page);
 		const reply = await finalReply(page);
 		log(`reply: ${JSON.stringify(reply.slice(0, 300))}`);
@@ -198,6 +256,75 @@ const skipOfflineCase = {
 	}
 };
 
+/** The next answer frame is swallowed and fails with relay_offline. */
+async function failNextAnswer(page) {
+	await page.evaluate(() => { window.__journeySocket.failAnswers = 1; });
+}
+
+/** The answer went out, failed with relay_offline and the question is back. */
+async function expectBackAfterFailure(page, open) {
+	await open.waitFor({ state: 'hidden', timeout: 2_000 });
+	await open.waitFor({ timeout: 10_000 });
+	expect((await page.evaluate(() => window.__journeySocket.failed)) === 1, 'one answer failed with relay_offline');
+	expect((await responsesSent(page)) === 0, 'nothing reached the server yet');
+}
+
+const relayOfflineCase = {
+	name: 'relay-offline',
+	setup: (ctx) => ask(ctx, 'ask-questions'),
+	async act({ page, mark, log }) {
+		await mark('pick one answer, write the other, send; delivery fails');
+		await form(page).getByRole('radio', { name: /^Teal/ }).check();
+		await form(page).getByRole('button', { name: /^Position/ }).click();
+		await heading(page).getByText(POSITION, { exact: true }).waitFor();
+		await form(page).getByRole('textbox').fill('Top, full width');
+		await failNextAnswer(page);
+		await form(page).getByRole('button', { name: 'Send answers', exact: true }).click();
+		await expectBackAfterFailure(page, form(page));
+
+		await mark('the draft came back');
+		expect((await form(page).getByRole('textbox').inputValue()) === 'Top, full width', 'the written answer came back');
+		await form(page).getByRole('button', { name: /^Colour/ }).click();
+		await heading(page).getByText(COLOUR, { exact: true }).waitFor();
+		expect(await form(page).getByRole('radio', { name: /^Teal/ }).isChecked(), 'the picked option came back');
+
+		await mark('send again');
+		await form(page).getByRole('button', { name: 'Send answers', exact: true }).click();
+		await expectTrayClosed(page);
+		const reply = await finalReply(page);
+		log(`reply: ${JSON.stringify(reply.slice(0, 300))}`);
+		expect(reply.includes(`${COLOUR}\nTeal`) && reply.includes(`${POSITION}\nTop, full width`), `the agent received the restored answers (${reply})`);
+		expect((await responsesSent(page)) === 1, 'the retry was sent once');
+	}
+};
+
+const relayOfflineTypedCase = {
+	name: 'relay-offline-typed',
+	viewports: ['phone'],
+	setup: (ctx) => ask(ctx, 'ask-question'),
+	async act({ page, mark, log }) {
+		const dock = page.getByRole('region', { name: 'Waiting on you' });
+		await mark('type an answer in the dock, send; delivery fails');
+		await dock.getByRole('button', { name: 'Type an answer' }).click();
+		await dock.getByRole('textbox', { name: 'Your answer' }).fill('Amber, but softer');
+		await failNextAnswer(page);
+		await dock.getByRole('button', { name: 'Send answer' }).click();
+		await expectBackAfterFailure(page, dock);
+
+		await mark('the typed answer came back');
+		const input = dock.getByRole('textbox', { name: 'Your answer' });
+		expect((await input.inputValue()) === 'Amber, but softer', 'the typed answer came back');
+
+		await mark('send again');
+		await dock.getByRole('button', { name: 'Send answer' }).click();
+		await dock.waitFor({ state: 'hidden', timeout: 15_000 });
+		const reply = await finalReply(page);
+		log(`reply: ${JSON.stringify(reply.slice(0, 200))}`);
+		expect(reply.includes('Amber, but softer'), `the agent received the restored answer (${reply})`);
+		expect((await responsesSent(page)) === 1, 'the retry was sent once');
+	}
+};
+
 const withProbe = (testCase) => ({
 	...testCase,
 	async setup(ctx) {
@@ -212,7 +339,10 @@ await runJourney({
 		withProbe(answerCase),
 		withProbe({ ...skipCase, viewports: mobileShell ? ['desktop'] : undefined }),
 		withProbe(skipTwoCase),
-		withProbe(skipOfflineCase)
+		withProbe(skipOfflineCase),
+		withProbe(relayOfflineCase),
+		// The dock's "Type an answer" exists only in the /mobile/ shell.
+		...(mobileShell ? [withProbe(relayOfflineTypedCase)] : [])
 	],
 	allow: [...DEV_INSTANCE_NOISE]
 });

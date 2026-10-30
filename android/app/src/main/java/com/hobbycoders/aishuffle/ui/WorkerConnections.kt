@@ -24,13 +24,21 @@ internal object WorkerConnections {
     }
 
     /** Public, bounded, HTTPS probes; never enroll a worker or forward another worker's key. */
-    suspend fun reachable(context: Context, failed: Server? = null): Server? = coroutineScope {
+    suspend fun reachable(
+        context: Context,
+        failed: Server? = null,
+        observations: Map<Server, ProbeResult>? = null,
+    ): Server? = coroutineScope {
         val now = SystemClock.elapsedRealtime()
         if (failed != null) policy.failed(failed, now)
         val candidates = policy.candidates(paired(context).filter { ChatSessionOwner(context, it).current() }, now, failed)
         val results = candidates.map { candidate ->
             async {
-                candidate to (withTimeoutOrNull(8_000) { WorkerPresenceProbe.check(candidate) } ?: ProbeResult.UNREACHABLE)
+                // The launcher already checks every visible row. Reuse that exact sweep,
+                // never probe twice or reuse evidence from a changed pairing.
+                val result = if (observations != null) observations[candidate] ?: ProbeResult.UNAVAILABLE
+                    else withTimeoutOrNull(8_000) { WorkerPresenceProbe.check(candidate) } ?: ProbeResult.UNREACHABLE
+                candidate to result
             }
         }.map { it.await() }
         val observedAt = SystemClock.elapsedRealtime()

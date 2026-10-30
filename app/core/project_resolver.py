@@ -139,7 +139,8 @@ def _seed_pv2_from_legacy(
 ) -> Optional[Dict[str, Any]]:
     """Create the ``projects_v2`` row and the legacy project's base ``checkouts``
     row for a post-migration legacy project, mirroring the v60 collapse EXACTLY:
-    ``id = 'pv2-'+sha256(origin)[:24]``, checkout ``id = 'ck-'+legacy_id``,
+    ``id = 'pv2-'+sha256(origin)[:24]``, checkout ``id = 'ck-'+legacy_id``
+    (see :func:`checkouts_db.seed_legacy_base_checkout` for a relinked project),
     ``runner_id = instance_id or ''``, ``branch`` NULL, ``ON CONFLICT DO NOTHING``.
 
     Idempotent (a concurrent seed loses the race harmlessly). Returns the
@@ -155,15 +156,10 @@ def _seed_pv2_from_legacy(
                 "ON CONFLICT (origin) DO NOTHING",
                 (pv2_id, origin, legacy.get("name") or origin, "{}"),
             )
-            runner = legacy.get("instance_id") or ""
-            if not checkouts_db.legacy_seed_is_redundant(cursor, pv2_id, runner, legacy.get("path")):
-                cursor.execute(
-                    "INSERT INTO checkouts "
-                    "(id, project_id, runner_id, path, branch, status) "
-                    "VALUES (%s, %s, %s, %s, NULL, 'active') "
-                    "ON CONFLICT DO NOTHING",
-                    ("ck-" + str(legacy.get("id")), pv2_id, runner, legacy.get("path")),
-                )
+            checkouts_db.seed_legacy_base_checkout(
+                cursor, str(legacy.get("id")), pv2_id,
+                legacy.get("instance_id") or "", legacy.get("path"),
+            )
     except Exception as e:  # pragma: no cover - best-effort self-seed
         logger.warning(
             "project_resolver: failed to self-seed project_v2 for origin %s: %s",

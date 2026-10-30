@@ -270,3 +270,31 @@ export function shouldPinLatestTurnOnSettle(
 ): boolean {
 	return wasUnsettled && !isUnsettled && stickToBottom;
 }
+
+/**
+ * Where the reader is in the transcript, by row: the row under the top edge
+ * of the view and how far into it the reader is. `offset` is the row's top
+ * relative to the view's top (negative once the row starts above it), `past`
+ * the fraction of the row already scrolled past.
+ */
+export interface ReadingAnchor {
+	key: string;
+	offset: number;
+	past: number;
+}
+
+export function readingAnchorOf(key: string, rowTop: number, rowHeight: number, viewTop: number): ReadingAnchor {
+	const offset = rowTop - viewTop;
+	return { key, offset, past: offset < 0 && rowHeight > 0 ? Math.min(1, -offset / rowHeight) : 0 };
+}
+
+/**
+ * The scrollTop change that puts the reader back on their anchor row after a
+ * width change reflowed the transcript (#865: a phone rotation or window
+ * resize). A row that started inside the view keeps its offset; a long row the
+ * reader was partway through keeps the same fraction of its new height.
+ */
+export function resolveReadingAnchorDelta(anchor: ReadingAnchor, rowTop: number, rowHeight: number, viewTop: number): number {
+	const target = anchor.offset >= 0 ? viewTop + anchor.offset : viewTop - anchor.past * rowHeight;
+	return rowTop - target;
+}

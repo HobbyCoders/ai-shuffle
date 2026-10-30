@@ -50,8 +50,8 @@ These workflows retain manual dispatch and also run on unfiltered
 - `ci-android-minified.yml`: build the R8/resource-shrunk Play release bundle and
   test the non-debuggable `releaseSmoke` variant on API 34/36. Its fixture launcher
   and disposable signing are test-only; release keep rules are unchanged. The
-  existing manual `android.yml` still runs the broader **debug** instrumentation
-  suite. Neither workflow publishes on a PR or needs publisher credentials.
+  `android.yml` also runs the broader **debug** instrumentation suite on relevant
+  PRs, as described below. Neither workflow publishes on a PR or needs publisher credentials.
 
 `ci-folder-confinement.yml` stays manual because it is macOS-only; Linux folder
 confinement is already covered by CI Backend. Stable release authorization is unchanged.
@@ -60,6 +60,23 @@ runs), cancelling superseded PR runs only. Permissions are `contents: read`;
 none of these workflows references secrets or requires private checkout access.
 Fork PRs use the ordinary read-only `pull_request` context, never
 `pull_request_target`.
+
+### Android native pull requests
+
+`android.yml` runs unsigned Gradle unit tests/lint, builds the debug and test APKs,
+and exercises the full native instrumentation suite on API 34 and API 36 for PRs
+changing `android/**`, `mobile/**`, `frontend/**`, the workflow itself, or its CI
+cost/publication policy tests. The asset paths matter: the APK's offline demo is
+built from `mobile/` and shared `frontend/` dependencies. Drafts and forks run too,
+on standard free `ubuntu-latest` runners. Superseded PR runs are cancelled.
+
+Only build/test and emulator jobs run on PRs. Existing owner/event/ref/input
+predicates still exclude PRs from every Firebase/signing/release-staging step
+and the write-permission publish job, even when evaluated with owner identity
+and publication inputs enabled. `tests/scripts/test_owner_publication_policy.py`
+checks those actual predicates; no release guard is relaxed. API 36 retains its
+existing release-advisory status (tracking #2375); its test-step failures remain
+visible and must be inspected, not treated as an app pass. API 34 gates publication.
 
 Cloud service checks and deploy workflows live in the private
 [HobbyCoders/hobbycoders-cloud](https://github.com/HobbyCoders/hobbycoders-cloud)
@@ -277,8 +294,9 @@ The suites the hook used to select locally run in full on every PR:
 | workflows | `ci-artifact-policy.yml` policy scripts, CI Backend shards and security policy step (`tests/scripts`) |
 | update-reach regressions | CI Backend shards (`tests/test_update_reach.py`); the verdict itself stays in the push gate |
 
-`android-app` (Gradle unit tests) never ran without a local Android SDK and stays
-a manual check (`android.yml`), as before.
+`android-app` (Gradle unit tests) needs an Android SDK. `android.yml` now runs
+those checks and the debug native emulator suite on Android/asset-related PRs;
+manual dispatch remains available for other revisions.
 
 `fast` stays available as an optional, explicit command (affected tests plus
 the offline scan). It compares against the configured public comparison ref's
