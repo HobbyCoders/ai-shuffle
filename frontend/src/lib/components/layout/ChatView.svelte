@@ -235,6 +235,27 @@
 	});
 	let surfaceHeight = $state(0);
 	let composerHeight = $state(0);
+
+	// #816: on a phone the call dock floats over the transcript's foot instead of
+	// stacking on the composer, so neither the composer nor the transcript moves
+	// when a call starts or ends. The transcript's tail spacer gets the dock's
+	// height (--call-dock-reserve, applied by the phone media query only) so its
+	// last lines can still scroll clear of the dock. The room is held after the
+	// call ends (the call's closing row lands in it) until the chat changes or
+	// the next reply starts: dropping it with the dock would clamp a bottomed-out
+	// transcript down by the dock's height, the very jump this avoids.
+	let callDockHeight = $state(0);
+	let heldCallRoom = $state(0);
+	let heldRoomSession: string | null = null;
+	$effect(() => {
+		const sessionId = $activeSession.sessionId ?? null;
+		if (voiceCallActive) {
+			if (callDockHeight > 0) heldCallRoom = callDockHeight;
+			heldRoomSession = sessionId;
+		} else if (heldCallRoom && (sessionId !== heldRoomSession || $activeSession.isStreaming)) {
+			heldCallRoom = 0;
+		}
+	});
 	$effect(() => {
 		if (showEmptyHero && surfaceHeight > 0 && composerHeight > surfaceHeight && platform.isMobile) {
 			void tick().then(() => {
@@ -395,7 +416,8 @@
 	);
 </script>
 
-<div class="chat-view" bind:clientHeight={surfaceHeight} style:--chat-surface-height={surfaceHeight ? `${surfaceHeight}px` : undefined} class:transitioning-from-empty={transitioningFromEmpty} class:is-empty={showEmptyHero}
+<div class="chat-view" bind:clientHeight={surfaceHeight} style:--chat-surface-height={surfaceHeight ? `${surfaceHeight}px` : undefined}
+	style:--call-dock-room={heldCallRoom ? `${heldCallRoom}px` : undefined} style:--call-dock-height={voiceCallActive && callDockHeight ? `${callDockHeight}px` : undefined} class:transitioning-from-empty={transitioningFromEmpty} class:is-empty={showEmptyHero}
 	data-ui-state={UI_STATE_CHAT}
 	data-ui-mount={UI_MOUNT.chatView}
 	data-ui-surface={paintedSurface}
@@ -522,7 +544,7 @@
 	{#if showComposer}
 		<div class="input-slot" bind:clientHeight={composerHeight} class:composer-overflow={surfaceHeight > 0 && composerHeight > surfaceHeight} class:input-wrapper={!showEmptyHero} class:empty-input-layout={showEmptyHero}>
 			{#if voiceCallActive && $activeSession.sessionId}
-				<VoiceCallPanel sessionId={$activeSession.sessionId} compact />
+				<div class="call-dock-slot" bind:clientHeight={callDockHeight}><VoiceCallPanel sessionId={$activeSession.sessionId} compact /></div>
 			{/if}
 			<BackgroundWorkStrip jobs={backgroundJobs} onOpen={openJob} onStop={stopJob} />
 			{#if archivedSessionId}
@@ -729,6 +751,37 @@
 
 	.input-wrapper {
 		flex-shrink: 0;
+	}
+
+	/* #816: a phone has no height to give the call dock, and stacking it on the
+	   composer moved the composer and the transcript by its full height whenever
+	   a call began or ended (the provider ending it included). There the dock
+	   floats just above the composer, over the transcript's foot, on a fade of
+	   the chat background; the transcript reserves its height (see
+	   heldCallRoom) and the jump-to-latest pill rises above it. Wider screens
+	   keep it in the composer's flow. */
+	@media (max-width: 639px) {
+		.chat-view {
+			--call-dock-reserve: var(--call-dock-room, 0px);
+			--call-dock-lift: var(--call-dock-height, 0px);
+		}
+		.input-wrapper:has(> .call-dock-slot) {
+			position: relative;
+		}
+		.call-dock-slot {
+			position: absolute;
+			inset-inline: 0;
+			bottom: 100%;
+			z-index: 2;
+			padding-top: 1.5rem;
+			background: linear-gradient(to bottom, transparent, var(--background) 1.5rem);
+			/* Only the controls catch touches: the rest of the band still scrolls
+			   the transcript beneath it. */
+			pointer-events: none;
+		}
+		.call-dock-slot :global(button) {
+			pointer-events: auto;
+		}
 	}
 
 	.transitioning-from-empty .message-area-wrapper {

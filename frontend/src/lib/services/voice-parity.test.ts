@@ -9,10 +9,11 @@ describe('voice composer parity', () => {
 		const view = source('components/layout/ChatView.svelte');
 		expect(view.match(/<ChatInput /g)).toHaveLength(1);
 		expect(view).toContain('const showComposer = true;');
-		// The background work strip sits between the call panel and the composer,
+		// The background work strip sits between the call panel (in its phone float
+		// slot, #816) and the composer,
 		// and a waiting private-access request shows above the question tray (#1807). A shell's
 		// prompt dock (the phone, #1816) takes the place of both, still directly above the composer.
-		expect(view).toMatch(/<VoiceCallPanel[^>]+compact \/>\s*\{\/if\}\s*<BackgroundWorkStrip[^>]+\/>\s*(?:\{#if archivedSessionId\}\s*<ArchivedChatBar[^>]+\/>\s*\{:else\}\s*)?\{#key \$sessionOwnerBoundary\}\s*\{#if PromptDock\}\s*<PromptDock[^>]+\/>\s*\{:else\}\s*(?:<PrivateAccessPrompt[^>]+\/>\s*)?<QuestionTray[^>]+\/>\s*\{\/if\}\s*<ChatInput/);
+		expect(view).toMatch(/<VoiceCallPanel[^>]+compact \/><\/div>\s*\{\/if\}\s*<BackgroundWorkStrip[^>]+\/>\s*(?:\{#if archivedSessionId\}\s*<ArchivedChatBar[^>]+\/>\s*\{:else\}\s*)?\{#key \$sessionOwnerBoundary\}\s*\{#if PromptDock\}\s*<PromptDock[^>]+\/>\s*\{:else\}\s*(?:<PrivateAccessPrompt[^>]+\/>\s*)?<QuestionTray[^>]+\/>\s*\{\/if\}\s*<ChatInput/);
 	});
 	it('uses code context and permission controls for voice on desktop and mobile', () => {
   expect(source('components/chat/ChatInput.svelte')).toContain('<ContextPillBar />');
