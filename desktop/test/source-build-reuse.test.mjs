@@ -98,7 +98,7 @@ test('a missing runtime dependency with intact install and output markers is rep
     const outputRoot = path.join(f.root, 'cache/builds', name);
     const [outputKey] = await fs.readdir(outputRoot);
     const outputMarker = await fs.readFile(path.join(outputRoot, outputKey, '.complete'), 'utf8');
-    await fs.rm(path.join(retained, 'locked'), { recursive: true });
+    await fs.rm(path.join(retained, 'locked'), { recursive: true, maxRetries: 10, retryDelay: 100 });
     const second = await f.build();
     const entry = path.join(second.opts.source, name, 'dist/index.js');
     assert.equal(execFileSync(process.execPath, ['-p', `require(${JSON.stringify(entry)})`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(), 'runtime dependency');
@@ -166,7 +166,7 @@ test('legacy and incomplete dependency records are misses without changing retai
 test('a failed replacement install publishes no entry and leaves the retained dependency tree untouched', async t => {
   const f = await fixture(t), first = await f.build();
   const retained = await fs.realpath(path.join(first.opts.source, 'browser-mcp/node_modules'));
-  await fs.rm(path.join(retained, 'locked'), { recursive: true });
+  await fs.rm(path.join(retained, 'locked'), { recursive: true, maxRetries: 10, retryDelay: 100 });
   f.clock.failNpm = 'browser-mcp';
   await assert.rejects(f.build(), /failed/);
   assert.deepEqual(await fs.readdir(path.dirname(path.dirname(retained))), [path.basename(path.dirname(retained))]);
