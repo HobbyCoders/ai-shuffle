@@ -38,8 +38,10 @@ const SOCKET_PROBE = () => {
 	const Real = window.WebSocket;
 	class Probed extends Real {
 		constructor(url, protocols) {
-			super(probe.blocked ? 'ws://127.0.0.1:9/' : url, protocols);
-			probe.sockets.push(this);
+			// Leave Vite's HMR socket alone: closing it makes the dev client reload the page.
+			const hmr = [protocols].flat().includes('vite-hmr');
+			super(probe.blocked && !hmr ? 'ws://127.0.0.1:9/' : url, protocols);
+			if (!hmr) probe.sockets.push(this);
 		}
 		send(data) {
 			if (typeof data === 'string' && data.includes('"user_question_response"')) probe.responses++;
