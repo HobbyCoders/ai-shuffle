@@ -231,6 +231,12 @@ function clearCatchupFallback(): void {
 
 function armCatchupFallback(generation: number): void {
 	clearCatchupFallback();
+	// A cached resume already shows its exact transcript, settled: silence
+	// before its first frame has no spinner to mark slow and no load to
+	// release, so there is nothing to wait for (and a deadline that already
+	// passed must never re-arm itself at 0 ms). Its rows stay; a frame that
+	// arrives later arms the mid-backfill idle budget below as usual.
+	if (eventsReduced === 0 && transcriptPublished) return;
 	// Before the first frame, never sleep past the ceiling: checking only every
 	// FIRST_FRAME_BUDGET_MS reached a 30 s ceiling at 32 s.
 	const budget = eventsReduced === 0

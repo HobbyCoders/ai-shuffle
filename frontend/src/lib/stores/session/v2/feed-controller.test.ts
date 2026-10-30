@@ -1679,6 +1679,49 @@ function hydrate(sessionId: string, seqs: number[]): void {
 	hoisted.onEvent!(caughtUp(seqs[seqs.length - 1] ?? 0));
 }
 
+describe('feedController silent cached resume (#913 review)', () => {
+	it('keeps the cached rows and never spins the pre-first-frame timer when nothing arrives', () => {
+		vi.useFakeTimers();
+		try {
+			const deps = makeDeps();
+			feedController.attach(deps);
+			hydrate('s1', [1, 2, 3]);
+			flushRaf();
+			feedController.stop();
+
+			// Reopen: the cached transcript publishes settled at once, then the
+			// resumed feed stays silent (no event, no caught_up) past the ceiling.
+			const callbacks = { count: 0 };
+			const realSetTimeout = globalThis.setTimeout;
+			const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) =>
+				realSetTimeout(() => { callbacks.count++; fn(); }, ms)) as typeof setTimeout);
+			try {
+				feedController.start('s1');
+				expect(deps.state.messages).toHaveLength(3);
+				expect(deps.state.isLoadingSession).toBeFalsy();
+				vi.advanceTimersByTime(HYDRATION_CEILING_MS * 2);
+				// The first-frame check may fire once; it must not re-arm itself
+				// (it used to re-arm at 0 ms forever once the ceiling passed).
+				expect(callbacks.count).toBeLessThanOrEqual(2);
+				expect(vi.getTimerCount()).toBe(0);
+			} finally {
+				spy.mockRestore();
+			}
+			expect(deps.state.messages).toHaveLength(3);
+			expect(deps.state.isLoadingSession).toBeFalsy();
+			expect(deps.state.historyStall ?? null).toBeNull();
+			expect(deps.state.isHydrationSlow).toBeFalsy();
+
+			// A frame that arrives later still folds through the idle floor.
+			hoisted.onEvent!(userMessageAt(4, 'm4'));
+			vi.advanceTimersByTime(CATCHUP_FALLBACK_MS);
+			expect(deps.state.messages).toHaveLength(4);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+
 describe('feedController parked turn', () => {
 	it('publishes turnParked from turn.parked until the wake turn starts', () => {
 		const deps = makeDeps();
