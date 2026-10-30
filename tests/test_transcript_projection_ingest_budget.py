@@ -20,7 +20,8 @@ from app.db.sessions import create_session
 
 
 @pytest.mark.asyncio
-async def test_background_projection_preserves_ingest_p95():
+async def test_background_projection_preserves_ingest_p95(monkeypatch):
+    monkeypatch.setenv('AI_SHUFFLE_TRANSCRIPT_PRODUCER', '1')
     store.initialize()
     create_profile('ingest-fixture', 'Fixture', None, {}, if_absent=True)
     sid = 'projection-ingest-fixture'
@@ -76,3 +77,100 @@ async def test_background_projection_preserves_ingest_p95():
         if task is not None:
             await task
         await bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_large_admissible_folds_preserve_loop_lag_and_ingest_p95(monkeypatch):
+    import threading
+    from app.core.transcript_views import producer as implementation
+
+    monkeypatch.setenv('AI_SHUFFLE_TRANSCRIPT_PRODUCER', '1')
+    store.initialize()
+    create_profile('large-ingest-profile', 'Fixture', None, {}, if_absent=True)
+    large, ingest_sid = 'large-fold-fixture', 'large-concurrent-ingest'
+    for sid in (large, ingest_sid):
+        create_session(sid, 'large-ingest-profile', derive_provider_from_profile=False)
+    source.append_events(large, [
+        {'type': 'message.user', 'payload': {'content': 'Large admissible result'}},
+        {'type': 'tool.use', 'payload': {'tool_use_id': 'large-tool', 'name': 'Read', 'input': {'path': 'fixture'}}},
+        {'type': 'tool.result', 'payload': {'tool_use_id': 'large-tool', 'content': 'x' * (1024 * 1024)}},
+        {'type': 'turn.completed', 'payload': {}}
+    ])
+    # Deterministically cover the cause, in addition to timing: the actual
+    # restore/re-evaluate/append/frame construction may never run on this loop.
+    owner, preparations = threading.get_ident(), 0
+    prepare = implementation._prepare_frames
+    def off_loop(*args, **kwargs):
+        nonlocal preparations
+        assert threading.get_ident() != owner
+        preparations += 1
+        return prepare(*args, **kwargs)
+    monkeypatch.setattr(implementation, '_prepare_frames', off_loop)
+    bridge, stop = ReducerBridge(), asyncio.Event()
+    actor = ProjectionActor(bridge)
+    ticker, background_task = None, None
+    async def heartbeat(values):
+        loop = asyncio.get_running_loop()
+        while not stop.is_set():
+            start = loop.time()
+            await asyncio.sleep(.001)
+            values.append(max(0.0, loop.time() - start - .001))
+    async def ingest():
+        values = []
+        for _ in range(150):
+            start = time.perf_counter()
+            await database(source.append_events, ingest_sid, [
+                {'type': 'assistant.text_delta', 'payload': {'text': 'small delta'}}])
+            values.append(time.perf_counter() - start)
+            await asyncio.sleep(.001)
+        return values
+    completed = 0
+    async def background():
+        nonlocal completed
+        for _ in range(8):
+            if stop.is_set():
+                return
+            await actor.process(large, recheck=True)
+            for _ in range(20):
+                if not await actor.process(large):
+                    break
+            state = await database(store.load, large)
+            assert state.ready == 1, (state.stage, state.error_code)
+            assert state.scan_seq == 4 and state.preview_json
+            completed += 1
+    try:
+        # Warm the bundled real Node process before measuring either phase.
+        await bridge.request('plan', carry=None, frames=[])
+        baseline_lag = []
+        ticker = asyncio.create_task(heartbeat(baseline_lag))
+        baseline = await ingest()
+        stop.set()
+        await ticker
+        stop.clear()
+        concurrent_lag = []
+        ticker = asyncio.create_task(heartbeat(concurrent_lag))
+        background_task = asyncio.create_task(background())
+        concurrent = await ingest()
+        stop.set()
+        await background_task
+        await ticker
+        assert completed >= 2 and preparations >= 4
+        p95 = lambda values: sorted(values)[math.ceil(len(values) * .95) - 1]
+        before, during = p95(baseline), p95(concurrent)
+        before_lag, during_lag = p95(baseline_lag), p95(concurrent_lag)
+        ingest_limit = max(before * 1.35, before + .006)
+        lag_limit = max(before_lag * 1.35, before_lag + .004)
+        print(f'large projection: 1MiB records={completed} preparations={preparations} '
+              f'ingest p95={before * 1000:.3f}->{during * 1000:.3f}ms '
+              f'limit={ingest_limit * 1000:.3f}ms '
+              f'loop-lag p95={before_lag * 1000:.3f}->{during_lag * 1000:.3f}ms '
+              f'limit={lag_limit * 1000:.3f}ms max={max(concurrent_lag) * 1000:.3f}ms')
+        assert during <= ingest_limit
+        assert during_lag <= lag_limit
+    finally:
+        stop.set()
+        try:
+            await asyncio.gather(*(task for task in (background_task, ticker) if task is not None),
+                                 return_exceptions=True)
+        finally:
+            await bridge.close()

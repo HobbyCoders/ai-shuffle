@@ -28,7 +28,7 @@ RETRY_SECONDS = 30.0
 
 
 def enabled() -> bool:
-    return os.environ.get('AI_SHUFFLE_TRANSCRIPT_PRODUCER', '1').strip().lower() not in {'0', 'off', 'false', 'no'}
+    return os.environ.get('AI_SHUFFLE_TRANSCRIPT_PRODUCER', '0').strip().lower() in {'1', 'on', 'true', 'yes'}
 
 
 class ProjectionProducer:
@@ -48,6 +48,7 @@ class ProjectionProducer:
         self._closed = True
         self._live_burst = 0
         self._cursor = ''
+        self._projection_cursor = ''
         self._durations = deque(maxlen=128)
         self.completed = self.dropped_hints = self.max_pending = 0
         self.last_error: str | None = None
@@ -148,6 +149,16 @@ class ProjectionProducer:
                         if not self.wake(session_id, backfill=True):
                             break  # Never advance past a dropped discovery hint.
                         self._cursor = session_id
+                    states = await database(work.projection_sources, self._projection_cursor)
+                    if not states:
+                        self._projection_cursor = ''
+                    for state in states:
+                        if not state['source_exists'] and not self.wake(state['session_id'], backfill=True):
+                            break  # Retry unadmitted deletions on the next keyset page.
+                        self._projection_cursor = state['session_id']
+                    # Retired content must make progress even during continuous
+                    # live traffic; each scan still performs only one finite GC.
+                    await database(work.collect_garbage)
                     next_scan = now + self.scan_seconds
                 session_id = self._next()
                 if session_id is None:

@@ -76,6 +76,31 @@ describe('dark transcript projection protocol', () => {
 		store.assertFullParity();
 	});
 
+	it('keeps implicit interrupt prose and its user barrier beyond the visible margin', () => {
+		const event = makeEvents(), store = new Store();
+		store.append([event('message.user', { content: 'First' }),
+			event('assistant.text_delta', { text: 'Answer' }), event('turn.completed')]);
+		ingest(store, Array.from({ length: 120 }, () => event('system.note', { subtype: 'info', content: 'notice' })));
+		store.append([event('turn.started', { turn_id: 'wake', source: 'agent_message' })]);
+		store.append([event('turn.aborted', { turn_id: 'wake', reason: 'interrupt' })]);
+		expect(store.assertFullParity().messages.find(message => message.role === 'assistant' && message.type === 'text')?.content)
+			.toBe('Answer\n\n[Stopped]');
+		store.append([event('message.user', { content: 'No output yet' })]);
+		ingest(store, Array.from({ length: 120 }, () => event('system.note', { subtype: 'info', content: 'notice' })));
+		store.append([event('turn.started', { turn_id: 'next', source: 'agent_message' }),
+			event('turn.aborted', { turn_id: 'next', reason: 'interrupt' })]);
+		store.assertFullParity();
+	});
+
+	it('fails closed before later implicit work when a deep rewind loses the known suffix', () => {
+		const event = makeEvents(), store = new Store();
+		ingest(store, ordinaryHistory(event));
+		store.append([event('transcript.rewound', { from_seq: 30 })]);
+		store.assertFullParity();
+		expect(() => store.append([event('turn.aborted', { reason: 'interrupt' })]))
+			.toThrow('implicit_anchor_unavailable');
+	});
+
 	it('replays the bounded mutable attempt from its base, without duplicating text', () => {
 		const event = makeEvents(), store = new Store();
 		store.append([event('message.user', { content: 'First' })]);

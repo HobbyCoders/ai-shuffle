@@ -85,6 +85,8 @@ def initialize() -> None:
         )""",
         """CREATE INDEX IF NOT EXISTS idx_session_transcript_projection_origin ON
             session_transcript_projection_records (session_id, generation, origin_seq)""",
+        """CREATE INDEX IF NOT EXISTS idx_session_transcript_projection_alias_record ON
+            session_transcript_projection_aliases (session_id, generation, record_id)""",
         """CREATE TABLE IF NOT EXISTS session_transcript_projection_retired (
             session_id TEXT NOT NULL, generation TEXT NOT NULL,
             PRIMARY KEY (session_id, generation)

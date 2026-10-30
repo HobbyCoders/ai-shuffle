@@ -310,11 +310,14 @@ Server-side switches are environment variables read by the worker on each event-
 
 ## Dark transcript producer
 
-Approved workers with Node 22 or newer build installation-local settled-message
-records in the background. **Reads are not implemented or negotiated:** opening
-chat still uses the existing event feed and full replay. Set
-`AI_SHUFFLE_TRANSCRIPT_PRODUCER=0` and restart to disable background production;
-this does not change serving, mutate the source log or delete chat content.
+Background production is **default-off**. On an approved worker with Node 22 or
+newer, set `AI_SHUFFLE_TRANSCRIPT_PRODUCER=1` and restart to build
+installation-local settled-message records. Enabling production is its own later
+step, after measuring a large real database; do not start a fleet-wide backfill
+with this change. **Reads are not implemented or negotiated:** opening chat
+still uses the existing event feed and full replay. Unset the switch (or set it
+to `0`) and restart to stop production. Neither setting changes serving, mutates
+the source log or deletes chat content.
 Missing/old Node, stale assets, unsupported legacy compaction and exceeded
 budgets fail closed to the existing serving path.
 
@@ -324,9 +327,15 @@ preprocessing, retaining a capped raw attempt and pending coalescers. Mutable
 carry and individually addressable settled records commit with one generation
 and revision CAS; logical pages use bounded keyset batches, not page-blob
 rewrites. NOTIFY hints have separate bounded live/backfill admissions before
-loop scheduling; a round-robin source scan repairs dropped hints. No source
-append or replication writer awaits the producer, and these tables are not
-replicated.
+loop scheduling; bounded source and derived-state keyset scans repair dropped
+hints, including deletion while the producer was offline. Retired generations
+are collected in finite batches even during ongoing live traffic. CPU-heavy
+restore, coalescing, frame construction and IPC JSON preparation use one
+admission-bounded, cancellation-joined worker, not the serving event loop.
+Implicit interrupt prose and its user barrier stay in carry regardless of
+window distance; a deep rewind without a known barrier fails closed rather
+than inventing an older target. No source append or replication writer awaits
+the producer, and these tables are not replicated.
 
 Run `npm run transcript:build` in `frontend/` after editing the shared reducer,
 its transitive helpers, the private Node entry point or canonical Python replay

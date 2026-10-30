@@ -28,6 +28,24 @@ def source_sessions(after: str = "", limit: int = 32) -> list[str]:
         return [row['session_id'] for row in cursor.fetchall()]
 
 
+def projection_sources(after: str = "", limit: int = 32) -> list[dict[str, Any]]:
+    """Reconcile a bounded keyset page of states, including absent sources.
+
+    Limit the derived-side page BEFORE the join/filter: a missing-row LIMIT
+    alone could scan every live generation when there are no deleted chats.
+    """
+    with get_db() as connection:
+        cursor = connection.cursor()
+        cursor.execute(
+            "SELECT p.session_id,(s.id IS NOT NULL) AS source_exists FROM "
+            "(SELECT session_id FROM session_transcript_projection_state "
+            "WHERE session_id>%s ORDER BY session_id LIMIT %s) p "
+            "LEFT JOIN sessions s ON s.id=p.session_id ORDER BY p.session_id",
+            (after, min(limit, 32)),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+
 def source_index(session_id: str, after: int, through: int) -> list[dict[str, Any]]:
     # SQL ->> is exactly the serving get_tool_use_seqs coercion. Do not infer
     # JSON scalar identity from Python payloads (booleans are not strings).

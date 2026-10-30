@@ -15,6 +15,8 @@ import shutil
 import subprocess
 from typing import Any
 
+from .preparation import PreparationBusy, PreparationWorker
+
 MAX_PACKET_BYTES = 24 * 1024 * 1024
 SAFE_ENV_KEYS = frozenset({"PATH", "Path", "SystemRoot", "SYSTEMROOT", "WINDIR", "TMP", "TEMP"})
 
@@ -53,6 +55,11 @@ def verified_manifest(directory: Path | None = None) -> dict[str, Any]:
         raise ReducerUnavailable("bundle_unavailable") from error
 
 
+def _encode_packet(sequence: int, method: str, params: dict[str, Any]) -> bytes:
+    return json.dumps({"id": sequence, "method": method, "params": params},
+                      ensure_ascii=True, allow_nan=False, separators=(",", ":"), default=str).encode("utf-8") + b"\n"
+
+
 class ReducerBridge:
     """One sequential process, bounded packets/deadlines, no hidden request queue.
 
@@ -69,6 +76,13 @@ class ReducerBridge:
         self._lock = asyncio.Lock()
         self._sequence = 0
         self.fingerprint: str | None = None
+        self._preparation = PreparationWorker()
+
+    async def prepare(self, call, *args, **kwargs):
+        try:
+            return await self._preparation.run(call, *args, **kwargs)
+        except PreparationBusy as error:
+            raise ReducerUnavailable("preparation_busy") from error
 
     async def _stop(self) -> None:
         process, self._process = self._process, None
@@ -92,7 +106,10 @@ class ReducerBridge:
 
     async def close(self) -> None:
         async with self._lock:
-            await self._stop()
+            try:
+                await self._stop()
+            finally:
+                await self._preparation.close()
 
     async def _start(self) -> None:
         if self._process is not None:
@@ -101,7 +118,7 @@ class ReducerBridge:
             await self._stop()
         if not self.node:
             raise ReducerUnavailable("node_missing")
-        manifest = verified_manifest(self.directory)
+        manifest = await self.prepare(verified_manifest, self.directory)
         environment = {key: value for key, value in os.environ.items() if key in SAFE_ENV_KEYS}
         options: dict[str, Any] = {}
         if os.name == "nt":
@@ -147,8 +164,7 @@ class ReducerBridge:
             await self._start()
             self._sequence += 1
             try:
-                packet = json.dumps({"id": self._sequence, "method": method, "params": params},
-                                    ensure_ascii=True, allow_nan=False, separators=(",", ":"), default=str).encode("utf-8") + b"\n"
+                packet = await self.prepare(_encode_packet, self._sequence, method, params)
                 if len(packet) > MAX_PACKET_BYTES:
                     raise ReducerUnavailable("node_input_limit")
                 assert self._process is not None and self._process.stdin is not None
@@ -162,7 +178,7 @@ class ReducerBridge:
                     line = await self._process.stdout.readline()
                     if len(line) > MAX_PACKET_BYTES:
                         raise ReducerUnavailable("node_output_limit")
-                    response = json.loads(line)
+                    response = await self.prepare(json.loads, line)
                     if not isinstance(response, dict) or response.get("id") != self._sequence:
                         raise ReducerUnavailable("node_protocol")
                     return response

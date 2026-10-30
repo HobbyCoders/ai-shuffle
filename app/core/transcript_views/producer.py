@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 import hashlib
+import time
 import json
 from typing import Any, Callable
 from uuid import uuid4
@@ -36,6 +37,31 @@ async def database(call: Callable, *args, **kwargs):
     except asyncio.CancelledError:
         await task
         raise
+
+
+def _prepare_frames(tail: ReplayTail, rows, lookup):
+    tail.reevaluate(lookup)
+    # Even off-loop CPython JSON work briefly holds the GIL. Yield this
+    # low-priority worker between finite stages, not after the whole MiB fold.
+    time.sleep(0)
+    if rows:
+        tail.append(rows, lookup)
+        time.sleep(0)
+    return tail.frames()
+
+
+def _checkpoint_tail(tail: ReplayTail, seq: int | None, lookup):
+    emitted = []
+    if seq is not None:
+        # Only unsuperseded input deltas actually committed at this boundary
+        # may later need a rebuild when a full tool.use arrives.
+        for row in tail.raw:
+            if row['event_type'] == serving._TOOL_INPUT_DELTA and int(row['seq']) <= seq:
+                key = lookup_key(row.get('turn_id'), (row.get('payload') or {}).get('tool_use_id'))
+                if key is not None and lookup.get(key, 0) <= int(row['seq']):
+                    emitted.append((key, int(row['seq'])))
+        tail.acknowledge(seq)
+    return emitted, tail.dump()
 
 
 class ProjectionActor:
@@ -144,8 +170,7 @@ class ProjectionActor:
         await database(store.commit, state, previous, tool_uses=additions)
         return True
 
-    async def _evaluate(self, state, tail):
-        frames = tail.frames()
+    async def _evaluate(self, state, frames):
         temporary = state.base_json
         boundary = None
         loaded: set[str] = set()
@@ -169,29 +194,20 @@ class ProjectionActor:
 
     async def _fold(self, state, previous) -> bool:
         await self._witness(state, cursor=state.scan_seq, identity=state.scan_id)
-        tail = ReplayTail.restore(state.preprocess_json)
-        lookup = await database(store.lookups, state, input_lookup_keys(tail.raw))
-        tail.reevaluate(lookup)
+        tail = await self.bridge.prepare(ReplayTail.restore, state.preprocess_json)
         rows = await database(work.source_rows, state.session_id, state.scan_seq, state.target_seq)
+        keys = await self.bridge.prepare(input_lookup_keys, [*tail.raw, *rows])
+        lookup = await database(store.lookups, state, keys)
+        frames = await self.bridge.prepare(_prepare_frames, tail, rows, lookup)
         if rows:
-            keys = input_lookup_keys(rows)
-            lookup.update(await database(store.lookups, state, keys))
-            tail.append(rows, lookup)
             state.scan_seq, state.scan_id = int(rows[-1]['seq']), str(rows[-1]['id'])
         elif state.scan_seq < state.target_seq:
             raise SourceChanged()
-        preview, boundary = await self._evaluate(state, tail)
-        emitted = []
+        preview, boundary = await self._evaluate(state, frames)
+        seq = None
         upserts, removed = [], []
         if boundary is not None:
             seq = int(boundary['lastSeq'])
-            # Only unsuperseded argument deltas actually committed in the stable
-            # fold can later require a rebuild when a new full tool.use arrives.
-            for row in tail.raw:
-                if row['event_type'] == serving._TOOL_INPUT_DELTA and int(row['seq']) <= seq:
-                    key = lookup_key(row.get('turn_id'), (row.get('payload') or {}).get('tool_use_id'))
-                    if key is not None and lookup.get(key, 0) <= int(row['seq']):
-                        emitted.append((key, int(row['seq'])))
             state.base_seq, state.base_json = seq, boundary['carry']
             upserts, removed = boundary['upserts'], boundary['removed']
             invalidations = [item for item in boundary['invalidations']
@@ -199,8 +215,8 @@ class ProjectionActor:
             if invalidations:
                 state.cleanup_json = json.dumps(invalidations, separators=(',', ':'))
                 state.stage = 'cleanup'
-            tail.acknowledge(seq)
-        state.preprocess_json, state.preview_json = tail.dump(), preview
+        emitted, state.preprocess_json = await self.bridge.prepare(_checkpoint_tail, tail, seq, lookup)
+        state.preview_json = preview
         witness = await self._witness(state, cursor=state.scan_seq, identity=state.scan_id)
         state.ready = int(state.scan_seq == state.target_seq and witness['seq'] == state.target_seq
                           and state.cleanup_json == '[]')

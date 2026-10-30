@@ -1951,6 +1951,8 @@ function emptyCarry() {
     originOrders: /* @__PURE__ */ new Map(),
     nextOrder: 0,
     nextOriginOrder: 0,
+    detachedThroughOrder: -1,
+    implicitAnchorsKnown: true,
     effects: []
   };
 }
@@ -1958,7 +1960,7 @@ function readCarry(body) {
   if (body === null) return emptyCarry();
   if (byteSize(body) > PROJECTION_LIMITS.carryBytes) throw new ProjectionUnsupported("carry_limit");
   const value = decode(body);
-  if (value?.version !== TRANSCRIPT_PROJECTION_VERSION || !Array.isArray(value.state?.messages) || !(value.state.messageOriginSeq instanceof Map) || !(value.slots instanceof Map) || !(value.originOrders instanceof Map) || !Array.isArray(value.effects) || value.effects.length > PROJECTION_LIMITS.effects || value.state.logEpoch !== null || !Number.isSafeInteger(value.nextOrder) || !Number.isSafeInteger(value.nextOriginOrder)) {
+  if (value?.version !== TRANSCRIPT_PROJECTION_VERSION || !Array.isArray(value.state?.messages) || !(value.state.messageOriginSeq instanceof Map) || !(value.slots instanceof Map) || !(value.originOrders instanceof Map) || !Array.isArray(value.effects) || value.effects.length > PROJECTION_LIMITS.effects || value.state.logEpoch !== null || !Number.isSafeInteger(value.nextOrder) || !Number.isSafeInteger(value.nextOriginOrder) || !Number.isSafeInteger(value.detachedThroughOrder) || typeof value.implicitAnchorsKnown !== "boolean") {
     throw new ProjectionUnsupported("carry_shape");
   }
   return value;
@@ -2100,12 +2102,17 @@ function finish(input, loaded, seal) {
   const upserts = [];
   const kept = [];
   const margin = new Set(carry.state.messages.slice(-PROJECTION_LIMITS.marginRows).map((message) => message.id));
+  const userAnchor = carry.state.messages.findLast((message) => message.role === "user");
+  const proseAnchor = carry.state.messages.findLast((message) => message.role === "assistant" && message.type === "text" && message.content.trim());
+  if (userAnchor) margin.add(userAnchor.id);
+  if (proseAnchor) margin.add(proseAnchor.id);
   for (const message of carry.state.messages) {
     const origin = carry.state.messageOriginSeq.get(message.id);
     const slot = carry.slots.get(message.id);
     const captured = { ...slot, message, origin: origin ?? -1, foldedThrough: carry.state.lastSeq };
     const body2 = seal && sealable(carry, message, margin) ? encode(captured) : null;
     if (body2 !== null && byteSize(body2) <= PROJECTION_LIMITS.rowBytes) {
+      carry.detachedThroughOrder = Math.max(carry.detachedThroughOrder, slot.order);
       upserts.push({
         id: message.id,
         order: slot.order,
@@ -2137,6 +2144,9 @@ function foldProjection(body, values, records = []) {
   const loaded = hydrate(carry, records);
   let boundary = null;
   for (const event of frames(values)) {
+    if (!carry.implicitAnchorsKnown && event.type !== "message.user") {
+      throw new ProjectionUnsupported("implicit_anchor_unavailable");
+    }
     if (event.seq <= carry.state.lastSeq) throw new ProjectionUnsupported("non_monotonic_input");
     const before = new Map(carry.state.messages.map((message) => [message.id, message]));
     const previousBoundary = carry.state.attemptStartSeq;
@@ -2148,6 +2158,18 @@ function foldProjection(body, values, records = []) {
     carry.effects = [...carry.effects, ...result.effects];
     if (carry.effects.length > PROJECTION_LIMITS.effects) throw new ProjectionUnsupported("effect_limit");
     indexFold(carry, before, event);
+    if (!carry.implicitAnchorsKnown && event.type === "message.user") {
+      const newest = carry.state.messages.at(-1);
+      if (newest?.role !== "user" || carry.state.messageOriginSeq.get(newest.id) !== event.seq) {
+        throw new ProjectionUnsupported("implicit_anchor_unavailable");
+      }
+      carry.implicitAnchorsKnown = true;
+    }
+    if (result.effects.some((effect) => effect.kind === "rewind")) {
+      const newest = carry.state.messages.at(-1);
+      const newestOrder = newest ? carry.slots.get(newest.id).order : -1;
+      carry.implicitAnchorsKnown = newestOrder >= carry.detachedThroughOrder;
+    }
     if (carry.state.attemptStartSeq !== previousBoundary) boundary = snapshot(carry);
   }
   return { boundary: boundary ? finish(boundary, loaded, true) : null, preview: finish(carry, loaded, false) };
@@ -2160,7 +2182,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "d4375de56a1e4ed833794b6c57e602e0df5693b87ebfc7613f34cb548feee614";
+var REDUCER_FINGERPRINT = "3ecf26109300b012c05a2d7fb6ef3d5fa294065c01f7ac85db54df618c0752d9";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {

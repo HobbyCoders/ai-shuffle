@@ -34,6 +34,9 @@ interface Carry {
 	originOrders: Map<string, number>;
 	nextOrder: number;
 	nextOriginOrder: number;
+	/** Upper bound on detached positions; deep rewinds cannot invent anchors. */
+	detachedThroughOrder: number;
+	implicitAnchorsKnown: boolean;
 	effects: CapturedMessageEffect[];
 }
 export interface ProjectionRow {
@@ -66,7 +69,8 @@ const decode = (value: string): unknown => unpackProjection(JSON.parse(value));
 
 function emptyCarry(): Carry {
 	return { version: TRANSCRIPT_PROJECTION_VERSION, state: initialState(), slots: new Map(),
-		originOrders: new Map(), nextOrder: 0, nextOriginOrder: 0, effects: [] };
+		originOrders: new Map(), nextOrder: 0, nextOriginOrder: 0,
+		detachedThroughOrder: -1, implicitAnchorsKnown: true, effects: [] };
 }
 function readCarry(body: string | null): Carry {
 	if (body === null) return emptyCarry();
@@ -76,7 +80,8 @@ function readCarry(body: string | null): Carry {
 		!(value.state.messageOriginSeq instanceof Map) || !(value.slots instanceof Map) ||
 		!(value.originOrders instanceof Map) || !Array.isArray(value.effects) ||
 		value.effects.length > PROJECTION_LIMITS.effects || value.state.logEpoch !== null ||
-		!Number.isSafeInteger(value.nextOrder) || !Number.isSafeInteger(value.nextOriginOrder)) {
+		!Number.isSafeInteger(value.nextOrder) || !Number.isSafeInteger(value.nextOriginOrder) ||
+		!Number.isSafeInteger(value.detachedThroughOrder) || typeof value.implicitAnchorsKnown !== 'boolean') {
 		throw new ProjectionUnsupported('carry_shape');
 	}
 	return value;
@@ -226,12 +231,20 @@ function finish(input: Carry, loaded: Set<string>, seal: boolean): ProjectionDel
 	const upserts: ProjectionRow[] = [];
 	const kept: ChatMessage[] = [];
 	const margin = new Set(carry.state.messages.slice(-PROJECTION_LIMITS.marginRows).map(message => message.id));
+	// Authoritative implicit operations scan backward for prose and its user
+	// barrier (notably interrupt's [Stopped] edit). Distance is not immutability.
+	const userAnchor = carry.state.messages.findLast(message => message.role === 'user');
+	const proseAnchor = carry.state.messages.findLast(message =>
+		message.role === 'assistant' && message.type === 'text' && message.content.trim());
+	if (userAnchor) margin.add(userAnchor.id);
+	if (proseAnchor) margin.add(proseAnchor.id);
 	for (const message of carry.state.messages) {
 		const origin = carry.state.messageOriginSeq.get(message.id);
 		const slot = carry.slots.get(message.id)!;
 		const captured: CapturedRow = { ...slot, message, origin: origin ?? -1, foldedThrough: carry.state.lastSeq };
 		const body = seal && sealable(carry, message, margin) ? encode(captured) : null;
 		if (body !== null && byteSize(body) <= PROJECTION_LIMITS.rowBytes) {
+			carry.detachedThroughOrder = Math.max(carry.detachedThroughOrder, slot.order);
 			upserts.push({ id: message.id, order: slot.order, origin: origin!,
 				foldedThrough: captured.foldedThrough, aliases: messageAliases(message), body });
 			carry.slots.delete(message.id);
@@ -257,6 +270,9 @@ export function foldProjection(body: string | null, values: unknown[], records: 
 	const loaded = hydrate(carry, records);
 	let boundary: Carry | null = null;
 	for (const event of frames(values)) {
+		if (!carry.implicitAnchorsKnown && event.type !== 'message.user') {
+			throw new ProjectionUnsupported('implicit_anchor_unavailable');
+		}
 		if (event.seq <= carry.state.lastSeq) throw new ProjectionUnsupported('non_monotonic_input');
 		const before = new Map(carry.state.messages.map(message => [message.id, message]));
 		const previousBoundary = carry.state.attemptStartSeq;
@@ -268,6 +284,23 @@ export function foldProjection(body: string | null, values: unknown[], records: 
 		carry.effects = [...carry.effects, ...result.effects];
 		if (carry.effects.length > PROJECTION_LIMITS.effects) throw new ProjectionUnsupported('effect_limit');
 		indexFold(carry, before, event);
+		if (!carry.implicitAnchorsKnown && event.type === 'message.user') {
+			const newest = carry.state.messages.at(-1);
+			// A fresh, authoritative user row is itself the backward-scan
+			// barrier. Echoes/restorations must not manufacture that guarantee.
+			if (newest?.role !== 'user' || carry.state.messageOriginSeq.get(newest.id) !== event.seq) {
+				throw new ProjectionUnsupported('implicit_anchor_unavailable');
+			}
+			carry.implicitAnchorsKnown = true;
+		}
+		if (result.effects.some(effect => effect.kind === 'rewind')) {
+			const newest = carry.state.messages.at(-1);
+			const newestOrder = newest ? carry.slots.get(newest.id)!.order : -1;
+			// The cut itself still materializes exactly from detached records.
+			// If it removed the entire known suffix, later implicit operations
+			// need unknown older anchors: reject rather than silently approximate.
+			carry.implicitAnchorsKnown = newestOrder >= carry.detachedThroughOrder;
+		}
 		if (carry.state.attemptStartSeq !== previousBoundary) boundary = snapshot(carry);
 	}
 	return { boundary: boundary ? finish(boundary, loaded, true) : null, preview: finish(carry, loaded, false) };

@@ -10,6 +10,11 @@ from app.core.transcript_views import manager
 from app.core.transcript_views.bridge import ReducerUnavailable
 
 
+@pytest.fixture(autouse=True)
+def producer_opted_in(monkeypatch):
+    monkeypatch.setenv('AI_SHUFFLE_TRANSCRIPT_PRODUCER', '1')
+
+
 class Bridge:
     def __init__(self):
         self.closed = False
@@ -51,10 +56,22 @@ class Actor:
 def instance(monkeypatch, *, scan_seconds=10):
     monkeypatch.setattr(manager.store, 'initialize', lambda: None)
     monkeypatch.setattr(manager.work, 'source_sessions', lambda after: [])
+    monkeypatch.setattr(manager.work, 'projection_sources', lambda after: [])
     monkeypatch.setattr(manager.work, 'collect_garbage', lambda: False)
     bridge, gateway, actor = Bridge(), Gateway(), Actor()
     producer = manager.ProjectionProducer(bridge=bridge, gateway=gateway, actor=actor, scan_seconds=scan_seconds)
     return producer, bridge, gateway, actor
+
+
+def test_producer_is_default_off_without_creating_a_task(monkeypatch):
+    monkeypatch.delenv('AI_SHUFFLE_TRANSCRIPT_PRODUCER', raising=False)
+    producer, bridge, gateway, actor = instance(monkeypatch)
+    assert not manager.enabled()
+    producer.start()
+    assert producer._task is None
+    assert producer.wake('disabled') is False
+    assert gateway.listeners == []
+    assert actor.processed == []
 
 
 @pytest.mark.asyncio
@@ -150,7 +167,7 @@ async def test_missing_node_is_a_nonfatal_startup_fallback(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_stop_before_run_starts_still_closes_owned_bridge(monkeypatch):
-    monkeypatch.delenv('AI_SHUFFLE_TRANSCRIPT_PRODUCER', raising=False)
+    monkeypatch.setenv('AI_SHUFFLE_TRANSCRIPT_PRODUCER', '1')
     bridge, gateway = Bridge(), Gateway()
     producer = manager.ProjectionProducer(bridge=bridge, actor=Actor(), gateway=gateway)
     producer.start()
