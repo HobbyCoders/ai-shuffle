@@ -37,7 +37,7 @@ import {
 } from './session/session-switcher';
 
 // Extracted sub-modules
-import { createSessionInit, setSkipRestore, bumpInitGeneration, tabWillRestoreChat } from './session/session-init';
+import { createSessionInit, setSkipRestore, bumpInitGeneration, tabWillRestoreChat, noteBootProjectPick } from './session/session-init';
 // V2 Phase 1: SSE-fed reducer store for v2_stream sessions (single writer).
 import { markChatUnavailable, clearUnavailableChat } from './unavailable-chat';
 import { feedController } from './session/v2/feed-controller';
@@ -1150,6 +1150,8 @@ export const activeSession = {
 			console.warn('[ActiveSession] Cannot change project after session has started');
 			return;
 		}
+		// Boot's landing reconcile must keep this new chat's project (#930).
+		if (!_state.sessionId) noteBootProjectPick();
 		const nextV2 = projectV2Id === undefined
 			? appData.current.clusterProjects.find(p => p.local_project_id === projectId)?.project_v2_id ?? null
 			: projectV2Id;

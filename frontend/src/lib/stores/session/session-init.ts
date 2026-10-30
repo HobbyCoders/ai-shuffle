@@ -119,7 +119,7 @@ export function bumpInitGeneration(): number {
 // this claim separate from the navigation epoch: adopting one's own new chat
 // is NOT navigation (ChatInput uses that distinction for draft recovery and
 // collapsing the phone composer). AppPage retires it after both boot reconciles.
-let bootSend: { generation: number; pendingSends: Set<symbol> } | null = null;
+let bootSend: { generation: number; pendingSends: Set<symbol>; projectPicked: boolean } | null = null;
 
 export function claimBootSend(): symbol | null {
 	if (bootSend?.generation !== getInitGeneration()) return null;
@@ -134,6 +134,20 @@ export function releaseBootSend(claim: symbol | null): void {
 
 export function hasBootSendClaim(generation: number): boolean {
 	return bootSend?.generation === generation && bootSend.pendingSends.size > 0;
+}
+
+/**
+ * The user picked (or cleared) the new chat's project while boot's first loads
+ * ran (#930). A slow boot shows the new-session screen well before AppPage's
+ * landing reconcile; resetting that compose to a fresh chat there threw the
+ * pick away, and the first send went out with no project.
+ */
+export function noteBootProjectPick(): void {
+	if (bootSend?.generation === getInitGeneration()) bootSend.projectPicked = true;
+}
+
+export function hasBootProjectPick(generation: number): boolean {
+	return bootSend?.generation === generation && bootSend.projectPicked;
 }
 
 export function finishBootReconciliation(generation: number): void {
@@ -160,7 +174,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 	 */
 	async function init(options: { deepLinkSessionId?: string | null } = {}) {
 		const initGen = bumpInitGeneration();
-		bootSend = { generation: initGen, pendingSends: new Set() };
+		bootSend = { generation: initGen, pendingSends: new Set(), projectPicked: false };
 
 		const deepLinkSessionId = options.deepLinkSessionId || null;
 		const skipRestore = getSkipRestore() || deepLinkSessionId !== null;
@@ -332,7 +346,9 @@ export function createSessionInit(deps: SessionInitDeps) {
 					}
 				} else {
 					// No saved compose: a new session starts without a project.
-					update(s => ({ ...s, isRestoringSession: false, profile: defaultProfile, ...(s.mode === 'chat' ? {} : { project: defaultProject }) }));
+					// One the user picked while this loaded is theirs (#930).
+					update(s => ({ ...s, isRestoringSession: false, profile: defaultProfile,
+						...(s.mode === 'chat' || hasBootProjectPick(initGen) ? {} : { project: defaultProject }) }));
 				}
 			}
 
