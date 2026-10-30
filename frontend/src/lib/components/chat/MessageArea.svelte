@@ -695,13 +695,25 @@
 	// A bounded slice, not an idle queue that eventually mounts all history.
 	// Explicit navigation remains available while streaming; hidden views do no
 	// optional mounting. A keyed DOM anchor survives eviction at either edge.
+	function transcriptIndexOfRow(row: HTMLElement): number {
+		const key = row.dataset.transcriptKey;
+		const index = Number(row.dataset.transcriptIndex);
+		return displayItems[index] && displayItemKey(displayItems[index]) === key ? index
+			: displayItems.findIndex(item => displayItemKey(item) === key);
+	}
 	function pinnedTranscriptRange(): TranscriptRange | null {
-		return selectedRowRange(chatColumnRef, ':scope > [data-transcript-key]', row => {
-			const key = row.dataset.transcriptKey;
-			const index = Number(row.dataset.transcriptIndex);
-			return displayItems[index] && displayItemKey(displayItems[index]) === key ? index
-				: displayItems.findIndex(item => displayItemKey(item) === key);
-		});
+		return selectedRowRange(chatColumnRef, ':scope > [data-transcript-key]', transcriptIndexOfRow);
+	}
+	function readingTranscriptIndex(): number | null {
+		if (!containerRef || !chatColumnRef) return null;
+		const viewport = containerRef.getBoundingClientRect();
+		for (const row of chatColumnRef.querySelectorAll<HTMLElement>(':scope > [data-transcript-key]')) {
+			const box = row.getBoundingClientRect();
+			if (box.bottom <= viewport.top || box.top >= viewport.bottom) continue;
+			const index = transcriptIndexOfRow(row);
+			if (index >= 0) return index;
+		}
+		return null;
 	}
 	const transcriptWindow = createTranscriptWindow({
 		// Real row geometry is kept: no estimated-height placeholders that move
@@ -710,7 +722,8 @@
 		cost: import.meta.env.VITE_PERF_TRANSCRIPT_CONTENT_WINDOW !== '0'
 			? (index) => transcriptItemCost(displayItems[index]) : undefined,
 		budget: TRANSCRIPT_CONTENT_BUDGET,
-		getPinnedRange: pinnedTranscriptRange
+		getPinnedRange: pinnedTranscriptRange,
+		getReadingIndex: readingTranscriptIndex
 	});
 	let selectionBlocksNavigation = $state(false);
 	$effect(() => {

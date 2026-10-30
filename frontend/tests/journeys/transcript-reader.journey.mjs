@@ -2,7 +2,7 @@
 // shifts. The selected span is pinned inside the SAME row/content budget; at
 // that boundary browsing pauses until the selection is collapsed/cleared.
 import { runJourney } from './runner.mjs';
-import { expect, waitChatOpen } from './lib/app.mjs';
+import { expect, openNewChat, typeAndSend, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 // Hosted journeys build only the shared desktop UI and exercise it at both
@@ -97,6 +97,83 @@ await runJourney({
 			await page.mouse.wheel(0, -1_000_000);
 			await page.waitForFunction(start => Number(document.querySelector('[data-transcript-index]')?.dataset.transcriptIndex) < Number(start), oldStart);
 			log('the accessible clear control released selected rows for eviction');
+		}
+	}, {
+		name: 'same-count-streaming-growth',
+		async setup({ page, status, variant }) {
+			// Produce a fresh native prefix through the real composer/provider, then
+			// replay it into the affected shell. No synthetic feed/state or SDK-only
+			// fork endpoint: default native seed sessions have no SDK session id.
+			await openNewChat({ page, status, variant });
+			await typeAndSend(page, 'Prepare a rich reading prefix. [script:reader-growth tps=0 latency_ms=0]');
+			await waitTurnSettled(page, { messagesAtLeast: 2, text: 'GROWING_READER_END', hold: 250 });
+			const id = await page.evaluate(() => JSON.parse(sessionStorage.getItem('ai-shuffle-active-session') || 'null')?.sessionId);
+			expect(typeof id === 'string', 'the real producer bound a fresh native session');
+			const prefix = mobileShell && variant.viewport === 'phone' ? '/mobile/' : '/';
+			await page.goto(new URL(`${prefix}?session=${encodeURIComponent(id)}`, status.urls.ui).toString());
+			await waitChatOpen(page, { messagesAtLeast: 2, hold: 250 });
+			await typeAndSend(page, 'Grow the reply while I read it. [script:reader-growth latency_ms=0]');
+			await page.waitForFunction(() => {
+				const row = [...document.querySelectorAll('[data-transcript-index]')].at(-1);
+				return Number(row?.dataset.transcriptIndex) >= 3 && row.textContent.includes('GROWING_READER_START') && row.textContent.length > 4000;
+			});
+			await page.locator(LOG).evaluate(log => {
+				const row = [...log.querySelectorAll('[data-transcript-index]')].filter(row => row.textContent.includes('GROWING_READER_START')).at(-1);
+				log.scrollTop += row.getBoundingClientRect().top - log.getBoundingClientRect().top + 400;
+			});
+			await page.locator(LOG).hover();
+			await page.mouse.wheel(0, -160);
+			await page.getByRole('button', { name: 'Jump to latest message', exact: true }).waitFor();
+			await twoFrames(page);
+		},
+		async act({ page, mark, log }) {
+			await mark('read the live reply while same-count growth reprices the window');
+			const before = await page.evaluate(selector => {
+				const container = document.querySelector(selector);
+				const row = [...container.querySelectorAll('[data-transcript-index]')].filter(row => row.textContent.includes('GROWING_READER_START')).at(-1);
+				if (!row) throw new Error('The growing reply disappeared before follow mode could be released.');
+				window.__growingReader = row;
+				window.__growingSamples = [];
+				window.__sampleGrowingReader = true;
+				const sample = () => {
+					if (!window.__sampleGrowingReader) return;
+					window.__growingSamples.push({
+						connected: row.isConnected, chars: row.textContent.length,
+						top: row.getBoundingClientRect().top - container.getBoundingClientRect().top,
+						indices: [...container.querySelectorAll('[data-transcript-index]')].map(row => Number(row.dataset.transcriptIndex))
+					});
+					requestAnimationFrame(sample);
+				};
+				requestAnimationFrame(sample);
+				return { chars: row.textContent.length, index: Number(row.dataset.transcriptIndex),
+					top: row.getBoundingClientRect().top - container.getBoundingClientRect().top,
+					start: Number(container.querySelector('[data-transcript-index]').dataset.transcriptIndex) };
+			}, LOG);
+			try {
+				await page.waitForFunction(() => !window.__growingReader.isConnected || window.__growingReader.textContent.length > 17000, undefined, { timeout: 25000 });
+				await twoFrames(page);
+				const after = await page.evaluate(selector => {
+					window.__sampleGrowingReader = false;
+					const samples = window.__growingSamples;
+					return { connected: window.__growingReader.isConnected, chars: window.__growingReader.textContent.length,
+						frames: samples.length, disconnected: samples.filter(sample => !sample.connected).length,
+						maxDrift: Math.max(...samples.map(sample => Math.abs(sample.top - samples[0].top))),
+						sameCount: samples.every(sample => sample.indices.at(-1) === Number(window.__growingReader.dataset.transcriptIndex)),
+						start: Number(document.querySelector(`${selector} [data-transcript-index]`).dataset.transcriptIndex),
+						rows: document.querySelectorAll('[data-transcript-index]').length,
+						nodes: document.querySelector(selector).querySelectorAll('*').length };
+				}, LOG);
+				log(`same-count growth ${JSON.stringify({ before, after })}`);
+				expect(after.connected && after.disconnected === 0, 'content repricing must retain the currently-read streaming reply');
+				expect(after.chars > 17000 && after.chars > before.chars, 'the real native stream grew beyond the old window budget');
+				expect(after.start > before.start && after.sameCount, 'same-count growth evicts offscreen neighbours, not the reading row');
+				expect(after.maxDrift <= 1, 'the same reading key keeps its viewport offset during repricing');
+				expect(after.rows <= 120 && after.nodes <= 12000, 'reading preservation keeps the row and nested DOM budgets');
+			} finally {
+				await page.evaluate(() => { window.__sampleGrowingReader = false; });
+				const stop = page.getByRole('button', { name: /^Stop/ });
+				if (await stop.isVisible()) await stop.click();
+			}
 		}
 	}],
 	allow: [...DEV_INSTANCE_NOISE]

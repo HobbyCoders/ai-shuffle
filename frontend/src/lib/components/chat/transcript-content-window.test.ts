@@ -2,6 +2,67 @@ import { describe, expect, it } from 'vitest';
 import { createTranscriptWindow, type TranscriptRange } from './transcript-window';
 
 describe('nested transcript mount budget', () => {
+ it('keeps the trailing mounted reply through same-count streaming growth when no viewport is available', () => {
+  let costs = [6000, 2000, 2000];
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000 });
+  window.onStreamingChange(true);
+  expect(window.setItemCount(3)).toEqual({ start: 0, end: 3 });
+  window.setItemCount(3, { followTail: false });
+  costs = [6000, 2000, 6000];
+  expect(window.setItemCount(3, { followTail: false })).toEqual({ start: 1, end: 3 });
+  expect(window.selectionLimited).toBe(false);
+ });
+ it.each([0, 1, 2])('keeps visible reading row %i, not an arbitrary range edge, when content is repriced', reading => {
+  let costs = [6000, 2000, 2000];
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000, getReadingIndex: () => reading });
+  window.setItemCount(3);
+  window.setItemCount(3, { followTail: false });
+  costs = [6000, 2000, 6000];
+  const range = window.setItemCount(3, { followTail: false });
+  expect(range.start).toBeLessThanOrEqual(reading);
+  expect(range.end).toBeGreaterThan(reading);
+  expect(costs.slice(range.start, range.end).reduce((sum, cost) => sum + cost, 0)).toBeLessThanOrEqual(12000);
+  expect(window.selectionLimited).toBe(false);
+ });
+ it('resolves a reading key against the new vector after a prepend and allows explicit navigation away', () => {
+  let costs = [6000, 2000, 2000], reading = 2;
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000, getReadingIndex: () => reading });
+  window.setItemCount(3);
+  window.setItemCount(3, { followTail: false });
+  costs = [2000, 6000, 2000, 6000]; reading = 3;
+  expect(window.setItemCount(4, { followTail: false })).toEqual({ start: 2, end: 4 });
+  expect(window.windowAround(0)).toEqual({ start: 0, end: 3 });
+ });
+ it('reads viewport geometry only when repricing would evict an already-mounted row', () => {
+  let costs = [6000, 2000, 2000], reads = 0;
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000, getReadingIndex: () => { reads++; return 2; } });
+  window.setItemCount(3);
+  for (let i = 0; i < 20; i++) window.setItemCount(3, { followTail: false });
+  expect(reads).toBe(0);
+  costs = [6000, 2000, 6000];
+  window.setItemCount(3, { followTail: false });
+  expect(reads).toBe(1);
+  for (let i = 0; i < 20; i++) window.setItemCount(3, { followTail: false });
+  expect(reads).toBe(1);
+ });
+ it('keeps an oversize reading reply intact on its own instead of truncating or evicting it', () => {
+  let costs = [6000, 2000, 2000];
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000, getReadingIndex: () => 2 });
+  window.setItemCount(3);
+  window.setItemCount(3, { followTail: false });
+  costs = [6000, 2000, 13000];
+  expect(window.setItemCount(3, { followTail: false })).toEqual({ start: 2, end: 3 });
+  expect(window.selectionLimited).toBe(false);
+ });
+ it('protects the reading key when a hidden view resumes after content growth', () => {
+  let costs = [6000, 2000, 2000];
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000, getReadingIndex: () => 2 });
+  window.setItemCount(3);
+  window.setItemCount(3, { followTail: false, hidden: true });
+  costs = [6000, 2000, 6000];
+  expect(window.setItemCount(3, { followTail: false, hidden: true })).toEqual({ start: 0, end: 3 });
+  expect(window.pauseWhenHidden(false)).toEqual({ start: 1, end: 3 });
+ });
  it.each([
   { costs: [64, 6000, 64, 9000], previous: { start: 0, end: 3 }, expected: { start: 2, end: 4 }, direction: 'newer' },
   { costs: [9000, 64, 6000, 64], previous: { start: 1, end: 4 }, expected: { start: 0, end: 2 }, direction: 'older' }
