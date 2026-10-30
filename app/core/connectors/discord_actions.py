@@ -29,12 +29,9 @@ from app.core.connectors.base import ActionDef, chunk_text
 
 logger = logging.getLogger(__name__)
 
-try:
-    import discord
+from importlib.util import find_spec
 
-    DISCORD_AVAILABLE = True
-except ImportError:  # pragma: no cover - exercised only without discord.py
-    DISCORD_AVAILABLE = False
+DISCORD_AVAILABLE = find_spec("discord") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -678,6 +675,8 @@ async def _send_message(conn, params, ctx):
 
 @_handler("send_embed")
 async def _send_embed(conn, params, ctx):
+    import discord
+
     title = str(params.get("title") or "").strip()
     description = str(params.get("description") or "")
     if not title and not description:
@@ -713,6 +712,8 @@ async def _send_embed(conn, params, ctx):
 
 @_handler("send_file")
 async def _send_file(conn, params, ctx):
+    import discord
+
     path = str(params.get("path") or "")
     if not path or not os.path.isfile(path):
         return _err(f"File not found: {path!r}")
@@ -728,6 +729,8 @@ async def _send_file(conn, params, ctx):
 
 @_handler("create_poll")
 async def _create_poll(conn, params, ctx):
+    import discord
+
     question = str(params.get("question") or "").strip()
     answers = params.get("answers")
     if not question:
@@ -755,6 +758,8 @@ async def _create_poll(conn, params, ctx):
 
 @_handler("read_messages")
 async def _read_messages(conn, params, ctx):
+    import discord
+
     try:
         limit = int(params.get("limit") or 20)
     except (TypeError, ValueError):
@@ -903,6 +908,8 @@ async def _clear_reactions(conn, params, ctx):
 
 @_handler("create_thread")
 async def _create_thread(conn, params, ctx):
+    import discord
+
     name = str(params.get("name") or "").strip()
     if not name:
         return _err("name is required.")
@@ -1100,6 +1107,8 @@ async def _list_roles(conn, params, ctx):
 
 
 def _parse_role_kwargs(params: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[str]]:
+    import discord
+
     kwargs: Dict[str, Any] = {}
     if params.get("name") is not None:
         kwargs["name"] = str(params["name"])
@@ -1117,6 +1126,8 @@ def _parse_role_kwargs(params: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional
 
 @_handler("create_role")
 async def _create_role(conn, params, ctx):
+    import discord
+
     guild, err = await _resolve_guild(conn, ctx)
     if err:
         return err
@@ -1288,6 +1299,8 @@ async def _kick_member(conn, params, ctx):
 
 @_handler("ban_member")
 async def _ban_member(conn, params, ctx):
+    import discord
+
     guild, err = await _resolve_guild(conn, ctx)
     if err:
         return err
@@ -1309,6 +1322,8 @@ async def _ban_member(conn, params, ctx):
 
 @_handler("unban_member")
 async def _unban_member(conn, params, ctx):
+    import discord
+
     guild, err = await _resolve_guild(conn, ctx)
     if err:
         return err
@@ -1470,6 +1485,8 @@ async def _list_scheduled_events(conn, params, ctx):
 
 @_handler("create_scheduled_event")
 async def _create_scheduled_event(conn, params, ctx):
+    import discord
+
     name = str(params.get("name") or "").strip()
     if not name:
         return _err("name is required.")
@@ -1569,6 +1586,10 @@ async def execute(
 ) -> Dict[str, Any]:
     """Dispatch one catalog action against a live DiscordConnector."""
     if not DISCORD_AVAILABLE:
+        return _err("discord.py is not installed.")
+    try:
+        import discord
+    except ImportError:
         return _err("discord.py is not installed.")
     handler = _HANDLERS.get(action_id)
     if handler is None:

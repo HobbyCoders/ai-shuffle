@@ -5,8 +5,6 @@ import asyncio
 import base64
 import logging
 
-import asyncssh
-
 from app.core import terminals as service
 from app.core.terminals import TerminalError
 from app.db.async_database import run_sync
@@ -231,6 +229,7 @@ class PeerTerminal(StreamTerminal):
 
 class SSHTerminal(StreamTerminal):
     async def start(self, target):
+        import asyncssh
         from app.core.chat_access import broker, AccessDenied
         self.broker = broker
         try:
