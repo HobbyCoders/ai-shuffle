@@ -47,6 +47,20 @@ def make_call(monkeypatch):
     return call, pc
 
 
+async def until_entered(entered, task):
+    """Wait for the fake to be reached, or for the task to end without reaching it.
+
+    No wall-clock deadline: a stalled CI runner (busy CPU, cold lazy imports on
+    the event loop) outlasted the old 1s wait and timed out a correct run (#794).
+    """
+    waiter = asyncio.ensure_future(entered.wait())
+    try:
+        await asyncio.wait({waiter, task}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        waiter.cancel()
+    assert entered.is_set(), f"task ended before reaching the fake: {task!r}"
+
+
 async def hang_up(call, action):
     if action == "hangup":
         await voice_stream.stop(call.session_id)
@@ -94,8 +108,40 @@ async def test_close_while_loading_token_never_opens_peer(monkeypatch, action):
     monkeypatch.setattr(fluid_credentials, "_load_codex_access_token", load)
     call, pc = make_call(monkeypatch)
     task = asyncio.create_task(call.start_live([]))
-    await asyncio.wait_for(entered.wait(), 1)
+    await until_entered(entered, task)
     await hang_up(call, action)
+    release.set()
+    with pytest.raises(ValueError, match="could not start"):
+        await task
+    call.upstream.make_peer.assert_not_called()
+    assert call.api_key == ""
+
+
+@pytest.mark.asyncio
+async def test_close_while_loading_waits_out_a_slow_cold_start(monkeypatch):
+    """#794: a cold start that blocks the loop past 1s must not fail the race test."""
+    import time
+
+    from app.core.provider import fluid_credentials
+
+    monkeypatch.setattr("app.core.voice_dependencies.availability", lambda: (True, None))
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def load(provider):
+        # A runner stall (lazy imports, a busy CPU) longer than the old 1s
+        # wait, then one more await before the fake is reached. CI saw the
+        # Event already set when that wait had timed out.
+        time.sleep(1.2)  # noqa: ASYNC251 — blocking the loop is the point
+        await asyncio.sleep(0)
+        entered.set()
+        await release.wait()
+        return "fake-token", None
+
+    monkeypatch.setattr(fluid_credentials, "_load_codex_access_token", load)
+    call, _ = make_call(monkeypatch)
+    task = asyncio.create_task(call.start_live([]))
+    await until_entered(entered, task)
+    await hang_up(call, "hangup")
     release.set()
     with pytest.raises(ValueError, match="could not start"):
         await task
@@ -117,7 +163,7 @@ async def test_close_during_post_leaves_no_open_connection(monkeypatch, action):
     client = AsyncMock()
     client.post.side_effect = post
     task = asyncio.create_task(call.upstream.open(client, "fake-token", None, {}))
-    await asyncio.wait_for(entered.wait(), 1)
+    await until_entered(entered, task)
     await hang_up(call, action)
     release.set()
     with pytest.raises(ValueError, match="closed"):
@@ -158,7 +204,7 @@ async def test_close_during_remote_description_closes_late_connection(monkeypatc
     client = AsyncMock()
     client.post.return_value = type("Response", (), {"status_code": 201, "text": "synthetic-answer"})()
     task = asyncio.create_task(call.upstream.open(client, "fake-token", None, {}))
-    await asyncio.wait_for(entered.wait(), 1)
+    await until_entered(entered, task)
     await hang_up(call, action)
     assert pc.closed
     release.set()
