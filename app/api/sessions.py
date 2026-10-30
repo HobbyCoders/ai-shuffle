@@ -69,6 +69,7 @@ from app.api.sessions_helpers import (  # noqa: F401 — re-exports
     build_live_messages,
     load_event_messages,
     local_store_is_stale,
+    prepend_pre_move_history,
     finalize_transcript,
     paginate_messages,
     DEFAULT_MESSAGE_PAGE_LIMIT,
@@ -930,7 +931,8 @@ async def get_session(
     store_parse_failed = False
 
     # A chat another worker owns: the local store stops at the move (#820).
-    if sdk_session_id and await run_sync(local_store_is_stale, session):
+    store_is_stale = bool(sdk_session_id) and await run_sync(local_store_is_stale, session)
+    if store_is_stale:
         # Token usage: the store here is stale, so use the per-turn DB columns.
         session["context_tokens"] = sum(
             session.get(key, 0) or 0
@@ -1024,6 +1026,10 @@ async def get_session(
         except Exception:
             logger.exception("Failed to read event transcript for %s", session["id"])
             has_events = await run_sync(_event_history_blocks_legacy_rescue, session["id"])
+        if store_is_stale:
+            # Earlier turns only this worker's store holds (#917).
+            messages = await run_sync(
+                prepend_pre_move_history, session, messages, build_detail_messages)
     if not messages and not has_events and not store_parse_failed:
         if sdk_session_id:
             logger.warning(
@@ -1331,8 +1337,9 @@ async def get_live_session(
     # Primary read: the Postgres session store.
     store_parse_failed = False
     # A chat another worker owns: the local store stops at the move (#820).
-    if (include_messages and sdk_session_id
-            and not await run_sync(local_store_is_stale, session)):
+    store_is_stale = (include_messages and bool(sdk_session_id)
+                      and await run_sync(local_store_is_stale, session))
+    if include_messages and sdk_session_id and not store_is_stale:
         try:
             from app.core.message_resolver import resolve_working_dir
 
@@ -1379,6 +1386,10 @@ async def get_live_session(
         except Exception:
             logger.exception("Failed to read event transcript for live %s", session_id)
             has_events = await run_sync(_event_history_blocks_legacy_rescue, session_id)
+        if store_is_stale:
+            # Earlier turns only this worker's store holds (#917).
+            messages = await run_sync(
+                prepend_pre_move_history, session, messages, build_live_messages)
     if include_messages and not messages and not has_events and not store_parse_failed:
         from app.core.db_message_loader import load_messages_from_db
         try:

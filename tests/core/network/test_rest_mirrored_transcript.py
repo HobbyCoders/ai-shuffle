@@ -1,6 +1,7 @@
 """REST reads of a real network mirror retain the recorder's assistant reply."""
 import asyncio
 import json
+import uuid
 
 import pytest
 from fastapi import FastAPI, Request
@@ -269,8 +270,8 @@ def test_failed_mirror_read_does_not_resurrect_legacy(
     assert len(calls) == (2 if fail_after_page else 1)
 
 
-def _populate_local_store(monkeypatch, suffix, text):
-    """Give the viewer's chat a real harness-store transcript of one reply."""
+def _populate_local_store(monkeypatch, suffix, text=None, entries=None):
+    """Give the viewer's chat a real harness-store transcript (one reply by default)."""
     from app.core import pg_session_store as pss
     from tests import pg_shim
     from tests.pg_shim import ShimCursor
@@ -303,16 +304,44 @@ def _populate_local_store(monkeypatch, suffix, text):
 
     monkeypatch.setattr(ShimCursor, "_as_dict", staticmethod(store_jsonb))
     monkeypatch.setattr(ShimCursor, "fetchall", store_fetchall)
-    sdk_id = "populated-store-sdk-" + ("live" if suffix else "detail")
+    # The store outlives a test's workers: a fresh id keeps each transcript apart.
+    sdk_id = f"populated-store-sdk-{'live' if suffix else 'detail'}-{uuid.uuid4().hex}"
     database.update_session("remote-chat", sdk_session_id=sdk_id)
     monkeypatch.setattr("app.core.message_resolver.resolve_working_dir", lambda session: "/missing")
     monkeypatch.setattr("app.core.provider.fluid_transcript.is_fluid_session", lambda sid: False)
     asyncio.run(pss.PgSessionStore().append(
         {"project_key": "-missing", "session_id": sdk_id},
-        [{"type": "assistant", "uuid": "store-reply", "message": {
+        entries or [{"type": "assistant", "uuid": "store-reply", "message": {
             "role": "assistant", "content": [{"type": "text", "text": text}],
         }}],
     ))
+
+
+def _store_turn(prompt, reply, timestamp):
+    return [
+        {"type": "user", "uuid": f"u-{prompt}", "timestamp": timestamp,
+         "message": {"role": "user", "content": prompt}},
+        {"type": "assistant", "uuid": f"a-{prompt}", "timestamp": timestamp,
+         "message": {"role": "assistant", "content": [{"type": "text", "text": reply}]}},
+    ]
+
+
+@pytest.mark.parametrize("suffix", ["", "/live"])
+@pytest.mark.parametrize("store, expected", [
+    # Pre-event-log history only this worker's store holds (#917): the mirror
+    # carries only the owner's post-move turn, so the earlier turns lead.
+    (_store_turn("Before the move", "Early reply", "2020-01-01T00:00:00Z"),
+     ["Before the move", "Early reply", "Say OK", "OK"]),
+    # The mirror already holds the store's first turn: nothing is repeated.
+    (_store_turn("Say OK", "OK", "2020-01-01T00:00:00Z"), ["Say OK", "OK"]),
+    # Store turns newer than the mirror's start overlap it: the mirror alone.
+    (_store_turn("Stale turn", "Stale reply", "2999-01-01T00:00:00Z"), ["Say OK", "OK"]),
+])
+def test_moved_chat_keeps_history_the_mirror_lacks(mirrored_chat, monkeypatch, suffix, store, expected):
+    _populate_local_store(monkeypatch, suffix, entries=store)
+    response = mirrored_chat.get("/api/v1/sessions/remote-chat" + suffix)
+    assert response.status_code == 200, response.text
+    assert [m["content"] for m in response.json()["messages"]] == expected
 
 
 @pytest.mark.parametrize("suffix", ["", "/live"])
