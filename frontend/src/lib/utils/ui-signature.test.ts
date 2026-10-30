@@ -48,10 +48,11 @@ describe('flight-recorder attributes stay on their elements', () => {
 		for (const attribute of [
 			'data-ui-state={UI_STATE_CHAT}',
 			'data-ui-mount={UI_MOUNT.chatView}',
-			'data-ui-surface={presentedSurface}',
-			'data-ui-session={uiSignature.session}',
+			'data-ui-surface={paintedSurface}',
+			'data-ui-session={!isEmptyState && !mirrorSync.waiting && transcriptSurface !== null ? uiSessionTag(transcriptSessionId) : uiSignature.session}',
+			'data-ui-target-session={uiSignature.session}',
 			'data-ui-composer={uiSignature.composer}',
-			'data-ui-messages={uiSignature.messages}',
+			'data-ui-messages={!isEmptyState && !mirrorSync.waiting && transcriptMessageCount !== null ? String(transcriptMessageCount) : uiSignature.messages}',
 			'data-ui-loading={uiSignature.loading}',
 			'data-ui-streaming={uiSignature.streaming}'
 		]) {

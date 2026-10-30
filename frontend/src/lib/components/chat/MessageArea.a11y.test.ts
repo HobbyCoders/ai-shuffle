@@ -37,7 +37,7 @@ describe('MessageArea error banner', () => {
 
 	it('is announced as an alert, with a named dismiss button', () => {
 		expect(banner).toContain('role="alert"');
-		expect(banner).toMatch(/<button type="button" onclick=\{\(\) => activeSession\.clearError\(\)\}[^>]*aria-label="Dismiss error"/);
+		expect(banner).toMatch(/<button type="button" onclick=\{\(\) => liveActiveSession\.clearError\(\)\}[^>]*aria-label="Dismiss error"/);
 	});
 
 	it('gives the dismiss button a real hit area, 44px on touch screens', () => {
