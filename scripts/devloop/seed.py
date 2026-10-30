@@ -256,6 +256,7 @@ def _chat(title: str, composite: str, project_id: str | None = None) -> str:
 
 
 async def seed_default() -> dict:
+    from app.api.git_helpers import ensure_git_repository_record
     from app.api.projects import create_project_record
     from app.api.sessions_helpers import CreateWorktreeSessionRequest
     from app.api.sessions_worktree import _create_v2_branch_session
@@ -292,6 +293,12 @@ async def seed_default() -> dict:
             await create_project_record(ProjectCreate(
                 id=project_id, name=name,
                 settings=ProjectSettings(default_profile_id=DEV_AGENT_ID)))
+        # What the Git panel's first poll does: record the repository and link
+        # the project to its remote, before the chats below create its shared
+        # (v2) project row. Done later, the project keeps a remote-less row
+        # whose base checkout chats made after the link cannot use, so their
+        # Git panel reports the checkout as unavailable (409).
+        await run_sync(ensure_git_repository_record, project_id, str(workspace / project_id))
         projects[project_id] = str(workspace / project_id)
         remote_urls[project_id] = remote.as_uri()
 
