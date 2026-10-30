@@ -28,7 +28,7 @@ def blocked(marker):
 
 PARENT = r'''
 import asyncio, importlib.util, json, os, sys, time
-from multiprocessing import resource_tracker
+import psutil
 from app.core.transcript_views.bridge import ReducerBridge
 from tests.test_transcript_projection_child_boundary import child_stats, blocked
 
@@ -42,7 +42,10 @@ async def main():
     stats["cold_seconds"] = time.perf_counter() - start
     await bridge.request("plan", carry=None, frames=[])
     stats["node"] = bridge._process.pid
-    stats["tracker"] = resource_tracker._resource_tracker._pid
+    # Inspect actual helpers rather than multiprocessing's private attributes,
+    # so the assertion covers every extra process on Linux and Windows.
+    stats["tracker"] = next((child.pid for child in psutil.Process().children()
+                             if child.pid not in {stats["pid"], stats["node"]}), None)
     if sys.argv[1] == "blocked":
         asyncio.create_task(bridge.prepare(blocked, sys.argv[2]))
         while not os.path.exists(sys.argv[2]):
@@ -57,8 +60,10 @@ asyncio.run(main())
 
 
 async def parent(tmp_path, mode="idle"):
-    environment = {key: value for key, value in os.environ.items()
-                   if key in {"PATH", "Path", "SystemRoot", "WINDIR", "TMP", "TEMP"}}
+    # Windows environ keys enumerate as uppercase but lookups are case-
+    # insensitive. Preserve mandatory SystemRoot, not just its display case.
+    environment = {key: os.environ[key]
+                   for key in ("PATH", "SystemRoot", "WINDIR", "TMP", "TEMP") if key in os.environ}
     environment.update(TESTING="1", AI_SHUFFLE_ENV_FILE=os.devnull,
                        PYTHONPATH=os.pathsep.join((str(ROOT), str(ROOT / "fluid"))),
                        DATA_DIR=str(tmp_path / "data"), REVIEW_TRANSCRIPT_FAKE_SECRET="fixture-only")
@@ -74,12 +79,16 @@ async def parent(tmp_path, mode="idle"):
         async def ready():
             nonlocal descendants
             while True:
-                descendants = psutil.Process(process.pid).children(recursive=True)
                 text = output.read_text()
                 for line in text.splitlines():
                     if line.startswith('{'):
                         return json.loads(line)
                 assert process.returncode is None, text
+                try:
+                    descendants = psutil.Process(process.pid).children(recursive=True)
+                except psutil.NoSuchProcess:
+                    await process.wait()
+                    raise AssertionError(output.read_text()) from None
                 await asyncio.sleep(.01)
         return process, await asyncio.wait_for(ready(), 15)
     except BaseException:
