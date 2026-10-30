@@ -381,9 +381,14 @@ is what CI runs: it starts `up --ci` as its own child (so the instance's
 parent lease is the driver), waits for the ready line and `status`, runs the
 journeys, then `down`. With one shard it runs
 `frontend/tests/journeys/run-all.mjs` when there is one, else every
-`*.journey.mjs`; with N shards it splits the journey files by case count
-(`python -m scripts.devloop.ci plan --shards N` prints the split) and runs
-each file of its shard, all of them even after a failure. `--build` builds
+`*.journey.mjs`; with N shards it splits the journey files by measured
+hosted runtime from `scripts/devloop/journey_weights.json`. Unmeasured files
+use their `--list` case count times the measured median seconds per case.
+`python -m scripts.devloop.ci plan --shards N` prints the JSON split, with
+estimated minutes in stderr and `$GITHUB_STEP_SUMMARY`. Refresh the medians
+with `python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...]` using
+recent green hosted runs ([measurement details](../ci/pr-checks.md#ui-journeys)).
+It runs each file of its shard, all of them even after a failure. `--build` builds
 and stamps the UI first when the stamp is missing or stale. It writes
 `devloop.log`, `logs/<journey>.log` and the per-case timelines (and contact
 sheets) under `--out`, prints the failing timelines, appends a summary to
