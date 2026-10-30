@@ -16,17 +16,23 @@ export interface DraftGitTab {
 	projectV2Id?: string | null;
 	worktreeId?: string | null;
 	worktreeBranch?: string | null;
+	/** `worktreeBranch` names a branch the first send creates, not an existing one. */
+	worktreeCreateNewBranch?: boolean;
 	selectedWorktreeBranch?: string | null;
 }
 
 /** A value key for the draft's worker Git target, or null when it has none. */
 export function workerGitTargetKey(tab: DraftGitTab | null | undefined): string | null {
 	if (!tab || tab.sessionId) return null;
+	// A branch the first send will create has no checkout yet: asking for its
+	// Git state answers 409 until the chat exists (#803). Its session scope
+	// takes over once the send binds the chat.
+	const branch = tab.worktreeCreateNewBranch ? null : tab.worktreeBranch || null;
 	const scoped = tab.deviceIntent
 		|| (tab.projectV2Id && !tab.worktreeId)
-		|| (tab.worktreeBranch && !tab.worktreeId);
+		|| (branch && !tab.worktreeId);
 	if (!scoped) return null;
-	return JSON.stringify([tab.deviceIntent?.id ?? 'local', tab.worktreeBranch || tab.selectedWorktreeBranch || null]);
+	return JSON.stringify([tab.deviceIntent?.id ?? 'local', branch || tab.selectedWorktreeBranch || null]);
 }
 
 export function workerGitTargetFromKey(key: string | null): WorkerGitTarget | null {

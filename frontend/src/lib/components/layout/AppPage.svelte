@@ -18,7 +18,8 @@
 	 * Text and calls share existing sessions. Sidebar owns the new-conversation
 	 * capability picker; ordinary navigation continues through handleOpenSession.
 	 */
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount, onDestroy, untrack } from 'svelte';
+	import { page } from '$app/state';
 	import { beginJourney, cancelJourney, claimNavigationOrigin, finishJourneyAfterPaint } from '$lib/services/journey-timing';
 	import { isAuthenticated, isAdmin } from '$lib/stores/auth.svelte';
 	import { activeSession, backgroundPermissions } from '$lib/stores/active-session';
@@ -28,7 +29,7 @@
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { appMode } from '$lib/stores/sessionMode.svelte';
 	import { hasComposerDraft } from '$lib/stores/session/composer-suggestion';
-	import { openSession as handleOpenSession } from '$lib/services/session-navigation';
+	import { followChatHistory, openSession as handleOpenSession } from '$lib/services/session-navigation';
 	import { appData, profiles, projects, sessions, sessionsTagFilter } from '$lib/stores/app-data.svelte';
 
 	import { layout, activeView, sidebarCollapsed, sidebarOverlay } from '$lib/stores/layout.svelte';
@@ -97,6 +98,18 @@
 		if (!bootReconciled) return;
 		const follow = createdChatToFollow($activeView, $activeSession?.sessionId ?? null);
 		if (follow) layout.openChat(follow);
+	});
+	// Back/Forward onto a chat link's history entry (breadcrumb, transcript
+	// link) reopens that chat. The first run is the page's initial state, not a step.
+	let firstChatHistory = true;
+	$effect(() => {
+		const state = page.state;
+		void (state as { chatSession?: string })?.chatSession;
+		if (firstChatHistory) {
+			firstChatHistory = false;
+			return;
+		}
+		untrack(() => followChatHistory(state));
 	});
 	function handleNewSession() {
 		navigationClaimed = true;

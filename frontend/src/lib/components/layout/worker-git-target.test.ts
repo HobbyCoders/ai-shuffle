@@ -18,6 +18,19 @@ describe('workerGitTargetKey', () => {
 		expect(workerGitTargetFromKey(workerGitTargetKey(base))).toEqual({ workerId: 'local', branch: null });
 	});
 
+	it('does not target a branch the first send is still creating (#803)', () => {
+		// Auto worktree: the send names the new branch before its checkout exists.
+		const draft = { projectV2Id: 'pv2-a' };
+		const sending = { ...draft, worktreeBranch: 'feat/from-prompt', worktreeCreateNewBranch: true };
+		expect(workerGitTargetKey(sending)).toBe(workerGitTargetKey(draft));
+		expect(workerGitTargetFromKey(workerGitTargetKey(sending))).toEqual({ workerId: 'local', branch: null });
+		// A legacy-project draft keeps its legacy load: no worker target at all.
+		expect(workerGitTargetKey({ worktreeBranch: 'feat/new', worktreeCreateNewBranch: true })).toBeNull();
+		// An existing branch picked for the worktree is still that checkout.
+		expect(workerGitTargetFromKey(workerGitTargetKey({ ...draft, worktreeBranch: 'feat/x' })))
+			.toEqual({ workerId: 'local', branch: 'feat/x' });
+	});
+
 	it('has no worker target for a started chat or a legacy worktree draft', () => {
 		expect(workerGitTargetKey({ sessionId: 's1', projectV2Id: 'pv2-a' })).toBeNull();
 		expect(workerGitTargetKey({ projectV2Id: 'pv2-a', worktreeId: 'wt-1' })).toBeNull();
