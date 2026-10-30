@@ -12,7 +12,9 @@
 	 * The parent decides when the row is shown (hover/focus on desktop, always
 	 * on mobile) and reserves its space so revealing it never reflows the chat.
 	 */
-	import { onDestroy, tick } from 'svelte';
+	import { getContext, onDestroy, tick } from 'svelte';
+	import { readable } from 'svelte/store';
+	import { TRANSCRIPT_ACTIONS, type TranscriptActions } from './TranscriptHydrationBoundary.svelte';
 	import { Ellipsis, Flag } from 'lucide-svelte';
 	import { executeRewind } from '$lib/api/client';
 	import { canReportAiContent, reportAiContent } from '$lib/stores/support-report.svelte';
@@ -54,6 +56,10 @@
 		isReading = false,
 		onRewindComplete
 	}: Props = $props();
+
+	const interaction = getContext<TranscriptActions>(TRANSCRIPT_ACTIONS);
+	const actionsAllowed = interaction ?? readable(true);
+	const canAct = (id = sessionId) => !interaction || interaction.isCurrent(id);
 
 	let copied = $state(false);
 	let copiedTimer: ReturnType<typeof setTimeout> | null = null;
@@ -111,6 +117,7 @@
 	}
 
 	async function handleCopy() {
+		if (!canAct()) return;
 		copied = false;
 		copyError = '';
 		const textToCopy = copyAs === 'markdown' ? messageContent : prepareTextForCopy(messageContent);
@@ -132,13 +139,13 @@
 	}
 
 	function handleRewindClick() {
-		if (!sessionId || !rewindEligible) return;
+		if (!sessionId || !rewindEligible || !canAct()) return;
 		showRewindDialog = true;
 		rewindError = null;
 	}
 
 	async function handleRewindConfirm() {
-		if (!sessionId || !rewindEligible) return;
+		if (!sessionId || !rewindEligible || !canAct()) return;
 
 		// Rewind prefers the message's JSONL entry uuid — the exact, unambiguous
 		// truncation target. Live v2 `message.user` events carry NO uuid, so a
@@ -155,6 +162,9 @@
 			return;
 		}
 
+		const requestedSessionId = sessionId;
+		const complete = onRewindComplete;
+		const removedPrompt = messageRole === 'user' ? messageContent : undefined;
 		isRewinding = true;
 		rewindError = null;
 
@@ -163,28 +173,32 @@
 			// For assistant messages: keeps this message, removes everything after.
 			const includeResponse = messageRole === 'assistant';
 			const result = notSentMessageId
-				? await executeRewind(sessionId, '', false, 'user', null, null, notSentMessageId)
+				? await executeRewind(requestedSessionId, '', false, 'user', null, null, notSentMessageId)
 				: useContent
-				? await executeRewind(sessionId, '', includeResponse, 'user', userPromptOccurrence, messageContent)
-				: await executeRewind(sessionId, messageUuid!, includeResponse, messageRole);
+				? await executeRewind(requestedSessionId, '', includeResponse, 'user', userPromptOccurrence, messageContent)
+				: await executeRewind(requestedSessionId, messageUuid!, includeResponse, messageRole);
 
+			// The API may finish after this row unmounts or the user changes chats.
+			// Never hand an outgoing result to the incoming session's composer/store.
+			if (sessionId !== requestedSessionId || !canAct(requestedSessionId)) return;
 			if (result.success || result.chat_rewound) {
 				showRewindDialog = false;
 				// A user-message rewind removes this very message — hand its text to
 				// the parent so the composer is refilled for editing/resending.
 				// Assistant-message rewinds keep their preceding prompt in the
 				// transcript, so there is nothing to restore.
-				const rewoundPrompt = messageRole === 'user' ? messageContent : undefined;
+				const rewoundPrompt = removedPrompt;
 				// Pass warning to parent to show as system message (for partial success)
 				if (result.unsent_restored) {
-						onRewindComplete?.(result.warning ?? undefined, result.restored_prompt ?? rewoundPrompt, result.restored_upload_paths);
-					} else {
-						onRewindComplete?.(result.warning ?? undefined, rewoundPrompt);
-					}
+					complete?.(result.warning ?? undefined, result.restored_prompt ?? rewoundPrompt, result.restored_upload_paths);
+				} else {
+					complete?.(result.warning ?? undefined, rewoundPrompt);
+				}
 			} else {
 				rewindError = result.error || 'Rewind failed';
 			}
 		} catch (e) {
+			if (sessionId !== requestedSessionId || !canAct(requestedSessionId)) return;
 			console.error('Rewind error:', e);
 			rewindError = e instanceof Error ? e.message : 'Unknown error';
 		} finally {
@@ -234,8 +248,10 @@
 	}
 
 	async function openMenu() {
+		if (!canAct()) return;
 		menuOpen = true;
 		await tick();
+		if (!canAct()) return;
 		placeMenu();
 		menuItems()[0]?.focus({ preventScroll: true });
 	}
@@ -270,6 +286,7 @@
 	}
 
 	function handleReport() {
+		if (!canAct()) return;
 		closeMenu();
 		reportAiContent(messageContent, sessionId);
 	}
@@ -299,7 +316,11 @@
 
 	// The entry can disappear under an open menu (a new turn starts streaming).
 	$effect(() => {
-		if (!showOverflow || !visible) menuOpen = false;
+		if (!$actionsAllowed) {
+			showRewindDialog = false;
+			rewindError = null;
+		}
+		if (!showOverflow || !visible || !$actionsAllowed) menuOpen = false;
 	});
 </script>
 
@@ -383,7 +404,7 @@
 {/if}
 
 <!-- ⋯ menu - portaled to body: the message container clips overflow -->
-{#if menuOpen && showOverflow}
+{#if menuOpen && showOverflow && $actionsAllowed}
 	<!-- svelte-ignore a11y_interactive_supports_focus -->
 	<div
 		use:portal
@@ -404,7 +425,7 @@
 {/if}
 
 <!-- Rewind Confirmation Dialog - portaled to body to escape content-visibility containment -->
-{#if showRewindDialog}
+{#if showRewindDialog && $actionsAllowed}
 	<div use:portal class="fixed inset-0 z-50 flex items-center justify-center" role="dialog" aria-modal="true">
 		<button class="absolute inset-0 w-full h-full bg-black/50 border-none p-0 cursor-default" onclick={handleRewindCancel} tabindex="-1" aria-label="Close dialog"></button>
 		<div

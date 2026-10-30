@@ -16,6 +16,7 @@
 	import { sessionOwnerBoundary } from '$lib/stores/session-owner';
 	import { notify } from '$lib/stores/notifications';
 	import { platform } from '$lib/stores/platform.svelte';
+	import { layout } from '$lib/stores/layout.svelte';
 	import { createConnectionBannerGrace } from '$lib/stores/session/connection-banner-grace';
 	import { connectionNoticeTier, RECONNECT_BANNER_ESCALATE_MS } from './connection-notice';
 	import Banner from '$lib/components/Banner.svelte';
@@ -23,6 +24,7 @@
 	import { DOCK_ORDER } from '$lib/stores/notification-dock.svelte';
 	import { forkOfferedSessionHere } from '$lib/components/chat/fork-here';
 	import MessageArea from '$lib/components/chat/MessageArea.svelte';
+	import TranscriptHydrationBoundary from '$lib/components/chat/TranscriptHydrationBoundary.svelte';
 	import MirrorSyncGate from '$lib/components/chat/MirrorSyncGate.svelte';
 	import { createMirrorSync, mirrorSyncHeadline } from '$lib/components/chat/mirror-sync.svelte';
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
@@ -53,9 +55,10 @@
 		terminal?: TerminalToggle;
 		/** Out: the open mirrored chat still waits for its first sync. */
 		mirrorSyncPending?: boolean;
+		navigationOverlayOpen?: boolean;
 	}
 
-	let { onBrowserToggle, onBrowserPreload, browserOpen = false, terminal, mirrorSyncPending = $bindable(false) }: Props = $props();
+	let { onBrowserToggle, onBrowserPreload, browserOpen = false, terminal, mirrorSyncPending = $bindable(false), navigationOverlayOpen }: Props = $props();
 
 	// Classify the empty-message surface. While a session's history is being
 	// fetched (boot restore OR an openChat navigation) messages is still [] but
@@ -116,7 +119,17 @@
 	// shows no transcript yet (the hero or the gate's pane), so it reads as
 	// loading, like the history load it is part of.
 	const presentedSurface = $derived(chatLayoutSurface(chatSurface, { mirrorSyncPending: mirrorSync.waiting }));
-	const isEmptyState = $derived(chatLayout(presentedSurface) === 'hero');
+	// Diagnostics follow the painted transcript, not the incoming empty store.
+	// Layout/composer binding still follow the live target and existing tracker.
+	let transcriptSurface = $state<typeof presentedSurface | null>(null);
+	let transcriptMessageCount = $state<number | null>(null);
+	let transcriptSessionId = $state<string | null | undefined>(undefined);
+	// A shown notice also survives an empty outcome until its minimum ends.
+	// The mirror gate still owns its own layout and visibility barrier.
+	const isEmptyState = $derived(chatLayout(presentedSurface) === 'hero'
+		&& (mirrorSync.waiting || transcriptSurface !== 'loading'));
+	const paintedSurface = $derived(isEmptyState || mirrorSync.waiting
+		? presentedSurface : transcriptSurface ?? presentedSurface);
 	// Which hero the hero layout shows: the new-session hero, a cleared chat,
 	// a chat opened from the hero still loading, or a mirrored chat waiting
 	// for its first sync.
@@ -385,10 +398,11 @@
 <div class="chat-view" bind:clientHeight={surfaceHeight} style:--chat-surface-height={surfaceHeight ? `${surfaceHeight}px` : undefined} class:transitioning-from-empty={transitioningFromEmpty} class:is-empty={showEmptyHero}
 	data-ui-state={UI_STATE_CHAT}
 	data-ui-mount={UI_MOUNT.chatView}
-	data-ui-surface={presentedSurface}
-	data-ui-session={uiSignature.session}
+	data-ui-surface={paintedSurface}
+	data-ui-session={!isEmptyState && !mirrorSync.waiting && transcriptSurface !== null ? uiSessionTag(transcriptSessionId) : uiSignature.session}
+	data-ui-target-session={uiSignature.session}
 	data-ui-composer={uiSignature.composer}
-	data-ui-messages={uiSignature.messages}
+	data-ui-messages={!isEmptyState && !mirrorSync.waiting && transcriptMessageCount !== null ? String(transcriptMessageCount) : uiSignature.messages}
 	data-ui-loading={uiSignature.loading}
 	data-ui-streaming={uiSignature.streaming}>
 	{#if showEmptyHero}
@@ -489,7 +503,11 @@
 				<!-- The sync check itself runs at the top of this view (mirrorSync),
 				     so it started even if the chat opened in the hero layout. -->
 				<MirrorSyncGate sync={mirrorSync} deviceName={mirrorDevice}>
-					<MessageArea />
+					<TranscriptHydrationBoundary mirrorPending={mirrorSync.waiting}
+						navigationOverlayOpen={navigationOverlayOpen ?? (layout.current.sidebarOverlay && !layout.current.sidebarCollapsed)}
+						onSurface={(surface, count, id) => { transcriptSurface = surface; transcriptMessageCount = count; transcriptSessionId = id; }}>
+						<MessageArea />
+					</TranscriptHydrationBoundary>
 				</MirrorSyncGate>
 			</div>
 		</div>

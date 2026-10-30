@@ -2720,6 +2720,11 @@
     "target_pr": 6,
     "base_settings": true
   },
+  "VITE_PERF_STABLE_TRANSCRIPT_LOADING": {
+    "kind": "internal",
+    "reason": "Internal build-time performance kill switch for stable transcript loading presentation; defaults enabled, with disable reserved for measured ablations and rollback",
+    "base_settings": false
+  },
   "VITE_PERF_TRANSCRIPT_CONTENT_WINDOW": {
     "kind": "internal",
     "reason": "Internal build-time performance kill switch for the nested transcript content budget; defaults enabled, with disable reserved for measured ablations and rollback",

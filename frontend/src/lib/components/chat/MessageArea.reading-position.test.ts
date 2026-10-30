@@ -70,7 +70,7 @@ describe('MessageArea reading position', () => {
 		// Wiring of the deferred write; its behaviour is exercised in
 		// scroll-top-persist.test.ts.
 		const persist = block('const scrollTopPersist = createScrollTopPersist({', 'function handleScroll() {');
-		expect(persist).toContain("currentKey: () => $activeSession.sessionId ?? 'new'");
+		expect(persist).toContain("currentKey: () => $liveActiveSession.sessionId ?? 'new'");
 		expect(persist).toContain('writeLeft: (key, position) => sessionEphemeralCache.patchScrollTop(key, position)');
 		expect(block('onDestroy(() => {', '// ── Session-switch scroll save/restore')).toContain('scrollTopPersist.destroy(cacheKey, leftAt)');
 		// A switch files the leaving position under the LEAVING id, never into the

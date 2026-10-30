@@ -52,6 +52,8 @@
 		onOpenFeature: (type: ViewType) => void;
 		onOpenSpotlight?: () => void;
 		hideGlobalStt?: boolean;
+		/** Out: the actual phone drawer, independent of desktop sidebar preferences. */
+		drawerOpen?: boolean;
 		/** Chat actions on the bar's right (private access, Git); omit off-chat. */
 		actions?: Snippet;
 	}
@@ -64,6 +66,7 @@
 		onOpenFeature,
 		onOpenSpotlight,
 		hideGlobalStt = false,
+		drawerOpen = $bindable(false),
 		actions
 	}: Props = $props();
 
@@ -111,7 +114,6 @@
 	// --- Navigation drawer ------------------------------------------------------
 	// The drawer mounts on first use and then stays mounted (inert while
 	// closed), so reopening it is instant and keeps the list where it was.
-	let drawerOpen = $state(false);
 	let mounted = $state(false);
 	let hamburgerRef = $state<HTMLButtonElement | null>(null);
 	let drawerRef = $state<HTMLElement | null>(null);

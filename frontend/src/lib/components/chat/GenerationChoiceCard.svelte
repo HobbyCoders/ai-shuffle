@@ -15,8 +15,9 @@
 	 * collapsing never hides it. Saving never submits, re-quotes or approves.
 	 */
 	import '../deck/cards/card-design-system.css';
-	import { onMount, untrack } from 'svelte';
-	import { derived } from 'svelte/store';
+	import { getContext, onMount, untrack } from 'svelte';
+	import { derived, get } from 'svelte/store';
+	import { TRANSCRIPT_PRESENTATION, TRANSCRIPT_ACTIONS, type TranscriptPresentation, type TranscriptActions } from './TranscriptHydrationBoundary.svelte';
 	import { ChevronDown, Check, Sparkles, TriangleAlert, Image as ImageIcon, Film, AudioLines, Box } from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { generationChoices } from '$lib/stores/generation-choices.svelte';
@@ -95,8 +96,13 @@
 	const QUOTE_DEBOUNCE_MS = 350;
 	const uid = `gcc-${Math.random().toString(36).slice(2, 9)}`;
 
-	// The first later user message answers a chat card (a tap here or a typed reply).
-	const laterReply = derived(activeSession, ($s) => {
+	const presentation = getContext<TranscriptPresentation>(TRANSCRIPT_PRESENTATION) ?? activeSession;
+	const interaction = getContext<TranscriptActions>(TRANSCRIPT_ACTIONS);
+	const canAct = (id: string | null | undefined) => get(activeSession).sessionId === id
+		&& (!interaction || interaction.isCurrent(id));
+	// The answered/expanded state is part of the outgoing transcript's geometry.
+	// Mutations below still use the real target, guarded by their originating id.
+	const laterReply = derived(presentation, ($s) => {
 		if (!toolId) return null;
 		const messages = $s.messages ?? [];
 		const index = messages.findIndex((m) => m.toolId === toolId);
@@ -330,7 +336,8 @@
 	);
 
 	async function use() {
-		if (!canUse || !current) return;
+		const sourceSessionId = get(presentation).sessionId;
+		if (!canUse || !current || (variant === 'chat' && !canAct(sourceSessionId))) return;
 		saving = true;
 		saveError = null;
 		const index = selected;
@@ -343,11 +350,13 @@
 				handoff && onpick
 					? await onpick(choiceOf(option, chosen))
 					: await generationChoices.save(kind, choiceOf(option, chosen), keep, variant === 'settings' ? 'settings' : 'card');
+			if (variant === 'chat' && !canAct(sourceSessionId)) return;
 			// Shown before the chat reply goes out, so a failed send still says what was saved.
 			const view = saveOutcome(result || null, kind);
 			if (view) outcome = { index, verb: savedVerb(keep), view };
 			if (variant === 'chat') {
 				const sent = await activeSession.sendMessage(pickMessage(tool, kind, option, chosen, priceView(quotes[index], kind), keep));
+				if (!canAct(sourceSessionId)) return;
 				if (sent === false) throw new Error('Your pick was saved, but the reply could not be sent. Reply in the chat instead.');
 			}
 			picked = { index, remembered: keep };
