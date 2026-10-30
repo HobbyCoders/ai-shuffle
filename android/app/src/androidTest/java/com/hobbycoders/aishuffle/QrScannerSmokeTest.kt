@@ -2,6 +2,8 @@ package com.hobbycoders.aishuffle
 
 import android.Manifest
 import android.content.Intent
+import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.view.WindowManager
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
@@ -19,6 +21,7 @@ import com.hobbycoders.aishuffle.ui.AddServerActivity
 import com.hobbycoders.aishuffle.ui.QrCaptureActivity
 import com.journeyapps.barcodescanner.BarcodeView
 import com.journeyapps.barcodescanner.DecoratedBarcodeView
+import com.journeyapps.barcodescanner.ScanOptions
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -41,6 +44,7 @@ class QrScannerSmokeTest {
                 val scanner = ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED)
                     .filterIsInstance<QrCaptureActivity>().singleOrNull()
                 if (scanner != null) {
+                    assertEquals("Scanner must not lock orientation at runtime", ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED, scanner.requestedOrientation)
                     assertEquals("QR scanner must allow user screenshots", 0, scanner.window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE)
                     camera = scanner.findViewById<DecoratedBarcodeView>(R.id.zxing_barcode_scanner).barcodeView
                     ready = scanner.hasWindowFocus() && camera!!.isPreviewActive
@@ -55,6 +59,30 @@ class QrScannerSmokeTest {
             var closed = false
             instrumentation.runOnMainSync { closed = camera!!.isCameraClosed && !camera!!.isPreviewActive }
             closed
+        }
+    }
+    @Test fun mergedManifestHasNoOrientationRestrictions() {
+        val activities = context.packageManager.getPackageInfo(context.packageName, PackageManager.GET_ACTIVITIES).activities
+        assertFalse(activities.any { it.name == "com.journeyapps.barcodescanner.CaptureActivity" })
+        activities.forEach { activity ->
+            assertEquals(activity.name, ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED, activity.screenOrientation)
+        }
+    }
+    @Test fun scannerRecreationRestartsCameraWithoutLockingOrientation() {
+        val intent = ScanOptions().setCaptureActivity(QrCaptureActivity::class.java)
+            .setDesiredBarcodeFormats(ScanOptions.QR_CODE).setBeepEnabled(false).createScanIntent(context)
+        ActivityScenario.launch<QrCaptureActivity>(intent).use { scenario ->
+            fun awaitPreview() = awaitCondition("Scanner preview did not resume after recreation") {
+                var ready = false
+                scenario.onActivity { scanner ->
+                    assertEquals(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED, scanner.requestedOrientation)
+                    ready = scanner.hasWindowFocus() && scanner.findViewById<DecoratedBarcodeView>(R.id.zxing_barcode_scanner).barcodeView.isPreviewActive
+                }
+                ready
+            }
+            awaitPreview()
+            scenario.recreate()
+            awaitPreview()
         }
     }
     @Test fun workerScannerBackReturnsToWorkerFormAndClosesCamera() {
