@@ -32,12 +32,15 @@ async def test_cpu_work_is_off_loop_and_overlap_is_rejected_before_submission():
 
 
 @pytest.mark.asyncio
-async def test_cancellation_joins_owned_work_before_restart():
+@pytest.mark.parametrize('worker_failure', [False, True])
+async def test_cancellation_joins_owned_work_before_restart(worker_failure):
     worker = PreparationWorker()
     entered, release = threading.Event(), threading.Event()
     def work():
         entered.set()
         assert release.wait(2)
+        if worker_failure:
+            raise ValueError('fixture worker failed after cancellation')
     task = asyncio.create_task(worker.run(work))
     try:
         assert await asyncio.to_thread(entered.wait, 1)

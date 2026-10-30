@@ -248,7 +248,7 @@
   },
   "AI_SHUFFLE_TRANSCRIPT_PRODUCER": {
     "kind": "internal",
-    "reason": "Default-on kill switch for installation-local shadow transcript production; disables background work only, never enables derived reads",
+    "reason": "Default-off opt-in for installation-local shadow transcript production; enables background work only, never enables derived reads",
     "base_settings": false
   },
   "AI_SHUFFLE_VERSION": {

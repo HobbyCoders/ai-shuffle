@@ -18,6 +18,7 @@ from app.db import session_events as source
 from app.db import transcript_projection_work as work
 from app.db import transcript_projections as store
 from .bridge import ReducerBridge, ReducerUnavailable, verified_manifest
+from .preparation import join_worker
 from .preprocess import ReplayTail, TailUnavailable, input_lookup_keys, lookup_key, replay_flags
 
 
@@ -32,11 +33,7 @@ async def database(call: Callable, *args, **kwargs):
     # A cancelled asyncio.to_thread does not stop its DB transaction. Join our
     # one owned operation before releasing the actor/test DB or shutting down.
     task = asyncio.create_task(asyncio.to_thread(call, *args, **kwargs))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        await task
-        raise
+    return await join_worker(task)
 
 
 def _prepare_frames(tail: ReplayTail, rows, lookup):

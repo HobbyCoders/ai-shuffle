@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from unittest.mock import AsyncMock
 
 import pytest
@@ -178,6 +179,71 @@ async def test_stop_before_run_starts_still_closes_owned_bridge(monkeypatch):
     producer.start()
     assert producer._task.done()
     assert producer.wake('after-stop') is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('worker_failure', [False, True])
+async def test_concurrent_stops_join_blocked_database_work_before_closing_bridge(
+        monkeypatch, worker_failure):
+    from app.core.transcript_views.producer import database
+
+    producer, bridge, gateway, _ = instance(monkeypatch)
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    finished_at_close = []
+    close = bridge.close
+
+    def transaction():
+        entered.set()
+        try:
+            assert release.wait(5), 'fixture transaction was not released'
+            if worker_failure:
+                raise ValueError('fixture transaction failed')
+            return False
+        finally:
+            finished.set()
+
+    class BlockedActor:
+        async def process(self, session_id):
+            return await database(transaction)
+
+    async def close_after_join():
+        finished_at_close.append(finished.is_set())
+        await close()
+
+    producer.actor = BlockedActor()
+    bridge.close = close_after_join
+    stops = []
+    producer.start()
+    try:
+        await asyncio.wait_for(gateway.ready.wait(), 2)
+        assert producer.wake('blocked-transaction')
+        assert await asyncio.to_thread(entered.wait, 2)
+        stops.append(asyncio.create_task(producer.stop()))
+        # Let the first cancellation reach the DB join before issuing another.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        stops.append(asyncio.create_task(producer.stop()))
+        # Drain the cancellation callbacks, not a wall-clock transaction delay.
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert producer._task.cancelling() >= 2
+        assert not finished.is_set()
+        assert all(not stop.done() for stop in stops)
+        assert not bridge.closed
+        assert gateway.listeners == [producer.wake]
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*stops), 2)
+        assert finished.is_set()
+        assert bridge.closed
+        assert finished_at_close and all(finished_at_close)
+        assert gateway.listeners == []
+        # Cancellation remains cancellation, even when the joined worker fails.
+        assert producer.last_error is None
+    finally:
+        release.set()
+        if stops:
+            await asyncio.wait_for(asyncio.gather(*stops, return_exceptions=True), 2)
+        await producer.stop()
 
 
 def test_global_listener_ownership_can_be_released_without_touching_subscribers(monkeypatch):
