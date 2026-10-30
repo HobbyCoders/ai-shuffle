@@ -86,6 +86,7 @@
 	import {
 		createTranscriptWindow,
 		selectedRowRange,
+		dominantReadingIndex,
 		transcriptItemCost,
 		TRANSCRIPT_CONTENT_BUDGET,
 		classifyTurnEntry,
@@ -706,14 +707,10 @@
 	}
 	function readingTranscriptIndex(): number | null {
 		if (!containerRef || !chatColumnRef) return null;
-		const viewport = containerRef.getBoundingClientRect();
-		for (const row of chatColumnRef.querySelectorAll<HTMLElement>(':scope > [data-transcript-key]')) {
-			const box = row.getBoundingClientRect();
-			if (box.bottom <= viewport.top || box.top >= viewport.bottom) continue;
-			const index = transcriptIndexOfRow(row);
-			if (index >= 0) return index;
-		}
-		return null;
+		return dominantReadingIndex(
+			chatColumnRef.querySelectorAll<HTMLElement>(':scope > [data-transcript-key]'),
+			containerRef.getBoundingClientRect(), transcriptIndexOfRow
+		);
 	}
 	const transcriptWindow = createTranscriptWindow({
 		// Real row geometry is kept: no estimated-height placeholders that move

@@ -1,7 +1,7 @@
 // Real browser regression: a live cross-turn selection must survive window
 // shifts. The selected span is pinned inside the SAME row/content budget; at
 // that boundary browsing pauses until the selection is collapsed/cleared.
-import { runJourney } from './runner.mjs';
+import { runJourney, VIEWPORTS } from './runner.mjs';
 import { expect, openNewChat, typeAndSend, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
@@ -11,6 +11,30 @@ import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const mobileShell = process.argv.includes('--mobile-shell');
 const LOG = '[role="log"][aria-label="Conversation messages"]';
 const twoFrames = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+// Review at the requested desktop size without changing the runner's defaults
+// for any other journey (each journey runs in its own process).
+if (process.argv.includes('--review-desktop')) VIEWPORTS.desktop = { viewport: { width: 1280, height: 800 } };
+const privateScreenshot = async (page, variant, stage) => {
+	if (process.env.JOURNEY_OUT) await page.screenshot({ path: `${process.env.JOURNEY_OUT}/${stage}@${variant.viewport}-${variant.throttle.cpu}x.png` });
+};
+const readViewport = page => page.locator(LOG).evaluate(log => {
+	const viewport = log.getBoundingClientRect();
+	const rows = [...log.querySelectorAll('[data-transcript-index]')].map(row => {
+		const box = row.getBoundingClientRect();
+		const visiblePixels = Math.max(0, Math.min(box.bottom, viewport.bottom) - Math.max(box.top, viewport.top));
+		const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+		let node, textVisible = false;
+		while (visiblePixels && !textVisible && (node = walker.nextNode())) {
+			if (!node.textContent.trim()) continue;
+			const range = document.createRange(); range.selectNodeContents(node);
+			textVisible = [...range.getClientRects()].some(rect => rect.width > 0 && rect.height > 0 &&
+				rect.bottom > viewport.top && rect.top < viewport.bottom && rect.right > viewport.left && rect.left < viewport.right);
+		}
+		return { index: Number(row.dataset.transcriptIndex), top: box.top - viewport.top, visiblePixels, textVisible };
+	});
+	return { rows, textRows: rows.filter(row => row.textVisible).map(row => row.index), height: log.clientHeight,
+		scrollTop: log.scrollTop, maxScrollTop: log.scrollHeight - log.clientHeight, viewport: { width: innerWidth, height: innerHeight } };
+});
 
 const cases = [{
 		name: 'selection-survives-eviction',
@@ -98,7 +122,7 @@ const cases = [{
 		}
 	}, {
 		name: 'same-count-streaming-growth',
-		async setup({ page, status, variant, readingBoundary = false }) {
+		async setup({ page, status, variant, readingBoundary = false, replyScenario = 'reader-growth' }) {
 			// Produce a fresh native prefix through the real composer/provider, then
 			// replay it into the affected shell. No synthetic feed/state or SDK-only
 			// fork endpoint: default native seed sessions have no SDK session id.
@@ -110,7 +134,7 @@ const cases = [{
 			const prefix = mobileShell && variant.viewport === 'phone' ? '/mobile/' : '/';
 			await page.goto(new URL(`${prefix}?session=${encodeURIComponent(id)}`, status.urls.ui).toString());
 			await waitChatOpen(page, { messagesAtLeast: 2, hold: 250 });
-			await typeAndSend(page, 'Grow the reply while I read it. [script:reader-growth latency_ms=0]');
+			await typeAndSend(page, `Grow the reply while I read it. [script:${replyScenario} latency_ms=0]`);
 			await page.waitForFunction(() => {
 				const row = [...document.querySelectorAll('[data-transcript-index]')].at(-1);
 				return Number(row?.dataset.transcriptIndex) >= 3 && row.textContent.includes('GROWING_READER_START') && row.textContent.length > 4000;
@@ -135,7 +159,7 @@ const cases = [{
 			});
 			expect(visible[0] === (readingBoundary ? 2 : 3) && visible.includes(3), `read the growing reply at the intended viewport position (boundary=${readingBoundary}, visible=${visible.join(',')})`);
 		},
-		async act({ page, mark, log }) {
+		async act({ page, mark, log, variant, minimumChars = 17000 }) {
 			await mark('read the live reply while same-count growth reprices the window');
 			const before = await page.evaluate(selector => {
 				const container = document.querySelector(selector);
@@ -159,7 +183,7 @@ const cases = [{
 					start: Number(container.querySelector('[data-transcript-index]').dataset.transcriptIndex) };
 			}, LOG);
 			try {
-				await page.waitForFunction(() => !window.__growingReader.isConnected || window.__growingReader.textContent.length > 17000, undefined, { timeout: 25000 });
+				await page.waitForFunction(minimum => !window.__growingReader.isConnected || window.__growingReader.textContent.length > minimum, minimumChars, { timeout: 45000 });
 				await twoFrames(page);
 				const after = await page.evaluate(selector => {
 					window.__sampleGrowingReader = false;
@@ -172,11 +196,18 @@ const cases = [{
 						rows: document.querySelectorAll('[data-transcript-index]').length,
 						nodes: document.querySelector(selector).querySelectorAll('*').length };
 				}, LOG);
-				log(`same-count growth ${JSON.stringify({ before, after })}`);
+				const viewport = await readViewport(page);
+				log(`same-count growth ${JSON.stringify({ before, after, viewport })}`);
 				expect(after.connected && after.disconnected === 0, 'content repricing must retain the currently-read streaming reply');
-				expect(after.chars > 17000 && after.chars > before.chars, 'the real native stream grew beyond the old window budget');
+				expect(after.chars > minimumChars && after.chars > before.chars, 'the real native stream grew beyond the old window budget');
 				expect(after.start > before.start && after.sameCount, 'same-count growth evicts offscreen neighbours, not the reading row');
-				expect(after.maxDrift <= 1, 'the same reading key keeps its viewport offset during repricing');
+				expect(viewport.textRows.includes(before.index), 'the retained reply has actual text intersecting the viewport');
+				if (minimumChars > 48000) {
+					const reply = viewport.rows.find(row => row.index === before.index);
+					expect(after.rows === 1 && reply.visiblePixels > viewport.height / 2, 'the dominant oversize reply remains readable as the permitted singleton');
+					expect(reply.top >= -1 && reply.top <= before.top + 1 && after.maxDrift <= Math.max(1, before.top), 'oversize fallback only clamps the removed space above the reply, never jumping past its start');
+					await privateScreenshot(page, variant, 'oversize-reading');
+				} else expect(after.maxDrift <= 1, 'the same reading key keeps its viewport offset during repricing');
 				expect(after.rows <= 120 && after.nodes <= 12000, 'reading preservation keeps the row and nested DOM budgets');
 			} finally {
 				await page.evaluate(() => { window.__sampleGrowingReader = false; });
@@ -195,7 +226,7 @@ cases.push({
 cases.push({
 	...growingReply,
 	name: 'native-selection-budget-during-streaming',
-	async act({ page, mark, log }) {
+	async act({ page, mark, log, variant }) {
 		await mark('keep an offscreen native selection without enlarging its budget');
 		const selected = await page.evaluate(() => {
 			const row = document.querySelector('[data-transcript-index="0"]');
@@ -221,6 +252,10 @@ cases.push({
 			expect(state.connected && state.selected === selected, 'cost growth retains the native selected endpoint and text');
 			expect(state.indices.at(-1) === 2, 'a separate reading key cannot retain an unselected reply over the selection budget');
 			expect(state.indices.length <= 120 && state.nodes <= 12000, 'the native selection keeps the bounded DOM contract');
+			const limitedViewport = await readViewport(page);
+			log(`selection-limited viewport ${JSON.stringify(limitedViewport)}`);
+			expect(limitedViewport.textRows.length > 0 && limitedViewport.scrollTop >= 0 && limitedViewport.scrollTop <= limitedViewport.maxScrollTop + 1, 'selection priority leaves actual transcript text in a valid, nonblank viewport');
+			await privateScreenshot(page, variant, 'selection-limited');
 			await clear.click();
 			await twoFrames(page);
 			expect(await page.evaluate(() => window.getSelection().isCollapsed), 'the accessible clear control releases selection priority');
@@ -228,12 +263,25 @@ cases.push({
 			// the explicit paging control rather than a wheel with no scroll event.
 			await page.getByRole('button', { name: 'Show newer messages', exact: true }).click();
 			await page.waitForFunction(() => document.querySelector('[data-transcript-index="3"]')?.textContent.includes('GROWING_READER_START'));
-			log('clearing selection permits the still-streaming reply to remount');
+			const recoveredViewport = await readViewport(page);
+			const reply = recoveredViewport.rows.find(row => row.index === 3);
+			log(`selection-cleared viewport ${JSON.stringify(recoveredViewport)}`);
+			expect(recoveredViewport.textRows.includes(3) && reply.visiblePixels > recoveredViewport.height / 2, 'clearing selection and paging makes real reply text readable, not merely mounted');
+			expect(reply.top >= -1 && reply.top < recoveredViewport.height / 2 && recoveredViewport.scrollTop >= 0 && recoveredViewport.scrollTop <= recoveredViewport.maxScrollTop + 1, 'recovery shows the new reply start without a stale absolute scroll position');
+			await privateScreenshot(page, variant, 'selection-cleared');
+			log('clearing selection permits the still-streaming reply to remount visibly');
 		} finally {
 			const stop = page.getByRole('button', { name: /^Stop/ });
 			if (await stop.isVisible()) await stop.click();
 		}
 	}
+});
+
+cases.push({
+	...growingReply,
+	name: 'same-count-visible-boundary-oversize',
+	setup: context => growingReply.setup({ ...context, readingBoundary: true, replyScenario: 'reader-oversize' }),
+	act: context => growingReply.act({ ...context, minimumChars: 52000 })
 });
 
 await runJourney({ name: 'transcript-reader', cases, allow: [...DEV_INSTANCE_NOISE] });

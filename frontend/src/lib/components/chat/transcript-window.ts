@@ -42,6 +42,26 @@ export function selectedRowRange(
 	return end < 0 ? null : { start, end };
 }
 
+/** Prefer the row covering most of the clipped viewport, not a short prompt
+ * crossing its top edge. When visible rows cannot jointly fit, this lets the
+ * controller keep the dominant reply as the permitted oversize singleton.
+ * Called lazily on repricing, never on every scroll frame/token. */
+export function dominantReadingIndex<T extends { getBoundingClientRect(): { top: number; bottom: number } }>(
+	rows: Iterable<T>, viewport: { top: number; bottom: number }, indexOf: (row: T) => number
+): number | null {
+	let reading: number | null = null, largest = 0;
+	for (const row of rows) {
+		const box = row.getBoundingClientRect();
+		const visible = Math.min(box.bottom, viewport.bottom) - Math.max(box.top, viewport.top);
+		if (visible <= largest) continue;
+		const index = indexOf(row);
+		if (index < 0) continue;
+		reading = index;
+		largest = visible;
+	}
+	return reading;
+}
+
 /** Hard limit for outer items; nested row windows need their own bound. */
 export const TRANSCRIPT_WINDOW_CAP = 120;
 /** Approximate nested markup work, in addition to the outer-row cap. A single
@@ -86,7 +106,7 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 	cap?: number; step?: number; cost?: (index: number) => number; budget?: number;
 	/** Only currently mounted, selected rows may be pinned; never retained DOM trees. */
 	getPinnedRange?: () => TranscriptRange | null;
-	/** Resolve the visible reading key only when automatic repricing may evict it. */
+	/** Resolve the dominant visible reading key only when automatic repricing may evict it. */
 	getReadingIndex?: () => number | null
 } = {}) {
 	if (!Number.isInteger(cap) || cap < 1 || !Number.isInteger(step) || step < 1 || !(budget > 0)) {
