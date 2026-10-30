@@ -292,6 +292,7 @@ await runJourney({
 				await mark('start B then return to A before its history settles');
 				await openSwitchChat(page, 'other_project');
 				await page.waitForFunction(() => window.__switchHydrationHold.started !== null);
+				await mark('return to A before B has hydrated');
 				await openSwitchChat(page, 'no_project');
 				await page.waitForFunction(tag => {
 					const chat = document.querySelector('[data-ui-state="chat"]');
