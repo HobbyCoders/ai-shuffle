@@ -4,7 +4,6 @@
 import { runJourney, VIEWPORTS } from './runner.mjs';
 import { SLOW_REPLY, expect, openNewChat, scriptTag, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
-import { permitsOversizeOriginSettle } from './lib/transcript-settle.mjs';
 
 // Hosted journeys build only the shared desktop UI and exercise it at both
 // widths. Opt in to the separately built production mobile shell for local QA:
@@ -285,9 +284,10 @@ const cases = [{
 			}
 			if (minimumChars > 48000) {
 				log(`oversize singleton settle ${JSON.stringify(oversizeSettle)}`);
-				const originSettle = permitsOversizeOriginSettle({ phone: variant.viewport === 'phone', before, after, settle: oversizeSettle });
-				expect(after.maxDrift <= 1 || originSettle, 'the <=1px reading limit only permits the single phone singleton transition at scroll origin');
-				expect(oversizeSettle.total < 0.05 || originSettle, 'strict CLS applies except to that same single phone-origin transition');
+				// #889: the singleton transition at scroll origin keeps the evicted
+				// leading rows' space, so phone and desktop share the strict limits.
+				expect(after.maxDrift <= 1, 'the oversize singleton transition keeps the reply within the <=1px reading limit');
+				expect(oversizeSettle.total < 0.05, 'the oversize singleton transition stays under strict CLS');
 			}
 		}
 	}];
@@ -485,13 +485,7 @@ const oversizeCase = {
 	setup: context => growingReply.setup({ ...context, readingBoundary: true, replyScenario: 'reader-oversize' }),
 	act: context => growingReply.act({ ...context, minimumChars: 52000 })
 };
-// Desktop retains the original recorder and <=1px reading limits. Only the
-// phone definition has a recorder allowance; the measured transition predicate
-// above must independently accept its exact event before that rule can apply.
-cases.push({ ...oversizeCase, viewports: ['desktop'] });
-cases.push({ ...oversizeCase, viewports: ['phone'], allow: [{ kind: 'layout_shift',
-	message: /^layout shifted 0\.0\d{2} in total; biggest 0\.0\d{2} at \d+ms \(moved: div\.msg-virtualized in MessageArea\)$/,
-	reason: 'Only the measured phone singleton TRANSITION at scrollTop=0: exactly one associated non-input shift, exact CLS<0.1, <=20px position and a readable reply. Desktop and every other event retain strict limits.' }] });
+cases.push(oversizeCase);
 
 // Fixed mobile sheets do not resize the transcript. Read the real native
 // prefix above the sheet while a later reply grows past the same budget.

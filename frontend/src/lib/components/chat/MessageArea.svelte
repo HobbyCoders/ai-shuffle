@@ -11,7 +11,7 @@
 	// Whether each session was following the bottom (true) or the reader had
 	// scrolled up (false) when it was last on screen.
 	const autoScrollCache = new Map<string, boolean>();
-	const mountedRangeCache = new Map<string, { start: number; end: number }>();
+	const mountedRangeCache = new Map<string, { start: number; end: number; leadingGap?: number }>();
 </script>
 
 <script lang="ts">
@@ -777,8 +777,12 @@
 	let windowShifting = false;
 	let revealedTurnId = $state<string | null>(null);
 	let anchorRounding: { scrollTop: number; error: number } | null = null;
+	// Space kept above the window when evicting leading rows would need a
+	// negative scrollTop (#889): at scroll origin the compensation clamps and
+	// the reader moves up. Measured per shift; every later shift re-anchors.
+	let leadingGap = $state(0);
 
-	function applyMountedRange(next: TranscriptRange, preserveAnchor = true) {
+	function applyMountedRange(next: TranscriptRange, preserveAnchor = true, keepLeadingSpace = false) {
 		// Once the budget was reached, keep the clear affordance stable until
 		// the native selection ends, even if this reprice itself fits the window.
 		selectionBlocksNavigation = transcriptWindow.selectionLimited ||
@@ -808,9 +812,12 @@
 		const boundaryIndex = preserveAnchor && !anchor
 			? boundaryAtStart ? next.start : next.end <= mountedStart ? next.end - 1 : null
 			: null;
+		const evictsLeading = next.start > mountedStart;
+		const shiftSessionKey = windowSessionKey;
 		const version = ++windowShiftVersion;
 		windowShifting = true;
 		mountedRange = next;
+		leadingGap = 0;
 		if (windowSessionKey) {
 			mountedRangeCache.set(windowSessionKey, next);
 			evictOldest(mountedRangeCache, SCROLL_CACHE_MAX);
@@ -839,13 +846,24 @@
 					}
 				}
 				if (delta !== undefined) {
+					// Reading preservation (not explicit paging) keeps a dropped
+					// leading row's space instead of clamping at scroll origin.
+					const shortfall = -(container.scrollTop + delta + roundingError);
+					if (keepLeadingSpace && evictsLeading && anchor && shortfall >= 0.5 && shiftSessionKey === windowSessionKey) {
+						leadingGap = shortfall;
+						// Saved with the range so a chat switch-back restores the same
+						// geometry its cached scrollTop was measured against.
+						if (shiftSessionKey) mountedRangeCache.set(shiftSessionKey, { ...next, leadingGap: shortfall });
+						await tick();
+						if (version !== windowShiftVersion || container !== containerRef) return;
+						delta = -container.scrollTop - roundingError;
+					}
 					markProgrammaticScrollSettling();
 					const previousScrollTop = container.scrollTop;
 					const scrollDelta = delta + roundingError;
 					container.scrollTop += scrollDelta;
 					const error = scrollDelta - (container.scrollTop - previousScrollTop);
-					// Never carry a real clamp/navigation boundary, including the
-					// accepted phone-origin singleton settle, into a later shift.
+					// Never carry a real clamp/navigation boundary into a later shift.
 					anchorRounding = anchor?.isConnected && Math.abs(error) < 1
 						? { scrollTop: container.scrollTop, error } : null;
 					lastKnownScrollTop = container.scrollTop;
@@ -876,7 +894,7 @@
 		const streaming = $activeSession.isStreaming;
 		untrack(() => {
 			const isNewSession = sessionKey !== windowSessionKey;
-			if (isNewSession) readingTranscriptKey = null;
+			if (isNewSession) { readingTranscriptKey = null; leadingGap = 0; }
 			const saved = isNewSession ? mountedRangeCache.get(sessionKey) : undefined;
 			windowSessionKey = sessionKey;
 			transcriptWindow.onStreamingChange(streaming);
@@ -889,7 +907,9 @@
 			if (isNewSession && saved && autoScrollCache.get(sessionKey) === false && count > 0) {
 				next = transcriptWindow.restoreRange(saved);
 			}
-			applyMountedRange(next, !isNewSession && !shouldAutoScroll);
+			const reading = !isNewSession && !shouldAutoScroll;
+			applyMountedRange(next, reading, reading);
+			if (isNewSession && saved?.leadingGap && next.start === saved.start && next.end === saved.end) leadingGap = saved.leadingGap;
 		});
 	});
 	let currentTurnIndex = $state(0);
@@ -2221,7 +2241,7 @@
 		<div class="chat-column" bind:this={chatColumnRef}>
 			{#if mountedStart > 0}
 				<!-- Keyboard-accessible equivalent of scrolling into the older edge. -->
-				<div class="earlier-row">
+				<div class="earlier-row" style:margin-top={leadingGap ? `${leadingGap}px` : undefined}>
 					<button type="button" class="earlier-button" onclick={loadOlderItems}>
 						Show earlier messages
 					</button>
