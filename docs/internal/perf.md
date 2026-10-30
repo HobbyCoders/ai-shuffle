@@ -162,6 +162,32 @@ outside/finished-request work does not count. The legacy trace helper counts
 DML only. Compare small/large histories after warmup to expose N+1 work, and
 report middleware/compression placement with every byte budget.
 
+### Detail message windows (native PostgreSQL)
+
+`tests/db/test_session_message_window_postgres.py` exercises the actual detail
+router on the same 104,630-event seed. Its one-message ratchet allows at most
+12 statements, two event-read statements and 12 source rows crossing into Python,
+at both small and large history sizes. It runs in the existing native PostgreSQL
+CI job, not the SQLite shim. Wall-clock samples remain observations, not gates.
+
+For event-backed detail responses, one SQL snapshot counts message boundaries
+and assistant-bearing user intervals in the prefix, then reads a complete,
+capped suffix starting at a turn barrier before the requested messages. The
+existing REST fold renders that suffix, verifies its ordered identities, and
+keeps later tool updates. Cost and per-content user-row attribution retain their
+whole-transcript offsets without transferring the prefix. The aggregate still
+visits relevant prefix events; this bounds transferred rows and round trips,
+not the database work of every aggregate independently of history size.
+
+This does **not** enable the default-off canonical TypeScript transcript view.
+Local Fluid/store, legacy readers and SDK-ID aliases remain unchanged. Rewinds, approval retry
+cards, reminder-bearing user matching, cross-boundary tool reopens, and suffixes
+over 8,192 relevant source rows fall back to full replay. Long histories without
+a usable turn barrier and deep older pages can exceed that cap too. Differential
+checks compare complete messages and pagination headers against the full path,
+including these fallbacks, streamed deltas, late tool results, answers, compaction,
+repeated prompts, profiles and cost attribution.
+
 ## Phase-1 baseline (2026-10-29)
 
 These are historical p75 observations, **not thresholds**. Seed shape and phone

@@ -414,6 +414,8 @@ def attach_cost_metadata(
     *,
     turn_offset: int = 0,
     total_turns: Optional[int] = None,
+    usage_entries: Optional[List[Dict[str, Any]]] = None,
+    usage_offset: int = 0,
 ) -> None:
     """
     Attach cost/duration metadata to final assistant messages in-place.
@@ -438,6 +440,8 @@ def attach_cost_metadata(
             total; without this a window's last turn would falsely claim to be
             the end of the conversation. Defaults to treating the supplied list
             as the whole session.
+        usage_entries: Optional bounded usage rows. When supplied, entry zero
+            is the absolute ``usage_offset``; otherwise use the full cached log.
     """
     if not messages:
         return
@@ -466,15 +470,17 @@ def attach_cost_metadata(
     final_indices.reverse()
 
     # Get usage entries (cached) and match to final messages
-    usage_entries = get_cached_usage(session_id)
+    if usage_entries is None:
+        usage_entries = get_cached_usage(session_id)
     # Absolute turn count for deciding which message is the session's last.
     effective_total = (
         total_turns if total_turns is not None else turn_offset + len(final_indices)
     )
     for local_idx, msg_idx in enumerate(final_indices):
         turn_idx = turn_offset + local_idx
-        if turn_idx < len(usage_entries):
-            usage = usage_entries[turn_idx]
+        usage_idx = turn_idx - usage_offset
+        if 0 <= usage_idx < len(usage_entries):
+            usage = usage_entries[usage_idx]
             is_absolute_final = (turn_idx == effective_total - 1)
             existing_metadata = messages[msg_idx].get("metadata") or {}
 
