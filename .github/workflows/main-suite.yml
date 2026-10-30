@@ -9,9 +9,12 @@ on:
 permissions:
   contents: read
 
+# A started run always finishes; GitHub keeps only the newest waiting run and
+# drops older waiting ones. Cancelling in progress let a burst of merges cancel
+# every run, so nothing was proven and the nightly stalled until main went quiet.
 concurrency:
   group: main-suite-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   backend:
