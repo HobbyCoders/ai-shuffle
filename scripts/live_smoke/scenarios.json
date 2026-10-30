@@ -1324,6 +1324,15 @@
           "past_bug": "#580: a 2s acquisition timeout became a failed worker ResultMessage."
         },
         {
+          "id": "harness-basics.pr844-update-snapshot-timing",
+          "check": "Container source updates expose snapshot and child-spawn timing without changing rollback",
+          "kind": "owner",
+          "needs": ["install"],
+          "how": "Use a disposable candidate container with only synthetic data, never a live worker or database. Activate a staged source update and capture the supervisor log across old-app stop and replacement startup. Compare source_database_bytes and copied_database_bytes with read-only pg_database_size queries. Repeat with a candidate that fails after a schema/data migration and verify rollback restores the exact pre-update rows and schema. A dev-instance UI journey cannot activate this container-supervisor update path; the producing-path lab and unit tests cover it separately.",
+          "pass_when": "Snapshot start and one terminal complete/failed record bracket copying, with total seconds, cumulative copy seconds, attempts and database-file bytes (not device-write or WAL bytes). Successful copy precedes child-spawn start and PID/elapsed logging. Failed copies never claim completed bytes. No arguments, environments or connection details appear in the new records. FILE_COPY, process deadlines and rollback protection remain unchanged, and failed-update rollback restores the synthetic data exactly. The next installed-container update remains unverified until these real producing-path receipts exist.",
+          "past_bug": "An uninstrumented shutdown-to-startup gap made database-copy time indistinguishable from application startup."
+        },
+        {
           "id": "harness-basics.rewind-file-restore-retired",
           "check": "Rewind never offers file restore and old agents lose the retired flag",
           "kind": "owner",
