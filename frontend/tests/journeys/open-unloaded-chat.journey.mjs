@@ -68,7 +68,7 @@ const viaDeepLink = (target) => async ({ page, status, mark }) => {
 // The switch-flash cases use the REAL mobile shell, unlike a narrow desktop
 // viewport. Hold only delivery of an actual native SSE response: no reducer,
 // content or loading flag is fabricated.
-async function prepareHeldSwitch(ctx, delayMs) {
+async function prepareHeldSwitch(ctx, delayMs, source = 'no_project') {
 	const { page, status, variant } = ctx;
 	const target = seededChatId(status, 'other_project');
 	await page.addInitScript(({ target, delayMs }) => {
@@ -86,7 +86,7 @@ async function prepareHeldSwitch(ctx, delayMs) {
 		};
 	}, { target, delayMs });
 	const prefix = variant.viewport === 'phone' ? '/mobile/' : '/';
-	await page.goto(new URL(`${prefix}?session=${encodeURIComponent(seededChatId(status, 'no_project'))}`, status.urls.ui).toString());
+	await page.goto(new URL(`${prefix}?session=${encodeURIComponent(seededChatId(status, source))}`, status.urls.ui).toString());
 	await page.getByRole('textbox', { name: 'Message' }).waitFor({ timeout: 60_000 });
 	await waitChatOpen(page, { messagesAtLeast: 2, hold: 500 });
 	await page.getByRole('textbox', { name: 'Message' }).fill('Draft for the outgoing chat');
@@ -107,17 +107,21 @@ async function sampleSwitchFrames(page) {
 		const firstRow = log?.querySelector('.msg-virtualized');
 		window.__switchHydrationFrames = [];
 		window.__switchHydrationSampling = true;
+		let loadingStarted = null;
 		const sample = t => {
 			if (!window.__switchHydrationSampling) return;
 			const chat = document.querySelector('[data-ui-state="chat"]');
+			if (chat?.dataset.uiLoading === 'true' && loadingStarted === null) loadingStarted = t;
 			const pending = !!document.querySelector('[data-transcript-pending="true"]');
 			const loader = document.querySelector('.loading-transcript');
 			const rows = [...document.querySelectorAll('[role="log"] .msg-virtualized')];
 			window.__switchHydrationFrames.push({
-				t, pending, heldAt: window.__switchHydrationHold.started,
+				t, pending, loadingStarted, heldAt: window.__switchHydrationHold.started,
 				loader: !!loader && getComputedStyle(loader).visibility !== 'hidden',
 				visibleRows: rows.filter(row => getComputedStyle(row).visibility !== 'hidden').length,
 				outgoingConnected: !!firstRow?.isConnected,
+				readerConnected: window.__switchReadingAnchor?.isConnected,
+				readerTop: window.__switchReadingAnchor?.getBoundingClientRect().top,
 				composerSame: composer === document.querySelector('[role="textbox"][aria-label="Message"]'),
 				logSame: log === document.querySelector('[role="log"][aria-label="Conversation messages"]'),
 				outgoingDraft: composer?.textContent?.includes('Draft for the outgoing chat'),
@@ -137,10 +141,22 @@ async function finishSwitchFrames(page, log, { slow = false } = {}) {
 		window.__switchHydrationSampling = false;
 		return window.__switchHydrationFrames;
 	});
-	const pending = frames.filter(frame => frame.pending && frame.heldAt !== null);
-	// The first 100ms is deliberately inside the production 180ms grace, with
-	// room for response-header/frame scheduling jitter on 4x CPU.
-	const underGrace = pending.filter(frame => frame.t - frame.heldAt < 100);
+	// Use the pre-existing live loading signature, not the new wrapper's pending
+	// attribute, so this ratchet also measures (and fails on) the rollback build.
+	const pending = frames.filter(frame => frame.loading === 'true' && frame.loadingStarted !== null);
+	// Time starts at the first painted loading frame, not response headers: a
+	// slow network can deliver headers after the production grace has elapsed.
+	const underGrace = pending.filter(frame => frame.t - frame.loadingStarted < 100);
+	const ready = frames.find(frame => frame.loadingStarted !== null && frame.loading === 'false');
+	const duration = predicate => frames.reduce((sum, frame, index) => sum +
+		(predicate(frame) ? Math.max(0, (frames[index + 1]?.t ?? frame.t) - frame.t) : 0), 0);
+	log(`switch-metric ${JSON.stringify({
+		frames: frames.length, pending: pending.length, underGrace: underGrace.length,
+		loaderFrames: pending.filter(frame => frame.loader).length,
+		loaderMs: duration(frame => frame.loading === 'true' && frame.loader),
+		emptyMs: duration(frame => frame.loading === 'true' && !frame.loader && frame.visibleRows === 0),
+		readyMs: ready ? ready.t - ready.loadingStarted : null
+	})}`);
 	expect(underGrace.length > 0, 'observed the real incoming history while under grace');
 	expect(underGrace.every(frame => !frame.loader && frame.visibleRows > 0 && frame.outgoingConnected), 'no empty/skeleton frame under grace');
 	expect(frames.every(frame => frame.composerSame && frame.logSame), 'composer and MessageArea retain their identity');
@@ -148,7 +164,6 @@ async function finishSwitchFrames(page, log, { slow = false } = {}) {
 	if (slow) {
 		expect(pending.some(frame => frame.loader && frame.outgoingConnected), 'a slow load shows its overlay without discarding the old rows');
 	}
-	log(`switch frames=${frames.length}, pending=${pending.length}, under-grace=${underGrace.length}, loader=${pending.filter(frame => frame.loader).length}`);
 }
 
 const heldSwitch = (delayMs, slow = false) => ({
@@ -195,6 +210,37 @@ await runJourney({
 	cases: [
 		{ name: 'short-switch-under-grace', ...heldSwitch(80) },
 		{ name: 'short-switch-slow-overlay', ...heldSwitch(800, true) },
+		{ name: 'reading-anchor-survives-hydration',
+			async setup(ctx) {
+				await prepareHeldSwitch(ctx, 800, 'long');
+				await ctx.page.evaluate(() => {
+					const log = document.querySelector('[role="log"][aria-label="Conversation messages"]');
+					log.scrollTop = (log.scrollHeight - log.clientHeight) / 2;
+				});
+				await ctx.page.waitForTimeout(500);
+				await ctx.page.evaluate(() => {
+					const log = document.querySelector('[role="log"][aria-label="Conversation messages"]');
+					window.__switchReadingAnchor = [...log.querySelectorAll('.msg-virtualized')]
+						.find(row => row.getBoundingClientRect().bottom > log.getBoundingClientRect().top + 20);
+					window.__switchReadingTop = window.__switchReadingAnchor?.getBoundingClientRect().top;
+				});
+			},
+			async act({ page, mark, log }) {
+				const top = await page.evaluate(() => window.__switchReadingTop);
+				expect(Number.isFinite(top), 'captured a real outgoing reading anchor');
+				await sampleSwitchFrames(page);
+				await mark('open B while A is scrolled away from the bottom');
+				await openSwitchChat(page, 'other_project');
+				await waitChatOpen(page, { messagesAtLeast: 2, hold: 250 });
+				await finishSwitchFrames(page, log, { slow: true });
+				const pending = await page.evaluate(() => window.__switchHydrationFrames.filter(frame => frame.pending));
+				expect(pending.length > 0, 'observed the retained reading viewport');
+				expect(pending.every(frame => frame.readerConnected && Math.abs(frame.readerTop - top) <= 1),
+					'the outgoing reading anchor keeps its exact geometry until the atomic swap');
+				log(`reading anchor retained across ${pending.length} hydration frames; return-to-chat auto-scroll policy is unchanged (#805)`);
+			},
+			verify: composer('bottom')
+		},
 		{ name: 'short-rapid-switch-cancels-overlay',
 			setup: ctx => prepareHeldSwitch(ctx, 3000),
 			async act({ page, mark, log }) {

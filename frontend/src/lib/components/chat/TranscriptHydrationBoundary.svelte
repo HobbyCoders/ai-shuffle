@@ -23,6 +23,8 @@
 		onSurface?: (surface: ChatSurface, messageCount: number, sessionId: string | null | undefined) => void;
 	} = $props();
 
+	// Build-time rollback to the original immediate loading presentation.
+	const enabled = import.meta.env.VITE_PERF_STABLE_TRANSCRIPT_LOADING !== '0';
 	const initial = get(activeSession);
 	const presented = writable(initial);
 	setContext<TranscriptPresentation>(TRANSCRIPT_PRESENTATION, { subscribe: presented.subscribe });
@@ -48,7 +50,7 @@
 	onMount(() => activeSession.subscribe(current => {
 		targetSessionId = current.sessionId;
 		const loading = current.isLoadingSession || current.isRestoringSession;
-		if (!loading) {
+		if (!enabled || !loading) {
 			cancelGrace();
 			retaining = false;
 			settled = current.sessionId ? { ...current } : null;

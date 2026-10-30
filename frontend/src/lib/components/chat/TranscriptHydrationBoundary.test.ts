@@ -30,12 +30,26 @@ beforeEach(() => {
 	vi.useFakeTimers(); live.set(state('outgoing', 'Previous conversation'));
 });
 afterEach(() => {
-	cleanup(); vi.useRealTimers();
+	cleanup(); vi.useRealTimers(); vi.unstubAllEnvs();
 	if (nativeInert) Object.defineProperty(HTMLElement.prototype, 'inert', nativeInert);
 	else delete (HTMLElement.prototype as { inert?: boolean }).inert;
 });
 
 describe('transcript hydration presentation', () => {
+	it('rolls back to the live empty/loading publication when the kill switch is disabled', async () => {
+		vi.stubEnv('VITE_PERF_STABLE_TRANSCRIPT_LOADING', '0');
+		const view = render(Harness);
+		const outgoing = view.getByText('Previous conversation');
+		live.set(state('incoming', '', true)); await tick();
+		expect(outgoing.isConnected).toBe(false);
+		expect(view.getByTestId('presented').dataset.session).toBe('incoming');
+		expect(view.getByText('No messages')).toBeTruthy();
+		expect(view.container.querySelector('[data-transcript-pending="true"]')).toBeNull();
+		await vi.advanceTimersByTimeAsync(500); await tick();
+		expect(view.container.querySelector('.hydration-overlay')).toBeNull();
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
 	it('does not manufacture an outgoing presentation on a cold first load', async () => {
 		live.set(state('incoming', '', true));
 		const view = render(Harness);
