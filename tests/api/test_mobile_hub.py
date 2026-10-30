@@ -555,6 +555,61 @@ def test_revocation_is_not_masked_by_cache_or_grace(setup, monkeypatch):
     assert failure.value.status_code == 503
 
 
+def _hub_answers(monkeypatch, *statuses):
+    """Drive the real ``account_hub.call``: one fake hub connection per call,
+    answering the given HTTP statuses in order (200 means an active device)."""
+    import json as _json
+
+    def connection(*args, **kwargs):
+        status = remaining.pop(0)
+        conn = Mock()
+        response = conn.getresponse.return_value
+        response.status = status
+        response.getheader = lambda name: None
+        response.read = lambda n: _json.dumps(active()).encode()
+        return conn
+
+    remaining = list(statuses)
+    monkeypatch.setattr(account_hub, '_PinnedHTTPS', connection)
+    monkeypatch.setattr(account_hub, 'secret_for', lambda binding: SECRET)
+    return remaining
+
+
+@pytest.mark.parametrize('hub_status', [401, 403])
+def test_hub_refusal_of_a_revoked_device_signs_its_session_out(setup, monkeypatch, hub_status):
+    """The hub answers 403 for a revoked device (and 401 for a revoked worker
+    link). That is a revocation, not an outage: the saved session must stop
+    resolving (so a local window falls back to local access and a phone is
+    told to reconnect) instead of failing 503 on every request forever."""
+    bind()
+    insert()
+    owner = store.ownership(DEVICE)
+    token = pairing.generate_controller_session()
+    database.set_paired_client_session(owner['paired_client_id'], pairing.hash_controller_session(token),
+                                       datetime.now(timezone.utc) + timedelta(days=1))
+    _verdict_settings(monkeypatch, ttl=0, grace=600)
+    remaining = _hub_answers(monkeypatch, 200, hub_status, hub_status)
+    assert get_paired_client_from_token(token)  # confirmed once: a grace verdict exists
+    with pytest.raises(HTTPException) as failure:
+        account_hub.require_active(owner)
+    assert failure.value.status_code == 401
+    # Not forgiven by the outage grace window, and the session no longer resolves.
+    assert get_paired_client_from_token(token) is None
+    assert remaining == []
+
+
+@pytest.mark.parametrize('hub_status', [429, 500, 502, 503])
+def test_hub_outage_on_device_check_is_still_an_outage(setup, monkeypatch, hub_status):
+    bind()
+    insert()
+    owner = store.ownership(DEVICE)
+    _verdict_settings(monkeypatch, ttl=0, grace=0)
+    _hub_answers(monkeypatch, hub_status)
+    with pytest.raises(HTTPException) as failure:
+        account_hub.require_active(owner)
+    assert failure.value.status_code == 503
+
+
 def test_binding_deactivation_bypasses_cache(setup, monkeypatch):
     bind()
     insert()

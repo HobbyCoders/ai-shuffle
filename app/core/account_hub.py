@@ -418,7 +418,18 @@ def require_active(owner):
     try:
         if leader:
             try:
-                result = call(binding, 'GET', suffix)
+                try:
+                    result = call(binding, 'GET', suffix)
+                except HTTPException as exc:
+                    # The hub refuses a revoked device with 403 (signed out,
+                    # removed, account recovered) and a revoked worker link
+                    # with 401. ``call`` reports both as a 503 "unavailable";
+                    # read as an outage they kept that device's sessions
+                    # failing 503 forever, never signed out.
+                    if hub_status(exc) in (401, 403):
+                        _forget_verdict(key)
+                        raise HTTPException(status_code=401, detail='Account authorization revoked') from None
+                    raise
                 if (result.get('active') is not True or result.get('account_id') != owner['account_id']
                         or result.get('device_id') != owner['hub_device_id']):
                     _forget_verdict(key)
