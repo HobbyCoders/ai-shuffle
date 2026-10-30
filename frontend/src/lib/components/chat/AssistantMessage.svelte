@@ -222,9 +222,33 @@
 	const unscopedRendered = $derived(gallerySources?.size && !streaming
 		? { prefix: finishedMarkdown(rewriteWithGallery(displayContent, gallerySources, sessionId), highlightEpoch), tail: '' }
 		: renderMarkdownMemoized(displayContent, streaming, highlightEpoch));
-	const rendered = $derived({
+	const latestRendered = $derived({
 		prefix: routeChatFiles(unscopedRendered.prefix, sessionId),
 		tail: routeChatFiles(unscopedRendered.tail, sessionId)
+	});
+
+	// A selection inside a streaming reply (#870). Each delta replaces the tail
+	// {@html} block (and the prefix when a paragraph completes), which detaches
+	// the selected text nodes and drops the reader's selection. While a
+	// non-collapsed selection touches this reply, the markup on screen is held
+	// as it was; the newest text appears as soon as the selection is cleared.
+	let heldRendered = $state.raw<{ prefix: string; tail: string } | null>(null);
+	const rendered = $derived(heldRendered ?? latestRendered);
+	function selectionTouchesReply(): boolean {
+		const selection = proseEl?.ownerDocument.getSelection();
+		if (!proseEl || !selection || selection.isCollapsed || !selection.rangeCount) return false;
+		return selection.getRangeAt(0).intersectsNode(proseEl);
+	}
+	$effect(() => {
+		if (!streaming && !heldRendered) return;
+		const doc = proseEl?.ownerDocument;
+		if (!doc) return;
+		const changed = () => {
+			if (!selectionTouchesReply()) heldRendered = null;
+			else if (!heldRendered && streaming) heldRendered = latestRendered;
+		};
+		doc.addEventListener('selectionchange', changed);
+		return () => doc.removeEventListener('selectionchange', changed);
 	});
 
 	// HTML artifacts render inside the reply, right after the top-level block
