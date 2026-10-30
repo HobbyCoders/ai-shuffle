@@ -224,8 +224,9 @@ cases.push({
 			await clear.click();
 			await twoFrames(page);
 			expect(await page.evaluate(() => window.getSelection().isCollapsed), 'the accessible clear control releases selection priority');
-			await page.locator(LOG).hover();
-			await page.mouse.wheel(0, 1_000_000);
+			// This slice is already at its scroll boundary after pinning. Use
+			// the explicit paging control rather than a wheel with no scroll event.
+			await page.getByRole('button', { name: 'Show newer messages', exact: true }).click();
 			await page.waitForFunction(() => document.querySelector('[data-transcript-index="3"]')?.textContent.includes('GROWING_READER_START'));
 			log('clearing selection permits the still-streaming reply to remount');
 		} finally {
