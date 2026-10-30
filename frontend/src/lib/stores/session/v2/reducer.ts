@@ -248,8 +248,17 @@ export function rewindCapturedMessage(
 	return rest;
 }
 
+/** Chronological changes that also apply to detached, settled page rows. */
+export type CapturedMessageEffect =
+	| { kind: 'dismiss'; through: number; at: number; seq: number }
+	| { kind: 'rewind'; fromSeq: number; seq: number };
+type MessageEffectObserver = (effect: CapturedMessageEffect) => void;
+
 /** Dismiss only captured prose; later messages and explicit cards stay intact. */
-function dismissProseThrough(state: V2SessionState, through: number, at = through): V2SessionState {
+function dismissProseThrough(
+	state: V2SessionState, through: number, at = through, observe?: MessageEffectObserver
+): V2SessionState {
+	observe?.({ kind: 'dismiss', through, at, seq: at });
 	return { ...state, messages: state.messages.map((m) =>
 		dismissCapturedProse(m, state.messageOriginSeq.get(m.id), through, at)) };
 }
@@ -1187,6 +1196,23 @@ const SUBAGENT_PREVIEW_CHARS = 2_000;
  * handing `state.messages` to a consumer that keeps the reference.
  */
 export function reduce(state: V2SessionState, event: WireEvent): V2SessionState {
+	return reduceInternal(state, event);
+}
+
+/** The same fold, with exact effects for locally persisted detached rows.
+ * Observe inside the authoritative branches: synthetic turns and stale-epoch
+ * notes must not create effects that the normal reducer would not apply.
+ */
+export function reduceWithMessageEffects(
+	state: V2SessionState, event: WireEvent
+): { state: V2SessionState; effects: CapturedMessageEffect[] } {
+	const effects: CapturedMessageEffect[] = [];
+	return { state: reduceInternal(state, event, effect => effects.push(effect)), effects };
+}
+
+function reduceInternal(
+	state: V2SessionState, event: WireEvent, observe?: MessageEffectObserver
+): V2SessionState {
 	const createdAt = str(event.created_at);
 	// lastSeq only ever advances (replay is monotonic).
 	const seq = typeof event.seq === 'number' ? event.seq : state.lastSeq;
@@ -1419,7 +1445,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 
 		case 'turn.aborted': {
 			const reason = str(event.reason);
-			let next = dismissProseThrough(closeOpen(state), seq);
+			let next = dismissProseThrough(closeOpen(state), seq, seq, observe);
 			if (reason === 'interrupt') {
 				// Mark any still-running tool card as errored (mirrors the legacy
 				// interrupt cleanup in message-sender).
@@ -2395,7 +2421,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			if (str(event.subtype) === 'session_settled') {
 				const cutoff = typeof event.through_seq === 'number' ? event.through_seq : seq;
 				if (event.epoch == null || state.logEpoch == null || event.epoch === state.logEpoch) {
-					state = dismissProseThrough(state, cutoff, seq);
+					state = dismissProseThrough(state, cutoff, seq, observe);
 				}
 			}
 			// `background_tasks_changed` is a CLI/SDK bookkeeping event that
@@ -2539,6 +2565,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 		case 'transcript.rewound': {
 			const fromSeq = typeof event.from_seq === 'number' ? event.from_seq : NaN;
 			if (Number.isNaN(fromSeq)) return state; // malformed: no-op
+			observe?.({ kind: 'rewind', fromSeq, seq });
 			// Drop every message/task CREATED at seq >= fromSeq. Optimistic
 			// messages (absent from messageOriginSeq) are exempt. Reducing the
 			// full log from seq 0 reproduces the same truncation → determinism.

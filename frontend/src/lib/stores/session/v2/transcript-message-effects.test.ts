@@ -2,8 +2,12 @@ import { describe, expect, it } from 'vitest';
 import type { ChatMessage } from '../../types';
 import {
 	dismissCapturedProse,
+	initialState,
+	reduce,
 	reduceAll,
+	reduceWithMessageEffects,
 	rewindCapturedMessage,
+	withLogEpoch,
 	type WireEvent
 } from './reducer';
 
@@ -96,5 +100,30 @@ describe('shared captured-message effects', () => {
 		expect(rows.find((row) => row.content === 'May I proceed?')?.proseQuestionDismissedAt).toBe(10);
 		expect(rows.some((row) => row.content === 'Later question?')).toBe(false);
 		expect(captured.messages.every((row) => row.proseQuestionDismissedAt === undefined)).toBe(true);
+	});
+
+	it('captures only effects actually applied by authoritative reducer branches', () => {
+		const prefix = [event(1, 'assistant.text_delta', { text: 'Question?' })];
+		const cases = [
+			{ frame: event(2, 'turn.aborted'), effects: [{ kind: 'dismiss', through: 2, at: 2, seq: 2 }] },
+			{ frame: event(2, 'system.note', { subtype: 'session_settled', through_seq: 1 }),
+				effects: [{ kind: 'dismiss', through: 1, at: 2, seq: 2 }] },
+			{ frame: event(2, 'transcript.rewound', { from_seq: 1 }),
+				effects: [{ kind: 'rewind', fromSeq: 1, seq: 2 }] },
+			{ frame: event(2, 'transcript.rewound', {}), effects: [] },
+			{ frame: event(2, 'turn.aborted', { turn_id: 'voice-synthetic' }), effects: [] },
+			{ frame: event(2, 'system.note', { subtype: 'session_settled', epoch: 'stale' }), effects: [] }
+		];
+		for (const { frame, effects } of cases) {
+			const tracked = reduceWithMessageEffects(withLogEpoch(reduceAll(prefix), 'current'), frame);
+			const expected = reduce(withLogEpoch(reduceAll(prefix), 'current'), frame);
+			expect(tracked.state).toStrictEqual(expected);
+			expect(tracked.effects).toStrictEqual(effects);
+		}
+	});
+
+	it('retains the normal two-argument reducer Array.reduce contract', () => {
+		const frames = [event(1, 'assistant.text_delta', { text: 'A' }), event(2, 'turn.aborted')];
+		expect(frames.reduce(reduce, initialState())).toStrictEqual(reduceAll(frames));
 	});
 });
