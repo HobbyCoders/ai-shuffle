@@ -24,6 +24,9 @@ export interface BuildOptions {
    */
   sharedCache?: string;
   revision: string;
+  version?: string;
+  /** A bundle already verified against this signed revision and build version. */
+  prebuiltUI?: string;
   log: string;
   progress: (message: string) => void;
 }
@@ -55,6 +58,7 @@ async function run(executable: string, args: string[], cwd: string, opts: BuildO
     await log.write(`\n[${new Date(started).toISOString()}] $ ${path.basename(executable)} ${args.join(' ')}\n`);
     await new Promise<void>((resolve, reject) => {
       const env: NodeJS.ProcessEnv = { ...buildEnvironment(opts.runtime.node, python), GITHUB_SHA: opts.revision };
+      if (opts.version) env.APP_VERSION = opts.version;
       if (electronDownload) delete env.ELECTRON_SKIP_BINARY_DOWNLOAD;
       const child = spawn(executable, args, { cwd, env, windowsHide: true, stdio: ['ignore', log.fd, log.fd], timeout: 15 * 60_000 });
       child.once('error', reject);
@@ -207,7 +211,7 @@ export async function buildSource(opts: BuildOptions): Promise<BuiltSource> {
   const python = pythonKey ? path.join(opts.cache, 'python', pythonKey.slice(0, 24), process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python') : opts.runtime.python;
   const dependencies = new Map<string, string>();
   const identity = opts.sharedCache ? await nodeIdentity(opts) : null;
-  for (const name of ['frontend', 'tools', 'browser-mcp', 'desktop']) dependencies.set(name, await nodePackage(name, opts, python, identity));
+  for (const name of [...(opts.prebuiltUI ? [] : ['frontend']), 'tools', 'browser-mcp', 'desktop']) dependencies.set(name, await nodePackage(name, opts, python, identity));
   const electronPackage = path.join(dependencies.get('desktop')!, 'electron');
   const electron = path.join(electronPackage, 'dist', process.platform === 'win32' ? 'electron.exe' : 'electron');
   if (!(await exists(electron))) {
@@ -221,7 +225,7 @@ export async function buildSource(opts: BuildOptions): Promise<BuiltSource> {
   // Explicit call starts can retry this signed, hash-pinned optional closure.
   await fs.copyFile(path.join(opts.source, 'requirements-voice.lock'), path.join(opts.server, 'requirements-voice.lock'));
   await fs.rm(path.join(opts.server, 'app/static'), { recursive: true, force: true });
-  await fs.cp(path.join(opts.source, 'frontend/build'), path.join(opts.server, 'app/static'), { recursive: true });
+  await fs.cp(opts.prebuiltUI ?? path.join(opts.source, 'frontend/build'), path.join(opts.server, 'app/static'), { recursive: true });
   await fs.cp(path.join(opts.source, 'fluid/fluid'), path.join(opts.server, 'fluid'), { recursive: true, filter: clean });
   for (const name of ['tools', 'browser-mcp']) {
     const target = path.join(opts.server, name);

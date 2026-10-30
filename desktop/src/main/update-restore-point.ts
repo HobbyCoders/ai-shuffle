@@ -77,8 +77,9 @@ export class SinglePassClusterCopy extends ColdClusterCopy {
  * exercises that factory against same-size file corruption. Launcher 8 changes only the
  * PostgreSQL start options and the Windows process-identity probe; the factory and
  * ready-journal path are unchanged.
+ * Launcher 9 adds signed UI bundle staging; the ColdClusterCopy factory and ready-journal path are byte-for-byte unchanged.
  * A new version is NOT trusted automatically: review its factory and ready-journal path. */
-export const RESTORE_POINT_VALIDATING_LAUNCHERS: ReadonlySet<number> = new Set([4, 5, 6, 7, 8]);
+export const RESTORE_POINT_VALIDATING_LAUNCHERS: ReadonlySet<number> = new Set([4, 5, 6, 7, 8, 9]);
 
 /** Unknown handoffs and fenced recovery must keep full validation. */
 export function launcherValidatedRestorePoint(platform: string, launcher: number, installedHandoff: boolean, migrationRisk: boolean): boolean {

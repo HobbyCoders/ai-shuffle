@@ -160,6 +160,10 @@
     "reason": "Temporary process-start rollback switch for SDK-free connector discovery; restores eager connector and optional SDK imports while the startup optimization is validated",
     "base_settings": false
   },
+  "AI_SHUFFLE_PERF_PREBUILT_UI": {
+    "kind": "internal",
+    "reason": "Updater-only rollback to verified-source UI compilation; bundle integrity and independent source verification remain mandatory."
+  },
   "AI_SHUFFLE_PERF_PROVIDER_HTTP_REUSE": {
     "kind": "internal",
     "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Reuse native HTTP clients instead of rebuilding them per operation",

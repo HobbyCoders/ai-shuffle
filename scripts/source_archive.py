@@ -141,13 +141,78 @@ def build(revision: str, output: Path, repo: Path = ROOT) -> dict:
             "tree": tree_digest(files), "files": len(files)}
 
 
+UI_MAX_SIZE = 64 * 1024**2
+UI_MAX_EXPANDED = 256 * 1024**2
+
+
+def describe_ui_bundle(archive: Path, revision: str, version: str) -> dict:
+    """Trusted publisher reads an artifact as bounded data, never candidate code."""
+    if not re.fullmatch(r"[a-f0-9]{40}", revision) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[.+-][A-Za-z0-9.+-]{1,60})?", version or ""):
+        raise ValueError("invalid UI build revision/version")
+    if not 0 < archive.stat().st_size <= UI_MAX_SIZE:
+        raise ValueError("UI archive exceeds size limit")
+    prefix = root_name(revision) + "/"
+    with zipfile.ZipFile(archive) as zipped:
+        entries = zipped.infolist()
+        if len(entries) > 20000 or sum(item.file_size for item in entries) > UI_MAX_EXPANDED:
+            raise ValueError("UI archive expansion exceeds limits")
+        seen, files = set(), []
+        for item in entries:
+            name = item.filename
+            relative = name[len(prefix):] if name.startswith(prefix) else ""
+            parts = relative.rstrip("/").split("/")
+            mode = (item.external_attr >> 16) & 0xf000
+            if (not relative or any(not part or part in (".", "..") or part.endswith((" ", "."))
+                                    or re.search(r'[\\:<>"|?*\x00-\x1f]', part)
+                                    or re.match(r"(?i)^(con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)", part) for part in parts)
+                    or mode not in (0, 0x8000, 0x4000) or item.flag_bits & 1 or name.casefold() in seen):
+                raise ValueError("unsafe UI archive entry")
+            seen.add(name.casefold())
+            if not item.is_dir():
+                files.append((relative, hashlib.sha256(zipped.read(item)).hexdigest()))
+        expected = {"format": 1, "revision": revision, "version": version}
+        if json.loads(zipped.read(prefix + "ui-build.json")) != expected:
+            raise ValueError("UI bundle build constants do not match the source release")
+        if not {"index.html", "mobile/index.html"}.issubset({name for name, _ in files}):
+            raise ValueError("UI bundle must contain both desktop and phone shells")
+    return {**expected, "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+            "size": archive.stat().st_size, "tree": tree_digest(files)}
+
+
+def build_ui_bundle(directory: Path, revision: str, version: str, output: Path) -> dict:
+    """Reproducible asset ZIP. The stamp binds all build-time version constants."""
+    if output.exists() or output.resolve().is_relative_to(directory.resolve()):
+        raise ValueError("UI output must be a new file outside the build directory")
+    paths = sorted(directory.rglob("*"))
+    if any(path.is_symlink() for path in paths):
+        raise ValueError("UI build cannot contain symlinks")
+    stamp = json.dumps({"format": 1, "revision": revision, "version": version}, sort_keys=True).encode()
+    with output.open("xb") as stream, zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as zipped:
+        files = [(path.relative_to(directory).as_posix(), path.read_bytes()) for path in paths
+                 if path.is_file() and path.relative_to(directory).as_posix() != "ui-build.json"]
+        for relative, data in sorted([*files, ("ui-build.json", stamp)]):
+            info = zipfile.ZipInfo(root_name(revision) + "/" + relative, (1980, 1, 1, 0, 0, 0))
+            info.create_system = 3
+            info.external_attr = 0o100644 << 16
+            info.compress_type = zipfile.ZIP_DEFLATED
+            zipped.writestr(info, data)
+    return describe_ui_bundle(output, revision, version)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     parser.add_argument("revision")
     parser.add_argument("output", type=Path)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--ui-build", type=Path)
+    mode.add_argument("--inspect-ui", action="store_true")
+    parser.add_argument("--version")
     args = parser.parse_args()
     try:
-        print(json.dumps(build(args.revision, args.output)))
+        result = (build_ui_bundle(args.ui_build, args.revision, args.version, args.output) if args.ui_build else
+                  describe_ui_bundle(args.output, args.revision, args.version) if args.inspect_ui else
+                  build(args.revision, args.output))
+        print(json.dumps(result))
     except (ValueError, subprocess.CalledProcessError) as exc:
         print(f"source_archive: {exc}", file=sys.stderr)
         sys.exit(1)

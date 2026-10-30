@@ -70,7 +70,7 @@ def build_feed(feed, monkeypatch, request):
 
     monkeypatch.setattr(updater, "run_build", run)
 
-    def stage(revision, sequence, changes=None):
+    def stage(revision, sequence, changes=None, **manifest_fields):
         files = {
             "requirements.lock": "# pinned core\n",
             "requirements-native.lock": "# pinned native\n",
@@ -83,7 +83,7 @@ def build_feed(feed, monkeypatch, request):
             files[f"{package}/package.json"] = json.dumps({"name": package, "private": True})
             files[f"{package}/package-lock.json"] = json.dumps({"lockfileVersion": 3, "name": package})
         files.update(changes or {})
-        publish(revision=revision, sequence=sequence,
+        publish(revision=revision, sequence=sequence, **manifest_fields,
                 entries={f"ai-shuffle-{revision}/{name}": content for name, content in files.items()})
         start = len(commands)
         updater.check(download=True)

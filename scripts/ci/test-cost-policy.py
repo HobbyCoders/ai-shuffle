@@ -120,7 +120,9 @@ class CostPolicyTests(unittest.TestCase):
         self.assertIsNone(publication.newest_attested(api, [newer, ancestor])[0])
         statuses[newer] = [status("success", publication.OWNER_ID)]
         self.assertEqual(publication.newest_attested(api, [newer, ancestor])[0], newer)
-        self.assertEqual(config["jobs"]["publish"]["needs"], "gate")
+        self.assertEqual(config["jobs"]["publish"]["needs"], ["gate", "ui"])
+        self.assertEqual(config["jobs"]["ui"]["needs"], "gate")
+        self.assertEqual(config["jobs"]["ui"]["permissions"], {"contents": "read"})
         self.assertEqual(config["jobs"]["publish"]["if"], "needs.gate.outputs.ready == 'true'")
 
     def test_ios_macos_job_is_unsigned_and_bounded(self):

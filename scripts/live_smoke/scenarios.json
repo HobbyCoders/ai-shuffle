@@ -1409,6 +1409,15 @@
           "past_bug": "Every container source update created a fresh Python environment and reinstalled byte-identical dependencies, while reusing an entire old app environment would run stale Fluid code."
         },
         {
+          "id": "harness-basics.source-update-prebuilt-ui",
+          "check": "Signed desktop and phone UI bundles skip local compilation and fail safely",
+          "kind": "owner",
+          "needs": ["device", "install"],
+          "how": "Use a disposable desktop install and candidate container with synthetic data and an ephemeral acceptance signing key; publication and an installed-launcher handover cannot be proved by a dev preview. Upgrade the desktop candidate from an older launcher to launcher 9, exercising the documented launcher-swap acceptance flow, then offer another signed source revision with its matching CI-produced desktop/phone UI asset. Record frontend npm ci/build invocations and the served revision/version stamp on / at 1280x800 and /mobile/ at 390x844. Repeat with an unreachable asset, corrupt asset bytes and a validly signed descriptor naming a wrong revision/version/tree; keep the independent source signature valid for those UI-fallback cases. Separately offer an invalid source signature. Repeat with AI_SHUFFLE_PERF_PREBUILT_UI=0 and with an older updater that ignores the optional UI field. Never publish test keys or update a production install.",
+          "pass_when": "A valid bundle skips every local frontend install/build and both actual shells serve the matching new revision/version. Invalid or missing UI falls back to verified-source compilation without changing runtime, first-boot or rollback checks; an invalid source signature still refuses the source update. The flag and older updater build locally. The installed swap, profile preservation, restart confirmation and rollback acceptance checks pass before release; an in-memory download fixture or preview alone does not pass this row.",
+          "past_bug": "Each source update reinstalled frontend dependencies and rebuilt identical desktop/phone UI; sharing unsigned or mismatched build output would risk stale or untrusted application assets."
+        },
+        {
           "id": "harness-basics.swarm-restart-settle",
           "check": "A swarm cut off by an app restart settles and can be cancelled",
           "kind": "owner",

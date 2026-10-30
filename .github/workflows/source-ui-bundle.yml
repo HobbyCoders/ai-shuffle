@@ -1,0 +1,58 @@
+name: Build source-update UI bundle
+
+on:
+  workflow_call:
+    inputs:
+      source-ref:
+        required: true
+        type: string
+      version:
+        default: ''
+        type: string
+      artifact-name:
+        default: source-ui
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source-ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          # The caller's control revision, never Python from an older candidate.
+          ref: ${{ github.workflow_sha }}
+          path: .ui-control
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Resolve the immutable UI source revision
+        id: source
+        run: |
+          revision=$(git rev-parse HEAD)
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+      - name: Build desktop and phone together without publication credentials
+        env:
+          UI_REVISION: ${{ steps.source.outputs.revision }}
+          UI_VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/source-ui"
+          python -I .ui-control/scripts/build_ui_bundle.py --source-root "$GITHUB_WORKSPACE" --revision "$UI_REVISION" --version "$UI_VERSION" --output "$RUNNER_TEMP/source-ui/ui.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ runner.temp }}/source-ui/ui.zip
+          retention-days: 1
+          if-no-files-found: error
