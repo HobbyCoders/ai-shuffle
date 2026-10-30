@@ -16,7 +16,6 @@ is equivalent to rewinding the conversation.
 
 import json
 import logging
-import re
 import os
 import tempfile
 import shutil
@@ -156,13 +155,37 @@ def _trim_trailing_queue_ops(
     return keep_count
 
 
-# A tempered body cannot consume a closing tag and erase genuine text between
-# two reminders. Both spellings exist in persisted native/delegated sessions.
-_TRAILING_REMINDERS = re.compile(
-    r'(?:\s*<system[•-]reminder>(?:(?!</system[•-]reminder>).)*'
-    r'</system[•-]reminder>)+\s*$',
-    re.DOTALL,
-)
+_REMINDER_OPENS = ("<system•reminder>", "<system-reminder>")
+_REMINDER_CLOSES = ("</system•reminder>", "</system-reminder>")
+
+
+def _strip_trailing_reminders(text: str) -> str:
+    """Remove only a complete trailing run, not canonical display reminders.
+
+    A body ends at the first close of either spelling; nested openers are
+    body text. Scan tags once and retain the start of the latest contiguous
+    run. In particular, never retry a failed body from every leading newline
+    or nested opener (the old tempered, repeated regex did both).
+    """
+    run_start = opener = None
+    cursor = search = 0
+    while (tag := text.find("<", search)) != -1:
+        search = tag + 1
+        if opener is None:
+            if text.startswith(_REMINDER_OPENS, tag):
+                opener = tag
+        elif text.startswith(_REMINDER_CLOSES, tag):
+            start = opener
+            # Accepted blocks and the whitespace before them are disjoint.
+            while start > cursor and text[start - 1].isspace():
+                start -= 1
+            if run_start is None or start != cursor:
+                run_start = start
+            cursor = search = tag + len(_REMINDER_CLOSES[0])
+            opener = None
+    if run_start is not None and (cursor == len(text) or text[cursor:].isspace()):
+        return text[:run_start]
+    return text
 
 
 def extract_entry_text(entry: Mapping[str, Any]) -> str:
@@ -191,7 +214,7 @@ def extract_entry_text(entry: Mapping[str, Any]) -> str:
         # Strip only a complete trailing run of host reminders for matching;
         # never use prefix equality ("retry" must not match "retry later").
         # Do not alter the stored transcript or assistant/tool-result text.
-        text = _TRAILING_REMINDERS.sub('', text)
+        text = _strip_trailing_reminders(text)
     return text
 
 

@@ -45,6 +45,31 @@ describe('shipped transcript reducer', () => {
 		expect(actual).toStrictEqual(withLogEpoch(reduceAll(frames), 'epoch'));
 	});
 
+	it.each(['held', 'task-block', 'task-field'])('bounds incomplete %s in the actual shipped reducer with an OS timeout', (kind) => {
+		const content = kind === 'held' ? ('<system-reminder>\n' +
+			'Messages from other agents that arrived while this session was parked:\n').repeat(80_000)
+			: kind === 'task-block' ? '<task-notification>'.repeat(400_000)
+			: '<task-notification>' + '<summary>'.repeat(400_000) + '</task-notification>';
+		const child = spawnSync(process.execPath, ['--max-old-space-size=192', bundle], {
+			cwd: root, env: minimalEnv, encoding: 'utf8', timeout: 5_000, killSignal: 'SIGKILL',
+			input: JSON.stringify({ id: 1, method: 'fold', params: { carry: null, records: [], frames: [
+				{ id: 'u', seq: 1, type: 'message.user', content }
+			] } }) + '\n'
+		});
+		expect(child.error).toBeUndefined();
+		expect(child.status, child.stderr).toBe(0);
+		const lines = child.stdout.trim().split('\n').map(line => JSON.parse(line));
+		// The oversized request must finish parsing before enforcing the carry
+		// limit; it must not hang or silently return partial transcript state.
+		expect(lines[1]).toEqual(kind === 'task-field'
+			? expect.objectContaining({ id: 1, ok: true })
+			: { id: 1, ok: false, error: 'carry_limit' });
+		const small = rpc({ id: 2, method: 'fold', params: { carry: null, records: [], frames: [
+			{ id: 'u', seq: 1, type: 'message.user', content: content.slice(0, 10_000) }
+		] } });
+		expect(small.lines[1]).toMatchObject({ id: 2, ok: true });
+	}, 10_000);
+
 	it('returns bounded error codes, never partial state, input or diagnostic payloads', () => {
 		const { raw, lines } = rpc({ id: 1, method: 'fold', params: { carry: null, records: [], frames: [
 			{ id: 'u', seq: 1, type: 'message.user', content: 'fixture-private-payload' },

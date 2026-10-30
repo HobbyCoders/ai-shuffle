@@ -106,7 +106,7 @@ _FENCE = re.compile(r"(```|~~~).*?(?:\1|\Z)", re.S)
 _MD_LINK = re.compile(r"!?\[([^\]\n]*)\]\(\s*<?([^)\s>]*)>?(?:\s+\"[^\"\n]*\")?\s*\)")
 _URL = re.compile(r"(?:https?://|www\.)[^\s<>()\[\]]+")
 _LIST_ITEM = re.compile(r"^\s*(?:[-*+•]|\d{1,3}[.)])\s+")
-_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$|^\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
+_ALIGNMENT_CELL = re.compile(r":?-{3,}:?")
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s+")
 _QUOTE = re.compile(r"^\s{0,3}>\s?")
 _RULE = re.compile(r"^\s*(?:[-*_]\s*){3,}$")
@@ -115,6 +115,18 @@ _ITALIC = re.compile(r"(?<![\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![\w*])")
 _INLINE_CODE = re.compile(r"`([^`\n]*)`")
 _SENTENCE_END = re.compile(r"[.!?…:;]$")
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+")
+
+
+def _is_table_row(line: str) -> bool:
+    # Split once instead of letting two trailing \s* quantifiers distribute
+    # a long whitespace suffix between them on every failed match.
+    text = line.strip()
+    if text.startswith("|") and text.endswith("|") and len(text) > 1 and "\n" not in text:
+        return True
+    cells = text.split("|")
+    if not cells[-1]:
+        cells.pop()  # The alignment row permits one optional final pipe.
+    return len(cells) >= 2 and all(_ALIGNMENT_CELL.fullmatch(cell.strip()) for cell in cells)
 
 
 def _url_words(match: "re.Match[str]") -> str:
@@ -207,7 +219,7 @@ def speech_text(value: str, limit: int = SPEECH_MAX_BYTES) -> str:
             if paragraphs[-1]:
                 paragraphs.append([])
             continue
-        if _TABLE_ROW.match(line):
+        if _is_table_row(line):
             dropped = True
             continue
         if _RULE.match(line):
