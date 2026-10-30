@@ -858,15 +858,8 @@ async def revert_security_instructions(token: str = Depends(require_admin)):
 
     Admin only.
     """
-    # Delete the custom setting to revert to default
-    from app.db.base import get_db
-
-    def _delete() -> None:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM system_settings WHERE key = %s", ("security_instructions",))
-
-    await run_sync(_delete)
+    # Use the registered helper so a committed reset also publishes to peers.
+    await run_sync(database.delete_system_setting, "security_instructions")
 
     return {
         "success": True,

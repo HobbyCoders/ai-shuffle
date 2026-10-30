@@ -20,8 +20,20 @@ INVENTORY = {'projects': ('projects', 'shared', 'create_project update_project d
 INVENTORY['api_users'] = ('api_users', 'admin', 'create_api_user update_api_user delete_api_user update_credential_policy set_user_credential_policy delete_user_credential_policy set_user_credential delete_user_credential')
 
 
+INVENTORY['settings'] = ('settings', 'admin', 'set_system_setting delete_system_setting get_or_create_system_setting set_user_preference delete_user_preference')
+INVENTORY['artifacts'] = ('artifacts', 'admin', 'upsert_artifact')
+BOUNDARY_OVERRIDES = {
+    **{('subagents', name): ('settings', 'shared') for name in
+       'add_permission_rule delete_permission_rule delete_profile_permission_rules'.split()},
+    **{('tags', name): ('sessions', 'session') for name in
+       'add_session_tag remove_session_tag set_session_tags'.split()},
+    **{('settings', name): ('preferences', 'admin') for name in
+       'set_user_preference delete_user_preference'.split()},
+}
+
+
 @pytest.mark.parametrize("module,resource,scope,name", [
-    (module, resource, scope, name)
+    (module, *BOUNDARY_OVERRIDES.get((module, name), (resource, scope)), name)
     for module, (resource, scope, names) in INVENTORY.items()
     for name in names.split()
 ])
@@ -82,6 +94,39 @@ def test_missing_connector_delete_does_not_initialize_journal() -> None:
     with patch.object(watch_journal, "purge") as purge:
         assert not database.delete_connector("missing-retention-connector")
         purge.assert_not_called()
+
+
+@pytest.mark.parametrize("rollback", [False, True])
+def test_multiple_resource_registrations_share_one_after_commit_connection(events, rollback):
+    from app.core.resource_sync import install_database_mutations
+    from app.db import base
+
+    committed = []
+    namespace = {"get_db": base.get_db}
+
+    def write(key):
+        with namespace["get_db"]() as conn:
+            conn.cursor().execute(
+                "INSERT INTO system_settings (key, value, updated_at, revision) VALUES (%s, %s, %s, %s)",
+                (key, "value", "now", "revision"),
+            )
+            base.after_commit(conn, lambda: committed.append(key))
+            assert key not in committed
+            if rollback:
+                raise RuntimeError("simulate rollback")
+        return True
+
+    namespace.update(write_settings=write, write_preferences=write)
+    install_database_mutations(namespace, "settings", "write_settings")
+    install_database_mutations(namespace, "preferences", "write_preferences")
+    for name in ("write_settings", "write_preferences"):
+        if rollback:
+            with pytest.raises(RuntimeError, match="simulate rollback"):
+                namespace[name](name)
+        else:
+            assert namespace[name](name)
+    assert committed == ([] if rollback else ["write_settings", "write_preferences"])
+    assert resources(events) == ([] if rollback else [["settings"]] * 3 + [["preferences"]] * 3)
 
 
 def test_system_settings_initialization_noop_and_delete(events):

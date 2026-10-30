@@ -162,6 +162,11 @@
     "target_pr": 2,
     "base_settings": true
   },
+  "AI_SHUFFLE_PERF_RESOURCE_WAKE": {
+    "kind": "internal",
+    "reason": "Temporary default-on rollback switch for post-commit publication of replicated preferences and audited shared writers",
+    "base_settings": false
+  },
   "AI_SHUFFLE_PERF_SCAN_WAKE": {
     "kind": "internal",
     "reason": "Temporary default-on rollback switch for interruptible network scanner rest and bounded urgent-wake coalescing",
