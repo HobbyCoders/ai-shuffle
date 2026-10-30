@@ -437,9 +437,11 @@
 				// the owner refuses it with 409 then (a new chat's first load runs
 				// as its first reply starts, #803). The status refresh at stream end
 				// still runs; only the optional fetch of remote refs is skipped.
-				const busyAtLoad = gitControlsStreaming.current;
+				// Read live: a reply that is still streaming when the fetch would go
+				// out blocks it (the store retries at stream end); one that already
+				// ended does not, so no deferral waits for a stream end that passed.
 				const options: GitLoadOptions = {
-					fetchBlocked: () => busyAtLoad || gitControlsStreaming.current,
+					fetchBlocked: () => gitControlsStreaming.current,
 					...(sessionId && deferGitOnOpen()
 						? { afterCriticalPath: whenTranscriptSettled(activeSession, sessionId, GIT_OPEN_GATE_MAX_MS) }
 						: {})

@@ -526,6 +526,7 @@ async function _loadCore(
 
 	const statusSeq = _nextSeq();
 	const requestScope = sessionId ?? _state.workerTarget ?? undefined;
+	_deferredFetch = null; // A new load decides its own fetch.
 	try {
 		const status = await gitApi.getGitStatus(projectId, worktreeId, undefined, requestScope);
 		if (_loadInFlight !== scope) return;
