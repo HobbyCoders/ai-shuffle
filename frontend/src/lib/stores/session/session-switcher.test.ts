@@ -1135,6 +1135,45 @@ describe('session-switcher · cached transcript prime (S2)', () => {
 		expect(getState().contextUsed).toBe(4242);
 	});
 
+	it('a row-less re-open of the chat on screen keeps its known owner; another chat starts unknown (#890)', async () => {
+		vi.mocked(feedController.cachedPatch).mockReturnValue(null);
+		_mockSessions.current = [];
+		// Every state the switch publishes: the switch-in itself must not
+		// forget the owner, not only the end state after /live answers again.
+		const seen: Array<{ isRemote?: boolean; ownerDeviceName?: string | null }> = [];
+		const open = async (initial: ActiveSessionState, target: string) => {
+			seen.length = 0;
+			let state = initial;
+			const switcher = createSessionSwitcher({
+				update: (fn) => {
+					state = fn(state);
+					seen.push({ isRemote: state.isRemote, ownerDeviceName: state.ownerDeviceName });
+				},
+				getState: () => state,
+				wsSend: vi.fn(() => true),
+				internal: {
+					pendingTools: new Set<string>(),
+					awaitingNewSession: false,
+					pendingRequestId: null,
+					stopRequestedBeforeSession: false,
+					worktreeCreationGeneration: 0,
+					worktreeCreateAbort: null,
+				},
+				sessionEphemeralCache: { save: vi.fn(), restore: () => null },
+				onPersistTimerChanged: vi.fn(),
+			});
+			await switcher.switchSession(target);
+			switcher.destroy();
+		};
+		// A deep link's chat, outside the loaded list; /live said it is local.
+		// Unknown would read as mirrored and hide the shown transcript.
+		await open(fullState({ sessionId: 'session-B', isRemote: false, ownerDeviceName: null }), 'session-B');
+		expect(seen[0]).toEqual({ isRemote: false, ownerDeviceName: null });
+		// A different chat never inherits the leaving one's owner.
+		await open(fullState({ isRemote: false, ownerDeviceName: null }), 'session-B');
+		expect(seen[0]).toEqual({ isRemote: undefined, ownerDeviceName: undefined });
+	});
+
 	it('falls back to the empty + loading reset on a cache miss', async () => {
 		vi.mocked(feedController.cachedPatch).mockReturnValue(null);
 		const { switcher, getState } = makeSwitcher(fullState());
