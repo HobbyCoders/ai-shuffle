@@ -59,9 +59,12 @@
 		isNearBottom,
 		isUserScrollUpGesture,
 		nextStickToBottom,
+		readingAnchorOf,
 		resolveAnchoredRevealDelta,
 		resolveAnchoredTailReserve,
 		resolveCurrentTurnAnchorScrollTop,
+		resolveReadingAnchorDelta,
+		type ReadingAnchor,
 		shouldAutoScrollOnChange,
 		shouldPinLatestTurnOnSettle,
 		shouldShowJumpToLatest,
@@ -1274,8 +1277,70 @@
 		writeLeft: (key, position) => sessionEphemeralCache.patchScrollTop(key, position)
 	});
 
+	// #865: a width change (phone rotation, window resize) reflows every row
+	// above the reader at the same scrollTop. The browser's own scroll anchoring
+	// does not cover it: the column's padding/gap change at the phone breakpoint
+	// suppresses it in Chromium, and iOS WebKit has none. So the row under the
+	// top edge is remembered per scroll frame, at the width it was measured at,
+	// and put back where it was when the container observer sees a new width.
+	let readingAnchor: (ReadingAnchor & { width: number }) | null = null;
+	let observedWidth = 0;
+	let readingAnchorRaf: number | null = null;
+
+	function captureReadingAnchor() {
+		if (!containerRef || !chatColumnRef) return;
+		// Not reading mid-transcript (following the bottom or the live turn):
+		// forget the old row so a later width change can't jump back to it.
+		if (shouldAutoScroll || currentTurnAnchorId) { readingAnchor = null; return; }
+		const width = containerRef.clientWidth;
+		// A width the observer has not handled yet: this layout is already
+		// reflowed, so it no longer says where the reader was. Keep the old one.
+		if (width !== observedWidth) return;
+		const viewTop = containerRef.getBoundingClientRect().top;
+		const rows = chatColumnRef.querySelectorAll<HTMLElement>(':scope > [data-transcript-key]');
+		let low = 0, high = rows.length - 1, found = -1;
+		while (low <= high) {
+			const mid = (low + high) >> 1;
+			if (rows[mid].getBoundingClientRect().bottom > viewTop + 1) { found = mid; high = mid - 1; } else low = mid + 1;
+		}
+		const row = rows[found];
+		if (!row?.dataset.transcriptKey) { readingAnchor = null; return; }
+		const box = row.getBoundingClientRect();
+		readingAnchor = { ...readingAnchorOf(row.dataset.transcriptKey, box.top, box.height, viewTop), width };
+	}
+
+	function scheduleReadingAnchorCapture() {
+		if (readingAnchorRaf !== null) return;
+		readingAnchorRaf = requestAnimationFrame(() => {
+			readingAnchorRaf = null;
+			captureReadingAnchor();
+		});
+	}
+
+	/** Container observer: after a width change, put the reader back on their row. */
+	function restoreReadingAnchorOnWidthChange() {
+		if (!containerRef) return;
+		const width = containerRef.clientWidth;
+		const changed = observedWidth > 0 && width !== observedWidth;
+		observedWidth = width;
+		const anchor = readingAnchor;
+		if (changed && anchor && anchor.width !== width && !shouldAutoScroll && !currentTurnAnchorId && chatColumnRef) {
+			const row = chatColumnRef.querySelector<HTMLElement>(`:scope > [data-transcript-key="${CSS.escape(anchor.key)}"]`);
+			if (row) {
+				const box = row.getBoundingClientRect();
+				const delta = resolveReadingAnchorDelta(anchor, box.top, box.height, containerRef.getBoundingClientRect().top);
+				if (Math.abs(delta) >= 1) {
+					setProgrammaticScrollTop(containerRef.scrollTop + delta);
+					lastScrollMetrics = readScrollMetrics();
+				}
+			}
+		}
+		scheduleReadingAnchorCapture();
+	}
+
 	function handleScroll() {
 		if (!containerRef) return;
+		scheduleReadingAnchorCapture();
 		if (programmaticScrollDepth > 0) {
 			// Scroll event triggered by (or racing with) a programmatic scroll or a
 			// resize-induced scrollTop clamp. Make no auto-scroll decision, but keep
@@ -1338,8 +1403,12 @@
 				const resolvedNext = Date.now() < manualNavigationReleaseUntil || mountedEnd < displayItems.length || pinnedTranscriptRange() !== null ? false : next;
 				// eslint-disable-next-line no-console
 				if (STREAM_DEBUG && resolvedNext !== shouldAutoScroll) console.log(`[AS] handleScroll ${resolvedNext ? 'ENABLE' : 'DISABLE'} currST=${currentScrollTop} prevST=${prev.scrollTop} SH=${currentMetrics.scrollHeight} CH=${currentMetrics.clientHeight}`);
+				const leftBottom = shouldAutoScroll && !resolvedNext;
 				shouldAutoScroll = resolvedNext;
 				lastScrollMetrics = currentMetrics;
+				// #865: the capture queued by this scroll ran while still following
+				// the bottom; take the reading row now that the reader has left it.
+				if (leftBottom) scheduleReadingAnchorCapture();
 				// Scrollbar, keyboard, and accessibility scrolling do not emit our
 				// wheel/touch intent hooks. Release the controlled prompt anchor as
 				// soon as ordinary scroll geometry says the reader left the live edge.
@@ -1529,6 +1598,7 @@
 		turnObserver = null;
 		clearJumpRevealTimer();
 		if (anchorMaintenanceRaf !== null) cancelAnimationFrame(anchorMaintenanceRaf);
+		if (readingAnchorRaf !== null) cancelAnimationFrame(readingAnchorRaf);
 		const cacheKey = $activeSession.sessionId ?? 'new';
 		scrollTopPersist.cancel();
 
@@ -1665,6 +1735,7 @@
 		}
 
 		resizeObserver = new ResizeObserver((entries) => {
+			restoreReadingAnchorOnWidthChange();
 			// The reading line is a fraction of the viewport height, so the turn
 			// observer's root margin has to be rebuilt when the container resizes.
 			const height = entries[0]?.contentRect.height;
@@ -1709,6 +1780,8 @@
 			raf = requestAnimationFrame(async () => {
 				raf = null;
 				if (!containerRef) return;
+				// A row the reader expanded or folded changes how far into it they are.
+				captureReadingAnchor();
 				if (currentTurnAnchorId) {
 					scheduleCurrentTurnAnchorMaintenance();
 					return;
@@ -1989,6 +2062,7 @@
 		const unsettled = latestTurnUnsettled;
 		if (sessionId !== settleSessionId) {
 			settleSessionId = sessionId;
+			readingAnchor = null; // #865: never restore another chat's row
 			wasLatestTurnUnsettled = unsettled;
 			return;
 		}

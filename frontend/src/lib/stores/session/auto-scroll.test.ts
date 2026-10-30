@@ -24,9 +24,11 @@ import {
 	isNearBottom,
 	isUserScrollUpGesture,
 	nextStickToBottom,
+	readingAnchorOf,
 	resolveAnchoredRevealDelta,
 	resolveAnchoredTailReserve,
 	resolveCurrentTurnAnchorScrollTop,
+	resolveReadingAnchorDelta,
 	shouldAutoScrollOnChange,
 	shouldPinLatestTurnOnSettle,
 	shouldShowJumpToLatest
@@ -305,5 +307,21 @@ describe('current-turn anchor geometry', () => {
 		expect(shouldPinLatestTurnOnSettle(true, false, false)).toBe(false);
 		expect(shouldPinLatestTurnOnSettle(true, true, true)).toBe(false);
 		expect(shouldPinLatestTurnOnSettle(false, false, true)).toBe(false);
+	});
+});
+
+describe('reading anchor across a width change (#865)', () => {
+	it('keeps a row that starts inside the view at the same offset', () => {
+		const anchor = readingAnchorOf('row-a', 140, 300, 100);
+		expect(anchor).toEqual({ key: 'row-a', offset: 40, past: 0 });
+		// After the reflow the row sits 900px further down: scroll down by that.
+		expect(resolveReadingAnchorDelta(anchor, 1040, 180, 60)).toBe(940);
+	});
+
+	it('keeps the same fraction of a long row the reader is partway through', () => {
+		const anchor = readingAnchorOf('reply', -400, 1600, 0);
+		expect(anchor.past).toBe(0.25);
+		// Landscape: the reply is half as tall; a quarter in is 200px past its top.
+		expect(resolveReadingAnchorDelta(anchor, -1500, 800, 0)).toBe(-1300);
 	});
 });
