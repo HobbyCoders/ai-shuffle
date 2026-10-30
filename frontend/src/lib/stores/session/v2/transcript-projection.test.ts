@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { reduceAll, withLogEpoch, type WireEvent } from './reducer';
+import type { ShuffleMobileRuntime } from '$lib/api/runtime';
 import {
 	foldProjection, materializeProjection, projectionReferences, ProjectionUnsupported,
 	PROJECTION_LIMITS, type ProjectionRow
@@ -93,10 +94,18 @@ describe('dark transcript projection protocol', () => {
 		store.assertFullParity();
 		store.append([event('transcript.rewound', { from_seq: 300 })]);
 		store.assertFullParity();
-		store.append([event('system.note', { subtype: 'session_settled', through_seq: 320 })]);
+		const redismiss = event('system.note', { subtype: 'session_settled', through_seq: 320 });
+		store.append([redismiss]);
 		const actual = store.assertFullParity();
 		expect(actual.messages.filter(message => message.role === 'assistant')
-			.every(message => message.proseQuestionDismissedAt === 323)).toBe(true);
+			.every(message => message.proseQuestionDismissedAt === redismiss.seq)).toBe(true);
+	});
+
+	it('stays exact when rewind retains only messages older than the loaded window', () => {
+		const event = makeEvents(), store = new Store();
+		ingest(store, ordinaryHistory(event));
+		store.append([event('transcript.rewound', { from_seq: 30 })]);
+		store.assertFullParity();
 	});
 
 	it('retains background cards before the window and handles park then real terminal delivery', () => {
@@ -129,6 +138,29 @@ describe('dark transcript projection protocol', () => {
 		expect([...store.rows.values()].some(row => row.aliases.includes('tool-old'))).toBe(true);
 		store.append([event('tool.result', { tool_use_id: 'tool-old', content: 'late result' })]);
 		store.assertFullParity();
+	});
+
+	it('materializes native phone artifact scope through the same full-serving helper', () => {
+		const event = makeEvents(), store = new Store(), hash = 'a'.repeat(64);
+		store.append([
+			event('message.user', { content: 'Capture' }),
+			event('tool.use', { tool_use_id: 'screen', name: 'browser_screenshot', input: {} }),
+			event('tool.result', { tool_use_id: 'screen', content: 'Captured', artifact_hashes: [hash] }),
+			event('turn.completed')
+		]);
+		store.assertFullParity();
+		const mobile: ShuffleMobileRuntime = { apiOrigin: 'https://phone-worker.example', token: 'fixture-not-a-key' };
+		window.__SHUFFLE_MOBILE__ = mobile;
+		try {
+			const full = withLogEpoch(reduceAll(store.history), 'source-epoch');
+			const actual = materializeProjection(store.preview!, [...store.rows.values()], 'source-epoch', {
+				sessionId: 'session', apiRoot: `${mobile.apiOrigin}/api/v1`
+			});
+			expect(actual).toStrictEqual(full);
+			expect(actual.messages.some(message => message.toolScreenshot?.startsWith(mobile.apiOrigin))).toBe(true);
+			expect(store.preview).not.toContain(mobile.apiOrigin);
+			expect(store.preview).not.toContain(mobile.token);
+		} finally { delete window.__SHUFFLE_MOBILE__; }
 	});
 
 	it('rejects oversized or non-monotonic work instead of clipping or changing canonical state', () => {

@@ -706,16 +706,37 @@ function str(v: unknown): string {
  * Returns undefined unless the first hash is a well-formed sha256 hex digest —
  * the only shape the artifact route serves.
  */
-function artifactScreenshotUrl(v: unknown, sessionId?: string): string | undefined {
+function artifactScreenshotUrl(v: unknown, sessionId?: string, apiRoot?: string): string | undefined {
 	if (!Array.isArray(v)) return undefined;
 	const hash = v.find((h) => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h));
-	return hash ? `${apiBase()}/artifacts/${hash}${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}` : undefined;
+	return hash ? `${apiRoot ?? apiBase()}/artifacts/${hash}${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}` : undefined;
 }
 
-function scopedScreenshot(v: unknown, sessionId?: string): string | undefined {
+function scopedScreenshot(v: unknown, sessionId?: string, apiRoot?: string): string | undefined {
 	const screenshot = str(v);
 	const artifact = screenshot?.match(/^\/api\/v1\/artifacts\/([0-9a-f]{64})(?:\?[^#]*)?$/);
-	return artifact ? artifactScreenshotUrl([artifact[1]], sessionId) : screenshot;
+	return artifact ? artifactScreenshotUrl([artifact[1]], sessionId, apiRoot) : screenshot;
+}
+
+/** Keep server-owned captured screenshots installation-neutral. Reuse the exact
+ * serving URL/scoping rule only at a read boundary (web or native phone shell).
+ * The producer never persists the requesting phone's worker origin or token.
+ */
+export function materializeCapturedScreenshots(
+	message: ChatMessage, sessionId: string, apiRoot?: string
+): ChatMessage {
+	const screenshot = message.toolScreenshot === undefined ? undefined :
+		scopedScreenshot(message.toolScreenshot, sessionId, apiRoot);
+	let next = screenshot === message.toolScreenshot ? message : { ...message, toolScreenshot: screenshot };
+	if (message.agentChildren) {
+		const children = message.agentChildren.map(child => {
+			if (child.toolScreenshot === undefined) return child;
+			const url = scopedScreenshot(child.toolScreenshot, sessionId, apiRoot);
+			return url === child.toolScreenshot ? child : { ...child, toolScreenshot: url };
+		});
+		if (children.some((child, index) => child !== message.agentChildren![index])) next = { ...next, agentChildren: children };
+	}
+	return next;
 }
 
 // ─── Copy-on-publish ownership ────────────────────────────────────────────────

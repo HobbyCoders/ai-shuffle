@@ -38,7 +38,7 @@ export function packProjection(value: unknown): PackedValue {
 				if (item.length > MAX_NODES || Object.keys(item).some(k => !/^(0|[1-9][0-9]*)$/.test(k) || Number(k) >= item.length)) {
 					throw new ProjectionCodecError('unsupported_array');
 				}
-				return { t: 'array', v: Array.from({ length: item.length }, (_, i) =>
+				return { t: 'array', v: Array.from({ length: item.length }, (_, i): PackedValue =>
 					Object.hasOwn(item, i) ? pack(item[i], depth + 1) : { t: 'hole' }) };
 			}
 			const prototype = Object.getPrototypeOf(item);

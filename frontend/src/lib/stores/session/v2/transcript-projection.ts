@@ -4,7 +4,7 @@
  */
 import type { ChatMessage } from '../../types';
 import {
-	dismissCapturedProse, initialState, parseWireEvent, reduceWithMessageEffects,
+	dismissCapturedProse, initialState, materializeCapturedScreenshots, parseWireEvent, reduceWithMessageEffects,
 	rewindCapturedMessage, sealState, withLogEpoch,
 	type CapturedMessageEffect, type V2SessionState, type WireEvent
 } from './reducer';
@@ -50,6 +50,8 @@ export interface ProjectionDelta {
 	removed: string[];
 	lastSeq: number;
 	effectCount: number;
+	/** Canonical index invalidations; storage never interprets message bodies. */
+	invalidations: Array<{ originAtLeast: number; foldedBefore: number }>;
 }
 export interface ProjectionFold {
 	/** Last authoritative attempt boundary: safe stable/raw-tail split. */
@@ -242,7 +244,9 @@ function finish(input: Carry, loaded: Set<string>, seal: boolean): ProjectionDel
 	if (byteSize(body) > PROJECTION_LIMITS.carryBytes) throw new ProjectionUnsupported('carry_limit');
 	const retained = new Set(upserts.map(row => row.id));
 	return { carry: body, upserts, removed: seal ? [...loaded].filter(id => !retained.has(id)) : [],
-		lastSeq: carry.state.lastSeq, effectCount: carry.effects.length };
+		lastSeq: carry.state.lastSeq, effectCount: carry.effects.length,
+		invalidations: carry.effects.flatMap(effect => effect.kind === 'rewind'
+			? [{ originAtLeast: effect.fromSeq, foldedBefore: effect.seq }] : []) };
 }
 
 /** Fold one bounded canonical-input quantum. The server rebuilds the bounded
@@ -257,6 +261,9 @@ export function foldProjection(body: string | null, values: unknown[], records: 
 		const before = new Map(carry.state.messages.map(message => [message.id, message]));
 		const previousBoundary = carry.state.attemptStartSeq;
 		const result = reduceWithMessageEffects(carry.state, event);
+		if (result.effects.some(effect => effect.kind === 'rewind' && !Number.isFinite(effect.fromSeq))) {
+			throw new ProjectionUnsupported('unsupported_cut');
+		}
 		carry.state = result.state;
 		carry.effects = [...carry.effects, ...result.effects];
 		if (carry.effects.length > PROJECTION_LIMITS.effects) throw new ProjectionUnsupported('effect_limit');
@@ -269,8 +276,13 @@ export function foldProjection(body: string | null, values: unknown[], records: 
 /** Test/read adapter: reconstitute actual data, never normalize expected state.
  * API reads remain disabled; callers must validate generation/source first.
  */
-export function materializeProjection(body: string, records: ProjectionRow[], epoch: string): V2SessionState {
+export function materializeProjection(
+	body: string, records: ProjectionRow[], epoch: string,
+	runtime?: { sessionId: string; apiRoot?: string }
+): V2SessionState {
 	const carry = readCarry(body);
 	hydrate(carry, records);
+	if (runtime) carry.state.messages = carry.state.messages.map(message =>
+		materializeCapturedScreenshots(message, runtime.sessionId, runtime.apiRoot));
 	return withLogEpoch(carry.state, epoch);
 }

@@ -308,6 +308,41 @@ Server-side switches are environment variables read by the worker on each event-
 | `AI_SHUFFLE_PERF_SLIM_USAGE_REPLAY` | Kill switch | The event feed sends stored `turn.usage` rows unchanged. Rows written before this change then carry the full context-usage snapshot twice (about 50 KB each). New rows are written compact regardless; the full breakdown is always available from `GET /api/v1/sessions/{id}/context-usage`. |
 | `AI_SHUFFLE_PERF_COALESCE_SUBAGENT_PROGRESS` | Kill switch | Opening a chat replays one `subagent.progress` frame per subagent text delta, instead of one frame per run of consecutive deltas from the same subagent. |
 
+## Dark transcript producer
+
+Approved workers with Node 22 or newer build installation-local settled-message
+records in the background. **Reads are not implemented or negotiated:** opening
+chat still uses the existing event feed and full replay. Set
+`AI_SHUFFLE_TRANSCRIPT_PRODUCER=0` and restart to disable background production;
+this does not change serving, mutate the source log or delete chat content.
+Missing/old Node, stale assets, unsupported legacy compaction and exceeded
+budgets fail closed to the existing serving path.
+
+The authoritative TypeScript reducer owns the captured message data and its
+chronological dismissal/rewind effects. Python feeds it the real server cold
+preprocessing, retaining a capped raw attempt and pending coalescers. Mutable
+carry and individually addressable settled records commit with one generation
+and revision CAS; logical pages use bounded keyset batches, not page-blob
+rewrites. NOTIFY hints have separate bounded live/backfill admissions before
+loop scheduling; a round-robin source scan repairs dropped hints. No source
+append or replication writer awaits the producer, and these tables are not
+replicated.
+
+Run `npm run transcript:build` in `frontend/` after editing the shared reducer,
+its transitive helpers, the private Node entry point or canonical Python replay
+helpers. Commit the generated `app/core/transcript_views/reducer.cjs` and
+`manifest.json`; the frontend bundle test rejects stale output in CI. The runtime
+checks artifact and canonical-source hashes, uses a credential-free child
+environment, and bounds IPC size, heap, deadlines, carry and each work quantum.
+
+**Read-enable remains blocked** on a separate durable source-rewrite/incarnation
+witness covering every rewrite path, including a mid-log replacement which
+keeps the first/last IDs and loses NOTIFY. Epoch/tail checks alone do not prove
+that case. It also requires real paired-worker/runtime checks and accepted
+10k/100k backfill/parity/ingest measurements. Do not enable reads based on unit
+tests, seeded previews or the shadow-ready flag. The standing checks are in
+[the live-smoke catalog](live-smoke-scenarios.md#transcript-shadow).
+
 ## Documentation
 
 | Topic | Guide |

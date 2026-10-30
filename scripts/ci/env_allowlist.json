@@ -246,6 +246,11 @@
     "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
     "base_settings": false
   },
+  "AI_SHUFFLE_TRANSCRIPT_PRODUCER": {
+    "kind": "internal",
+    "reason": "Default-on kill switch for installation-local shadow transcript production; disables background work only, never enables derived reads",
+    "base_settings": false
+  },
   "AI_SHUFFLE_VERSION": {
     "kind": "internal",
     "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",

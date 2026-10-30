@@ -20,6 +20,8 @@
     "test:coverage": "vitest run --coverage",
     "contract:gen": "node scripts/generate-contract.mjs",
     "contract:check": "node scripts/generate-contract.mjs --check",
+    "transcript:build": "node scripts/build-transcript-reducer.mjs",
+    "transcript:check": "node scripts/build-transcript-reducer.mjs --check",
     "test:visual": "node tests/visual-regression.mjs"
   },
   "devDependencies": {
@@ -31,6 +33,7 @@
     "@testing-library/svelte": "^5.3.1",
     "@types/dompurify": "^3.0.5",
     "@types/node": "^22.9.0",
+    "esbuild": "^0.28.2",
     "jsdom": "^27.4.0",
     "json-schema-to-typescript": "^15.0.4",
     "svelte": "^5.55.9",

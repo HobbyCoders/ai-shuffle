@@ -360,11 +360,20 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 60)
 
     from app.core.provider_usage import provider_usage_monitor
+    transcript_producer = None
     if runner_approved:
         provider_usage_monitor.start()
+        # Installation-local shadow records only. No serving route negotiates
+        # these reads; a missing Node runtime retains the existing full replay.
+        from app.core.transcript_views.manager import ProjectionProducer
+        transcript_producer = ProjectionProducer()
+        transcript_producer.start()
 
-    yield
-
+    try:
+        yield
+    finally:
+        if transcript_producer is not None:
+            await transcript_producer.stop()
     await provider_usage_monitor.stop()
 
     # Shutdown
