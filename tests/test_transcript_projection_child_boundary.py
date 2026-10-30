@@ -227,12 +227,14 @@ async def test_windows_job_failure_kills_the_unowned_child(monkeypatch):
 
     pids = []
 
-    def cannot_assign(pid, *additional_pids):
-        pids.extend((pid, *additional_pids))
+    from app.core.transcript_views.windows_process import _WindowsAPI
+
+    def cannot_assign(handle):
+        pids.append(_WindowsAPI().pid(handle))
         return None
 
     monkeypatch.setattr(child_process, "_job_object", lambda: SimpleNamespace(
-        assign_kill_on_close_job=cannot_assign))
+        assign_kill_on_close_job_handle=cannot_assign))
     with pytest.raises(OSError, match="projection_parent_ownership_failed"):
         await child_process.launch(sys.executable, "-I", str(ROOT / "app/core/transcript_views/preparation_child.py"),
                                    limit=4096, runtime="python")
@@ -306,11 +308,14 @@ async def test_windows_startup_gates_do_not_execute_or_consume_protocol(tmp_path
     ("exception", 202), ("drain", 202), ("cancelled", 202), ("invalid", 0),
 ])
 async def test_windows_gate_admission_owns_every_pid_and_closes_once(monkeypatch, mode, runtime_pid):
+    from contextlib import nullcontext
     from types import SimpleNamespace
 
     from app.core.transcript_views import child_process
 
     calls, handles = [], []
+    monkeypatch.setattr(child_process, "_pinned_windows_processes", lambda launcher, runtime: nullcontext(
+        [(pid, pid) for pid in dict.fromkeys((launcher, runtime))]))
 
     class Input:
         def write(self, data):
@@ -347,7 +352,7 @@ async def test_windows_gate_admission_owns_every_pid_and_closes_once(monkeypatch
 
     process = SimpleNamespace(pid=101, stdin=Input(), stdout=Output(), returncode=0, wait=wait)
     monkeypatch.setattr(child_process, "_job_object", lambda: SimpleNamespace(
-        assign_kill_on_close_job=assign, close_job=lambda handle: calls.append(("close-job", handle))))
+        assign_kill_on_close_job_handle=assign, close_job=lambda handle: calls.append(("close-job", handle))))
     if mode in ("success", "same"):
         await child_process._admit_windows(process)
         await child_process.stop(process)
@@ -359,6 +364,98 @@ async def test_windows_gate_admission_owns_every_pid_and_closes_once(monkeypatch
     assert any(op == "write" for op, value in calls) == (mode in ("success", "same", "drain", "cancelled"))
     await child_process.stop(process)
     assert [handle for op, handle in calls if op == "close-job"] == handles
+
+
+@pytest.mark.parametrize("mode", [
+    "valid", "same", "unrelated", "older", "recycled", "launcher-exited",
+    "runtime-exited", "open-error", "query-error",
+])
+def test_windows_identity_is_validated_and_pinned_through_assignment(monkeypatch, mode):
+    from app.core.transcript_views import windows_process
+
+    calls, opened, closed = [], [], []
+    runtime_pid = 101 if mode == "same" else 202
+
+    class API:
+        launcher_alive = True
+
+        def open(self, pid):
+            calls.append(("open", pid))
+            if pid == 202 and mode == "open-error":
+                raise OSError("missing candidate")
+            handle = pid + 1000
+            opened.append(handle)
+            if pid == 202 and mode == "launcher-exited":
+                self.launcher_alive = False
+            return handle
+
+        def identity(self, handle):
+            if handle == 1101:
+                return 101, 1, 100
+            if mode == "query-error":
+                raise OSError("identity unavailable")
+            return (303 if mode == "recycled" else 202,
+                    999 if mode == "unrelated" else 101,
+                    50 if mode == "older" else 200)
+
+        def running(self, handle):
+            calls.append(("running", handle))
+            return self.launcher_alive if handle == 1101 else mode != "runtime-exited"
+
+        def close(self, handle):
+            closed.append(handle)
+
+    monkeypatch.setattr(windows_process, "_WindowsAPI", API)
+    if mode in ("valid", "same"):
+        with windows_process.pinned_processes(101, runtime_pid) as targets:
+            assert targets == ([(101, 1101)] if mode == "same" else [(101, 1101), (202, 1202)])
+            assert closed == [], "assignment must use still-open handles"
+    else:
+        with pytest.raises(OSError):
+            with windows_process.pinned_processes(101, runtime_pid):
+                pytest.fail("invalid identity must never reach Job assignment")
+    assert closed == list(reversed(opened))
+    if mode in ("valid", "launcher-exited"):
+        assert calls.index(("running", 1101)) > calls.index(("open", 202))
+
+
+@pytest.mark.parametrize("assigned", [True, False, "raises"])
+def test_borrowed_job_assignment_never_reopens_or_closes_the_process(monkeypatch, assigned):
+    import ctypes
+    from ctypes import wintypes
+
+    from app.core.transcript_views.child_process import _job_object
+
+    module, closed = _job_object(), []
+
+    class Kernel:
+        def CreateJobObjectW(self, security, name):
+            return 900
+
+        def SetInformationJobObject(self, *args):
+            return True
+
+        def OpenProcess(self, *args):
+            pytest.fail("borrowed handle must not reopen a PID")
+
+        def AssignProcessToJobObject(self, job, process):
+            assert (job, process) == (900, 808)
+            if assigned == "raises":
+                raise OSError("synthetic assignment error")
+            return assigned
+
+        def CloseHandle(self, handle):
+            closed.append(handle)
+            return True
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(module.sys, "platform", "win32")
+        scoped.setattr(module, "_kernel32", lambda: (ctypes, wintypes, Kernel()))
+        job = module.assign_kill_on_close_job_handle(808)
+        assert job == (900 if assigned is True else None)
+        if job is not None:
+            module.close_job(job)
+    assert closed == [900], "the caller alone closes borrowed process handle 808"
 
 
 @pytest.fixture(scope="module")
@@ -438,7 +535,9 @@ async def main():
     # The supervising test attaches its externally held outer job before B.
     assert os.read(0, 1) == b"B"
     jobs = child_process._job_object()
-    original = jobs.assign_kill_on_close_job
+    from app.core.transcript_views.windows_process import _WindowsAPI
+    api = _WindowsAPI()
+    original = jobs.assign_kill_on_close_job_handle
     original_admit = child_process._admit_windows
     current = None
     async def admit(process):
@@ -446,7 +545,8 @@ async def main():
         current = process
         await original_admit(process)
     child_process._admit_windows = admit
-    def assign(pid):
+    def assign(handle):
+        pid = api.pid(handle)
         seen["pid"] = current.pid
         seen["runtime_pid"] = current._projection_runtime_pid
         if runtime == "python":
@@ -461,14 +561,14 @@ async def main():
         # can create an escaping descendant here, before retroactive assignment.
         time.sleep(.4)
         fail = mode == "failure" or (mode == "partial-failure" and pid == seen["runtime_pid"])
-        job = None if fail else original(pid)
+        job = None if fail else original(handle)
         if mode == "assigned-death" and pid == seen["runtime_pid"]:
             assert job is not None, "cannot attach launch-death fixture"
             print(json.dumps(seen), flush=True)
             os.read(0, 1)  # Attached, but no go byte has been returned/written.
             raise AssertionError("assigned-death parent unexpectedly released")
         return job
-    jobs.assign_kill_on_close_job = assign
+    jobs.assign_kill_on_close_job_handle = assign
     command = (executable, "-I", target) if runtime == "python" else (
         executable, "--max-old-space-size=192", target)
     child = None
@@ -577,3 +677,85 @@ async def test_windows_owns_startup_descendants_and_launch_window(tmp_path, star
                 psutil.Process(pid).kill()
         if outer is not None:
             _job_object().close_job(outer)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native pinned Windows identity validation")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["unrelated", "exited-before", "exits-during-open"])
+async def test_windows_rejects_unrelated_identity_or_exited_launcher(tmp_path, monkeypatch, mode):
+    from app.core.transcript_views import child_process, windows_process
+
+    marker = tmp_path / "startup-ran"
+    runtime_code = ("import os,time;from pathlib import Path;os.write(1,os.getpid().to_bytes(4,'big'));"
+                    "go=os.read(0,1);Path(" + repr(str(marker)) + ").touch() if go==b'G' else None")
+    if mode == "unrelated":
+        # Start the candidate AFTER the launcher, so only the parent relation
+        # (not its timestamp) distinguishes this live same-user process.
+        launcher_code = ("import os,time;from pathlib import Path;claimed=os.read(0,4);os.write(1,claimed);"
+                         "go=os.read(0,1);Path(" + repr(str(marker)) + ").touch() if go==b'G' else None")
+    else:
+        launcher_code = ("import subprocess,sys,time;subprocess.Popen([sys.executable,'-I','-S','-c'," +
+                         repr(runtime_code) + "],stdin=sys.stdin,stdout=sys.stdout,stderr=sys.stderr);" +
+                         ("time.sleep(30)" if mode == "exits-during-open" else ""))
+    launcher = await asyncio.create_subprocess_exec(
+        sys.executable, "-I", "-S", "-c", launcher_code, env=parent_environment(tmp_path),
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    candidate, runtime_pid = None, None
+    try:
+        if mode == "unrelated":
+            candidate = await asyncio.create_subprocess_exec(
+                sys.executable, "-I", "-S", "-c", "import time;time.sleep(30)",
+                env=parent_environment(tmp_path), stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            launcher.stdin.write(candidate.pid.to_bytes(4, "big"))
+            await launcher.stdin.drain()
+        elif mode == "exited-before":
+            deadline = time.monotonic() + 5
+            while launcher.returncode is None:
+                assert time.monotonic() < deadline, "launcher did not exit"
+                await asyncio.sleep(.01)
+        else:
+            original_open = windows_process._WindowsAPI.open
+            launcher_handle = None
+
+            def open_and_exit(api, pid):
+                nonlocal launcher_handle
+                handle = original_open(api, pid)
+                if pid == launcher.pid:
+                    launcher_handle = handle
+                else:
+                    # Deterministically kill the launcher AFTER the runtime
+                    # handle is open but BEFORE liveness is validated.
+                    launcher.kill()
+                    assert api.kernel.WaitForSingleObject(launcher_handle, 5000) == 0
+                return handle
+
+            monkeypatch.setattr(windows_process._WindowsAPI, "open", open_and_exit)
+        assignments = []
+        original_assign = child_process._job_object().assign_kill_on_close_job_handle
+
+        def assign(handle):
+            assignments.append(handle)
+            return original_assign(handle)
+
+        monkeypatch.setattr(child_process._job_object(), "assign_kill_on_close_job_handle", assign)
+        with pytest.raises(OSError, match="projection_runtime_identity_failed"):
+            await child_process._admit_windows(launcher)
+        runtime_pid = getattr(launcher, "_projection_runtime_pid", None)
+        assert assignments == [], "reject before creating any kill-on-close membership"
+        assert not marker.exists(), "no startup code can run on rejection"
+        if candidate is not None:
+            assert candidate.returncode is None and alive(candidate.pid), "unrelated process must survive"
+        else:
+            assert runtime_pid is not None
+            deadline = time.monotonic() + 3
+            while alive(runtime_pid) and time.monotonic() < deadline:
+                await asyncio.sleep(.01)
+            assert not alive(runtime_pid), "owned gated runtime must exit on EOF"
+    finally:
+        await child_process.stop(launcher)
+        if candidate is not None and candidate.returncode is None:
+            candidate.kill()
+            await candidate.wait()
+        if mode != "unrelated" and runtime_pid is not None and alive(runtime_pid):
+            psutil.Process(runtime_pid).kill()

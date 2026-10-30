@@ -10,6 +10,10 @@ from functools import cache
 from pathlib import Path
 from typing import Literal
 
+from app.core.transcript_views.windows_process import (
+    pinned_processes as _pinned_windows_processes,
+)
+
 SAFE_ENV_KEYS = frozenset({"PATH", "Path", "SystemRoot", "SYSTEMROOT", "WINDIR", "TMP", "TEMP"})
 
 
@@ -56,13 +60,14 @@ async def _admit_windows(process: asyncio.subprocess.Process) -> None:
         if runtime_pid <= 0:
             raise OSError("projection_invalid_runtime_identity")
         setattr(process, "_projection_runtime_pid", runtime_pid)
-        for pid in dict.fromkeys((process.pid, runtime_pid)):
-            job = _job_object().assign_kill_on_close_job(pid)
-            if job is None:
-                raise OSError("projection_parent_ownership_failed")
-            jobs.append(job)  # Parent-only, non-inheritable; retain before G.
-        process.stdin.write(b"G")
-        await process.stdin.drain()
+        with _pinned_windows_processes(process.pid, runtime_pid) as targets:
+            for _, handle in targets:
+                job = _job_object().assign_kill_on_close_job_handle(handle)
+                if job is None:
+                    raise OSError("projection_parent_ownership_failed")
+                jobs.append(job)  # Parent-only, non-inheritable; retain before G.
+            process.stdin.write(b"G")
+            await process.stdin.drain()
     except BaseException:
         await stop(process)  # EOF + kill/reap, closing every attached Job once.
         raise

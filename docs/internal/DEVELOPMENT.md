@@ -352,8 +352,12 @@ startup hooks/entrypoints. The gate first reports its actual PID (a Windows
 venv may redirect through another process); the parent owns each distinct PID
 with a separate Job before sending one go byte. This accommodates CPython's
 existing nested/silent-breakaway Job; startup descendants inherit the runtime's
-new innermost Job, which does not allow breakaway. Failed attachment closes stdin and
-kills/reaps the gated child without running startup code. The bounded stdin reader still
+new innermost Job, which does not allow breakaway. Before any attachment, open
+and pin both process handles, validate the runtime's parent PID and creation
+time against the launcher, and verify the launcher is still running. Assign
+those same handles (never reopen a reported PID) so recycling cannot enroll an
+unrelated process. Failed validation/attachment closes stdin and kills/reaps
+the gated child without running startup code. The bounded stdin reader still
 handles ordinary EOF. Neither mechanism adds a supervisor process or tracker.
 Preparation admits one job, reuses one child, refreshes two normalized replay switches per
 call and joins the child on shutdown. Database operations stay on the existing
