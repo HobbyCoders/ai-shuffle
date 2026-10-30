@@ -7,6 +7,7 @@ import {
 	CHECK_MIN_INTERVAL_MS,
 	RELOAD_SETTLE_MS,
 	RESUME_GRACE_MS,
+	SW_RECHECK_MS,
 	canReloadSilently,
 	createAppUpdateMonitor,
 	isChunkLoadError,
@@ -309,6 +310,19 @@ describe('createAppUpdateMonitor', () => {
 			state.t += 1_000;
 			expect(await monitor.check('online')).toBe(false); // throttled: the old answer
 			expect(await monitor.serviceWorkerActivated()).toBe(true);
+			expect(deps.showBanner).toHaveBeenCalledWith(false);
+		});
+
+		it('asks once more later when the check read "same build" (a failed fetch reads the same)', async () => {
+			const { monitor, deps, state, scheduled } = setup({ newBuild: false });
+			expect(await monitor.serviceWorkerActivated()).toBe(false);
+			const recheck = scheduled.find(({ ms }) => ms === SW_RECHECK_MS);
+			expect(recheck).toBeDefined();
+			// The version fetch had failed; the new build is there when asked again.
+			state.newBuild = true;
+			state.t += SW_RECHECK_MS;
+			recheck!.fn();
+			await vi.waitFor(() => expect(monitor.stale).toBe(true));
 			expect(deps.showBanner).toHaveBeenCalledWith(false);
 		});
 

@@ -50,6 +50,12 @@ export const AUTO_RELOAD_COOLDOWN_MS = 10 * 60_000;
 
 /** Checks closer together than this share one answer (focus and visibility fire together). */
 export const CHECK_MIN_INTERVAL_MS = 5_000;
+/**
+ * After a service-worker activation that read as "same build", ask once more
+ * this long after: a failed version fetch also reads as "same build", and the
+ * worker never signals that build again.
+ */
+export const SW_RECHECK_MS = 30_000;
 
 // ── Chunk-load failures ─────────────────────────────────────────────────────
 
@@ -274,8 +280,12 @@ export function createAppUpdateMonitor(deps: AppUpdateMonitorDeps) {
 		 * landed); only a different build makes the page stale.
 		 */
 		async serviceWorkerActivated(): Promise<boolean> {
+			// A reload already under way is not a confirmed new build.
+			if (reloading) return stale;
 			if (inflight) await inflight;
-			return check('service-worker');
+			const updated = await check('service-worker');
+			if (!updated) schedule(() => { if (!stale) void check('service-worker'); }, SW_RECHECK_MS);
+			return updated;
 		},
 		/** Something outside the version check already confirmed a newer build. */
 		markStale() {
