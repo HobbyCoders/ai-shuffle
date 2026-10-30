@@ -58,8 +58,11 @@ function _update(fn: (s: PWAState) => PWAState) {
 //
 // A new service worker calls skipWaiting() on install, so it activates
 // immediately and fires `controllerchange` (some builds also postMessage
-// `SW_UPDATED`). That only says the page is out of date. Whether and when to
-// reload is the app-update monitor's call (app-update-watch.ts), the same one
+// `SW_UPDATED`). Neither says the page is out of date: a fresh visit's FIRST
+// install claims the page and posts SW_UPDATED too, on the very build the
+// page runs (#908). So both only ask the app-update monitor to check the
+// served build against this page's. Whether and when a page confirmed stale
+// reloads is the monitor's call (app-update-watch.ts), the same one
 // every client's version check uses: never over a live call, a draft or an
 // unsaved field, a silent reload only while hidden or just resumed, at most
 // one automatic reload per cooldown, and never again from the build a reload
@@ -75,13 +78,18 @@ function _reloadNow() {
 	window.location.reload();
 }
 
-function handleSwUpdate() {
+async function handleSwUpdate() {
 	if (!browser) return;
-	if (!_state.updateReady) {
+	// No monitor yet (the root layout installs it on mount): its own start-up
+	// and resume checks find a newer build.
+	const monitor = appUpdateMonitor();
+	if (!monitor) return;
+	// The monitor reloads or shows its banner itself once the build differs.
+	const stale = await monitor.serviceWorkerActivated();
+	if (stale && !_state.updateReady) {
 		_update((s) => ({ ...s, updateReady: true }));
 		_notifySubscribers();
 	}
-	appUpdateMonitor()?.markStale();
 }
 
 function checkInstallState() {
@@ -129,11 +137,11 @@ async function registerServiceWorker() {
 		_update((s) => ({ ...s, serviceWorkerRegistration: registration }));
 
 		// Both activation signals hand the news to the app-update monitor (see above).
-		navigator.serviceWorker.addEventListener('controllerchange', handleSwUpdate);
+		navigator.serviceWorker.addEventListener('controllerchange', () => void handleSwUpdate());
 
 		navigator.serviceWorker.addEventListener('message', (event) => {
 			if (event.data?.type === 'SW_UPDATED') {
-				handleSwUpdate();
+				void handleSwUpdate();
 			}
 		});
 

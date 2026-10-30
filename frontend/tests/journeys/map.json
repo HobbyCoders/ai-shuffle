@@ -174,6 +174,15 @@
 			]
 		},
 		{
+			"why": "the service worker and the app-update monitor: a first visit must not reload (#908)",
+			"journeys": ["first-visit"],
+			"globs": [
+				"frontend/static/sw.js",
+				"frontend/src/lib/stores/pwa.svelte.ts",
+				"frontend/src/lib/services/app-update*"
+			]
+		},
+		{
 			"why": "opening and switching chats (sidebar, new-session screen, reading position)",
 			"journeys": ["switch-chats", "open-unloaded-chat", "cleared-chat", "parked-timer"],
 			"globs": [
