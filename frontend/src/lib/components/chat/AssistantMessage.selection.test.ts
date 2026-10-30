@@ -54,6 +54,26 @@ describe('selection inside a streaming reply (#870)', () => {
 		await vi.waitFor(() => expect(prose.textContent).toContain('Third paragraph lands.'));
 	});
 
+	it('shows the settled reply when the stream ends with the selection still held', async () => {
+		const first = 'Select from here.\n\nStill streaming';
+		const view = render(AssistantMessage, { content: first, streaming: true });
+		const prose = view.container.querySelector('.abody') as HTMLElement;
+		await vi.waitFor(() => expect(prose.textContent).toContain('Still streaming'));
+		const range = document.createRange();
+		range.selectNodeContents(textNodeContaining(prose, 'Select from here'));
+		document.getSelection()!.removeAllRanges();
+		document.getSelection()!.addRange(range);
+		document.dispatchEvent(new Event('selectionchange'));
+		await tick();
+		await view.rerender({ content: first + ' and held', streaming: true });
+		await tick();
+		expect(prose.textContent).not.toContain('and held');
+
+		// The turn finishes while the reader still has text selected.
+		await view.rerender({ content: first + ' and held. Final words.', streaming: false });
+		await vi.waitFor(() => expect(prose.textContent).toContain('Final words.'));
+	});
+
 	it('does not hold a reply whose selection is elsewhere', async () => {
 		const outside = document.createElement('p');
 		outside.textContent = 'Another turn';

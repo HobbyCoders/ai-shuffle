@@ -232,15 +232,17 @@
 	// the selected text nodes and drops the reader's selection. While a
 	// non-collapsed selection touches this reply, the markup on screen is held
 	// as it was; the newest text appears as soon as the selection is cleared.
+	// The hold ends with the stream: a finished reply always shows its settled
+	// markup, even if that drops a selection still inside it.
 	let heldRendered = $state.raw<{ prefix: string; tail: string } | null>(null);
-	const rendered = $derived(heldRendered ?? latestRendered);
+	const rendered = $derived(streaming && heldRendered ? heldRendered : latestRendered);
 	function selectionTouchesReply(): boolean {
 		const selection = proseEl?.ownerDocument.getSelection();
 		if (!proseEl || !selection || selection.isCollapsed || !selection.rangeCount) return false;
 		return selection.getRangeAt(0).intersectsNode(proseEl);
 	}
 	$effect(() => {
-		if (!streaming && !heldRendered) return;
+		if (!streaming) { heldRendered = null; return; }
 		const doc = proseEl?.ownerDocument;
 		if (!doc) return;
 		const changed = () => {
