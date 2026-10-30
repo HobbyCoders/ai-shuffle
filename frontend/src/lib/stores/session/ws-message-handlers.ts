@@ -1432,8 +1432,12 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			case 'user_question_response_ack':
 			case 'user_question_timeout': {
 				const responseSessionId = data.session_id as string | undefined;
-				if (responseSessionId && responseSessionId !== getState().sessionId) break;
 				const requestId = data.request_id as string;
+				// The sent mark is global (#891): drop it whatever chat is open, or
+				// an ack that lands after a chat switch leaves the question hidden
+				// when the user comes back (the resync restores it, the mark hides it).
+				unmarkQuestionSent(requestId);
+				if (responseSessionId && responseSessionId !== getState().sessionId) break;
 				// A failed ack carries WHY it failed. Only a retryable delivery
 				// failure (`reason: 'relay_offline'` — owner install unreachable)
 				// keeps the modal up so the user's in-progress answer isn't lost.

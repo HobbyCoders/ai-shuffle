@@ -1531,6 +1531,24 @@ describe('ws-message-handlers', () => {
 			expect(notify.error).not.toHaveBeenCalled();
 		});
 
+		it('drops the sent mark even when the ack is for another chat (#891)', () => {
+			const state = stateWithOpenQuestion();
+			deps = createMockDeps({ getState: vi.fn(() => ({ ...state, sessionId: 'session-2' })) });
+			handlers = createMessageHandlers(deps);
+
+			markQuestionSent('q-1');
+			handlers.handleMessage({
+				type: 'user_question_response_ack',
+				session_id: 'session-1',
+				request_id: 'q-1',
+				success: false,
+				reason: 'relay_offline',
+			});
+
+			expect(get(sentQuestions).has('q-1')).toBe(false);
+			expect(deps.update).not.toHaveBeenCalled();
+		});
+
 		it('keeps the question AND toasts an error on a retryable relay failure (reason: relay_offline)', () => {
 			// Cross-install bug: a failed answer relay (owner install offline) was acked
 			// with success:false, but the handler removed the question anyway — dismissing
