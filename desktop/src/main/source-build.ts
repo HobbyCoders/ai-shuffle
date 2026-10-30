@@ -13,7 +13,7 @@ export interface SourceRuntime {
 }
 export interface BuiltSource {
   revision: string; pythonKey: string | null; electron: string;
-  /** Exact cache-root-relative generation IDs; absent on legacy builds (GC defers). */
+  /** Selected cache-root-relative IDs; legacy builds may omit them. Metadata only, not deletion authority. */
   nodeGenerations?: string[];
 }
 export interface BuildOptions {
@@ -284,9 +284,6 @@ async function nodeDependencyTree(directory: string): Promise<string> {
   await visit('');
   return hash.digest('hex');
 }
-const NODE_GENERATION = /^[a-f0-9]{24}(?:-[a-z0-9]+-[a-f0-9]{8})?$/;
-const NODE_TEMPORARY = /^[a-f0-9]{24}(?:-[a-z0-9]+-[a-f0-9]{8})?\.tmp-[a-f0-9]{8}$/;
-const NODE_INSTALL_STALE_MS = 24 * 60 * 60_000;
 // Portable, cache-root-relative IDs cover shared and legacy runtime namespaces.
 const NODE_GENERATION_ID = /^(?:[a-f0-9]{24}(?:[a-f0-9]{40})?\/)?node\/(?:frontend|tools|browser-mcp|desktop)\/[a-f0-9]{24}(?:-[a-z0-9]+-[a-f0-9]{8})?$/;
 function nodeGenerationID(root: string, directory: string): string {
@@ -294,80 +291,6 @@ function nodeGenerationID(root: string, directory: string): string {
   if (id.trim() !== id || !NODE_GENERATION_ID.test(id)) throw new Error('Dependency generation is outside the managed cache');
   return id;
 }
-async function nodeCacheExists(file: string): Promise<boolean> {
-  try { await fs.lstat(file); return true; }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
-}
-async function nodeCacheDirectories(directory: string) {
-  try {
-    const stat = await fs.lstat(directory);
-    return stat.isDirectory() && !stat.isSymbolicLink() ? await fs.readdir(directory, { withFileTypes: true }) : [];
-  } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
-}
-async function nodeInstallLocked(directory: string): Promise<boolean> {
-  try {
-    const text = await fs.readFile(path.join(directory, '.install.lock'), 'utf8');
-    const pid = /^\s*\d+\s*$/.test(text) ? Number(text) : NaN;
-    if (!Number.isSafeInteger(pid) || pid <= 0) return false;
-    try { process.kill(pid, 0); return true; }
-    catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
-  } catch (error) { return (error as NodeJS.ErrnoException).code !== 'ENOENT'; }
-}
-/** Caller holds update.lock. Inventory every retained version before deleting
- * anything; unknown/unreadable references defer cleanup, never guess unused. */
-export async function pruneNodeDependencies(root: string, revisions: string[], staging?: string): Promise<void> {
-  const references = new Set<string>();
-  async function inventory(revision: string) {
-    const record = JSON.parse(await fs.readFile(path.join(revision, 'build.json'), 'utf8'));
-    if (!Array.isArray(record?.nodeGenerations)) throw new Error('Retained build has no dependency generation inventory');
-    for (const id of record.nodeGenerations) {
-      if (typeof id !== 'string' || id.trim() !== id || !NODE_GENERATION_ID.test(id)) throw new Error('Invalid retained dependency generation');
-      references.add(id);
-    }
-  }
-  // Records are written from the paths actually selected by the builder. Never
-  // infer ownership from junctions: topology changes cannot erase these IDs.
-  // Legacy, missing or unreadable retained records defer ALL deletion.
-  for (const revision of revisions) await inventory(revision);
-  if (staging && await nodeCacheExists(staging)) await inventory(staging);
-  const roots = [path.join(root, 'node')];
-  const unused = new Map<string, { file: string; entry: string; time: number; discard: () => Promise<void> }[]>();
-  for (const entry of await nodeCacheDirectories(root)) {
-    if (entry.isDirectory() && !entry.isSymbolicLink() && /^[a-f0-9]{24}(?:[a-f0-9]{40})?$/.test(entry.name)) roots.push(path.join(root, entry.name, 'node'));
-  }
-  for (const base of roots) {
-    if (!(await nodeCacheDirectories(base)).length) continue;
-    for (const name of ['frontend', 'tools', 'browser-mcp', 'desktop']) {
-      const directory = path.join(base, name), entries = await nodeCacheDirectories(directory), spares = unused.get(name) ?? [];
-      unused.set(name, spares);
-      async function discard(file: string, entry: string) {
-        await fs.rm(file, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-        await fs.rm(path.join(directory, '.invalid-' + entry), { force: true });
-      }
-      for (const entry of entries) {
-        if (!entry.isDirectory() || entry.isSymbolicLink() || !(NODE_GENERATION.test(entry.name) || NODE_TEMPORARY.test(entry.name))) continue;
-        const file = path.join(directory, entry.name);
-        if (references.has(path.relative(root, file).split(path.sep).join('/'))) continue;
-        const stat = await fs.lstat(file);
-        if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
-        const time = stat.mtimeMs;
-        if (NODE_TEMPORARY.test(entry.name) || !(await nodeCacheExists(path.join(file, '.complete')))) {
-          if (Date.now() - time >= NODE_INSTALL_STALE_MS && !await nodeInstallLocked(file)) await discard(file, entry.name);
-        } else if (await nodeCacheExists(path.join(directory, '.invalid-' + entry.name))) await discard(file, entry.name);
-        else spares.push({ file, entry: entry.name, time, discard: () => discard(file, entry.name) });
-      }
-      for (const entry of entries) {
-        const target = entry.name.slice('.invalid-'.length);
-        if (entry.name.startsWith('.invalid-') && NODE_GENERATION.test(target) && !await nodeCacheExists(path.join(directory, target))) await fs.rm(path.join(directory, entry.name), { force: true });
-      }
-    }
-  }
-  for (const entries of unused.values()) {
-    entries.sort((a, b) => b.time - a.time || b.entry.localeCompare(a.entry));
-    for (const entry of entries.slice(2)) await entry.discard();
-  }
-}
-
 async function cachedNodeDependencies(root: string, key: string): Promise<string | null> {
   const prefix = key.slice(0, 24);
   const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);

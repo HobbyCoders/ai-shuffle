@@ -15,7 +15,7 @@ async function fixture(t) {
   t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   await fs.mkdir(path.join(root, 'npm/bin'), { recursive: true });
   await fs.writeFile(path.join(root, 'npm/package.json'), '{"version":"10.0.0"}');
-  const calls = [], stats = [], env = { ...process.env }, clock = { identity: 'v22 linux x64 abi-127', fail: null, failNpm: null, omitElectron: false, fixedTime: false, leases: [], deadPid: 2_000_000_000, unknownPid: 1_999_999_999 };
+  const calls = [], stats = [], env = { ...process.env }, clock = { identity: 'v22 linux x64 abi-127', fail: null, failNpm: null, omitElectron: false, fixedTime: false, leases: [] };
   const spawn = (exe, args, options) => {
     calls.push({ exe, args, cwd: options.cwd });
     const child = new EventEmitter(); child.stdout = new EventEmitter();
@@ -52,7 +52,7 @@ async function fixture(t) {
   const input = await fs.readFile(new URL('../src/main/source-build.ts', import.meta.url), 'utf8');
   const output = ts.transpileModule(input, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
   const trackedFs = { ...require('node:fs'), promises: { ...fs } };
-  for (const method of ['lstat', 'readFile', 'realpath', 'readlink', 'stat']) trackedFs.promises[method] = async (...args) => {
+  for (const method of ['lstat', 'readFile', 'rm']) trackedFs.promises[method] = async (...args) => {
     if (clock.onIo) await clock.onIo(method, String(args[0]));
     if (method === 'lstat') stats.push(String(args[0]));
     if (clock.ioError?.method === method && clock.ioError.file === String(args[0])) {
@@ -61,11 +61,7 @@ async function fixture(t) {
     }
     return fs[method](...args);
   };
-  const kill = (pid, signal) => {
-    if (pid === clock.deadPid || pid === clock.unknownPid) throw Object.assign(new Error('probe'), { code: pid === clock.deadPid ? 'ESRCH' : 'EPERM' });
-    return process.kill(pid, signal);
-  };
-  vm.runInNewContext(output, { module, exports: module.exports, process: { ...process, env, kill }, console, Buffer,
+  vm.runInNewContext(output, { module, exports: module.exports, process: { ...process, env }, console, Buffer,
     require: name => name === 'node:child_process' ? { spawn } : name === 'node:fs' ? trackedFs : require(name) });
   let number = 0;
   const build = async (mutate = async () => {}) => {
@@ -95,16 +91,15 @@ async function fixture(t) {
     await fs.writeFile(path.join(stage, 'build.json'), JSON.stringify(built));
     return { opts, calls: calls.slice(start), stats: stats.slice(statStart), built };
   };
-  const loadUpdates = async cleanup => {
+  const loadUpdates = async () => {
     const loaded = { exports: {} };
     const text = await fs.readFile(new URL('../src/main/source-updates.ts', import.meta.url), 'utf8');
     vm.runInNewContext(ts.transpileModule(text, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText,
       { module: loaded, exports: loaded.exports, process, console, Buffer, Response, AbortSignal, setTimeout, clearTimeout,
-        require: name => name === './source-build' ? { ...module.exports, pruneNodeDependencies: cleanup } : name.startsWith('.') ? {} : require(name) });
+        require: name => name === './source-build' ? module.exports : name.startsWith('.') ? {} : require(name) });
     return loaded.exports.SourceUpdates;
   };
   return { root, build, env, clock, loadUpdates,
-    prune: (revisions, cache = path.join(root, 'cache'), staging) => module.exports.pruneNodeDependencies(cache, revisions, staging),
     forget: result => module.exports.removeSourceDirectory(path.dirname(result.opts.source)) };
 
 }
@@ -208,11 +203,11 @@ test('a failed replacement install publishes no entry and leaves the retained de
   assert.deepEqual(installed(await f.build()), ['browser-mcp']);
 });
 
-test('repeated repairs prune unreferenced generations and never rehash known damaged predecessors', async t => {
+test('repeated repairs retain every permanent generation and never rehash known damaged predecessors', async t => {
   const f = await fixture(t), first = await f.build();
   const retained = await fs.realpath(path.join(first.opts.source, 'browser-mcp/node_modules'));
   const marker = await fs.readFile(path.join(path.dirname(retained), '.complete'), 'utf8');
-  const cache = path.dirname(path.dirname(retained)), rejected = [];
+  const cache = path.dirname(path.dirname(retained)), rejected = [], generations = new Set([path.dirname(retained)]);
   let current = first;
   for (let repair = 0; repair < 6; repair++) {
     const damaged = await fs.realpath(path.join(current.opts.source, 'browser-mcp/node_modules'));
@@ -223,69 +218,18 @@ test('repeated repairs prune unreferenced generations and never rehash known dam
     rejected.push(damaged);
     if (current !== first) await f.forget(current);
     current = replacement;
-    await f.prune([path.dirname(first.opts.source), path.dirname(current.opts.source)]);
-    assert.equal((await fs.readdir(cache, { withFileTypes: true })).filter(entry => entry.isDirectory()).length, 2, 'only retained generations remain after repair');
+    generations.add(path.dirname(await fs.realpath(path.join(current.opts.source, 'browser-mcp/node_modules'))));
+    assert.equal(generations.size, repair + 2);
+    assert.equal((await fs.readdir(cache, { withFileTypes: true })).filter(entry => entry.isDirectory()).length, generations.size);
+    for (const generation of generations) await fs.access(path.join(generation, '.complete'));
   }
   assert.equal(await fs.readFile(path.join(path.dirname(retained), '.complete'), 'utf8'), marker);
   await assert.rejects(fs.access(path.join(retained, 'locked')), { code: 'ENOENT' });
   assert.equal(f.clock.leases.every(Boolean), true, 'every npm install owns a temporary lease');
-  await f.forget(first); await f.prune([path.dirname(current.opts.source)]);
-  assert.equal((await fs.readdir(cache, { withFileTypes: true })).filter(entry => entry.isDirectory()).length, 1);
-  assert.equal((await fs.readdir(cache)).some(entry => entry.startsWith('.invalid-')), false);
-});
-
-test('dependency retention keeps rollback/runtime references and only two unused generations per package', async t => {
-  const f = await fixture(t), first = await f.build();
-  const retained = await fs.realpath(path.join(first.opts.source, 'browser-mcp/node_modules'));
-  const cache = path.dirname(path.dirname(retained));
-  let current = first;
-  for (let version = 1; version <= 7; version++) {
-    const next = await f.build(source => fs.writeFile(path.join(source, 'browser-mcp/package-lock.json'), JSON.stringify({ version })));
-    if (current !== first) await f.forget(current);
-    current = next;
-    await f.prune([path.dirname(first.opts.source), path.dirname(current.opts.source)]);
-    assert.ok((await fs.readdir(cache, { withFileTypes: true })).filter(entry => entry.isDirectory()).length <= 4, 'two referenced plus at most two unused');
-  }
-  const runtime = path.join(first.opts.server, 'browser-mcp/dist/index.js');
-  assert.equal(execFileSync(process.execPath, ['-p', `require(${JSON.stringify(runtime)})`], { encoding: 'utf8' }).trim(), 'runtime dependency');
-  assert.equal(await fs.realpath(path.join(first.opts.source, 'browser-mcp/node_modules')), retained);
   await f.forget(first);
-  await f.prune([path.dirname(current.opts.source)]);
-  assert.equal((await fs.readdir(cache, { withFileTypes: true })).filter(entry => entry.isDirectory()).length, 3);
+  assert.equal((await fs.readdir(cache, { withFileTypes: true })).filter(entry => entry.isDirectory()).length, generations.size);
+  assert.equal((await fs.readdir(cache)).filter(entry => entry.startsWith('.invalid-')).length, rejected.length);
 });
-
-test('all retained generations survive via server links, missing module roots and build.json alone', async t => {
-  const f = await fixture(t), retained = [];
-  for (let version = 1; version <= 5; version++) retained.push(await f.build(async source => {
-    for (const name of ['browser-mcp', 'desktop']) await fs.writeFile(path.join(source, name, 'package-lock.json'), JSON.stringify({ version }));
-  }));
-  const first = retained[0], browser = await fs.realpath(path.join(first.opts.source, 'browser-mcp/node_modules'));
-  const desktop = await fs.realpath(path.join(first.opts.source, 'desktop/node_modules'));
-  for (const name of packages) await fs.unlink(path.join(first.opts.source, name, 'node_modules'));
-  await fs.rm(first.opts.source, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-  // The browser now has only a dangling server link; desktop only build.json.
-  await fs.rm(browser, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-  await f.prune(retained.map(result => path.dirname(result.opts.source)));
-  for (const modules of [browser, desktop]) {
-    await fs.access(path.join(path.dirname(modules), '.complete'));
-    const cache = path.dirname(path.dirname(modules));
-    assert.equal((await fs.readdir(cache, { withFileTypes: true })).filter(entry => entry.isDirectory()).length, 5);
-  }
-});
-
-async function gcCandidates(cache, retained) {
-  const old = new Date(Date.now() - 48 * 60 * 60_000);
-  await fs.utimes(path.dirname(retained), old, old);
-  for (const digit of ['1', '2', '3']) {
-    const entry = path.join(cache, digit.repeat(24)); await fs.mkdir(entry);
-    await fs.writeFile(path.join(entry, '.complete'), 'legacy');
-  }
-  const abandoned = path.join(cache, '4'.repeat(24) + '.tmp-00000000');
-  await fs.mkdir(abandoned); await fs.utimes(abandoned, old, old);
-  const invalid = '5'.repeat(24); await fs.mkdir(path.join(cache, invalid));
-  await fs.writeFile(path.join(cache, invalid, '.complete'), 'legacy');
-  await fs.writeFile(path.join(cache, '.invalid-' + invalid), '');
-}
 
 test('build records contain the exact selected generations for new, reused and runtime-local installs', async t => {
   const f = await fixture(t);
@@ -306,134 +250,6 @@ test('build records contain the exact selected generations for new, reused and r
   }
 });
 
-test('update.lock cleanup retains recorded dependencies when a package target disappears mid-inventory', async t => {
-  const f = await fixture(t); f.clock.cacheRoot = 'dependencies';
-  const first = await f.build(), revision = 'a'.repeat(40), directory = path.join(f.root, 'versions', revision);
-  const retained = await fs.realpath(path.join(first.opts.server, 'browser-mcp/node_modules'));
-  const cache = path.dirname(path.dirname(retained)); await gcCandidates(cache, retained);
-  for (const name of packages) await fs.unlink(path.join(first.opts.source, name, 'node_modules'));
-  await fs.rm(first.opts.source, { recursive: true, maxRetries: 10, retryDelay: 100 });
-  await fs.mkdir(path.dirname(directory)); await fs.rename(path.dirname(first.opts.source), directory);
-  const server = path.join(directory, 'server/browser-mcp'), external = path.join(f.root, 'external-package'), hidden = external + '-unavailable';
-  await fs.rename(server, external); await fs.symlink(external, server, process.platform === 'win32' ? 'junction' : 'dir');
-  const runtime = path.join(server, 'dist/index.js'), modulePath = path.join(server, 'node_modules'), record = path.join(directory, 'build.json');
-  const imported = () => execFileSync(process.execPath, ['-p', `require(${JSON.stringify(runtime)})`], { encoding: 'utf8' }).trim();
-  assert.equal(imported(), 'runtime dependency');
-  let removed = false, locked = false;
-  f.clock.onIo = async (method, file) => {
-    if (!removed && ((method === 'lstat' && file === modulePath) || (method === 'readFile' && file === record))) {
-      locked = existsSync(path.join(f.root, 'update.lock')); removed = true; await fs.rename(external, hidden);
-    }
-  };
-  const Updates = await f.loadUpdates((root, revisions, staging) => f.prune(revisions, root, staging));
-  const updater = new Updates({ root: f.root, publicKey: 'test', bootstrapNode: process.execPath });
-  updater.state = { active: revision }; updater.retryCleanup = async () => {};
-  updater.manifest = async () => ({ signed: '', manifest: { revision } });
-  try { assert.equal((await updater.check()).kind, 'current'); }
-  finally { if (removed) await fs.rename(hidden, external); f.clock.onIo = null; }
-  assert.equal(removed, true); assert.equal(locked, true);
-  await fs.access(path.join(path.dirname(retained), '.complete'));
-  assert.equal(imported(), 'runtime dependency');
-  assert.equal((await fs.readdir(cache, { withFileTypes: true })).filter(entry => entry.isDirectory()).length, 3);
-});
-
-test('chained module junctions protect physical and intermediate generations and rollback imports', async t => {
-  for (const internal of [false, true]) {
-    const f = await fixture(t), first = await f.build();
-    const retained = await fs.realpath(path.join(first.opts.source, 'browser-mcp/node_modules'));
-    const cache = path.dirname(path.dirname(retained)), alias = path.join(f.root, 'modules-alias');
-    await gcCandidates(cache, retained);
-    let target = retained;
-    if (internal) {
-      for (const digit of ['1', '2']) {
-        const link = path.join(cache, digit.repeat(24), 'node_modules');
-        await fs.symlink(target, link, process.platform === 'win32' ? 'junction' : 'dir'); target = link;
-      }
-      for (const digit of ['6', '7']) {
-        await fs.mkdir(path.join(cache, digit.repeat(24))); await fs.writeFile(path.join(cache, digit.repeat(24), '.complete'), 'legacy');
-      }
-      // This synthetic revision also uses two alias generations: declare them,
-      // just as the builder declares every generation it selected.
-      await fs.writeFile(path.join(path.dirname(first.opts.source), 'build.json'), JSON.stringify({ ...first.built,
-        nodeGenerations: [...first.built.nodeGenerations, ...['1', '2'].map(digit => 'node/browser-mcp/' + digit.repeat(24))] }));
-    }
-    await fs.symlink(target, alias, process.platform === 'win32' ? 'junction' : 'dir');
-    for (const base of [first.opts.source, first.opts.server]) {
-      const link = path.join(base, 'browser-mcp/node_modules');
-      await fs.unlink(link); await fs.symlink(alias, link, process.platform === 'win32' ? 'junction' : 'dir');
-    }
-    const runtime = path.join(first.opts.server, 'browser-mcp/dist/index.js');
-    const imported = () => execFileSync(process.execPath, ['-p', `require(${JSON.stringify(runtime)})`], { encoding: 'utf8' }).trim();
-    assert.equal(imported(), 'runtime dependency');
-    await f.prune([path.dirname(first.opts.source)]);
-    await fs.access(path.join(path.dirname(retained), '.complete'));
-    assert.equal(imported(), 'runtime dependency');
-    assert.equal((await fs.readdir(cache, { withFileTypes: true })).filter(entry => entry.isDirectory()).length, internal ? 5 : 3);
-  }
-});
-
-test('unavailable records defer deletion while unavailable module junctions retain their recorded generations', async t => {
-  for (const kind of ['revision', 'source', 'package', 'modules']) {
-    const f = await fixture(t), first = await f.build();
-    const retained = await fs.realpath(path.join(first.opts.source, 'browser-mcp/node_modules'));
-    const cache = path.dirname(path.dirname(retained)); await gcCandidates(cache, retained);
-    const revision = path.dirname(first.opts.source);
-    const link = kind === 'revision' ? path.join(f.root, 'retained-alias') : kind === 'source' ? first.opts.source
-      : path.join(first.opts.server, 'browser-mcp', ...(kind === 'modules' ? ['node_modules'] : []));
-    const target = kind === 'revision' ? revision : kind === 'modules' ? retained : path.join(f.root, 'moved-' + kind);
-    if (kind !== 'revision' && kind !== 'modules') await fs.rename(link, target);
-    if (kind === 'modules') await fs.unlink(link);
-    await fs.symlink(target, link, process.platform === 'win32' ? 'junction' : 'dir');
-    const unavailable = target + '-unavailable'; await fs.rename(target, unavailable);
-    const before = (await fs.readdir(cache)).sort();
-    try {
-      if (kind === 'revision') {
-        await assert.rejects(f.prune([link]), { code: 'ENOENT' });
-        assert.deepEqual((await fs.readdir(cache)).sort(), before, 'an unavailable record defers all deletion');
-      } else {
-        await f.prune([revision]);
-        await fs.access(path.join(path.dirname(retained), '.complete'));
-      }
-    } finally { await fs.rename(unavailable, target); }
-    const runtime = path.join(first.opts.server, 'browser-mcp/dist/index.js');
-    assert.equal(execFileSync(process.execPath, ['-p', `require(${JSON.stringify(runtime)})`], { encoding: 'utf8' }).trim(), 'runtime dependency');
-    await f.prune([kind === 'revision' ? link : revision]);
-    assert.equal((await fs.readdir(cache, { withFileTypes: true })).filter(entry => entry.isDirectory()).length, 3, 'cleanup resumes after the reference is available');
-  }
-});
-
-test('nested relative parent aliases retain exactly recorded generations without any link walking', async t => {
-  const f = await fixture(t), first = await f.build();
-  const retained = await fs.realpath(path.join(first.opts.source, 'browser-mcp/node_modules'));
-  const cache = path.dirname(path.dirname(retained)); await gcCandidates(cache, retained);
-  const firstAlias = path.join(cache, '1'.repeat(24)), secondAlias = path.join(cache, '2'.repeat(24)), outer = path.join(f.root, 'outer');
-  const link = async (target, file) => fs.symlink(process.platform === 'win32' ? target : path.relative(path.dirname(file), target), file, process.platform === 'win32' ? 'junction' : 'dir');
-  await link(path.dirname(retained), path.join(firstAlias, 'root-alias'));
-  await link(firstAlias, path.join(secondAlias, 'generation-alias'));
-  await link(secondAlias, outer);
-  const target = path.join(outer, 'generation-alias/root-alias/node_modules');
-  for (const base of [first.opts.source, first.opts.server]) {
-    const modules = path.join(base, 'browser-mcp/node_modules'); await fs.unlink(modules); await link(target, modules);
-  }
-  for (const digit of ['6', '7', '8', '9']) {
-    const directory = path.join(cache, digit.repeat(24)); await fs.mkdir(directory); await fs.writeFile(path.join(directory, '.complete'), 'legacy');
-  }
-  const revision = path.dirname(first.opts.source), record = path.join(revision, 'build.json');
-  await fs.writeFile(record, JSON.stringify({ ...first.built,
-    nodeGenerations: [...first.built.nodeGenerations, ...['1', '2'].map(digit => 'node/browser-mcp/' + digit.repeat(24))] }));
-  const runtime = path.join(first.opts.server, 'browser-mcp/dist/index.js');
-  const imported = () => execFileSync(process.execPath, ['-p', `require(${JSON.stringify(runtime)})`], { encoding: 'utf8' }).trim();
-  assert.equal(imported(), 'runtime dependency');
-  f.clock.onIo = async (method, file) => {
-    assert.equal(['realpath', 'readlink', 'stat'].includes(method), false, 'GC must not resolve or follow links');
-    assert.equal(file.startsWith(revision + path.sep) && file !== record, false, 'GC reads only the revision build record');
-    assert.equal(file.split(path.sep).includes('node_modules'), false, 'GC never inventories dependency links or contents');
-  };
-  try { await f.prune([revision]); } finally { f.clock.onIo = null; }
-  assert.equal(imported(), 'runtime dependency');
-  for (const directory of [path.dirname(retained), firstAlias, secondAlias]) await fs.access(path.join(directory, '.complete'));
-  assert.equal((await fs.readdir(cache, { withFileTypes: true })).filter(entry => entry.isDirectory()).length, 5);
-});
 
 test('transient validation errors skip reuse once without tombstoning healthy dependencies', async t => {
   for (const code of ['EACCES', 'EIO', 'EBUSY', 'EPERM']) for (const location of ['marker', 'source', 'directory']) {
@@ -453,143 +269,43 @@ test('transient validation errors skip reuse once without tombstoning healthy de
   }
 });
 
-test('legacy, malformed and unreadable retained records defer every deletion', async t => {
-  const invalidIDs = ['../node/browser-mcp/' + 'a'.repeat(24), '/node/browser-mcp/' + 'a'.repeat(24), 'node\\browser-mcp\\' + 'a'.repeat(24), 'node/browser-mcp/' + 'a'.repeat(24) + '\n', 'node/browser-mcp/' + 'a'.repeat(24) + '.tmp-00000000', 'node/unknown/' + 'a'.repeat(24)];
-  const faults = ['missing-build', 'syntax', undefined, null, {}, 'legacy', ...invalidIDs.map(id => [id]), ...['EACCES', 'EIO', 'EBUSY', 'EPERM']];
-  for (const fault of faults) {
-    const f = await fixture(t), first = await f.build();
-    const retained = await fs.realpath(path.join(first.opts.source, 'browser-mcp/node_modules'));
-    const cache = path.dirname(path.dirname(retained)); await gcCandidates(cache, retained);
-    const revision = path.join(f.root, 'second-retained'), metadata = path.join(revision, 'build.json');
-    await fs.mkdir(revision);
-    const original = JSON.stringify(first.built); await fs.writeFile(metadata, original);
-    if (fault === 'missing-build') await fs.unlink(metadata);
-    else if (fault === 'syntax') await fs.writeFile(metadata, '{');
-    else if (['EACCES', 'EIO', 'EBUSY', 'EPERM'].includes(fault)) f.clock.ioError = { method: 'readFile', code: fault, file: metadata };
-    else await fs.writeFile(metadata, JSON.stringify({ ...first.built, nodeGenerations: fault }));
-    const before = (await fs.readdir(cache)).sort();
-    await assert.rejects(f.prune([path.dirname(first.opts.source), revision]));
-    assert.deepEqual((await fs.readdir(cache)).sort(), before, 'all records must be valid before complete, invalid or abandoned deletion');
-    await fs.writeFile(metadata, original);
-    await f.prune([path.dirname(first.opts.source), revision]);
-    assert.equal((await fs.readdir(cache, { withFileTypes: true })).filter(entry => entry.isDirectory()).length, 3);
-  }
-});
-
-test('optional staging may be absent or incomplete but never hides a dangling junction', async t => {
-  for (const state of ['absent', 'incomplete', 'complete', 'dangling']) {
-    const f = await fixture(t), first = await f.build();
-    const retained = await fs.realpath(path.join(first.opts.source, 'browser-mcp/node_modules'));
-    const cache = path.dirname(path.dirname(retained)); await gcCandidates(cache, retained);
-    const staging = path.join(f.root, 'staging');
-    if (state === 'incomplete' || state === 'complete') {
-      await fs.mkdir(path.join(staging, 'source/browser-mcp'), { recursive: true });
-      await fs.symlink(retained, path.join(staging, 'source/browser-mcp/node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
-      if (state === 'complete') await fs.writeFile(path.join(staging, 'build.json'), JSON.stringify(first.built));
-      await f.forget(first);
+test('update checks never delete any permanent dependency generation, including unreferenced ones', async t => {
+  const f = await fixture(t); f.clock.cacheRoot = 'dependencies';
+  const generations = new Map(); let current;
+  for (let version = 0; version < 5; version++) {
+    const next = await f.build(source => fs.writeFile(path.join(source, 'browser-mcp/package-lock.json'), JSON.stringify({ version })));
+    for (const name of packages) {
+      const generation = path.dirname(await fs.realpath(path.join(next.opts.source, name, 'node_modules')));
+      generations.set(generation, await fs.readFile(path.join(generation, '.complete'), 'utf8'));
     }
-    if (state === 'dangling') {
-      await fs.symlink(path.join(f.root, 'unavailable-stage'), staging, process.platform === 'win32' ? 'junction' : 'dir');
-    }
-    if (state === 'incomplete' || state === 'dangling') {
-      const before = (await fs.readdir(cache)).sort();
-      await assert.rejects(f.prune([], undefined, staging), { code: 'ENOENT' });
-      assert.deepEqual((await fs.readdir(cache)).sort(), before);
-    } else {
-      await f.prune(state === 'absent' ? [path.dirname(first.opts.source)] : [], undefined, staging);
-      await fs.access(path.join(path.dirname(retained), '.complete'));
-      assert.equal((await fs.readdir(cache, { withFileTypes: true })).filter(entry => entry.isDirectory()).length, 3);
-    }
+    if (current) await f.forget(current);
+    current = next;
   }
-});
-
-test('the two-unused-generation cap spans shared and native-runtime cache namespaces', async t => {
-  const f = await fixture(t), parents = ['node', path.join('1'.repeat(24), 'node'), path.join('2'.repeat(64), 'node')];
-  for (const parent of parents) for (const digit of ['a', 'b', 'c']) {
-    const entry = path.join(f.root, 'cache', parent, 'browser-mcp', digit.repeat(24));
-    await fs.mkdir(entry, { recursive: true }); await fs.writeFile(path.join(entry, '.complete'), 'legacy');
-  }
-  await f.prune([]);
-  let count = 0;
-  for (const parent of parents) count += (await fs.readdir(path.join(f.root, 'cache', parent, 'browser-mcp'), { withFileTypes: true })).filter(entry => entry.isDirectory()).length;
-  assert.equal(count, 2);
-});
-
-test('abandoned install cleanup requires age and no live/unknown lease, and never follows a junction', async t => {
-  const f = await fixture(t), first = await f.build();
-  const retained = await fs.realpath(path.join(first.opts.source, 'browser-mcp/node_modules'));
-  const cache = path.dirname(path.dirname(retained)), prefix = path.basename(path.dirname(retained)).slice(0, 24);
-  const old = new Date(Date.now() - 25 * 60 * 60_000), recent = new Date();
-  const candidates = [];
-  for (const [index, pid, time] of [[1, null, old], [2, f.clock.deadPid, old], [3, process.pid, old], [4, null, recent], [5, f.clock.unknownPid, old]]) {
-    const entry = path.join(cache, `${prefix}.tmp-${String(index).padStart(8, '0')}`);
-    await fs.mkdir(entry);
-    if (pid !== null) await fs.writeFile(path.join(entry, '.install.lock'), String(pid));
-    await fs.utimes(entry, time, time); candidates.push(entry);
-  }
-  const outside = path.join(f.root, 'outside'); await fs.mkdir(outside); await fs.writeFile(path.join(outside, 'keep'), 'safe');
-  await fs.symlink(outside, path.join(candidates[0], 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
-  await fs.utimes(candidates[0], old, old);
-  await f.prune([path.dirname(first.opts.source)]);
-  for (const entry of candidates.slice(0, 2)) await assert.rejects(fs.access(entry), { code: 'ENOENT' });
-  for (const entry of candidates.slice(2)) await fs.access(entry);
-  assert.equal(await fs.readFile(path.join(outside, 'keep'), 'utf8'), 'safe');
-  await fs.writeFile(path.join(candidates[2], '.install.lock'), String(f.clock.deadPid));
-  await fs.utimes(candidates[2], old, old); await fs.utimes(candidates[3], old, old);
-  await f.prune([path.dirname(first.opts.source)]);
-  for (const entry of candidates.slice(2, 4)) await assert.rejects(fs.access(entry), { code: 'ENOENT' });
-  await fs.access(candidates[4]);
-});
-
-test('unreadable retained metadata defers dependency cleanup rather than guessing unused', async t => {
-  const f = await fixture(t), first = await f.build();
-  const dependencies = await fs.realpath(path.join(first.opts.source, 'browser-mcp/node_modules'));
-  const cache = path.dirname(path.dirname(dependencies));
-  for (let index = 1; index <= 4; index++) {
-    const entry = path.join(cache, String(index).repeat(24)); await fs.mkdir(entry);
-    await fs.writeFile(path.join(entry, '.complete'), 'legacy');
-  }
-  await fs.writeFile(path.join(path.dirname(first.opts.source), 'build.json'), '{');
-  await assert.rejects(f.prune([path.dirname(first.opts.source)]));
-  assert.equal((await fs.readdir(cache, { withFileTypes: true })).filter(entry => entry.isDirectory()).length, 5);
-});
-
-test('updater dependency cleanup runs under update.lock on success/error but never after lock refusal', async t => {
-  const f = await fixture(t), cleanupCalls = [];
-  const Updates = await f.loadUpdates(async (...args) => {
-    cleanupCalls.push({ args, held: existsSync(path.join(f.root, 'update.lock')) });
-    // Exercise the real cleanup with the exact dependency root/retained paths.
-    assert.equal(args[0], path.join(f.root, 'dependencies'));
-    await f.prune(args[1], args[0], args[2]);
-  });
-  const revision = 'a'.repeat(40); await fs.mkdir(path.join(f.root, 'versions', revision), { recursive: true });
-  const linkedRevision = path.join(f.root, 'versions', 'b'.repeat(40));
-  const external = path.join(f.root, 'retained'); await fs.mkdir(external);
-  await fs.symlink(external, linkedRevision, process.platform === 'win32' ? 'junction' : 'dir');
-  const electron = path.join(f.root, 'electron'); await fs.writeFile(electron, 'runtime');
-  for (const directory of [path.join(f.root, 'versions', revision), external]) await fs.writeFile(path.join(directory, 'build.json'), JSON.stringify({ electron, nodeGenerations: [] }));
-  const cache = path.join(f.root, 'dependencies/node/browser-mcp');
-  for (const digit of ['1', '2', '3']) {
-    const entry = path.join(cache, digit.repeat(24)); await fs.mkdir(entry, { recursive: true });
-    await fs.writeFile(path.join(entry, '.complete'), 'legacy');
-  }
+  const revision = 'a'.repeat(40), versions = path.join(f.root, 'versions'); await fs.mkdir(versions);
+  // Active files may be outside the SHA-named inventory during restore. Neither
+  // that nor unreferenced older generations permits deleting dependency data.
+  const restoring = path.join(versions, revision + '.restoring');
+  await fs.rename(path.dirname(current.opts.source), restoring);
+  const runtime = path.join(restoring, 'server/browser-mcp/dist/index.js');
+  assert.equal(execFileSync(process.execPath, ['-p', `require(${JSON.stringify(runtime)})`], { encoding: 'utf8' }).trim(), 'runtime dependency');
+  const removals = [];
+  f.clock.onIo = async (method, file) => { if (method === 'rm' && generations.has(file)) removals.push(file); };
+  const Updates = await f.loadUpdates();
   const updater = new Updates({ root: f.root, publicKey: 'test', bootstrapNode: process.execPath });
-  updater.state = { active: revision }; updater.retryCleanup = async () => {};
+  updater.state = { active: revision }; updater.running = revision; updater.retryCleanup = async () => {};
   updater.manifest = async () => ({ signed: '', manifest: { revision } });
   assert.equal((await updater.check()).kind, 'current');
-  assert.equal(cleanupCalls.length, 1); assert.equal(cleanupCalls[0].held, true);
-  assert.equal((await fs.readdir(cache)).length, 2, 'the updater actually reclaims unused generations');
-  assert.deepEqual(Array.from(cleanupCalls[0].args[1]), [path.join(f.root, 'versions', revision), linkedRevision]);
-  assert.equal(cleanupCalls[0].args[2], path.join(f.root, 'staging'), 'optional staging is distinct from required retained revisions');
-  await assert.rejects(fs.access(path.join(f.root, 'update.lock')), { code: 'ENOENT' });
   updater.manifest = async () => { throw new Error('feed failed'); };
   await assert.rejects(updater.check(), /feed failed/);
-  assert.equal(cleanupCalls.length, 2); assert.equal(cleanupCalls[1].held, true); assert.equal(updater.checking, false);
+  assert.equal(updater.checking, false);
+  await assert.rejects(fs.access(path.join(f.root, 'update.lock')), { code: 'ENOENT' });
+  assert.deepEqual(removals, [], 'no permanent generation may be removed by update cleanup');
+  for (const [generation, marker] of generations) assert.equal(await fs.readFile(path.join(generation, '.complete'), 'utf8'), marker);
+  assert.equal(execFileSync(process.execPath, ['-p', `require(${JSON.stringify(runtime)})`], { encoding: 'utf8' }).trim(), 'runtime dependency');
   await fs.writeFile(path.join(f.root, 'update.lock'), String(process.pid));
   await assert.rejects(updater.check(), /already running/);
-  assert.equal(cleanupCalls.length, 2); await fs.access(path.join(f.root, 'update.lock'));
+  assert.deepEqual(removals, []);
 });
-
 test('Electron postinstall is completed before dependency integrity is recorded', async t => {
   const f = await fixture(t); f.clock.omitElectron = true;
   const first = await f.build();
@@ -634,7 +350,7 @@ test('shared config and Node ABI changes cannot reuse incompatible output', asyn
   assert.deepEqual(built(third), packages); assert.deepEqual(installed(third), packages);
 });
 
-test('corrupted and incomplete cache entries rebuild, and retention is bounded', async t => {
+test('corrupted and incomplete build-output entries rebuild, and output retention is bounded', async t => {
   const f = await fixture(t); await f.build();
   const directory = path.join(f.root, 'cache/builds/tools');
   const [key] = await fs.readdir(directory);
