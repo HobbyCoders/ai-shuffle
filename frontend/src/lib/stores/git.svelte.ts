@@ -448,6 +448,11 @@ export interface GitLoadOptions {
 	/** Settles once the chat's transcript is on screen (or a cap elapsed). The
 	 *  PR lookup, and the remote fetch that follows the load, wait for it. */
 	afterCriticalPath?: Promise<unknown>;
+	/** True while a turn may be using the checkout. The owner refuses a fetch
+	 *  (409) while a session on it is active, and the load's status can predate
+	 *  the turn: a new chat's first load runs as its first reply starts (#803).
+	 *  Asked right before the background fetch; true skips it. */
+	fetchBlocked?: () => boolean;
 }
 
 type TranscriptSource = {
@@ -521,6 +526,7 @@ async function _loadCore(
 
 	const statusSeq = _nextSeq();
 	const requestScope = sessionId ?? _state.workerTarget ?? undefined;
+	_deferredFetch = null; // A new load decides its own fetch.
 	try {
 		const status = await gitApi.getGitStatus(projectId, worktreeId, undefined, requestScope);
 		if (_loadInFlight !== scope) return;
@@ -597,7 +603,10 @@ async function _loadCore(
 
 			// Fetch updates refs, so the same safety guard as an explicit mutation
 			// applies. Do not knowingly send a background request that must fail.
-			if (!status.mutations_blocked) _backgroundFetch(key, projectId, worktreeId, requestScope);
+			if (!status.mutations_blocked) {
+				if (options?.fetchBlocked?.()) _deferredFetch = { key, projectId, worktreeId, scope: requestScope };
+				else _backgroundFetch(key, projectId, worktreeId, requestScope);
+			}
 		} else {
 			// Not a git repo — a POSITIVE answer, so clear ALL git state (stale
 			// cached diffStats/prState/branches from a previous load must not
@@ -676,6 +685,10 @@ function _keepPreviousPrState(
 /**
  * Background fetch from remote + silent refresh of status/branches.
  */
+/** A background fetch skipped because a turn was running (#803); the
+ *  stream-end forceRefresh() runs it if the same checkout is still loaded. */
+let _deferredFetch: { key: string; projectId: string; worktreeId?: string; scope?: gitApi.GitRequestScope } | null = null;
+
 function _backgroundFetch(key: string, projectId: string, worktreeId?: string, sessionId?: gitApi.GitRequestScope) {
 	if (_bgFetchRunning) return;
 	_bgFetchRunning = true;
@@ -1733,6 +1746,11 @@ export const git = {
 		_diffStatsInFlight = false;
 		_branchesInFlight = false;
 		git.refreshStatus();
+		const deferred = _deferredFetch;
+		_deferredFetch = null;
+		if (deferred && deferred.key === _loadedKey && !_state.status?.mutations_blocked) {
+			_backgroundFetch(deferred.key, deferred.projectId, deferred.worktreeId, deferred.scope);
+		}
 		if (_state.status?.is_git_repo) {
 			git.refreshDiffStats();
 			git.loadBranches();
