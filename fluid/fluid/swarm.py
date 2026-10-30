@@ -146,6 +146,20 @@ class SwarmCoordinator:
         self.cancelled = set()
         self.closed = False
         self._publish_lock = asyncio.Lock()
+        self._worker_stops = {}
+
+    async def _stop_worker(self, task_id):
+        # Receipt publication, cancel(), and interrupted-spawn cleanup can all
+        # reach the same worker. Join one host stop, including after it succeeds;
+        # a failed stop remains retryable. A cancelled waiter must not cancel the
+        # host's teardown or let a later waiter launch a second one alongside it.
+        stop = self._worker_stops.get(task_id)
+        if stop is None or (stop.done() and (stop.cancelled() or stop.exception() is not None)):
+            stop = asyncio.create_task(self.cancel_worker(task_id))
+            self._worker_stops[task_id] = stop
+            # The last waiter can be cancelled while the shielded stop finishes.
+            stop.add_done_callback(lambda job: None if job.cancelled() else job.exception())
+        await asyncio.shield(stop)
 
     def snapshot(self, key):
         return copy.deepcopy(self.swarms[key])
@@ -274,7 +288,7 @@ class SwarmCoordinator:
                     worker_session_id=task["worker_session_id"] or receipt.worker_session_id)
                 await self.emit(key)
                 if key in self.cancelled:
-                    await self.cancel_worker(receipt.task_id)
+                    await self._stop_worker(receipt.task_id)
                 status, result = await future
             else:
                 status, result = ("failed" if outcome.is_error else "completed"), outcome.text
@@ -290,7 +304,7 @@ class SwarmCoordinator:
             raise
         except Exception as exc:
             if receipt is not None:
-                await self.cancel_worker(receipt.task_id)
+                await self._stop_worker(receipt.task_id)
             task.update(status="failed", error=str(exc)[:RESULT_LIMIT])
         finally:
             task["finished_at"] = now()
@@ -306,7 +320,7 @@ class SwarmCoordinator:
         if receipt is not None:
             task.update(task_id=receipt.task_id,
                 worker_session_id=task["worker_session_id"] or receipt.worker_session_id)
-            await self.cancel_worker(receipt.task_id)
+            await self._stop_worker(receipt.task_id)
 
     async def cancel(self, key):
         if self.swarms[key]["status"] in TERMINAL:
@@ -315,7 +329,7 @@ class SwarmCoordinator:
         # Do not cancel dispatch coroutines: spawn receipts must not be lost.
         for task in self.swarms[key]["tasks"]:
             if task["status"] == "running" and task["task_id"]:
-                await self.cancel_worker(task["task_id"])
+                await self._stop_worker(task["task_id"])
         await self.emit(key)
         return self.snapshot(key)
 
