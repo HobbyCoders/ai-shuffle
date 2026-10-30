@@ -788,7 +788,8 @@ export class SourceUpdates {
         const prebuiltUI = await prepareUIBundle(stage, manifest, this.options.fetch);
         built = { ...await buildSource({ source, server: path.join(stage, 'server'), cache: path.join(this.options.root, 'dependencies', native.key.slice(0, 24)), sharedCache: path.join(this.options.root, 'dependencies'), runtime: native.runtime, revision: manifest.revision, version: manifest.version, prebuiltUI, log: path.join(this.options.root, 'build.log'), progress: message }), runtimeKey: native.key, layout: 2 };
       }
-      await fs.writeFile(path.join(stage, 'build.json'), JSON.stringify(built));
+      await fs.writeFile(path.join(stage, 'build.json.tmp'), JSON.stringify(built));
+      await fs.rename(path.join(stage, 'build.json.tmp'), path.join(stage, 'build.json'));
       await fs.writeFile(path.join(stage, 'release.json'), signed);
       const target = this.directory(manifest.revision);
       if ([this.state.active, this.state.previous].includes(manifest.revision)) throw new Error('Cannot overwrite a retained application version');

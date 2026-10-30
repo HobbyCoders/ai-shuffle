@@ -11,7 +11,11 @@ export interface SourceRuntime {
   npm: string;
   pythonDependencies: string | null;
 }
-export interface BuiltSource { revision: string; pythonKey: string | null; electron: string }
+export interface BuiltSource {
+  revision: string; pythonKey: string | null; electron: string;
+  /** Exact cache-root-relative generation IDs; absent on legacy builds (GC defers). */
+  nodeGenerations?: string[];
+}
 export interface BuildOptions {
   source: string;
   server: string;
@@ -283,6 +287,17 @@ async function nodeDependencyTree(directory: string): Promise<string> {
 const NODE_GENERATION = /^[a-f0-9]{24}(?:-[a-z0-9]+-[a-f0-9]{8})?$/;
 const NODE_TEMPORARY = /^[a-f0-9]{24}(?:-[a-z0-9]+-[a-f0-9]{8})?\.tmp-[a-f0-9]{8}$/;
 const NODE_INSTALL_STALE_MS = 24 * 60 * 60_000;
+// Portable, cache-root-relative IDs cover shared and legacy runtime namespaces.
+const NODE_GENERATION_ID = /^(?:[a-f0-9]{24}(?:[a-f0-9]{40})?\/)?node\/(?:frontend|tools|browser-mcp|desktop)\/[a-f0-9]{24}(?:-[a-z0-9]+-[a-f0-9]{8})?$/;
+function nodeGenerationID(root: string, directory: string): string {
+  const id = path.relative(root, directory).split(path.sep).join('/');
+  if (id.trim() !== id || !NODE_GENERATION_ID.test(id)) throw new Error('Dependency generation is outside the managed cache');
+  return id;
+}
+async function nodeCacheExists(file: string): Promise<boolean> {
+  try { await fs.lstat(file); return true; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
+}
 async function nodeCacheDirectories(directory: string) {
   try {
     const stat = await fs.lstat(directory);
@@ -301,52 +316,20 @@ async function nodeInstallLocked(directory: string): Promise<boolean> {
 /** Caller holds update.lock. Inventory every retained version before deleting
  * anything; unknown/unreadable references defer cleanup, never guess unused. */
 export async function pruneNodeDependencies(root: string, revisions: string[], staging?: string): Promise<void> {
-  const references = new Set<string>(), inspected = new Set<string>();
-  const normalize = (file: string) => process.platform === 'win32' ? path.toNamespacedPath(path.resolve(file)).toLowerCase() : path.resolve(file);
-  async function reference(file: string) {
-    // Chained junctions can put the physical generation outside every lexical
-    // ancestor. Inventory BOTH ancestor chains, and never ignore resolution errors.
-    for (const start of [file, await fs.realpath(file)]) for (let at = path.resolve(start);;) {
-      const key = normalize(at); references.add(key);
-      if (!inspected.has(key)) {
-        inspected.add(key);
-        // Intermediate aliases may themselves live inside collectable generations.
-        if ((await fs.lstat(at)).isSymbolicLink()) await reference(path.resolve(path.dirname(at), await fs.readlink(at)));
-      }
-      const parent = path.dirname(at); if (parent === at) break; at = parent;
+  const references = new Set<string>();
+  async function inventory(revision: string) {
+    const record = JSON.parse(await fs.readFile(path.join(revision, 'build.json'), 'utf8'));
+    if (!Array.isArray(record?.nodeGenerations)) throw new Error('Retained build has no dependency generation inventory');
+    for (const id of record.nodeGenerations) {
+      if (typeof id !== 'string' || id.trim() !== id || !NODE_GENERATION_ID.test(id)) throw new Error('Invalid retained dependency generation');
+      references.add(id);
     }
   }
-  async function directory(file: string, optional = false): Promise<boolean> {
-    let stat;
-    try { stat = await fs.lstat(file); }
-    catch (error) { if (optional && (error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
-    // lstat distinguishes an absent optional path from a dangling junction. Check
-    // each parent before its optional children, so ENOENT cannot hide a junction.
-    if (stat.isSymbolicLink()) stat = await fs.stat(file);
-    if (!stat.isDirectory()) throw new Error('Unknown retained dependency directory');
-    await reference(file);
-    return true;
-  }
-  async function inventory(revision: string, optional = false) {
-    if (!await directory(revision, optional)) return;
-    for (const base of ['source', 'server']) {
-      const parent = path.join(revision, base);
-      if (!await directory(parent, true)) continue;
-      for (const name of ['frontend', 'mobile', 'tools', 'browser-mcp', 'desktop']) {
-        const project = path.join(parent, name);
-        if (await directory(project, true)) await directory(path.join(project, 'node_modules'), true);
-      }
-    }
-    let built;
-    try { built = JSON.parse(await fs.readFile(path.join(revision, 'build.json'), 'utf8')); }
-    catch (error) { if (optional && (error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
-    if (typeof built?.electron !== 'string') throw new Error('Unknown retained dependency references');
-    await reference(built.electron);
-  }
-  // Finish the entire reference inventory BEFORE any deletion. Only staging can
-  // legitimately be absent or lack build.json after an interrupted build.
+  // Records are written from the paths actually selected by the builder. Never
+  // infer ownership from junctions: topology changes cannot erase these IDs.
+  // Legacy, missing or unreadable retained records defer ALL deletion.
   for (const revision of revisions) await inventory(revision);
-  if (staging) await inventory(staging, true);
+  if (staging && await nodeCacheExists(staging)) await inventory(staging);
   const roots = [path.join(root, 'node')];
   const unused = new Map<string, { file: string; entry: string; time: number; discard: () => Promise<void> }[]>();
   for (const entry of await nodeCacheDirectories(root)) {
@@ -363,17 +346,19 @@ export async function pruneNodeDependencies(root: string, revisions: string[], s
       }
       for (const entry of entries) {
         if (!entry.isDirectory() || entry.isSymbolicLink() || !(NODE_GENERATION.test(entry.name) || NODE_TEMPORARY.test(entry.name))) continue;
-        const file = path.join(directory, entry.name), paths = [normalize(file), normalize(await fs.realpath(file))];
-        if (paths.some(at => references.has(at))) continue;
-        const time = (await fs.stat(file)).mtimeMs;
-        if (NODE_TEMPORARY.test(entry.name) || !(await exists(path.join(file, '.complete')))) {
+        const file = path.join(directory, entry.name);
+        if (references.has(path.relative(root, file).split(path.sep).join('/'))) continue;
+        const stat = await fs.lstat(file);
+        if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
+        const time = stat.mtimeMs;
+        if (NODE_TEMPORARY.test(entry.name) || !(await nodeCacheExists(path.join(file, '.complete')))) {
           if (Date.now() - time >= NODE_INSTALL_STALE_MS && !await nodeInstallLocked(file)) await discard(file, entry.name);
-        } else if (await exists(path.join(directory, '.invalid-' + entry.name))) await discard(file, entry.name);
+        } else if (await nodeCacheExists(path.join(directory, '.invalid-' + entry.name))) await discard(file, entry.name);
         else spares.push({ file, entry: entry.name, time, discard: () => discard(file, entry.name) });
       }
       for (const entry of entries) {
         const target = entry.name.slice('.invalid-'.length);
-        if (entry.name.startsWith('.invalid-') && NODE_GENERATION.test(target) && !await exists(path.join(directory, target))) await fs.rm(path.join(directory, entry.name), { force: true });
+        if (entry.name.startsWith('.invalid-') && NODE_GENERATION.test(target) && !await nodeCacheExists(path.join(directory, target))) await fs.rm(path.join(directory, entry.name), { force: true });
       }
     }
   }
@@ -488,7 +473,8 @@ export async function buildSource(opts: BuildOptions): Promise<BuiltSource> {
   opts.progress('Preparing the verified remote-access runtime…');
   await run(python, ['-B', '-m', 'app.core.cloudflared', '--bundle', '--reuse-verified'], opts.server, opts, python);
   await fs.cp(path.join(opts.server, 'downloads'), cloudCache, { recursive: true });
-  return { revision: opts.revision, pythonKey, electron };
+  const nodeGenerations = [...dependencies.values()].map(modules => nodeGenerationID(opts.sharedCache ?? opts.cache, path.dirname(modules)));
+  return { revision: opts.revision, pythonKey, electron, nodeGenerations };
 }
 
 /** Detach our dependency junctions before deleting a staged/old version. */

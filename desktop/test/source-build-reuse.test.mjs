@@ -37,6 +37,9 @@ async function fixture(t) {
     }
     const missingRuntime = args[1] === 'run' && !existsSync(path.join(options.cwd, 'node_modules/locked/index.js'));
     if (args[1] === 'run' && !missingRuntime) put('dist/index.js', 'module.exports = require("locked");');
+    if (args[1] === 'run' && path.basename(options.cwd) === 'frontend' && !missingRuntime) {
+      put('build/index.html', 'compiled desktop'); put('build/mobile/index.html', 'compiled phone');
+    }
     if (args.includes('app.core.cloudflared')) put('downloads/verified-runtime');
     setImmediate(() => {
       if (args[0] === '-p') child.stdout.emit('data', clock.identity);
@@ -49,7 +52,8 @@ async function fixture(t) {
   const input = await fs.readFile(new URL('../src/main/source-build.ts', import.meta.url), 'utf8');
   const output = ts.transpileModule(input, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
   const trackedFs = { ...require('node:fs'), promises: { ...fs } };
-  for (const method of ['lstat', 'readFile', 'realpath']) trackedFs.promises[method] = (...args) => {
+  for (const method of ['lstat', 'readFile', 'realpath', 'readlink', 'stat']) trackedFs.promises[method] = async (...args) => {
+    if (clock.onIo) await clock.onIo(method, String(args[0]));
     if (method === 'lstat') stats.push(String(args[0]));
     if (clock.ioError?.method === method && clock.ioError.file === String(args[0])) {
       const { code } = clock.ioError; clock.ioError = null;
@@ -66,13 +70,14 @@ async function fixture(t) {
   let number = 0;
   const build = async (mutate = async () => {}) => {
     const stage = path.join(root, `stage-${++number}`), source = path.join(stage, 'source');
-    for (const name of ['app', 'fluid/fluid', 'ui/mobile', ...packages]) await fs.mkdir(path.join(source, name), { recursive: true });
+    const nodePackages = clock.localUI ? ['frontend', ...packages] : packages;
+    for (const name of ['app', 'fluid/fluid', 'ui/mobile', ...nodePackages]) await fs.mkdir(path.join(source, name), { recursive: true });
     for (const name of ['requirements.lock', 'requirements-native.lock', 'requirements-voice.lock', 'fluid/pyproject.toml']) await fs.writeFile(path.join(source, name), '# locked');
     await fs.writeFile(path.join(source, 'app/main.py'), `# app revision ${number}`);
     await fs.writeFile(path.join(source, 'fluid/fluid/__init__.py'), `# Fluid revision ${number}`);
     await fs.writeFile(path.join(source, 'ui/index.html'), 'verified desktop');
     await fs.writeFile(path.join(source, 'ui/mobile/index.html'), 'verified phone');
-    for (const name of packages) {
+    for (const name of nodePackages) {
       await fs.mkdir(path.join(source, name, 'src'));
       await fs.writeFile(path.join(source, name, 'src/index.ts'), 'export const value = 1;');
       await fs.writeFile(path.join(source, name, 'package.json'), JSON.stringify({ name, scripts: { build: 'tsc' }, dependencies: { locked: '1.0.0' } }));
@@ -80,8 +85,9 @@ async function fixture(t) {
       await fs.writeFile(path.join(source, name, 'tsconfig.json'), '{}');
     }
     await mutate(source);
-    const opts = { source, server: path.join(stage, 'server'), cache: path.join(root, 'cache'), sharedCache: path.join(root, 'cache'),
-      log: path.join(root, 'build.log'), prebuiltUI: path.join(source, 'ui'),
+    const sharedCache = path.join(root, clock.cacheRoot ?? 'cache');
+    const opts = { source, server: path.join(stage, 'server'), cache: path.join(sharedCache, clock.namespace ?? ''), sharedCache,
+      log: path.join(root, 'build.log'), prebuiltUI: clock.localUI ? undefined : path.join(source, 'ui'),
       runtime: { python: 'fake-python', node: 'fake-node', npm: path.join(root, 'npm/bin/npm-cli.js'), pythonDependencies: await module.exports.pythonDependencyKey(source) },
       revision: number.toString(16).padStart(40, '0'), progress() {} };
     const start = calls.length, statStart = stats.length;
@@ -259,7 +265,7 @@ test('all retained generations survive via server links, missing module roots an
   await fs.rm(first.opts.source, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   // The browser now has only a dangling server link; desktop only build.json.
   await fs.rm(browser, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-  await assert.rejects(f.prune(retained.map(result => path.dirname(result.opts.source))), { code: 'ENOENT' });
+  await f.prune(retained.map(result => path.dirname(result.opts.source)));
   for (const modules of [browser, desktop]) {
     await fs.access(path.join(path.dirname(modules), '.complete'));
     const cache = path.dirname(path.dirname(modules));
@@ -281,6 +287,56 @@ async function gcCandidates(cache, retained) {
   await fs.writeFile(path.join(cache, '.invalid-' + invalid), '');
 }
 
+test('build records contain the exact selected generations for new, reused and runtime-local installs', async t => {
+  const f = await fixture(t);
+  for (const runtime of [null, '1'.repeat(24), '2'.repeat(64), 'ui']) {
+    f.clock.localUI = runtime === 'ui'; f.clock.namespace = f.clock.localUI ? null : runtime;
+    f.clock.identity = f.clock.namespace ? '' : 'v22 linux x64 abi-127';
+    const first = await f.build(), second = await f.build();
+    assert.deepEqual(installed(second), []);
+    for (const result of [first, second]) {
+      const expected = [];
+      for (const name of f.clock.localUI ? ['frontend', ...packages] : packages) expected.push(path.relative(result.opts.sharedCache, path.dirname(await fs.realpath(path.join(result.opts.source, name, 'node_modules')))).split(path.sep).join('/'));
+      const record = JSON.parse(await fs.readFile(path.join(path.dirname(result.opts.source), 'build.json'), 'utf8'));
+      assert.deepEqual(Array.from(result.built.nodeGenerations), expected);
+      assert.deepEqual(record.nodeGenerations, expected);
+      assert.equal(record.nodeGenerations.every(id => !id.includes('..') && !id.includes('\\')), true);
+      if (f.clock.namespace) assert.equal(record.nodeGenerations.every(id => id.startsWith(runtime + '/node/')), true);
+    }
+  }
+});
+
+test('update.lock cleanup retains recorded dependencies when a package target disappears mid-inventory', async t => {
+  const f = await fixture(t); f.clock.cacheRoot = 'dependencies';
+  const first = await f.build(), revision = 'a'.repeat(40), directory = path.join(f.root, 'versions', revision);
+  const retained = await fs.realpath(path.join(first.opts.server, 'browser-mcp/node_modules'));
+  const cache = path.dirname(path.dirname(retained)); await gcCandidates(cache, retained);
+  for (const name of packages) await fs.unlink(path.join(first.opts.source, name, 'node_modules'));
+  await fs.rm(first.opts.source, { recursive: true, maxRetries: 10, retryDelay: 100 });
+  await fs.mkdir(path.dirname(directory)); await fs.rename(path.dirname(first.opts.source), directory);
+  const server = path.join(directory, 'server/browser-mcp'), external = path.join(f.root, 'external-package'), hidden = external + '-unavailable';
+  await fs.rename(server, external); await fs.symlink(external, server, process.platform === 'win32' ? 'junction' : 'dir');
+  const runtime = path.join(server, 'dist/index.js'), modulePath = path.join(server, 'node_modules'), record = path.join(directory, 'build.json');
+  const imported = () => execFileSync(process.execPath, ['-p', `require(${JSON.stringify(runtime)})`], { encoding: 'utf8' }).trim();
+  assert.equal(imported(), 'runtime dependency');
+  let removed = false, locked = false;
+  f.clock.onIo = async (method, file) => {
+    if (!removed && ((method === 'lstat' && file === modulePath) || (method === 'readFile' && file === record))) {
+      locked = existsSync(path.join(f.root, 'update.lock')); removed = true; await fs.rename(external, hidden);
+    }
+  };
+  const Updates = await f.loadUpdates((root, revisions, staging) => f.prune(revisions, root, staging));
+  const updater = new Updates({ root: f.root, publicKey: 'test', bootstrapNode: process.execPath });
+  updater.state = { active: revision }; updater.retryCleanup = async () => {};
+  updater.manifest = async () => ({ signed: '', manifest: { revision } });
+  try { assert.equal((await updater.check()).kind, 'current'); }
+  finally { if (removed) await fs.rename(hidden, external); f.clock.onIo = null; }
+  assert.equal(removed, true); assert.equal(locked, true);
+  await fs.access(path.join(path.dirname(retained), '.complete'));
+  assert.equal(imported(), 'runtime dependency');
+  assert.equal((await fs.readdir(cache, { withFileTypes: true })).filter(entry => entry.isDirectory()).length, 3);
+});
+
 test('chained module junctions protect physical and intermediate generations and rollback imports', async t => {
   for (const internal of [false, true]) {
     const f = await fixture(t), first = await f.build();
@@ -296,6 +352,10 @@ test('chained module junctions protect physical and intermediate generations and
       for (const digit of ['6', '7']) {
         await fs.mkdir(path.join(cache, digit.repeat(24))); await fs.writeFile(path.join(cache, digit.repeat(24), '.complete'), 'legacy');
       }
+      // This synthetic revision also uses two alias generations: declare them,
+      // just as the builder declares every generation it selected.
+      await fs.writeFile(path.join(path.dirname(first.opts.source), 'build.json'), JSON.stringify({ ...first.built,
+        nodeGenerations: [...first.built.nodeGenerations, ...['1', '2'].map(digit => 'node/browser-mcp/' + digit.repeat(24))] }));
     }
     await fs.symlink(target, alias, process.platform === 'win32' ? 'junction' : 'dir');
     for (const base of [first.opts.source, first.opts.server]) {
@@ -312,7 +372,7 @@ test('chained module junctions protect physical and intermediate generations and
   }
 });
 
-test('unavailable retained revisions or nested junctions defer all deletion until accessible', async t => {
+test('unavailable records defer deletion while unavailable module junctions retain their recorded generations', async t => {
   for (const kind of ['revision', 'source', 'package', 'modules']) {
     const f = await fixture(t), first = await f.build();
     const retained = await fs.realpath(path.join(first.opts.source, 'browser-mcp/node_modules'));
@@ -327,14 +387,52 @@ test('unavailable retained revisions or nested junctions defer all deletion unti
     const unavailable = target + '-unavailable'; await fs.rename(target, unavailable);
     const before = (await fs.readdir(cache)).sort();
     try {
-      await assert.rejects(f.prune([kind === 'revision' ? link : revision]), { code: 'ENOENT' });
-      assert.deepEqual((await fs.readdir(cache)).sort(), before, 'no complete, invalid or partial entry may be deleted');
+      if (kind === 'revision') {
+        await assert.rejects(f.prune([link]), { code: 'ENOENT' });
+        assert.deepEqual((await fs.readdir(cache)).sort(), before, 'an unavailable record defers all deletion');
+      } else {
+        await f.prune([revision]);
+        await fs.access(path.join(path.dirname(retained), '.complete'));
+      }
     } finally { await fs.rename(unavailable, target); }
     const runtime = path.join(first.opts.server, 'browser-mcp/dist/index.js');
     assert.equal(execFileSync(process.execPath, ['-p', `require(${JSON.stringify(runtime)})`], { encoding: 'utf8' }).trim(), 'runtime dependency');
     await f.prune([kind === 'revision' ? link : revision]);
     assert.equal((await fs.readdir(cache, { withFileTypes: true })).filter(entry => entry.isDirectory()).length, 3, 'cleanup resumes after the reference is available');
   }
+});
+
+test('nested relative parent aliases retain exactly recorded generations without any link walking', async t => {
+  const f = await fixture(t), first = await f.build();
+  const retained = await fs.realpath(path.join(first.opts.source, 'browser-mcp/node_modules'));
+  const cache = path.dirname(path.dirname(retained)); await gcCandidates(cache, retained);
+  const firstAlias = path.join(cache, '1'.repeat(24)), secondAlias = path.join(cache, '2'.repeat(24)), outer = path.join(f.root, 'outer');
+  const link = async (target, file) => fs.symlink(process.platform === 'win32' ? target : path.relative(path.dirname(file), target), file, process.platform === 'win32' ? 'junction' : 'dir');
+  await link(path.dirname(retained), path.join(firstAlias, 'root-alias'));
+  await link(firstAlias, path.join(secondAlias, 'generation-alias'));
+  await link(secondAlias, outer);
+  const target = path.join(outer, 'generation-alias/root-alias/node_modules');
+  for (const base of [first.opts.source, first.opts.server]) {
+    const modules = path.join(base, 'browser-mcp/node_modules'); await fs.unlink(modules); await link(target, modules);
+  }
+  for (const digit of ['6', '7', '8', '9']) {
+    const directory = path.join(cache, digit.repeat(24)); await fs.mkdir(directory); await fs.writeFile(path.join(directory, '.complete'), 'legacy');
+  }
+  const revision = path.dirname(first.opts.source), record = path.join(revision, 'build.json');
+  await fs.writeFile(record, JSON.stringify({ ...first.built,
+    nodeGenerations: [...first.built.nodeGenerations, ...['1', '2'].map(digit => 'node/browser-mcp/' + digit.repeat(24))] }));
+  const runtime = path.join(first.opts.server, 'browser-mcp/dist/index.js');
+  const imported = () => execFileSync(process.execPath, ['-p', `require(${JSON.stringify(runtime)})`], { encoding: 'utf8' }).trim();
+  assert.equal(imported(), 'runtime dependency');
+  f.clock.onIo = async (method, file) => {
+    assert.equal(['realpath', 'readlink', 'stat'].includes(method), false, 'GC must not resolve or follow links');
+    assert.equal(file.startsWith(revision + path.sep) && file !== record, false, 'GC reads only the revision build record');
+    assert.equal(file.split(path.sep).includes('node_modules'), false, 'GC never inventories dependency links or contents');
+  };
+  try { await f.prune([revision]); } finally { f.clock.onIo = null; }
+  assert.equal(imported(), 'runtime dependency');
+  for (const directory of [path.dirname(retained), firstAlias, secondAlias]) await fs.access(path.join(directory, '.complete'));
+  assert.equal((await fs.readdir(cache, { withFileTypes: true })).filter(entry => entry.isDirectory()).length, 5);
 });
 
 test('transient validation errors skip reuse once without tombstoning healthy dependencies', async t => {
@@ -355,38 +453,45 @@ test('transient validation errors skip reuse once without tombstoning healthy de
   }
 });
 
-test('required retained metadata and transient inventory failures defer every deletion', async t => {
-  for (const fault of ['missing-build', 'missing-electron', 'readFile', 'lstat', 'realpath']) {
+test('legacy, malformed and unreadable retained records defer every deletion', async t => {
+  const invalidIDs = ['../node/browser-mcp/' + 'a'.repeat(24), '/node/browser-mcp/' + 'a'.repeat(24), 'node\\browser-mcp\\' + 'a'.repeat(24), 'node/browser-mcp/' + 'a'.repeat(24) + '\n', 'node/browser-mcp/' + 'a'.repeat(24) + '.tmp-00000000', 'node/unknown/' + 'a'.repeat(24)];
+  const faults = ['missing-build', 'syntax', undefined, null, {}, 'legacy', ...invalidIDs.map(id => [id]), ...['EACCES', 'EIO', 'EBUSY', 'EPERM']];
+  for (const fault of faults) {
     const f = await fixture(t), first = await f.build();
     const retained = await fs.realpath(path.join(first.opts.source, 'browser-mcp/node_modules'));
     const cache = path.dirname(path.dirname(retained)); await gcCandidates(cache, retained);
-    const revision = path.dirname(first.opts.source), metadata = path.join(revision, 'build.json');
-    const original = await fs.readFile(metadata, 'utf8');
+    const revision = path.join(f.root, 'second-retained'), metadata = path.join(revision, 'build.json');
+    await fs.mkdir(revision);
+    const original = JSON.stringify(first.built); await fs.writeFile(metadata, original);
     if (fault === 'missing-build') await fs.unlink(metadata);
-    else if (fault === 'missing-electron') await fs.writeFile(metadata, JSON.stringify({ electron: path.join(f.root, 'unavailable-runtime') }));
-    else f.clock.ioError = { method: fault, code: 'EIO', file: fault === 'readFile' ? metadata : fault === 'lstat' ? first.opts.source : path.join(first.opts.source, 'browser-mcp/node_modules') };
+    else if (fault === 'syntax') await fs.writeFile(metadata, '{');
+    else if (['EACCES', 'EIO', 'EBUSY', 'EPERM'].includes(fault)) f.clock.ioError = { method: 'readFile', code: fault, file: metadata };
+    else await fs.writeFile(metadata, JSON.stringify({ ...first.built, nodeGenerations: fault }));
     const before = (await fs.readdir(cache)).sort();
-    await assert.rejects(f.prune([revision]), { code: fault.startsWith('missing-') ? 'ENOENT' : 'EIO' });
-    assert.deepEqual((await fs.readdir(cache)).sort(), before, 'incomplete inventory must defer complete, invalid and abandoned deletion');
+    await assert.rejects(f.prune([path.dirname(first.opts.source), revision]));
+    assert.deepEqual((await fs.readdir(cache)).sort(), before, 'all records must be valid before complete, invalid or abandoned deletion');
     await fs.writeFile(metadata, original);
-    await f.prune([revision]);
+    await f.prune([path.dirname(first.opts.source), revision]);
     assert.equal((await fs.readdir(cache, { withFileTypes: true })).filter(entry => entry.isDirectory()).length, 3);
   }
 });
 
 test('optional staging may be absent or incomplete but never hides a dangling junction', async t => {
-  for (const state of ['absent', 'incomplete', 'dangling']) {
+  for (const state of ['absent', 'incomplete', 'complete', 'dangling']) {
     const f = await fixture(t), first = await f.build();
     const retained = await fs.realpath(path.join(first.opts.source, 'browser-mcp/node_modules'));
     const cache = path.dirname(path.dirname(retained)); await gcCandidates(cache, retained);
     const staging = path.join(f.root, 'staging');
-    if (state === 'incomplete') {
+    if (state === 'incomplete' || state === 'complete') {
       await fs.mkdir(path.join(staging, 'source/browser-mcp'), { recursive: true });
       await fs.symlink(retained, path.join(staging, 'source/browser-mcp/node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
+      if (state === 'complete') await fs.writeFile(path.join(staging, 'build.json'), JSON.stringify(first.built));
       await f.forget(first);
     }
     if (state === 'dangling') {
       await fs.symlink(path.join(f.root, 'unavailable-stage'), staging, process.platform === 'win32' ? 'junction' : 'dir');
+    }
+    if (state === 'incomplete' || state === 'dangling') {
       const before = (await fs.readdir(cache)).sort();
       await assert.rejects(f.prune([], undefined, staging), { code: 'ENOENT' });
       assert.deepEqual((await fs.readdir(cache)).sort(), before);
@@ -462,7 +567,7 @@ test('updater dependency cleanup runs under update.lock on success/error but nev
   const external = path.join(f.root, 'retained'); await fs.mkdir(external);
   await fs.symlink(external, linkedRevision, process.platform === 'win32' ? 'junction' : 'dir');
   const electron = path.join(f.root, 'electron'); await fs.writeFile(electron, 'runtime');
-  for (const directory of [path.join(f.root, 'versions', revision), external]) await fs.writeFile(path.join(directory, 'build.json'), JSON.stringify({ electron }));
+  for (const directory of [path.join(f.root, 'versions', revision), external]) await fs.writeFile(path.join(directory, 'build.json'), JSON.stringify({ electron, nodeGenerations: [] }));
   const cache = path.join(f.root, 'dependencies/node/browser-mcp');
   for (const digit of ['1', '2', '3']) {
     const entry = path.join(cache, digit.repeat(24)); await fs.mkdir(entry, { recursive: true });
