@@ -21,6 +21,10 @@ from app.core import remote_task, swarm, turn_scheduler
 from app.db import database, session_events
 from app.network import catalog, transport
 
+# Hang guard for waits that synchronize on events. It should never be reached
+# when the code is correct, however slow a shared CI runner is (#794).
+SAFETY_S = 30
+
 
 async def burst(app, method, paths, bodies=None):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
@@ -150,20 +154,25 @@ async def test_start_waiters_do_not_starve_short_reads(monkeypatch):
     release = threading.Event()
     active = 0
     guard = threading.Lock()
+    # Saturate every admission thread before reading, so no read can borrow one.
+    admission = remote_task._start_executor._max_workers
     def prepare(body, peer):
         nonlocal active
         with guard:
             active += 1
-            if active == 4:
+            if active == admission:
                 loop.call_soon_threadsafe(entered.set)
-        assert release.wait(5)
+        # Held until the reads below have finished, never released by a clock:
+        # a read that needs one of these threads deadlocks and fails the test.
+        # The bound only frees the threads if the test itself breaks.
+        assert release.wait(SAFETY_S * 2)
         return {"created": True, "worker_session_id": body["worker_session_id"]}
     monkeypatch.setattr(remote_task, "prepare_task_start", prepare)
     monkeypatch.setattr(turn_scheduler, "kick", lambda *a: None)
     monkeypatch.setattr(transport, "request_scan", lambda *a, **kw: None)
     starts = [asyncio.create_task(remote_task.handle_task_start({"worker_session_id": f"blocked-{i}"}, "peer")) for i in range(31)]
     try:
-        await asyncio.wait_for(entered.wait(), 2)
+        await asyncio.wait_for(entered.wait(), SAFETY_S)
         app = FastAPI()
         app.include_router(gitops.router)
         app.include_router(swarms.router, prefix="/api/sessions")
@@ -177,9 +186,15 @@ async def test_start_waiters_do_not_starve_short_reads(monkeypatch):
         monkeypatch.setattr(swarms, "check_transcript_access", AsyncMock())
         # Exercise both actual read handlers while all admission threads are
         # blocked. The default pool is deliberately small, as on small workers.
+        # Starvation is proven by order, not speed: the reads must finish while
+        # every admission thread is still blocked and no start has returned.
+        # SAFETY_S is a hang guard for a starved read, not a latency budget.
         reads = await asyncio.wait_for(burst(app, "GET", [
             "/api/v1/projects/p/git/pr-state", "/api/sessions/load/swarms",
-        ]), 1)
+        ]), SAFETY_S)
+        assert not release.is_set()
+        assert active == admission
+        assert not any(start.done() for start in starts)
         timings("reads-during-31-starts", reads, {"blocked_starts": len(starts)})
     finally:
         release.set()

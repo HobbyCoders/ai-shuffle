@@ -233,6 +233,8 @@
 	// mid-load). Previously an open, titled session with no messages fell through
 	// to "New Chat", which read as "clearing deleted my session" (see #558 +
 	// chat-empty-state.ts). Only a genuinely unbound, empty chat shows "New Chat".
+	// ChatView reports whether the open mirrored chat still waits for its first sync.
+	let chatMirrorSyncPending = $state(false);
 	const headerTitle = $derived.by(() => {
 		if (!$activeView) return '';
 		if ($activeView.type === 'session') {
@@ -241,11 +243,15 @@
 				title: activeTab?.title,
 				messageCount: activeTab?.messages.length ?? 0,
 				// A deep-linked chat can finish its history before /live names it.
+				// A mirrored chat's first sync is part of its open, as in ChatView's
+				// hero, so the two always show the same title (#812).
 				loading: !!(
 					activeTab?.isRestoringSession ||
 					activeTab?.isLoadingSession ||
-					(activeTab?.sessionId && $pendingDeepLink === activeTab.sessionId)
-				)
+					(activeTab?.sessionId && $pendingDeepLink === activeTab.sessionId) ||
+					(activeTab?.sessionId && chatMirrorSyncPending)
+				),
+				listTitle: activeSessionRow?.title
 			});
 		}
 		return viewTitles[$activeView.type] || '';
@@ -1035,6 +1041,7 @@
 						onBrowserPreload={() => BrowserSidePanel.preload()}
 						browserOpen={sessionBrowser.open}
 						terminal={terminalToggle}
+						bind:mirrorSyncPending={chatMirrorSyncPending}
 					/>
 					</div>
 				</div>

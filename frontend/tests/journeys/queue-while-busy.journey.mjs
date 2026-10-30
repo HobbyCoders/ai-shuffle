@@ -10,6 +10,8 @@ import {
 	expect,
 	openNewChat,
 	scriptTag,
+	scrollTranscriptTo,
+	transcriptScroll,
 	typeAndSend,
 	uniq,
 	waitChat,
@@ -61,6 +63,47 @@ await runJourney({
 			},
 			verify({ recording }) {
 				expectStopFollowsStreaming(recording, { from: markTime(recording, 'send the first') });
+			}
+		},
+		{
+			// #863: a reader who scrolled up while a turn runs stays where they are
+			// when the queued turn starts. Only a reader at the bottom follows it.
+			name: 'queue-scrolled-up',
+			async setup(ctx) {
+				await openNewChat(ctx);
+				await ctx.page.waitForTimeout(800);
+				// Enough transcript above the live turn to scroll up into.
+				await typeAndSend(ctx.page, `history tok-${uniq()} ${scriptTag(ctx.variant, 'long', { tps: 400 })}`);
+				await waitTurnSettled(ctx.page, { text: 'Here is a long answer', messagesAtLeast: 2, timeout: 90_000 });
+			},
+			async act({ page, mark, variant, log }) {
+				await mark('send the first');
+				await typeAndSend(page, `first tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 5 })}`);
+				await page.getByText(SLOW_REPLY.start, { exact: false }).first().waitFor({ timeout: 60_000 });
+				await waitChat(page, { streaming: 'true' });
+
+				await mark('queue the second');
+				const second = `tok-${uniq()}`;
+				await typeAndSend(page, `queued ${second} ${fakeAiTag(variant)}`.trim());
+				await page.locator('.pending-messages [role="article"]').filter({ hasText: second }).waitFor({ timeout: 5000 });
+
+				await mark('scroll up to read');
+				await scrollTranscriptTo(page, 0.15);
+				const before = await transcriptScroll(page);
+				expect(!before.atBottom && before.firstRow, `scrolled up while the turn runs (${JSON.stringify(before)})`);
+
+				await mark('the queued turn starts');
+				await page.locator('[data-user-turn-id]').filter({ hasText: second }).first().waitFor({ state: 'attached', timeout: 90_000 });
+				await page.waitForTimeout(1500);
+				const after = await transcriptScroll(page);
+				log(`before ${JSON.stringify(before)}, after ${JSON.stringify(after)}`);
+				// Rows can be taller than the screen, so the same first row alone is not
+				// proof: the scroll offset must hold too (new content grows below it).
+				expect(
+					!after.atBottom && after.firstRow === before.firstRow && Math.abs(after.top - before.top) <= 150,
+					`the queued turn starting moved the reader (before ${JSON.stringify(before)}, after ${JSON.stringify(after)})`
+				);
+				await waitTurnSettled(page, { text: `You said: “queued ${second}`, messagesAtLeast: 6, timeout: 90_000 });
 			}
 		}
 	],
