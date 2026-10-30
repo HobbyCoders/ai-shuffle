@@ -62,7 +62,8 @@ class QrScannerSmokeTest {
         }
     }
     @Test fun mergedManifestHasNoOrientationRestrictions() {
-        val activities = context.packageManager.getPackageInfo(context.packageName, PackageManager.GET_ACTIVITIES).activities
+        val activities = requireNotNull(context.packageManager.getPackageInfo(context.packageName, PackageManager.GET_ACTIVITIES).activities)
+        assertTrue("Merged manifest must contain activities", activities.isNotEmpty())
         assertFalse(activities.any { it.name == "com.journeyapps.barcodescanner.CaptureActivity" })
         activities.forEach { activity ->
             assertEquals(activity.name, ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED, activity.screenOrientation)
