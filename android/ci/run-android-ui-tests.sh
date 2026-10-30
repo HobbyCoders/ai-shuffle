@@ -14,7 +14,10 @@ on_exit() {
     fi
   fi
   # Keep timing evidence on success too, before emulator teardown loses logcat.
-  timeout 15 adb -s emulator-5554 logcat -d -v threadtime ConsentTiming:I ProfileTiming:I DemoNavigation:I '*:S' > "$out/timing.txt" || true
+  timeout 15 adb -s emulator-5554 logcat -d -v threadtime ConsentTiming:I ProfileTiming:I NativeInputTiming:I AppControlTiming:I AppControlFence:I DemoNavigation:I '*:S' > "$out/timing.txt" || true
+  # The always-uploaded artifact is deliberately confined to readiness evidence.
+  # Keep this compact trace there too, without widening its path allowlist.
+  mkdir -p "$RUNNER_TEMP/android-emulator/readiness" && cp "$out/timing.txt" "$RUNNER_TEMP/android-emulator/readiness/native-timing.txt" || true
   timeout 30 adb -s emulator-5554 pull /sdcard/Android/media/com.hobbycoders.aishuffle/ui-smoke "$out/screenshots" || true
   if (( status != 0 )); then
     bash ci/emulator-diagnostics.sh test-failure || true
@@ -46,6 +49,7 @@ python3 ci/check-instrumentation.py "$out/cold-chat.txt"
 # the old 600s suite deadline killed a healthy test, not a hung refresh.
 # Give the full suite room while bounding each test independently (milliseconds).
 # Keep the host deadline as a backstop for an unresponsive instrumentation process.
+# Consent coverage also exercises a separate APK so the bundled WebView is not the target.
 timeout --kill-after=15s 1200s adb -s emulator-5554 shell am instrument -w -r \
   -e timeout_msec 180000 \
   -e notClass 'com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#realSystemSaveDialogReturnsToChatAndCompletesTransfer' \

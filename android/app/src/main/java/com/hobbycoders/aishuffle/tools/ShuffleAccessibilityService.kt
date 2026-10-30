@@ -42,12 +42,15 @@ class ShuffleAccessibilityService : AccessibilityService() {
             captured != null -> {
                 val root = safeRoot()
                 if (root == null) false else try {
-                    root.windowId == captured.window && root.packageName?.toString() == captured.pkg && fingerprint(root) == captured.fingerprint
+                    root.windowId == captured.window && root.packageName?.toString() == captured.pkg && sameFingerprint(root, captured.fingerprint)
                 } finally { root.recycle() }
             }
             else -> true
         }
-        if (!unchanged) { revision++; clearSnapshot(); cancelConsent() }
+        if (!unchanged) {
+            fenceTrace("event=${event.eventType} ownPackage=${event.packageName == packageName} revision=$revision pending=${pendingTarget != null} snapshot=${captured != null}")
+            revision++; clearSnapshot(); cancelConsent()
+        }
     }
     override fun onInterrupt() { cancelConsent(); clearSnapshot(); ToolsPreferences(this).setCrossAppEnabled(false) }
     override fun onUnbind(intent: android.content.Intent?): Boolean { shutdown(); return super.onUnbind(intent) }
@@ -118,15 +121,20 @@ class ShuffleAccessibilityService : AccessibilityService() {
                 current === this && consentId == id && enabled() && System.currentTimeMillis() < expires && targetStillValid()
         } finally { countdown.cancel(); consent = null; consentId = null; consentTargetValid = null; removeOverlay(); updateIndicator() }
     }
+    private fun fenceTrace(detail: String) {
+        if (com.hobbycoders.aishuffle.BuildConfig.DEBUG) android.util.Log.i("AppControlFence", detail)
+    }
+    private fun rejectedRoot(reason: String): AccessibilityNodeInfo? { fenceTrace("root=$reason"); return null }
     private fun safeRoot(): AccessibilityNodeInfo? {
-        if (!enabled() || (getSystemService(KEYGUARD_SERVICE) as KeyguardManager).isKeyguardLocked) return null
+        if (!enabled() || (getSystemService(KEYGUARD_SERVICE) as KeyguardManager).isKeyguardLocked) return rejectedRoot("disabled_or_locked")
         val windowsNow = windows
         try {
-            val target = windowsNow.singleOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive } ?: return null
-            if (windowsNow.any { (it.isActive || it.isFocused) && it.id != target.id && it.type != AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY }) return null
-            val root = target.root ?: return null
+            val target = windowsNow.singleOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive }
+                ?: return rejectedRoot("active_app_count=${windowsNow.count { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive }}")
+            if (windowsNow.any { (it.isActive || it.isFocused) && it.id != target.id && it.type != AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY }) return rejectedRoot("other_focused_window")
+            val root = target.root ?: return rejectedRoot("missing_window_root")
             val pkg = root.packageName?.toString()
-            if (pkg !in ToolsPreferences(this).allowedApps || pkg !in AppControlPolicy.candidates(this) || unsafe(root, 0, intArrayOf(0))) { root.recycle(); return null }
+            if (pkg !in ToolsPreferences(this).allowedApps || pkg !in AppControlPolicy.candidates(this) || unsafe(root, 0, intArrayOf(0))) { root.recycle(); return rejectedRoot("not_allowed_or_unsafe") }
             return root
         } finally { windowsNow.forEach { it.recycle() } }
     }
@@ -154,22 +162,46 @@ class ShuffleAccessibilityService : AccessibilityService() {
         visit(root, 0)
         return out.toString()
     }
+    /** Debug diagnostics report only changed field names/counts, never screen values. */
+    private fun fingerprintChange(expected: String, actual: String): String {
+        val fields = listOf("window", "viewId", "class", "text", "description", "bounds", "clickable", "scrollable", "editable", "visible", "children")
+        val before = expected.split(';'); val after = actual.split(';')
+        val changed = before.zip(after).flatMap { (left, right) ->
+            left.split('|').zip(right.split('|')).mapIndexedNotNull { index, (a, b) ->
+                if (a != b) fields.getOrNull(index) ?: "structure" else null
+            }
+        }.toSet()
+        return "rows=${before.size}->${after.size} fields=$changed"
+    }
+    private fun sameFingerprint(root: AccessibilityNodeInfo, expected: String): Boolean {
+        val actual = fingerprint(root)
+        if (actual == expected) return true
+        if (com.hobbycoders.aishuffle.BuildConfig.DEBUG) fenceTrace("fingerprint ${fingerprintChange(expected, actual)}")
+        return false
+    }
     suspend fun execute(name: String, args: JSONObject, deadline: Long = System.currentTimeMillis() + 20_000): JSONObject {
         if (!enabled()) return ToolRegistry.error("cross_app_disabled", "Enable Allow while using other apps and choose allowed apps in Phone tools. OS accessibility must be connected.")
         val initial = safeRoot() ?: return ToolRegistry.error("protected_screen", "This screen is not an allowed app, or contains security, permission, credential or payment content.")
         val pkg = initial.packageName.toString(); val window = initial.windowId; val fingerprint = fingerprint(initial); initial.recycle()
         val ref = if (name == "read_screen") null else ToolRegistry.text(args, "ref")
         val before = snapshot; val version = revision
-        if (ref != null && !valid(before, pkg, window, fingerprint, ref)) return ToolRegistry.error("stale_ref", "Read the current screen again; this reference is stale.")
+        if (ref != null && !valid(before, pkg, window, fingerprint, ref)) {
+            fenceTrace("reference_precheck snapshot=${before != null} revision=$revision" +
+                if (com.hobbycoders.aishuffle.BuildConfig.DEBUG && before != null) " ${fingerprintChange(before.fingerprint, fingerprint)}" else "")
+            return ToolRegistry.error("stale_ref", "Read the current screen again; this reference is stale.")
+        }
         val direction = if (name == "scroll") ToolRegistry.text(args, "direction") else ""
         require(name != "scroll" || direction in setOf("up", "down", "left", "right")) { "direction must be up, down, left or right." }
         val appName = AppControlPolicy.candidates(this)[pkg] ?: pkg
         val nodeText = before?.nodes?.get(ref)?.let { "${it.text?.toString().orEmpty()} ${it.contentDescription?.toString().orEmpty()}" }.orEmpty().take(200)
         val proposed = when (name) { "read_screen" -> "Read visible screen content and send it to your selected server"; "tap_node" -> "Tap $nodeText"; "scroll" -> "Scroll $direction on $nodeText"; "go_back" -> "Go back from this screen"; else -> return ToolRegistry.error("unsupported", "Unsupported screen action.") }
         fun unchanged(): Boolean {
-            if (revision != version || System.currentTimeMillis() >= deadline) return false
+            if (revision != version || System.currentTimeMillis() >= deadline) {
+                fenceTrace("command=$name revision=$version->$revision expired=${System.currentTimeMillis() >= deadline}")
+                return false
+            }
             val root = safeRoot() ?: return false
-            return try { root.windowId == window && root.packageName?.toString() == pkg && fingerprint(root) == fingerprint } finally { root.recycle() }
+            return try { root.windowId == window && root.packageName?.toString() == pkg && sameFingerprint(root, fingerprint) } finally { root.recycle() }
         }
         if (!approve("$appName ($pkg)\n$proposed${ref?.let { "\nReference: $it" }.orEmpty()}\nServer: ${DeviceToolsRuntime.selectedServerName().orEmpty()}", deadline, ::unchanged))
             return ToolRegistry.error("denied", "Local consent denied, expired or target changed; no action was performed.")
