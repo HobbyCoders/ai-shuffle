@@ -118,6 +118,19 @@ describe('opening an existing chat', () => {
 		expect(mocks.fetchRemote).toHaveBeenCalledTimes(1);
 	});
 
+	it('runs the skipped fetch once the turn ends (stream-end refresh)', async () => {
+		await git.loadRepository('p', false, 's1', { fetchBlocked: () => true });
+		await settle();
+		expect(mocks.fetchRemote).not.toHaveBeenCalled();
+		git.forceRefresh();
+		await settle();
+		expect(mocks.fetchRemote).toHaveBeenCalledTimes(1);
+		// Only once: a later stream end does not fetch again.
+		git.forceRefresh();
+		await settle();
+		expect(mocks.fetchRemote).toHaveBeenCalledTimes(1);
+	});
+
 	it.each([409, 503])('does not auto-fetch an unavailable checkout (%s)', async (status) => {
 		mocks.getGitStatus.mockRejectedValue({ status, detail: 'Checkout unavailable' });
 		vi.spyOn(console, 'error').mockImplementation(() => {});
