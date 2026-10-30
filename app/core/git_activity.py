@@ -9,7 +9,7 @@ from app.core.project_resolver import resolve_existing_cwd, resolve_project_v2
 from app.core.task_registry import task_registry
 from app.db import database
 from app.db.base import get_db
-from app.db.checkouts import get_checkout_by_path
+from app.db.checkouts import get_checkouts_by_path
 from app.db.sessions import list_sessions_for_cleanup
 from app.network import control
 
@@ -31,8 +31,10 @@ def _live_session_ids():
         return {row['session_id'] for row in cursor.fetchall()}
 
 def _project_candidates(project_id, working_dir=None):
-    checkout = get_checkout_by_path(working_dir) if working_dir else None
-    canonical = checkout['project_id'] if checkout else None
+    # A project linked late keeps its placeholder identity next to the remote
+    # one at the same folder (#802); a chat on either can be using it.
+    identities = [row['project_id'] for row in get_checkouts_by_path(working_dir)] if working_dir else []
+    canonical = identities[0] if len(identities) == 1 else (identities or None)
     if not canonical:
         project = resolve_project_v2({'project_id': project_id})
         canonical = project['id'] if project else None
