@@ -5,6 +5,10 @@ import { runJourney } from './runner.mjs';
 import { expect, waitChatOpen } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
+// Hosted journeys build only the shared desktop UI and exercise it at both
+// widths. Opt in to the separately built production mobile shell for local QA:
+// node frontend/tests/journeys/transcript-reader.journey.mjs --mobile-shell
+const mobileShell = process.argv.includes('--mobile-shell');
 const LOG = '[role="log"][aria-label="Conversation messages"]';
 const twoFrames = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 
@@ -15,7 +19,7 @@ await runJourney({
 		async setup({ page, status, variant }) {
 			const id = status.seed?.chats?.long ?? status.seed?.sessions?.large;
 			if (!id) throw new Error('This reader journey needs the standard long or performance seed.');
-			const prefix = variant.viewport === 'phone' ? '/mobile/' : '/';
+			const prefix = mobileShell && variant.viewport === 'phone' ? '/mobile/' : '/';
 			await page.goto(new URL(`${prefix}?session=${encodeURIComponent(id)}`, status.urls.ui).toString());
 			await waitChatOpen(page, { messagesAtLeast: 50, timeout: 90_000 });
 			await page.locator(LOG).hover();
@@ -26,8 +30,10 @@ await runJourney({
 			await mark('select across two transcript turns');
 			const selected = await page.evaluate(() => {
 				const rows = [...document.querySelectorAll('[data-transcript-index]')];
-				const rich = rows.findIndex((row, i) => i + 1 < rows.length && row.textContent.length > 800);
-				const start = rich >= 0 ? rich : Math.max(0, Math.floor(rows.length / 2) - 1);
+				// Pin the tail pair: moving to older history MUST eventually evict
+				// these rows without the fix. A middle pair in the short CI seed
+				// can fit at BOTH history edges and never hit a selection boundary.
+				const start = Math.max(0, rows.length - 2);
 				const first = document.createTreeWalker(rows[start], NodeFilter.SHOW_TEXT);
 				const last = document.createTreeWalker(rows[start + 1], NodeFilter.SHOW_TEXT);
 				const anchor = first.nextNode();
