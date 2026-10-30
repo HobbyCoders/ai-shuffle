@@ -44,6 +44,8 @@ internal class NativeStateIdlingResource(
     }
     private fun requestFrame() {
         if (!requireFocusedFrame || framePending || closed || !root.hasWindowFocus()) return
+        check(android.os.Build.VERSION.SDK_INT >= 29) { "Focused-frame idling requires API 29+" }
+        check(root.isHardwareAccelerated) { "The native test window must render a hardware frame" }
         framePending = true
         root.viewTreeObserver.registerFrameCommitCallback {
             framePending = false

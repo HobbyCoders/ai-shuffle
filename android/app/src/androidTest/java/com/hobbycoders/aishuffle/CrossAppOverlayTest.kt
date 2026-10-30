@@ -37,6 +37,25 @@ class CrossAppOverlayTest {
     }
     private var screenshotNumber = 0
     private var lastResult: AtomicReference<JSONObject>? = null
+    /** Read-only evidence from the external fixture, never a substitute root or consent bypass. */
+    private fun screenTrace(): JSONObject {
+        val service = ShuffleAccessibilityService.current ?: return JSONObject().put("service", false)
+        val revision = ShuffleAccessibilityService::class.java.getDeclaredField("revision").apply { isAccessible = true }
+        val snapshot = ShuffleAccessibilityService::class.java.getDeclaredField("snapshot").apply { isAccessible = true }.get(service)
+        val captured = snapshot?.javaClass?.getDeclaredField("fingerprint")?.apply { isAccessible = true }?.get(snapshot)
+        val fingerprint = ShuffleAccessibilityService::class.java.getDeclaredMethod("fingerprint", AccessibilityNodeInfo::class.java).apply { isAccessible = true }
+        val windows = service.windows
+        return try {
+            val target = windows.singleOrNull { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive }
+            val root = target?.root
+            try {
+                JSONObject().put("revision", revision.getLong(service))
+                    .put("snapshot", captured ?: JSONObject.NULL)
+                    .put("target", if (root?.packageName?.toString() == instrumentation.context.packageName) fingerprint.invoke(service, root) else JSONObject.NULL)
+                    .put("windows", windows.map { "${it.id}:${it.type}:active=${it.isActive}:focused=${it.isFocused}" })
+            } finally { root?.recycle() }
+        } finally { windows.forEach { it.recycle() } }
+    }
     private fun localPress(automation: UiAutomation, text: String) {
         var target: AccessibilityNodeInfo? = null
         awaitCondition("Consent button $text was not visible") {
@@ -77,7 +96,13 @@ class CrossAppOverlayTest {
                 val started = System.currentTimeMillis()
                 val elapsedStarted = android.os.SystemClock.elapsedRealtime()
                 val deadline = started + ttl
+                val screenBefore = screenTrace()
                 val reply = DeviceToolExecutor(context).execute(name, args, deadline)
+                listOf("before" to screenBefore, "reply" to reply, "after" to screenTrace()).forEach { (stage, state) ->
+                    state.toString().chunked(3_000).forEachIndexed { index, part ->
+                        android.util.Log.i("AppControlTiming", "$name.$stage[$index]: $part")
+                    }
+                }
                 val finished = System.currentTimeMillis()
                 val elapsed = android.os.SystemClock.elapsedRealtime() - elapsedStarted
                 trace?.set(JSONObject().put("deadline_ms", deadline).put("finished_ms", finished)
