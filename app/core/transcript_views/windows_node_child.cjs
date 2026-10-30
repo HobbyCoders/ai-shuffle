@@ -1,5 +1,8 @@
 // No application/preload code before Job admission; NODE_OPTIONS is excluded.
 const fs = require('node:fs');
+const identity = Buffer.alloc(4);
+identity.writeUInt32BE(process.pid);
+fs.writeSync(1, identity);
 const go = Buffer.alloc(1);
 if (fs.readSync(0, go, 0, 1, null) !== 1 || go[0] !== 0x47) process.exit(70);
 process.argv.splice(1, 1);

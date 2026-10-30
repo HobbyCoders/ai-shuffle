@@ -59,7 +59,15 @@ async def launch(*command: str, limit: int, runtime: Literal["python", "node"]) 
         limit=limit, **options)
     if os.name == "nt":
         try:
-            job = _job_object().assign_kill_on_close_job(process.pid)
+            # The Windows venv executable can be a redirector that already
+            # started a real interpreter. Both are inert until G; enroll both
+            # known PIDs, not a racy snapshot of an arbitrarily growing tree.
+            identity = await asyncio.wait_for(process.stdout.readexactly(4), 5.0)
+            runtime_pid = int.from_bytes(identity, "big")
+            if runtime_pid <= 0:
+                raise OSError("projection_invalid_runtime_identity")
+            extra = (runtime_pid,) if runtime_pid != process.pid else ()
+            job = _job_object().assign_kill_on_close_job(process.pid, *extra)
             if job is None:
                 raise OSError("projection_parent_ownership_failed")
             # The handle is parent-only/non-inheritable. Abrupt parent death

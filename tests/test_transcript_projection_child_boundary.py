@@ -227,8 +227,8 @@ async def test_windows_job_failure_kills_the_unowned_child(monkeypatch):
 
     pids = []
 
-    def cannot_assign(pid):
-        pids.append(pid)
+    def cannot_assign(pid, *additional_pids):
+        pids.extend((pid, *additional_pids))
         return None
 
     monkeypatch.setattr(child_process, "_job_object", lambda: SimpleNamespace(
@@ -278,6 +278,8 @@ async def test_windows_startup_gates_do_not_execute_or_consume_protocol(tmp_path
         *_windows_command(command, runtime), env=parent_environment(tmp_path),
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
+        runtime_pid = int.from_bytes(await asyncio.wait_for(process.stdout.readexactly(4), 5), "big")
+        assert runtime_pid > 0 and alive(runtime_pid)
         await asyncio.sleep(.15)
         assert process.returncode is None and not marker.exists()
         if admission == "go":
@@ -296,6 +298,56 @@ async def test_windows_startup_gates_do_not_execute_or_consume_protocol(tmp_path
         if process.returncode is None:
             process.kill()
             await process.wait()
+
+
+@pytest.mark.parametrize("failure", ["none", "open", "assign", "exception"])
+def test_job_admits_known_redirector_and_runtime_or_closes_all(monkeypatch, failure):
+    import ctypes
+    from ctypes import wintypes
+
+    from app.core.transcript_views.child_process import _job_object
+
+    module = _job_object()
+    calls = []
+
+    class Kernel:
+        def CreateJobObjectW(self, security, name):
+            return 900
+
+        def SetInformationJobObject(self, *args):
+            return True
+
+        def OpenProcess(self, access, inherit, pid):
+            assert not inherit
+            calls.append(("open", pid))
+            if pid == 202 and failure == "exception":
+                raise OSError("synthetic admission failure")
+            return 0 if pid == 202 and failure == "open" else pid + 1000
+
+        def AssignProcessToJobObject(self, job, process):
+            assert job == 900
+            calls.append(("assign", process))
+            return not (process == 1202 and failure == "assign")
+
+        def CloseHandle(self, handle):
+            calls.append(("close", handle))
+            return True
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(module.sys, "platform", "win32")
+        scoped.setattr(module, "_kernel32", lambda: (ctypes, wintypes, Kernel()))
+        result = module.assign_kill_on_close_job(101, 202, 101)
+        assert result == (900 if failure == "none" else None)
+        if result is not None:
+            module.close_job(result)
+        before = list(calls)
+        assert module.assign_kill_on_close_job(101, 0) is None
+        assert calls == before, "invalid extra PID must not create a partial job"
+    assert [pid for op, pid in calls if op == "open"] == [101, 202]
+    assert calls.count(("close", 900)) == 1
+    assert calls.count(("close", 1101)) == 1
+    if failure in ("none", "assign"):
+        assert calls.count(("close", 1202)) == 1
 
 
 @pytest.fixture(scope="module")
@@ -336,6 +388,8 @@ async def test_python_gate_defers_installed_site_hook_until_admission(tmp_path, 
         env=parent_environment(tmp_path), stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
+        runtime_pid = int.from_bytes(await asyncio.wait_for(process.stdout.readexactly(4), 5), "big")
+        assert runtime_pid > 0 and alive(runtime_pid)
         await asyncio.sleep(.15)
         assert process.returncode is None and not entry.exists() and not marker.exists()
         process.stdin.write(b"G")
@@ -349,7 +403,13 @@ async def test_python_gate_defers_installed_site_hook_until_admission(tmp_path, 
             process.kill()
             await process.wait()
         if marker.exists() and alive(int(marker.read_text())):
-            psutil.Process(int(marker.read_text())).kill()
+            descendant = psutil.Process(int(marker.read_text()))
+            # A private Windows venv Popen PID can itself be a redirector.
+            for member in reversed([descendant, *descendant.children(recursive=True)]):
+                try:
+                    member.kill()
+                except psutil.NoSuchProcess:
+                    pass
 
 
 STARTUP_PARENT = r'''
@@ -368,8 +428,13 @@ async def main():
     assert os.read(0, 1) == b"B"
     jobs = child_process._job_object()
     original = jobs.assign_kill_on_close_job
-    def assign(pid):
+    def assign(pid, *additional_pids):
         seen["pid"] = pid
+        seen["runtime_pid"] = additional_pids[0] if additional_pids else pid
+        if runtime == "python":
+            # EnvBuilder on Windows uses a real PE redirector. Keep this a
+            # two-PID regression rather than silently testing the base exe.
+            assert additional_pids, "private venv must exercise runtime redirection"
         if mode == "launch-death":
             print(json.dumps(seen), flush=True)
             os.read(0, 1)  # The test kills us in this pre-assignment window.
@@ -377,7 +442,7 @@ async def main():
         # Enlarge the creation/assignment window. An ungated script/site hook
         # can create an escaping descendant here, before retroactive assignment.
         time.sleep(.4)
-        job = None if mode == "failure" else original(pid)
+        job = None if mode == "failure" else original(pid, *additional_pids)
         if mode == "assigned-death":
             assert job is not None, "cannot attach launch-death fixture"
             print(json.dumps(seen), flush=True)
@@ -457,7 +522,7 @@ async def test_windows_owns_startup_descendants_and_launch_window(tmp_path, star
                 assert process.returncode is None, text
                 await asyncio.sleep(.01)
         stats = await asyncio.wait_for(ready(), 15)
-        owned.add(stats["pid"])
+        owned.update((stats["pid"], stats["runtime_pid"]))
         if mode in ("success", "nested"):
             assert not stats["failed"] and grandchild.exists() and entry.exists(), stats
             owned.add(stats["grandchild"])

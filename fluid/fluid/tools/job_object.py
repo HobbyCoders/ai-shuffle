@@ -42,15 +42,19 @@ def _kernel32():  # pragma: no cover - win32 only
     return ctypes, wintypes, kernel32
 
 
-def assign_kill_on_close_job(pid: int | None) -> int | None:
-    """Put ``pid`` in a new job that kills its whole tree when closed.
+def assign_kill_on_close_job(pid: int | None, *additional_pids: int) -> int | None:
+    """Put the known initial PIDs in one job that kills their trees when closed.
 
     Returns the job handle, which the caller must keep and later pass to
     :func:`close_job`, or None when not on Windows or when anything fails.
-    Processes ``pid`` starts after this call join the job.
+    Future descendants join the job. Existing redirector/runtime pairs must
+    both be supplied; assignment of a parent is not retroactive. If admitting
+    any initial PID fails, close the job (ending already admitted members).
     """
-    if sys.platform != "win32" or not isinstance(pid, int) or pid <= 0:
+    pids = (pid, *additional_pids)
+    if sys.platform != "win32" or any(not isinstance(item, int) or item <= 0 for item in pids):
         return None
+    job = None
     try:  # pragma: no cover - win32 only
         ctypes, wintypes, kernel32 = _kernel32()
 
@@ -96,20 +100,22 @@ def assign_kill_on_close_job(pid: int | None) -> int | None:
         ):
             kernel32.CloseHandle(job)
             return None
-        process = kernel32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid)
-        if not process:
-            kernel32.CloseHandle(job)
-            return None
-        try:
-            assigned = kernel32.AssignProcessToJobObject(job, process)
-        finally:
-            kernel32.CloseHandle(process)
-        if not assigned:
-            kernel32.CloseHandle(job)
-            return None
+        for item in dict.fromkeys(pids):
+            process = kernel32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, item)
+            if not process:
+                kernel32.CloseHandle(job)
+                return None
+            try:
+                assigned = kernel32.AssignProcessToJobObject(job, process)
+            finally:
+                kernel32.CloseHandle(process)
+            if not assigned:
+                kernel32.CloseHandle(job)
+                return None
         return int(job)
     except Exception:  # noqa: BLE001
-        log.debug("could not put process %s in a kill-on-close job", pid, exc_info=True)
+        close_job(job)
+        log.debug("could not put processes %s in a kill-on-close job", pids, exc_info=True)
         return None
 
 
