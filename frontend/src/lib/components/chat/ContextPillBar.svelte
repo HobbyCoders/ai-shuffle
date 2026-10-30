@@ -764,9 +764,36 @@
 		display: none;
 	}
 
+	/* Who shrinks on a narrow row: the repository and branch names first, the
+	   agent's name less, the runner ("Local" or the worker's name) and the
+	   worktree box not at all. */
 	.context-pill-bar:not(.sheet-mode) > .ctx-sep,
+	.context-pill-bar:not(.sheet-mode) > .runner-badge-wrap,
 	.context-pill-bar:not(.sheet-mode) .wt-indicator {
 		flex-shrink: 0;
+	}
+
+	.context-pill-bar:not(.sheet-mode) > :global(.selector-wrapper) {
+		flex-shrink: 0.4;
+		min-width: 0;
+	}
+
+	/* A phone-width row keeps room for the names: the menu chevrons go and the
+	   worktree chip is its tick box alone (its title and label still name it). */
+	@media (max-width: 480px) {
+		.context-pill-bar:not(.sheet-mode) :global(.ctx-chip .ctx-chip-chev),
+		.context-pill-bar:not(.sheet-mode) :global(.ctx-chip svg.lucide-chevron-down) {
+			display: none;
+		}
+
+		.context-pill-bar:not(.sheet-mode) .wt-indicator .ctx-chip-label {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			overflow: hidden;
+			clip: rect(0 0 0 0);
+			white-space: nowrap;
+		}
 	}
 
 	.runner-badge-wrap {
