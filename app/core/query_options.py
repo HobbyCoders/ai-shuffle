@@ -791,7 +791,8 @@ def _generation_context(
                       choices_unreadable=bool(choices.get("unreadable")),
                       choices_loader=lambda: _generation_choices(choice_config, session_row, api_user_id),
                       turn_source=turn_source if isinstance(turn_source, str) else None,
-                      requires_active_turn=bool(session_id))
+                      requires_active_turn=bool(session_id),
+                      voice_mode=bool(session_row and session_row.get("mode") == "voice"))
 
 
 #: A turn whose bound provider row was deleted. Plain words, no raw id.

@@ -116,7 +116,7 @@ async def test_pooled_interactive_server_checks_current_turn_before_writing(
     assert (await invoke(action="get"))["choices"] == {"image": saved}
     assert choices.load(OWNER, run_migration=False)["remembered"] == {"image": saved}
 
-    turn("user")
+    current = turn("user")
     assert (await invoke(action="remember", kind="image", choice=changed, confirm=True))["success"]
     assert (await invoke(action="get"))["choices"] == {
         "image": {**changed, "origin": "conversation"},
@@ -126,7 +126,7 @@ async def test_pooled_interactive_server_checks_current_turn_before_writing(
 
     # A late write after this pooled client's turn has ended cannot fall back
     # to the interactive context it connected with. Reads remain available.
-    gr.clear_turn_context(session_id)
+    gr.clear_turn_context(session_id, expected=current.aih_generation_context)
     assert (await invoke(action="remember", kind="image", choice=PICK, confirm=True))["success"] is False
     assert (await invoke(action="get"))["choices"] == {}
 

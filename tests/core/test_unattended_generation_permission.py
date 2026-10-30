@@ -2,9 +2,10 @@
 
 An automation in Ask mode put ``generateImage`` to a permission prompt nobody
 could answer, so the run hung until its timeout and the tool's own unattended
-skip (``skipped/no_stored_choice``) never happened (#776). Every run classified
-as unattended by query_options goes straight to generation admission;
-interactive runs and tools without generation admission still ask.
+skip (``skipped/no_stored_choice``) never happened (#776). Only unattended,
+background-only sources go straight to generation admission. Model-routing
+attendance is broader: API, Resume, connectors, voice and unknown sources may
+have a person present, so they retain Ask. Idle generation denies immediately.
 
 The permission callback and the generation tools read ONE per-turn context
 (``generation_resolver.turn_context``), stamped when the turn claims its
@@ -104,8 +105,7 @@ async def _asks(cb, broadcast, name):
 
 
 @pytest.mark.parametrize("source", [
-    "automation", "wakeup", "auto_continue", "unpark", "resume", "agent_message",
-    "voice", "connector", "api", "unknown", None,
+    "automation", "wakeup", "auto_continue", "unpark", "failover", "agent_message",
 ])
 @pytest.mark.parametrize("name", [CLI_NAME, "mcp__ai-tools__generateVideo", "mcp__ai-tools__runFalModel",
                                   "mcp__ai-tools__searchModels", "GenerateNativeImage"])
@@ -136,7 +136,6 @@ async def test_a_saved_deny_rule_still_wins_unattended(tmp_path):
     (TYPED, CLI_NAME),  # the owner is here to answer
     (AUTOMATION, "mcp__ai-tools__editImage"),  # not admission-gated
     (AUTOMATION, "mcp__other__generateImage"),  # not our server
-    (None, CLI_NAME),  # no turn bound: nothing is known, so it asks
 ])
 async def test_every_other_turn_and_tool_still_asks(tmp_path, turn, name):
     cb, broadcast = await _callback(tmp_path)
@@ -152,17 +151,49 @@ async def test_the_callback_reads_the_current_turn_not_an_earlier_one(tmp_path):
     await _asks(cb, broadcast, CLI_NAME)
 
 
-async def test_a_late_permission_call_cannot_use_the_finished_automation(tmp_path):
+@pytest.mark.parametrize("source,mode", [
+    ("api", None), ("resume", None), ("connector", None), ("voice", None),
+    ("user", "voice"), ("automation", "voice"), ("wakeup", "voice"),
+    ("unknown", None), (None, None),
+])
+async def test_person_attended_and_unknown_sources_keep_the_ask_prompt(tmp_path, source, mode):
+    from app.core.agent_types import PermissionResultDeny
+    from app.core.query_options import _generation_context, _is_interactive_run
+
     cb, broadcast = await _callback(tmp_path)
+    row = {"id": SID, "mode": mode}
+    unattended = not _is_interactive_run({"turn_source": source}, row)
+    assert unattended  # model-routing attendance alone cannot suppress Ask
+    _bind(_generation_context({}, row, None, session_id=SID,
+                              unattended=unattended, turn_source=source))
+    with patch.object(permission_handler, "request_permission", new=AsyncMock(
+        return_value=PermissionResultDeny(message="fixture owner's reply"),
+    )) as request:
+        result = await asyncio.wait_for(cb(CLI_NAME, {"prompt": "a tree"}, _ctx()), 5)
+    request.assert_awaited_once()
+    assert not _allowed(result)
+
+
+@pytest.mark.parametrize("name", [CLI_NAME, "GenerateNativeImage", "mcp__ai-tools__runFalModel",
+                                  "mcp__ai-tools__searchModels"])
+@pytest.mark.parametrize("mode", ["default", "bypassPermissions"])
+async def test_a_late_permission_call_denies_without_an_unanswerable_prompt(tmp_path, name, mode):
+    cb, broadcast = await _callback(tmp_path, mode=mode)
     _bind(AUTOMATION)
-    gr.clear_turn_context(SID)
-    await _asks(cb, broadcast, CLI_NAME)
+    gr.clear_turn_context(SID, expected=AUTOMATION)
+    with patch.object(permission_handler, "request_permission", new=AsyncMock(
+        side_effect=AssertionError("Idle generation must not open an Ask prompt"),
+    )):
+        result = await asyncio.wait_for(cb(name, {"prompt": "a tree"}, _ctx()), 5)
+    assert not _allowed(result)
+    assert "no active turn" in result.message.lower()
+    assert _prompts(broadcast) == []
 
 
 def test_predicate_needs_this_sessions_unattended_turn():
     assert admission_gates_unattended(CLI_NAME, AUTOMATION, session_id=SID)
     assert not admission_gates_unattended(CLI_NAME, AUTOMATION, session_id="another-session")
-    assert admission_gates_unattended(CLI_NAME, VOICE, session_id=SID)
+    assert not admission_gates_unattended(CLI_NAME, VOICE, session_id=SID)
     assert not admission_gates_unattended(CLI_NAME, replace(AUTOMATION, unattended=False), session_id=SID)
     # A mock or missing context is never read as unattended.
     assert not admission_gates_unattended(CLI_NAME, MagicMock(unattended=True, turn_source="automation",

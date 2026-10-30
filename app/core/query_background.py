@@ -361,7 +361,7 @@ async def _run_background_query_impl(
     # This turn's generation context, read by the permission callback AND by
     # the (possibly reused) client's generation tools (generation_resolver).
     from app.core.generation_resolver import bind_turn_context, clear_turn_context
-    bound_generation_context = bind_turn_context(options, session_id=session_id)
+    bound_generation_context = bind_turn_context(options, session_id=session_id, client=state)
 
     # Mark as streaming
     state.is_streaming = True
@@ -595,8 +595,9 @@ async def _run_background_query_impl(
         state.last_activity = datetime.now(timezone.utc)
         state.background_task = None
 
-        # Remove dead clients from pool
-        if not state.is_connected:
+        # A delayed old turn must not remove a reused/replacement client.
+        if (not state.is_connected and pool.peek(session_id) is state
+                and state.generation_context is bound_generation_context):
             await pool.remove_dead(session_id)
 
         # Record the terminal event so the turn closes cleanly in the event

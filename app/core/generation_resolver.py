@@ -54,22 +54,34 @@ ADMISSION_GATED_TOOLS = frozenset({
     "GenerateNativeImage", "GenerateNativeVideo",
 })
 READ_ONLY_GENERATION_TOOLS = frozenset({"mcp__ai-tools__searchModels"})
+# Model-routing attendance is broader than "nobody can answer Ask". API,
+# Resume, connectors, voice and unknown sources may have a person present.
+NO_PERSON_TURN_SOURCES = frozenset({
+    "automation", "wakeup", "auto_continue", "unpark", "failover", "agent_message",
+})
+NO_ACTIVE_TURN_MESSAGE = ("Generation skipped: no active turn is available to authorize this call. "
+                          "Nothing was submitted; start a new turn to request generation.")
+
+
+def is_generation_tool(tool_name) -> bool:
+    from app.core.background_permissions import canonical
+
+    return canonical(tool_name) in (ADMISSION_GATED_TOOLS | READ_ONLY_GENERATION_TOOLS)
 
 
 def admission_gates_unattended(tool_name, context, *, session_id=None) -> bool:
-    """Whether this call needs no person's prompt: a guarded generation tool in
-    an unattended turn (as classified by query_options._is_interactive_run).
+    """Whether admission replaces Ask: an unattended, background-only source,
+    never a voice-mode session. This is the single no-person classifier.
 
     ``context`` must be the current turn's own ``RunContext``
     (:func:`turn_context`), the one the generation tools run under too, and
-    belong to ``session_id``. Anything else (no generation tools, an unknown
-    caller, another session's turn) keeps the prompt.
+    belong to ``session_id``. Other sources do not replace Ask; the caller
+    separately denies generation when there is no active binding at all.
     """
-    from app.core.background_permissions import canonical
-
-    return (isinstance(context, RunContext) and context.unattended
+    return (isinstance(context, RunContext) and context.unattended and not context.voice_mode
+            and context.turn_source in NO_PERSON_TURN_SOURCES
             and bool(context.session_id) and context.session_id == session_id
-            and canonical(tool_name) in (ADMISSION_GATED_TOOLS | READ_ONLY_GENERATION_TOOLS))
+            and is_generation_tool(tool_name))
 
 
 @dataclass(frozen=True)
@@ -101,6 +113,9 @@ class RunContext:
     # Pooled tools must not fall back to their connect-time snapshot between
     # turns. Standalone callers (voice, catalog, peer requests) keep theirs.
     requires_active_turn: bool = False
+    voice_mode: bool = False
+    # False only for the fail-closed context of an idle pooled tool server.
+    active_turn: bool = True
 
     def remembered_for(self, kind):
         return self.remembered_choice or (self.remembered_choices or {}).get(kind)
@@ -119,17 +134,18 @@ _TURN_CONTEXTS: "OrderedDict[str, RunContext]" = OrderedDict()
 _TURN_CONTEXT_LIMIT = 4096
 
 
-def clear_turn_context(session_id, *, expected: RunContext | None = None) -> None:
-    """Release a turn before yielding its client; old cleanup cannot erase a new turn."""
-    if isinstance(session_id, str) and (expected is None or turn_context(session_id) is expected):
+def clear_turn_context(session_id, *, expected: RunContext | None) -> None:
+    """Release only this binding; a missing/invalid binding owns nothing."""
+    if isinstance(expected, RunContext) and turn_context(session_id) is expected:
         _TURN_CONTEXTS.pop(session_id, None)
 
 
-def bind_turn_context(options, *, session_id=None) -> RunContext | None:
-    """Bind this turn, or clear its session's old entry if its context is invalid.
+def bind_turn_context(options, *, session_id=None, client=None) -> RunContext | None:
+    """Bind this turn; invalid options release only the claimed client's entry.
 
-    The engine supplies the claimed session explicitly; options carry it too,
-    so a context missing its own session id cannot leave a previous turn live.
+    The engine supplies the claimed session and client explicitly, so a context
+    missing its session id cannot retain that client's previous turn or erase
+    a binding owned by another client.
     """
     context = getattr(options, "aih_generation_context", None)
     if session_id is None:
@@ -137,8 +153,12 @@ def bind_turn_context(options, *, session_id=None) -> RunContext | None:
         if not isinstance(session_id, str) or not session_id:
             session_id = context.session_id if isinstance(context, RunContext) else None
     if not isinstance(context, RunContext) or not context.session_id or context.session_id != session_id:
-        clear_turn_context(session_id)
+        clear_turn_context(session_id, expected=getattr(client, "generation_context", None))
+        if client is not None:
+            client.generation_context = None
         return None
+    if client is not None:
+        client.generation_context = context
     _TURN_CONTEXTS[session_id] = context
     _TURN_CONTEXTS.move_to_end(session_id)
     while len(_TURN_CONTEXTS) > _TURN_CONTEXT_LIMIT:
@@ -187,7 +207,7 @@ def context_for_turn(context: RunContext) -> RunContext:
     if context.requires_active_turn:
         # No active turn: no connect-time principal, choices or loader may be
         # reused. Unattended admission skips without looking up any source.
-        return RunContext(session_id=context.session_id, requires_active_turn=True)
+        return RunContext(session_id=context.session_id, requires_active_turn=True, active_turn=False)
     return context
 
 
@@ -280,6 +300,10 @@ def result(status, *, price=None, **values):
     return {"status": status, "success": status in ("completed", "catalog"), "price": dict(price or UNKNOWN_PRICE), **values}
 
 
+def no_active_turn_result():
+    return result("skipped", reason="no_active_turn", message=NO_ACTIVE_TURN_MESSAGE)
+
+
 class Resolver:
     def __init__(self, backend: Backend):
         self.backend = backend
@@ -315,6 +339,8 @@ class Resolver:
 
     async def generate(self, kind: str, args: dict, context: RunContext, *, exclude_sources=()) -> dict:
         """``exclude_sources``: sources the caller's policy forbids for this call."""
+        if not context.active_turn:
+            return no_active_turn_result()
         if kind not in KINDS:
             return result("refused", error="Unknown generation kind.")
         prompt = args.get("prompt")
