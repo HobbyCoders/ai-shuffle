@@ -1330,16 +1330,24 @@ def _publish_history(cur, sid, token):
         if timing:
             timing.waiting("publish_history." + table)
         count = len(snapshot)
-        snapshot = _reconcile_app_rows(cur, sid, table, snapshot)
+        metrics = {"statements": 0, "execute_seconds": 0.0, "max_statement_seconds": 0.0}
+        measured = _HistoryCursor(cur, metrics)
+        snapshot = _reconcile_app_rows(measured, sid, table, snapshot)
         columns = ("session_id", *TABLES[table])
         rows = [(sid, *[Json(v) if c in JSON_COLUMNS and v is not None else v
                         for c, v in zip(TABLES[table], values)]) for values in snapshot]
         from app.db.history_indexing import importing
-        with importing(cur, table) as deferred:
-            _insert_rows(cur, table, columns, rows,
+        with importing(measured, table) as deferred:
+            _insert_rows(measured, table, columns, rows,
                          _history_conflict(table, columns, deferred), batch=200)
+        seconds = monotonic() - started
+        # Empty snapshots can still prune a large stale mirror; measure those too.
+        logger.info("Hand-off import for session %s publish_history.%s: rows=%d candidates=%d statements=%d "
+                    "total=%.3fs execute=%.3fs max_statement=%.3fs",
+                    sid, table, count, len(rows), metrics["statements"], seconds,
+                    metrics["execute_seconds"], metrics["max_statement_seconds"])
         if timing:
-            timing.steps.append(f"publish_history.{table}={monotonic() - started:.3f}s rows={count}")
+            timing.steps.append(f"publish_history.{table}={seconds:.3f}s rows={count}")
     cur.execute("SELECT COALESCE(MAX(seq), 0) AS seq FROM session_events WHERE session_id=%s", (sid,))
     ceiling = cur.fetchone()["seq"]
     cur.execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,%s) "
