@@ -360,8 +360,8 @@ async def _run_background_query_impl(
 
     # This turn's generation context, read by the permission callback AND by
     # the (possibly reused) client's generation tools (generation_resolver).
-    from app.core.generation_resolver import bind_turn_context
-    bind_turn_context(options)
+    from app.core.generation_resolver import bind_turn_context, clear_turn_context
+    bound_generation_context = bind_turn_context(options, session_id=session_id)
 
     # Mark as streaming
     state.is_streaming = True
@@ -385,6 +385,7 @@ async def _run_background_query_impl(
         sdk_session_id = resume_id
         interrupted = False
     except BaseException:
+        clear_turn_context(session_id, expected=bound_generation_context)
         state.is_streaming = False
         state.streaming_started_at = None
         raise
@@ -587,6 +588,7 @@ async def _run_background_query_impl(
         metadata["error"] = str(e)
 
     finally:
+        clear_turn_context(session_id, expected=bound_generation_context)
         # Mark as not streaming — keep in pool for reuse
         state.is_streaming = False
         state.streaming_started_at = None

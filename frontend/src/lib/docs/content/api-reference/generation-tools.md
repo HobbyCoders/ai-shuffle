@@ -47,12 +47,16 @@ submitted, including unattended calls.
   account's remembered choice for that kind (see below) without asking, in
   interactive and unattended runs alike. With none, an interactive run returns
   `choose` and the chat shows a choice card; an unattended run is skipped and
-  reported, never guessed. In an automation or scheduled wake-up turn these
-  tools, `searchModels` and the native aliases never wait on a permission
-  prompt, since nobody is there to answer one: the guard decides, and a saved
-  Deny rule still applies. Voice, connector and other turns keep Ask mode's
-  prompt. The prompt decision and the guard read the same per-turn context,
-  also when a chat's tool server outlives the turn it was built for.
+  reported, never guessed. In every run classified as unattended these tools,
+  `searchModels` and the native aliases never wait on a permission prompt:
+  the guard decides, and a saved Deny rule still applies. This includes
+  automations, wake-ups, automatic continuation, unpark/resume, agent messages,
+  voice, connectors and unknown sources. Only a user, queued or worktree turn
+  in a visible, non-worker, non-automation, non-voice session is interactive
+  and keeps Ask mode's prompt. The prompt decision and the guard read the
+  same active-turn context, even on a reused tool server. The context is
+  released at turn end and client removal; a late call cannot reuse the
+  connect-time choices or interactive preference-write permission.
 - **Saved Settings defaults.** A fal.ai model explicitly saved for image,
   video, audio or 3D generation in the previous Default models page is copied
   into the account's remembered choices once, with its saved options, before

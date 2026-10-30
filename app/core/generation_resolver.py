@@ -54,15 +54,11 @@ ADMISSION_GATED_TOOLS = frozenset({
     "GenerateNativeImage", "GenerateNativeVideo",
 })
 READ_ONLY_GENERATION_TOOLS = frozenset({"mcp__ai-tools__searchModels"})
-# Turn sources nobody is present for. Only these skip the permission prompt for
-# the tools above: voice, connector, background-worker and unknown turns keep
-# Ask mode's prompt, because a person may be there to answer it.
-NO_PERSON_TURN_SOURCES = frozenset({"automation", "wakeup"})
 
 
 def admission_gates_unattended(tool_name, context, *, session_id=None) -> bool:
     """Whether this call needs no person's prompt: a guarded generation tool in
-    an automation or wake-up turn.
+    an unattended turn (as classified by query_options._is_interactive_run).
 
     ``context`` must be the current turn's own ``RunContext``
     (:func:`turn_context`), the one the generation tools run under too, and
@@ -72,7 +68,6 @@ def admission_gates_unattended(tool_name, context, *, session_id=None) -> bool:
     from app.core.background_permissions import canonical
 
     return (isinstance(context, RunContext) and context.unattended
-            and context.turn_source in NO_PERSON_TURN_SOURCES
             and bool(context.session_id) and context.session_id == session_id
             and canonical(tool_name) in (ADMISSION_GATED_TOOLS | READ_ONLY_GENERATION_TOOLS))
 
@@ -103,6 +98,9 @@ class RunContext:
     choices_loader: Callable[[], dict] | None = field(default=None, compare=False, repr=False)
     # The turn's source (user, automation, wakeup, voice, ...), host-supplied.
     turn_source: str | None = None
+    # Pooled tools must not fall back to their connect-time snapshot between
+    # turns. Standalone callers (voice, catalog, peer requests) keep theirs.
+    requires_active_turn: bool = False
 
     def remembered_for(self, kind):
         return self.remembered_choice or (self.remembered_choices or {}).get(kind)
@@ -121,15 +119,31 @@ _TURN_CONTEXTS: "OrderedDict[str, RunContext]" = OrderedDict()
 _TURN_CONTEXT_LIMIT = 4096
 
 
-def bind_turn_context(options) -> None:
-    """Record ``options``' run context as its session's current turn."""
+def clear_turn_context(session_id, *, expected: RunContext | None = None) -> None:
+    """Release a turn before yielding its client; old cleanup cannot erase a new turn."""
+    if isinstance(session_id, str) and (expected is None or turn_context(session_id) is expected):
+        _TURN_CONTEXTS.pop(session_id, None)
+
+
+def bind_turn_context(options, *, session_id=None) -> RunContext | None:
+    """Bind this turn, or clear its session's old entry if its context is invalid.
+
+    The engine supplies the claimed session explicitly; options carry it too,
+    so a context missing its own session id cannot leave a previous turn live.
+    """
     context = getattr(options, "aih_generation_context", None)
-    if not isinstance(context, RunContext) or not context.session_id:
-        return
-    _TURN_CONTEXTS[context.session_id] = context
-    _TURN_CONTEXTS.move_to_end(context.session_id)
+    if session_id is None:
+        session_id = getattr(options, "aih_session_id", None)
+        if not isinstance(session_id, str) or not session_id:
+            session_id = context.session_id if isinstance(context, RunContext) else None
+    if not isinstance(context, RunContext) or not context.session_id or context.session_id != session_id:
+        clear_turn_context(session_id)
+        return None
+    _TURN_CONTEXTS[session_id] = context
+    _TURN_CONTEXTS.move_to_end(session_id)
     while len(_TURN_CONTEXTS) > _TURN_CONTEXT_LIMIT:
         _TURN_CONTEXTS.popitem(last=False)
+    return context
 
 
 def turn_context(session_id) -> RunContext | None:
@@ -165,11 +179,21 @@ def same_backend_identity(a: RunContext, b: RunContext) -> bool:
                for key in ("session_id", "owner", "api_user_id", "chat_mode", "unattended"))
 
 
+def context_for_turn(context: RunContext) -> RunContext:
+    """One attendance read for generation and preference writes, including idle clients."""
+    current = turn_context(context.session_id)
+    if current is not None:
+        return current
+    if context.requires_active_turn:
+        # No active turn: no connect-time principal, choices or loader may be
+        # reused. Unattended admission skips without looking up any source.
+        return RunContext(session_id=context.session_id, requires_active_turn=True)
+    return context
+
+
 async def current_context(context: RunContext) -> RunContext:
-    """The context a generation call runs under: its session's current turn
-    (the one the permission callback reads), else the context the tool server
-    was built with, with the saved choices re-read either way."""
-    return await with_current_choices(turn_context(context.session_id) or context)
+    """The active turn's context (or a standalone caller), with fresh choices."""
+    return await with_current_choices(context_for_turn(context))
 
 
 @dataclass

@@ -909,19 +909,19 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
         refused = _fal_image_refusal(args) if image_restricted else None
         if refused:
             return _tool_result({"success": False, "error": refused})
+        current, call_resolver = await for_this_call()
         endpoint = args.get("endpoint_id")
         kind = args.get("output_type") or (
             (_catalog_output_type(endpoint) or _infer_fal_output_type(endpoint)) if isinstance(endpoint, str) else None)
-        schema = await schema_service.get_schema(endpoint, await backend.fal_key()) if isinstance(endpoint, str) else None
+        schema = await schema_service.get_schema(endpoint, await call_resolver.backend.fal_key()) if isinstance(endpoint, str) else None
         values = dict(args["input"]) if isinstance(args.get("input"), dict) else None
         prompt = values.pop(schema.primary_text_field, None) if schema and values is not None and schema.primary_text_field else None
         if kind not in KINDS or schema is None or values is None or not isinstance(prompt, str) or not prompt.strip():
             message = "A declared input schema with a text prompt and a known output type is required. Nothing was submitted."
-            return _tool_result(result("skipped" if context.unattended else "refused",
+            return _tool_result(result("skipped" if current.unattended else "refused",
                                        reason="invalid_request", error=message, message=message))
         request = {"prompt": prompt, "source": "fal", "model": endpoint, "options": values,
                    "confirmed": args.get("confirmed"), "confirmation_token": args.get("confirmation_token")}
-        current, call_resolver = await for_this_call()
         local_lane = bool(all_lanes.get("runFalModel")) and not current.chat_mode
         if local_lane and not current.unattended and not (current.job_choice or current.remembered_for(kind)):
             request["worker"] = backend.local_worker()

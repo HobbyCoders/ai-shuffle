@@ -1142,7 +1142,7 @@ class SessionPool:
             # Remove the entry while still holding the lock so concurrent
             # evict_if_needed callers immediately see the freed slot.
             session_id, state, reason = victim
-            self._pool.pop(session_id, None)
+            self._pop_session(session_id)
 
         # Slow work (subprocess teardown, eviction callback) happens OUTSIDE the
         # critical section. The evicted id is still returned only after teardown
@@ -1165,7 +1165,7 @@ class SessionPool:
         is a single sync dict op (atomic on the event loop). evict_if_needed does
         its own locked removal and calls _finish_evict directly.
         """
-        self._pool.pop(session_id, None)
+        self._pop_session(session_id)
         return await self._finish_evict(session_id, state, reason)
 
     async def _finish_evict(
@@ -1206,6 +1206,14 @@ class SessionPool:
                 )
         return session_id
 
+    def _pop_session(self, session_id: str) -> Optional[SessionState]:
+        # Synchronous with removal, before disconnect/eviction can yield: a
+        # late tool call must not see the removed client's previous turn.
+        from app.core.generation_resolver import clear_turn_context
+
+        clear_turn_context(session_id)
+        return self._pool.pop(session_id, None)
+
     async def remove(
         self, session_id: str, *, preserve_session: bool = False,
     ) -> Optional[SessionState]:
@@ -1213,7 +1221,7 @@ class SessionPool:
 
         Explicit close, clear and delete retain destructive teardown by default.
         """
-        state = self._pool.pop(session_id, None)
+        state = self._pop_session(session_id)
         if state is None:
             return None
         was_connected = state.is_connected
@@ -1238,7 +1246,7 @@ class SessionPool:
 
         Used when the subprocess has already died and we just need to clean up the entry.
         """
-        state = self._pool.pop(session_id, None)
+        state = self._pop_session(session_id)
         if state is None:
             return None
         state.is_connected = False
@@ -1258,7 +1266,7 @@ class SessionPool:
         background so the interrupt confirmation is not delayed past the
         frontend's window.
         """
-        state = self._pool.pop(session_id, None)
+        state = self._pop_session(session_id)
         if state is None:
             return None
         state.is_connected = False
@@ -1651,7 +1659,7 @@ class SessionPool:
             if state.is_connected and not is_subprocess_alive(state):
                 was_streaming = state.is_streaming
                 pid = subprocess_pid(state)
-                del self._pool[session_id]
+                self._pop_session(session_id)
                 # Subprocess is already dead, so its descendants are already
                 # orphaned (reparented to init). Best-effort record so the
                 # reaper still tries; descendants may be empty here.

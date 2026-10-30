@@ -790,7 +790,8 @@ def _generation_context(
                       last_choices=choices["last"], job_choices=choices.get("job"),
                       choices_unreadable=bool(choices.get("unreadable")),
                       choices_loader=lambda: _generation_choices(choice_config, session_row, api_user_id),
-                      turn_source=turn_source if isinstance(turn_source, str) else None)
+                      turn_source=turn_source if isinstance(turn_source, str) else None,
+                      requires_active_turn=bool(session_id))
 
 
 #: A turn whose bound provider row was deleted. Plain words, no raw id.
@@ -1737,15 +1738,13 @@ def build_options_from_profile(
     # Add app-config MCP server for admin sessions whose picker permits it
     if app_config_enabled:
         try:
-            from app.core.generation_resolver import turn_context
+            from app.core.generation_resolver import context_for_turn
             from app.mcp.app_config_sdk import create_app_config_server
             app_config_srv = create_app_config_server(
                 is_admin=True,
                 project_id=project.get("id") if project else None,
                 project_dir=working_dir,
-                generation_preferences_writable=lambda: not (
-                    turn_context(session_id) or generation_context
-                ).unattended,
+                generation_preferences_writable=lambda: not context_for_turn(generation_context).unattended,
             )
             if app_config_srv:
                 mcp_servers_dict["app-config"] = app_config_srv
