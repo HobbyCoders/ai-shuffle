@@ -6,21 +6,26 @@ Every failure leaves the existing full-replay serving path authoritative.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 import hashlib
-import time
 import json
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import replace
 from uuid import uuid4
 
 from app.api import events as serving
 from app.db import session_events as source
 from app.db import transcript_projection_work as work
 from app.db import transcript_projections as store
+
 from .bridge import ReducerBridge, ReducerUnavailable, verified_manifest
 from .preparation import join_worker
-from .preprocess import ReplayTail, TailUnavailable, input_lookup_keys, lookup_key, replay_flags
-
+from .preprocess import (
+    ReplayTail,
+    TailUnavailable,
+    input_lookup_keys,
+    lookup_key,
+    replay_flags,
+)
 
 NODE_QUANTUM = 128
 
@@ -38,13 +43,11 @@ async def database(call: Callable, *args, **kwargs):
 
 def _prepare_frames(tail: ReplayTail, rows, lookup):
     tail.reevaluate(lookup)
-    # Even off-loop CPython JSON work briefly holds the GIL. Yield this
-    # low-priority worker between finite stages, not after the whole MiB fold.
-    time.sleep(0)
     if rows:
         tail.append(rows, lookup)
-        time.sleep(0)
-    return tail.frames()
+    # Preparation owns a separate process; explicitly return the modified tail
+    # rather than relying on thread-shared mutations before checkpointing it.
+    return tail, tail.frames()
 
 
 def _checkpoint_tail(tail: ReplayTail, seq: int | None, lookup):
@@ -195,7 +198,7 @@ class ProjectionActor:
         rows = await database(work.source_rows, state.session_id, state.scan_seq, state.target_seq)
         keys = await self.bridge.prepare(input_lookup_keys, [*tail.raw, *rows])
         lookup = await database(store.lookups, state, keys)
-        frames = await self.bridge.prepare(_prepare_frames, tail, rows, lookup)
+        tail, frames = await self.bridge.prepare(_prepare_frames, tail, rows, lookup)
         if rows:
             state.scan_seq, state.scan_id = int(rows[-1]['seq']), str(rows[-1]['id'])
         elif state.scan_seq < state.target_seq:

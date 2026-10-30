@@ -316,9 +316,9 @@ installation-local settled-message records. Enabling production is its own later
 step, after measuring a large real database; do not start a fleet-wide backfill
 with this change. Enabling it is also blocked by
 [the large-fold ingest regression](https://github.com/HobbyCoders/ai-shuffle/issues/902).
-The large-record CI scenario still runs its correctness checks, but its two
-latency budgets are temporarily expected failures with their original limits;
-fix the contention and restore gating before enabling production.
+The large-record CI scenario gates both ingest and loop-lag budgets at their
+original limits against the SQLite shim and native PostgreSQL; the contention
+fix does not authorize enabling production without the large-database check.
 **Reads are not implemented or negotiated:** opening chat
 still uses the existing event feed and full replay. Unset the switch (or set it
 to `0`) and restart to stop production. Neither setting changes serving, mutates
@@ -339,7 +339,12 @@ loop scheduling; bounded source and derived-state keyset scans repair dropped
 hints, including deletion while the producer was offline. Retired generations
 are collected in finite batches even during ongoing live traffic. CPU-heavy
 restore, coalescing, frame construction and IPC JSON preparation use one
-admission-bounded, cancellation-joined worker, not the serving event loop.
+admission-bounded, cancellation-joined **spawned process**, not a Python thread
+sharing the serving loop's GIL. It admits one job, reuses one child, refreshes
+canonical replay switches per call and joins the child on shutdown. Database
+operations stay on the existing asynchronous thread path; no pool/socket is
+forked into the CPU child. The warm-runtime ingest ratchet runs repeatedly in
+CI on both the SQLite shim and native PostgreSQL.
 Implicit interrupt prose and its user barrier stay in carry regardless of
 window distance; a deep rewind without a known barrier fails closed rather
 than inventing an older target. No source append or replication writer awaits

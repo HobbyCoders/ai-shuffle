@@ -10,8 +10,8 @@ from app.core.transcript_views.producer import ProjectionActor
 from app.db import session_events as source
 from app.db import transcript_projection_work as work
 from app.db import transcript_projections as store
-from app.db.sessions import create_session
 from app.db.profiles import create_profile
+from app.db.sessions import create_session
 
 
 def create(session_id='projection-fixture'):
@@ -96,6 +96,30 @@ async def test_durable_producer_matches_real_full_cold_serving(progress, usage, 
         await assert_full_serving_parity(bridge, state)
     finally:
         await bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_process_preparation_returns_mutable_tail_across_restart():
+    sid = create()
+    source.append_events(sid, [event('message.user', {'content': 'Start'}),
+                               event('assistant.text_delta', {'text': 'partial '})])
+    first = ReducerBridge()
+    try:
+        checkpoint = await drain(ProjectionActor(first), sid)
+        raw = json.loads(checkpoint.preprocess_json)['raw']
+        assert raw[-1]['payload']['text'] == 'partial '
+        await assert_full_serving_parity(first, checkpoint)
+    finally:
+        await first.close()
+    source.append_events(sid, [event('assistant.text_delta', {'text': 'complete'}),
+                               event('turn.completed')])
+    second = ReducerBridge()
+    try:
+        current = await drain(ProjectionActor(second), sid)
+        assert current.generation == checkpoint.generation
+        await assert_full_serving_parity(second, current)
+    finally:
+        await second.close()
 
 
 @pytest.mark.asyncio

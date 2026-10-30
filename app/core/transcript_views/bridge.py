@@ -10,12 +10,12 @@ import asyncio
 import hashlib
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Any
 
-from .preparation import PreparationBusy, PreparationWorker
+from .preparation import PreparationBusy, PreparationUnavailable, PreparationWorker
 
 MAX_PACKET_BYTES = 24 * 1024 * 1024
 SAFE_ENV_KEYS = frozenset({"PATH", "Path", "SystemRoot", "SYSTEMROOT", "WINDIR", "TMP", "TEMP"})
@@ -83,6 +83,8 @@ class ReducerBridge:
             return await self._preparation.run(call, *args, **kwargs)
         except PreparationBusy as error:
             raise ReducerUnavailable("preparation_busy") from error
+        except PreparationUnavailable as error:
+            raise ReducerUnavailable("preparation_unavailable") from error
 
     async def _stop(self) -> None:
         process, self._process = self._process, None
