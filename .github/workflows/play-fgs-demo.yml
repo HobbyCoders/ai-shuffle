@@ -1,0 +1,89 @@
+name: Play microphone FGS recording (temporary)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/play-fgs-demo.yml'
+      - 'android/ci/record-play-fgs.py'
+      - 'android/app/src/androidTest/java/com/hobbycoders/aishuffle/PlayFgsRecordingTest.kt'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: play-fgs-demo-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  recording:
+    name: Real Android microphone recording (API 34)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install isolated worker dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -e ./fluid
+          pip install aiohttp
+          chmod -R go-w "$(python -c 'import sys; print(sys.base_prefix)')"
+          npm ci --prefix frontend
+      - name: Build the real desktop and phone UI
+        run: |
+          npm run build --prefix frontend
+          python -m app.preview stamp
+          bash android/scripts/sync-offline-demo.sh
+      - name: Generate disposable localhost TLS certificate (debug build only)
+        run: |
+          mkdir -p android/app/src/debug/res/raw
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=Disposable demo worker' -addext 'subjectAltName=DNS:localhost' -keyout "$RUNNER_TEMP/demo-worker.key" -out "$RUNNER_TEMP/demo-worker.crt"
+          cp "$RUNNER_TEMP/demo-worker.crt" android/app/src/debug/res/raw/fgs_demo_ca.crt
+      - name: Build real app and recording instrumentation
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug assembleDebugAndroidTest --max-workers=2 --stacktrace
+      - name: Enable free standard-runner emulator acceleration
+        run: sudo chmod 666 /dev/kvm
+      - name: Record genuine app UI against a throwaway worker
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: default
+          arch: x86_64
+          profile: pixel_6
+          cores: 2
+          ram-size: 2048M
+          disk-size: 6144M
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-boot-anim -camera-back none
+          script: |
+            export PATH="/usr/lib/postgresql/16/bin:$PATH"
+            python android/ci/record-play-fgs.py --out "$RUNNER_TEMP/play-fgs-video" --cert "$RUNNER_TEMP/demo-worker.crt" --key "$RUNNER_TEMP/demo-worker.key"
+      - name: Upload raw recording and verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: play-fgs-microphone-video
+          path: ${{ runner.temp }}/play-fgs-video/
+          retention-days: 7
+          if-no-files-found: error
