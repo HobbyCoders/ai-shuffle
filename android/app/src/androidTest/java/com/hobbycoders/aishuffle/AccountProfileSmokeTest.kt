@@ -266,6 +266,9 @@ class AccountProfileSmokeTest {
                     scenario.onActivity { focused = it.hasWindowFocus() }
                     throw AssertionError("Single Edit username tap: profileGets=${profileGets.get()}, " +
                         "state=${scenario.state}, focused=$focused; ${failure.message}", failure)
+                } finally {
+                    android.util.Log.i("ProfileTiming", "Single Edit username tap completed form wait: " +
+                        "profileGets=${profileGets.get()}, state=${scenario.state}")
                 }
                 android.util.Log.i("ProfileTiming", "Single Edit username tap reached Save username: " +
                     "profileGets=${profileGets.get()}, state=${scenario.state}")

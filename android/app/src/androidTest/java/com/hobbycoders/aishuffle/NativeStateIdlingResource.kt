@@ -98,6 +98,17 @@ internal fun awaitNativeWindow(activity: Activity) {
         IdlingRegistry.getInstance().unregister(resource)
         instrumentation.runOnMainSync { resource.close() }
     }
+    instrumentation.runOnMainSync {
+        val callback = activity.window.callback
+        activity.window.callback = object : android.view.Window.Callback by callback {
+            override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
+                android.util.Log.i("NativeInputTiming", "${activity.javaClass.simpleName} action=${event.actionMasked} " +
+                    "flags=${event.flags} x=${event.x} y=${event.y} eventTime=${event.eventTime} " +
+                    "uptime=${android.os.SystemClock.uptimeMillis()} focused=${activity.hasWindowFocus()}")
+                return callback.dispatchTouchEvent(event)
+            }
+        }
+    }
 }
 
 internal fun <A : Activity> ActivityScenario<A>.nativeActivity(): A {

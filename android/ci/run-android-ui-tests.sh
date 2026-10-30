@@ -14,7 +14,7 @@ on_exit() {
     fi
   fi
   # Keep timing evidence on success too, before emulator teardown loses logcat.
-  timeout 15 adb -s emulator-5554 logcat -d -v threadtime ConsentTiming:I ProfileTiming:I AppControlTiming:I AppControlFence:I DemoNavigation:I '*:S' > "$out/timing.txt" || true
+  timeout 15 adb -s emulator-5554 logcat -d -v threadtime ConsentTiming:I ProfileTiming:I NativeInputTiming:I AppControlTiming:I AppControlFence:I DemoNavigation:I '*:S' > "$out/timing.txt" || true
   # The always-uploaded artifact is deliberately confined to readiness evidence.
   # Keep this compact trace there too, without widening its path allowlist.
   mkdir -p "$RUNNER_TEMP/android-emulator/readiness" && cp "$out/timing.txt" "$RUNNER_TEMP/android-emulator/readiness/native-timing.txt" || true
