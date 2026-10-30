@@ -35,7 +35,8 @@
 	const visible = $derived(items.slice(range.start, range.end));
 
 	function apply(next: TranscriptRange, preserve = true) {
-		selectionLimited = window.selectionLimited;
+		// A harmless same-window reprice must not remove the clear control mid-gesture.
+		selectionLimited = window.selectionLimited || (selectionLimited && !!pinnedRange());
 		if (next.start === range.start && next.end === range.end) return;
 		const top = scroller?.getBoundingClientRect().top ?? 0;
 		const candidates = preserve && root

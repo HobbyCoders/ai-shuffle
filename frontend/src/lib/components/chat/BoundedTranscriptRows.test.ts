@@ -68,7 +68,7 @@ describe('bounded nested transcript mounting', () => {
 	});
 
 	it.each(['collapse', 'clear'])('preserves selected nested text nodes, then releases them on %s', async release => {
-		render(BoundedTranscriptRows<typeof items[number]>, { items, keyOf, children, startAtTail: true });
+		const view = render(BoundedTranscriptRows<typeof items[number]>, { items, keyOf, children, startAtTail: true });
 		const start = screen.getByText('Entry 1997').firstChild!;
 		const end = screen.getByText('Entry 1999').firstChild!;
 		const selection = document.getSelection()!;
@@ -80,6 +80,8 @@ describe('bounded nested transcript mounting', () => {
 			expect(selection.toString()).toBe(selected);
 			expect(screen.getAllByTestId('row')).toHaveLength(60);
 		}
+		expect(screen.getByText('Clear text selection to browse further.')).toBeTruthy();
+		await view.rerender({ items: [...items] });
 		expect(screen.getByText('Clear text selection to browse further.')).toBeTruthy();
 		if (release === 'collapse') {
 			selection.collapseToStart();

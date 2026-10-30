@@ -734,7 +734,10 @@
 	let revealedTurnId = $state<string | null>(null);
 
 	function applyMountedRange(next: TranscriptRange, preserveAnchor = true) {
-		selectionBlocksNavigation = transcriptWindow.selectionLimited;
+		// Once the budget was reached, keep the clear affordance stable until
+		// the native selection ends, even if this reprice itself fits the window.
+		selectionBlocksNavigation = transcriptWindow.selectionLimited ||
+			(selectionBlocksNavigation && !!pinnedTranscriptRange());
 		if (selectionBlocksNavigation) shouldAutoScroll = false;
 		if (next.start === mountedStart && next.end === mountedEnd) return;
 		const container = containerRef;
