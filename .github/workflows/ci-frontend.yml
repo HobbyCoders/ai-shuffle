@@ -250,7 +250,7 @@ jobs:
     # Real app, real PostgreSQL 16, fake AI, real Chromium: every
     # frontend/tests/journeys/*.journey.mjs against a fresh dev instance
     # (python -m scripts.devloop up --ci). Shards split the journey files by
-    # case count, each file exactly once; a shard with none ends after the plan.
+    # measured hosted runtime, each file exactly once; a shard with none ends after the plan.
     strategy:
       fail-fast: false
       matrix:

@@ -2,6 +2,7 @@
 
     python -m scripts.devloop.ci plan [--shards N]
     python -m scripts.devloop.ci journeys [--shard I/N] [--out DIR] [--build]
+    python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...]
 
 ``journeys`` starts ``python -m scripts.devloop up --ci`` as its own child (so
 the instance's parent lease is this process, not a CI shell step that
@@ -10,7 +11,8 @@ exits), waits until it is ready (its ``DEVLOOP_READY`` line, then
 ``python -m scripts.devloop down``. With one shard and a
 ``frontend/tests/journeys/run-all.mjs`` it runs that; otherwise it runs each
 ``*.journey.mjs`` of the shard, every one even after a failure. Shards split
-the journey files by their case count (``--list``), each file exactly once.
+the journey files by measured hosted runtime, each file exactly once. Unknown
+journeys use their case count (``--list``) times the measured per-case median.
 
 Outputs under ``--out``: ``devloop.log`` (the instance's whole log),
 ``logs/<journey>.log``, and the runner's per-case text timelines (and contact
@@ -21,8 +23,11 @@ could not be used.
 from __future__ import annotations
 
 import argparse
+import io
 import json
+import math
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -30,12 +35,17 @@ import sys
 import tempfile
 import threading
 import time
+import zipfile
+from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
+from statistics import median
 
 ROOT = Path(__file__).resolve().parents[2]
 FRONTEND = ROOT / "frontend"
 JOURNEYS = FRONTEND / "tests" / "journeys"
 RUN_ALL = "run-all.mjs"
+WEIGHTS = Path(__file__).with_name("journey_weights.json")
 READY_SECONDS = 420
 JOURNEY_SECONDS = 1500
 SUMMARY_CASE_CHARS = 12_000
@@ -60,12 +70,12 @@ def case_count(path: Path) -> int:
     return max(1, len(lines)) if listed.returncode == 0 else 1
 
 
-def partition(weights: dict[str, int], shards: int) -> list[list[str]]:
+def partition(weights: dict[str, float], shards: int) -> list[list[str]]:
     """Greedy longest-first split: every name in exactly one shard, deterministic."""
     if shards < 1:
         raise ValueError("shards must be at least 1")
     buckets: list[list[str]] = [[] for _ in range(shards)]
-    loads = [0] * shards
+    loads = [0.0] * shards
     for name in sorted(weights, key=lambda n: (-weights[n], n)):
         index = min(range(shards), key=lambda i: (loads[i], i))
         buckets[index].append(name)
@@ -76,11 +86,110 @@ def partition(weights: dict[str, int], shards: int) -> list[list[str]]:
     return [sorted(bucket) for bucket in buckets]
 
 
-def plan(shards: int, directory: Path = JOURNEYS) -> list[list[str]]:
+def estimated_seconds(directory: Path = JOURNEYS, weights_path: Path = WEIGHTS) -> dict[str, float]:
+    """Use hosted medians; only unmeasured files need Node/``--list``."""
     files = journey_files(directory)
     if not files:
         raise SystemExit(f"No *.journey.mjs under {directory}: refusing to pass with no journeys")
-    return partition({path.name: case_count(path) for path in files}, shards)
+    data = json.loads(weights_path.read_text(encoding="utf-8"))
+    measured, per_case = data["seconds"], data["seconds_per_case"]
+    for value in [per_case, *measured.values()]:
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value <= 0):
+            raise ValueError(f"{weights_path}: runtime weights must be positive finite seconds")
+    return {path.name: measured[path.name] if path.name in measured else case_count(path) * per_case
+            for path in files}
+
+
+def plan(shards: int, directory: Path = JOURNEYS, weights_path: Path = WEIGHTS) -> list[list[str]]:
+    weights = estimated_seconds(directory, weights_path)
+    buckets = partition(weights, shards)
+    lines = ["### Estimated UI journey shard loads", "",
+             "Journey runtime only; excludes dev-instance setup and teardown.", "",
+             "| Shard | Journeys | Estimated minutes |", "| --- | --- | --- |"]
+    for index, bucket in enumerate(buckets, 1):
+        minutes = sum(weights[name] for name in bucket) / 60
+        # stdout is the plan's JSON API, consumed by the workflow's command substitution.
+        print(f"[ci] planned shard {index}/{shards}: {minutes:.1f} estimated minutes "
+              f"({len(bucket)} journeys)", file=sys.stderr, flush=True)
+        lines.append(f"| {index}/{shards} | {len(bucket)} | {minutes:.1f} |")
+    _write_summary("\n".join(lines) + "\n")
+    return buckets
+
+
+# ─── refresh hosted runtime measurements ────────────────────────────────────
+
+
+def parse_journey_log(log: str) -> list[tuple[str, float, int]]:
+    """One job's timestamped log -> (file, seconds, cases), excluding teardown.
+
+    A journey's own passing footer closes its interval, including the last
+    journey in a shard. Missing/failed results must not become short weights.
+    """
+    samples = []
+    pending = None
+    for line in log.splitlines():
+        stamp, _, message = line.partition(" ")
+        start = re.fullmatch(r"\[ci\] running (\S+\.journey\.mjs)", message)
+        if start:
+            if pending is not None:
+                raise ValueError(f"Incomplete journey log: {pending[0]}")
+            pending = (start[1], datetime.fromisoformat(stamp))
+        elif pending is not None:
+            name, started = pending
+            footer = re.fullmatch(re.escape(name.removesuffix(".journey.mjs"))
+                                  + r": (\d+)/(\d+) passed; timelines in .+", message)
+            if footer:
+                seconds = (datetime.fromisoformat(stamp) - started).total_seconds()
+                passed, cases = int(footer[1]), int(footer[2])
+                if passed != cases or cases == 0 or seconds <= 0:
+                    raise ValueError(f"Not a completed passing journey: {name}")
+                samples.append((name, seconds, cases))
+                pending = None
+    if pending is not None:
+        raise ValueError(f"Incomplete journey log: {pending[0]}")
+    return samples
+
+
+def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS) -> None:
+    """Recompute medians from completed green runs using the GitHub CLI's auth."""
+    repo = subprocess.check_output(["gh", "repo", "view", "--json", "nameWithOwner",
+                                    "--jq", ".nameWithOwner"], cwd=ROOT, text=True, timeout=120).strip()
+    durations = defaultdict(list)
+    per_case = []
+    run_ids = sorted(set(run_ids))
+    for run_id in run_ids:
+        state = json.loads(subprocess.check_output(
+            ["gh", "run", "view", str(run_id), "--repo", repo, "--json", "status,conclusion"],
+            cwd=ROOT, text=True, timeout=120))
+        if state != {"status": "completed", "conclusion": "success"}:
+            raise ValueError(f"Run {run_id} must be completed and green: {state}")
+        logs = subprocess.check_output(
+            ["gh", "api", f"repos/{repo}/actions/runs/{run_id}/logs"], cwd=ROOT, timeout=120)
+        samples = []
+        with zipfile.ZipFile(io.BytesIO(logs)) as archive:
+            for name in sorted(archive.namelist()):
+                # The archive includes both whole-job logs and copies per step.
+                if "/" not in name and "UI journeys" in name and name.endswith(".txt"):
+                    samples.extend(parse_journey_log(archive.read(name).decode("utf-8-sig")))
+        if not samples:
+            raise ValueError(f"Run {run_id} has no completed UI journey measurements")
+        if len({name for name, _, _ in samples}) != len(samples):
+            raise ValueError(f"Run {run_id} has duplicate journey measurements")
+        for name, seconds, cases in samples:
+            durations[name].append(seconds)
+            per_case.append(seconds / cases)
+    data = {
+        "_comment": "Median hosted journey seconds, excluding instance setup/teardown. Refresh from "
+                    "green main-suite/ci-frontend runs: python -m scripts.devloop.ci refresh-weights "
+                    "RUN_ID [RUN_ID ...]. seconds_per_case is the median of seconds/cases per sample.",
+        "source_runs": run_ids,
+        "seconds_per_case": round(median(per_case), 2),
+        "seconds": {name: round(median(values), 2) for name, values in sorted(durations.items())},
+    }
+    # Do not replace the checked-in measurements until every run was validated.
+    weights_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    print(f"[ci] refreshed {len(durations)} journey weights from {len(run_ids)} green runs: {weights_path}")
 
 
 def commands_for(shard_files: list[str], shards: int, directory: Path = JOURNEYS) -> list[list[str]]:
@@ -334,6 +443,8 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     show = commands.add_parser("plan", help="Print the journey files of every shard as JSON")
     show.add_argument("--shards", type=int, default=1)
+    refresh = commands.add_parser("refresh-weights", help="Measure journey runtimes from green hosted runs")
+    refresh.add_argument("run_ids", type=int, nargs="+", metavar="RUN_ID")
     run = commands.add_parser("journeys", help="Run a shard of the journeys on a fresh instance")
     run.add_argument("--shard", type=_shard, default=(1, 1), metavar="I/N")
     run.add_argument("--out", type=Path,
@@ -346,6 +457,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "plan":
         print(json.dumps(plan(args.shards)))
+        return 0
+    if args.command == "refresh-weights":
+        refresh_weights(args.run_ids)
         return 0
     return journeys(args)
 

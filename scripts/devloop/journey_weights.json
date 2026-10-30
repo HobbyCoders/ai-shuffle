@@ -1,0 +1,37 @@
+{
+  "_comment": "Median hosted journey seconds, excluding instance setup/teardown. Refresh from green main-suite/ci-frontend runs: python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...]. seconds_per_case is the median of seconds/cases per sample.",
+  "source_runs": [
+    41071513091,
+    41082119694,
+    41093871590
+  ],
+  "seconds_per_case": 11.17,
+  "seconds": {
+    "chat-send-stream.journey.mjs": 185.95,
+    "cleared-chat.journey.mjs": 69.98,
+    "compaction.journey.mjs": 382.49,
+    "composer-large-input.journey.mjs": 54.28,
+    "first-visit.journey.mjs": 6.35,
+    "mirrored-chat.journey.mjs": 269.46,
+    "new-worktree-session.journey.mjs": 307.51,
+    "open-unloaded-chat.journey.mjs": 319.41,
+    "parked-timer.journey.mjs": 127.06,
+    "phone-composer.journey.mjs": 79.99,
+    "provider-account-switch.journey.mjs": 22.18,
+    "provider-errors.journey.mjs": 322.3,
+    "question-tray.journey.mjs": 334.12,
+    "queue-while-busy.journey.mjs": 169.9,
+    "reload-midstream.journey.mjs": 167.36,
+    "send-during-init.journey.mjs": 55.05,
+    "side-panels.journey.mjs": 189.19,
+    "stop-midstream.journey.mjs": 54.06,
+    "switch-chats.journey.mjs": 123.05,
+    "tool-cards.journey.mjs": 107.02,
+    "transcript-boundary.journey.mjs": 32.54,
+    "transcript-reader.journey.mjs": 461.66,
+    "type-at-boot.journey.mjs": 39.66,
+    "voice-call.journey.mjs": 171.4,
+    "voice-provider-endings.journey.mjs": 73.25,
+    "worker-machine-settings.journey.mjs": 5.52
+  }
+}
