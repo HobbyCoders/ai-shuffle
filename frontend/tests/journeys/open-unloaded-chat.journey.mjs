@@ -95,19 +95,16 @@ async function prepareHeldSwitch(ctx, delayMs, source = 'no_project') {
 async function openSwitchChat(page, key, beforeNavigate) {
 	if (new URL(page.url()).pathname.startsWith('/mobile/')) {
 		await page.getByRole('button', { name: /^Open menu/ }).click();
-		const group = page.getByRole('group', { name: `${SEEDED[key]} session`, exact: true });
-		const button = group.getByRole('button').first();
-		if (beforeNavigate) {
-			// Opening the drawer still belongs to the previous pending load.
-			// Mark the new navigation only when its actual row is actionable.
-			await button.click({ trial: true });
-			await beforeNavigate();
-		}
-		await button.click();
-	} else {
-		await beforeNavigate?.();
-		await openFromSidebar(page, SEEDED[key]);
 	}
+	const group = page.getByRole('group', { name: `${SEEDED[key]} session`, exact: true });
+	const button = group.getByRole('button').first();
+	if (beforeNavigate) {
+		// Both desktop scrolling/actionability and the phone drawer still belong
+		// to the previous load. Mark only at the actionable navigation row.
+		await button.click({ trial: true });
+		await beforeNavigate();
+	}
+	await button.click();
 }
 
 async function sampleSwitchFrames(page) {
@@ -260,6 +257,45 @@ const deepLinkLateCatalog = async ({ page, status, mark }) => {
 await runJourney({
 	name: 'open-unloaded-chat',
 	cases: [
+		{ name: 'rewind-portal-closes-on-switch',
+			async setup(ctx) {
+				await prepareHeldSwitch(ctx, 1500);
+				const { page } = ctx;
+				// Keyboard navigation can reach the sidebar while this body portal is
+				// open. On phones open the drawer first; do not force a pointer click
+				// through the confirmation scrim.
+				if (ctx.variant.viewport === 'phone') await page.getByRole('button', { name: /^Open menu/ }).click();
+				await page.getByTitle('Rewind to before this message', { exact: true }).first().focus();
+				await page.keyboard.press('Enter');
+				await page.getByRole('heading', { name: 'Rewind Conversation?', exact: true }).waitFor();
+				await page.evaluate(() => {
+					window.__staleRewindRequests = 0;
+					const original = window.fetch.bind(window);
+					window.fetch = async (input, init) => {
+						const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+						if ((init?.method || input?.method || 'GET').toUpperCase() === 'POST' && url.pathname.includes('/rewind')) {
+							window.__staleRewindRequests++;
+							return new Response(JSON.stringify({ success: false, error: 'Unexpected stale rewind' }), { status: 409 });
+						}
+						return original(input, init);
+					};
+				});
+			},
+			async act({ page, mark, log }) {
+				await mark('keyboard-open B while A owns a rewind confirmation');
+				const target = page.getByRole('group', { name: `${SEEDED.other_project} session`, exact: true }).getByRole('button').first();
+				await target.focus();
+				await page.keyboard.press('Enter');
+				await page.waitForFunction(() => window.__switchHydrationHold.started !== null);
+				expect(await page.getByRole('heading', { name: 'Rewind Conversation?', exact: true }).count() === 0,
+					'outgoing body-portaled rewind confirmation closes before incoming history is released');
+				expect(await page.evaluate(() => window.__staleRewindRequests) === 0, 'no outgoing rewind request during incoming hydration');
+				await waitChatOpen(page, { messagesAtLeast: 2, hold: 250 });
+				expect(await page.getByRole('heading', { name: 'Rewind Conversation?', exact: true }).count() === 0, 'the old confirmation never reopens over B');
+				log('rewind portal closed on target divergence; no cross-session mutation');
+			},
+			verify: composer('bottom')
+		},
 		{ name: 'short-switch-under-grace', ...heldSwitch(80) },
 		{ name: 'short-switch-slow-overlay', ...heldSwitch(800, true) },
 		{ name: 'reading-anchor-survives-hydration',

@@ -39,7 +39,9 @@
 	 * rows the user stopped here (so they read "Stopped" and name the worker
 	 * until the list closes).
 	 */
-	import { onDestroy, tick, untrack } from 'svelte';
+	import { getContext, onDestroy, tick, untrack } from 'svelte';
+	import { readable } from 'svelte/store';
+	import { TRANSCRIPT_ACTIONS, type TranscriptActions } from './TranscriptHydrationBoundary.svelte';
 	import {
 		ArrowLeft,
 		ArrowRightLeft,
@@ -59,7 +61,7 @@
 		Workflow,
 		X
 	} from 'lucide-svelte';
-	import { activeSession } from '$lib/stores/active-session';
+	import { activeSession, type ActiveSessionState } from '$lib/stores/active-session';
 	import { runningTasksOpen } from '$lib/stores/expansion-preferences';
 	import { swarms } from '$lib/stores/swarms';
 	import { watches } from '$lib/stores/watches';
@@ -114,6 +116,8 @@
 	interface Props {
 		sessionId: string | null | undefined;
 		variant?: 'sheet' | 'inline' | 'page';
+		/** Frozen transcript render data; mutation endpoints never read this. */
+		presentation?: Pick<ActiveSessionState, 'sessionId' | 'activeTasks' | 'messages'>;
 		/**
 		 * Close the sheet (Back, Escape, scrim). The caller unmounts it. A page
 		 * host also hears it when a row opens a transcript.
@@ -121,7 +125,10 @@
 		onClose?: () => void;
 	}
 
-	let { sessionId, variant = 'inline', onClose }: Props = $props();
+	let { sessionId, variant = 'inline', presentation, onClose }: Props = $props();
+	const interaction = getContext<TranscriptActions>(TRANSCRIPT_ACTIONS);
+	const actionsAllowed = interaction ?? readable(true);
+	const canAct = () => !interaction || interaction.isCurrent(sessionId);
 
 	const mobileShell = buildShell() === 'mobile';
 	/** Inline rows shown before the list caps its height and offers Show all. */
@@ -129,9 +136,10 @@
 	const titleId = $props.id();
 
 	// ── Data (store-backed, no copies) ────────────────────────────────────────
-	const live = $derived(!!sessionId && $activeSession.sessionId === sessionId);
-	const tasks = $derived(live ? ($activeSession.activeTasks ?? []) : []);
-	const messages = $derived(live ? $activeSession.messages : []);
+	const renderSession = $derived(presentation ?? $activeSession);
+	const bound = $derived(!!sessionId && renderSession.sessionId === sessionId);
+	const tasks = $derived(bound ? (renderSession.activeTasks ?? []) : []);
+	const messages = $derived(bound ? renderSession.messages : []);
 	const sessionSwarms = $derived(Object.values($swarms.bySession[sessionId ?? ''] ?? {}));
 	const swarmError = $derived($swarms.errors[sessionId ?? ''] || '');
 	const defaultWorker = $derived($usageTargetDeviceName || 'This worker');
@@ -343,7 +351,7 @@
 	}
 
 	async function stopTask(id: string): Promise<boolean> {
-		if (!sessionId) return false;
+		if (!sessionId || !canAct()) return false;
 		try {
 			// A paused worker is stopped by cancelling its scheduled resume.
 			if (paused.has(id)) return (await cancelLimitResume(sessionId, id)).cancelled;
@@ -356,7 +364,8 @@
 
 	/** Stop one row. `quiet` leaves the error toast to the caller (Stop all). */
 	async function stopRow(row: RunRow, quiet = false): Promise<boolean> {
-		if (!sessionId || row.state !== 'running') return false;
+		if (!sessionId || row.state !== 'running' || !canAct()) return false;
+		const requestedSessionId = sessionId;
 		markStopping(row.key, true);
 		let ok = false;
 		if (row.type === 'swarm') {
@@ -370,6 +379,7 @@
 			ok = await stopTask(row.id);
 			if (!ok && !quiet) notify.error("Couldn't stop the task. It may have already finished.");
 		}
+		if (sessionId !== requestedSessionId || !canAct()) return ok;
 		if (ok) remember(row);
 		else markStopping(row.key, false);
 		return ok;
@@ -550,6 +560,7 @@
 	let closeRef = $state<HTMLButtonElement | null>(null);
 
 	function openOwnSheet(event: MouseEvent) {
+		if (!canAct()) return;
 		sheetOpener = event.currentTarget as HTMLElement;
 		ownSheetOpen = true;
 	}
@@ -583,8 +594,12 @@
 		filterTouched = false;
 		const opener = sheetOpener;
 		sheetOpener = null;
-		void tick().then(() => opener?.focus({ preventScroll: true }));
+		if ($actionsAllowed) void tick().then(() => { if (canAct()) opener?.focus({ preventScroll: true }); });
 	}
+
+	$effect(() => {
+		if (!$actionsAllowed) untrack(closeSheet);
+	});
 
 	$effect(() => {
 		if (sheetVisible && closeRef) {

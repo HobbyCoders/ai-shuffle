@@ -124,6 +124,38 @@ describe('transcript hydration presentation', () => {
 		expect(view.getByText('Incoming conversation').closest('[inert]')).toBeNull();
 	});
 
+	it.each([false, true])('defers a first notice through the native drawer-close handoff (cached return: %s)', async (cachedReturn) => {
+		const view = render(Harness, { navigationOverlayOpen: true });
+		live.set(state('incoming', '', true)); await tick();
+		await vi.advanceTimersByTimeAsync(GRACE_MS + 50); await tick();
+		expect(view.queryByText('Loading conversation…')).toBeNull();
+		expect(view.getByText('Previous conversation').closest('[inert]')).not.toBeNull();
+		await view.rerender({ navigationOverlayOpen: false }); await tick();
+		// openSession selects in the next rAF, before this presentation handoff.
+		expect(view.queryByText('Loading conversation…')).toBeNull();
+		if (cachedReturn) { live.set(state('outgoing', 'Previous conversation')); await tick(); }
+		await vi.advanceTimersByTimeAsync(32); await tick();
+		if (cachedReturn) {
+			expect(view.queryByText('Loading conversation…')).toBeNull();
+			expect(view.getByText('Previous conversation').closest('[inert]')).toBeNull();
+		} else {
+			// Dismissing the drawer without navigating reveals the already-due
+			// notice immediately after the handoff, not after another 350 ms.
+			expect(view.getByText('Loading conversation…')).toBeTruthy();
+		}
+	});
+
+	it('does not hide an already-visible slow notice when the drawer opens or closes', async () => {
+		const view = render(Harness);
+		live.set(state('incoming', '', true)); await tick();
+		await vi.advanceTimersByTimeAsync(GRACE_MS); await tick();
+		expect(view.getByText('Loading conversation…')).toBeTruthy();
+		await view.rerender({ navigationOverlayOpen: true }); await tick();
+		expect(view.getByText('Loading conversation…')).toBeTruthy();
+		await view.rerender({ navigationOverlayOpen: false }); await tick();
+		expect(view.getByText('Loading conversation…')).toBeTruthy();
+	});
+
 	it('restarts grace for a newer target and ignores the obsolete timer after readiness', async () => {
 		const view = render(Harness);
 		live.set(state('middle', '', true)); await tick();

@@ -16,6 +16,7 @@
 	import { sessionOwnerBoundary } from '$lib/stores/session-owner';
 	import { notify } from '$lib/stores/notifications';
 	import { platform } from '$lib/stores/platform.svelte';
+	import { layout } from '$lib/stores/layout.svelte';
 	import { createConnectionBannerGrace } from '$lib/stores/session/connection-banner-grace';
 	import { connectionNoticeTier, RECONNECT_BANNER_ESCALATE_MS } from './connection-notice';
 	import Banner from '$lib/components/Banner.svelte';
@@ -499,6 +500,7 @@
 				     so it started even if the chat opened in the hero layout. -->
 				<MirrorSyncGate sync={mirrorSync} deviceName={mirrorDevice}>
 					<TranscriptHydrationBoundary mirrorPending={mirrorSync.waiting}
+						navigationOverlayOpen={layout.current.sidebarOverlay && !layout.current.sidebarCollapsed}
 						onSurface={(surface, count, id) => { transcriptSurface = surface; transcriptMessageCount = count; transcriptSessionId = id; }}>
 						<MessageArea />
 					</TranscriptHydrationBoundary>

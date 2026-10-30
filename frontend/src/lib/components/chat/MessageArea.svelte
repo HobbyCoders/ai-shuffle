@@ -31,7 +31,7 @@
 	 */
 	import { tick, untrack, onMount, onDestroy, getContext } from 'svelte';
 	import { X } from 'lucide-svelte';
-	import { derived as derivedStore } from 'svelte/store';
+	import { derived as derivedStore, get } from 'svelte/store';
 	import { activeSession as liveActiveSession, backgroundPermissions } from '$lib/stores/active-session';
 	import { TRANSCRIPT_PRESENTATION, type TranscriptPresentation } from './TranscriptHydrationBoundary.svelte';
 	import TranscriptLoadingSkeleton from './TranscriptLoadingSkeleton.svelte';
@@ -194,6 +194,15 @@
 		liveActiveSession.reloadSession(true);
 	}
 
+	// Capture the originating session when the callback is handed to a row, not
+	// when an async rewind later completes against a possibly different target.
+	function rewindCompleteFor(sessionId: string | null | undefined) {
+		return (warning?: string, prompt?: string, uploads?: string[]) => {
+			if (!sessionId || get(liveActiveSession).sessionId !== sessionId) return;
+			handleRewindComplete(warning, prompt, uploads);
+		};
+	}
+
 	let containerRef = $state<HTMLDivElement | null>(null);
 	let shouldAutoScroll = $state(true); // Start with auto-scroll enabled
 	// Counter (not boolean) to handle overlapping programmatic scrolls correctly.
@@ -320,6 +329,7 @@
 	// itself changes, so a fold does not even mark the rows for a recheck.
 	const activeSessionIdStore = derivedStore(activeSession, ($session) => $session.sessionId);
 	const activeSessionId = $derived($activeSessionIdStore);
+	const presentedRewindComplete = $derived(rewindCompleteFor(activeSessionId));
 
 	// Current profile for message settings (uses current UI selection)
 	const currentProfile = $derived($profiles.find(p => p.id === $activeSession.profile));
@@ -2297,7 +2307,7 @@
 			     for agents, its transcript. The phone shows the same collapsible row.
 			     Renders nothing when nothing runs. Chats this one started
 			     show beside the composer (BackgroundWorkStrip). -->
-			<RunningTasksList sessionId={$activeSession.sessionId} variant="inline" />
+			<RunningTasksList sessionId={$activeSession.sessionId} presentation={$activeSession} variant="inline" />
 
 			<!-- Responsive room belongs only to the live edge, never historical turns. -->
 			<div
@@ -2395,7 +2405,7 @@
 			notSent={!!message.metadata?.not_sent}
 			notSentMessageId={typeof message.metadata?.not_sent_id === 'string' ? message.metadata.not_sent_id : null}
 			midTurn={!!message.id && midTurnUserIds.has(message.id)}
-			onRewindComplete={handleRewindComplete}
+			onRewindComplete={presentedRewindComplete}
 		/>
 	{:else if message.type === 'thinking' && chatPrefs?.showThinkingBlocks !== false}
 		<!-- Thinking block - shown based on user preference -->
@@ -2424,7 +2434,7 @@
 				streaming={isStreamAnchor}
 				{hasPartialMessages}
 				metadata={message.metadata}
-				onRewindComplete={handleRewindComplete}
+				onRewindComplete={presentedRewindComplete}
 				profileName={getProfileName(message)}
 				modelLabel={getModelDisplayName(message)}
 			/>

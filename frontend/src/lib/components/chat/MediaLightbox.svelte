@@ -6,10 +6,14 @@
 	 * that opens the lightbox when a generated-media expand button or a
 	 * `.media-zoomable` image is clicked. Esc / backdrop / close button dismiss.
 	 */
-	import { onMount } from 'svelte';
+	import { getContext, onMount } from 'svelte';
+	import { readable } from 'svelte/store';
+	import { TRANSCRIPT_ACTIONS, type TranscriptActions } from './TranscriptHydrationBoundary.svelte';
 	import { lightbox, openLightbox, closeLightbox, selectGalleryMedia } from '$lib/stores/lightbox';
 	import { filenameFromMediaUrl, retryImage, withoutImageRetry } from '$lib/utils/media';
 	import { ChevronLeft, ChevronRight, X, Download, Minus, Plus, Film } from 'lucide-svelte';
+	const actionsAllowed = getContext<TranscriptActions>(TRANSCRIPT_ACTIONS) ?? readable(true);
+	$effect(() => { if (!$actionsAllowed && $lightbox.open) closeLightbox(); });
 	let viewportEl = $state<HTMLDivElement | null>(null);
 	let overlayEl: HTMLElement | null = null;
 	const currentItem = $derived($lightbox.items[$lightbox.index]);
@@ -49,6 +53,7 @@
 	}
 
 	function handleDocClick(e: MouseEvent) {
+		if (!$actionsAllowed) return;
 		const target = e.target as HTMLElement | null;
 		if (!target) return;
 
