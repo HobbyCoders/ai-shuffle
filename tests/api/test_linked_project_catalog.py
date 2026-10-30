@@ -70,4 +70,27 @@ def test_project_linked_to_its_remote_after_its_first_chat_is_listed_once(client
     # Every catalog row the picker shows beside the local list is this project;
     # none is a remote-only copy of it.
     assert [row for row in catalog if row["local_project_id"] != PROJECT_ID] == []
-    assert len(catalog) <= 1
+    assert not any(row["origin"] == f"local:{PROJECT_ID}" for row in catalog)
+
+
+def test_relinked_placeholder_hides_only_this_workers_checkout():
+    """A peer's own remote-less project with the same id stays listed."""
+    from app.api.cluster import _build_cluster_catalog
+
+    placeholder = {"id": "pv2-local", "origin": f"local:{PROJECT_ID}", "name": "Sandbox"}
+    installs = [
+        {"id": ME, "device_name": "This Mac", "approved": True, "online": True},
+        {"id": "peer", "device_name": "Peer", "approved": True, "online": True},
+    ]
+    linked_here = {"id": PROJECT_ID, "instance_id": ME, "path": "/x",
+                   "link_group_id": "g", "git_remote_url": "https://github.com/acme/sandbox.git"}
+
+    def catalog(bases):
+        return _build_cluster_catalog(bases=bases, pv2s=[placeholder], installs=installs,
+                                      local_projects=[linked_here], me=ME)
+
+    mine = {"project_id": "pv2-local", "runner_id": ME}
+    peers = {"project_id": "pv2-local", "runner_id": "peer"}
+    assert catalog([mine]) == []
+    rows = catalog([mine, peers])
+    assert [[e["install_id"] for e in row["eligible"]] for row in rows] == [["peer"]]
