@@ -1400,6 +1400,15 @@
           "past_bug": "An old agent flag made the rewind dialog offer a file restore the backend always refused, with a warning that blamed a missing checkpoint."
         },
         {
+          "id": "harness-basics.source-update-dependency-reuse",
+          "check": "Docker source revisions reuse only complete compatible dependencies and run current Fluid",
+          "kind": "owner",
+          "needs": ["install"],
+          "how": "Use only a disposable candidate container, synthetic data and an ephemeral signed-source acceptance feed; this cannot be proved by a normal dev preview. Stage two source revisions with identical Python/Node dependency closures, changing a harmless Fluid probe in the second. Record third-party pip downloads/install commands and npm ci by package, excluding the separately installed current Fluid code. Import the changed Fluid probe in a fresh interpreter. Change one Python lock, then one Node package lock in separate signed fixtures. Interrupt only the candidate during an incomplete dependency installation and retry. Under a valid completion record, delete an installed Python module and a Node entry point, then make same-size edits to critical code while restoring its modification time; also add damaged bytecode. Warm a nested Python module's bytecode, then change its source while preserving size, inode and mtime. Confirm ctime changes, the old probe can still read the warmed value, and the fresh candidate rebuilds instead of importing the edited source. Confirm only the affected dependency installation is rebuilt at a new path and the retained tree is untouched. Change the signed optional-dependency installer, installation recipe and selected pip/ensurepip identity in separate disposable fixtures. Check fresh imports in both current and rollback revisions after reuse. Stage enough revisions to exercise cleanup, then restart each retained revision. Repeat once with AI_SHUFFLE_PERF_DOCKER_DEPENDENCY_REUSE=0. Never stop a production updater or use production signing keys.",
+          "pass_when": "The second identical-closure revision makes zero third-party pip downloads/installs and zero npm ci calls, yet executes the new Fluid code. Each lock change misses only its relevant dependency cache. Interrupted/partial environments are never reused; active and retained revisions remain startable at the original venv paths, and no more than two unused complete environments per package remain. The rollback flag restores per-revision dependency preparation without weakening signatures or runtime checks. These are real-candidate acceptance checks, not a pass from the offline wheel lab.",
+          "past_bug": "Every container source update created a fresh Python environment and reinstalled byte-identical dependencies, while reusing an entire old app environment would run stale Fluid code."
+        },
+        {
           "id": "harness-basics.swarm-restart-settle",
           "check": "A swarm cut off by an app restart settles and can be cancelled",
           "kind": "owner",

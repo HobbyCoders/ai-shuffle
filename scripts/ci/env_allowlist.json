@@ -151,6 +151,10 @@
     "target_pr": 2,
     "base_settings": true
   },
+  "AI_SHUFFLE_PERF_DOCKER_DEPENDENCY_REUSE": {
+    "kind": "internal",
+    "reason": "Supervisor-only dependency-cache rollback switch; source signatures, runtime checks and per-revision app code remain mandatory."
+  },
   "AI_SHUFFLE_PERF_LAZY_CONNECTORS": {
     "kind": "internal",
     "reason": "Temporary process-start rollback switch for SDK-free connector discovery; restores eager connector and optional SDK imports while the startup optimization is validated",

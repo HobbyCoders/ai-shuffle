@@ -33,6 +33,12 @@ On a Docker worker, a downloaded update that is waiting for **Update and restart
 
 **Settings → System → Updates → Allow updates** turns in-app updates on or off for every worker on your account.
 
+Docker source updates reuse third-party Python dependencies only when the signed lockfiles, optional-dependency installer, installation recipe and selected Python runtime (including pip/ensurepip versions) match. Each revision still installs its own current Fluid code separately. Node dependencies are reused only when the Node/npm versions, platform/ABI, package manifest and lockfile match; source builds still run. Incomplete installs are never reused.
+
+A completion record is checked against every installed file's path, size, mode, modification and change times (mtime/ctime), inode and symlink target. Content hashes cover every installed Python `.py` source as well as critical bytecode, Node entry points, package metadata and native code. Python also receives a bounded, isolated core-import probe. Source validation does not rely on the probe's potentially warmed bytecode. These are local-damage checks, not a boundary against someone who can forge both cache files and their completion record; noncritical non-Python files are not all content-hashed. New Python bytecode stays with each revision rather than changing the shared installation.
+
+Damaged entries are replaced at a new permanent path, never repaired under a running or retained revision. Dependency environments stay at their original paths, and cleanup keeps environments referenced by retained revisions plus at most two unused complete environments per package. Set `AI_SHUFFLE_PERF_DOCKER_DEPENDENCY_REUSE=0` on the supervisor to return to installing dependencies for each revision; this does not disable signature, source-tree or runtime checks.
+
 ### Runtime overlays
 
 An overlay-aware Docker supervisor can install a release's required Python, Node, Chromium and relocatable tools/libraries on the persistent data volume. Nothing changes for an ordinary release: the image's runtimes remain the default. Overlays activate only when a signed release requires a capability the image lacks and includes an archive for this architecture with a pinned SHA-256 and size limits. Downloads and installed contents are verified before use; there are no privileged package-manager operations.
