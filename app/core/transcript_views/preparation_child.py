@@ -1,7 +1,7 @@
-"""Lightweight private CPU entrypoint; stdin EOF owns lifetime on Linux/Windows.
+"""Lightweight CPU entrypoint; the launcher owns lifetime at the OS level.
 
-The reader is also the watchdog: it observes parent death even while the main
-thread is computing/waiting. No multiprocessing helper or application startup.
+The reader drains bounded input and handles ordinary EOF. Parent-death signals
+or a kill-on-close job also stop GIL-holding work. No application startup.
 """
 from __future__ import annotations
 

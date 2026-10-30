@@ -344,8 +344,12 @@ Python thread sharing the serving loop's GIL. Both it and Node use the same
 minimal environment allowlist and supervised stdio boundary. The lightweight
 `-I` entrypoint imports pure canonical replay helpers, not `app.main`, API,
 settings or provider modules; no multiprocessing resource tracker is created.
-A stdin-EOF watchdog ends CPU work on parent death on Linux and Windows. It
-admits one job, reuses one child, refreshes two normalized replay switches per
+OS ownership ends both projection children on parent death even while CPU work
+holds the GIL: a Linux exec shim arms `PR_SET_PDEATHSIG` and checks the expected
+parent PID after arming; Windows uses Fluid's parent-owned kill-on-close Job
+Object and rejects launch if assignment fails. The bounded stdin reader still
+handles ordinary EOF. Neither mechanism adds a supervisor process or tracker.
+Preparation admits one job, reuses one child, refreshes two normalized replay switches per
 call and joins the child on shutdown. Database operations stay on the existing
 asynchronous thread path; no pool/socket is forked into the CPU child. Both
 SQLite and native PostgreSQL have an unconditional CI measurement on PRs;

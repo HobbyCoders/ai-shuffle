@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import signal
 import sys
 import time
 from pathlib import Path
@@ -26,11 +28,20 @@ def blocked(marker):
     time.sleep(30)
 
 
+def gil_blocked(marker):
+    # Deliberately unrelated to canonical reminder parsing: that parser's
+    # independent linear-time fix must not make this ownership test vacuous.
+    expression = re.compile(r"(a+)+$")
+    Path(marker).touch()
+    expression.fullmatch("a" * 32 + "!")  # C regex holds the GIL for many seconds.
+    raise AssertionError("GIL-holding fixture unexpectedly completed")
+
+
 PARENT = r'''
 import asyncio, importlib.util, json, os, sys, time
 import psutil
 from app.core.transcript_views.bridge import ReducerBridge
-from tests.test_transcript_projection_child_boundary import child_stats, blocked
+from tests.test_transcript_projection_child_boundary import child_stats, blocked, gil_blocked
 
 async def main():
     # Exactly the production spawn hazard: multiprocessing reconstructs this
@@ -46,10 +57,13 @@ async def main():
     # so the assertion covers every extra process on Linux and Windows.
     stats["tracker"] = next((child.pid for child in psutil.Process().children()
                              if child.pid not in {stats["pid"], stats["node"]}), None)
-    if sys.argv[1] == "blocked":
-        asyncio.create_task(bridge.prepare(blocked, sys.argv[2]))
+    if sys.argv[1] in ("blocked", "gil-blocked"):
+        operation = gil_blocked if sys.argv[1] == "gil-blocked" else blocked
+        asyncio.create_task(bridge.prepare(operation, sys.argv[2]))
         while not os.path.exists(sys.argv[2]):
             await asyncio.sleep(.005)
+        if sys.argv[1] == "gil-blocked":
+            await asyncio.sleep(.2)  # Ensure the child entered C before killing its parent.
     print(json.dumps(stats), flush=True)
     # The supervisor kills this parent without giving close()/finally a turn.
     sys.stdin.read(1)
@@ -59,14 +73,20 @@ asyncio.run(main())
 '''
 
 
-async def parent(tmp_path, mode="idle"):
+def parent_environment(tmp_path):
     # Windows environ keys enumerate as uppercase but lookups are case-
     # insensitive. Preserve mandatory SystemRoot, not just its display case.
     environment = {key: os.environ[key]
                    for key in ("PATH", "SystemRoot", "WINDIR", "TMP", "TEMP") if key in os.environ}
     environment.update(TESTING="1", AI_SHUFFLE_ENV_FILE=os.devnull,
                        PYTHONPATH=os.pathsep.join((str(ROOT), str(ROOT / "fluid"))),
-                       DATA_DIR=str(tmp_path / "data"), REVIEW_TRANSCRIPT_FAKE_SECRET="fixture-only")
+                       DATA_DIR=str(tmp_path / "data"), HOME=str(tmp_path), USERPROFILE=str(tmp_path),
+                       REVIEW_TRANSCRIPT_FAKE_SECRET="fixture-only")
+    return environment
+
+
+async def parent(tmp_path, mode="idle"):
+    environment = parent_environment(tmp_path)
     # Files, not inherited output pipes: the pre-fix orphan helper retains
     # stdout/stderr, so awaiting their EOF would hide the regression in a hang.
     output = tmp_path / "parent-output"
@@ -158,7 +178,7 @@ async def test_same_uid_sibling_cannot_find_fake_credential_in_either_child(tmp_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["idle", "blocked"])
+@pytest.mark.parametrize("mode", ["idle", "blocked", "gil-blocked"])
 async def test_abrupt_parent_death_stops_all_owned_children(tmp_path, mode):
     process, stats = await parent(tmp_path, mode)
     try:
@@ -172,3 +192,42 @@ async def test_abrupt_parent_death_stops_all_owned_children(tmp_path, mode):
         assert not any(alive(pid) for pid in pids), {pid: alive(pid) for pid in pids}
     finally:
         await cleanup(process, stats)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux parent-death exec guard")
+@pytest.mark.asyncio
+async def test_linux_guard_rejects_a_parent_lost_before_it_is_armed(tmp_path):
+    marker = tmp_path / "must-not-execute"
+    script = "from pathlib import Path; Path(" + repr(str(marker)) + ").touch()"
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-I", "-S", str(ROOT / "app/core/transcript_views/linux_child.py"),
+        str(os.getpid() + 1), sys.executable, "-I", "-c", script,
+        env=parent_environment(tmp_path),
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    try:
+        assert await asyncio.wait_for(process.wait(), 3) == -signal.SIGKILL
+        assert not marker.exists()
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows kill-on-close job")
+@pytest.mark.asyncio
+async def test_windows_job_failure_kills_the_unowned_child(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.core.transcript_views import child_process
+
+    pids = []
+
+    def cannot_assign(pid):
+        pids.append(pid)
+        return None
+
+    monkeypatch.setattr(child_process, "_job_object", lambda: SimpleNamespace(
+        assign_kill_on_close_job=cannot_assign))
+    with pytest.raises(OSError, match="projection_parent_ownership_failed"):
+        await child_process.launch(sys.executable, "-I", "-c", "import time; time.sleep(30)", limit=4096)
+    assert pids and not alive(pids[0])
