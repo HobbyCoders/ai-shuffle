@@ -1,0 +1,135 @@
+name: Android minified release smoke
+
+# No release credentials or publishing. The existing Android CI's full emulator
+# suite remains debug; these black-box tests exercise R8/resource-shrunk code.
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: android-minified-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build minified release and smoke APKs
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install PyYAML==6.0.3
+      - run: python android/ci/test-minified-build.py
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Bundle the offline demo
+        working-directory: frontend
+        run: |
+          npm ci
+          bash ../android/scripts/sync-offline-demo.sh
+      - name: Build production Play bundle and minified smoke instrumentation
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew bundleRelease assembleReleaseSmoke assembleReleaseSmokeAndroidTest -PplayStoreBuild=true -PminifiedSmoke=true --max-workers=2 --stacktrace
+          python3 ci/verify-mobile-apk.py --app-bundle app/build/outputs/bundle/release/app-release.aab
+          python3 ci/check-minified-build.py app/build/outputs/mapping/release/mapping.txt app/build/outputs/mapping/releaseSmoke/mapping.txt
+      - name: Stage only disposable smoke APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-minified-smoke-apks
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            android/app/build/outputs/apk/releaseSmoke/app-releaseSmoke.apk
+            android/app/build/outputs/apk/androidTest/releaseSmoke/app-releaseSmoke-androidTest.apk
+      - name: Keep R8 diagnostics for this exact build
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-minified-mappings
+          retention-days: 3
+          if-no-files-found: warn
+          path: android/app/build/outputs/mapping/
+
+  smoke:
+    name: Minified releaseSmoke (API ${{ matrix.api }})
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - api: 34
+            cores: 2
+            memory: 2048
+          - api: 36
+            cores: 4
+            memory: 4096
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-minified-smoke-apks
+          path: android/minified-apks
+      - name: Free disk for the disposable AVD
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL /usr/local/lib/android/sdk/ndk
+          sudo docker image prune --all --force
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Enable KVM and prepare AVD
+        shell: bash
+        run: |
+          sudo chmod 666 /dev/kvm
+          sdkmanager --install platform-tools 'platforms;android-${{ matrix.api }}' emulator 'system-images;android-${{ matrix.api }};default;x86_64'
+          export ANDROID_AVD_HOME="$HOME/.android/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          avdmanager create avd --force --name test --package 'system-images;android-${{ matrix.api }};default;x86_64' --device pixel_6 <<< no
+          printf '\ndisk.dataPartition.size=6144M\n' >> "$ANDROID_AVD_HOME/test.avd/config.ini"
+          bash ci/emulator-diagnostics.sh before-boot
+          bash ci/emulator-storage.sh check
+      - name: Run black-box tests against non-debuggable minified code
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api }}
+          target: default
+          arch: x86_64
+          profile: pixel_6
+          working-directory: android
+          force-avd-creation: false
+          disk-size: 6144M
+          disable-animations: true
+          pre-emulator-launch-script: bash ci/emulator-diagnostics.sh before-boot
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+            -camera-back emulated -no-snapshot -memory ${{ matrix.memory }} -cores ${{ matrix.cores }}
+            -logcat '*:I' > "$RUNNER_TEMP/android-emulator/emulator.log" 2>&1
+          script: bash ci/run-minified-smoke.sh
+      - name: Keep failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-minified-failure-api-${{ matrix.api }}
+          retention-days: 3
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/android-emulator/
