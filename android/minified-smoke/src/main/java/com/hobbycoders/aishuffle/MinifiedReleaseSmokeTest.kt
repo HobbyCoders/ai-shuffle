@@ -8,7 +8,10 @@ import android.os.SystemClock
 import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.test.core.app.ActivityScenario
 import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.action.ViewActions.click
@@ -22,6 +25,7 @@ import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.ByteArrayInputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
@@ -34,10 +38,10 @@ class MinifiedReleaseSmokeTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val context get() = instrumentation.targetContext
     private fun intent(activity: String) = Intent().setClassName(context.packageName, "${context.packageName}.$activity")
-    private fun await(message: String, condition: () -> Boolean) {
+    private fun await(message: String, diagnostic: () -> String = { "" }, condition: () -> Boolean) {
         val deadline = SystemClock.elapsedRealtime() + 12_000
         while (!condition()) {
-            if (SystemClock.elapsedRealtime() >= deadline) throw AssertionError(message)
+            if (SystemClock.elapsedRealtime() >= deadline) throw AssertionError("$message ${diagnostic()}")
             Thread.sleep(50)
         }
     }
@@ -49,6 +53,13 @@ class MinifiedReleaseSmokeTest {
         instrumentation.runOnMainSync { web.evaluateJavascript(source) { value.set(it); done.countDown() } }
         assertTrue("JavaScript callback did not return", done.await(5, TimeUnit.SECONDS))
         return value.get()
+    }
+
+    private fun documentState(web: WebView): String {
+        var topLevel: String? = null
+        instrumentation.runOnMainSync { topLevel = web.url }
+        return "nativeURL=$topLevel document=" + javascript(web,
+            "JSON.stringify({href:location.href,origin:location.origin,state:document.readyState,shell:typeof shuffleShell,file:typeof shuffleFileSave})")
     }
 
     @Test fun realChatInstallsBothBridgesAndProcessesMessagesAfterMinification() {
@@ -72,17 +83,29 @@ class MinifiedReleaseSmokeTest {
                     web != null && toolbar != null
                 }
                 val page = requireNotNull(web)
-                // The production onCreate installs the real listeners. Only the
-                // HTTPS document is synthetic; no listener/bootstrap is seeded.
+                // The production onCreate installs the real listeners. Replace
+                // only document delivery, not listeners or authorization. Commit
+                // a real HTTPS URL: the native guard reads WebView.url, not just
+                // the JavaScript origin set by loadDataWithBaseURL.
                 instrumentation.runOnMainSync {
-                    page.loadDataWithBaseURL("https://release-smoke.invalid/mobile/", "<html><body>Release bridge smoke</body></html>", "text/html", "UTF-8", null)
+                    page.stopLoading()
+                    page.webViewClient = object : WebViewClient() {
+                        override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse {
+                            check(request.url.host in setOf("release-smoke.invalid", "untrusted.invalid"))
+                            return WebResourceResponse("text/html", "UTF-8", ByteArrayInputStream(
+                                "<html><body>Release bridge smoke</body></html>".toByteArray(Charsets.UTF_8)))
+                        }
+                    }
+                    page.loadUrl("https://release-smoke.invalid/mobile/")
                 }
-                await("Production message bridges missing") {
-                    javascript(page, "typeof shuffleShell === 'object' && typeof shuffleFileSave === 'object'") == "true"
+                await("Production message bridges missing", { documentState(page) }) {
+                    var committed = false
+                    instrumentation.runOnMainSync { committed = page.url == "https://release-smoke.invalid/mobile/" }
+                    committed && javascript(page, "document.readyState === 'complete' && location.origin === 'https://release-smoke.invalid' && typeof shuffleShell === 'object' && typeof shuffleFileSave === 'object'") == "true"
                 }
                 for (shown in listOf(true, false)) {
                     javascript(page, "shuffleShell.postMessage(JSON.stringify({type:'worker-bar',shown:$shown}))")
-                    await("Native toolbar did not react to the real JS message") {
+                    await("Native toolbar did not react to the real JS message", { documentState(page) }) {
                         var changed = false
                         instrumentation.runOnMainSync { changed = toolbar!!.visibility == if (shown) View.GONE else View.VISIBLE }
                         changed
@@ -95,7 +118,7 @@ class MinifiedReleaseSmokeTest {
                 """.trimIndent())
                 await("File bridge did not reply through native JSON/coroutine code") { javascript(page, "window.releaseReply") == "true" }
                 instrumentation.runOnMainSync {
-                    page.loadDataWithBaseURL("https://untrusted.invalid/mobile/", "<html><body>Wrong origin</body></html>", "text/html", "UTF-8", null)
+                    page.loadUrl("https://untrusted.invalid/mobile/")
                 }
                 await("Untrusted document did not load without privileged bridges") {
                     javascript(page, "location.hostname === 'untrusted.invalid' && typeof shuffleShell === 'undefined' && typeof shuffleFileSave === 'undefined'") == "true"

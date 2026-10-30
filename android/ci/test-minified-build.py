@@ -92,6 +92,9 @@ class MinifiedBuildTests(unittest.TestCase):
         self.assertNotIn("getDeclaredField", test)
         self.assertIn("shuffleShell.postMessage", test)
         self.assertIn("shuffleFileSave.postMessage", test)
+        self.assertIn('page.loadUrl("https://release-smoke.invalid/mobile/")', test)
+        self.assertIn("committed && javascript", test)
+        self.assertNotIn("page.loadDataWithBaseURL(", test)
 
 
 if __name__ == "__main__":
