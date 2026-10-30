@@ -82,12 +82,15 @@ const viaDeepLink = (target) => async ({ page, status, mark, variant }) => {
 async function holdIncomingHistory(page, target, delayMs) {
 	await page.addInitScript(({ target, delayMs }) => {
 		const fetchOriginal = window.fetch.bind(window);
-		const hold = window.__switchHydrationHold = { started: null, released: null };
+		let notifyStarted;
+		const whenStarted = new Promise(resolve => { notifyStarted = resolve; });
+		const hold = window.__switchHydrationHold = { started: null, released: null, whenStarted };
 		window.fetch = async (input, init) => {
 			const response = await fetchOriginal(input, init);
 			const url = new URL(typeof input === 'string' ? input : input.url, location.href);
 			if (url.pathname === `/api/v1/sessions/${target}/events` && hold.started === null) {
 				hold.started = performance.now();
+				notifyStarted();
 				await new Promise(resolve => setTimeout(resolve, delayMs));
 				hold.released = performance.now();
 			}
@@ -97,8 +100,13 @@ async function holdIncomingHistory(page, target, delayMs) {
 }
 
 async function prepareHeldSwitch(ctx, delayMs, source = 'no_project') {
-	const { page, status, variant } = ctx;
-	await holdIncomingHistory(page, seededChatId(status, 'other_project'), delayMs);
+	await holdIncomingHistory(ctx.page, seededChatId(ctx.status, 'other_project'), delayMs);
+	await resetHeldSwitch(ctx, source);
+}
+
+async function resetHeldSwitch({ page, status, variant }, source = 'no_project') {
+	// A fresh document unloads B and resets the existing history-hold init script.
+	// Do not install it twice: stacked fetch wrappers would change the fixture.
 	const prefix = mobileShell && variant.viewport === 'phone' ? '/mobile/' : '/';
 	await page.goto(new URL(`${prefix}?session=${encodeURIComponent(seededChatId(status, source))}`, status.urls.ui).toString());
 	await page.getByRole('textbox', { name: 'Message' }).waitFor({ timeout: 60_000 });
@@ -479,50 +487,89 @@ await runJourney({
 		},
 		{ name: 'short-rapid-switch-cancels-overlay',
 			setup: ctx => prepareHeldSwitch(ctx, 3000),
-			async act({ page, mark, log }) {
-				const outgoing = await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-session');
-				expect(typeof outgoing === 'string', 'outgoing session has a safe diagnostic tag');
-				if (new URL(page.url()).pathname.startsWith('/mobile/')) {
-					await page.getByRole('button', { name: /^Open menu/ }).click();
-				} else await showSidebar(page);
-				const incomingRow = page.getByRole('group', { name: `${SEEDED.other_project} session`, exact: true }).getByRole('button').first();
-				await incomingRow.click({ trial: true });
-				const incomingButton = await incomingRow.elementHandle();
-				await sampleSwitchFrames(page);
-				await mark('start B then return to A before its history settles');
-				// One browser-side sequence: driver round-trips must not turn this
-				// rapid switch into a legitimate load past the notice deadline.
-				const dispatched = await page.evaluate(async ({ incoming, outgoing, graceMs }) => {
-					const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-					if (!incoming?.isConnected) throw new Error('missing rapid-switch row');
-					const first = performance.now();
-					incoming.click();
-					await frame();
-					// Reopen/paint the real drawer while B's native headers are in flight,
-					// not afterwards: serializing network and drawer rendering can use
-					// the whole grace interval on hosted runners. Both remain real.
-					const menu = document.querySelector('button[aria-label^="Open menu"], button[aria-label="Show sidebar"]');
-					if (menu) { menu.click(); await frame(); }
-					while (window.__switchHydrationHold.started === null) {
-						if (performance.now() - first >= graceMs) {
-							throw new Error('invalid rapid-switch run: B did not start its held history before the notice deadline');
-						}
-						await frame();
+			async act(ctx) {
+				const { page, mark, log } = ctx;
+				const dispatchTimes = [];
+				let outgoing;
+				for (let attempt = 1; attempt <= 3; attempt++) {
+					if (attempt > 1) {
+						// Only an unmet timing precondition reaches here. Discard that
+						// invalid recording and unrecord the fixture reset, not a valid
+						// attempt's anomalies. Retain exactly the same recorder rules.
+						const options = await page.evaluate(() => {
+							window.__switchHydrationSampling = false;
+							return window.__flightRecorder.stop().options;
+						});
+						await resetHeldSwitch(ctx);
+						const started = await page.evaluate(options => window.__flightRecorder.start({ ...options, restart: true }), options);
+						expect(started.ok, 'restarted the rapid-switch recorder after resetting the fixture');
 					}
-					// Responsive desktop unmounts its closed sidebar; find the freshly
-					// opened card rather than dispatching on a detached old handle.
-					const group = [...document.querySelectorAll('[role="group"]')]
-						.find(node => node.getAttribute('aria-label') === `${outgoing} session`);
-					const returnButton = group?.querySelector('[role="button"]');
-					if (!returnButton) throw new Error('missing rapid-return session card');
-					window.__flightRecorder.mark('return to A before B has hydrated');
-					const returned = performance.now();
-					returnButton.click();
-					return { first, returned, elapsed: returned - first, graceMs };
-				}, { incoming: incomingButton, outgoing: SEEDED.no_project, graceMs: SWITCH_GRACE_MS });
-				log(`rapid-dispatch ${JSON.stringify(dispatched)}`);
-				expect(dispatched.elapsed < dispatched.graceMs,
-					`invalid rapid-switch run: return dispatched at ${dispatched.elapsed.toFixed(1)} ms, not before ${dispatched.graceMs} ms`);
+					outgoing = await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-session');
+					expect(typeof outgoing === 'string', 'outgoing session has a safe diagnostic tag');
+					expect(await page.evaluate(() => window.__switchHydrationHold.started === null), 'B is unloaded before each rapid-switch attempt');
+					if (new URL(page.url()).pathname.startsWith('/mobile/')) {
+						await page.getByRole('button', { name: /^Open menu/ }).click();
+					} else await showSidebar(page);
+					const incomingRow = page.getByRole('group', { name: `${SEEDED.other_project} session`, exact: true }).getByRole('button').first();
+					await incomingRow.click({ trial: true });
+					const incomingButton = await incomingRow.elementHandle();
+					await sampleSwitchFrames(page);
+					await mark('start B then return to A before its history settles');
+					// One browser-side sequence: no driver round-trips or fixed frame
+					// waits may consume the rapid-switch precondition's grace interval.
+					const dispatched = await page.evaluate(async ({ incoming, outgoing, graceMs }) => {
+						if (!incoming?.isConnected) throw new Error('missing rapid-switch row');
+						const first = performance.now();
+						incoming.click();
+						// Flush the drawer close, not a whole painted frame. B's real
+						// selection still runs on its normal production schedule.
+						await Promise.resolve();
+						const menu = document.querySelector('button[aria-label^="Open menu"], button[aria-label="Show sidebar"]');
+						if (menu) menu.click();
+						// Responsive desktop unmounts the closed sidebar. Resolve as
+						// soon as A's new card is connected; do not wait for a paint.
+						const returnButton = await new Promise((resolve, reject) => {
+							const find = () => {
+								const group = [...document.querySelectorAll('[role="group"]')]
+									.find(node => node.getAttribute('aria-label') === `${outgoing} session`);
+								const button = group?.querySelector('[role="button"]');
+								if (!button?.isConnected) return;
+								observer.disconnect();
+								clearTimeout(timeout);
+								resolve(button);
+							};
+							const observer = new MutationObserver(find);
+							observer.observe(document, { childList: true, subtree: true });
+							const timeout = setTimeout(() => {
+								observer.disconnect();
+								reject(new Error('missing rapid-return session card'));
+							}, 6000);
+							find();
+						});
+						// Wake on native headers, not the next rAF poll. The timeout
+						// only bounds an invalid precondition; it never delays a ready B.
+						let deadline;
+						await Promise.race([
+							window.__switchHydrationHold.whenStarted,
+							new Promise(resolve => { deadline = setTimeout(resolve, Math.max(0, graceMs - (performance.now() - first))); })
+						]);
+						clearTimeout(deadline);
+						const held = window.__switchHydrationHold.started !== null;
+						window.__flightRecorder.mark('return to A before B has hydrated');
+						const returned = performance.now();
+						returnButton.click();
+						return { first, returned, elapsed: returned - first, graceMs, held };
+					}, { incoming: incomingButton, outgoing: SEEDED.no_project, graceMs: SWITCH_GRACE_MS });
+					dispatchTimes.push(dispatched.elapsed.toFixed(1));
+					const valid = dispatched.held && dispatched.elapsed < dispatched.graceMs;
+					log(`rapid-dispatch attempt ${attempt}/3 ${valid ? 'VALID' : 'PRECONDITION INVALID'} ${JSON.stringify(dispatched)}; dispatch times: ${dispatchTimes.join(', ')} ms`);
+					if (valid) break;
+					expect(attempt < 3,
+						`invalid rapid-switch run: return dispatched at ${dispatched.elapsed.toFixed(1)} ms, not before ${dispatched.graceMs} ms${dispatched.held ? '' : '; B did not start its held history before the notice deadline'}; all 3 attempts invalid (dispatch times: ${dispatchTimes.join(', ')} ms)`);
+					log('retrying only the rapid-dispatch precondition with clean A and B unloaded');
+				}
+				// No retry is possible below: every-frame and recorder assertions
+				// from the first valid attempt fail the case immediately.
 				await page.waitForFunction(tag => {
 					const chat = document.querySelector('[data-ui-state="chat"]');
 					return chat?.dataset.uiSession === tag && chat?.dataset.uiTargetSession === tag && chat?.dataset.uiLoading === 'false';
