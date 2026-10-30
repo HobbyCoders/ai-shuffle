@@ -54,7 +54,7 @@ function fetchAnswers(...answers: (Error | null)[]) {
 		if (url.endsWith('/fetch-models')) {
 			const a = answers[n++];
 			if (a) throw a;
-			return { source: 'upstream', models: catalog, recommended };
+			return { source: 'upstream', binding: 'fixture-connect-binding', models: catalog, recommended };
 		}
 		return {};
 	});
@@ -186,7 +186,7 @@ describe('setup: connecting an API key', () => {
 
 	it('keeps a default the row already has while it is still picked', async () => {
 		fetchAnswers(null);
-		mocks.rows = [{ id: 'row-1', default_model: 'model-a', models: [] }];
+		mocks.rows = [{ id: 'row-1', catalog_binding: 'fixture-connect-binding', default_model: 'model-a', models: [] }];
 		render(ProviderConnect, { provider: 'openrouter' });
 		await saveKey('key');
 		await fireEvent.click(await screen.findByRole('button', { name: 'Use selected (1)' }));
@@ -197,7 +197,7 @@ describe('setup: connecting an API key', () => {
 
 	it('replaces a stale default that is no longer among the picked models', async () => {
 		fetchAnswers(null);
-		mocks.rows = [{ id: 'row-1', default_model: 'model-b', models: [] }];
+		mocks.rows = [{ id: 'row-1', catalog_binding: 'fixture-connect-binding', default_model: 'model-b', models: [] }];
 		render(ProviderConnect, { provider: 'openrouter' });
 		await saveKey('key');
 		await fireEvent.click(await screen.findByRole('button', { name: 'Use selected (1)' }));
