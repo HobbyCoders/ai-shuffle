@@ -29,18 +29,24 @@ let passed = 0;
 
 const sessions = {
 	child: { id: 'child', title: 'Agents page header review', hidden: true, parent_session_id: 'assistant' },
-	assistant: { id: 'assistant', title: 'Assistant' },
+	assistant: { id: 'assistant', title: 'Assistant', hidden: false, parent_session_id: null },
 };
 
 async function measure({ width, actions, title }) {
 	const context = await browser.newContext({ viewport: { width, height: 300 }, deviceScaleFactor: 1, serviceWorkers: 'block' });
+	const identityReads = [];
 	await context.route((u) => u.pathname.startsWith('/api/'), (route) => {
-		const path = new URL(route.request().url()).pathname.replace(/^\/api\/v1/, '');
+		const url = new URL(route.request().url());
+		const path = url.pathname.replace(/^\/api\/v1/, '');
 		if (path === '/auth/status') return route.fulfill({ json: { authenticated: true, is_admin: true, setup_required: false } });
 		if (path === '/owner/agents') return route.fulfill({ json: [] });
 		if (path === '/assistant') return route.fulfill({ json: { home_session_id: 'assistant' } });
-		const id = decodeURIComponent(path.split('/').pop() || '');
-		return sessions[id] ? route.fulfill({ json: sessions[id] }) : route.fulfill({ status: 404, json: {} });
+		const sessionRead = path.match(/^\/sessions\/([^/]+)(\/live)?$/);
+		if (!sessionRead) return route.fulfill({ status: 404, json: { detail: 'Not Found' } });
+		const id = decodeURIComponent(sessionRead[1]);
+		identityReads.push(url);
+		if (!sessions[id]) return route.fulfill({ status: 404, json: { detail: `Session not found: ${id}` } });
+		return route.fulfill({ json: sessionRead[2] ? { session_meta: sessions[id] } : sessions[id] });
 	});
 	const page = await context.newPage();
 	const errors = [];
@@ -51,6 +57,11 @@ async function measure({ width, actions, title }) {
 	await page.locator('.current .title-text').waitFor();
 	await page.evaluate(() => document.fonts.ready);
 	const name = `${width}px, actions ${actions}px${title ? `, "${title}"` : ''}`;
+	for (const id of ['child', 'assistant'])
+		assert(identityReads.some(url => url.pathname === `/api/v1/sessions/${id}/live`), `[${name}] light ${id} identity was read`);
+	assert(identityReads.every(url => url.pathname.endsWith('/live')
+		&& url.searchParams.get('include_messages') === 'false'
+		&& url.searchParams.get('owner_fields') === 'true'), `[${name}] identity reads must remain transcript-free`);
 	if (shots) await page.locator('.topbar').screenshot({ path: join(shots, `crumb-strip-${width}-${actions}-${(title || 'default').length}.png`) });
 	const m = await page.evaluate(() => {
 		const textWidth = (el) => { const r = document.createRange(); r.selectNodeContents(el); return r.getBoundingClientRect().width; };

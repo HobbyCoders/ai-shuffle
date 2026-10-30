@@ -1184,9 +1184,9 @@ async def get_live_session(
     owner_fields: bool = Query(
         False,
         description=(
-            "Also put the owning-device fields (`is_remote`, `device_name`) in "
-            "`session_meta`, so a client can read them without the full "
-            "`GET /sessions/{id}` transcript."
+            "Also put identity/ancestry (`id`, `hidden`, `parent_session_id`) "
+            "and owning-device fields (`is_remote`, `device_name`) in "
+            "`session_meta`, without the full `GET /sessions/{id}` transcript."
         ),
     ),
     token: str = Depends(require_auth)
@@ -1234,6 +1234,11 @@ async def get_live_session(
     active_tasks = lifecycle.active_tasks
     unpark_pending = lifecycle.unpark_pending
 
+    # The same durable, running-only presence as GET /sessions/{id}. Do not
+    # infer it from activeTasks: that display view also retains terminal work.
+    from app.db.background_tasks import get_running_task_presence
+    presence = await run_sync(get_running_task_presence, [session_id])
+
     # Surfaced on every response body, like the lifecycle flags above.
     v2_stream = bool(session.get("v2_stream"))
 
@@ -1273,16 +1278,23 @@ async def get_live_session(
         "away_mode": session.get("away_mode"),
     }
     if owner_fields:
+        # Breadcrumbs also need hidden/deep-linked chats outside the sidebar
+        # page. All fields stay behind require_transcript_session above, just
+        # like the existing device fields; no transcript or parent read needed.
+        session_meta.update({
+            "id": session["id"],
+            "hidden": bool(session.get("hidden")),
+            "parent_session_id": session.get("parent_session_id"),
+        })
         # Which device runs this chat (private access is managed there).
         annotated = dict(session)
         await run_sync(_annotate_cluster_fields, [annotated])
         session_meta["is_remote"] = bool(annotated.get("is_remote"))
         session_meta["device_name"] = annotated.get("device_name")
 
-    # Always include the title so the frontend header stays in sync
-    session_title = session.get("title")
-    if session_title:
-        session_meta["title"] = session_title
+    # Presence is the identity contract, even for an untitled chat. Omitting a
+    # null/empty title makes a new worker look like one without this contract.
+    session_meta["title"] = session.get("title")
 
     wt_id = session.get("worktree_id")
     wt = await run_sync(database.get_worktree, wt_id) if wt_id else None
@@ -1432,6 +1444,8 @@ async def get_live_session(
             "cache_read_tokens": cache_read,
         },
         "activeTasks": active_tasks,
+        "has_running_tasks": presence.get(session_id, {}).get("has_running_tasks", False),
+        "parked_task_kind": session.get("parked_task_kind"),
         "unpark_pending": unpark_pending,
         "v2_stream": v2_stream,
         # Transcript window. Additive: `messages` still carries the newest
