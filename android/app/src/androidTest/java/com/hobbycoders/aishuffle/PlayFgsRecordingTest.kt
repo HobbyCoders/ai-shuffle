@@ -144,7 +144,7 @@ class PlayFgsRecordingTest {
                 pause(1_500)
                 permission!!.click()
                 waitFor("Real call did not become live", 60_000) {
-                    js(scenario, "document.querySelector('[aria-label=\"Active voice call\"]')?.textContent.includes('Voice call · live') === true") == "true"
+                    js(scenario, "!!document.querySelector('[data-testid=\"voice-ring\"].live')") == "true"
                 }
                 phase("live")
                 assertRecordingAndForeground()
@@ -177,15 +177,15 @@ class PlayFgsRecordingTest {
                 notification!!.click()
                 phase("unlocked")
                 waitFor("Call did not stay live after unlocking") {
-                    js(scenario, "document.querySelector('[aria-label=\"Active voice call\"]')?.textContent.includes('Voice call · live') === true") == "true"
+                    js(scenario, "!!document.querySelector('[data-testid=\"voice-ring\"].live')") == "true"
                 }
                 assertRecordingAndForeground()
                 device.takeScreenshot(File(out, "06-unlocked.png"))
                 pause(3_000)
-                tap("End voice call")
+                tap("Stop voice agent")
                 phase("ended")
                 waitFor("Call controls did not disappear after hangup") {
-                    js(scenario, "!document.querySelector('[aria-label=\"Active voice call\"]')") == "true"
+                    js(scenario, "!document.querySelector('[data-testid=\"voice-ring\"].live')") == "true"
                 }
                 @Suppress("DEPRECATION")
                 waitFor("Microphone service stayed in foreground after hangup") {
