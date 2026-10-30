@@ -777,6 +777,10 @@
 	let windowShifting = false;
 	let revealedTurnId = $state<string | null>(null);
 	let anchorRounding: { scrollTop: number; error: number } | null = null;
+	// Space kept above the window when evicting leading rows would need a
+	// negative scrollTop (#889): at scroll origin the compensation clamps and
+	// the reader moves up. Measured per shift; every later shift re-anchors.
+	let leadingGap = $state(0);
 
 	function applyMountedRange(next: TranscriptRange, preserveAnchor = true) {
 		// Once the budget was reached, keep the clear affordance stable until
@@ -811,6 +815,7 @@
 		const version = ++windowShiftVersion;
 		windowShifting = true;
 		mountedRange = next;
+		leadingGap = 0;
 		if (windowSessionKey) {
 			mountedRangeCache.set(windowSessionKey, next);
 			evictOldest(mountedRangeCache, SCROLL_CACHE_MAX);
@@ -842,12 +847,21 @@
 					markProgrammaticScrollSettling();
 					const previousScrollTop = container.scrollTop;
 					const scrollDelta = delta + roundingError;
-					container.scrollTop += scrollDelta;
-					const error = scrollDelta - (container.scrollTop - previousScrollTop);
-					// Never carry a real clamp/navigation boundary, including the
-					// accepted phone-origin singleton settle, into a later shift.
-					anchorRounding = anchor?.isConnected && Math.abs(error) < 1
-						? { scrollTop: container.scrollTop, error } : null;
+					// Keep a dropped leading row's space instead of clamping at 0.
+					const shortfall = -(previousScrollTop + scrollDelta);
+					if (preserveAnchor && next.start > 0 && shortfall >= 0.5) {
+						leadingGap = shortfall;
+						await tick();
+						if (version !== windowShiftVersion || container !== containerRef) return;
+						container.scrollTop = 0;
+						anchorRounding = null;
+					} else {
+						container.scrollTop += scrollDelta;
+						const error = scrollDelta - (container.scrollTop - previousScrollTop);
+						// Never carry a real clamp/navigation boundary into a later shift.
+						anchorRounding = anchor?.isConnected && Math.abs(error) < 1
+							? { scrollTop: container.scrollTop, error } : null;
+					}
 					lastKnownScrollTop = container.scrollTop;
 					lastScrollMetrics = readScrollMetrics();
 				}
@@ -2221,7 +2235,7 @@
 		<div class="chat-column" bind:this={chatColumnRef}>
 			{#if mountedStart > 0}
 				<!-- Keyboard-accessible equivalent of scrolling into the older edge. -->
-				<div class="earlier-row">
+				<div class="earlier-row" style:margin-top={leadingGap ? `${leadingGap}px` : undefined}>
 					<button type="button" class="earlier-button" onclick={loadOlderItems}>
 						Show earlier messages
 					</button>
