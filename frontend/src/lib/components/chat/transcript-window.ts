@@ -174,14 +174,20 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 	}
 	function reprice(checkReadingKey = false): TranscriptRange {
 		const next = startingRange(range.start);
-		// Unchanged streaming bodies usually keep the entire mounted slice. Do not
+		// Most streaming updates keep the entire mounted slice. Do not
 		// force a DOM/layout read on each token just to rediscover that fact.
 		const retainsMounted = next.start <= range.start && next.end >= Math.min(count, range.end);
 		if (!weighted || !count || (!checkReadingKey && retainsMounted)) return commit(next.start, next.end);
 		// No viewport (e.g. controller-only consumers): retain the old trailing row
 		// rather than silently dropping a growing reply. The rendered caller names
 		// its actual visible key, including its new index after a prepend.
-		return commit(next.start, next.end, getReadingIndex?.() ?? Math.min(count, range.end) - 1);
+		const reading = getReadingIndex?.() ?? Math.min(count, range.end) - 1;
+		if (!Number.isInteger(reading) || reading < 0 || reading >= count) return commit(next.start, next.end);
+		// Fill forward from the visible key, then backfill affordable neighbours.
+		// Merely pinning it in the old-start candidate can preserve an offscreen
+		// expensive prefix and still evict a visible reply immediately below it.
+		const around = endingRange(startingRange(reading).end);
+		return commit(around.start, around.end, reading);
 	}
 	const shift = () => weighted ? Math.min(step, Math.max(1, Math.floor((range.end - range.start) / 4))) : step;
 	function toTail(): TranscriptRange { followsTail = true; return endingAt(count); }

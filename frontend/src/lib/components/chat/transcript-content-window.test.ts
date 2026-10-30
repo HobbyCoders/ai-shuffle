@@ -24,6 +24,14 @@ describe('nested transcript mount budget', () => {
   expect(costs.slice(range.start, range.end).reduce((sum, cost) => sum + cost, 0)).toBeLessThanOrEqual(12000);
   expect(window.selectionLimited).toBe(false);
  });
+ it('evicts the offscreen prefix before a visible reply below the first reading row', () => {
+  let costs = [6000, 2000, 2000];
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000, getReadingIndex: () => 1 });
+  window.setItemCount(3);
+  window.setItemCount(3, { followTail: false });
+  costs = [6000, 2000, 6000];
+  expect(window.setItemCount(3, { followTail: false })).toEqual({ start: 1, end: 3 });
+ });
  it('resolves a reading key against the new vector after a prepend and allows explicit navigation away', () => {
   let costs = [6000, 2000, 2000], reading = 2;
   const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000, getReadingIndex: () => reading });

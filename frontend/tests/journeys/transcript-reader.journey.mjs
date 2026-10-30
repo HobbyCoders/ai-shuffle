@@ -12,9 +12,7 @@ const mobileShell = process.argv.includes('--mobile-shell');
 const LOG = '[role="log"][aria-label="Conversation messages"]';
 const twoFrames = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 
-await runJourney({
-	name: 'transcript-reader',
-	cases: [{
+const cases = [{
 		name: 'selection-survives-eviction',
 		async setup({ page, status, variant }) {
 			const id = status.seed?.chats?.long ?? status.seed?.sessions?.large;
@@ -100,7 +98,7 @@ await runJourney({
 		}
 	}, {
 		name: 'same-count-streaming-growth',
-		async setup({ page, status, variant }) {
+		async setup({ page, status, variant, readingBoundary = false }) {
 			// Produce a fresh native prefix through the real composer/provider, then
 			// replay it into the affected shell. No synthetic feed/state or SDK-only
 			// fork endpoint: default native seed sessions have no SDK session id.
@@ -117,14 +115,25 @@ await runJourney({
 				const row = [...document.querySelectorAll('[data-transcript-index]')].at(-1);
 				return Number(row?.dataset.transcriptIndex) >= 3 && row.textContent.includes('GROWING_READER_START') && row.textContent.length > 4000;
 			});
-			await page.locator(LOG).evaluate(log => {
-				const row = [...log.querySelectorAll('[data-transcript-index]')].filter(row => row.textContent.includes('GROWING_READER_START')).at(-1);
-				log.scrollTop += row.getBoundingClientRect().top - log.getBoundingClientRect().top + 400;
-			});
+			// Release the controlled turn anchor with real wheel intent BEFORE
+			// positioning the reading key; it must not fight our viewport setup.
 			await page.locator(LOG).hover();
 			await page.mouse.wheel(0, -160);
 			await page.getByRole('button', { name: 'Jump to latest message', exact: true }).waitFor();
 			await twoFrames(page);
+			await page.locator(LOG).evaluate((log, boundary) => {
+				const row = [...log.querySelectorAll('[data-transcript-index]')].filter(row => row.textContent.includes('GROWING_READER_START')).at(-1);
+				const key = boundary ? log.querySelector(`[data-transcript-index="${Number(row.dataset.transcriptIndex) - 1}"]`) : row;
+				log.scrollTop += key.getBoundingClientRect().top - log.getBoundingClientRect().top + (boundary ? 24 : 400);
+			}, readingBoundary);
+			await twoFrames(page);
+			const visible = await page.locator(LOG).evaluate(log => {
+				const top = log.getBoundingClientRect().top, bottom = log.getBoundingClientRect().bottom;
+				return [...log.querySelectorAll('[data-transcript-index]')].filter(row => {
+					const box = row.getBoundingClientRect(); return box.bottom > top && box.top < bottom;
+				}).map(row => Number(row.dataset.transcriptIndex));
+			});
+			expect(visible[0] === (readingBoundary ? 2 : 3) && visible.includes(3), `read the growing reply at the intended viewport position (boundary=${readingBoundary}, visible=${visible.join(',')})`);
 		},
 		async act({ page, mark, log }) {
 			await mark('read the live reply while same-count growth reprices the window');
@@ -175,6 +184,12 @@ await runJourney({
 				if (await stop.isVisible()) await stop.click();
 			}
 		}
-	}],
-	allow: [...DEV_INSTANCE_NOISE]
+	}];
+const growingReply = cases[1];
+cases.push({
+	...growingReply,
+	name: 'same-count-visible-boundary-growth',
+	setup: context => growingReply.setup({ ...context, readingBoundary: true })
 });
+
+await runJourney({ name: 'transcript-reader', cases, allow: [...DEV_INSTANCE_NOISE] });
