@@ -214,6 +214,7 @@ def test_pr_triggers_are_only_for_read_only_secret_free_checks():
         "ci-backend.yml", "ci-fluid.yml", "ci-frontend.yml", "desktop.yml",
         "desktop-source-checks.yml", "windows-suite.yml", "ci-instance-identity.yml",
         "ci-artifact-policy.yml", "ci-browser-workspace.yml", "container-postgres.yml",
+        "ci-android-minified.yml",
     }
     found = set()
     for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
