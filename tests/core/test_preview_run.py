@@ -454,3 +454,20 @@ def test_saved_access_is_reused_only_on_launcher_disposable_data(
     out = capsys.readouterr().out
     assert "still valid" not in out and "open once in the agent browser" in out
     assert json.loads(access.read_text())["token"] != first["token"]
+
+
+@pytest.mark.parametrize("has_nofollow", [True, False])
+def test_private_json_write_works_without_o_nofollow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, has_nofollow: bool,
+) -> None:
+    """Windows Python has no os.O_NOFOLLOW; the saved-access write must still work (#843)."""
+    from app.preview_run import _write_private_json
+
+    if not has_nofollow:
+        monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    target = tmp_path / "access.json"
+    _write_private_json(target, {"token": "t"})
+    assert target.read_text(encoding="utf-8") == '{"token": "t"}'
+    assert not (tmp_path / "access.json.tmp").exists()
+    if os.name == "posix":
+        assert target.stat().st_mode & 0o777 == 0o600
