@@ -8,7 +8,7 @@
 	 * - Keyboard shortcuts for sending messages
 	 */
 	import { onMount, onDestroy, tick } from 'svelte';
-	import { createChatEditor, setEditorPlaceholder, type Editor } from './tiptap/editorConfig';
+	import { createChatEditor, insertPlainText as insertPlainTextInView, setEditorPlaceholder, type Editor } from './tiptap/editorConfig';
 	import { createLiveDictation } from './tiptap/liveDictation';
 	import { createPlainPasteIntent } from './tiptap/large-paste';
 	import type { FileChipAttributes } from './tiptap/FileChipNode';
@@ -263,7 +263,7 @@
 	/** Insert text at the cursor as text (never parsed as HTML). */
 	export function insertPlainText(text: string) {
 		if (!editor) return;
-		editor.view.dispatch(editor.state.tr.insertText(text));
+		insertPlainTextInView(editor.view, text);
 	}
 
 	/**
@@ -437,6 +437,11 @@
 		outline: none;
 		width: 100%;
 		min-height: 24px;
+		/* The editable keeps its full content height inside the capped,
+		   scrolling .tiptap-editor. Shrunk to the cap, its box sat thousands of
+		   pixels above the field once scrolled, so clicks beside short lines
+		   missed the editor (#912). */
+		flex-shrink: 0;
 		font-family: var(--font-sans);
 		font-size: 14.5px;
 		font-weight: 400;
