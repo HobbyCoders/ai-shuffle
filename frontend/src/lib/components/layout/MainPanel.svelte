@@ -111,12 +111,15 @@
 		/** Desktop shell: sidebar state + toggle, surfaced in the top bar. */
 		sidebarCollapsed?: boolean;
 		onToggleSidebar?: () => void;
+		/** Shell-owned full-screen navigation overlay (not a sidebar preference). */
+		navigationOverlayOpen?: boolean;
 	}
 
 	let {
 		onOpenSession,
 		header,
 		sidebarCollapsed = false,
+		navigationOverlayOpen,
 		onToggleSidebar
 	}: Props = $props();
 
@@ -1040,6 +1043,7 @@
 			<div class="chat-row">
 				<div class="chat-browser-underlay">
 				<ChatView
+					{navigationOverlayOpen}
 					onBrowserToggle={$activeView?.type === 'session' && activeTab?.sessionId
 						? () => browserPanel.toggle(activeTab?.sessionId ?? null)
 						: undefined}

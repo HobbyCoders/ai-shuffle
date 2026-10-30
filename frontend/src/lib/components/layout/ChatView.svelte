@@ -55,9 +55,10 @@
 		terminal?: TerminalToggle;
 		/** Out: the open mirrored chat still waits for its first sync. */
 		mirrorSyncPending?: boolean;
+		navigationOverlayOpen?: boolean;
 	}
 
-	let { onBrowserToggle, onBrowserPreload, browserOpen = false, terminal, mirrorSyncPending = $bindable(false) }: Props = $props();
+	let { onBrowserToggle, onBrowserPreload, browserOpen = false, terminal, mirrorSyncPending = $bindable(false), navigationOverlayOpen }: Props = $props();
 
 	// Classify the empty-message surface. While a session's history is being
 	// fetched (boot restore OR an openChat navigation) messages is still [] but
@@ -500,7 +501,7 @@
 				     so it started even if the chat opened in the hero layout. -->
 				<MirrorSyncGate sync={mirrorSync} deviceName={mirrorDevice}>
 					<TranscriptHydrationBoundary mirrorPending={mirrorSync.waiting}
-						navigationOverlayOpen={layout.current.sidebarOverlay && !layout.current.sidebarCollapsed}
+						navigationOverlayOpen={navigationOverlayOpen ?? (layout.current.sidebarOverlay && !layout.current.sidebarCollapsed)}
 						onSurface={(surface, count, id) => { transcriptSurface = surface; transcriptMessageCount = count; transcriptSessionId = id; }}>
 						<MessageArea />
 					</TranscriptHydrationBoundary>

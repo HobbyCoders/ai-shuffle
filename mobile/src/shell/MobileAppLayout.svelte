@@ -25,6 +25,8 @@
 		onOpenSpotlight
 	}: AppShellProps = $props();
 
+	let drawerOpen = $state(false);
+
 	// The drawer is always an overlay on the mobile shell (never persisted).
 	onMount(() => {
 		layout.setSidebarOverlay(true);
@@ -34,9 +36,10 @@
 <div class="app-shell mobile">
 	<CredentialStorageBanner />
 	<div class="app-body">
-		<MainPanel {onOpenSession}>
+		<MainPanel {onOpenSession} navigationOverlayOpen={drawerOpen}>
 			{#snippet header(ctx)}
 				<AppTopBar
+					bind:drawerOpen
 					{isAdmin}
 					{onNewSession}
 					{onSettledOpenSession}
