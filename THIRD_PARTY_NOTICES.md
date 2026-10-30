@@ -721,6 +721,7 @@ Direct app and test dependencies declared in `android/app/build.gradle.kts` are 
 | androidx.security:security-crypto | 1.1.0-alpha06 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/security/security-crypto/1.1.0-alpha06/security-crypto-1.1.0-alpha06.pom |
 | androidx.test.espresso:espresso-core | 3.6.1 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/test/espresso/espresso-core/3.6.1/espresso-core-3.6.1.pom |
 | androidx.test.ext:junit | 1.2.1 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/test/ext/junit/1.2.1/junit-1.2.1.pom |
+| androidx.test.uiautomator:uiautomator | 2.3.0 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/test/uiautomator/uiautomator/2.3.0/uiautomator-2.3.0.pom |
 | androidx.test:rules | 1.6.1 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/test/rules/1.6.1/rules-1.6.1.pom |
 | androidx.test:runner | 1.6.2 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/test/runner/1.6.2/runner-1.6.2.pom |
 | androidx.test:runner | 1.6.2 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/test/runner/1.6.2/runner-1.6.2.pom |
