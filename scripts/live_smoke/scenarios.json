@@ -610,6 +610,15 @@
           ]
         },
         {
+          "id": "two-worker-smoke.android-edge-to-edge-and-qr-rotation",
+          "check": "Android 15+ edge-to-edge keeps every screen clear of system bars and the keyboard, and QR pairing survives rotation",
+          "kind": "owner",
+          "needs": ["install", "device"],
+          "how": "Install the candidate Play build on a real Android 15 or 16 phone (and an Android 13 or 14 phone if available). In light and dark mode, open the welcome, account, workers, chat, offline demo and worker repair screens in portrait and landscape; check nothing sits under the status bar, navigation bar or display cutout and that bar icons stay readable. In a chat, open the keyboard and confirm the composer stays above it. Scan a disposable worker's pairing QR from Add worker, and an account pairing QR from a signed-in throwaway account's Add a trusted device flow from the phone's account sign-in scanner, rotating the phone mid-scan in each; repeat once after denying, then granting, camera permission. Use only disposable workers and throwaway accounts.",
+          "pass_when": "No content or control is hidden under system bars, cutouts or the keyboard on any checked screen, orientation or theme, and bar icons stay legible. Both scanners keep scanning through rotation, release the camera when closed and accept their own QR type. Emulator screenshots alone do not pass this row.",
+          "past_bug": "Play flagged deprecated edge-to-edge APIs and the ZXing scanner's landscape orientation lock; the fix moved to enableEdgeToEdge() and unlocked scanner rotation, verified only on emulators."
+        },
+        {
           "id": "two-worker-smoke.machine-settings",
           "check": "Manage a peer worker’s real machine settings without leaving this worker’s UI",
           "kind": "browser",
