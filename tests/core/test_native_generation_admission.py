@@ -2,15 +2,17 @@
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from dataclasses import dataclass, replace
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fluid.tools.registry import ToolCtx, ToolRegistry
 
-from app.core import generation_budget, generation_choices, model_effort, query_options
+from app.core import generation_budget, generation_choices, generation_resolver, model_effort, query_options
 from app.core.generation_resolver import (
     INCLUDED_PRICE,
     UNKNOWN_PRICE,
@@ -36,6 +38,10 @@ class Probe:
     events: list[str]
 
     async def registry(self, context: RunContext | None) -> ToolRegistry:
+        # Match the engine's active-turn claim before dispatching pooled tools.
+        generation_resolver.bind_turn_context(
+            SimpleNamespace(aih_generation_context=context), session_id="session-a",
+        )
         adapter = ha.HarnessAdapter()
         adapter._provider_kind = "openai_responses"
         options = SessionOptions(model="test-chat", extra={
@@ -65,6 +71,7 @@ def probe(monkeypatch: pytest.MonkeyPatch) -> Probe:
     from app.core import artifact_store
     from app.network import generation, runners
 
+    monkeypatch.setattr(generation_resolver, "_TURN_CONTEXTS", OrderedDict())
     row = {"id": "plan-a", "provider_type": "grok", "enabled": True}
     monkeypatch.setattr(ha, "_lookup_provider_row", Mock(return_value=row))
     monkeypatch.setattr(database, "get_model_provider", Mock(return_value=row))
