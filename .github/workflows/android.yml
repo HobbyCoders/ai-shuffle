@@ -295,7 +295,6 @@ jobs:
           path: |
             ${{ runner.temp }}/android-emulator/readiness/
             ${{ runner.temp }}/android-emulator/launcher-recovery*/
-            ${{ runner.temp }}/android-emulator/instrumentation/timing.txt
           if-no-files-found: warn
       # Full reports, logcat and screenshots remain failure-only diagnostics.
       - name: Upload test reports
