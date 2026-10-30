@@ -96,9 +96,8 @@ class CrossAppOverlayTest {
                 val started = System.currentTimeMillis()
                 val elapsedStarted = android.os.SystemClock.elapsedRealtime()
                 val deadline = started + ttl
-                val screenBefore = screenTrace()
                 val reply = DeviceToolExecutor(context).execute(name, args, deadline)
-                listOf("before" to screenBefore, "reply" to reply, "after" to screenTrace()).forEach { (stage, state) ->
+                listOf("reply" to reply, "after" to screenTrace()).forEach { (stage, state) ->
                     state.toString().chunked(3_000).forEachIndexed { index, part ->
                         android.util.Log.i("AppControlTiming", "$name.$stage[$index]: $part")
                     }
