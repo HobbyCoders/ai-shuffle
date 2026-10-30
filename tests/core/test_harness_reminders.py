@@ -9,7 +9,13 @@ text the user typed survives, and check every read path that uses it.
 from __future__ import annotations
 
 import json
+import os
+import random
+import re
+import subprocess
+import sys
 from collections import deque
+from pathlib import Path
 
 import pytest
 
@@ -110,11 +116,11 @@ def test_fluid_native_reminder_blocks_are_removed():
     pytest.importorskip("fluid")
     from fluid.context.environment import environment_note
     from fluid.engine.native import _RUNTIME_FACTS_HEADER
+    from fluid.state import scratch_prompt
     from fluid.tools.builtins.ledger import render_ledger_reminder
     from fluid.tools.builtins.note import render_notes_reminder
     from fluid.tools.builtins.tool_search import render_deferred_catalog
     from fluid.tools.registry import ToolCtx, ToolSpec
-    from fluid.state import scratch_prompt
 
     blocks = [
         scratch_prompt(ToolCtx(cwd="/", session_id="scratch-test")),
@@ -159,6 +165,75 @@ def test_text_after_the_close_tag_on_the_same_line_keeps_the_block():
 def test_unchanged_text_keeps_its_own_whitespace():
     assert strip_harness_reminders("  hi  \n") == "  hi  \n"
     assert strip_harness_reminders(None) is None
+
+
+def test_reminder_scan_matches_legacy_output_on_bounded_corpus():
+    from app.core.harness_reminders import HARNESS_REMINDER_OPENERS
+
+    # The old expression is a bounded compatibility oracle only, never used
+    # for the large adversarial inputs below or by production code.
+    legacy = re.compile(
+        r"(?:\n+|^)<system-reminder>\n(?:"
+        + "|".join(re.escape(header) for header in HARNESS_REMINDER_OPENERS)
+        + r")[\s\S]*?\n</system-reminder>(?=\n|\Z)"
+    )
+    pieces = ["", "text", "\n", "\n\n", " \n", "\r\n", "\t", "</system-reminder>",
+              "\n</system-reminder>", "\n</system-reminder> inline", "<system-reminder>\n",
+              "<system-reminder>\nunknown\n", "<system-reminder>\r\n# Memory\n"]
+    corpus = []
+    for header in HARNESS_REMINDER_OPENERS:
+        opener = "<system-reminder>\n" + header
+        pieces.append(opener)
+        for prefix in ("", "\n\n", "text\n\n", "text ", " \n"):
+            for suffix in ("</system-reminder>", "\n</system-reminder>",
+                           "\n</system-reminder>\n", "\n</system-reminder> inline",
+                           "\n</system-reminder>\r\n"):
+                corpus.append(prefix + opener + suffix)
+    rng = random.Random(0)
+    corpus.extend("".join(rng.choices(pieces, k=rng.randrange(1, 16))) for _ in range(3000))
+    for text in corpus:
+        expected = legacy.sub("", text)
+        expected = expected.strip() if expected != text else text
+        actual = strip_harness_reminders(text)
+        assert actual == expected
+        if expected == text:
+            assert actual is text
+
+
+def _run_reminder_probe(script: str, *, timeout: int, tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    # No credential-bearing parent environment is needed for a pure probe.
+    environment = {key: os.environ[key] for key in ("PATH", "SystemRoot", "WINDIR", "TMP", "TEMP")
+                   if key in os.environ}
+    environment.update(PYTHONPATH=os.pathsep.join((str(root), str(root / "fluid"))),
+                       TESTING="1", AI_SHUFFLE_ENV_FILE=os.devnull,
+                       DATA_DIR=str(tmp_path), HOME=str(tmp_path), USERPROFILE=str(tmp_path),
+                       CLAUDE_CONFIG_DIR=str(tmp_path / "claude"), CODEX_HOME=str(tmp_path / "codex"))
+    subprocess.run([sys.executable, "-c", script], cwd=root, env=environment,
+                   capture_output=True, check=True, timeout=timeout)
+
+
+def test_unterminated_reminder_scans_are_time_bounded(tmp_path):
+    # An outer OS timeout kills a regression even when the C regex holds the
+    # GIL. A same-process watchdog/async timeout cannot provide that guarantee.
+    _run_reminder_probe(r"""
+from app.core.harness_reminders import HARNESS_REMINDER_OPENERS, _OPEN, strip_harness_reminders
+opener = _OPEN + "\n" + HARNESS_REMINDER_OPENERS[0]
+for text in ("\n" * 200_000 + opener, opener * 20_000,
+             opener + "\n</system-reminder> inline" * 20_000):
+    assert strip_harness_reminders(text) is text
+""", timeout=3, tmp_path=tmp_path)
+
+
+def test_unterminated_reminder_does_not_block_cold_event_feed(tmp_path):
+    _run_reminder_probe(r"""
+from app.api.events import _wire, _frame
+from app.core.harness_reminders import HARNESS_REMINDER_OPENERS, _OPEN
+text = "\n" * 200_000 + _OPEN + "\n" + HARNESS_REMINDER_OPENERS[0]
+row = {"event_type": "message.user", "seq": 1, "payload": {"content": text}}
+assert _wire(row)["content"] is text
+assert _frame(row)
+""", timeout=15, tmp_path=tmp_path)
 
 
 def test_live_evidence_shape():
