@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { promises as fs, mkdirSync, writeFileSync } from 'node:fs';
+import { promises as fs, existsSync, mkdirSync, utimesSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,23 +15,32 @@ async function fixture(t) {
   t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   await fs.mkdir(path.join(root, 'npm/bin'), { recursive: true });
   await fs.writeFile(path.join(root, 'npm/package.json'), '{"version":"10.0.0"}');
-  const calls = [], env = { ...process.env }, clock = { identity: 'v22 linux x64 abi-127', fail: null };
+  const calls = [], env = { ...process.env }, clock = { identity: 'v22 linux x64 abi-127', fail: null, failNpm: null, omitElectron: false, fixedTime: false };
   const spawn = (exe, args, options) => {
     calls.push({ exe, args, cwd: options.cwd });
     const child = new EventEmitter(); child.stdout = new EventEmitter();
     const put = (relative, content = '') => {
       const target = path.join(options.cwd, relative);
       mkdirSync(path.dirname(target), { recursive: true }); writeFileSync(target, content);
+      if (clock.fixedTime) utimesSync(target, 1_000_000_000, 1_000_000_000);
     };
     if (args[1] === 'ci') {
       put('node_modules/.installed');
-      put(`node_modules/electron/dist/${process.platform === 'win32' ? 'electron.exe' : 'electron'}`);
+      put('node_modules/locked/package.json', '{"name":"locked","main":"index.js"}');
+      put('node_modules/locked/index.js', 'module.exports = "runtime dependency";');
+      if (!clock.omitElectron) put(`node_modules/electron/dist/${process.platform === 'win32' ? 'electron.exe' : 'electron'}`);
     }
-    if (args[1] === 'run') put('dist/index.js', `compiled ${path.basename(options.cwd)}`);
+    if (args[0]?.endsWith(path.join('electron', 'install.js'))) {
+      put(`dist/${process.platform === 'win32' ? 'electron.exe' : 'electron'}`);
+      put('path.txt', process.platform === 'win32' ? 'electron.exe' : 'electron');
+    }
+    const missingRuntime = args[1] === 'run' && !existsSync(path.join(options.cwd, 'node_modules/locked/index.js'));
+    if (args[1] === 'run' && !missingRuntime) put('dist/index.js', 'module.exports = require("locked");');
     if (args.includes('app.core.cloudflared')) put('downloads/verified-runtime');
     setImmediate(() => {
       if (args[0] === '-p') child.stdout.emit('data', clock.identity);
-      child.emit('exit', args[1] === 'run' && path.basename(options.cwd) === clock.fail ? 1 : 0);
+      const failedInstall = args[1] === 'ci' && path.basename(path.dirname(options.cwd)) === clock.failNpm;
+      child.emit('exit', missingRuntime || failedInstall || (args[1] === 'run' && path.basename(options.cwd) === clock.fail) ? 1 : 0);
     });
     return child;
   };
@@ -76,6 +86,108 @@ test('unchanged content across signed revisions runs zero package builds or npm 
   assert.deepEqual(installed(second), []);
   assert.equal(await fs.readFile(path.join(second.opts.server, 'fluid/__init__.py'), 'utf8'), '# Fluid revision 2');
   assert.equal(await fs.readFile(path.join(second.opts.server, 'app/main.py'), 'utf8'), '# app revision 2');
+});
+
+
+test('a missing runtime dependency with intact install and output markers is replaced before output reuse', async t => {
+  for (const name of packages) {
+    const f = await fixture(t), first = await f.build();
+    const retained = await fs.realpath(path.join(first.opts.source, name, 'node_modules'));
+    const marker = path.join(path.dirname(retained), '.complete');
+    const originalMarker = await fs.readFile(marker, 'utf8');
+    const outputRoot = path.join(f.root, 'cache/builds', name);
+    const [outputKey] = await fs.readdir(outputRoot);
+    const outputMarker = await fs.readFile(path.join(outputRoot, outputKey, '.complete'), 'utf8');
+    await fs.rm(path.join(retained, 'locked'), { recursive: true });
+    const second = await f.build();
+    const entry = path.join(second.opts.source, name, 'dist/index.js');
+    assert.equal(execFileSync(process.execPath, ['-p', `require(${JSON.stringify(entry)})`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(), 'runtime dependency');
+    assert.deepEqual(installed(second), [name], 'only the damaged dependency closure is reinstalled');
+    assert.deepEqual(built(second), [], 'unchanged output is reusable after its runtime dependencies are restored');
+    const replacement = await fs.realpath(path.join(second.opts.source, name, 'node_modules'));
+    assert.notEqual(replacement, retained, 'retained dependency entries must never be repaired in place');
+    assert.equal(await fs.readFile(marker, 'utf8'), originalMarker);
+    await assert.rejects(fs.access(path.join(retained, 'locked')), { code: 'ENOENT' });
+    assert.equal(await fs.readFile(path.join(outputRoot, outputKey, '.complete'), 'utf8'), outputMarker);
+    const third = await f.build();
+    assert.deepEqual(installed(third), []);
+    assert.deepEqual(built(third), []);
+    assert.equal(await fs.realpath(path.join(third.opts.source, name, 'node_modules')), replacement);
+  }
+});
+
+
+test('same-size dependency source edits with restored mtime are replaced, not repaired', async t => {
+  const f = await fixture(t); f.clock.fixedTime = true;
+  const first = await f.build();
+  const retained = await fs.realpath(path.join(first.opts.source, 'browser-mcp/node_modules'));
+  const file = path.join(retained, 'locked/index.js'), before = await fs.stat(file, { bigint: true });
+  await fs.writeFile(file, 'module.exports = "runtime dependencY";');
+  await fs.utimes(file, 1_000_000_000, 1_000_000_000);
+  const after = await fs.stat(file, { bigint: true });
+  assert.equal(after.size, before.size); assert.equal(after.mtimeNs, before.mtimeNs); assert.equal(after.ino, before.ino);
+  const second = await f.build();
+  assert.deepEqual(installed(second), ['browser-mcp']); assert.deepEqual(built(second), []);
+  assert.equal(await fs.readFile(file, 'utf8'), 'module.exports = "runtime dependencY";');
+  const runtime = path.join(second.opts.server, 'browser-mcp/dist/index.js');
+  assert.equal(execFileSync(process.execPath, ['-p', `require(${JSON.stringify(runtime)})`], { encoding: 'utf8' }).trim(), 'runtime dependency');
+});
+
+test('only root npm build-scratch directories are excluded from dependency integrity', async t => {
+  const f = await fixture(t), first = await f.build();
+  const retained = await fs.realpath(path.join(first.opts.source, 'browser-mcp/node_modules'));
+  for (const name of ['.cache', '.vite', '.vite-temp']) {
+    await fs.mkdir(path.join(retained, name));
+    await fs.writeFile(path.join(retained, name, 'generated.json'), '{}');
+  }
+  const second = await f.build();
+  assert.deepEqual(installed(second), []); assert.deepEqual(built(second), []);
+  await fs.mkdir(path.join(retained, 'locked/.cache'));
+  await fs.writeFile(path.join(retained, 'locked/.cache', 'runtime.json'), '{}');
+  const third = await f.build();
+  assert.deepEqual(installed(third), ['browser-mcp']); assert.deepEqual(built(third), []);
+});
+
+test('legacy and incomplete dependency records are misses without changing retained records', async t => {
+  for (const value of ['legacy', 'partial']) {
+    const f = await fixture(t), first = await f.build();
+    const retained = await fs.realpath(path.join(first.opts.source, 'tools/node_modules'));
+    const marker = path.join(path.dirname(retained), '.complete');
+    const key = JSON.parse(await fs.readFile(marker, 'utf8')).key;
+    if (value === 'legacy') await fs.writeFile(marker, key); else await fs.unlink(marker);
+    const second = await f.build();
+    assert.deepEqual(installed(second), ['tools']); assert.deepEqual(built(second), []);
+    assert.notEqual(await fs.realpath(path.join(second.opts.source, 'tools/node_modules')), retained);
+    if (value === 'legacy') assert.equal(await fs.readFile(marker, 'utf8'), key);
+    else await assert.rejects(fs.access(marker), { code: 'ENOENT' });
+  }
+});
+
+test('a failed replacement install publishes no entry and leaves the retained dependency tree untouched', async t => {
+  const f = await fixture(t), first = await f.build();
+  const retained = await fs.realpath(path.join(first.opts.source, 'browser-mcp/node_modules'));
+  await fs.rm(path.join(retained, 'locked'), { recursive: true });
+  f.clock.failNpm = 'browser-mcp';
+  await assert.rejects(f.build(), /failed/);
+  assert.deepEqual(await fs.readdir(path.dirname(path.dirname(retained))), [path.basename(path.dirname(retained))]);
+  await assert.rejects(fs.access(path.join(retained, 'locked')), { code: 'ENOENT' });
+  f.clock.failNpm = null;
+  assert.deepEqual(installed(await f.build()), ['browser-mcp']);
+});
+
+test('Electron postinstall is completed before dependency integrity is recorded', async t => {
+  const f = await fixture(t); f.clock.omitElectron = true;
+  const first = await f.build();
+  const downloads = result => result.calls.filter(call => call.args[0]?.endsWith(path.join('electron', 'install.js')));
+  assert.equal(downloads(first).length, 1);
+  const retained = await fs.realpath(path.join(first.opts.source, 'desktop/node_modules'));
+  const second = await f.build();
+  assert.deepEqual(installed(second), []); assert.deepEqual(built(second), []); assert.equal(downloads(second).length, 0);
+  const binary = path.join(retained, 'electron/dist', process.platform === 'win32' ? 'electron.exe' : 'electron');
+  await fs.unlink(binary);
+  const third = await f.build();
+  assert.deepEqual(installed(third), ['desktop']); assert.deepEqual(built(third), []); assert.equal(downloads(third).length, 1);
+  await assert.rejects(fs.access(binary), { code: 'ENOENT' });
 });
 
 test('one source or lock change misses exactly its package', async t => {
