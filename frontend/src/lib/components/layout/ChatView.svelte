@@ -41,8 +41,8 @@
 	import VoiceCallPanel from '$lib/components/voice/VoiceCallPanel.svelte';
 	import { voiceCallState, isCallSurfaceActive } from '$lib/services/voiceCall';
 	import { watchCallOutcomes } from '$lib/services/voiceCallOutcome';
-	import { RotateCcw, LoaderCircle } from 'lucide-svelte';
-	import { chatHeaderTitle, chatHeroKind, chatLayoutSurface, classifyChatSurface, createChatLayoutTracker } from './chat-empty-state';
+	import { RotateCcw, LoaderCircle, CloudOff } from 'lucide-svelte';
+	import { chatHeaderTitle, chatHeroKind, chatLayoutSurface, classifyChatSurface, createChatLayoutTracker, HISTORY_STALL_MESSAGE } from './chat-empty-state';
 	import { pendingDeepLink, deepLinkLoading } from '$lib/stores/pending-deep-link';
 	// The phone shell docks prompts above its composer; the web build has none.
 	import { composerShell } from '$lib/components/chat/composer-shell';
@@ -69,7 +69,11 @@
 	// never the cleared hint (the chat may turn out to have messages). A load
 	// keeps the layout the view already had (hero or message column) until its
 	// outcome is known; see createChatLayoutTracker below, chat-empty-state.ts
-	// and #558.
+	// and #558. A load the feed released without any history (historyStall,
+	// #913) is still 'loading': only a completed response or a clear proves a
+	// chat empty, so it never turns into the cleared hero or moves the composer.
+	const historyUnconfirmed = $derived(!!$activeSession.historyStall
+		&& $activeSession.messages.length + ($activeSession.pendingPeerMessages?.length ?? 0) === 0);
 	const chatSurface = $derived(
 		classifyChatSurface({
 			sessionId: $activeSession.sessionId,
@@ -78,7 +82,8 @@
 			isRestoringSession: $activeSession.isRestoringSession,
 			// A deep link boot has read but not opened yet is a load in progress,
 			// not a New Chat: no hero flash before the linked chat appears.
-			isLoadingSession: $activeSession.isLoadingSession || deepLinkLoading($pendingDeepLink, $activeSession.sessionId)
+			isLoadingSession: $activeSession.isLoadingSession || deepLinkLoading($pendingDeepLink, $activeSession.sessionId),
+			historyStalled: historyUnconfirmed
 		})
 	);
 	// The chat.open sample ends after the DOM update once history has settled.
@@ -87,7 +92,7 @@
 	// cancels the frames, so a view that moved on never completes the old sample.
 	const settledChatId = $derived.by(() => {
 		const id = $activeSession.sessionId;
-		const loading = $activeSession.isLoadingSession || $activeSession.isRestoringSession;
+		const loading = $activeSession.isLoadingSession || $activeSession.isRestoringSession || historyUnconfirmed;
 		return id && !loading && !deepLinkLoading($pendingDeepLink, id) ? id : null;
 	});
 	$effect(() => {
@@ -141,6 +146,9 @@
 	// brand-new "Let's build your project" workspace picker.)
 	// The bound chat's hero is still waiting (history load or first sync).
 	const isLoadingHero = $derived(heroKind === 'loading' || heroKind === 'syncing');
+	// The history load gave up waiting without any (#913): the same hero says
+	// so in its one line and offers Retry.
+	const heroStall = $derived(heroKind === 'loading' && historyUnconfirmed ? $activeSession.historyStall ?? null : null);
 	// A chat that could not be opened, while this surface is still the unbound
 	// New Chat it fell back to. Binding any chat hides it.
 	const unavailable = $derived($activeSession.sessionId ? null : $unavailableChat);
@@ -190,7 +198,9 @@
 	const heroHint = $derived(
 		heroKind === 'syncing'
 			? mirrorSyncHeadline(mirrorSync.syncState, mirrorDevice)
-			: isLoadingHero
+			: heroStall
+				? HISTORY_STALL_MESSAGE[heroStall]
+				: isLoadingHero
 				? 'Opening the conversation…'
 				: 'Conversation cleared — send a message to start fresh.'
 	);
@@ -231,7 +241,8 @@
 		composer: uiComposer({ archived: Boolean(archivedSessionId), emptyHero: showEmptyHero }),
 		messages: mirrorSync.waiting ? '0' : String($activeSession.messages.length + ($activeSession.pendingPeerMessages?.length ?? 0)),
 		loading: uiFlag(
-			$activeSession.isLoadingSession || $activeSession.isRestoringSession || deepLinkLoading($pendingDeepLink, $activeSession.sessionId)
+			$activeSession.isLoadingSession || $activeSession.isRestoringSession || historyUnconfirmed
+				|| deepLinkLoading($pendingDeepLink, $activeSession.sessionId)
 		),
 		streaming: uiFlag($activeSession.isStreaming)
 	});
@@ -454,19 +465,26 @@
 					     its history loads (or, mirrored, while its first sync runs),
 					     so the composer stays put until the outcome is known
 					     (createChatLayoutTracker). -->
-					<div class="cleared-hero" class:is-loading={isLoadingHero} aria-busy={isLoadingHero}>
-						<div class="cleared-badge" aria-hidden="true">
-							{#if isLoadingHero}
+					<div class="cleared-hero" class:is-loading={isLoadingHero && heroStall !== 'error'} aria-busy={isLoadingHero && heroStall !== 'error'}>
+						<div class="cleared-badge" class:is-error={heroStall === 'error'} aria-hidden="true">
+							{#if heroStall === 'error'}
+								<CloudOff size={22} strokeWidth={1.5} />
+							{:else if isLoadingHero}
 								<LoaderCircle size={22} strokeWidth={1.5} class="hero-spin" />
 							{:else}
 								<RotateCcw size={22} strokeWidth={1.5} />
 							{/if}
 						</div>
 						<h1 class="cleared-title" title={heroTitle}>{heroTitle}</h1>
-						<p class="cleared-hint" role="status">
+						<p class="cleared-hint" class:is-stalled={!!heroStall} role="status" data-history-stall={heroStall ?? undefined}>
 							<!-- One short line in every state (no update count): a hint that
 							     wraps to two lines and back moves the centred composer. -->
-							{heroHint}
+							{#if heroStall}
+								<span class="hint-text">{heroHint}</span>
+								<button type="button" class="hero-retry" aria-label="Retry loading the conversation" onclick={() => activeSession.reloadSession()}>Retry</button>
+							{:else}
+								{heroHint}
+							{/if}
 						</p>
 					</div>
 				{:else}
@@ -911,6 +929,39 @@
 		line-height: 1.5;
 		max-width: 40ch;
 	}
+
+	.cleared-badge.is-error { color: var(--warning, var(--subtle-foreground)); }
+
+	/* Stalled load: still exactly one line (the text ellipsises before the hint
+	   could wrap), so swapping it in never moves the centred composer. */
+	.cleared-hint.is-stalled {
+		display: flex;
+		align-items: baseline;
+		justify-content: center;
+		gap: 0.5rem;
+		max-width: min(40ch, 100%);
+		white-space: nowrap;
+	}
+	.cleared-hint .hint-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+	.hero-retry {
+		position: relative;
+		flex-shrink: 0;
+		padding: 0;
+		border: 0;
+		background: none;
+		color: var(--foreground);
+		font: inherit;
+		font-weight: 600;
+		text-decoration: underline;
+		text-decoration-color: color-mix(in oklch, var(--foreground) 35%, transparent);
+		text-underline-offset: 3px;
+		cursor: pointer;
+		transition: text-decoration-color 150ms ease-out;
+	}
+	/* 44px touch target without growing the line. */
+	.hero-retry::before { content: ''; position: absolute; inset: -12px -10px; }
+	.hero-retry:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 4px; }
+	@media (hover: hover) { .hero-retry:hover { text-decoration-color: var(--foreground); } }
 
 	.cleared-hero.is-loading :global(.hero-spin) {
 		animation: reconnect-spin 1s linear infinite;

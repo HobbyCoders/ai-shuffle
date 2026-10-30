@@ -251,6 +251,8 @@
 				loading: !!(
 					activeTab?.isRestoringSession ||
 					activeTab?.isLoadingSession ||
+					// A load released without history (#913) still names the chat as loading.
+					(activeTab?.historyStall && !activeTab?.messages.length) ||
 					(activeTab?.sessionId && $pendingDeepLink === activeTab.sessionId) ||
 					(activeTab?.sessionId && chatMirrorSyncPending)
 				),

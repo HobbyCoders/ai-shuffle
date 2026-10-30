@@ -313,6 +313,15 @@ export interface ActiveSessionState {
 	 *  Written only by feed-controller; cleared when hydration completes.
 	 *  Optional for the same reason as `optimisticStreaming` above. */
 	isHydrationSlow?: boolean;
+	/** The feed released hydration (its ceiling, or a failed history request
+	 *  past the first-frame budget) without the server confirming any history
+	 *  (#913). Loading has ended, so sends no longer wait, but the chat is NOT
+	 *  known to be empty: 'timeout' when nothing came back in time, 'error' when
+	 *  the request failed. While the chat shows none of its own rows the surface
+	 *  stays `loading` and offers Retry, never the cleared chat. Written only by
+	 *  feed-controller; cleared by any hydration that confirms history, a
+	 *  restart and a session switch. */
+	historyStall?: 'timeout' | 'error' | null;
 }
 
 /** Minimal shape persisted to the backend.
@@ -434,6 +443,7 @@ function defaultState(): ActiveSessionState {
 		pendingRestorePrompt: null,
 		isRestoringSession: false,
 		isLoadingSession: false,
+		historyStall: null,
 		isHydrationSlow: false,
 	};
 }
@@ -1574,6 +1584,7 @@ export const activeSessionLoading = createDerived(
 		isLoadingSession: _state.isLoadingSession,
 		isRestoringSession: _state.isRestoringSession,
 		isHydrationSlow: _state.isHydrationSlow,
+		historyStall: _state.historyStall,
 	}),
 	shallowEqual
 );
