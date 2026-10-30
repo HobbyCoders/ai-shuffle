@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.ApplicationInfo
+import android.os.SystemClock
 import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
@@ -33,9 +34,12 @@ class MinifiedReleaseSmokeTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val context get() = instrumentation.targetContext
     private fun intent(activity: String) = Intent().setClassName(context.packageName, "${context.packageName}.$activity")
-    private fun await(message: String, condition: () -> Boolean) = kotlinx.coroutines.runBlocking {
-        try { kotlinx.coroutines.withTimeout(12_000) { while (!condition()) kotlinx.coroutines.delay(50) } }
-        catch (error: kotlinx.coroutines.TimeoutCancellationException) { throw AssertionError(message, error) }
+    private fun await(message: String, condition: () -> Boolean) {
+        val deadline = SystemClock.elapsedRealtime() + 12_000
+        while (!condition()) {
+            if (SystemClock.elapsedRealtime() >= deadline) throw AssertionError(message)
+            Thread.sleep(50)
+        }
     }
     private fun views(root: View): List<View> = listOf(root) +
         if (root is ViewGroup) (0 until root.childCount).flatMap { views(root.getChildAt(it)) } else emptyList()

@@ -8,6 +8,13 @@
     @android.webkit.JavascriptInterface <methods>;
 }
 
+# AGP deduplicates AndroidJUnitRunner's tracing dependency against the app.
+# Keep this single public API available in both release and releaseSmoke so
+# instrumentation can start without adding test-only app/bridge keep rules.
+-keep,allowoptimization class androidx.tracing.Trace {
+    public static <methods>;
+}
+
 # Framework parcel deserialization looks up CREATOR by name. AGP's defaults
 # also cover Parcelable, manifest components and XML-inflated view constructors.
 -keepclassmembers class * implements android.os.Parcelable {
