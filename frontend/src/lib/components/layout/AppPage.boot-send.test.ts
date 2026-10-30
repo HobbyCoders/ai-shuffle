@@ -303,6 +303,21 @@ it.each([true, false])('keeps a project picked on the new-session screen during 
 	expect(hasBootProjectPick(getInitGeneration())).toBe(false);
 });
 
+it.each([true, false])('a saved unbound compose does not overwrite a project picked during init (picked=%s)', async picked => {
+	mocks.get.mockResolvedValue({ value: { sessionId: null, title: 'Saved compose', profile: 'saved-agent', project: 'stale-project', worktreeBranch: 'stale-branch' } });
+	const ctx = setup();
+	const initializing = ctx.init.init();
+	if (picked) {
+		noteBootProjectPick();
+		state.update(s => ({ ...s, mode: 'code', project: 'picked-project', projectV2Id: null, worktreeBranch: '' }));
+	}
+	ctx.preferences.resolve(null);
+	await initializing;
+	expect(get(state)).toMatchObject(picked
+		? { sessionId: null, mode: 'code', project: 'picked-project', worktreeBranch: '' }
+		: { sessionId: null, mode: 'code', project: 'stale-project', worktreeBranch: 'stale-branch' });
+});
+
 it.each(['explicit', 'auto'])('keeps a %s worktree adopted before its inner send is refused', async kind => {
 	mocks.get.mockResolvedValue({ value: { sessionId: 'stale', title: 'Old saved chat', profile: 'old-agent' } });
 	vi.mocked(api.post).mockResolvedValue({ session_id: 'created', branch_name: 'feature/test', base_branch: 'main', status: 'ready', worktree_path: '/test/worktree', query_started: false });

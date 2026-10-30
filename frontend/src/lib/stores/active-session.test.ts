@@ -346,7 +346,14 @@ describe('a project picked while boot loads (#930)', () => {
 		const initializing = activeSession.init();
 		const generation = getInitGeneration();
 		expect(hasBootProjectPick(generation)).toBe(false);
+		// A system fix-up (dropMissingProject's clear) and a no-op are not picks.
+		activeSession.clearProject();
+		activeSession.setProject('', null, { user: true });
+		expect(hasBootProjectPick(generation)).toBe(false);
 		activeSession.setProject('proj-picked', null);
+		expect(hasBootProjectPick(generation)).toBe(false);
+		activeSession.setProject('', null);
+		activeSession.setProject('proj-picked', null, { user: true });
 		expect(hasBootProjectPick(generation)).toBe(true);
 		await initializing;
 		expect(activeSession.current).toMatchObject({ sessionId: null, mode: 'code', project: 'proj-picked' });
@@ -360,7 +367,7 @@ describe('a project picked while boot loads (#930)', () => {
 		await activeSession.init();
 		const generation = getInitGeneration();
 		finishBootReconciliation(generation);
-		activeSession.setProject('proj-later', null);
+		activeSession.setProject('proj-later', null, { user: true });
 		expect(hasBootProjectPick(generation)).toBe(false);
 	});
 });

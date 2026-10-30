@@ -1145,13 +1145,12 @@ export const activeSession = {
 		return mode;
 	},
 
-	setProject(projectId: string, projectV2Id?: string | null) {
+	/** `user`: the owner picked it in the UI (not a catalog or default fix-up). */
+	setProject(projectId: string, projectV2Id?: string | null, { user = false }: { user?: boolean } = {}) {
 		if (_state.worktreeIntent === 'local' && _state.messages.length > 0) {
 			console.warn('[ActiveSession] Cannot change project after session has started');
 			return;
 		}
-		// Boot's landing reconcile must keep this new chat's project (#930).
-		if (!_state.sessionId) noteBootProjectPick();
 		const nextV2 = projectV2Id === undefined
 			? appData.current.clusterProjects.find(p => p.local_project_id === projectId)?.project_v2_id ?? null
 			: projectV2Id;
@@ -1163,6 +1162,8 @@ export const activeSession = {
 		if (_state.project === projectId && _state.projectV2Id === nextV2 && _state.mode === nextMode) {
 			return;
 		}
+		// Boot's landing reconcile must keep this new chat's project (#930).
+		if (user && !_state.sessionId) noteBootProjectPick();
 		_update(s => ({
 			...s,
 			mode: nextMode,
@@ -1182,9 +1183,9 @@ export const activeSession = {
 	},
 
 	/** Leave a new session without a project (the strip's ✕). */
-	clearProject() {
+	clearProject({ user = false }: { user?: boolean } = {}) {
 		if (_state.sessionId) return;
-		activeSession.setProject('', null);
+		activeSession.setProject('', null, { user });
 	},
 
 	/**

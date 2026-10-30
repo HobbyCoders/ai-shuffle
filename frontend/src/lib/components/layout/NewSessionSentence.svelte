@@ -48,7 +48,7 @@
 	let showCreateBranchModal = $state(false);
 
 	function selectProject(projectId: string, projectV2Id?: string | null) {
-		activeSession.setProject(projectId, projectV2Id ?? null);
+		activeSession.setProject(projectId, projectV2Id ?? null, { user: true });
 	}
 </script>
 
@@ -57,7 +57,7 @@
 	{#if hasProject}
 		<ExecutionModeBar variant="sentence">
 			{#snippet between()}
-				in {#if projectName}<WorkspaceFolderSelector variant="sentence" {projectName} onClear={() => activeSession.clearProject()} />{:else}<span class="ns-pending">a project</span>{/if}
+				in {#if projectName}<WorkspaceFolderSelector variant="sentence" {projectName} onClear={() => activeSession.clearProject({ user: true })} />{:else}<span class="ns-pending">a project</span>{/if}
 				{#if showCheckoutBranch}
 					on <BranchSelector variant="sentence" onClickNewBranch={() => (showCreateBranchModal = true)} />
 				{/if}

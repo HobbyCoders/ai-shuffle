@@ -150,6 +150,14 @@ export function hasBootProjectPick(generation: number): boolean {
 	return bootSend?.generation === generation && bootSend.projectPicked;
 }
 
+/** The lane, project and checkout a boot project pick set on the compose. */
+function pickedCheckout(s: ActiveSessionState) {
+	const { mode, project, projectV2Id, workspaceProjectIds, worktreeIntent, worktreeBranch, worktreeBaseBranch,
+		worktreeId, worktreeMode, selectedWorktreeBranch, worktreeDeleted } = s;
+	return { mode, project, projectV2Id, workspaceProjectIds, worktreeIntent, worktreeBranch, worktreeBaseBranch,
+		worktreeId, worktreeMode, selectedWorktreeBranch, worktreeDeleted };
+}
+
 export function finishBootReconciliation(generation: number): void {
 	if (bootSend?.generation === generation) bootSend = null;
 }
@@ -261,6 +269,10 @@ export function createSessionInit(deps: SessionInitDeps) {
 					// real values, else placeholders /live fills (#418). A snapshot
 					// written before that record existed may hold fabricated ones.
 					const binding = persisted.sessionId ? restoreComposerBinding(persisted, null) : null;
+					// A saved unbound compose must not overwrite the project the
+					// user picked while this loaded (#930): keep that pick's lane
+					// and checkout. An existing session restores as before.
+					const keepPick = !persisted.sessionId && hasBootProjectPick(initGen);
 					update(s => ({
 						...s,
 						sessionId: persisted.sessionId ?? null,
@@ -327,6 +339,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 						worktreeMode: persisted.worktreeMode || 'new',
 						selectedWorktreeBranch: persisted.selectedWorktreeBranch ?? null,
 						worktreeDeleted: persisted.worktreeDeleted ?? false,
+						...(keepPick ? pickedCheckout(s) : {}),
 					}));
 
 					// Start the transcript feed the moment the session id is known
