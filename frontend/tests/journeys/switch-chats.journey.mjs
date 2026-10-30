@@ -8,9 +8,15 @@
 // Cases:
 //   away-and-back   another chat → long (first open) → the other (cached) → long
 //   scrolled-up     long scrolled up 40% → the other (cached) → long: same rows on screen
+//   draft-caret     a draft with the caret mid-text → long → back: typing goes in at
+//                   the caret, not at the end (#864)
 import { runJourney } from './runner.mjs';
+
+/** draft-caret: the caret offset measured just before leaving the chat. */
+let caretBeforeSwitch = 5;
 import {
 	SEEDED,
+	composer,
 	expect,
 	gotoApp,
 	openFromSidebar,
@@ -112,6 +118,48 @@ await runJourney({
 					back.firstRow === left.firstRow || Math.abs(back.top - left.top) <= 150,
 					`came back where the reader left it (left ${JSON.stringify(left)}, back ${JSON.stringify(back)})`
 				);
+			}
+		},
+		{
+			name: 'draft-caret',
+			async setup(ctx) {
+				const { page, status } = ctx;
+				await warmOtherChat(page, status);
+				const box = composer(page);
+				await box.click();
+				await box.pressSequentially('ABCDEFGHIJ');
+				for (let i = 0; i < 5; i++) await box.press('ArrowLeft');
+				await page.waitForTimeout(800);
+				// Where the caret really is before leaving: a fast run can drop a key
+				// press, and the case checks the caret comes back, not the keyboard.
+				caretBeforeSwitch = await box.evaluate((el) => {
+					const sel = el.ownerDocument.getSelection();
+					if (!sel?.rangeCount) return -1;
+					const range = el.ownerDocument.createRange();
+					range.selectNodeContents(el);
+					range.setEnd(sel.focusNode, sel.focusOffset);
+					return range.toString().length;
+				});
+				expect(caretBeforeSwitch > 0 && caretBeforeSwitch < 10, `caret is mid-draft before the switch (${caretBeforeSwitch})`);
+			},
+			async act({ page, mark }) {
+				await mark('open another chat');
+				await openFromSidebar(page, SEEDED.long);
+				await waitChatOpen(page, { messagesAtLeast: 50 });
+
+				await mark('back to the drafted chat');
+				await openFromSidebar(page, SEEDED.no_project);
+				await waitChatOpen(page, { messagesAtLeast: 2 });
+				const box = composer(page);
+				// Keyboard focus (Tab) keeps the editor's selection; a click would move it.
+				// ProseMirror puts its selection back into the page ~20ms after focus,
+				// so type the way a person would, not on the same frame.
+				await box.focus();
+				await page.waitForTimeout(300);
+				await page.keyboard.type('x');
+				const text = (await box.innerText()).trim();
+				const want = 'ABCDEFGHIJ'.slice(0, caretBeforeSwitch) + 'x' + 'ABCDEFGHIJ'.slice(caretBeforeSwitch);
+				expect(text === want, `typing after the switch goes in at the caret (${JSON.stringify(text)}, want ${JSON.stringify(want)})`);
 			}
 		}
 	],

@@ -201,7 +201,16 @@
 
 	/** Blur the editor, allowing the mobile composer to return to its compact state. */
 	export function blur() {
-		editor?.commands.blur();
+		// Not `editor.commands.blur()`: a frame later it clears the WHOLE document
+		// selection, so a transcript tap on the phone composer (which blurs the
+		// editor on every outside pointerdown) dropped a Shift+click selection
+		// extension in the transcript (#869). Only the editor's own focus and
+		// caret are released here.
+		if (!editor || editor.isDestroyed) return;
+		const dom = editor.view.dom;
+		if (dom.contains(dom.ownerDocument.activeElement)) dom.blur();
+		const selection = dom.ownerDocument.getSelection();
+		if (selection?.rangeCount && dom.contains(selection.anchorNode)) selection.removeAllRanges();
 	}
 
 	/** Model suggestions are text, never HTML or an editor JSON document. */

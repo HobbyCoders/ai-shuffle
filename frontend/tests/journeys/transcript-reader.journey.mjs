@@ -2,7 +2,7 @@
 // shifts. The selected span is pinned inside the SAME row/content budget; at
 // that boundary browsing pauses until the selection is collapsed/cleared.
 import { runJourney, VIEWPORTS } from './runner.mjs';
-import { expect, openNewChat, typeAndSend, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
+import { SLOW_REPLY, expect, openNewChat, scriptTag, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { permitsOversizeOriginSettle } from './lib/transcript-settle.mjs';
 
@@ -279,6 +279,89 @@ cases.push({
 	...growingReply,
 	name: 'same-count-visible-boundary-growth',
 	setup: context => growingReply.setup({ ...context, readingBoundary: true })
+});
+
+cases.push({
+		// #869: on the phone composer every transcript pointerdown blurred the
+		// editor through TipTap's blur command, which cleared the whole document
+		// selection a frame later, so a Shift+click extension vanished.
+		name: 'shift-click-extends-selection',
+		async setup({ page, status, variant }) {
+			const id = status.seed?.chats?.long ?? status.seed?.sessions?.large;
+			if (!id) throw new Error('This reader journey needs the standard long or performance seed.');
+			const prefix = mobileShell && variant.viewport === 'phone' ? '/mobile/' : '/';
+			await page.goto(new URL(`${prefix}?session=${encodeURIComponent(id)}`, status.urls.ui).toString());
+			await waitChatOpen(page, { messagesAtLeast: 10, timeout: 90_000 });
+		},
+		async act({ page, mark, log }) {
+			await mark('select three characters, then Shift+click further along');
+			const target = await page.evaluate(() => {
+				const viewport = document.querySelector('[role="log"][aria-label="Conversation messages"]').getBoundingClientRect();
+				const paragraph = [...document.querySelectorAll('[data-transcript-index] .abody p')].reverse().find(p => {
+					const box = p.getBoundingClientRect();
+					return box.top > viewport.top + 8 && box.bottom < viewport.bottom - 8 && (p.firstChild?.textContent?.length ?? 0) > 30;
+				});
+				if (!paragraph) throw new Error('No fully visible assistant paragraph to select in.');
+				const text = paragraph.firstChild;
+				const range = document.createRange();
+				range.setStart(text, 0); range.setEnd(text, 3);
+				const selection = window.getSelection();
+				selection.removeAllRanges(); selection.addRange(range);
+				const point = document.createRange();
+				point.setStart(text, 20); point.setEnd(text, 21);
+				const box = point.getBoundingClientRect();
+				return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+			});
+			await page.keyboard.down('Shift');
+			await page.mouse.click(target.x, target.y);
+			await page.keyboard.up('Shift');
+			await twoFrames(page);
+			await page.waitForTimeout(300);
+			const state = await page.evaluate(() => ({ ranges: window.getSelection().rangeCount, chars: window.getSelection().toString().length }));
+			log(`after Shift+click: ranges=${state.ranges}, chars=${state.chars}`);
+			expect(state.ranges === 1 && state.chars > 3, 'Shift+click extends the transcript selection and it survives the click');
+		}
+	}, {
+		// #870: each streamed delta replaced the reply's {@html} blocks, which
+		// detached the selected text nodes and dropped the reader's selection.
+		name: 'selection-survives-streaming',
+		async setup(ctx) {
+			await openNewChat(ctx);
+			await ctx.page.waitForTimeout(800);
+		},
+		async act({ page, mark, variant, log }) {
+			await mark('send a slowly streamed reply');
+			await typeAndSend(page, `stream slowly tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 3 })}`);
+			await page.getByText(SLOW_REPLY.start, { exact: false }).first().waitFor({ timeout: 60_000 });
+			await waitChat(page, { streaming: 'true' });
+			await mark('select part of the streaming reply');
+			const selected = await page.evaluate(start => {
+				const bodies = document.querySelectorAll('[data-transcript-index] .abody');
+				const body = bodies[bodies.length - 1];
+				const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+				let node; while ((node = walker.nextNode()) && !node.textContent.includes(start));
+				if (!node) throw new Error('The streaming reply has no selectable text yet.');
+				const range = document.createRange();
+				range.setStart(node, 5); range.setEnd(node, 18);
+				const selection = window.getSelection();
+				selection.removeAllRanges(); selection.addRange(range);
+				window.__streamSelectionNode = node;
+				return selection.toString();
+			}, SLOW_REPLY.start);
+			await page.waitForTimeout(2500);
+			const state = await page.evaluate(() => ({
+				streaming: document.querySelector('[data-ui-state="chat"]').getAttribute('data-ui-streaming'),
+				connected: window.__streamSelectionNode.isConnected,
+				text: window.getSelection().toString()
+			}));
+			log(`after 2.5s of deltas: streaming=${state.streaming}, connected=${state.connected}, text=${JSON.stringify(state.text)}`);
+			expect(state.streaming === 'true', 'the reply was still streaming while the selection was held');
+			expect(state.connected && state.text === selected, 'the selection inside the streaming reply survives appended text');
+			await mark('clear the selection; the rest of the reply appears');
+			await page.evaluate(() => window.getSelection().removeAllRanges());
+			await waitTurnSettled(page, { text: SLOW_REPLY.end, messagesAtLeast: 2 });
+		}
+
 });
 
 cases.push({
