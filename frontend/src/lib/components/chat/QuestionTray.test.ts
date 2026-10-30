@@ -34,6 +34,22 @@ describe('QuestionTray', () => {
 		await view.rerender({ requests: [request('two')], onRespond });
 		expect(screen.getByText('Choose two?')).toBeTruthy();
 	});
+	it('hides a sent request at once and brings it back with its draft when delivery fails (#891)', async () => {
+		const onRespond = vi.fn(); const requests = [request()];
+		const view = render(QuestionTray, { requests, onRespond, sent: new Set<string>() });
+		await fireEvent.input(screen.getByLabelText('Your answer'), { target: { value: 'Kept draft' } });
+		await view.rerender({ requests, onRespond, sent: new Set(['one']) });
+		expect(screen.queryByRole('region', { name: 'Questions for you' })).toBeNull();
+		expect(screen.queryByRole('textbox')).toBeNull();
+		await view.rerender({ requests, onRespond, sent: new Set<string>() });
+		expect((screen.getByLabelText('Your answer') as HTMLTextAreaElement).value).toBe('Kept draft');
+	});
+	it('shows only the requests not yet sent', async () => {
+		const onRespond = vi.fn(); const requests = [request('one'), request('two')];
+		render(QuestionTray, { requests, onRespond, sent: new Set(['one']) });
+		expect(screen.getByText('Choose two?')).toBeTruthy();
+		expect(screen.queryByRole('group', { name: 'Pending requests' })).toBeNull();
+	});
 	it('disables answers while disconnected and distinguishes idle from working', async () => {
 		const view = render(QuestionTray, { requests: [request()], connected: false, working: true, onRespond: vi.fn() });
 		expect(screen.getByText('Reconnect to answer')).toBeTruthy();

@@ -1926,22 +1926,17 @@ def _run_column_migrations(cursor: Any) -> None:
         # legacy rows exist in the wild) yield distinct `ck-<id>` ids but collide
         # on the (project_id, runner_id, path) unique — `(id)`-scoped conflict
         # would raise UniqueViolation and abort EVERY boot; bare skips the dup.
+        # This pass re-runs whenever the migration code changes: the seeder
+        # never re-adds a relative legacy path whose folder already has a base
+        # row, and gives a project linked to its remote after its first chat
+        # a base row under its new origin too (#802).
         seeded_ck = 0
-        from app.db.checkouts import legacy_seed_is_redundant
+        from app.db.checkouts import seed_legacy_base_checkout
         for row in legacy_projects:
             origin = _origin_for(row)
-            # This pass re-runs whenever the migration code changes: never
-            # re-add a relative legacy path whose folder already has a base row.
-            if legacy_seed_is_redundant(cursor, _pv2_id(origin), row["instance_id"] or "", row["path"]):
-                continue
-            cursor.execute(
-                "INSERT INTO checkouts "
-                "(id, project_id, runner_id, path, branch, status) "
-                "VALUES (%s, %s, %s, %s, NULL, 'active') "
-                "ON CONFLICT DO NOTHING",
-                ("ck-" + row["id"], _pv2_id(origin), row["instance_id"] or "", row["path"]),
-            )
-            if cursor.rowcount and cursor.rowcount > 0:
+            if seed_legacy_base_checkout(
+                cursor, row["id"], _pv2_id(origin), row["instance_id"] or "", row["path"]
+            ):
                 seeded_ck += 1
         if seeded_ck:
             migrations_applied.append(f"checkouts<-projects({seeded_ck})")

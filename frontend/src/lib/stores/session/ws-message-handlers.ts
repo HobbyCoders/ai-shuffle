@@ -34,6 +34,7 @@ import { markChatUnavailable } from '../unavailable-chat';
 import { dismissSettledSessionPrompts } from './settle-prompts';
 import { sessionEphemeralCache } from '../session-cache';
 import { markBindingHydrated } from './composer-binding';
+import { unmarkQuestionSent } from './sent-questions';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -1431,8 +1432,12 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			case 'user_question_response_ack':
 			case 'user_question_timeout': {
 				const responseSessionId = data.session_id as string | undefined;
-				if (responseSessionId && responseSessionId !== getState().sessionId) break;
 				const requestId = data.request_id as string;
+				// The sent mark is global (#891): drop it whatever chat is open, or
+				// an ack that lands after a chat switch leaves the question hidden
+				// when the user comes back (the resync restores it, the mark hides it).
+				unmarkQuestionSent(requestId);
+				if (responseSessionId && responseSessionId !== getState().sessionId) break;
 				// A failed ack carries WHY it failed. Only a retryable delivery
 				// failure (`reason: 'relay_offline'` — owner install unreachable)
 				// keeps the modal up so the user's in-progress answer isn't lost.
@@ -1446,6 +1451,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					data.success === false &&
 					data.reason === 'relay_offline'
 				) {
+					// The tray closed on the tap (#891); bring it back, draft intact.
+					unmarkQuestionSent(requestId);
 					notify.error(
 						"Couldn't deliver your answer — the owning device is unreachable. Try again.",
 						{ category: 'user-question-relay-error', session_id: responseSessionId }
@@ -1456,6 +1463,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					...s,
 					pendingQuestions: s.pendingQuestions.filter(q => q.request_id !== requestId),
 				}));
+				unmarkQuestionSent(requestId);
 				break;
 			}
 

@@ -662,6 +662,16 @@
           "past_bug": "#196: peer terminals were only verified in-process; no real two-worker run had been recorded."
         },
         {
+          "id": "two-worker-smoke.phone-startup-presence",
+          "check": "Android startup shares one bounded presence sweep and cancels obsolete probes on stop or resume",
+          "kind": "owner",
+          "needs": ["install", "device"],
+          "two_worker": true,
+          "how": "Use a real Android phone with the candidate APK and at least two disposable paired candidate workers; never interrupt production workers. With both workers responsive, clear only their disposable request logs, launch from the app icon and inspect each worker's health or mobile endpoint request log before the next 30-second presence poll: count startup presence probes separately from chat bootstrap traffic. Hold one worker's probe response at its disposable ingress for longer than eight seconds while the other is online, then relaunch; repeat with an unreachable or stalled-DNS worker. Next make both workers unavailable, including one held probe, and relaunch. While probes are pending on the Workers screen, background the app, resume it and release the old responses; repeat a stop/resume before the eight-second deadline. Inspect request and disconnect logs and the phone's rows/selected worker across each transition. Restore the disposable workers and remove any injected delays afterwards.",
+          "pass_when": "Each worker receives exactly one presence probe in the initial startup sweep, not a duplicate selection sweep. Startup selects the online authorized worker by about eight seconds even when another probe is still pending; with none online, the usable Workers fallback appears by that deadline without extra probe requests. Stopping the screen cancels pending probes; resuming cancels any obsolete sweep and starts exactly one fresh probe per worker. Released old responses cannot supply stale green rows or trigger an obsolete hand-off. A late response in the still-visible fallback may update its own row but does not restart auto-connect. A browser preview or emulator-only pass does not pass this real-phone row.",
+          "past_bug": "#838 started row and selection probe sweeps concurrently. Sharing the sweep removed duplicate requests but initially lost the coroutine-level startup deadline, letting stalled DNS block both auto-connect and fallback. Native lifecycle and real-network behavior were not tried on a physical phone."
+        },
+        {
           "id": "two-worker-smoke.phone-worker-connection",
           "check": "Android prefers a reachable recent worker, fails over without bouncing, and authorizes a manually chosen keyless account worker",
           "kind": "owner",

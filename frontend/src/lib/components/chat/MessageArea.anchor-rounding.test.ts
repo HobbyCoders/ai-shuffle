@@ -21,6 +21,7 @@ const compensate = new Function('container', 'delta', 'anchor', 'previous', 'pre
 `) as (container: HTMLElement, delta: number, anchor: HTMLElement | null, previous: Remainder, preserveAnchor: boolean) => Remainder;
 const scroll = new Function('containerRef', 'previous', `
 	let anchorRounding = previous;
+	const scheduleReadingAnchorCapture = () => {};
 	${statements('if (anchorRounding && containerRef.scrollTop !== anchorRounding.scrollTop)', 'if (programmaticScrollDepth > 0)')}
 	return anchorRounding;
 `) as (container: HTMLElement, previous: Remainder) => Remainder;
@@ -40,6 +41,12 @@ function viewport(quantize = Math.round, initial = 10_000_000) {
 }
 
 describe('MessageArea subpixel anchor compensation', () => {
+	it('clears the scroll remainder before scheduling the rotation reading-anchor capture', () => {
+		const handler = statements('function handleScroll() {', 'if (programmaticScrollDepth > 0)');
+		const reset = handler.indexOf('if (anchorRounding && containerRef.scrollTop !== anchorRounding.scrollTop)');
+		expect(reset).toBeGreaterThan(-1);
+		expect(handler.indexOf('scheduleReadingAnchorCapture();')).toBeGreaterThan(reset);
+	});
 	it.each([['nearest integer', Math.round], ['integer truncation', Math.trunc]] as const)(
 		'keeps cumulative drift below 1px over 1000 repricings with %s', (_mode, quantize) => {
 			const { container, anchor } = viewport(quantize);

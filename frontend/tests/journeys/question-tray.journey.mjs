@@ -3,7 +3,9 @@
 // `[script:ask-question]` asks one question and `[script:ask-questions]` two in
 // one request; the answer the app queues for the agent wakes the scenario,
 // whose reply quotes exactly what it received ("User skipped this question."
-// for a skip). Every case ends with the tray gone and the turn settled.
+// for a skip). Every case ends with the tray gone and the turn settled, and
+// every send closes the tray on the tap, while the server's ack is held back
+// (#891).
 //
 // Cases:
 //   answer         one question: pick an option and send it
@@ -33,8 +35,10 @@ const REPLY = 'Thanks. I received:';
 
 // Counts the user_question_response frames the page sends, and can drop the
 // socket and hold reconnects off (the app's own retry then fails until let go).
+// `holdAcks` keeps the server's user_question_response_ack frames from the app
+// until released, so a case can see the tray close on the tap alone (#891).
 const SOCKET_PROBE = () => {
-	const probe = (window.__journeySocket = { sockets: [], blocked: false, responses: 0 });
+	const probe = (window.__journeySocket = { sockets: [], blocked: false, responses: 0, holdAcks: false, held: [] });
 	const Real = window.WebSocket;
 	class Probed extends Real {
 		constructor(url, protocols) {
@@ -47,10 +51,23 @@ const SOCKET_PROBE = () => {
 			if (typeof data === 'string' && data.includes('"user_question_response"')) probe.responses++;
 			return super.send(data);
 		}
+		get onmessage() {
+			return super.onmessage;
+		}
+		set onmessage(handler) {
+			super.onmessage = handler && ((event) => {
+				if (probe.holdAcks && typeof event.data === 'string' && event.data.includes('"user_question_response_ack"')) {
+					probe.held.push(() => handler.call(this, event));
+					return;
+				}
+				return handler.call(this, event);
+			});
+		}
 	}
 	window.WebSocket = Probed;
 };
 const responsesSent = (page) => page.evaluate(() => window.__journeySocket?.responses ?? 0);
+const holdAcks = (page) => page.evaluate(() => { window.__journeySocket.holdAcks = true; });
 
 const form = (page) => page.getByRole('form', { name: 'Answer questions' });
 const tray = (page) => page.getByRole('region', { name: 'Questions for you' });
@@ -90,6 +107,24 @@ async function finalReply(page) {
 	}, REPLY);
 }
 
+/**
+ * Sending closed the tray (desktop UI) or the prompt dock (mobile shell) at
+ * once, while the server's ack was still held back: it must not wait for the
+ * ack, which comes after the answer's follow-up work, so the composer moves
+ * with the tap and not up to a second later (#891). Then let the ack through.
+ */
+async function expectClosedOnTap(page) {
+	const open = [form(page), tray(page), page.getByRole('region', { name: 'Waiting on you' })];
+	const closed = await Promise.all(open.map((l) => l.waitFor({ state: 'hidden', timeout: 2_000 }).then(() => true, () => false)));
+	const held = await page.evaluate(() => window.__journeySocket.held.length);
+	await page.evaluate(() => {
+		const probe = window.__journeySocket;
+		probe.holdAcks = false;
+		for (const deliver of probe.held.splice(0)) deliver();
+	});
+	expect(closed.every(Boolean), `the question closed on the tap, before the server's ack (${held} ack(s) held)`);
+}
+
 /** The tray (and any answer form) is gone and stays gone. */
 async function expectTrayClosed(page) {
 	await form(page).waitFor({ state: 'detached', timeout: 15_000 });
@@ -102,14 +137,15 @@ const answerCase = {
 	setup: (ctx) => ask(ctx, 'ask-question'),
 	async act({ page, mark, variant, log }) {
 		await mark('pick an option and send');
+		await holdAcks(page);
 		if (inMobileShell(variant)) {
 			// One single-choice question: the mobile dock answers with a tap.
 			await page.getByRole('button', { name: /^Amber/ }).click();
-			await page.getByRole('button', { name: /^Amber/ }).waitFor({ state: 'detached', timeout: 15_000 });
 		} else {
 			await form(page).getByRole('radio', { name: /^Amber/ }).check();
 			await form(page).getByRole('button', { name: 'Send answer', exact: true }).click();
 		}
+		await expectClosedOnTap(page);
 		await expectTrayClosed(page);
 		const reply = await finalReply(page);
 		log(`reply: ${JSON.stringify(reply.slice(0, 200))}`);
@@ -124,7 +160,9 @@ const skipCase = {
 	async act({ page, mark, log }) {
 		expect((await responsesSent(page)) === 0, 'nothing answered before the skip');
 		await mark('skip the only question');
+		await holdAcks(page);
 		await skipButton(page).click();
+		await expectClosedOnTap(page);
 		await expectTrayClosed(page);
 		const reply = await finalReply(page);
 		log(`reply: ${JSON.stringify(reply.slice(0, 200))}`);
@@ -156,7 +194,9 @@ const skipTwoCase = {
 		await mark('skip the last open question');
 		await form(page).getByRole('button', { name: /^Position/ }).click();
 		await heading(page).getByText(POSITION, { exact: true }).waitFor();
+		await holdAcks(page);
 		await skipButton(page).click();
+		await expectClosedOnTap(page);
 		await expectTrayClosed(page);
 		const reply = await finalReply(page);
 		log(`reply: ${JSON.stringify(reply.slice(0, 300))}`);

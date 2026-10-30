@@ -37,6 +37,22 @@ const readViewport = page => page.locator(LOG).evaluate(log => {
 		scrollTop: log.scrollTop, maxScrollTop: log.scrollHeight - log.clientHeight, viewport: { width: innerWidth, height: innerHeight } };
 });
 
+// The row under the top edge of the transcript, and where the reader is in it:
+// its top offset when the row starts inside the view, else the fraction of the
+// row already scrolled past (a long reply reflows to a new height).
+const readingAnchor = (page, key) => page.evaluate(({ selector, key }) => {
+	const top = document.querySelector(selector).getBoundingClientRect().top;
+	const rows = [...document.querySelectorAll('[data-transcript-key]')];
+	const row = key ? rows.find(node => node.dataset.transcriptKey === key) : rows.find(node => node.getBoundingClientRect().bottom > top + 1);
+	if (!row) return null;
+	const box = row.getBoundingClientRect();
+	return { key: row.dataset.transcriptKey, offset: box.top - top, height: box.height, past: Math.max(0, top - box.top) / box.height };
+}, { selector: LOG, key });
+/** How far (px, in the row's new geometry) the reading point moved within its row. */
+const anchorDrift = (before, after) => before.offset >= 0
+	? Math.abs(after.offset - before.offset)
+	: Math.abs(after.past - before.past) * after.height + Math.max(0, after.offset);
+
 const cases = [{
 		name: 'selection-survives-eviction',
 		async setup({ page, status, variant }) {
@@ -362,7 +378,51 @@ cases.push({
 			await page.evaluate(() => window.getSelection().removeAllRanges());
 			await waitTurnSettled(page, { text: SLOW_REPLY.end, messagesAtLeast: 2 });
 		}
+});
 
+cases.push({
+	// #865: rotating the phone (or resizing the window) reflowed every row
+	// above the reader at the same scrollTop, so the turn being read moved
+	// far out of view. The row at the top of the view must stay put.
+	name: 'rotation-keeps-reading-row',
+	async setup({ page, status, variant }) {
+		const id = status.seed?.chats?.long ?? status.seed?.sessions?.large;
+		if (!id) throw new Error('This reader journey needs the standard long or performance seed.');
+		const prefix = mobileShell && variant.viewport === 'phone' ? '/mobile/' : '/';
+		await page.goto(new URL(`${prefix}?session=${encodeURIComponent(id)}`, status.urls.ui).toString());
+		await waitChatOpen(page, { messagesAtLeast: 50, timeout: 90_000 });
+		await page.locator(LOG).hover();
+		// Partway up the mounted transcript: well clear of both edges.
+		const target = await page.evaluate(selector => {
+			const log = document.querySelector(selector);
+			return Math.round((log.scrollHeight - log.clientHeight) * 0.45);
+		}, LOG);
+		for (let i = 0; i < 40; i++) {
+			const left = await page.evaluate(selector => document.querySelector(selector).scrollTop, LOG);
+			if (left <= target + 50) break;
+			await page.mouse.wheel(0, -Math.min(600, left - target));
+			await twoFrames(page);
+		}
+		await page.waitForTimeout(400);
+	},
+	async act({ page, mark, variant, log }) {
+		const start = page.viewportSize();
+		const turned = variant.viewport === 'desktop'
+			? { width: 960, height: start.height }
+			: { width: start.height, height: start.width };
+		const settle = async () => { await twoFrames(page); await page.waitForTimeout(500); await twoFrames(page); };
+		for (const [label, size] of [['rotate', turned], ['rotate back', start]]) {
+			const before = await readingAnchor(page);
+			expect(before, 'a transcript row sits at the top of the view');
+			await mark(`${label} to ${size.width}x${size.height}`);
+			await page.setViewportSize(size);
+			await settle();
+			const after = await readingAnchor(page, before.key);
+			const drift = after ? anchorDrift(before, after) : Infinity;
+			log(`${label}: row ${before.key} offset ${before.offset.toFixed(1)} (past ${(before.past * 100).toFixed(1)}%) -> ${after ? `${after.offset.toFixed(1)} (past ${(after.past * 100).toFixed(1)}%)` : 'unmounted'}, drift ${drift.toFixed(1)}px`);
+			expect(drift <= 4, `${label}: the row being read stays where it was (drift ${drift.toFixed(1)}px)`);
+		}
+	}
 });
 
 cases.push({
