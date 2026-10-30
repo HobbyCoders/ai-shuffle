@@ -25,6 +25,8 @@ export const MIRROR_SYNC_POLL_MS = 2000;
 /** Failed sync checks in a row before a waiting chat stops waiting and says
  *  it cannot reach its owner (#814). */
 export const MIRROR_SYNC_FAILURE_LIMIT = 3;
+/** A sync check that hasn't answered by then counts as a failed one. */
+export const MIRROR_SYNC_REQUEST_TIMEOUT_MS = 10_000;
 /** Longest gap between background retries once the owner is unreachable. */
 export const MIRROR_SYNC_MAX_BACKOFF_MS = 30_000;
 
@@ -116,6 +118,12 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 		retrying = false;
 		async function poll() {
 			inFlight = true;
+			// A stalled request (half-open socket, a proxy that never answers)
+			// must count as a failure too, or the chat waits forever (#814).
+			const request = new AbortController();
+			const abortRequest = () => request.abort();
+			controller.signal.addEventListener('abort', abortRequest, { once: true });
+			const deadline = setTimeout(abortRequest, MIRROR_SYNC_REQUEST_TIMEOUT_MS);
 			try {
 				const query = new URLSearchParams();
 				if (initialTarget && !caughtUpOnce) {
@@ -124,7 +132,7 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 					query.set('initial_tail_id', initialTarget.tail_id);
 				}
 				const suffix = query.size ? `?${query}` : '';
-				const response = await fetch(`${apiBase()}/sessions/${encodeURIComponent(id!)}/sync-status${suffix}`, withAuth({ signal: controller.signal }));
+				const response = await fetch(`${apiBase()}/sessions/${encodeURIComponent(id!)}/sync-status${suffix}`, withAuth({ signal: request.signal }));
 				if (!response.ok) throw new Error('Sync status unavailable');
 				const status = await response.json();
 				if (controller.signal.aborted) return;
@@ -156,6 +164,8 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 					notice.setConnected(true);
 				}
 			} finally {
+				clearTimeout(deadline);
+				controller.signal.removeEventListener('abort', abortRequest);
 				inFlight = false;
 				retrying = false;
 				if (!controller.signal.aborted) timer = setTimeout(poll, mirrorSyncRetryDelay(failures));

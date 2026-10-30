@@ -11,7 +11,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { flushSync, createRawSnippet } from 'svelte';
 import { cleanup, render, screen } from '@testing-library/svelte';
-import { createMirrorSync, mirrorSyncHeadline, mirrorSyncRetryDelay, MIRROR_SYNC_FAILURE_LIMIT, MIRROR_SYNC_MAX_BACKOFF_MS, MIRROR_SYNC_POLL_MS, type MirrorSync } from './mirror-sync.svelte';
+import { createMirrorSync, mirrorSyncHeadline, mirrorSyncRetryDelay, MIRROR_SYNC_FAILURE_LIMIT, MIRROR_SYNC_MAX_BACKOFF_MS, MIRROR_SYNC_POLL_MS, MIRROR_SYNC_REQUEST_TIMEOUT_MS, type MirrorSync } from './mirror-sync.svelte';
 import MirrorSyncGate from './MirrorSyncGate.svelte';
 
 const reply = (body: Record<string, unknown>) => new Response(JSON.stringify(body));
@@ -170,6 +170,23 @@ describe('a sync check that keeps failing (#814)', () => {
 		expect(sync.syncState).toBe('current');
 		expect(screen.queryByText(/Can't reach/)).toBeNull();
 		expect(onCaughtUp).toHaveBeenCalledOnce();
+		destroy();
+	});
+
+	it('counts a check that never answers as a failure (no endless wait)', async () => {
+		vi.useFakeTimers();
+		const fetch = vi.fn().mockImplementation((_url: string, init?: RequestInit) => new Promise((_resolve, reject) => {
+			init?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+		}));
+		vi.stubGlobal('fetch', fetch);
+		const { sync, destroy } = startSync({ sessionId: 'remote-hang', remote: true });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(sync.waiting).toBe(true);
+		await vi.advanceTimersByTimeAsync(
+			MIRROR_SYNC_FAILURE_LIMIT * MIRROR_SYNC_REQUEST_TIMEOUT_MS + (MIRROR_SYNC_FAILURE_LIMIT - 1) * MIRROR_SYNC_POLL_MS);
+		expect(fetch).toHaveBeenCalledTimes(MIRROR_SYNC_FAILURE_LIMIT);
+		expect(sync.unreachable).toBe(true);
+		expect(sync.waiting).toBe(false);
 		destroy();
 	});
 
