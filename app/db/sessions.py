@@ -2563,6 +2563,25 @@ def clear_session_conversation(session_id: str) -> Optional[str]:
                  WHERE id = {_ph}""",
             (datetime.now(timezone.utc).isoformat(), session_id),
         )
+        # Tell every shared SSE reader (``app.api.events._SessionTail``, on any
+        # install) that this log was replaced. Each one still holds the OLD
+        # log's cursor, so without this it skips the restarted seq 1, 2, 3 …
+        # as already sent and a tab that reattaches to it never sees the next
+        # reply. The recheck makes the reader compare log epochs and close;
+        # its clients reset or move to a fresh reader. Sent on commit; guarded
+        # because pg_notify is absent on the SQLite shim.
+        try:
+            from app.db.session_events import NOTIFY_CHANNEL
+
+            cursor.execute(
+                "SELECT pg_notify(%s, %s)",
+                (
+                    NOTIFY_CHANNEL,
+                    json.dumps({"session_id": session_id, "max_seq": 0, "recheck_log": True}),
+                ),
+            )
+        except Exception:  # noqa: BLE001 — the reader's resync is the backstop
+            logger.debug("clear recheck notify failed for %s", session_id, exc_info=True)
         return prev_sdk_sid
 
 
