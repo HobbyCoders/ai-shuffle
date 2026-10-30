@@ -15,12 +15,14 @@
 	 * waiting items show "1 of N", which cycles.
 	 */
 	import { untrack } from 'svelte';
+	import { get } from 'svelte/store';
 	import { ChevronRight, KeyRound, MessageCircleQuestionMark, Pencil, SendHorizontal, Terminal, Check, X } from 'lucide-svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
-	import type { UserQuestionData } from '$lib/components/UserQuestion.svelte';
+	import type { QuestionDraft, QuestionResponse, UserQuestionData } from '$lib/components/UserQuestion.svelte';
 	import type { PermissionRequestData } from '$lib/components/PermissionRequest.svelte';
 	import { chatAccessSummary, type PendingAccessItem } from '$lib/stores/chat-access';
 	import { notify } from '$lib/stores/notifications';
+	import { sentQuestions } from '$lib/stores/session/sent-questions';
 	import type { PromptDockProps } from '$lib/components/chat/composer-shell';
 	import SlideToAnswer from './SlideToAnswer.svelte';
 	import {
@@ -80,14 +82,47 @@
 	let flash = $state<{ ok: boolean; text: string } | null>(null);
 	let typeRef = $state<HTMLInputElement | null>(null);
 
+	/**
+	 * A question's draft by queue id (#899). An answered question leaves the
+	 * dock at once (#891) and comes back if delivery fails (`relay_offline`):
+	 * the typed answer, or the shared form's picks, written answers and
+	 * skips, come back with it. `sent` marks a question this dock answered,
+	 * so its return also clears the "Answer sent" flash.
+	 */
+	type Draft = { typing: boolean; typed: string; form?: QuestionDraft; sent?: boolean };
+	const drafts = new Map<string, Draft>();
+	function keep(id: string, patch: Partial<Draft>) {
+		drafts.set(id, { typing: false, typed: '', ...drafts.get(id), ...patch });
+	}
+	// Forget a draft once its question is neither open nor on its way. The
+	// open list is rebuilt whenever the sent marks change, so a relay_offline
+	// return is safe because the mark drops and the question reappears in the
+	// same update. Only this chat's questions count as open, so a draft for
+	// another chat's question is dropped on a switch (as before this dock kept drafts).
+	$effect(() => {
+		const open = new Set(questions.map((request) => request.request_id));
+		untrack(() => {
+			const sent = get(sentQuestions);
+			for (const id of drafts.keys()) {
+				const requestId = id.slice(2);
+				if (!open.has(requestId) && !sent.has(requestId)) drafts.delete(id);
+			}
+		});
+	});
+
 	$effect(() => {
 		const id = currentId;
 		untrack(() => {
 			armed = false;
 			answered = false;
 			scope = 'none';
-			typing = false;
-			typed = '';
+			const draft = id ? drafts.get(id) : undefined;
+			typing = draft?.typing ?? false;
+			typed = draft?.typed ?? '';
+			if (id && draft?.sent) {
+				flash = null;
+				keep(id, { sent: false });
+			}
 		});
 		if (!id) return;
 		const timer = setTimeout(() => (armed = true), ARM_MS);
@@ -180,6 +215,7 @@
 		const text = answer.trim();
 		if (!text || answered || !connected) return;
 		answered = true;
+		keep(`q:${request.request_id}`, { sent: true });
 		const q = request.questions[0];
 		onQuestion({
 			request_id: request.request_id,
@@ -190,8 +226,14 @@
 		showResult(true, 'Answer sent');
 	}
 
+	function sendForm(response: QuestionResponse) {
+		keep(`q:${response.request_id}`, { sent: true });
+		onQuestion(response);
+	}
+
 	function startTyping() {
 		typing = true;
+		if (currentId) keep(currentId, { typing: true });
 		queueMicrotask(() => typeRef?.focus());
 	}
 </script>
@@ -279,7 +321,7 @@
 					<p class="p-body q-text">{question.question}</p>
 					{#if typing || !question.options?.length}
 						<form class="q-type" onsubmit={(event) => { event.preventDefault(); answerQuestion(request, typed); }}>
-							<input bind:this={typeRef} bind:value={typed} type="text" placeholder="Type your answer" aria-label="Your answer" disabled={!connected || answered} enterkeyhint="send" />
+							<input bind:this={typeRef} bind:value={typed} oninput={(event) => keep(current.id, { typed: event.currentTarget.value })} type="text" placeholder="Type your answer" aria-label="Your answer" disabled={!connected || answered} enterkeyhint="send" />
 							<button type="submit" class="q-send" aria-label="Send answer" disabled={!typed.trim() || !connected || answered}><SendHorizontal size={18} aria-hidden="true" /></button>
 						</form>
 					{:else}
@@ -295,7 +337,10 @@
 					{/if}
 				{:else}
 					<div class="q-form">
-						<UserQuestion data={request} onRespond={onQuestion} disabled={!connected} />
+						{#key request.request_id}
+							<UserQuestion data={request} onRespond={sendForm} disabled={!connected}
+								draft={drafts.get(current.id)?.form} onDraft={(requestId, form) => keep(`q:${requestId}`, { form })} />
+						{/key}
 					</div>
 				{/if}
 			{/if}
