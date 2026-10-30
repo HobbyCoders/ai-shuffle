@@ -1010,6 +1010,15 @@ def stash_pending(cursor, env: dict) -> None:
         (env["origin_device_id"], env["origin_incarnation"], env["origin_seq"], _json(env), _now()))
 
 
+def stash_pending_batch(cursor, envelopes: List[dict]) -> None:
+    """Stash a bounded, validated wire chunk under the caller's state lock."""
+    now = _now()
+    _insert_rows(cursor, "sync_pending", ("origin_device_id", "incarnation", "seq", "envelope", "received_at"),
+                 [(env["origin_device_id"], env["origin_incarnation"], env["origin_seq"], _json(env), now)
+                  for env in envelopes],
+                 "ON CONFLICT (origin_device_id, incarnation, seq) DO NOTHING")
+
+
 def pending_ready(cursor, origin: str, incarnation: int) -> bool:
     """One lock-free primary-key probe before opening a drain's state lock."""
     cursor.execute(

@@ -1757,8 +1757,18 @@ def test_offline_database_commands_exempt_sql_defaults_but_keep_process_deadline
     else:
         db.drop_update_database(snapshot)
         expected = 120
-    assert command.call_args.kwargs["timeout"] == expected
-    for call in command.call_args_list:
+    offline_calls = command.call_args_list
+    if operation == "snapshot":
+        size_sql = {f"SELECT pg_database_size('{name}')" for name in (runtime.APP_DB, snapshot)}
+        size_calls = [call for call in offline_calls if call.kwargs.get("text") in size_sql]
+        assert len(size_calls) == 2
+        for call in size_calls:
+            assert call.kwargs["timeout"] == 10
+            assert "PGOPTIONS" not in call.kwargs["env"]
+        offline_calls = [call for call in offline_calls if call not in size_calls]
+        assert len(offline_calls) == 2  # DROP plus the original CREATE DATABASE
+    assert offline_calls[-1].kwargs["timeout"] == expected
+    for call in offline_calls:
         env = call.kwargs["env"]
         assert env["PGOPTIONS"] == runtime.OFFLINE_SQL_OPTIONS
         assert call.kwargs["timeout"] > 0

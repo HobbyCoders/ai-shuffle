@@ -7,7 +7,7 @@ import pytest
 from app.core import encryption
 from app.db import database as db
 from app.network import engine, policy
-from tests.core.network.harness import Worker, exchange, join
+from tests.core.network.harness import Worker, exchange, exchange_with_gap, join
 
 
 @pytest.fixture(autouse=True)
@@ -40,15 +40,21 @@ def pair(workers):
 
 
 @pytest.mark.parametrize("change", ["auth_token", "base_url", "provider_type", "auth_mode"])
-def test_incoming_credential_change_clears_rejection(workers, change):
+@pytest.mark.parametrize("delivery", ["ordered", "gap"])
+def test_incoming_credential_change_clears_rejection(workers, change, delivery):
     a, b = pair(workers)
     with a.active():
+        if delivery == "gap":
+            for index in range(2):
+                db.set_system_setting(f"gap_buffer_probe_{index}", "held-prefix")
+            engine.scan_collection("system_settings")
         value = {"auth_token": encryption.encrypt_value("new-key"),
                  "base_url": "https://replacement.test/v1", "provider_type": "openai",
                  "auth_mode": "api_key"}[change]
         db.update_model_provider("api", **{change: value})
         assert engine.scan_collection("model_providers") == 1
-    exchange(a, b)
+    deliver = exchange_with_gap if delivery == "gap" else exchange
+    deliver(a, b)
     with b.active():
         assert b.sql("SELECT credential_status FROM model_providers WHERE id='api'")[0]["credential_status"] is None
         assert [r["id"] for r in db.list_usable_model_providers()] == ["api"]

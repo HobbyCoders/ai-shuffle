@@ -115,6 +115,34 @@ def exchange(sender: Worker, receiver: Worker, *, limit: int = 500) -> engine.Ap
         return engine.apply_batch(ops)
 
 
+def exchange_with_gap(sender: Worker, receiver: Worker) -> engine.ApplyResult:
+    """Buffer one stream's signed tail, then release its original first op."""
+    from app.db import network as store
+    with receiver.active():
+        marks = store.local_watermarks()
+    with sender.active():
+        ops, _, needs_snapshot = store.exchange_batch(marks, exclude_origin=receiver.device_id)
+    # A singleton uses apply_batch's row path; leave at least two tail ops.
+    assert not needs_snapshot and 3 <= len(ops) <= engine.APPLY_CHUNK
+    origin, incarnation = ops[0]["origin_device_id"], ops[0]["origin_incarnation"]
+    assert origin == sender.device_id
+    assert all((op["origin_device_id"], op["origin_incarnation"]) == (origin, incarnation) for op in ops)
+    with receiver.active():
+        with patch.object(store, "stash_pending_batch", wraps=store.stash_pending_batch) as stash:
+            buffered = engine.apply_batch(ops[1:])
+        assert stash.call_count == 1, [(op["collection"], op["origin_seq"]) for op in ops]
+        assert buffered.pending == len(ops) - 1
+        assert buffered.applied == buffered.retry == buffered.rejected == 0
+        assert not buffered.touched
+        result = engine.apply_batch(ops[:1])
+        assert result.retry == result.rejected == 0
+        with store.get_db() as conn:
+            cursor = conn.cursor()
+            assert store.count_pending(cursor, origin, incarnation) == 0
+            assert store.get_watermark(cursor, origin, incarnation) == ops[-1]["origin_seq"]
+        return result
+
+
 def converge(workers: List[Worker], rounds: int = 3) -> None:
     for _ in range(rounds):
         for a in workers:
