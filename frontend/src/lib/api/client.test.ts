@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ApiClient, lastGetFailed, lastGetStartedAt, recheckAuthOn401 } from './client';
+import { ApiClient, fetchAndDownload, getErrorMessage, isApiError, isRouteMissing, lastGetFailed, lastGetStartedAt, recheckAuthOn401 } from './client';
 import { auth } from '$lib/stores/auth.svelte';
 
 describe('ApiClient', () => {
@@ -54,7 +54,8 @@ describe('ApiClient', () => {
 
 			await expect(client.get('/missing')).rejects.toEqual({
 				detail: 'Not found',
-				status: 404
+				status: 404,
+				body: { detail: 'Not found' }
 			});
 		});
 	});
@@ -163,15 +164,79 @@ describe('ApiClient', () => {
 
 			await expect(client.delete('/items/1')).rejects.toEqual({
 				detail: 'Forbidden',
-				status: 403
+				status: 403,
+				body: { detail: 'Forbidden' }
 			});
+		});
+	});
+
+	describe('structured HTTP error provenance', () => {
+		it.each([
+			['canonical missing route', 404, '{"detail":"Not Found"}', { detail: 'Not Found' }, 'Not Found', true],
+			['missing session', 404, '{"detail":"Session not found: parent-id"}', { detail: 'Session not found: parent-id' }, 'Session not found: parent-id', false],
+			['plain text', 404, 'Not Found', null, 'Not Found', false],
+			['message field', 404, '{"message":"Not Found"}', { message: 'Not Found' }, 'Not Found', false],
+			['error field', 404, '{"error":"Not Found"}', { error: 'Not Found' }, 'Not Found', false],
+			['empty body', 404, '', null, "Not found — the requested resource doesn't exist", false],
+			['unsupported method', 405, '{"detail":"Method Not Allowed"}', { detail: 'Method Not Allowed' }, 'Method Not Allowed', true],
+			['not implemented', 501, '{"detail":"Not Implemented"}', { detail: 'Not Implemented' }, 'Not Implemented', true],
+			['server failure', 500, '{"detail":"Not Found"}', { detail: 'Not Found' }, 'Not Found', false],
+			['extra message key', 404, '{"detail":"Not Found","message":"domain failure"}', { detail: 'Not Found', message: 'domain failure' }, 'Not Found', false],
+			['extra null key', 404, '{"detail":"Not Found","context":null}', { detail: 'Not Found', context: null }, 'Not Found', false],
+			['JSON string', 404, '"Not Found"', 'Not Found', "Not found — the requested resource doesn't exist", false],
+			['JSON null', 404, 'null', null, "Not found — the requested resource doesn't exist", false],
+			['JSON array', 404, '[{"detail":"Not Found"}]', [{ detail: 'Not Found' }], "Not found — the requested resource doesn't exist", false],
+		] as const)('%s', async (_name, status, text, body, detail, routeMissing) => {
+			fetchMock.mockResolvedValueOnce(new Response(text, { status }));
+			const error = await client.get('/sessions/parent-id/live').catch((error: unknown) => error);
+
+			expect(error).toEqual({ detail, status, body });
+			expect(isApiError(error)).toBe(true);
+			expect(getErrorMessage(error)).toBe(detail);
+			expect(isRouteMissing(error)).toBe(routeMissing);
+		});
+
+		it('preserves network error identity without inventing HTTP provenance', async () => {
+			const failure = new TypeError('Failed to fetch');
+			fetchMock.mockRejectedValueOnce(failure);
+			const error = await client.get('/sessions/parent-id/live').catch((error: unknown) => error);
+
+			expect(error).toBe(failure);
+			expect(getErrorMessage(error)).toBe('Failed to fetch');
+			expect(isRouteMissing(error)).toBe(false);
+		});
+
+		it.each([undefined, null, 'Not Found', { detail: 'Not Found', status: 404 }, { detail: 'Not Found', status: '404', body: { detail: 'Not Found' } }])(
+			'does not infer a missing route from an unstructured error: %j', (error) => {
+				expect(isRouteMissing(error)).toBe(false);
+		});
+
+		it('preserves provenance on upload errors', async () => {
+			const body = { detail: 'Not Found' };
+			fetchMock.mockResolvedValueOnce(Response.json(body, { status: 404 }));
+			const error = await client.uploadFile('/upload', new File(['test'], 'test.txt')).catch((error: unknown) => error);
+
+			expect(error).toEqual({ detail: 'Not Found', status: 404, body });
+			expect(isRouteMissing(error)).toBe(true);
+		});
+
+		it.each([
+			['{"detail":"Not Found"}', { detail: 'Not Found' }, 'Not Found', true],
+			['Not Found', null, 'Export failed', false],
+			['{"message":"Not Found"}', { message: 'Not Found' }, 'Export failed', false],
+		] as const)('preserves download error messages and provenance: %s', async (text, body, detail, routeMissing) => {
+			fetchMock.mockResolvedValueOnce(new Response(text, { status: 404 }));
+			const error = await fetchAndDownload('/export', 'export.json').catch((error: unknown) => error);
+
+			expect(error).toEqual({ detail, status: 404, body });
+			expect(isRouteMissing(error)).toBe(routeMissing);
 		});
 	});
 
 	describe('error handling', () => {
 		it('preserves a real plain-text response after JSON parsing fails', async () => {
 			fetchMock.mockResolvedValueOnce(new Response('upstream process unavailable', { status: 502 }));
-			await expect(client.get('/error')).rejects.toEqual({ detail: 'upstream process unavailable', status: 502 });
+			await expect(client.get('/error')).rejects.toEqual({ detail: 'upstream process unavailable', status: 502, body: null });
 		});
 		it('should fall back to text body when json parsing fails', async () => {
 			fetchMock.mockResolvedValueOnce({
@@ -184,7 +249,8 @@ describe('ApiClient', () => {
 
 			await expect(client.get('/error')).rejects.toEqual({
 				detail: 'git worktree add failed',
-				status: 500
+				status: 500,
+				body: null
 			});
 		});
 
@@ -199,7 +265,8 @@ describe('ApiClient', () => {
 
 			await expect(client.get('/error')).rejects.toEqual({
 				detail: 'Internal server error — something went wrong on the server',
-				status: 500
+				status: 500,
+				body: null
 			});
 		});
 
@@ -214,7 +281,8 @@ describe('ApiClient', () => {
 
 			await expect(client.get('/error')).rejects.toEqual({
 				detail: 'Not found — the requested resource doesn\'t exist',
-				status: 404
+				status: 404,
+				body: null
 			});
 		});
 
@@ -227,7 +295,8 @@ describe('ApiClient', () => {
 
 			await expect(client.get('/error')).rejects.toEqual({
 				detail: 'Branch name is required',
-				status: 400
+				status: 400,
+				body: { message: 'Branch name is required' }
 			});
 		});
 
@@ -240,7 +309,8 @@ describe('ApiClient', () => {
 
 			await expect(client.get('/error')).rejects.toEqual({
 				detail: 'Validation failed',
-				status: 422
+				status: 422,
+				body: { error: 'Validation failed' }
 			});
 		});
 
@@ -257,7 +327,11 @@ describe('ApiClient', () => {
 
 			await expect(client.get('/error')).rejects.toEqual({
 				detail: "default_branch: String should match pattern '^[a-zA-Z0-9_][a-zA-Z0-9._/-]*$'; Field required",
-				status: 422
+				status: 422,
+				body: { detail: [
+					{ type: 'string_pattern_mismatch', loc: ['body', 'default_branch'], msg: "String should match pattern '^[a-zA-Z0-9_][a-zA-Z0-9._/-]*$'" },
+					{ type: 'missing', loc: ['query', 0], msg: 'Field required' }
+				] }
 			});
 		});
 
@@ -270,7 +344,8 @@ describe('ApiClient', () => {
 
 			await expect(client.get('/error')).rejects.toEqual({
 				detail: 'Validation error — the input data is invalid',
-				status: 422
+				status: 422,
+				body: { detail: [{ loc: ['body'] }] }
 			});
 		});
 
@@ -285,7 +360,8 @@ describe('ApiClient', () => {
 
 			await expect(client.get('/error')).rejects.toEqual({
 				detail: 'Server error (HTTP 418: I\'m a teapot)',
-				status: 418
+				status: 418,
+				body: null
 			});
 		});
 
@@ -302,7 +378,7 @@ describe('ApiClient', () => {
 			['a structured error object', 400, { error: { code: 'bad_branch' } }, '{"code":"bad_branch"}'],
 		])('api_error body: %s', async (_name, status, body, detail) => {
 			fetchMock.mockResolvedValueOnce(Response.json(body, { status }));
-			await expect(client.get('/error')).rejects.toEqual({ detail, status });
+			await expect(client.get('/error')).rejects.toEqual({ detail, status, body });
 		});
 
 		it('does not re-check worker auth on 403, only on 401', async () => {
@@ -310,7 +386,7 @@ describe('ApiClient', () => {
 			// re-checking the session would not change it.
 			const checkAuth = vi.spyOn(auth, 'checkAuth').mockResolvedValue(undefined as never);
 			fetchMock.mockResolvedValueOnce(Response.json({ detail: 'Owner only' }, { status: 403 }));
-			await expect(client.get('/sessions')).rejects.toEqual({ detail: 'Owner only', status: 403 });
+			await expect(client.get('/sessions')).rejects.toEqual({ detail: 'Owner only', status: 403, body: { detail: 'Owner only' } });
 			await new Promise((r) => setTimeout(r, 0));
 			expect(checkAuth).not.toHaveBeenCalled();
 		});

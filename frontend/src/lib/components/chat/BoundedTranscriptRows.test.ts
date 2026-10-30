@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
-import { createRawSnippet } from 'svelte';
+import { createRawSnippet, tick } from 'svelte';
 import BoundedTranscriptRows from './BoundedTranscriptRows.svelte';
 
 const items = Array.from({ length: 2000 }, (_, index) => ({ id: `row-${index}`, content: `Entry ${index}` }));
@@ -8,7 +8,7 @@ const keyOf = (item: typeof items[number]) => item.id;
 const children = createRawSnippet<[typeof items[number]]>((item) => ({
 	render: () => `<p data-testid="row">${item().content}</p>`
 }));
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
+afterEach(() => { document.getSelection()?.removeAllRanges(); cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('bounded nested transcript mounting', () => {
 	it('does not page on follow-bottom scroll, but uses its baseline for the next reader scroll', async () => {
@@ -65,5 +65,39 @@ describe('bounded nested transcript mounting', () => {
 		const before = screen.getAllByTestId('row').map(row => row.textContent);
 		await view.rerender({ items: [...items, { id: 'new', content: 'New streaming entry' }] });
 		expect(screen.getAllByTestId('row').map(row => row.textContent)).toEqual(before);
+	});
+
+	it.each(['collapse', 'clear'])('preserves selected nested text nodes, then releases them on %s', async release => {
+		const view = render(BoundedTranscriptRows<typeof items[number]>, { items, keyOf, children, startAtTail: true });
+		const start = screen.getByText('Entry 1997').firstChild!;
+		const end = screen.getByText('Entry 1999').firstChild!;
+		const selection = document.getSelection()!;
+		selection.setBaseAndExtent(start, 0, end, end.textContent!.length);
+		const selected = selection.toString();
+		for (let i = 0; i < 6; i++) {
+			await fireEvent.click(screen.getByRole('button', { name: 'Show earlier log entries' }));
+			expect(start.isConnected && end.isConnected).toBe(true);
+			expect(selection.toString()).toBe(selected);
+			expect(screen.getAllByTestId('row')).toHaveLength(60);
+		}
+		expect(screen.getByText('Clear text selection to browse further.')).toBeTruthy();
+		await view.rerender({ items: [...items] });
+		expect(screen.getByText('Clear text selection to browse further.')).toBeTruthy();
+		if (release === 'collapse') {
+			selection.collapseToStart();
+			document.dispatchEvent(new Event('selectionchange'));
+			await tick();
+		} else {
+			const clear = screen.getByRole('button', { name: 'Clear selection' });
+			const down = new MouseEvent('pointerdown', { bubbles: true, cancelable: true });
+			clear.dispatchEvent(down);
+			expect(down.defaultPrevented).toBe(true);
+			expect(selection.toString()).toBe(selected);
+			await fireEvent.click(clear);
+		}
+		expect(screen.queryByText('Clear text selection to browse further.')).toBeNull();
+		await fireEvent.click(screen.getByRole('button', { name: 'Show earlier log entries' }));
+		expect(screen.queryByText('Entry 1999')).toBeNull();
+		expect(screen.getAllByTestId('row')).toHaveLength(60);
 	});
 });

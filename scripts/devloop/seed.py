@@ -355,6 +355,29 @@ async def seed_default() -> dict:
                   answer=f"This chat works on `{SECOND_BRANCH}` in its own checkout.")
     await run_sync(worktree.save)
 
+    # Four native rows with deliberately heterogeneous markdown costs. Keep
+    # existing chats/ids untouched: these session ids use their own namespace
+    # names and are seeded after every existing native transcript.
+    def boundary_body(cost: int) -> str:
+        if cost < 100:
+            return "Boundary prompt"
+        length = (cost - 64) * 4
+        prefix = "```text\nBoundary\n```\n\n"
+        line = "- A readable boundary row with **bold text**.\n"
+        return (prefix + line * ((length + len(line) - 1) // len(line)))[:length]
+
+    for key, costs in (("boundary_overlap", (65, 6000, 65, 9000)),
+                       ("boundary_disjoint", (65, 9000, 9000, 65))):
+        chats[key] = str(uuid.uuid5(_ID_NAMESPACE, f"chat:{key}"))
+        await run_sync(database.create_session, session_id=chats[key],
+                       profile_id=DEV_AGENT_ID, title=f"{key} (seeded)",
+                       is_active=True, model=composite)
+        boundary = Transcript(chats[key], DEV_AGENT_ID, model)
+        content = [boundary_body(cost) for cost in costs]
+        for prompt, answer in zip(content[::2], content[1::2]):
+            boundary.turn(prompt, answer=answer)
+        await run_sync(boundary.save)
+
     return {
         "provider_id": provider_id, "model": model, "agent_id": DEV_AGENT_ID,
         "projects": projects, "remotes": remote_urls, "worktree_path": created.worktree_path,

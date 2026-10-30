@@ -2687,6 +2687,11 @@
     "target_pr": 6,
     "base_settings": true
   },
+  "VITE_PERF_FINISHED_MARKDOWN_CACHE": {
+    "kind": "internal",
+    "reason": "Internal build-time performance kill switch for the finished assistant markdown cache; defaults enabled, with disable reserved for measured ablations and rollback",
+    "base_settings": false
+  },
   "VITE_PERF_KEEP_MIRROR_CACHE": {
     "kind": "internal",
     "reason": "Temporary default-on performance kill switch for preserving the mirrored transcript and cursor through freshness; 0 restores the legacy opening replay and unmount."
@@ -2714,6 +2719,11 @@
     "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Enable startup dedupe startup optimization",
     "target_pr": 6,
     "base_settings": true
+  },
+  "VITE_PERF_TRANSCRIPT_CONTENT_WINDOW": {
+    "kind": "internal",
+    "reason": "Internal build-time performance kill switch for the nested transcript content budget; defaults enabled, with disable reserved for measured ablations and rollback",
+    "base_settings": false
   },
   "VITE_SHUFFLE_SHELL": {
     "kind": "internal",

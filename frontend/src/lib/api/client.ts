@@ -16,6 +16,11 @@ import { apiBase, withAuth } from './runtime';
 export interface ApiError {
 	detail: string;
 	status: number;
+	/**
+	 * Parsed JSON response body, or null when the body is not JSON/readable.
+	 * ApiClient always sets this; optional for legacy/manual ApiError producers.
+	 */
+	body?: unknown;
 }
 
 /**
@@ -64,13 +69,16 @@ export function recheckAuthOn401(): Promise<void> {
 }
 
 /**
- * Extract a meaningful error message from a failed HTTP response.
+ * Extract a meaningful error and its JSON provenance from a failed HTTP response.
  * Tries JSON first, then plain text, then falls back to status description.
  */
-async function extractErrorDetail(response: Response): Promise<string> {
+async function extractApiError(response: Response): Promise<ApiError> {
+	let body: unknown = null;
+	const withDetail = (detail: string): ApiError => ({ detail, status: response.status, body });
 	try {
 		// Preserve the original body for the plain-text fallback below.
 		const json = await response.clone().json();
+		body = json;
 		// Slice C: SDK 0.1.81+ structured api_error body — prefer its concrete
 		// fields over generic 429 / 5xx canned strings when present.
 		if (json && typeof json === 'object') {
@@ -80,14 +88,14 @@ async function extractErrorDetail(response: Response): Promise<string> {
 				const explicit = typeof json.detail === 'string' ? json.detail
 					: typeof json.message === 'string' ? json.message
 					: null;
-				if (explicit) return explicit;
+				if (explicit) return withDetail(explicit);
 				if (status === 429 && retry !== null) {
-					return `Rate limited — retry in ${retry}s`;
+					return withDetail(`Rate limited — retry in ${retry}s`);
 				}
 				if (status === 429) {
-					return 'Rate limited — too many requests, try again shortly';
+					return withDetail('Rate limited — too many requests, try again shortly');
 				}
-				return `API error: HTTP ${status}`;
+				return withDetail(`API error: HTTP ${status}`);
 			}
 			// FastAPI request validation (422) sends a list of {loc, msg}; the
 			// detail must stay a string, so name each failing field.
@@ -98,21 +106,21 @@ async function extractErrorDetail(response: Response): Promise<string> {
 						const field = Array.isArray(d.loc) ? d.loc[d.loc.length - 1] : null;
 						return typeof field === 'string' ? `${field}: ${d.msg}` : d.msg;
 					});
-				if (messages.length) return messages.join('; ');
-			} else if (json.detail) return json.detail;
-			if (json.message) return json.message;
-			if (json.error) return typeof json.error === 'string' ? json.error : JSON.stringify(json.error);
+				if (messages.length) return withDetail(messages.join('; '));
+			} else if (json.detail) return withDetail(json.detail);
+			if (json.message) return withDetail(json.message);
+			if (json.error) return withDetail(typeof json.error === 'string' ? json.error : JSON.stringify(json.error));
 			// Even when `type` is missing, an explicit `retry_after_seconds` on a
 			// 429 response gives us a better message than the canned fallback.
 			if (response.status === 429 && typeof json.retry_after_seconds === 'number') {
-				return `Rate limited — retry in ${json.retry_after_seconds}s`;
+				return withDetail(`Rate limited — retry in ${json.retry_after_seconds}s`);
 			}
 		}
 	} catch {
 		// JSON parsing failed — try plain text
 		try {
 			const text = await response.text();
-			if (text && text.length < 500) return text.trim();
+			if (text && text.length < 500) return withDetail(text.trim());
 		} catch {
 			// Text extraction also failed
 		}
@@ -132,7 +140,7 @@ async function extractErrorDetail(response: Response): Promise<string> {
 		503: 'Service unavailable — the server is overloaded or under maintenance',
 		504: 'Gateway timeout — the upstream server didn\'t respond in time',
 	};
-	return statusMessages[response.status] || `Server error (HTTP ${response.status}: ${response.statusText || 'no details'})`;
+	return withDetail(statusMessages[response.status] || `Server error (HTTP ${response.status}: ${response.statusText || 'no details'})`);
 }
 
 export interface RequestOptions {
@@ -256,16 +264,13 @@ export class ApiClient {
 
 		if (!response.ok) {
 			markFailed();
-			const detail = await extractErrorDetail(response);
+			const error = await extractApiError(response);
 			// Confirm worker authentication separately from provider-specific or stale
 			// failures. Auth endpoints render their own expected authentication errors.
 			if (response.status === 401 && !isAuthPath(path)) {
 				recheckAuthOn401();
 			}
-			throw {
-				detail,
-				status: response.status
-			} as ApiError;
+			throw error;
 		}
 
 		// Handle 204 No Content
@@ -367,11 +372,7 @@ export class ApiClient {
 		}));
 
 		if (!response.ok) {
-			const detail = await extractErrorDetail(response);
-			throw {
-				detail,
-				status: response.status
-			} as ApiError;
+			throw await extractApiError(response);
 		}
 
 		return response.json();
@@ -393,10 +394,15 @@ export async function fetchAndDownload(
 		method: 'GET' }));
 
 	if (!response.ok) {
-		const error = await response.json().catch(() => ({ detail: 'Export failed' }));
+		let body: unknown = null;
+		const error = await response.json().then(json => {
+			body = json;
+			return json;
+		}).catch(() => ({ detail: 'Export failed' }));
 		throw {
 			detail: error.detail || 'Export failed',
-			status: response.status
+			status: response.status,
+			body
 		} as ApiError;
 	}
 
@@ -773,6 +779,23 @@ export async function getSubagentsForAutocomplete(
  */
 export function isApiError(e: unknown): e is ApiError {
 	return e !== null && typeof e === 'object' && 'detail' in e && 'status' in e;
+}
+
+/**
+ * Whether a route is unavailable on this worker: HTTP 405/501, or FastAPI's
+ * canonical HTTP 404 JSON body. For 404, require exactly one own JSON key,
+ * detail: "Not Found"; reject ALL extra keys (even null) to fail closed on domain
+ * errors. Successful JSON parsing, not Content-Type or flattened text, supplies
+ * the body. Legacy errors without body provenance never qualify as route 404s.
+ */
+export function isRouteMissing(e: unknown): boolean {
+	if (!isApiError(e)) return false;
+	if (e.status === 405 || e.status === 501) return true;
+	const body = e.body;
+	if (e.status !== 404 || !body || typeof body !== 'object' || Array.isArray(body)) return false;
+	const keys = Object.keys(body);
+	return keys.length === 1 && keys[0] === 'detail'
+		&& (body as { detail?: unknown }).detail === 'Not Found';
 }
 
 /**

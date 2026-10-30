@@ -1,3 +1,47 @@
+<script lang="ts" module>
+	import { sanitizeHtml as sanitizeFinishedHtml } from '$lib/utils/sanitize';
+	import { renderChatMarkdown as parseFinishedMarkdown } from '$lib/utils/chat-markdown';
+	import { highlightGenerationForSource as finishedHighlightGeneration } from '$lib/utils/shiki';
+	import { lookupCommandBlock as cachedCommandBlock } from '$lib/terminal/commands';
+	import { lookupTable as cachedTable } from '$lib/utils/table-export';
+
+	// Only immutable, unscoped HTML strings survive a row unmount. No elements,
+	// component instances, session actions or streaming prefixes are retained.
+	const FINISHED_CACHE_BYTES = 8 * 1024 * 1024;
+	const FINISHED_CACHE_ENTRIES = 160;
+	const finishedBodies = new Map<string, { html: string; bytes: number }>();
+	let finishedBytes = 0;
+	export const finishedMessageCache = {
+		clear() { finishedBodies.clear(); finishedBytes = 0; },
+		stats() { return { entries: finishedBodies.size, bytes: finishedBytes }; }
+	};
+	function finishedMarkdown(source: string, _epoch = 0): string {
+		const enabled = import.meta.env.VITE_PERF_FINISHED_MARKDOWN_CACHE !== '0';
+		const key = `${finishedHighlightGeneration(source)}\0${source}`;
+		const hit = enabled ? finishedBodies.get(key) : undefined;
+		if (hit) {
+			// The renderer registers table sources and trusted terminal commands.
+			// Those registries have their own lifetime; an evicted id must be
+			// regenerated, never trusted merely because its HTML was cached.
+			const valid = [...hit.html.matchAll(/data-(cb|table)-id="([^"]+)"/g)]
+				.every(([, kind, id]) => kind === 'cb' ? cachedCommandBlock(id) : cachedTable(id));
+			if (valid) { finishedBodies.delete(key); finishedBodies.set(key, hit); return hit.html; }
+			finishedBodies.delete(key); finishedBytes -= hit.bytes;
+		}
+		const html = sanitizeFinishedHtml(parseFinishedMarkdown(source, true));
+		const bytes = (key.length + html.length) * 2 + 64;
+		if (enabled && bytes <= FINISHED_CACHE_BYTES) {
+			finishedBodies.set(key, { html, bytes }); finishedBytes += bytes;
+			while (finishedBodies.size > FINISHED_CACHE_ENTRIES || finishedBytes > FINISHED_CACHE_BYTES) {
+				const oldest = finishedBodies.keys().next().value!;
+				finishedBytes -= finishedBodies.get(oldest)!.bytes;
+				finishedBodies.delete(oldest);
+			}
+		}
+		return html;
+	}
+</script>
+
 <script lang="ts">
 	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 	/**
@@ -176,7 +220,7 @@
 	onDestroy(_stopHighlightWatch);
 
 	const unscopedRendered = $derived(gallerySources?.size && !streaming
-		? { prefix: sanitizeHtml(renderChatMarkdown(rewriteWithGallery(displayContent, gallerySources, sessionId), true)), tail: '' }
+		? { prefix: finishedMarkdown(rewriteWithGallery(displayContent, gallerySources, sessionId), highlightEpoch), tail: '' }
 		: renderMarkdownMemoized(displayContent, streaming, highlightEpoch));
 	const rendered = $derived({
 		prefix: routeChatFiles(unscopedRendered.prefix, sessionId),
@@ -486,8 +530,9 @@
 	 * See $lib/utils/media for detection rules and produced markup.
 	 */
 	function renderMarkdownFull(text: string, isStreaming: boolean): string {
-		const html = renderChatMarkdown(rewriteMediaMarkdown(text), !isStreaming);
-		return isStreaming ? sanitizeHtml(injectStreamingCursor(html)) : sanitizeHtml(html);
+		const source = rewriteMediaMarkdown(text);
+		if (!isStreaming) return finishedMarkdown(source);
+		return sanitizeHtml(injectStreamingCursor(renderChatMarkdown(source, false)));
 	}
 
 	// ── Code-block copy ────────────────────────────────────────────────────
