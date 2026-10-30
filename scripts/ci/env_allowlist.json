@@ -140,6 +140,11 @@
     "target_pr": 2,
     "base_settings": true
   },
+  "AI_SHUFFLE_PERF_BULK_PENDING": {
+    "kind": "internal",
+    "reason": "Temporary default-on rollback switch for validated chunked buffering of out-of-order network operations",
+    "base_settings": false
+  },
   "AI_SHUFFLE_PERF_COALESCE_SUBAGENT_PROGRESS": {
     "kind": "internal",
     "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Combine subagent progress updates",

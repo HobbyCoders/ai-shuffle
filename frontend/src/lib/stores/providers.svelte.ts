@@ -471,8 +471,8 @@ export const providers = {
 	},
 
 	/**
-	 * Fetch a provider's model catalog (upstream `/models`, or the built-in
-	 * preset roster). Persists nothing; throws on failure.
+	 * Fetch the provider's live catalog and share a bounded discovery snapshot.
+	 * Curation is unchanged; throws only when discovery itself fails.
 	 */
 	async fetchProviderModels(id: string): Promise<FetchModelsResult> {
 		return apiFetchProviderModels(id);

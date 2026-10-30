@@ -1210,6 +1210,16 @@
           "past_bug": "#580 review: short server defaults could cancel every boot migration."
         },
         {
+          "id": "harness-basics.model-catalog-worker-sync",
+          "check": "Refreshing models shares discovery without losing concurrent curation",
+          "kind": "owner",
+          "needs": ["install"],
+          "two_worker": true,
+          "how": "Use two disposable candidate workers A and B paired through normal settings sync and a controlled local OpenAI-compatible endpoint (label it as a fixture). On B keep Settings > Providers > Models open. Add a model to the endpoint and press Refresh model list on A. Without reloading B, inspect the new model and Last refreshed time and worker. While a delayed refresh is running, change the curated selection on the other worker, then toggle a different model in the first panel. Also submit a PATCH with the previous provider expected_revision. Delete the disposable provider and inspect both workers after sync. Never use the installed workers' provider credentials or data.",
+          "pass_when": "B shows the newly discovered model unchecked, the refresh timestamp and A's name without reload or an upstream fetch on B. The concurrent selected models remain checked and a later toggle preserves them. The stale PATCH returns 409 without changing curation, the panel reloads current selection on conflict, and deleting the provider removes its model_catalog:<provider_id> setting on both workers. Real two-worker delivery remains unverified until this row is exercised.",
+          "past_bug": "Refresh models only returned a local catalog; concurrent resource subscribers rebuilt curation from an older provider revision and saved the stale whole selection."
+        },
+        {
           "id": "harness-basics.named-id-result-round-trip",
           "check": "Named scenario ID survives a real worker run and persisted result",
           "kind": "script",
@@ -1257,6 +1267,16 @@
           "how": "On a disposable candidate, install a test plugin declaring a read-only MCP ping tool and enable it through the plugin UI. In a native-model code chat, discover and call ping, then repeat on a second turn. Disable the plugin and start a new chat; repeat with an unreviewed authored plugin. Re-enable the reviewed plugin and configure a host MCP server with the same server name but a distinct ping response. Finally open a delegated Claude chat with a Claude-installed plugin declaring the same tool and inspect its catalog. Archive the throwaway chats and remove only the test plugin and host config.",
           "pass_when": "The enabled plugin's ping is discoverable and callable once per native catalog, and its catalog hash stays unchanged across turns. Disabled and unreviewed plugin tools are absent in new native chats. The host server wins a name collision. Delegated Claude retains its own plugin tool without a second copy from the native merge.",
           "past_bug": "The shared MCP builder assumed NativeLoop discovered plugin servers, but neither layer connected them."
+        },
+        {
+          "id": "harness-basics.network-pending-gap-buffer",
+          "check": "A delayed signed prefix buffers in bounded chunks and then catches up without lost or duplicate events",
+          "kind": "owner",
+          "needs": ["install"],
+          "two_worker": true,
+          "how": "Use only a disposable paired candidate installation and a fault-controlled test transport. Produce a 193-operation throwaway transcript through the candidate's normal write path. Hold its first signed operation, then deliver the remaining original envelopes to B in 64-operation chunks without modifying their signatures. Scope SQL receipts to B's buffering transactions, excluding health/presence traffic and BEGIN/COMMIT. Release the prefix, replay the chunks, and compare both transcripts and stream frontiers. Repeat with a bad-signature copy and with AI_SHUFFLE_PERF_BULK_PENDING=off on B, restarting only the candidate. Remove only the disposable test state; never intercept production traffic or publish private receipts.",
+          "pass_when": "The default path buffers each eligible 64-envelope chunk with at most five SQL statements and bounded transaction work while leaving its watermark below the gap. Releasing the prefix applies all 193 operations exactly once in source order; replay does not duplicate events, and the bad-signature copy is refused without losing neighboring valid operations. The off flag preserves the same final state through per-envelope buffering. Component SQL tests alone do not pass this real-transport fault row.",
+          "past_bug": "Buffering 192 operations above a missing prefix used 1,164 SQL calls even though ordered apply was already chunked."
         },
         {
           "id": "harness-basics.network-scanner-urgent-wakes",
@@ -1340,6 +1360,15 @@
           "how": "On a disposable candidate worker, use Settings > Providers to sign in to ChatGPT account A, then Add another subscription and complete sign-in as a different ChatGPT account B. Repeat for two SuperGrok accounts. Use private input/sign-in controls; never put tokens or codes in evidence. Reopen Providers, activate each saved sibling in turn, and send a short follow-up in a throwaway chat originally pinned to A. Cancel an additional sign-in and confirm the saved accounts remain. Real browser/device OAuth and provider account identity require real accounts; the seeded Settings journey covers only switching public account rows, not enrollment.",
           "pass_when": "Both distinct accounts remain saved under each subscription slot; only the newly activated sibling is on and marked Active. Switching subscriptions does not disable an API-key account in the other kind. A follow-up uses the selected subscription with no history loss, duplicate saved row or overwritten sibling login. Cancelled enrollment leaves the prior selection and credentials intact. Claude Code's single existing sign-in is unchanged.",
           "past_bug": "PR #840 added saved ChatGPT/SuperGrok accounts without real-worker second-sign-in acceptance coverage."
+        },
+        {
+          "id": "harness-basics.pr844-update-snapshot-timing",
+          "check": "Container source updates expose snapshot and child-spawn timing without changing rollback",
+          "kind": "owner",
+          "needs": ["install"],
+          "how": "Use a disposable candidate container with only synthetic data, never a live worker or database. Activate a staged source update and capture the supervisor log across old-app stop and replacement startup. Compare source_database_bytes and copied_database_bytes with read-only pg_database_size queries. Repeat with a candidate that fails after a schema/data migration and verify rollback restores the exact pre-update rows and schema. A dev-instance UI journey cannot activate this container-supervisor update path; the producing-path lab and unit tests cover it separately.",
+          "pass_when": "Snapshot start and one terminal complete/failed record bracket copying, with total seconds, cumulative copy seconds, attempts and database-file bytes (not device-write or WAL bytes). Successful copy precedes child-spawn start and PID/elapsed logging. Failed copies never claim completed bytes. No arguments, environments or connection details appear in the new records. FILE_COPY, process deadlines and rollback protection remain unchanged, and failed-update rollback restores the synthetic data exactly. The next installed-container update remains unverified until these real producing-path receipts exist.",
+          "past_bug": "An uninstrumented shutdown-to-startup gap made database-copy time indistinguishable from application startup."
         },
         {
           "id": "harness-basics.rewind-file-restore-retired",

@@ -22,7 +22,7 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -37,6 +37,7 @@ from app.core import (
     encryption,
     grok_rate_limit_resets,
     model_catalog_presets,
+    model_catalogs,
     model_modality,
     model_registry,
     xai_oauth,
@@ -45,6 +46,7 @@ from app.db import database as db
 from app.db.async_database import run_sync
 from app.db.model_provider_slots import model_provider_slot
 
+from app.api import model_catalogs as catalog_api
 from app.api import openrouter_billing, provider_balances
 from app.core.provider_locks import operation_lock
 
@@ -53,6 +55,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/model-providers", tags=["Model Providers"])
 router.include_router(provider_balances.router)
 router.include_router(openrouter_billing.router)
+router.include_router(catalog_api.router)
 
 _VALID_PROVIDER_TYPES = ("openrouter", "custom", "openai", "chatgpt", "xai", "grok")
 
@@ -86,6 +89,7 @@ class ModelProviderCreate(BaseModel):
 
 class ModelProviderUpdate(BaseModel):
     """Request body for a partial update. All fields optional."""
+    expected_revision: Optional[str] = None
     name: Optional[str] = None
     provider_type: Optional[str] = None
     base_url: Optional[str] = None
@@ -109,6 +113,7 @@ class ModelProviderResponse(BaseModel):
     api_dialect: Optional[str] = None
     auth_token_set: bool
     auth_token_masked: str
+    catalog_binding: Optional[str] = None
     models: List[Dict[str, Any]]
     default_model: Optional[str] = None
     small_fast_model: Optional[str] = None
@@ -129,6 +134,7 @@ class ModelProviderResponse(BaseModel):
     account_plan: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    revision: Optional[str] = None
 
 
 class ModelProviderListResponse(BaseModel):
@@ -161,6 +167,10 @@ class FetchModelsResponse(BaseModel):
     models: List[Dict[str, Any]]
     hidden: List[Dict[str, Any]] = []
     recommended: List[str] = []
+    binding: Optional[str] = None
+    fetched_at: Optional[str] = None
+    fetched_by_device: Optional[str] = None
+    fetched_by_name: Optional[str] = None
 
 
 class CodexDeviceStartResponse(BaseModel):
@@ -356,6 +366,7 @@ def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
         api_dialect=row.get("api_dialect"),
         auth_token_set=bool(row.get("_auth_token_set")),
         auth_token_masked=row.get("_auth_token_masked", ""),
+        catalog_binding=row.get("_catalog_binding"),
         models=models,
         default_model=row.get("default_model"),
         small_fast_model=row.get("small_fast_model"),
@@ -373,6 +384,7 @@ def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
         account_plan=row.get("_account_plan"),
         created_at=_iso(row.get("created_at")),
         updated_at=_iso(row.get("updated_at")),
+        revision=row.get("revision"),
     )
 
 
@@ -385,6 +397,8 @@ def _apply_token_flags(row: Dict[str, Any]) -> Dict[str, Any]:
     (``_codex_access_token_set`` / ``_codex_refresh_token_set``). The raw blobs
     never survive this call, so they can never reach ``_public_provider``.
     """
+    row["_catalog_binding"] = model_catalogs.binding(row)
+    row.pop("openai_admin_key", None)
     token = row.pop("auth_token", None)
     row["_auth_token_set"] = bool(token)
     row["_auth_token_masked"] = mask_api_key(token) if token else ""
@@ -686,9 +700,10 @@ def _generic_auth_token(row: Dict[str, Any]) -> Optional[str]:
 
 
 async def _fetch_codex_models(
-    provider_id: str, *, client: httpx.AsyncClient
+    provider_id: str, *, client: httpx.AsyncClient,
+    on_success: Optional[Callable[[str, Optional[str]], None]] = None,
 ) -> List[Dict[str, Any]]:
-    """Live ``GET /backend-api/codex/models`` with Codex OAuth + one 401 retry."""
+    """Fetch Codex models and identify the token/account of the successful attempt."""
     access_token, account_id = _subscription_access_token(
         provider_id, kind="chatgpt"
     )
@@ -741,6 +756,8 @@ async def _fetch_codex_models(
     models = _parse_models_response(
         _codex_visible_payload(payload), provider_type="chatgpt"
     )
+    if on_success:
+        on_success(access_token, account_id)
     return [m for m in models if m.get("id") not in _CODEX_EXCLUDED_MODEL_IDS]
 
 
@@ -771,13 +788,18 @@ async def _fetch_upstream_with_grok_retry(
     token: str,
     *,
     client: httpx.AsyncClient,
+    account_id: Optional[str] = None,
+    on_success: Optional[Callable[[str, Optional[str]], None]] = None,
 ) -> List[Dict[str, Any]]:
-    """SuperGrok catalog fetch: one 401 → refresh → retry."""
+    """Fetch Grok models and identify the token/account of the successful attempt."""
     try:
-        return await fetch_upstream_models(
+        models = await fetch_upstream_models(
             row["base_url"], token, client=client,
             provider_type=row.get("provider_type"),
         )
+        if on_success:
+            on_success(token, account_id)
+        return models
     except UpstreamModelsError as exc:
         if str(exc) != "http_401":
             raise
@@ -796,12 +818,15 @@ async def _fetch_upstream_with_grok_retry(
             status_code=status.HTTP_409_CONFLICT,
             detail=_CATALOG_RECONNECT_GROK,
         )
-    access, _ = _subscription_access_token(provider_id, kind="xai")
+    access, account_id = _subscription_access_token(provider_id, kind="xai")
     try:
-        return await fetch_upstream_models(
+        models = await fetch_upstream_models(
             row["base_url"], access, client=client,
             provider_type=row.get("provider_type"),
         )
+        if on_success:
+            on_success(access, account_id)
+        return models
     except UpstreamModelsError as exc:
         if str(exc) == "http_401":
             raise HTTPException(
@@ -953,13 +978,24 @@ async def update_provider(
     raw_token = (body.auth_token or "").strip()
     if raw_token:
         updates["auth_token"] = _encrypt_token_or_400(raw_token)
+    # A discovery snapshot belongs to the key and endpoint that produced it.
+    # Treat an explicit nonblank replacement as a new binding conservatively.
+    catalog_binding_changed = bool(raw_token) or any(
+        field in updates and (updates[field] or None) != (existing.get(field) or None)
+        for field in ("base_url", "provider_type", "api_dialect")
+    )
 
     if updates:
         async with operation_lock(provider_id):
-            row = await run_sync(db.update_model_provider, provider_id, **updates)
+            row = await run_sync(db.update_model_provider, provider_id,
+                                 expected_revision=body.expected_revision, **updates)
             if row is None:
+                if body.expected_revision is not None and await run_sync(db.get_model_provider, provider_id):
+                    raise HTTPException(status_code=409, detail="Models changed on another worker. Reload and try again.")
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                                     detail="Model provider not found")
+            if catalog_binding_changed:
+                await run_sync(model_catalogs.delete, provider_id)
 
     full_row = await run_sync(_row_with_token_flags, provider_id)
     return _public_provider(full_row)
@@ -979,6 +1015,7 @@ async def delete_provider(provider_id: str, token: str = Depends(require_admin))
         if not deleted:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                                 detail="Model provider not found")
+        await run_sync(model_catalogs.delete, provider_id)
     return {"success": True}
 
 
@@ -1161,11 +1198,12 @@ async def _record_credential_check(
 
 
 @router.post("/{provider_id}/fetch-models", response_model=FetchModelsResponse)
-async def fetch_models(provider_id: str, token: str = Depends(require_admin)):
-    return await _fetch_models(provider_id)
+async def fetch_models(provider_id: str, token: str = Depends(require_admin)) -> FetchModelsResponse:
+    """Fetch live discovery and share it only for the credential that was checked."""
+    return await catalog_api.store_catalog(provider_id, await _fetch_models(provider_id))
 
 
-async def _fetch_models(provider_id: str, *, backfill_context: bool = True):
+async def _fetch_models(provider_id: str, *, backfill_context: bool = True) -> FetchModelsResponse:
     """Fetch a provider's live model catalog for the curation UI.
 
     Every provider is pulled from upstream on this call (Refresh models):
@@ -1185,16 +1223,24 @@ async def _fetch_models(provider_id: str, *, backfill_context: bool = True):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Model provider not found")
 
+    checked_binding = model_catalogs.binding(row)
+
+    def record_subscription_binding(access: str, account: Optional[str]) -> None:
+        """Capture credentials used by the successful attempt, not a later DB read."""
+        nonlocal checked_binding
+        checked_binding = model_catalogs.binding({**row, "codex_access_token": access, "codex_account_id": account})
+
     kind = model_catalog_presets.preset_kind_for(row)
     from app.core.http_client import get_http_client
     client = get_http_client()
     try:
         if kind == "chatgpt":
-            models = await _fetch_codex_models(provider_id, client=client)
+            models = await _fetch_codex_models(provider_id, client=client, on_success=record_subscription_binding)
         elif row.get("auth_mode") == "grok":
-            access, _ = _subscription_access_token(provider_id, kind="xai")
+            access, account = _subscription_access_token(provider_id, kind="xai")
             models = await _fetch_upstream_with_grok_retry(
-                provider_id, row, access, client=client,
+                provider_id, row, access, client=client, account_id=account,
+                on_success=record_subscription_binding,
             )
         else:
             auth_token = _generic_auth_token(row)
@@ -1241,6 +1287,7 @@ async def _fetch_models(provider_id: str, *, backfill_context: bool = True):
     ]
     return FetchModelsResponse(
         source="upstream", models=models, hidden=hidden, recommended=recommended,
+        binding=checked_binding,
     )
 
 

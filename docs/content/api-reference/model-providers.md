@@ -210,9 +210,9 @@ Update a provider. Takes the same fields as create, all optional, with the same 
 
 **Auth:** Owner only
 
-- Omitting `auth_token` or sending it blank keeps the stored key.
+- Omitting `auth_token` or sending it blank keeps the stored key. Replacing the key or changing the endpoint invalidates its shared discovery snapshot; setup always checks the current key live, never from a cached catalog.
 - Sending `context_window` or `max_output_tokens` as `null` clears it; omitting it leaves it unchanged.
-- `models` replaces the whole list.
+- `models` replaces the whole list. Send `expected_revision` from the provider response to guard a curation save. A stale revision returns `409` without changing the provider; reload its current selection before editing again.
 
 ```bash
 curl -X PATCH http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9a61-2d4f7b9e0c11 \
@@ -225,7 +225,7 @@ Returns `404` if the provider does not exist.
 
 ### DELETE /api/v1/model-providers/{provider_id}
 
-Delete a provider. A stored ChatGPT sign-in is revoked first when possible; a failed revoke does not block the delete. Any OpenAI usage key on the provider is removed too.
+Delete a provider. A stored ChatGPT sign-in is revoked first when possible; a failed revoke does not block the delete. The shared discovery snapshot for the provider is removed too.
 
 **Auth:** Owner only
 
@@ -249,7 +249,7 @@ The existing create/PATCH and device enrollment validation errors are unchanged.
 
 ### POST /api/v1/model-providers/{provider_id}/toggle
 
-Flip `enabled`. No body. Returns the updated provider object. Turning on disables other accounts in the same slot atomically. Turning off leaves that slot off. Disabling invalidates readings but keeps billing access, including the OpenAI Admin key, for re-enabling.
+Flip `enabled`. No body. Returns the updated provider object. Turning on disables other accounts in the same slot atomically. Turning off leaves that slot off. Disabling invalidates readings but keeps billing access for re-enabling.
 
 **Auth:** Owner only
 
@@ -274,6 +274,18 @@ Sessions on these providers call the provider directly. These settings bound tho
 A provider error carries the HTTP status and the provider's own short message (`provider returned HTTP 429: ...`), and a `429` shows the rate-limited notice. Billing errors that providers send as `429` (for example `insufficient_quota`) are reported as `402` and are not retried. A reply cut off mid-stream keeps its partial text, marked interrupted; [Resume](/docs/api-reference/sessions#post-apiv1sessionssession_idresume) re-sends the turn. When no tool call finished before the error, it starts again from the user's message and the partial reply stays on a side branch; when one did, the partial reply and its tool calls stay on the re-sent path, and the model reads them and the calls' error results before it continues.
 
 ## Model catalog
+
+### GET /api/v1/model-providers/{provider_id}/model-catalog
+
+**Auth:** Owner only
+
+Read the last successful discovery snapshot without contacting upstream, or `null` if none matches the current credential and endpoint (`404` if the provider does not exist). The snapshot contains `source`, `models`, `hidden`, `recommended`, `binding`, `fetched_at` (UTC), `fetched_by_device` and `fetched_by_name`. It is separate from the curated `models` selection.
+
+`binding` is an opaque, domain-separated HMAC of the provider type, endpoint, dialect/auth mode and decrypted credential identity. Paired workers derive its secret from their network key; unpaired workers use a local-only secret and skip sharing. It is not a public hash that can verify guesses of a weak gateway token. No credential or endpoint is stored in the snapshot. Provider responses expose the current fingerprint as `catalog_binding`, and live discovery includes `binding` even when sharing is skipped. Different ciphertexts for the same key do not change it. Subscription account IDs also keep it stable across routine token renewals; a legacy sign-in without an account ID conservatively binds to the access token of the request that actually succeeded, including a successful retry after token renewal. Legacy snapshots without a binding are ignored.
+
+Saving re-checks the binding used for the upstream request, and reading re-checks it against the current provider. An in-flight old-key refresh or a delayed sync record therefore cannot make an old-key catalog usable after a credential change. The panel hides mismatched results, including oversized catalogs that were never shared. When catalog sync arrives before the matching provider row, its candidate remains hidden until the provider binding catches up; ordinary echoes of the same proven binding keep the full local metadata.
+
+Settings > Providers shows this shared snapshot and its **Last refreshed** time and worker. Refreshing on one worker publishes it to the others through settings sync; open Models tabs update without a page reload and newly discovered models stay unchecked. Concurrent selection edits are reconciled from the current provider revision.
 
 ### POST /api/v1/model-providers/{provider_id}/fetch-models
 
@@ -304,7 +316,9 @@ curl -X POST http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9a6
 
 `models` holds text models only, at most 2000. Each has `id` and `label`, plus `context_window`, `pricing` (OpenRouter prices) and `reasoning_capabilities` when upstream reports them. `hidden` lists the audio, voice, image and video models that were held back, each with a `media_kind`.
 
-**Errors:** `404` provider not found. `409` when a ChatGPT or Grok sign-in is missing or expired (sign in again). `400` when credential storage is unavailable. `502` when the upstream request fails.
+A successful fetch returns the complete live catalog and tries to save a compact, token-free snapshot in the shared `model_catalog:<provider_id>` system setting (maximum 512 KiB). If needed, the shared copy omits pricing first, then context/reasoning metadata and recommendations; it never truncates model IDs or labels. If even that cannot fit, sharing is skipped with one warning and the previous snapshot is kept. Successful sharing adds `fetched_at`, `fetched_by_device` and `fetched_by_name` to the live response; these are `null` if sharing was skipped. The panel keeps the complete live result even when the shared copy is compacted or not saved. Failed upstream fetches leave the previous snapshot intact. Snapshots contain public model metadata and worker attribution, never credentials or endpoints.
+
+**Errors:** `404` provider not found. `409` when a ChatGPT or Grok sign-in is missing or expired (sign in again). `400` when credential storage is unavailable. `502` when the upstream request fails. Sharing or size-limit failures do not fail successful discovery.
 
 ### POST /api/v1/model-providers/refresh-capabilities
 

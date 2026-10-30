@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import secrets
 import threading
 import time
@@ -2107,8 +2108,72 @@ def _apply_one(data: Mapping[str, Any], ctx: NetworkContext, result: ApplyResult
     _count_outcome(result, outcome)
 
 
+@dataclass(frozen=True)
+class _WireStream:
+    origin: str
+    incarnation: int
+    first_seq: int
+    highest: int
+    watermark: int
+    pending: int
+
+
+def _wire_stream(cursor, chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext) -> Optional[_WireStream]:
+    """Read the first stream once for the buffer and ordered-append fast paths.
+
+    The caller already holds network_state. This is only a candidate: each fast
+    path still validates every envelope before writing anything.
+    """
+    try:
+        first = Envelope.from_dict(chunk[0])
+    except (ValueError, TypeError, KeyError):
+        return None
+    member = ctx.member(first.origin_device_id)
+    if (first.network_id != ctx.network_id or first.origin_device_id == ctx.device_id
+            or member is None or member.status != membership.STATUS_ACTIVE):
+        return None
+    return _WireStream(first.origin_device_id, first.origin_incarnation, first.origin_seq,
+                       store.highest_incarnation(cursor, first.origin_device_id),
+                       store.get_watermark(cursor, first.origin_device_id, first.origin_incarnation),
+                       store.count_pending(cursor, first.origin_device_id, first.origin_incarnation))
+
+
+def _buffer_pending_chunk(cursor, chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext,
+                          result: ApplyResult, stream: _WireStream) -> bool:
+    """Bulk-stash only a contiguous, fully validated run beyond a real gap.
+
+    Revoked/unknown/own origins, mixed streams, malformed envelopes and chunks
+    crossing the sequence/cap budgets retain the per-envelope path. In
+    particular cap-boundary chunks must preserve partial acceptance and the
+    existing duplicate-at-cap behavior. Payload validation still happens when
+    the missing head arrives, exactly as for single-row buffering.
+    """
+    if (stream.first_seq <= stream.watermark + 1 or stream.incarnation < stream.highest
+            or stream.pending + len(chunk) > PENDING_CAP_PER_STREAM):
+        return False  # Ordered appends must not parse the entire chunk twice.
+    member = ctx.member(stream.origin)
+    if member is None or member.status != membership.STATUS_ACTIVE:
+        return False
+    try:
+        envs = [Envelope.from_dict(data) for data in chunk]
+        first_seq = envs[0].origin_seq
+        if first_seq <= stream.watermark + 1 or envs[-1].origin_seq > stream.watermark + PENDING_WINDOW:
+            return False
+        for index, env in enumerate(envs):
+            if (env.network_id != ctx.network_id or env.origin_device_id != stream.origin
+                    or env.origin_incarnation != stream.incarnation or env.origin_seq != first_seq + index
+                    or env.key_version not in ctx.keyring or not env.verify_signature(member.signing_public)):
+                return False
+    except (ValueError, TypeError, KeyError, crypto.CryptoError):
+        return False
+    store.stash_pending_batch(cursor, [env.to_dict() for env in envs])
+    result.pending += len(envs)
+    return True
+
+
 def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext,
-                        result: ApplyResult, *, _from_pending: bool = False) -> bool:
+                        result: ApplyResult, *, _from_pending: bool = False,
+                        _stream: Optional[_WireStream] = None) -> bool:
     """Batch only fresh, contiguous events from a known remote session owner.
 
     Rewrites, holes, revocations, conflicts and malformed input use the normal
@@ -2129,9 +2194,15 @@ def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Network
         member = ctx.member(origin)
         if origin == ctx.device_id or member is None or member.status != membership.STATUS_ACTIVE:
             return False
-        highest = store.highest_incarnation(cursor, origin)
-        watermark = store.get_watermark(cursor, origin, incarnation)
-        if incarnation < highest or (not _from_pending and store.count_pending(cursor, origin, incarnation)):
+        if _stream is None:
+            highest = store.highest_incarnation(cursor, origin)
+            watermark = store.get_watermark(cursor, origin, incarnation)
+            pending = 0 if _from_pending else store.count_pending(cursor, origin, incarnation)
+        else:
+            if (_stream.origin, _stream.incarnation) != (origin, incarnation):
+                return False
+            highest, watermark, pending = _stream.highest, _stream.watermark, _stream.pending
+        if incarnation < highest or (not _from_pending and pending):
             return False
         rows = []
         for index, env in enumerate(envs):
@@ -2176,7 +2247,7 @@ def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Network
 
 
 def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result: ApplyResult) -> bool:
-    """Apply fresh transcript appends in bulk; otherwise use per-op savepoints.
+    """Bulk-apply fresh appends or buffer gaps; otherwise use per-op savepoints.
 
     A refused envelope rolls back to its savepoint and the rest of the chunk
     goes on, as if each had its own transaction. Without savepoints (the
@@ -2205,7 +2276,14 @@ def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result
             savepoints = type(cursor).__module__.startswith("psycopg2")
             if seen:
                 store.observe_clock(cursor, seen)
-            appended = _apply_event_append(cursor, chunk, ctx, part)
+            else:
+                store.lock_state(cursor)
+            bulk_pending = os.environ.get("AI_SHUFFLE_PERF_BULK_PENDING", "").strip().lower() not in (
+                "0", "false", "off", "no")
+            stream = _wire_stream(cursor, chunk, ctx) if bulk_pending else None
+            appended = (stream is not None and _buffer_pending_chunk(cursor, chunk, ctx, part, stream))
+            if not appended:
+                appended = _apply_event_append(cursor, chunk, ctx, part, _stream=stream)
             for data in (() if appended else chunk):
                 if savepoints:
                     cursor.execute("SAVEPOINT apply_envelope")
