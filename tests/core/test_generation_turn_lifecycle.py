@@ -131,6 +131,7 @@ async def test_an_idle_tool_server_cannot_use_its_connect_context(monkeypatch, s
     # or fall back to an interactive/automation connect-time snapshot.
     from app.core import query_options
     from app.services import generation_sources
+    from app.services.generation_sources import Sources as ProductionSources
     from app.mcp.ai_tools_sdk import _create_unified_tools
     from tests.core.test_generation_resolver import FakeBackend, candidate
     import json
@@ -141,14 +142,17 @@ async def test_an_idle_tool_server_cannot_use_its_connect_context(monkeypatch, s
     context = _generation_context({}, {"id": SID}, None, session_id=SID,
                                   unattended=source != "user", turn_source=source)
     backend = FakeBackend([pick])
-    monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: backend)
     if surface == "native":
         from fluid.tools.registry import ToolCtx
         from app.core.provider import native_generation_aliases as aliases
 
+        # A lazy module import must not retain another surface's temporary
+        # Sources fake after monkeypatch restores the original dependency.
+        assert aliases.Sources is ProductionSources
         monkeypatch.setattr(aliases, "Sources", lambda *args, **kw: backend)
         _, handler = aliases.make_alias("image", context)
     else:
+        monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: backend)
         tool = next(t for t in _create_unified_tools(None, context) if t.name == "generateImage")
     gr.bind_turn_context(SimpleNamespace(aih_generation_context=context))
     gr.clear_turn_context(SID)
