@@ -284,8 +284,8 @@ jobs:
       - name: Collect emulator host diagnostics
         if: always()
         run: bash ci/emulator-diagnostics.sh after-emulator
-      # Keep small readiness/provider and recovery captures even on green runs:
-      # a pass with a workaround must remain distinguishable from a clean pass.
+      # Keep small readiness/provider, recovery and native timing evidence even
+      # on green runs so intermittent screen-fence changes remain comparable.
       - name: Upload emulator readiness evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -295,6 +295,7 @@ jobs:
           path: |
             ${{ runner.temp }}/android-emulator/readiness/
             ${{ runner.temp }}/android-emulator/launcher-recovery*/
+            ${{ runner.temp }}/android-emulator/instrumentation/timing.txt
           if-no-files-found: warn
       # Full reports, logcat and screenshots remain failure-only diagnostics.
       - name: Upload test reports
