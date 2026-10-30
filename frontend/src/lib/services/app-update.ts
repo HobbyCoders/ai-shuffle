@@ -238,8 +238,10 @@ export function createAppUpdateMonitor(deps: AppUpdateMonitorDeps) {
 			act();
 			return true;
 		}
-		// A missing chunk is worth asking about even right after another check.
-		if (reason !== 'chunk' && now() - lastCheckAt < CHECK_MIN_INTERVAL_MS) return inflight ? inflight : false;
+		// A missing chunk or a service-worker activation is worth asking about
+		// even right after another check (the start-up one, say).
+		const urgent = reason === 'chunk' || reason === 'service-worker';
+		if (!urgent && now() - lastCheckAt < CHECK_MIN_INTERVAL_MS) return inflight ? inflight : false;
 		lastCheckAt = now();
 		inflight ??= deps.checkForNewBuild().catch(() => false).finally(() => { inflight = null; });
 		const updated = await inflight;
@@ -264,7 +266,18 @@ export function createAppUpdateMonitor(deps: AppUpdateMonitorDeps) {
 			visibleSince = now();
 			return check('resume');
 		},
-		/** Something outside the version check (the service worker) already knows. */
+		/**
+		 * A service worker took control of the page. That alone is no news: a
+		 * fresh visit's first install claims the page too, on the very build
+		 * the page runs (#908). Ask the server, past the throttle and after
+		 * any check already in flight (it may have asked before the update
+		 * landed); only a different build makes the page stale.
+		 */
+		async serviceWorkerActivated(): Promise<boolean> {
+			if (inflight) await inflight;
+			return check('service-worker');
+		},
+		/** Something outside the version check already confirmed a newer build. */
 		markStale() {
 			stale = true;
 			act();
