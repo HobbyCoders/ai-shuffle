@@ -106,7 +106,7 @@ class PlayFgsRecordingTest {
                 .body(json.toResponseBody("application/json".toMediaType())).build()
             when (request.url.encodedPath) {
                 "/api/v1/mobile/key/renew" -> PresenceFixture.renewDeviceKey(request, server)
-                "/api/v1/mobile/web-session/reservations" -> answer(404, "{}")
+                "/api/v1/mobile/web-session/reservations" -> answer(404, "{\"detail\":\"Not Found\"}")
                 "/api/v1/mobile/web-session" -> answer(200, "{\"session_token\":\"demo-session-not-a-real-credential\"}")
                 else -> chain.proceed(request)
             }
