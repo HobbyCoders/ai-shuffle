@@ -1288,7 +1288,10 @@
 	let readingAnchorRaf: number | null = null;
 
 	function captureReadingAnchor() {
-		if (!containerRef || !chatColumnRef || shouldAutoScroll || currentTurnAnchorId) return;
+		if (!containerRef || !chatColumnRef) return;
+		// Not reading mid-transcript (following the bottom or the live turn):
+		// forget the old row so a later width change can't jump back to it.
+		if (shouldAutoScroll || currentTurnAnchorId) { readingAnchor = null; return; }
 		const width = containerRef.clientWidth;
 		// A width the observer has not handled yet: this layout is already
 		// reflowed, so it no longer says where the reader was. Keep the old one.
@@ -1301,7 +1304,7 @@
 			if (rows[mid].getBoundingClientRect().bottom > viewTop + 1) { found = mid; high = mid - 1; } else low = mid + 1;
 		}
 		const row = rows[found];
-		if (!row?.dataset.transcriptKey) return;
+		if (!row?.dataset.transcriptKey) { readingAnchor = null; return; }
 		const box = row.getBoundingClientRect();
 		readingAnchor = { ...readingAnchorOf(row.dataset.transcriptKey, box.top, box.height, viewTop), width };
 	}
@@ -2055,6 +2058,7 @@
 		const unsettled = latestTurnUnsettled;
 		if (sessionId !== settleSessionId) {
 			settleSessionId = sessionId;
+			readingAnchor = null; // #865: never restore another chat's row
 			wasLatestTurnUnsettled = unsettled;
 			return;
 		}
