@@ -691,26 +691,51 @@ async def test_orphan_with_a_running_worker_is_not_settled(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("pause_receipt_publication", [False, True], ids=["normal", "publishing"])
 async def test_live_coordinator_is_never_settled_and_cancels_normally(
-        agents: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        agents: Any, monkeypatch: pytest.MonkeyPatch, pause_receipt_publication: bool) -> None:
     from app.core import startup_reconcile
     from app.db.background_tasks import upsert_background_task
     sid = "orphan-live"
+    publishing, release = asyncio.Event(), asyncio.Event()
+    emit = SwarmCoordinator.emit
+
+    async def gated_emit(coordinator, key):
+        launch = swarm.current_launch.get()
+        publishing_receipt = (launch is not None and launch.coordinator is coordinator
+            and any(task["id"] == launch.task_id and task["task_id"]
+                    for task in coordinator.swarms[key]["tasks"]))
+        await emit(coordinator, key)
+        if (pause_receipt_publication and coordinator.session_id == sid
+                and publishing_receipt and not publishing.is_set()):
+            # Force the CI ordering: cancel sees the receipt while its dispatcher
+            # has not yet resumed to observe the cancellation latch (#794).
+            publishing.set()
+            await release.wait()
+
+    monkeypatch.setattr(SwarmCoordinator, "emit", gated_emit)
     key, wids = await _start_blocked_swarm(agents, monkeypatch, sid)
-    # Even stale terminal evidence for the key cannot outrank a live coordinator.
-    upsert_background_task(dict(task_id=key, session_id=sid, kind="agent", status="killed"))
-    assert await swarm.settle_orphans(sid) == []
-    assert await startup_reconcile._settle_orphaned_swarms() == 0
-    assert await swarm.record_worker_completion(sid, wids["a"]) == []
-    assert (await swarm.snapshots(sid))[0]["status"] == "running"
-    stopped = []
-    async def stop(worker_id: str, reason: str) -> None:
-        stopped.append(worker_id)
-        swarm.workers[worker_id].finish("cancelled", "stopped")
-    monkeypatch.setattr(swarm, "_stop_item", stop)
-    snapshot = await swarm.cancel(sid, key)
-    assert sorted(stopped) == sorted(wids.values())
+    try:
+        if pause_receipt_publication:
+            await publishing.wait()
+        # Even stale terminal evidence for the key cannot outrank a live coordinator.
+        upsert_background_task(dict(task_id=key, session_id=sid, kind="agent", status="killed"))
+        assert await swarm.settle_orphans(sid) == []
+        assert await startup_reconcile._settle_orphaned_swarms() == 0
+        assert await swarm.record_worker_completion(sid, wids["a"]) == []
+        assert (await swarm.snapshots(sid))[0]["status"] == "running"
+        stopped = []
+        async def stop(worker_id: str, reason: str) -> None:
+            stopped.append(worker_id)
+            swarm.workers[worker_id].finish("cancelled", "stopped")
+        monkeypatch.setattr(swarm, "_stop_item", stop)
+        snapshot = await swarm.cancel(sid, key)
+        assert sorted(stopped) == sorted(wids.values())
+    finally:
+        release.set()
     await swarm.coordinators[sid].jobs[key]
+    # Check again after the paused receipt path has unwound: no late second stop.
+    assert sorted(stopped) == sorted(wids.values())
     assert (await swarm.snapshots(sid))[-1]["status"] == "cancelled"
     assert snapshot["id"] == key
 

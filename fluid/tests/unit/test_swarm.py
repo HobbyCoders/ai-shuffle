@@ -214,6 +214,132 @@ async def test_concurrency_dependencies_failure_and_early_completion():
     assert rows["a"]["worker_session_id"] == "session-a"
     finished.assert_awaited_once()
 
+@pytest.mark.parametrize("interrupt", [False, True], ids=["cancel", "coordinator-interrupt"])
+async def test_cancel_during_receipt_publication_stops_worker_once(interrupt):
+    """#794: the receipt is visible to cancel() before _task resumes its emit."""
+    publishing, release = asyncio.Event(), asyncio.Event()
+    launches = {}
+
+    async def dispatch(data, ctx):
+        launches["worker"] = current_launch.get()
+        return BackgroundTaskReceipt(task_id="worker", worker_session_id="child")
+
+    async def publish(snapshot):
+        if snapshot["tasks"][0]["task_id"] and not publishing.is_set():
+            publishing.set()
+            await release.wait()
+
+    async def stop(key):
+        launches[key].finish("cancelled", "stopped")
+
+    cancel, finished = AsyncMock(side_effect=stop), AsyncMock()
+    c = SwarmCoordinator("main", dispatch, cancel, publish, finished)
+    _, receipt = await c.start({"tasks": [spec("a")]}, ToolCtx())
+    job = c.jobs[receipt.task_id]
+    try:
+        await publishing.wait()
+        # cancel() stops the visible receipt before blocking on the publish lock.
+        stopping = asyncio.create_task(c.cancel(receipt.task_id))
+        await launches["worker"].future
+        cancel.assert_awaited_once_with("worker")
+        if interrupt:
+            job.cancel()  # _settle_cancelled_spawn must join that same stop.
+        release.set()
+        await stopping
+        if interrupt:
+            with pytest.raises(asyncio.CancelledError):
+                await job
+        else:
+            await job
+        cancel.assert_awaited_once_with("worker")
+        finished.assert_awaited_once()
+        snapshot = c.snapshot(receipt.task_id)
+        assert snapshot["status"] == ("interrupted" if interrupt else "cancelled")
+        assert snapshot["tasks"][0]["task_id"] == "worker"
+    finally:
+        release.set()
+        await asyncio.gather(job, return_exceptions=True)
+
+
+async def test_concurrent_cancels_join_stop_even_when_first_caller_is_cancelled():
+    recorded, entered, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    launches = {}
+
+    async def dispatch(data, ctx):
+        launches["worker"] = current_launch.get()
+        return BackgroundTaskReceipt(task_id="worker")
+
+    async def publish(snapshot):
+        if snapshot["tasks"][0]["task_id"]:
+            recorded.set()
+
+    async def stop(key):
+        entered.set()
+        await release.wait()
+        launches[key].finish("cancelled", "stopped")
+
+    cancel, finished = AsyncMock(side_effect=stop), AsyncMock()
+    c = SwarmCoordinator("main", dispatch, cancel, publish, finished)
+    _, receipt = await c.start({"tasks": [spec("a")]}, ToolCtx())
+    callers = []
+    try:
+        await recorded.wait()
+        first = asyncio.create_task(c.cancel(receipt.task_id))
+        callers.append(first)
+        await entered.wait()
+        second = asyncio.create_task(c.cancel(receipt.task_id))
+        callers.append(second)
+        await asyncio.sleep(0)  # Let the second caller join the still-blocked stop.
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert not second.done()
+        cancel.assert_awaited_once_with("worker")
+        release.set()
+        await second
+        await c.jobs[receipt.task_id]
+        cancel.assert_awaited_once_with("worker")
+        finished.assert_awaited_once()
+        assert c.snapshot(receipt.task_id)["status"] == "cancelled"
+    finally:
+        release.set()
+        await asyncio.gather(*callers, c.jobs[receipt.task_id], return_exceptions=True)
+
+
+async def test_failed_worker_stop_can_be_retried():
+    recorded = asyncio.Event()
+    launches = {}
+
+    async def dispatch(data, ctx):
+        launches["worker"] = current_launch.get()
+        return BackgroundTaskReceipt(task_id="worker")
+
+    async def publish(snapshot):
+        if snapshot["tasks"][0]["task_id"]:
+            recorded.set()
+
+    async def stop(key):
+        if cancel.await_count == 1:
+            raise RuntimeError("host stop failed")
+        launches[key].finish("cancelled", "stopped")
+
+    cancel = AsyncMock(side_effect=stop)
+    c = SwarmCoordinator("main", dispatch, cancel, publish, AsyncMock())
+    _, receipt = await c.start({"tasks": [spec("a")]}, ToolCtx())
+    try:
+        await recorded.wait()
+        with pytest.raises(RuntimeError, match="host stop failed"):
+            await c.cancel(receipt.task_id)
+        await c.cancel(receipt.task_id)
+        await c.jobs[receipt.task_id]
+        await c.cancel(receipt.task_id)
+        assert cancel.await_count == 2  # One failed attempt, one successful stop.
+        assert c.snapshot(receipt.task_id)["status"] == "cancelled"
+    finally:
+        launches["worker"].finish("cancelled", "fixture cleanup")
+        await c.jobs[receipt.task_id]
+
+
 async def test_cancel_during_spawn_preserves_receipt_and_cancels_successors():
     entering, release = asyncio.Event(), asyncio.Event()
     launches = {}
