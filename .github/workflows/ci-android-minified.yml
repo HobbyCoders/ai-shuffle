@@ -46,18 +46,19 @@ jobs:
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew bundleRelease assembleReleaseSmoke assembleReleaseSmokeAndroidTest -PplayStoreBuild=true -PminifiedSmoke=true --max-workers=2 --stacktrace
+          ./gradlew :app:bundleRelease :app:assembleReleaseSmoke :minified-smoke:assembleDebug -PplayStoreBuild=true -PminifiedSmoke=true --max-workers=2 --stacktrace
           python3 ci/verify-mobile-apk.py --app-bundle app/build/outputs/bundle/release/app-release.aab
           python3 ci/check-minified-build.py app/build/outputs/mapping/release/mapping.txt app/build/outputs/mapping/releaseSmoke/mapping.txt
+          mkdir -p minified-apks/releaseSmoke minified-apks/tests
+          cp app/build/outputs/apk/releaseSmoke/app-releaseSmoke.apk minified-apks/releaseSmoke/
+          cp minified-smoke/build/outputs/apk/debug/minified-smoke-debug.apk minified-apks/tests/
       - name: Stage only disposable smoke APKs
         uses: actions/upload-artifact@v4
         with:
           name: android-minified-smoke-apks
           retention-days: 1
           if-no-files-found: error
-          path: |
-            android/app/build/outputs/apk/releaseSmoke/app-releaseSmoke.apk
-            android/app/build/outputs/apk/androidTest/releaseSmoke/app-releaseSmoke-androidTest.apk
+          path: android/minified-apks/
       - name: Keep R8 diagnostics for this exact build
         if: always()
         uses: actions/upload-artifact@v4

@@ -79,14 +79,6 @@ android {
             }
         }
     }
-    if (minifiedSmoke) {
-        testBuildType = "releaseSmoke"
-        sourceSets.getByName("androidTest").apply {
-            java.setSrcDirs(listOf("src/releaseSmokeTest/java"))
-            manifest.srcFile("src/releaseSmokeTest/AndroidManifest.xml")
-        }
-    }
-
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
