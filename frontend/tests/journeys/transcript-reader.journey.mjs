@@ -72,8 +72,11 @@ await runJourney({
 			const clear = page.getByRole('button', { name: 'Clear selection in transcript', exact: true });
 			// The selected rows can begin anywhere in the mounted slice. Reach
 			// its protected edge without assuming a particular row cost/density.
+			await page.locator(LOG).hover();
 			for (let attempt = 0; attempt < 6 && !(await clear.count()); attempt++) {
-				await page.getByRole('button', { name: 'Show earlier messages', exact: true }).click();
+				// A touch click elsewhere can legitimately collapse a native
+				// selection. Wheel input isolates pinning from that default.
+				await page.mouse.wheel(0, -1_000_000);
 				await twoFrames(page);
 			}
 			expect(await clear.count() === 1, 'the selection budget exposes a named clear control');

@@ -2131,7 +2131,8 @@
 		<div class="selection-limit-layer">
 			<div class="selection-limit-note" role="status">
 				<span>Text selection is keeping these messages on screen.</span>
-				<button type="button" class="earlier-button" onclick={clearTranscriptSelection} aria-label="Clear selection in transcript">Clear selection</button>
+				<!-- Preserve selection until click; native focus can otherwise remove this control on pointerdown. -->
+				<button type="button" class="earlier-button" onpointerdown={(event) => event.preventDefault()} onclick={clearTranscriptSelection} aria-label="Clear selection in transcript">Clear selection</button>
 			</div>
 		</div>
 	{:else if showJumpToLatest}

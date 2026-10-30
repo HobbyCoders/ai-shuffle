@@ -85,7 +85,14 @@ describe('bounded nested transcript mounting', () => {
 			selection.collapseToStart();
 			document.dispatchEvent(new Event('selectionchange'));
 			await tick();
-		} else await fireEvent.click(screen.getByRole('button', { name: 'Clear selection' }));
+		} else {
+			const clear = screen.getByRole('button', { name: 'Clear selection' });
+			const down = new MouseEvent('pointerdown', { bubbles: true, cancelable: true });
+			clear.dispatchEvent(down);
+			expect(down.defaultPrevented).toBe(true);
+			expect(selection.toString()).toBe(selected);
+			await fireEvent.click(clear);
+		}
 		expect(screen.queryByText('Clear text selection to browse further.')).toBeNull();
 		await fireEvent.click(screen.getByRole('button', { name: 'Show earlier log entries' }));
 		expect(screen.queryByText('Entry 1999')).toBeNull();

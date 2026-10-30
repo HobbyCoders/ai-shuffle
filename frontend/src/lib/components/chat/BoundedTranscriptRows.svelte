@@ -119,7 +119,7 @@
 	{#if selectionLimited}
 		<div class="slice-selection" role="status">
 			<span>Clear text selection to browse further.</span>
-			<button type="button" class="slice-page" onclick={() => { root?.ownerDocument.getSelection()?.removeAllRanges(); selectionLimited = false; }}>Clear selection</button>
+			<button type="button" class="slice-page" onpointerdown={(event) => event.preventDefault()} onclick={() => { root?.ownerDocument.getSelection()?.removeAllRanges(); selectionLimited = false; }}>Clear selection</button>
 		</div>
 	{/if}
 	{#if range.start > 0}
