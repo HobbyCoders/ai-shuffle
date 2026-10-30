@@ -14,6 +14,8 @@
 //               moment the composer shows, while a boot load is still held; the
 //               text survives to Send and the created chat stays open (#811)
 //   follow-up   a second message in the same chat once the first settled
+//   double-send a double click (double tap on a phone) on Send in an idle
+//               chat sends once: one user row, nothing left queued (#858)
 import { fakeAiTag, runJourney } from './runner.mjs';
 import {
 	composer,
@@ -157,6 +159,30 @@ await runJourney({
 				});
 			},
 			verify: ({ recording }) => expectStopFollowsStreaming(recording, { from: markTime(recording, 'send') })
+		},
+		{
+			name: 'double-send',
+			async setup(ctx) {
+				const { page } = ctx;
+				await openNewChat(ctx);
+				await typeAndSend(page, `first tok-${uniq()}`);
+				await waitTurnSettled(page, { text: 'Fake AI here', messagesAtLeast: 2 });
+			},
+			async act(ctx) {
+				const { page, mark, variant } = ctx;
+				const token = `tok-${uniq()}`;
+				const box = composer(page);
+				await box.click();
+				await box.pressSequentially(`twice ${token} ${fakeAiTag(variant)}`.trim());
+				await mark('double-activate Send');
+				await sendButton(page).dblclick();
+				await waitTurnSettled(page, { text: 'You said: “twice', messagesAtLeast: 4 });
+				await page.waitForTimeout(1500);
+				expect((await countUserRows(page, token)) === 1, `the double-sent message (${token}) shows exactly once`);
+				expect((await countText(page, 'Not seen yet')) === 0, 'no second copy is left queued');
+				await waitChat(page, { surface: 'active', streaming: 'false', messagesAtLeast: 4, messagesAtMost: 4 }, { timeout: 5000 });
+			},
+			verify: ({ recording }) => expectStopFollowsStreaming(recording, { from: markTime(recording, 'double-activate Send') })
 		}
 	],
 	allow: [...DEV_INSTANCE_NOISE]

@@ -18,6 +18,10 @@ Reply selection is stateless and keyed off the request alone:
   rounds (assistant tool calls) the request already carries after the prompt,
   so turn 1 can call a tool and turn 2, which sends the tool result back,
   gives the final text. Past the last step the last step repeats.
+* A question-tray answer (the app queues it as a user message starting
+  ``Answer to your question:``) is not a new prompt: it counts as one more
+  round of the scenario that asked, and ``{answer}`` in a step's text is
+  replaced by it.
 
 Every request is appended to a JSONL log (``--log``) for assertions.
 """
@@ -57,6 +61,8 @@ DEFAULT_MODEL = "fake-ai"
 _TAG = re.compile(r"\[script:([A-Za-z0-9_.-]+)((?:\s+[A-Za-z_]+=[^\s\]]+)*)\s*\]")
 _REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
 _TOKEN = re.compile(r"\S+\s*|\s+")
+# How the app hands a question-tray answer to the agent (user_question_handler).
+_ANSWER = re.compile(r"(?:^|\n)Answer to your question:\n(.*)\Z", re.DOTALL)
 _REDACT = {"authorization", "x-api-key", "cookie", "proxy-authorization"}
 
 
@@ -133,13 +139,35 @@ def visible(text: str) -> str:
     return _REMINDER.sub("", text).strip()
 
 
+def question_answer(text: str) -> str | None:
+    """The body of a question-tray answer the app queued as a user message
+    (``Answer to your question:`` then question/answer lines), else None."""
+    found = _ANSWER.search(visible(text))
+    return found.group(1).strip() if found else None
+
+
 def prompt_and_round(entries: list[tuple[str, str]]) -> tuple[str, int]:
-    """The user's prompt text and how many tool rounds followed it."""
+    """The user's prompt text and how many rounds followed it.
+
+    A round is an assistant tool-call turn or a question-tray answer: the
+    answer to a question the scenario asked continues that scenario instead
+    of starting a new one."""
+    def rounds(after: list[tuple[str, str]]) -> int:
+        return sum(1 for kind, text in after
+                   if kind == "call" or (kind == "user" and question_answer(text) is not None))
+
     for index in range(len(entries) - 1, -1, -1):
         kind, text = entries[index]
-        if kind == "user" and visible(text):
-            return visible(text), sum(1 for k, _ in entries[index + 1:] if k == "call")
-    return "", sum(1 for k, _ in entries if k == "call")
+        if kind == "user" and visible(text) and question_answer(text) is None:
+            return visible(text), rounds(entries[index + 1:])
+    return "", rounds(entries)
+
+
+def latest_answer(entries: list[tuple[str, str]]) -> str | None:
+    for kind, text in reversed(entries):
+        if kind == "user" and (answer := question_answer(text)) is not None:
+            return answer
+    return None
 
 
 def offered_tools(body: Any) -> list[str]:
@@ -443,7 +471,8 @@ class FakeAI:
         """Choose the reply for a request; also returns the log facts."""
         dialect = dialect_for(recorded.path)
         body = recorded.body if isinstance(recorded.body, dict) else {}
-        prompt, round_ = prompt_and_round(conversation(dialect or "", body))
+        entries = conversation(dialect or "", body)
+        prompt, round_ = prompt_and_round(entries)
         name, params = parse_tag(prompt)
         scenarios = self.scenarios.load()
         facts = {"dialect": dialect, "stream": bool(body.get("stream")),
@@ -468,6 +497,7 @@ class FakeAI:
         text = text.replace("{summary}", summary(prompt) or "(empty)")
         text = text.replace("{scenarios}", ", ".join(sorted(scenarios)))
         text = text.replace("{round}", str(round_ + 1))
+        text = text.replace("{answer}", latest_answer(entries) or "(no answer yet)")
         plan.text = text
         wanted = step.get("tool_calls") or []
         if wanted:

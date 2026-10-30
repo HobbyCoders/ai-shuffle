@@ -18,6 +18,7 @@ extra["license"] = "AGPL-3.0-only"
 // ANDROID_PLAY_STORE_BUILD=true; `-PplayStoreBuild=true` does the same locally.
 val playStoreBuild = System.getenv("ANDROID_PLAY_STORE_BUILD") == "true" ||
     project.findProperty("playStoreBuild")?.toString() == "true"
+val minifiedSmoke = project.findProperty("minifiedSmoke")?.toString() == "true"
 
 android {
     namespace = "com.hobbycoders.aishuffle"
@@ -58,7 +59,8 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -67,8 +69,16 @@ android {
                 signingConfig = signingConfigs.getByName("release")
             }
         }
+        if (minifiedSmoke) {
+            // Never shipped: same R8/resource rules and non-debuggable code as
+            // release, plus a fixture launcher and disposable debug signing.
+            create("releaseSmoke") {
+                initWith(getByName("release"))
+                signingConfig = signingConfigs.getByName("debug")
+                matchingFallbacks += "release"
+            }
+        }
     }
-
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

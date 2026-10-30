@@ -76,3 +76,19 @@ it('refetches a half whose latest request predates the invalidation or failed', 
 	expect(mocks.listClusterProjects).toHaveBeenCalledTimes(4);
 	expect(appData.projectCatalogFailed).toBe(false);
 });
+
+// #804 review: the sidebar hides chats of deleted projects only once the
+// catalog is known good; a later failed refresh must not bring them back.
+it('becomes ready only after both halves load, and stays ready through a failed refresh', async () => {
+	vi.spyOn(console, 'error').mockImplementation(() => {});
+	mocks.get.mockResolvedValue([]); mocks.listClusterProjects.mockRejectedValue(new Error('down'));
+	await Promise.all([appData.loadProjects(), appData.loadClusterProjects()]);
+	expect(appData.current.projectCatalogReady).toBe(false);
+	mocks.listClusterProjects.mockResolvedValue({ projects: [] });
+	await appData.loadClusterProjects();
+	expect(appData.current.projectCatalogReady).toBe(true);
+	mocks.get.mockRejectedValue(new Error('down'));
+	await appData.loadProjects();
+	expect(appData.projectCatalogFailed).toBe(true);
+	expect(appData.current.projectCatalogReady).toBe(true);
+});

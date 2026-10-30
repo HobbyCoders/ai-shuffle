@@ -295,8 +295,9 @@ async def seed_default() -> dict:
                 settings=ProjectSettings(default_profile_id=DEV_AGENT_ID)))
         # What the Git panel's first poll does: record the repository and link
         # the project to its remote, before the chats below create its shared
-        # (v2) project row. Done later, that row keeps the remote-less origin
-        # and the composer's project picker lists the project twice.
+        # (v2) project row. Done later, the project keeps a remote-less row
+        # whose base checkout chats made after the link cannot use, so their
+        # Git panel reports the checkout as unavailable (409).
         await run_sync(ensure_git_repository_record, project_id, str(workspace / project_id))
         projects[project_id] = str(workspace / project_id)
         remote_urls[project_id] = remote.as_uri()

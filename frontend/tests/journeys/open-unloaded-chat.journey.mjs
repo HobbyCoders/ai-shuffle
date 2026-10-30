@@ -92,6 +92,48 @@ const offCatalogLong = async (ctx) => {
 	await fromNew(ctx);
 };
 
+// #804: on a full load the sidebar's session cards must paint in place. The
+// project catalog used to gate every project chat (an empty catalog read as
+// "every project deleted"), so with a long list — whose load let the catalog
+// answer last — project chats popped in above the loose chats about a second
+// later and pushed every card down (layout shift 0.13 from div.scard-frame).
+// Holding the catalog until the cards have painted makes that ordering
+// deterministic on the seeded list.
+const cardTitles = (page) =>
+	page.evaluate(() => [...document.querySelectorAll('.scard-frame')].map((el) => (el.textContent || '').replace(/\s+/g, ' ').trim()));
+
+const deepLinkLateCatalog = async ({ page, status, mark }) => {
+	// Wrap fetch rather than page.route: the app's service worker serves its
+	// API calls, and page.route never sees requests a service worker handles.
+	await page.addInitScript(() => {
+		const original = window.fetch.bind(window);
+		const painted = new Promise((resolve) => (window.__releaseCatalog = resolve));
+		window.__catalogAnswered = false;
+		window.fetch = async (input, init) => {
+			const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+			const method = (init?.method || input?.method || 'GET').toUpperCase();
+			if (method !== 'GET' || url.pathname !== '/api/v1/projects') return original(input, init);
+			await painted;
+			const response = await original(input, init);
+			window.__catalogAnswered = true;
+			return response;
+		};
+	});
+	await mark('load a link with the project catalog answering after the sidebar paints');
+	await page.goto(new URL(`/?session=${encodeURIComponent(seededChatId(status, 'no_project'))}`, status.urls.ui).toString());
+	await page.locator('.scard-frame').first().waitFor();
+	await page.waitForTimeout(300);
+	const firstPaint = await cardTitles(page);
+	await page.evaluate(() => window.__releaseCatalog());
+	await page.waitForTimeout(2500);
+	expect(await page.evaluate(() => window.__catalogAnswered), 'the held project catalog answered');
+	const settled = await cardTitles(page);
+	expect(
+		JSON.stringify(settled) === JSON.stringify(firstPaint),
+		`sidebar cards changed after the catalog answered:\n  first paint: ${firstPaint.slice(0, 6).join(' | ')}\n  settled:     ${settled.slice(0, 6).join(' | ')}`
+	);
+};
+
 await runJourney({
 	name: 'open-unloaded-chat',
 	cases: [
@@ -101,6 +143,8 @@ await runJourney({
 		{ name: 'cleared-from-chat', setup: fromChat('no_project'), act: viaSidebar('cleared'), verify: composer('bottom', 'centre') },
 		{ name: 'long-from-cleared', setup: fromChat('cleared'), act: viaSidebar('long'), verify: composer('centre', 'bottom') },
 		{ name: 'long-deep-link', setup: fromNew, act: viaDeepLink('long'), verify: composer('centre', 'bottom') },
+		// Desktop only: the phone shell keeps the sidebar closed on load.
+		{ name: 'deep-link-late-catalog', viewports: ['desktop'], setup: fromNew, act: deepLinkLateCatalog },
 		{
 			name: 'long-deep-link-off-catalog-metadata',
 			setup: offCatalogLong,

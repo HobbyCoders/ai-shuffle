@@ -50,9 +50,11 @@
 		onBrowserPreload?: () => void;
 		browserOpen?: boolean;
 		terminal?: TerminalToggle;
+		/** Out: the open mirrored chat still waits for its first sync. */
+		mirrorSyncPending?: boolean;
 	}
 
-	let { onBrowserToggle, onBrowserPreload, browserOpen = false, terminal }: Props = $props();
+	let { onBrowserToggle, onBrowserPreload, browserOpen = false, terminal, mirrorSyncPending = $bindable(false) }: Props = $props();
 
 	// Classify the empty-message surface. While a session's history is being
 	// fetched (boot restore OR an openChat navigation) messages is still [] but
@@ -92,18 +94,17 @@
 	// live transcript, not a new replay. A conversation composed here has no old
 	// transcript to reveal: keep its local echo and live feed through that checkpoint.
 	// An unknown owner reads as mirrored, as the gate always did.
-	const mirrorRemote = $derived(
-		$sessions.find(s => s.id === $activeSession.sessionId)?.is_remote ?? $activeSession.isRemote ?? true
-	);
-	const mirrorDevice = $derived(
-		$sessions.find(s => s.id === $activeSession.sessionId)?.device_name ?? $activeSession.ownerDeviceName
-	);
+	const activeRow = $derived($sessions.find(s => s.id === $activeSession.sessionId));
+	const mirrorRemote = $derived(activeRow?.is_remote ?? $activeSession.isRemote ?? true);
+	const mirrorDevice = $derived(activeRow?.device_name ?? $activeSession.ownerDeviceName);
 	const mirrorSync = createMirrorSync(() => ({
 		sessionId: $activeSession.sessionId,
 		remote: mirrorRemote,
 		createdFromComposer: $activeSession.createdFromComposer,
 		onCaughtUp: () => activeSession.reloadSession(false, 'mirror-caught-up')
 	}));
+	// MainPanel's header title follows the hero through the first sync (#812).
+	$effect(() => { mirrorSyncPending = mirrorSync.waiting; });
 	// The centred hero layout (new or cleared chat) versus the message column.
 	// A load keeps the layout the view already had until its outcome is known,
 	// so opening a chat moves the composer at most once (never centre → bottom
@@ -166,7 +167,8 @@
 			sessionId: $activeSession.sessionId,
 			title: $activeSession.title,
 			messageCount: 0,
-			loading: isLoadingHero
+			loading: isLoadingHero,
+			listTitle: activeRow?.title
 		})
 	);
 	const heroHint = $derived(

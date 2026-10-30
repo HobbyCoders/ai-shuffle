@@ -320,7 +320,21 @@ await runJourney({
 				await menu.getByRole('button', { name: SEEDED_BRANCH, exact: true }).click();
 				await hero.getByRole('button', { name: `Worktree branch: ${SEEDED_BRANCH}` }).waitFor({ timeout: 20_000 });
 			}),
-			act: (ctx) => sendFirstMessage(ctx, 'existing-branch')
+			act: (ctx) => sendFirstMessage(ctx, 'existing-branch'),
+			allow: [
+				{
+					kind: 'failed_requests',
+					status: 409,
+					url: /\/git\/(fetch|status)(\?|$)/,
+					reason:
+						'known bug #803 (existing-branch residual): an early background git fetch for the new worktree chat can still beat its checkout; seen intermittently on CI'
+				},
+				{
+					kind: 'errors',
+					message: /Failed to load git repository: No matching Git checkout exists/,
+					reason: 'known bug #803 (existing-branch residual): the same early request, logged as a console error'
+				}
+			]
 		},
 		{
 			name: 'main-checkout',
@@ -349,18 +363,6 @@ await runJourney({
 			status: 502,
 			url: /\/git\/fetch(\?|$)/,
 			reason: 'background fetch: the seeded repository has no remote to fetch from'
-		},
-		{
-			kind: 'failed_requests',
-			status: 409,
-			url: /\/git\/(fetch|status)(\?|$)/,
-			reason:
-				'known bug #803: the git header asks for a brand-new worktree chat\'s Git state before its checkout exists; a background request, nothing on screen'
-		},
-		{
-			kind: 'errors',
-			message: /Failed to load git repository: No matching Git checkout exists/,
-			reason: 'known bug #803: the same early git/status request, logged as a console error'
 		},
 		{
 			kind: 'failed_requests',

@@ -120,6 +120,17 @@
 			]
 		},
 		{
+			"why": "the question tray: answer, Skip, undo and sending while disconnected",
+			"journeys": ["question-tray"],
+			"globs": [
+				"frontend/src/lib/components/UserQuestion.svelte",
+				"frontend/src/lib/components/chat/QuestionTray.svelte",
+				"mobile/src/shell/MobilePromptDock.svelte",
+				"app/core/user_question_handler.py",
+				"frontend/tests/journeys/question-tray.journey.mjs"
+			]
+		},
+		{
 			"why": "tool calls and the work log",
 			"journeys": ["tool-cards"],
 			"globs": [
