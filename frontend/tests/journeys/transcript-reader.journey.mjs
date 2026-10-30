@@ -90,7 +90,11 @@ await runJourney({
 			await clear.click();
 			await twoFrames(page);
 			expect(await page.evaluate(() => window.getSelection().isCollapsed), 'the visible clear control collapses the native selection');
-			await page.getByRole('button', { name: 'Show earlier messages', exact: true }).click();
+			// Scroll into the released edge. Scrolling an offscreen earlier button
+			// into view can itself page and detach it before Playwright clicks it;
+			// the contract is successful eviction after clear, not that click race.
+			await page.locator(LOG).hover();
+			await page.mouse.wheel(0, -1_000_000);
 			await page.waitForFunction(start => Number(document.querySelector('[data-transcript-index]')?.dataset.transcriptIndex) < Number(start), oldStart);
 			log('the accessible clear control released selected rows for eviction');
 		}
