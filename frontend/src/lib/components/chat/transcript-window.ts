@@ -42,6 +42,26 @@ export function selectedRowRange(
 	return end < 0 ? null : { start, end };
 }
 
+/** Prefer the row covering most of the clipped viewport, not a short prompt
+ * crossing its top edge. When visible rows cannot jointly fit, this lets the
+ * controller keep the dominant reply as the permitted oversize singleton.
+ * Called lazily on repricing, never on every scroll frame/token. */
+export function dominantReadingIndex<T extends { getBoundingClientRect(): { top: number; bottom: number } }>(
+	rows: Iterable<T>, viewport: { top: number; bottom: number }, indexOf: (row: T) => number
+): number | null {
+	let reading: number | null = null, largest = 0;
+	for (const row of rows) {
+		const box = row.getBoundingClientRect();
+		const visible = Math.min(box.bottom, viewport.bottom) - Math.max(box.top, viewport.top);
+		if (visible <= largest) continue;
+		const index = indexOf(row);
+		if (index < 0) continue;
+		reading = index;
+		largest = visible;
+	}
+	return reading;
+}
+
 /** Hard limit for outer items; nested row windows need their own bound. */
 export const TRANSCRIPT_WINDOW_CAP = 120;
 /** Approximate nested markup work, in addition to the outer-row cap. A single
@@ -82,10 +102,12 @@ function rangeAt(start: number, count: number, cap: number, previous?: Transcrip
 /** Per-view range controller. No timers or idle expansion: only explicit
  * navigation moves into history. Apply the same controller to rows inside a
  * large group: an outer-item cap alone cannot bound nested mounted rows. */
-export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30, cost, budget = Infinity, getPinnedRange }: {
+export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30, cost, budget = Infinity, getPinnedRange, getReadingIndex }: {
 	cap?: number; step?: number; cost?: (index: number) => number; budget?: number;
 	/** Only currently mounted, selected rows may be pinned; never retained DOM trees. */
-	getPinnedRange?: () => TranscriptRange | null
+	getPinnedRange?: () => TranscriptRange | null;
+	/** Resolve the dominant visible reading key only when automatic repricing may evict it. */
+	getReadingIndex?: () => number | null
 } = {}) {
 	if (!Number.isInteger(cap) || cap < 1 || !Number.isInteger(step) || step < 1 || !(budget > 0)) {
 		throw new RangeError('Transcript cap, step and content budget must be positive');
@@ -99,16 +121,22 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 	const weighted = !!cost && Number.isFinite(budget);
 	const charge = (index: number) => Math.max(1, cost?.(index) ?? 1);
 	let selectionLimited = false;
-	function commit(start: number, end: number): TranscriptRange {
+	function commit(start: number, end: number, readingIndex?: number | null): TranscriptRange {
 		selectionLimited = false;
-		const pinned = getPinnedRange?.();
+		const selected = getPinnedRange?.();
+		let pinned = selected;
+		// Explicit selection keeps its existing stronger budget priority. A soft
+		// viewport key must not enlarge that span and admit unselected content.
+		if (!selected && readingIndex != null && Number.isInteger(readingIndex) && readingIndex >= 0 && readingIndex < count) {
+			pinned = { start: readingIndex, end: readingIndex + 1 };
+		}
 		if (count && pinned && pinned.end > pinned.start) {
 			const first = Math.max(0, pinned.start), last = Math.min(count, pinned.end);
 			const requestedStart = start, requestedEnd = end;
-			// A native selection can only cover the already-mounted (<= cap) rows.
+			// Protected selection/reading keys come only from already-mounted (<= cap) rows.
 			// If a model rewrite moves those keys further apart, freeze navigation
 			// rather than admitting an unbounded new range.
-			if (last - first > cap) { selectionLimited = true; return range; }
+			if (last - first > cap) { selectionLimited = !!selected; return range; }
 			start = Math.min(start, first);
 			end = Math.max(end, last);
 			const older = requestedStart < range.start;
@@ -127,10 +155,10 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 					if (removed === null) break;
 					used -= charge(removed);
 				}
-				// If selected bodies themselves grow beyond the content budget, keep
-				// only that span until collapse; admit no additional unselected rows.
+				// Never truncate a protected body/selection that itself exceeds the
+				// budget; keep that span without admitting further unprotected rows.
 			}
-			selectionLimited = start !== requestedStart || end !== requestedEnd;
+			selectionLimited = !!selected && (start !== requestedStart || end !== requestedEnd);
 		}
 		if (range.start !== start || range.end !== end) range = { start, end };
 		return range;
@@ -165,6 +193,23 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 		const next = endingRange(end);
 		return commit(next.start, next.end);
 	}
+	function reprice(checkReadingKey = false): TranscriptRange {
+		const next = startingRange(range.start);
+		// Most streaming updates keep the entire mounted slice. Do not
+		// force a DOM/layout read on each token just to rediscover that fact.
+		const retainsMounted = next.start <= range.start && next.end >= Math.min(count, range.end);
+		if (!weighted || !count || (!checkReadingKey && retainsMounted)) return commit(next.start, next.end);
+		// No viewport (e.g. controller-only consumers): retain the old trailing row
+		// rather than silently dropping a growing reply. The rendered caller names
+		// its actual visible key, including its new index after a prepend.
+		const reading = getReadingIndex?.() ?? Math.min(count, range.end) - 1;
+		if (!Number.isInteger(reading) || reading < 0 || reading >= count) return commit(next.start, next.end);
+		// Fill forward from the visible key, then backfill affordable neighbours.
+		// Merely pinning it in the old-start candidate can preserve an offscreen
+		// expensive prefix and still evict a visible reply immediately below it.
+		const around = endingRange(startingRange(reading).end);
+		return commit(around.start, around.end, reading);
+	}
 	const shift = () => weighted ? Math.min(step, Math.max(1, Math.floor((range.end - range.start) / 4))) : step;
 	function toTail(): TranscriptRange { followsTail = true; return endingAt(count); }
 	function extendOlder(): TranscriptRange {
@@ -190,11 +235,12 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 			if (!Number.isInteger(next) || next < 0) throw new RangeError('Item count must be a non-negative integer');
 			// Visibility and the current item vector form one transaction. Resuming
 			// with the PREVIOUS count can charge rows removed by a session switch.
+			const countChanged = count !== next;
 			count = next;
 			hidden = options.hidden ?? hidden;
 			followsTail = options.followTail ?? followsTail;
 			if (hidden && count >= range.end) return range;
-			return followsTail ? endingAt(count) : move(range.start);
+			return followsTail ? endingAt(count) : reprice(countChanged);
 		},
 		extendOlder,
 		loadOlder: extendOlder,
@@ -232,7 +278,7 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 		onStreamingChange(value: boolean): TranscriptRange { streaming = value; return range; },
 		pauseWhenHidden(value: boolean): TranscriptRange {
 			hidden = value;
-			return hidden ? range : followsTail ? endingAt(count) : move(range.start);
+			return hidden ? range : followsTail ? endingAt(count) : reprice(true);
 		}
 	};
 }

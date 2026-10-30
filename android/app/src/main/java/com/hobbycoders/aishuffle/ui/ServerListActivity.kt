@@ -54,7 +54,23 @@ class ServerListActivity : NativeScreen() {
             }))
         }
     }
-    private fun refreshPresence() { presence.start(statusRows.values.map { it.server }, AccountRepository(this).store.session()) }
+    private fun refreshPresence() {
+        presence.start(statusRows.values.map { it.server }, AccountRepository(this).store.session()) { observations ->
+            if (autoConnectPending && connectionJob?.isActive != true) {
+                connectionJob = lifecycleScope.launch {
+                    val target = WorkerConnections.reachable(this@ServerListActivity, observations = observations)
+                    if (isFinishing || !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return@launch
+                    autoConnectPending = false
+                    if (target != null) {
+                        openWorker(target)
+                        finish()
+                    } else if (WorkerConnections.paired(this@ServerListActivity).isNotEmpty()) {
+                        status.text = "No authorized worker is reachable. Check the connection, retry a worker, or add one."
+                    }
+                }
+            }
+        }
+    }
     override fun onStop() { connectionJob?.cancel(); presence.stop(); super.onStop() }
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
@@ -72,19 +88,6 @@ class ServerListActivity : NativeScreen() {
         }
         intent.getStringExtra("sync_message")?.let { status.text = it; intent.removeExtra("sync_message") }
         ServerStore.get(this).selectedToolsServer()?.let { com.hobbycoders.aishuffle.tools.DeviceToolsRuntime.attach(this, it) }
-        if (autoConnectPending && connectionJob?.isActive != true) {
-            connectionJob = lifecycleScope.launch {
-                val target = WorkerConnections.reachable(this@ServerListActivity)
-                if (isFinishing || !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return@launch
-                autoConnectPending = false
-                if (target != null) {
-                    openWorker(target)
-                    finish()
-                } else if (WorkerConnections.paired(this@ServerListActivity).isNotEmpty()) {
-                    status.text = "No authorized worker is reachable. Check the connection, retry a worker, or add one."
-                }
-            }
-        }
     }
     private fun openAccount(mode: String) { startActivity(Intent(this, AccountActivity::class.java).putExtra("mode", mode)) }
     private fun openWorker(server: Server) {

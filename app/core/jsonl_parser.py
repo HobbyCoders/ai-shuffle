@@ -34,6 +34,7 @@ from app.core.config import settings
 from app.core.harness_reminders import strip_harness_reminders
 from app.core.query_streaming import extract_mcp_image
 from app.core.session_title import derive_session_title
+from app.core.transcript_tags import first_tagged_text
 from app.core.system_message_filter import is_hidden_system_subtype
 
 logger = logging.getLogger(__name__)
@@ -248,9 +249,8 @@ def _is_task_launch_rejection(output: Any) -> bool:
 
 def _extract_task_notification_field(content: str, tag: str) -> Optional[str]:
     """Pull a single ``<tag>value</tag>`` field out of a task-notification body."""
-    import re
-    m = re.search(rf"<{tag}>(.*?)</{tag}>", content, re.DOTALL)
-    return m.group(1).strip() if m else None
+    body = first_tagged_text(content, tag)
+    return body.strip() if body is not None else None
 
 
 def _apply_task_notification_status(
@@ -756,27 +756,16 @@ def _parse_slash_command(content: str) -> Optional[Dict[str, Any]]:
     Returns:
         Dict with command_id, command_name, command_args, or None if not a slash command
     """
-    import re
-
     if not content or not content.strip().startswith("<command-"):
         return None
 
     result = {}
 
-    # Extract command-message (the internal command identifier)
-    msg_match = re.search(r'<command-message>(.*?)</command-message>', content, re.DOTALL)
-    if msg_match:
-        result["command_id"] = msg_match.group(1).strip()
-
-    # Extract command-name (the display name with slash prefix)
-    name_match = re.search(r'<command-name>(.*?)</command-name>', content, re.DOTALL)
-    if name_match:
-        result["command_name"] = name_match.group(1).strip()
-
-    # Extract command-args (the arguments passed to the command)
-    args_match = re.search(r'<command-args>(.*?)</command-args>', content, re.DOTALL)
-    if args_match:
-        result["command_args"] = args_match.group(1).strip()
+    for field, tag in (("command_id", "command-message"), ("command_name", "command-name"),
+                       ("command_args", "command-args")):
+        body = first_tagged_text(content, tag)
+        if body is not None:
+            result[field] = body.strip()
 
     # Must have at least command_name to be valid
     if "command_name" in result:
@@ -805,11 +794,8 @@ def _extract_local_command_output(content: str) -> Optional[str]:
 
     Returns the extracted content, or None if no tags found.
     """
-    import re
-    match = re.search(r'<local-command-stdout>(.*?)</local-command-stdout>', content, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return None
+    body = first_tagged_text(content, "local-command-stdout")
+    return body.strip() if body is not None else None
 
 
 def get_agent_jsonl_paths(sdk_session_id: str, working_dir: str = "/workspace") -> Dict[str, Path]:

@@ -109,11 +109,13 @@ export async function gotoApp(page, status, path = '/') {
 /**
  * Settle the service worker's first visit (unrecorded, for `setup`). In a
  * secure context (CI's loopback; a plain-HTTP dev instance has no worker) the
- * first load installs /sw.js, which claims the page, and the app reloads once
- * on that claim (pwa.svelte.ts → app-update-watch). A case that reloads on
- * purpose would race that second load, so: wait for the worker to control the
- * page, then reload into a document it controls from the start (no claim, no
- * second load) and wait for the app again. No-op without a worker.
+ * first load installs /sw.js, which claims the page and posts SW_UPDATED; the
+ * app asks the server for its build on that claim (pwa.svelte.ts →
+ * app-update-watch) and, on the same build, does not reload (#908,
+ * first-visit.journey.mjs). A case that reloads on purpose still starts from a
+ * settled worker: wait for it to control the page, then reload into a document
+ * it controls from the start (no claim) and wait for the app again. No-op
+ * without a worker.
  */
 export async function settleServiceWorker(page, status) {
 	const controlled = await page

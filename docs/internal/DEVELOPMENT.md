@@ -308,6 +308,83 @@ Server-side switches are environment variables read by the worker on each event-
 | `AI_SHUFFLE_PERF_SLIM_USAGE_REPLAY` | Kill switch | The event feed sends stored `turn.usage` rows unchanged. Rows written before this change then carry the full context-usage snapshot twice (about 50 KB each). New rows are written compact regardless; the full breakdown is always available from `GET /api/v1/sessions/{id}/context-usage`. |
 | `AI_SHUFFLE_PERF_COALESCE_SUBAGENT_PROGRESS` | Kill switch | Opening a chat replays one `subagent.progress` frame per subagent text delta, instead of one frame per run of consecutive deltas from the same subagent. |
 
+## Dark transcript producer
+
+Background production is **default-off**. On an approved worker with Node 22 or
+newer, set `AI_SHUFFLE_TRANSCRIPT_PRODUCER=1` and restart to build
+installation-local settled-message records. Enabling production is its own later
+step, after measuring a large real database; do not start a fleet-wide backfill
+with this change. Enabling it is also blocked by
+[the large-fold ingest regression](https://github.com/HobbyCoders/ai-shuffle/issues/902).
+The large-record CI scenario gates both ingest and loop-lag budgets at their
+original limits against the SQLite shim and native PostgreSQL; the contention
+fix does not authorize enabling production without the large-database check.
+**Reads are not implemented or negotiated:** opening chat
+still uses the existing event feed and full replay. Unset the switch (or set it
+to `0`) and restart to stop production. Neither setting changes serving, mutates
+the source log or deletes chat content. For an isolated dev-loop check, use
+`python -m scripts.devloop up --transcript-producer`: the launcher intentionally
+does not inherit this or other worker settings from the shell. Without that
+explicit option, disposable previews also leave production off.
+Missing/old Node, stale assets, unsupported legacy compaction and exceeded
+budgets fail closed to the existing serving path.
+
+The authoritative TypeScript reducer owns the captured message data and its
+chronological dismissal/rewind effects. Python feeds it the real server cold
+preprocessing, retaining a capped raw attempt and pending coalescers. Mutable
+carry and individually addressable settled records commit with one generation
+and revision CAS; logical pages use bounded keyset batches, not page-blob
+rewrites. NOTIFY hints have separate bounded live/backfill admissions before
+loop scheduling; bounded source and derived-state keyset scans repair dropped
+hints, including deletion while the producer was offline. Retired generations
+are collected in finite batches even during ongoing live traffic. CPU-heavy
+restore, coalescing, frame construction and IPC JSON preparation use one
+admission-bounded, cancellation-joined **private Python subprocess**, not a
+Python thread sharing the serving loop's GIL. Both it and Node use the same
+minimal environment allowlist and supervised stdio boundary. The lightweight
+`-I` entrypoint imports pure canonical replay helpers, not `app.main`, API,
+settings or provider modules; no multiprocessing resource tracker is created.
+OS ownership ends both projection children on parent death even while CPU work
+holds the GIL: a Linux exec shim arms `PR_SET_PDEATHSIG` and checks the expected
+parent PID after arming; Windows uses Fluid's parent-owned kill-on-close Job
+Object. Site-free Python (`-I -S`) and builtin-only Node gates block before
+startup hooks/entrypoints. The gate first reports its actual PID (a Windows
+venv may redirect through another process); the parent owns each distinct PID
+with a separate Job before sending one go byte. This accommodates CPython's
+existing nested/silent-breakaway Job; startup descendants inherit the runtime's
+new innermost Job, which does not allow breakaway. Before any attachment, open
+and pin both process handles, validate the runtime's parent PID and creation
+time against the launcher, and verify the launcher is still running. Assign
+those same handles (never reopen a reported PID) so recycling cannot enroll an
+unrelated process. Failed validation/attachment closes stdin and kills/reaps
+the gated child without running startup code. The bounded stdin reader still
+handles ordinary EOF. Neither mechanism adds a supervisor process or tracker.
+Preparation admits one job, reuses one child, refreshes two normalized replay switches per
+call and joins the child on shutdown. Database operations stay on the existing
+asynchronous thread path; no pool/socket is forked into the CPU child. Both
+SQLite and native PostgreSQL have an unconditional CI measurement on PRs;
+main-suite repeats each five times. Cold application-import and abrupt-death
+regressions cover the child boundary separately from warm contention limits.
+Implicit interrupt prose and its user barrier stay in carry regardless of
+window distance; a deep rewind without a known barrier fails closed rather
+than inventing an older target. No source append or replication writer awaits
+the producer, and these tables are not replicated.
+
+Run `npm run transcript:build` in `frontend/` after editing the shared reducer,
+its transitive helpers, the private Node entry point or canonical Python replay
+helpers. Commit the generated `app/core/transcript_views/reducer.cjs` and
+`manifest.json`; the frontend bundle test rejects stale output in CI. The runtime
+checks artifact and canonical-source hashes, uses a credential-free child
+environment, and bounds IPC size, heap, deadlines, carry and each work quantum.
+
+**Read-enable remains blocked** on a separate durable source-rewrite/incarnation
+witness covering every rewrite path, including a mid-log replacement which
+keeps the first/last IDs and loses NOTIFY. Epoch/tail checks alone do not prove
+that case. It also requires real paired-worker/runtime checks and accepted
+10k/100k backfill/parity/ingest measurements. Do not enable reads based on unit
+tests, seeded previews or the shadow-ready flag. The standing checks are in
+[the live-smoke catalog](live-smoke-scenarios.md#transcript-shadow).
+
 ## Documentation
 
 | Topic | Guide |

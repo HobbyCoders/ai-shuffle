@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { ArrowUpRight, Check, SkipForward } from 'lucide-svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
@@ -23,8 +24,26 @@
 		dismissed?: boolean;
 		skipped?: string[];
 	}
-	interface Props { data: UserQuestionData; onRespond?: (detail: QuestionResponse) => void; disabled?: boolean; }
-	let { data, onRespond, disabled = false }: Props = $props();
+	/** Everything typed, picked or skipped so far, for a host that unmounts the form. */
+	export interface QuestionDraft {
+		active: number;
+		selections: Record<number, string[]>;
+		written: Record<number, string>;
+		skipped: Record<number, boolean>;
+	}
+	interface Props {
+		data: UserQuestionData;
+		onRespond?: (detail: QuestionResponse) => void;
+		disabled?: boolean;
+		/**
+		 * A host that unmounts the form while an answer is on its way (the phone
+		 * prompt dock, #899) hands the draft back here and keeps it from
+		 * `onDraft`. Hosts that keep the form mounted need neither.
+		 */
+		draft?: QuestionDraft;
+		onDraft?: (requestId: string, draft: QuestionDraft) => void;
+	}
+	let { data, onRespond, disabled = false, draft, onDraft }: Props = $props();
 	const id = $props.id();
 	let active = $state(0);
 	let selections = $state<Record<number, string[]>>({});
@@ -36,10 +55,18 @@
 	$effect(() => {
 		if (requestId === data.request_id) return;
 		requestId = data.request_id;
-		active = 0;
-		selections = {};
-		written = {};
-		skipped = {};
+		const saved = untrack(() => draft);
+		active = saved?.active ?? 0;
+		selections = saved ? structuredClone(saved.selections) : {};
+		written = saved ? { ...saved.written } : {};
+		skipped = saved ? { ...saved.skipped } : {};
+	});
+	// Report every change, keyed by the request it belongs to.
+	$effect(() => {
+		if (!onDraft || !requestId) return;
+		const key = requestId;
+		const snapshot = $state.snapshot({ active, selections, written, skipped });
+		untrack(() => onDraft(key, snapshot));
 	});
 	const questions = $derived(data.questions ?? []);
 	const current = $derived(questions[active]);
@@ -99,6 +126,9 @@
 			if (skipped[i]) skippedKeys.push(key);
 			else answers[key] = answer(i);
 		});
+		// Report the final state now: sending can unmount this form in the same
+		// tick (the phone dock hides a sent question), before the effect above runs.
+		if (onDraft && requestId) onDraft(requestId, $state.snapshot({ active, selections, written, skipped }));
 		onRespond?.({ request_id: data.request_id, tool_use_id: data.tool_use_id, answers, skipped: skippedKeys });
 	}
 </script>

@@ -358,7 +358,28 @@ jobs:
             tests/core/test_pg_session_store.py tests/core/test_pg_session_store_rewind.py \
             tests/db/test_explore_retirement_postgres.py tests/db/test_builtin_refresh_postgres.py \
             tests/db/test_turn_context_postgres.py tests/db/test_git_repository_record_postgres.py \
+            tests/db/test_transcript_projection_postgres.py \
             -o addopts="" -p no:cacheprovider --timeout=120 -v
+
+      # One unconditional measurement per database on PRs; five on main-suite.
+      # Ordinary backend shards still cover the complete isolated test tree.
+      - name: Measure large-fold contention on both databases
+        env:
+          TESTING: '1'
+          AI_SHUFFLE_TRANSCRIPT_PRODUCER: '1'
+          AI_SHUFFLE_ENV_FILE: /dev/null
+          PYTHONPATH: .
+          CONTENTION_ATTEMPTS: ${{ github.ref == 'refs/heads/main' && '5' || '1' }}
+        run: |
+          for attempt in $(seq 1 "$CONTENTION_ATTEMPTS"); do
+            python -m pytest --durations=50 tests/test_transcript_projection_ingest_budget.py \
+              -o addopts="" -q -s -p no:cacheprovider --timeout=60 \
+              --junitxml="reports/large-fold-shim-${attempt}.xml"
+            ALLOW_REAL_PG=1 TEST_POSTGRES_DSN=postgresql://shuffle_safety_test:safety-test-only@127.0.0.1:5432/shuffle_safety_test \
+              python -m pytest --durations=50 tests/db/test_transcript_projection_ingest_postgres.py \
+              -o addopts="" -q -s -p no:cacheprovider --timeout=60 \
+              --junitxml="reports/large-fold-pg-${attempt}.xml"
+          done
 
       - name: Audit public Python dependencies
         # Kept on every run: it takes about 2 s.

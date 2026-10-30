@@ -9,7 +9,11 @@ const LOG = '[role="log"][aria-label="Conversation messages"]';
 const mobileShell = process.argv.includes('--mobile-shell');
 const twoFrames = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 async function navigate(page, direction) {
-	await page.getByRole('button', { name: `Show ${direction} messages`, exact: true }).evaluate(button => button.click());
+	// A trusted key activates the actual control without Playwright scrolling
+	// an offscreen button into auto-paging. Unlike synthetic .click(), this
+	// correctly classifies the intentional navigation as recent user input.
+	await page.getByRole('button', { name: `Show ${direction} messages`, exact: true }).evaluate(button => button.focus({ preventScroll: true }));
+	await page.keyboard.press('Enter');
 	await twoFrames(page);
 }
 async function middle(page) {
@@ -48,7 +52,9 @@ await runJourney({
 			const prefix = mobileShell && variant.viewport === 'phone' ? '/mobile/' : '/';
 			await page.goto(new URL(`${prefix}?session=${encodeURIComponent(id)}`, status.urls.ui).toString());
 			await waitChatOpen(page, { messagesAtLeast: 4 });
-			await page.getByRole('button', { name: 'Show earlier messages', exact: true }).click();
+			// Reuse the direct navigation helper: Playwright's scroll-into-view
+			// can itself trigger automatic older paging and detach this button.
+			await navigate(page, 'earlier');
 			await page.waitForFunction(expected => JSON.stringify([...document.querySelectorAll('[data-transcript-index]')].map(row => Number(row.dataset.transcriptIndex))) === JSON.stringify(expected), spec.previous, { timeout: 5000 });
 			const before = await state(page, 0);
 			expect(JSON.stringify(before.indices) === JSON.stringify(spec.previous), `setup range: ${JSON.stringify(before)}`);

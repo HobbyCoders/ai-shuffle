@@ -14,6 +14,7 @@
 	 * title in place inside the sheet. Renders nothing for an unbound chat.
 	 */
 	import { onDestroy } from 'svelte';
+	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
 	import { ChevronDown, GitFork, Pencil, Trash2, X } from 'lucide-svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { focusTrap } from '$lib/components/ui/focus-trap';
@@ -224,7 +225,7 @@
 				<!-- svelte-ignore a11y_click_events_have_key_events -->
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
 				<div class="stm-scrim" onclick={closeSheet}></div>
-				<div bind:this={sheetRef} class="stm-sheet" role="dialog" aria-modal="true" aria-labelledby={sheetTitleId} tabindex="-1" data-no-drawer-swipe use:focusTrap={{ initial: '.sheet-row' }}>
+				<div bind:this={sheetRef} use:obscuresTranscript class="stm-sheet" role="dialog" aria-modal="true" aria-labelledby={sheetTitleId} tabindex="-1" data-no-drawer-swipe use:focusTrap={{ initial: '.sheet-row' }}>
 					<div class="stm-head">
 						<h2 id={sheetTitleId}>Chat actions</h2>
 						<button type="button" class="stm-close" aria-label="Close chat actions" onclick={closeSheet}><X size={18} aria-hidden="true" /></button>

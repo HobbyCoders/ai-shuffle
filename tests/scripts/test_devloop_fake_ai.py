@@ -137,6 +137,32 @@ def test_multi_round_scenario_steps_by_tool_rounds(fake: FakeAI) -> None:
     assert "two rounds" in _chat_text(_chat(fake, round_trip(2), BASH))
 
 
+def test_question_answer_continues_the_scenario_that_asked(fake: FakeAI) -> None:
+    ask = [{"type": "function", "function": {"name": "AskUser", "parameters": {}}}]
+    prompt = {"role": "user", "content": "pick one [script:ask-question]"}
+    calls = _chat_calls(_chat(fake, [prompt], ask))
+    assert [call["name"] for call in calls] == ["AskUser"]
+    assert len(json.loads(calls[0]["arguments"])["questions"]) == 1
+    history = [prompt,
+               {"role": "assistant", "tool_calls": [{"id": "c1", "type": "function",
+                                                     "function": {"name": "AskUser",
+                                                                  "arguments": "{}"}}]},
+               {"role": "tool", "tool_call_id": "c1", "content": '{"status": "queued"}'}]
+    assert "wait for your answer" in _chat_text(_chat(fake, history, ask))
+    # The app queues the tray's answer as a user message: it is round 2 of the
+    # scenario that asked, not a new prompt, and {answer} carries it.
+    answer = {"role": "user", "content": "Answer to your question:\n"
+              "Which colour should the banner use?\nUser skipped this question."}
+    reply = _chat_text(_chat(fake, history + [
+        {"role": "assistant", "content": "I'll wait."}, answer], ask))
+    assert "Which colour should the banner use?\nUser skipped this question." in reply
+    assert [e["round"] for e in _log(fake)] == [0, 1, 2]
+    assert _log(fake)[-1]["scenario"] == "ask-question"
+    # Two questions in one request.
+    two = _chat_calls(_chat(fake, [{"role": "user", "content": "[script:ask-questions]"}], ask))
+    assert len(json.loads(two[0]["arguments"])["questions"]) == 2
+
+
 def test_code_mode_requests_get_one_python_cell(fake: FakeAI) -> None:
     calls = _chat_calls(_chat(fake, [{"role": "user", "content": "[script:tool-bash]"}], CODE_MODE))
     assert [call["name"] for call in calls] == ["run_python"]

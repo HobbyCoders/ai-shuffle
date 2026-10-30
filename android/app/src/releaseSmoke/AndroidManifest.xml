@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- Disposable Play-like test app: impossible to install without adb -t. -->
+    <application android:testOnly="true">
+        <service android:name=".tools.ShuffleAccessibilityService" tools:node="remove" />
+        <activity android:name=".ci.ReleaseSmokeFixtureActivity" android:exported="false" />
+    </application>
+</manifest>

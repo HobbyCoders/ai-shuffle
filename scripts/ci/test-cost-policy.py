@@ -1,7 +1,8 @@
 """CI policy: fast local push checks, full PR suites on standard free runners.
 
 Publishing still requires explicit dispatch or an attested local full pass.
-PR checks have no secrets, publishing permissions, draft skips or path filters.
+Unfiltered PR suites have no secrets or publishing permissions. Android additionally
+runs path-filtered unsigned native checks; its release-only steps stay owner-gated.
 """
 from pathlib import Path
 import unittest
@@ -14,11 +15,13 @@ PR_CHECKS = {
     "ci-backend.yml", "ci-fluid.yml", "ci-frontend.yml", "desktop.yml",
     "desktop-source-checks.yml", "windows-suite.yml", "ci-instance-identity.yml",
     "ci-artifact-policy.yml", "ci-browser-workspace.yml", "container-postgres.yml",
+    "ci-android-minified.yml",
 }
 # The only workflows that may start without a person dispatching them.
 AUTOMATIC = {
     "desktop-source.yml": {"schedule", "workflow_dispatch", "workflow_run"},
     "main-suite.yml": {"push", "workflow_dispatch"},
+    "android.yml": {"pull_request", "workflow_dispatch", "workflow_call"},
     **{name: {"pull_request", "workflow_dispatch", "workflow_call"} for name in PR_CHECKS},
 }
 FORBIDDEN = {"pull_request", "pull_request_target", "merge_group", "schedule", "workflow_run",
@@ -73,6 +76,26 @@ class CostPolicyTests(unittest.TestCase):
                             "'[\"windows-latest\"]' || '[\"windows-latest\", \"macos-latest\"]') }}")
                     else:
                         self.assertIn(runner, {"ubuntu-latest", "windows-latest"})
+
+    def test_android_native_pr_checks_cover_the_apk_inputs_on_free_runners(self):
+        config = workflow("android.yml")
+        self.assertEqual(config["on"]["pull_request"], {"paths": [
+            "android/**", "mobile/**", "frontend/**", ".github/workflows/android.yml",
+            "scripts/ci/test-cost-policy.py", "tests/scripts/test_owner_publication_policy.py",
+        ]})
+        self.assertEqual(config["permissions"], {"contents": "read"})
+        self.assertEqual(config["concurrency"], {
+            "group": "android-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}",
+            "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+        })
+        self.assertEqual(set(config["jobs"]), {"build", "android-ui", "publish"})
+        for name in ("build", "android-ui"):
+            job = config["jobs"][name]
+            self.assertNotIn("if", job)  # Includes drafts and forks.
+            self.assertEqual(job.get("permissions", config["permissions"]), {"contents": "read"})
+        for job in config["jobs"].values():
+            self.assertEqual(job["runs-on"], "ubuntu-latest")
+        self.assertEqual([leg["api"] for leg in config["jobs"]["android-ui"]["strategy"]["matrix"]["include"]], ["34", "36"])
 
     def test_stable_release_requires_explicit_dispatch(self):
         self.assertEqual(triggers(workflow("release.yml")), {"workflow_dispatch"})

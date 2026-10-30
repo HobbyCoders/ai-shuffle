@@ -22,6 +22,7 @@ import { isSwarmTool } from '$lib/utils/swarm';
 import { isQueuedSummary } from '$lib/utils/subagent-status';
 import { heldAgentDeliveries, type AgentDelivery } from '$lib/utils/agent-delivery';
 import { stripUntrustedFence } from '$lib/utils/untrusted-fence';
+import { firstTaggedText, splitTaggedBlocks } from '$lib/utils/transcript-tags';
 import {
 	APPROVAL_CARD_SUBTYPE,
 	approvalCardFromRequest,
@@ -221,12 +222,46 @@ const COMPACTION_CLEARING_EVENTS = new Set([
 	'transcript.rewound',
 ]);
 
+/** Shared by replay and derived-page hydration; never dismiss explicit cards. */
+export function dismissCapturedProse(
+	message: ChatMessage,
+	origin: number | undefined,
+	through: number,
+	at = through
+): ChatMessage {
+	return message.role === 'assistant' && (!message.type || message.type === 'text') &&
+		(origin ?? message.seq ?? Infinity) <= through
+		? { ...message, proseQuestionDismissedAt: message.proseQuestionDismissedAt ?? at }
+		: message;
+}
+
+/** Rewind a captured row, including dismissals that happened after the cut. */
+export function rewindCapturedMessage(
+	message: ChatMessage,
+	origin: number | undefined,
+	fromSeq: number
+): ChatMessage | null {
+	if (origin !== undefined && !(origin < fromSeq)) return null;
+	if (message.proseQuestionDismissedAt == null || message.proseQuestionDismissedAt < fromSeq) {
+		return message;
+	}
+	const { proseQuestionDismissedAt: _dismissed, ...rest } = message;
+	return rest;
+}
+
+/** Chronological changes that also apply to detached, settled page rows. */
+export type CapturedMessageEffect =
+	| { kind: 'dismiss'; through: number; at: number; seq: number }
+	| { kind: 'rewind'; fromSeq: number; seq: number };
+type MessageEffectObserver = (effect: CapturedMessageEffect) => void;
+
 /** Dismiss only captured prose; later messages and explicit cards stay intact. */
-function dismissProseThrough(state: V2SessionState, through: number, at = through): V2SessionState {
+function dismissProseThrough(
+	state: V2SessionState, through: number, at = through, observe?: MessageEffectObserver
+): V2SessionState {
+	observe?.({ kind: 'dismiss', through, at, seq: at });
 	return { ...state, messages: state.messages.map((m) =>
-		m.role === 'assistant' && (!m.type || m.type === 'text') &&
-		(state.messageOriginSeq.get(m.id) ?? m.seq ?? Infinity) <= through
-			? { ...m, proseQuestionDismissedAt: m.proseQuestionDismissedAt ?? at } : m) };
+		dismissCapturedProse(m, state.messageOriginSeq.get(m.id), through, at)) };
 }
 
 export function initialState(): V2SessionState {
@@ -672,16 +707,37 @@ function str(v: unknown): string {
  * Returns undefined unless the first hash is a well-formed sha256 hex digest —
  * the only shape the artifact route serves.
  */
-function artifactScreenshotUrl(v: unknown, sessionId?: string): string | undefined {
+function artifactScreenshotUrl(v: unknown, sessionId?: string, apiRoot?: string): string | undefined {
 	if (!Array.isArray(v)) return undefined;
 	const hash = v.find((h) => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h));
-	return hash ? `${apiBase()}/artifacts/${hash}${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}` : undefined;
+	return hash ? `${apiRoot ?? apiBase()}/artifacts/${hash}${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}` : undefined;
 }
 
-function scopedScreenshot(v: unknown, sessionId?: string): string | undefined {
+function scopedScreenshot(v: unknown, sessionId?: string, apiRoot?: string): string | undefined {
 	const screenshot = str(v);
 	const artifact = screenshot?.match(/^\/api\/v1\/artifacts\/([0-9a-f]{64})(?:\?[^#]*)?$/);
-	return artifact ? artifactScreenshotUrl([artifact[1]], sessionId) : screenshot;
+	return artifact ? artifactScreenshotUrl([artifact[1]], sessionId, apiRoot) : screenshot;
+}
+
+/** Keep server-owned captured screenshots installation-neutral. Reuse the exact
+ * serving URL/scoping rule only at a read boundary (web or native phone shell).
+ * The producer never persists the requesting phone's worker origin or token.
+ */
+export function materializeCapturedScreenshots(
+	message: ChatMessage, sessionId: string, apiRoot?: string
+): ChatMessage {
+	const screenshot = message.toolScreenshot === undefined ? undefined :
+		scopedScreenshot(message.toolScreenshot, sessionId, apiRoot);
+	let next = screenshot === message.toolScreenshot ? message : { ...message, toolScreenshot: screenshot };
+	if (message.agentChildren) {
+		const children = message.agentChildren.map(child => {
+			if (child.toolScreenshot === undefined) return child;
+			const url = scopedScreenshot(child.toolScreenshot, sessionId, apiRoot);
+			return url === child.toolScreenshot ? child : { ...child, toolScreenshot: url };
+		});
+		if (children.some((child, index) => child !== message.agentChildren![index])) next = { ...next, agentChildren: children };
+	}
+	return next;
 }
 
 // ─── Copy-on-publish ownership ────────────────────────────────────────────────
@@ -983,8 +1039,7 @@ function turnOutputTokens(usage: unknown): number {
  *  does not XML-escape field values (app/core/turn_scheduler.py::_esc is a
  *  plain str() passthrough), so the raw inner text is returned as-is. */
 function extractTag(block: string, tag: string): string {
-	const m = block.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`));
-	return m ? m[1] : '';
+	return firstTaggedText(block, tag) ?? '';
 }
 
 /** The block's header slice — the text before the first `<summary>` or
@@ -1008,8 +1063,6 @@ function parseUsageNum(raw: string): number | string | undefined {
 	const n = Number(t);
 	return Number.isFinite(n) && String(n) === t ? n : t;
 }
-
-const TASK_NOTIFICATION_BLOCK = /<task-notification>[\s\S]*?<\/task-notification>/g;
 
 /** One `agent_message` item per delivered peer message, rendered the same way
  *  as a live delivery receipt. `sole`: these are the event's only items, so a
@@ -1162,6 +1215,23 @@ const SUBAGENT_PREVIEW_CHARS = 2_000;
  * handing `state.messages` to a consumer that keeps the reference.
  */
 export function reduce(state: V2SessionState, event: WireEvent): V2SessionState {
+	return reduceInternal(state, event);
+}
+
+/** The same fold, with exact effects for locally persisted detached rows.
+ * Observe inside the authoritative branches: synthetic turns and stale-epoch
+ * notes must not create effects that the normal reducer would not apply.
+ */
+export function reduceWithMessageEffects(
+	state: V2SessionState, event: WireEvent
+): { state: V2SessionState; effects: CapturedMessageEffect[] } {
+	const effects: CapturedMessageEffect[] = [];
+	return { state: reduceInternal(state, event, effect => effects.push(effect)), effects };
+}
+
+function reduceInternal(
+	state: V2SessionState, event: WireEvent, observe?: MessageEffectObserver
+): V2SessionState {
 	const createdAt = str(event.created_at);
 	// lastSeq only ever advances (replay is monotonic).
 	const seq = typeof event.seq === 'number' ? event.seq : state.lastSeq;
@@ -1394,7 +1464,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 
 		case 'turn.aborted': {
 			const reason = str(event.reason);
-			let next = dismissProseThrough(closeOpen(state), seq);
+			let next = dismissProseThrough(closeOpen(state), seq, seq, observe);
 			if (reason === 'interrupt') {
 				// Mark any still-running tool card as errored (mirrors the legacy
 				// interrupt cleanup in message-sender).
@@ -1549,7 +1619,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// than a raw user chat bubble. If the marker substring is present but
 			// NOTHING parses, fall through to the normal user-bubble path below.
 			if (content.includes('<task-notification>')) {
-				const blocks = content.match(/<task-notification>[\s\S]*?<\/task-notification>/g) || [];
+				const { blocks, outside } = splitTaggedBlocks(content, 'task-notification');
 				if (blocks.length > 0) {
 					const notifStamp = stampTs(event, createdAt);
 					let next = state;
@@ -1570,7 +1640,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					});
 					// Peer messages held while parked ride the same wake, after its
 					// notifications (turn_scheduler::_unpark_prompt).
-					const held = heldAgentDeliveries(content.replace(TASK_NOTIFICATION_BLOCK, ''));
+					const held = heldAgentDeliveries(outside);
 					if (held) next = appendAgentDeliveries(next, held, event.id, notifStamp, seq, false);
 					// A pump card arms "ok"-ack suppression for the live turn; a purely
 					// own notification (or nothing pumped) clears any stale watch.
@@ -2370,7 +2440,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			if (str(event.subtype) === 'session_settled') {
 				const cutoff = typeof event.through_seq === 'number' ? event.through_seq : seq;
 				if (event.epoch == null || state.logEpoch == null || event.epoch === state.logEpoch) {
-					state = dismissProseThrough(state, cutoff, seq);
+					state = dismissProseThrough(state, cutoff, seq, observe);
 				}
 			}
 			// `background_tasks_changed` is a CLI/SDK bookkeeping event that
@@ -2514,17 +2584,14 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 		case 'transcript.rewound': {
 			const fromSeq = typeof event.from_seq === 'number' ? event.from_seq : NaN;
 			if (Number.isNaN(fromSeq)) return state; // malformed: no-op
+			observe?.({ kind: 'rewind', fromSeq, seq });
 			// Drop every message/task CREATED at seq >= fromSeq. Optimistic
 			// messages (absent from messageOriginSeq) are exempt. Reducing the
 			// full log from seq 0 reproduces the same truncation → determinism.
 			const keptMessages = own(
-				state.messages.filter((m) => {
-					const origin = state.messageOriginSeq.get(m.id);
-					return origin === undefined || origin < fromSeq;
-				}).map((m) => {
-					if (m.proseQuestionDismissedAt == null || m.proseQuestionDismissedAt < fromSeq) return m;
-					const { proseQuestionDismissedAt: _dismissed, ...rest } = m;
-					return rest;
+				state.messages.flatMap((m) => {
+					const kept = rewindCapturedMessage(m, state.messageOriginSeq.get(m.id), fromSeq);
+					return kept ? [kept] : [];
 				})
 			);
 			const messageOriginSeq = own(new Map<string, number>());

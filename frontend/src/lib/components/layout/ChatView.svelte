@@ -42,6 +42,7 @@
 	import { pendingDeepLink, deepLinkLoading } from '$lib/stores/pending-deep-link';
 	// The phone shell docks prompts above its composer; the web build has none.
 	import { composerShell } from '$lib/components/chat/composer-shell';
+	import { sentQuestions, markQuestionSent } from '$lib/stores/session/sent-questions';
 	// Flight-recorder signature (attribute-only; see ui-signature.ts).
 	import { UI_MOUNT, UI_STATE_CHAT, uiComposer, uiFlag, uiSessionTag } from '$lib/utils/ui-signature';
 
@@ -50,9 +51,11 @@
 		onBrowserPreload?: () => void;
 		browserOpen?: boolean;
 		terminal?: TerminalToggle;
+		/** Out: the open mirrored chat still waits for its first sync. */
+		mirrorSyncPending?: boolean;
 	}
 
-	let { onBrowserToggle, onBrowserPreload, browserOpen = false, terminal }: Props = $props();
+	let { onBrowserToggle, onBrowserPreload, browserOpen = false, terminal, mirrorSyncPending = $bindable(false) }: Props = $props();
 
 	// Classify the empty-message surface. While a session's history is being
 	// fetched (boot restore OR an openChat navigation) messages is still [] but
@@ -92,18 +95,17 @@
 	// live transcript, not a new replay. A conversation composed here has no old
 	// transcript to reveal: keep its local echo and live feed through that checkpoint.
 	// An unknown owner reads as mirrored, as the gate always did.
-	const mirrorRemote = $derived(
-		$sessions.find(s => s.id === $activeSession.sessionId)?.is_remote ?? $activeSession.isRemote ?? true
-	);
-	const mirrorDevice = $derived(
-		$sessions.find(s => s.id === $activeSession.sessionId)?.device_name ?? $activeSession.ownerDeviceName
-	);
+	const activeRow = $derived($sessions.find(s => s.id === $activeSession.sessionId));
+	const mirrorRemote = $derived(activeRow?.is_remote ?? $activeSession.isRemote ?? true);
+	const mirrorDevice = $derived(activeRow?.device_name ?? $activeSession.ownerDeviceName);
 	const mirrorSync = createMirrorSync(() => ({
 		sessionId: $activeSession.sessionId,
 		remote: mirrorRemote,
 		createdFromComposer: $activeSession.createdFromComposer,
 		onCaughtUp: () => activeSession.reloadSession(false, 'mirror-caught-up')
 	}));
+	// MainPanel's header title follows the hero through the first sync (#812).
+	$effect(() => { mirrorSyncPending = mirrorSync.waiting; });
 	// The centred hero layout (new or cleared chat) versus the message column.
 	// A load keeps the layout the view already had until its outcome is known,
 	// so opening a chat moves the composer at most once (never centre → bottom
@@ -166,7 +168,8 @@
 			sessionId: $activeSession.sessionId,
 			title: $activeSession.title,
 			messageCount: 0,
-			loading: isLoadingHero
+			loading: isLoadingHero,
+			listTitle: activeRow?.title
 		})
 	);
 	const heroHint = $derived(
@@ -316,7 +319,14 @@
 			skipped
 		});
 		if (!sent) notify.error('Your answer was not sent. Reconnect and try again.');
+		// Close it on the tap, not on the server's ack (#891); a failed delivery reopens it.
+		else markQuestionSent(request_id);
 	}
+
+	// Questions still waiting for an answer from this user: not the ones just sent.
+	const openQuestions = $derived(
+		($activeSession.pendingQuestions ?? []).filter((q) => !$sentQuestions.has(q.request_id))
+	);
 
 	// Manually re-establish the WebSocket (the Reconnect button on the
 	// disconnection banner). Replace a suspect socket and reset retry backoff.
@@ -505,7 +515,7 @@
 						<PromptDock
 							sessionId={$activeSession.sessionId}
 							permissions={showPermissionModal ? dialogPermissions : []}
-							questions={$activeSession.pendingQuestions ?? []}
+							questions={openQuestions}
 							working={$activeSession.isStreaming}
 							connected={$activeWsConnected}
 							onPermission={handlePermissionResponse}
@@ -513,7 +523,7 @@
 						/>
 					{:else}
 						<PrivateAccessPrompt sessionId={$activeSession.sessionId} />
-						<QuestionTray requests={$activeSession.pendingQuestions ?? []} working={$activeSession.isStreaming} connected={$activeWsConnected} onRespond={handleQuestionResponse} />
+						<QuestionTray requests={$activeSession.pendingQuestions ?? []} sent={$sentQuestions} working={$activeSession.isStreaming} connected={$activeWsConnected} onRespond={handleQuestionResponse} />
 					{/if}
 					<ChatInput compact={!showEmptyHero} newSession={showNewSessionHero} {onBrowserToggle} {onBrowserPreload} {browserOpen} {terminal} />
 				{/key}

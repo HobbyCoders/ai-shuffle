@@ -55,6 +55,7 @@ from app.core.session_pool import (
     subprocess_pid,
 )
 from app.core.session_title import derive_session_title
+from app.core.transcript_tags import first_tagged_text
 from app.core.profiles import get_profile
 from app.core.sync_engine import sync_engine
 from app.core.permission_handler import PermissionDecision, permission_handler, _DeferSentinel
@@ -3685,13 +3686,13 @@ async def _stream_to_websocket_impl(
                     # At-rest injections never pass through stream_to_websocket.
                     # Check for local command output
                     if "<local-command-stdout>" in content:
-                        match = re.search(r'<local-command-stdout>(.*?)</local-command-stdout>', content, re.DOTALL)
-                        if match and not is_subagent_user_msg:
+                        output = first_tagged_text(content, "local-command-stdout")
+                        if output is not None and not is_subagent_user_msg:
                             has_visible_content = True
                             yield {
                                 "type": "system",
                                 "subtype": "local_command",
-                                "data": {"content": match.group(1).strip()}
+                                "data": {"content": output.strip()}
                             }
                     elif is_slash_command and content.strip() and content.strip() != "No response requested." and not is_subagent_user_msg:
                         has_visible_content = True
@@ -3712,13 +3713,13 @@ async def _stream_to_websocket_impl(
                         # string-content branch above.
                         # Check for local command output (e.g., /context, /compact)
                         if "<local-command-stdout>" in text:
-                            match = re.search(r'<local-command-stdout>(.*?)</local-command-stdout>', text, re.DOTALL)
-                            if match and not is_subagent_user_msg:
+                            output = first_tagged_text(text, "local-command-stdout")
+                            if output is not None and not is_subagent_user_msg:
                                 has_visible_content = True
                                 yield {
                                     "type": "system",
                                     "subtype": "local_command",
-                                    "data": {"content": match.group(1).strip()}
+                                    "data": {"content": output.strip()}
                                 }
                         elif is_slash_command and text.strip() and text.strip() != "No response requested." and not is_subagent_user_msg:
                             # For slash commands, forward non-trivial UserMessage text

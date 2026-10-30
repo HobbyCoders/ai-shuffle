@@ -1,3 +1,9 @@
+<script lang="ts" module>
+	/** Each chat's composer caret/selection, kept with its draft across chat
+	 *  switches and composer remounts (#864). Editor positions, this page only. */
+	const composerSelections = new Map<string | null, { from: number; to: number }>();
+</script>
+
 <script lang="ts">
 	import type { TerminalToggle } from './composer-shell';
 	/**
@@ -31,7 +37,7 @@
 	import { composerSuggestion, suggestionKey, hasComposerDraft } from '$lib/stores/session/composer-suggestion';
 	import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
 	import { attachComposerDictation, detachComposerDictation, startComposerDictation } from '$lib/services/composerDictation';
-	import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
+	import { flushPendingDraft, holdPendingDraft, readDraft, releasePendingDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 	import { promptStash } from '$lib/stores/session/prompt-stash';
 	import { promptHistory, createPromptRecall } from '$lib/stores/session/prompt-recall';
 	import { pastedTextFile } from './tiptap/large-paste';
@@ -63,6 +69,7 @@
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
 	import { UI_MOUNT } from '$lib/utils/ui-signature';
 	import TiptapEditor from './TiptapEditor.svelte';
+	import type { Editor } from '@tiptap/core';
 	import VoiceRecorder from './VoiceRecorder.svelte';
 	import VoiceCallButton from './VoiceCallButton.svelte';
 	import StopButton from './StopButton.svelte';
@@ -162,7 +169,11 @@
 	// authoritative, but it's wiped by a full page reload (e.g. a PWA update), so
 	// fall back to the per-tab sessionStorage mirror when the store is empty.
 	function resolveInitialDraft(): string {
-		const storeDraft = $activeSession.draft;
+		// A composer this one replaces may still hold text inside its draft
+		// debounce; Svelte can mount the replacement before the old one's
+		// onDestroy saves it, so save it now or this editor opens empty (#811).
+		flushPendingDraft();
+		const storeDraft = get(activeSession).draft;
 		if (storeDraft) return storeDraft;
 		return readDraft($activeSession.sessionId) || '';
 	}
@@ -275,23 +286,29 @@
 		if (draftSaveTimeout) {
 			clearTimeout(draftSaveTimeout);
 		}
-		draftSaveTimeout = setTimeout(() => {
+		const save = () => {
+			if (draftSaveTimeout) clearTimeout(draftSaveTimeout);
+			draftSaveTimeout = null;
+			releasePendingDraft(save);
 			if (!ownsComposer()) return;
 			// Guard: only save if we're still on the same session
 			if (get(activeSession).sessionId !== capturedSessionId) return;
 			const draftValue = getDraftJSON();
-			if (draftValue !== $activeSession.draft) {
+			if (draftValue !== get(activeSession).draft) {
 				activeSession.setDraft(draftValue);
 			}
 			// Mirror to sessionStorage so the draft survives a full page reload
 			// (e.g. a silent PWA update). Empty text clears the entry.
 			writeDraft(capturedSessionId, draftValue);
-			draftSaveTimeout = null;
-		}, 100);
+		};
+		draftSaveTimeout = setTimeout(save, 100);
+		// A composer mounting in this one's place saves it first (#811).
+		holdPendingDraft(save);
 
 		// Clear the pending save on re-run/unmount so a stale timer can't fire
 		// after the editor is torn down (or after a session switch).
 		return () => {
+			releasePendingDraft(save);
 			if (draftSaveTimeout) {
 				clearTimeout(draftSaveTimeout);
 				draftSaveTimeout = null;
@@ -311,6 +328,28 @@
 		if (currentSessionId !== initialSessionId) return; // session switched
 		saveDraftImmediately();
 	});
+	// A remounted composer (a chat archived and restored, a layout change)
+	// puts back the caret its chat had, once the editor is bound (#864).
+	let mountSelectionRestored = false;
+	$effect(() => {
+		if (mountSelectionRestored || !editorRef?.getEditor()) return;
+		mountSelectionRestored = true;
+		if (get(activeSession).sessionId === initialSessionId) restoreComposerSelection(initialSessionId, initialComposerDraft);
+	});
+	/** The editor is going away: keep its caret with the chat whose draft it holds. */
+	function beforeEditorDestroy(editor: Editor) {
+		detachComposerDictation(editor);
+		if (!ownsComposer()) return;
+		rememberComposerSelection(prevSessionId, editor);
+	}
+	/** Keep a chat's caret with its draft; an empty composer (sent or cleared)
+	 *  forgets it so a later draft never gets a stale offset. Not gated on
+	 *  messageSent, which stays set after a send while this composer lives. */
+	function rememberComposerSelection(sessionId: string | null, editor: Editor | null | undefined) {
+		if (!editor || editor.isEmpty) { composerSelections.delete(sessionId); return; }
+		const { from, to } = editor.state.selection;
+		composerSelections.set(sessionId, { from, to });
+	}
 
 	let isUploading = $state(false);
 	let isRecording = $state(false);
@@ -365,6 +404,16 @@
 		if (text) { editorRef.setPlainText(text); editorRef.focus(); }
 	}
 
+	/** Put back the caret or selection this chat's draft had when it was left
+	 *  (#864); a selection past the end of a changed draft is clamped. */
+	function restoreComposerSelection(sessionId: string | null, draft: string) {
+		const saved = composerSelections.get(sessionId);
+		const editor = editorRef?.getEditor();
+		if (!saved || !editor || !hasComposerDraft(draft)) return;
+		const end = editor.state.doc.content.size;
+		editor.commands.setTextSelection({ from: Math.min(saved.from, end), to: Math.min(saved.to, end) });
+	}
+
 	// Sync editor content when session changes (ChatInput is NOT keyed by sessionId).
 	// Because this single component is reused across sessions, it is solely
 	// responsible for moving draft text between the editor and the correct
@@ -386,6 +435,8 @@
 				// leaving session's draft also survives a reload.
 				writeDraft(prevSessionId, leavingDraft);
 			}
+			// The caret and selection go with the draft (#864).
+			rememberComposerSelection(prevSessionId, editorRef?.getEditor());
 			prevSessionId = newSessionId;
 			recall.reset();
 			stashOpen = false;
@@ -395,6 +446,7 @@
 			inputValue = newDraft;
 			plainTextValue = '';
 			editorRef?.setContent(newDraft);
+			restoreComposerSelection(newSessionId, newDraft);
 		}
 		attachComposerDictation(editorRef?.getEditor(), newSessionId);
 	});
@@ -890,8 +942,24 @@
 		notify.banner(message, { severity, persist: false, duration_ms: 6000 });
 	}
 
-	// Handle form submission
+	// One send per user action (#858). Every send path (Send, Enter, a
+	// submitted slash command, Send anyway, Compact first) comes through here,
+	// and the checks below await before the composer is cleared; a second
+	// click or tap in that window would read the same text and send it again.
+	// Held until the composer is cleared, so a new message may go at once.
+	let submitPending = false;
+
 	async function handleSubmit(compactBeforeSend = false) {
+		if (submitPending) return;
+		submitPending = true;
+		try {
+			await submitComposer(compactBeforeSend, () => { submitPending = false; });
+		} finally {
+			submitPending = false;
+		}
+	}
+
+	async function submitComposer(compactBeforeSend: boolean, composerCleared: () => void) {
 		if (!ownsComposer() || heldForCatalog || (compacting && !compactBeforeSend)) return;
 		if (projectLane !== 'chat' && !catalogHoldWaived && activeSession.composerAwaitingProjectCatalog) {
 			if (!(await holdForProjectCatalog())) return;
@@ -934,7 +1002,10 @@
 		}
 
 		// Send the message, optionally queued behind a server-owned compaction.
-		await sendMessage(messageToSend, compactBeforeSend);
+		// sendMessage clears the composer before its first await.
+		const sending = sendMessage(messageToSend, compactBeforeSend);
+		composerCleared();
+		await sending;
 	}
 
 	/**
@@ -1572,7 +1643,7 @@
 
 						<TiptapEditor
 							bind:this={editorRef}
-							onBeforeDestroy={detachComposerDictation}
+							onBeforeDestroy={beforeEditorDestroy}
 							placeholder={composerPlaceholder}
 							suggestion={ghostReply}
 							onAcceptSuggestion={acceptSuggestion}

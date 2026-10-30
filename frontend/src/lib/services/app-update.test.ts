@@ -7,6 +7,7 @@ import {
 	CHECK_MIN_INTERVAL_MS,
 	RELOAD_SETTLE_MS,
 	RESUME_GRACE_MS,
+	SW_RECHECK_MS,
 	canReloadSilently,
 	createAppUpdateMonitor,
 	isChunkLoadError,
@@ -251,11 +252,91 @@ describe('createAppUpdateMonitor', () => {
 		expect(deps.reload).toHaveBeenCalledTimes(1);
 	});
 
-	it('takes the service worker at its word', () => {
+	it('markStale takes an already-confirmed update at its word', () => {
 		const { monitor, deps } = setup({ newBuild: false });
 		monitor.markStale();
 		expect(monitor.stale).toBe(true);
 		expect(deps.showBanner).toHaveBeenCalledWith(false);
 		expect(deps.checkForNewBuild).not.toHaveBeenCalled();
+	});
+
+	describe('a service worker taking control (#908)', () => {
+		/** A page that has only just loaded: visible, inside the start-up grace. */
+		function freshPage(newBuild: boolean) {
+			const state = { newBuild, t: 100_000 };
+			const deps = {
+				schedule: () => {},
+				checkForNewBuild: vi.fn(async () => state.newBuild),
+				isHidden: () => false,
+				blockers: () => [] as string[],
+				reload: vi.fn(),
+				showBanner: vi.fn(),
+				now: () => state.t
+			};
+			const monitor = createAppUpdateMonitor(deps);
+			state.t += 500;
+			return { monitor, deps, state };
+		}
+
+		it("a fresh visit's first install on the same build neither reloads nor shows a banner", async () => {
+			const { monitor, deps } = freshPage(false);
+			// The claim's controllerchange and the SW_UPDATED message, together.
+			const answers = await Promise.all([monitor.serviceWorkerActivated(), monitor.serviceWorkerActivated()]);
+			expect(answers).toEqual([false, false]);
+			expect(monitor.stale).toBe(false);
+			expect(deps.checkForNewBuild).toHaveBeenCalled();
+			expect(deps.reload).not.toHaveBeenCalled();
+			expect(deps.showBanner).not.toHaveBeenCalled();
+		});
+
+		it('a different build still reloads a page that has only just loaded', async () => {
+			const { monitor, deps } = freshPage(true);
+			expect(await monitor.serviceWorkerActivated()).toBe(true);
+			expect(deps.reload).toHaveBeenCalledTimes(1);
+		});
+
+		it('a different build gets the banner while the user is using the page', async () => {
+			const { monitor, deps } = setup();
+			expect(await monitor.serviceWorkerActivated()).toBe(true);
+			expect(deps.reload).not.toHaveBeenCalled();
+			expect(deps.showBanner).toHaveBeenCalledWith(false);
+		});
+
+		it('the check throttle cannot hide an update the worker found moments later', async () => {
+			const { monitor, deps, state } = setup({ newBuild: false });
+			expect(await monitor.check('resume')).toBe(false);
+			// The update lands a second later and the new worker takes over.
+			state.newBuild = true;
+			state.t += 1_000;
+			expect(await monitor.check('online')).toBe(false); // throttled: the old answer
+			expect(await monitor.serviceWorkerActivated()).toBe(true);
+			expect(deps.showBanner).toHaveBeenCalledWith(false);
+		});
+
+		it('asks once more later when the check read "same build" (a failed fetch reads the same)', async () => {
+			const { monitor, deps, state, scheduled } = setup({ newBuild: false });
+			expect(await monitor.serviceWorkerActivated()).toBe(false);
+			const recheck = scheduled.find(({ ms }) => ms === SW_RECHECK_MS);
+			expect(recheck).toBeDefined();
+			// The version fetch had failed; the new build is there when asked again.
+			state.newBuild = true;
+			state.t += SW_RECHECK_MS;
+			recheck!.fn();
+			await vi.waitFor(() => expect(monitor.stale).toBe(true));
+			expect(deps.showBanner).toHaveBeenCalledWith(false);
+		});
+
+		it('asks again after a check that was already in flight when the worker took over', async () => {
+			const { monitor, deps, state } = setup({ newBuild: false });
+			let answerFirst: (v: boolean) => void = () => {};
+			deps.checkForNewBuild.mockImplementationOnce(() => new Promise<boolean>((done) => { answerFirst = done; }));
+			const first = monitor.check('resume');
+			state.newBuild = true;
+			const activated = monitor.serviceWorkerActivated();
+			answerFirst(false); // asked before the update landed
+			expect(await first).toBe(false);
+			expect(await activated).toBe(true);
+			expect(deps.checkForNewBuild).toHaveBeenCalledTimes(2);
+		});
 	});
 });

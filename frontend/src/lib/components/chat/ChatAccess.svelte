@@ -14,6 +14,7 @@
 	 * title, shown on the card).
 	 */
 	import { onDestroy, onMount, tick, untrack } from 'svelte';
+	import { obscuresTranscript } from './transcript-reading-area';
 	import { Shield, ShieldAlert, ShieldCheck, X } from 'lucide-svelte';
 	import { api, getErrorMessage } from '$lib/api/client';
 	import { auth } from '$lib/stores/auth.svelte';
@@ -456,6 +457,7 @@
 	     reopened where it was left; closing clears secrets (clearSecretsKey). -->
 	<div
 		bind:this={panelRef}
+		use:obscuresTranscript={sheetLayout && panelOpen}
 		id={panelId}
 		class="pa-pop card-system"
 		class:dragging-sheet={draggingSheet}
