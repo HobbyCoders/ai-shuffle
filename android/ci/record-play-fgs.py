@@ -160,7 +160,12 @@ def main() -> None:
         try:
             failure = instance.wait_ready(420)
             if failure:
-                # Do not upload status/cookies or the private dev instance log.
+                # Diagnose startup without copying status, cookies or connection strings.
+                import re
+                tail = instance.log_tail()
+                tail = re.sub(r"postgres(?:ql)?://[^\s]+", "postgresql://<redacted>", tail)
+                tail = re.sub(r"v1\.[A-Za-z0-9_.-]+", "<preview-token-redacted>", tail)
+                print(tail, flush=True)
                 raise RuntimeError(failure)
             asyncio.run(record(args, instance))
         finally:

@@ -72,8 +72,7 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-boot-anim -camera-back none
           script: |
-            export PATH="/usr/lib/postgresql/16/bin:$PATH"
-            python android/ci/record-play-fgs.py --out "$RUNNER_TEMP/play-fgs-video" --cert "$RUNNER_TEMP/demo-worker.crt" --key "$RUNNER_TEMP/demo-worker.key"
+            PATH="/usr/lib/postgresql/16/bin:$PATH" python android/ci/record-play-fgs.py --out "$RUNNER_TEMP/play-fgs-video" --cert "$RUNNER_TEMP/demo-worker.crt" --key "$RUNNER_TEMP/demo-worker.key"
       - name: Upload raw recording and verification evidence
         if: always()
         uses: actions/upload-artifact@v4
