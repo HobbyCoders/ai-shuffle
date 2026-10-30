@@ -115,11 +115,20 @@ It is chosen by the request alone, so it behaves the same after restarts:
 
 * Plain messages get a short streamed echo of what you wrote.
 * `[script:NAME]` anywhere in your message plays `scripts/devloop/scenarios/NAME.json`:
-  `default`, `long`, `slow`, `tool-bash`, `tool-multi`, `error-500`,
+  `default`, `long`, `slow`, `tool-bash`, `tool-multi`, `tool-background-stream`, `error-500`,
   `rate-limit-429`, `cut`, `ask-question` and `ask-questions` (below), and
   for voice calls `voice-reply` (a three-paragraph reply) and `voice-wait`
   (an update, a background job and a wait; the job's output tags its wake
   turn `voice-wait-done`). Unknown names reply with the list.
+* `[script:tool-background-stream]` starts a real session-owned `Monitor` shell
+  (`sleep 120`, no inline wait), then streams a reply at six words per second
+  while the task remains in `/live`'s `activeTasks` and the running-tasks list.
+  Use a native **Dev agent** chat attached to a project (for example the seeded
+  **Cleared chat**) so shell tools are available. In Ask mode, approve the
+  `run_python` and `Monitor` requests, then switch away while both the task and
+  reply are active. Stop or archive the session afterwards to reap the shell;
+  otherwise it exits after two minutes. The usual tag options can stretch the
+  stream further.
 * `[script:ask-question]` asks one question in the question tray (`AskUser`,
   two options) and ends its turn; `[script:ask-questions]` asks two in one
   request. The app queues the answer as a user message (`Answer to your

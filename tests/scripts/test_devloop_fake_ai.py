@@ -137,6 +137,78 @@ def test_multi_round_scenario_steps_by_tool_rounds(fake: FakeAI) -> None:
     assert "two rounds" in _chat_text(_chat(fake, round_trip(2), BASH))
 
 
+@pytest.mark.asyncio
+async def test_background_stream_has_a_real_running_monitor_task(fake: FakeAI, tmp_path: Path) -> None:
+    import time
+
+    from app.core.monitor_spawn import make_fluid_monitor_spawner
+    from app.core.query_session_lifecycle import stop_all_background_tasks
+    from app.core.task_registry import task_registry
+    from app.db import database
+    from app.mcp import builtin_tools as bt
+    from fluid.tools.builtins import register_builtins
+    from fluid.tools.registry import ToolCtx, ToolRegistry
+
+    session_id = "background-stream"
+    database.create_session(session_id, "default")
+    prompt = {"role": "user", "content": "[script:tool-background-stream]"}
+    tools = [{"type": "function", "function": {"name": "Monitor", "parameters": {}}}]
+    calls = _chat_calls(_chat(fake, [prompt], tools))
+    assert len(calls) == 1 and calls[0]["name"] == "Monitor"
+    call = calls[0]
+    arguments = json.loads(call["arguments"])
+    assert arguments == {"command": "sleep 120", "wait_seconds": 0}
+    registry = ToolRegistry()
+    register_builtins(registry)
+    task = None
+    try:
+        outcome = await registry.dispatch(call["name"], arguments, ToolCtx(
+            cwd=str(tmp_path), extra={"monitor_spawn": make_fluid_monitor_spawner(session_id)},
+        ))
+        assert not outcome.is_error
+        task_id = outcome.background_task.task_id
+        task = bt._background_tasks[task_id]
+        assert task.session_id == session_id and task.is_running()
+        assert task_registry.is_monitor_shell_task(session_id, task_id)
+        messages = [prompt, {"role": "assistant", "tool_calls": [
+            {"id": "monitor-1", "type": "function", "function": call}]},
+            {"role": "tool", "tool_call_id": "monitor-1", "content": outcome.text}]
+        deltas, times = [], []
+        async with httpx.AsyncClient(timeout=10) as client:
+            async with client.stream("POST", fake.url + "/v1/chat/completions", json={
+                "model": "fake-ai", "stream": True, "messages": messages, "tools": tools,
+            }) as response:
+                assert response.status_code == 200
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: ") or line == "data: [DONE]":
+                        continue
+                    for choice in json.loads(line[len("data: "):]).get("choices", []):
+                        delta = choice["delta"]
+                        assert not delta.get("tool_calls")
+                        if delta.get("content"):
+                            deltas.append(delta["content"])
+                            times.append(time.monotonic())
+                            assert task.is_running()
+                            # This is the wire view consumed by /live's activeTasks.
+                            visible = task_registry.get_visible(session_id)
+                            assert [(t["id"], t["kind"], t["status"]) for t in visible] == [
+                                (task_id, "shell", "running")]
+        assert len(deltas) > 10
+        assert times[-1] - times[0] >= 3
+        assert "switch chats" in "".join(deltas)
+        assert [(e["round"], e["reply"]) for e in _log(fake)] == [(0, "tool_calls"), (1, "text")]
+        # Archive uses this Stop sweep, ignoring any keep-shells preference.
+        await stop_all_background_tasks(session_id, user_stop=True, respect_shell_preference=False)
+        assert not task.is_running()
+        assert task_registry.get_active(session_id) == []
+    finally:
+        # Reap the real shell even on assertion failure; never wait 120s.
+        await bt.stop_session_background_shells(session_id, require_stopped=True)
+    assert task is not None and task.process.returncode is not None
+    assert task.task_id not in bt._background_tasks
+    assert task_registry.get_active(session_id) == []
+
+
 def test_question_answer_continues_the_scenario_that_asked(fake: FakeAI) -> None:
     ask = [{"type": "function", "function": {"name": "AskUser", "parameters": {}}}]
     prompt = {"role": "user", "content": "pick one [script:ask-question]"}
@@ -163,12 +235,17 @@ def test_question_answer_continues_the_scenario_that_asked(fake: FakeAI) -> None
     assert len(json.loads(two[0]["arguments"])["questions"]) == 2
 
 
-def test_code_mode_requests_get_one_python_cell(fake: FakeAI) -> None:
-    calls = _chat_calls(_chat(fake, [{"role": "user", "content": "[script:tool-bash]"}], CODE_MODE))
+@pytest.mark.parametrize("scenario,tool,arguments", [
+    ("tool-bash", "Bash", "command='echo hello from fake ai'"),
+    ("tool-background-stream", "Monitor", "command='sleep 120', wait_seconds=0"),
+])
+def test_code_mode_requests_get_one_python_cell(fake: FakeAI, scenario, tool, arguments) -> None:
+    prompt = {"role": "user", "content": f"[script:{scenario} tps=0]"}
+    calls = _chat_calls(_chat(fake, [prompt], CODE_MODE))
     assert [call["name"] for call in calls] == ["run_python"]
     code = json.loads(calls[0]["arguments"])["code"]
-    assert "from tools.Bash import Bash" in code
-    assert "Bash(command='echo hello from fake ai')" in code
+    assert f"from tools.{tool} import {tool}" in code
+    assert f"{tool}({arguments})" in code
     compile(code, "<cell>", "exec")
     assert _log(fake)[0]["code_mode"] is True
 
@@ -245,7 +322,8 @@ def test_timing_knobs_come_from_tag_scenario_then_globals(tmp_path: Path) -> Non
 
 def test_shipped_scenarios_all_load() -> None:
     assert set(Scenarios(SCENARIOS_DIR).load()) >= {
-        "default", "long", "slow", "tool-bash", "tool-multi", "error-500", "rate-limit-429", "cut"}
+        "default", "long", "slow", "tool-bash", "tool-multi", "tool-background-stream",
+        "error-500", "rate-limit-429", "cut"}
 
 
 @pytest.mark.parametrize("data,message", [

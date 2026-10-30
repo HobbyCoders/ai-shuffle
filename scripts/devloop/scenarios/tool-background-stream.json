@@ -1,0 +1,21 @@
+{
+  "description": "Starts a standalone, session-owned Monitor shell for 120 seconds, then streams a slow reply while it is still running. For switching chats with a real running-tasks list. Stop or archive the session to reap the shell.",
+  "tps": 6,
+  "steps": [
+    {
+      "text": "Starting it.",
+      "tool_calls": [
+        {
+          "name": "Monitor",
+          "input": {
+            "command": "sleep 120",
+            "wait_seconds": 0
+          }
+        }
+      ]
+    },
+    {
+      "text": "The background task is running while this reply arrives a few words at a time. You can switch chats now and watch the running task stay with this conversation while another transcript loads. Come back before the task finishes to see both the task and the rest of this streaming reply. Stop or archive this session when you are done to clean up the shell."
+    }
+  ]
+}
