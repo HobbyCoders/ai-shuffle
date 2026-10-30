@@ -32,6 +32,17 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 LISTEN_CHANNEL = "session_events"
+# A replicated row can replace an already-seen seq, including seq 1 (the epoch).
+# Preserve this identity-check hint over ordinary max-seq hints in both buffers.
+LOG_RECHECK = object()
+
+
+def _merge_tick(previous, incoming):
+    if previous is LOG_RECHECK or incoming is LOG_RECHECK:
+        return LOG_RECHECK
+    if isinstance(previous, int) and isinstance(incoming, int):
+        return max(previous, incoming)
+    return previous if not isinstance(previous, int) else incoming
 
 
 class _TickQueue(asyncio.Queue):
@@ -48,10 +59,7 @@ class _TickQueue(asyncio.Queue):
         if self.full():
             previous = super().get_nowait()
             self.task_done()
-            if isinstance(previous, int) and isinstance(item, int):
-                item = max(previous, item)
-            elif not isinstance(previous, int):
-                item = previous
+            item = _merge_tick(previous, item)
         super().put_nowait(item)
 
 
@@ -63,7 +71,7 @@ class EventGateway:
         self._subscribers: Dict[str, Set[Tuple[object, object]]] = {}
         # At most ONE scheduled callback per subscriber, even if the asyncio
         # loop is stalled while the LISTEN thread receives a burst of notifies.
-        self._pending_ticks: dict[object, int] = {}
+        self._pending_ticks: dict[object, object] = {}
         # All-sessions listeners: fn(session_id) invoked on every notify tick.
         self._global_listeners: List[Callable[[str], None]] = []
         self._message_listeners: dict[str, list[Callable[[dict], None]]] = {}
@@ -158,7 +166,7 @@ class EventGateway:
     # ------------------------------------------------------------------
     # Dispatch
     # ------------------------------------------------------------------
-    def _dispatch(self, session_id: str, max_seq: int) -> None:
+    def _dispatch(self, session_id: str, max_seq: object) -> None:
         """Push ``max_seq`` to every queue registered for ``session_id``.
 
         Tolerates a closed loop (``RuntimeError``) by dropping that subscriber.
@@ -170,7 +178,7 @@ class EventGateway:
                 if (loop, queue) not in self._subscribers.get(session_id, ()):
                     continue
                 if queue in self._pending_ticks:
-                    self._pending_ticks[queue] = max(self._pending_ticks[queue], max_seq)
+                    self._pending_ticks[queue] = _merge_tick(self._pending_ticks[queue], max_seq)
                     continue
                 self._pending_ticks[queue] = max_seq
             try:
@@ -308,7 +316,7 @@ class EventGateway:
                     "event gateway: global listener failed for %s",
                     session_id, exc_info=True,
                 )
-        self._dispatch(session_id, max_seq)
+        self._dispatch(session_id, LOG_RECHECK if data.get("recheck_log") is True else max_seq)
 
     def _sleep(self, seconds: float) -> None:
         # Interruptible backoff sleep: ``stop()`` sets ``_stop_event`` to wake

@@ -2682,6 +2682,10 @@
     "target_pr": 6,
     "base_settings": true
   },
+  "VITE_PERF_KEEP_MIRROR_CACHE": {
+    "kind": "internal",
+    "reason": "Temporary default-on performance kill switch for preserving the mirrored transcript and cursor through freshness; 0 restores the legacy opening replay and unmount."
+  },
   "VITE_PERF_PARALLEL_AUTH_PROBES": {
     "kind": "internal",
     "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Enable parallel auth probes startup optimization",
