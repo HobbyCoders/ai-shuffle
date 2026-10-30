@@ -65,6 +65,65 @@ async def test_unattended_cannot_save_its_own_choice_even_with_confirmation() ->
     assert result["success"] is False
 
 
+@pytest.mark.parametrize("unattended_source", ["automation", "wakeup"])
+@pytest.mark.asyncio
+async def test_pooled_interactive_server_checks_current_turn_before_writing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, unattended_source: str,
+) -> None:
+    from collections import OrderedDict
+
+    from app.core import generation_resolver as gr
+
+    monkeypatch.setattr(gr, "_TURN_CONTEXTS", OrderedDict())
+    profile_id, session_id = "generation-preferences", "generation-preferences-pooled"
+    database.create_profile(profile_id, "Generation preferences", None, {"model": "sonnet"})
+    database.create_session(session_id, profile_id)
+    profile = database.get_profile(profile_id)
+
+    def turn(source: str) -> Any:
+        options, _ = query_options.build_options_from_profile(
+            profile, session_id=session_id,
+            overrides={"cwd": str(tmp_path), "turn_source": source},
+        )
+        assert options.aih_generation_context.unattended is (source != "user")
+        gr.bind_turn_context(options)
+        return options
+
+    connected = turn("user")
+    # Retain the server built at the interactive connect, just as a pooled
+    # Claude CLI client does; never swap in the next turn's new server.
+    tool = next(t for t in connected.mcp_servers["app-config"]["instance"].tools
+                if t.name == "generationPreferences")
+
+    async def invoke(**args: Any) -> dict:
+        return json.loads((await tool.handler(args))["content"][0]["text"])
+
+    assert (await invoke(action="remember", kind="image", choice=PICK, confirm=True))["success"]
+    changed = {**PICK, "model": "different-model"}
+    turn(unattended_source)
+    # Even with confirmation (and in Bypass mode), an unattended turn may
+    # neither save a new pick, overwrite a saved one, nor forget it.
+    for args in (
+        {"action": "remember", "kind": "video", "choice": changed},
+        {"action": "remember", "kind": "image", "choice": changed},
+        {"action": "forget", "kind": "image"},
+    ):
+        result = await invoke(**args, confirm=True)
+        assert result["success"] is False
+        assert "interactive owner chat" in result["error"]
+    saved = {**PICK, "origin": "conversation"}
+    assert (await invoke(action="get"))["choices"] == {"image": saved}
+    assert choices.load(OWNER, run_migration=False)["remembered"] == {"image": saved}
+
+    turn("user")
+    assert (await invoke(action="remember", kind="image", choice=changed, confirm=True))["success"]
+    assert (await invoke(action="get"))["choices"] == {
+        "image": {**changed, "origin": "conversation"},
+    }
+    assert (await invoke(action="forget", kind="image", confirm=True))["success"]
+    assert choices.load(OWNER, run_migration=False)["remembered"] == {}
+
+
 @pytest.mark.parametrize("action", ["get", "remember", "forget", "other", None])
 def test_permission_level_requires_host_approval_for_writes(action: str | None) -> None:
     from app.core import background_permissions as permissions

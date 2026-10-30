@@ -1,11 +1,13 @@
 """Conversational controls for the owner's remembered and job generation picks."""
 
-from typing import Any
+from typing import Any, Callable
 
 from app.mcp.config_helpers import _error, _tool_result
 
 
-def _create_generation_tools(is_admin: bool, *, writable: bool = False) -> list[Any]:
+def _create_generation_tools(
+    is_admin: bool, *, writable: bool | Callable[[], bool] = False,
+) -> list[Any]:
     from app.db.async_database import run_sync
     from app.mcp.inproc import tool
 
@@ -45,7 +47,9 @@ def _create_generation_tools(is_admin: bool, *, writable: bool = False) -> list[
             return _error("Unknown generation preference action.")
         if (kind is not None or action != "get") and kind not in ("image", "video", "audio", "3d"):
             return _error("Choose image, video, audio or 3d.")
-        if action != "get" and not writable:
+        # A pooled CLI keeps this handler across turns. Resolve the host's
+        # write gate on each write, never when the server connects.
+        if action != "get" and not (writable() if callable(writable) else writable):
             return _error("Generation picks can only be changed in an interactive owner chat.")
         if action != "get" and args.get("confirm") is not True:
             return _error(

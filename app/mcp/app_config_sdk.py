@@ -26,7 +26,7 @@ Module layout (split for maintainability):
 """
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from app.mcp.config_automations import _create_automation_tools
 from app.mcp.config_connectors import _create_connector_tools
@@ -224,7 +224,7 @@ def collect_app_config_tools(
     is_admin: bool = False,
     project_id: str | None = None,
     project_dir: str | None = None,
-    *, generation_preferences_writable: bool = False,
+    *, generation_preferences_writable: bool | Callable[[], bool] = False,
 ) -> list:
     """The raw ``@tool`` objects of the app-config surface, no server around them.
 
@@ -232,6 +232,8 @@ def collect_app_config_tools(
     SDK MCP server) and the voice bridge, which declares the same tools on the
     OpenAI Realtime sideband and calls their handlers in-process. Returns an
     empty list when the SDK is unavailable — the caller degrades, never fails.
+    ``generation_preferences_writable`` may be a host callback evaluated on
+    each write, so pooled tool servers follow the current turn's context.
     """
     try:
         import app.mcp.inproc  # noqa: F401 — the tool factories need @tool
@@ -256,7 +258,7 @@ def create_app_config_server(
     is_admin: bool = False,
     project_id: str | None = None,
     project_dir: str | None = None,
-    *, generation_preferences_writable: bool = False,
+    *, generation_preferences_writable: bool | Callable[[], bool] = False,
 ) -> Any | None:
     """
     Create the app-config SDK MCP server with all configuration tools.
