@@ -1,6 +1,7 @@
 import { Editor } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
 import Placeholder from '@tiptap/extension-placeholder';
+import type { EditorView } from '@tiptap/pm/view';
 import { FileChipNode } from './FileChipNode';
 import { isLargePaste } from './large-paste';
 
@@ -42,6 +43,22 @@ export function setEditorPlaceholder(editor: Editor, text: string): void {
 	if (!box || box.text === text) return;
 	box.text = text;
 	editor.view.dispatch(editor.state.tr);
+}
+
+/**
+ * Insert text as plain text in one transaction and keep the caret in view.
+ * Line breaks stay `\n` in the paragraph (the editor renders them pre-wrap).
+ */
+export function insertPlainText(view: EditorView, text: string): void {
+	view.dispatch(view.state.tr.insertText(text.replace(/\r\n?/g, '\n')).scrollIntoView());
+}
+
+/** The text of a non-composing `beforeinput` that inserts more than one line, else null. */
+export function multiLineTextInput(event: InputEvent): string | null {
+	if (event.isComposing) return null;
+	if (event.inputType !== 'insertText' && event.inputType !== 'insertReplacementText') return null;
+	const text = event.data ?? event.dataTransfer?.getData('text/plain') ?? '';
+	return /[\r\n]/.test(text) ? text : null;
 }
 
 export interface EditorOptions {
@@ -118,14 +135,27 @@ export function createChatEditor(options: EditorOptions): Editor {
 			// Handle paste to strip formatting
 			handlePaste: (view, event) => {
 				const text = event.clipboardData?.getData('text/plain');
+				if (!text) return false;
 				const plain = consumePlainPaste?.() ?? false;
-				if (text && !plain && onLargePaste && isLargePaste(text) && onLargePaste(text)) return true;
-				if (text) {
-					// Insert as plain text
-					view.dispatch(view.state.tr.insertText(text));
+				if (!plain && onLargePaste && isLargePaste(text) && onLargePaste(text)) return true;
+				insertPlainText(view, text);
+				return true;
+			},
+			handleDOMEvents: {
+				// Multi-line text that arrives as typed input rather than a paste
+				// event: an IME commit (Gboard's clipboard chip), dictation or an
+				// automation fill. Chrome's native editing would apply it as one
+				// paragraph split per line, each re-laying out the growing editor
+				// and firing its own `input` (about 1,000 for a 1 KB fill of blank
+				// lines: an 11.7 s freeze at 4x CPU, #912). Take it as one plain-text
+				// transaction instead, under the same large-text rule as a paste.
+				beforeinput: (view, event) => {
+					const text = multiLineTextInput(event);
+					if (text === null || view.composing || !event.cancelable) return false;
+					event.preventDefault();
+					if (!(onLargePaste && isLargePaste(text) && onLargePaste(text))) insertPlainText(view, text);
 					return true;
 				}
-				return false;
 			}
 		},
 		onUpdate: () => {
