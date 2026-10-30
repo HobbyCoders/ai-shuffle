@@ -17,9 +17,14 @@ def _job_object():
     # Reuse Fluid's stdlib-only job helper without importing its tool registry
     # (or application configuration) in this lightweight launch boundary.
     package = importlib.util.find_spec("fluid")
-    if package is None or package.origin is None:
+    if package is None:
         raise OSError("projection_parent_ownership_failed")
-    source = Path(package.origin).parent / "tools/job_object.py"
+    if package.origin is not None:
+        source = Path(package.origin).parent / "tools/job_object.py"
+    else:
+        # Root-only source invocations see the outer fluid/ namespace, not the
+        # inner package. Do not import that namespace or the tool registry.
+        source = Path(__file__).resolve().parents[3] / "fluid/fluid/tools/job_object.py"
     spec = importlib.util.spec_from_file_location("_projection_windows_job", source)
     if spec is None or spec.loader is None:
         raise OSError("projection_parent_ownership_failed")

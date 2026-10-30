@@ -235,3 +235,19 @@ async def test_windows_job_failure_kills_the_unowned_child(monkeypatch):
     with pytest.raises(OSError, match="projection_parent_ownership_failed"):
         await child_process.launch(sys.executable, "-I", "-c", "import time; time.sleep(30)", limit=4096)
     assert pids and not alive(pids[0])
+
+
+def test_job_helper_also_resolves_root_only_source_namespace(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.core.transcript_views import child_process
+
+    child_process._job_object.cache_clear()
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(child_process.importlib.util, "find_spec", lambda name: SimpleNamespace(origin=None))
+            module = child_process._job_object()
+        assert Path(module.__file__) == ROOT / "fluid/fluid/tools/job_object.py"
+        assert callable(module.assign_kill_on_close_job)
+    finally:
+        child_process._job_object.cache_clear()
