@@ -1,6 +1,6 @@
-/** Fixed sheets publish coverage only on open/close/resize (and the end of
- * their opening animation). Transcript repricing reads cached bounds, never
- * polls geometry per frame/token. Svelte action cleanup owns registration. */
+/** Fixed sheets publish settled layout coverage only on open/close/resize.
+ * Transcript repricing reads cached bounds, never polls per frame/token.
+ * Svelte action cleanup owns registration. */
 type Bounds = Pick<DOMRect, 'top' | 'bottom' | 'left' | 'right'>;
 const overlays = new Map<HTMLElement, Bounds>();
 const beforeCover = new Set<() => void>();
@@ -16,7 +16,14 @@ export function obscuresTranscript(node: HTMLElement, enabled = true) {
 	let observer: ResizeObserver | null = null;
 	function measure(event?: Event) {
 		if (!registered || !node.isConnected || (event && event.type !== 'resize' && event.target !== node)) return;
-		overlays.set(node, node.getBoundingClientRect());
+		// Fixed sheets animate with transform/translate, which never resizes
+		// their layout box. Reserve the final open coverage from the first
+		// frame, conservatively, instead of caching an offscreen animated rect.
+		// All viewport-fixed publishers have no positioned offset parent.
+		if (getComputedStyle(node).position === 'fixed' && node.offsetParent === null) {
+			const top = node.offsetTop, left = node.offsetLeft;
+			overlays.set(node, { top, left, bottom: top + node.offsetHeight, right: left + node.offsetWidth });
+		} else overlays.set(node, node.getBoundingClientRect());
 	}
 	function update(next: boolean) {
 		if (registered === next) return;
@@ -27,17 +34,11 @@ export function obscuresTranscript(node: HTMLElement, enabled = true) {
 			observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => measure());
 			observer?.observe(node);
 			window.addEventListener('resize', measure);
-			// Transforms do not resize the border box. Publish its final position
-			// once, not on every frame of a sheet's opening transition.
-			node.addEventListener('animationend', measure);
-			node.addEventListener('transitionend', measure);
 		} else {
 			registered = false;
 			overlays.delete(node);
 			observer?.disconnect(); observer = null;
 			window.removeEventListener('resize', measure);
-			node.removeEventListener('animationend', measure);
-			node.removeEventListener('transitionend', measure);
 		}
 	}
 	update(enabled);

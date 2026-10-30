@@ -1,5 +1,9 @@
 // The sole relaxed reading settle is a phone oversize-singleton transition
 // at scroll origin. All entries are counted, including individually small CLS.
+/** @param {{ phone: boolean, before: { top: number }, after: { rows: number, maxDrift: number },
+ * settle: { total: number, entries: Array<{ value: number, transition: number | null, scrollTop: number,
+ * singleton: boolean, virtualizedOnly: boolean }>, transitions: Array<{ id: number, fromRows: number,
+ * toRows: number, reader: boolean, scrollTop: number }> } }} sample */
 export function permitsOversizeOriginSettle({ phone, before, after, settle }) {
 	if (!phone || after.rows !== 1 || !(after.maxDrift <= Math.min(20, Math.max(1, before.top))) ||
 		settle.transitions.length !== 1 || settle.entries.length !== 1) return false;
