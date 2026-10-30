@@ -11,7 +11,7 @@
 	// Whether each session was following the bottom (true) or the reader had
 	// scrolled up (false) when it was last on screen.
 	const autoScrollCache = new Map<string, boolean>();
-	const mountedRangeCache = new Map<string, { start: number; end: number }>();
+	const mountedRangeCache = new Map<string, { start: number; end: number; leadingGap?: number }>();
 </script>
 
 <script lang="ts">
@@ -812,6 +812,8 @@
 		const boundaryIndex = preserveAnchor && !anchor
 			? boundaryAtStart ? next.start : next.end <= mountedStart ? next.end - 1 : null
 			: null;
+		const evictsLeading = next.start > mountedStart;
+		const shiftSessionKey = windowSessionKey;
 		const version = ++windowShiftVersion;
 		windowShifting = true;
 		mountedRange = next;
@@ -847,8 +849,11 @@
 					// Reading preservation (not explicit paging) keeps a dropped
 					// leading row's space instead of clamping at scroll origin.
 					const shortfall = -(container.scrollTop + delta + roundingError);
-					if (keepLeadingSpace && anchor && next.start > 0 && shortfall >= 0.5) {
+					if (keepLeadingSpace && evictsLeading && anchor && shortfall >= 0.5 && shiftSessionKey === windowSessionKey) {
 						leadingGap = shortfall;
+						// Saved with the range so a chat switch-back restores the same
+						// geometry its cached scrollTop was measured against.
+						if (shiftSessionKey) mountedRangeCache.set(shiftSessionKey, { ...next, leadingGap: shortfall });
 						await tick();
 						if (version !== windowShiftVersion || container !== containerRef) return;
 						delta = -container.scrollTop - roundingError;
@@ -889,7 +894,7 @@
 		const streaming = $activeSession.isStreaming;
 		untrack(() => {
 			const isNewSession = sessionKey !== windowSessionKey;
-			if (isNewSession) readingTranscriptKey = null;
+			if (isNewSession) { readingTranscriptKey = null; leadingGap = 0; }
 			const saved = isNewSession ? mountedRangeCache.get(sessionKey) : undefined;
 			windowSessionKey = sessionKey;
 			transcriptWindow.onStreamingChange(streaming);
@@ -904,6 +909,7 @@
 			}
 			const reading = !isNewSession && !shouldAutoScroll;
 			applyMountedRange(next, reading, reading);
+			if (isNewSession && saved?.leadingGap && next.start === saved.start && next.end === saved.end) leadingGap = saved.leadingGap;
 		});
 	});
 	let currentTurnIndex = $state(0);
