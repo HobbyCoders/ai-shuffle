@@ -1,4 +1,5 @@
 """Host-owned coordination and sidebar management for top-level sessions."""
+from fluid.context.peer import KIND_HINT, MESSAGE_KINDS
 from fluid.tools.registry import ToolSpec, ToolOutcome
 
 _COMMON = (
@@ -144,7 +145,8 @@ SPECS = (
         "A busy peer receives queued work at its next eligible normal steering boundary, "
         "as peer-authored context, never authoritative user input. In-flight tools are not "
         "interrupted and no parallel recipient turn is started. Without eligible steering "
-        "the normal queued-turn drain is used; an idle peer can wake. "
+        "the normal queued-turn drain is used; an idle peer wakes, but kind=progress "
+        "rides its next wake. "
         "Stopped, archived, hidden, subagent and foreign-owner sessions are refused. "
         "A chat on another of the owner's workers is relayed there, and that worker checks it "
         "again; only the owner's chats can message across workers, and a chat whose worker is "
@@ -154,8 +156,9 @@ SPECS = (
         "Use a stable request_id for this message and reuse it on retries to avoid duplicates. "
         + _COMMON), input_schema={"type": "object", "properties": {
             "session_id": {"type": "string"}, "message": {"type": "string", "maxLength": 8000},
-            "request_id": {"type": "string", "maxLength": 120}},
-            "required": ["session_id", "message", "request_id"], "additionalProperties": False},
+            "request_id": {"type": "string", "maxLength": 120},
+            "kind": {"type": "string", "enum": list(MESSAGE_KINDS), "description": KIND_HINT}},
+            "required": ["session_id", "message", "request_id", "kind"], "additionalProperties": False},
         risk="write", requires_extra=("session_orchestration",)), _handler("message")),
     (start_session_spec(), _handler("start")),
     _management_tool("SettleSession", "settle",

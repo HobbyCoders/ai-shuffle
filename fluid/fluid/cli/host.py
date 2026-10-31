@@ -649,12 +649,26 @@ class CliHost:
             return ToolOutcome(
                 text=error or f"could not resolve {to!r}", is_error=True,
             )
+        from fluid.context.peer import PROGRESS, held_text, message_kind
+
+        try:
+            kind = message_kind(input.get("kind"), bool(input.get("urgent")))
+        except ValueError as exc:
+            return ToolOutcome(text=str(exc), is_error=True)
         message = AgentMessage(
             text=str(input.get("message") or ""), sender=self.identity,
             provenance="parent" if (target.worker is not None and any(
                 target.worker is w for w in self.workers.values())) else "peer",
-            urgent=bool(input.get("urgent")),
+            urgent=bool(input.get("urgent")), kind=kind,
         )
+        if target.engine is None and kind == PROGRESS:
+            # Resuming a finished worker costs a whole run; a status note
+            # never earns one. Nothing is waiting to read it later either.
+            return ToolOutcome(
+                text=(f"Not sent: {target.name} has finished, and a progress note does not "
+                      "resume it. Send result, needs_decision or alert if it must act."),
+                is_error=True,
+            )
         if target.engine is None:
             assert target.worker is not None  # _resolve_target's invariant
             worker, error = await self._resume_worker(target.worker, ctx, message)
@@ -677,6 +691,8 @@ class CliHost:
             return ToolOutcome(
                 text=f"could not deliver to {target.name}: {exc}", is_error=True,
             )
+        if getattr(target.engine, "last_held_message", None) is message:
+            return ToolOutcome(text=held_text(target.name))
         return ToolOutcome(
             text=(
                 f"Delivered to {target.name}. It picks the message up at its "

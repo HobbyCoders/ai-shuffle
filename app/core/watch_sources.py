@@ -248,8 +248,13 @@ def session_poll(watch: dict[str, Any]) -> tuple[list[tuple[str, dict[str, Any]]
                         add(event["turn_id"])
                 elif state == "waiting_on_owner" and event["event_type"] == "interaction.requested":
                     add(payload.get("interaction_id", event["id"]))
+            # A progress note moved to the held store (#960) is not a turn the
+            # session finished; a parked session holding one is still parked.
             c.execute(
-                "SELECT * FROM turns WHERE session_id=%s ORDER BY position DESC LIMIT 1", (sid,)
+                "SELECT * FROM turns WHERE session_id=%s "
+                "AND NOT (state='aborted' AND COALESCE(stop_reason, '')='held_progress') "
+                "ORDER BY position DESC LIMIT 1",
+                (sid,),
             )
             turn = c.fetchone()
             if not turn:

@@ -51,6 +51,10 @@ def test_stop_latch_and_durable_stop_are_honored(assistant_fixture):
     turn = turns.enqueue_turn(sid, "user", prompt="run")
     turns.settle_turn(turn["id"], "aborted", stop_reason="user_stopped")
     assert service.session_stopped(sid)
+    # A held progress note after the Stop never ran and does not mask it.
+    note = turns.enqueue_turn(sid, "agent_message", prompt="tests 40/80")
+    turns.remove_queued_turn(note["id"], stop_reason="held_progress")
+    assert service.session_stopped(sid)
     turns.enqueue_turn(sid, "user", prompt="user continued")
     assert not service.session_stopped(sid)
 

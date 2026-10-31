@@ -334,6 +334,15 @@ async def test_session_source_real_queue_wait_and_finish(owner: dict[str, Any]) 
         owner, source={"kind": "session", "state": "finished", "session_id": owner["id"]}
     )
     assert len((await sources.poll(finished))[0]) == 1
+    # A parked session holding a progress note (#960) has not finished.
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET state='parked' WHERE id=%s", (tid,))
+    note = turns.enqueue_turn(owner["id"], "agent_message", prompt="tests 40/80")
+    turns.remove_queued_turn(note["id"], stop_reason="held_progress")
+    parked = make_watch(
+        owner, source={"kind": "session", "state": "finished", "session_id": owner["id"]}
+    )
+    assert (await sources.poll(parked))[0] == []
     with get_db() as conn:
         conn.cursor().execute("UPDATE turns SET state='running' WHERE id=%s", (tid,))
         conn.cursor().execute(

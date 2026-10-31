@@ -525,7 +525,8 @@ async def test_swarm_alias_survives_roster_reconstruction(agents, monkeypatch, a
     result = await send_message.handler({"to": alias, "message": "Continue the review"},
         ToolCtx(extra={"agent_message": agent_messaging.make_message(lambda: sid)}))
     assert not result.is_error, result.text
-    enqueue.assert_awaited_once_with(worker_id, sid, "Continue the review", reply_to=sid)
+    enqueue.assert_awaited_once_with(worker_id, sid, "Continue the review", reply_to=sid,
+                                    kind="alert")
 
 
 async def _finish_resumed_worker(

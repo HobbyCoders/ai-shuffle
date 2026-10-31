@@ -17,6 +17,7 @@ double-firing.
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from typing import Any, Dict, List, Optional
 
 from app.db.base import get_db, get_cursor, rows_to_list
@@ -196,6 +197,7 @@ def merge_session_wakeup(
     reason: Optional[str] = None,
     model: Optional[str] = None,
     instance_id: Optional[str] = None,
+    _conn: Any = None,
 ) -> tuple[Dict[str, Any], List[str]]:
     """Fold a session's pending wakeups of one ``source`` into one new row.
 
@@ -206,9 +208,10 @@ def merge_session_wakeup(
     timer claimed before the delete is not folded in, so its text is never
     written twice; no crash between the delete and the insert can lose the
     old text. Returns the new row and the ids of the rows it replaced.
+    ``_conn`` joins a caller's transaction (a queued row moved into the store).
     """
     _ph = ph()
-    with get_db() as conn:
+    with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = get_cursor(conn)
         cursor.execute(
             f"SELECT id, prompt, fire_at FROM pending_wakeups "
@@ -249,6 +252,20 @@ def merge_session_wakeup(
         "fire_at": float(fire_at),
     }
     return row, [str(r["id"]) for r in kept]
+
+
+def sessions_with_wakeup_text(source: str, needle: str) -> List[str]:
+    """Sessions holding a ``source`` row whose prompt contains ``needle``."""
+    _ph = ph()
+    escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"SELECT DISTINCT session_id FROM pending_wakeups WHERE source = {_ph} "
+            f"AND prompt LIKE {_ph} ESCAPE '\\'",
+            (source, f"%{escaped}%"),
+        )
+        return [r["session_id"] for r in rows_to_list(list(cursor.fetchall() or []))]
 
 
 def get_session_wakeups(session_id: str, source: Optional[str] = None) -> List[Dict[str, Any]]:

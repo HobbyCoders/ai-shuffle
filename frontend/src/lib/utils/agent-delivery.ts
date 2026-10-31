@@ -9,10 +9,17 @@ export interface AgentDelivery { sender: string; content: string; senderLabel?: 
 const ENVELOPE = String.raw`\[agent\x20message from=(['"])(.*?)\1 — (?:host-verified (?:parent assignment update|same-owner session delegation); )?a message from another (?:agent(?: in this session)?|top-level session), delivered once at this position; not part of the tool output, and not a new message when re-read from history\]\r?\n([\s\S]*?)\r?\n\[\/agent\x20message\]`;
 const SINGLE_ENVELOPE = new RegExp(`^${ENVELOPE}$`);
 const NEXT_ENVELOPE = new RegExp(ENVELOPE, 'y');
-// The reminder that carries messages held while the receiver was parked
-// (app/core/turn_scheduler.py::_held_peer_block, fluid NativeLoop._queued_peer_reminder).
+// The reminder that carries messages held for the receiver's next wake
+// (app/core/turn_scheduler.py::_held_peer_block, fluid.context.peer.held_notes_block).
 const HELD_OPEN = '<system-reminder>';
-const HELD_HEADER = 'Messages from other agents that arrived while this session was parked';
+// Before #960 the reminder held whole envelopes; transcripts keep that form.
+const LEGACY_HELD_HEADER = 'Messages from other agents that arrived while this session was parked';
+// Since #960: one line per message under one of these headers.
+const COMPACT_HELD_HEADERS = [
+	'Progress notes from other agents, held while this session was not working',
+	"Messages from other agents held for this session's next wake",
+];
+const COMPACT_LINE = /^- from (['"])(.*?)\1(?: \(host-verified (?:parent|same-owner session)\))?: (.*)$/;
 const HELD_CLOSE = '</system-reminder>';
 
 function skipWhitespace(text: string, start: number): number {
@@ -53,6 +60,18 @@ function envelopesOnly(text: string): AgentDelivery[] | null {
 	return found;
 }
 
+/** One `- from 'sender': text` line per message and nothing else, else null. */
+function compactOnly(text: string): AgentDelivery[] | null {
+	const found: AgentDelivery[] = [];
+	for (const line of text.split(/\r?\n/)) {
+		if (!line.trim()) continue;
+		const match = line.match(COMPACT_LINE);
+		if (!match) return null;
+		found.push({ sender: match[2], content: match[3] });
+	}
+	return found.length ? found : null;
+}
+
 /**
  * The peer messages in a delivered prompt that carries held messages: the
  * parked-delivery reminder (one or more), optionally followed by fresh
@@ -69,14 +88,16 @@ export function heldAgentDeliveries(text: string): AgentDelivery[] | null {
 	while ((opener = text.indexOf(HELD_OPEN, search)) !== -1) {
 		search = opener + HELD_OPEN.length;
 		const header = skipWhitespace(text, search);
-		if (!text.startsWith(HELD_HEADER, header)) continue;
-		const lineEnd = text.indexOf('\n', header + HELD_HEADER.length);
+		const legacy = text.startsWith(LEGACY_HELD_HEADER, header);
+		if (!legacy && !COMPACT_HELD_HEADERS.some(h => text.startsWith(h, header))) continue;
+		const lineEnd = text.indexOf('\n', header);
 		if (lineEnd === -1) break;
 		const bodyStart = lineEnd + 1;
 		const closer = text.indexOf(HELD_CLOSE, bodyStart);
 		// Every later body starts farther right, so no later match can close.
 		if (closer === -1) break;
-		const inner = envelopesOnly(text.slice(bodyStart, closer));
+		const body = text.slice(bodyStart, closer);
+		const inner = legacy ? envelopesOnly(body) : compactOnly(body);
 		if (inner === null) return null;
 		deliveries.push(...inner);
 		outside.push(text.slice(cursor, opener), '\n');

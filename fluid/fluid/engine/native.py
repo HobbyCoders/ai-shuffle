@@ -1186,10 +1186,13 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._turn_progress_at = time.monotonic()
         self._turn_cancel_reason: str | None = None
         self._watchdog_task: asyncio.Task | None = None
-        # Pre-upgrade messages held while parked: rehydrate and deliver once
-        # with the next turn. New peer messages wake immediately instead.
+        # Progress notes held while idle or parked (and pre-upgrade held
+        # rows): rehydrated from the log and delivered once with the next turn.
         self._queued_peer_messages: list[AgentMessage] = []
         self._queued_peer_rehydrated = False
+        # The last AgentMessage submit() held rather than delivered, so a host
+        # can tell its sender "held" instead of "delivered".
+        self.last_held_message: AgentMessage | None = None
         # The model the last ProfileResolved event was emitted for.
         self._profile_resolved_for: str | None = None
         # Runtime-facts block bookkeeping (see _environment_reminder): the
@@ -1725,11 +1728,18 @@ class NativeLoop(BackgroundLifecycleMixin):
                     raise RuntimeError("receiver is finishing its turn; retry the peer message")
                 self._pending_steers.append(replace(op, text=text))
             else:
-                # Ordinary peer traffic wakes parked receivers too. A host
-                # that owns scheduling gets an explicit refusal and keeps the
-                # message on its durable queue instead of an engine-only hold.
+                # Results, questions and alerts wake an idle or parked
+                # receiver. A host that owns scheduling gets an explicit
+                # refusal and keeps the message on its durable queue (and holds
+                # progress there itself) instead of an engine-only hold.
                 if not op.wake:
                     raise RuntimeError("no turn is running; peer message was not delivered")
+                if op.kind == "progress" and not op.urgent:
+                    # Information only: it rides the next turn, whatever
+                    # starts it, instead of paying a model call now.
+                    await self._hold_peer_message(replace(op, text=text))
+                    self.last_held_message = op
+                    return
                 from fluid.context.peer import format_peer_message
 
                 self._interrupted.clear()
@@ -3286,17 +3296,27 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._profile_resolved_for = self.model
 
     async def _queue_if_parked(self, op: AgentMessage) -> bool:
-        """Legacy held-row writer, retained for recovery fixtures.
+        """Legacy parked-only held-row writer, retained for recovery fixtures.
 
-        New AgentMessage admissions never use this path. Pre-upgrade
-        ``SubagentEvent(kind="progress")`` rows still recover through
-        :meth:`_rehydrate_queued_peer_messages` and drain once on the next turn.
+        Admissions use :meth:`_hold_peer_message` for ``progress`` only.
+        Pre-upgrade ``SubagentEvent(kind="progress")`` rows still recover
+        through :meth:`_rehydrate_queued_peer_messages` and drain once.
         """
         async with self._background_lock:
             await self._rehydrate_background_lifecycle_unlocked()
             parked = bool(self._park_pending_ids())
         if not parked:
             return False
+        await self._hold_peer_message(op)
+        return True
+
+    async def _hold_peer_message(self, op: AgentMessage) -> None:
+        """Hold one peer message for the next turn, durably.
+
+        It is persisted as a ``SubagentEvent(kind="progress")`` so a host that
+        evicts the idle engine and rebuilds it for the next turn still
+        delivers it (see :meth:`_rehydrate_queued_peer_messages`).
+        """
         meta = await self._ensure_session()
         # Read the log first: once this message is in it, a later first read
         # would find it there as well as in memory and deliver it twice.
@@ -3310,7 +3330,6 @@ class NativeLoop(BackgroundLifecycleMixin):
         # The event's seq is the message's id: the in-memory copy and the one
         # a rebuilt engine reads back from the log share it.
         self._queued_peer_messages.append(replace(op, id=_held_peer_id(event.seq)))
-        return True
 
     async def _rehydrate_queued_peer_messages(self, sid: str) -> None:
         """Recover peer messages queued while parked from the event log (once).
@@ -3360,18 +3379,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         queued = unique
         if not queued:
             return None
-        from fluid.context.peer import format_peer_message
+        from fluid.context.peer import held_notes_block
 
-        parts = [
-            "<system-reminder>",
-            "Messages from other agents that arrived while this session was "
-            "parked (they were not delivered separately; a subagent's final "
-            "report is the completion below, if any):",
-        ]
-        for message in queued:
-            parts.append(format_peer_message(message.sender, message.text, message.provenance).strip())
-        parts.append("</system-reminder>")
-        return "\n\n".join(parts)
+        return held_notes_block([(m.sender, m.text, m.provenance) for m in queued])
 
     def _deferred_catalog_reminder(self) -> str | None:
         """Announce known-but-unloaded tools, once per tool (name + one-liner).
