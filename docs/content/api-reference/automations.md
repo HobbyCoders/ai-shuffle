@@ -73,6 +73,7 @@ curl -X POST http://localhost:8000/api/v1/automations \
 | `profile_id` | string | Yes | Agent to run (an agent id from `GET /api/v1/agents`) |
 | `model` | string | No | Model every run uses: a Claude model such as `sonnet`, or `prov:<providerId>:<modelId>` for a provider model. Omit to use the app default |
 | `provider_id` | string | No | Provider for a bare provider model id in `model` (`"model": "gpt-5.6", "provider_id": "openai"`). Omit for Claude |
+| `permission_mode` | string | No | Permission mode every run starts in: `default` (Ask), `acceptEdits`, `auto` or `bypassPermissions`. Omit for `bypassPermissions`. See [Permission mode](#permission-mode) |
 | `project_id` | string | No | Project context |
 | `output_config` | object | No | Where to send results |
 | `max_cost_per_run` | number | No | Expected USD cost per run. Checked after the run: a costlier run is logged, not stopped |
@@ -84,7 +85,7 @@ curl -X POST http://localhost:8000/api/v1/automations \
 | `requires_approval` | boolean | No | Require manual approval |
 | `enabled` | boolean | No | Enable on create (default: false) |
 
-Send `trigger_type` or `triggers`; one of them is required. Returns `201` with the automation. Returns `400` when there is no trigger, an interval is under 60 seconds, the agent or project does not exist, or the model is not available (unknown or disabled provider, a model that provider does not list, or a bare id that is not a Claude model), and `422` for an unknown trigger type or a field out of range (`max_turns` below 1, `timeout_seconds` below 10).
+Send `trigger_type` or `triggers`; one of them is required. Returns `201` with the automation. Returns `400` when there is no trigger, an interval is under 60 seconds, the agent or project does not exist, `permission_mode` is not one of the modes above, or the model is not available (unknown or disabled provider, a model that provider does not list, or a bare id that is not a Claude model), and `422` for an unknown trigger type or a field out of range (`max_turns` below 1, `timeout_seconds` below 10).
 
 ### Model choice
 
@@ -114,6 +115,29 @@ If the stored model is no longer available (its provider was removed or disabled
   "model_error": null
 }
 ```
+
+### Permission mode
+
+Each run's session starts in the automation's `permission_mode`, the same modes the chat composer offers:
+
+| Value | Composer label | What a run does |
+|-------|----------------|-----------------|
+| `default` | Ask | Every tool that needs approval asks first. Nobody watches an automation, so the request times out and the tool is denied |
+| `acceptEdits` | Accept Edits | File edits run without asking; every other tool asks (and is denied) |
+| `auto` | Auto | The provider checks each tool call and approves safe ones. Only Claude Code supports it; on other providers it runs as Ask |
+| `bypassPermissions` | Bypass | Every tool runs without asking, including shell commands |
+
+A new automation runs in `bypassPermissions` unless you pick another mode, here, in the Automations form, or with the app-configuration `createAutomation` and `CronCreate` tools. Bypass keeps one safety rule: a Claude Code safety check that needs a person is still denied. The retired `plan` value is stored as `default`.
+
+An automation saved before this setting existed has `permission_mode: null` and keeps its old behaviour: runs use a mode an older version saved on the agent, else Ask. Nothing is changed for it until you pick a mode. Every automation response reports what a run would use now:
+
+| Field | Description |
+|-------|-------------|
+| `permission_mode` | The stored mode, or `null` for an automation saved before the setting existed |
+| `effective_permission_mode` | The mode a run would start in |
+| `permission_mode_source` | `automation` for its own mode, `agent` for a mode an older version saved on the agent, or `default` (Ask) |
+
+`send_prompt` action steps run in the same mode. The mode is the run session's own setting, so a retry after a usage-limit switch, an auto-continue or a wake-up in that session uses it too.
 
 ### Trigger Configurations
 
@@ -179,7 +203,7 @@ Get automation details.
 
 Update an automation. Send only the fields to change; `triggers` replaces the whole list. Returns `404` for an unknown automation and `400` for the same problems as create. A webhook trigger sent without a `secret` gets a new one, so send the current secret back to keep it.
 
-Send `"model": null` to clear the model choice so runs use the app default again. Sending the stored `model` back unchanged is accepted even if that model is no longer available, so other edits still save.
+Send `permission_mode` to change the mode; omitting it (or sending `null`) leaves the stored mode unchanged. Send `"model": null` to clear the model choice so runs use the app default again. Sending the stored `model` back unchanged is accepted even if that model is no longer available, so other edits still save.
 
 **Auth:** Owner only
 

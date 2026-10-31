@@ -19,6 +19,14 @@ from app.mcp.config_helpers import (
 
 logger = logging.getLogger(__name__)
 
+# The composer's permission modes (``session_modes.PERMISSION_MODE_STRICTNESS``).
+PERMISSION_MODE_SCHEMA: Dict[str, Any] = {
+    "type": "string",
+    "enum": ["default", "acceptEdits", "auto", "bypassPermissions"],
+    "description": "Mode each run starts in; new automations default to "
+                   "'bypassPermissions'. In 'default' (Ask) unanswered prompts are denied.",
+}
+
 
 def _describe_model(automation: Dict[str, Any]) -> Optional[str]:
     """The model its runs use, in one line; ``None`` if it cannot be read.
@@ -212,6 +220,7 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
                     "type": "string",
                     "description": "Provider for 'model' when it is a bare model id. Omit for Claude.",
                 },
+                "permission_mode": PERMISSION_MODE_SCHEMA,
                 "enabled": {
                     "type": "boolean",
                     "description": "Whether the automation is active on creation (default true). "
@@ -280,11 +289,18 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
                 except ValueError as e:
                     return str(e), None, None, None
 
-            from app.core.automation_service import normalize_model_choice
+            from app.core.automation_service import (
+                DEFAULT_AUTOMATION_PERMISSION_MODE, normalize_model_choice,
+                normalize_permission_mode_choice,
+            )
 
             try:
                 model, provider_id = normalize_model_choice(
                     args.get("model"), args.get("provider_id")
+                )
+                # Same default as the REST create and the form: Bypass.
+                permission_mode = normalize_permission_mode_choice(
+                    args.get("permission_mode"), default=DEFAULT_AUTOMATION_PERMISSION_MODE,
                 )
             except ValueError as e:
                 return str(e), None, None, None
@@ -319,6 +335,7 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
                 enabled=enabled,
                 model=model,
                 provider_id=provider_id,
+                permission_mode=permission_mode,
             )
             # The model report reads the agent and provider: same hop.
             if created:
@@ -357,6 +374,7 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
             "scheduled": scheduled,
             "max_cost_per_run": max_cost_per_run,
             "model": auto.get("model"),
+            "permission_mode": auto.get("permission_mode"),
             "runs_on": report.get("runs_on"),
         }
 
@@ -427,6 +445,7 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
                     "type": "string",
                     "description": "Provider for 'model' when it is a bare model id. Omit for Claude.",
                 },
+                "permission_mode": PERMISSION_MODE_SCHEMA,
             },
             "required": ["automation_id"],
         },
@@ -476,6 +495,16 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
                 try:
                     kwargs["model"], kwargs["provider_id"] = normalize_model_choice(
                         req_model, args.get("provider_id")
+                    )
+                except ValueError as e:
+                    return str(e), None, None
+
+            if args.get("permission_mode"):
+                from app.core.automation_service import normalize_permission_mode_choice
+
+                try:
+                    kwargs["permission_mode"] = normalize_permission_mode_choice(
+                        args["permission_mode"]
                     )
                 except ValueError as e:
                     return str(e), None, None

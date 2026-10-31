@@ -583,6 +583,9 @@ async def execute_query(
             # must NOT land in the user's Active group — only interactive,
             # user-initiated sessions are "active".
             is_active=automation_id is None,
+            # An automation step's mode is the new session's binding, so a
+            # failover retry on it resolves the same mode from the row.
+            permission_mode=(overrides or {}).get("permission_mode") if automation_id else None,
         )
         resume_id = None
 

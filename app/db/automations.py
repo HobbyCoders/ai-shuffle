@@ -45,6 +45,10 @@ class AutomationRow(TypedDict):
     # NULL = no choice; runs fall back to the agent's saved model.
     model: Optional[str]
     provider_id: Optional[str]
+    # The permission mode each run's session starts in (a composer mode).
+    # NULL = saved before the choice existed; runs use the agent's legacy
+    # saved mode, else Ask.
+    permission_mode: Optional[str]
     created_at: str
     updated_at: str
 
@@ -151,6 +155,7 @@ def create_automation(
     enabled: bool = False,
     model: Optional[str] = None,
     provider_id: Optional[str] = None,
+    permission_mode: Optional[str] = None,
 ) -> Optional[AutomationRow]:
     """Create a new automation.
 
@@ -161,7 +166,10 @@ def create_automation(
     was created disabled regardless of caller intent and silently never fired.
 
     ``model`` / ``provider_id`` are stored as given; callers validate them
-    (``automation_service.normalize_model_choice``).
+    (``automation_service.normalize_model_choice``). So is
+    ``permission_mode``: each creation path passes its validated choice or the
+    new-automation default (``automation_service.normalize_permission_mode_choice``);
+    ``None`` stores NULL, the legacy agent/Ask fallback.
     """
     now = datetime.now(timezone.utc).isoformat()
     if output_config is None:
@@ -177,15 +185,15 @@ def create_automation(
                 profile_id, project_id, output_config, max_turns, timeout_seconds,
                 max_cost_per_run, max_cost_per_day, max_cost_total, max_runs_per_day,
                 requires_approval, action_steps, triggers, is_enabled, model, provider_id,
-                created_at, updated_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                permission_mode, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (automation_id, name, description, trigger_type,
              json.dumps(trigger_config), prompt or "", profile_id, project_id,
              json.dumps(output_config), max_turns, timeout_seconds,
              max_cost_per_run, max_cost_per_day, max_cost_total, max_runs_per_day,
              requires_approval, json.dumps(action_steps) if action_steps else None,
              json.dumps(triggers), bool(enabled), model or None, provider_id or None,
-             now, now)
+             permission_mode or None, now, now)
         )
     return get_automation(automation_id)
 
@@ -273,7 +281,8 @@ def update_automation(automation_id: str, **kwargs) -> Optional[AutomationRow]:
                 "max_turns", "timeout_seconds", "max_cost_per_run", "max_cost_per_day",
                 "max_cost_total", "max_runs_per_day", "is_enabled", "status",
                 "last_run_at", "last_error", "run_count", "failure_count",
-                "total_cost_used", "requires_approval", "model", "provider_id"):
+                "total_cost_used", "requires_approval", "model", "provider_id",
+                "permission_mode"):
         if key in kwargs:
             updates.append(f"{key} = %s")
             values.append(kwargs[key])

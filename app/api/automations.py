@@ -134,6 +134,7 @@ async def create_automation_endpoint(
             enabled=data.enabled,
             model=data.model,
             provider_id=data.provider_id,
+            permission_mode=data.permission_mode,
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))

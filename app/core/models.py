@@ -1511,6 +1511,11 @@ class AutomationCreate(BaseModel):
     # model lists.
     model: Optional[str] = None
     provider_id: Optional[str] = None
+    # The permission mode each run's session starts in: one of the composer's
+    # modes (``default`` = Ask, ``acceptEdits``, ``auto``,
+    # ``bypassPermissions``). Omitted = ``bypassPermissions``: nobody watches
+    # an automation, so in Ask every tool needing approval is denied.
+    permission_mode: Optional[str] = None
 
 
 class AutomationUpdate(BaseModel):
@@ -1536,6 +1541,8 @@ class AutomationUpdate(BaseModel):
     # Same shape as on create. Send ``model: null`` to clear the choice.
     model: Optional[str] = None
     provider_id: Optional[str] = None
+    # Same values as on create. Omitted or null = unchanged.
+    permission_mode: Optional[str] = None
 
 
 class Automation(BaseModel):
@@ -1581,6 +1588,13 @@ class Automation(BaseModel):
     effective_provider_id: Optional[str] = None
     model_source: Optional[str] = None
     model_error: Optional[str] = None
+    # The stored permission mode (null on an automation saved before the
+    # choice existed) and the one a run starts in right now:
+    # ``permission_mode_source`` is ``automation`` for its own choice,
+    # ``agent`` for the agent's legacy saved mode, or ``default`` (Ask).
+    permission_mode: Optional[str] = None
+    effective_permission_mode: Optional[str] = None
+    permission_mode_source: Optional[str] = None
     # Advice returned by create/update, e.g. "use an API key for scheduled
     # runs" while Claude Code runs on the user's subscription.
     notices: List[str] = Field(default_factory=list)

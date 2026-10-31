@@ -5,7 +5,7 @@ Automation service — business logic for CRUD, budget checking, and prompt rend
 import logging
 import re
 import secrets
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from app.core import encryption
 from app.core.config import settings
@@ -545,7 +545,36 @@ def with_model_resolution(automation: Any, lookups: Optional[ModelLookups] = Non
         "effective_provider_id": resolved["provider_id"],
         "model_source": resolved["source"],
         "model_error": resolved["error"],
+        **resolve_automation_permission_mode(automation, lookups),
     }
+
+
+def resolve_automation_permission_mode(
+    automation: Mapping[str, Any], lookups: Optional[ModelLookups] = None,
+) -> Dict[str, Optional[str]]:
+    """The permission mode a run would start in right now, and why.
+
+    ``permission_mode_source`` is ``automation`` (its own choice), ``agent``
+    (a NULL row on an agent that still carries a legacy saved mode) or
+    ``default`` (a NULL row: Ask). Blocking when ``lookups`` misses.
+    """
+    if automation.get("permission_mode"):
+        return {
+            "effective_permission_mode": automation_run_permission_mode(automation, None),
+            "permission_mode_source": "automation",
+        }
+    profile_id = automation.get("profile_id")
+    profile = None
+    if profile_id:
+        profile = (lookups or ModelLookups()).profile(profile_id)
+    legacy = automation_run_permission_mode(automation, (profile or {}).get("config"))
+    if legacy:
+        try:
+            effective = normalize_permission_mode_choice(legacy) or "default"
+        except ValueError:
+            effective = "default"
+        return {"effective_permission_mode": effective, "permission_mode_source": "agent"}
+    return {"effective_permission_mode": "default", "permission_mode_source": "default"}
 
 
 _MODEL_SOURCE_PHRASES = {
@@ -622,6 +651,65 @@ def model_choice_errors_for_run(automation: Dict[str, Any]) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Permission mode
+# ---------------------------------------------------------------------------
+
+#: The mode a NEW automation's runs start in unless its creator picks another
+#: (owner decision, 2026-10-31). Nobody watches an automation, so in Ask every
+#: tool that needs approval waits on a card nobody answers and is denied. The
+#: Bypass safety rule still applies: Claude CLI safety checks that need a
+#: person are denied (``session_modes.bypass_refuses``).
+DEFAULT_AUTOMATION_PERMISSION_MODE = "bypassPermissions"
+
+
+def normalize_permission_mode_choice(value: Any, *, default: Optional[str] = None) -> Optional[str]:
+    """Validate an automation's permission mode against the session modes.
+
+    The accepted values are the composer's modes
+    (``session_modes.PERMISSION_MODE_STRICTNESS``: ``default`` = Ask,
+    ``acceptEdits``, ``auto``, ``bypassPermissions``). The retired ``plan``
+    runs as Ask everywhere, so it is stored as ``default``. ``None`` / ``""``
+    returns ``default`` (the creation default, or ``None`` = no change). Any
+    other value raises ``ValueError``.
+    """
+    from app.core.session_modes import PERMISSION_MODE_STRICTNESS
+
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    if not isinstance(value, str):
+        raise ValueError("permission_mode must be a string")
+    mode = value.strip()
+    if mode == "plan":
+        return "default"
+    if mode not in PERMISSION_MODE_STRICTNESS:
+        allowed = ", ".join(PERMISSION_MODE_STRICTNESS)
+        raise ValueError(f"Invalid permission_mode {mode!r}; use one of: {allowed}")
+    return mode
+
+
+def automation_run_permission_mode(
+    automation: Mapping[str, Any], agent_config: Optional[Mapping[str, Any]],
+) -> Optional[str]:
+    """The permission mode a run's session is created in.
+
+    The automation's own choice wins. A NULL choice (an automation saved
+    before the choice existed) keeps the fallback it always had: the agent's
+    legacy saved mode, else ``None``, which the session resolves to Ask.
+    """
+    own = automation.get("permission_mode")
+    if own:
+        try:
+            return normalize_permission_mode_choice(own) or None
+        except ValueError:
+            # A value this build does not know (e.g. synced from a newer
+            # worker) fails closed to Ask rather than guessing.
+            logger.warning("Automation %s has unknown permission_mode %r; running in Ask",
+                           automation.get("id"), own)
+            return "default"
+    return (agent_config or {}).get("permission_mode") or None
+
+
+# ---------------------------------------------------------------------------
 # CRUD operations
 # ---------------------------------------------------------------------------
 
@@ -646,8 +734,13 @@ async def create_automation(
     enabled: bool = False,
     model: Optional[str] = None,
     provider_id: Optional[str] = None,
+    permission_mode: Optional[str] = None,
 ) -> Dict:
     """Create a new automation.
+
+    ``permission_mode`` is the mode each run's session starts in (validated by
+    :func:`normalize_permission_mode_choice`); omitted, a new automation runs
+    in :data:`DEFAULT_AUTOMATION_PERMISSION_MODE` (Bypass).
 
     ``model`` / ``provider_id`` are the optional model choice for its runs (see
     :func:`normalize_model_choice`); omitted, runs use the app default (see
@@ -704,6 +797,9 @@ async def create_automation(
 
         selection, bound_provider = normalize_model_choice(model, provider_id)
         _normalize_step_models(action_steps)
+        run_mode = normalize_permission_mode_choice(
+            permission_mode, default=DEFAULT_AUTOMATION_PERMISSION_MODE,
+        )
 
         # Generate automation ID
         automation_id = f"auto-{secrets.token_hex(4)}"
@@ -730,6 +826,7 @@ async def create_automation(
             enabled=enabled,
             model=selection,
             provider_id=bound_provider,
+            permission_mode=run_mode,
         )
 
     automation_id, automation = await run_sync(_create_blocking)
@@ -810,6 +907,13 @@ async def update_automation(automation_id: str, **kwargs) -> Optional[Dict]:
             )
         if kwargs.get("action_steps") is not None:
             _normalize_step_models(kwargs["action_steps"], existing.get("action_steps"))
+        # Permission mode: a value replaces the stored one; null / empty is
+        # "no change" (a NULL row keeps its legacy fallback until the owner
+        # picks a mode).
+        if "permission_mode" in kwargs:
+            mode = normalize_permission_mode_choice(kwargs.pop("permission_mode"))
+            if mode is not None:
+                kwargs["permission_mode"] = mode
 
         # Handle triggers array — validate and encrypt webhook secrets
         trigger_changed = False

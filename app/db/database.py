@@ -935,6 +935,14 @@ def _run_column_migrations(cursor: Any) -> None:
                 cursor.execute(f"ALTER TABLE automations ADD COLUMN {column} TEXT")
                 migrations_applied.append(f"automations.{column}")
 
+    # Per-automation permission mode (the composer's mode values). NULL keeps
+    # a pre-existing automation on the fallback it already used: the agent's
+    # legacy saved mode, else Ask. Never backfilled. Additive, so no
+    # SCHEMA_VERSION bump: this guarded ADD COLUMN runs on every startup.
+    if table_exists(cursor, "automations") and not column_exists(cursor, "automations", "permission_mode"):
+        cursor.execute("ALTER TABLE automations ADD COLUMN permission_mode TEXT")
+        migrations_applied.append("automations.permission_mode")
+
     # Add triggers JSON column for multi-trigger support (v37)
     if table_exists(cursor, "automations") and not column_exists(cursor, "automations", "triggers"):
         cursor.execute("ALTER TABLE automations ADD COLUMN triggers TEXT DEFAULT NULL")
