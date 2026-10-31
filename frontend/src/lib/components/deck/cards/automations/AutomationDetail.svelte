@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { automationModelLabel, type Automation, type AutomationRun } from '$lib/api/automations';
+	import { automationModelLabel, automationPermissionLabel, type Automation, type AutomationRun } from '$lib/api/automations';
 	import { fade, slide } from 'svelte/transition';
 	import {
 		ArrowLeft,
@@ -92,6 +92,11 @@
 					data-testid="automation-model-badge"
 					title={automation.model_error || 'Model its runs use'}
 				>{automationModelLabel(automation)}</span>
+				<span
+					class="card-badge card-badge--muted"
+					data-testid="automation-permission-badge"
+					title="Permission mode its runs start in"
+				>{automationPermissionLabel(automation)}</span>
 				{#if !automation.is_enabled}
 					<span
 						class="card-badge card-badge--warning"

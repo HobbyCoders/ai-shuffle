@@ -16,8 +16,9 @@ Automations run while you are away, so use an API key for them rather than a sub
 2. Pick one or more **triggers** (see below).
 3. Write the **prompt**: what the agent should do each time.
 4. Choose the **agent**, and optionally the **model**. Without a model, runs use the same default as a new chat.
-5. Set a **budget**, where the results go, and whether each run needs your approval.
-6. Save and turn it on.
+5. Choose the **permissions** each run starts with. New automations start on **Bypass**.
+6. Set a **budget**, where the results go, and whether each run needs your approval.
+7. Save and turn it on.
 
 **Test** shows the finished prompt without running it or spending anything. **Run now** starts it straight away.
 
@@ -99,6 +100,12 @@ Two filters keep noise down:
 When a limit is already reached, the run does not start, and the automation shows why.
 
 The same automation never runs twice at once. A trigger that fires during a run is skipped.
+
+## Permissions
+
+Each run starts in one of the modes the chat composer offers: **Ask**, **Auto** (Claude Code only), **Accept Edits** or **Bypass**. Nobody watches an automation, so a tool that would ask for approval is denied when its request times out. That is why new automations start on **Bypass**: every tool runs without asking, including shell commands. Bypass still denies a Claude Code safety check that needs a person.
+
+An automation you made before this setting existed keeps working as it did: it uses a mode saved on its agent by an older version, else **Ask**. The form shows that mode; pick one to save it on the automation.
 
 ## Approval
 

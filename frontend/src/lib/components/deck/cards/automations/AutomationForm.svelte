@@ -7,8 +7,10 @@
 		type TriggerItem,
 		type ActionStep,
 		type ActionStepType,
-		type OutputType
+		type OutputType,
+		type AutomationPermissionMode
 	} from '$lib/api/automations';
+	import { accessModes, effectiveAccessMode } from '$lib/components/chat/session-scope';
 	import ModelPicker from '$lib/components/settings/ModelPicker.svelte';
 	import type { Profile } from '$lib/api/client';
 	import type { Project } from '$lib/stores/types';
@@ -24,7 +26,8 @@
 		Settings,
 		FileText,
 		DollarSign,
-		Sparkles
+		Sparkles,
+		TriangleAlert
 	} from 'lucide-svelte';
 	import AutomationTriggerConfig from './AutomationTriggerConfig.svelte';
 	import AutomationJobChoices from './AutomationJobChoices.svelte';
@@ -37,7 +40,7 @@
 	import { layout } from '$lib/stores/layout.svelte';
 	import { onMount } from 'svelte';
 	import { getClaudeAuth } from '$lib/api/claude-auth';
-	import { decodeProviderModel } from '$lib/constants/models';
+	import { decodeProviderModel, supportsAutoPermission } from '$lib/constants/models';
 	import { openSettings } from '$lib/settings/navigation.svelte';
 
 	interface Props {
@@ -61,6 +64,8 @@
 		formRequiresApproval: boolean;
 		/** Model picker value; '' = no choice of its own. */
 		formModel: string;
+		/** Permission mode each run starts in (a composer mode). */
+		formPermissionMode: AutomationPermissionMode;
 		formActionSteps: ActionStep[];
 		/** The saved automation when editing, for its fallback / unavailable model. */
 		savedAutomation?: Automation | null;
@@ -96,6 +101,7 @@
 		onUpdateFormTimeoutSeconds: (val: string) => void;
 		onUpdateFormRequiresApproval: (val: boolean) => void;
 		onUpdateFormModel: (val: string) => void;
+		onUpdateFormPermissionMode: (val: AutomationPermissionMode) => void;
 		onUpdateFormActionSteps: (val: ActionStep[]) => void;
 		onToggleSection: (id: string) => void;
 		onToggleTriggerExpand: (idx: number) => void;
@@ -122,6 +128,7 @@
 		formTimeoutSeconds,
 		formRequiresApproval,
 		formModel,
+		formPermissionMode,
 		formActionSteps,
 		savedAutomation = null,
 		generationDraft = {},
@@ -154,6 +161,7 @@
 		onUpdateFormTimeoutSeconds,
 		onUpdateFormRequiresApproval,
 		onUpdateFormModel,
+		onUpdateFormPermissionMode,
 		onUpdateFormActionSteps,
 		onToggleSection,
 		onToggleTriggerExpand,
@@ -199,6 +207,23 @@
 		}
 		return automationFallbackModel(profiles.find((p) => p.id === formProfileId)?.config);
 	});
+	// Permission modes: the composer's list. Auto is offered only for a run
+	// model that supports it, as in the composer; a stored Auto on another
+	// model reads (and runs) as Ask.
+	const runModelForAccess = $derived(
+		formModel || profiles.find((p) => p.id === formProfileId)?.config?.model || savedAutomation?.effective_model || ''
+	);
+	const accessContext = $derived({ hasProject: !!formProjectId, autoSupported: supportsAutoPermission(runModelForAccess || null) });
+	const permissionModes = $derived(accessModes(accessContext));
+	const permissionValue = $derived(effectiveAccessMode(formPermissionMode, accessContext));
+	const permissionHint = $derived.by(() => {
+		const base = permissionModes.find((m) => m.value === permissionValue)?.description ?? '';
+		const legacy = !!savedAutomation && !savedAutomation.permission_mode
+			&& savedAutomation.permission_mode_source === 'agent'
+			&& formPermissionMode === savedAutomation.effective_permission_mode;
+		return legacy ? `${base}. Saved on this agent (legacy); pick a mode to set it here.` : `${base}.`;
+	});
+
 	const modelEmptyLabel = $derived(fallbackModel.legacy ? 'Saved on agent (legacy)' : 'Worker default');
 
 	// What the Model row says under the picker; an unchanged choice that is
@@ -542,6 +567,31 @@
 				/>
 			</div>
 		</div>
+		<div class="set-row perm-row" data-testid="automation-permission-row">
+			<div class="lab"><h4 id="automation-permission-label">Permissions</h4><p>{permissionHint}</p></div>
+			<div class="ctl perm-ctl">
+				<div class="seg perm-seg" role="radiogroup" aria-labelledby="automation-permission-label">
+					{#each permissionModes as mode (mode.value)}
+						<button
+							type="button"
+							role="radio"
+							aria-checked={permissionValue === mode.value}
+							class:on={permissionValue === mode.value}
+							class:bypass={mode.value === 'bypassPermissions'}
+							title={mode.description}
+							data-mode={mode.value}
+							onclick={() => onUpdateFormPermissionMode(mode.value)}
+						>{mode.label}</button>
+					{/each}
+				</div>
+				{#if permissionValue === 'bypassPermissions'}
+					<p class="perm-warn" data-testid="automation-bypass-hint" transition:slide={{ duration: 160 }}>
+						<TriangleAlert size={13} aria-hidden="true" />
+						<span>Runs every tool, including shell commands, without asking — nobody is watching an automation.</span>
+					</p>
+				{/if}
+			</div>
+		</div>
 		<div class="set-row">
 			<div class="lab"><h4>Project</h4><p>Scope the run to a project, or leave global.</p></div>
 			<div class="ctl">
@@ -727,6 +777,73 @@
 
 	.lab .model-error {
 		color: var(--destructive);
+	}
+
+	/* ── Permission mode (the composer's modes as a segmented control) ── */
+	.perm-ctl {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
+		gap: 8px;
+		min-width: 0;
+	}
+	.perm-seg {
+		max-width: 100%;
+	}
+	.perm-seg button {
+		white-space: nowrap;
+		min-height: 34px;
+	}
+	.perm-seg button:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: -2px;
+	}
+	.perm-seg button:active {
+		filter: brightness(0.94);
+	}
+	/* Bypass selected reads as a caution, not the plain primary fill. */
+	.perm-seg button.bypass.on {
+		background: var(--warning);
+		color: var(--warning-foreground);
+	}
+	.perm-warn {
+		display: flex;
+		align-items: flex-start;
+		gap: 7px;
+		margin: 0;
+		max-width: 340px;
+		padding: 7px 10px;
+		border: 1px solid color-mix(in oklab, var(--warning) 45%, var(--border));
+		border-radius: 8px;
+		background: color-mix(in oklab, var(--warning) 10%, var(--card));
+		color: var(--foreground);
+		font-size: 12px;
+		line-height: 1.4;
+		text-align: left;
+	}
+	.perm-warn :global(svg) {
+		flex: none;
+		margin-top: 2px;
+		color: color-mix(in oklab, var(--warning) 70%, var(--foreground));
+	}
+	@media (max-width: 560px) {
+		.perm-ctl {
+			align-items: stretch;
+			width: 100%;
+		}
+		.perm-seg {
+			display: flex;
+			width: 100%;
+		}
+		.perm-seg button {
+			flex: 1 1 0;
+			justify-content: center;
+			padding: 8px 6px;
+			min-height: 44px;
+		}
+		.perm-warn {
+			max-width: none;
+		}
 	}
 
 	/* Narrow numeric inputs in budget rows */

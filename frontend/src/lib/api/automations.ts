@@ -5,6 +5,7 @@
 import { api } from './client';
 import { apiOrigin } from './runtime';
 import { encodeProviderModel, getModelLabel, getProviders } from '$lib/constants/models';
+import { accessModes, type AccessMode } from '$lib/components/chat/session-scope';
 
 // ============================================================================
 // Types
@@ -86,6 +87,8 @@ export interface AutomationCreate {
 	 */
 	model?: string | null;
 	provider_id?: string | null;
+	/** Mode each run starts in; omitted = `bypassPermissions` (see DEFAULT_AUTOMATION_PERMISSION_MODE). */
+	permission_mode?: AutomationPermissionMode;
 }
 
 export interface AutomationUpdate {
@@ -110,6 +113,84 @@ export interface AutomationUpdate {
 	/** Same shape as on create; send null to clear the choice. */
 	model?: string | null;
 	provider_id?: string | null;
+	/** Omitted = unchanged. */
+	permission_mode?: AutomationPermissionMode;
+}
+
+/** The composer's permission modes (`AccessMode` in components/chat/session-scope.ts). */
+export type AutomationPermissionMode = AccessMode['value'];
+
+/**
+ * Where a run's permission mode comes from: the automation's own choice, the
+ * agent's legacy saved mode (an automation saved before the choice existed),
+ * or `default` (no mode anywhere: Ask).
+ */
+export type AutomationPermissionSource = 'automation' | 'agent' | 'default';
+
+/**
+ * A new automation's mode unless the owner picks another. Nobody watches an
+ * automation, so in Ask every tool that needs approval waits on a card nobody
+ * answers and is denied. Mirrors DEFAULT_AUTOMATION_PERMISSION_MODE in
+ * app/core/automation_service.py.
+ */
+export const DEFAULT_AUTOMATION_PERMISSION_MODE: AutomationPermissionMode = 'bypassPermissions';
+
+const PERMISSION_MODE_VALUES: readonly AutomationPermissionMode[] = ['default', 'auto', 'acceptEdits', 'bypassPermissions'];
+
+function knownMode(value: string | null | undefined): AutomationPermissionMode | null {
+	if (value === 'plan') return 'default';
+	return PERMISSION_MODE_VALUES.includes(value as AutomationPermissionMode) ? (value as AutomationPermissionMode) : null;
+}
+
+/**
+ * The mode the form starts on. A new automation: Bypass. A saved one: its own
+ * mode, else (saved before the choice existed) the mode its runs use today —
+ * the server's report, else the agent's legacy saved mode, else Ask.
+ */
+export function formPermissionMode(
+	saved: Pick<Automation, 'permission_mode' | 'effective_permission_mode'> | null | undefined,
+	agentConfig?: { permission_mode?: string | null } | null
+): AutomationPermissionMode {
+	if (!saved) return DEFAULT_AUTOMATION_PERMISSION_MODE;
+	return (
+		knownMode(saved.permission_mode) ??
+		knownMode(saved.effective_permission_mode) ??
+		knownMode(agentConfig?.permission_mode) ??
+		'default'
+	);
+}
+
+/**
+ * The `permission_mode` a save sends. A new automation always sends its mode.
+ * An automation saved before the choice existed keeps NULL (its legacy
+ * fallback) until the owner picks a mode other than the one it shows; after
+ * that, and on every automation with a mode of its own, the form's value.
+ */
+export function permissionModePayload(
+	saved: Pick<Automation, 'permission_mode' | 'effective_permission_mode'> | null | undefined,
+	value: AutomationPermissionMode,
+	agentConfig?: { permission_mode?: string | null } | null
+): AutomationPermissionMode | undefined {
+	if (!saved || saved.permission_mode) return value;
+	return value === formPermissionMode(saved, agentConfig) ? undefined : value;
+}
+
+/** Composer label for a mode, e.g. `Bypass`; unknown values read as Ask. */
+export function permissionModeLabel(mode: string | null | undefined): string {
+	const value = knownMode(mode) ?? 'default';
+	return accessModes({ hasProject: true, autoSupported: true }).find((m) => m.value === value)?.label ?? 'Ask';
+}
+
+/**
+ * The detail view's line for the mode a run starts in, e.g. `Bypass`, or
+ * `Ask (saved on agent)` for an automation that still uses a legacy mode.
+ */
+export function automationPermissionLabel(
+	automation: Pick<Automation, 'permission_mode' | 'effective_permission_mode' | 'permission_mode_source'>
+): string {
+	if (automation.permission_mode) return permissionModeLabel(automation.permission_mode);
+	const label = permissionModeLabel(automation.effective_permission_mode);
+	return automation.permission_mode_source === 'agent' ? `${label} (saved on agent)` : label;
 }
 
 /**
@@ -157,6 +238,14 @@ export interface Automation {
 	model_source?: AutomationModelSource | null;
 	/** Set when the stored choice is no longer available; runs fail with it. */
 	model_error?: string | null;
+	/**
+	 * Stored permission mode; null on an automation saved before the choice
+	 * existed, whose runs use the agent's legacy saved mode, else Ask.
+	 */
+	permission_mode?: AutomationPermissionMode | null;
+	/** The mode a run starts in right now, and where it comes from. */
+	effective_permission_mode?: AutomationPermissionMode | null;
+	permission_mode_source?: AutomationPermissionSource | null;
 	/** Advice from create/update, e.g. use an API key for scheduled runs. */
 	notices?: string[];
 }

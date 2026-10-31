@@ -22,7 +22,8 @@
 		TriggerType,
 		OutputType,
 		ActionStep,
-		TriggerItem
+		TriggerItem,
+		AutomationPermissionMode
 	} from '$lib/api/automations';
 	import {
 		getAutomations,
@@ -36,7 +37,10 @@
 		getAutomationStats,
 		getPendingApprovals,
 		approveRun,
-		denyRun
+		denyRun,
+		DEFAULT_AUTOMATION_PERMISSION_MODE,
+		formPermissionMode as initialPermissionMode,
+		permissionModePayload
 	} from '$lib/api/automations';
 	import { api, getErrorMessage } from '$lib/api/client';
 	import type { Profile } from '$lib/api/client';
@@ -126,6 +130,9 @@
 	let formRequiresApproval = $state(false);
 	// The model picker's value; '' = no choice of its own (the app default).
 	let formModel = $state('');
+	// The mode each run starts in. A new automation starts on Bypass; a saved
+	// one on its own mode, or the mode its runs use today when it predates the choice.
+	let formPermissionMode: AutomationPermissionMode = $state(DEFAULT_AUTOMATION_PERMISSION_MODE);
 	let formActionSteps: ActionStep[] = $state([]);
 	// Pinned generation job choices, staged until Save and written after the
 	// automation itself (a new automation is created paused, so it cannot run
@@ -235,6 +242,7 @@
 		formTimeoutSeconds = '300';
 		formRequiresApproval = false;
 		formModel = '';
+		formPermissionMode = DEFAULT_AUTOMATION_PERMISSION_MODE;
 		formActionSteps = [];
 		generationDraft = {};
 		generationCommit = null;
@@ -278,6 +286,7 @@
 		formTimeoutSeconds = automation.timeout_seconds != null ? String(automation.timeout_seconds) : '';
 		formRequiresApproval = automation.requires_approval;
 		formModel = automation.model || '';
+		formPermissionMode = initialPermissionMode(automation, agentConfigFor(automation.profile_id));
 		generationDraft = {};
 		generationCommit = null;
 		formError = '';
@@ -360,8 +369,20 @@
 			max_runs_per_day: formMaxRunsPerDay ? parseInt(formMaxRunsPerDay) : null,
 			requires_approval: formRequiresApproval,
 			// null clears the choice on edit (PATCH skips undefined keys).
-			model: formModel || null
+			model: formModel || null,
+			// undefined (dropped) keeps a pre-choice automation on its legacy
+			// fallback until the owner picks a different mode.
+			permission_mode: permissionModePayload(
+				currentView === 'edit' ? selectedAutomation : null,
+				formPermissionMode,
+				agentConfigFor(selectedAutomation?.profile_id)
+			)
 		};
+	}
+
+	function agentConfigFor(profileId: string | null | undefined): { permission_mode?: string | null } | null {
+		if (!profileId) return null;
+		return (profiles.find((p) => p.id === profileId)?.config as { permission_mode?: string | null } | undefined) ?? null;
 	}
 
 	async function handleSave() {
@@ -570,7 +591,7 @@
 	}
 	let remoteChange = $state('');
 	let remoteBaseline = '';
-	function remoteSnapshot(draft: JobChoiceDraft = generationDraft) { return JSON.stringify([formName, formDescription, formTriggers, formPrompt, formProfileId, formProjectId, formOutputType, formOutputConfig, formMaxCostPerRun, formMaxCostPerDay, formMaxCostTotal, formMaxRunsPerDay, formMaxTurns, formTimeoutSeconds, formRequiresApproval, formModel, formActionSteps, draft]); }
+	function remoteSnapshot(draft: JobChoiceDraft = generationDraft) { return JSON.stringify([formName, formDescription, formTriggers, formPrompt, formProfileId, formProjectId, formOutputType, formOutputConfig, formMaxCostPerRun, formMaxCostPerDay, formMaxCostTotal, formMaxRunsPerDay, formMaxTurns, formTimeoutSeconds, formRequiresApproval, formModel, formPermissionMode, formActionSteps, draft]); }
 	// The project picker: a project deleted elsewhere leaves it at once (#434).
 	watchResources(['projects'], async () => {
 		try { projects = await api.get<Project[]>('/projects'); } catch { /* the next load retries */ }
@@ -666,6 +687,7 @@
 				{formTimeoutSeconds}
 				{formRequiresApproval}
 				{formModel}
+				{formPermissionMode}
 				{formActionSteps}
 				{profiles}
 				{projects}
@@ -694,6 +716,7 @@
 				onUpdateFormTimeoutSeconds={(val) => formTimeoutSeconds = val}
 				onUpdateFormRequiresApproval={(val) => formRequiresApproval = val}
 				onUpdateFormModel={(val) => formModel = val}
+				onUpdateFormPermissionMode={(val) => formPermissionMode = val}
 				onUpdateFormActionSteps={(val) => formActionSteps = val}
 				{generationDraft}
 				{generationCommit}
