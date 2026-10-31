@@ -41,6 +41,14 @@ over the descriptions an MCP server supplies before they enter the
 deferred-tool catalog, which is itself a `<system-reminder>` block, and each
 description is folded to one line so it cannot add an entry of its own.
 
+The delegated Claude Code path stages `claude_output_guard` independently
+of the optional guidance mod. Its `session.append` function hook applies
+the same marker replacements inside CLI-owned `tool_result.content`, for
+built-in and MCP tools, successes and failures. Host-authored deliveries
+remain unchanged. If the guard cannot run, the selected compatibility
+policy keeps tools running with a one-time visible warning and ERROR log;
+pre-existing tool deny policies still apply.
+
 **4. Prompt-bound file screening** (`fluid/context/screening.py`).
 Instruction files (AGENTS.md chain, nested files, the identity file) and
 memory entries enter the prompt verbatim, so they are screened *before*

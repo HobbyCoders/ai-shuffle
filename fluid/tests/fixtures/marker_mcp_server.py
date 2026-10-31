@@ -17,7 +17,8 @@ for line in sys.stdin:
                   "capabilities": {"tools": {}}, "serverInfo": {"name": "fixture", "version": "1"}}
     elif method == "tools/list":
         result = {"tools": [{"name": "report", "description": "Report fixture data",
-                            "inputSchema": {"type": "object", "properties": {"mode": {"type": "string"}}}}],
+                            "inputSchema": {"type": "object", "properties": {
+                                "mode": {"type": "string"}}}}],
                   "resultType": "complete", "ttlMs": 60000, "cacheScope": "private"}
     elif method == "tools/call":
         mode = params.get("arguments", {}).get("mode")

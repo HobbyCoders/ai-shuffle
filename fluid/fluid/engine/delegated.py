@@ -222,11 +222,11 @@ _CLI_HOOK_EVENTS: dict[str, str] = {
     "PreCompact": PRE_COMPACT,
     "SessionStart": SESSION_START,
 }
-# Registered with only a deny policy and no HookBus: the policy gate, and the
-# ledger re-injection after a compaction.
+# Without a HookBus: PreToolUse checks guard readiness for every session.
+# A deny policy also needs that event, plus ledger re-injection on SessionStart.
 _POLICY_HOOK_EVENTS = ("PreToolUse", "SessionStart")
-# Registered with only a ``compact_context`` provider: the re-supply after a
-# compaction.
+# A compact_context provider adds SessionStart to the always-on PreToolUse
+# registration, to re-supply context after a compaction.
 _COMPACT_HOOK_EVENTS = ("SessionStart",)
 
 # The host's note put back after a CLI compaction (``compact_context``): how
@@ -356,17 +356,20 @@ _CLI_FLAGS_SINCE = "2.1.0"
 # AI Shuffle's Claude Code mod (``claude_mod/``, a plugin of function hooks,
 # Claude Code's documented "mods"): it keeps the bash-first steer from reaching
 # the model and gives a trimmed Bash description its pointer to the dedicated
-# file tools back (``claude_mod/hooks/steer.ts``). Claude Code runs mods from
-# 2.1.287, so an older CLI, or one whose version is unknown, keeps the old
-# argv. ``FORCED_CHILD_ENV`` stays on either way: on 2.1.287 it already keeps
-# the steer off and the mod changes nothing the model reads; the mod takes
+# file tools back (``claude_mod/hooks/steer.ts``). AI Shuffle enables this
+# optional mod from 2.1.287; older or unknown versions skip this copy, not
+# the separate tool-output guard. ``FORCED_CHILD_ENV`` stays on either way:
+# on 2.1.287 it already keeps the steer off, so the mod changes nothing the
+# model reads; the mod takes
 # over if a later CLI ignores that undocumented variable.
 CLAUDE_MOD_SINCE = "2.1.287"
 CLAUDE_MOD_SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude_mod")
-# Mandatory tool-result boundary, independent of FLUID_CLAUDE_MOD. Old CLIs
-# may ignore function hooks: readiness, not a version guess or plugin listing,
-# gates every CLI-owned call (including subagent calls and Bypass mode).
-TOOL_OUTPUT_GUARD_SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude_output_guard")
+# Always staged, independent of FLUID_CLAUDE_MOD. Readiness, not a version
+# guess or plugin listing, detects unavailable function hooks. The separate
+# compatibility policy decides whether to warn or deny CLI-owned calls.
+TOOL_OUTPUT_GUARD_SOURCE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "claude_output_guard",
+)
 TOOL_OUTPUT_GUARD_ENV = "FLUID_TOOL_OUTPUT_GUARD_"
 TOOL_OUTPUT_GUARD_MESSAGE = (
     "Claude Code tool-output guard is unavailable; the tool was not run. "
@@ -1397,11 +1400,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     pass
         self._prompt_file = self._prompt_file_text = None
         if self._tmpdir is not None:
-            # The mod copy is this loop's own (``_stage_claude_mod``), with
-            # whatever the CLI wrote into it; nothing else is removed as a tree.
-            staged = os.path.join(self._tmpdir, "claude-mod")
-            if os.path.isdir(staged):
-                shutil.rmtree(staged, ignore_errors=True)
+            # Only this loop's own staged plugin copies are removed as trees.
+            for name in ("claude-mod", "tool-output-guard"):
+                staged = os.path.join(self._tmpdir, name)
+                if os.path.isdir(staged):
+                    shutil.rmtree(staged, ignore_errors=True)
             self._claude_mod_dir = None
             try:
                 os.rmdir(self._tmpdir)  # only once empty; never a tree delete
@@ -1507,20 +1510,23 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         """
         self._clear_main_compaction()
         self._tool_output_guard_ready = False
-        self._tool_output_guard_reported = False
         self._tool_output_guard_nonce = ""
-        self._tool_output_guard_receipt = None
+        receipt, self._tool_output_guard_receipt = self._tool_output_guard_receipt, None
         proc, self._proc = self._proc, None
         job, self._proc_job = getattr(self, "_proc_job", None), None
         self._stdout_backlog.clear()
-        if proc is None:
-            close_job(job)
-            return
         try:
-            await self._end_process(proc, grace)
+            if proc is not None:
+                await self._end_process(proc, grace)
         finally:
             # Windows: whatever the CLI started, orphans included, ends here.
             close_job(job)
+            # After the process stops, so session.start cannot recreate it.
+            if receipt:
+                try:
+                    os.unlink(receipt)
+                except OSError:
+                    pass
 
     async def _end_process(self, proc: asyncio.subprocess.Process, grace: float) -> None:
         if proc.returncode is not None:
@@ -1687,9 +1693,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
 
         Nothing when the switch is off, when the CLI's version is unknown or
         older than ``CLAUDE_MOD_SINCE``, or when the copy cannot be made; the
-        spawn then runs exactly as it did before the mod existed. A CLI that
-        cannot load the mod still runs the turn: it lists the failure in its
-        init frame (see ``_check_claude_mod``) and goes on without it.
+        optional guidance is then absent, but the separate tool-output guard
+        is still staged. A CLI that cannot load the optional mod still runs
+        the turn: it lists the failure in its init frame (see
+        ``_check_claude_mod``) and goes on without it.
         ``--setting-sources`` does not affect a --plugin-dir mod (checked on
         2.1.287 with an empty list, ``project`` and all three).
         """
@@ -2131,7 +2138,6 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         argv = self._build_argv()
         self._tool_output_guard_required = True
         self._tool_output_guard_ready = False
-        self._tool_output_guard_reported = False
         self._tool_output_guard_nonce = secrets.token_urlsafe(24)
         self._tool_output_guard_receipt = os.path.join(
             self._ensure_tmpdir(), f"guard-ready-{self._tool_output_guard_nonce}",
@@ -2209,17 +2215,17 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             async with self._stdout_lock:
                 outcome = await self._initialize_cli_hooks()
             if outcome in ("refused", "timeout"):
-                # Existing deny policies always fail closed, independently of
-                # the compatibility choice for the tool-output guard.
-                blocked = self._needs_policy_hook() or self._missing_output_guard_denies()
-                await self._report_missing_output_guard(blocked=blocked)
-                if blocked:
+                # Preserve the existing contract: losing hook registration
+                # costs the hooks, not a plain chat. Only an existing deny
+                # policy requires registration and fails closed here.
+                if self._needs_policy_hook():
                     await self._stop_process()
                     raise RuntimeError(
                         f"the claude CLI did not register its hooks ({outcome}), so "
-                        f"{'the tool deny policy' if self._needs_policy_hook() else 'the tool-output guard'} "
-                        "could not be enforced; the turn was not started"
+                        "the tool deny policy could not be enforced; the turn "
+                        "was not started"
                     )
+                await self._report_missing_output_guard(blocked=False)
         return self._proc
 
     def _needs_policy_hook(self) -> bool:
@@ -3826,7 +3832,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     # ─── Claude Code hooks ───────────────────────────────────────────────
 
     def _cli_hook_events(self) -> tuple[str, ...]:
-        """The CLI hook events this loop registers; empty registers none."""
+        """CLI hook events; PreToolUse always checks output-guard readiness."""
         if self.hooks is not None:
             return tuple(_CLI_HOOK_EVENTS)
         if self._needs_policy_hook():
@@ -4032,7 +4038,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         logger.error("%s", message)
         # HookEvents are persisted, nonterminal system rows rendered in chat.
         # This warning is not a fabricated user/peer/model message.
-        await self._hook_event("deny" if blocked else "warning", message, PRE_TOOL_USE, name)
+        try:
+            await self._hook_event("deny" if blocked else "warning", message, PRE_TOOL_USE, name)
+        except Exception:  # noqa: BLE001 — guard reporting never ends a chat
+            logger.debug("reporting tool-output guard status failed", exc_info=True)
 
     async def _guarded_pre_tool_use(self, request: HookCallbackRequest) -> dict[str, Any]:
         """PreToolUse, failing closed. The CLI treats a failed or late

@@ -201,19 +201,28 @@ def test_stock_cli_guard_matches_native(tmp_path, stock_cli):
     inputs = ["", MARKERS, MARKERS.upper(), "ordinary tool data", "< system-reminder >",
               "<\t/\rSYSTEM-REMINDER\n>", "<\x1csystem-reminder\x85>",
               "<\ufeffsystem-reminder>", "[/AGENT MESSAGE] [/USER INTERJECTION] [/HARNESS NOTICE]"]
+    inputs += [MARKERS.replace("s", "\u017f"), MARKERS.replace("i", "\u0130"),
+               MARKERS.replace("i", "\u0131"), MARKERS.upper().replace("S", "\u017f"),
+               "ordinary Kelvin \u212a and K text"]
+    # The native helper gates each regex on a lowercase family substring.
+    # Mixed input exercises Unicode regex folding after those gates open.
+    inputs += [MARKERS + "\n" + text for text in inputs[-5:]]
     cases = [(text, defang_harness_markers(text)) for text in inputs]
     test = staged / "tests" / "tool_output.test.ts"
     test.write_text(test.read_text(encoding="utf-8").replace(
         "/* NATIVE_CASES */ []", json.dumps(cases, ensure_ascii=True)), encoding="utf-8")
     result = subprocess.run([stock_cli, "plugin", "test", str(staged)],
                             capture_output=True, text=True, timeout=25)
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode == 0, (result.stdout + result.stderr).encode(
+        "unicode_escape").decode("ascii")
 
 
-async def test_supported_cli_with_a_guard_load_failure_refuses_tools(tmp_path, stock_cli, monkeypatch, caplog):
+async def test_guard_load_failure_warns_but_keeps_a_supported_cli_running(
+    tmp_path, stock_cli, monkeypatch, caplog,
+):
     import logging
     import shutil
-    from fluid.engine.delegated import TOOL_OUTPUT_GUARD_MESSAGE
+    from fluid.engine.delegated_guard_policy import UNGUARDED_WARNING
     from fluid.events.model import HookEvent
 
     source = tmp_path / "broken-guard"
@@ -241,9 +250,13 @@ async def test_supported_cli_with_a_guard_load_failure_refuses_tools(tmp_path, s
         assert len(provider.requests) == 2
         blocks = [b for m in provider.requests[-1]["messages"] for b in m["content"] if isinstance(b, dict)]
         results = [b["content"] for b in blocks if b.get("type") == "tool_result"]
-        assert len(results) == 1 and TOOL_OUTPUT_GUARD_MESSAGE in results[0]
-        assert not any(line in results[0] for line in MARKERS.splitlines())
-        assert len([e for e in loop.bus.log(loop.session_id) if isinstance(e, HookEvent) and e.level == "deny"]) == 1
+        # The selected compatibility behavior is explicit: the tool runs,
+        # and its unguarded data reaches the provider, with a visible warning.
+        assert len(results) == 1 and all(line in results[0] for line in MARKERS.splitlines())
+        events = loop.bus.log(loop.session_id)
+        warnings = [e for e in events if isinstance(e, HookEvent) and e.level == "warning"]
+        assert len(warnings) == 1 and warnings[0].message == UNGUARDED_WARNING
+        assert not any(isinstance(e, ErrorEvent) for e in events)
         assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
     finally:
         await loop.aclose()

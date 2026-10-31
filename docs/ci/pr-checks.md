@@ -20,7 +20,13 @@ These workflows retain manual dispatch and also run on unfiltered
 
 - `ci-backend.yml`: four backend shards, parallel real PostgreSQL/boot contracts,
   unconditional security checks and the stable fail-closed `Backend tests` gate.
-- `ci-fluid.yml`: the complete fluid unit suite in its isolated environment.
+- `ci-fluid.yml`: the complete fluid unit suite in its isolated environment,
+  plus a real-Claude-CLI tool-output contract matrix (2.1.286, 2.1.308,
+  2.1.314). Each contract job fetches its versioned Linux CLI fixture from
+  `downloads.claude.ai`, verifies the vendor manifest's checksum and size,
+  and runs it with isolated configuration against a scripted local Messages
+  API. This adds a network fixture fetch, not live provider calls or user
+  credentials; it never installs or updates a production CLI.
 - `ci-frontend.yml`: four full frontend Vitest shards, production build (including
   mobile postbuild), frontend/mobile typechecks, mobile tests, contracts/docs/audit,
   tools/WebCrypto vectors, Browser MCP, the four `UI journeys (N/4)` shards

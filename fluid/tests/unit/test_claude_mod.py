@@ -318,7 +318,9 @@ async def test_without_the_optional_mod_the_output_guard_still_loads(tmp_path, c
     loop, record = _loop(tmp_path, version, claude_mod=claude_mod)
     try:
         await _turn(loop)
-        assert str(Path(loop._tmpdir) / "tool-output-guard") in _spawn_argv(record)
+        argv = _spawn_argv(record)
+        assert str(Path(loop._tmpdir) / "tool-output-guard") in argv
+        assert str(Path(loop._tmpdir) / "claude-mod") not in argv
         assert loop._claude_mod_listed is None
         assert not any("AI Shuffle's mod" in r.getMessage() for r in caplog.records)
     finally:
@@ -350,6 +352,7 @@ async def test_compaction_recall_tools_require_a_staged_mod(
         assert ("HistorySearch" in names) is exposed
         argv = _spawn_argv(record)
         assert (loop._claude_mod_dir is not None) is exposed
+        assert (str(Path(loop._tmpdir) / "claude-mod") in argv) is exposed
         assert str(Path(loop._tmpdir) / "tool-output-guard") in argv
         config = json.loads(Path(loop._mcp_config_path).read_text(encoding="utf-8"))
         assert ("fluid_bundled" in config["mcpServers"]) is exposed

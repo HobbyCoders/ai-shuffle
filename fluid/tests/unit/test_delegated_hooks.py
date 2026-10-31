@@ -853,8 +853,8 @@ async def test_policy_deny_blocks_a_cli_tool_call_end_to_end(tmp_path, policy_de
 async def test_a_refused_initialize_fails_closed_when_a_deny_policy_rides_it(
     tmp_path, with_policy,
 ) -> None:
-    """A deny policy always fails closed. An older CLI can continue under
-    the separate guard-compatibility policy, with a visible warning."""
+    """A deny policy fails closed. Otherwise refusal costs the hooks, as
+    before, not the session; the output guard now adds a visible warning."""
     from fluid.events.model import ErrorEvent
 
     loop = DelegatedLoop(
@@ -876,10 +876,55 @@ async def test_a_refused_initialize_fails_closed_when_a_deny_policy_rides_it(
         assert isinstance(events[-1], ErrorEvent)
         assert "did not register its hooks (refused)" in events[-1].message
         assert results == []
+        # Do not misdiagnose a policy-registration failure as a guard failure.
+        assert not any(isinstance(e, HookEvent) and "tool-output" in e.message for e in events)
     else:
         assert isinstance(events[-1], TurnComplete)
         assert len(results) == 1
         assert any(isinstance(e, HookEvent) and e.level == "warning" for e in events)
+
+
+@pytest.mark.parametrize("with_policy", [True, False])
+async def test_current_cli_initialize_timeout_keeps_plain_chats_running_but_not_denied_policy(
+    tmp_path, monkeypatch, caplog, with_policy,
+) -> None:
+    """A registration timeout costs the hooks, as before, not a plain chat.
+    Only the pre-existing deny policy requires a stopped turn."""
+    import logging
+    import fluid.engine.delegated as delegated_mod
+    from fluid.engine.delegated_guard_policy import UNGUARDED_WARNING
+    from fluid.events.model import ErrorEvent
+
+    monkeypatch.setattr(delegated_mod, "INITIALIZE_TIMEOUT", 0.25)
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="claude-fake", claude_cmd=[sys.executable, FAKE],
+        env={"FAKE_CLAUDE_SCENARIO": "u", "FAKE_CLAUDE_IGNORE_INITIALIZE": "1",
+             "FAKE_CLAUDE_VERSION": "claude 2.1.314 (fixture)"},
+        cwd=str(tmp_path), hooks=HookBus(),
+        tool_policy=(lambda name, _i: "no shells here") if with_policy else None,
+    )
+    try:
+        with caplog.at_level(logging.ERROR, logger="fluid.engine.delegated"):
+            await loop.submit(UserTurn(content="run it"))
+            await loop.wait_turn()
+        events = loop.bus.log(loop.session_id)
+    finally:
+        await loop.aclose()
+
+    assert loop.cli_version == "claude 2.1.314 (fixture)"
+    assert loop.cli_hooks_registered is False
+    warnings = [e for e in events if isinstance(e, HookEvent) and e.level == "warning"]
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    if with_policy:
+        assert isinstance(events[-1], ErrorEvent)
+        assert "tool deny policy" in events[-1].message and "timeout" in events[-1].message
+        assert not warnings
+        assert not any("tool-output" in message for message in errors)
+    else:
+        assert isinstance(events[-1], TurnComplete)
+        assert any(isinstance(e, ToolResult) for e in events)
+        assert [e.message for e in warnings] == [UNGUARDED_WARNING]
+        assert errors == [UNGUARDED_WARNING]
 
 
 async def test_the_ledger_reminder_names_the_bridged_ledger_tool(tmp_path) -> None:

@@ -279,8 +279,11 @@ def answer_initialize(msg: dict) -> None:
     """Record the registered hook callbacks and accept, as the real CLI does.
 
     ``FAKE_CLAUDE_REFUSE_INITIALIZE=1`` refuses instead, with the error
-    subtype, and registers nothing.
+    subtype, and registers nothing. ``FAKE_CLAUDE_IGNORE_INITIALIZE=1``
+    leaves registration unanswered, while later user frames still run.
     """
+    if os.environ.get("FAKE_CLAUDE_IGNORE_INITIALIZE") == "1":
+        return
     if os.environ.get("FAKE_CLAUDE_REFUSE_INITIALIZE") == "1":
         emit({"type": "control_response", "response": {
             "subtype": "error", "request_id": msg.get("request_id", ""),
@@ -563,7 +566,7 @@ def turn_long_stream(sid: str) -> None:
 
 def main() -> int:
     if "--version" in sys.argv:
-        print("claude 2.0.0 (fake-fluid)")
+        print(os.environ.get("FAKE_CLAUDE_VERSION", "claude 2.0.0 (fake-fluid)"))
         return 0
 
     from fake_guard_ready import announce_tool_output_guard
