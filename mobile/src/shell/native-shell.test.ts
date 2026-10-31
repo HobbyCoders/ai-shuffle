@@ -1,10 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { announceWorkerBar, hasShellBridge, openNativeWorkers } from './native-shell';
+import { announceWorkerBar, hasShellBridge, nativeAppSettingsRoute, openNativeAppSettings, openNativeWorkers } from './native-shell';
 
 type TestWindow = Window & { shuffleShell?: unknown };
 
-function inApp(bridge?: unknown) {
-	window.__SHUFFLE_MOBILE__ = { apiOrigin: 'https://pc.test', token: 'shc_test' };
+function inApp(bridge?: unknown, capabilities?: string[]) {
+	window.__SHUFFLE_MOBILE__ = {
+		apiOrigin: 'https://pc.test',
+		token: 'shc_test',
+		...(capabilities ? { native: { platform: 'android', bridge: 1, capabilities } } : {})
+	};
 	(window as TestWindow).shuffleShell = bridge;
 }
 
@@ -28,11 +32,29 @@ describe('native shell messages', () => {
 		]);
 	});
 
+	it('asks for the app’s own Settings when the app offers app-settings', () => {
+		const postMessage = vi.fn();
+		inApp({ postMessage }, ['app-settings']);
+		expect(nativeAppSettingsRoute()).toBe('settings');
+		expect(openNativeAppSettings()).toBe(true);
+		expect(postMessage.mock.calls.map(([raw]) => JSON.parse(raw))).toEqual([{ type: 'app-settings' }]);
+	});
+
+	it('falls back to the Workers screen in an app from before app-settings', () => {
+		const postMessage = vi.fn();
+		inApp({ postMessage }, ['worker-switch']);
+		expect(nativeAppSettingsRoute()).toBe('workers');
+		expect(openNativeAppSettings()).toBe(true);
+		expect(postMessage.mock.calls.map(([raw]) => JSON.parse(raw))).toEqual([{ type: 'workers' }]);
+	});
+
 	it('does nothing in an app without the bridge', () => {
-		inApp(undefined);
+		inApp(undefined, ['app-settings']);
 		expect(hasShellBridge()).toBe(false);
 		expect(announceWorkerBar(true)).toBe(false);
 		expect(openNativeWorkers()).toBe(false);
+		expect(nativeAppSettingsRoute()).toBeNull();
+		expect(openNativeAppSettings()).toBe(false);
 	});
 
 	it('does nothing in a plain browser, even if something named shuffleShell exists', () => {
@@ -40,6 +62,7 @@ describe('native shell messages', () => {
 		(window as TestWindow).shuffleShell = { postMessage };
 		expect(hasShellBridge()).toBe(false);
 		expect(announceWorkerBar(true)).toBe(false);
+		expect(openNativeAppSettings()).toBe(false);
 		expect(postMessage).not.toHaveBeenCalled();
 	});
 

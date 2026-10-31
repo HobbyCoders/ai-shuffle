@@ -8,12 +8,13 @@
  * "Connected to" bar itself, so a worker UI from before that bar keeps the
  * app's. The bar's sheet then reaches the app's Workers screen (pair,
  * rename, remove) through `openNativeWorkers`, which the app's bar menu
- * used to offer.
+ * used to offer, and the app's own Settings (account, sign out, phone tools)
+ * through `openNativeAppSettings`.
  *
  * The bridge object exists only in app builds that install the listener;
  * everywhere else these calls do nothing and report false.
  */
-import { isBundledMobile } from '$lib/api/runtime';
+import { isBundledMobile, nativeCapability } from '$lib/api/runtime';
 
 interface ShellBridge {
 	postMessage(message: string): void;
@@ -49,4 +50,25 @@ export function announceWorkerBar(shown: boolean): boolean {
 /** Open the app's native Workers screen. */
 export function openNativeWorkers(): boolean {
 	return post({ type: 'workers' });
+}
+
+/** The app opens its own Settings (account, sign out, phone tools) on `{"type":"app-settings"}`. */
+export const APP_SETTINGS_CAPABILITY = 'app-settings';
+
+/**
+ * Where "App settings" lands in the app showing this page: `settings` when it
+ * opens its own Settings screen directly, `workers` for an app from before
+ * that message (its Workers screen has the Settings button), or null outside
+ * the app.
+ */
+export function nativeAppSettingsRoute(): 'settings' | 'workers' | null {
+	if (!hasShellBridge()) return null;
+	return nativeCapability(APP_SETTINGS_CAPABILITY) ? 'settings' : 'workers';
+}
+
+/** Open the app's own Settings screen (account, sign out, phone tools). */
+export function openNativeAppSettings(): boolean {
+	const route = nativeAppSettingsRoute();
+	if (route === 'settings') return post({ type: 'app-settings' });
+	return route === 'workers' ? openNativeWorkers() : false;
 }

@@ -10,11 +10,13 @@
 	 * In the Android app this chip replaces the app's own worker-name bar: it
 	 * tells the app it is shown (native-shell.ts). Worker management lives in
 	 * Settings > Devices; the native Workers screen is a connection-recovery
-	 * fallback, so pairing remains available without a reachable worker.
+	 * fallback, so pairing remains available without a reachable worker. In the
+	 * app the sheet also opens the app's own Settings (account, sign out, phone
+	 * tools), which the hidden native bar no longer reaches (#951).
 	 */
 	import { onMount, tick } from 'svelte';
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
-	import { Check, Info, LoaderCircle, Server, Settings, X } from 'lucide-svelte';
+	import { Check, Info, LoaderCircle, Server, Settings, Smartphone, X } from 'lucide-svelte';
 	import { listInstalls, type Install } from '$lib/api/installs';
 	import { isBundledMobile, nativeCapability } from '$lib/api/runtime';
 	import { sessions } from '$lib/stores/app-data.svelte';
@@ -22,7 +24,7 @@
 	import { notify } from '$lib/stores/notifications';
 	import { openSettings } from '$lib/settings/navigation.svelte';
 	import { connectionWorkers, switchRoute, WORKER_SWITCH_CAPABILITY, type ConnectionWorker } from './worker-connection';
-	import { announceWorkerBar, hasShellBridge, openNativeWorkers } from './native-shell';
+	import { announceWorkerBar, hasShellBridge, nativeAppSettingsRoute, openNativeAppSettings, openNativeWorkers } from './native-shell';
 
 	/** How long "Connecting to" waits before giving the bar back (the app refused, or nothing happened). */
 	const CONNECT_TIMEOUT_MS = 5000;
@@ -93,6 +95,10 @@
 
 	// The app hides its own worker-name bar while this one is on screen.
 	const canManage = hasShellBridge();
+	// With that bar hidden, this sheet is the way into the app's own Settings
+	// (account, sign out, phone tools). An app from before the `app-settings`
+	// message reaches them through its Workers screen.
+	const appSettingsRoute = nativeAppSettingsRoute();
 	$effect(() => {
 		announceWorkerBar(true);
 		return () => { announceWorkerBar(false); };
@@ -145,6 +151,11 @@
 		closeSheet();
 		if (nativeManagement && openNativeWorkers()) return;
 		openSettings({ category: 'devices' });
+	}
+
+	function appSettings() {
+		closeSheet();
+		openNativeAppSettings();
 	}
 
 	function keydown(event: KeyboardEvent) {
@@ -230,11 +241,20 @@
 					<p class="empty">No workers found. Add a worker in Settings > Devices.</p>
 				{/if}
 			{/if}
-			<button type="button" class="manage" aria-label={nativeManagement ? 'Open app Workers' : 'Manage workers'} disabled={!!connecting} onclick={manageWorkers}>
-				<Settings size={16} aria-hidden="true" />
-				<span>{nativeManagement ? 'Open app Workers' : 'Manage workers'}</span>
-				{#if !nativeManagement}<small>Settings > Devices</small>{/if}
-			</button>
+			<div class="actions">
+				<button type="button" class="manage" aria-label={nativeManagement ? 'Open app Workers' : 'Manage workers'} disabled={!!connecting} onclick={manageWorkers}>
+					<Settings size={16} aria-hidden="true" />
+					<span>{nativeManagement ? 'Open app Workers' : 'Manage workers'}</span>
+					{#if !nativeManagement}<small>Settings > Devices</small>{/if}
+				</button>
+				{#if appSettingsRoute}
+					<button type="button" class="manage" aria-label="App settings" aria-describedby="conn-app-settings" disabled={!!connecting} onclick={appSettings}>
+						<Smartphone size={16} aria-hidden="true" />
+						<span>App settings</span>
+						<small id="conn-app-settings">{appSettingsRoute === 'settings' ? 'Account, sign out' : 'Workers > Settings'}</small>
+					</button>
+				{/if}
+			</div>
 			<p class="note"><Info size={15} aria-hidden="true" />To move one chat, use Runs on in Chat controls.</p>
 		</div>
 	</div>
@@ -342,13 +362,18 @@
 	.retry { min-height: 44px; padding: 0 14px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--card); color: var(--foreground); font: inherit; cursor: pointer; }
 	.load-error { margin-bottom: 12px; }
 	.load-error p { margin: 0 0 8px; font-size: 13px; color: var(--muted-foreground); }
-	.manage { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; width: 100%; min-height: 44px; margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius); background: var(--card); color: var(--foreground); font: inherit; font-size: 13px; cursor: pointer; }
+	/* Manage workers and, in the app, App settings: one card of rows, like the worker list. */
+	.actions { display: flex; flex-direction: column; margin-top: 10px; overflow: hidden; border: 1px solid var(--border-subtle); border-radius: var(--radius); background: var(--card); }
+	.manage { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; width: 100%; min-height: 44px; padding: 10px 12px; border: 0; background: transparent; color: var(--foreground); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+	.manage + .manage { border-top: 1px solid var(--border-subtle); }
 	.manage:hover:not(:disabled), .retry:hover:not(:disabled) { background: var(--hover-overlay); }
 	.manage :global(svg) { flex: none; color: var(--muted-foreground); }
 	.manage small { margin-left: auto; font-size: 11px; color: var(--muted-foreground); }
 	.note { display: flex; align-items: flex-start; gap: 8px; margin: 12px 2px 2px; font-size: 12px; line-height: 1.5; color: var(--muted-foreground); }
 	.note :global(svg) { flex: none; margin-top: 2px; }
-	.opt-row:focus-visible, .icon-btn:focus-visible, .retry:focus-visible, .manage:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.opt-row:focus-visible, .icon-btn:focus-visible, .retry:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	/* Inside the clipped card, so the ring sits inside the row. */
+	.manage:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 	:global(.conn-spin) { animation: conn-spin 0.9s linear infinite; }
 	@keyframes conn-spin { to { transform: rotate(360deg); } }
 	@media (prefers-reduced-motion: reduce) {

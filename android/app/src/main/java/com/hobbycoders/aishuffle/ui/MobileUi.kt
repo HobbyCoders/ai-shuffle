@@ -33,7 +33,15 @@ object MobileUi {
      * screen with an ongoing notification (VoiceCallService).
      */
     const val VOICE_CALL_CONTROLS = "voice-call-controls"
-    val CAPABILITIES = listOf("file-save", "file-chooser", "microphone", "device-tools", "voice-routing", VOICE_CALL_CONTROLS, WorkerSwitch.CAPABILITY)
+
+    /**
+     * The shell opens the app's own Settings (account, sign out, phone tools)
+     * on `{"type":"app-settings"}`. Without it the page sends `workers`, whose
+     * screen has the Settings button.
+     */
+    const val APP_SETTINGS = "app-settings"
+    val CAPABILITIES = listOf("file-save", "file-chooser", "microphone", "device-tools", "voice-routing", VOICE_CALL_CONTROLS,
+        WorkerSwitch.CAPABILITY, APP_SETTINGS)
 
     /**
      * Web-message bridge the page uses to tell the shell about its own chrome
@@ -44,6 +52,9 @@ object MobileUi {
      *    shows its bar until told, so an older worker UI keeps it.
      *  - `{"type":"workers"}`: open the native Workers screen (pair, rename,
      *    remove), which the hidden bar's menu used to reach.
+     *  - `{"type":"app-settings"}`: open the app's own Settings screen (account,
+     *    sign out, trusted devices, phone tools, delete account), which the
+     *    hidden bar left out of reach while connected ([APP_SETTINGS]).
      *  - `{"type":"voice-call","active":true|false}`: a call started or ended
      *    (headset routing and the call's foreground service follow it).
      *  - `{"type":"voice-call-state","status":"connecting"|"live"|"reconnecting",
@@ -59,6 +70,7 @@ object MobileUi {
         data class VoiceCall(val active: Boolean) : ShellMessage()
         data class VoiceCallState(val status: String, val muted: Boolean, val since: Long?, val title: String?) : ShellMessage()
         object OpenWorkers : ShellMessage()
+        object OpenAppSettings : ShellMessage()
     }
 
     /** Parses one `shuffleShell` message; null for anything unknown or malformed. */
@@ -68,6 +80,7 @@ object MobileUi {
         return when (json.optString("type")) {
             "worker-bar" -> (json.opt("shown") as? Boolean)?.let { ShellMessage.WorkerBar(it) }
             "workers" -> ShellMessage.OpenWorkers
+            APP_SETTINGS -> ShellMessage.OpenAppSettings
             "voice-call" -> (json.opt("active") as? Boolean)?.let { ShellMessage.VoiceCall(it) }
             "voice-call-state" -> voiceCallState(json)
             else -> null
