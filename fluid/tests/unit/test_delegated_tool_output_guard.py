@@ -139,3 +139,78 @@ async def test_close_removes_session_guard_copy_and_receipt(
     finally:
         await loop.aclose()
     assert not session_dir.exists()
+
+
+@pytest.mark.parametrize("exit_mode", ["exit", "crash"])
+async def test_self_exit_receipts_are_removed_on_respawn_and_close(tmp_path, exit_mode):
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="fixture", claude_cmd=[sys.executable, FAKE],
+        cwd=str(tmp_path), claude_mod=False,
+        env={"FAKE_CLAUDE_VERSION": "claude 2.1.314 (fixture)"},
+    )
+    try:
+        await loop.submit(UserTurn(content="first"))
+        await loop.wait_turn()
+        session_dir = Path(loop._tmpdir)
+        first_receipt = Path(loop._tool_output_guard_receipt)
+        assert first_receipt.is_file()
+        previous = loop._proc
+        if exit_mode == "crash":
+            previous.kill()
+        else:
+            previous.stdin.close()
+        await previous.wait()
+        assert previous.returncode is not None and first_receipt.exists()
+
+        await loop.submit(UserTurn(content="second"))
+        await loop.wait_turn()
+        assert isinstance(loop.bus.log(loop.session_id)[-1], TurnComplete)
+        second_receipt = Path(loop._tool_output_guard_receipt)
+        assert second_receipt != first_receipt and second_receipt.is_file()
+        assert not first_receipt.exists()
+    finally:
+        await loop.aclose()
+    assert not session_dir.exists()
+
+
+async def test_hooks_warning_does_not_consume_output_guard_warning(tmp_path, monkeypatch, caplog):
+    import fluid.engine.delegated as delegated_mod
+
+    monkeypatch.setattr(delegated_mod, "INITIALIZE_TIMEOUT", 0.25)
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="fixture", claude_cmd=[sys.executable, FAKE],
+        cwd=str(tmp_path), claude_mod=False,
+        env={"FAKE_CLAUDE_VERSION": "claude 2.1.314 (fixture)",
+             "FAKE_CLAUDE_IGNORE_INITIALIZE": "1"},
+    )
+    try:
+        with caplog.at_level(logging.WARNING, logger="fluid.engine.delegated"):
+            await loop.submit(UserTurn(content="first"))
+            await loop.wait_turn()
+            assert Path(loop._tool_output_guard_receipt).is_file()
+            assert not loop._tool_output_guard_reported
+            assert not any(isinstance(e, HookEvent) for e in loop.bus.log(loop.session_id))
+            assert any("session runs without hooks" in r.getMessage() for r in caplog.records)
+            assert not any(r.levelno == logging.ERROR for r in caplog.records)
+
+            # A later process has a known guard-stage failure. The unrelated
+            # initialization timeout must not have consumed its warning.
+            monkeypatch.setattr(delegated_mod, "TOOL_OUTPUT_GUARD_SOURCE",
+                                str(tmp_path / "missing-guard-source"))
+            for message in ("second", "third"):
+                previous = loop._proc
+                previous.stdin.close()
+                await previous.wait()
+                await loop.submit(UserTurn(content=message))
+                await loop.wait_turn()
+                assert isinstance(loop.bus.log(loop.session_id)[-1], TurnComplete)
+                assert loop._tool_output_guard_reported
+        warnings = [e for e in loop.bus.log(loop.session_id)
+                    if isinstance(e, HookEvent) and e.level == "warning"]
+        assert len(warnings) == 1
+        assert "Tools will continue" in warnings[0].message
+        assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
+        session_dir = Path(loop._tmpdir)
+    finally:
+        await loop.aclose()
+    assert not session_dir.exists()

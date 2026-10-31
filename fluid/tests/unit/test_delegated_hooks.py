@@ -854,7 +854,7 @@ async def test_a_refused_initialize_fails_closed_when_a_deny_policy_rides_it(
     tmp_path, with_policy,
 ) -> None:
     """A deny policy fails closed. Otherwise refusal costs the hooks, as
-    before, not the session; the output guard now adds a visible warning."""
+    before, not the session; it does not diagnose the separate output guard."""
     from fluid.events.model import ErrorEvent
 
     loop = DelegatedLoop(
@@ -881,12 +881,14 @@ async def test_a_refused_initialize_fails_closed_when_a_deny_policy_rides_it(
     else:
         assert isinstance(events[-1], TurnComplete)
         assert len(results) == 1
-        assert any(isinstance(e, HookEvent) and e.level == "warning" for e in events)
+        assert not any(isinstance(e, HookEvent) and e.level == "warning" for e in events)
+        assert not loop._tool_output_guard_reported
 
 
 @pytest.mark.parametrize("with_policy", [True, False])
+@pytest.mark.parametrize("stage_failed", [True, False])
 async def test_current_cli_initialize_timeout_keeps_plain_chats_running_but_not_denied_policy(
-    tmp_path, monkeypatch, caplog, with_policy,
+    tmp_path, monkeypatch, caplog, with_policy, stage_failed,
 ) -> None:
     """A registration timeout costs the hooks, as before, not a plain chat.
     Only the pre-existing deny policy requires a stopped turn."""
@@ -896,6 +898,9 @@ async def test_current_cli_initialize_timeout_keeps_plain_chats_running_but_not_
     from fluid.events.model import ErrorEvent
 
     monkeypatch.setattr(delegated_mod, "INITIALIZE_TIMEOUT", 0.25)
+    if stage_failed:
+        monkeypatch.setattr(delegated_mod, "TOOL_OUTPUT_GUARD_SOURCE",
+                            str(tmp_path / "missing-guard-source"))
     loop = DelegatedLoop(
         store=MemoryStore(), model="claude-fake", claude_cmd=[sys.executable, FAKE],
         env={"FAKE_CLAUDE_SCENARIO": "u", "FAKE_CLAUDE_IGNORE_INITIALIZE": "1",
@@ -923,8 +928,13 @@ async def test_current_cli_initialize_timeout_keeps_plain_chats_running_but_not_
     else:
         assert isinstance(events[-1], TurnComplete)
         assert any(isinstance(e, ToolResult) for e in events)
-        assert [e.message for e in warnings] == [UNGUARDED_WARNING]
-        assert errors == [UNGUARDED_WARNING]
+        if stage_failed:
+            assert [e.message for e in warnings] == [UNGUARDED_WARNING]
+            assert errors == [UNGUARDED_WARNING]
+            assert loop._tool_output_guard_reported
+        else:
+            assert not warnings and not errors
+            assert not loop._tool_output_guard_reported
 
 
 async def test_the_ledger_reminder_names_the_bridged_ledger_tool(tmp_path) -> None:

@@ -1060,6 +1060,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._claude_mod_listed: bool | None = None
         self._tool_output_guard_required = False  # armed for each child process
         self._tool_output_guard_ready = False
+        # Session-level warning: only a genuine guard problem consumes it,
+        # not an unrelated SDK hook failure or a process restart.
         self._tool_output_guard_reported = False
         self._tool_output_guard_nonce = ""
         self._tool_output_guard_receipt: str | None = None
@@ -2123,8 +2125,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         elif self._proc is not None:
             # The previous CLI exited on its own (a crash, or the CLI's own
             # exit). Its process group may still hold commands it started;
-            # end them before the respawn replaces the only record of its pid.
-            await _end_process_group(self._proc.pid)
+            # end them and remove its receipt before replacing either record.
+            await self._stop_process(grace=1.0)
         await self._version_guard()
         spawn_kwargs: dict[str, Any] = {}
         if os.name != "nt":
@@ -2143,6 +2145,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             self._ensure_tmpdir(), f"guard-ready-{self._tool_output_guard_nonce}",
         )
         guard = os.path.join(self._ensure_tmpdir(), "tool-output-guard")
+        guard_staged = False
         try:
             shutil.copytree(
                 TOOL_OUTPUT_GUARD_SOURCE, guard, dirs_exist_ok=True,
@@ -2153,6 +2156,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # decides whether tools are denied or warned about, never silence.
             pass
         else:
+            guard_staged = True
             argv += ["--plugin-dir", guard]
         # Staging the mod registers its recall tools before the bridge decides
         # which tools to expose. The first spawn has no MCP config until now.
@@ -2225,7 +2229,16 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                         "the tool deny policy could not be enforced; the turn "
                         "was not started"
                     )
-                await self._report_missing_output_guard(blocked=False)
+                if not guard_staged:
+                    await self._report_missing_output_guard(blocked=False)
+                else:
+                    # SDK callbacks and the plugin's function hooks are
+                    # independent. Losing one does not diagnose the other
+                    # or consume a later, genuine guard-availability warning.
+                    logger.warning(
+                        "claude CLI hook registration is unavailable (%s); "
+                        "the session runs without hooks", outcome,
+                    )
         return self._proc
 
     def _needs_policy_hook(self) -> bool:
