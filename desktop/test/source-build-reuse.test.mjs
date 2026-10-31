@@ -10,7 +10,8 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const packages = ['tools', 'browser-mcp', 'desktop'];
 
-async function fixture(t) {
+/** `electron`: load source-build as Electron does, where node:fs reads `*.asar` files as folders. */
+async function fixture(t, { electron = false } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-output-reuse-'));
   t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   await fs.mkdir(path.join(root, 'npm/bin'), { recursive: true });
@@ -34,6 +35,7 @@ async function fixture(t) {
     if (args[0]?.endsWith(path.join('electron', 'install.js'))) {
       put(`dist/${process.platform === 'win32' ? 'electron.exe' : 'electron'}`);
       put('path.txt', process.platform === 'win32' ? 'electron.exe' : 'electron');
+      if (electron) put('dist/resources/default_app.asar', 'Electron default app archive');
     }
     const missingRuntime = args[1] === 'run' && !existsSync(path.join(options.cwd, 'node_modules/locked/index.js'));
     if (args[1] === 'run' && !missingRuntime) put('dist/index.js', 'module.exports = require("locked");');
@@ -61,8 +63,22 @@ async function fixture(t) {
     }
     return fs[method](...args);
   };
-  vm.runInNewContext(output, { module, exports: module.exports, process: { ...process, env }, console, Buffer,
-    require: name => name === 'node:child_process' ? { spawn } : name === 'node:fs' ? trackedFs : require(name) });
+  // Electron's asar-aware node:fs opens each archive it reads and keeps it open
+  // until the process exits; Windows then cannot rename or delete the install.
+  const asarReads = [];
+  const asarAware = { ...trackedFs, promises: Object.fromEntries(Object.entries(trackedFs.promises).map(([method, call]) => [method, typeof call !== 'function' ? call : (...args) => {
+    const archive = args.find(arg => typeof arg === 'string' && /\.asar(?:[\\/]|$)/i.test(arg));
+    if (archive === undefined) return call(...args);
+    asarReads.push(archive);
+    return Promise.reject(new Error(`asar-aware fs opened ${archive}`));
+  }])) };
+  const versions = electron ? { ...process.versions, electron: '44.0.0' } : process.versions;
+  vm.runInNewContext(output, { module, exports: module.exports, process: { ...process, env, versions }, console, Buffer,
+    require: name => name === 'node:child_process' ? { spawn }
+      : name === (electron ? 'original-fs' : 'node:fs') ? trackedFs
+      : name === 'node:fs' ? asarAware
+      : name === 'node:timers' ? { setTimeout: (callback, ms, ...rest) => setTimeout(callback, clock.discardWait ?? ms, ...rest), clearTimeout }
+      : require(name) });
   let number = 0;
   const build = async (mutate = async () => {}) => {
     const stage = path.join(root, `stage-${++number}`), source = path.join(stage, 'source');
@@ -99,7 +115,7 @@ async function fixture(t) {
         require: name => name === './source-build' ? module.exports : name.startsWith('.') ? {} : require(name) });
     return loaded.exports.SourceUpdates;
   };
-  return { root, build, env, clock, loadUpdates,
+  return { root, build, env, clock, loadUpdates, asarReads,
     forget: result => module.exports.removeSourceDirectory(path.dirname(result.opts.source)) };
 
 }
@@ -319,6 +335,34 @@ test('Electron postinstall is completed before dependency integrity is recorded'
   const third = await f.build();
   assert.deepEqual(installed(third), ['desktop']); assert.deepEqual(built(third), []); assert.equal(downloads(third).length, 1);
   await assert.rejects(fs.access(binary), { code: 'ENOENT' });
+});
+
+test('inside Electron, the Electron download is hashed and published with the unpatched fs', async t => {
+  const f = await fixture(t, { electron: true }); f.clock.omitElectron = true;
+  const first = await f.build();
+  assert.deepEqual(f.asarReads, [], 'the asar-aware fs must never read a dependency tree');
+  assert.deepEqual(installed(first), packages);
+  const retained = await fs.realpath(path.join(first.opts.source, 'desktop/node_modules'));
+  assert.equal(await fs.readFile(path.join(retained, 'electron/dist/resources/default_app.asar'), 'utf8'), 'Electron default app archive');
+  assert.deepEqual((await fs.readdir(path.dirname(retained))).filter(name => name.includes('.tmp-')), []);
+  assert.deepEqual(installed(await f.build()), [], 'the recorded integrity matches on the next build');
+  // A marker hashed by the asar-aware fs records a different tree: replace it once.
+  const marker = path.join(path.dirname(retained), '.complete');
+  await fs.writeFile(marker, JSON.stringify({ ...JSON.parse(await fs.readFile(marker, 'utf8')), integrity: 'f'.repeat(64) }));
+  assert.deepEqual(installed(await f.build()), ['desktop']);
+  assert.deepEqual(installed(await f.build()), []);
+  assert.deepEqual(f.asarReads, []);
+});
+
+test('a failed install reports its own error when its temporary folder cannot be removed', async t => {
+  const f = await fixture(t);
+  f.clock.failNpm = 'desktop'; f.clock.discardWait = 20;
+  // The removal never finishes, as when another process keeps a file open.
+  f.clock.onIo = (method, file) => method === 'rm' && /[\\/]desktop[\\/][^\\/]+\.tmp-[a-f0-9]{8}$/.test(file) ? new Promise(() => {}) : undefined;
+  await assert.rejects(f.build(), /fake-node failed \(1\)/);
+  assert.match(await fs.readFile(path.join(f.root, 'build.log'), 'utf8'), /Could not remove .+\.tmp-[a-f0-9]{8} \(still busy after 60s\); it was left behind\./);
+  f.clock.onIo = null; f.clock.failNpm = null;
+  assert.deepEqual(installed(await f.build()), ['desktop'], 'a left-behind install is never reused');
 });
 
 test('one source or lock change misses exactly its package', async t => {
