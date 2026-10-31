@@ -162,6 +162,24 @@ async def test_a_child_completion_wake_carries_held_notes(mock_db, _quiet):
     assert _held("p6") == []
 
 
+async def test_a_held_note_does_not_stop_the_completion_wake_resuming_the_parked_turn(mock_db, _quiet):
+    from app.core.session_runtime import SessionRuntime
+
+    parked = _parked("p6r")
+    await turn_scheduler.on_agent_message("p6r", "w1", "halfway", kind="progress")
+    # The retired held row sits after the parked turn; it is not a turn of the chat.
+    assert any(t["stop_reason"] == turn_scheduler.HELD_PROGRESS_STOP_REASON for t in _turns("p6r"))
+
+    frame = {"task_id": "w1", "status": "completed", "summary": "w1 done"}
+    async with turn_scheduler._terminal_delivery_lock("p6r"):
+        await turn_scheduler._enqueue_context_wake(
+            "p6r", "unpark", [frame], ["w1"], turn_scheduler._build_task_notification_prompt([frame]),
+        )
+    (wake,) = turns_db.get_queued_turns("p6r")
+    resumed = turns_db.start_turn(wake["id"], can_resume=SessionRuntime._can_resume_parked)
+    assert resumed["id"] == parked["id"]
+
+
 async def test_a_busy_receiver_keeps_progress_for_its_next_tool_boundary(mock_db, _quiet):
     _seed("p7")
     live = turns_db.enqueue_turn("p7", "user", prompt="work", profile_id="profile")

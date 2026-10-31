@@ -964,6 +964,9 @@ def start_turn(
                 cursor.execute(
                     "SELECT * FROM turns WHERE session_id=%s AND state <> 'queued' "
                     "AND COALESCE(stop_reason, '') <> 'steered' "
+                    # A progress note moved to the held store (#960) never ran;
+                    # it must not stand between a parked turn and its wake.
+                    "AND NOT (state='aborted' AND COALESCE(stop_reason, '')='held_progress') "
                     # Skip only withdrawals that never executed. Crash recovery
                     # clears started_at, but a durable start receipt must still
                     # prevent resuming across a turn that actually ran.
@@ -1525,6 +1528,7 @@ def latest_reply_to_turn(
             "SELECT * FROM turns WHERE session_id=%s "
             "AND payload ->> 'agent_message_reply_to' = %s "
             "AND position < %s AND COALESCE(stop_reason, '') <> 'steered' "
+            "AND NOT (state='aborted' AND COALESCE(stop_reason, '')='held_progress') "
             "ORDER BY position DESC, insert_order DESC, created_at DESC, id DESC LIMIT 1",
             (session_id, owner, before_position),
         )
