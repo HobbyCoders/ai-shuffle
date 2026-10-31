@@ -699,8 +699,14 @@ export function branchLabel(s: Session): string | null {
 /** Grouping key that folds same-repo clones from several installs into one. */
 export const UNGROUPED_PROJECT = '__ungrouped__';
 
+/**
+ * The link group wins over the session's own origin, as in the backend's
+ * catalog (`_catalog_origin`): a chat started before its project was linked to
+ * a git remote keeps the old `local:` origin, and would otherwise sit apart
+ * from the same project's chats on another worker.
+ */
 export function projectKey(s: Session): string {
-	return s.origin || s.link_group_id || s.project_id || UNGROUPED_PROJECT;
+	return s.link_group_id || s.origin || s.project_id || UNGROUPED_PROJECT;
 }
 
 /** Identity tokens for a still-present local project. */
