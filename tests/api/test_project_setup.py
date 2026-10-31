@@ -721,3 +721,30 @@ def test_self_seed_clone_url_prefers_the_stored_remote(mock_db):
     assert checkout_manager._resolve_clone_url(origin, row) == url  # no legacy record needed
     assert checkout_manager._resolve_clone_url(auto_link_group_id("https://x.example/y.git"), row) is None
 
+
+def test_removing_from_a_peer_forgets_it_in_the_cached_catalog(client, ws, test_db, network):
+    pv2 = _peer_project(test_db, "demo", "Demo", remote=_bare_remote(ws), instance=ME)
+    setup_db.save_peer_catalog(PEER, [pv2["id"], "pv2-other"])
+
+    async def peer_worker(device_id, action, body):
+        if body.get("action") == "remove":
+            return {"removed": ["demo-copy"]}
+        return {"project_ids": [], "workspace": "/data/ws", "ops": [], "projects": {}}
+
+    network.state["handler"] = peer_worker
+    assert client.delete(f"/api/v1/projects/workers/{PEER}", params={"project_v2_id": pv2["id"]}).status_code == 200
+    assert setup_db.peer_catalogs()[PEER] == ["pv2-other"]
+
+
+def test_session_count_follows_a_project_linked_to_its_remote_after_its_first_chats(client, ws, test_db):
+    database.create_project(project_id="late", name="Late", description=None, path="late")
+    (ws / "late").mkdir()
+    old_pv2 = projects_v2.upsert_project("local:late", name="Late")
+    database.create_session("s-late-1", "default", project_id="late")
+    test_db.execute("UPDATE sessions SET project_v2_id = ? WHERE id = 's-late-1'", (old_pv2["id"],))
+    origin = auto_link_group_id("https://github.com/acme/late.git")
+    database.set_project_link_group("late", origin)
+    projects_v2.upsert_project(origin, name="Late")
+    listed = {p["name"]: p for p in client.get("/api/v1/projects/overview").json()["projects"]}
+    assert listed["Late"]["project_v2_id"] == projects_v2.project_v2_id_for_origin(origin)
+    assert listed["Late"]["session_count"] == 1
