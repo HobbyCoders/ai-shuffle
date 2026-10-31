@@ -200,6 +200,8 @@ describe('live permission selection', () => {
 		activeSession.current.sessionId = null;
 		await activeSession.setPermissionModeOverride('acceptEdits');
 		Object.assign(activeSession.current, { draft: '', worktreeBranch: '', worktreeId: null });
+		// New sessions open on the owner's last project choice; here, none.
+		activeSession.clearProject({ user: true });
 		activeSession.newChat();
 		// A session without a project is a normal session: Accept Edits carries over.
 		expect(activeSession.current.mode).toBe('chat');

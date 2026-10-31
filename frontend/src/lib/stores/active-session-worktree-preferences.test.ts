@@ -95,11 +95,9 @@ it('uses the same project’s cached Git capability before a refresh or a quick 
  status('a',true); active.setProject('a'); active.setWorktreeIntent('worktree');
  status('b',true); active.setProject('b');
  status('a',true,true); active.setProject('a');
- // A new session starts without a project (#371 step 4); adding A again
- // reads its cached Git capability and its remembered On.
+ // A new session opens in the last project picked, with its cached Git
+ // capability and its remembered On.
  active.newChat();
- expect(active.current).toMatchObject({project:'',mode:'chat'});
- active.setProject('a');
  expect(active.current).toMatchObject({project:'a',mode:'code',worktreeIntent:'worktree'});
 });
 it('restores A’s saved On when its stale Git status arrives after selecting A from B', () => {

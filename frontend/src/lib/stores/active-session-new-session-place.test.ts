@@ -110,30 +110,71 @@ it('keeps a picked branch and a one-time new branch until a session spends it', 
 it('keeps the worker and "no project" when the owner cleared the project', () => {
 	gitRepo('a'); active.setProject('a'); active.setWorktreeIntent('worktree');
 	active.setDeviceIntent(PEER);
-	active.clearProject();
+	active.clearProject({ user: true });
 
 	awayAndBack();
 
 	expect(active.current).toMatchObject({ mode: 'chat', project: '', projectV2Id: null, worktreeIntent: 'local', deviceIntent: PEER });
 });
 
-it('still starts a fresh compose without a project once a session was created from it', () => {
-	gitRepo('a'); active.setProject('a'); active.setWorktreeIntent('worktree');
+// The owner's last project choice is what every new session opens with,
+// "no project" included (owner decision 2026-10-31).
+it('opens the next new session in the last project picked once a session was created from it', () => {
+	gitRepo('a'); active.setProject('a', null, { user: true }); active.setWorktreeIntent('worktree');
 	// A first send spends the compose (message-sender clears the slot).
 	active.switchSession('created-chat', 'a', null, 'Created', null);
 	ephemeral.remove('__new_chat__');
 
 	active.newChat();
 
-	expect(active.current).toMatchObject({ mode: 'chat', project: '' });
+	expect(active.current).toMatchObject({ sessionId: null, mode: 'code', project: 'a', worktreeIntent: 'worktree' });
 });
 
-it('starts fresh when New session is pressed on the new-session screen itself', () => {
-	gitRepo('a'); active.setProject('a'); active.setWorktreeIntent('worktree');
+it('keeps the last project when New session is pressed on the new-session screen itself', () => {
+	gitRepo('a'); active.setProject('a', null, { user: true });
+
+	active.newChat();
+
+	expect(active.current).toMatchObject({ mode: 'code', project: 'a' });
+});
+
+it('opens the next new session without a project once the owner cleared it, until one is picked again', () => {
+	active.setProject('a', null, { user: true });
+	active.clearProject({ user: true });
+	active.switchSession('created-chat', null, null, 'Created', null);
+	ephemeral.remove('__new_chat__');
+
+	active.newChat();
+	expect(active.current).toMatchObject({ mode: 'chat', project: '', projectV2Id: null });
+
+	active.setProject('b', null, { user: true });
+	active.newChat();
+	expect(active.current).toMatchObject({ mode: 'code', project: 'b' });
+});
+
+it('never opens a new session in the project of the chat being left', () => {
+	active.clearProject({ user: true });
+	active.switchSession('project-chat', 'b', null, 'In b', null);
 
 	active.newChat();
 
 	expect(active.current).toMatchObject({ mode: 'chat', project: '' });
+});
+
+it('does not remember a clear the app made itself, and skips a remembered project this worker no longer lists', () => {
+	active.setProject('a', null, { user: true });
+	// A catalog fix-up (dropMissingProject) clears without the owner.
+	active.clearProject();
+	active.newChat();
+	expect(active.current).toMatchObject({ mode: 'code', project: 'a' });
+
+	mocks.catalog.projects = [{ id: 'b' }];
+	try {
+		active.newChat();
+		expect(active.current).toMatchObject({ mode: 'chat', project: '', projectV2Id: null });
+	} finally {
+		mocks.catalog.projects = [{ id: 'a' }, { id: 'b' }];
+	}
 });
 
 describe('one-time new branch picked, sent, and left while the session is still being created', () => {

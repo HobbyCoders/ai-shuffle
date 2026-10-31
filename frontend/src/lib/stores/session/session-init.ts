@@ -358,8 +358,9 @@ export function createSessionInit(deps: SessionInitDeps) {
 						void switcher.refreshSessionMetadata(persisted.sessionId);
 					}
 				} else {
-					// No saved compose: a new session starts without a project.
-					// One the user picked while this loaded is theirs (#930).
+					// No saved compose: the owner's last project choice applies
+					// after init (applyComposerDefaults). One the user picked
+					// while this loaded is theirs (#930).
 					update(s => ({ ...s, isRestoringSession: false, profile: defaultProfile,
 						...(s.mode === 'chat' || hasBootProjectPick(initGen) ? {} : { project: defaultProject }) }));
 				}

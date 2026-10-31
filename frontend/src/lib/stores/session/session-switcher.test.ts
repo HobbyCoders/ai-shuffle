@@ -691,7 +691,7 @@ describe('session-switcher · switchSession isolation', () => {
 		}));
 		await switcher.switchSession('another-session');
 		setPersistedRunBinding('permissionMode', 'bypassPermissions');
-		expect(switcher.newChat()).toBe(false);
+		expect(switcher.newChat().restoredDraft).toBe(false);
 		expect(getState().permissionModeOverride).toBe('bypassPermissions');
 		switcher.destroy();
 	});
@@ -706,7 +706,7 @@ describe('session-switcher · switchSession isolation', () => {
 		}));
 		await switcher.switchSession('another-session');
 		localStorage.setItem('aihub_last_profile', 'new-global-profile');
-		expect(switcher.newChat()).toBe(true);
+		expect(switcher.newChat().restoredDraft).toBe(true);
 		expect(getState()).toMatchObject({sessionId:null, draft, profile:'draft-profile',
 			project:'draft-project',projectV2Id:'draft-v2',modelOverride:'draft-model',
 			permissionModeOverride:'acceptEdits',worktreeBranch:'feature/draft',
@@ -1389,8 +1389,9 @@ describe('session mode lanes', () => {
 		expect(getState().mode).toBe('voice');
 	});
 
-	it.each(['code', 'chat'] as const)('opens a new session without a project whatever lane was shown (%s)', (lane) => {
-		// #371 step 4: one kind of session; the project is optional and starts empty.
+	it.each(['code', 'chat'] as const)('opens a new session without a project when none is remembered, whatever lane was shown (%s)', (lane) => {
+		// One kind of session; the project is optional. A new one opens on the
+		// owner's last project choice, and none was ever made here.
 		appMode.set(lane);
 		const { switcher, getState } = makeSwitcher(fullState({ mode: lane }));
 
