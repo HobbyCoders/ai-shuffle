@@ -12,13 +12,31 @@ A project is a folder on your worker, usually a code repository. Chats started i
 
 1. Open the workspace picker at the top of the app.
 2. Choose **Add Project**.
-3. Pick the folder, or type its path.
+3. Choose where it comes from:
+   - **Folder on** this worker: pick the folder, or type its path.
+   - **Clone from GitHub**: pick one of your repositories, or paste a clone URL. It clones into your workspace.
 4. Give it a display name and a project ID (lowercase letters, numbers and hyphens).
-5. Choose **Add Project**.
+5. If you have other workers, tick them under **Set it up on** to set the project up there as well. Offline workers are set up when they come back.
+6. Choose **Add Project** (or **Clone project**, or **Create on N workers**).
 
-You can also ask an agent to add a project in an owner conversation with app configuration tools enabled. `listProjects` lists projects on the current worker. `createProject` takes a `name` and optional `id`, `path` and `description`. Without a path it creates a folder in the workspace; a supplied path attaches that folder, creating it if needed. Docker paths must stay in the workspace. These tools do not clone Git URLs.
+You can also ask an agent to add a project in an owner conversation with app configuration tools enabled. `listProjects` lists projects on the current worker. `createProject` takes a `name` and optional `id`, `path` and `description`. Without a path it creates a folder in the workspace; a supplied path attaches that folder, creating it if needed. Docker paths must stay in the workspace. These tools do not clone Git URLs; use Add Project or the Projects page for that.
 
 Creation follows the same approval rules as other app configuration writes: Ask prompts before it runs. An existing project with the same name or resolved folder path on this worker is refused rather than added twice.
+
+## Projects across workers
+
+A project is shared by every worker in your network, but each worker needs its own copy of the folder before a chat can run there. The Projects page shows one chip per worker on every project: ready, missing (dashed), setting up, failed, or offline. Select a missing chip to set the project up on that worker.
+
+A project's **Workers** tab lists each worker's folder and branch. From there you can:
+
+- **Set up** the project on a worker that doesn't have it, or **Set up on all missing**.
+- Choose an existing folder on that worker instead of a new one. A folder that already holds the same repository is used as it is.
+- Cancel a setup that is still running.
+- **Remove from** a worker. This drops that worker's record of the project; its files stay.
+
+Setting up a Git project clones its remote on that worker, with that worker's own GitHub sign-in. A project that isn't a Git repository gets an empty folder. Setup never overwrites anything: a folder that already holds something else is refused, and you can choose another. If a worker is offline, the setup waits and runs when it is back.
+
+When you start a new chat on a worker that doesn't have the project yet, the new chat says so, and the send button becomes **Set up & send**. It sets the project up there first, then sends your message.
 
 ## Files
 

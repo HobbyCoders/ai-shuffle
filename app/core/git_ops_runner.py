@@ -239,10 +239,26 @@ def execute_refresh_status(op_row: Dict[str, Any]) -> Dict[str, Any]:
     return {"refreshed": n, "skipped": skipped}
 
 
+def execute_setup_project(op_row: Dict[str, Any]) -> Dict[str, Any]:
+    """Clone (or adopt, or create) a project folder and register it here.
+
+    See :mod:`app.core.project_setup`. Claimed ops of this kind run in their
+    own background task (``claim_once`` hands them to ``project_setup.spawn``)
+    so a long clone never delays ``ensure_worktree``.
+    """
+    from app.core import project_setup
+
+    return project_setup.execute_setup(op_row)
+
+
 _EXECUTORS = {
     "ensure_worktree": execute_ensure_worktree,
     "refresh_status": execute_refresh_status,
+    "setup_project": execute_setup_project,
 }
+
+# Ops that run detached from the claim pass (long, cancellable work).
+_BACKGROUND_OPS = frozenset({"setup_project"})
 
 
 async def run_op(op_row: Dict[str, Any]) -> None:
@@ -265,7 +281,9 @@ async def run_op(op_row: Dict[str, Any]) -> None:
     except Exception as exc:  # noqa: BLE001 — the failure belongs on the row.
         logger.warning("git_ops: op %s failed: %s", op_id, exc, exc_info=True)
         try:
-            await asyncio.to_thread(git_ops_db.fail_op, op_id, str(exc))
+            await asyncio.to_thread(
+                git_ops_db.fail_op, op_id, str(exc), code=getattr(exc, "error_code", None)
+            )
         except Exception:  # noqa: BLE001
             logger.warning("git_ops: could not record failure for %s", op_id, exc_info=True)
         return
@@ -307,6 +325,12 @@ async def claim_once() -> int:
         logger.info(
             "git_ops: claimed %s (%s) on %s", claimed["id"], claimed.get("op"), me
         )
+        if claimed.get("op") in _BACKGROUND_OPS:
+            from app.core import project_setup
+
+            project_setup.spawn(claimed)
+            executed += 1
+            continue
         await run_op(claimed)
         executed += 1
     return executed
@@ -317,9 +341,12 @@ def sweep_once(*, stop=None) -> Dict[str, int]:
     from app.db import git_ops as git_ops_db
     from app.db import upload_blobs as upload_blobs_db
 
+    from app.db import project_setup as project_setup_db
+
     return {
         "git_ops": git_ops_db.purge_terminal(RETENTION_DAYS, stop=stop),
         "upload_blobs": upload_blobs_db.purge_old(RETENTION_DAYS, stop=stop),
+        "project_setup_requests": project_setup_db.purge_settled(RETENTION_DAYS),
     }
 
 
@@ -344,6 +371,11 @@ def start() -> None:
     turn_claim.register_pass(
         "git_ops_retention", _sweep_pass, SWEEP_INTERVAL_SECONDS
     )
+    # Cross-worker project setup: sends requests that waited for an offline
+    # worker, and settles setups a restart interrupted.
+    from app.core import project_setup
+
+    project_setup.start_dispatch_pass()
     logger.info(
         "git_ops: registered (poll every %ss, runner=%s)",
         int(CLAIM_POLL_SECONDS), settings.effective_instance_id,
@@ -391,5 +423,9 @@ async def stop() -> None:
 
         turn_claim.unregister_pass("git_ops")
         turn_claim.unregister_pass("git_ops_retention")
+        from app.core import project_setup
+
+        project_setup.stop_dispatch_pass()
+        await project_setup.cancel_all()
     except Exception:  # noqa: BLE001 — teardown must never raise.
         logger.debug("git_ops: unregister failed during shutdown", exc_info=True)

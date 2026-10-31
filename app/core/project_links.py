@@ -102,6 +102,60 @@ def maybe_auto_link_project(project_id: str, remote_url: Optional[str]) -> Optio
     return group_id
 
 
+def record_project_remote(project_id: str, remote_url: Optional[str],
+                          default_branch: Optional[str] = None) -> bool:
+    """Best-effort: store the project's remote on its replicated projects_v2 row.
+
+    Called after :func:`maybe_auto_link_project` whenever the git repository
+    record is ensured, so the row it writes is the project's CURRENT logical
+    identity. The URL is stored without credentials. A worker that never had
+    the project can then still clone it after every worker holding a copy
+    went offline or dropped its record. Never raises into the caller.
+    """
+    from app.core.scrub import strip_url_userinfo
+
+    clean = strip_url_userinfo((remote_url or "").strip()) or ""
+    if not clean:
+        return False
+    try:
+        from app.core.project_resolver import origin_for_legacy_project, resolve_project_v2
+        from app.db import projects_v2
+
+        project = database.get_project(project_id)
+        if not project:
+            return False
+        origin = origin_for_legacy_project(project)
+        if projects_v2.get_project_v2_by_origin(origin) is None:
+            # Seed the logical row the same way first use does (with its base checkout).
+            resolve_project_v2({"project_id": project_id})
+        return projects_v2.record_remote(origin, clean, default_branch or None)
+    except Exception:  # noqa: BLE001 - never break the caller's main flow
+        logger.debug("record_project_remote failed for %s", project_id, exc_info=True)
+        return False
+
+
+def backfill_project_remotes() -> int:
+    """Record every remote this database's git repository records know (sync).
+
+    For rows that predate :func:`record_project_remote`. Cheap to repeat:
+    :func:`app.db.projects_v2.record_remote` writes nothing when the row is
+    already right. Returns how many rows changed.
+    """
+    from app.db.base import get_db
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT gr.project_id AS project_id, gr.remote_url AS remote_url, "
+            "gr.default_branch AS default_branch FROM git_repositories gr "
+            "JOIN projects p ON p.id = gr.project_id "
+            "WHERE gr.remote_url IS NOT NULL AND gr.remote_url <> ''"
+        )
+        rows = cursor.fetchall()
+    return sum(1 for row in rows
+               if record_project_remote(row["project_id"], row["remote_url"], row["default_branch"]))
+
+
 # ---------------------------------------------------------------------------
 # Cross-install project resolution
 #

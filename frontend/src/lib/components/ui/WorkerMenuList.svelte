@@ -13,6 +13,8 @@
 		title: string;
 		/** Short trailing tag, e.g. "offline" or "no checkout". */
 		note?: string | null;
+		/** The note names something picking the row will do ("not set up · set up"). */
+		noteAction?: boolean;
 		/** Radio pickers only: the currently picked worker. */
 		checked?: boolean;
 	}
@@ -88,7 +90,7 @@
 		<WorkerStatusDot online={row.online} />
 		<span class="worker-row-name">{row.label}</span>
 		{#if row.note}
-			<span class="worker-row-note">{row.note}</span>
+			<span class="worker-row-note" class:action={row.noteAction}>{row.note}</span>
 		{/if}
 		{#if role === 'menuitemradio' && row.checked}
 			<Check size={13} strokeWidth={2} class="worker-row-check" aria-hidden="true" />
@@ -173,6 +175,12 @@
 		border-radius: 4px;
 		border: 1px solid color-mix(in oklch, var(--muted-foreground) 25%, transparent);
 		color: var(--muted-foreground);
+	}
+
+	.worker-row-note.action {
+		border-color: color-mix(in oklch, var(--primary) 40%, transparent);
+		color: var(--primary);
+		font-weight: 600;
 	}
 
 	/* Dim the row's contents, not the row, so an offline worker's red dot

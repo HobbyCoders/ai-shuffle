@@ -63,6 +63,20 @@ def test_workers_have_private_state_and_explicit_protected_peer_urls(tmp_path, m
     assert envs[1]["SHUFFLE_DEV_SEED"] == "empty"
 
 
+def test_fixed_ports_pin_worker_a_and_give_worker_b_the_next_pair(tmp_path):
+    """A container publishes one small range; both workers must land inside it."""
+    args = _args(tmp_path, port=18080, vite_port=18081)
+    fake = SimpleNamespace(url="http://127.0.0.1:9/v1")
+    voice = SimpleNamespace(url="ws://127.0.0.1:10")
+    used = {18080, 18081, 9, 10}
+    pairs = []
+    for index, name in enumerate(("worker-a", "worker-b")):
+        env, vite = workers.worker_environment(args, tmp_path / name, index, fake, voice,
+                                               used_ports=used)
+        pairs.append((int(env["SHUFFLE_PREVIEW_PORT"]), vite))
+    assert pairs == [(18080, 18081), (18082, 18083)]
+
+
 
 
 def test_single_worker_keeps_its_status_and_pair_reporters_can_publish_to_a_sink(tmp_path):

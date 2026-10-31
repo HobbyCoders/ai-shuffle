@@ -23,6 +23,7 @@ import {
 	isRemovedProjectSession,
 	isVisibleSidebarSession,
 	liveProjectKeys,
+	projectKey,
 	prStateText,
 	sessionPrState,
 	sessionPullRequests,
@@ -117,6 +118,21 @@ describe('liveProjectKeys', () => {
 			[{ origin: 'git:example.git', project_v2_id: 'pv2-1', local_project_id: 'local-1' }]
 		);
 		expect(keys).toEqual(new Set(['local-1', 'lg-1', 'git:example.git', 'pv2-1']));
+	});
+});
+
+describe('projectKey', () => {
+	it('groups a chat from before the project was linked with the same project on another worker', () => {
+		const here = session({ project_id: 'dev-other', origin: 'local:dev-other', link_group_id: 'git:ee50' });
+		const there = session({ project_id: null, origin: 'git:ee50', link_group_id: null, is_remote: true });
+		expect(projectKey(here)).toBe('git:ee50');
+		expect(projectKey(there)).toBe('git:ee50');
+	});
+
+	it('falls back to origin, then project id, then ungrouped', () => {
+		expect(projectKey(session({ origin: 'local:p', project_id: 'p' }))).toBe('local:p');
+		expect(projectKey(session({ project_id: 'p' }))).toBe('p');
+		expect(projectKey(session({ project_id: null }))).toBe('__ungrouped__');
 	});
 });
 

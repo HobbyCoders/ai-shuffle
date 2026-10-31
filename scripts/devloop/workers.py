@@ -86,10 +86,15 @@ def worker_environment(args: argparse.Namespace, directory: Path, index: int,
         used_ports.add(value)
         return value
 
+    def pinned(requested: int | None) -> int | None:
+        # A fixed --port/--vite-port pins worker A; B takes the next pair, so
+        # both stay inside one published range (docs/internal/dev-loop.md).
+        return requested + 2 * index if requested else None
+
     directory.mkdir()
-    preview = port(args.port if index == 0 else None)
+    preview = port(pinned(args.port))
     protected = port()
-    vite = None if args.no_vite else port(args.vite_port if index == 0 else None)
+    vite = None if args.no_vite else port(pinned(args.vite_port))
     extra = {"SHUFFLE_DEV_FAKE_AI_URL": fake.url, "SHUFFLE_DEV_FAKE_VOICE_URL": fake_voice.url,
              "SHUFFLE_DEV_VOICE_ENGINE": args.voice_engine,
              "SHUFFLE_DEV_ACCESS_FILE": str(directory / "access.json"),

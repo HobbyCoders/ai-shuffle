@@ -107,6 +107,14 @@ async function extractApiError(response: Response): Promise<ApiError> {
 						return typeof field === 'string' ? `${field}: ${d.msg}` : d.msg;
 					});
 				if (messages.length) return withDetail(messages.join('; '));
+			} else if (json.detail && typeof json.detail === 'object') {
+				// A structured detail ({error_code, error}) keeps its code in
+				// `body`; the shown detail must stay a string, never "[object Object]".
+				const nested = json.detail as { error?: unknown; message?: unknown };
+				const text = typeof nested.error === 'string' ? nested.error
+					: typeof nested.message === 'string' ? nested.message
+					: null;
+				if (text) return withDetail(text);
 			} else if (json.detail) return withDetail(json.detail);
 			if (json.message) return withDetail(json.message);
 			if (json.error) return withDetail(typeof json.error === 'string' ? json.error : JSON.stringify(json.error));

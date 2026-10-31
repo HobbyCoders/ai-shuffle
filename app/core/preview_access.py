@@ -36,7 +36,10 @@ Threat model, and what the token is NOT:
   reach: every unsafe-method request under :data:`MUTATION_DENY_PREFIXES`
   (auth, pairing, credentials, settings, network, plugins, ...) is refused
   even when the browser independently authenticates as a local owner, paired
-  client or API user. Cross-site mutations are refused by the same
+  client or API user. One exception, on a launcher-marked throwaway instance
+  only: it may add a project and set one up on, or remove it from, a paired
+  dev worker (``app.api.auth._preview_may_manage_projects``), so the dev loop
+  can be driven at all. Cross-site mutations are refused by the same
   ``same_origin`` check the local owner is held to. Account-preference writes
   are also refused by the preferences API, even if the browser independently
   qualifies as a direct LAN owner; test clicks must not sync to the user's UI.

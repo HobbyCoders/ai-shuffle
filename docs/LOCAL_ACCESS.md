@@ -62,6 +62,14 @@ samples and client-secret minting, even if the browser is independently the
 owner. Read-only voice discovery stays available. The remote listener ignores
 it entirely. It is not a login: the local owner boundary above is unchanged.
 
+On owner-only routes the cookie only reads. One exception: on a launcher-owned
+throwaway instance (the dev loop and `python -m app.preview run`, whose marked
+data directory an installed worker never has), it may also manage projects
+(`/api/v1/projects/...`: add, edit or remove a project, set one up on another
+worker, cancel that), because the cookie is the only way into such an
+instance. The mutation ceiling and the same-origin rule still apply there,
+and every other owner-only change stays refused.
+
 ### Obsolete session cookies in an isolated preview
 
 Browsers scope cookies to the host, not the port, so an isolated branch

@@ -439,6 +439,11 @@ class WorktreeManager:
             github_repo_name=github_repo_name
         )
         logger.debug(f"Created git repository record for project {project_id}: {repo_id}")
+        # As the Git panel's record path does: link the project to its remote's
+        # identity, then store the remote on that replicated identity.
+        from app.core.project_links import maybe_auto_link_project, record_project_remote
+        maybe_auto_link_project(project_id, (repo or {}).get("remote_url"))
+        record_project_remote(project_id, (repo or {}).get("remote_url"), (repo or {}).get("default_branch"))
         return repo
 
     def sync_worktrees_for_project(self, project_id: str) -> Dict[str, Any]:

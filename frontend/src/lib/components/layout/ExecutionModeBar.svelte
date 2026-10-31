@@ -22,10 +22,12 @@
 	import {
 		peerRunners,
 		checkoutEligibility,
-		isBlocked,
-		runnerTitle
+		isBlockedForNewChat,
+		newChatRowNote,
+		newChatRowTitle,
+		overviewRowFor
 	} from './execution-mode-eligibility';
-	import { workerRowNote } from '$lib/components/chat/runner-badge-menu';
+	import { loadProjectsOverview, projectsOverview, projectsOverviewSupported } from '$lib/stores/projects-overview';
 	import WorkerStatusDot from '$lib/components/ui/WorkerStatusDot.svelte';
 	import WorkerMenuList, { type WorkerMenuRow } from '$lib/components/ui/WorkerMenuList.svelte';
 
@@ -282,6 +284,12 @@
 
 	const deviceIntent = $derived($activeSession.deviceIntent);
 
+	// Cross-worker project sync: the picked project's per-worker state. When it
+	// is known, a worker without the project stays pickable (set up at send).
+	const syncRow = $derived($projectsOverviewSupported === true
+		? overviewRowFor($projectsOverview, { project: $activeSession.project || null, projectV2Id: $activeSession.projectV2Id })
+		: undefined);
+
 	// Presence of the picked runner for the chip's dot. Local is this worker and
 	// always online; a picked peer not in the loaded list has unknown presence,
 	// so the chip shows no dot.
@@ -320,6 +328,7 @@
 				return null;
 			})
 			: Promise.resolve(null);
+		if (projectId || projectV2Id) void loadProjectsOverview();
 		try {
 			await refreshWorkerPresence();
 			installsFailed = false;
@@ -333,6 +342,9 @@
 		eligibility = checkoutEligibility(gitState);
 	}
 
+	const selfInstall = $derived(installs.find((i) => i.is_self) ?? null);
+	const selfNote = $derived(syncRow && selfInstall ? newChatRowNote(selfInstall, null, syncRow) : null);
+
 	// Rows for the shared worker list. Local is this worker: always online,
 	// never blocked. Peers keep their blocked state and tooltip.
 	const runnerRows = $derived<WorkerMenuRow[]>([
@@ -341,16 +353,21 @@
 			label: 'Local',
 			online: true,
 			disabled: false,
-			title: 'Run this session on this device',
+			title: selfNote === 'not set up · set up' && syncRow
+				? `${syncRow.name} isn't on this device yet — it's set up here when you send`
+				: 'Run this session on this device',
+			note: selfNote,
+			noteAction: selfNote === 'not set up · set up',
 			checked: !deviceIntent
 		},
 		...peers.map((install): WorkerMenuRow => ({
 			id: install.id,
 			label: install.device_name,
 			online: install.online,
-			disabled: isBlocked(install, worktreeOn, eligibility),
-			title: runnerTitle(install, worktreeOn, eligibility),
-			note: workerRowNote(install, eligibility),
+			disabled: isBlockedForNewChat(install, worktreeOn, eligibility, syncRow),
+			title: newChatRowTitle(install, worktreeOn, eligibility, syncRow),
+			note: newChatRowNote(install, eligibility, syncRow),
+			noteAction: newChatRowNote(install, eligibility, syncRow) === 'not set up · set up',
 			checked: deviceIntent?.id === install.id
 		}))
 	]);
@@ -362,7 +379,7 @@
 	}
 
 	function selectDevice(install: Install) {
-		if (isBlocked(install, worktreeOn, eligibility)) return;
+		if (isBlockedForNewChat(install, worktreeOn, eligibility, syncRow)) return;
 		activeSession.setDeviceIntent({ id: install.id, name: install.device_name });
 		setModeDropdown(false);
 	}

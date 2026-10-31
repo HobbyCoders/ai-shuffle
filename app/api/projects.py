@@ -279,62 +279,69 @@ async def create_project(request: ProjectCreate, token: str = Depends(require_ad
 
 async def create_project_record(request: ProjectCreate) -> dict:
     """Shared REST/app-config creation path; callers enforce owner permissions."""
-    def _create():
-        # Serialize local creates so concurrent REST/tool calls cannot both pass
-        # the name/path checks. Filesystem and DB work stay off the event loop.
-        with _project_creation_lock:
-            payload = request
+    created = await run_sync(create_project_record_sync, request)
+    _announce_catalog_change()
+    return created
 
-            # Keep cross-install ID suffixing: another worker may use the same ID.
-            existing = database.get_project(payload.id)
-            if existing:
-                if existing.get("instance_id") and existing["instance_id"] != settings.effective_instance_id:
-                    import hashlib
-                    suffix = hashlib.sha256(settings.effective_instance_id.encode()).hexdigest()[:6]
-                    payload = payload.model_copy(update={"id": f"{payload.id}-{suffix}"})
-                    if database.get_project(payload.id):
-                        raise HTTPException(
-                            status_code=status.HTTP_409_CONFLICT,
-                            detail=f"Project already exists: {payload.id}"
-                        )
-                else:
+
+def create_project_record_sync(request: ProjectCreate) -> dict:
+    """The blocking body of :func:`create_project_record` (run it off the loop).
+
+    Also used by cross-worker project setup (``app.core.project_setup``) so a
+    project set up from another worker passes exactly the same id, path,
+    nested-repository and duplicate checks as one added here.
+    """
+    # Serialize local creates so concurrent REST/tool calls cannot both pass
+    # the name/path checks. Filesystem and DB work stay off the event loop.
+    with _project_creation_lock:
+        payload = request
+
+        # Keep cross-install ID suffixing: another worker may use the same ID.
+        existing = database.get_project(payload.id)
+        if existing:
+            if existing.get("instance_id") and existing["instance_id"] != settings.effective_instance_id:
+                import hashlib
+                suffix = hashlib.sha256(settings.effective_instance_id.encode()).hexdigest()[:6]
+                payload = payload.model_copy(update={"id": f"{payload.id}-{suffix}"})
+                if database.get_project(payload.id):
                     raise HTTPException(
                         status_code=status.HTTP_409_CONFLICT,
                         detail=f"Project already exists: {payload.id}"
                     )
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Project already exists: {payload.id}"
+                )
 
-            effective_path = normalize_docker_path(payload.path) if payload.path else None
-            db_path = effective_path if effective_path else payload.id
-            project_path = validate_project_path(db_path, allow_create=True)
-            refuse_nested_repository(project_path)
+        effective_path = normalize_docker_path(payload.path) if payload.path else None
+        db_path = effective_path if effective_path else payload.id
+        project_path = validate_project_path(db_path, allow_create=True)
+        refuse_nested_repository(project_path)
 
-            # Only this worker's projects (including legacy rows) are duplicates.
-            # Resolve paths so relative, absolute and symlink spellings agree.
-            for project in database.get_all_projects():
-                if project["name"].strip().casefold() == payload.name.strip().casefold():
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail=f"Project already exists with name '{payload.name}': {project['id']}"
-                    )
-                if get_project_working_dir_as_path(project).resolve() == project_path:
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail=f"Project already exists at path '{project_path}': {project['id']}"
-                    )
+        # Only this worker's projects (including legacy rows) are duplicates.
+        # Resolve paths so relative, absolute and symlink spellings agree.
+        for project in database.get_all_projects():
+            if project["name"].strip().casefold() == payload.name.strip().casefold():
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Project already exists with name '{payload.name}': {project['id']}"
+                )
+            if get_project_working_dir_as_path(project).resolve() == project_path:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Project already exists at path '{project_path}': {project['id']}"
+                )
 
-            project_path.mkdir(parents=True, exist_ok=True)
-            settings_dict = request.settings.model_dump(exclude_none=True) if request.settings else None
-            return database.create_project(
-                project_id=payload.id,
-                name=payload.name,
-                description=payload.description,
-                path=db_path,
-                settings_dict=settings_dict
-            )
-
-    created = await run_sync(_create)
-    _announce_catalog_change()
-    return created
+        project_path.mkdir(parents=True, exist_ok=True)
+        settings_dict = request.settings.model_dump(exclude_none=True) if request.settings else None
+        return database.create_project(
+            project_id=payload.id,
+            name=payload.name,
+            description=payload.description,
+            path=db_path,
+            settings_dict=settings_dict
+        )
 
 
 @router.put("/{project_id}", response_model=Project)

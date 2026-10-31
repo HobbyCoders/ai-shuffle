@@ -183,6 +183,18 @@ async def test_preview_send_to_another_worker_is_refused(workspace: Path) -> Non
     assert await _handler(_owner())._may_send_elsewhere("sess-x") is True
 
 
+async def test_preview_send_to_another_worker_is_allowed_between_throwaway_dev_workers(
+        workspace: Path, monkeypatch) -> None:
+    """``devloop up --workers 2``: both workers are launcher-marked throwaway
+    copies, so the owner can test a cross-worker chat through the preview link."""
+    from app import preview_run
+
+    monkeypatch.setattr(preview_run, "disposable_preview_data", lambda: True)
+    preview = _handler(identity.preview_principal())
+    assert await preview._may_send_elsewhere("sess-x") is True
+    preview.send_json.assert_not_awaited()
+
+
 def test_a_forwarded_turn_carries_only_a_stated_caller() -> None:
     from app.network import control
 

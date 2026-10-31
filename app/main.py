@@ -638,6 +638,9 @@ app.include_router(model_providers.router)
 app.include_router(agents.router)
 app.include_router(owner_services.router)
 app.include_router(watches.router)
+# Before the projects router: /projects/overview and /projects/workers are not project ids.
+from app.api import project_workers
+app.include_router(project_workers.router)
 app.include_router(projects.router)
 app.include_router(sessions.router)
 from app.api import data_export

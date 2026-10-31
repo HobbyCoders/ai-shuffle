@@ -46,9 +46,9 @@ describe('streaming composer actions', () => {
 	});
 
 	it('keeps Stop outside the draft gate so typing never removes the control', () => {
-		// Send (or Talk) holds the slot; Stop is its own circle after it, shown
+		// Send (or Talk, or "Set up & send") holds the slot; Stop is its own circle after it, shown
 		// whenever work runs (composer-wrap.composerCircles keeps it with a draft).
-		expect(circles).toMatch(/\{:else if circles\.includes\('send'\)\}\s*<button[\s\S]*?type="submit"[\s\S]*?aria-label="Send"[\s\S]*?<\/button>\s*\{\/if\}[\s\S]*?\{#if circles\.includes\('stop'\)\}\s*<StopButton[\s\S]*?\/>/);
+		expect(circles).toMatch(/\{:else if circles\.includes\('send'\)\}\s*<button[\s\S]*?type="submit"[\s\S]*?aria-label=(?:"Send"|\{[^}]*'Send'\})[\s\S]*?<\/button>\s*\{\/if\}[\s\S]*?\{#if circles\.includes\('stop'\)\}\s*<StopButton[\s\S]*?\/>/);
 		expect(circles.match(/<StopButton/g)).toHaveLength(1);
 	});
 

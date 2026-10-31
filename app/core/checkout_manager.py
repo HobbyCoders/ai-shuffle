@@ -315,11 +315,16 @@ def _branch_plan(
         return None
 
 
-def _resolve_clone_url(origin: str) -> Optional[str]:
-    """Recover a cloneable remote URL for a project_v2 ``origin`` from legacy data.
+def _resolve_clone_url(origin: str, project_v2_row: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """Recover a cloneable remote URL for a project_v2 ``origin``.
 
     Consumed by ``_seed_base_checkout`` to clone a base checkout on demand when a
     pinned runner has no local materialization.
+
+    The remote stored on the replicated ``projects_v2`` row
+    (``settings.remote_url``, see ``app.db.projects_v2.record_remote``) wins when
+    it reproduces ``origin``: it survives the last local record of the project
+    going away, which the legacy scan below does not.
 
     A v2 ``origin`` is the collapse key ``project_resolver.origin_for_legacy_project``
     seeds: the legacy ``link_group_id`` (a ``git:…`` / ``manual:…`` token) or a synth
@@ -339,6 +344,12 @@ def _resolve_clone_url(origin: str) -> Optional[str]:
         return None
     if origin.startswith("local:") or origin.startswith("manual:"):
         return None
+    from app.db.projects_v2 import stored_remote
+
+    stored_url, _stored_branch = stored_remote(project_v2_row)
+    if stored_url is not None and (project_v2_row or {}).get("origin") == origin \
+            and auto_link_group_id(stored_url) == origin:
+        return stored_url
     try:
         with get_db() as conn:
             cursor = conn.cursor()
@@ -418,7 +429,7 @@ def _seed_base_checkout(
         return None
 
     origin = project_v2_row.get("origin")
-    clone_url = _resolve_clone_url(origin) if origin else None
+    clone_url = _resolve_clone_url(origin, project_v2_row) if origin else None
     if clone_url is None:
         logger.warning(
             "checkout_manager: cannot self-seed base checkout for project %s "

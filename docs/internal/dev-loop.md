@@ -53,6 +53,11 @@ python -m scripts.devloop status --wait 180
 python -m scripts.devloop down
 ```
 
+For the owner to open both from another device on the LAN, pin the ports
+inside a published range and use the host's LAN address (see "Opening a
+branch copy from a phone" below): `--port 18080 --vite-port 18081` pins
+worker A, and worker B takes the next pair, `18082`/`18083`.
+
 Run `up` under Monitor, just like the one-worker mode. **Dev worker A** has
 its own PostgreSQL, data directory, home and workspace, with the normal
 **Dev sandbox** / **Dev other** projects and chats. **Dev worker B** has a
@@ -85,7 +90,12 @@ owner, not a preview cookie; that does not indicate an offline peer.
 
 Both projects' `file://` bare remotes live in the pair's shared scratch
 `remotes/`, **outside both workspaces**, readable by either worker. B can
-clone those URLs without GitHub or real Git credentials. The two apps run as
+clone those URLs without GitHub or real Git credentials: setting a project
+up on another worker clones the project's own recorded remote, which may be a
+local path outside the workspace (typed clone URLs in the Git panel still may
+not). On a dev instance the preview cookie may add projects and set them up,
+cancel or remove them on the other worker (Projects → Workers); other
+owner-only changes stay refused. The two apps run as
 the same OS user: this exercises real pairing, encrypted sync, cross-worker
 API calls and separate project installations, not host isolation or Unix
 permissions between different users.

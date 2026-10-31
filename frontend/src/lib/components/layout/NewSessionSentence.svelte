@@ -27,6 +27,7 @@
 	import ExecutionModeBar from './ExecutionModeBar.svelte';
 	import RunsOnPicker from './RunsOnPicker.svelte';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
+	import NewChatSetupCallout from './NewChatSetupCallout.svelte';
 
 	const hasProject = $derived(!!($activeSession.project || $activeSession.projectV2Id));
 	const projectName = $derived(
@@ -75,6 +76,10 @@
 		/><span class="ns-stop" aria-hidden="true">.</span></span>
 	{/if}
 </div>
+{#if hasProject}
+	<!-- The picked worker lacks the project: say so, and that Send sets it up first. -->
+	<NewChatSetupCallout />
+{/if}
 
 {#if showCheckoutBranch}
 	<CreateBranchModal
