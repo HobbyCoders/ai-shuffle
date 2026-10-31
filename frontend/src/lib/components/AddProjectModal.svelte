@@ -250,12 +250,24 @@
 	function onFieldEnter(e: KeyboardEvent) {
 		if (e.key === 'Enter' && canSubmit) handleAddProject();
 	}
+
+	// Some openers sit inside a transformed or stacking parent (the new chat's
+	// "in <project>" sentence), which would trap this fixed overlay under the
+	// composer and pin it to that parent. Render it on <body> instead.
+	function portal(node: HTMLElement) {
+		document.body.appendChild(node);
+		return {
+			destroy() {
+				node.remove();
+			}
+		};
+	}
 </script>
 
 <svelte:window onkeydown={handleWindowKeydown} />
 
 {#if open}
-	<div class="create-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="add-project-title" tabindex="-1" use:focusTrap>
+	<div class="create-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="add-project-title" tabindex="-1" use:portal use:focusTrap>
 		<button class="create-modal-backdrop-btn" onclick={onClose} tabindex="-1" aria-label="Close dialog"></button>
 		<div class="create-modal add-project-modal">
 			<div class="create-modal-header">
