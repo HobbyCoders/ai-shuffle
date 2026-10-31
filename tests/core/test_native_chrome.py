@@ -402,7 +402,10 @@ async def test_page_probe_recovers_a_wedged_renderer_without_touching_profile(mo
             return [{"type": "page", "id": target, "webSocketDebuggerUrl": base + "/page/" + target}]
 
         monkeypatch.setattr(nc, "cdp_get", get)
-        monkeypatch.setattr(nc, "_PAGE_PROBE_TIMEOUT_S", 0.05)
+        # Bounds every CDP command, including the cleanup closeTarget: 50 ms
+        # was shorter than a loaded CI runner's connect + handshake, so that
+        # close was swallowed and never reached the fake endpoint.
+        monkeypatch.setattr(nc, "_PAGE_PROBE_TIMEOUT_S", 0.5)
         monkeypatch.setattr(nc, "_health_states", {})
         monkeypatch.setattr(nc, "_browser_in_use", lambda: False)
         monkeypatch.setattr(nc, "_health_now", lambda: clock[0])
