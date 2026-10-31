@@ -241,6 +241,7 @@ true only when the app showing the page offers `name`:
 | `worker-switch` | yes | no | the app connects to another paired worker when the page navigates to `/mobile/?connect=<origin>` |
 | `voice-routing` | yes | no | the app follows headset routes while the page reports a call (`voice-call` over `shuffleShell`) |
 | `voice-call-controls` | yes | no | the app keeps a call running with the phone locked, with an ongoing notification; the page reports `voice-call-state` and answers its Mute/Hang up as a `shufflevoicecall` window event |
+| `app-settings` | yes | no | the app opens its own Settings screen (account, sign out, trusted devices, phone tools, delete account) on `{"type":"app-settings"}` over `shuffleShell` |
 
 Both are false on the web UI and in app builds from before the descriptor.
 Those builds bundle their own UI, so they never show a worker page anyway.
@@ -300,6 +301,12 @@ says so over the `shuffleShell` web-message bridge, which is scoped like
   `{"type":"workers"}` opens the native Workers screen only as a fallback
   when no page connection is available; that screen also handles first setup
   and the paired-account authorization hand-off described above.
+- In the app, the sheet's App settings row sends `{"type":"app-settings"}`,
+  which opens the app's own Settings screen (account, sign out, trusted
+  devices, phone tools, delete account) above chat. The hidden native bar
+  was the only other way there while connected. An app without the
+  `app-settings` capability gets `{"type":"workers"}` instead; its Workers
+  screen has the Settings button. Browsers never see the row.
 - `{"type":"voice-call","active":…}` and `{"type":"voice-call-state",…}`
   from the voice call (`frontend/src/lib/services/voiceCall.ts` and
   `voiceCallNative.ts`): the app follows headset routes and keeps the call

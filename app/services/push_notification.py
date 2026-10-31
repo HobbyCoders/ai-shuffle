@@ -6,6 +6,7 @@ relay acceptance is not proof that a notification was displayed or seen.
 """
 import asyncio
 import logging
+import math
 from dataclasses import dataclass
 import time
 from enum import Enum
@@ -37,6 +38,7 @@ class NotificationResult:
     not_linked: bool = False
     retry_after: Optional[float] = None
     permanent_failure: bool = False
+    reason: Optional[str] = None
 
 
 NO_PUSH_RECEIVER_REASON = "no device can receive push notifications"
@@ -64,11 +66,30 @@ def delivered_count(results: List[NotificationResult]) -> int:
     return sum(r.success and not r.simulated for r in results)
 
 
+def failure_reason(results: List[NotificationResult]) -> str:
+    if not results:
+        return NO_PUSH_RECEIVER_REASON
+    failure = next((r for r in results if r.reason), results[0])
+    reason = failure.reason or failure.error or ("not_linked" if failure.not_linked else "relay did not accept the send")
+    if failure.retry_after is not None:
+        reason += f"; retry after {math.ceil(failure.retry_after)}s"
+    return reason
+
+
 class PushNotificationService:
     def __init__(self):
         self._rejected_binding = None
         self._retry_binding = None
         self._retry_at = 0.0
+        self._warning_at = {}
+
+    def _warn_failure(self, reason):
+        # Only fixed messages / allow-listed hub codes and HTTP status reach here.
+        # One warning per outcome per five minutes, independent of send backoff.
+        now = time.monotonic()
+        if now >= self._warning_at.get(reason, 0.0):
+            self._warning_at[reason] = now + 300.0
+            logger.warning("Attention push failed: %s", reason)
 
     @staticmethod
     def _identity(binding):
@@ -108,23 +129,30 @@ class PushNotificationService:
             payload.update(token=device_id, expires_at=int(data["expires_at"]))
             result = await asyncio.to_thread(account_hub.call, binding, "POST", "push", payload)
             if result.get("accepted") is not True:
+                self._warn_failure("relay did not accept the send (200)")
                 return NotificationResult(False, error="relay did not accept the send")
             return NotificationResult(True, message_id=result.get("message_id"))
         except Exception as exc:
-            logger.debug("Attention push transport failed (%s)", type(exc).__name__)
             status = account_hub.hub_status(exc)
-            if status in (401, 403):
-                self._rejected_binding = identity
-                return NotificationResult(False, error="not_linked", not_linked=True)
+            code = getattr(exc, "hub_error", None) or "relay unavailable"
+            reason = f"{code} ({status if status is not None else 'no HTTP response'})"
             if status == 410:
-                return NotificationResult(False, error="token_invalid", invalid_token=True)
+                # Routine pruning of an uninstalled app's token, not a relay fault.
+                return NotificationResult(False, error="token_invalid", invalid_token=True, reason=reason)
+            if status in (401, 403):
+                # Terminal until relink; keep the documented not_linked reason.
+                reason = f"not_linked: {getattr(exc, 'hub_error', None) or 'refused'} ({status})"
+                self._warn_failure(reason)
+                self._rejected_binding = identity
+                return NotificationResult(False, error="not_linked", not_linked=True, reason=reason)
+            self._warn_failure(reason)
             if status == 400:
                 # A malformed command cannot be repaired by retrying it.
-                return NotificationResult(False, error="invalid push command", permanent_failure=True)
+                return NotificationResult(False, error="invalid push command", permanent_failure=True, reason=reason)
             delay = account_hub.retry_after(exc)
             delay = max(15.0, delay or 0.0)
             self._retry_binding, self._retry_at = identity, time.monotonic() + delay
-            return NotificationResult(False, error="relay unavailable", retry_after=delay)
+            return NotificationResult(False, error="relay unavailable", retry_after=delay, reason=reason)
 
     async def send_to_all_devices(self, title: str, body: str, data=None,
                                   device_tokens=None, raise_lookup_errors=False) -> List[NotificationResult]:

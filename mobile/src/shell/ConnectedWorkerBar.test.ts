@@ -81,6 +81,39 @@ describe('ConnectedWorkerBar in the Android app', () => {
 		expect(openSettings).not.toHaveBeenCalled();
 	});
 
+	it('reaches the app’s own Settings (account, sign out) while connected', async () => {
+		inApp(['worker-switch', 'app-settings']);
+		render(ConnectedWorkerBar);
+		await fireEvent.click(await chip());
+		const appSettings = screen.getByRole('button', { name: 'App settings' });
+		expect(appSettings.getAttribute('aria-describedby')).toBe('conn-app-settings');
+		expect(document.getElementById('conn-app-settings')?.textContent).toBe('Account, sign out');
+		await fireEvent.click(appSettings);
+		expect(posted().at(-1)).toEqual({ type: 'app-settings' });
+		expect(posted()).not.toContainEqual({ type: 'workers' });
+		expect(openSettings).not.toHaveBeenCalled();
+		expect(screen.queryByRole('dialog')).toBeNull();
+	});
+
+	it('keeps App settings when the worker cannot be reached', async () => {
+		inApp(['worker-switch', 'app-settings']);
+		vi.mocked(listInstalls).mockRejectedValue(new TypeError('Failed to fetch'));
+		render(ConnectedWorkerBar);
+		await fireEvent.click(await screen.findByRole('button', { name: 'Connection to this worker lost. Switch worker' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'App settings' }));
+		expect(posted().at(-1)).toEqual({ type: 'app-settings' });
+	});
+
+	it('sends an app from before App settings to its Workers screen, which has the Settings button', async () => {
+		inApp(['worker-switch']);
+		render(ConnectedWorkerBar);
+		await fireEvent.click(await chip());
+		expect(document.getElementById('conn-app-settings')?.textContent).toBe('Workers > Settings');
+		await fireEvent.click(screen.getByRole('button', { name: 'App settings' }));
+		expect(posted().at(-1)).toEqual({ type: 'workers' });
+		expect(posted()).not.toContainEqual({ type: 'app-settings' });
+	});
+
 	it('gives the bar back when the app does not switch', async () => {
 		inApp(['worker-switch']);
 		const assign = vi.fn();
@@ -106,6 +139,14 @@ describe('ConnectedWorkerBar without the Android bridge', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Manage workers' }));
 		expect(openSettings).toHaveBeenCalledWith({ category: 'devices' });
 		expect(postMessage).not.toHaveBeenCalled();
+	});
+
+	it('shows no App settings row outside the app', async () => {
+		inApp(['worker-switch', 'app-settings'], false);
+		render(ConnectedWorkerBar);
+		await fireEvent.click(await chip());
+		expect(screen.getByRole('button', { name: 'Manage workers' })).toBeTruthy();
+		expect(screen.queryByRole('button', { name: 'App settings' })).toBeNull();
 	});
 });
 
