@@ -22,7 +22,7 @@ inside a private directory:
 
 | Field | What it is |
 | --- | --- |
-| `state` | `starting`, `ready`, `restarting`, `app-exited` or `stopping` |
+| `state` | `starting`, `pairing` (two workers), `ready`, `restarting`, `app-exited` or `stopping` |
 | `pid`, `pid_identity` | The launcher and its start time (a reused pid is not the launcher) |
 | `mode` | `dev`, or `ci` for `--ci` |
 | `access_link`, `urls.ui` | The link to open; the UI (Vite, or the stamped build) origin |
@@ -44,6 +44,75 @@ status whose pid is gone.
 UI journeys (`frontend/tests/journeys/*.journey.mjs`) read that status file,
 drive the instance in Chromium and fail on any flight-recorder anomaly; see
 `frontend/tests/journeys/README.md`.
+
+## Two real workers on one Linux machine
+
+```bash
+python -m scripts.devloop up --workers 2 --host 0.0.0.0 --browser-host 172.17.0.2
+python -m scripts.devloop status --wait 180
+python -m scripts.devloop down
+```
+
+Run `up` under Monitor, just like the one-worker mode. **Dev worker A** has
+its own PostgreSQL, data directory, home and workspace, with the normal
+**Dev sandbox** / **Dev other** projects and chats. **Dev worker B** has a
+second private PostgreSQL, data directory, home and workspace, and an **empty
+seed**: no local projects or chats. Enrollment then brings A's shared records
+across through the real network sync; it does not copy A's project directories
+into B's workspace. This is the starting state for testing “set up this
+project on another worker.” Two-worker mode requires the default seed (not
+`--seed long` or `--seed none`).
+
+The launcher creates a network on A, mints a single-use `network:join` grant,
+and asks B to enroll through the app's normal API. Possession of that code is
+the app's approval path. Both enrollment and peer sync use **protected
+loopback listeners**, not the local-owner or preview listeners. Each worker
+explicitly advertises its own protected URL, and enrollment sends its real
+instance id. The launcher's setup requests to each local-owner listener use
+the existing per-launch desktop-listener credential; no Origin header is
+fabricated and no CSRF or peer authentication checks are disabled. No live
+worker, account, identity key, credential file or database is used.
+
+Wait for the `PAIRED` line / `state: ready`: readiness requires **both**
+`GET /api/v1/network/status` and `GET /api/v1/cluster/installs` on **each**
+worker to list the other as active, approved and **online**, in the same fully
+bootstrapped network. Then open each printed access link once. Both UIs are
+reachable at `--browser-host`; on A, **Settings → Devices** shows A as ready
+and B as online. The preview cookie remains read-only for ownership,
+credentials and network settings. The Devices page's cloud-device
+confirmations request may return 403 because it requires a worker-authenticated
+owner, not a preview cookie; that does not indicate an offline peer.
+
+Both projects' `file://` bare remotes live in the pair's shared scratch
+`remotes/`, **outside both workspaces**, readable by either worker. B can
+clone those URLs without GitHub or real Git credentials. The two apps run as
+the same OS user: this exercises real pairing, encrypted sync, cross-worker
+API calls and separate project installations, not host isolation or Unix
+permissions between different users.
+
+The status JSON adds:
+
+| Field | Meaning in `--workers 2` mode |
+| --- | --- |
+| `worker_count`, `workers` | `2`, and both workers' names, access links, URLs, seeds, directories and app/PostgreSQL/Vite process identities |
+| `network` | Network id and each worker's observed approved/online peer, or `null` while starting/restarting |
+| `remotes_dir` | Shared bare repositories, outside either workspace |
+| Top-level `access_link`, `urls`, `app`, `postgres`, `seed`, `data_dir`, `workspace_dir` | A's existing fields, so journey tools still target A |
+| `state` | Adds `pairing`; `ready` means both apps and the initial mutual-online check are ready |
+
+`--port` / `--vite-port` select A's ports; B's ports are allocated separately.
+Each app gets its own Vite proxy in dev mode. A Python save restarts **both
+apps**, keeps both databases/identities/access cookies, and rechecks mutual
+presence before returning to `ready`. A source error can be fixed and saved
+without tearing the pair down. The TTL, parent loss, stop signals and `down`
+end **both** leases; the SIGKILL guardian also covers both apps, Vites,
+PostgreSQL clusters and private socket directories. Either supervisor ending
+ends the pair. Do not stop only one app by hand; use `down` for the pair.
+
+This cannot simulate a second physical machine, Windows, distinct OS users,
+WAN latency or partitions, account/tunnel registration, real GitHub access or
+real AI providers. Those still need the live smoke. `--workers 1` (the default)
+keeps the original single-worker behavior.
 
 ## Live reload
 
@@ -401,7 +470,8 @@ See [PR checks](../ci/pr-checks.md#ui-journeys-and-visual-regression).
 * Never point it at, or run it beside, the live worker's data, database or
   ports; it never reads them, and it inherits no `DATA_DIR`, `DATABASE_URL`, key
   or DSN (the app's environment is PATH/LANG/LD_LIBRARY_PATH plus its own
-  settings; the launcher may add only the dev loop's own `SHUFFLE_DEV_*` settings).
+  settings; two-worker mode also generates a private desktop-listener token and
+  an explicit protected-loopback `CLUSTER_ADVERTISE_URL` for each app).
 * Never copy a `.env` into the checkout.
 * The preview cookie cannot change auth, credentials, settings or providers,
   so seed what you need instead of clicking it into Settings.

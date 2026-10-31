@@ -1,6 +1,6 @@
 """One command for a private, live-reloading dev copy of this checkout.
 
-    python -m scripts.devloop up [--host 0.0.0.0 --browser-host IP] [--ttl-seconds N]
+    python -m scripts.devloop up [--workers 1|2] [--host 0.0.0.0 --browser-host IP] [--ttl-seconds N]
                                  [--no-vite] [--seed default|none] [--status PATH] [--ci]
                                  [--claude-cli fake|none] [--voice-engine gpt-live|grok]
                                  [--fake-voice-host 127.0.0.1|0.0.0.0]
@@ -32,6 +32,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -274,11 +275,13 @@ class Instance:
     """The status file and the readiness reporting for one ``up``."""
 
     def __init__(self, args: argparse.Namespace, directory: Path, env: dict, fake: Any,
-                 vite_port: int | None, gate: RestartGate | None = None) -> None:
+                 vite_port: int | None, gate: RestartGate | None = None,
+                 *, status_writer: Callable[[dict], None] | None = None) -> None:
         from app.core.temp_scratch import process_identity
 
         self.args, self.directory, self.env, self.fake = args, directory, env, fake
         self.vite_port = vite_port
+        self.status_writer = status_writer
         self.gate = gate or RestartGate(threading.Event())
         #: Set by a stop signal: the status says "stopping" and is never rewritten.
         self.retired = False
@@ -327,6 +330,12 @@ class Instance:
             if self.retired:
                 return
             self.data.update(changes)
+            self._write_status()
+
+    def _write_status(self) -> None:
+        if self.status_writer is not None:
+            self.status_writer(self.data)
+        else:
             write_private_json(self.args.status, self.data)
 
     def retire(self) -> None:
@@ -343,7 +352,7 @@ class Instance:
             self.retired = True
             self.data["state"] = "stopping"
             try:
-                write_private_json(self.args.status, self.data)
+                self._write_status()
             except (OSError, StatusError):
                 self.args.status.unlink(missing_ok=True)
 
@@ -510,6 +519,8 @@ def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
         parser.error("--ttl-seconds must be positive and at most four hours")
     if str(args.fake_voice_host) not in ("127.0.0.1", "0.0.0.0"):
         parser.error("--fake-voice-host must be 127.0.0.1 or 0.0.0.0 (the app reaches it over loopback)")
+    if getattr(args, "workers", 1) == 2 and args.seed != "default":
+        parser.error("--workers 2 uses the default seed on A and an empty seed on B")
     if args.ci:
         if not args.host.is_loopback or args.browser_host is not None:
             parser.error("--ci binds loopback only (no --host/--browser-host)")
@@ -560,6 +571,10 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     if existing and status_alive(existing):
         parser.error(f"A dev instance for this checkout is already running (pid "
                      f"{existing['pid']}): python -m scripts.devloop down")
+    if args.workers == 2:
+        from scripts.devloop.workers import up_workers
+
+        return up_workers(args)
     from app.core.temp_scratch import scratch_directory
     from app.preview_run import free_port, supervise
     from docker import container_runtime as runtime
@@ -780,6 +795,8 @@ def main(argv: list[str] | None = None) -> int:
                        help="Bind address for the UI listeners; 0.0.0.0 for a remote browser")
     start.add_argument("--browser-host", type=ipaddress.ip_address,
                        help="Address the browser reaches this machine by (required with 0.0.0.0)")
+    start.add_argument("--workers", type=int, choices=(1, 2), default=1,
+                       help="One worker (default), or two real paired workers on this machine")
     start.add_argument("--ttl-seconds", type=int, default=3600)
     start.add_argument("--port", type=int, help="Preview listener port (default: free)")
     start.add_argument("--vite-port", type=int, help="Vite dev port (default: free)")

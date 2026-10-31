@@ -2270,6 +2270,11 @@
     "reason": "Dev-loop launcher's loopback fake realtime voice provider; voice calls use it only for a bare loopback ws:// URL on a launcher-marked disposable preview data directory, never inherited from the worker",
     "base_settings": false
   },
+  "SHUFFLE_DEV_REMOTES_DIR": {
+    "kind": "internal",
+    "reason": "Dev-loop two-worker launcher's shared directory for the seed's bare git remotes, outside both disposable workspaces so the second worker can clone them; never inherited from the worker",
+    "base_settings": false
+  },
   "SHUFFLE_DEV_SEED": {
     "kind": "internal",
     "reason": "Dev-loop seed name; honoured only on a launcher-marked disposable preview data directory, never inherited from the worker",
