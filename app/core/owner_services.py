@@ -174,7 +174,10 @@ def session_stopped(session_id):
         return True
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM turns WHERE session_id=%s ORDER BY position DESC,created_at DESC LIMIT 1", (session_id,))
+        # A held progress note (#960) never ran, so it cannot mask a durable Stop.
+        cursor.execute("SELECT * FROM turns WHERE session_id=%s "
+                       "AND NOT (state='aborted' AND COALESCE(stop_reason, '')='held_progress') "
+                       "ORDER BY position DESC,created_at DESC LIMIT 1", (session_id,))
         turn = row_to_dict(cursor.fetchone())
         if not turn:
             return False
