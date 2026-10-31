@@ -205,6 +205,15 @@ describe('permissionModePayload', () => {
 		expect(permissionModePayload(legacy, 'bypassPermissions', {})).toBe('bypassPermissions');
 	});
 
+	it('pins the shown mode on a legacy row when the agent changes', () => {
+		// The old agent saved Bypass, so the form shows Bypass. Left NULL after
+		// switching agents, the run would use the new agent's mode instead.
+		const legacy = saved({ effective_permission_mode: 'bypassPermissions', permission_mode_source: 'agent' });
+		const oldAgent = { permission_mode: 'bypassPermissions' };
+		expect(permissionModePayload(legacy, 'bypassPermissions', oldAgent)).toBeUndefined();
+		expect(permissionModePayload(legacy, 'bypassPermissions', oldAgent, true)).toBe('bypassPermissions');
+	});
+
 	it("always sends an automation's own mode", () => {
 		const own = saved({ permission_mode: 'acceptEdits', effective_permission_mode: 'acceptEdits', permission_mode_source: 'automation' });
 		expect(permissionModePayload(own, 'acceptEdits')).toBe('acceptEdits');

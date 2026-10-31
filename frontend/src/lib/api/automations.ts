@@ -165,13 +165,16 @@ export function formPermissionMode(
  * An automation saved before the choice existed keeps NULL (its legacy
  * fallback) until the owner picks a mode other than the one it shows; after
  * that, and on every automation with a mode of its own, the form's value.
+ * Switching the agent pins the shown mode (`agentChanged`): left NULL, the run
+ * would follow the NEW agent's legacy mode, not the one the form displayed.
  */
 export function permissionModePayload(
 	saved: Pick<Automation, 'permission_mode' | 'effective_permission_mode'> | null | undefined,
 	value: AutomationPermissionMode,
-	agentConfig?: { permission_mode?: string | null } | null
+	agentConfig?: { permission_mode?: string | null } | null,
+	agentChanged = false
 ): AutomationPermissionMode | undefined {
-	if (!saved || saved.permission_mode) return value;
+	if (!saved || saved.permission_mode || agentChanged) return value;
 	return value === formPermissionMode(saved, agentConfig) ? undefined : value;
 }
 

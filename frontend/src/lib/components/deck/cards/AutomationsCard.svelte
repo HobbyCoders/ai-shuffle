@@ -371,11 +371,14 @@
 			// null clears the choice on edit (PATCH skips undefined keys).
 			model: formModel || null,
 			// undefined (dropped) keeps a pre-choice automation on its legacy
-			// fallback until the owner picks a different mode.
+			// fallback until the owner picks a different mode. Switching the
+			// agent pins the shown mode: left NULL, the run would follow the NEW
+			// agent's legacy mode, not the one the form displayed.
 			permission_mode: permissionModePayload(
 				currentView === 'edit' ? selectedAutomation : null,
 				formPermissionMode,
-				agentConfigFor(selectedAutomation?.profile_id)
+				agentConfigFor(selectedAutomation?.profile_id),
+				currentView === 'edit' && formProfileId !== (selectedAutomation?.profile_id ?? '')
 			)
 		};
 	}
