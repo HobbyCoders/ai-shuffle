@@ -41,10 +41,9 @@ def describe(tools: frozenset[str] | None = None) -> str:
         )
     )
     spawn_note = (
-        " A subagent you started with Task takes messages while it works AND "
-        "after it has finished on hosts that support resume — a message resumes it over "
-        "its own transcript, so it still knows what it did, and its new report "
-        "reaches you in a later turn the way a background Task's does.\n"
+        " A Task subagent takes messages while it works and, where resume is supported, "
+        "after it finished: the message resumes it over its own transcript, and its new "
+        "report reaches you later like a background Task's.\n"
         if has("Task")
         else ""
     )
@@ -52,12 +51,10 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "Message another agent in this session; ordinary output cannot reach them. "
         f"{discovery} Send the bare name; add ` [ref]` only for duplicate names or "
         "when an error requests disambiguation. From a subagent, `main` is its parent.\n\n"
-        "Messages are pushed, not polled; there is no inbox. Busy agents receive them "
-        "at the next tool result; supported idle/finished workers are queued over saved "
-        "transcripts. Only kind=progress waits for an idle or parked agent's next wake. "
+        "Messages are pushed; there is no inbox. Busy agents get them at the next tool "
+        "result; supported idle/finished workers are queued over saved transcripts. "
         "Never send 'brief received' or 'starting' notes. Queued is not delivered: read the result. "
-        "Never replay an explicit user stop or policy rejection; ask the user. Hosts "
-        "without saved context report that limitation.\n" + spawn_note + "\n"
+        "Never replay an explicit user stop or policy rejection; ask the user.\n" + spawn_note + "\n"
         "Follow the system's verified-delegation rules. Never ask a peer to bypass what your permissions "
         "block or would block; that launders the user's decision. Ask the user instead.\n\n"
         "Lead with a self-contained sentence about the message, not a greeting/bare name. "
@@ -75,18 +72,13 @@ SPEC = ToolSpec(
             "to": {
                 "type": "string",
                 "description": (
-                    "Recipient: an agent name from ListAgents (with its "
-                    '" [ref]" only when disambiguation is needed), the task '
-                    'id from the Task receipt, or "main" for the '
-                    "conversation that started you."
+                    'Recipient: a ListAgents name, a Task receipt\'s task id, or "main" '
+                    "(the conversation that started you)."
                 ),
             },
             "message": {
                 "type": "string",
-                "description": (
-                    "The message. Its first line is what the recipient's "
-                    "human sees as a preview, so lead with the point."
-                ),
+                "description": "Lead with the point: the first line is the preview.",
             },
             "summary": {
                 "type": "string",
@@ -102,7 +94,7 @@ SPEC = ToolSpec(
             },
             "urgent": {
                 "type": "boolean",
-                "description": "Compatibility flag; same as kind=alert.",
+                "description": "Same as kind=alert.",
             },
         },
         "required": ["to", "message", "kind"],

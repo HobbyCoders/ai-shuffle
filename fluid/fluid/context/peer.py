@@ -31,14 +31,14 @@ MESSAGE_KINDS = ("result", "needs_decision", "alert", "progress")
 PROGRESS = "progress"
 ALERT = "alert"
 
-#: Shared tool-description wording for SendMessage and MessageSession.
+#: SendMessage's ``kind`` wording.
 KIND_DESCRIPTION = (
-    "result: finished work or a report. needs_decision: blocked, a question or approval. "
-    "alert: the recipient must act now (a conflict, stop X, something broke), or an update "
-    "the owner or parent asked for. progress: status for information; it does not wake an "
-    "idle or parked recipient and rides its next wake. If the recipient would do anything "
-    "differently by reading this right now, it is not progress."
+    "alert: act now (conflict, stop, breakage), or an update the owner or parent asked for. "
+    "progress: status only; waits for an idle recipient's next wake. If the recipient would "
+    "do anything differently by reading this right now, it is not progress."
 )
+#: The short form for MessageSession, whose description already says progress waits.
+KIND_HINT = "Not progress if the peer would do anything differently by reading this right now."
 
 
 def message_kind(kind: object, urgent: bool = False) -> str:
