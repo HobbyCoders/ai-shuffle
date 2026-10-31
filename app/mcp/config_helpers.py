@@ -132,4 +132,6 @@ def _automation_summary(auto: dict) -> dict:
         "total_cost_used": auto.get("total_cost_used", 0),
         "requires_approval": auto.get("requires_approval", False),
         "model": auto.get("model"),
+        # NULL = saved before the choice existed (agent's legacy mode, else Ask).
+        "permission_mode": auto.get("permission_mode"),
     }

@@ -2011,6 +2011,13 @@ def create_builtin_tools_server(
                                    "'prov:<providerId>:<modelId>'. Omit to use the app "
                                    "default, the model a new chat uses.",
                 },
+                "permission_mode": {
+                    "type": "string",
+                    "enum": ["default", "acceptEdits", "auto", "bypassPermissions"],
+                    "description": "Permission mode each run starts in. Omit for "
+                                   "'bypassPermissions' (nobody watches a scheduled run, "
+                                   "so in 'default' (Ask) tools needing approval are denied).",
+                },
             },
             "required": ["name", "expression", "prompt"],
         },
@@ -2026,10 +2033,16 @@ def create_builtin_tools_server(
         if not name or not expression or not prompt:
             return _err("name, expression, and prompt are required.")
         try:
-            from app.core.automation_service import normalize_model_choice
+            from app.core.automation_service import (
+                DEFAULT_AUTOMATION_PERMISSION_MODE, normalize_model_choice,
+                normalize_permission_mode_choice,
+            )
 
             model, model_provider_id = await asyncio.to_thread(
                 normalize_model_choice, args.get("model")
+            )
+            run_permission_mode = normalize_permission_mode_choice(
+                args.get("permission_mode"), default=DEFAULT_AUTOMATION_PERMISSION_MODE,
             )
         except ValueError as e:
             return _err(str(e))
@@ -2054,6 +2067,7 @@ def create_builtin_tools_server(
                 max_runs_per_day=args.get("max_runs_per_day"),
                 model=model,
                 provider_id=model_provider_id,
+                permission_mode=run_permission_mode,
             )
             if not row:
                 return _err("automation not created.")
@@ -2062,7 +2076,8 @@ def create_builtin_tools_server(
                 await automation_manager.schedule_automation(automation_id)
             except Exception:
                 logger.exception("Failed to register cron with scheduler")
-            result = {"automation_id": automation_id, "name": name, "expression": expression}
+            result = {"automation_id": automation_id, "name": name, "expression": expression,
+                      "permission_mode": run_permission_mode}
             try:
                 from app.core.automation_service import describe_automation_model
 

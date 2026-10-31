@@ -1254,6 +1254,11 @@ def create_postgres_schema(cursor: Any) -> None:
             -- with a clear error, not silently clear the choice.
             model TEXT,
             provider_id TEXT,
+            -- Permission mode each run's session starts in (a composer mode:
+            -- default / acceptEdits / auto / bypassPermissions). NULL = an
+            -- automation saved before the choice existed: runs use the
+            -- agent's legacy saved mode, else Ask.
+            permission_mode TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE RESTRICT,
