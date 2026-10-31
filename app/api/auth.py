@@ -5,6 +5,7 @@ Authentication API routes
 import hashlib
 import logging
 import os
+import re
 import subprocess
 import time
 import uuid as _uuid
@@ -262,6 +263,15 @@ def _preview_may_read(request: Request) -> bool:
     return preview_access.grant(request) is not None
 
 
+# The project changes a throwaway instance's preview cookie may make.
+_PREVIEW_PROJECT_CHANGE = re.compile(
+    r"(POST /api/v1/projects"
+    r"|POST /api/v1/projects/setup"
+    r"|POST /api/v1/projects/setup/[^/]+/cancel"
+    r"|DELETE /api/v1/projects/workers/[^/]+)"
+)
+
+
 def _preview_may_manage_projects(request: Request) -> bool:
     """Whether a preview may change projects here: a disposable instance only.
 
@@ -272,9 +282,13 @@ def _preview_may_manage_projects(request: Request) -> bool:
     worker's preview cookie stays read-only on owner routes. The mutation
     ceiling (``preview_access.mutation_allowed``) and same-origin rule still
     apply.
+
+    Only these four changes: add a project, set one up on a worker, cancel
+    that setup, and remove a worker's copy. Every other owner-only project
+    change (delete, relink, settings, memory) stays refused even here.
     """
-    path = request.url.path
-    if path != '/api/v1/projects' and not path.startswith('/api/v1/projects/'):
+    if not _PREVIEW_PROJECT_CHANGE.fullmatch(
+            f"{getattr(request, 'method', 'GET')} {request.url.path.rstrip('/')}"):
         return False
     try:
         from app.preview_run import disposable_preview_data

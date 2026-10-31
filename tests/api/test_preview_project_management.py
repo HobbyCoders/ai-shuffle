@@ -58,9 +58,10 @@ def client(data):
     api = FastAPI()
 
     for path in ("/api/v1/projects", "/api/v1/projects/setup", "/api/v1/projects/setup/op-1/cancel",
-                 "/api/v1/automations", "/api/v1/projects/demo/git/worktrees/wt-1/forget"):
+                 "/api/v1/automations", "/api/v1/projects/demo/git/worktrees/wt-1/forget",
+                 "/api/v1/projects/demo", "/api/v1/projects/demo/link"):
         api.add_api_route(path, lambda principal=Depends(auth.require_admin): {"principal": principal},
-                          methods=["POST", "GET"])
+                          methods=["POST", "GET", "PUT", "DELETE"])
     api.add_api_route("/api/v1/projects/workers/peer-1",
                       lambda principal=Depends(auth.require_admin): {"principal": principal},
                       methods=["DELETE"])
@@ -103,6 +104,11 @@ def test_a_throwaway_instance_still_refuses_other_owner_changes(client, data, mo
     # The preview mutation ceiling holds under /projects too.
     forget = client.post("/api/v1/projects/demo/git/worktrees/wt-1/forget", headers={"Origin": ORIGIN})
     assert forget.status_code == 403
+    # Only add / set up / cancel / remove-a-worker's-copy: deleting, editing or
+    # relinking a project stays owner-only even on a throwaway instance.
+    for method, path in (("DELETE", "/api/v1/projects/demo"), ("PUT", "/api/v1/projects/demo"),
+                         ("POST", "/api/v1/projects/demo/link"), ("DELETE", "/api/v1/projects/setup")):
+        assert client.request(method, path, headers={"Origin": ORIGIN}).status_code == 403, (method, path)
 
 
 def test_a_stray_preview_variable_without_the_launcher_marker_is_a_real_install(client, monkeypatch):
