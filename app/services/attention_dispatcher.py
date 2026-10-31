@@ -216,18 +216,19 @@ class AttentionDispatcher:
             state = await run_sync(_transition, session_id, worker_id, self.private_needs(session_id), explicit_id)
             if state is None:
                 return {"sent": False, "reason": "only the chat's owner worker may send"}
-            from app.services.push_notification import push_notification_service, delivered_count
+            from app.services.push_notification import push_notification_service, delivered_count, failure_reason
             if self.sender is None and not await run_sync(push_notification_service.is_linked):
                 if state.get("pending"):
                     await run_sync(_ack, session_id, worker_id, state["version"])
                 return {"sent": False, "reason": "not_linked"}
             if not state.get("pending"):
-                return {"sent": False, "deduplicated": True}
+                return {"sent": False, "deduplicated": True, "reason": "attention already reconciled"}
             # Recheck ownership/latest state immediately before transport. Never send stale work.
             command = await run_sync(current_command, session_id, worker_id)
             if command is None or int(command["version"]) != state["version"]:
                 return {"sent": False, "reason": "attention changed"}
-            if time.time() > state["enqueued_at"] + 600:
+            expired = time.time() > state["enqueued_at"] + 600
+            if expired:
                 results = []
             else:
                 sender = self.sender or push_notification_service
@@ -237,9 +238,13 @@ class AttentionDispatcher:
             if not results or all(r.success or r.simulated or r.invalid_token or r.not_linked or r.permanent_failure for r in results):
                 await run_sync(_ack, session_id, worker_id, state["version"])
             if any(r.not_linked for r in results):
-                return {"sent": False, "reason": "not_linked"}
-            return {"sent": delivered_count(results) > 0, "accepted": delivered_count(results),
-                    "note": "Relay acceptance is not proof of display or that the owner has seen it."}
+                return {"sent": False, "reason": failure_reason([r for r in results if r.not_linked])}
+            accepted = delivered_count(results)
+            result = {"sent": accepted > 0, "accepted": accepted,
+                      "note": "Relay acceptance is not proof of display or that the owner has seen it."}
+            if not accepted:
+                result["reason"] = "attention expired" if expired else failure_reason(results)
+            return result
 
     async def run(self):
         self.loop = asyncio.get_running_loop()

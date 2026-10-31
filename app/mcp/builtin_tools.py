@@ -1959,7 +1959,7 @@ def create_builtin_tools_server(
         "Never for completions, parking, progress, errors, watches, expiry or updates. "
         "Question/approval/access cards notify automatically; do not double-notify. "
         "One alert per episode; retries dedupe by tool-use id. "
-        "Push needs a signed-in, linked HobbyCoders worker; otherwise sent: false, reason: not_linked. "
+        "Push needs a signed-in, linked HobbyCoders worker; otherwise sent: false, reason starting with not_linked. "
         "Fixed text: AI Shuffle / A chat needs you; no chat titles or tool input. "
         "sent means relay accepted, not displayed or seen. Otherwise ask in chat.",
         {"type": "object", "properties": {

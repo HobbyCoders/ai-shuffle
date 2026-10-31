@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from app.mcp import builtin_tools as bt
 from tests.mcp.tool_helpers import tool_result_json
 
@@ -207,6 +209,28 @@ def test_notify_only_requests_owner_attention_and_uses_tool_identity(mock_db):
         assert body["sent"] is True
         assert "delivered" not in body
         assert "not proof of display" in body["note"]
+    finally:
+        current_tool_use_id.reset(token)
+
+
+@pytest.mark.parametrize("reason", [
+    "no device can receive push notifications",
+    "push_upstream_unavailable (503); retry after 15s",
+    "push_rate_limited (429); retry after 90s",
+    "relay unavailable; retry after 89s",
+    "relay did not accept the send",
+])
+def test_notify_preserves_unsent_reason(mock_db, reason):
+    from fluid.tools.registry import current_tool_use_id
+    from app.services.attention_dispatcher import dispatcher
+    token = current_tool_use_id.set("unsent-notify")
+    try:
+        result = {"sent": False, "accepted": 0, "reason": reason}
+        with patch.object(dispatcher, "reconcile", new=AsyncMock(return_value=result)):
+            body = tool_result_json(asyncio.run(_builtin_handlers()["NotifyDevices"].handler(
+                {"title": "Private title", "body": "Private input"})))
+        assert all(body[key] == value for key, value in result.items())
+        assert "Private" not in str(body)
     finally:
         current_tool_use_id.reset(token)
 
