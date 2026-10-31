@@ -1178,9 +1178,17 @@ class ChatWebSocketHandler:
 
         That worker cannot see this socket's principal; an older one would run
         the message as the owner's. Fails closed with an error frame (#641).
+
+        A launcher-marked throwaway dev worker (``devloop up --workers 2``) is
+        the exception: both workers are disposable and the owner is testing a
+        cross-worker flow, so running it as the owner there is the point. An
+        installed worker never carries that marker.
         """
         from app.core.session_modes import CALLER_PREVIEW
         if self._caller != CALLER_PREVIEW:
+            return True
+        from app.preview_run import disposable_preview_data
+        if disposable_preview_data():
             return True
         await self.send_json({
             "type": "error", "session_id": session_id,
