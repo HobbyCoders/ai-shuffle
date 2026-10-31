@@ -477,8 +477,8 @@ async def setup_project(request: Request, body: SetupRequest,
 
     if target_id == me:
         try:
-            result = await run_sync(setup.start_local, spec, op_id=op_id,
-                                    requested_by=setup._own_device_id())
+            result = await setup.start_local_now(spec, op_id=op_id,
+                                                 requested_by=setup._own_device_id())
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         setup.emit_changed()

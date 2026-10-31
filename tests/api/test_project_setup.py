@@ -748,3 +748,50 @@ def test_session_count_follows_a_project_linked_to_its_remote_after_its_first_ch
     listed = {p["name"]: p for p in client.get("/api/v1/projects/overview").json()["projects"]}
     assert listed["Late"]["project_v2_id"] == projects_v2.project_v2_id_for_origin(origin)
     assert listed["Late"]["session_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Start at once; don't flood the requester
+# ---------------------------------------------------------------------------
+
+def test_a_queued_setup_starts_at_once_from_a_peer_or_this_worker(client, ws, test_db, monkeypatch):
+    """``start_local`` runs in a worker thread with no event loop to kick from,
+    so a setup queued from a peer used to wait for the next scheduled claim pass
+    (seen live: about 37 s on a worker that had just paired)."""
+    from app.network import engine, git as network_git
+
+    kicks = []
+    monkeypatch.setattr(git_ops_runner, "kick", lambda: kicks.append(1))
+
+    here = _peer_project(test_db, "other", "Other", remote=_bare_remote(ws, "other"))
+    response = client.post("/api/v1/projects/setup",
+                           json={"project_v2_id": here["id"], "install_id": ME})
+    assert response.status_code == 202 and response.json()["status"] == "queued"
+    assert kicks == [1]
+
+    monkeypatch.setattr(engine, "context", lambda: SimpleNamespace(device_id="dev-me"))
+    monkeypatch.setattr(network_git, "device_id", lambda runner_id: runner_id)
+    remote = _bare_remote(ws)
+    pv2 = _peer_project(test_db, "demo", "Demo", remote=remote)
+    spec = {"project_v2_id": pv2["id"], "origin": pv2["origin"], "name": "Demo", "kind": "git",
+            "clone_url": remote, "folder": "demo", "mode": "auto"}
+    started = asyncio.run(project_setup.handle_control(
+        {"action": "start", "op_id": project_setup.new_op_id(), "spec": spec}, "dev-requester"))
+    assert started["status"] == "queued"
+    assert kicks == [1, 1]
+
+
+def test_progress_notices_are_capped_at_one_a_second(monkeypatch):
+    notified = []
+    monkeypatch.setattr(project_setup, "_notify_threadsafe", lambda job: notified.append(job))
+    monkeypatch.setattr(git_ops_db, "set_running_result", lambda *args, **kwargs: None)
+    clock = [100.0]
+    monkeypatch.setattr(project_setup.time, "monotonic", lambda: clock[0])
+    job = project_setup._Job("psetup-x", "dev-requester", None)
+
+    for value in range(0, 101, 10):  # a fast clone: every 10% step at once
+        project_setup._report_progress(job, value)
+    assert len(notified) == 1
+    clock[0] += 1.5
+    project_setup._report_progress(job, 100)
+    assert len(notified) == 2

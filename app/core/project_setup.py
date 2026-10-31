@@ -37,6 +37,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -431,18 +432,27 @@ def start_local(spec: Dict[str, Any], *, op_id: str, requested_by: Optional[str]
         projects_v2.upsert_project(origin, name=name)
     row = git_ops_db.insert_op(me, SETUP_OP, project_v2_id=pv2_id,
                                params={**params, "folder": stored, "path": str(full)}, op_id=op_id)
-    _kick_runner()
     return {"id": row["id"], "status": row["status"], "runner_id": device}
 
 
-def _kick_runner() -> None:
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return  # off the loop; the next claim pass picks it up
-    from app.core import git_ops_runner
+async def start_local_now(spec: Dict[str, Any], *, op_id: str,
+                          requested_by: Optional[str]) -> Dict[str, Any]:
+    """Queue a setup on THIS worker and start it at once.
 
-    git_ops_runner.kick()
+    ``start_local`` runs in a worker thread (it reads the database and the
+    disk), where there is no event loop to kick the claim pass from, so a
+    queued setup used to wait for the next scheduled pass: up to the slow
+    single-install cadence on a worker that had just paired. Kick from here,
+    on the loop, after the row is written.
+    """
+    from app.db.async_database import run_sync
+
+    result = await run_sync(start_local, spec, op_id=op_id, requested_by=requested_by)
+    if result.get("status") == "queued":
+        from app.core import git_ops_runner
+
+        git_ops_runner.kick()
+    return result
 
 
 def _summarize_op(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -558,7 +568,13 @@ class _Job:
     proc: Optional[subprocess.Popen] = None
     temp_dir: Optional[str] = None
     last_progress: Optional[int] = None
+    last_notified: float = 0.0
 
+
+# A fast clone crosses every 10% step within milliseconds; each step would be
+# a control call to the requesting worker. Its pages poll as well, so at most
+# one progress notice a second is enough (the finish always notifies).
+PROGRESS_NOTIFY_SECONDS = 1.0
 
 _jobs: Dict[str, _Job] = {}
 _tasks: set = set()
@@ -725,6 +741,10 @@ def _report_progress(job: _Job, value: int) -> None:
         git_ops_db.set_running_result(job.op_id, {"progress": value, "temp_dir": job.temp_dir})
     except Exception:  # noqa: BLE001 - progress is display only
         logger.debug("project setup: progress write failed for %s", job.op_id, exc_info=True)
+    now = time.monotonic()
+    if now - job.last_notified < PROGRESS_NOTIFY_SECONDS:
+        return
+    job.last_notified = now
     _notify_threadsafe(job)
 
 
@@ -1103,7 +1123,8 @@ async def handle_control(body: Dict[str, Any], from_device: str) -> Dict[str, An
         spec = body.get("spec")
         if not isinstance(spec, dict):
             raise ValueError("spec is required")
-        result = await run_sync(start_local, spec, op_id=str(body.get("op_id") or ""), requested_by=from_device)
+        result = await start_local_now(spec, op_id=str(body.get("op_id") or ""),
+                                       requested_by=from_device)
         emit_changed()
         return result
     if action == "cancel":
