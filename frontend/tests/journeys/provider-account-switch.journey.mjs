@@ -72,6 +72,13 @@ await runJourney({
 
 			await settings.getByRole('button', { name: 'Providers', exact: true }).click();
 			await assertSelection(page, 'journey-account-a', 'journey-account-b');
+			// Touch-target rules once forced the switch to 44x44, drawing a big circle
+			// on phones (coarse pointer). It must stay a pill at every viewport.
+			for (const id of ['journey-account-a', 'journey-account-b']) {
+				const box = await row(page, id).getByRole('switch').boundingBox();
+				expect(box && box.width >= box.height * 1.4 && box.height <= 32,
+					`${id} switch keeps pill geometry (got ${box && `${box.width}x${box.height}`})`);
+			}
 			await page.waitForTimeout(1000);
 		},
 		async act({ page, mark }) {
