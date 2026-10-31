@@ -779,8 +779,9 @@
 		color: var(--destructive);
 	}
 
-	/* ── Permission mode (the composer's modes as a segmented control) ── */
-	.perm-ctl {
+	/* ── Permission mode (the composer's modes as a segmented control) ──
+	   Qualified to outrank the shared `.ptab .set-row .ctl` (align-items: center). */
+	.set-row .ctl.perm-ctl {
 		display: flex;
 		flex-direction: column;
 		align-items: flex-end;
@@ -827,7 +828,7 @@
 		color: color-mix(in oklab, var(--warning) 70%, var(--foreground));
 	}
 	@media (max-width: 560px) {
-		.perm-ctl {
+		.set-row .ctl.perm-ctl {
 			align-items: stretch;
 			width: 100%;
 		}
