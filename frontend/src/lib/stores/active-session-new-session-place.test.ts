@@ -212,3 +212,43 @@ describe('one-time new branch picked, sent, and left while the session is still 
 		});
 	});
 });
+
+describe('a draft restored by a reload keeps the place it was typed in', () => {
+	// After a reload the text is only in this tab's draft slot until the
+	// composer reads it back; another tab or device may have saved a different
+	// project choice meanwhile.
+	const typed = JSON.stringify({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'half-typed' }] }] });
+
+	it('keeps no project', async () => {
+		active.clearProject({ user: true });
+		const { composerPreferences } = await import('./composer-preferences');
+		composerPreferences.set('project', { projectId: 'a', projectV2Id: null });
+		sessionStorage.setItem('__aihub_draft_new', typed);
+
+		active.applyComposerDefaults();
+
+		expect(active.current).toMatchObject({ sessionId: null, mode: 'chat', project: '' });
+	});
+
+	it('keeps its own project', async () => {
+		active.setProject('a', null, { user: true });
+		const { composerPreferences } = await import('./composer-preferences');
+		composerPreferences.set('project', { projectId: 'b', projectV2Id: null });
+		sessionStorage.setItem('__aihub_draft_new', typed);
+
+		active.applyComposerDefaults();
+
+		expect(active.current).toMatchObject({ mode: 'code', project: 'a' });
+	});
+
+	it('a blank editor slot is not a draft', async () => {
+		active.clearProject({ user: true });
+		const { composerPreferences } = await import('./composer-preferences');
+		composerPreferences.set('project', { projectId: 'a', projectV2Id: null });
+		sessionStorage.setItem('__aihub_draft_new', JSON.stringify({ type: 'doc', content: [{ type: 'paragraph' }] }));
+
+		active.applyComposerDefaults();
+
+		expect(active.current).toMatchObject({ mode: 'code', project: 'a' });
+	});
+});

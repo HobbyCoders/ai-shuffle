@@ -47,6 +47,7 @@ import { markBindingHydrated, markBindingPicked, type ComposerBindingFlags } fro
 import { createPermissionHandler } from './session/permission-handler';
 import { createDraftManager } from './session/draft-manager';
 import { hasComposerDraft } from './session/composer-suggestion';
+import { readDraft } from './session/draft-persistence';
 import { registerReloadBlocker } from '$lib/services/app-update';
 
 // Caches and helpers
@@ -1428,6 +1429,9 @@ export const activeSession = {
 	/** Remote defaults may update an idle composer, never an existing session or typed draft. */
 	applyComposerDefaults({ keepCheckout = false }: { keepCheckout?: boolean } = {}) {
 		if (_state.sessionId || hasComposerDraft(_state.draft) || _state.worktreeBranch || composerBusy()) return;
+		// After a reload the typed text is still only in this tab's draft slot
+		// until the composer reads it back; it keeps the place it was typed in.
+		if (hasComposerDraft(readDraft(null) ?? '')) return;
 		const picks = composerPreferences.current;
 		// An idle compose follows the owner's last project choice; a kept one,
 		// and a voice compose, keep their lane.
