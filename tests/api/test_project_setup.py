@@ -580,3 +580,171 @@ def test_peer_control_action_start_status_cancel_remove(ws, test_db, monkeypatch
     with pytest.raises(LookupError):
         call({"action": "remove", "project_v2_id": pv2["id"]})
     assert (ws / "demo" / "README.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# The project's own remote: clone source and replicated identity
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def fresh_records(monkeypatch):
+    """No git-record cache or one-time remote backfill carried over from another test."""
+    from app.api import git_helpers
+
+    monkeypatch.setattr(git_helpers, "_repo_record_cache", {})
+    monkeypatch.setattr(project_setup, "_remotes_backfilled", False)
+
+
+def _outside_remote(ws: Path, name: str = "demo") -> str:
+    """A bare repo OUTSIDE the workspace and every project folder (like the dev
+    loop's shared ``remotes/``, or a NAS path both workers mount)."""
+    src = init_repo(ws.parent / f"{name}-src", files={"README.md": f"{name}\n"})
+    bare = ws.parent / "remotes" / f"{name}.git"
+    bare.parent.mkdir(exist_ok=True)
+    git(ws.parent, "init", "-q", "--bare", "-b", "main", str(bare))
+    git(src, "remote", "add", "origin", str(bare))
+    git(src, "push", "-q", "-u", "origin", "main")
+    return "file://" + str(bare)
+
+
+def test_setup_clones_the_projects_own_remote_from_outside_the_workspace(client, ws, test_db, fresh_records):
+    remote = _outside_remote(ws)
+    pv2 = _peer_project(test_db, "demo", "Demo", remote=remote)
+    resp = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": ME})
+    assert resp.status_code == 202, resp.text
+    _run_setups()
+    assert git_ops_db.get_op(resp.json()["op_id"])["status"] == "done"
+    assert (ws / "demo" / "README.md").read_text() == "demo\n"
+
+
+def test_a_local_source_that_is_not_the_projects_remote_stays_refused(ws, test_db):
+    validate = project_setup._validate_clone_url
+    remote = _outside_remote(ws)
+    other = _outside_remote(ws, "other")
+    origin = auto_link_group_id(remote)
+    assert validate(remote, origin) == remote
+    # Another repository on this disk, under this project's identity: refused.
+    with pytest.raises(ValueError, match="own remote"):
+        validate(other, origin)
+    # An identity that is not a remote hash names no remote until one is stored.
+    manual = projects_v2.upsert_project("manual:group-1", name="Linked")
+    with pytest.raises(ValueError, match="own remote"):
+        validate(remote, manual["origin"])
+    projects_v2.record_remote(manual["origin"], remote, "main")
+    assert validate(remote, manual["origin"]) == remote
+    with pytest.raises(ValueError, match="own remote"):
+        validate(other, manual["origin"])
+    # Relative paths and remote helpers stay refused whatever the identity.
+    with pytest.raises(ValueError, match="absolute"):
+        validate("remotes/demo.git", "manual:group-1")
+    with pytest.raises(ValueError):
+        validate("ext::sh -c touch% /tmp/pwned", origin)
+    # Inside the workspace is still fine for any identity, as /git/clone allows the owner.
+    assert validate(_bare_remote(ws, "inside"), "manual:group-1").endswith("_remotes/inside.git")
+
+
+def test_the_remote_is_stored_on_the_replicated_identity_and_outlives_every_copy(client, ws, test_db,
+                                                                               fresh_records):
+    remote = _outside_remote(ws)
+    git(ws, "clone", "-q", remote, "demo")
+    database.create_project(project_id="demo", name="Demo", description=None, path="demo")
+    origin = auto_link_group_id(remote)
+
+    # Never polled by the Git panel: the read itself records it as a Git project.
+    listed = {p["name"]: p for p in client.get("/api/v1/projects/overview").json()["projects"]}
+    assert listed["Demo"]["kind"] == "git" and listed["Demo"]["default_branch"] == "main"
+    assert database.get_project("demo")["link_group_id"] == origin
+    pv2 = projects_v2.get_project_v2_by_origin(origin)
+    assert projects_v2.stored_remote(pv2) == (remote, "main")
+
+    # The only copy's record goes (and with it its git_repositories row).
+    assert client.delete(f"/api/v1/projects/workers/{ME}", params={"project_v2_id": pv2["id"]}).status_code == 200
+    assert database.get_git_repository_by_project("demo") is None
+    detail = client.get("/api/v1/projects/workers", params={"project_v2_id": pv2["id"]}).json()
+    assert detail["kind"] == "git" and detail["remote"] == project_setup.display_remote(remote)
+    assert detail["default_branch"] == "main"
+
+    op = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": ME,
+                                                     "folder": "demo-again"}).json()
+    assert op["status"] == "queued"
+    _run_setups()
+    assert git_ops_db.get_op(op["op_id"])["status"] == "done"
+    assert (ws / "demo-again" / "README.md").read_text() == "demo\n"
+
+
+def test_record_remote_fills_gaps_and_never_flaps_between_spellings(mock_db):
+    from app.core.project_links import record_project_remote
+
+    url = "https://github.com/Acme/Repo.git"
+    origin = auto_link_group_id(url)
+    row = projects_v2.upsert_project(origin, name="Repo")
+    assert projects_v2.record_remote(origin, url) is True
+    assert projects_v2.stored_remote(projects_v2.get_project_v2(row["id"])) == (url, None)
+    assert projects_v2.record_remote(origin, url, "main") is True  # the branch was missing
+    # Another spelling of the same remote changes nothing (workers never take turns).
+    assert projects_v2.record_remote(origin, "https://github.com/acme/repo", "trunk") is False
+    # Another repository's remote is never stored on this identity.
+    assert projects_v2.record_remote(origin, "https://github.com/acme/other.git") is False
+    assert projects_v2.record_remote("git:unknown", url) is False
+    assert projects_v2.stored_remote(projects_v2.get_project_v2(row["id"])) == (url, "main")
+
+    # The project path stores it without credentials, on the project's current identity.
+    database.create_project(project_id="tok", name="Tok", description=None, path="tok")
+    secret = "https://user:s3cret@github.com/acme/tok.git"
+    database.set_project_link_group("tok", auto_link_group_id("https://github.com/acme/tok.git"))
+    assert record_project_remote("tok", secret, "main") is True
+    stored = projects_v2.get_project_v2_by_origin(auto_link_group_id("https://github.com/acme/tok.git"))
+    assert projects_v2.stored_remote(stored) == ("https://github.com/acme/tok.git", "main")
+    assert "s3cret" not in str(stored)
+
+
+def test_backfill_stores_remotes_known_before_this_existed(mock_db, test_db):
+    from app.core.project_links import backfill_project_remotes
+
+    remote = "https://github.com/acme/old.git"
+    pv2 = _peer_project(test_db, "old", "Old", remote=remote, instance=ME)
+    assert projects_v2.stored_remote(projects_v2.get_project_v2(pv2["id"])) == (None, None)
+    assert backfill_project_remotes() == 1
+    assert projects_v2.stored_remote(projects_v2.get_project_v2(pv2["id"]))[0] == remote
+    assert backfill_project_remotes() == 0  # nothing left to write
+
+
+def test_self_seed_clone_url_prefers_the_stored_remote(mock_db):
+    from app.core import checkout_manager
+
+    url = "https://github.com/acme/seed.git"
+    origin = auto_link_group_id(url)
+    row = projects_v2.upsert_project(origin, name="Seed")
+    assert checkout_manager._resolve_clone_url(origin, row) is None  # nobody knows it yet
+    projects_v2.record_remote(origin, url, "main")
+    row = projects_v2.get_project_v2(row["id"])
+    assert checkout_manager._resolve_clone_url(origin, row) == url  # no legacy record needed
+    assert checkout_manager._resolve_clone_url(auto_link_group_id("https://x.example/y.git"), row) is None
+
+
+def test_removing_from_a_peer_forgets_it_in_the_cached_catalog(client, ws, test_db, network):
+    pv2 = _peer_project(test_db, "demo", "Demo", remote=_bare_remote(ws), instance=ME)
+    setup_db.save_peer_catalog(PEER, [pv2["id"], "pv2-other"])
+
+    async def peer_worker(device_id, action, body):
+        if body.get("action") == "remove":
+            return {"removed": ["demo-copy"]}
+        return {"project_ids": [], "workspace": "/data/ws", "ops": [], "projects": {}}
+
+    network.state["handler"] = peer_worker
+    assert client.delete(f"/api/v1/projects/workers/{PEER}", params={"project_v2_id": pv2["id"]}).status_code == 200
+    assert setup_db.peer_catalogs()[PEER] == ["pv2-other"]
+
+
+def test_session_count_follows_a_project_linked_to_its_remote_after_its_first_chats(client, ws, test_db):
+    database.create_project(project_id="late", name="Late", description=None, path="late")
+    (ws / "late").mkdir()
+    old_pv2 = projects_v2.upsert_project("local:late", name="Late")
+    database.create_session("s-late-1", "default", project_id="late")
+    test_db.execute("UPDATE sessions SET project_v2_id = ? WHERE id = 's-late-1'", (old_pv2["id"],))
+    origin = auto_link_group_id("https://github.com/acme/late.git")
+    database.set_project_link_group("late", origin)
+    projects_v2.upsert_project(origin, name="Late")
+    listed = {p["name"]: p for p in client.get("/api/v1/projects/overview").json()["projects"]}
+    assert listed["Late"]["project_v2_id"] == projects_v2.project_v2_id_for_origin(origin)
+    assert listed["Late"]["session_count"] == 1

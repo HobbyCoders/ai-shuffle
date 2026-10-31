@@ -150,7 +150,10 @@ def _offline_has(installs: List[Dict[str, Any]], networked: bool) -> Dict[str, s
 
 
 def _session_counts() -> Dict[str, int]:
-    """Sessions per logical project, by ``project_v2_id`` or the legacy row's origin."""
+    """Sessions per logical project: by the legacy row's CURRENT origin when the
+    session names a project row here (a project linked to its remote after its
+    first chats keeps those chats' older ``project_v2_id``, #802), else by
+    ``project_v2_id``."""
     from app.core.project_resolver import origin_for_legacy_project
     from app.db.base import get_db
     from app.db.projects_v2 import project_v2_id_for_origin
@@ -158,15 +161,13 @@ def _session_counts() -> Dict[str, int]:
     counts: Dict[str, int] = {}
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT project_v2_id, COUNT(*) AS n FROM sessions "
-                       "WHERE project_v2_id IS NOT NULL GROUP BY project_v2_id")
+        cursor.execute("SELECT s.project_v2_id AS project_v2_id, p.id AS id, p.link_group_id AS link_group_id, "
+                       "COUNT(*) AS n FROM sessions s LEFT JOIN projects p ON p.id = s.project_id "
+                       "WHERE s.project_v2_id IS NOT NULL OR p.id IS NOT NULL "
+                       "GROUP BY s.project_v2_id, p.id, p.link_group_id")
         for row in cursor.fetchall():
-            counts[row["project_v2_id"]] = counts.get(row["project_v2_id"], 0) + int(row["n"])
-        cursor.execute("SELECT p.id AS id, p.link_group_id AS link_group_id, COUNT(*) AS n "
-                       "FROM sessions s JOIN projects p ON p.id = s.project_id "
-                       "WHERE s.project_v2_id IS NULL GROUP BY p.id, p.link_group_id")
-        for row in cursor.fetchall():
-            pv2 = project_v2_id_for_origin(origin_for_legacy_project(row))
+            pv2 = (project_v2_id_for_origin(origin_for_legacy_project(row)) if row["id"] is not None
+                   else row["project_v2_id"])
             counts[pv2] = counts.get(pv2, 0) + int(row["n"])
     return counts
 
@@ -177,6 +178,7 @@ def _local_snapshot() -> Dict[str, Any]:
     from app.db import projects_v2
     from app.db import project_setup as setup_db
 
+    setup.ensure_repo_records()
     own_rows = setup._own_project_rows()
     pv2s = {row["id"]: row for row in projects_v2.list_projects_v2()}
     for row in own_rows:
@@ -617,6 +619,7 @@ async def remove_from_worker(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except control.RunnerUnreachable as exc:
             raise HTTPException(status_code=409, detail={"error_code": setup.OFFLINE, "error": str(exc)}) from exc
+        await run_sync(setup_db.forget_peer_project, target_id, pv2["id"])
         setup.emit_changed()
     await run_sync(setup_db.delete_requests_for, pv2["id"], target_id)
     return {"ok": True, "install_id": target_id, "removed": result.get("removed", [])}

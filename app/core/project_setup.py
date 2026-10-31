@@ -184,10 +184,13 @@ def _superseded_local_origins(rows: List[Dict[str, Any]]) -> set:
 
 
 def _repo_info_by_origin() -> Dict[str, Dict[str, Any]]:
-    """``{origin: {clone_url, default_branch}}`` from git records this DB holds."""
+    """``{origin: {clone_url, default_branch}}`` from git records this DB holds,
+    then the remotes stored on the replicated ``projects_v2`` rows (which still
+    know a project no local record has any more)."""
     from app.core.project_links import auto_link_group_id
     from app.core.scrub import strip_url_userinfo
-    from app.db.base import get_db
+    from app.db import projects_v2
+    from app.db.base import get_db, parse_jsonb
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -198,6 +201,8 @@ def _repo_info_by_origin() -> Dict[str, Dict[str, Any]]:
             "WHERE gr.remote_url IS NOT NULL AND gr.remote_url <> ''"
         )
         rows = cursor.fetchall()
+        cursor.execute("SELECT origin, settings FROM projects_v2")
+        stored_rows = cursor.fetchall()
     out: Dict[str, Dict[str, Any]] = {}
     for row in rows:
         url = strip_url_userinfo(row["remote_url"])
@@ -208,7 +213,57 @@ def _repo_info_by_origin() -> Dict[str, Dict[str, Any]]:
         derived = auto_link_group_id(url)
         if derived:
             out.setdefault(derived, info)
+    for row in stored_rows:
+        url, branch = projects_v2.stored_remote({"settings": parse_jsonb(row["settings"])})
+        url = strip_url_userinfo(url) if url else None
+        origin = row["origin"]
+        if not url or (origin.startswith("git:") and auto_link_group_id(url) != origin):
+            continue
+        out.setdefault(origin, {"clone_url": url, "default_branch": branch})
     return out
+
+
+_remotes_backfilled = False
+
+
+def ensure_repo_records() -> None:
+    """Give this worker's Git projects their repository record (sync, best effort).
+
+    A project added from a folder gets its record (and with it its remote
+    identity) on the Git panel's first poll. Until then it would read as a
+    plain folder here and to every peer, and a setup elsewhere would make an
+    empty folder instead of cloning it. ``ensure_git_repository_record``
+    caches each answer for a minute, including "not a Git folder". The first
+    call in a process also stores every known remote on its replicated
+    ``projects_v2`` row (rows recorded before that existed).
+    """
+    global _remotes_backfilled
+    from app.api.git_helpers import ensure_git_repository_record
+    from app.core.project_utils import get_project_working_dir
+    from app.db.base import get_db
+
+    try:
+        rows = _own_project_rows()
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT project_id FROM git_repositories")
+            recorded = {row["project_id"] for row in cursor.fetchall()}
+        for row in rows:
+            if row["id"] in recorded:
+                continue
+            try:
+                folder = get_project_working_dir(row)
+            except (OSError, ValueError):
+                continue
+            if os.path.isdir(folder):
+                ensure_git_repository_record(row["id"], folder)
+        if not _remotes_backfilled:
+            from app.core.project_links import backfill_project_remotes
+
+            backfill_project_remotes()
+            _remotes_backfilled = True
+    except Exception:  # noqa: BLE001 - reads must not fail on this
+        logger.debug("project setup: repository record check failed", exc_info=True)
 
 
 def _local_project_infos() -> Dict[str, Dict[str, Any]]:
@@ -262,7 +317,34 @@ def resolve_folder(folder: str) -> Tuple[str, Path]:
     return stored, full
 
 
+def _is_recorded_remote(clean: str, origin: str) -> bool:
+    """Whether ``clean`` is the remote the project's stored identity names.
+
+    A ``git:`` origin IS the hash of its remote, so a URL that reproduces it is
+    that remote. Any other origin can only name one through the remote stored
+    on its replicated ``projects_v2`` row.
+    """
+    from app.core.project_links import auto_link_group_id, normalize_remote_url
+    from app.db import projects_v2
+
+    if origin.startswith("git:"):
+        return auto_link_group_id(clean) == origin
+    stored, _branch = projects_v2.stored_remote(projects_v2.get_project_v2_by_origin(origin))
+    return bool(stored) and normalize_remote_url(stored) == normalize_remote_url(clean)
+
+
 def _validate_clone_url(url: str, origin: str) -> str:
+    """The clone source for a setup, refused unless it is safe to clone here.
+
+    The URL never comes from a person: the requesting worker takes it from the
+    project's stored records (``project_workers._spec_for``), and only the
+    owner can ask (``require_admin``; API keys never reach this). Remote helpers
+    and other schemes stay refused. A local path or ``file://`` source is
+    accepted when it is the project's own recorded remote (the base-checkout
+    self-seed clones that same remote), or when it is inside the workspace or a
+    project folder, as ``/git/clone`` allows the owner. ``/git/clone``'s own
+    check for typed URLs is unchanged.
+    """
     from app.core.git_service import classify_clone_url
     from app.core.project_links import auto_link_group_id
     from app.core.scrub import strip_url_userinfo
@@ -273,11 +355,12 @@ def _validate_clone_url(url: str, origin: str) -> str:
     if kind == "invalid":
         raise ValueError(detail or "Invalid clone URL")
     if kind == "local":
-        # A path on this worker's disk: only from where the owner may read
-        # files here (the workspace or a registered project), as /git/clone.
         path = Path(detail or "")
-        if not path.is_absolute() or not is_path_served(path, settings.effective_workspace_dir):
-            raise ValueError("A local clone source must be inside the workspace or a project folder")
+        if not path.is_absolute():
+            raise ValueError("A local clone source must be an absolute path")
+        if not _is_recorded_remote(clean, origin) and not is_path_served(path, settings.effective_workspace_dir):
+            raise ValueError("A local clone source must be the project's own remote, "
+                             "or inside the workspace or a project folder")
     if origin.startswith("git:") and auto_link_group_id(clean) != origin:
         raise ValueError("The remote does not match this project")
     return clean
@@ -447,6 +530,7 @@ def local_status(project_v2_id: Optional[str] = None) -> Dict[str, Any]:
 
     from app.db.projects_v2 import project_v2_id_for_origin
 
+    ensure_repo_records()
     me = _me()
     # A remote-less identity this worker since linked to its remote (#802)
     # keeps its base checkout but is no longer a separate project here.
@@ -1076,6 +1160,10 @@ async def dispatch_once() -> None:
     from app.db.async_database import run_sync
     from app.network import engine, transport
 
+    if not _remotes_backfilled:
+        # Soon after start, so a worker that then goes offline has already
+        # stored its projects' remotes where every peer can read them.
+        await run_sync(ensure_repo_records)
     if not _zombies_checked:
         try:
             _zombies_checked = await run_sync(settle_zombies) is not None

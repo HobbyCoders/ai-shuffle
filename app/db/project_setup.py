@@ -170,6 +170,14 @@ def save_peer_catalog(device_id: str, project_ids: List[str]) -> None:
         )
 
 
+def forget_peer_project(device_id: str, project_v2_id: str) -> None:
+    """Drop one project from a peer's cached catalog (it was just removed there),
+    so the peer does not read as ``offline_has`` until its next catalog read."""
+    cached = peer_catalogs().get(device_id)
+    if cached is not None and project_v2_id in cached:
+        save_peer_catalog(device_id, [pid for pid in cached if pid != project_v2_id])
+
+
 def peer_catalogs() -> Dict[str, List[str]]:
     """``{device_id: [project_v2_id, ...]}`` as last read from each peer."""
     with get_db() as conn:
