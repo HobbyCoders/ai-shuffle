@@ -16,8 +16,14 @@ import {
 	isBlocked,
 	runnerTitle,
 	emptyRunnersCopy,
+	isBlockedForNewChat,
+	newChatRowNote,
+	newChatRowTitle,
+	overviewRowFor,
+	overviewWorkerFor,
 	type EligibilityMap
 } from './execution-mode-eligibility';
+import type { ProjectOverviewRow } from '$lib/api/project-workers';
 
 function install(overrides: Partial<Install> = {}): Install {
 	return {
@@ -148,5 +154,49 @@ describe('emptyRunnersCopy', () => {
 		expect(emptyRunnersCopy).toBe('No other workers in this network');
 		expect(emptyRunnersCopy.toLowerCase()).not.toContain('device');
 		expect(peerRunners([self, offlinePeer]).length).toBeGreaterThan(0);
+	});
+});
+
+
+// Cross-worker project sync: with the overview, a worker that lacks the
+// project stays pickable in a new chat (also with a worktree): Send sets it
+// up there first. Only offline or unapproved block. Without it, the classic
+// rules above hold.
+describe('new chat with project sync', () => {
+	const row: ProjectOverviewRow = {
+		project_v2_id: 'pv2-1', local_project_id: 'proj', name: 'ai-shuffle', kind: 'git', remote: null,
+		default_branch: 'main', session_count: 0,
+		workers: [
+			{ install_id: 'inst-self', device_name: 'This box', is_self: true, online: true, approved: true, state: 'ready', setup: null },
+			{ install_id: 'inst-online', device_name: 'Laptop', is_self: false, online: true, approved: true, state: 'missing', setup: null },
+			{ install_id: 'inst-offline', device_name: 'Old', is_self: false, online: false, approved: true, state: 'offline_missing', setup: null }
+		]
+	};
+	const ineligible: EligibilityMap = { 'inst-online': false };
+
+	it('finds the row by logical or local id, and the worker by any install id', () => {
+		expect(overviewRowFor([row], { project: 'proj', projectV2Id: null })).toBe(row);
+		expect(overviewRowFor([row], { project: null, projectV2Id: 'pv2-1' })).toBe(row);
+		expect(overviewRowFor([row], { project: null, projectV2Id: null })).toBeUndefined();
+		expect(overviewWorkerFor(row, install({ id: 'dev-x', device_id: 'dev-x', legacy_instance_id: 'inst-online' }))?.device_name).toBe('Laptop');
+		expect(overviewWorkerFor(row, null)?.is_self).toBe(true);
+	});
+
+	it('a missing worker stays selectable even with a worktree; offline still blocks', () => {
+		expect(isBlockedForNewChat(onlinePeer, true, ineligible, row)).toBe(false);
+		expect(isBlockedForNewChat(offlinePeer, false, null, row)).toBe(true);
+		expect(isBlockedForNewChat(install({ approved: false }), false, null, row)).toBe(true);
+	});
+
+	it('without the overview (older server) the classic worktree block holds', () => {
+		expect(isBlockedForNewChat(onlinePeer, true, ineligible, undefined)).toBe(true);
+		expect(newChatRowNote(onlinePeer, ineligible, undefined)).toBe('no checkout');
+	});
+
+	it('notes read ready / not set up · set up / offline, and the title says it is set up at send', () => {
+		expect(newChatRowNote(self, null, row)).toBe('ready');
+		expect(newChatRowNote(onlinePeer, ineligible, row)).toBe('not set up · set up');
+		expect(newChatRowNote(offlinePeer, null, row)).toBe('offline');
+		expect(newChatRowTitle(onlinePeer, true, ineligible, row)).toBe("ai-shuffle isn't on Laptop yet — it's set up there when you send");
 	});
 });
