@@ -17,7 +17,8 @@ from scripts.devloop import seed_long as fixture
 
 
 def test_long_is_opt_in():
-    assert set(seed.SEEDS) == {"default", "long"}
+    # "empty" is the second worker's seed in `devloop up --workers 2`.
+    assert set(seed.SEEDS) == {"default", "long", "empty"}
     assert seed.LONG_TURNS == 70  # the normal dev fixture must stay small
 
 
