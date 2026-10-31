@@ -52,7 +52,9 @@ import java.io.ByteArrayInputStream
  * paired worker; no JavascriptInterface. The page may ask to connect to
  * another paired worker (`?connect=`, see WorkerSwitch) and tells the shell
  * when it draws its own "Connected to" bar (MobileUi.SHELL_BRIDGE), which
- * replaces the native worker-name bar. The paired session is handed to the
+ * replaces the native worker-name bar; the page's sheet then reaches the
+ * Workers screen and the app's Settings through the same bridge
+ * (ShellNavigation). The paired session is handed to the
  * page as a Bearer token through a document-start script, never as a cookie.
  * Voice calls are the page's own (the same as the website); the shell grants
  * the microphone and follows headset routes while the page has a call, and
@@ -387,9 +389,7 @@ class ChatActivity : NativeScreen() {
         setContentView(ChatScreenLayout.build(this, toolbar, status, repairButton, web, color(R.color.surface)))
     }
     private fun openWorkers(message: String? = null) {
-        startActivity(Intent(this, ServerListActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            .apply { if (message != null) putExtra("sync_message", message) })
+        startActivity(ShellNavigation.workers(this, message))
     }
     /** Open only this target's own paired session; no token or credential crosses workers. */
     private fun openChat(target: Server, offlineWorker: String? = null) {
@@ -417,7 +417,8 @@ class ChatActivity : NativeScreen() {
                 !ChatAccessPolicy.message(server.baseUrl, web.url, origin.toString(), mainFrame, authorized())) return@addWebMessageListener
             when (val parsed = MobileUi.shellMessage(message.data)) {
                 is MobileUi.ShellMessage.WorkerBar -> applyPageWorkerBar(parsed.shown)
-                is MobileUi.ShellMessage.OpenWorkers -> openWorkers()
+                is MobileUi.ShellMessage.OpenWorkers, is MobileUi.ShellMessage.OpenAppSettings ->
+                    ShellNavigation.intent(this, parsed)?.let { startActivity(it) }
                 is MobileUi.ShellMessage.VoiceCall -> {
                     if (parsed.active) {
                         if (voiceRouting == null) voiceRouting = VoiceAudioRouting(this) {

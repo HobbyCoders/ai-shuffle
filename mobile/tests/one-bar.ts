@@ -17,11 +17,22 @@ import { installMobileShell } from '../src/shell/register';
  *   ?scenario=nogit       a chat whose project is not a git repository
  *   ?scenario=settings    a non-chat page
  *   ?unread=1             unread notifications (the dot on the menu)
+ *   ?app=1                inside the Android app: a stubbed shell bridge (the
+ *                         chip sheet's App settings row; posts go to the console)
+ *   ?app=old              an app from before the `app-settings` capability
  *   ?theme=light
  */
+const params = new URLSearchParams(location.search);
+const app = params.get('app');
+if (app) {
+	const capabilities = ['worker-switch', ...(app === 'old' ? [] : ['app-settings'])];
+	window.__SHUFFLE_MOBILE__ = { apiOrigin: location.origin, token: 'fixture', native: { platform: 'android', bridge: 1, capabilities } };
+	(window as unknown as { shuffleShell: { postMessage(message: string): void } }).shuffleShell = {
+		postMessage: (message) => console.info('[shuffleShell]', message)
+	};
+}
 installMobileShell();
 
-const params = new URLSearchParams(location.search);
 const scenario = params.get('scenario') ?? 'normal';
 const chat = scenario !== 'settings';
 const subagent = scenario === 'subagent';

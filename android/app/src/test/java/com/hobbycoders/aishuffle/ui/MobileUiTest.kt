@@ -95,6 +95,8 @@ class MobileUiTest {
         assertEquals(MobileUi.ShellMessage.WorkerBar(true), MobileUi.shellMessage("{\"type\":\"worker-bar\",\"shown\":true}"))
         assertEquals(MobileUi.ShellMessage.WorkerBar(false), MobileUi.shellMessage("{\"type\":\"worker-bar\",\"shown\":false}"))
         assertEquals(MobileUi.ShellMessage.OpenWorkers, MobileUi.shellMessage("{\"type\":\"workers\"}"))
+        assertEquals(MobileUi.ShellMessage.OpenAppSettings, MobileUi.shellMessage("{\"type\":\"app-settings\"}"))
+        assertTrue("the page shows App settings only to an app that answers it", MobileUi.APP_SETTINGS in MobileUi.CAPABILITIES)
         for (raw in listOf(null, "", "not json", "[]", "{}", "{\"type\":\"worker-bar\"}", "{\"type\":\"worker-bar\",\"shown\":\"true\"}",
                 "{\"type\":\"worker-bar\",\"shown\":1}", "{\"type\":\"connect\",\"url\":\"https://evil.example\"}",
                 "{\"type\":\"workers\",\"pad\":\"" + "x".repeat(300) + "\"}")) assertNull(raw.toString(), MobileUi.shellMessage(raw))
