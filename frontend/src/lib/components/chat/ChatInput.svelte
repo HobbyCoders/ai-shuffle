@@ -47,6 +47,7 @@
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
 	import { getInitGeneration } from '$lib/stores/session/session-init';
 	import { appData, profiles, sessions } from '$lib/stores/app-data.svelte';
+	import { newChatSetup, newChatSetupNeed, type NewChatSetupNeed } from '$lib/stores/project-setup';
 	import { hasStoppableWork } from './stoppable-work';
 	import { agentGate, anyCredential } from '$lib/stores/auth.svelte';
 	import { git } from '$lib/stores/git.svelte';
@@ -195,6 +196,12 @@
 	// user's answer and goes out as composed.
 	let catalogHoldWaived = false;
 	const CATALOG_HOLD_MS = 10_000;
+	// A new chat on a worker that lacks the picked project: Send reads "Set up
+	// & send", and a send sets the project up there first with the text held
+	// in place, then goes out on its own. A failure keeps the draft; the reason
+	// shows in the new-session callout (NewChatSetupCallout).
+	const setupNeed = $derived(newSession ? $newChatSetupNeed : null);
+	const heldForSetup = $derived(newSession && $newChatSetup.phase === 'running');
 
 	// Before a send into a large chat whose provider cache went cold: say what
 	// it costs and offer to compact first (#1831). The check is bounded so a
@@ -642,7 +649,7 @@
 		callAvailable,
 		hasContent: hasMessageContent,
 		working: stoppableWork,
-		busy: $activeSession.isCreatingWorktree || heldForCatalog
+		busy: $activeSession.isCreatingWorktree || heldForCatalog || heldForSetup
 	}));
 	const showTalk = $derived(circles.includes('talk'));
 
@@ -960,9 +967,15 @@
 	}
 
 	async function submitComposer(compactBeforeSend: boolean, composerCleared: () => void) {
-		if (!ownsComposer() || heldForCatalog || (compacting && !compactBeforeSend)) return;
+		if (!ownsComposer() || heldForCatalog || heldForSetup || (compacting && !compactBeforeSend)) return;
 		if (projectLane !== 'chat' && !catalogHoldWaived && activeSession.composerAwaitingProjectCatalog) {
 			if (!(await holdForProjectCatalog())) return;
+		}
+		// Set the project up on the picked worker first ("Set up & send"). Only
+		// with something to send: an empty composer is refused below as usual.
+		const need = setupNeed;
+		if (need && projectLane !== 'chat' && ((editorRef?.getMessage() ?? '').trim() || uploadedFiles.length > 0)) {
+			if (!(await holdForProjectSetup(need))) return;
 		}
 		// Get serialized message from editor (includes inline @path references)
 		const finalPrompt = editorRef?.getMessage() ?? '';
@@ -1032,6 +1045,18 @@
 			return false;
 		}
 		return true;
+	}
+
+	/**
+	 * Hold a new chat's send while its project is set up on the picked worker.
+	 * The text stays in the composer throughout; true when the send may go on
+	 * (the view is still this new chat and the worker now has the project).
+	 */
+	async function holdForProjectSetup(need: NewChatSetupNeed): Promise<boolean> {
+		const navigation = getInitGeneration();
+		const ready = await newChatSetup.run(need);
+		if (!ownsComposer() || getInitGeneration() !== navigation || get(activeSession).sessionId) return false;
+		return ready;
 	}
 
 	/** Two composer drafts as one, earlier first. Drafts are Tiptap JSON, or
@@ -1682,9 +1707,10 @@
 							onDelete={deleteStashed}
 						/>
 						{#if circles.includes('busy')}
-							<!-- Creating worktree, or a send held for the project catalog - show spinner -->
+							<!-- Creating worktree, or a send held for the project catalog or a project setup - show spinner -->
 							{#if heldForCatalog}<span class="sr-only" role="status">Loading projects…</span>{/if}
-							<button type="button" class="send-btn creating-worktree" disabled title={heldForCatalog ? 'Loading projects…' : 'Creating worktree...'} aria-label={heldForCatalog ? 'Loading projects…' : 'Creating worktree'}>
+							{@const busyLabel = heldForSetup ? `Setting up on ${$newChatSetup.workerName}…` : heldForCatalog ? 'Loading projects…' : 'Creating worktree'}
+							<button type="button" class="send-btn creating-worktree" disabled title={busyLabel} aria-label={busyLabel}>
 								<svg class="w-3.5 h-3.5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
 									<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
 								</svg>
@@ -1693,10 +1719,14 @@
 							<button
 								type="submit"
 								class="send-btn"
+								class:send-btn--setup={!!setupNeed && !sendState.disabled}
 								disabled={sendState.disabled}
-								title={stoppableWork && !sendState.disabled ? 'Send — Enter' : sendState.title}
-								aria-label="Send"
+								title={setupNeed && !sendState.disabled
+									? `Set ${setupNeed.projectName} up on ${setupNeed.workerName}, then send — Enter`
+									: stoppableWork && !sendState.disabled ? 'Send — Enter' : sendState.title}
+								aria-label={setupNeed && !sendState.disabled ? 'Set up & send' : 'Send'}
 							>
+								{#if setupNeed && !sendState.disabled}<span class="send-btn-label">Set up &amp; send</span>{/if}
 								<ArrowUp size={16} strokeWidth={2.4} aria-hidden="true" />
 							</button>
 						{/if}
@@ -2054,6 +2084,30 @@
 	.send-btn:focus-visible {
 		outline: 2px solid var(--ring);
 		outline-offset: 2px;
+	}
+
+	/* "Set up & send": the circle grows into a labelled pill. */
+	.send-btn.send-btn--setup {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		width: auto;
+		padding: 0 10px 0 12px;
+		border-radius: 999px;
+		font-size: 0.78rem;
+		font-weight: 600;
+		white-space: nowrap;
+	}
+	/* Phones: the toolbar has no room for the label; the callout above the
+	   composer says what Send will do (the button keeps its accessible name). */
+	@media (max-width: 480px) {
+		.send-btn.send-btn--setup {
+			display: grid;
+			width: 32px;
+			padding: 0;
+			border-radius: var(--composer-btn-radius);
+		}
+		.send-btn--setup .send-btn-label { display: none; }
 	}
 
 	/* Nothing to send yet: a quiet circle. */

@@ -11,6 +11,8 @@
  */
 
 import type { ClusterGitState, Install } from '$lib/api/installs';
+import type { ProjectOverviewRow, ProjectWorker } from '$lib/api/project-workers';
+import { runsOnNote } from '$lib/components/deck/cards/project-workers-view';
 
 /** Per-install checkout eligibility. `null` = unknown (fail-open). */
 export type EligibilityMap = Record<string, boolean> | null;
@@ -66,6 +68,71 @@ export function runnerTitle(
 		return worktreeOn
 			? `No checkout of this project on ${install.device_name} — a worktree can't be created there`
 			: `No checkout of this project on ${install.device_name}`;
+	}
+	return `Run this session on ${install.device_name}`;
+}
+
+// ─── New chat, once workers can set projects up for each other ──────────────
+//
+// With cross-worker project sync (GET /projects/overview answers), a worker
+// that lacks the picked project stays selectable in the new-chat pickers,
+// also with a worktree: "Set up & send" sets it up there first. Only an
+// offline or unapproved worker is blocked. Without the overview (an older
+// server) the rules above apply unchanged.
+
+/** The overview row of the project a new chat has picked. */
+export function overviewRowFor(
+	overview: ProjectOverviewRow[],
+	project: { project: string | null; projectV2Id: string | null }
+): ProjectOverviewRow | undefined {
+	if (!project.project && !project.projectV2Id) return undefined;
+	return overview.find((r) =>
+		(!!project.projectV2Id && r.project_v2_id === project.projectV2Id) ||
+		(!!project.project && r.local_project_id === project.project));
+}
+
+/** The overview worker standing for an install (any of its ids), or this worker's row. */
+export function overviewWorkerFor(row: ProjectOverviewRow | undefined, install: Install | null): ProjectWorker | undefined {
+	if (!row) return undefined;
+	if (!install) return row.workers.find((w) => w.is_self);
+	const ids = [install.id, install.device_id, install.legacy_instance_id].filter(Boolean);
+	return row.workers.find((w) => ids.includes(w.install_id)) ?? (install.is_self ? row.workers.find((w) => w.is_self) : undefined);
+}
+
+/** A new-chat picker row is blocked: with sync only offline/unapproved; else the classic rule. */
+export function isBlockedForNewChat(
+	install: Install,
+	worktreeOn: boolean,
+	eligibility: EligibilityMap,
+	syncRow: ProjectOverviewRow | undefined
+): boolean {
+	if (syncRow) return install.approved === false || !install.online;
+	return isBlocked(install, worktreeOn, eligibility);
+}
+
+/** The trailing note: "ready" / "not set up · set up" / "offline" with sync, else the classic note. */
+export function newChatRowNote(
+	install: Install,
+	eligibility: EligibilityMap,
+	syncRow: ProjectOverviewRow | undefined
+): string | null {
+	if (!install.online) return 'offline';
+	if (syncRow) return runsOnNote(overviewWorkerFor(syncRow, install)) ?? null;
+	if (isIneligible(eligibility, install.id)) return 'no checkout';
+	return null;
+}
+
+/** The row's tooltip with sync: says a missing project is set up at send. */
+export function newChatRowTitle(
+	install: Install,
+	worktreeOn: boolean,
+	eligibility: EligibilityMap,
+	syncRow: ProjectOverviewRow | undefined
+): string {
+	if (!syncRow || install.approved === false || !install.online) return runnerTitle(install, worktreeOn, eligibility);
+	const worker = overviewWorkerFor(syncRow, install);
+	if (worker && (worker.state === 'missing' || worker.state === 'failed')) {
+		return `${syncRow.name} isn't on ${install.device_name} yet — it's set up there when you send`;
 	}
 	return `Run this session on ${install.device_name}`;
 }

@@ -12,6 +12,7 @@ import type { Session, Profile, PaginatedSessions, CursorPaginatedSessions, Sess
 import { feedController } from './session/v2/feed-controller';
 import { api, searchSessionsPaginated, renameSession as apiRenameSession, setSessionActive as apiSetSessionActive, setSessionArchived as apiSetSessionArchived } from '$lib/api/client';
 import { listClusterProjects, type ClusterProject } from '$lib/api/installs';
+import { refreshProjectsOverviewIfUsed } from './projects-overview';
 import type { Project } from './types';
 import { createSubscribers } from './store-utils';
 import { activeSession } from './active-session';
@@ -813,7 +814,7 @@ export const appData = {
 			activeSession.newChat();
 		}
 		activeSession.dropMissingProject();
-		await Promise.all([appData.loadProjects(), appData.loadClusterProjects()]);
+		await Promise.all([appData.loadProjects(), appData.loadClusterProjects(), refreshProjectsOverviewIfUsed()]);
 		activeSession.dropMissingProject();
 	},
 

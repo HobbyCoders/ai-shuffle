@@ -12,13 +12,21 @@
 	 * can run on any online worker; with a project, workers that cannot run it
 	 * are greyed with the reason (the cluster git-state eligibility map, fail
 	 * open).
+	 *
+	 * With cross-worker project sync (the projects overview answers), each row
+	 * says "ready", "not set up · set up" or "offline", and a worker without
+	 * the project stays selectable (also with a worktree): the composer's
+	 * "Set up & send" sets it up there first. Only offline or unapproved
+	 * workers are blocked then.
 	 */
 	import { tick, untrack } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { getClusterGitState, type Install } from '$lib/api/installs';
 	import { workerInstalls, refreshWorkerPresence, watchWorkerPresence, presenceOf } from '$lib/stores/worker-presence';
-	import { peerRunners, checkoutEligibility, isBlocked, runnerTitle } from './execution-mode-eligibility';
-	import { workerRowNote } from '$lib/components/chat/runner-badge-menu';
+	import { loadProjectsOverview, projectsOverview, projectsOverviewSupported } from '$lib/stores/projects-overview';
+	import {
+		peerRunners, checkoutEligibility, isBlockedForNewChat, newChatRowNote, newChatRowTitle, overviewRowFor
+	} from './execution-mode-eligibility';
 	import WorkerMenuList, { type WorkerMenuRow } from '$lib/components/ui/WorkerMenuList.svelte';
 	import { floatingMenu } from '$lib/components/ui/floating-menu';
 
@@ -39,6 +47,12 @@
 	const hasProject = $derived(!!($activeSession.project || $activeSession.projectV2Id));
 	const label = $derived(intent ? intent.name : selfName);
 	const online = $derived.by((): boolean | null => (intent ? presenceOf(installs, [intent.id]) : true));
+	// The picked project's per-worker state, when this worker can set projects up elsewhere.
+	const syncRow = $derived(hasProject && $projectsOverviewSupported === true
+		? overviewRowFor($projectsOverview, { project: $activeSession.project || null, projectV2Id: $activeSession.projectV2Id })
+		: undefined);
+	const selfInstall = $derived(installs.find((i) => i.is_self) ?? null);
+	const selfNote = $derived(syncRow && selfInstall ? newChatRowNote(selfInstall, null, syncRow) : null);
 
 	// Keep presence fresh while the menu is open or a peer is picked.
 	const watching = $derived(open || !!intent);
@@ -61,6 +75,8 @@
 		const gitState = (projectId || projectV2Id)
 			? getClusterGitState(projectV2Id ? null : projectId || null, projectV2Id || null).catch(() => null)
 			: Promise.resolve(null);
+		// The per-worker project state rides along; it never blocks the list.
+		if (projectId || projectV2Id) void loadProjectsOverview();
 		try {
 			await refreshWorkerPresence();
 			failed = false;
@@ -73,14 +89,23 @@
 	}
 
 	const rows = $derived<WorkerMenuRow[]>([
-		{ id: LOCAL_ROW_ID, label: selfName, online: true, disabled: false, title: 'Run this session on this worker', checked: !intent },
+		{
+			id: LOCAL_ROW_ID, label: selfName, online: true, disabled: false,
+			title: selfNote === 'not set up · set up' && syncRow
+				? `${syncRow.name} isn't on ${selfName} yet — it's set up here when you send`
+				: 'Run this session on this worker',
+			note: selfNote,
+			noteAction: selfNote === 'not set up · set up',
+			checked: !intent
+		},
 		...peers.map((install): WorkerMenuRow => ({
 			id: install.id,
 			label: install.device_name,
 			online: install.online,
-			disabled: isBlocked(install, worktreeOn, hasProject ? eligibility : null),
-			title: runnerTitle(install, worktreeOn, hasProject ? eligibility : null),
-			note: workerRowNote(install, hasProject ? eligibility : null),
+			disabled: isBlockedForNewChat(install, worktreeOn, hasProject ? eligibility : null, syncRow),
+			title: newChatRowTitle(install, worktreeOn, hasProject ? eligibility : null, syncRow),
+			note: newChatRowNote(install, hasProject ? eligibility : null, syncRow),
+			noteAction: newChatRowNote(install, hasProject ? eligibility : null, syncRow) === 'not set up · set up',
 			checked: intent?.id === install.id
 		}))
 	]);
@@ -160,7 +185,7 @@
 			activeSession.setDeviceIntent(null);
 		} else {
 			const install = peers.find((i) => i.id === row.id);
-			if (!install || isBlocked(install, worktreeOn, hasProject ? eligibility : null)) return;
+			if (!install || isBlockedForNewChat(install, worktreeOn, hasProject ? eligibility : null, syncRow)) return;
 			activeSession.setDeviceIntent({ id: install.id, name: install.device_name });
 		}
 		open = false;
