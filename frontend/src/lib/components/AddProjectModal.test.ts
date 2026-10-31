@@ -55,6 +55,27 @@ describe('AddProjectModal keyboard and focus', () => {
 	});
 });
 
+describe('AddProjectModal placement', () => {
+	it('renders its overlay on <body>, not inside the opener, and removes it on close', async () => {
+		// The new chat's "in <project>" picker opens it from inside a
+		// transformed parent; there the fixed overlay sat under the composer.
+		const host = document.createElement('div');
+		host.style.transform = 'translateZ(0)';
+		document.body.appendChild(host);
+		const onClose = vi.fn();
+		const view = render(AddProjectModal, { target: host, props: { open: true, onClose } });
+		await tick();
+
+		const dialog = screen.getByRole('dialog', { name: 'New project' });
+		expect(dialog.parentElement).toBe(document.body);
+		expect(host.contains(dialog)).toBe(false);
+
+		await view.rerender({ open: false, onClose });
+		await tick();
+		expect(screen.queryByRole('dialog', { name: 'New project' })).toBeNull();
+	});
+});
+
 describe('AddProjectModal "Set it up on"', () => {
 	const inst = (id: string, name: string, extra: Record<string, unknown> = {}) => ({
 		id, device_name: name, base_url: null, platform: 'linux', version: '1', capabilities: {}, last_seen: null,
