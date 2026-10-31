@@ -1,8 +1,18 @@
 /** Build an immutable GitHub source snapshot using installed runtimes and cached dependencies. */
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { promises as fs } from 'node:fs';
+import type * as FS from 'node:fs';
 import path from 'node:path';
+import { clearTimeout, setTimeout } from 'node:timers';
+
+/**
+ * Electron's unpatched fs, as rawFs() in asar.ts. Inside Electron, node:fs reads
+ * `*.asar` files as folders and keeps each archive it reads open until the
+ * process exits. The desktop dependency tree holds Electron's own
+ * dist/resources/default_app.asar: hashing it that way left Windows unable to
+ * publish or delete the install, and the update waited on it forever.
+ */
+const fs: typeof FS.promises = (process.versions?.electron ? require('original-fs') : require('node:fs')).promises;
 
 export interface SourceRuntime {
   root: string;
@@ -313,6 +323,24 @@ async function cachedNodeDependencies(root: string, key: string): Promise<string
   return null;
 }
 
+/** How long removing a failed install may hold up its error. */
+const DISCARD_WAIT_MS = 60_000;
+/**
+ * Remove a temporary install without letting it hide or hold up the result.
+ * fs.rm retries a busy entry at every directory level, so one file another
+ * process keeps open can stall it for hours. After DISCARD_WAIT_MS the folder
+ * is left behind; a `.tmp-` folder is never reused.
+ */
+async function discard(directory: string, opts: BuildOptions): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const outcome = await Promise.race([
+    fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }).then(() => null, (error: Error) => error.message),
+    new Promise<string>(resolve => { timer = setTimeout(resolve, DISCARD_WAIT_MS, `still busy after ${DISCARD_WAIT_MS / 1000}s`); }),
+  ]);
+  clearTimeout(timer);
+  if (outcome) await fs.appendFile(opts.log, `[${new Date().toISOString()}] Could not remove ${directory} (${outcome}); it was left behind.\n`).catch(() => {});
+}
+
 async function nodePackage(name: string, opts: BuildOptions, python: string, identity: string | null): Promise<string> {
   const source = path.join(opts.source, name);
   const files = await fingerprint(source, ['package.json', 'package-lock.json'], reuseNodeBuilds() ? nodeDependencyInputText : undefined);
@@ -344,8 +372,9 @@ async function nodePackage(name: string, opts: BuildOptions, python: string, ide
       await fs.mkdir(path.dirname(cache), { recursive: true });
       await fs.rename(temporary, cache);
     } finally {
-      await fs.rm(path.join(temporary, '.install.lock'), { force: true });
-      await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      // Cleanup never replaces or delays the install's own error.
+      await fs.rm(path.join(temporary, '.install.lock'), { force: true }).catch(() => {});
+      await discard(temporary, opts);
     }
   }
   const dependencies = path.join(cache, 'node_modules');
