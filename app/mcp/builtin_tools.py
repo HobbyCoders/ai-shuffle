@@ -2014,9 +2014,7 @@ def create_builtin_tools_server(
                 "permission_mode": {
                     "type": "string",
                     "enum": ["default", "acceptEdits", "auto", "bypassPermissions"],
-                    "description": "Permission mode each run starts in. Omit for "
-                                   "'bypassPermissions' (nobody watches a scheduled run, "
-                                   "so in 'default' (Ask) tools needing approval are denied).",
+                    "description": "Mode each run starts in (default 'bypassPermissions').",
                 },
             },
             "required": ["name", "expression", "prompt"],

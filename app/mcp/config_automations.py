@@ -23,12 +23,8 @@ logger = logging.getLogger(__name__)
 PERMISSION_MODE_SCHEMA: Dict[str, Any] = {
     "type": "string",
     "enum": ["default", "acceptEdits", "auto", "bypassPermissions"],
-    "description": "Permission mode each run starts in: 'default' (Ask: tools needing "
-                   "approval wait for a person, and nobody watches an automation, so "
-                   "they are denied), 'acceptEdits' (file edits run, other tools ask), "
-                   "'auto' (Claude's classifier decides; Claude Code only) or "
-                   "'bypassPermissions' (every tool runs without asking). New "
-                   "automations default to 'bypassPermissions'.",
+    "description": "Mode each run starts in; new automations default to "
+                   "'bypassPermissions'. In 'default' (Ask) unanswered prompts are denied.",
 }
 
 
