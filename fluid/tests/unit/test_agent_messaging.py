@@ -989,6 +989,55 @@ async def test_a_message_wakes_a_parked_receiver_and_gets_a_delivery_receipt(tmp
         await receiver.aclose()
 
 
+async def test_progress_to_an_idle_receiver_is_held_for_its_next_turn(tmp_path) -> None:
+    """#960: a progress note starts no turn; it rides the next one, whatever
+    starts it, as one compact block (oldest first, one line each)."""
+    from fluid.engine.native import NativeLoop
+    from tests.unit.test_turn_source import _Provider
+
+    provider = _Provider()
+    receiver = NativeLoop(provider=provider, store=MemoryStore(), model="m")
+    try:
+        await receiver.submit(UserTurn(content="delegate"))
+        await asyncio.wait_for(receiver.wait_turn(), 5)
+        calls = len(provider.requests)
+        host = _host(tmp_path)
+        worker = _worker(host, "research", "task_aaaaaaaaaaaa")
+        worker.engine = receiver
+
+        for text in ("cloned the repo", "tests 40/80\npassing"):
+            outcome = await host.agent_message(
+                {"to": "research", "message": text, "kind": "progress"}, ToolCtx(),
+            )
+            assert not outcome.is_error and outcome.text.startswith("Held for research")
+        assert receiver._turn_task is None or receiver._turn_task.done()
+        assert len(provider.requests) == calls
+
+        # An actionable message wakes it; the held notes ride that turn once.
+        outcome = await host.agent_message(
+            {"to": "research", "message": "stop: main is red", "kind": "alert"}, ToolCtx(),
+        )
+        assert outcome.text.startswith("Delivered to research")
+        await asyncio.wait_for(receiver.wait_turn(), 5)
+        sent = provider.requests[-1].messages[-1].text()
+        assert ("- from 'main' (host-verified parent): cloned the repo\n"
+                "- from 'main' (host-verified parent): tests 40/80 passing") in sent
+        assert sent.count("<system-reminder>") >= 1 and "stop: main is red" in sent
+        assert receiver._queued_peer_messages == []
+    finally:
+        await receiver.aclose()
+
+
+async def test_progress_never_resumes_a_finished_worker(tmp_path) -> None:
+    host = _host(tmp_path)
+    _worker(host, "research", "task_aaaaaaaaaaaa", status="completed")
+
+    outcome = await host.agent_message(
+        {"to": "research", "message": "fyi: 40%", "kind": "progress"}, ToolCtx(),
+    )
+    assert outcome.is_error and "does not resume it" in outcome.text
+
+
 async def test_a_worker_addresses_its_parent_as_main(tmp_path) -> None:
     submitted: list[Any] = []
 
@@ -1046,6 +1095,40 @@ async def test_send_message_rejects_malformed_input(input, expected) -> None:
     ctx.extra["agent_message"] = lambda i, c: ToolOutcome(text="delivered")
     outcome = await send_message.handler(input, ctx)
     assert outcome.is_error and expected in outcome.text
+
+
+def test_send_message_requires_a_kind_with_the_progress_test() -> None:
+    from fluid.tools.builtins import send_message
+
+    schema = send_message.SPEC.input_schema
+    assert "kind" in schema["required"]
+    assert schema["properties"]["kind"]["enum"] == ["result", "needs_decision", "alert", "progress"]
+    words = schema["properties"]["kind"]["description"] + send_message.SPEC.description
+    assert "would do anything differently by reading this right now, it is not progress" in words
+    assert "asked for" in words and "brief received" in words
+
+
+@pytest.mark.parametrize("input, kind", [
+    ({}, "alert"), ({"kind": "progress"}, "progress"),
+    ({"kind": "progress", "urgent": True}, "alert"), ({"kind": "result"}, "result"),
+])
+async def test_send_message_passes_the_delivered_kind(input, kind) -> None:
+    from fluid.tools.builtins import send_message
+
+    seen = []
+    ctx = ToolCtx()
+    ctx.extra["agent_message"] = lambda i, c: seen.append(i) or ToolOutcome(text="ok")
+    await send_message.handler({"to": "w", "message": "m", **input}, ctx)
+    assert seen[0]["kind"] == kind
+
+
+async def test_send_message_refuses_an_unknown_kind() -> None:
+    from fluid.tools.builtins import send_message
+
+    ctx = ToolCtx()
+    ctx.extra["agent_message"] = lambda i, c: ToolOutcome(text="ok")
+    outcome = await send_message.handler({"to": "w", "message": "m", "kind": "fyi"}, ctx)
+    assert outcome.is_error and "kind must be one of" in outcome.text
 
 
 def test_list_agents_formats_an_empty_roster_as_guidance() -> None:

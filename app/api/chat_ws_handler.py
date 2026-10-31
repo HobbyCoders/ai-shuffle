@@ -192,6 +192,11 @@ def _v2_peer_queue_view(session_id: str) -> List[Dict[str, Any]]:
         if turn.get("source") != "agent_message":
             continue
         payload = turn.get("payload") or {}
+        if payload.get("agent_message_kind") == "progress":
+            # A progress note is taken at the next tool boundary or held for
+            # the next wake (#960): never a pending row that may sit there.
+            # The transcript shows it where it is delivered.
+            continue
         sender_id = payload.get("orchestration_sender")
         content = payload.get("peer_message_content")
         if not isinstance(content, str):

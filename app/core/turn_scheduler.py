@@ -247,7 +247,8 @@ def _latest_context_turn(session_id: str) -> Optional[Dict[str, Any]]:
         ):
             cursor.execute(
                 "SELECT * FROM turns WHERE session_id=%s AND " + state_clause + " "
-                "AND COALESCE(stop_reason, '') <> 'steered' "
+                # Neither a steered row nor a held progress note (#960) ran.
+                "AND COALESCE(stop_reason, '') NOT IN ('steered', 'held_progress') "
                 "ORDER BY ended_at DESC NULLS LAST, position DESC, created_at DESC, id DESC "
                 "LIMIT 1",
                 (session_id,),
@@ -459,6 +460,8 @@ async def _kick_impl(session_id: str) -> None:
     if task_registry.is_user_stopped(session_id):
         return
     try:
+        # Progress notes never start a turn of their own (#960).
+        await hold_queued_progress(session_id)
         row = await asyncio.to_thread(turns_db.pop_ready, session_id)
         if row is None or task_registry.stop_invalidated(session_id, generation):
             return
@@ -544,7 +547,10 @@ async def _on_turn_settled_impl(session_id: str, turn_id: str, outcome: str) -> 
     await finish_message_resume(session_id, settled, outcome)
 
     # (2) QUEUE DRAIN — pop_ready (non-mutating peek) → kick starts the front
-    # queued row. Fires on ALL outcomes, ahead of auto-continue.
+    # queued row. Fires on ALL outcomes, ahead of auto-continue. A progress
+    # note no tool boundary took before this turn ended is held first: it
+    # rides the next turn instead of starting one (#960).
+    await hold_queued_progress(session_id)
     front = await asyncio.to_thread(turns_db.pop_ready, session_id)
     if front is not None:
         kick(session_id)
@@ -576,6 +582,13 @@ async def _on_turn_settled_impl(session_id: str, turn_id: str, outcome: str) -> 
         from app.core.session_orchestration import report_settled_start
 
         await report_settled_start(session_id, settled, outcome)
+        # A worker's run ended: notes it left held for chats that are not
+        # its dispatcher are delivered now rather than waiting on it (#960).
+        try:
+            await release_held_progress_from(session_id)
+        except Exception:  # noqa: BLE001 — they still ride the receiver's next wake
+            logger.warning("turn_scheduler: releasing held notes from %s failed",
+                           session_id, exc_info=True)
         # A Task child another worker started here owes that worker a report.
         from app.core.remote_task import on_child_settled
 
@@ -1224,10 +1237,20 @@ def _dedupe_frames_by_task_id(
 # Held peer messages — a parked parent is not woken for an interim message
 # ---------------------------------------------------------------------------
 #
-# Legacy held messages from releases that deferred parked-recipient traffic.
-# New peer messages wake immediately. Keep recovery of ONE ``pending_wakeups``
-# row per session (``source=HELD_PEER_SOURCE``) whose prompt contains all held
-# messages and whose ``fire_at`` is their original promotion deadline.
+# Progress notes (#960). An agent message carries a kind (``fluid.context.peer.
+# MESSAGE_KINDS``): result, needs_decision and alert wake an idle or parked
+# receiver at once; ``progress`` does not. Every kind reaches a BUSY receiver
+# at its next tool boundary (``SessionRuntime.steer_pending``), as before.
+#
+# A progress note is queued like any agent message (its kind on the row's
+# payload, ``AGENT_MESSAGE_KIND_KEY``), so producers, receipts and restart
+# recovery stay one path. Whenever the receiver has no live turn,
+# :func:`hold_queued_progress` moves its queued progress rows, in one
+# transaction, into ONE ``pending_wakeups`` row per session
+# (``source=HELD_PEER_SOURCE``) that has no timer (``NEVER_FIRE_AT``). It runs
+# on admission, on every kick, and when a turn settles (a busy receiver whose
+# turn ended before a boundary took the note). Rows written by releases that
+# held every message keep their own promotion deadline and still drain.
 #
 # Held messages ride the parent's NEXT turn, however that turn starts:
 #
@@ -1238,9 +1261,13 @@ def _dedupe_frames_by_task_id(
 # * a completion steered into a live turn carries them in the same steer
 #   (:func:`_try_steer_terminal_notification`); a steer the turn never
 #   delivers puts them back for the wake that replaces it;
-# * an urgent message takes them along into its own wake;
-# * the deadline fires: the wakeup service promotes them to a
-#   ``source="promotion"`` turn (:func:`promote_held_peer_messages`).
+# * an actionable message (result, needs_decision, alert) takes them along
+#   into its own wake;
+# * a worker that sent them ends its run: they become a
+#   ``source="promotion"`` turn (:func:`release_held_progress_from`), unless
+#   the receiver dispatched it, whose completion wake carries them;
+# * a legacy row's deadline fires: the wakeup service promotes them
+#   (:func:`promote_held_peer_messages`).
 #
 # Each held message carries an id (:func:`_held_entry`). Every path that
 # delivers held messages records their ids for the session, and every take
@@ -1252,17 +1279,18 @@ def _dedupe_frames_by_task_id(
 # turn runs beside the background work). The receiver is running, so the
 # message queues as an ordinary agent message and joins that live turn at its
 # next tool boundary (``SessionRuntime.steer_pending``). If the turn ends
-# before a boundary takes it, the queued row runs as a turn of its own.
+# before a boundary takes it, a progress row is held then; any other kind
+# runs as a turn of its own.
 #
 # Policy defaults (deliberate, not configurable):
 #
 # * Stop drops held messages: ``query_session_lifecycle.enter_user_stop``
 #   cancels every pending wakeup of the session, this row included, and a
 #   stopped session refuses new holds.
-# * The promotion deadline is fixed at :data:`HELD_PEER_PROMOTION_SECONDS`
-#   (10 minutes) from the FIRST held message.
-# * Later messages do not extend it: the row keeps the earliest ``fire_at``
-#   (``wakeups_db.merge_session_wakeup``).
+# * New holds have no timer (``wakeup_service.NEVER_FIRE_AT``). A legacy
+#   row keeps its deadline (:data:`HELD_PEER_PROMOTION_SECONDS`, 10 minutes
+#   from the FIRST held message); later messages do not extend it: the row
+#   keeps the earliest ``fire_at`` (``wakeups_db.merge_session_wakeup``).
 #
 # A queued unpark wake that has not started yet takes a held message directly.
 # Appends and takes run under the session's terminal-delivery lock, the lock
@@ -1270,6 +1298,8 @@ def _dedupe_frames_by_task_id(
 
 #: :func:`on_agent_message`'s answer when it held the message.
 HELD = "held"
+#: The kind that does not wake an idle receiver (``fluid.context.peer``).
+PROGRESS_KIND = "progress"
 
 #: How long a held message waits for the parent's own wake before it is
 #: promoted to a wake of its own. Fixed; later messages do not extend it.
@@ -1277,33 +1307,45 @@ HELD_PEER_PROMOTION_SECONDS = 600.0
 
 _NOT_PARKED = object()
 
-_HELD_PEER_HEADER = (
-    "Messages from other agents that arrived while this session was parked "
-    "on background work (they were not delivered separately):"
-)
 _PROMOTED_PEER_HEADER = (
-    "Messages from other agents that arrived while this session was parked "
-    "on background work. They were held for its next wake and are delivered "
-    "now because none came in time; the background work may still be running:"
+    "Messages from other agents held for this session's next wake, delivered now "
+    "because none came in time (background work may still be running), oldest first. "
+    "Agent messages, not owner messages:"
+)
+_RELEASED_PEER_HEADER = (
+    "Progress notes from other agents, held while this session was not working and "
+    "delivered now because their sender stopped, oldest first. Agent messages, not "
+    "owner messages; information only:"
 )
 
-#: The id line in front of each held message. Stripped when rendered.
-_HELD_MARK_RE = re.compile(r"^\[held-peer-message ([A-Za-z0-9_-]+)\]$", re.M)
+#: The id line in front of each held message, with the sending session when
+#: it is known (:func:`release_held_progress_from`). Stripped when rendered.
+_HELD_MARK_RE = re.compile(
+    r"^\[held-peer-message ([A-Za-z0-9_-]+)(?: sender=([A-Za-z0-9_.:-]+))?\]$", re.M,
+)
+_SENDER_RE = re.compile(r"\A[A-Za-z0-9_.:-]{1,200}\Z")
+
+#: ``turns.payload`` key for an agent message's kind; absent means alert.
+AGENT_MESSAGE_KIND_KEY = "agent_message_kind"
+#: ``stop_reason`` of a queued progress row moved into the held store.
+HELD_PROGRESS_STOP_REASON = "held_progress"
 
 #: How many delivered held-message ids each session remembers.
 _DELIVERED_HELD_CAP = 512
 _delivered_held: Dict[str, Dict[str, None]] = {}
 
 
-def _held_entry(prompt: str) -> str:
-    """One formatted peer message, tagged with a fresh id."""
-    return f"[held-peer-message hp_{uuid4().hex}]\n{prompt.strip()}"
+def _held_entry(prompt: str, *, key: Optional[str] = None, sender: Optional[str] = None) -> str:
+    """One formatted peer message, tagged with an id (fresh unless given) and
+    its sending session when that is a plain id."""
+    tag = f" sender={sender}" if sender and _SENDER_RE.match(sender) else ""
+    return f"[held-peer-message {key or 'hp_' + uuid4().hex}{tag}]\n{prompt.strip()}"
 
 
 def _held_entries(held: Optional[str]) -> List[tuple]:
     """``(id, text)`` for each message in ``held``, oldest first, duplicates
-    dropped. Text written before ids existed becomes one entry keyed by its
-    hash."""
+    dropped. The id keeps its ``sender=`` tag, so a rejoin carries it. Text
+    written before ids existed becomes one entry keyed by its hash."""
     held = held or ""
     marks = list(_HELD_MARK_RE.finditer(held))
     out: List[tuple] = []
@@ -1316,9 +1358,10 @@ def _held_entries(held: Optional[str]) -> List[tuple]:
     for i, mark in enumerate(marks):
         end = marks[i + 1].start() if i + 1 < len(marks) else len(held)
         text = held[mark.end():end].strip()
-        if text and mark.group(1) not in seen:
-            seen.add(mark.group(1))
-            out.append((mark.group(1), text))
+        key = mark.group(1) + (f" sender={mark.group(2)}" if mark.group(2) else "")
+        if text and key not in seen:
+            seen.add(key)
+            out.append((key, text))
     return out
 
 
@@ -1361,10 +1404,29 @@ def _undelivered(session_id: str, held: Optional[str], skip: Set[str] = frozense
     ])
 
 
-def _held_peer_block(held: str, *, promoted: bool = False) -> str:
-    header = _PROMOTED_PEER_HEADER if promoted else _HELD_PEER_HEADER
-    body = "\n\n".join(text for _, text in _held_entries(held))
-    return f"<system-reminder>\n{header}\n\n{body}\n</system-reminder>"
+def _held_notes(held: Optional[str]) -> List[tuple]:
+    """``(sender, content, provenance)`` per held message, oldest first."""
+    out = []
+    for _, text in _held_entries(held):
+        match = _HELD_OPEN_RE.match(text)
+        if match:
+            opening = match.group(3)
+            provenance = ("parent" if "parent assignment update" in opening
+                          else "same-owner" if "same-owner session delegation" in opening
+                          else "peer")
+            out.append((match.group(2), match.group(4), provenance))
+        else:
+            out.append(("Agent", text, "peer"))
+    return out
+
+
+def _held_peer_block(held: str, *, promoted: bool = False, released: bool = False) -> str:
+    """ONE compact reminder for held messages: oldest first, one line each."""
+    from fluid.context.peer import HELD_NOTES_HEADER, held_notes_block
+
+    header = (_PROMOTED_PEER_HEADER if promoted else _RELEASED_PEER_HEADER if released
+              else HELD_NOTES_HEADER)
+    return held_notes_block(_held_notes(held), header)
 
 
 def _join_held(*parts: Optional[str]) -> str:
@@ -1467,9 +1529,10 @@ def _restore_held_peer_messages(session_id: str, held: str) -> None:
         from app.core import wakeup_service
 
         context = _latest_context_turn(session_id) or {}
+        # No timer: they ride the next turn, as progress notes always do.
         wakeup_service.restore_held_peer_messages(
             session_id, held,
-            delay_seconds=HELD_PEER_PROMOTION_SECONDS,
+            delay_seconds=None,
             profile_id=context.get("profile_id"),
             project_id=context.get("project_id"),
             model=(context.get("overrides") or {}).get("model"),
@@ -1481,13 +1544,16 @@ def _restore_held_peer_messages(session_id: str, held: str) -> None:
         )
 
 
-async def promote_held_peer_messages(session_id: str, held: str) -> Optional[str]:
-    """Deliver held peer messages whose promotion deadline fired.
+async def promote_held_peer_messages(
+    session_id: str, held: str, *, released: bool = False,
+) -> Optional[str]:
+    """Deliver held peer messages now, as a wake of their own.
 
-    Called by the wakeup service after it claimed the row. A queued unpark
-    wake takes them if one is waiting; otherwise they become a
-    ``source="promotion"`` context wake. Returns the turn id, or None when
-    nothing could be queued (the wakeup service then re-arms the row).
+    Called by the wakeup service after it claimed a legacy row whose
+    promotion deadline fired, or with ``released`` when the notes' sender
+    stopped (:func:`release_held_progress_from`). A queued unpark wake takes
+    them if one is waiting; otherwise they become a ``source="promotion"``
+    context wake. Returns the turn id, or None when nothing could be queued.
     """
     held = _undelivered(session_id, held)
     if not held.strip():
@@ -1497,7 +1563,8 @@ async def promote_held_peer_messages(session_id: str, held: str) -> Optional[str
         if merged is not None:
             return merged["id"]
         turn = await _enqueue_context_wake(
-            session_id, "promotion", [], [], _held_peer_block(held, promoted=True),
+            session_id, "promotion", [], [],
+            _held_peer_block(held, promoted=not released, released=released),
             extra_payload={"held_peer_messages": held},
         )
     if turn.get("id"):
@@ -1507,6 +1574,134 @@ async def promote_held_peer_messages(session_id: str, held: str) -> Optional[str
         )
         kick(session_id)
     return turn.get("id")
+
+
+def _is_progress_row(row: Dict[str, Any]) -> bool:
+    payload = row.get("payload") or {}
+    return (row.get("source") == "agent_message"
+            and payload.get(AGENT_MESSAGE_KIND_KEY) == PROGRESS_KIND)
+
+
+def _move_progress_rows(session_id: str, rows: List[Dict[str, Any]]) -> List[str]:
+    """Move queued progress rows into the held store; return the moved ids.
+
+    One transaction per row: the guarded queued -> aborted removal (which
+    records ``queue.cancelled``, retiring any pending row in the UI) and the
+    merge into the store commit together, so a crash loses nothing and a row
+    a boundary steered meanwhile is left alone.
+    """
+    from app.core import wakeup_service
+    from app.db import session_events
+    from app.db import wakeups as wakeups_db
+    from app.db.base import transaction
+
+    context = _latest_context_turn(session_id) or {}
+    moved: List[str] = []
+    for row in rows:
+        payload = row.get("payload") or {}
+        sender = payload.get("task_peer_sender") or payload.get("orchestration_sender")
+        entry = _held_entry(row.get("prompt") or "", key=f"hp_{row['id']}", sender=sender)
+        with transaction() as conn:
+            if turns_db.remove_queued_turn(
+                row["id"], HELD_PROGRESS_STOP_REASON, _conn=conn,
+            ) is None:
+                continue
+            merged, replaced = wakeups_db.merge_session_wakeup(
+                **wakeup_service.hold_merge_kwargs(
+                    session_id, entry, profile_id=context.get("profile_id") or row.get("profile_id"),
+                    project_id=context.get("project_id"),
+                    model=(context.get("overrides") or {}).get("model"),
+                ),
+                _conn=conn,
+            )
+        wakeup_service.after_hold_merge(merged, replaced)
+        moved.append(row["id"])
+    if moved:
+        session_events.notify_session_write(session_id, "session_events")
+    return moved
+
+
+async def hold_queued_progress(session_id: str) -> List[str]:
+    """Hold the session's queued progress notes while it has no live turn.
+
+    Returns the ids of the queued rows held (#960). A live receiver keeps
+    them queued: its next tool boundary takes every kind. A stopped receiver
+    keeps them too; Stop's own queue cancellation retires them.
+    """
+    from app.core.task_registry import task_registry
+
+    try:
+        rows = [row for row in await asyncio.to_thread(turns_db.get_queued_turns, session_id)
+                if _is_progress_row(row)]
+        if not rows or task_registry.is_user_stopped(session_id):
+            return []
+        async with _terminal_delivery_lock(session_id):
+            if await asyncio.to_thread(turns_db.get_live_turn, session_id) is not None:
+                return []
+            moved = await asyncio.to_thread(_move_progress_rows, session_id, rows)
+    except Exception:  # noqa: BLE001 — a note left queued still runs; never lost
+        logger.warning("turn_scheduler: holding progress notes failed for %s",
+                       session_id, exc_info=True)
+        return []
+    if moved:
+        logger.info(
+            "turn_scheduler: %d progress note(s) for idle %s held for its next wake",
+            len(moved), session_id,
+        )
+    return moved
+
+
+async def release_held_progress_from(sender_id: str) -> int:
+    """Deliver progress notes the worker ``sender_id`` left held when its run ended.
+
+    Only a worker (a session a parent started, not a fork, or a delegated
+    worker) releases: a chat's notes ride the receiver's next wake. A receiver that
+    dispatched the sender as its own Task is skipped: the sender's
+    completion, failure or stop wakes it, and that wake carries them. Every
+    other receiver gets them as one wake now, so a note is never left waiting
+    on a worker that will not send again. Returns the number of receivers
+    woken.
+    """
+    from app.core import wakeup_service
+    from app.core.task_registry import task_registry
+    from app.db import sessions
+    from app.db import wakeups as wakeups_db
+
+    if not sender_id or not _SENDER_RE.match(sender_id):
+        return 0
+    try:
+        sender = await asyncio.to_thread(sessions.get_session, sender_id) or {}
+        # A fork also has a parent, but it is a chat of its own.
+        if not (sender.get("is_worker") or (sender.get("parent_session_id")
+                                            and sender.get("fork_point_message_index") is None)):
+            return 0
+        receivers = await asyncio.to_thread(
+            wakeups_db.sessions_with_wakeup_text,
+            wakeup_service.HELD_PEER_SOURCE, f" sender={sender_id}]",
+        )
+    except Exception:  # noqa: BLE001 — a lookup failure leaves them for the next wake
+        logger.warning("turn_scheduler: held-note lookup failed for %s", sender_id, exc_info=True)
+        return 0
+    woken = 0
+    for receiver in receivers:
+        if receiver == sender_id or await asyncio.to_thread(
+                task_registry.get_task, receiver, sender_id, durable=True) is not None:
+            continue
+        async with _terminal_delivery_lock(receiver):
+            held = await _take_held_peer_messages(receiver)
+        if not held:
+            continue
+        try:
+            turn_id = await promote_held_peer_messages(receiver, held, released=True)
+        except Exception:  # noqa: BLE001
+            turn_id = None
+            logger.warning("turn_scheduler: releasing held notes for %s failed",
+                           receiver, exc_info=True)
+        if turn_id:
+            woken += 1
+        else:
+            _restore_held_peer_messages(receiver, held)
+    return woken
 
 
 async def fold_held_peer_messages_for_turn(
@@ -1547,6 +1742,11 @@ _HELD_ENVELOPE_RE = re.compile(
     r"\A\[agent message from=(['\"])(.*?)\1 — [^\n]*\]\n(.*)\n\[/agent message\]\Z",
     re.S,
 )
+#: The same envelope with the host-authored opening kept (for provenance).
+_HELD_OPEN_RE = re.compile(
+    r"\A\[agent message from=(['\"])(.*?)\1 — ([^\n]*)\]\n(.*)\n\[/agent message\]\Z",
+    re.S,
+)
 
 
 def held_peer_deliveries(held: str) -> List[Dict[str, str]]:
@@ -1582,12 +1782,16 @@ def message_resume_lock(session_id: str) -> asyncio.Lock:
 async def on_agent_message(
     session_id: str, sender: str, text: str, *, reply_to: str | None = None,
     urgent: bool = False, extra_payload: Dict[str, Any] | None = None,
+    kind: str | None = None,
 ) -> str | None:
-    """Queue a peer message for ``session_id``, waking it even while parked.
+    """Queue a peer message for ``session_id``.
 
-    Returns the queued turn's id, or None when the receiver was stopped.
-    ``extra_payload`` rides a worker continuation's turn (``reply_to`` set):
-    a usage-limit resume marks its continuation with it (#1831).
+    Returns the queued turn's id, :data:`HELD` when a ``progress`` note was
+    held for a receiver with no live turn (it rides its next wake), or None
+    when the receiver was stopped. Every other kind wakes an idle or parked
+    receiver; a missing kind or ``urgent`` is ``alert``. ``extra_payload``
+    rides a worker continuation's turn (``reply_to`` set): a usage-limit
+    resume marks its continuation with it (#1831).
     """
     from app.core import archive_guard
     from app.core.task_registry import task_registry
@@ -1605,13 +1809,14 @@ async def on_agent_message(
             return None
         return await _on_agent_message_locked(
             session_id, sender, text, reply_to=reply_to, urgent=urgent,
-            continuation_payload=extra_payload,
+            continuation_payload=extra_payload, kind=kind,
         )
 
 
 async def _on_agent_message_locked(
     session_id: str, sender: str, text: str, *, reply_to: str | None = None,
     urgent: bool = False, continuation_payload: Dict[str, Any] | None = None,
+    kind: str | None = None,
 ) -> str | None:
     """Queue peer traffic that cannot join an app-owned live turn.
 
@@ -1619,11 +1824,14 @@ async def _on_agent_message_locked(
     completion frames and must not overwrite a peer's progress message. The
     shared context-wake path preserves attribution, bindings, and Stop's latch.
 
-    A peer message wakes a receiver parked on background work immediately,
-    just like an idle receiver. Held messages from an older release still
-    ride its next turn or drain through their existing promotion deadline.
-    ``urgent`` remains accepted for compatibility; it is not needed to wake.
+    A result, question or alert wakes a receiver parked on background work
+    immediately, just like an idle receiver. A ``progress`` note is queued
+    the same way and then held at once unless the receiver has a live turn
+    (:func:`hold_queued_progress`): it rides the receiver's next wake. Held
+    messages from an older release still drain through their own deadline.
+    ``urgent`` is ``alert``.
     """
+    from fluid.context.peer import message_kind
     from fluid.context.peer import format_peer_message
     from fluid.tools.hardening import defang_harness_markers
     from app.core.task_registry import task_registry
@@ -1657,6 +1865,7 @@ async def _on_agent_message_locked(
             if earlier:
                 prompt = f"{_held_peer_block(earlier)}\n\n{prompt}"
                 extra_payload = {"held_peer_messages": earlier}
+    kind = message_kind(kind, urgent)
     if not (extra_payload or {}).get("held_peer_messages"):
         # Reporting ownership and live delivery are independent. A resumed
         # worker still takes an individual peer message at its next boundary;
@@ -1667,6 +1876,7 @@ async def _on_agent_message_locked(
             "task_peer_sender": sender,
             "peer_message_content": defang_harness_markers(text),
         }
+    extra_payload = {**(extra_payload or {}), AGENT_MESSAGE_KIND_KEY: kind}
     try:
         turn = await _enqueue_context_wake(
             session_id, "agent_message", [], [], prompt,
@@ -1679,6 +1889,9 @@ async def _on_agent_message_locked(
                 session_id, (extra_payload or {}).get("held_peer_messages") or "",
             )
         raise
+    if turn.get("id") and kind == PROGRESS_KIND and turn["id"] in await hold_queued_progress(session_id):
+        # Not even a finished worker is resumed for a status note.
+        return HELD
     if turn.get("id"):
         if reply_to:
             if task_registry.stop_invalidated(reply_to, owner_generation):

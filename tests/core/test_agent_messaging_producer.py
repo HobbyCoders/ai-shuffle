@@ -619,11 +619,12 @@ async def test_urgent_worker_message_wakes_a_parked_parent_now(
 
 
 def test_held_receipt_tells_the_sender_not_to_wait():
+    # A held progress note (#960): the sender is told it waits for the next
+    # wake, not to resend, and how to send something that must act now.
     text = messaging.held_receipt("main")
-    assert text.startswith("Queued for main")
-    assert "Do not resend" in text
-    assert "urgent" not in text and "Held for" not in text
-    assert "Delivered" not in text
+    assert text.startswith("Held for main")
+    assert "next wake" in text and "Do not resend" in text and "alert" in text
+    assert "urgent" not in text and "Delivered" not in text
 
 
 @pytest.mark.asyncio

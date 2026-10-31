@@ -102,7 +102,12 @@ var ENVELOPE = String.raw`\[agent\x20message from=(['"])(.*?)\1 — (?:host-veri
 var SINGLE_ENVELOPE = new RegExp(`^${ENVELOPE}$`);
 var NEXT_ENVELOPE = new RegExp(ENVELOPE, "y");
 var HELD_OPEN = "<system-reminder>";
-var HELD_HEADER = "Messages from other agents that arrived while this session was parked";
+var LEGACY_HELD_HEADER = "Messages from other agents that arrived while this session was parked";
+var COMPACT_HELD_HEADERS = [
+  "Progress notes from other agents, held while this session was not working",
+  "Messages from other agents held for this session's next wake"
+];
+var COMPACT_LINE = /^- from (['"])(.*?)\1(?: \(host-verified (?:parent|same-owner session)\))?: (.*)$/;
 var HELD_CLOSE = "</system-reminder>";
 function skipWhitespace(text2, start) {
   while (start < text2.length && /\s/.test(text2[start])) start++;
@@ -120,6 +125,16 @@ function envelopesOnly(text2) {
   }
   return found;
 }
+function compactOnly(text2) {
+  const found = [];
+  for (const line of text2.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const match = line.match(COMPACT_LINE);
+    if (!match) return null;
+    found.push({ sender: match[2], content: match[3] });
+  }
+  return found.length ? found : null;
+}
 function heldAgentDeliveries(text2) {
   const deliveries = [];
   const outside = [];
@@ -129,13 +144,15 @@ function heldAgentDeliveries(text2) {
   while ((opener = text2.indexOf(HELD_OPEN, search)) !== -1) {
     search = opener + HELD_OPEN.length;
     const header = skipWhitespace(text2, search);
-    if (!text2.startsWith(HELD_HEADER, header)) continue;
-    const lineEnd = text2.indexOf("\n", header + HELD_HEADER.length);
+    const legacy = text2.startsWith(LEGACY_HELD_HEADER, header);
+    if (!legacy && !COMPACT_HELD_HEADERS.some((h) => text2.startsWith(h, header))) continue;
+    const lineEnd = text2.indexOf("\n", header);
     if (lineEnd === -1) break;
     const bodyStart = lineEnd + 1;
     const closer = text2.indexOf(HELD_CLOSE, bodyStart);
     if (closer === -1) break;
-    const inner = envelopesOnly(text2.slice(bodyStart, closer));
+    const body = text2.slice(bodyStart, closer);
+    const inner = legacy ? envelopesOnly(body) : compactOnly(body);
     if (inner === null) return null;
     deliveries.push(...inner);
     outside.push(text2.slice(cursor, opener), "\n");
@@ -2258,7 +2275,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "f56825557998006facd2a0d77f5cd039777bb0857c80a098044fec14a45d4752";
+var REDUCER_FINGERPRINT = "1d317f11e6fe074f477157c1dbaa5050413928ebf7ec1ac986b1f76b6e4fb79b";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {

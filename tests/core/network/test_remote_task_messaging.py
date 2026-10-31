@@ -40,10 +40,11 @@ def _clean_tracking():
     wakeup_service._timers.clear()
 
 
-def send(b, to, text, *, sender="caller", urgent=False):
+def send(b, to, text, *, sender="caller", urgent=False, kind=None):
     with b.active():
         message = agent_messaging.make_message(lambda: sender)
-        return asyncio.run(message({"to": to, "message": text, "urgent": urgent}, None))
+        data = {"to": to, "message": text, "urgent": urgent, **({"kind": kind} if kind else {})}
+        return asyncio.run(message(data, None))
 
 
 def message_turns(session_id):
@@ -432,6 +433,76 @@ def test_main_refuses_a_child_it_did_not_send_there(workers, monkeypatch, kicks)
         call(a, b.device_id, body(child, to=remote_task.TO_MAIN, sender="caller"))
     with b.active():
         assert message_turns("caller") == []
+
+
+# --- kinds across workers (#960) --------------------------------------------------------
+
+def _parked_child(a, b):
+    child = started_child(a, b)
+    with a.active():
+        [turn] = [t for t in all_turns(child) if t["source"] == "provider_agent"]
+        assert turns.start_turn(turn["id"])
+        turns.park_turn(turn["id"], ["bg-1"])
+    return child
+
+
+def _held_on(worker, session_id):
+    from app.db import wakeups
+
+    with worker.active():
+        return wakeups.get_session_wakeups(session_id, wakeup_service.HELD_PEER_SOURCE)
+
+
+def test_progress_to_a_parked_remote_child_is_held_there(workers, monkeypatch, kicks):
+    a, b, _ = network(workers, monkeypatch)
+    child = _parked_child(a, b)
+    kicks.clear()
+    outcome = send(b, child, "Scan is 40% done.", kind="progress")
+    assert not outcome.is_error, outcome.text
+    assert outcome.text.startswith("Held for Default on ServerWorker")
+    with a.active():
+        assert [t for t in message_turns(child) if t["state"] == "queued"] == []
+    (row,) = _held_on(a, child)
+    assert "Scan is 40% done." in row["prompt"] and wakeup_service.never_fires(row)
+    assert kicks == []
+    # An actionable kind still wakes it at once, and is persisted as sent.
+    outcome = send(b, child, "Stop the scan now.", kind="needs_decision")
+    assert outcome.text == "Queued for Default on ServerWorker"
+    with a.active():
+        [wake] = [t for t in message_turns(child) if t["state"] == "queued"]
+        assert wake["payload"]["agent_message_kind"] == "needs_decision"
+    assert kicks == [child]
+
+
+def test_progress_from_a_remote_child_to_idle_main_is_held(workers, monkeypatch, kicks):
+    a, b, _ = network(workers, monkeypatch)
+    child = started_child(a, b)
+    outcome = send(a, "main", "Tests 40/80 passing.", sender=child, kind="progress")
+    assert not outcome.is_error and outcome.text.startswith("Held for main on Windows")
+    with b.active():
+        assert [t for t in message_turns("caller") if t["state"] == "queued"] == []
+    (row,) = _held_on(b, "caller")
+    assert "Tests 40/80 passing." in row["prompt"]
+
+
+def test_an_older_worker_gets_the_message_without_a_kind(workers, monkeypatch, kicks):
+    """A worker from before kinds refuses the field it does not know; the
+    sender sends it again as that worker understands it (it wakes)."""
+    a, b, _ = network(workers, monkeypatch)
+    child = _parked_child(a, b)
+    monkeypatch.setattr(remote_task, "_MESSAGE_KEYS", remote_task._MESSAGE_KEYS - {"kind"})
+    outcome = send(b, child, "Scan is 40% done.", kind="progress")
+    assert not outcome.is_error and outcome.text == "Queued for Default on ServerWorker"
+    with a.active():
+        [wake] = message_turns(child)
+        assert wake["payload"]["agent_message_kind"] == "alert"
+
+
+def test_a_wire_message_without_kind_is_an_alert_and_a_bad_kind_is_refused(workers, monkeypatch, kicks):
+    assert remote_task._parse_message(body("c"))["kind"] == "alert"
+    assert remote_task._parse_message({**body("c"), "kind": "progress", "urgent": True})["kind"] == "alert"
+    with pytest.raises(ValueError, match="kind must be one of"):
+        remote_task._parse_message({**body("c"), "kind": "fyi"})
 
 
 # --- a local-only session is unchanged ---------------------------------------------------

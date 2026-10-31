@@ -483,6 +483,9 @@ def _context(session_id, *, allow_empty=False):
 def _delivery_status(turn):
     """Bounded durable receipt, not an acknowledgement or automatic peer reply."""
     from app.core.task_registry import task_registry
+    from app.core.turn_scheduler import HELD_PROGRESS_STOP_REASON
+    if turn.get("state") == "aborted" and turn.get("stop_reason") == HELD_PROGRESS_STOP_REASON:
+        return "held"
     if turn.get("state") == "aborted" or task_registry.is_user_stopped(turn["session_id"]):
         return "stopped"
     if turn.get("state") == "queued":
@@ -1058,8 +1061,16 @@ def _peer_prompt(sender_id, text):
 
 
 _POLICY_WORDS = ("cyber_policy", "content_policy", "policy rejection", "policy violation", "safety policy")
-_QUEUED_NOTE = ("Queued is not delivered. Retry the same request_id to read queued/begun/consumed/stopped "
+_QUEUED_NOTE = ("Queued is not delivered. Retry the same request_id to read queued/held/begun/consumed/stopped "
                 "status. No automatic reply or completion notification; peers must use MessageSession.")
+_HELD_NOTE = ("Held: the chat is not working now, so this progress note rides its next wake. "
+              "Do not resend; use alert only if it must act now.")
+
+
+def _message_kind(data):
+    """MessageSession's kind; a missing one (an older caller) is alert."""
+    from fluid.context.peer import message_kind
+    return message_kind(data.get("kind"))
 
 
 def _reply_credit(cursor, sender_id, target_id):
@@ -1093,7 +1104,7 @@ def _reply_credit(cursor, sender_id, target_id):
 
 
 def _reserve_remote_message(sender, context, peer, *, session_id, text, root_id, depth,
-                            command_id, fingerprint):
+                            command_id, fingerprint, kind="alert"):
     """Reserve a MessageSession to a chat ``peer`` runs: a settled receipt in
     the caller's chain (dedupe and budget stay here, as for a remote start)
     and the body for the owning worker, which builds and queues the peer row."""
@@ -1103,7 +1114,8 @@ def _reserve_remote_message(sender, context, peer, *, session_id, text, root_id,
     principals = {sender["id"]: _principal(sender["id"])}
     body = {"session_id": session_id, "command_id": command_id, "fingerprint": fingerprint,
             "message": defang_harness_markers(text), "sender_session_id": sender["id"],
-            "sender_label": str(sender.get("title") or sender["id"])[:400], "depth": depth + 1}
+            "sender_label": str(sender.get("title") or sender["id"])[:400], "depth": depth + 1,
+            "kind": kind}
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (sender["id"],))
@@ -1219,6 +1231,8 @@ def accept_remote_message(body, from_device):
     depth = body.get("depth")
     if type(depth) is not int or depth < 1:
         raise ValueError("Invalid peer-chain depth")
+    # An older sender names no kind: alert, so it wakes as it always did.
+    kind = _message_kind(body)
     # A retry may read its receipt after Stop; fresh work is refused below.
     target = _target({"id": sender_session}, session_id, allow_stopped=True, owner=_OWNER_CHAT)
 
@@ -1238,6 +1252,7 @@ def accept_remote_message(body, from_device):
                    peer_message_content=content,
                    peer_sender_label=f"{sender_label} (on {member.name or from_device})",
                    orchestration_message_transport="remote", forwarded_by_device=from_device)
+    payload[turn_scheduler.AGENT_MESSAGE_KIND_KEY] = kind
     if body.get("reply_to") is not None:
         payload["orchestration_reply_to"] = _remote_text(body, "reply_to", 200)
     principals = {session_id: _principal(session_id)}
@@ -1283,17 +1298,24 @@ async def handle_remote_message(body, from_device):
             if task_registry.stop_invalidated(target_id, generation):
                 await run_sync(turns.remove_queued_turn, result["turn_id"])
                 raise ValueError("The receiver was stopped by the user; queued work was cancelled.")
-            await _wake_peer(target_id)
+            if result["turn_id"] in await _wake_peer(target_id):
+                result["delivery_status"] = "held"
     return result
 
 
 async def _wake_peer(session_id):
-    """A peer row was queued: steer it in at the next boundary or wake the chat."""
+    """A peer row was queued: steer it in at the next boundary or wake the chat.
+
+    A progress note for a chat with no live turn is held instead (#960);
+    returns the ids of the rows held."""
     from app.core import turn_scheduler
     from app.core.session_runtime import try_steer_pending
+    from app.db import turns
     await try_steer_pending(session_id)
-    turn_scheduler.note_wake_pending(session_id)
-    turn_scheduler.kick(session_id)
+    held = await turn_scheduler.hold_queued_progress(session_id)
+    if not held or await asyncio.to_thread(turns.pop_ready, session_id) is not None:
+        turn_scheduler.note_wake_pending(session_id)
+        turn_scheduler.kick(session_id)
     try:
         from app.api.chat_ws_handler import _v2_queue_view, _v2_peer_queue_view
         from app.core.sync_engine import sync_engine
@@ -1302,6 +1324,7 @@ async def _wake_peer(session_id):
         await sync_engine.broadcast_queue_updated(session_id, queue, pending_peer_messages=peers)
     except Exception:
         log.exception("Peer message queued, but queue broadcast failed")
+    return held
 
 
 def _start_checkout(sender, new_id, *, named_project=False):
@@ -1450,7 +1473,8 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
         if peer is not None:
             return _reserve_remote_message(
                 sender, context, peer, session_id=_text(data, "session_id", 200), text=text,
-                root_id=root_id, depth=depth, command_id=command_id, fingerprint=fingerprint)
+                root_id=root_id, depth=depth, command_id=command_id, fingerprint=fingerprint,
+                kind=_message_kind(data))
     target = sender if action == "start" else _target(sender, _text(data, "session_id", 200), allow_stopped=True)
     target_context = context if action == "start" else _context(target["id"], allow_empty=True)
     principals = {sid: _principal(sid) for sid in {sender_id, target["id"]}}
@@ -1464,7 +1488,9 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
                    peer_message_content=defang_harness_markers(text),
                    peer_sender_label=sender.get("title") or sender_id)
     if action == "message":
+        from app.core.turn_scheduler import AGENT_MESSAGE_KIND_KEY
         payload["orchestration_message_transport"] = "local"
+        payload[AGENT_MESSAGE_KIND_KEY] = _message_kind(data)
     if remote_origin:
         payload["orchestration_remote_origin"] = remote_origin
     if target.get("api_user_id"):
@@ -1785,7 +1811,8 @@ def _origin_turn(session_id, settled):
                        "(source NOT IN ('user','queue','api') AND "
                        "CAST(payload ->> 'continued_turn' AS TEXT) IN ('true','1') AND "
                        "payload ->> 'birth_source' IN ('user','queue','api','agent_message'))) "
-                       "AND state IN ('completed','aborted') AND COALESCE(stop_reason, '')<>'steered' "
+                       "AND state IN ('completed','aborted') "
+                       "AND COALESCE(stop_reason, '') NOT IN ('steered', 'held_progress') "
                        "AND position <= %s "
                        "ORDER BY position DESC LIMIT 1", (session_id, settled.get("position") or 0))
         return turns._row(cursor.fetchone())
@@ -2037,7 +2064,8 @@ def make_handler(supplier):
                         await asyncio.to_thread(turns.remove_queued_turn, result["turn_id"])
                         raise ValueError("The user stopped a participating session; queued work was cancelled.")
                     if not relay and result.get("delivery_status") == "queued":
-                        await _wake_peer(result["session_id"])
+                        if result.get("turn_id") in await _wake_peer(result["session_id"]):
+                            result.update(delivery_status="held", note=_HELD_NOTE)
                 if relay:
                     # Outside the lock: the owning worker takes its own, then
                     # queues, wakes and publishes the message.

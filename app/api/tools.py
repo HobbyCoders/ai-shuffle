@@ -1,6 +1,7 @@
 """Tool inventory API: GET /api/v1/tools/surface."""
 
 import logging
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -39,6 +40,8 @@ class PeerMessageRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=200)
     message: str = Field(min_length=1, max_length=8000)
     request_id: str = Field(min_length=1, max_length=200)
+    # Absent means alert, as for MessageSession (#960).
+    kind: Optional[Literal["result", "needs_decision", "alert", "progress"]] = None
 
 
 @router.post("/sessions/{sender_id}/peer-message")
@@ -66,7 +69,7 @@ async def send_peer_message(
     from app.core.session_orchestration import make_handler
 
     await require_transcript_session(request, sender_id)
-    outcome = await make_handler(lambda: sender_id)("message", body.model_dump(), None)
+    outcome = await make_handler(lambda: sender_id)("message", body.model_dump(exclude_none=True), None)
     if outcome.is_error:
         raise HTTPException(409, outcome.text)
     return outcome.ui

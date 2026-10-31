@@ -146,12 +146,15 @@ itself rides along as `ToolCtx.extra["cli_host"]`).
   live workers share a name; the task id from the Task receipt resolves too,
   and a child also sees `main`, its parent. Delivery is one `AgentMessage`
   submit and the receiving engine picks the channel: queued for its next tool
-  result while a turn runs, an ordinary user-role turn when it is idle. An
-  idle receiver that is *parked on background tasks* does not wake for an
-  ordinary message: it is held (persisted as a `progress` SubagentEvent) and
-  delivered with the next wake or user turn, because an interim note from a
-  running subagent is not worth a turn of its own; `urgent=True` on the op
-  forces the wake. "Running" is never a precondition: a message to a worker
+  result while a turn runs, an ordinary user-role turn when it is idle. Every
+  message carries a `kind`: `result`, `needs_decision` and `alert` wake an idle
+  or parked receiver; `progress` does not. A progress note to an idle receiver
+  is held (persisted as a `progress` SubagentEvent) and delivered with its next
+  turn, whatever starts it, as one compact reminder (one line per note), because
+  a status note is not worth a turn of its own. A missing kind and `urgent=True`
+  are `alert`. A busy receiver takes every kind at its next tool result. A
+  progress note never resumes a finished worker. "Running" is otherwise never a
+  precondition: a message to a worker
   that has already finished rebuilds it over its stored session — same agent
   definition, same prompt and tool restriction, its own transcript behind it —
   and the message becomes its next turn. The resume registers as a *new*
