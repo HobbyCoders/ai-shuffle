@@ -85,7 +85,12 @@ owner, not a preview cookie; that does not indicate an offline peer.
 
 Both projects' `file://` bare remotes live in the pair's shared scratch
 `remotes/`, **outside both workspaces**, readable by either worker. B can
-clone those URLs without GitHub or real Git credentials. The two apps run as
+clone those URLs without GitHub or real Git credentials: setting a project
+up on another worker clones the project's own recorded remote, which may be a
+local path outside the workspace (typed clone URLs in the Git panel still may
+not). On a dev instance the preview cookie may add projects and set them up,
+cancel or remove them on the other worker (Projects → Workers); other
+owner-only changes stay refused. The two apps run as
 the same OS user: this exercises real pairing, encrypted sync, cross-worker
 API calls and separate project installations, not host isolation or Unix
 permissions between different users.

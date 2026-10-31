@@ -78,6 +78,67 @@ def upsert_project(
     return row
 
 
+#: ``projects_v2.settings`` keys holding the project's Git remote (never with
+#: credentials) and default branch. ``settings`` replicates with the row, so a
+#: project whose only copy is on an offline worker can still be cloned
+#: elsewhere (cross-worker setup, base-checkout self-seed).
+REMOTE_URL_KEY = "remote_url"
+DEFAULT_BRANCH_KEY = "default_branch"
+
+
+def stored_remote(row: Optional[Dict[str, Any]]) -> tuple:
+    """``(remote_url, default_branch)`` recorded on a projects_v2 row (each may be None)."""
+    project_settings = (row or {}).get("settings")
+    if not isinstance(project_settings, dict):
+        return None, None
+    url = project_settings.get(REMOTE_URL_KEY)
+    branch = project_settings.get(DEFAULT_BRANCH_KEY)
+    return (url if isinstance(url, str) and url else None,
+            branch if isinstance(branch, str) and branch else None)
+
+
+def record_remote(origin: str, remote_url: str, default_branch: Optional[str] = None) -> bool:
+    """Record ``origin``'s Git remote and default branch on its (existing) row.
+
+    ``remote_url`` must already be credential-free (``strip_url_userinfo``).
+    Writes only what is missing or wrong, so workers holding different
+    spellings of one remote (HTTPS and SSH) never take turns overwriting it:
+    the URL is replaced only when absent or, for a ``git:`` origin, when the
+    stored one no longer names this origin; the branch only when absent or
+    when the URL is being replaced. Returns whether the row changed.
+    """
+    from app.core.project_links import auto_link_group_id
+
+    if not origin or not remote_url:
+        return False
+    if origin.startswith("git:") and auto_link_group_id(remote_url) != origin:
+        return False  # never store another repository's remote on this identity
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT settings FROM projects_v2 WHERE origin = %s", (origin,))
+        found = cursor.fetchone()
+        if found is None:
+            return False
+        current = _parse_json(found["settings"])
+        current = dict(current) if isinstance(current, dict) else {}
+        stored_url, stored_branch = stored_remote({"settings": current})
+        patch: Dict[str, Any] = {}
+        if stored_url is None or (origin.startswith("git:") and auto_link_group_id(stored_url) != origin):
+            patch[REMOTE_URL_KEY] = remote_url
+            if default_branch and default_branch != stored_branch:
+                patch[DEFAULT_BRANCH_KEY] = default_branch
+        elif stored_branch is None and default_branch:
+            patch[DEFAULT_BRANCH_KEY] = default_branch
+        if not patch:
+            return False
+        current.update(patch)
+        cursor.execute(
+            "UPDATE projects_v2 SET settings = %s, updated_at = NOW() WHERE origin = %s",
+            (json.dumps(current), origin),
+        )
+        return bool(cursor.rowcount)
+
+
 def get_project_v2(project_id: str) -> Optional[Dict[str, Any]]:
     """Return a project_v2 by its ``id``, or ``None``."""
     with get_db() as conn:
@@ -151,6 +212,6 @@ from app.core.resource_sync import install_database_mutations as _install_resour
 
 _install_resource_sync(
     globals(), 'projects',
-    'upsert_project',
+    'upsert_project record_remote',
     scope='shared',
 )

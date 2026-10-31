@@ -370,8 +370,10 @@ def _auto_link_from_repo(project_id: str, repo: Optional[dict]) -> None:
     other installs group together on the board. Never raises into the caller.
     """
     try:
-        from app.core.project_links import maybe_auto_link_project
+        from app.core.project_links import maybe_auto_link_project, record_project_remote
         maybe_auto_link_project(project_id, (repo or {}).get("remote_url"))
+        # After the link, so the remote lands on the project's current identity.
+        record_project_remote(project_id, (repo or {}).get("remote_url"), (repo or {}).get("default_branch"))
     except Exception:  # noqa: BLE001
         logger.debug("auto-link from repo failed for %s", project_id, exc_info=True)
 

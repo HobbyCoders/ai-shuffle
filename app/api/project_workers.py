@@ -177,6 +177,7 @@ def _local_snapshot() -> Dict[str, Any]:
     from app.db import projects_v2
     from app.db import project_setup as setup_db
 
+    setup.ensure_repo_records()
     own_rows = setup._own_project_rows()
     pv2s = {row["id"]: row for row in projects_v2.list_projects_v2()}
     for row in own_rows:
