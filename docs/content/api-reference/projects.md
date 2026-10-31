@@ -62,6 +62,40 @@ Delete a project from the database (does not delete files). Its chats are delete
 
 **Auth:** Owner only
 
+## Projects Across Workers
+
+### GET /api/v1/projects/overview
+
+Every project with each approved worker's state for it: `ready`, `missing`, `setting_up`, `failed` (the last setup failed), `offline_has` or `offline_missing` (offline, with or without a copy), or `unknown` (online but not answering), plus the latest setup's progress or error.
+
+**Auth:** Required
+
+### GET /api/v1/projects/workers
+
+One project's per-worker detail (folder, branch, changed files, setup state). Pass `project_v2_id` or `project_id`.
+
+**Auth:** Required
+
+### POST /api/v1/projects/setup
+
+Set a project up on a worker: clone its remote there, use a folder that already holds the same repository, or create an empty folder for a non-Git project. Returns `202` with an `op_id`. Repeating the request while a setup is in flight returns the same one. A setup for an offline worker is queued until it comes back.
+
+**Body:** `install_id` (the worker), `project_v2_id` or `project_id`, optional `folder` (relative to that worker's workspace), and `mode`: `auto` (default) or `adopt` (use the existing folder).
+
+**Auth:** Owner only
+
+### POST /api/v1/projects/setup/{op_id}/cancel
+
+Cancel a queued or running setup. A partly cloned folder is removed.
+
+**Auth:** Owner only
+
+### DELETE /api/v1/projects/workers/{install_id}
+
+Remove one worker's record of the project. Pass `project_v2_id` or `project_id`. Its files stay on that worker.
+
+**Auth:** Owner only
+
 ## Project Files
 
 ### GET /api/v1/projects/{project_id}/files
