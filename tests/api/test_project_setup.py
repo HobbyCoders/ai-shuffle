@@ -167,6 +167,19 @@ def test_setup_is_idempotent_while_in_flight(client, ws, test_db):
     assert third["status"] == "done"  # already set up here: nothing to do
 
 
+def test_setup_of_a_project_already_here_is_done_even_with_an_unserved_remote(client, ws, test_db):
+    # A remote outside the workspace is not a source this worker may clone
+    # from, but nothing needs cloning when the project is registered here.
+    unserved = "file://" + str(ws.parent / "elsewhere" / "demo.git")
+    pv2 = _peer_project(test_db, "demo", "Demo", remote=unserved, instance=ME)
+    (ws / "demo").mkdir()
+    test_db.execute("UPDATE projects SET path = 'demo' WHERE id = 'demo'")
+    body = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": ME})
+    assert body.status_code == 202, body.text
+    assert body.json()["status"] == "done"
+    assert client.post(f"/api/v1/projects/setup/{body.json()['op_id']}/cancel").status_code == 409
+
+
 def test_setup_adopts_a_folder_that_is_already_the_same_repo(client, ws, test_db):
     remote = _bare_remote(ws)
     pv2 = _peer_project(test_db, "demo", "Demo", remote=remote)

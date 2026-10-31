@@ -319,7 +319,6 @@ def start_local(spec: Dict[str, Any], *, op_id: str, requested_by: Optional[str]
     if mode not in ("auto", "adopt"):
         raise ValueError("Unknown setup mode")
     name = str(spec.get("name") or "").strip()[:100] or "Project"
-    clone_url = _validate_clone_url(str(spec.get("clone_url") or ""), origin) if kind == "git" else None
 
     me = _me()
     device = _own_device_id()
@@ -327,16 +326,11 @@ def start_local(spec: Dict[str, Any], *, op_id: str, requested_by: Optional[str]
         if row.get("project_v2_id") == pv2_id and row["status"] in ("queued", "running"):
             return {"id": row["id"], "status": row["status"], "runner_id": device}
 
-    if projects_v2.get_project_v2(pv2_id) is None:
-        # The identity replicates, but the request can outrun it.
-        projects_v2.upsert_project(origin, name=name)
-
-    params = {
-        "origin": origin, "name": name, "kind": kind, "mode": mode,
-        "clone_url": clone_url, "requested_by": requested_by,
-    }
+    params = {"origin": origin, "name": name, "kind": kind, "mode": mode,
+              "clone_url": None, "requested_by": requested_by}
     existing = _registered_row(origin)
     if existing is not None:
+        # Already set up here: record a finished op so the caller has an answer.
         row = git_ops_db.insert_op(me, SETUP_OP, project_v2_id=pv2_id,
                                    params={**params, "folder": None, "path": None}, op_id=op_id)
         if row["status"] == "queued" and git_ops_db.claim_op(row["id"], me):
@@ -344,9 +338,14 @@ def start_local(spec: Dict[str, Any], *, op_id: str, requested_by: Optional[str]
                                                     "progress": 100}) or row
         return {"id": row["id"], "status": row["status"], "runner_id": device}
 
+    if kind == "git":
+        params["clone_url"] = _validate_clone_url(str(spec.get("clone_url") or ""), origin)
     stored, full = resolve_folder(str(spec.get("folder") or ""))
     if mode == "adopt" and not full.is_dir():
         raise ValueError(f"There is no folder at {full} to use")
+    if projects_v2.get_project_v2(pv2_id) is None:
+        # The identity replicates, but the request can outrun it.
+        projects_v2.upsert_project(origin, name=name)
     row = git_ops_db.insert_op(me, SETUP_OP, project_v2_id=pv2_id,
                                params={**params, "folder": stored, "path": str(full)}, op_id=op_id)
     _kick_runner()
