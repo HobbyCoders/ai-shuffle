@@ -205,21 +205,24 @@ def relay_chat(mock_db, hub, monkeypatch):
         "push_upstream_unavailable", "push_upstream_invalid", "push_upstream_rejected")],
     (429, "push_rate_limited", {"Retry-After": "90"}),
     (401, "unauthorized", {}), (403, "worker_not_registered", {}),
-    (410, "token_invalid", {}), (400, "bad_shape", {}),
+    (410, "token_invalid", {}), (400, "bad_shape", {}), (400, "invalid_push", {}),
+    (503, "push_pending", {}),
 ])
 async def test_relay_refusal_reason_and_safe_warning(relay_chat, hub, caplog, status, code, headers):
     from app.db.base import get_db, parse_jsonb
     hub[1].append((status, {"error": code, "detail": "private-fcm-token"}, headers))
     result = await relay_chat.reconcile("relay-chat")
     reason = f"{code} ({status})"
+    if status in (401, 403):
+        reason = f"not_linked: {reason}"
+    logged = [] if status == 410 else [(logging.WARNING, f"Attention push failed: {reason}")]
     delay = 90 if status == 429 else 15
     if status not in (400, 401, 403, 410):
         reason += f"; retry after {delay}s"
     assert not result["sent"] and result["reason"] == reason
     if status not in (401, 403):
         assert result["accepted"] == 0
-    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (logging.WARNING, f"Attention push failed: {code} ({status})")]
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == logged
     for private in ("private-fcm-token", "test-worker-secret", "Private", hub[0]["hub_url"], hub[0]["server_id"]):
         assert private not in caplog.text and private not in json.dumps(result)
     with get_db() as conn:
@@ -230,8 +233,17 @@ async def test_relay_refusal_reason_and_safe_warning(relay_chat, hub, caplog, st
     if status not in (400, 401, 403, 410):
         assert retry["reason"].startswith("relay unavailable; retry after ")
     assert len(hub[2]) == 1  # Terminal ack or existing backoff; neither retries HTTP.
-    assert len(caplog.records) == 1
+    assert len(caplog.records) == len(logged)
     assert "Private" not in json.dumps(hub[2][0][2])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403])
+async def test_auth_refusal_without_known_code_still_reads_not_linked(hub, caplog, status):
+    hub[1].append((status, "<html>denied</html>", {}))
+    result = await PushNotificationService().send_notification("token", "ignored", "ignored", COMMAND)
+    assert result.not_linked and result.reason == f"not_linked: refused ({status})"
+    assert [r.getMessage() for r in caplog.records] == [f"Attention push failed: not_linked: refused ({status})"]
 
 
 @pytest.mark.asyncio

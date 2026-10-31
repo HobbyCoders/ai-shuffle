@@ -260,7 +260,8 @@ def tunnel_limit(exc):
 _PUSH_ERROR_CODES = frozenset({
     'push_disabled', 'push_unconfigured', 'push_unavailable', 'push_rate_limited',
     'push_upstream_unavailable', 'push_upstream_invalid', 'push_upstream_rejected',
-    'token_invalid', 'worker_not_registered', 'unauthorized', 'bad_shape',
+    'push_pending', 'token_invalid', 'worker_not_registered', 'invalid_push',
+    'request_id_reused', 'unauthorized', 'bad_shape',
 })
 
 

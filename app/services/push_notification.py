@@ -136,12 +136,16 @@ class PushNotificationService:
             status = account_hub.hub_status(exc)
             code = getattr(exc, "hub_error", None) or "relay unavailable"
             reason = f"{code} ({status if status is not None else 'no HTTP response'})"
-            self._warn_failure(reason)
+            if status == 410:
+                # Routine pruning of an uninstalled app's token, not a relay fault.
+                return NotificationResult(False, error="token_invalid", invalid_token=True, reason=reason)
             if status in (401, 403):
+                # Terminal until relink; keep the documented not_linked reason.
+                reason = f"not_linked: {getattr(exc, 'hub_error', None) or 'refused'} ({status})"
+                self._warn_failure(reason)
                 self._rejected_binding = identity
                 return NotificationResult(False, error="not_linked", not_linked=True, reason=reason)
-            if status == 410:
-                return NotificationResult(False, error="token_invalid", invalid_token=True, reason=reason)
+            self._warn_failure(reason)
             if status == 400:
                 # A malformed command cannot be repaired by retrying it.
                 return NotificationResult(False, error="invalid push command", permanent_failure=True, reason=reason)
