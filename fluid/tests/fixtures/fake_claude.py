@@ -569,6 +569,8 @@ def main() -> int:
         print(os.environ.get("FAKE_CLAUDE_VERSION", "claude 2.0.0 (fake-fluid)"))
         return 0
 
+    # runpy callers do not add this file's directory to the import path.
+    sys.path.insert(0, os.path.dirname(__file__))
     from fake_guard_ready import announce_tool_output_guard
     announce_tool_output_guard()
 

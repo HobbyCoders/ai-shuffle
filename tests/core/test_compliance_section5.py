@@ -231,6 +231,30 @@ def _turn_calls(calls: list[dict]) -> list[dict]:
     return [c for c in calls if "--version" not in c["argv"]]
 
 
+def test_stock_cli_wrapper_can_initialize_from_another_working_directory(tmp_path, fake_cli):
+    """The recording runpy wrapper does not put the fixture directory on sys.path."""
+    import subprocess
+
+    cwd = tmp_path / "another-cwd"
+    cwd.mkdir()
+    frames = [
+        {"type": "control_request", "request_id": "fixture-initialize",
+         "request": {"subtype": "initialize", "hooks": {}}},
+        {"type": "user", "message": {"role": "user", "content": "fixture"}},
+    ]
+    result = subprocess.run(
+        [sys.executable, str(fake_cli["recorder"])], cwd=cwd,
+        input="".join(json.dumps(frame) + "\n" for frame in frames),
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    replies = [json.loads(line) for line in result.stdout.splitlines()]
+    assert any(frame.get("type") == "control_response"
+               and frame["response"]["request_id"] == "fixture-initialize"
+               and frame["response"]["subtype"] == "success" for frame in replies)
+    assert any(frame.get("type") == "result" and not frame.get("is_error") for frame in replies)
+
+
 # ---------------------------------------------------------------------------
 # 1. Fresh install: blocked with a clear message
 # ---------------------------------------------------------------------------
