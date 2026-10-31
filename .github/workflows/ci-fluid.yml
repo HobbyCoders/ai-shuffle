@@ -61,7 +61,7 @@ jobs:
       fail-fast: false
       matrix:
         # Verified stock function-hook builds, not a production version pin.
-        cli_version: ["2.1.287", "2.1.308", "2.1.314"]
+        cli_version: ["2.1.286", "2.1.308", "2.1.314"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

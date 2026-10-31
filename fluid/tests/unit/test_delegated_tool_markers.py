@@ -208,3 +208,44 @@ def test_stock_cli_guard_matches_native(tmp_path, stock_cli):
     result = subprocess.run([stock_cli, "plugin", "test", str(staged)],
                             capture_output=True, text=True, timeout=25)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+async def test_supported_cli_with_a_guard_load_failure_refuses_tools(tmp_path, stock_cli, monkeypatch, caplog):
+    import logging
+    import shutil
+    from fluid.engine.delegated import TOOL_OUTPUT_GUARD_MESSAGE
+    from fluid.events.model import HookEvent
+
+    source = tmp_path / "broken-guard"
+    shutil.copytree(delegated_mod.TOOL_OUTPUT_GUARD_SOURCE, source)
+    (source / "hooks" / "register.ts").write_text(
+        "export const register = () => { throw new Error('fixture guard did not load') }\n",
+        encoding="utf-8")
+    monkeypatch.setattr(delegated_mod, "TOOL_OUTPUT_GUARD_SOURCE", str(source))
+    fixture = tmp_path / "content.txt"
+    fixture.write_text(MARKERS, encoding="utf-8")
+    provider = ScriptedProvider([tool_call("toolu_read", "Read", file_path=str(fixture))])
+    server = await asyncio.start_server(provider.handle, "127.0.0.1", 0)
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="claude-sonnet-4-6", claude_cmd=[stock_cli],
+        cwd=str(tmp_path), permission_mode="bypassPermissions", setting_sources=(), claude_mod=False,
+        env={"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}",
+             "ANTHROPIC_API_KEY": "fixture-only", "CLAUDE_CONFIG_DIR": str(tmp_path / "config"),
+             "DISABLE_AUTOUPDATER": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"},
+    )
+    try:
+        with caplog.at_level(logging.ERROR, logger="fluid.engine.delegated"):
+            await loop.submit(UserTurn(content="Read the fixture."))
+            await asyncio.wait_for(loop.wait_turn(), 35)
+        assert not loop._tool_output_guard_ready
+        assert len(provider.requests) == 2
+        blocks = [b for m in provider.requests[-1]["messages"] for b in m["content"] if isinstance(b, dict)]
+        results = [b["content"] for b in blocks if b.get("type") == "tool_result"]
+        assert len(results) == 1 and TOOL_OUTPUT_GUARD_MESSAGE in results[0]
+        assert not any(line in results[0] for line in MARKERS.splitlines())
+        assert len([e for e in loop.bus.log(loop.session_id) if isinstance(e, HookEvent) and e.level == "deny"]) == 1
+        assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
+    finally:
+        await loop.aclose()
+        server.close()
+        await server.wait_closed()

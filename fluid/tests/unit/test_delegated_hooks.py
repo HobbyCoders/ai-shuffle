@@ -853,8 +853,8 @@ async def test_policy_deny_blocks_a_cli_tool_call_end_to_end(tmp_path, policy_de
 async def test_a_refused_initialize_fails_closed_when_a_deny_policy_rides_it(
     tmp_path, with_policy,
 ) -> None:
-    """Without PreToolUse neither the output guard nor a deny policy can be
-    enforced. Refusing registration never starts an unguarded turn."""
+    """A deny policy always fails closed. An older CLI can continue under
+    the separate guard-compatibility policy, with a visible warning."""
     from fluid.events.model import ErrorEvent
 
     loop = DelegatedLoop(
@@ -872,9 +872,14 @@ async def test_a_refused_initialize_fails_closed_when_a_deny_policy_rides_it(
 
     assert loop.cli_hooks_registered is False
     results = [e for e in events if isinstance(e, ToolResult)]
-    assert isinstance(events[-1], ErrorEvent)
-    assert "did not register its hooks (refused)" in events[-1].message
-    assert results == []
+    if with_policy:
+        assert isinstance(events[-1], ErrorEvent)
+        assert "did not register its hooks (refused)" in events[-1].message
+        assert results == []
+    else:
+        assert isinstance(events[-1], TurnComplete)
+        assert len(results) == 1
+        assert any(isinstance(e, HookEvent) and e.level == "warning" for e in events)
 
 
 async def test_the_ledger_reminder_names_the_bridged_ledger_tool(tmp_path) -> None:

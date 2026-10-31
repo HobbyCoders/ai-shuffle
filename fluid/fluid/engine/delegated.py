@@ -80,6 +80,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
+from fluid.engine import delegated_guard_policy as guard_policy
 from fluid.engine.background import BackgroundLifecycleMixin
 from fluid.engine.base import EngineCaps, matches_tool_pattern
 from fluid.engine.claude_mod_usage import USAGE_PATH, PlanUsageReport, parse_plan_usage_report
@@ -1056,6 +1057,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._claude_mod_listed: bool | None = None
         self._tool_output_guard_required = False  # armed for each child process
         self._tool_output_guard_ready = False
+        self._tool_output_guard_reported = False
         self._tool_output_guard_nonce = ""
         self._tool_output_guard_receipt: str | None = None
         # The host's taker of the plan usage the mod reports (see
@@ -1505,6 +1507,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         """
         self._clear_main_compaction()
         self._tool_output_guard_ready = False
+        self._tool_output_guard_reported = False
         self._tool_output_guard_nonce = ""
         self._tool_output_guard_receipt = None
         proc, self._proc = self._proc, None
@@ -2128,16 +2131,23 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         argv = self._build_argv()
         self._tool_output_guard_required = True
         self._tool_output_guard_ready = False
+        self._tool_output_guard_reported = False
         self._tool_output_guard_nonce = secrets.token_urlsafe(24)
         self._tool_output_guard_receipt = os.path.join(
             self._ensure_tmpdir(), f"guard-ready-{self._tool_output_guard_nonce}",
         )
         guard = os.path.join(self._ensure_tmpdir(), "tool-output-guard")
-        shutil.copytree(
-            TOOL_OUTPUT_GUARD_SOURCE, guard, dirs_exist_ok=True,
-            ignore=shutil.ignore_patterns("tests", "types", "tsconfig.json", "__pycache__"),
-        )
-        argv += ["--plugin-dir", guard]
+        try:
+            shutil.copytree(
+                TOOL_OUTPUT_GUARD_SOURCE, guard, dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns("tests", "types", "tsconfig.json", "__pycache__"),
+            )
+        except OSError:
+            # No readiness receipt: the separate unavailable-guard policy
+            # decides whether tools are denied or warned about, never silence.
+            pass
+        else:
+            argv += ["--plugin-dir", guard]
         # Staging the mod registers its recall tools before the bridge decides
         # which tools to expose. The first spawn has no MCP config until now.
         await self._start_bundled_server()
@@ -2199,17 +2209,17 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             async with self._stdout_lock:
                 outcome = await self._initialize_cli_hooks()
             if outcome in ("refused", "timeout"):
-                # Fail closed: without its PreToolUse hook the deny policy is
-                # off for this whole process, and in bypass mode nothing else
-                # stops an outward write (invariant I10). The spawn fails, so
-                # the turn ends with an error and a wake stays undelivered.
-                await self._stop_process()
-                raise RuntimeError(
-                    f"the claude CLI did not register its hooks ({outcome}), so "
-                    f"{'the tool deny policy' if self._needs_policy_hook() else 'the tool-output guard'} "
-                    "could not be enforced; the turn was "
-                    "not started"
-                )
+                # Existing deny policies always fail closed, independently of
+                # the compatibility choice for the tool-output guard.
+                blocked = self._needs_policy_hook() or self._missing_output_guard_denies()
+                await self._report_missing_output_guard(blocked=blocked)
+                if blocked:
+                    await self._stop_process()
+                    raise RuntimeError(
+                        f"the claude CLI did not register its hooks ({outcome}), so "
+                        f"{'the tool deny policy' if self._needs_policy_hook() else 'the tool-output guard'} "
+                        "could not be enforced; the turn was not started"
+                    )
         return self._proc
 
     def _needs_policy_hook(self) -> bool:
@@ -4003,6 +4013,27 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             specific["permissionDecisionReason"] = f"{reason}\n\n{self._boundary_text(peers)}"
         return peers
 
+    def _missing_output_guard_denies(self) -> bool:
+        policy = guard_policy.UNAVAILABLE_GUARD_POLICY
+        if policy == "warn":
+            return False
+        if policy == "split":
+            return (_version_key(self.cli_version) is None
+                    or _version_at_least(self.cli_version, guard_policy.OLDEST_VERIFIED_GUARD_CLI))
+        return True
+
+    async def _report_missing_output_guard(
+        self, *, blocked: bool, name: str | None = None,
+    ) -> None:
+        if self._tool_output_guard_reported:
+            return
+        self._tool_output_guard_reported = True
+        message = TOOL_OUTPUT_GUARD_MESSAGE if blocked else guard_policy.UNGUARDED_WARNING
+        logger.error("%s", message)
+        # HookEvents are persisted, nonterminal system rows rendered in chat.
+        # This warning is not a fabricated user/peer/model message.
+        await self._hook_event("deny" if blocked else "warning", message, PRE_TOOL_USE, name)
+
     async def _guarded_pre_tool_use(self, request: HookCallbackRequest) -> dict[str, Any]:
         """PreToolUse, failing closed. The CLI treats a failed or late
         callback as "no opinion" and runs the call, so a hook or policy that
@@ -4010,11 +4041,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         answered with a deny carrying the reason."""
         name = str(request.input.get("tool_name") or "")
         if self._tool_output_guard_required and not self._check_tool_output_guard():
-            await self._hook_event("deny", TOOL_OUTPUT_GUARD_MESSAGE, PRE_TOOL_USE, name or None)
-            return {"hookSpecificOutput": {
-                "hookEventName": "PreToolUse", "permissionDecision": "deny",
-                "permissionDecisionReason": TOOL_OUTPUT_GUARD_MESSAGE,
-            }}
+            blocked = self._missing_output_guard_denies()
+            await self._report_missing_output_guard(blocked=blocked, name=name or None)
+            if blocked:
+                return {"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse", "permissionDecision": "deny",
+                    "permissionDecisionReason": TOOL_OUTPUT_GUARD_MESSAGE,
+                }}
         try:
             return await asyncio.wait_for(
                 self._cli_pre_tool_use(request.input, request.tool_use_id),
