@@ -9,7 +9,7 @@
  * whichever credentials exist.
  */
 
-import { api, type AgentGateStatus } from './client';
+import { api, isApiError, type AgentGateStatus } from './client';
 
 export type ClaudeAuthMode = 'subscription' | 'api_key' | 'cloud' | 'off';
 
@@ -37,19 +37,121 @@ export interface ClaudeKeyAccount {
 	last4: string | null;
 }
 
+/**
+ * A Claude Code CLI sign-in saved on this worker (never synced to others).
+ * `default` is Claude Code's own folder; `saved` is an extra sign-in in its
+ * own folder. Identity is what `claude auth status` last reported for it.
+ */
+export interface ClaudeSubscriptionAccount {
+	id: string;
+	label: string;
+	kind: 'default' | 'saved';
+	/** The sign-in Claude Code uses on this worker; at most one. */
+	active: boolean;
+	email: string | null;
+	plan: string | null;
+	org_name: string | null;
+	signed_in: boolean | null;
+	/** Unix seconds of the last `claude auth status` for this entry. */
+	checked_at: number | null;
+	/** The last check found no sign-in, or its folder is missing. */
+	needs_sign_in: boolean;
+}
+
+/** A pending "add another" sign-in into a fresh folder. */
+export interface ClaudeSubscriptionLogin {
+	id: string;
+	status: 'running' | 'waiting' | 'failed';
+	error: string | null;
+	/** True: drive it through the in-app terminal (`/auth/claude/cli-login*`). */
+	terminal: boolean;
+	command: string;
+	env: { CLAUDE_CONFIG_DIR: string };
+	/**
+	 * Without the in-app terminal: what to run in a terminal on that worker.
+	 * `cmd` is null when the folder path cannot be quoted for Command Prompt.
+	 */
+	commands: { powershell: string; cmd: string | null; posix: string } | null;
+	/** The in-app terminal's state for this sign-in (terminal workers only). */
+	terminal_state?: {
+		running: boolean;
+		url: string | null;
+		output: string;
+		offset: number;
+		succeeded: boolean | null;
+	} | null;
+}
+
 export interface ClaudeAccounts {
 	api_key: ClaudeKeyAccount[];
-	subscription: never[];
-	subscription_support: { supported: boolean; reason: string };
+	subscription: ClaudeSubscriptionAccount[];
+	/** False on macOS, with a plain-language `reason`. */
+	subscription_support: { supported: boolean; reason: string | null };
+	/** Claude Code runs in its own folder (no saved extra sign-in active). Absent on older workers. */
+	default_in_use?: boolean;
 	storage_locked: boolean;
 	error: string | null;
 	login_pending: boolean;
+	/** The pending add-another sign-in, or null. Absent on older workers. */
+	login?: ClaudeSubscriptionLogin | null;
+	/** The active saved sign-in needs signing in again. */
 	recovery_required: boolean;
 }
 
 export interface ClaudeAccountsResponse {
 	accounts: ClaudeAccounts;
 	account_id?: string;
+	login?: ClaudeSubscriptionLogin | null;
+}
+
+/**
+ * The `{code, message}` a saved-accounts route refused with (its `detail`
+ * object), or nulls for any other error.
+ */
+export function claudeAccountError(e: unknown): { code: string | null; message: string | null } {
+	const body = isApiError(e) ? e.body : null;
+	const detail = body && typeof body === 'object' ? (body as { detail?: unknown }).detail : null;
+	if (!detail || typeof detail !== 'object') return { code: null, message: null };
+	const { code, message } = detail as { code?: unknown; message?: unknown };
+	return {
+		code: typeof code === 'string' ? code : null,
+		message: typeof message === 'string' ? message : null
+	};
+}
+
+/** List saved accounts; also finishes a pending add-another once the CLI reports it. */
+export function getClaudeAccounts(): Promise<ClaudeAccountsResponse> {
+	return api.get('/settings/claude-auth/accounts', { cache: 'no-store' });
+}
+
+export function saveCurrentClaudeSubscription(label = ''): Promise<ClaudeAccountsResponse> {
+	return api.post('/settings/claude-auth/accounts/subscription/save-current', { label });
+}
+
+export function addAnotherClaudeSubscription(): Promise<ClaudeAccountsResponse> {
+	return api.post('/settings/claude-auth/accounts/subscription/add-another');
+}
+
+/**
+ * Stop a pending add-another sign-in. When the CLI had already finished
+ * signing in, the worker keeps it (active) and returns its `account_id`.
+ */
+export function cancelClaudeSubscriptionLogin(): Promise<ClaudeAccountsResponse> {
+	return api.post('/settings/claude-auth/accounts/subscription/cancel-login');
+}
+
+export function renameClaudeSubscription(id: string, label: string): Promise<ClaudeAccountsResponse> {
+	return api.patch(`/settings/claude-auth/accounts/subscription/${id}`, { label });
+}
+
+export function activateClaudeSubscription(id: string): Promise<ClaudeAccountsResponse> {
+	return api.post(`/settings/claude-auth/accounts/subscription/${id}/activate`);
+}
+
+export async function deleteClaudeSubscription(id: string): Promise<ClaudeAccountsResponse> {
+	const result = await api.delete<ClaudeAccountsResponse>(`/settings/claude-auth/accounts/subscription/${id}`);
+	if (!result) throw new Error('Could not reload saved accounts');
+	return result;
 }
 
 export function addClaudeKey(api_key: string, label?: string): Promise<ClaudeAccountsResponse> {

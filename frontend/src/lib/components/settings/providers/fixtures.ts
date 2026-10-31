@@ -3,7 +3,13 @@
  * Code mode summary shaped like the worker's answers.
  */
 import type { ModelProvider } from '$lib/api/model-providers';
-import type { ClaudeAuthSummary, ClaudeCloudConfig, ClaudeCloudMethod } from '$lib/api/claude-auth';
+import type {
+	ClaudeAccounts,
+	ClaudeAuthSummary,
+	ClaudeCloudConfig,
+	ClaudeCloudMethod,
+	ClaudeSubscriptionAccount
+} from '$lib/api/claude-auth';
 
 export function row(partial: Partial<ModelProvider> = {}): ModelProvider {
 	return {
@@ -97,6 +103,39 @@ export function claudeSummary(partial: Partial<ClaudeAuthSummary> = {}): ClaudeA
 			claude_credential_ready: mode !== 'off',
 			reason: mode === 'off' ? 'Claude is off on this worker.' : null
 		},
+		...partial
+	};
+}
+
+/** One saved Claude Code CLI sign-in, as `accounts.subscription[]` lists it. */
+export function subAccount(partial: Partial<ClaudeSubscriptionAccount> = {}): ClaudeSubscriptionAccount {
+	return {
+		id: 'sub-default',
+		label: 'Personal',
+		kind: 'default',
+		active: true,
+		email: 'owner@example.com',
+		plan: 'max',
+		org_name: null,
+		signed_in: true,
+		checked_at: 1793491200,
+		needs_sign_in: false,
+		...partial
+	};
+}
+
+/** The saved-accounts envelope; several sign-ins supported unless `partial` says otherwise. */
+export function claudeAccounts(partial: Partial<ClaudeAccounts> = {}): ClaudeAccounts {
+	return {
+		api_key: [],
+		subscription: [],
+		subscription_support: { supported: true, reason: null },
+		default_in_use: true,
+		storage_locked: false,
+		error: null,
+		login_pending: false,
+		login: null,
+		recovery_required: false,
 		...partial
 	};
 }

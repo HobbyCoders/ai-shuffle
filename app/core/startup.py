@@ -301,10 +301,12 @@ def check_prerequisites() -> None:
     # cache that /health and the runner capabilities read.
     import os
     from pathlib import Path
-    from app.core import claude_cli_status
+    from app.core import claude_cli_status, claude_subscriptions
     native_bin = str(Path.home() / ".local" / "bin")
     if native_bin not in os.environ.get("PATH", "").split(os.pathsep):
         os.environ["PATH"] = native_bin + os.pathsep + os.environ.get("PATH", "")
+    # Re-link saved subscription sign-in folders before the first probe uses one.
+    claude_subscriptions.repair_on_startup()
     cli = claude_cli_status.get_status(force=True)
     if cli.signed_in:
         logger.info("Claude Code CLI %s: signed in", cli.cli_version or "")

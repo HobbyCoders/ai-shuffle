@@ -1766,6 +1766,27 @@ class SessionPool:
                 )
         return evicted
 
+    async def evict_idle_claude_auth_changed(self, fingerprint: str) -> list[str]:
+        """Evict idle Claude CLI sessions spawned under another credential.
+
+        Called after the active Claude subscription sign-in or credential
+        changes. A busy session keeps its CLI and reconnects on its next turn
+        through the normal ``claude_auth`` options check; provider sessions
+        (no fingerprint) are untouched.
+        """
+        evicted: list[str] = []
+        for session_id, state in list(self._pool.items()):
+            old = getattr(state.connect_options, "aih_claude_auth_fingerprint", None)
+            if old is None or old == fingerprint or self._is_busy(session_id, state):
+                continue
+            if self._pool.get(session_id) is not state:
+                continue
+            await self._do_evict(session_id, state, "claude_auth")
+            evicted.append(session_id)
+        if evicted:
+            logger.info("[Pool] Evicted %d idle Claude session(s) after a sign-in change", len(evicted))
+        return evicted
+
     async def shutdown(self) -> None:
         """Disconnect all sessions. Called during server shutdown."""
         await self.stop_idle_watchdog()

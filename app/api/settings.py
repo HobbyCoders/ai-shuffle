@@ -514,7 +514,11 @@ async def claude_auth_payload(refresh: bool = False) -> dict:
                 # is about the worker as a whole.
                 "claude_reason": claude_reason}
 
-    return await run_sync(_load)
+    payload = await run_sync(_load)
+    from app.core import claude_subscriptions
+    # Listing accounts can finish a pending sign-in that switched the active one.
+    await claude_subscriptions.reap_idle_pooled_clis()
+    return payload
 
 
 class ClaudeCliUpdate(BaseModel):

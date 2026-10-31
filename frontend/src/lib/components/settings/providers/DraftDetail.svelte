@@ -16,9 +16,10 @@
 	import FalKeySetup from './setup/FalKeySetup.svelte';
 	import GatewaySetup from './setup/GatewaySetup.svelte';
 	import ClaudeCliSetup from './setup/ClaudeCliSetup.svelte';
+	import ClaudeSubscriptionAddSetup from './setup/ClaudeSubscriptionAddSetup.svelte';
 	import ClaudeCloudSetup from './setup/ClaudeCloudSetup.svelte';
 	import { providerDrafts, type Draft } from './drafts.svelte';
-	import { rowItem, type ProviderView } from './providers-model';
+	import { claudeAddsAnotherSubscription, rowItem, type ProviderView } from './providers-model';
 
 	interface Props {
 		draft: Draft;
@@ -31,6 +32,9 @@
 	const claudeFirst = $derived(
 		!!provider?.claude && !provider.credentials.some((c) => !c.draft && c.status !== 'warn')
 	);
+
+	/** A saved sign-in exists and the worker keeps several: sign in to a fresh folder. */
+	const another = $derived(draft.flavor === 'cli' && !!provider && claudeAddsAnotherSubscription(provider));
 
 	const subtitle = $derived(
 		provider?.draft
@@ -95,6 +99,8 @@
 			</RowGroup>
 			<div class="pv-acts"><button type="button" class="st-btn ghost" onclick={cancel}>Cancel</button></div>
 		{/if}
+	{:else if draft.flavor === 'cli' && another}
+		<ClaudeSubscriptionAddSetup onFinish={finish} onCancel={cancel} />
 	{:else if draft.flavor === 'cli'}
 		<ClaudeCliSetup makeActive={claudeFirst} onFinish={finish} onCancel={cancel} />
 	{:else if draft.flavor === 'cloud'}

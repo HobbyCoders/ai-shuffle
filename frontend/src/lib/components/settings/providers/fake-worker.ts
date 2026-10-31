@@ -22,6 +22,8 @@ export type RouteHandler = (body: unknown, path: string) => unknown;
 export interface FakeWorkerState {
 	rows: ModelProvider[];
 	claude: ClaudeAuthSummary;
+	/** "Add another" runs in the in-app terminal (Docker/Linux); false: desktop commands. */
+	subscriptionTerminal?: boolean;
 	integrations: {
 		anthropic_api_key_set: boolean;
 		anthropic_api_key_masked: string | null;
@@ -144,6 +146,67 @@ export function fakeWorker(init: Partial<FakeWorkerState> = {}, routes: Record<s
 			const active = state.claude.accounts!.api_key.find((a) => a.active)?.id ?? null;
 			state.claude.accounts!.api_key = state.claude.accounts!.api_key.filter((a) => a.id !== path.split('/')[5]);
 			return selectClaude(active);
+		},
+		// Saved Claude Code CLI sign-ins (several per worker).
+		'GET /settings/claude-auth/accounts': () => ({ accounts: state.claude.accounts }),
+		'POST /settings/claude-auth/accounts/subscription/save-current': (body) => {
+			const accounts = state.claude.accounts!;
+			if (!state.claude.cli.signed_in) throw { status: 409, detail: { code: 'not_signed_in', message: 'Claude Code is not signed in.' } };
+			let entry = accounts.subscription.find((a) => a.kind === 'default');
+			if (!entry) {
+				entry = { id: 'sub-default', label: '', kind: 'default', active: !!accounts.default_in_use, email: state.claude.cli.email,
+					plan: state.claude.cli.plan, org_name: state.claude.cli.org_name, signed_in: true, checked_at: 1793491200, needs_sign_in: false };
+				accounts.subscription.unshift(entry);
+			}
+			entry.label = (body as { label?: string })?.label || entry.label || state.claude.cli.email || 'Claude subscription';
+			return { accounts, account_id: entry.id };
+		},
+		'POST /settings/claude-auth/accounts/subscription/add-another': () => {
+			const accounts = state.claude.accounts!;
+			const id = accounts.login?.id ?? 'sub-new';
+			const terminal = state.subscriptionTerminal ?? true;
+			accounts.login = {
+				id, status: 'waiting', error: null, terminal, command: 'claude auth login',
+				env: { CLAUDE_CONFIG_DIR: `/data/claude-logins/${id}` },
+				commands: terminal ? null : {
+					powershell: `$env:CLAUDE_CONFIG_DIR='C:\\data\\claude-logins\\${id}'; claude auth login`,
+					cmd: `set "CLAUDE_CONFIG_DIR=C:\\data\\claude-logins\\${id}" && claude auth login`,
+					posix: `CLAUDE_CONFIG_DIR='/data/claude-logins/${id}' claude auth login`
+				},
+				terminal_state: terminal ? { running: true, url: 'https://claude.ai/oauth/authorize?test', output: 'Opening sign-in…\n', offset: 17, succeeded: null } : undefined
+			};
+			accounts.login_pending = true;
+			return { accounts, login: accounts.login };
+		},
+		'POST /settings/claude-auth/accounts/subscription/cancel-login': () => {
+			const accounts = state.claude.accounts!;
+			accounts.login = null;
+			accounts.login_pending = false;
+			return { accounts, login: null };
+		},
+		'PATCH /settings/claude-auth/accounts/subscription/:id': (body, path) => {
+			const a = state.claude.accounts!.subscription.find((a) => a.id === path.split('/')[5])!;
+			a.label = (body as { label: string }).label;
+			return { accounts: state.claude.accounts };
+		},
+		'POST /settings/claude-auth/accounts/subscription/:id/activate': (_body, path) => {
+			const accounts = state.claude.accounts!;
+			const id = path.split('/')[5];
+			accounts.subscription = accounts.subscription.map((a) => ({ ...a, active: a.id === id }));
+			accounts.default_in_use = accounts.subscription.find((a) => a.id === id)?.kind === 'default';
+			return { accounts };
+		},
+		'DELETE /settings/claude-auth/accounts/subscription/:id': (_body, path) => {
+			const accounts = state.claude.accounts!;
+			const id = path.split('/')[5];
+			const wasActive = accounts.subscription.find((a) => a.id === id)?.active;
+			accounts.subscription = accounts.subscription.filter((a) => a.id !== id);
+			if (wasActive) {
+				// Back to Claude Code's own folder; never another saved entry.
+				accounts.default_in_use = true;
+				accounts.subscription = accounts.subscription.map((a) => ({ ...a, active: a.kind === 'default' }));
+			}
+			return { accounts };
 		},
 		'PATCH /model-providers/:id': (body, path) => {
 			const id = decodeURIComponent(path.split('/')[2]);

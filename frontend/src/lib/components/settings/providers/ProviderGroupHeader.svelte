@@ -125,9 +125,10 @@
 		text-overflow: ellipsis;
 	}
 	/* Claude: the name gives way before the mode switch does, so the switch
-	   never has to scroll. */
+	   never has to scroll. Three columns (name, mode, "+"), so the "+" stays on
+	   the header line instead of wrapping under it onto the first credential. */
 	.pgh.claude {
-		grid-template-columns: minmax(0, 1fr) auto;
+		grid-template-columns: minmax(0, 1fr) auto auto;
 	}
 	.mode {
 		justify-self: end;
@@ -135,9 +136,10 @@
 		align-items: center;
 		min-width: 0;
 	}
-	/* A 280-340px list cannot hold the name and the mode switch on one line:
-	   the switch moves under the name, the connector runs past it. */
-	@container st-list (max-width: 359px) {
+	/* A list up to phone width (280-420px) cannot hold the name, the mode
+	   switch and the "+" on one line: the switch moves under the name, the
+	   connector runs past it. */
+	@container st-list (max-width: 419px) {
 		.pgh.claude:has(.mode) {
 			grid-template-columns: minmax(0, 1fr) auto;
 			height: auto;

@@ -1093,11 +1093,16 @@ Which credential Claude Code agents run on: your Claude subscription (the signed
 {
   "accounts": {
     "api_key": [{"id": "uuid", "label": "Work", "active": true, "masked_key": "sk-ant-...1234", "last4": "1234"}],
-    "subscription": [],
-    "subscription_support": {"supported": false, "reason": "Safe CLI state isolation is not verified across supported platforms."},
+    "subscription": [
+      {"id": "3f9c0a1b2c3d4e5f", "label": "Personal", "kind": "default", "active": false, "email": "me@example.com", "plan": "max", "org_name": null, "signed_in": true, "checked_at": 1793491200.0, "needs_sign_in": false},
+      {"id": "8a7b6c5d4e3f2a1b", "label": "work@example.com", "kind": "saved", "active": true, "email": "work@example.com", "plan": "pro", "org_name": null, "signed_in": true, "checked_at": 1793491260.0, "needs_sign_in": false}
+    ],
+    "subscription_support": {"supported": true, "reason": null},
+    "default_in_use": false,
     "storage_locked": false,
     "error": null,
     "login_pending": false,
+    "login": null,
     "recovery_required": false
   }
 }
@@ -1110,13 +1115,21 @@ Which credential Claude Code agents run on: your Claude subscription (the signed
 | `PATCH /api_key/{id}` | `{"label":"New label"}` | Rename; at most 120 characters. |
 | `POST /api_key/{id}/activate` | none | Activate this entry and deactivate its sibling. |
 | `DELETE /api_key/{id}` | none | Delete the entry; deleting the active entry leaves no key active. |
+| `POST /subscription/save-current` | `{"label":"Personal"}` | Save the sign-in in Claude Code's own folder as a `default` entry (one at most; saving again relabels it). Needs that folder signed in: `409 not_signed_in` otherwise. Returns `account_id`. |
+| `POST /subscription/add-another` | none | Start `claude auth login` into a fresh folder. Returns `login` (below). The sign-in is saved and made active once the CLI reports it. |
+| `POST /subscription/cancel-login` | none | Stop a pending add-another sign-in and delete its unfinished folder. If the CLI had already finished signing in there, the sign-in is kept and made active instead, and its id comes back as `account_id`. |
+| `PATCH /subscription/{id}` | `{"label":"Work"}` | Rename; at most 120 characters. |
+| `POST /subscription/{id}/activate` | none | Make this sign-in the one Claude Code uses; the other subscription turns off. |
+| `DELETE /subscription/{id}` | none | Forget the entry. A `saved` entry is signed out with `claude auth logout` in its folder and its folder is deleted; a `default` entry is only forgotten (Claude Code's own folder and sign-in stay). |
 
-Mutations return `{"accounts":{…}}`; add-key also returns `account_id`. These
-operations do not change the Claude Code mode (`subscription`, `api_key`,
-`cloud`, `off`). Cloud stays single; the existing single CLI sign-in is unchanged.
-Existing chats use the current active key on their next turn. An in-flight CLI
-turn retains its original environment; normal credential-fingerprint reconnect
-logic applies the new key at the next turn.
+Mutations return `{"accounts":{…}}`; add-key and save-current also return
+`account_id`. These operations do not change the Claude Code mode
+(`subscription`, `api_key`, `cloud`, `off`). Cloud stays single. One API key
+and one subscription can be active at the same time. Existing chats use the
+current active key or sign-in on their next turn. An in-flight CLI turn retains
+its original environment; normal credential-fingerprint reconnect logic applies
+the change at the next turn, and idle Claude sessions still on the previous
+sign-in are closed when a subscription switch happens.
 
 Both key settings sync encrypted under the existing system-settings policy.
 The active key remains a scalar in `anthropic_api_key`, preserving every
@@ -1126,24 +1139,77 @@ not a separately replicated pointer. If the scalar arrives before the list, a
 masked legacy entry is shown until the list arrives, never another key's active
 label. Concurrent edits use normal settings sync conflict handling.
 
-`subscription_support.supported` is deliberately `false` on Linux, Windows and
-macOS for now. The reserved subscription routes (`PATCH /subscription/{id}`,
-`POST /subscription/{id}/activate`, `DELETE /subscription/{id}`,
-`POST /subscription/save-current`, `POST /subscription/add-another`, and
-`POST /subscription/cancel-login`) return `501 unsupported`, without accessing
-CLI sign-in files. The app does not read, copy, store or refresh CLI tokens.
+#### Saved subscription sign-ins
 
-Subscription follow-up must isolate CLI-owned identity and credentials while
-sharing transcripts and customizations reliably across platforms. Claude Code
-2.1.312 honors `CLAUDE_SECURESTORAGE_CONFIG_DIR` for secure storage, but its status
-email/org come from the global `oauthAccount`, so that override alone can
-mislabel accounts. A real installed CLI probe on Linux accepted a per-account
-`CLAUDE_CONFIG_DIR` with linked `projects/` and `settings.json` and resolved the
-shared transcript directory correctly. Cross-platform junction/file-link rewrite
-and resume behavior remain unverified; no multi-login claim is made here.
+Each saved subscription is a Claude Code CLI sign-in on **this worker**. The
+list and the active choice are kept per worker in `claude_cli_logins:<instance
+id>` and never sync: every worker keeps its own CLI sign-ins. AI Shuffle never
+reads, copies or stores CLI credentials; email, plan and organization come only
+from running `claude auth status` against an entry's folder.
+
+- `kind: "default"` is Claude Code's own folder (the worker's
+  `CLAUDE_CONFIG_DIR`, else `~/.claude`), the sign-in from `claude auth login`.
+- `kind: "saved"` is an extra sign-in in its own folder under the app data
+  directory (`claude-logins/<id>`). Every `claude` the worker starts (chats,
+  `auth status`, sign-in, sign-out, the installer) runs with
+  `CLAUDE_CONFIG_DIR` set to the active entry's folder. Transcripts
+  (`projects/`), `settings.json`, agents, commands, skills, plugins and the
+  other shared Claude Code folders are linked back to the default folder, so
+  existing chats continue on the newly active sign-in and settings are shared.
+  On Windows, folders are linked with directory junctions; files are linked
+  only where Windows allows a symbolic link (Developer Mode or administrator),
+  otherwise that sign-in keeps its own copy of the file.
+
+`active` is true for the entry Claude Code uses. When no saved entry is active,
+Claude Code uses its own folder: `default_in_use` is then `true` and a saved
+`default` entry shows as active. Deleting the active saved sign-in returns
+Claude Code to its own folder; it never activates another saved entry.
+`signed_in`, `email`, `plan` and `org_name` are from the last `claude auth
+status` of that entry (`checked_at`, Unix seconds). `needs_sign_in` is true
+when that check found no sign-in or the entry's folder is missing;
+`recovery_required` is true when this applies to the active saved entry. The
+folder is rebuilt with its shared links, and signing in again
+(`POST /api/v1/auth/claude/cli-login/start`, which signs in to the active
+folder) repairs it.
+
+`login` describes a pending add-another sign-in (`null` when none):
+
+```json
+{
+  "id": "8a7b6c5d4e3f2a1b",
+  "status": "running",
+  "error": null,
+  "terminal": true,
+  "command": "claude auth login",
+  "env": {"CLAUDE_CONFIG_DIR": "/data/claude-logins/8a7b6c5d4e3f2a1b"},
+  "commands": null,
+  "terminal_state": {"running": true, "url": "https://claude.com/…", "output": "…", "offset": 412, "succeeded": null}
+}
+```
+
+`status` is `running` (the in-app terminal is running it), `waiting` (waiting
+for the sign-in) or `failed` (the CLI exited, or its in-app run is gone, without
+signing in; start again or cancel). With `terminal: true` (Docker and Linux), drive it like the regular
+sign-in: read `GET /api/v1/auth/claude/cli-login`, send the code with
+`POST /api/v1/auth/claude/cli-login/input`. Without the in-app terminal
+(desktop app, Windows) `terminal_state` is absent and `commands` holds the
+command to run in a terminal on that worker (`powershell`, `cmd`, `posix`;
+the folder path is quoted for each shell, and `cmd` is `null` when the path
+holds a character Command Prompt cannot quote: `"`, `%` or `!`).
+Either way, keep polling `GET /claude-auth/accounts` (every few seconds): it
+checks the new folder with `claude auth status` (at most every 3 seconds) and,
+once signed in, saves it as the active entry and clears `login`.
+
+`subscription_support.supported` is `false` on macOS, where Claude Code keeps
+its sign-in in the Keychain: the list stays empty, `reason` says so and every
+subscription route returns `501 unsupported`. The single CLI sign-in works
+there as before.
 
 Service errors use `detail: {"code":"…","message":"…"}`: `400` invalid key or
-label, `404 not_found`, `501 unsupported`, and `503 storage_locked`,
+label, `404 not_found`, `409 not_signed_in` (save-current),
+`409 login_busy` (another Claude sign-in is running), `409 cli_missing`,
+`409 folder_unavailable` (a sign-in folder could not be prepared),
+`501 unsupported` (macOS), and `503 storage_locked`,
 `storage_unreadable` or `storage_unavailable`. Key validation keeps the legacy
 error strings: `400` authentication/API error, `429` rate limit; a transient
 network error still saves the key. Invalid request shapes return `422`.

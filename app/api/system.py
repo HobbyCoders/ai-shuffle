@@ -263,12 +263,13 @@ async def get_version():
     claude_version = None
 
     def _claude_version() -> str | None:
+        from app.core import claude_subscriptions
         result = subprocess.run(
             ['claude', '--version'],
             capture_output=True,
             text=True,
             timeout=5,
-            env=scrub_child_env(),
+            env=claude_subscriptions.apply_cli_home(scrub_child_env()),
         )
         return result.stdout.strip() if result.returncode == 0 else None
 

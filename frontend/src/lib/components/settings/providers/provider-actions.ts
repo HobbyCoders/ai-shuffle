@@ -11,10 +11,14 @@ import { flashSaved } from '$lib/settings/save-status.svelte';
 import { providerDrafts } from './drafts.svelte';
 import { CLAUDE_CLOUD_ITEM, type CredentialFlavor, type CredentialView, type ProviderView } from './providers-model';
 
-/** A credential row's switch: PATCH `{enabled}` for model_providers rows, the fal flag for fal.ai. */
+/**
+ * A credential row's switch: PATCH `{enabled}` for model_providers rows, the
+ * fal flag for fal.ai, activation for saved Claude keys and sign-ins.
+ */
 export async function setCredentialEnabled(c: CredentialView, enabled: boolean): Promise<boolean> {
 	try {
 		if (c.account && enabled) await providers.activateAnthropicAccount(c.account.id);
+		else if (c.subscription && enabled) await providers.activateClaudeSubscriptionAccount(c.subscription.id);
 		else if (c.flavor === 'fal') await providers.setFalEnabled(enabled);
 		else if (c.row) await providers.setProviderEnabled(c.row.id, enabled);
 		else return false;

@@ -86,6 +86,8 @@ _LOCAL_SETTING_PATTERNS = [
         r"^plugin_oauth:",
         r"^claude_cli_relogin_notice(:|$)",
         r"^claude_auth_mode(:|$)",
+        # Saved Claude subscription sign-ins: each worker keeps its own CLI login.
+        r"^claude_cli_logins(:|$)",
         r"^claude_cli_(keep_installed|installed_by_app)(:|$)",
         # The Claude "Cloud provider or gateway" method and its secrets belong
         # to this worker, like the Claude auth mode (claude_auth_mode:<instance>).

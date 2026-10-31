@@ -9,7 +9,9 @@ import {
 	claudeGateNotice,
 	CLAUDE_SUB_ITEM,
 	claudeHeaderStatus,
+	claudeAddsAnotherSubscription,
 	claudeInUse,
+	claudeSubItem,
 	claudeUsageRecorded,
 	draftName,
 	FAL_KEY_ITEM,
@@ -19,7 +21,7 @@ import {
 	splitProviders,
 	type ProvidersInput
 } from './providers-model';
-import { chatgptRow, claudeSummary, gatewayRow, grokRow, row } from './fixtures';
+import { chatgptRow, claudeAccounts, claudeSummary, gatewayRow, grokRow, row, subAccount } from './fixtures';
 
 const noFal = { keySet: false, masked: '', enabled: true };
 const input = (over: Partial<ProvidersInput> = {}): ProvidersInput => ({
@@ -453,5 +455,86 @@ describe('Claude before its summary answers', () => {
 	it('is Not connected once the read failed (no longer pending)', () => {
 		const { notConnected } = splitProviders(buildProviders(input({ rows: [row()], claude: null })));
 		expect(notConnected.map((p) => p.id)).toContain('claude');
+	});
+});
+
+describe('saved Claude subscriptions', () => {
+	const withSubs = (accounts: Parameters<typeof claudeAccounts>[0], over: Parameters<typeof claudeSummary>[0] = {}) =>
+		byId(buildProviders(input({ claude: claudeSummary({ api_key: { set: false, last4: null }, accounts: claudeAccounts(accounts), ...over }) })), 'claude');
+
+	it('offers "Another Subscription" once a sign-in exists, matching ChatGPT and Grok', () => {
+		const claude = withSubs({});
+		expect(claude.claudeSubscriptions).toBe(true);
+		expect(claude.credentials.map((c) => c.item)).toEqual([CLAUDE_SUB_ITEM]);
+		const kinds = addableKinds(claude);
+		expect(kinds.map((k) => [k.menuLabel, k.hint])).toEqual([
+			['Another Subscription', 'Becomes active after sign-in'],
+			['API key', 'Pay per use'],
+			['Cloud provider or gateway', 'Bedrock, Vertex, Foundry, gateway']
+		]);
+		expect(claudeAddsAnotherSubscription(claude)).toBe(true);
+	});
+
+	it('keeps one subscription on macOS (unsupported) and with older workers', () => {
+		const mac = withSubs({ subscription_support: { supported: false, reason: 'Keychain' }, subscription: [subAccount()] });
+		expect(mac.credentials.map((c) => c.item)).toEqual([CLAUDE_SUB_ITEM]);
+		expect(addableKinds(mac).map((k) => k.flavor)).not.toContain('cli');
+		expect(claudeAddsAnotherSubscription(mac)).toBe(false);
+		const old = byId(buildProviders(input()), 'claude');
+		expect(addableKinds(old).map((k) => k.flavor)).not.toContain('cli');
+	});
+
+	it('lists each saved sign-in as its own row with one active, independent of the mode', () => {
+		const accounts = {
+			default_in_use: false,
+			subscription: [
+				subAccount({ active: false }),
+				subAccount({ id: 'work', label: 'Work', kind: 'saved', email: 'work@example.com', plan: 'pro', active: true })
+			]
+		};
+		const claude = withSubs(accounts, { cli: { ...claudeSummary().cli, email: 'work@example.com', plan: 'pro' } });
+		expect(claude.credentials.map((c) => [c.item, c.name, c.summary, c.statusText, c.active, c.on, c.switchable])).toEqual([
+			[claudeSubItem('sub-default'), 'Personal', 'owner@example.com, Max plan', 'Saved', false, false, true],
+			[claudeSubItem('work'), 'Work', 'work@example.com, Pro plan', 'Active for Claude', true, true, true]
+		]);
+		const apiMode = withSubs(accounts, { mode: 'api_key' });
+		expect(apiMode.credentials.filter((c) => c.flavor === 'cli').map((c) => [c.statusText, c.on, c.status])).toEqual([
+			['Saved', false, 'standby'],
+			['Selected for subscription mode', false, 'standby']
+		]);
+		expect(addableKinds(claude).find((k) => k.flavor === 'cli')?.menuLabel).toBe('Another Subscription');
+	});
+
+	it('keeps the CLI’s own sign-in listed while it is in use but not saved yet', () => {
+		const claude = withSubs({ default_in_use: true, subscription: [subAccount({ id: 'work', label: 'Work', kind: 'saved', active: false })] });
+		expect(claude.credentials.map((c) => [c.item, c.on])).toEqual([
+			[CLAUDE_SUB_ITEM, true],
+			[claudeSubItem('work'), false]
+		]);
+	});
+
+	it('shows a neutral "Sign in again" for a sign-in that lapsed; attention only when it is the active one', () => {
+		const saved = withSubs({
+			default_in_use: false,
+			subscription: [
+				subAccount({ active: true, kind: 'saved', id: 'a', label: 'A', signed_in: false, needs_sign_in: true }),
+				subAccount({ active: false, kind: 'saved', id: 'b', label: 'B', signed_in: false, needs_sign_in: true })
+			],
+			recovery_required: true
+		}, { cli: { ...claudeSummary().cli, signed_in: false } });
+		expect(saved.credentials.map((c) => [c.name, c.summary, c.statusText, c.status, c.attention])).toEqual([
+			['A', 'Sign in again', 'Sign in again', 'warn', true],
+			['B', 'Sign in again', 'Sign in again', 'standby', false]
+		]);
+		expect(attentionCount([saved])).toBe(1);
+		expect(JSON.stringify(saved.credentials)).not.toMatch(/unofficial|unsupported/i);
+	});
+
+	it('trusts the live CLI status for the active entry once it is signed in again', () => {
+		const claude = withSubs({
+			default_in_use: false,
+			subscription: [subAccount({ active: true, kind: 'saved', id: 'a', label: 'A', signed_in: false, needs_sign_in: true })]
+		});
+		expect(claude.credentials[0]).toMatchObject({ statusText: 'Active for Claude', on: true, attention: false });
 	});
 });

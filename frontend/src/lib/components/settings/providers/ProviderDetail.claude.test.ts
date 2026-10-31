@@ -22,7 +22,7 @@ import { settingsNav } from '$lib/settings/navigation.svelte';
 import { SETTINGS_ACCESS_CONTEXT } from '$lib/settings/access.svelte';
 import ProvidersCollection from './ProvidersCollection.svelte';
 import { providerDrafts } from './drafts.svelte';
-import { claudeSummary } from './fixtures';
+import { claudeAccounts, claudeSummary, subAccount } from './fixtures';
 import { fakeWorker } from './fake-worker';
 import { CLAUDE_SUB_ITEM } from './providers-model';
 import { terminals } from '$lib/stores/terminals.svelte';
@@ -222,4 +222,44 @@ it('carries the Claude compaction switch, on by default, and saves a change', as
 	expect(sw.getAttribute('aria-checked')).toBe('true');
 	await fireEvent.click(sw);
 	await waitFor(() => expect(worker.sent('PUT', '/settings/claude-compaction')[0]?.body).toEqual({ enabled: false }));
+});
+
+it('lists saved sign-ins with "Another Subscription" and keeps the mode control separate', async () => {
+	worker.state.claude = claudeSummary({
+		api_key: { set: false, last4: null },
+		accounts: claudeAccounts({
+			default_in_use: false,
+			subscription: [subAccount({ active: false }), subAccount({ id: 'work', kind: 'saved', label: 'Work', email: 'work@example.com', plan: 'pro', active: true })]
+		})
+	});
+	worker.state.integrations.anthropic_api_key_set = false;
+	await show();
+	const creds = credentials();
+	expect(within(creds).getByText('Personal')).toBeTruthy();
+	expect(within(creds).getByText('Work')).toBeTruthy();
+	expect(within(creds).getByRole('button', { name: 'Use Personal' })).toBeTruthy();
+	expect(within(creds).getByText('Active')).toBeTruthy();
+	const add = screen.getByRole('region', { name: 'Add' });
+	expect(within(add).getByText('Another Subscription')).toBeTruthy();
+	expect(within(add).getByText('Becomes active after sign-in')).toBeTruthy();
+	// Which sign-in is active never moves the Claude Code mode.
+	expect(within(modes()).getByRole('button', { name: 'Subscription' }).getAttribute('aria-pressed')).toBe('true');
+	await fireEvent.click(within(modes()).getByRole('button', { name: 'API key' }));
+	await waitFor(() => expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(1));
+	expect(worker.state.claude.accounts?.subscription.map((a) => a.active)).toEqual([false, true]);
+	expect(worker.sent('POST', '/settings/claude-auth/accounts/subscription/work/activate')).toHaveLength(0);
+});
+
+it('opens the active saved sign-in from the stable subscription link', async () => {
+	worker.state.claude = claudeSummary({
+		accounts: claudeAccounts({
+			default_in_use: false,
+			subscription: [subAccount({ active: false }), subAccount({ id: 'work', kind: 'saved', label: 'Work', active: true })]
+		})
+	});
+	await providers.refreshAll();
+	settingsNav.go({ category: 'providers', item: CLAUDE_SUB_ITEM });
+	render(ProvidersCollection);
+	await flush();
+	expect(await screen.findByRole('heading', { level: 2, name: 'Work' })).toBeTruthy();
 });

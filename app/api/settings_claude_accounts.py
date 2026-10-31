@@ -52,6 +52,8 @@ async def _call(function, *args, subscription=False):
 
 async def _result(account_id=None):
     result = {"accounts": await run_sync(accounts.accounts_payload)}
+    # Listing can finish a pending sign-in, which switches the active one.
+    await accounts.subscriptions.reap_idle_pooled_clis()
     if account_id:
         result["account_id"] = account_id
     return result
@@ -83,14 +85,14 @@ async def add_key(request: KeyRequest, token: str = Depends(require_admin)) -> d
 async def save_current(
     request: LabelRequest, token: str = Depends(require_admin)
 ) -> dict[str, Any]:
-    """Request saving a CLI login; currently returns the unsupported response."""
+    """Save the CLI's current default sign-in (asked with `claude auth status`)."""
     account_id = await _call(accounts.save_current_login, request.label, subscription=True)
     return await _result(account_id)
 
 
 @router.post("/subscription/add-another")
 async def add_another(token: str = Depends(require_admin)) -> dict[str, Any]:
-    """Request a second CLI sign-in; currently returns the unsupported response."""
+    """Start `claude auth login` into a fresh folder; it becomes active once signed in."""
     try:
         login = await accounts.start_login(external=True)
     except accounts.AccountError as exc:
@@ -100,12 +102,16 @@ async def add_another(token: str = Depends(require_admin)) -> dict[str, Any]:
 
 @router.post("/subscription/cancel-login")
 async def cancel(token: str = Depends(require_admin)) -> dict[str, Any]:
-    """Request cancelling the unsupported saved-subscription sign-in flow."""
+    """Stop a pending add-another sign-in and remove its unfinished folder.
+
+    If the CLI had already finished signing in, the sign-in is kept and made
+    active instead, and its id comes back as ``account_id``.
+    """
     try:
-        login = await accounts.cancel_login()
+        account_id = await accounts.cancel_login()
     except accounts.AccountError as exc:
         raise http_error(exc) from None
-    return {**await _result(), "login": login}
+    return {**await _result(account_id), "login": None}
 
 
 @router.patch("/{kind}/{account_id}")
@@ -116,7 +122,8 @@ async def rename(
     token: str = Depends(require_admin),
 ) -> dict[str, Any]:
     """Rename a saved account without changing the selected key or auth mode."""
-    await _call(accounts.change_account, kind, account_id, "rename", request.label)
+    await _call(accounts.change_account, kind, account_id, "rename", request.label,
+                subscription=kind == "subscription")
     return await _result()
 
 
@@ -126,7 +133,7 @@ async def activate(
     account_id: str,
     token: str = Depends(require_admin),
 ) -> dict[str, Any]:
-    """Select a saved key without changing the Claude Code auth mode."""
+    """Select a saved key or sign-in (siblings turn off); the auth mode is unchanged."""
     await _call(
         accounts.change_account, kind, account_id, "activate", subscription=kind == "subscription"
     )
@@ -139,7 +146,8 @@ async def delete(
     account_id: str,
     token: str = Depends(require_admin),
 ) -> dict[str, Any]:
-    """Delete one saved account, clearing the scalar only if it was selected."""
+    """Delete one saved account. A deleted active key leaves no key active; a
+    deleted active sign-in returns Claude Code to its default folder."""
     await _call(
         accounts.change_account, kind, account_id, "delete", subscription=kind == "subscription"
     )

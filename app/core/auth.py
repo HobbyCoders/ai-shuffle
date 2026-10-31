@@ -126,8 +126,12 @@ class AuthService:
             if not claude_cmd:
                 return {"success": False, "message": "Logout failed",
                         "error": status.error or "Claude CLI not found"}
+            from app.core import claude_subscriptions
             env = {k: v for k, v in scrub_child_env().items()
                    if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")}
+            # Signs out the active saved sign-in's folder (the default one
+            # when none is active), the same folder every spawn uses.
+            claude_subscriptions.apply_cli_home(env)
             result = subprocess.run(
                 [claude_cmd, 'auth', 'logout'],
                 capture_output=True,

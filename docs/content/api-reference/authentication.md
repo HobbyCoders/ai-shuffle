@@ -198,7 +198,9 @@ curl http://localhost:8000/api/v1/auth/claude/cli?refresh=true \
 
 ### POST /api/v1/auth/claude/cli-login/start
 
-Run `claude auth login` in the in-app terminal (Docker and local runs; not the desktop app or Windows). Poll `GET /api/v1/auth/claude/cli-login?offset=N` for its output and the sign-in link, send the code Anthropic's page shows with `POST /api/v1/auth/claude/cli-login/input` (`{"text": "..."}`), and stop it with `POST /api/v1/auth/claude/cli-login/cancel`.
+Run `claude auth login` in the in-app terminal (Docker and local runs; not the desktop app or Windows). Poll `GET /api/v1/auth/claude/cli-login?offset=N` for its output and the sign-in link, send the code Anthropic's page shows with `POST /api/v1/auth/claude/cli-login/input` (`{"text": "..."}`), and stop it with `POST /api/v1/auth/claude/cli-login/cancel`. While an add-another subscription sign-in is running, starting or cancelling this one returns `409`: stop that sign-in with `POST /api/v1/settings/claude-auth/accounts/subscription/cancel-login`. Reading and sending input work for it.
+
+These endpoints, `GET /claude/cli` and `POST /claude/logout` act on the active saved subscription sign-in when one is selected (see [Saved Claude accounts](/docs/api-reference/miscellaneous#saved-claude-accounts-apiv1settingsclaude-authaccounts)); otherwise on Claude Code's own folder.
 
 **Auth:** Owner only
 

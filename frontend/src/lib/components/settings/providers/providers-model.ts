@@ -8,15 +8,21 @@
  * - Built-in accounts share a provider + kind slot: one API key and one
  *   subscription may be active together, never two of the same kind. Switching
  *   refetches siblings; existing chats follow the active account. Gateways are independent.
- * - Claude saves multiple Anthropic keys with one selected. The Claude Code
- *   mode (Subscription | API key | Cloud | Off) remains a separate choice;
- *   its single CLI sign-in and cloud configuration are unchanged.
+ * - Claude saves multiple Anthropic keys with one selected, and (where the
+ *   worker supports it, not macOS) several Claude Code CLI sign-ins with one
+ *   active. The Claude Code mode (Subscription | API key | Cloud | Off)
+ *   remains a separate choice; the cloud configuration stays single.
  * - fal.ai has one credential, the media key, with its own on/off flag.
  *
  * Pure functions only: the components and the tests feed it plain data.
  */
 import type { ModelProvider } from '$lib/api/model-providers';
-import type { ClaudeAuthMode, ClaudeAuthSummary, ClaudeKeyAccount } from '$lib/api/claude-auth';
+import type {
+	ClaudeAuthMode,
+	ClaudeAuthSummary,
+	ClaudeKeyAccount,
+	ClaudeSubscriptionAccount
+} from '$lib/api/claude-auth';
 import type { ProviderGlyphKind } from '$lib/components/settings/ProviderGlyph.svelte';
 import type { StatusTone } from '$lib/settings/types';
 
@@ -35,6 +41,8 @@ export const rowItem = (rowId: string): string => `mp:${rowId}`;
 
 /** Stable item ids of the credentials that are not model_providers rows. */
 export const CLAUDE_SUB_ITEM = 'claude:subscription';
+/** One saved Claude Code CLI sign-in (`accounts.subscription[]`). */
+export const claudeSubItem = (id: string): string => `${CLAUDE_SUB_ITEM}:${id}`;
 export const CLAUDE_KEY_ITEM = 'claude:api-key';
 export const claudeKeyItem = (id: string): string => `${CLAUDE_KEY_ITEM}:${id}`;
 export const CLAUDE_CLOUD_ITEM = 'claude:cloud';
@@ -167,6 +175,8 @@ export interface CredentialView {
 	on: boolean;
 	/** Saved Anthropic account; selection is independent of the Claude Code mode. */
 	account?: ClaudeKeyAccount;
+	/** Saved Claude Code CLI sign-in; which one is active is independent of the mode. */
+	subscription?: ClaudeSubscriptionAccount;
 	/** Selected account in a built-in provider + kind slot. */
 	active?: boolean;
 	/** Has a switch or a saved-account activation action. */
@@ -198,6 +208,8 @@ export interface ProviderView {
 	draft?: boolean;
 	/** Its state is not known yet (Claude before `/settings/claude-auth` answers). */
 	pending?: boolean;
+	/** Claude: this worker can save several CLI sign-ins (not on macOS). */
+	claudeSubscriptions?: boolean;
 }
 
 export interface DraftCredential {
@@ -272,6 +284,7 @@ function plural(n: number, one: string, many = `${one}s`): string {
 export function claudeInUse(claude: ClaudeAuthSummary | null, usageRecorded = false): boolean {
 	if (!claude) return false;
 	if (claude.cli?.signed_in || claude.api_key?.set || claude.accounts?.api_key.length || claude.cloud?.configured || claude.mode === 'cloud') return true;
+	if (claudeSubscriptionAccounts(claude).length) return true;
 	return claude.mode !== 'off' && usageRecorded;
 }
 
@@ -306,36 +319,15 @@ function claudeCredentials(claude: ClaudeAuthSummary | null, keyMasked?: string 
 	const out: CredentialView[] = [];
 	const cli = claude.cli;
 	const subActive = mode === 'subscription';
-	if (cli.signed_in || subActive) {
-		const ready = !!cli.signed_in;
-		const plan = claudePlan(cli.plan);
-		const account = [cli.email, plan ? `${plan} plan` : null].filter(Boolean).join(', ');
-		const status: StatusTone = !ready ? 'warn' : mode === 'off' ? 'off' : subActive ? 'ok' : 'standby';
-		const statusText = !ready
-			? cli.installed === false
-				? 'CLI not installed'
-				: 'Not signed in'
-			: mode === 'off'
-				? 'Off'
-				: subActive
-					? 'Active for Claude'
-					: 'Standby';
-		out.push({
-			item: CLAUDE_SUB_ITEM,
-			providerId: 'claude',
-			flavor: 'cli',
-			name: plan ? `Claude ${plan} subscription` : 'Claude subscription',
-			kind: 'Subscription',
-			summary: ready
-				? [account || 'Signed in', subActive ? '' : statusText.toLowerCase()].filter(Boolean).join(', ')
-				: statusText,
-			status,
-			statusText,
-			on: subActive && ready,
-			switchable: false,
-			enabled: subActive,
-			attention: subActive && !ready
-		});
+	const saved = claudeSubscriptionAccounts(claude);
+	if (saved.length) {
+		for (const account of saved) out.push(subscriptionCredential(claude, account));
+		// The CLI's own sign-in, in use but not saved as an entry yet: still a row.
+		if (!saved.some((a) => a.kind === 'default') && claude.accounts?.default_in_use && cli.signed_in) {
+			out.unshift(cliCredential(claude));
+		}
+	} else if (cli.signed_in || subActive) {
+		out.push(cliCredential(claude));
 	}
 	const keyActive = mode === 'api_key';
 	for (const account of claude.accounts?.api_key ?? []) {
@@ -409,6 +401,99 @@ function claudeCredentials(claude: ClaudeAuthSummary | null, keyMasked?: string 
 		});
 	}
 	return out;
+}
+
+/** Saved CLI sign-ins, only where the worker supports several (never on macOS). */
+export function claudeSubscriptionAccounts(claude: ClaudeAuthSummary | null): ClaudeSubscriptionAccount[] {
+	const accounts = claude?.accounts;
+	if (!accounts?.subscription_support?.supported) return [];
+	return accounts.subscription ?? [];
+}
+
+/** The single CLI sign-in in Claude Code's own folder (no saved entries, or not saved yet). */
+function cliCredential(claude: ClaudeAuthSummary): CredentialView {
+	const mode = claude.mode;
+	const cli = claude.cli;
+	const subActive = mode === 'subscription';
+	const ready = !!cli.signed_in;
+	const plan = claudePlan(cli.plan);
+	const account = [cli.email, plan ? `${plan} plan` : null].filter(Boolean).join(', ');
+	const status: StatusTone = !ready ? 'warn' : mode === 'off' ? 'off' : subActive ? 'ok' : 'standby';
+	const statusText = !ready
+		? cli.installed === false
+			? 'CLI not installed'
+			: 'Not signed in'
+		: mode === 'off'
+			? 'Off'
+			: subActive
+				? 'Active for Claude'
+				: 'Standby';
+	return {
+		item: CLAUDE_SUB_ITEM,
+		providerId: 'claude',
+		flavor: 'cli',
+		name: plan ? `Claude ${plan} subscription` : 'Claude subscription',
+		kind: 'Subscription',
+		summary: ready
+			? [account || 'Signed in', subActive ? '' : statusText.toLowerCase()].filter(Boolean).join(', ')
+			: statusText,
+		status,
+		statusText,
+		on: subActive && ready,
+		switchable: false,
+		enabled: subActive,
+		attention: subActive && !ready
+	};
+}
+
+/**
+ * Whether a saved sign-in is signed in. The active one also trusts the live
+ * `claude auth status` (it runs in the active folder), which is fresher than
+ * the entry's last check after "Sign in again".
+ */
+export function subscriptionReady(claude: ClaudeAuthSummary | null, account: ClaudeSubscriptionAccount): boolean {
+	if (account.active && claude?.cli?.signed_in) return true;
+	return !account.needs_sign_in;
+}
+
+/** One saved CLI sign-in as a credential row. */
+function subscriptionCredential(claude: ClaudeAuthSummary, account: ClaudeSubscriptionAccount): CredentialView {
+	const mode = claude.mode;
+	const subActive = mode === 'subscription';
+	const ready = subscriptionReady(claude, account);
+	const live = account.active && claude.cli?.signed_in;
+	const email = (live ? claude.cli.email : null) ?? account.email;
+	const plan = claudePlan((live ? claude.cli.plan : null) ?? account.plan);
+	const on = subActive && account.active && ready;
+	const statusText = !ready
+		? 'Sign in again'
+		: !account.active
+			? 'Saved'
+			: mode === 'off'
+				? 'Off'
+				: subActive
+					? 'Active for Claude'
+					: 'Selected for subscription mode';
+	const status: StatusTone = on ? 'ok' : !ready && account.active && subActive ? 'warn' : account.active && mode === 'off' ? 'off' : 'standby';
+	const identity = [email && email !== account.label ? email : null, plan ? `${plan} plan` : null].filter(Boolean).join(', ');
+	return {
+		item: claudeSubItem(account.id),
+		providerId: 'claude',
+		flavor: 'cli',
+		name: account.label || (plan ? `Claude ${plan} subscription` : 'Claude subscription'),
+		kind: 'Subscription',
+		summary: !ready
+			? 'Sign in again'
+			: [identity || 'Signed in', account.active && !subActive ? statusText.toLowerCase() : null].filter(Boolean).join(', '),
+		status,
+		statusText,
+		on,
+		active: account.active,
+		switchable: true,
+		enabled: account.active,
+		attention: account.active && subActive && !ready,
+		subscription: account
+	};
 }
 
 export function claudePlan(plan: string | null | undefined): string | null {
@@ -567,6 +652,8 @@ export function buildProviders(input: ProvidersInput): ProviderView[] {
 	for (const d of drafts) push(d.providerId, draftCredential(d));
 
 	const views: ProviderView[] = BUILT_IN.map((b) => view(b.id, b.name, b.glyph, b.letter, byProvider.get(b.id) ?? []));
+	const claudeView = views.find((v) => v.claude);
+	if (claudeView) claudeView.claudeSubscriptions = !!input.claude?.accounts?.subscription_support?.supported;
 	if (input.claudePending && !input.claude) {
 		const claude = views.find((v) => v.claude);
 		if (claude && claude.credentials.length === 0) claude.pending = true;
@@ -677,15 +764,30 @@ export interface AddableKind extends CredentialKindDef {
 }
 
 /** Kinds the "+" offers: the ones not added yet, plus another of a kind that allows several. */
-export function addableKinds(p: Pick<ProviderView, 'id' | 'credentials'>): AddableKind[] {
+export function addableKinds(p: Pick<ProviderView, 'id' | 'credentials' | 'claudeSubscriptions'>): AddableKind[] {
 	const present = new Set(p.credentials.map((c) => c.flavor));
 	return kindsOf(p.id)
+		// Claude saves several CLI sign-ins only where the worker supports it (not macOS).
+		.map((k) => (k.flavor === 'cli' && p.claudeSubscriptions ? { ...k, multiple: true } : k))
 		.filter((k) => k.multiple || !present.has(k.flavor))
-		.map((k) => ({
-			...k,
-			menuLabel: k.multiple && present.has(k.flavor) ? `Another ${k.label}` : k.label,
-			hint: k.multiple && present.has(k.flavor) ? (k.flavor === 'device' ? 'Becomes active after sign-in' : 'New key becomes active') : k.hint
-		}));
+		.map((k) => {
+			const another = k.multiple && present.has(k.flavor);
+			const signIn = k.flavor === 'device' || k.flavor === 'cli';
+			return {
+				...k,
+				menuLabel: another ? `Another ${k.label}` : k.label,
+				hint: another ? (signIn ? 'Becomes active after sign-in' : 'New key becomes active') : k.hint
+			};
+		});
+}
+
+/**
+ * A "Subscription" draft for Claude adds another saved sign-in (a fresh
+ * folder) rather than signing in to Claude Code's own folder: the worker
+ * supports several and a subscription row already exists.
+ */
+export function claudeAddsAnotherSubscription(p: Pick<ProviderView, 'claude' | 'credentials' | 'claudeSubscriptions'>): boolean {
+	return !!p.claude && !!p.claudeSubscriptions && p.credentials.some((c) => c.flavor === 'cli' && !c.draft);
 }
 
 /** Claude keeps its mode control and also offers saved-key setup. */

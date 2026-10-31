@@ -16,7 +16,8 @@ distribution, not as a runtime sync service.
 
 The sharing policy in `app/network/policy.py` applies to incoming operations
 and state transfers as well as outgoing rows. Local-only settings, including
-`claude_auth_mode:<instance id>`, `claude_cloud_config` and
+`claude_auth_mode:<instance id>`, `claude_cli_logins:<instance id>` (the saved
+Claude subscription sign-ins and which one is active), `claude_cloud_config` and
 `claude_cloud_secrets`, cannot be inserted, overwritten or deleted by a peer.
 A refused operation advances its origin stream without retaining its row in
 records, conflicts or the forwarding log; later shared operations still apply.

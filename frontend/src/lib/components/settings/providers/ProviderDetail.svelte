@@ -57,7 +57,11 @@
 
 	const badge = $derived(provider.gateway ? 'Custom gateway' : provider.media ? 'Media provider' : 'Provider');
 	const subtitle = $derived(
-		provider.claude ? 'Saved keys, one selected for API key mode' : provider.media ? 'Used by media tools' : provider.gateway ? 'Independent model source' : 'One active account per kind'
+		provider.claude
+			? provider.claudeSubscriptions
+				? 'Saved sign-ins and keys, one of each selected'
+				: 'Saved keys, one selected for API key mode'
+			: provider.media ? 'Used by media tools' : provider.gateway ? 'Independent model source' : 'One active account per kind'
 	);
 
 	const facts = $derived(
