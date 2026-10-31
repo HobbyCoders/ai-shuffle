@@ -1293,6 +1293,21 @@
     "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
     "base_settings": false
   },
+  "FLUID_TOOL_OUTPUT_GUARD_": {
+    "kind": "internal",
+    "reason": "Construction prefix for the harness's private per-process delegated guard-readiness handshake; not user configuration",
+    "base_settings": false
+  },
+  "FLUID_TOOL_OUTPUT_GUARD_NONCE": {
+    "kind": "internal",
+    "reason": "Harness-generated per-process readiness nonce returned by the CLI function-hook module and cleared before tool subprocesses inherit it; not user configuration",
+    "base_settings": false
+  },
+  "FLUID_TOOL_OUTPUT_GUARD_RECEIPT": {
+    "kind": "internal",
+    "reason": "Harness-chosen per-process temporary readiness receipt path written by the CLI function-hook module; cleared from the environment before tool children and removed on process cleanup",
+    "base_settings": false
+  },
   "FLUID_TRACE_REQUESTS": {
     "kind": "infra",
     "reason": "File path for raw provider-request diagnostic tracing",
