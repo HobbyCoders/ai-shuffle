@@ -42,5 +42,7 @@
 <style>
 	.control { display: inline-flex; align-items: center; gap: 10px; flex: none; }
 	.state { font-size: 12px; color: var(--st-mfg); white-space: nowrap; }
-	@media (pointer: coarse) { .control { min-height: 44px; } .control :global(button) { min-height: 44px; min-width: 44px; } }
+	/* Touch target for the "Use" button only: forcing 44px on the Switch too
+	   squashed its 36x21 pill into a 44x44 circle on phones. */
+	@media (pointer: coarse) { .control { min-height: 44px; } .control :global(button:not([role='switch'])) { min-height: 44px; min-width: 44px; } }
 </style>
