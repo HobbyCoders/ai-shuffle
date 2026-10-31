@@ -17,14 +17,19 @@ folder without activating another saved entry. The Claude Code mode
 
 Every ``claude`` spawn applies :func:`apply_cli_home`, which points it at the
 active entry's folder. Identity (email, plan, organization) only ever comes from
-``claude auth status`` run against an entry's folder; nothing here opens the
-CLI's credential or config files.
+``claude auth status`` run against an entry's folder; nothing here reads, copies
+or stores the CLI's credentials. On disk this module only prepares and removes
+whole folders (:mod:`app.core.claude_cli_home`): preparing one links the shared
+state and creates an empty ``settings.json`` (``{}``) in the default folder if it
+has none, and deleting a saved entry removes its app-made folder entirely after
+``claude auth logout`` there.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from typing import Any, Optional
@@ -42,6 +47,9 @@ DEFAULT_LABEL = "Claude subscription"
 _PROBE_INTERVAL_SECONDS = 3.0
 _VERIFY_INTERVAL_SECONDS = 30.0
 _lock = threading.RLock()
+# Serializes creating/repairing a saved folder on the spawn path against
+# removing one, so a spawn never recreates a folder that is being deleted.
+_folder_lock = threading.Lock()
 _verified: dict[str, float] = {}
 _last_pending_probe = 0.0
 # Set when the active folder changes; the API then retires idle pooled CLIs.
@@ -135,11 +143,17 @@ def active_home_env() -> dict[str, str]:
         return {}
     now = time.monotonic()
     if now - _verified.get(account_id, 0.0) > _VERIFY_INTERVAL_SECONDS:
-        try:
-            home.ensure(account_id)
-            _verified[account_id] = now
-        except (home.HomeError, OSError):
-            logger.warning("The active Claude sign-in folder could not be repaired", exc_info=True)
+        with _folder_lock:
+            # Re-read under the lock: a delete saves the shortened list before
+            # it removes the folder, so a deleted entry is never recreated.
+            account_id = active_home_id()
+            if account_id is None:
+                return {}
+            try:
+                home.ensure(account_id)
+                _verified[account_id] = now
+            except (home.HomeError, OSError):
+                logger.warning("The active Claude sign-in folder could not be repaired", exc_info=True)
     return home.env_for(account_id)
 
 
@@ -176,6 +190,23 @@ def support() -> dict[str, Any]:
     return {"supported": supported, "reason": reason}
 
 
+def _quote_powershell(value: str) -> str:
+    """A PowerShell single-quoted literal (every single-quote form doubled)."""
+    return "'" + re.sub("['\u2018\u2019\u201a\u201b]", lambda m: m.group(0) * 2, value) + "'"
+
+
+def _quote_posix(value: str) -> str:
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
+def _cmd_command(folder: str) -> Optional[str]:
+    """The Command Prompt line, or None when the path cannot be quoted for cmd
+    (a ``"`` ends the quoted ``set``; ``%`` and ``!`` would be expanded)."""
+    if any(ch in folder for ch in '"%!\r\n'):
+        return None
+    return f'set "CLAUDE_CONFIG_DIR={folder}" && claude auth login'
+
+
 def _login_state(pending: Optional[dict]) -> Optional[dict]:
     if not pending:
         return None
@@ -193,9 +224,9 @@ def _login_state(pending: Optional[dict]) -> Optional[dict]:
         "command": "claude auth login",
         "env": {"CLAUDE_CONFIG_DIR": folder},
         "commands": None if terminal else {
-            "powershell": f"$env:CLAUDE_CONFIG_DIR='{folder}'; claude auth login",
-            "cmd": f'set "CLAUDE_CONFIG_DIR={folder}" && claude auth login',
-            "posix": f"CLAUDE_CONFIG_DIR='{folder}' claude auth login",
+            "powershell": f"$env:CLAUDE_CONFIG_DIR={_quote_powershell(folder)}; claude auth login",
+            "cmd": _cmd_command(folder),
+            "posix": f"CLAUDE_CONFIG_DIR={_quote_posix(folder)} claude auth login",
         },
     }
     if terminal:
@@ -320,15 +351,8 @@ def change(account_id: str, action: str, label: str = "") -> None:
             return
         if action == "delete":
             was_active_folder = _active_saved_id(state) == account["id"]
-            if account["kind"] == KIND_SAVED:
-                _sign_out_folder(account["id"])
-                try:
-                    home.remove(account["id"])
-                except (home.HomeError, OSError) as exc:
-                    raise SubscriptionError(
-                        "storage_unavailable",
-                        f"The saved sign-in folder could not be removed ({type(exc).__name__}).", 503,
-                    ) from None
+            # Drop the entry first, so no new spawn picks this folder (and
+            # recreates it) while it is being removed.
             state["accounts"] = [a for a in state["accounts"] if a["id"] != account["id"]]
             if state["active_id"] == account["id"]:
                 state["active_id"] = None
@@ -336,6 +360,17 @@ def change(account_id: str, action: str, label: str = "") -> None:
             _verified.pop(account["id"], None)
             if was_active_folder:
                 _switched()
+            if account["kind"] == KIND_SAVED:
+                _sign_out_folder(account["id"])
+                try:
+                    with _folder_lock:
+                        home.remove(account["id"])
+                except (home.HomeError, OSError) as exc:
+                    raise SubscriptionError(
+                        "storage_unavailable",
+                        "The sign-in was removed from the list, but its folder could not be "
+                        f"deleted ({type(exc).__name__}).", 503,
+                    ) from None
             return
         raise SubscriptionError("invalid_action", "Unknown account action.", 400)
 
@@ -405,33 +440,8 @@ def start_login() -> dict:
         return _login_state(pending)
 
 
-def _poll_pending() -> None:
-    """Finish a pending add-another login once the CLI reports it."""
-    global _last_pending_probe
-    state = _load()
-    pending = state["pending"]
-    if pending is None:
-        return
-    from app.core import claude_cli_login
-
-    failed = False
-    if claude_cli_login.terminal_supported():
-        run = claude_cli_login.login_terminal.read_for(_tag(pending["id"]))
-        if run is not None and run["running"]:
-            return
-        failed = run is not None and run["succeeded"] is False
-    now = time.monotonic()
-    if now - _last_pending_probe < _PROBE_INTERVAL_SECONDS:
-        return
-    _last_pending_probe = now
-    if not home.intact(pending["id"]):
-        return
-    status = _probe(pending["id"])
-    if not status.signed_in:
-        if failed and pending.get("status") != "failed":
-            pending.update(status="failed", error="The sign-in did not finish. Try again or cancel it.")
-            _save(state)
-        return
+def _adopt(state: dict, pending: dict, status) -> str:
+    """Save the pending folder's finished sign-in as the active entry."""
     account = {"id": pending["id"], "kind": KIND_SAVED,
                "label": status.email or DEFAULT_LABEL}
     _record_identity(account, status)
@@ -442,19 +452,70 @@ def _poll_pending() -> None:
     _verified[account["id"]] = time.monotonic()
     logger.info("Saved another Claude subscription sign-in and made it active")
     _switched()
+    return account["id"]
 
 
-def cancel_login() -> None:
-    """Stop a pending add-another login and remove its folder."""
+def _signed_in_status(account_id: str):
+    """``claude auth status`` for an intact pending folder that reports a sign-in, else None."""
+    if not home.intact(account_id):
+        return None
+    status = _probe(account_id)
+    return status if status.signed_in else None
+
+
+def _poll_pending() -> None:
+    """Finish a pending add-another login once the CLI reports it.
+
+    With the in-app terminal, a pending login whose run is gone (stopped from
+    another view, never started, or expired) or has exited without signing in
+    is marked failed, so the owner sees it and can try again or cancel.
+    """
+    global _last_pending_probe
+    state = _load()
+    pending = state["pending"]
+    if pending is None:
+        return
+    from app.core import claude_cli_login
+
+    ended = False
+    if claude_cli_login.terminal_supported():
+        run = claude_cli_login.login_terminal.read_for(_tag(pending["id"]))
+        if run is not None and run["running"]:
+            return
+        ended = True  # no run of ours is going: nothing else will finish it
+    now = time.monotonic()
+    if now - _last_pending_probe < _PROBE_INTERVAL_SECONDS:
+        return
+    _last_pending_probe = now
+    status = _signed_in_status(pending["id"])
+    if status is None:
+        if ended and pending.get("status") != "failed":
+            pending.update(status="failed", error="The sign-in did not finish. Try again or cancel it.")
+            _save(state)
+        return
+    _adopt(state, pending, status)
+
+
+def cancel_login() -> Optional[str]:
+    """Stop a pending add-another login and remove its folder.
+
+    When the CLI already finished signing in to that folder (before the poll
+    caught up), the sign-in is kept instead: it is saved and made active just
+    as the poll would, and its id is returned. Otherwise returns None.
+    """
     _require_support()
     with _lock:
         state = _load()
         pending = state["pending"]
         if pending is None:
-            return
+            return None
         from app.core import claude_cli_login
 
+        # Stop first, then ask: a login that finished meanwhile is still kept.
         claude_cli_login.login_terminal.cancel_for(_tag(pending["id"]))
+        status = _signed_in_status(pending["id"])
+        if status is not None:
+            return _adopt(state, pending, status)
         try:
             home.remove(pending["id"])
         except (home.HomeError, OSError) as exc:
@@ -464,6 +525,7 @@ def cancel_login() -> None:
             ) from None
         state["pending"] = None
         _save(state)
+        return None
 
 
 # ─── Startup ─────────────────────────────────────────────────────────────────

@@ -135,6 +135,20 @@ def test_subscription_routes_contract(client, sign_ins, tmp_path):
     cancelled = client.post(BASE + "/subscription/cancel-login")
     assert cancelled.status_code == 200 and cancelled.json()["accounts"]["login_pending"] is False
     assert not (tmp_path / "logins" / pending["id"]).exists()
+    assert "account_id" not in cancelled.json()
+
+    # Cancelled after the CLI finished but before a poll saw it: the sign-in is kept.
+    pending = client.post(BASE + "/subscription/add-another").json()["login"]
+    late_folder = str(tmp_path / "logins" / pending["id"])
+    sign_ins[late_folder] = "late@example.com"
+    claude_subscriptions._last_pending_probe = float("inf")
+    kept = client.post(BASE + "/subscription/cancel-login")
+    assert kept.status_code == 200, kept.text
+    body = kept.json()
+    assert body["account_id"] == pending["id"] and body["login"] is None
+    row = next(r for r in body["accounts"]["subscription"] if r["id"] == pending["id"])
+    assert row["active"] and row["email"] == "late@example.com"
+    assert claude_subscriptions.active_home_env() == {"CLAUDE_CONFIG_DIR": late_folder}
 
 
 @pytest.mark.parametrize("method,path,body", [

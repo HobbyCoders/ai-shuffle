@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 from uuid import uuid4
 
 from app.core import claude_subscriptions as subscriptions, encryption
@@ -241,9 +241,12 @@ async def start_login(*, external: bool = False) -> dict:
     return await run_sync(_subscription_call, subscriptions.start_login)
 
 
-async def cancel_login() -> None:
-    """Stop a pending ``add another`` sign-in and remove its folder."""
+async def cancel_login() -> Optional[str]:
+    """Stop a pending ``add another`` sign-in and remove its folder.
+
+    Returns the new entry's id when the CLI had already finished signing in,
+    in which case the sign-in was kept and made active instead.
+    """
     from app.db.async_database import run_sync
 
-    await run_sync(_subscription_call, subscriptions.cancel_login)
-    return None
+    return await run_sync(_subscription_call, subscriptions.cancel_login)

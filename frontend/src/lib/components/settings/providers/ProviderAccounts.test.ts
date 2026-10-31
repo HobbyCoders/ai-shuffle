@@ -171,6 +171,103 @@ describe('saved Claude subscriptions', () => {
 		expect(providerDrafts.list).toHaveLength(0);
 	}, 10000);
 
+	const ADD = '/settings/claude-auth/accounts/subscription/add-another';
+	const SAVE = 'POST /settings/claude-auth/accounts/subscription/save-current';
+	async function openAdd() {
+		await show();
+		await fireEvent.click(group('Claude').getByRole('button', { name: 'Add credential to Claude' }));
+		await fireEvent.click(screen.getByRole('menuitem', { name: /Another Subscription/ }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Start sign-in' }));
+	}
+	/** The worker's cancel found the CLI already signed in, so it kept the sign-in. */
+	const keptOnCancel = () => {
+		const a = worker.state.claude.accounts!;
+		a.subscription = [
+			...a.subscription.map((s) => ({ ...s, active: false })),
+			subAccount({ id: 'sub-new', kind: 'saved', label: 'late@example.com', email: 'late@example.com', active: true })
+		];
+		a.default_in_use = false;
+		a.login = null;
+		a.login_pending = false;
+		return { accounts: a, account_id: 'sub-new', login: null };
+	};
+
+	it('does not start the sign-in when saving the current one fails for another reason', async () => {
+		worker = fakeWorker({ rows: [chatgptRow()], claude: claudeSummary({ accounts: claudeAccounts() }) }, {
+			[SAVE]: () => { throw { status: 503, detail: { code: 'storage_unavailable', message: 'Saved sign-ins could not be stored.' } }; }
+		});
+		await openAdd();
+		expect(await screen.findByText('Saved sign-ins could not be stored.')).toBeTruthy();
+		expect(worker.sent('POST', ADD)).toHaveLength(0);
+		expect(screen.getByRole('button', { name: 'Start sign-in' })).toBeTruthy();
+	});
+
+	it('still starts the sign-in when the current one turns out not to be signed in', async () => {
+		worker = fakeWorker({ rows: [chatgptRow()], claude: claudeSummary({ accounts: claudeAccounts() }) }, {
+			'GET /auth/claude/cli-login': runningTerminal,
+			[SAVE]: () => { throw { status: 409, detail: { code: 'not_signed_in', message: 'Claude Code is not signed in.' } }; }
+		});
+		await openAdd();
+		await screen.findByTestId('claude-cli-terminal');
+		expect(worker.sent('POST', ADD)).toHaveLength(1);
+		expect(screen.queryByRole('alert')).toBeNull();
+	});
+
+	it('Cancel opens a sign-in the worker kept because it had already finished', async () => {
+		worker = fakeWorker({
+			rows: [chatgptRow()], subscriptionTerminal: false,
+			claude: claudeSummary({ accounts: claudeAccounts({ subscription: [subAccount()] }) })
+		}, { 'POST /settings/claude-auth/accounts/subscription/cancel-login': keptOnCancel });
+		await openAdd();
+		await screen.findByTestId('claude-add-subscription');
+		await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+		await screen.findByRole('heading', { name: 'late@example.com' });
+		expect(settingsNav.selectedItem('providers')).toBe('claude:subscription:sub-new');
+		expect(providerDrafts.list).toHaveLength(0);
+	});
+
+	it("the terminal's Stop opens a sign-in the worker kept because it had already finished", async () => {
+		worker = fakeWorker({
+			rows: [chatgptRow()], claude: claudeSummary({ accounts: claudeAccounts({ subscription: [subAccount()] }) })
+		}, {
+			'GET /auth/claude/cli-login': runningTerminal,
+			'POST /settings/claude-auth/accounts/subscription/cancel-login': keptOnCancel
+		});
+		await openAdd();
+		await screen.findByTestId('claude-cli-terminal');
+		await fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+		await screen.findByRole('heading', { name: 'late@example.com' });
+		expect(worker.sent('POST', '/settings/claude-auth/accounts/subscription/cancel-login')).toHaveLength(1);
+		expect(worker.sent('POST', '/auth/claude/cli-login/cancel')).toHaveLength(0);
+	});
+
+	it('hides Command Prompt when the folder path cannot be quoted for it', async () => {
+		worker = fakeWorker({
+			rows: [chatgptRow()], subscriptionTerminal: false,
+			claude: claudeSummary({ accounts: claudeAccounts({ subscription: [subAccount()] }) })
+		}, {
+			['POST ' + ADD]: () => {
+				const a = worker.state.claude.accounts!;
+				a.login = {
+					id: 'sub-new', status: 'waiting', error: null, terminal: false, command: 'claude auth login',
+					env: { CLAUDE_CONFIG_DIR: '/data/50%/claude-logins/sub-new' },
+					commands: {
+						powershell: "$env:CLAUDE_CONFIG_DIR='/data/50%/claude-logins/sub-new'; claude auth login",
+						cmd: null,
+						posix: "CLAUDE_CONFIG_DIR='/data/50%/claude-logins/sub-new' claude auth login"
+					}
+				};
+				a.login_pending = true;
+				return { accounts: a, login: a.login };
+			}
+		});
+		await openAdd();
+		await screen.findByTestId('claude-add-subscription');
+		expect(screen.getByRole('button', { name: 'PowerShell' })).toBeTruthy();
+		expect(screen.queryByRole('button', { name: 'Command Prompt' })).toBeNull();
+		expect(screen.getByText(/CLAUDE_CONFIG_DIR/)).toBeTruthy();
+	});
+
 	it('switches, renames and removes saved sign-ins without changing the Claude Code mode', async () => {
 		worker = fakeWorker({
 			rows: [chatgptRow()],

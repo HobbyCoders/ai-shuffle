@@ -1117,7 +1117,7 @@ Which credential Claude Code agents run on: your Claude subscription (the signed
 | `DELETE /api_key/{id}` | none | Delete the entry; deleting the active entry leaves no key active. |
 | `POST /subscription/save-current` | `{"label":"Personal"}` | Save the sign-in in Claude Code's own folder as a `default` entry (one at most; saving again relabels it). Needs that folder signed in: `409 not_signed_in` otherwise. Returns `account_id`. |
 | `POST /subscription/add-another` | none | Start `claude auth login` into a fresh folder. Returns `login` (below). The sign-in is saved and made active once the CLI reports it. |
-| `POST /subscription/cancel-login` | none | Stop a pending add-another sign-in and delete its unfinished folder. |
+| `POST /subscription/cancel-login` | none | Stop a pending add-another sign-in and delete its unfinished folder. If the CLI had already finished signing in there, the sign-in is kept and made active instead, and its id comes back as `account_id`. |
 | `PATCH /subscription/{id}` | `{"label":"Work"}` | Rename; at most 120 characters. |
 | `POST /subscription/{id}/activate` | none | Make this sign-in the one Claude Code uses; the other subscription turns off. |
 | `DELETE /subscription/{id}` | none | Forget the entry. A `saved` entry is signed out with `claude auth logout` in its folder and its folder is deleted; a `default` entry is only forgotten (Claude Code's own folder and sign-in stay). |
@@ -1188,12 +1188,14 @@ folder) repairs it.
 ```
 
 `status` is `running` (the in-app terminal is running it), `waiting` (waiting
-for the sign-in) or `failed` (the CLI exited without signing in; start again or
-cancel). With `terminal: true` (Docker and Linux), drive it like the regular
+for the sign-in) or `failed` (the CLI exited, or its in-app run is gone, without
+signing in; start again or cancel). With `terminal: true` (Docker and Linux), drive it like the regular
 sign-in: read `GET /api/v1/auth/claude/cli-login`, send the code with
 `POST /api/v1/auth/claude/cli-login/input`. Without the in-app terminal
 (desktop app, Windows) `terminal_state` is absent and `commands` holds the
-command to run in a terminal on that worker (`powershell`, `cmd`, `posix`).
+command to run in a terminal on that worker (`powershell`, `cmd`, `posix`;
+the folder path is quoted for each shell, and `cmd` is `null` when the path
+holds a character Command Prompt cannot quote: `"`, `%` or `!`).
 Either way, keep polling `GET /claude-auth/accounts` (every few seconds): it
 checks the new folder with `claude auth status` (at most every 3 seconds) and,
 once signed in, saves it as the active entry and clears `login`.

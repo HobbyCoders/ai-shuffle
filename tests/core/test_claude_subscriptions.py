@@ -338,6 +338,106 @@ def test_in_app_terminal_login_targets_the_new_folder(world, monkeypatch):
     assert not os.path.lexists(world.root / login["id"])
 
 
+def test_pending_login_whose_run_is_gone_fails_and_cancel_cleans_up(world, monkeypatch):
+    """The tagged run was stopped elsewhere: the pending sign-in must not wait forever."""
+    run = {"state": {"running": True, "succeeded": None}}
+
+    class Terminal:
+        def start(self, binary=None, *, home_env=None, tag=None):
+            return run["state"]
+
+        def read_for(self, tag):
+            return None if run["state"] is None else dict(run["state"])
+
+        def cancel_for(self, tag):
+            pass
+
+    monkeypatch.setattr(claude_cli_login, "terminal_supported", lambda: True)
+    monkeypatch.setattr(claude_cli_login, "login_terminal", Terminal())
+    login = subs.start_login()
+    assert subs.payload()["login"]["status"] == "running"
+    run["state"] = None  # e.g. the regular view's Stop reset the terminal
+    subs._last_pending_probe = 0.0
+    listing = subs.payload()
+    assert listing["login"]["status"] == "failed" and listing["login"]["error"]
+    subs.cancel_login()
+    assert not os.path.lexists(world.root / login["id"])
+    assert subs.payload()["login_pending"] is False
+
+
+def test_cancel_keeps_a_sign_in_that_already_finished(world):
+    """The CLI finished before the poll adopted it: cancel saves it instead of deleting it."""
+    login = subs.start_login()
+    folder = world.root / login["id"]
+    world.signed[str(folder)] = "late@example.com"
+    # The 3 s poll has not run since the sign-in finished.
+    subs._last_pending_probe = float("inf")
+    assert subs.payload()["login_pending"] is True
+    assert subs.cancel_login() == login["id"]
+    assert folder.is_dir() and home.intact(login["id"])
+    listing = subs.payload()
+    assert listing["login_pending"] is False
+    [row] = listing["subscription"]
+    assert row["id"] == login["id"] and row["active"] and row["email"] == "late@example.com"
+    assert subs.active_home_env() == {"CLAUDE_CONFIG_DIR": str(folder)}
+    assert subs._reap_due is True
+    # With nothing pending, cancel is a no-op.
+    assert subs.cancel_login() is None
+
+
+def test_commands_quote_a_data_dir_with_an_apostrophe(world, tmp_path, monkeypatch):
+    root = tmp_path / "Bob's data" / home.ROOT_NAME
+    monkeypatch.setattr(home, "root", lambda: root)
+    login = subs.start_login()
+    folder = str(root / login["id"])
+    commands = login["commands"]
+    quoted = folder.replace("'", "''")
+    assert commands["powershell"] == f"$env:CLAUDE_CONFIG_DIR='{quoted}'; claude auth login"
+    assert commands["cmd"] == f'set "CLAUDE_CONFIG_DIR={folder}" && claude auth login'
+    # A real POSIX shell gets exactly the folder back.
+    probe = commands["posix"].replace("claude auth login", "printenv CLAUDE_CONFIG_DIR")
+    out = subprocess.run(["sh", "-c", probe], capture_output=True, text=True, check=True).stdout
+    assert out.rstrip("\n") == folder
+    # PowerShell's typographic quotes are single quotes too; cmd cannot quote % or ".
+    assert subs._quote_powershell("a\u2019b") == "'a\u2019\u2019b'"
+    for bad in ('/data/50%/x', '/data/a"b', '/data/a!b'):
+        assert subs._cmd_command(bad) is None
+
+
+def test_delete_drops_the_entry_before_removing_its_folder(world, monkeypatch):
+    """A spawn during or after a delete never recreates the deleted folder."""
+    account_id = _add(world, "second@example.com")
+    folder = world.root / account_id
+    seen = []
+
+    def run_home(args, home_env):
+        # The folder is still there, but the list no longer has the entry and
+        # a spawn now uses the default folder.
+        seen.append((account_id in [a["id"] for a in subs._load()["accounts"]],
+                     subs._load()["active_id"], subs.active_home_env()))
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(cs, "run_home", run_home)
+    subs.change(account_id, "delete")
+    assert seen == [(False, None, {})]
+    assert not os.path.lexists(folder)
+    # A spawn that read the old active entry just before the delete re-checks
+    # under the folder lock and does not bring the folder back.
+    real = subs.active_home_id
+    stale = iter([account_id])
+    monkeypatch.setattr(subs, "active_home_id", lambda: next(stale, None) or real())
+    assert subs.active_home_env() == {}
+    assert not os.path.lexists(folder)
+
+
+def test_claude_off_mode_does_not_point_spawns_at_a_saved_folder(world, monkeypatch):
+    from app.core.environment import inject_claude_code_auth
+    _add(world, "second@example.com")
+    assert "CLAUDE_CONFIG_DIR" in inject_claude_code_auth({})
+    monkeypatch.setattr(claude_auth_mode, "current_mode", lambda: claude_auth_mode.MODE_OFF)
+    assert "CLAUDE_CONFIG_DIR" not in inject_claude_code_auth({})
+
+
 def test_missing_active_folder_is_repaired_and_flagged(world):
     account_id = _add(world, "second@example.com")
     folder = world.root / account_id

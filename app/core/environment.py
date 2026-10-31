@@ -367,10 +367,12 @@ def inject_claude_code_auth(
       ``ANTHROPIC_API_KEY``. Other Anthropic credential variables from the host
       or the profile env are kept away from the CLI, so it sees that key and
       nothing else credential-like.
-    - ``subscription``: nothing is injected, and any ``ANTHROPIC_API_KEY`` /
-      ``ANTHROPIC_AUTH_TOKEN`` from the host or the profile env is kept away,
-      so the CLI runs on the sign-in the user completed with ``claude auth
-      login``. The CLI's own credential files are never read or touched here.
+    - ``subscription``: no credential is injected, and any
+      ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN`` from the host or the
+      profile env is kept away, so the CLI runs on the sign-in the user
+      completed with ``claude auth login``. With a saved sign-in active, only
+      ``CLAUDE_CONFIG_DIR`` is set to its folder (see below). The CLI's own
+      credential files are never read or touched here.
     - ``cloud``: the owner's chosen cloud provider or gateway
       (``app.core.claude_cloud_auth``). Every ``AWS_``, ``GOOGLE_``,
       ``AZURE_``, ``ANTHROPIC_`` and provider-switch variable, plus
@@ -380,8 +382,8 @@ def inject_claude_code_auth(
       With neither configuration, the credential gate refuses. When the values cannot be prepared,
       :class:`ClaudeCloudSetupError` is raised (the host names are already
       marked for removal), so the run fails instead of falling back.
-    - ``off``: Claude is turned off. Nothing is injected and every Anthropic
-      credential variable (``ANTHROPIC_API_KEY``, ``ANTHROPIC_AUTH_TOKEN``,
+    - ``off``: Claude is turned off. Nothing is injected (not even the saved
+      sign-in folder) and every Anthropic credential variable (``ANTHROPIC_API_KEY``, ``ANTHROPIC_AUTH_TOKEN``,
       ``CLAUDE_CODE_OAUTH_TOKEN``) is kept away; the credential gate refuses
       the turn before a CLI starts, so this only guards a spawn that slipped
       past it.
@@ -390,9 +392,9 @@ def inject_claude_code_auth(
     ``FLUID_CHILD_ENV_UNSET`` marker, which the delegated loop honors and never
     passes on.
 
-    In every mode the CLI runs in the active saved subscription sign-in's
-    folder (``CLAUDE_CONFIG_DIR``, :mod:`app.core.claude_subscriptions`); with
-    no saved sign-in active the folder is left as inherited.
+    In every mode but ``off`` the CLI runs in the active saved subscription
+    sign-in's folder (``CLAUDE_CONFIG_DIR``, :mod:`app.core.claude_subscriptions`);
+    with no saved sign-in active the folder is left as inherited.
 
     When ``provider_id`` is truthy the session targets a non-Anthropic model
     provider: ``apply_provider_env`` owns auth for those spawns (provider token
@@ -405,9 +407,9 @@ def inject_claude_code_auth(
 
     from app.core import claude_auth_mode, claude_subscriptions
 
-    claude_subscriptions.apply_cli_home(env)
-
     mode = claude_auth_mode.current_mode()
+    if mode != claude_auth_mode.MODE_OFF:
+        claude_subscriptions.apply_cli_home(env)
     if mode == claude_auth_mode.MODE_API_KEY:
         unset = claude_auth_mode.API_KEY_UNSET
         api_key = _get_decrypted_api_key(claude_auth_mode.API_KEY_SETTING)

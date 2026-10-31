@@ -622,9 +622,9 @@ async def claude_cli_login_input(request: Request, token: str = Depends(require_
 
 @router.post("/claude/cli-login/cancel")
 async def claude_cli_login_cancel(token: str = Depends(require_admin)):
-    """Stop the running login."""
+    """Stop the running login (409 when Settings' add-another sign-in owns it)."""
     from app.core.claude_cli_login import login_terminal
-    return await run_sync(login_terminal.cancel)
+    return await run_sync(_login_terminal_call, login_terminal.cancel)
 
 
 @router.get("/claude/login-instructions")

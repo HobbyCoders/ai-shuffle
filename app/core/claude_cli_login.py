@@ -6,7 +6,8 @@ page shows back into the CLI. AI Shuffle only runs the command on a
 pseudo-terminal, shows what it prints and passes typed lines to it. It never
 reads, stores or forwards anything the CLI writes to its config dir.
 
-- One login at a time per worker. Starting again while one runs returns it.
+- One login at a time per worker. Starting again while one runs returns it;
+  starting one while another caller's tagged run is going is refused.
 - Only ``claude auth login`` runs here; there is no general shell.
 - Echo is off on the terminal, so a pasted code never lands in the output kept
   in memory; typed input is written to the CLI and not kept or logged.
@@ -17,8 +18,9 @@ reads, stores or forwards anything the CLI writes to its config dir.
   Windows show the command to run in the user's own terminal instead.
 - The login signs in to the active saved sign-in's folder
   (:mod:`app.core.claude_subscriptions`), or to a fresh folder when Settings
-  adds another subscription; such a run carries a ``tag`` so only its owner
-  can read or stop it.
+  adds another subscription; such a run carries a ``tag``. Only its owner can
+  stop it (the untagged :meth:`LoginTerminal.cancel` refuses), while the
+  terminal relay still reads it and types into it through the untagged routes.
 """
 
 from __future__ import annotations
@@ -212,9 +214,18 @@ class LoginTerminal:
         """Stop the run only when it belongs to ``tag``."""
         with self._lock:
             if self._tag == tag:
-                self.cancel()
+                self._stop()
 
     def cancel(self) -> dict:
+        """Stop an untagged run. A running tagged run is refused: stopping it
+        here would leave its owner's pending sign-in waiting on nothing."""
+        with self._lock:
+            if self._tag is not None and self._proc is not None and self._proc.running:
+                raise RuntimeError("This sign-in was started from Settings > Providers > "
+                                   "Another Subscription. Cancel it there.")
+            return self._stop()
+
+    def _stop(self) -> dict:
         with self._lock:
             proc = self._proc
             if proc is not None and proc.running:

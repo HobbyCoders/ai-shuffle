@@ -6,11 +6,14 @@
 	 * app and Windows show the command to run in a terminal on that worker.
 	 * Either way the saved-accounts list is polled; once the CLI reports the
 	 * sign-in, the worker saves it as the active subscription and clears
-	 * `login`. Cancel stops it and removes the unfinished folder.
+	 * `login`. Cancel stops it and removes the unfinished folder; when the CLI
+	 * had already finished signing in, the worker keeps that sign-in instead
+	 * and this view opens it, as a finished poll would.
 	 *
 	 * Before the first extra sign-in, the CLI's own sign-in is saved as the
 	 * `default` entry so it stays listed (and can be switched back to) once
-	 * the new one becomes active.
+	 * the new one becomes active. If that save fails for any reason other than
+	 * "not signed in", the sign-in does not start.
 	 */
 	import { onDestroy, onMount } from 'svelte';
 	import { SquareTerminal } from 'lucide-svelte';
@@ -18,6 +21,7 @@
 	import {
 		addAnotherClaudeSubscription,
 		cancelClaudeSubscriptionLogin,
+		claudeAccountError,
 		getClaudeAccounts,
 		saveCurrentClaudeSubscription,
 		type ClaudeSubscriptionLogin
@@ -58,6 +62,12 @@
 	);
 	let pollTimer: ReturnType<typeof setTimeout> | undefined;
 	let disposed = false;
+	/** The entry the worker kept when a cancel found the sign-in already finished. */
+	let kept: string | null = null;
+
+	function errorText(e: unknown, fallback: string): string {
+		return claudeAccountError(e).message ?? getErrorMessage(e, fallback);
+	}
 
 	/** The add-another run's terminal chunk, in the shape the shared relay reads. */
 	function chunk(next: ClaudeSubscriptionLogin | null | undefined): TerminalChunk {
@@ -73,8 +83,17 @@
 			absorb(result.login ?? result.accounts.login ?? null, result.accounts);
 			return chunk(login);
 		},
-		cancel: () => cancelClaudeSubscriptionLogin()
+		cancel: async () => {
+			kept = await cancelPending();
+		}
 	});
+
+	/** Cancel the pending sign-in; resolves with the kept entry's id, if the CLI had finished. */
+	async function cancelPending(): Promise<string | null> {
+		const result = await cancelClaudeSubscriptionLogin();
+		providers.setClaudeAccounts(result.accounts);
+		return result.account_id ?? null;
+	}
 
 	function absorb(next: ClaudeSubscriptionLogin | null, accounts?: Parameters<typeof providers.setClaudeAccounts>[0]) {
 		if (accounts) providers.setClaudeAccounts(accounts);
@@ -90,8 +109,10 @@
 		try {
 			const result = await saveCurrentClaudeSubscription('');
 			providers.setClaudeAccounts(result.accounts);
-		} catch {
-			// Not signed in after all (409 not_signed_in): nothing to keep.
+		} catch (e) {
+			// Not signed in after all: nothing to keep. Anything else stops the
+			// start, or the original sign-in would become unreachable.
+			if (claudeAccountError(e).code !== 'not_signed_in') throw e;
 		}
 	}
 
@@ -107,7 +128,7 @@
 			if (login?.terminal) cli.attach(chunk(login));
 			schedulePoll();
 		} catch (e) {
-			error = getErrorMessage(e, 'Could not start the sign-in');
+			error = errorText(e, 'Could not start the sign-in');
 		} finally {
 			starting = false;
 		}
@@ -117,13 +138,17 @@
 		if (cancelling) return;
 		cancelling = true;
 		clearTimeout(pollTimer);
+		kept = null;
 		try {
 			// A running terminal's Stop already cancels the add-another sign-in.
 			const stopped = cli.terminalOpen && cli.running;
 			if (cli.terminalOpen) await cli.closeTerminal();
-			if (login && !stopped) await cancelClaudeSubscriptionLogin().catch(() => {});
+			if (login && !stopped) kept = await cancelPending().catch(() => null);
 			login = null;
-			onCancel();
+			const id = kept;
+			kept = null;
+			if (id) await finish(id);
+			else onCancel();
 		} finally {
 			cancelling = false;
 		}
@@ -132,14 +157,12 @@
 	/** The terminal's Stop or Close: end this sign-in and offer Start again. */
 	async function terminalClosed() {
 		clearTimeout(pollTimer);
-		if (login) {
-			try {
-				const result = await cancelClaudeSubscriptionLogin();
-				absorb(null, result.accounts);
-			} catch {
-				login = null;
-			}
-		}
+		// Stop on a running terminal already cancelled it (and set `kept`).
+		let id = kept;
+		kept = null;
+		if (!id && login) id = await cancelPending().catch(() => null);
+		login = null;
+		if (id) await finish(id);
 	}
 
 	function schedulePoll() {
@@ -161,7 +184,7 @@
 			}
 			if (!next) return; // Cancelled elsewhere.
 		} catch (e) {
-			if (!disposed) error = getErrorMessage(e, 'Could not check the sign-in');
+			if (!disposed) error = errorText(e, 'Could not check the sign-in');
 		}
 		schedulePoll();
 	}
@@ -195,6 +218,9 @@
 	});
 
 	const failed = $derived(login?.status === 'failed');
+	// Only the shells this path can be quoted for (Command Prompt may be missing).
+	const shells = $derived(login?.commands ? SHELLS.filter((s) => !!login?.commands?.[s.value]) : SHELLS);
+	const shownShell = $derived(shells.some((s) => s.value === shell) ? shell : (shells[0]?.value ?? 'posix'));
 </script>
 
 {#if login && cli.terminalOpen}
@@ -211,8 +237,8 @@
 		<div class="pv-flow" data-testid="claude-add-subscription">
 			{#if login.commands}
 				<div class="pv-flow-head">Run this in a terminal on this worker, then sign in on Anthropic’s page</div>
-				<Segmented options={SHELLS} value={shell} label="Terminal" size="sm" onchange={(v) => (shell = v)} />
-				<CodeBlock code={login.commands[shell]} prompt />
+				<Segmented options={shells} value={shownShell} label="Terminal" size="sm" onchange={(v) => (shell = v)} />
+				<CodeBlock code={login.commands[shownShell] ?? ''} prompt />
 			{:else}
 				<div class="pv-flow-head">Signing in with <span class="st-mono">{login.command}</span> on this worker</div>
 			{/if}

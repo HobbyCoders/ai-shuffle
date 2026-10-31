@@ -102,12 +102,16 @@ async def add_another(token: str = Depends(require_admin)) -> dict[str, Any]:
 
 @router.post("/subscription/cancel-login")
 async def cancel(token: str = Depends(require_admin)) -> dict[str, Any]:
-    """Stop a pending add-another sign-in and remove its unfinished folder."""
+    """Stop a pending add-another sign-in and remove its unfinished folder.
+
+    If the CLI had already finished signing in, the sign-in is kept and made
+    active instead, and its id comes back as ``account_id``.
+    """
     try:
-        login = await accounts.cancel_login()
+        account_id = await accounts.cancel_login()
     except accounts.AccountError as exc:
         raise http_error(exc) from None
-    return {**await _result(), "login": login}
+    return {**await _result(account_id), "login": None}
 
 
 @router.patch("/{kind}/{account_id}")

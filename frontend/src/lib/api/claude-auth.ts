@@ -9,7 +9,7 @@
  * whichever credentials exist.
  */
 
-import { api, type AgentGateStatus } from './client';
+import { api, isApiError, type AgentGateStatus } from './client';
 
 export type ClaudeAuthMode = 'subscription' | 'api_key' | 'cloud' | 'off';
 
@@ -67,8 +67,11 @@ export interface ClaudeSubscriptionLogin {
 	terminal: boolean;
 	command: string;
 	env: { CLAUDE_CONFIG_DIR: string };
-	/** Without the in-app terminal: what to run in a terminal on that worker. */
-	commands: { powershell: string; cmd: string; posix: string } | null;
+	/**
+	 * Without the in-app terminal: what to run in a terminal on that worker.
+	 * `cmd` is null when the folder path cannot be quoted for Command Prompt.
+	 */
+	commands: { powershell: string; cmd: string | null; posix: string } | null;
 	/** The in-app terminal's state for this sign-in (terminal workers only). */
 	terminal_state?: {
 		running: boolean;
@@ -101,6 +104,21 @@ export interface ClaudeAccountsResponse {
 	login?: ClaudeSubscriptionLogin | null;
 }
 
+/**
+ * The `{code, message}` a saved-accounts route refused with (its `detail`
+ * object), or nulls for any other error.
+ */
+export function claudeAccountError(e: unknown): { code: string | null; message: string | null } {
+	const body = isApiError(e) ? e.body : null;
+	const detail = body && typeof body === 'object' ? (body as { detail?: unknown }).detail : null;
+	if (!detail || typeof detail !== 'object') return { code: null, message: null };
+	const { code, message } = detail as { code?: unknown; message?: unknown };
+	return {
+		code: typeof code === 'string' ? code : null,
+		message: typeof message === 'string' ? message : null
+	};
+}
+
 /** List saved accounts; also finishes a pending add-another once the CLI reports it. */
 export function getClaudeAccounts(): Promise<ClaudeAccountsResponse> {
 	return api.get('/settings/claude-auth/accounts', { cache: 'no-store' });
@@ -114,6 +132,10 @@ export function addAnotherClaudeSubscription(): Promise<ClaudeAccountsResponse> 
 	return api.post('/settings/claude-auth/accounts/subscription/add-another');
 }
 
+/**
+ * Stop a pending add-another sign-in. When the CLI had already finished
+ * signing in, the worker keeps it (active) and returns its `account_id`.
+ */
 export function cancelClaudeSubscriptionLogin(): Promise<ClaudeAccountsResponse> {
 	return api.post('/settings/claude-auth/accounts/subscription/cancel-login');
 }
