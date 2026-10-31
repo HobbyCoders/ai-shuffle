@@ -1513,7 +1513,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._clear_main_compaction()
         self._tool_output_guard_ready = False
         self._tool_output_guard_nonce = ""
-        receipt, self._tool_output_guard_receipt = self._tool_output_guard_receipt, None
+        receipt = getattr(self, "_tool_output_guard_receipt", None)
+        self._tool_output_guard_receipt = None
         proc, self._proc = self._proc, None
         job, self._proc_job = getattr(self, "_proc_job", None), None
         self._stdout_backlog.clear()

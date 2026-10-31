@@ -70,6 +70,26 @@ def _bare_loop(proc) -> DelegatedLoop:
     return loop
 
 
+@pytest.mark.parametrize("initialized", [True, False])
+async def test_stopping_a_never_spawned_loop_needs_no_guard_receipt(initialized) -> None:
+    if initialized:
+        from fluid.store.base import MemoryStore
+        loop = DelegatedLoop(store=MemoryStore(), model="fixture")
+        assert loop._tool_output_guard_receipt is None
+        assert loop._tool_output_guard_nonce == ""
+    else:
+        # Teardown is also used on lightweight adapters that bypass __init__.
+        loop = _bare_loop(None)
+        assert not hasattr(loop, "_tool_output_guard_receipt")
+        assert not hasattr(loop, "_tool_output_guard_nonce")
+
+    await loop._stop_process()
+
+    assert loop._tool_output_guard_receipt is None
+    assert loop._tool_output_guard_nonce == ""
+    assert loop._tool_output_guard_ready is False
+
+
 @posix_only
 async def test_a_clean_cli_exit_ends_the_commands_it_backgrounded() -> None:
     proc, background = await _spawn_cli_that_backgrounds_a_command()
