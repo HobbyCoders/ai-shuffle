@@ -4,7 +4,7 @@
 	 *
 	 *   ready     solid, green dot
 	 *   missing   dashed; a click sets the project up there (default folder)
-	 *   busy      spinner ("GamingPC · cloning 40%")
+	 *   busy      spinner ("Studio · cloning 40%")
 	 *   offline   grey ("offline · has it", "offline", "queued")
 	 *   failed    red; its title is the reason
 	 *   unknown   quiet outline (the worker's catalog could not be read)

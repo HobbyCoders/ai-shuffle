@@ -337,7 +337,7 @@ describe('ApiClient', () => {
 
 		it('should show the message of a structured detail and keep its code in body', async () => {
 			// e.g. POST /projects/setup to a worker too old to know the action.
-			const detail = { error_code: 'unsupported', error: 'Update GamingPC to set projects up from here' };
+			const detail = { error_code: 'unsupported', error: 'Update Studio to set projects up from here' };
 			fetchMock.mockResolvedValueOnce({
 				ok: false,
 				status: 409,
@@ -345,7 +345,7 @@ describe('ApiClient', () => {
 			});
 
 			await expect(client.get('/error')).rejects.toEqual({
-				detail: 'Update GamingPC to set projects up from here',
+				detail: 'Update Studio to set projects up from here',
 				status: 409,
 				body: { detail }
 			});

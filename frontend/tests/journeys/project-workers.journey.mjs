@@ -4,7 +4,7 @@
 //
 // The dev instance is one worker, so the other workers and their states are
 // simulated in the page (`simulateWorkers`): the installs list gains three
-// peers (GamingPC, pop-os, an offline Laptop) and /projects/overview,
+// peers (Studio, pop-os, an offline Laptop) and /projects/overview,
 // /projects/workers, /projects/setup and its cancel answer from an in-page
 // model that moves a setup forward on every read. In the page, not
 // page.route: the built app's service worker makes the requests page.route
@@ -52,7 +52,7 @@ async function simulateWorkers(page, { overview404 = false, failOn = {} } = {}) 
 			}
 			let selfId = null;
 			const peers = [
-				{ install_id: 'gamingpc', device_name: 'GamingPC', online: true },
+				{ install_id: 'studio', device_name: 'Studio', online: true },
 				{ install_id: 'pop-os', device_name: 'pop-os', online: true },
 				{ install_id: 'laptop', device_name: 'Laptop', online: false }
 			];
@@ -62,9 +62,9 @@ async function simulateWorkers(page, { overview404 = false, failOn = {} } = {}) 
 			];
 			const P = [
 				{ id: 'pv2-sandbox', local: 'dev-sandbox', name: 'Dev sandbox', kind: 'git', remote: 'github.com/example/dev-sandbox',
-					st: { self: 'ready', gamingpc: 'ready', 'pop-os': 'missing', laptop: 'offline_missing' } },
+					st: { self: 'ready', studio: 'ready', 'pop-os': 'missing', laptop: 'offline_missing' } },
 				{ id: 'pv2-couch', local: null, name: 'couch-cash', kind: 'git', remote: 'github.com/example/couch-cash',
-					st: { self: 'missing', gamingpc: 'ready', 'pop-os': 'failed', laptop: 'offline_has' } }
+					st: { self: 'missing', studio: 'ready', 'pop-os': 'failed', laptop: 'offline_has' } }
 			];
 			const setup = { 'pv2-couch:pop-os': { op_id: 'op-0', status: 'error', progress: null, error_code: 'network', error: "pop-os couldn't reach the repository." } };
 			let ops = 0;
@@ -192,7 +192,7 @@ await runJourney({
 				await openProjects(page, variant);
 				await page.locator('[data-ui-projects="overview"]').waitFor({ timeout: 30_000 });
 				const chips = page.getByRole('group', { name: `Workers with ${PROJECT}` });
-				await chips.getByRole('button', { name: /^GamingPC: / }).waitFor();
+				await chips.getByRole('button', { name: /^Studio: / }).waitFor();
 				expect(await page.getByRole('radiogroup', { name: 'Show projects' }).isVisible(), 'the All workers / On this worker filter shows');
 
 				await mark('click the dashed pop-os chip');

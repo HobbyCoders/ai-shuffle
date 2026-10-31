@@ -17,7 +17,7 @@ export type ChipTone = 'ready' | 'missing' | 'busy' | 'offline' | 'failed' | 'un
 
 export interface WorkerChip {
 	tone: ChipTone;
-	/** Visible text, e.g. "GamingPC · cloning". */
+	/** Visible text, e.g. "Studio · cloning". */
 	text: string;
 	/** Tooltip and accessible description: the state in a sentence. */
 	title: string;

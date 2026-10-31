@@ -64,14 +64,14 @@ describe('AddProjectModal "Set it up on"', () => {
 	it('lists the other workers once the server can set projects up; Git pre-ticks online ones, plain folders do not', async () => {
 		m.overview.mockResolvedValue([]);
 		m.installs.mockResolvedValue({
-			installs: [inst('self', 'Unraid', { is_self: true }), inst('pc', 'GamingPC'), inst('lap', 'Laptop', { online: false })],
+			installs: [inst('self', 'Unraid', { is_self: true }), inst('pc', 'Studio'), inst('lap', 'Laptop', { online: false })],
 			self_instance_id: 'self'
 		});
 		render(AddProjectModal, { props: { open: true, onClose: vi.fn() } });
 		await screen.findByText('Set it up on');
 
 		// Folder source: nobody pre-ticked; each worker gets an empty folder.
-		const pc = screen.getByRole('checkbox', { name: /GamingPC/ }) as HTMLInputElement;
+		const pc = screen.getByRole('checkbox', { name: /Studio/ }) as HTMLInputElement;
 		const lap = screen.getByRole('checkbox', { name: /Laptop/ }) as HTMLInputElement;
 		expect(pc.checked).toBe(false);
 		expect(screen.getAllByText(/files aren't copied/).length).toBeGreaterThan(0);
@@ -81,7 +81,7 @@ describe('AddProjectModal "Set it up on"', () => {
 		// Clone from GitHub: online workers pre-ticked, offline left unticked.
 		await fireEvent.click(screen.getByRole('radio', { name: /Clone from GitHub/ }));
 		await tick();
-		expect((screen.getByRole('checkbox', { name: /GamingPC/ }) as HTMLInputElement).checked).toBe(true);
+		expect((screen.getByRole('checkbox', { name: /Studio/ }) as HTMLInputElement).checked).toBe(true);
 		expect((screen.getByRole('checkbox', { name: /Laptop/ }) as HTMLInputElement).checked).toBe(false);
 		expect(lap.disabled).toBe(false);
 		expect(screen.getByRole('button', { name: 'Create on 2 workers' })).toBeTruthy();
@@ -89,7 +89,7 @@ describe('AddProjectModal "Set it up on"', () => {
 
 	it('an older server (no overview) shows no worker list', async () => {
 		m.overview.mockResolvedValue(null);
-		m.installs.mockResolvedValue({ installs: [inst('self', 'Unraid', { is_self: true }), inst('pc', 'GamingPC')], self_instance_id: 'self' });
+		m.installs.mockResolvedValue({ installs: [inst('self', 'Unraid', { is_self: true }), inst('pc', 'Studio')], self_instance_id: 'self' });
 		render(AddProjectModal, { props: { open: true, onClose: vi.fn() } });
 		await screen.findByRole('button', { name: 'Add Project' });
 		expect(screen.queryByText('Set it up on')).toBeNull();
