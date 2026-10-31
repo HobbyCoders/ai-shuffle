@@ -203,16 +203,19 @@ def cleanup(status_path: Path, scratch: Path, launcher_pid: int, launcher_identi
         and status.get("pid_identity") == launcher_identity
     owned = _owned_scratch(scratch, launcher_pid, launcher_identity)
     victims: list[tuple[str, int, str | None]] = []
-    if names_launcher:
+    workers = (status.get("workers") or [status]) if names_launcher else []
+    for worker in workers:
         for key in ("app", "vite", "postgres"):
-            record = status.get(key) or {}
+            record = worker.get(key) or {}
             pid, start = record.get("pid"), record.get("pid_identity")
-            if alive(pid, start):
+            if alive(pid, start) and all(old_pid != pid for _, old_pid, _ in victims):
                 victims.append((key, pid, start))
     if owned:
-        postmaster = _postmaster(scratch)
-        if postmaster is not None and all(pid != postmaster for _, pid, _ in victims):
-            victims.append(("postgres", postmaster, identity(postmaster)))
+        # A SIGKILL during database.open() can precede on_app_start/status.
+        for directory in (scratch, scratch / "worker-a", scratch / "worker-b"):
+            postmaster = _postmaster(directory)
+            if postmaster is not None and all(pid != postmaster for _, pid, _ in victims):
+                victims.append(("postgres", postmaster, identity(postmaster)))
     for name, pid, _ in victims:
         _kill_group(pid)
         done.append(f"killed {name} (pid {pid})")
@@ -220,10 +223,11 @@ def cleanup(status_path: Path, scratch: Path, launcher_pid: int, launcher_identi
     while any(alive(pid, start) for _, pid, start in victims) and time.monotonic() < deadline:
         time.sleep(0.1)
     if names_launcher:
-        socket_dir = _private_socket_dir((status.get("postgres") or {}).get("socket_dir"))
-        if socket_dir is not None:
-            shutil.rmtree(socket_dir, ignore_errors=True)
-            done.append(f"removed {socket_dir}")
+        for worker in workers:
+            socket_dir = _private_socket_dir((worker.get("postgres") or {}).get("socket_dir"))
+            if socket_dir is not None:
+                shutil.rmtree(socket_dir, ignore_errors=True)
+                done.append(f"removed {socket_dir}")
         # Re-read right before removing: a newer `up` may have replaced it.
         current = _read_owned_json(status_path)
         if current and current.get("pid") == launcher_pid \

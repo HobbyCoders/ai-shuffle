@@ -61,7 +61,8 @@ compaction the way the real CLI does, from fixtures derived from it
 ([claude-code-compaction-protocol.md](claude-code-compaction-protocol.md));
 what that page lists as not verified still needs a real CLI. It does not
 cover: real provider behaviour (what a real voice model says and hears, a real
-Claude Code model), two real workers, Android
+Claude Code model), workers on two different machines (`up --workers 2`
+covers two real paired workers on one Linux machine; see [dev-loop.md](dev-loop.md#two-real-workers-on-one-linux-machine)), Android
 native behaviour (locked-screen calls), Windows installers and updates. Those
 stay in the live smoke (`docs/internal/live-smoke.md`). Its hand-checked rows
 say why with `needs` (a device, a real provider, a disposable install or two

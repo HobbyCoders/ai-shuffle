@@ -281,7 +281,8 @@ async def seed_default() -> dict:
     workspace = Path(settings.effective_workspace_dir).resolve()
     # Beside the data and workspace in the launcher's scratch directory: not a
     # folder the workspace lists as a project, and removed with the instance.
-    remotes = Path(settings.effective_data_dir).resolve().parent / "remotes"
+    remotes = Path(os.environ.get("SHUFFLE_DEV_REMOTES_DIR") or
+                   Path(settings.effective_data_dir).resolve().parent / "remotes")
     projects, remote_urls = {}, {}
     for project_id, name, branch in ((MAIN_PROJECT, "Dev sandbox", True),
                                      (OTHER_PROJECT, "Dev other", False)):
@@ -514,7 +515,12 @@ async def seed_long() -> dict:
     return await apply_long()
 
 
-SEEDS = {"default": seed_default, "long": seed_long}
+async def seed_empty() -> dict:
+    """Worker B has no local projects; it learns shared rows through enrollment."""
+    return {"projects": {}, "chats": {}}
+
+
+SEEDS = {"default": seed_default, "long": seed_long, "empty": seed_empty}
 
 
 def _write_result(result: dict) -> None:
