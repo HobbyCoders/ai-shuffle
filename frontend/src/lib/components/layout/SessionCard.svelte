@@ -23,7 +23,8 @@
 	 * too. The row then slides out and folds away. A press-and-hold starts
 	 * selection, where a tap toggles the row's checkmark. A mouse never
 	 * swipes: on a pointer that hovers, the same actions sit at the row's right
-	 * edge on hover. Settle and Archive offer Undo. Rename, Fork, and Delete
+	 * edge on hover. Archive offers Undo; Settle does not, since a settled
+	 * session is one tap from Active. Rename, Fork, and Delete
 	 * live on the header session-title menu.
 	 */
 	import { untrack } from 'svelte';
@@ -342,7 +343,6 @@
 					// Desktop moves to a fresh composer. On mobile, keep the current
 					// session and drawer open so settling does not navigate the user away.
 					if (active && !platform.isMobile) onSettled?.();
-					offerUndo(`Settled “${title}”`, () => appData.setSessionActive(id, true));
 					break;
 				case 'activate':
 					await appData.setSessionActive(id, true);

@@ -600,9 +600,6 @@
 		if (done.length === 0) return;
 		if (kind === 'settle') {
 			if (activeId && done.includes(activeId) && !phone) onSettledOpenSession();
-			offerUndo(`Settled ${plural(done.length)}`, () =>
-				Promise.all(done.map((id) => appData.setSessionActive(id, true)))
-			);
 		} else if (kind === 'archive') {
 			offerUndo(`Archived ${plural(done.length)}`, () =>
 				Promise.all(done.map((id) => appData.setSessionArchived(id, false, wasActive.get(id))))

@@ -1,5 +1,5 @@
 // Real-browser check of the redesigned side panel: the rail, More, Customize,
-// the filter sheet, row gestures with the Undo banner, the Assistant row in
+// the filter sheet, row gestures with Archive's Undo banner, the Assistant row in
 // both states, the update check (#1623), and the phone sheet drag-to-dismiss.
 //
 // Run from frontend/ while the fixture is serving:
@@ -112,7 +112,7 @@ async function desktop() {
 	await page.getByRole('button', { name: 'Clear project filter notes' }).click();
 	await page.waitForTimeout(150);
 
-	// Hover action settles a row and the Undo banner brings it back.
+	// Hover action settles a row. Settling offers no Undo banner; only Archive does.
 	const card = page.getByRole('group', { name: 'Fix the update check on desktop session' });
 	await card.hover();
 	await card.getByRole('button', { name: 'Settle session' }).click();
@@ -122,6 +122,7 @@ async function desktop() {
 		{ id: 'a2', body: { is_active: false } },
 		`[${name}] hover settle patches the row`,
 	);
+	assert.equal(await page.getByRole('button', { name: 'Undo' }).count(), 0, `[${name}] settling offers no Undo`);
 	await shot(page, `${name}-settled`);
 	assert.deepEqual(errors, [], `[${name}] no page errors`);
 	await context.close();
@@ -134,17 +135,31 @@ async function phone() {
 	await shot(page, `${name}-initial`);
 	assert.equal(await page.getByRole('button', { name: 'Open your assistant' }).count(), 0, `[${name}] no assistant row`);
 
-	// Swipe right settles; swipe left archives.
-	await swipe(page, cdp, 'Fix the update check', 240);
-	assert.deepEqual(await page.evaluate(() => window.fixture.patches.at(-1)), { id: 'a2', body: { is_active: false } }, `[${name}] swipe right settles`);
-	await swipe(page, cdp, 'Rename the build tab', -240);
+	// Swipe left settles, with no Undo banner; swipe right archives, and its
+	// Undo banner brings the row back.
+	const undo = page.getByRole('button', { name: 'Undo' });
+	await swipe(page, cdp, 'Fix the update check', -240);
+	assert.deepEqual(await page.evaluate(() => window.fixture.patches.at(-1)), { id: 'a2', body: { is_active: false } }, `[${name}] swipe left settles`);
+	assert.equal(await undo.count(), 0, `[${name}] swipe settle offers no Undo`);
+	await swipe(page, cdp, 'Rename the build tab', 240);
 	const archived = await page.evaluate(() => window.fixture.patches.at(-1));
-	assert.equal(archived.id, 's3', `[${name}] swipe left archives the row`);
-	assert.equal(archived.body.archived, true, `[${name}] swipe left archives the row`);
+	assert.equal(archived.id, 's3', `[${name}] swipe right archives the row`);
+	assert.equal(archived.body.archived, true, `[${name}] swipe right archives the row`);
 	assert.equal(await page.locator('.scard', { hasText: 'Rename the build tab' }).count(), 0, `[${name}] archived row leaves`);
+	await undo.waitFor();
+	await shot(page, `${name}-undo-banner`);
+	await undo.tap();
+	await undo.waitFor({ state: 'detached' });
+	await page.waitForTimeout(400);
+	assert.deepEqual(
+		await page.evaluate(() => window.fixture.patches.at(-1)),
+		{ id: 's3', body: { is_active: false, archived: false } },
+		`[${name}] Undo restores the archived row to Settled`,
+	);
+	assert.equal(await page.locator('.scard', { hasText: 'Rename the build tab' }).count(), 1, `[${name}] the row comes back`);
 	await shot(page, `${name}-after-swipes`);
 
-	// Long press starts selection; Settle the picks, then Undo.
+	// Long press starts selection; settling the picks offers no Undo.
 	await longPress(page, cdp, page.locator('.scard', { hasText: 'Redesign the mobile side panel' }).first());
 	await page.locator('.scard', { hasText: 'Draft the release notes' }).first().tap();
 	await shot(page, `${name}-selecting`);
@@ -152,13 +167,7 @@ async function phone() {
 	await page.locator('.selbar').getByRole('button', { name: 'Settle' }).tap();
 	await page.waitForTimeout(400);
 	assert.equal((await page.evaluate(() => window.fixture.patches.length)) - (await before), 2, `[${name}] bulk settle patches both`);
-	const undo = page.getByRole('button', { name: 'Undo' });
-	await undo.waitFor();
-	await shot(page, `${name}-undo-banner`);
-	await undo.tap();
-	await page.waitForTimeout(400);
-	const lastTwo = await page.evaluate(() => window.fixture.patches.slice(-2).map((p) => p.body.is_active));
-	assert.deepEqual(lastTwo, [true, true], `[${name}] Undo restores both rows`);
+	assert.equal(await undo.count(), 0, `[${name}] bulk settle offers no Undo`);
 	assert.equal(await page.evaluate(() => document.querySelector('.col').scrollTop), 0, `[${name}] the selection bar leaves the column unscrolled`);
 
 	// Long-press a rail icon opens Customize; Back closes it.
