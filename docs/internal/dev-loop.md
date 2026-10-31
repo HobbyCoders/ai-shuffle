@@ -53,6 +53,11 @@ python -m scripts.devloop status --wait 180
 python -m scripts.devloop down
 ```
 
+For the owner to open both from another device on the LAN, pin the ports
+inside a published range and use the host's LAN address (see "Opening a
+branch copy from a phone" below): `--port 18080 --vite-port 18081` pins
+worker A, and worker B takes the next pair, `18082`/`18083`.
+
 Run `up` under Monitor, just like the one-worker mode. **Dev worker A** has
 its own PostgreSQL, data directory, home and workspace, with the normal
 **Dev sandbox** / **Dev other** projects and chats. **Dev worker B** has a
