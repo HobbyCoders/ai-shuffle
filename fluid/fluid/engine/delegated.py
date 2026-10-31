@@ -362,6 +362,15 @@ _CLI_FLAGS_SINCE = "2.1.0"
 # over if a later CLI ignores that undocumented variable.
 CLAUDE_MOD_SINCE = "2.1.287"
 CLAUDE_MOD_SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude_mod")
+# Mandatory tool-result boundary, independent of FLUID_CLAUDE_MOD. Old CLIs
+# may ignore function hooks: readiness, not a version guess or plugin listing,
+# gates every CLI-owned call (including subagent calls and Bypass mode).
+TOOL_OUTPUT_GUARD_SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude_output_guard")
+TOOL_OUTPUT_GUARD_ENV = "FLUID_TOOL_OUTPUT_GUARD_"
+TOOL_OUTPUT_GUARD_MESSAGE = (
+    "Claude Code tool-output guard is unavailable; the tool was not run. "
+    "Update Claude Code and retry the session."
+)
 # How the CLI's init frame lists a --plugin-dir plugin: ``<name>@inline``.
 CLAUDE_MOD_PLUGIN = "ai-shuffle@inline"
 # Unset leaves the mod on; otherwise only 1, true, yes or on keep it on.
@@ -1045,6 +1054,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._claude_mod_dir: str | None = None
         self._claude_mod_state = "off"
         self._claude_mod_listed: bool | None = None
+        self._tool_output_guard_required = False  # armed for each child process
+        self._tool_output_guard_ready = False
+        self._tool_output_guard_nonce = ""
+        self._tool_output_guard_receipt: str | None = None
         # The host's taker of the plan usage the mod reports (see
         # ``CLAUDE_MOD_URL_ENV``), and the token for that route alone.
         self.plan_usage_sink = plan_usage_sink
@@ -1491,6 +1504,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         it. On POSIX that group is ended as soon as the CLI is gone (#436).
         """
         self._clear_main_compaction()
+        self._tool_output_guard_ready = False
+        self._tool_output_guard_nonce = ""
+        self._tool_output_guard_receipt = None
         proc, self._proc = self._proc, None
         job, self._proc_job = getattr(self, "_proc_job", None), None
         self._stdout_backlog.clear()
@@ -1753,6 +1769,25 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if self._compaction_route:
             env[CLAUDE_MOD_COMPACT_URL_ENV] = f"{origin}{COMPACT_PATH}"
         return env
+
+    def _tool_output_guard_env(self) -> dict[str, str]:
+        return {
+            f"{TOOL_OUTPUT_GUARD_ENV}RECEIPT": self._tool_output_guard_receipt or "",
+            f"{TOOL_OUTPUT_GUARD_ENV}NONCE": self._tool_output_guard_nonce,
+        }
+
+    def _check_tool_output_guard(self) -> bool:
+        """Read only the host-chosen, per-process receipt; never tool content."""
+        if self._tool_output_guard_ready:
+            return True
+        if not self._tool_output_guard_receipt or not self._tool_output_guard_nonce:
+            return False
+        try:
+            with open(self._tool_output_guard_receipt, encoding="utf-8") as receipt:
+                self._tool_output_guard_ready = receipt.read(256) == self._tool_output_guard_nonce
+        except (OSError, UnicodeError):
+            return False
+        return self._tool_output_guard_ready
 
     async def _compact_mod_messages(self, body: Any) -> dict[str, Any]:
         """The bridge's compaction route: Claude Code's rows, compacted.
@@ -2091,6 +2126,18 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._cli_cost_total = None if self._spawn_resume else 0.0
         self._claude_mod_listed = None
         argv = self._build_argv()
+        self._tool_output_guard_required = True
+        self._tool_output_guard_ready = False
+        self._tool_output_guard_nonce = secrets.token_urlsafe(24)
+        self._tool_output_guard_receipt = os.path.join(
+            self._ensure_tmpdir(), f"guard-ready-{self._tool_output_guard_nonce}",
+        )
+        guard = os.path.join(self._ensure_tmpdir(), "tool-output-guard")
+        shutil.copytree(
+            TOOL_OUTPUT_GUARD_SOURCE, guard, dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns("tests", "types", "tsconfig.json", "__pycache__"),
+        )
+        argv += ["--plugin-dir", guard]
         # Staging the mod registers its recall tools before the bridge decides
         # which tools to expose. The first spawn has no MCP config until now.
         await self._start_bundled_server()
@@ -2101,6 +2148,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # Only this spawn's own bridge may announce the compaction route.
         child_env.pop(CLAUDE_MOD_COMPACT_URL_ENV, None)
         child_env.update(self._claude_mod_env())
+        child_env.update(self._tool_output_guard_env())
         # The window this spawn pins, checked against the CLI's own first
         # context-usage report (#754).
         self._window_pinned = _positive_int(child_env.get(AUTO_COMPACT_WINDOW_ENV))
@@ -2150,7 +2198,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if self._cli_hook_events():
             async with self._stdout_lock:
                 outcome = await self._initialize_cli_hooks()
-            if outcome in ("refused", "timeout") and self._needs_policy_hook():
+            if outcome in ("refused", "timeout"):
                 # Fail closed: without its PreToolUse hook the deny policy is
                 # off for this whole process, and in bypass mode nothing else
                 # stops an outward write (invariant I10). The spawn fails, so
@@ -2158,7 +2206,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 await self._stop_process()
                 raise RuntimeError(
                     f"the claude CLI did not register its hooks ({outcome}), so "
-                    "the tool deny policy could not be enforced; the turn was "
+                    f"{'the tool deny policy' if self._needs_policy_hook() else 'the tool-output guard'} "
+                    "could not be enforced; the turn was "
                     "not started"
                 )
         return self._proc
@@ -3773,8 +3822,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if self._needs_policy_hook():
             return _POLICY_HOOK_EVENTS
         if self.compact_context is not None:
-            return _COMPACT_HOOK_EVENTS
-        return ()
+            return ("PreToolUse", *_COMPACT_HOOK_EVENTS)
+        return ("PreToolUse",)
 
     def _has_deny_rules(self) -> bool:
         rules = getattr(self.permissions, "rules", None) or ()
@@ -3960,6 +4009,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         raises, or has not decided within ``PRE_TOOL_USE_HOOK_BUDGET``, is
         answered with a deny carrying the reason."""
         name = str(request.input.get("tool_name") or "")
+        if self._tool_output_guard_required and not self._check_tool_output_guard():
+            await self._hook_event("deny", TOOL_OUTPUT_GUARD_MESSAGE, PRE_TOOL_USE, name or None)
+            return {"hookSpecificOutput": {
+                "hookEventName": "PreToolUse", "permissionDecision": "deny",
+                "permissionDecisionReason": TOOL_OUTPUT_GUARD_MESSAGE,
+            }}
         try:
             return await asyncio.wait_for(
                 self._cli_pre_tool_use(request.input, request.tool_use_id),

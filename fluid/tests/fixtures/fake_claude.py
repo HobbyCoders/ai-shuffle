@@ -566,6 +566,9 @@ def main() -> int:
         print("claude 2.0.0 (fake-fluid)")
         return 0
 
+    from fake_guard_ready import announce_tool_output_guard
+    announce_tool_output_guard()
+
     scenario = os.environ.get("FAKE_CLAUDE_SCENARIO", "a")
     resume = None
     if "--resume" in sys.argv:

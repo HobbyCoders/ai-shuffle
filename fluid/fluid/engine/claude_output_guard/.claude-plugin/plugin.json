@@ -1,0 +1,5 @@
+{
+  "name": "ai-shuffle-tool-output",
+  "version": "1.0.0",
+  "description": "Keep tool output separate from harness delivery channels."
+}

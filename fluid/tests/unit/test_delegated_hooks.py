@@ -702,7 +702,7 @@ async def test_a_note_alone_registers_session_start(tmp_path) -> None:
     """With neither a HookBus nor a deny policy, a note provider still has
     the CLI ask the loop at SessionStart, and the answer needs no bus."""
     loop, written = await _loop(tmp_path, compact_context=_note_provider())
-    assert loop._cli_hook_events() == ("SessionStart",)
+    assert loop._cli_hook_events() == ("PreToolUse", "SessionStart")
     output = await _fire_main_compact(loop, written)
     assert output["hookSpecificOutput"]["additionalContext"] == _NOTE
 
@@ -804,9 +804,9 @@ def test_mapper_surfaces_hook_callbacks() -> None:
     )
 
 
-def test_no_hooks_and_no_policy_register_nothing(tmp_path) -> None:
+def test_no_hooks_and_no_policy_still_register_the_output_guard(tmp_path) -> None:
     loop = DelegatedLoop(store=MemoryStore(), model="m", claude_cmd=["true"])
-    assert loop._cli_hook_events() == ()
+    assert loop._cli_hook_events() == ("PreToolUse",)
     loop = DelegatedLoop(store=MemoryStore(), model="m", claude_cmd=["true"], hooks=HookBus())
     assert set(loop._cli_hook_events()) == {
         "PreToolUse", "PostToolUse", "PostToolUseFailure", "UserPromptSubmit",
@@ -853,9 +853,8 @@ async def test_policy_deny_blocks_a_cli_tool_call_end_to_end(tmp_path, policy_de
 async def test_a_refused_initialize_fails_closed_when_a_deny_policy_rides_it(
     tmp_path, with_policy,
 ) -> None:
-    """Without its PreToolUse hook the deny policy is off for the whole CLI
-    process. With a policy the turn is not started; without one the CLI's
-    refusal only costs the hooks, as before."""
+    """Without PreToolUse neither the output guard nor a deny policy can be
+    enforced. Refusing registration never starts an unguarded turn."""
     from fluid.events.model import ErrorEvent
 
     loop = DelegatedLoop(
@@ -873,13 +872,9 @@ async def test_a_refused_initialize_fails_closed_when_a_deny_policy_rides_it(
 
     assert loop.cli_hooks_registered is False
     results = [e for e in events if isinstance(e, ToolResult)]
-    if with_policy:
-        assert isinstance(events[-1], ErrorEvent)
-        assert "did not register its hooks (refused)" in events[-1].message
-        assert results == []
-    else:
-        assert isinstance(events[-1], TurnComplete)
-        assert len(results) == 1
+    assert isinstance(events[-1], ErrorEvent)
+    assert "did not register its hooks (refused)" in events[-1].message
+    assert results == []
 
 
 async def test_the_ledger_reminder_names_the_bridged_ledger_tool(tmp_path) -> None:

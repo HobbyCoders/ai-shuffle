@@ -52,3 +52,29 @@ jobs:
         # fluid/pyproject.toml carries the pytest config (asyncio_mode=auto);
         # pytest picks it up as rootdir because the test path sits under it.
         run: python -m pytest fluid/tests/unit -q -p no:cacheprovider
+
+  delegated-tool-output:
+    name: delegated tool-output contract (${{ matrix.cli_version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # Verified stock function-hook builds, not a production version pin.
+        cli_version: ["2.1.287", "2.1.308", "2.1.314"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Fluid test dependencies
+        run: pip install './fluid[dev]'
+      - name: Fetch the isolated stock CLI fixture
+        run: >-
+          python scripts/ci/fetch_claude_fixture.py
+          --version '${{ matrix.cli_version }}'
+          --output '${{ runner.temp }}/claude-fixture'
+      - name: Inspect delegated model input with the scripted local provider
+        env:
+          FLUID_TEST_CLAUDE_BIN: ${{ runner.temp }}/claude-fixture
+        run: python -m pytest fluid/tests/unit/test_delegated_tool_markers.py -q -p no:cacheprovider

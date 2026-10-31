@@ -448,6 +448,11 @@ class Fake:
         }
 
     def main(self) -> int:
+        # Imported dynamically by the devloop too, so use the repository path.
+        sys.path.insert(0, os.path.dirname(__file__))
+        from fake_guard_ready import announce_tool_output_guard
+        if not (self.script.get("init") or {}).get("drop_guard"):
+            announce_tool_output_guard()
         spawn_exit = self.script.get("spawn_exit")
         if spawn_exit:
             sys.stderr.write(spawn_exit.get("stderr", "") + "\n")

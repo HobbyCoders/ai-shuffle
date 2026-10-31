@@ -313,12 +313,12 @@ async def test_a_mod_the_cli_does_not_list_is_reported_and_the_turn_still_runs(
 
 
 @pytest.mark.parametrize(("version", "claude_mod"), [("2.1.286", True), ("2.1.287", False)])
-async def test_without_the_mod_the_spawn_is_unchanged(tmp_path, caplog, version, claude_mod) -> None:
+async def test_without_the_optional_mod_the_output_guard_still_loads(tmp_path, caplog, version, claude_mod) -> None:
     caplog.set_level(logging.INFO, logger="fluid.engine.delegated")
     loop, record = _loop(tmp_path, version, claude_mod=claude_mod)
     try:
         await _turn(loop)
-        assert "--plugin-dir" not in _spawn_argv(record)
+        assert str(Path(loop._tmpdir) / "tool-output-guard") in _spawn_argv(record)
         assert loop._claude_mod_listed is None
         assert not any("AI Shuffle's mod" in r.getMessage() for r in caplog.records)
     finally:
@@ -349,7 +349,8 @@ async def test_compaction_recall_tools_require_a_staged_mod(
         assert ("HistoryExpand" in names) is exposed
         assert ("HistorySearch" in names) is exposed
         argv = _spawn_argv(record)
-        assert ("--plugin-dir" in argv) is exposed
+        assert (loop._claude_mod_dir is not None) is exposed
+        assert str(Path(loop._tmpdir) / "tool-output-guard") in argv
         config = json.loads(Path(loop._mcp_config_path).read_text(encoding="utf-8"))
         assert ("fluid_bundled" in config["mcpServers"]) is exposed
         if exposed:
