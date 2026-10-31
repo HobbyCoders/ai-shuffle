@@ -1,5 +1,9 @@
 <script lang="ts">
-	/** Shared account action: built-in switches select their slot; Claude keys keep the mode unchanged. */
+	/**
+	 * Shared account action: built-in switches select their slot; saved Claude
+	 * keys and sign-ins show "Use" (one is always the selected one) and keep
+	 * the Claude Code mode unchanged.
+	 */
 	import { providers } from '$lib/stores/providers.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import Switch from '../rows/Switch.svelte';
@@ -13,13 +17,14 @@
 	} = $props();
 	const access = getSettingsAccess();
 	const busy = $derived(!!providers.current.togglingProviderId || !!providers.current.claudeAccountBusy);
+	const saved = $derived(credential.account ?? credential.subscription);
 	const saving = $derived(providers.current.togglingProviderId === credential.row?.id ||
-		(!!credential.account && providers.current.claudeAccountBusy === credential.account.id));
+		(!!saved && providers.current.claudeAccountBusy === saved.id));
 </script>
 
 <span class="control" aria-busy={saving}>
-	{#if credential.account}
-		{#if credential.account.active}
+	{#if saved}
+		{#if saved.active}
 			<span class="state">{credential.on ? 'Active' : 'Selected'}</span>
 		{:else}
 			<button type="button" class="st-btn ghost sm" disabled={busy || access.readOnly}

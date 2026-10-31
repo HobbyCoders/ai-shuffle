@@ -14,7 +14,7 @@ import { settingsNav } from '$lib/settings/navigation.svelte';
 import { SETTINGS_ACCESS_CONTEXT } from '$lib/settings/access.svelte';
 import ProvidersCollection from './ProvidersCollection.svelte';
 import { providerDrafts } from './drafts.svelte';
-import { chatgptRow, claudeSummary, row } from './fixtures';
+import { chatgptRow, claudeAccounts, claudeSummary, row, subAccount } from './fixtures';
 import { fakeWorker } from './fake-worker';
 
 const accounts = (): ClaudeAccounts => ({
@@ -111,5 +111,103 @@ describe('saved account controls', () => {
 	it('disables saved-key selection for read-only Settings', async () => {
 		await show(true);
 		expect((group('Claude').getByRole('button', { name: 'Use Personal' }) as HTMLButtonElement).disabled).toBe(true);
+	});
+});
+
+describe('saved Claude subscriptions', () => {
+	const runningTerminal = () => ({
+		supported: true, active: true, running: true, exit_code: null, succeeded: null,
+		output: '', offset: 17, reset: false, url: 'https://claude.ai/oauth/authorize?test', error: null
+	});
+
+	it('adds another subscription: saves the default first, shows the in-app terminal, and Cancel stops it', async () => {
+		worker = fakeWorker({ rows: [chatgptRow()], claude: claudeSummary({ accounts: claudeAccounts() }) }, {
+			'GET /auth/claude/cli-login': runningTerminal
+		});
+		await show();
+		await fireEvent.click(group('Claude').getByRole('button', { name: 'Add credential to Claude' }));
+		const item = screen.getByRole('menuitem', { name: /Another Subscription/ });
+		expect(item.textContent).toContain('Becomes active after sign-in');
+		await fireEvent.click(item);
+		await fireEvent.click(await screen.findByRole('button', { name: 'Start sign-in' }));
+		await screen.findByTestId('claude-cli-terminal');
+		expect(screen.getByRole('link', { name: /Anthropic’s sign-in page/ }).getAttribute('href')).toBe('https://claude.ai/oauth/authorize?test');
+		// The CLI's own sign-in is saved first, so it stays listed once the new one is active.
+		expect(worker.sent('POST', '/settings/claude-auth/accounts/subscription/save-current')).toHaveLength(1);
+		expect(worker.sent('POST', '/settings/claude-auth/accounts/subscription/add-another')).toHaveLength(1);
+		expect(worker.sent('POST', '/auth/claude/cli-login/start')).toHaveLength(0);
+		expect(providers.current.claude?.accounts?.subscription.map((a) => [a.kind, a.label])).toEqual([['default', 'owner@example.com']]);
+		await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+		await waitFor(() => expect(worker.sent('POST', '/settings/claude-auth/accounts/subscription/cancel-login').length).toBeGreaterThan(0));
+		await waitFor(() => expect(providerDrafts.list).toHaveLength(0));
+		expect(worker.state.claude.accounts?.login).toBeNull();
+		expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
+	});
+
+	it('without the in-app terminal shows the commands, polls, and opens the new active sign-in', async () => {
+		worker = fakeWorker({
+			rows: [chatgptRow()], subscriptionTerminal: false,
+			claude: claudeSummary({ accounts: claudeAccounts({ subscription: [subAccount()] }) })
+		});
+		await show();
+		await fireEvent.click(group('Claude').getByRole('button', { name: 'Add credential to Claude' }));
+		await fireEvent.click(screen.getByRole('menuitem', { name: /Another Subscription/ }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Start sign-in' }));
+		await screen.findByTestId('claude-add-subscription');
+		expect(screen.getByText(/CLAUDE_CONFIG_DIR/)).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'PowerShell' })).toBeTruthy();
+		expect(worker.sent('POST', '/settings/claude-auth/accounts/subscription/save-current')).toHaveLength(0);
+		// The owner signs in on their own terminal; the worker saves it as the active entry.
+		const accounts = worker.state.claude.accounts!;
+		accounts.subscription = [
+			{ ...accounts.subscription[0], active: false },
+			subAccount({ id: 'sub-new', kind: 'saved', label: 'work@example.com', email: 'work@example.com', plan: 'pro', active: true })
+		];
+		accounts.default_in_use = false;
+		accounts.login = null;
+		accounts.login_pending = false;
+		await screen.findByRole('heading', { name: 'work@example.com' }, { timeout: 5000 });
+		expect(settingsNav.selectedItem('providers')).toBe('claude:subscription:sub-new');
+		expect(providerDrafts.list).toHaveLength(0);
+	}, 10000);
+
+	it('switches, renames and removes saved sign-ins without changing the Claude Code mode', async () => {
+		worker = fakeWorker({
+			rows: [chatgptRow()],
+			claude: claudeSummary({ accounts: claudeAccounts({
+				default_in_use: false,
+				subscription: [subAccount({ active: false }), subAccount({ id: 'work', kind: 'saved', label: 'Work', email: 'work@example.com', active: true })]
+			}) })
+		});
+		await show();
+		await fireEvent.click(group('Claude').getByRole('button', { name: 'Use Personal' }));
+		await waitFor(() => expect(providers.current.claude?.accounts?.subscription.map((a) => a.active)).toEqual([true, false]));
+		expect(worker.sent('POST', '/settings/claude-auth/accounts/subscription/sub-default/activate')).toHaveLength(1);
+		expect(group('Claude').getByRole('button', { name: 'Use Work' })).toBeTruthy();
+		expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
+
+		await fireEvent.click(group('Claude').getByRole('button', { name: 'Work, Saved' }));
+		const name = await screen.findByRole('textbox', { name: 'Name' });
+		await fireEvent.focus(name); await fireEvent.input(name, { target: { value: 'Team' } }); await fireEvent.blur(name);
+		await waitFor(() => expect(worker.sent('PATCH', '/settings/claude-auth/accounts/subscription/work')[0]?.body).toEqual({ label: 'Team' }));
+		await screen.findByRole('heading', { name: 'Team' });
+		await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+		await waitFor(() => expect(worker.sent('DELETE', '/settings/claude-auth/accounts/subscription/work')).toHaveLength(1));
+		await waitFor(() => expect(providers.current.claude?.accounts?.subscription.map((a) => [a.id, a.active])).toEqual([['sub-default', true]]));
+		expect(providers.current.claude?.mode).toBe('subscription');
+	});
+
+	it('shows "Sign in again" for a lapsed saved sign-in, with no warning wording', async () => {
+		worker = fakeWorker({
+			rows: [chatgptRow()],
+			claude: claudeSummary({ accounts: claudeAccounts({
+				subscription: [subAccount(), subAccount({ id: 'old', kind: 'saved', label: 'Old', active: false, signed_in: false, needs_sign_in: true })]
+			}) })
+		});
+		await show();
+		await fireEvent.click(group('Claude').getByRole('button', { name: 'Old, Sign in again' }));
+		expect((await screen.findAllByRole('button', { name: /Sign in again/ })).length).toBeGreaterThan(0);
+		expect(document.body.textContent).not.toMatch(/unofficial|unsupported/i);
 	});
 });

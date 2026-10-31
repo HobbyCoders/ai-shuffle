@@ -29,9 +29,18 @@ export interface ClaudeCliLoginOptions {
 	onStatus?: (status: ClaudeCliStatus) => void;
 	/** Called after the terminal output grows (scroll it to the end). */
 	onOutput?: () => void;
+	/**
+	 * Starts the login instead of `POST /auth/claude/cli-login/start` ("Add
+	 * another" starts it into a fresh folder). The terminal is then read and
+	 * fed through the same routes.
+	 */
+	start?: () => Promise<TerminalChunk>;
+	/** Stops a running login instead of `POST /auth/claude/cli-login/cancel`. */
+	cancel?: () => Promise<unknown>;
 }
 
-type TerminalChunk = Pick<ClaudeCliLoginState, 'output' | 'offset' | 'reset' | 'url' | 'running' | 'error'>;
+export type TerminalChunk = Pick<ClaudeCliLoginState, 'output' | 'offset' | 'running'> &
+	Partial<Pick<ClaudeCliLoginState, 'reset' | 'url' | 'error'>>;
 
 export class ClaudeCliLogin {
 	status = $state<ClaudeCliStatus | null>(null);
@@ -114,19 +123,30 @@ export class ClaudeCliLogin {
 	}
 
 	async startLogin(): Promise<void> {
+		this.#clear();
+		try {
+			this.#absorb(await (this.#options.start ? this.#options.start() : startClaudeCliLogin()));
+			this.#schedulePoll(300);
+		} catch (e) {
+			this.loginError = getErrorMessage(e, 'Could not start `claude auth login`.');
+			this.running = false;
+		}
+	}
+
+	/** Show the terminal for a login the server already started (add another). */
+	attach(state: TerminalChunk): void {
+		this.#clear();
+		this.#absorb(state);
+		this.#schedulePoll(300);
+	}
+
+	#clear(): void {
 		this.loginError = '';
 		this.loginResult = null;
 		this.output = '';
 		this.#offset = 0;
 		this.url = null;
 		this.terminalOpen = true;
-		try {
-			this.#absorb(await startClaudeCliLogin());
-			this.#schedulePoll(300);
-		} catch (e) {
-			this.loginError = getErrorMessage(e, 'Could not start `claude auth login`.');
-			this.running = false;
-		}
 	}
 
 	async sendCode(): Promise<void> {
@@ -149,7 +169,7 @@ export class ClaudeCliLogin {
 		clearTimeout(this.#pollTimer);
 		if (this.running) {
 			try {
-				await cancelClaudeCliLogin();
+				await (this.#options.cancel ? this.#options.cancel() : cancelClaudeCliLogin());
 			} catch {
 				// The server stops an abandoned login on its own.
 			}

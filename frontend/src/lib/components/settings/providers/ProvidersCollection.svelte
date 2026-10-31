@@ -23,7 +23,14 @@
 	import CredentialDetail from './CredentialDetail.svelte';
 	import DraftDetail from './DraftDetail.svelte';
 	import { providerDrafts } from './drafts.svelte';
-	import { buildProviders, CLAUDE_KEY_ITEM, claudeUsageRecorded, isConnected, parseProviderItem } from './providers-model';
+	import {
+		buildProviders,
+		CLAUDE_KEY_ITEM,
+		CLAUDE_SUB_ITEM,
+		claudeUsageRecorded,
+		isConnected,
+		parseProviderItem
+	} from './providers-model';
 	import { startGateway } from './provider-actions';
 
 	let filter = $state('');
@@ -63,6 +70,13 @@
 			const provider = views.find((p) => p.claude);
 			const keys = provider?.credentials.filter((c) => c.flavor === 'anthropic') ?? [];
 			const credential = keys.find((c) => c.active) ?? keys[0];
+			if (provider && credential) return { kind: 'credential', credential, provider } as const;
+		}
+		// The same for saved Claude sign-ins: the stable id opens the active one.
+		if (selected === CLAUDE_SUB_ITEM) {
+			const provider = views.find((p) => p.claude);
+			const subs = provider?.credentials.filter((c) => c.flavor === 'cli' && !c.draft) ?? [];
+			const credential = subs.find((c) => c.item === CLAUDE_SUB_ITEM) ?? subs.find((c) => c.active) ?? subs[0];
 			if (provider && credential) return { kind: 'credential', credential, provider } as const;
 		}
 		for (const provider of views) {

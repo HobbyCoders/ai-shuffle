@@ -49,7 +49,7 @@
 		}}
 		onkeydown={moveListFocus}
 	>
-		<span class="name-line"><span class="nm">{credential.name}</span>{#if credential.active && !credential.account}<span class="active">Active</span>{/if}</span>
+		<span class="name-line"><span class="nm">{credential.name}</span>{#if credential.active && !credential.account && !credential.subscription}<span class="active">Active</span>{/if}</span>
 		<span class="sm">{credential.summary}</span>
 	</button>
 	{#if credential.switchable}

@@ -40,6 +40,9 @@ import {
 	renameClaudeKey,
 	activateClaudeKey,
 	deleteClaudeKey,
+	renameClaudeSubscription,
+	activateClaudeSubscription,
+	deleteClaudeSubscription,
 	type ClaudeAccounts,
 	clearClaudeCloud as apiClearClaudeCloud,
 	getClaudeAuth,
@@ -359,6 +362,34 @@ export const providers = {
 
 	async deleteAnthropicAccount(id: string) {
 		const result = await deleteClaudeKey(id);
+		await providers.refreshClaudeAccounts(result.accounts);
+	},
+
+	/** A fresh saved-accounts list (polling a pending sign-in): no reload. */
+	setClaudeAccounts(accounts: ClaudeAccounts) {
+		_update((s) => ({ ...s, claude: s.claude ? { ...s.claude, accounts } : null }));
+	},
+
+	async renameClaudeSubscriptionAccount(id: string, label: string) {
+		const result = await renameClaudeSubscription(id, label.trim());
+		await providers.refreshClaudeAccounts(result.accounts);
+	},
+
+	/** Make a saved CLI sign-in the one Claude Code uses; the mode is unchanged. */
+	async activateClaudeSubscriptionAccount(id: string) {
+		if (_state.claudeAccountBusy) return;
+		_update((s) => ({ ...s, claudeAccountBusy: id }));
+		try {
+			const result = await activateClaudeSubscription(id);
+			await providers.refreshClaudeAccounts(result.accounts);
+		} finally {
+			_update((s) => ({ ...s, claudeAccountBusy: null }));
+		}
+	},
+
+	/** Forget a saved sign-in (a saved folder is signed out and removed). */
+	async deleteClaudeSubscriptionAccount(id: string) {
+		const result = await deleteClaudeSubscription(id);
 		await providers.refreshClaudeAccounts(result.accounts);
 	},
 
