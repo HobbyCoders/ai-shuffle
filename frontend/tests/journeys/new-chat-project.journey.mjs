@@ -94,8 +94,9 @@ await runJourney({
 				await reload(page, mark);
 				await expectProject(page, null);
 
-				await mark('pick it again: the next New session has it');
+				await mark('pick the project again');
 				await pickProject(page, hero(page));
+				await mark('New session after picking it again');
 				await pressNewSession(page);
 				await expectProject(page, PROJECT);
 			}

@@ -1488,8 +1488,9 @@ export const activeSession = {
 			activeSession.applyComposerDefaults();
 			return;
 		}
-		// A saved project this worker no longer lists leaves the compose without one.
-		const mode = rememberedComposeMode();
+		// A saved project this worker no longer lists leaves the compose without
+		// one. A voice compose keeps its lane.
+		const mode = _state.mode === 'voice' ? _state.mode : rememberedComposeMode();
 		_update(s => ({ ...s, mode, ...composerCheckoutDefaults(mode !== 'chat'),
 			...(mode === 'chat' ? { permissionModeOverride: noProjectPermission(s.permissionModeOverride) } : {}) }));
 	},

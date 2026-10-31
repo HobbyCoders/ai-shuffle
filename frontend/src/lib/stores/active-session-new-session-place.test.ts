@@ -252,3 +252,22 @@ describe('a draft restored by a reload keeps the place it was typed in', () => {
 		expect(active.current).toMatchObject({ mode: 'code', project: 'a' });
 	});
 });
+
+it('keeps the shared id of a remembered project this worker has no local copy of', async () => {
+	const { composerPreferences } = await import('./composer-preferences');
+	const remote = { project_v2_id: 'repo-x', local_project_id: null, remote_only: true, origin: 'git@example:x', name: 'X' };
+	(mocks.catalog.clusterProjects as unknown[]).push(remote);
+	try {
+		composerPreferences.set('project', { projectId: '', projectV2Id: 'repo-x' });
+		active.switchSession('other-chat', null, null, 'Other chat', null);
+		ephemeral.remove('__new_chat__');
+		// Even when the defaults stand aside (a draft slot left by a reload).
+		sessionStorage.setItem('__aihub_draft_new', JSON.stringify({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'x' }] }] }));
+
+		active.newChat();
+
+		expect(active.current).toMatchObject({ mode: 'code', project: '', projectV2Id: 'repo-x' });
+	} finally {
+		mocks.catalog.clusterProjects.length = 0;
+	}
+});

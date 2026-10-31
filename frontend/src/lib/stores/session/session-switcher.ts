@@ -1126,6 +1126,11 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const keptPlace = newChatEphemeral && (savedDraft || comingBack)
 			&& (newChatEphemeral.project || newChatEphemeral.projectV2Id) ? newChatEphemeral : null;
 		const mode: SessionMode = keptPlace ? 'code' : savedDraft ? 'chat' : rememberedComposeMode();
+		// The remembered project as this worker resolves it, shared id included,
+		// so a project with only a shared id here is not dropped from the compose.
+		const remembered = mode === 'code' && !keptPlace
+			? resolveComposerProject(composerPreferences.current.project, appData.current.projects, appData.current.clusterProjects)
+			: null;
 
 		// Single update: reset everything (including draft from ephemeral cache)
 		update(s => ({
@@ -1199,9 +1204,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// restored for a code compose, cleared for the projectless lanes.
 			...newChatModeState(
 				mode,
-				newChatEphemeral,
+				remembered ?? newChatEphemeral,
 				// Never the session being left: its project is not a choice here.
-				getPersistedProject(),
+				remembered?.project ?? getPersistedProject(),
 			),
 			// A restored compose keeps its explicit pick (including Local/null).
 			// Otherwise use the last worker chosen, not the session being left.
