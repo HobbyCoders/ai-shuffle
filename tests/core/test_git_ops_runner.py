@@ -624,4 +624,4 @@ def test_executor_heartbeats_updated_at_at_start(project):
 
 
 def test_sweep_once_reports_both_tables(mock_db):
-    assert set(git_ops_runner.sweep_once()) == {"git_ops", "upload_blobs"}
+    assert set(git_ops_runner.sweep_once()) == {"git_ops", "upload_blobs", "project_setup_requests"}

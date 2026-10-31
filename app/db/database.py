@@ -2746,6 +2746,8 @@ def _run_column_migrations(cursor: Any) -> None:
     migrations_applied.extend(migrate_email_watches(cursor))
     from app.db.working_record import create_schema as create_working_record_schema
     create_working_record_schema(cursor)
+    from app.db.project_setup import create_schema as create_project_setup_schema
+    create_project_setup_schema(cursor)
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
@@ -3524,7 +3526,7 @@ def migrations_fingerprint() -> str:
 
     from app.db import (
         schema_postgres, mobile_hub, network, owner_state, working_record, watches, watch_delivery,
-        session_mode_migration, model_provider_slots,
+        session_mode_migration, model_provider_slots, project_setup,
     )
     from app.core import owner_auth
 
@@ -3535,6 +3537,7 @@ def migrations_fingerprint() -> str:
     for module in (
         sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network, owner_state,
         working_record, watches, watch_delivery, session_mode_migration, model_provider_slots,
+        project_setup,
     ):
         path = getattr(module, "__file__", None)
         if not path:

@@ -395,7 +395,7 @@ async def test_git_ops_and_interaction_sweeper_register_their_passes():
         interaction_sweeper.start()
 
         assert set(turn_claim._passes) == {
-            "git_ops", "git_ops_retention", "interaction_expiry",
+            "git_ops", "git_ops_retention", "interaction_expiry", "project_setup_dispatch",
         }
         assert turn_claim._passes["git_ops"].tight_interval == (
             git_ops_runner.CLAIM_POLL_SECONDS

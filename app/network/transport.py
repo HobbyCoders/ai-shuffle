@@ -1196,6 +1196,8 @@ def note_contact(device_id: str) -> None:
     _last_contact[device_id] = now
     from app.network.handoff import note_source_contact
     note_source_contact(device_id)
+    from app.core.project_setup import note_peer_contact
+    note_peer_contact(device_id)
     link = _links.get(device_id)
     if link is None or link.contact_kick_used:
         return
