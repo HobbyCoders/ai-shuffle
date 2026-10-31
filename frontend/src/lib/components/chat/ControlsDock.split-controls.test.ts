@@ -32,12 +32,14 @@ vi.mock('$lib/api/client', async (importOriginal) => {
 	};
 });
 
-// The dock reads its lane off `$activeSession.mode`. A new session starts
-// without a project ('chat', #371 step 4) and picking a project makes it a
-// project session ('code') — so that is how a test puts the dock in either.
-// Every test starts (and leaves) with a project picked.
+// The dock reads its lane off `$activeSession.mode`. A new session opens on
+// the owner's last project choice: clearing the project makes it one without
+// ('chat') and picking one makes it a project session ('code') — so that is
+// how a test puts the dock in either. Every test starts (and leaves) with a
+// project picked.
 function setLane(mode: Exclude<SessionMode, 'voice'>) {
 	appMode.set(mode);
+	if (mode === 'chat') activeSession.clearProject({ user: true });
 	activeSession.newChat();
 	if (mode === 'code') activeSession.setProject('proj-dock', null);
 	expect(get(activeSession).mode).toBe(mode);

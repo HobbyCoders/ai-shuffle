@@ -144,7 +144,9 @@ interface SessionSwitcher {
 	 *  strip with it (#320). For a reconnect, which resumes the feed at its
 	 *  cursor without a fresh `/live` snapshot. */
 	refreshRunningTasks: (sessionId: string) => Promise<void>;
-	newChat: () => boolean;
+	/** `restoredDraft`: a typed draft came back. `keptPlace`: so did the
+	 *  project and checkout of a compose left unsent. */
+	newChat: () => { restoredDraft: boolean; keptPlace: boolean };
 	persistSession: () => void;
 	loadPersistedSession: () => Promise<PersistedSession | null>;
 	getPersistedProfile: () => string;
@@ -164,6 +166,23 @@ export function getPersistedProfile(): string {
 export function getPersistedProject(): string {
 	if (!composerPreferences.current.project.projectV2Id) return typeof window !== 'undefined' ? localStorage.getItem('aihub_selectedProject') || '' : '';
 	return resolveComposerProject(composerPreferences.current.project, appData.current.projects, appData.current.clusterProjects).project;
+}
+
+/**
+ * The lane a fresh compose opens in: the owner's last project choice, "no
+ * project" included (owner decision 2026-10-31, replacing #371 step 4's
+ * "starts empty"). Working in a project, every new session opens in it until
+ * the owner picks another or clears it. Before the catalog answers a saved
+ * project counts (the composer holds a send until it resolves, #1636); after,
+ * one this worker no longer lists does not (#434).
+ */
+export function rememberedComposeMode(): SessionMode {
+	const pick = composerPreferences.current.project;
+	if (!pick.projectId && !pick.projectV2Id) return 'chat';
+	if (!appData.projectCatalogLoaded || appData.projectCatalogFailed) return 'code';
+	const { projects, clusterProjects } = appData.current;
+	const { project, projectV2Id } = resolveComposerProject(pick, projects, clusterProjects);
+	return project || (projectV2Id && clusterProjects.some(p => p.project_v2_id === projectV2Id)) ? 'code' : 'chat';
 }
 
 /** Reuse the already-loaded Git status; never borrow another project's status. */
@@ -1097,17 +1116,21 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const savedDraft = newChatEphemeral && (hasComposerDraft(newChatEphemeral.draft) || newChatEphemeral.worktreeBranch || newChatEphemeral.worktreeId)
 			? newChatEphemeral : null;
 
-		// A new session starts without a project (#371 step 4): the project is
-		// optional and added on the new-session screen, which switches the
-		// compose to a project session. A kept draft typed for a project reopens
-		// with it. So does a compose left unsent to open another chat, typed or
-		// not: coming back, its project, branch and worktree are still the
-		// owner's picks, like its worker. A first send spends that slot, and New
-		// session pressed on the new-session screen itself starts fresh.
+		// A new session opens on the owner's last project choice, "no project"
+		// included (rememberedComposeMode). A kept draft typed for a project
+		// reopens with it. So does a compose left unsent to open another chat,
+		// typed or not: coming back, its project, branch and worktree are still
+		// the owner's picks, like its worker. A draft typed with no project stays
+		// without one: the text was written for that place.
 		const comingBack = leavingSessionId !== null;
 		const keptPlace = newChatEphemeral && (savedDraft || comingBack)
 			&& (newChatEphemeral.project || newChatEphemeral.projectV2Id) ? newChatEphemeral : null;
-		const mode: SessionMode = keptPlace ? 'code' : 'chat';
+		const mode: SessionMode = keptPlace ? 'code' : savedDraft ? 'chat' : rememberedComposeMode();
+		// The remembered project as this worker resolves it, shared id included,
+		// so a project with only a shared id here is not dropped from the compose.
+		const remembered = mode === 'code' && !keptPlace
+			? resolveComposerProject(composerPreferences.current.project, appData.current.projects, appData.current.clusterProjects)
+			: null;
 
 		// Single update: reset everything (including draft from ephemeral cache)
 		update(s => ({
@@ -1181,8 +1204,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// restored for a code compose, cleared for the projectless lanes.
 			...newChatModeState(
 				mode,
-				newChatEphemeral,
-				getPersistedProject() || s.project,
+				remembered ?? newChatEphemeral,
+				// Never the session being left: its project is not a choice here.
+				remembered?.project ?? getPersistedProject(),
 			),
 			// A restored compose keeps its explicit pick (including Local/null).
 			// Otherwise use the last worker chosen, not the session being left.
@@ -1221,7 +1245,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		// Persist immediately (not debounced)
 		persistSessionImmediate();
-		return savedDraft !== null;
+		return { restoredDraft: savedDraft !== null, keptPlace: keptPlace !== null };
 	}
 
 	function destroy() {

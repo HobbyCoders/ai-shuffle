@@ -33,7 +33,7 @@ import {
 	getPersistedWorktreeIntent, setPersistedWorktreeIntent, projectRejectsWorktrees,
 	getPersistedModel, getPersistedEffort, getPersistedPermissionMode, normalizePermissionMode, getPersistedFastMode,
 	getPersistedContextWindowChoice, setPersistedRunBinding,
-	reconciledSessionMode, attachedSinceSaved, type AttachRowFields,
+	reconciledSessionMode, attachedSinceSaved, rememberedComposeMode, type AttachRowFields,
 } from './session/session-switcher';
 
 // Extracted sub-modules
@@ -47,6 +47,7 @@ import { markBindingHydrated, markBindingPicked, type ComposerBindingFlags } fro
 import { createPermissionHandler } from './session/permission-handler';
 import { createDraftManager } from './session/draft-manager';
 import { hasComposerDraft } from './session/composer-suggestion';
+import { readDraft } from './session/draft-persistence';
 import { registerReloadBlocker } from '$lib/services/app-update';
 
 // Caches and helpers
@@ -376,9 +377,9 @@ function getAuthToken(): string | null {
 function defaultState(): ActiveSessionState {
 	return {
 		sessionId: null,
-		// A fresh surface starts without a project (#371 step 4); picking one
-		// makes it a project session. switchSession overwrites this from the
-		// session's own row.
+		// A fresh surface starts without a project until init applies the
+		// owner's last project choice (applyComposerDefaults); picking one makes
+		// it a project session. switchSession overwrites this from the row.
 		mode: 'chat',
 		title: 'New Chat',
 		messages: [],
@@ -1001,11 +1002,11 @@ export const activeSession = {
 		clearUnavailableChat();
 		setSkipRestore(true);
 		bumpInitGeneration();
-		const restoredDraft = switcher.newChat();
-		// A new session only opens with a project when it kept the place of
-		// the compose left unsent: the run binding follows the account
-		// defaults, but its project, branch and worktree stay as picked.
-		if (!restoredDraft) activeSession.applyComposerDefaults({ keepCheckout: _state.mode !== 'chat' });
+		const { restoredDraft, keptPlace } = switcher.newChat();
+		// The run binding follows the account defaults. A compose left unsent
+		// keeps its project, branch and worktree as picked; otherwise the
+		// project is the owner's last choice (rememberedComposeMode).
+		if (!restoredDraft) activeSession.applyComposerDefaults({ keepCheckout: keptPlace });
 	},
 
 	// ── Messaging (delegated to message-sender) ─────────────────────
@@ -1164,8 +1165,9 @@ export const activeSession = {
 		const nextV2 = projectV2Id === undefined
 			? appData.current.clusterProjects.find(p => p.local_project_id === projectId)?.project_v2_id ?? null
 			: projectV2Id;
-		// Clearing the pick is not a new preference; a project is.
-		if (projectId || nextV2) composerPreferences.set('project', {projectId, projectV2Id:nextV2});
+		// The owner's choice, "no project" included, is what the next new chat
+		// opens with. A catalog fix-up clearing a deleted project is not one.
+		if (projectId || nextV2 || (user && !_state.sessionId)) composerPreferences.set('project', {projectId, projectV2Id:nextV2});
 		// On a new session the project decides its kind (#371 step 4): picking
 		// one makes it a project session, clearing it makes it one without.
 		const nextMode: SessionMode = _state.sessionId ? _state.mode : (projectId || nextV2 ? 'code' : 'chat');
@@ -1427,9 +1429,15 @@ export const activeSession = {
 	/** Remote defaults may update an idle composer, never an existing session or typed draft. */
 	applyComposerDefaults({ keepCheckout = false }: { keepCheckout?: boolean } = {}) {
 		if (_state.sessionId || hasComposerDraft(_state.draft) || _state.worktreeBranch || composerBusy()) return;
+		// After a reload the typed text is still only in this tab's draft slot
+		// until the composer reads it back; it keeps the place it was typed in.
+		if (hasComposerDraft(readDraft(null) ?? '')) return;
 		const picks = composerPreferences.current;
-		const code = _state.mode !== 'chat';
-		_update(s => ({...s,
+		// An idle compose follows the owner's last project choice; a kept one,
+		// and a voice compose, keep their lane.
+		const mode = keepCheckout || _state.mode === 'voice' ? _state.mode : rememberedComposeMode();
+		const code = mode !== 'chat';
+		_update(s => ({...s, mode,
 			profile:picks.profile, modelOverride:picks.model, effortLevelOverride:composerPreferences.effortForModel(picks.model) ?? s.effortLevelOverride,
 			permissionModeOverride:code ? normalizePermissionMode(picks.permissionMode) : noProjectPermission(normalizePermissionMode(picks.permissionMode)), fastMode:fastModeForModel(picks.model, picks.fastMode === '1'),
 			contextWindowChoice:getPersistedContextWindowChoice(),
@@ -1480,7 +1488,11 @@ export const activeSession = {
 			activeSession.applyComposerDefaults();
 			return;
 		}
-		_update(s => ({ ...s, ...composerCheckoutDefaults(s.mode !== 'chat') }));
+		// A saved project this worker no longer lists leaves the compose without
+		// one. A voice compose keeps its lane.
+		const mode = _state.mode === 'voice' ? _state.mode : rememberedComposeMode();
+		_update(s => ({ ...s, mode, ...composerCheckoutDefaults(mode !== 'chat'),
+			...(mode === 'chat' ? { permissionModeOverride: noProjectPermission(s.permissionModeOverride) } : {}) }));
 	},
 
 	createWorktree: (prompt?: string, pendingUploadPaths?: string[]) =>
