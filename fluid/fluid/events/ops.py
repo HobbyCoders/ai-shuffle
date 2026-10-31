@@ -113,7 +113,9 @@ class AgentMessage(Op):
     An idle receiver starts an ordinary user-role turn, including when parked
     on background work, unless ``wake=False``; hosts that own turn
     scheduling can disable that wake, in which case the receiver raises
-    RuntimeError without accepting the message. During shutdown
+    RuntimeError without accepting the message. A ``progress`` message to an
+    idle receiver with ``wake=True`` does not start a turn: it is held and
+    delivered with the receiver's next turn, whatever starts it. During shutdown
     or the short terminal-publication window, submission raises an explicit
     error instead of acknowledging traffic the receiver cannot consume.
 
@@ -128,9 +130,11 @@ class AgentMessage(Op):
     provenance: str = "peer"
     id: str | None = None
     wake: bool = True
-    # Compatibility flag. All peer messages wake idle/parked receivers;
-    # wake=False still leaves scheduling to the host.
+    # Compatibility flag: an urgent message is delivered as ``alert``.
     urgent: bool = False
+    # fluid.context.peer.MESSAGE_KINDS. Only ``progress`` is held by an idle
+    # receiver; a busy one takes every kind at its next tool result.
+    kind: str = "alert"
 
 
 @dataclass(kw_only=True)

@@ -1770,12 +1770,14 @@ def get_latest_turn(session_id: str) -> Optional[Dict[str, Any]]:
     Used to read the caller's most recent per-turn ``overrides`` (e.g. the
     permission mode the user picked in the composer) when a Task-dispatched
     worker inherits its parent's effective permission level. A parked
-    continuation's queue row resolves to the logical turn it resumed.
+    continuation's queue row resolves to the logical turn it resumed. A
+    progress note moved to the held store (#960) is not a turn of the chat.
     """
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT * FROM turns WHERE session_id=%s "
+            "AND NOT (state='aborted' AND COALESCE(stop_reason, '')='held_progress') "
             "ORDER BY insert_order DESC, created_at DESC, position DESC, id DESC LIMIT 1",
             (session_id,),
         )
@@ -1824,6 +1826,8 @@ def get_latest_run_turn(session_id: str) -> Optional[Dict[str, Any]]:
         cursor.execute(
             "SELECT * FROM turns WHERE session_id=%s "
             "AND NOT (state='completed' AND COALESCE(stop_reason, '')='steered') "
+            # A progress note moved to the held store (#960) never runs.
+            "AND NOT (state='aborted' AND COALESCE(stop_reason, '')='held_progress') "
             "ORDER BY insert_order DESC, created_at DESC, position DESC, id DESC LIMIT 1",
             (session_id,),
         )

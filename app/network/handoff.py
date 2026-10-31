@@ -302,6 +302,8 @@ def wake_label(row):
     if source == wakeup_service.LIMIT_RESUME_SOURCE:
         return f"the resume after the usage limit at {when}"
     if source == wakeup_service.HELD_PEER_SOURCE:
+        if wakeup_service.never_fires(row):
+            return "held progress notes from other agents, delivered with its next wake"
         return f"a held message from another chat due at {when}"
     return f"the scheduled wake-up at {when}"
 

@@ -75,6 +75,19 @@ DROPPED_NOTE_SUBTYPE = "wakeup_dropped"
 #: supersede it, because the row is the only copy of those messages.
 HELD_PEER_SOURCE = "held_peer_promotion"
 
+#: ``fire_at`` of a held row with no timer: progress notes (#960) never wake
+#: a session on their own; they ride its next turn, whatever starts it. A
+#: legacy row merged into one keeps its own earlier deadline.
+NEVER_FIRE_AT = 253402300799.0  # 9999-12-31T23:59:59Z
+
+
+def never_fires(row: Dict[str, Any]) -> bool:
+    """True for a held row with no timer (:data:`NEVER_FIRE_AT`)."""
+    try:
+        return float(row.get("fire_at") or 0.0) >= NEVER_FIRE_AT
+    except (TypeError, ValueError):
+        return False
+
 #: ``pending_wakeups.source`` for a resume after a usage limit resets
 #: (``app.core.limit_resume``). Its ``reason`` column holds that module's
 #: metadata as JSON. A user's message supersedes it like any other wake.
@@ -561,7 +574,12 @@ async def take_session_wakeups(session_id: str, source: str) -> List[Dict[str, A
 
 
 def _arm(row: Dict[str, Any], delay_seconds: float) -> None:
-    """Arm an in-process timer that fires ``row`` after ``delay_seconds``."""
+    """Arm an in-process timer that fires ``row`` after ``delay_seconds``.
+
+    A row that never fires (held progress notes) gets no timer.
+    """
+    if never_fires(row):
+        return
     wakeup_id = row.get("id")
 
     async def _run() -> None:
@@ -621,15 +639,17 @@ def arm_persisted(row: Dict[str, Any]) -> None:
 
 
 def _held_merge_kwargs(
-    session_id: str, prompt: str, delay_seconds: float, *, prepend: bool,
+    session_id: str, prompt: str, delay_seconds: Optional[float], *, prepend: bool,
     profile_id: Optional[str], project_id: Optional[str], model: Optional[str],
 ) -> Dict[str, Any]:
+    """``delay_seconds=None`` holds without a timer (:data:`NEVER_FIRE_AT`)."""
     return dict(
         id=f"wake-{uuid.uuid4().hex}",
         session_id=session_id,
         source=HELD_PEER_SOURCE,
         prompt=prompt,
-        fire_at=_now_epoch() + max(0.0, float(delay_seconds)),
+        fire_at=(NEVER_FIRE_AT if delay_seconds is None
+                 else _now_epoch() + max(0.0, float(delay_seconds))),
         prepend=prepend,
         profile_id=profile_id,
         project_id=project_id,
@@ -640,7 +660,7 @@ def _held_merge_kwargs(
 
 
 async def hold_peer_messages(
-    session_id: str, prompt: str, *, delay_seconds: float,
+    session_id: str, prompt: str, *, delay_seconds: Optional[float],
     profile_id: Optional[str], project_id: Optional[str], model: Optional[str],
 ) -> Dict[str, Any]:
     """Add ``prompt`` to the session's held peer messages and return the row.
@@ -669,8 +689,26 @@ async def hold_peer_messages(
     return row
 
 
+def hold_merge_kwargs(
+    session_id: str, prompt: str, *, profile_id: Optional[str],
+    project_id: Optional[str], model: Optional[str],
+) -> Dict[str, Any]:
+    """:func:`wakeups_db.merge_session_wakeup` arguments for a timerless hold,
+    for a caller that writes it inside its own transaction and then calls
+    :func:`after_hold_merge`."""
+    return _held_merge_kwargs(session_id, prompt, None, prepend=False,
+                              profile_id=profile_id, project_id=project_id, model=model)
+
+
+def after_hold_merge(row: Dict[str, Any], replaced: List[str]) -> None:
+    """Timers after a committed :func:`hold_merge_kwargs` merge: the replaced
+    rows' are cancelled; a merged legacy deadline is armed again."""
+    _disarm(replaced)
+    arm_persisted(row)
+
+
 def restore_held_peer_messages(
-    session_id: str, prompt: str, *, delay_seconds: float,
+    session_id: str, prompt: str, *, delay_seconds: Optional[float],
     profile_id: Optional[str], project_id: Optional[str], model: Optional[str],
 ) -> Dict[str, Any]:
     """Sync form of :func:`hold_peer_messages` for messages that were held

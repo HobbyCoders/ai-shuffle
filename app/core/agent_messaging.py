@@ -292,6 +292,11 @@ def make_message(supplier):
         target = row["worker_session_id"]
         text = str(data.get("message") or "")
         urgent = bool(data.get("urgent"))
+        from fluid.context.peer import message_kind
+        try:
+            kind = message_kind(data.get("kind"), urgent)
+        except ValueError as exc:
+            return ToolOutcome(text=str(exc), is_error=True)
         if row.get("remote_parent") or row.get("worker"):
             # That session lives on another worker: the message travels there
             # (app.core.remote_task), and nothing here queues a turn on the
@@ -299,9 +304,9 @@ def make_message(supplier):
             from app.core import remote_task
 
             if row.get("remote_parent"):
-                outcome = await remote_task.send_to_parent(session_id, row, text, urgent=urgent)
+                outcome = await remote_task.send_to_parent(session_id, row, text, urgent=urgent, kind=kind)
             else:
-                outcome = await remote_task.send_to_child(session_id, row, text, urgent=urgent)
+                outcome = await remote_task.send_to_child(session_id, row, text, urgent=urgent, kind=kind)
             return ToolOutcome(text=outcome["text"], is_error=outcome["is_error"])
         from app.core import archive_guard
 
@@ -326,10 +331,11 @@ def make_message(supplier):
                 is_error=True,
             )
         if not resuming:
-            status, turn_id = await deliver_message(target, session_id, text, urgent=urgent)
+            status, turn_id = await deliver_message(target, session_id, text, urgent=urgent,
+                                                    kind=kind)
             return ToolOutcome(**delivery_receipt(row["name"], status, turn_id))
         turn_id = await turn_scheduler.on_agent_message(
-            target, session_id, text, reply_to=session_id,
+            target, session_id, text, reply_to=session_id, kind=kind,
         )
         if not turn_id:
             return ToolOutcome(**delivery_receipt(row["name"], STOPPED))
@@ -348,13 +354,15 @@ STOPPED = "stopped"
 
 
 async def deliver_message(target: str, sender: str, text: str, *,
-                          urgent: bool = False) -> tuple[str, str | None]:
+                          urgent: bool = False, kind: str | None = None) -> tuple[str, str | None]:
     """Hand ``text`` from ``sender`` to ``target``, a session on this worker.
 
     ``(DELIVERED, None)`` when its live engine took it (read at the next tool
     result), ``(QUEUED, turn id)`` when it waits on the session's queue (a
     running receiver still takes it at its next tool boundary, and a parked
-    receiver wakes immediately), ``(STOPPED, None)`` when stopped. Used for
+    receiver wakes immediately), ``(HELD, None)`` for a ``progress`` note to a
+    receiver with no live turn (it rides the next wake), ``(STOPPED, None)``
+    when stopped. A missing ``kind`` is ``alert``. Used for
     local receivers and for messages another worker sent here
     (``app.core.remote_task``).
     """
@@ -377,7 +385,7 @@ async def deliver_message(target: str, sender: str, text: str, *,
             # Only the app queue may start a turn. The atomic no-wake op
             # also covers a runtime still starting or an engine just done.
             await engine.submit(AgentMessage(
-                text=text, sender=sender, wake=False, urgent=urgent,
+                text=text, sender=sender, wake=False, urgent=urgent, kind=kind or "alert",
                 provenance=await message_provenance_async(target, sender),
             ))
         except RuntimeError:
@@ -386,7 +394,7 @@ async def deliver_message(target: str, sender: str, text: str, *,
         else:
             return DELIVERED, None
     turn_id = await turn_scheduler.on_agent_message(
-        target, sender, text, **({"urgent": True} if urgent else {}),
+        target, sender, text, **({"urgent": True} if urgent else {}), kind=kind,
     )
     if not turn_id:
         return STOPPED, None
@@ -411,8 +419,10 @@ def delivery_receipt(name: str, status: str, turn_id: str | None = None) -> dict
 
 
 def held_receipt(name: str) -> str:
-    """Compatibility receipt for a legacy worker reporting held delivery."""
-    return f"Queued for {name}; delivery is not yet confirmed. Do not resend."
+    """The sender's receipt for a progress note held for its receiver's next wake."""
+    from fluid.context.peer import held_text
+
+    return held_text(name)
 
 
 async def resume_unavailable(target, row):

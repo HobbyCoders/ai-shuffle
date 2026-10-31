@@ -2,9 +2,9 @@
 
 A turn that delivers peer messages records its prompt as the turn's
 ``message.user``. The real scheduler builds four shapes: one immediate message (a
-single envelope), and three that carry messages held by the previous release while
-parked, inside a ``<system-reminder>`` (a promotion wake, an unpark wake after
-its task notification, and an urgent message after the held ones).
+single envelope), and three that carry held messages in ONE compact
+``<system-reminder>``, one line per message (#960): a promotion wake, an unpark
+wake after its task notification, and an urgent message after the held ones.
 ``frontend/src/lib/utils/__fixtures__/agent-delivery-producer.json`` holds
 those prompts; ``agent-delivery.test.ts`` feeds them to the chat reducer and
 requires one attributed agent message per peer and no visible reminder text.
@@ -110,7 +110,12 @@ async def test_shared_frontend_fixture_matches_the_real_producers(mock_db):
     assert prompts["urgent_with_held"].index("</system-reminder>") < prompts["urgent_with_held"].index("Blocked:")
     assert "<system-reminder>" not in prompts["idle_single"]
 
-    payload = {"held": [{"sender": s, "content": t} for s, t in HELD], "prompts": prompts}
+    for key in ("promotion", "unpark_with_held", "urgent_with_held"):
+        block = prompts[key][prompts[key].index("<system-reminder>"):prompts[key].index("</system-reminder>")]
+        # One line per held message, oldest first; a multi-line body is flattened.
+        assert block.count("\n- from ") == len(HELD), key
+    # What each attributed row shows: the held text on its one line.
+    payload = {"held": [{"sender": s, "content": " ".join(t.split())} for s, t in HELD], "prompts": prompts}
     if os.environ.get("UPDATE_AGENT_DELIVERY_FIXTURE") == "1":
         FIXTURE.parent.mkdir(parents=True, exist_ok=True)
         FIXTURE.write_text(json.dumps(payload, indent="\t", sort_keys=True) + "\n",

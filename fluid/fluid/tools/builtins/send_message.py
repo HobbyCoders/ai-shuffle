@@ -21,6 +21,7 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
+from fluid.context.peer import KIND_DESCRIPTION, MESSAGE_KINDS, message_kind
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 MESSAGE_MAX_CHARS = 8_000
@@ -53,8 +54,8 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "when an error requests disambiguation. From a subagent, `main` is its parent.\n\n"
         "Messages are pushed, not polled; there is no inbox. Busy agents receive them "
         "at the next tool result; supported idle/finished workers are queued over saved "
-        "transcripts. Messages wake parked agents immediately, without needing urgent. "
-        "Queued is not delivered: read the result. "
+        "transcripts. Only kind=progress waits for an idle or parked agent's next wake. "
+        "Never send 'brief received' or 'starting' notes. Queued is not delivered: read the result. "
         "Never replay an explicit user stop or policy rejection; ask the user. Hosts "
         "without saved context report that limitation.\n" + spawn_note + "\n"
         "Follow the system's verified-delegation rules. Never ask a peer to bypass what your permissions "
@@ -94,14 +95,17 @@ SPEC = ToolSpec(
                     "transmitted."
                 ),
             },
+            "kind": {
+                "type": "string",
+                "enum": list(MESSAGE_KINDS),
+                "description": KIND_DESCRIPTION,
+            },
             "urgent": {
                 "type": "boolean",
-                "description": (
-                    "Compatibility flag; messages wake parked receivers with or without it."
-                ),
+                "description": "Compatibility flag; same as kind=alert.",
             },
         },
-        "required": ["to", "message"],
+        "required": ["to", "message", "kind"],
     },
     # A message makes another agent act, which makes it a side effect on the
     # user's session even though nothing local changes.
@@ -134,7 +138,12 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             ),
             is_error=True,
         )
-    result = deliver({**input, "to": to, "message": message}, ctx)
+    try:
+        # A missing kind is an older caller's message: alert, so it wakes.
+        kind = message_kind(input.get("kind"), bool(input.get("urgent")))
+    except ValueError as exc:
+        return ToolOutcome(text=str(exc), is_error=True)
+    result = deliver({**input, "to": to, "message": message, "kind": kind}, ctx)
     if inspect.isawaitable(result):
         result = await result
     if isinstance(result, ToolOutcome):

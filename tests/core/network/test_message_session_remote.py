@@ -417,6 +417,60 @@ async def test_message_is_relayed_to_the_owning_worker_once(workers, monkeypatch
     assert changed.is_error and "different arguments" in changed.text
 
 
+def _held_rows(session_id):
+    from app.core import wakeup_service
+    from app.db import wakeups
+
+    return wakeups.get_session_wakeups(session_id, wakeup_service.HELD_PEER_SOURCE)
+
+
+@pytest.mark.parametrize("where", ["relayed", "local"])
+async def test_a_progress_note_to_an_idle_chat_is_held_not_woken(workers, monkeypatch, kicks, where):
+    """#960: kind=progress rides the receiver's next wake; the receipt says
+    held, a retry reads the same, and nothing is kicked."""
+    a, b, _ = _two_workers(workers, monkeypatch)
+    owner = a
+    if where == "local":
+        _chat(b, "here", title="Local chat")
+        owner = b
+    note = {**MESSAGE, "session_id": "target" if where == "relayed" else "here",
+            "message": "Build is 40% done.", "kind": "progress"}
+    with b.active():
+        outcome = await _tool("MessageSession", note)
+        assert not outcome.is_error, outcome.text
+        result = json.loads(outcome.text)
+    assert result["delivery_status"] == "held"
+    with owner.active():
+        [turn] = agent_turns(note["session_id"])
+        assert turn["state"] == "aborted" and turn["payload"]["agent_message_kind"] == "progress"
+        [row] = _held_rows(note["session_id"])
+        assert "Build is 40% done." in row["prompt"] and "sender=caller]" in row["prompt"]
+    assert kicks == []
+    with b.active():
+        again = json.loads((await _tool("MessageSession", note)).text)
+    assert again["status"] == "already_queued" and again["delivery_status"] == "held"
+
+    # An alert wakes it at once, and the held note rides that wake.
+    with b.active():
+        alert = json.loads((await _tool("MessageSession", {**note, "request_id": "ask-2",
+                                                           "message": "Stop: main is red.",
+                                                           "kind": "alert"})).text)
+    assert alert["delivery_status"] == "queued" and kicks == [note["session_id"]]
+
+
+async def test_a_relayed_body_without_kind_is_an_alert(workers, monkeypatch, kicks):
+    a, b, _ = _two_workers(workers, monkeypatch)
+    call = AsyncMock(return_value={"session_id": "target", "turn_id": "turn-1", "status": "queued",
+                                   "delivery_status": "queued", "created": True})
+    monkeypatch.setattr(control, "call", call)
+    with b.active():
+        await _tool("MessageSession", {**MESSAGE, "kind": "progress"})
+    assert call.await_args.args[2]["kind"] == "progress"
+    with b.active():
+        bad = await _tool("MessageSession", {**MESSAGE, "request_id": "ask-3", "kind": "fyi"})
+    assert bad.is_error and "kind must be one of" in bad.text
+
+
 async def test_relay_returns_the_queued_shape(workers, monkeypatch, kicks):
     a, b, _ = _two_workers(workers, monkeypatch)
     call = AsyncMock(return_value={"session_id": "target", "turn_id": "turn-1", "status": "queued",

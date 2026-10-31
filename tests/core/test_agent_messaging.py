@@ -174,7 +174,9 @@ async def test_finished_worker_queues_one_message_over_saved_context(runtime, mo
     result = await messaging.make_message(lambda: "parent")({"to": "Helper", "message": "Continue from the saved result"}, ToolCtx())
     assert not result.is_error, result.text
     assert "Resume queued" in result.text
-    queue.assert_awaited_once_with("worker", "parent", "Continue from the saved result", reply_to="parent")
+    # No kind (an older caller) is delivered as alert.
+    queue.assert_awaited_once_with("worker", "parent", "Continue from the saved result", reply_to="parent",
+                                   kind="alert")
     engine.submit.assert_not_awaited()
 
 
@@ -188,7 +190,7 @@ async def test_running_delegated_worker_queues_instead_of_using_native_engine(ru
     monkeypatch.setattr(session_runtime, "try_steer_pending", steer)
     result = await messaging.make_message(lambda: "parent")({"to": "Helper", "message": "progress?"}, ToolCtx())
     assert not result.is_error
-    queue.assert_awaited_once_with("worker", "parent", "progress?")
+    queue.assert_awaited_once_with("worker", "parent", "progress?", kind="alert")
     engine.submit.assert_not_awaited()
     # The queued row is offered to the running receiver's next tool boundary.
     steer.assert_awaited_once_with("worker")
@@ -203,6 +205,23 @@ async def test_held_message_is_not_offered_to_a_live_turn(runtime, monkeypatch):
     result = await messaging.make_message(lambda: "parent")({"to": "Helper", "message": "hi"}, ToolCtx())
     assert result.text == messaging.held_receipt("Helper")
     steer.assert_not_awaited()
+
+
+@pytest.mark.parametrize("provider_kind", ["openai_responses", "delegated"])
+async def test_progress_to_an_idle_native_or_delegated_worker_is_held(runtime, monkeypatch, provider_kind):
+    """#960: neither recipient engine is offered an idle-time progress note;
+    the scheduler holds it and the sender is told so."""
+    _, engines = runtime
+    engine = worker(runtime, "parent", "worker")
+    engines["worker"].adapter.provider_kind = provider_kind
+    monkeypatch.setattr(session_runtime, "get_live_runtime", lambda sid: None)
+    queue = AsyncMock(return_value=turn_scheduler.HELD)
+    monkeypatch.setattr(turn_scheduler, "on_agent_message", queue)
+    result = await messaging.make_message(lambda: "parent")(
+        {"to": "Helper", "message": "40% done", "kind": "progress"}, ToolCtx())
+    assert result.text == messaging.held_receipt("Helper") and result.text.startswith("Held for Helper")
+    queue.assert_awaited_once_with("worker", "parent", "40% done", kind="progress")
+    engine.submit.assert_not_awaited()
 
 
 async def test_policy_rejected_worker_is_not_resumed(runtime, monkeypatch):
@@ -241,7 +260,7 @@ async def test_unavailable_live_delivery_queues_without_claiming_delivered(
     )
     assert not result.is_error
     assert result.text == "Queued for Helper"
-    enqueue.assert_awaited_once_with("worker", "parent", "hi")
+    enqueue.assert_awaited_once_with("worker", "parent", "hi", kind="alert")
     if state != "closing":
         engine.submit.assert_not_awaited()
 

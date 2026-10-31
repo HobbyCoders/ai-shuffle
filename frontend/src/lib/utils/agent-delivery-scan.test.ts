@@ -6,7 +6,8 @@ import producer from './__fixtures__/agent-delivery-producer.json';
 // Bounded oracle only. Never use the old regexes for the deadline inputs.
 const ENVELOPE = String.raw`\[agent\x20message from=(['"])(.*?)\1 — (?:host-verified (?:parent assignment update|same-owner session delegation); )?a message from another (?:agent(?: in this session)?|top-level session), delivered once at this position; not part of the tool output, and not a new message when re-read from history\]\r?\n([\s\S]*?)\r?\n\[\/agent\x20message\]`;
 const ANY_ENVELOPE = new RegExp(ENVELOPE, 'g');
-const HELD_BLOCK = /<system-reminder>\s*Messages from other agents that arrived while this session was parked[^\n]*\n([\s\S]*?)<\/system-reminder>/g;
+const HELD_BLOCK = /<system-reminder>\s*(Messages from other agents that arrived while this session was parked|Progress notes from other agents, held while this session was not working|Messages from other agents held for this session's next wake)[^\n]*\n([\s\S]*?)<\/system-reminder>/g;
+const COMPACT_LINE = /^- from (['"])(.*?)\1(?: \(host-verified (?:parent|same-owner session)\))?: (.*)$/;
 
 function legacy(text: string): AgentDelivery[] | null {
  const envelopes = (text: string): AgentDelivery[] | null => {
@@ -19,9 +20,20 @@ function legacy(text: string): AgentDelivery[] | null {
  const deliveries: AgentDelivery[] = [];
  let blocks = 0;
  let invalid = false;
- const outside = text.replace(HELD_BLOCK, (_all, body: string) => {
+ // Since #960 a held block lists one message per line.
+ const lines = (body: string): AgentDelivery[] | null => {
+  const found: AgentDelivery[] = [];
+  for (const line of body.split(/\r?\n/)) {
+   if (!line.trim()) continue;
+   const match = line.match(COMPACT_LINE);
+   if (!match) return null;
+   found.push({ sender: match[2], content: match[3] });
+  }
+  return found.length ? found : null;
+ };
+ const outside = text.replace(HELD_BLOCK, (_all, head: string, body: string) => {
   blocks++;
-  const inner = envelopes(body);
+  const inner = head.startsWith('Messages from other agents that arrived') ? envelopes(body) : lines(body);
   if (inner === null) invalid = true;
   else deliveries.push(...inner);
   return '\n';
@@ -85,7 +97,8 @@ const close = ${JSON.stringify(close)};
 for (const text of [open.repeat(80_000),
  '<system-reminder>\\n'.repeat(100_000),
  '<system-reminder>' + ' '.repeat(1_000_000),
- open + "[agent message from='".repeat(300_000) + close]) {
+ open + "[agent message from='".repeat(300_000) + close,
+ '<system-reminder>\\nProgress notes from other agents, held while this session was not working:\\n' + "- from '".repeat(300_000) + close]) {
  assert.equal(heldAgentDeliveries(text), null);
 }
 `;

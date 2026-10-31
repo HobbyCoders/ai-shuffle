@@ -2449,7 +2449,7 @@ RESUMED = "resumed"
 
 _MESSAGE_KEYS = frozenset({
     "version", "to", "worker_session_id", "message_id", "sender_session_id", "text",
-    "urgent", "known_completion_id",
+    "urgent", "known_completion_id", "kind",
 })
 _RESUMABLE = {"completed": "completed", "failed": "failed"}
 
@@ -2516,6 +2516,13 @@ async def _send_message(device_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
 
     try:
         return await control.call(device_id, TASK_MESSAGE_ACTION, body, timeout=MESSAGE_TIMEOUT)
+    except control.ControlRefused as exc:
+        # An older worker refuses fields it does not know and never applied
+        # the message: send it as it understands it (every message wakes).
+        if "kind" not in body or "Unknown message fields" not in str(exc):
+            raise
+        body = {key: value for key, value in body.items() if key != "kind"}
+        return await _send_message(device_id, body)
     except control.RunnerUnreachable as exc:
         if MAY_HAVE_APPLIED not in str(exc):
             raise
@@ -2560,12 +2567,21 @@ def _invalid_answer(who: str, where: str) -> Dict[str, Any]:
                      "have arrived; do not send it again until you have checked."), "is_error": True}
 
 
+def _with_kind(body: Dict[str, Any], kind: Optional[str]) -> Dict[str, Any]:
+    """``kind`` rides the wire only when it is not ``alert``, which is what
+    a receiver assumes without one; an alert stays readable to older workers."""
+    if kind and kind != "alert":
+        body["kind"] = kind
+    return body
+
+
 async def send_to_child(sender_session_id: str, row: Mapping[str, Any], text: str, *,
-                        urgent: bool = False) -> Dict[str, Any]:
+                        urgent: bool = False, kind: Optional[str] = None) -> Dict[str, Any]:
     """SendMessage from this worker to a Task child it sent to another worker.
 
     Same meaning as for a local child: a running child takes it at its next
-    tool result, a parked one wakes immediately, and a
+    tool result, a parked one wakes immediately (a ``progress`` note is held
+    for its next wake), and a
     finished one is resumed over its own transcript, its new report coming
     back through ``task-report``. A stopped child refuses. A child whose
     worker the caller was told is away (:func:`notice_offline`) is still
@@ -2600,11 +2616,11 @@ async def send_to_child(sender_session_id: str, row: Mapping[str, Any], text: st
     if refusal:
         return {"text": f"Could not deliver to {who}: {refusal}", "is_error": True}
     known = dispatch.get("completion_id")
-    body = {
+    body = _with_kind({
         "version": WIRE_VERSION, "to": TO_CHILD, "worker_session_id": worker_id,
         "message_id": str(uuid.uuid4()), "sender_session_id": sender_session_id,
         "text": text, "urgent": bool(urgent), "known_completion_id": known,
-    }
+    }, kind)
     try:
         answer = await _send_message(dispatch["target_device_id"], body)
     except Exception as exc:  # noqa: BLE001 — refused or unreachable: say which
@@ -2626,7 +2642,7 @@ async def send_to_child(sender_session_id: str, row: Mapping[str, Any], text: st
 
 
 async def send_to_parent(sender_session_id: str, row: Mapping[str, Any], text: str, *,
-                         urgent: bool = False) -> Dict[str, Any]:
+                         urgent: bool = False, kind: Optional[str] = None) -> Dict[str, Any]:
     """SendMessage ``main`` from a Task child that another worker started here.
 
     The message reaches the conversation that started it on that worker as a
@@ -2644,11 +2660,11 @@ async def send_to_parent(sender_session_id: str, row: Mapping[str, Any], text: s
     if len(text) > MAX_MESSAGE_CHARS:
         return {"text": (f"Could not deliver to {who}: the message is {len(text)} characters; another "
                          f"worker takes at most {MAX_MESSAGE_CHARS}."), "is_error": True}
-    body = {
+    body = _with_kind({
         "version": WIRE_VERSION, "to": TO_MAIN, "worker_session_id": sender_session_id,
         "message_id": str(uuid.uuid4()), "sender_session_id": sender_session_id,
         "text": text, "urgent": bool(urgent), "known_completion_id": None,
-    }
+    }, kind)
     try:
         answer = await _send_message(parent["device_id"], body)
     except Exception as exc:  # noqa: BLE001 — refused or unreachable: say which
@@ -2726,7 +2742,12 @@ def _parse_message(body: Mapping[str, Any]) -> Dict[str, Any]:
     known = body.get("known_completion_id")
     if known is not None and (not isinstance(known, str) or len(known) > 200):
         raise ValueError("known_completion_id must be a string")
+    from fluid.context.peer import message_kind
+
+    # A sender that names no kind is an older worker: alert, so it wakes.
+    kind = message_kind(body.get("kind"), bool(body.get("urgent")))
     return {
+        "kind": kind,
         "to": body["to"],
         "worker_session_id": _text(body, "worker_session_id", 64),
         "message_id": _text(body, "message_id", 100),
@@ -2761,7 +2782,8 @@ async def _message_child(msg: Mapping[str, Any], from_device: str) -> Dict[str, 
         raise ValueError(_STOPPED_CHILD)
     if child["state"] == remote_tasks.RUNNING:
         status, turn_id = await agent_messaging.deliver_message(
-            worker_id, msg["sender_session_id"], msg["text"], urgent=msg["urgent"])
+            worker_id, msg["sender_session_id"], msg["text"], urgent=msg["urgent"],
+            kind=msg["kind"])
         if status == agent_messaging.STOPPED:
             raise ValueError(_STOPPED_CHILD)
         return {"status": status, "turn_id": turn_id}
@@ -2772,6 +2794,16 @@ async def _message_child(msg: Mapping[str, Any], from_device: str) -> Dict[str, 
         worker_id, {"status": _RESUMABLE.get(report.get("status"), "completed")})
     if error:
         raise ValueError(f"it cannot be resumed: {error}")
+    if msg["kind"] == turn_scheduler.PROGRESS_KIND:
+        # A status note never resumes a finished child: it waits for the
+        # message (or the owner) that does.
+        turn_id = await turn_scheduler.on_agent_message(
+            worker_id, msg["sender_session_id"], msg["text"], kind=msg["kind"])
+        if not turn_id:
+            raise ValueError(_STOPPED_CHILD)
+        if turn_id == turn_scheduler.HELD:
+            return {"status": agent_messaging.HELD, "turn_id": None}
+        return {"status": agent_messaging.QUEUED, "turn_id": turn_id}
     # Known as a worker again, so its settle hook owes the new report at once.
     provider_agent.register_worker_session(worker_id)
     turn_id = await turn_scheduler.on_agent_message(
@@ -2799,7 +2831,7 @@ async def _message_main(msg: Mapping[str, Any], from_device: str) -> Dict[str, A
     if await asyncio.to_thread(database.get_session, owner) is None:
         raise ValueError("the conversation that started it no longer exists")
     status, turn_id = await agent_messaging.deliver_message(
-        owner, worker_id, msg["text"], urgent=msg["urgent"])
+        owner, worker_id, msg["text"], urgent=msg["urgent"], kind=msg["kind"])
     if status == agent_messaging.STOPPED:
         raise ValueError("main was stopped by the owner")
     return {"status": status, "turn_id": turn_id}

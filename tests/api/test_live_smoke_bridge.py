@@ -49,6 +49,14 @@ def test_bridge_reuses_host_handler_and_stable_arguments(bridge):
         assert call.args == ("message", BODY, None)
 
 
+def test_bridge_passes_a_message_kind(bridge):
+    client, _allowed, dispatch, _senders = bridge
+    body = {**BODY, "kind": "progress"}
+    assert client.post(PATH, json=body, headers={"x-owner": "yes"}).status_code == 200
+    assert dispatch.await_args.args == ("message", body, None)
+    assert client.post(PATH, json={**BODY, "kind": "fyi"}, headers={"x-owner": "yes"}).status_code == 422
+
+
 @pytest.mark.parametrize("headers", [{}, {"x-owner": "yes", "x-ingress": "remote"},
                                       {"x-owner": "yes", "x-ingress": "preview"}])
 def test_bridge_refuses_non_owner_or_nonlocal(bridge, headers):
