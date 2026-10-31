@@ -205,12 +205,14 @@ class HubResponseError(HTTPException):
     ``status_code`` stays 503 so existing callers keep treating it as
     "unavailable". ``hub_status`` is what the hub answered (None when it was
     not reached) and ``retry_after`` its Retry-After in seconds, if any.
+    ``hub_error`` is an allow-listed push error code, never arbitrary hub text.
     """
 
-    def __init__(self, detail, hub_status=None, retry_after=None):
+    def __init__(self, detail, hub_status=None, retry_after=None, *, hub_error=None):
         super().__init__(status_code=503, detail=detail)
         self.hub_status = hub_status
         self.retry_after = retry_after
+        self.hub_error = hub_error
 
 
 class TunnelLimitError(HubResponseError):
@@ -253,6 +255,23 @@ def tunnel_limit(exc):
     return exc if isinstance(exc, TunnelLimitError) else None
 
 
+# Only these machine codes may leave a push error body. Never echo arbitrary
+# relay text: it could contain a registration token or request details.
+_PUSH_ERROR_CODES = frozenset({
+    'push_disabled', 'push_unconfigured', 'push_unavailable', 'push_rate_limited',
+    'push_upstream_unavailable', 'push_upstream_invalid', 'push_upstream_rejected',
+    'token_invalid', 'worker_not_registered', 'unauthorized', 'bad_shape',
+})
+
+
+def _push_error(response):
+    try:
+        code = json.loads(response.read(4097)).get('error')
+        return code if isinstance(code, str) and code in _PUSH_ERROR_CODES else None
+    except Exception:
+        return None
+
+
 def hub_status(exc):
     return getattr(exc, 'hub_status', None)
 
@@ -279,7 +298,7 @@ def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384
     """
     conn = None
     detail = 'Account hub authorization unavailable'
-    status = wait = None
+    status = wait = error_code = None
     try:
         origin = trusted_origin(binding['hub_url'])
         server = identifier(binding['server_id'])
@@ -328,6 +347,8 @@ def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384
                 raise HTTPException(response.status, message)
             if response.status == 429:
                 detail = 'Account hub is rate limiting this worker'
+            if suffix == 'push':
+                error_code = _push_error(response)
             raise ValueError(f'hub answered HTTP {response.status}')
         raw = response.read(max_bytes + 1)
         if len(raw) > max_bytes:
@@ -353,7 +374,7 @@ def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384
             logger.warning('Account hub %s %s failed: %s: %s', method, suffix, type(exc).__name__, exc)
         if status == 503 and wait:
             detail = 'Account hub is paused'
-        raise HubResponseError(detail, status, wait) from None
+        raise HubResponseError(detail, status, wait, hub_error=error_code) from None
     finally:
         if conn:
             conn.close()
