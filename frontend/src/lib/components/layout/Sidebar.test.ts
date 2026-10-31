@@ -1087,7 +1087,7 @@ describe('Sidebar multi-select (R15)', () => {
 		expect(countClickListeners(12)).toBe(countClickListeners(1));
 	});
 
-	it('starts selecting on a long press, then settles the picked rows with Undo', async () => {
+	it('starts selecting on a long press, then settles the picked rows without an Undo banner', async () => {
 		vi.useFakeTimers();
 		try {
 			const onOpenSession = vi.fn();
@@ -1106,9 +1106,7 @@ describe('Sidebar multi-select (R15)', () => {
 			await vi.advanceTimersByTimeAsync(0);
 
 			expect(mocks.setSessionActive).toHaveBeenCalledWith('active', false);
-			expect(mocks.banner).toHaveBeenCalledTimes(1);
-			const [, options] = mocks.banner.mock.calls[0] as [string, { action?: { label: string } }];
-			expect(options.action?.label).toBe('Undo');
+			expect(mocks.banner).not.toHaveBeenCalled();
 			expect(selbar().getAttribute('aria-hidden')).toBe('true');
 		} finally {
 			vi.useRealTimers();
@@ -1133,6 +1131,17 @@ describe('Sidebar multi-select (R15)', () => {
 			await vi.advanceTimersByTimeAsync(0);
 			expect(mocks.setSessionArchived).toHaveBeenCalledWith('active', true, true);
 			expect(mocks.setSessionArchived).toHaveBeenCalledWith('settled', true, false);
+			// Archive still offers Undo, which puts each row back where it was.
+			expect(mocks.banner).toHaveBeenCalledTimes(1);
+			const [message, options] = mocks.banner.mock.calls[0] as [
+				string,
+				{ action: { label: string; onClick: () => void } },
+			];
+			expect(message).toBe('Archived 2 sessions');
+			expect(options.action.label).toBe('Undo');
+			options.action.onClick();
+			expect(mocks.setSessionArchived).toHaveBeenCalledWith('active', false, true);
+			expect(mocks.setSessionArchived).toHaveBeenCalledWith('settled', false, false);
 		} finally {
 			vi.useRealTimers();
 		}

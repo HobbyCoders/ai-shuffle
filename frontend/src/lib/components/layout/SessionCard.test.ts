@@ -186,22 +186,22 @@ describe('SessionCard archive and undo', () => {
 	type BannerOpts = { action: { label: string; onClick: () => void }; duration_ms: number; persist: boolean };
 	const lastBanner = () => mocks.banner.mock.calls.at(-1) as unknown as [string, BannerOpts];
 
-	it('offers Undo after settling, which moves the session back to Active', async () => {
+	it('settles without an Undo banner', async () => {
 		renderCard({ is_active: true });
 		await fireEvent.click(screen.getByTitle('Settle session'));
-		const [message, opts] = lastBanner();
-		expect(message).toBe('Settled “Sidebar work”');
-		expect(opts).toMatchObject({ persist: false, duration_ms: 6000, action: { label: 'Undo' } });
-		opts.action.onClick();
-		expect(mocks.dismissLive).toHaveBeenCalledWith('banner-1');
-		expect(mocks.setSessionActive).toHaveBeenLastCalledWith('session-a', true);
+		await vi.waitFor(() => expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false));
+		expect(mocks.banner).not.toHaveBeenCalled();
 	});
 
 	it('archives an active desktop session directly and Undo restores Active', async () => {
 		renderCard({ is_active: true });
 		await fireEvent.click(screen.getByTitle('Archive session'));
 		expect(mocks.setSessionArchived).toHaveBeenCalledWith('session-a', true);
-		lastBanner()[1].action.onClick();
+		const [message, opts] = lastBanner();
+		expect(message).toBe('Archived “Sidebar work”');
+		expect(opts).toMatchObject({ persist: false, duration_ms: 6000, action: { label: 'Undo' } });
+		opts.action.onClick();
+		expect(mocks.dismissLive).toHaveBeenCalledWith('banner-1');
 		expect(mocks.setSessionArchived).toHaveBeenLastCalledWith('session-a', false, true);
 	});
 
@@ -523,7 +523,7 @@ describe('SessionCard swipe gestures', () => {
 		vi.restoreAllMocks();
 	});
 
-	it('settles an active row on a long left swipe, then offers Undo', async () => {
+	it('settles an active row on a long left swipe, with no Undo banner', async () => {
 		const clock = slowClock();
 		const { container, onOpen } = renderCard({ is_active: true });
 		const { frame, card } = parts(container);
@@ -547,7 +547,7 @@ describe('SessionCard swipe gestures', () => {
 		expect(mocks.setSessionActive).not.toHaveBeenCalled();
 		await vi.advanceTimersByTimeAsync(450);
 		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
-		expect(mocks.banner.mock.calls.at(-1)?.[0]).toBe('Settled “Sidebar work”');
+		expect(mocks.banner).not.toHaveBeenCalled();
 		expect(onOpen).not.toHaveBeenCalled();
 	});
 
