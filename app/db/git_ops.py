@@ -188,17 +188,65 @@ def complete_op(op_id: str, result: Optional[Dict[str, Any]] = None) -> Optional
         return _row(cursor.fetchone())
 
 
-def fail_op(op_id: str, error: str) -> Optional[Dict[str, Any]]:
-    """Settle a running op as ``error``, recording the message in ``result``."""
+def fail_op(op_id: str, error: str, *, code: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Settle a running op as ``error``, recording the message in ``result``.
+
+    ``code`` is an optional stable machine-readable reason (``setup_project``
+    records ``github_auth``, ``folder_exists``, ...) stored as ``error_code``.
+    """
+    result: Dict[str, Any] = {"error": str(error)}
+    if code:
+        result["error_code"] = code
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE git_ops SET status = 'error', result = %s, updated_at = NOW() "
             "WHERE id = %s "
             "RETURNING *",
-            (json.dumps({"error": str(error)}), op_id),
+            (json.dumps(result), op_id),
         )
         return _row(cursor.fetchone())
+
+
+def set_running_result(op_id: str, result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Record interim ``result`` (progress) on a RUNNING op; also a heartbeat."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE git_ops SET result = %s, updated_at = NOW() "
+            "WHERE id = %s AND status = 'running' RETURNING *",
+            (json.dumps(result), op_id),
+        )
+        return _row(cursor.fetchone())
+
+
+def cancel_queued(op_id: str, runner_id: str, message: str) -> Optional[Dict[str, Any]]:
+    """Settle a still-QUEUED op as a cancelled error (``error_code`` ``cancelled``).
+
+    One conditional UPDATE, so it races the claim exactly like ``claim_op``:
+    either the cancel wins and nothing runs, or the claim won and the caller
+    gets ``None`` (the op is already running or finished).
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE git_ops SET status = 'error', result = %s, updated_at = NOW() "
+            "WHERE id = %s AND runner_id = %s AND status = 'queued' RETURNING *",
+            (json.dumps({"error": message, "error_code": "cancelled"}), op_id, runner_id),
+        )
+        return _row(cursor.fetchone())
+
+
+def list_ops_for_runner(runner_id: str, op: str, limit: int = 200) -> List[Dict[str, Any]]:
+    """Recent ops of one kind on one runner, newest first (settled ones included)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM git_ops WHERE runner_id = %s AND op = %s "
+            "ORDER BY created_at DESC, id DESC LIMIT %s",
+            (runner_id, op, limit),
+        )
+        return _rows(cursor.fetchall())
 
 
 def touch_op(op_id: str) -> Optional[Dict[str, Any]]:

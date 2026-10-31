@@ -408,6 +408,11 @@ def _git_op_handler():
     return git.handle_op
 
 
+def _project_setup_handler():
+    from app.core.project_setup import handle_control
+    return handle_control
+
+
 # Handlers that live in modules imported lazily (they pull in the session
 # runtime). One table serves both dispatch and ``known_action`` so a new
 # action cannot be reachable in one and unknown to the other.
@@ -599,6 +604,7 @@ _LAZY_HANDLERS = {
     "git-catalog": _git_catalog_handler,
     "projects-changed": _projects_changed_handler,
     "git-op": _git_op_handler,
+    "project-setup": _project_setup_handler,
 }
 
 

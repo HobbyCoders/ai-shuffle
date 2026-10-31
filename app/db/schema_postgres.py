@@ -115,6 +115,9 @@ def create_postgres_schema(cursor: Any) -> None:
     create_network_schema(cursor)
     from app.db.working_record import create_schema as create_working_record_schema
     create_working_record_schema(cursor)
+    # Cross-worker project setup requests and cached peer catalogs (local only).
+    from app.db.project_setup import create_schema as create_project_setup_schema
+    create_project_setup_schema(cursor)
 
     # 1. Schema version
     # ------------------------------------------------------------------
