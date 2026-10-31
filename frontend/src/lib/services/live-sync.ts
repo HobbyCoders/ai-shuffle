@@ -22,6 +22,7 @@ import { RESOURCE_NAMES, resourceSync } from './resource-sync';
 import { resetUserEventDedupe } from './user-event-dedupe';
 import { handleGlobalUserEvent, activeSession } from '$lib/stores/active-session';
 import { appData } from '$lib/stores/app-data.svelte';
+import { refreshProjectsOverviewIfUsed } from '$lib/stores/projects-overview';
 import { hydrateModelRegistry } from '$lib/constants/models';
 import { notify } from '$lib/stores/notifications';
 import { feedController } from '$lib/stores/session/v2/feed-controller';
@@ -86,7 +87,7 @@ export function startLiveSync() {
  const unsubscribeResources = [
   resourceSync.subscribe(['sessions', 'tags'], () => appData.loadSessions()),
   resourceSync.subscribe(['projects'], async () => {
-   await Promise.all([appData.loadProjectCatalog(projectsInvalidatedAt), appData.loadSessions()]);
+   await Promise.all([appData.loadProjectCatalog(projectsInvalidatedAt), appData.loadSessions(), refreshProjectsOverviewIfUsed()]);
    activeSession.applyComposerDefaults();
    activeSession.dropMissingProject();
   }),
