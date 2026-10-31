@@ -3,18 +3,29 @@
 	 * ProjectCard — Studio-v2 project surface.
 	 *
 	 * List view: a Studio page header + `.pc`-style project list.
-	 * Detail view: page header + project hero + sub-nav (General / MCP / Agents /
-	 * Hooks / Memory) hosting the existing tab components.
+	 * Detail view: page header + project hero + sub-nav (General / Workers /
+	 * MCP / Agents / Hooks / Memory) hosting the existing tab components.
+	 *
+	 * Cross-worker project sync: when GET /projects/overview answers, the list
+	 * is every logical project known to any worker, each with worker chips
+	 * (ready / missing → set up there / setting up / offline / failed), an
+	 * "All workers | On <this worker>" filter and a legend. A project that is
+	 * not on this worker is still listed (dimmed icon, "Not on <worker>") and
+	 * opens its detail on the Workers tab; the tabs that need a local project
+	 * are disabled there with a note. When the overview is not available (an
+	 * older worker) the list is this worker's projects with no chips, as before.
 	 *
 	 * The chrome (header / hero / sub-nav / list) is pure Studio-v2 (app theme
 	 * tokens). The inner tab components keep their own styling (they alias the same
 	 * theme tokens via card-design-system), so they render on-theme unchanged.
 	 */
+	import { onDestroy } from 'svelte';
 	import { appData as tabs, projects } from '$lib/stores/app-data.svelte';
+	import { loadProjectsOverview, patchOverviewWorker, projectsOverview, projectsOverviewSupported } from '$lib/stores/projects-overview';
 	import { groups } from '$lib/stores/groups.svelte';
 	import {
-		Search, Plus, Trash2, FolderOpen, Settings, Server, Bot, Zap, Brain,
-		ChevronRight, ChevronLeft, Loader2, AlertTriangle
+		Search, Plus, Trash2, FolderOpen, FolderGit2, Folder, Settings, Server, Bot, Zap, Brain,
+		ChevronRight, ChevronLeft, Loader2, AlertTriangle, MonitorSmartphone
 	} from 'lucide-svelte';
 	import Banner from '$lib/components/Banner.svelte';
 	import StudioPageHeader from '$lib/components/layout/StudioPageHeader.svelte';
@@ -25,24 +36,35 @@
 	import ProjectAgentsTab from './ProjectAgentsTab.svelte';
 	import ProjectHooksTab from './ProjectHooksTab.svelte';
 	import ProjectMemoryTab from './ProjectMemoryTab.svelte';
+	import ProjectWorkersTab from './ProjectWorkersTab.svelte';
+	import ProjectWorkerChips from './ProjectWorkerChips.svelte';
 	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
+	import { isAdmin } from '$lib/stores/auth.svelte';
+	import { activeView } from '$lib/stores/layout.svelte';
+	import { startProjectSetup, type ProjectKind, type ProjectOverviewRow, type ProjectWorker } from '$lib/api/project-workers';
+	import { SETUP_POLL_MS } from '$lib/stores/project-setup';
+	import { isOnThisWorker, isRunning, missingCount, selfWorker } from './project-workers-view';
 	import './card-design-system.css';
 
 	// View mode: list or detail
 	type ViewMode = 'list' | 'detail';
 	let viewMode = $state<ViewMode>('list');
-	let selectedProjectId = $state<string | null>(null);
+	/** The selected row's key: its logical id when known, else this worker's id. */
+	let selectedKey = $state<string | null>(null);
 
 	// Detail view tab
-	type DetailTab = 'general' | 'mcp' | 'agents' | 'hooks' | 'memory';
+	type DetailTab = 'general' | 'workers' | 'mcp' | 'agents' | 'hooks' | 'memory';
 	let activeTab = $state<DetailTab>('general');
+	/** A chip was clicked: the Workers tab focuses that worker's card. */
+	let focusInstallId = $state<string | null>(null);
 
-	const TABS: { id: DetailTab; label: string; icon: typeof Settings }[] = [
-		{ id: 'general', label: 'General', icon: Settings },
-		{ id: 'mcp', label: 'MCP Servers', icon: Server },
-		{ id: 'agents', label: 'Agents', icon: Bot },
-		{ id: 'hooks', label: 'Hooks', icon: Zap },
-		{ id: 'memory', label: 'Memory', icon: Brain }
+	const TABS: { id: DetailTab; label: string; icon: typeof Settings; local: boolean }[] = [
+		{ id: 'general', label: 'General', icon: Settings, local: true },
+		{ id: 'workers', label: 'Workers', icon: MonitorSmartphone, local: false },
+		{ id: 'mcp', label: 'MCP Servers', icon: Server, local: true },
+		{ id: 'agents', label: 'Agents', icon: Bot, local: true },
+		{ id: 'hooks', label: 'Hooks', icon: Zap, local: true },
+		{ id: 'memory', label: 'Memory', icon: Brain, local: true }
 	];
 
 	// Add project modal state
@@ -51,8 +73,9 @@
 	// Error state
 	let error = $state<string | null>(null);
 
-	// Search state
+	// Search + worker filter
 	let searchQuery = $state('');
+	let workerFilter = $state<'all' | 'here'>('all');
 
 	// MCP tab ref (for triggering add from the sub-nav)
 	let mcpTabRef = $state<ProjectMcpTabType>();
@@ -84,40 +107,161 @@
 		}
 	}
 
-	// Get selected project
-	// Keep the mounted detail shell after deletion so child drafts remain recoverable.
-	let retainedProject = $state<(typeof $projects)[number] | undefined>();
-	const liveProject = $derived($projects.find((p) => p.id === selectedProjectId));
-	$effect(() => { if (liveProject) retainedProject = liveProject; });
-	const selectedProject = $derived(liveProject ?? (retainedProject?.id === selectedProjectId ? retainedProject : undefined));
+	// ── Rows: the overview merged with this worker's projects ────────────────
+
+	type LocalProject = (typeof $projects)[number];
+
+	interface ListRow {
+		key: string;
+		name: string;
+		localId: string | null;
+		projectV2Id: string | null;
+		path: string | null;
+		kind: ProjectKind | null;
+		remote: string | null;
+		defaultBranch: string | null;
+		sessionCount: number;
+		workers: ProjectWorker[];
+		onHere: boolean;
+		local: LocalProject | undefined;
+	}
+
+	// Ask for the overview each time the page shows (it stays mounted while
+	// hidden); live-sync's `projects` refresh keeps it fresh while it is used.
+	const shown = $derived(($activeView?.type ?? 'project') === 'project');
+	$effect(() => { if (shown) void loadProjectsOverview(); });
+
+	const overviewOn = $derived($projectsOverviewSupported === true);
+	const selfName = $derived.by(() => {
+		for (const row of $projectsOverview) {
+			const self = selfWorker(row.workers);
+			if (self) return self.device_name;
+		}
+		return 'this worker';
+	});
+
+	function fromOverview(row: ProjectOverviewRow): ListRow {
+		const local = row.local_project_id ? $projects.find((p) => p.id === row.local_project_id) : undefined;
+		return {
+			key: row.project_v2_id,
+			name: local?.name ?? row.name,
+			localId: row.local_project_id,
+			projectV2Id: row.project_v2_id,
+			path: local?.path ?? null,
+			kind: row.kind,
+			remote: row.remote,
+			defaultBranch: row.default_branch,
+			sessionCount: row.session_count ?? local?.session_count ?? 0,
+			workers: row.workers,
+			onHere: isOnThisWorker(row),
+			local
+		};
+	}
+
+	function fromLocal(p: LocalProject): ListRow {
+		return {
+			key: p.id, name: p.name, localId: p.id, projectV2Id: null, path: p.path, kind: null, remote: null,
+			defaultBranch: null, sessionCount: p.session_count ?? 0, workers: [], onHere: true, local: p
+		};
+	}
+
+	const allRows = $derived.by((): ListRow[] => {
+		if (!overviewOn) return $projects.map(fromLocal);
+		const rows = $projectsOverview.map(fromOverview);
+		// A project this worker just added may not be in the overview yet.
+		const covered = new Set(rows.map((r) => r.localId).filter(Boolean));
+		for (const p of $projects) if (!covered.has(p.id)) rows.push(fromLocal(p));
+		return rows;
+	});
+
+	const workerCount = $derived.by(() => {
+		const ids = new Set<string>();
+		for (const row of $projectsOverview) for (const w of row.workers) ids.add(w.install_id);
+		return ids.size;
+	});
 
 	// Filtered projects
-	const filteredProjects = $derived.by(() => {
-		if (!searchQuery.trim()) return $projects;
+	const filteredRows = $derived.by(() => {
+		let rows = allRows;
+		if (overviewOn && workerFilter === 'here') rows = rows.filter((r) => r.onHere);
+		if (!searchQuery.trim()) return rows;
 		const q = searchQuery.toLowerCase();
-		return $projects.filter(
-			(p) =>
-				p.name.toLowerCase().includes(q) ||
-				p.id.toLowerCase().includes(q) ||
-				p.path.toLowerCase().includes(q)
+		return rows.filter(
+			(r) =>
+				r.name.toLowerCase().includes(q) ||
+				(r.localId ?? '').toLowerCase().includes(q) ||
+				(r.path ?? '').toLowerCase().includes(q) ||
+				(r.remote ?? '').toLowerCase().includes(q)
 		);
 	});
 
-	const summary = $derived(
-		`${$projects.length} ${$projects.length === 1 ? 'project' : 'projects'}`
-	);
+	const summary = $derived.by(() => {
+		const n = allRows.length;
+		const base = `${n} ${n === 1 ? 'project' : 'projects'}`;
+		if (!overviewOn || workerCount < 2) return base;
+		return `${base} across ${workerCount} workers · viewing from ${selfName}`;
+	});
 
-	function handleProjectClick(projectId: string) {
-		selectedProjectId = projectId;
+	// While a setup runs somewhere, re-read the overview every 2 s (the
+	// resources_changed refresh also lands; this is the fail-safe).
+	const anyRunning = $derived(overviewOn && $projectsOverview.some((r) => r.workers.some((w) => isRunning(w))));
+	let pollTimer: ReturnType<typeof setInterval> | undefined;
+	$effect(() => {
+		if (!anyRunning) return;
+		pollTimer = setInterval(() => void loadProjectsOverview(), SETUP_POLL_MS);
+		return () => { clearInterval(pollTimer); pollTimer = undefined; };
+	});
+	onDestroy(() => { if (pollTimer) clearInterval(pollTimer); });
+
+	// ── Selection ─────────────────────────────────────────────────────────────
+
+	// Keep the mounted detail shell after deletion so child drafts remain recoverable.
+	let retainedRow = $state<ListRow | undefined>();
+	const liveRow = $derived(allRows.find((r) => r.key === selectedKey || (!!r.localId && r.localId === selectedKey)));
+	$effect(() => { if (liveRow) retainedRow = liveRow; });
+	const selectedRow = $derived(liveRow ?? (retainedRow && (retainedRow.key === selectedKey || retainedRow.localId === selectedKey) ? retainedRow : undefined));
+	const selectedProject = $derived(selectedRow?.local);
+	/** The selected project is not on this worker (no local tabs). */
+	const remoteOnly = $derived(!!selectedRow && !selectedRow.localId);
+	const showWorkersTab = $derived(overviewOn && !!selectedRow?.projectV2Id);
+	const detailMissing = $derived(selectedRow ? missingCount(selectedRow.workers) : 0);
+
+	// When a project gets set up here while its detail is open, its local tabs unlock.
+	$effect(() => {
+		if (remoteOnly && activeTab !== 'workers') activeTab = 'workers';
+	});
+
+	function handleRowClick(row: ListRow, tab?: DetailTab, installId: string | null = null) {
+		selectedKey = row.key;
 		viewMode = 'detail';
-		activeTab = 'general';
+		activeTab = tab ?? (row.localId ? 'general' : 'workers');
+		focusInstallId = installId;
 		confirmingRemove = false;
 	}
 
 	function handleBack() {
 		viewMode = 'list';
-		selectedProjectId = null;
+		selectedKey = null;
+		focusInstallId = null;
 		confirmingRemove = false;
+	}
+
+	/** A dashed chip: set the project up on that worker in its default folder. */
+	async function setUpFromChip(row: ListRow, worker: ProjectWorker) {
+		if (!row.projectV2Id) return;
+		if (!$isAdmin) return handleRowClick(row, 'workers', worker.install_id);
+		error = null;
+		try {
+			const res = await startProjectSetup({ project_v2_id: row.projectV2Id }, { install_id: worker.install_id });
+			patchOverviewWorker(row.projectV2Id, worker.install_id, {
+				state: res.status === 'done' ? 'ready' : res.status === 'queued_offline' ? 'queued_offline' : 'setting_up',
+				setup: { op_id: res.op_id, status: res.status, progress: null }
+			});
+			void loadProjectsOverview();
+		} catch (e: unknown) {
+			const err = e as { detail?: string; message?: string };
+			error = `Couldn't start the setup on ${worker.device_name}: ${err.detail || err.message || 'unknown error'}`;
+		}
 	}
 
 	async function handleDeleteProject() {
@@ -142,12 +286,33 @@
 		if (!error) handleBack();
 		confirmingRemove = false;
 	}
+
+	function rowTag(row: ListRow): string | null {
+		if (row.kind === 'git') return row.defaultBranch ? `git · ${row.defaultBranch}` : 'git';
+		if (row.kind === 'folder') return 'folder';
+		return null;
+	}
+
+	function rowMeta(row: ListRow): string {
+		const sessions = `${row.sessionCount} session${row.sessionCount === 1 ? '' : 's'}`;
+		if (!overviewOn) return row.path ?? '';
+		const where = row.remote ?? (row.kind === 'folder' ? 'not a Git repo' : row.path);
+		return [where, sessions].filter(Boolean).join(' · ');
+	}
+
+	const LEGEND = [
+		{ tone: 'ready' as const, text: 'has it' },
+		{ tone: 'missing' as const, text: 'click to set up' },
+		{ tone: 'busy' as const, text: 'setting up' },
+		{ tone: 'offline' as const, text: 'offline' },
+		{ tone: 'failed' as const, text: 'failed — open for why' }
+	];
 </script>
 
 <svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
 
-{#if viewMode === 'detail' && selectedProject}
-	{#if !liveProject}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">This project was deleted elsewhere. Any unsaved fields remain available below until you leave.</p>{/if}
+{#if viewMode === 'detail' && selectedRow}
+	{#if selectedRow.localId && !liveRow}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">This project was deleted elsewhere. Any unsaved fields remain available below until you leave.</p>{/if}
 	<!-- ─────────────────────────── DETAIL ─────────────────────────── -->
 	<div class="pc">
 		<div class="pc-scroll">
@@ -163,24 +328,43 @@
 
 				<!-- Hero -->
 				<div class="pc-hero">
-					<span class="pc-hero-ic"><FolderOpen size={26} strokeWidth={1.6} /></span>
+					<span class="pc-hero-ic" class:dim={remoteOnly}>
+						{#if selectedRow.kind === 'git'}<FolderGit2 size={26} strokeWidth={1.6} />{:else}<FolderOpen size={26} strokeWidth={1.6} />{/if}
+					</span>
 					<div class="pc-hero-id">
-						<h2>{selectedProject.name}</h2>
-						<div class="pc-hero-path">{selectedProject.path}</div>
+						<h2>{selectedRow.name}</h2>
+						<div class="pc-hero-path">
+							{#if selectedProject}{selectedProject.path}{:else}{selectedRow.remote ?? 'Not on this worker'}{/if}
+							{#if selectedRow.remote && selectedProject} · {selectedRow.remote}{/if}
+							{#if selectedRow.defaultBranch} · default branch {selectedRow.defaultBranch}{/if}
+						</div>
 					</div>
-					<div class="pc-hero-acts">
-						{#if confirmingRemove}
-							<span class="pc-confirm-text">Remove this project?</span>
-							<button class="pc-btn pc-btn--sm" onclick={() => (confirmingRemove = false)} disabled={deleteLoading}>Cancel</button>
-							<button class="pc-btn pc-btn--sm pc-btn--danger" onclick={handleRemoveFromDetail} disabled={deleteLoading}>
-								{#if deleteLoading}<Loader2 size={13} class="pc-spin" />{/if}Remove
-							</button>
-						{:else}
-							<button class="pc-btn pc-btn--sm pc-btn--danger" onclick={() => (confirmingRemove = true)}>
-								<Trash2 size={14} strokeWidth={1.8} /><span>Remove</span>
-							</button>
-						{/if}
-					</div>
+					{#if overviewOn && selectedRow.workers.length > 0}
+						<div class="pc-hero-chips">
+							<ProjectWorkerChips
+								workers={selectedRow.workers}
+								kind={selectedRow.kind}
+								projectName={selectedRow.name}
+								onSetup={(w) => setUpFromChip(selectedRow, w)}
+								onOpen={(w) => { activeTab = 'workers'; focusInstallId = w.install_id; }}
+							/>
+						</div>
+					{/if}
+					{#if selectedProject}
+						<div class="pc-hero-acts">
+							{#if confirmingRemove}
+								<span class="pc-confirm-text">Remove this project{overviewOn ? ` from ${selfName}` : ''}?</span>
+								<button class="pc-btn pc-btn--sm" onclick={() => (confirmingRemove = false)} disabled={deleteLoading}>Cancel</button>
+								<button class="pc-btn pc-btn--sm pc-btn--danger" onclick={handleRemoveFromDetail} disabled={deleteLoading}>
+									{#if deleteLoading}<Loader2 size={13} class="pc-spin" />{/if}Remove
+								</button>
+							{:else}
+								<button class="pc-btn pc-btn--sm pc-btn--danger" onclick={() => (confirmingRemove = true)}>
+									<Trash2 size={14} strokeWidth={1.8} /><span>Remove</span>
+								</button>
+							{/if}
+						</div>
+					{/if}
 				</div>
 
 				{#if error}
@@ -189,11 +373,24 @@
 
 				<!-- Sub-nav -->
 				<div class="pc-subnav">
-					<div class="pc-subtabs">
-						{#each TABS as t}
-							<button class="pc-subtab" class:on={activeTab === t.id} onclick={() => (activeTab = t.id)}>
-								<t.icon size={14} strokeWidth={1.7} /><span>{t.label}</span>
-							</button>
+					<div class="pc-subtabs" role="tablist" aria-label="Project settings">
+						{#each TABS as t (t.id)}
+							{#if t.id !== 'workers' || showWorkersTab}
+								{@const locked = t.local && remoteOnly}
+								<button
+									class="pc-subtab"
+									class:on={activeTab === t.id}
+									class:locked
+									role="tab"
+									aria-selected={activeTab === t.id}
+									aria-disabled={locked}
+									title={locked ? `${selectedRow.name} isn't on ${selfName}. Set it up here to change this.` : undefined}
+									onclick={() => { if (!locked) { activeTab = t.id; if (t.id !== 'workers') focusInstallId = null; } }}
+								>
+									<t.icon size={14} strokeWidth={1.7} /><span>{t.label}</span>
+									{#if t.id === 'workers' && detailMissing > 0}<span class="pc-count">{detailMissing} missing</span>{/if}
+								</button>
+							{/if}
 						{/each}
 					</div>
 					{#if activeTab === 'mcp'}
@@ -203,18 +400,34 @@
 					{/if}
 				</div>
 
+				{#if remoteOnly}
+					<p class="pc-note" role="note">
+						<strong>{selectedRow.name} isn't on {selfName}.</strong> Its settings, MCP servers, agents, hooks and memory live with each copy; set it up on {selfName} from the card below to change them here.
+					</p>
+				{/if}
+
 				<!-- Tab body -->
 				<div class="pc-tabbody">
-					{#if activeTab === 'general'}
-						<ProjectGeneralTab projectId={selectedProject.id} />
-					{:else if activeTab === 'mcp'}
-						<ProjectMcpTab bind:this={mcpTabRef} projectId={selectedProject.id} />
-					{:else if activeTab === 'agents'}
-						<ProjectAgentsTab projectId={selectedProject.id} />
-					{:else if activeTab === 'hooks'}
-						<ProjectHooksTab projectId={selectedProject.id} />
-					{:else if activeTab === 'memory'}
-						<ProjectMemoryTab projectId={selectedProject.id} />
+					{#if activeTab === 'workers' && showWorkersTab && selectedRow.projectV2Id}
+						<ProjectWorkersTab
+							projectRef={{ project_v2_id: selectedRow.projectV2Id }}
+							projectName={selectedRow.name}
+							localProjectId={selectedRow.localId}
+							{focusInstallId}
+							onChanged={() => void loadProjectsOverview()}
+						/>
+					{:else if selectedProject}
+						{#if activeTab === 'general'}
+							<ProjectGeneralTab projectId={selectedProject.id} />
+						{:else if activeTab === 'mcp'}
+							<ProjectMcpTab bind:this={mcpTabRef} projectId={selectedProject.id} />
+						{:else if activeTab === 'agents'}
+							<ProjectAgentsTab projectId={selectedProject.id} />
+						{:else if activeTab === 'hooks'}
+							<ProjectHooksTab projectId={selectedProject.id} />
+						{:else if activeTab === 'memory'}
+							<ProjectMemoryTab projectId={selectedProject.id} />
+						{/if}
 					{/if}
 				</div>
 			</div>
@@ -244,16 +457,27 @@
 					<div class="pc-toolbar">
 						<div class="pc-search">
 							<Search size={14} strokeWidth={1.7} />
-							<input type="text" bind:value={searchQuery} placeholder="Search projects…" autocomplete="off" />
+							<input type="text" bind:value={searchQuery} placeholder="Search projects…" autocomplete="off" aria-label="Search projects" />
 						</div>
+						{#if overviewOn && workerCount > 1}
+							<div class="pc-seg" role="radiogroup" aria-label="Show projects">
+								<button type="button" role="radio" aria-checked={workerFilter === 'all'} class:on={workerFilter === 'all'} onclick={() => (workerFilter = 'all')}>All workers</button>
+								<button type="button" role="radio" aria-checked={workerFilter === 'here'} class:on={workerFilter === 'here'} onclick={() => (workerFilter = 'here')}>On {selfName}</button>
+							</div>
+						{/if}
 					</div>
 
-					{#if filteredProjects.length === 0}
+					{#if filteredRows.length === 0}
 						<div class="pc-empty">
 							{#if searchQuery}
 								<Search size={34} strokeWidth={1.25} />
 								<p class="pc-empty-title">No projects match "{searchQuery}"</p>
 								<button class="pc-link" onclick={() => (searchQuery = '')}>Clear search</button>
+							{:else if workerFilter === 'here' && allRows.length > 0}
+								<FolderOpen size={34} strokeWidth={1.25} />
+								<p class="pc-empty-title">No projects on {selfName} yet</p>
+								<p class="pc-empty-sub">Other workers have {allRows.length === 1 ? 'one' : allRows.length}. Open one to set it up here.</p>
+								<button class="pc-link" onclick={() => (workerFilter = 'all')}>Show all workers</button>
 							{:else}
 								<FolderOpen size={34} strokeWidth={1.25} />
 								<p class="pc-empty-title">No projects configured yet</p>
@@ -262,58 +486,80 @@
 							{/if}
 						</div>
 					{:else}
-						<div class="pc-list">
-							{#each filteredProjects as project (project.id)}
-								{#if deletingId === project.id}
+						<div class="pc-list" data-ui-projects={overviewOn ? 'overview' : 'local'}>
+							{#each filteredRows as row (row.key)}
+								{#if row.localId && deletingId === row.localId}
 									<div class="pc-row pc-row--confirm">
 										<div class="pc-confirm-body">
-											{#if project.session_count && project.session_count > 0}
+											{#if row.sessionCount > 0}
 												<span class="pc-confirm-ic"><AlertTriangle size={16} strokeWidth={1.8} /></span>
 												<p class="pc-confirm-text">
-													Delete <strong>{project.name}</strong> and its {project.session_count} conversation{project.session_count === 1 ? '' : 's'}? This can't be undone.
+													Delete <strong>{row.name}</strong>{overviewOn ? ` from ${selfName}` : ''} and its {row.sessionCount} conversation{row.sessionCount === 1 ? '' : 's'}? This can't be undone.
 												</p>
 											{:else}
-												<p class="pc-confirm-text">Delete <strong>{project.name}</strong>? This can't be undone.</p>
+												<p class="pc-confirm-text">Delete <strong>{row.name}</strong>{overviewOn ? ` from ${selfName}` : ''}? This can't be undone.</p>
 											{/if}
 										</div>
 										<div class="pc-confirm-actions">
 											<button class="pc-btn pc-btn--sm" onclick={(e) => { e.stopPropagation(); deletingId = null; }} disabled={deleteLoading}>Cancel</button>
 											<button class="pc-btn pc-btn--sm pc-btn--danger" onclick={(e) => { e.stopPropagation(); handleDeleteProject(); }} disabled={deleteLoading}>
 												{#if deleteLoading}<Loader2 size={13} class="pc-spin" />{/if}
-												{project.session_count && project.session_count > 0 ? 'Delete all' : 'Delete'}
+												{row.sessionCount > 0 ? 'Delete all' : 'Delete'}
 											</button>
 										</div>
 									</div>
 								{:else}
+									{@const tag = rowTag(row)}
 									<div
 										class="pc-row"
+										class:pc-row--chips={overviewOn && row.workers.length > 0}
 										role="button"
 										tabindex="0"
-										onclick={() => handleProjectClick(project.id)}
-										onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleProjectClick(project.id); } }}
+										aria-label="Open {row.name}{row.onHere ? '' : ` (not on ${selfName})`}"
+										data-project-key={row.key}
+										onclick={() => handleRowClick(row)}
+										onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); handleRowClick(row); } }}
 									>
-										<span class="pc-ic"><FolderOpen size={17} strokeWidth={1.7} /></span>
+										<span class="pc-ic" class:dim={!row.onHere}>
+											{#if row.kind === 'git'}<FolderGit2 size={17} strokeWidth={1.7} />{:else if row.kind === 'folder'}<Folder size={17} strokeWidth={1.7} />{:else}<FolderOpen size={17} strokeWidth={1.7} />{/if}
+										</span>
 										<div class="pc-body">
 											<h4 class="pc-name">
-												{project.name}
-												{#if $groups.projects.assignments[project.id]}
-													<span class="pc-badge">{$groups.projects.assignments[project.id]}</span>
+												{row.name}
+												{#if tag}<span class="pc-pill">{tag}</span>{/if}
+												{#if !row.onHere}<span class="pc-pill pc-pill--warn">Not on {selfName}</span>{/if}
+												{#if row.localId && $groups.projects.assignments[row.localId]}
+													<span class="pc-badge">{$groups.projects.assignments[row.localId]}</span>
 												{/if}
 											</h4>
-											<p class="pc-path">{project.path}</p>
+											<p class="pc-path">{rowMeta(row)}</p>
 										</div>
-										<div class="pc-meta">
-											<span class="pc-tag">{project.session_count || 0} session{project.session_count === 1 ? '' : 's'}</span>
-										</div>
-										<RowActionMenu
-											open={actionsOpenId === project.id}
-											onToggle={(e) => toggleRowActions(e, project.id)}
-											label="Project actions"
-										>
-											<button class="pc-act pc-act--danger" title="Delete" onclick={(e) => { e.stopPropagation(); actionsOpenId = null; deletingId = project.id; }}>
-												<Trash2 size={15} strokeWidth={1.7} />
-											</button>
-										</RowActionMenu>
+										{#if overviewOn && row.workers.length > 0}
+											<div class="pc-chips">
+												<ProjectWorkerChips
+													workers={row.workers}
+													kind={row.kind}
+													projectName={row.name}
+													onSetup={(w) => setUpFromChip(row, w)}
+													onOpen={(w) => handleRowClick(row, 'workers', w.install_id)}
+												/>
+											</div>
+										{:else}
+											<div class="pc-meta">
+												<span class="pc-tag">{row.sessionCount} session{row.sessionCount === 1 ? '' : 's'}</span>
+											</div>
+										{/if}
+										{#if row.localId}
+											<RowActionMenu
+												open={actionsOpenId === row.key}
+												onToggle={(e) => toggleRowActions(e, row.key)}
+												label="Project actions"
+											>
+												<button class="pc-act pc-act--danger" title="Delete" aria-label="Delete {row.name}" onclick={(e) => { e.stopPropagation(); actionsOpenId = null; deletingId = row.localId; }}>
+													<Trash2 size={15} strokeWidth={1.7} />
+												</button>
+											</RowActionMenu>
+										{/if}
 										<span class="pc-chev"><ChevronRight size={16} strokeWidth={1.7} /></span>
 									</div>
 								{/if}
@@ -324,6 +570,11 @@
 								<span>New project</span>
 							</button>
 						</div>
+						{#if overviewOn && workerCount > 1}
+							<div class="pc-legend">
+								<ProjectWorkerChips workers={[]} kind={null} projectName="" legend={LEGEND} />
+							</div>
+						{/if}
 					{/if}
 				</div>
 			</div>
@@ -332,7 +583,7 @@
 {/if}
 
 <!-- Add Project Modal (shared across all modes) -->
-<AddProjectModal open={showAddModal} onClose={() => (showAddModal = false)} />
+<AddProjectModal open={showAddModal} onClose={() => (showAddModal = false)} onCreated={() => void loadProjectsOverview()} />
 
 <style>
 	.pc {
@@ -535,11 +786,42 @@
 	:global(.pc-spin) { animation: pc-spin 1s linear infinite; }
 	@keyframes pc-spin { to { transform: rotate(360deg); } }
 
+
+	/* ── Cross-worker sync ── */
+	.pc-ic.dim, .pc-hero-ic.dim { background: color-mix(in oklch, var(--muted-foreground) 14%, transparent); color: var(--muted-foreground); }
+	.pc-hero-chips { flex: 0 1 auto; min-width: 0; max-width: 46%; }
+	.pc-pill { flex-shrink: 0; font-family: var(--font-sans, inherit); font-size: 0.66rem; font-weight: 500; letter-spacing: 0; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted-foreground); }
+	.pc-pill--warn { color: var(--warning); border-color: color-mix(in oklch, var(--warning) 45%, transparent); }
+	.pc-chips { flex: 0 1 auto; min-width: 0; max-width: 48%; }
+	.pc-legend { margin-top: -2px; font-size: 0.75rem; }
+	.pc-seg { display: inline-flex; flex-shrink: 0; border: 1px solid var(--border); border-radius: calc(var(--radius, 0.75rem) - 2px); overflow: hidden; background: var(--card); }
+	.pc-seg button { height: 32px; padding: 0 12px; border: none; background: transparent; color: var(--muted-foreground); font: inherit; font-size: 0.78rem; font-weight: 500; cursor: pointer; white-space: nowrap; transition: color 120ms ease, background-color 120ms ease; }
+	.pc-seg button + button { border-left: 1px solid var(--border); }
+	.pc-seg button:hover { color: var(--foreground); }
+	.pc-seg button.on { color: var(--foreground); background: color-mix(in oklch, var(--primary) 16%, transparent); }
+	.pc-seg button:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+	.pc-subtab.locked { opacity: 0.45; cursor: not-allowed; }
+	.pc-subtab.locked:hover { color: var(--muted-foreground); }
+	.pc-subtab:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; border-radius: 6px; }
+	.pc-count { font-size: 0.66rem; font-weight: 600; padding: 0 6px; border-radius: 999px; background: color-mix(in oklch, var(--warning) 22%, transparent); color: var(--warning); }
+	.pc-note { margin: 12px 0 0; padding: 10px 12px; border-radius: calc(var(--radius, 0.75rem) - 2px); background: color-mix(in oklch, var(--warning) 9%, transparent); border: 1px solid color-mix(in oklch, var(--warning) 35%, transparent); font-size: 0.78rem; color: var(--foreground); }
+
 	@media (max-width: 639px) {
 		.pc-wrap { padding: 18px 16px 24px; }
 		.pc-search { max-width: none; }
 		.pc-meta { display: none; }
 		.pc-hero { flex-wrap: wrap; }
 		.pc-hero-acts { margin-left: 0; width: 100%; }
+		.pc-hero-chips { max-width: none; width: 100%; }
+		.pc-hero-chips :global(.wchips) { justify-content: flex-start; }
+		.pc-toolbar { flex-wrap: wrap; }
+		.pc-seg { width: 100%; }
+		.pc-seg button { flex: 1; height: 36px; }
+		/* Chips drop under the name, aligned with it. */
+		.pc-row--chips { flex-wrap: wrap; row-gap: 8px; }
+		.pc-row--chips .pc-body { flex: 1 1 0; min-width: 0; }
+		.pc-row--chips .pc-chips { order: 5; flex: 1 0 100%; max-width: none; padding-left: 50px; }
+		.pc-row--chips .pc-chips :global(.wchips) { justify-content: flex-start; }
+		.pc-row--chips :global(.wchip) { min-height: 28px; }
 	}
 </style>
