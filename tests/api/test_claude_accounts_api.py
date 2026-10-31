@@ -64,6 +64,79 @@ def test_locked_store_is_explicit(client, monkeypatch):
         assert KEY not in response.text
 
 
+@pytest.fixture
+def sign_ins(client, tmp_path, monkeypatch):
+    """Worker-local sign-in list in a dict, folders under tmp_path, a fake CLI."""
+    import subprocess
+
+    from app.core import claude_cli_home, claude_cli_login, claude_cli_status as cs, claude_subscriptions
+    base = tmp_path / ".claude"
+    (base / "projects").mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(base))
+    monkeypatch.setattr(claude_cli_home.sys, "platform", "linux")
+    monkeypatch.setattr(claude_cli_home, "root", lambda: tmp_path / "logins")
+    values = {}
+    for name in ("get_system_setting", "get_system_setting_cached"):
+        monkeypatch.setattr(claude_subscriptions.database, name, lambda key, *a, **k: values.get(key))
+    monkeypatch.setattr(claude_subscriptions.database, "set_system_setting", values.__setitem__)
+    monkeypatch.setattr(claude_subscriptions, "setting_key", lambda: "claude_cli_logins:test")
+    monkeypatch.setattr(claude_subscriptions, "_last_pending_probe", 0.0)
+    monkeypatch.setattr(claude_cli_login, "terminal_supported", lambda: False)
+    monkeypatch.setattr(cs, "announce_account_change", lambda: None)
+    signed = {}
+
+    def probe_home(home_env, resolver=None):
+        email = signed.get(home_env.get("CLAUDE_CONFIG_DIR", "default"))
+        return cs.ClaudeCliStatus(installed=True, signed_in=bool(email), email=email, plan="pro")
+    monkeypatch.setattr(cs, "probe_home", probe_home)
+    monkeypatch.setattr(cs, "run_home", lambda args, env: subprocess.CompletedProcess(args, 0, "", ""))
+    return signed
+
+
+def test_subscription_routes_contract(client, sign_ins, tmp_path):
+    from app.core import claude_subscriptions
+    listing = client.get(BASE).json()["accounts"]
+    assert listing["subscription"] == [] and listing["subscription_support"]["supported"] is True
+    assert listing["default_in_use"] is True and listing["login"] is None
+
+    assert client.post(BASE + "/subscription/save-current", json={}).status_code == 409
+    sign_ins["default"] = "me@example.com"
+    saved = client.post(BASE + "/subscription/save-current", json={"label": "Personal"})
+    assert saved.status_code == 200, saved.text
+    default_id = saved.json()["account_id"]
+
+    started = client.post(BASE + "/subscription/add-another")
+    assert started.status_code == 200, started.text
+    login = started.json()["login"]
+    folder = str(tmp_path / "logins" / login["id"])
+    assert login["env"] == {"CLAUDE_CONFIG_DIR": folder} and login["terminal"] is False
+    assert started.json()["accounts"]["login_pending"] is True
+
+    sign_ins[folder] = "work@example.com"
+    claude_subscriptions._last_pending_probe = 0.0  # the next poll asks the CLI again
+    rows = client.get(BASE).json()["accounts"]["subscription"]
+    assert [(r["kind"], r["active"], r["email"]) for r in rows] == [
+        ("default", False, "me@example.com"), ("saved", True, "work@example.com")]
+    new_id = rows[1]["id"]
+    assert set(rows[1]) == {"id", "label", "kind", "active", "email", "plan", "org_name",
+                            "signed_in", "checked_at", "needs_sign_in"}
+
+    assert client.patch(BASE + f"/subscription/{new_id}", json={"label": "Work"}).status_code == 200
+    assert client.post(BASE + f"/subscription/{default_id}/activate").status_code == 200
+    assert claude_subscriptions.active_home_env() == {}
+    assert client.post(BASE + f"/subscription/{new_id}/activate").status_code == 200
+    assert claude_subscriptions.active_home_env() == {"CLAUDE_CONFIG_DIR": folder}
+    deleted = client.delete(BASE + f"/subscription/{new_id}").json()["accounts"]
+    assert deleted["default_in_use"] is True and [r["active"] for r in deleted["subscription"]] == [True]
+    assert (tmp_path / ".claude" / "projects").is_dir()
+    assert client.post(BASE + "/subscription/missing0000000000/activate").status_code == 404
+
+    pending = client.post(BASE + "/subscription/add-another").json()["login"]
+    cancelled = client.post(BASE + "/subscription/cancel-login")
+    assert cancelled.status_code == 200 and cancelled.json()["accounts"]["login_pending"] is False
+    assert not (tmp_path / "logins" / pending["id"]).exists()
+
+
 @pytest.mark.parametrize("method,path,body", [
     ("post", "/subscription/save-current", {}),
     ("post", "/subscription/add-another", None),
@@ -72,7 +145,9 @@ def test_locked_store_is_explicit(client, monkeypatch):
     ("patch", "/subscription/account", {"label": "New"}),
     ("delete", "/subscription/account", None),
 ])
-def test_subscription_mutations_report_unsupported_without_cli_access(client, method, path, body):
+def test_subscription_routes_report_unavailable_on_macos(client, monkeypatch, method, path, body):
+    from app.core import claude_cli_home
+    monkeypatch.setattr(claude_cli_home.sys, "platform", "darwin")
     payload = client.get(BASE).json()["accounts"]
     assert payload["subscription"] == []
     assert payload["subscription_support"]["supported"] is False

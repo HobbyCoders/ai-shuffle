@@ -113,3 +113,32 @@ def test_login_environment_has_no_keys(monkeypatch):
     assert "ANTHROPIC_API_KEY" not in env
     assert env["TERM"] == "dumb"
     assert os.environ["ANTHROPIC_API_KEY"] == "sk-ant-test"
+
+
+def test_tagged_login_targets_its_folder_and_is_owned_by_its_tag(fake_cli, monkeypatch, tmp_path):
+    """An add-another login signs in to its own folder; nobody else can take it over."""
+    monkeypatch.delenv("SHUFFLE_DESKTOP", raising=False)
+    envs = []
+    real = cl.PtyProcess
+    monkeypatch.setattr(cl, "PtyProcess", lambda argv, env, **kw: envs.append(env) or real(argv, env, **kw))
+    folder = str(tmp_path / "claude-logins" / "0123456789abcdef")
+    term = cl.LoginTerminal()
+    term.start(binary=fake_cli, home_env={"CLAUDE_CONFIG_DIR": folder}, tag="add:1")
+    assert envs[0]["CLAUDE_CONFIG_DIR"] == folder and "ANTHROPIC_API_KEY" not in envs[0]
+    with pytest.raises(RuntimeError, match="already running"):
+        term.start(binary=fake_cli)
+    assert term.read_for("other") is None
+    assert term.read_for("add:1")["running"] is True
+    term.cancel_for("other")
+    assert term.read_for("add:1")["running"] is True
+    term.cancel_for("add:1")
+    assert term.read_for("add:1") is None
+
+
+def test_login_environment_follows_the_active_sign_in(monkeypatch):
+    from app.core import claude_subscriptions
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(claude_subscriptions, "active_home_env",
+                        lambda: {"CLAUDE_CONFIG_DIR": "/data/claude-logins/0123456789abcdef"})
+    assert cl._login_env()["CLAUDE_CONFIG_DIR"] == "/data/claude-logins/0123456789abcdef"
+    assert "CLAUDE_CONFIG_DIR" not in cl._login_env({})

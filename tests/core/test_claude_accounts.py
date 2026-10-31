@@ -81,10 +81,29 @@ def test_legacy_deactivate_preserves_saved_keys(isolated):
     assert not accounts.accounts_payload()["api_key"][0]["active"]
 
 
-def test_subscription_management_is_explicitly_unsupported():
-    assert accounts.subscription_support()["supported"] is False
+def test_subscription_management_is_gated_on_macos(monkeypatch):
+    """macOS reports saved subscription sign-ins as unavailable, neutrally."""
+    from app.core import claude_cli_home
+    monkeypatch.setattr(claude_cli_home.sys, "platform", "darwin")
+    support = accounts.subscription_support()
+    assert support["supported"] is False and "Mac" in support["reason"]
+    assert accounts.accounts_payload()["subscription"] == []
     with pytest.raises(accounts.AccountError) as exc:
         accounts.save_current_login()
     assert exc.value.code == "unsupported" and exc.value.status == 501
     with pytest.raises(accounts.AccountError):
         accounts.change_account("subscription", "anything", "activate")
+
+
+def test_subscription_list_shows_while_key_storage_is_locked(monkeypatch):
+    from app.core import claude_cli_home, claude_subscriptions
+    monkeypatch.setattr(claude_cli_home.sys, "platform", "linux")
+    monkeypatch.setattr(claude_subscriptions, "payload", lambda: {
+        "subscription": [{"id": "x"}], "default_in_use": True, "login_pending": False,
+        "login": None, "recovery_required": False})
+    monkeypatch.setattr(encryption, "_encryption_key", None)
+    # Keys need unlocked storage; subscription sign-ins are plain worker-local data.
+    payload = accounts.accounts_payload()
+    assert payload["storage_locked"] is True
+    assert payload["subscription"] == [{"id": "x"}]
+    assert payload["subscription_support"]["supported"] is True

@@ -390,6 +390,10 @@ def inject_claude_code_auth(
     ``FLUID_CHILD_ENV_UNSET`` marker, which the delegated loop honors and never
     passes on.
 
+    In every mode the CLI runs in the active saved subscription sign-in's
+    folder (``CLAUDE_CONFIG_DIR``, :mod:`app.core.claude_subscriptions`); with
+    no saved sign-in active the folder is left as inherited.
+
     When ``provider_id`` is truthy the session targets a non-Anthropic model
     provider: ``apply_provider_env`` owns auth for those spawns (provider token
     plus an explicitly empty ``ANTHROPIC_API_KEY``), so nothing happens here.
@@ -399,7 +403,9 @@ def inject_claude_code_auth(
         return env
     from fluid.tools.child_env import UNSET_ENV
 
-    from app.core import claude_auth_mode
+    from app.core import claude_auth_mode, claude_subscriptions
+
+    claude_subscriptions.apply_cli_home(env)
 
     mode = claude_auth_mode.current_mode()
     if mode == claude_auth_mode.MODE_API_KEY:

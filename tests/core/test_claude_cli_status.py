@@ -217,3 +217,32 @@ def test_real_cli_if_present():
     assert status.installed is True
     assert status.cli_version
     assert status.signed_in in (True, False, None)
+
+
+def test_probe_home_asks_about_that_folder_only(monkeypatch):
+    """A saved sign-in's identity comes from `claude auth status` in its own folder."""
+    cli = FakeCli(status_out=json.dumps({"loggedIn": True, "authMethod": "claude.ai",
+                                         "email": "second@example.com", "subscriptionType": "max"}))
+    folders = []
+
+    def run(argv, env=None):
+        folders.append((env or {}).get("CLAUDE_CONFIG_DIR", "<active>"))
+        return cli(argv)
+    monkeypatch.setattr(cs, "_run", run)
+    cs._auth_support.clear()
+    cs.invalidate()
+    status = cs.probe_home({"CLAUDE_CONFIG_DIR": "/data/claude-logins/0123456789abcdef"},
+                           resolver=lambda: "/home/appuser/.local/bin/claude")
+    assert status.signed_in is True and status.email == "second@example.com" and status.plan == "max"
+    assert set(folders) == {"/data/claude-logins/0123456789abcdef"}
+    assert cs.peek() is None  # the shared cache keeps describing the active sign-in
+
+
+def test_probe_environment_follows_the_active_sign_in(monkeypatch):
+    from app.core import claude_subscriptions
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(claude_subscriptions, "active_home_env",
+                        lambda: {"CLAUDE_CONFIG_DIR": "/data/claude-logins/0123456789abcdef"})
+    assert cs._probe_env()["CLAUDE_CONFIG_DIR"] == "/data/claude-logins/0123456789abcdef"
+    # An explicit default folder leaves the worker's own setting alone.
+    assert "CLAUDE_CONFIG_DIR" not in cs._probe_env({})

@@ -148,8 +148,12 @@ def spawn_fingerprint() -> str:
     """Non-secret pooled-session identity, without materializing CLI credentials."""
     from app.core import claude_cloud_auth
 
+    from app.core import claude_subscriptions
+
     mode = current_mode()
-    identity = [mode]
+    # Which sign-in folder the CLI runs in (a saved subscription switch must
+    # reconnect pooled sessions), as an opaque id, never an email.
+    identity = [mode, claude_subscriptions.fingerprint_part()]
     if mode == MODE_CLOUD:
         if claude_cloud_auth._use_environment():
             identity.append(json.dumps(claude_cloud_auth.environment_env_for_cli(), sort_keys=True))

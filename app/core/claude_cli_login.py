@@ -15,6 +15,10 @@ reads, stores or forwards anything the CLI writes to its config dir.
   stopped after 15 minutes.
 - Unix only (Docker and Linux or macOS local runs). The desktop app and
   Windows show the command to run in the user's own terminal instead.
+- The login signs in to the active saved sign-in's folder
+  (:mod:`app.core.claude_subscriptions`), or to a fresh folder when Settings
+  adds another subscription; such a run carries a ``tag`` so only its owner
+  can read or stop it.
 """
 
 from __future__ import annotations
@@ -66,9 +70,16 @@ def terminal_supported() -> bool:
     return os.environ.get("SHUFFLE_DESKTOP") != "1"
 
 
-def _login_env() -> dict:
+def _login_env(home_env: Optional[dict] = None) -> dict:
+    """Scrubbed env for the CLI login. ``home_env`` picks the sign-in folder;
+    None is the active saved sign-in (``{}`` would be the default folder)."""
     env = {k: v for k, v in scrub_child_env().items()
            if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")}
+    if home_env is None:
+        from app.core import claude_subscriptions
+
+        home_env = claude_subscriptions.active_home_env()
+    env.update(home_env)
     env["TERM"] = "dumb"
     env["NO_COLOR"] = "1"
     return env
@@ -76,7 +87,7 @@ def _login_env() -> dict:
 
 class LoginTerminal:
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._proc: Optional[PtyProcess] = None
         self._text = ""
         self._base = 0          # absolute offset of self._text[0]
@@ -85,6 +96,7 @@ class LoginTerminal:
         self._ended_at: Optional[float] = None
         self._exit_code: Optional[int] = None
         self._error: Optional[str] = None
+        self._tag: Optional[str] = None
 
     # -- internal ---------------------------------------------------------
     def _pump(self) -> None:
@@ -126,6 +138,7 @@ class LoginTerminal:
         self._proc = None
         self._text, self._base, self._url = "", 0, None
         self._ended_at = self._exit_code = self._error = None
+        self._tag = None
 
     def _state(self, offset: int = 0) -> dict:
         proc = self._proc
@@ -144,10 +157,14 @@ class LoginTerminal:
         }
 
     # -- public -----------------------------------------------------------
-    def start(self, binary: Optional[str] = None) -> dict:
+    def start(self, binary: Optional[str] = None, *, home_env: Optional[dict] = None,
+              tag: Optional[str] = None) -> dict:
         with self._lock:
             self._pump()
             if self._proc is not None and self._proc.running:
+                if self._tag != tag:
+                    raise RuntimeError("Another Claude sign-in is already running. "
+                                       "Finish or cancel it first.")
                 return self._state()
             if not terminal_supported():
                 raise RuntimeError("Sign in from your own terminal on this machine: run `claude auth login`.")
@@ -158,7 +175,8 @@ class LoginTerminal:
                     raise ClaudeCliMissingError()
             self._reset()
             cwd = os.environ.get("HOME") or None
-            self._proc = PtyProcess([binary, *LOGIN_ARGS], env=_login_env(), cwd=cwd, echo=False)
+            self._proc = PtyProcess([binary, *LOGIN_ARGS], env=_login_env(home_env), cwd=cwd, echo=False)
+            self._tag = tag
             self._started_at = time.monotonic()
             logger.info("Started `claude auth login` in the in-app terminal")
             return self._state()
@@ -180,6 +198,21 @@ class LoginTerminal:
             self._proc.write(line + "\r")
             self._started_at = time.monotonic()
             return self._state(offset)
+
+    def read_for(self, tag: str) -> Optional[dict]:
+        """The run's state when it belongs to ``tag``, else None."""
+        with self._lock:
+            self._pump()
+            self._expire()
+            if self._proc is None or self._tag != tag:
+                return None
+            return self._state()
+
+    def cancel_for(self, tag: str) -> None:
+        """Stop the run only when it belongs to ``tag``."""
+        with self._lock:
+            if self._tag == tag:
+                self.cancel()
 
     def cancel(self) -> dict:
         with self._lock:

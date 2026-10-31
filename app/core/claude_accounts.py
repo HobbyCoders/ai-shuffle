@@ -1,8 +1,10 @@
-"""Saved Anthropic API keys, retaining the existing active-key scalar.
+"""Saved Claude accounts: Anthropic API keys and subscription sign-ins.
 
-Both settings follow encrypted shared-system-settings policy. Subscription
-switching is explicitly unsupported until CLI-owned state isolation is safe on
-all supported platforms. This module never accesses CLI sign-in files.
+API keys keep the existing active-key scalar; both key settings follow the
+encrypted shared-system-settings policy. Subscription sign-ins are per worker
+and live in :mod:`app.core.claude_subscriptions` (each saved sign-in is its own
+CLI config folder; the app never reads, copies or stores CLI credentials).
+This module is the facade the accounts API calls.
 """
 
 from __future__ import annotations
@@ -10,21 +12,15 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
-from typing import Any, Callable, NoReturn
+from typing import Any, Callable
 from uuid import uuid4
 
-from app.core import encryption
+from app.core import claude_subscriptions as subscriptions, encryption
 from app.db import database
 
 API_SETTING = "anthropic_api_key"
 API_LIST_SETTING = "claude_saved_api_keys"
 _lock = threading.RLock()
-_SUBSCRIPTION_REASON = (
-    "Multiple saved Claude subscription logins are not supported yet. "
-    "Safe isolation of CLI-owned identity and shared transcripts across Linux, Windows "
-    "and macOS is not verified. Keep using the existing Claude CLI sign-in; "
-    "saved Anthropic API keys are supported."
-)
 
 
 class AccountError(RuntimeError):
@@ -142,18 +138,21 @@ def add_api_key(key: str, label: str = "", activate: bool = True) -> str:
 
 
 def subscription_support() -> dict[str, Any]:
-    """Describe the unchanged single-CLI-login subscription capability."""
-    return {"supported": False, "reason": _SUBSCRIPTION_REASON}
+    """Whether this worker can keep several Claude subscription sign-ins."""
+    return subscriptions.support()
 
 
-def _unsupported_subscription():
-    _error("unsupported", _SUBSCRIPTION_REASON, 501)
+def _subscription_call(function: Callable[..., Any], *args: Any) -> Any:
+    try:
+        return function(*args)
+    except subscriptions.SubscriptionError as exc:
+        raise AccountError(exc.code, str(exc), exc.status) from None
 
 
 def change_account(kind: str, account_id: str, action: str, label: str = "") -> None:
-    """Rename, activate or delete a saved key without changing Claude auth mode."""
+    """Rename, activate or delete a saved account without changing Claude auth mode."""
     if kind == "subscription":
-        _unsupported_subscription()
+        return _subscription_call(subscriptions.change, account_id, action, label)
     if kind != "api_key":
         _error("invalid_kind", "Use api_key or subscription.", 400)
     with _lock:
@@ -198,8 +197,12 @@ def accounts_payload() -> dict[str, Any]:
             "storage_locked": not encryption.is_encryption_ready(),
             "error": None,
             "login_pending": False,
+            "login": None,
             "recovery_required": False,
         }
+        if result["subscription_support"]["supported"]:
+            # Plain worker-local data: listed even while key storage is locked.
+            result.update(subscriptions.payload())
         try:
             bundle = _keys()
         except AccountError as exc:
@@ -217,21 +220,30 @@ def accounts_payload() -> dict[str, Any]:
         return result
 
 
-def save_current_login(label: str = "") -> NoReturn:
-    """Refuse saving CLI subscription state until isolated logins are supported."""
-    _unsupported_subscription()
+def save_current_login(label: str = "") -> str:
+    """Save the CLI's current default sign-in as a named subscription entry."""
+    return _subscription_call(subscriptions.save_current, label)
 
 
-async def mutate_subscription(function: Callable[..., Any], *args: Any) -> NoReturn:
-    """Refuse saved-subscription mutations without touching CLI state."""
-    _unsupported_subscription()
+async def mutate_subscription(function: Callable[..., Any], *args: Any) -> Any:
+    """Run a subscription change off the loop, then retire idle CLIs on the old sign-in."""
+    from app.db.async_database import run_sync
+
+    result = await run_sync(function, *args)
+    await subscriptions.reap_idle_pooled_clis()
+    return result
 
 
-async def start_login(*, external: bool = False) -> NoReturn:
-    """Refuse a second Claude CLI login; the existing sign-in stays unchanged."""
-    _unsupported_subscription()
+async def start_login(*, external: bool = False) -> dict:
+    """Start a CLI sign-in into a fresh folder (``add another``)."""
+    from app.db.async_database import run_sync
+
+    return await run_sync(_subscription_call, subscriptions.start_login)
 
 
-async def cancel_login() -> NoReturn:
-    """Refuse cancellation of the unsupported saved-subscription login flow."""
-    _unsupported_subscription()
+async def cancel_login() -> None:
+    """Stop a pending ``add another`` sign-in and remove its folder."""
+    from app.db.async_database import run_sync
+
+    await run_sync(_subscription_call, subscriptions.cancel_login)
+    return None

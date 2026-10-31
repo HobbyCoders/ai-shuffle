@@ -90,22 +90,30 @@ class ClaudeCliStatus:
         return data
 
 
-def _probe_env() -> dict:
+def _probe_env(home_env: Optional[dict] = None) -> dict:
+    """The probe's env. ``home_env`` picks one sign-in folder (``{}`` is the
+    default folder); None uses the active saved sign-in
+    (:mod:`app.core.claude_subscriptions`)."""
     from fluid.tools.child_env import claude_program_env
 
     env = {k: v for k, v in claude_program_env().items() if k not in _STRIPPED_ENV}
     env.setdefault("NO_COLOR", "1")
+    if home_env is None:
+        from app.core import claude_subscriptions
+
+        home_env = claude_subscriptions.active_home_env()
+    env.update(home_env)
     return env
 
 
-def _run(argv: list[str]) -> subprocess.CompletedProcess:
+def _run(argv: list[str], env: Optional[dict] = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         argv,
         capture_output=True,
         text=True,
         timeout=_COMMAND_TIMEOUT_SECONDS,
         stdin=subprocess.DEVNULL,
-        env=_probe_env(),
+        env=_probe_env() if env is None else env,
     )
 
 
@@ -180,9 +188,9 @@ def parse_text_status(text: str, status: ClaudeCliStatus) -> None:
             status.plan = value
 
 
-def _supports_auth_status(binary: str) -> bool:
+def _supports_auth_status(binary: str, run: Optional[Callable] = None) -> bool:
     try:
-        result = _run([binary, "auth", "--help"])
+        result = (run or _run)([binary, "auth", "--help"])
     except (OSError, subprocess.SubprocessError):
         return False
     return result.returncode == 0 and "status" in (result.stdout + result.stderr).lower()
@@ -192,7 +200,27 @@ _auth_support: dict[tuple[str, Optional[str]], bool] = {}
 
 
 def probe(resolver: Optional[Callable[[], str]] = None) -> ClaudeCliStatus:
-    """Run the CLI's own status command once, uncached. Never raises."""
+    """Run the CLI's own status command once, uncached, for the active sign-in. Never raises."""
+    return _probe(resolver, None)
+
+
+def probe_home(home_env: dict, resolver: Optional[Callable[[], str]] = None) -> ClaudeCliStatus:
+    """``claude auth status`` for one sign-in folder (``{}``: the default one).
+
+    Uncached and never raises; the shared cache keeps describing the active
+    sign-in. This is the only way a saved sign-in's email and plan are read.
+    """
+    env = _probe_env(home_env)
+    return _probe(resolver, lambda argv: _run(argv, env))
+
+
+def run_home(args: list[str], home_env: dict) -> subprocess.CompletedProcess:
+    """Run one ``claude`` subcommand (``auth logout``) against a sign-in folder."""
+    return _run([_default_resolver(), *args], _probe_env(home_env))
+
+
+def _probe(resolver: Optional[Callable[[], str]], run: Optional[Callable]) -> ClaudeCliStatus:
+    run = run or _run
     status = ClaudeCliStatus()
     try:
         binary = (resolver or _default_resolver)()
@@ -203,7 +231,7 @@ def probe(resolver: Optional[Callable[[], str]] = None) -> ClaudeCliStatus:
     status.binary_path = binary
 
     try:
-        version = _run([binary, "--version"])
+        version = run([binary, "--version"])
         match = _VERSION_RE.search(version.stdout or "")
         status.cli_version = match.group(0) if match else None
     except (OSError, subprocess.SubprocessError) as exc:
@@ -213,16 +241,16 @@ def probe(resolver: Optional[Callable[[], str]] = None) -> ClaudeCliStatus:
 
     key = (binary, status.cli_version)
     if key not in _auth_support:
-        _auth_support[key] = _supports_auth_status(binary)
+        _auth_support[key] = _supports_auth_status(binary, run)
     if not _auth_support[key]:
         status.error = ("This Claude Code CLI has no `claude auth status` command. "
                         "Update the CLI (`claude update`) and check again.")
         return status
 
     try:
-        result = _run([binary, "auth", "status", "--json"])
+        result = run([binary, "auth", "status", "--json"])
         if result.returncode not in (0, 1) or "unknown option" in (result.stderr or "").lower():
-            result = _run([binary, "auth", "status"])
+            result = run([binary, "auth", "status"])
     except subprocess.TimeoutExpired:
         status.error = "`claude auth status` did not answer in time."
         return status
@@ -257,6 +285,11 @@ _cached_at = 0.0
 # apart from the cache because ``invalidate()`` drops the cache on the very
 # login this is meant to notice.
 _last_account: Optional[tuple] = None
+
+
+def announce_account_change() -> None:
+    """Tell open clients the active Claude sign-in changed (a saved-login switch)."""
+    _announce_account_change()
 
 
 def _announce_account_change() -> None:

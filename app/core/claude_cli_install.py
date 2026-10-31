@@ -199,6 +199,10 @@ def _installer_env():
     # Windows environment names are case-insensitive (os.environ uppercases them).
     fold = str.upper if sys.platform == "win32" else str
     env = {k: v for k, v in os.environ.items() if fold(k) in _INSTALLER_ENV}
+    # `claude update` and the installer use the active saved sign-in's folder,
+    # like every other spawn (only CLAUDE_CONFIG_DIR, never a credential).
+    from app.core import claude_subscriptions
+    claude_subscriptions.apply_cli_home(env)
     path_key = next((k for k in env if fold(k) == "PATH"), "PATH")
     env[path_key] = str(_launcher().parent) + os.pathsep + env.get(path_key, "")
     return env
