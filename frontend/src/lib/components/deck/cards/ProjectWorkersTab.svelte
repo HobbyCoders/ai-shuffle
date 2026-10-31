@@ -489,7 +489,7 @@
 	}
 	.pw-card:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 	.pw-card--missing { border-style: dashed; background: transparent; }
-	.pw-card--failed { border-color: color-mix(in oklch, var(--destructive) 40%, var(--border)); }
+	.pw-card--failed { border-color: color-mix(in oklab, var(--destructive) 40%, var(--border)); }
 	.pw-skel { min-height: 132px; background: linear-gradient(90deg, var(--card), var(--hover-overlay), var(--card)); background-size: 200% 100%; animation: pw-shimmer 1.4s ease-in-out infinite; }
 
 	.pw-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
