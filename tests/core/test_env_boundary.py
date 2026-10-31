@@ -54,6 +54,17 @@ def test_scanner_wake_kill_switch_is_internal_only():
     assert entry["base_settings"] is False
 
 
+def test_tool_output_guard_handshake_is_internal_not_user_configuration():
+    from fluid.engine.delegated import TOOL_OUTPUT_GUARD_ENV
+
+    allowed = json.loads((ROOT / "scripts/ci/env_allowlist.json").read_text())
+    for name in (TOOL_OUTPUT_GUARD_ENV, TOOL_OUTPUT_GUARD_ENV + "NONCE",
+                 TOOL_OUTPUT_GUARD_ENV + "RECEIPT"):
+        assert allowed[name]["kind"] == "internal"
+        assert allowed[name]["base_settings"] is False
+        assert allowed[name]["reason"].strip()
+
+
 def test_scanner_detects_new_fields_aliases_and_own_prefix_reads():
     source = '''class Config(BaseSettings):
     harmless_name: bool = Field(False, validation_alias="AI_SHUFFLE_NEW_BEHAVIOUR")

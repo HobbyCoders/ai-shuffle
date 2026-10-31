@@ -80,6 +80,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
+from fluid.engine import delegated_guard_policy as guard_policy
 from fluid.engine.background import BackgroundLifecycleMixin
 from fluid.engine.base import EngineCaps, matches_tool_pattern
 from fluid.engine.claude_mod_usage import USAGE_PATH, PlanUsageReport, parse_plan_usage_report
@@ -221,11 +222,11 @@ _CLI_HOOK_EVENTS: dict[str, str] = {
     "PreCompact": PRE_COMPACT,
     "SessionStart": SESSION_START,
 }
-# Registered with only a deny policy and no HookBus: the policy gate, and the
-# ledger re-injection after a compaction.
+# Without a HookBus: PreToolUse checks guard readiness for every session.
+# A deny policy also needs that event, plus ledger re-injection on SessionStart.
 _POLICY_HOOK_EVENTS = ("PreToolUse", "SessionStart")
-# Registered with only a ``compact_context`` provider: the re-supply after a
-# compaction.
+# A compact_context provider adds SessionStart to the always-on PreToolUse
+# registration, to re-supply context after a compaction.
 _COMPACT_HOOK_EVENTS = ("SessionStart",)
 
 # The host's note put back after a CLI compaction (``compact_context``): how
@@ -355,13 +356,25 @@ _CLI_FLAGS_SINCE = "2.1.0"
 # AI Shuffle's Claude Code mod (``claude_mod/``, a plugin of function hooks,
 # Claude Code's documented "mods"): it keeps the bash-first steer from reaching
 # the model and gives a trimmed Bash description its pointer to the dedicated
-# file tools back (``claude_mod/hooks/steer.ts``). Claude Code runs mods from
-# 2.1.287, so an older CLI, or one whose version is unknown, keeps the old
-# argv. ``FORCED_CHILD_ENV`` stays on either way: on 2.1.287 it already keeps
-# the steer off and the mod changes nothing the model reads; the mod takes
+# file tools back (``claude_mod/hooks/steer.ts``). AI Shuffle enables this
+# optional mod from 2.1.287; older or unknown versions skip this copy, not
+# the separate tool-output guard. ``FORCED_CHILD_ENV`` stays on either way:
+# on 2.1.287 it already keeps the steer off, so the mod changes nothing the
+# model reads; the mod takes
 # over if a later CLI ignores that undocumented variable.
 CLAUDE_MOD_SINCE = "2.1.287"
 CLAUDE_MOD_SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude_mod")
+# Always staged, independent of FLUID_CLAUDE_MOD. Readiness, not a version
+# guess or plugin listing, detects unavailable function hooks. The separate
+# compatibility policy decides whether to warn or deny CLI-owned calls.
+TOOL_OUTPUT_GUARD_SOURCE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "claude_output_guard",
+)
+TOOL_OUTPUT_GUARD_ENV = "FLUID_TOOL_OUTPUT_GUARD_"
+TOOL_OUTPUT_GUARD_MESSAGE = (
+    "Claude Code tool-output guard is unavailable; the tool was not run. "
+    "Update Claude Code and retry the session."
+)
 # How the CLI's init frame lists a --plugin-dir plugin: ``<name>@inline``.
 CLAUDE_MOD_PLUGIN = "ai-shuffle@inline"
 # Unset leaves the mod on; otherwise only 1, true, yes or on keep it on.
@@ -1045,6 +1058,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._claude_mod_dir: str | None = None
         self._claude_mod_state = "off"
         self._claude_mod_listed: bool | None = None
+        self._tool_output_guard_required = False  # armed for each child process
+        self._tool_output_guard_ready = False
+        # Session-level warning: only a genuine guard problem consumes it,
+        # not an unrelated SDK hook failure or a process restart.
+        self._tool_output_guard_reported = False
+        self._tool_output_guard_nonce = ""
+        self._tool_output_guard_receipt: str | None = None
         # The host's taker of the plan usage the mod reports (see
         # ``CLAUDE_MOD_URL_ENV``), and the token for that route alone.
         self.plan_usage_sink = plan_usage_sink
@@ -1382,11 +1402,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     pass
         self._prompt_file = self._prompt_file_text = None
         if self._tmpdir is not None:
-            # The mod copy is this loop's own (``_stage_claude_mod``), with
-            # whatever the CLI wrote into it; nothing else is removed as a tree.
-            staged = os.path.join(self._tmpdir, "claude-mod")
-            if os.path.isdir(staged):
-                shutil.rmtree(staged, ignore_errors=True)
+            # Only this loop's own staged plugin copies are removed as trees.
+            for name in ("claude-mod", "tool-output-guard"):
+                staged = os.path.join(self._tmpdir, name)
+                if os.path.isdir(staged):
+                    shutil.rmtree(staged, ignore_errors=True)
             self._claude_mod_dir = None
             try:
                 os.rmdir(self._tmpdir)  # only once empty; never a tree delete
@@ -1491,17 +1511,25 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         it. On POSIX that group is ended as soon as the CLI is gone (#436).
         """
         self._clear_main_compaction()
+        self._tool_output_guard_ready = False
+        self._tool_output_guard_nonce = ""
+        receipt = getattr(self, "_tool_output_guard_receipt", None)
+        self._tool_output_guard_receipt = None
         proc, self._proc = self._proc, None
         job, self._proc_job = getattr(self, "_proc_job", None), None
         self._stdout_backlog.clear()
-        if proc is None:
-            close_job(job)
-            return
         try:
-            await self._end_process(proc, grace)
+            if proc is not None:
+                await self._end_process(proc, grace)
         finally:
             # Windows: whatever the CLI started, orphans included, ends here.
             close_job(job)
+            # After the process stops, so session.start cannot recreate it.
+            if receipt:
+                try:
+                    os.unlink(receipt)
+                except OSError:
+                    pass
 
     async def _end_process(self, proc: asyncio.subprocess.Process, grace: float) -> None:
         if proc.returncode is not None:
@@ -1668,9 +1696,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
 
         Nothing when the switch is off, when the CLI's version is unknown or
         older than ``CLAUDE_MOD_SINCE``, or when the copy cannot be made; the
-        spawn then runs exactly as it did before the mod existed. A CLI that
-        cannot load the mod still runs the turn: it lists the failure in its
-        init frame (see ``_check_claude_mod``) and goes on without it.
+        optional guidance is then absent, but the separate tool-output guard
+        is still staged. A CLI that cannot load the optional mod still runs
+        the turn: it lists the failure in its init frame (see
+        ``_check_claude_mod``) and goes on without it.
         ``--setting-sources`` does not affect a --plugin-dir mod (checked on
         2.1.287 with an empty list, ``project`` and all three).
         """
@@ -1753,6 +1782,25 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if self._compaction_route:
             env[CLAUDE_MOD_COMPACT_URL_ENV] = f"{origin}{COMPACT_PATH}"
         return env
+
+    def _tool_output_guard_env(self) -> dict[str, str]:
+        return {
+            f"{TOOL_OUTPUT_GUARD_ENV}RECEIPT": self._tool_output_guard_receipt or "",
+            f"{TOOL_OUTPUT_GUARD_ENV}NONCE": self._tool_output_guard_nonce,
+        }
+
+    def _check_tool_output_guard(self) -> bool:
+        """Read only the host-chosen, per-process receipt; never tool content."""
+        if self._tool_output_guard_ready:
+            return True
+        if not self._tool_output_guard_receipt or not self._tool_output_guard_nonce:
+            return False
+        try:
+            with open(self._tool_output_guard_receipt, encoding="utf-8") as receipt:
+                self._tool_output_guard_ready = receipt.read(256) == self._tool_output_guard_nonce
+        except (OSError, UnicodeError):
+            return False
+        return self._tool_output_guard_ready
 
     async def _compact_mod_messages(self, body: Any) -> dict[str, Any]:
         """The bridge's compaction route: Claude Code's rows, compacted.
@@ -2078,8 +2126,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         elif self._proc is not None:
             # The previous CLI exited on its own (a crash, or the CLI's own
             # exit). Its process group may still hold commands it started;
-            # end them before the respawn replaces the only record of its pid.
-            await _end_process_group(self._proc.pid)
+            # end them and remove its receipt before replacing either record.
+            await self._stop_process(grace=1.0)
         await self._version_guard()
         spawn_kwargs: dict[str, Any] = {}
         if os.name != "nt":
@@ -2091,6 +2139,26 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._cli_cost_total = None if self._spawn_resume else 0.0
         self._claude_mod_listed = None
         argv = self._build_argv()
+        self._tool_output_guard_required = True
+        self._tool_output_guard_ready = False
+        self._tool_output_guard_nonce = secrets.token_urlsafe(24)
+        self._tool_output_guard_receipt = os.path.join(
+            self._ensure_tmpdir(), f"guard-ready-{self._tool_output_guard_nonce}",
+        )
+        guard = os.path.join(self._ensure_tmpdir(), "tool-output-guard")
+        guard_staged = False
+        try:
+            shutil.copytree(
+                TOOL_OUTPUT_GUARD_SOURCE, guard, dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns("tests", "types", "tsconfig.json", "__pycache__"),
+            )
+        except OSError:
+            # No readiness receipt: the separate unavailable-guard policy
+            # decides whether tools are denied or warned about, never silence.
+            pass
+        else:
+            guard_staged = True
+            argv += ["--plugin-dir", guard]
         # Staging the mod registers its recall tools before the bridge decides
         # which tools to expose. The first spawn has no MCP config until now.
         await self._start_bundled_server()
@@ -2101,6 +2169,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # Only this spawn's own bridge may announce the compaction route.
         child_env.pop(CLAUDE_MOD_COMPACT_URL_ENV, None)
         child_env.update(self._claude_mod_env())
+        child_env.update(self._tool_output_guard_env())
         # The window this spawn pins, checked against the CLI's own first
         # context-usage report (#754).
         self._window_pinned = _positive_int(child_env.get(AUTO_COMPACT_WINDOW_ENV))
@@ -2150,17 +2219,27 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if self._cli_hook_events():
             async with self._stdout_lock:
                 outcome = await self._initialize_cli_hooks()
-            if outcome in ("refused", "timeout") and self._needs_policy_hook():
-                # Fail closed: without its PreToolUse hook the deny policy is
-                # off for this whole process, and in bypass mode nothing else
-                # stops an outward write (invariant I10). The spawn fails, so
-                # the turn ends with an error and a wake stays undelivered.
-                await self._stop_process()
-                raise RuntimeError(
-                    f"the claude CLI did not register its hooks ({outcome}), so "
-                    "the tool deny policy could not be enforced; the turn was "
-                    "not started"
-                )
+            if outcome in ("refused", "timeout"):
+                # Preserve the existing contract: losing hook registration
+                # costs the hooks, not a plain chat. Only an existing deny
+                # policy requires registration and fails closed here.
+                if self._needs_policy_hook():
+                    await self._stop_process()
+                    raise RuntimeError(
+                        f"the claude CLI did not register its hooks ({outcome}), so "
+                        "the tool deny policy could not be enforced; the turn "
+                        "was not started"
+                    )
+                if not guard_staged:
+                    await self._report_missing_output_guard(blocked=False)
+                else:
+                    # SDK callbacks and the plugin's function hooks are
+                    # independent. Losing one does not diagnose the other
+                    # or consume a later, genuine guard-availability warning.
+                    logger.warning(
+                        "claude CLI hook registration is unavailable (%s); "
+                        "the session runs without hooks", outcome,
+                    )
         return self._proc
 
     def _needs_policy_hook(self) -> bool:
@@ -3767,14 +3846,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     # ─── Claude Code hooks ───────────────────────────────────────────────
 
     def _cli_hook_events(self) -> tuple[str, ...]:
-        """The CLI hook events this loop registers; empty registers none."""
+        """CLI hook events; PreToolUse always checks output-guard readiness."""
         if self.hooks is not None:
             return tuple(_CLI_HOOK_EVENTS)
         if self._needs_policy_hook():
             return _POLICY_HOOK_EVENTS
         if self.compact_context is not None:
-            return _COMPACT_HOOK_EVENTS
-        return ()
+            return ("PreToolUse", *_COMPACT_HOOK_EVENTS)
+        return ("PreToolUse",)
 
     def _has_deny_rules(self) -> bool:
         rules = getattr(self.permissions, "rules", None) or ()
@@ -3954,12 +4033,44 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             specific["permissionDecisionReason"] = f"{reason}\n\n{self._boundary_text(peers)}"
         return peers
 
+    def _missing_output_guard_denies(self) -> bool:
+        policy = guard_policy.UNAVAILABLE_GUARD_POLICY
+        if policy == "warn":
+            return False
+        if policy == "split":
+            return (_version_key(self.cli_version) is None
+                    or _version_at_least(self.cli_version, guard_policy.OLDEST_VERIFIED_GUARD_CLI))
+        return True
+
+    async def _report_missing_output_guard(
+        self, *, blocked: bool, name: str | None = None,
+    ) -> None:
+        if self._tool_output_guard_reported:
+            return
+        self._tool_output_guard_reported = True
+        message = TOOL_OUTPUT_GUARD_MESSAGE if blocked else guard_policy.UNGUARDED_WARNING
+        logger.error("%s", message)
+        # HookEvents are persisted, nonterminal system rows rendered in chat.
+        # This warning is not a fabricated user/peer/model message.
+        try:
+            await self._hook_event("deny" if blocked else "warning", message, PRE_TOOL_USE, name)
+        except Exception:  # noqa: BLE001 — guard reporting never ends a chat
+            logger.debug("reporting tool-output guard status failed", exc_info=True)
+
     async def _guarded_pre_tool_use(self, request: HookCallbackRequest) -> dict[str, Any]:
         """PreToolUse, failing closed. The CLI treats a failed or late
         callback as "no opinion" and runs the call, so a hook or policy that
         raises, or has not decided within ``PRE_TOOL_USE_HOOK_BUDGET``, is
         answered with a deny carrying the reason."""
         name = str(request.input.get("tool_name") or "")
+        if self._tool_output_guard_required and not self._check_tool_output_guard():
+            blocked = self._missing_output_guard_denies()
+            await self._report_missing_output_guard(blocked=blocked, name=name or None)
+            if blocked:
+                return {"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse", "permissionDecision": "deny",
+                    "permissionDecisionReason": TOOL_OUTPUT_GUARD_MESSAGE,
+                }}
         try:
             return await asyncio.wait_for(
                 self._cli_pre_tool_use(request.input, request.tool_use_id),

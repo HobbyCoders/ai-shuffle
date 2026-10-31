@@ -3060,7 +3060,13 @@ def read():
     return json.loads(line) if line.strip() else {}
 
 while True:
-    if read().get("type") != "user":
+    frame = read()
+    if (frame.get("type") == "control_request"
+            and frame.get("request", {}).get("subtype") == "initialize"):
+        emit({"type": "control_response", "response": {
+            "subtype": "success", "request_id": frame["request_id"], "response": {}}})
+        continue
+    if frame.get("type") != "user":
         continue
     emit({"type": "system", "subtype": "init", "session_id": SID, "model": "m",
           "tools": [], "mcp_servers": []})
