@@ -19,6 +19,11 @@
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import { flashSaved } from '$lib/settings/save-status.svelte';
 	import { getErrorMessage } from '$lib/api/client';
+	import { claudeAccountError } from '$lib/api/claude-auth';
+
+	/** Saved-account routes refuse with `detail: {code, message}`; show the message. */
+	const accountErrorText = (e: unknown, fallback: string): string =>
+		claudeAccountError(e).message ?? getErrorMessage(e, fallback);
 	import TextField from '../rows/TextField.svelte';
 	import CredentialControl from './CredentialControl.svelte';
 	import DetailPane from '../shell/DetailPane.svelte';
@@ -136,7 +141,7 @@
 			await providers.renameClaudeSubscriptionAccount(account.id, label);
 			flashSaved();
 		} catch (e) {
-			accountError = getErrorMessage(e, 'Could not rename this sign-in');
+			accountError = accountErrorText(e, 'Could not rename this sign-in');
 		} finally {
 			saving = false;
 		}
@@ -150,7 +155,7 @@
 			await providers.deleteClaudeSubscriptionAccount(account.id);
 			settingsNav.selectItem(back, 'providers');
 		} catch (e) {
-			accountError = getErrorMessage(e, 'Could not remove this sign-in');
+			accountError = accountErrorText(e, 'Could not remove this sign-in');
 		}
 	}
 
@@ -200,7 +205,7 @@
 			await cli.load(true);
 			if (cli.terminalAvailable(!access.readOnly, platform.isMobile) && !cli.status?.signed_in) startSignIn();
 		} catch (e) {
-			accountError = getErrorMessage(e, 'Could not switch to this sign-in');
+			accountError = accountErrorText(e, 'Could not switch to this sign-in');
 		}
 	}
 
