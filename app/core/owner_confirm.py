@@ -78,6 +78,15 @@ PARKED_KEY = "parked"
 RELEASED_KEY = "released"
 # A provider safety-check prompt (fluid.engine.guardrail.GUARDRAIL_TOOL).
 _GUARDRAIL_TOOL = "ModelGuardrail"
+# The safety-check categories in the same plain words the chat card uses
+# (frontend/src/lib/utils/guardrail.ts CATEGORY_WORDS).
+_GUARDRAIL_CATEGORY_WORDS = {
+    "cyber": "cybersecurity",
+    "bio": "biology",
+    "frontier_llm": "frontier AI research",
+    "reasoning_extraction": "requests for its hidden reasoning",
+    "content_filter": "content policy",
+}
 # Turn payload key on a wake: the call a yes given outside the chat admits once.
 PASS_KEY = APPROVAL_PASS_KEY
 
@@ -207,7 +216,8 @@ def _guardrail_action(data: Dict[str, Any]) -> str:
     provider = field("provider_label") or field("provider")
     owner = (f"{provider}'" if provider.lower().endswith("s") else f"{provider}'s") if provider \
         else "the provider's"
-    category = field("category").replace("_", " ")
+    raw_category = field("category")
+    category = _GUARDRAIL_CATEGORY_WORDS.get(raw_category) or re.sub(r"[_-]+", " ", raw_category)
     blocked = f"{owner} safety check blocked {field('requested_model') or 'the model'}"
     if category:
         blocked += f" ({category})"

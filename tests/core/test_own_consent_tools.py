@@ -292,7 +292,12 @@ def test_a_safety_check_is_asked_in_plain_words():
             "suggested_model": "claude-opus-4-7"}
     assert owner_confirm.describe("ModelGuardrail", data) == (
         "continue this turn on claude-opus-4-7; Anthropic's safety check blocked "
-        "claude-opus-4-8 (reasoning extraction)")
+        "claude-opus-4-8 (requests for its hidden reasoning)")
+    # The same plain words as the chat card; an unknown category reads as-is.
+    assert owner_confirm.describe("ModelGuardrail", {**data, "category": "content_filter"}).endswith(
+        "(content policy)")
+    assert owner_confirm.describe("ModelGuardrail", {**data, "category": "self-harm"}).endswith(
+        "(self harm)")
     assert owner_confirm.describe("ModelGuardrail", {"guardrail": True}) == (
         "continue this turn on another model; the provider's safety check blocked the model")
     question = owner_confirm.question("ModelGuardrail", data)
