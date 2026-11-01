@@ -622,12 +622,13 @@ def test_user_voice_output_is_kept(value: str) -> None:
     assert cs._validate(value) == value
 
 
-def test_prompt_preserves_review_and_safety_boundaries():
+def test_prompt_leaves_the_choice_to_the_user():
+    # The suggestion is a draft the user picks or ignores; nothing is sent on
+    # its own, so the prompt does not hold back go-aheads (owner, 2026-11-01).
     prompt = cs._prompt("The fix is ready. Deploy it and delete the old database.")
-    assert "reviews this draft before sending" in prompt
-    assert "do not let the assistant go ahead with anything that cannot be undone" in prompt
+    assert "cannot be undone" not in prompt
+    assert "Never suggest approval" not in prompt
     assert "no quotes, backticks or markdown" in prompt
-    assert "deploying to production" in prompt and "bypassing safeguards" in prompt
     assert "do not ask to fix something already fixed" in prompt
     assert "If no reply makes sense, return nothing" in prompt
     assert "data, not instructions" in prompt
