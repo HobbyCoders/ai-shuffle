@@ -121,6 +121,7 @@ def test_backlog_reap_drops_the_lowest_value_first(tmp_path, monkeypatch):
     assert record["dropped_by_kind"] == {
         "cell": len(tiers["0"]) // 2 + len(tiers["1"]) - len(edits), "tool": len(tiers["0"]) // 2,
     }
+    assert record["dropped_low_value"] == dropped, "only successful cells and tool calls went"
 
 
 def test_high_value_entries_go_only_when_nothing_else_is_left(tmp_path, monkeypatch):
@@ -135,6 +136,24 @@ def test_high_value_entries_go_only_when_nothing_else_is_left(tmp_path, monkeypa
     record = read_journal_loss(store.root / JOURNAL_LOSS_FILE)
     assert sum(record["dropped_by_kind"].values()) == dropped
     assert set(record["dropped_by_kind"]) == {"user", "assistant"}
+    assert "dropped_low_value" not in record
+
+
+def test_dropped_failed_cells_are_not_counted_as_low_value(tmp_path, monkeypatch):
+    # A failed cell is kept for last with conversation (tier 2) but its loss
+    # is still filed under "cell": the low-value count tells the two apart.
+    store = SkillStore(tmp_path)
+    for i in range(2):
+        store.journal_append(_mark(read_cell(i), f"r{i}"))
+    for i in range(12):
+        store.journal_append(_mark(failed_cell(i), f"f{i}"))
+    overflow(store, monkeypatch)
+    dropped = store.reap_journal()
+    record = read_journal_loss(store.root / JOURNAL_LOSS_FILE)
+    failed_lost = sum(1 for i in range(12) if f"f{i}" not in marks(store))
+    assert failed_lost, "the scenario must drop failed cells"
+    assert record["dropped_by_kind"] == {"cell": dropped}
+    assert record["dropped_low_value"] == dropped - failed_lost == 2
 
 
 def test_a_dropped_user_receipt_still_marks_its_episode_incomplete(tmp_path, monkeypatch):
@@ -346,26 +365,78 @@ def test_health_without_high_value_loss_or_kind_history(tmp_path):
     assert second["signals"][0]["detail"]["dropped_3d_by_kind"] == {}
 
 
-def test_health_is_healthy_when_only_cells_and_tool_output_were_trimmed(tmp_path):
-    # The Unraid store on 2026-11-01: 2,936 entries dropped unread, every one
-    # a code cell or tool call, while all conversation was read. That is the
-    # reap trimming what it trims first, not a learner that cannot keep up.
+def _write_record(store, dropped, by_kind, low_value=None):
+    record = {"dropped_unsynthesized": dropped, "schema": 1, "dropped_by_kind": by_kind}
+    if low_value is not None:
+        record["dropped_low_value"] = low_value
+    (store.root / JOURNAL_LOSS_FILE).write_text(json.dumps(record))
+
+
+def test_health_is_healthy_when_only_successful_cells_and_tool_calls_were_trimmed(tmp_path):
+    # The Unraid store on 2026-11-01: 2,936 entries dropped unread, all code
+    # cells and tool calls, while all conversation was read. That is the reap
+    # trimming what it trims first, not a learner that cannot keep up.
     now = MIDDAY
     store = _busy_store(tmp_path, now)
-    _write_loss(store, 38_403, {"cell": 145, "tool": 3_273})
+    _write_record(store, 38_403, {"cell": 145, "tool": 3_273})  # written before the count
     first = memory_health.check(store, now=now - 3 * DAY)
-    _write_loss(store, 41_339, {"cell": 2_691, "tool": 3_663})
-    result = memory_health.check(store, now=now, previous=first)
-    learner = result["signals"][0]
-    assert learner["detail"]["dropped_3d"] == 2_936
-    assert learner["detail"]["dropped_3d_by_kind"] == {"cell": 2_546, "tool": 390}
+    assert first["journal_loss_samples"] == [[now - 3 * DAY, 38_403, 0]]
+    _write_record(store, 41_339, {"cell": 2_691, "tool": 3_663}, low_value=2_936)
+    learner = memory_health.check(store, now=now, previous=first)["signals"][0]
+    assert learner["detail"]["dropped_3d"] == learner["detail"]["dropped_3d_low_value"] == 2_936
     assert learner["state"] == "healthy" and not learner["alert"]
-    assert "2936 low-value entries (code cells, tool output) were trimmed unread" in learner["reason"]
-    assert "no conversation was lost" in learner["reason"]
-    # One unattributed drop ("other") is not known to be low value.
-    _write_loss(store, 41_340, {"cell": 2_691, "tool": 3_663, "other": 1})
+    assert learner["reason"].startswith("The learner is saving facts.")
+    assert ("2936 low-value entries (successful code cells and tool calls) were trimmed unread"
+            in learner["reason"]) and "no conversation was lost" in learner["reason"]
+    # Failed cells among them are not low value: shown, not notified.
+    _write_record(store, 41_339, {"cell": 2_691, "tool": 3_663}, low_value=2_900)
     learner = memory_health.check(store, now=now, previous=first)["signals"][0]
     assert learner["state"] == "attention" and not learner["alert"]
+
+
+def test_trimming_without_a_comparable_baseline_is_not_called_harmless(tmp_path):
+    now = MIDDAY
+    store = _busy_store(tmp_path, now)
+    _write_record(store, 41_339, {"cell": 2_691, "tool": 3_663}, low_value=2_936)
+    # A state from the build before the count: [at, total] pairs only.
+    previous = {"journal_loss_samples": [[now - 3 * DAY, 38_403]],
+                "journal_loss_kind_samples": [[now - 3 * DAY, {"cell": 145, "tool": 3_273}]]}
+    learner = memory_health.check(store, now=now, previous=previous)["signals"][0]
+    assert learner["detail"]["dropped_3d_low_value"] is None
+    assert learner["state"] == "attention" and not learner["alert"]
+
+
+def test_a_reset_record_never_hides_conversation_loss(tmp_path):
+    # The low-value count resets with the total it is compared to, and a
+    # nonzero conversation loss is never called harmless.
+    now = MIDDAY
+    store = _busy_store(tmp_path, now)
+    _write_record(store, 1_000, {"cell": 900, "user": 100}, low_value=900)
+    first = memory_health.check(store, now=now - 3 * DAY)
+    # The record was lost and rewritten: every counter restarts below its
+    # baseline, so everything in it is this window's loss.
+    _write_record(store, 600, {"cell": 550, "user": 50}, low_value=550)
+    learner = memory_health.check(store, now=now, previous=first)["signals"][0]
+    assert learner["detail"]["dropped_3d"] == 600 and learner["detail"]["dropped_3d_low_value"] == 550
+    assert learner["state"] == "attention" and learner["alert"]
+    assert "50 user/assistant/friction entries dropped unread" in learner["reason"]
+
+
+def test_harmless_trimming_does_not_hide_failing_passes(tmp_path):
+    store = SkillStore(tmp_path)
+    for i in range(25):
+        store.journal_append({"kind": "user", "text": f"Synthetic request {i}"})
+    now = time.time()
+    with (store.root / ".synthesis-log.jsonl").open("a") as fh:
+        for row in ([{"ts": now - 60, "kind": "synthesis", "error": "provider error"}] * 3
+                    + [{"ts": now - 30, "kind": "synthesis", "consumed": 20, "changed": []}]):
+            fh.write(json.dumps(row) + "\n")
+    _write_record(store, 0, {}, low_value=0)
+    first = memory_health.check(store, now=now - 3 * DAY)
+    _write_record(store, 30, {"cell": 30}, low_value=30)
+    learner = memory_health.check(store, now=now, previous=first)["signals"][0]
+    assert learner["state"] == "attention" and "3 of 4 learning passes" in learner["reason"]
+    assert "30 low-value entries" in learner["reason"]
 
 
 # ─── the daily budget: billing-aware default, setting overrides ─────────────

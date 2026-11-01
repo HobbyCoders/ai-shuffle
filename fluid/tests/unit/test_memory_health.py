@@ -375,6 +375,27 @@ def test_run_flaps_do_not_notify_twice_in_a_day(tmp_path, monkeypatch):
     assert not memory_health.run(store, now=now + 120)["notify"]
 
 
+def test_upgrade_carries_an_announced_stretch_over_without_a_second_bell(tmp_path, monkeypatch):
+    store = _nearly_full(tmp_path, monkeypatch)
+    now = time.time()
+    # What a build before alerts recorded: the same full store, announced
+    # two days ago, and no alert_since.
+    legacy = memory_health.run(store, now=now - 2 * DAY)
+    legacy.pop("alert_since")
+    legacy.update(attention_since=now - 2 * DAY, notified_for=now - 2 * DAY, notified_at=now - 2 * DAY)
+    legacy.pop("notify")
+    (tmp_path / memory_health.HEALTH_FILE).write_text(json.dumps(legacy))
+    state = memory_health.run(store, now=now)
+    assert not state["notify"] and state["alert_since"] == now - 2 * DAY
+    # A legacy stretch that was about something else does not swallow a new alert.
+    for s in legacy["signals"]:
+        if s["id"] == "capacity":
+            s["state"] = "healthy"
+    legacy["signals"].append({"id": "learner", "state": "attention"})
+    (tmp_path / memory_health.HEALTH_FILE).write_text(json.dumps(legacy))
+    assert memory_health.run(store, now=now)["notify"]
+
+
 def test_heuristic_attention_is_shown_but_never_notifies(tmp_path):
     # Settings shows a learner that has not run, but nothing was lost or
     # refused, so the owner is not notified (the alarm used to ring for each

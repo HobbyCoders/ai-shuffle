@@ -52,10 +52,6 @@ MIN_PASSES_TO_JUDGE = 4
 # and beside them (time, {kind: total}) samples of its dropped_by_kind split.
 COVERAGE_WINDOW = 3 * DAY
 DROPPED_SHARE = 0.1
-# The reap drops these first (successful cells and tool calls; see
-# skills.journal_drop_tier). Their loss alone is the reap working as
-# designed, not a learner that cannot keep up.
-LOW_VALUE_LOSS_KINDS = ("cell", "tool")
 LOSS_SAMPLE_EVERY = 3 * 3600.0
 LOSS_SAMPLES_KEPT = 64
 # Usage: share of settled facts (older than USAGE_GRACE) never recalled and
@@ -348,33 +344,46 @@ def check(store, *, now: float | None = None, learning_enabled: bool = True,
     }
 
 
-def _loss_samples(store, now, previous) -> tuple[list[list[float]], int, int | None]:
-    """``(samples, dropped_total, dropped_in_window)``.
+def _loss_samples(store, now, previous) -> tuple[list[list[float]], int, int | None, int | None]:
+    """``(samples, dropped_total, dropped_in_window, low_value_in_window)``.
 
-    ``samples`` are the ``[at, dropped_unsynthesized]`` pairs to keep, this
-    run's reading included. ``dropped_in_window`` is the growth since the
-    newest sample at least COVERAGE_WINDOW old (or the oldest one, while the
-    history is shorter), None with no earlier sample to compare against.
+    ``samples`` are the ``[at, dropped_unsynthesized, dropped_low_value]``
+    triples to keep, this run's reading included (a state written before the
+    low-value count holds ``[at, total]`` pairs). ``dropped_in_window`` is the
+    growth since the newest sample at least COVERAGE_WINDOW old (or the oldest
+    one, while the history is shorter), None with no earlier sample to compare
+    against. ``low_value_in_window`` is the growth of the low-value count
+    against that same baseline and reset, None when the baseline predates it.
     """
     record = read_journal_loss(Path(store.root) / JOURNAL_LOSS_FILE) or {}
     total = int(record.get("dropped_unsynthesized") or 0)
+    # A record without the key has had no drop by a build that counts them,
+    # so every drop measured from a sample this build took is counted.
+    low = int(record.get("dropped_low_value") or 0)
     kept = []
     for sample in previous.get("journal_loss_samples") or []:
-        if (isinstance(sample, list) and len(sample) == 2
+        if (isinstance(sample, list) and len(sample) in (2, 3)
                 and all(isinstance(v, (int, float)) for v in sample) and sample[0] <= now):
-            kept.append([float(sample[0]), int(sample[1])])
+            kept.append([float(sample[0]), *(int(v) for v in sample[1:])])
     kept.sort()
     baseline = None
     if kept:
         older = [s for s in kept if s[0] <= now - COVERAGE_WINDOW]
         baseline = older[-1] if older else kept[0]
-    # A total below the baseline means the record was reset: count from zero.
-    dropped = None if baseline is None else (total - baseline[1] if total >= baseline[1] else total)
+    dropped = low_dropped = None
+    if baseline is not None:
+        base_low = baseline[2] if len(baseline) == 3 else None
+        # A count below the baseline means the record was reset: count both
+        # from zero, so the two stay comparable.
+        if total < baseline[1] or (base_low is not None and low < base_low):
+            dropped, low_dropped = total, (None if base_low is None else low)
+        else:
+            dropped, low_dropped = total - baseline[1], (None if base_low is None else low - base_low)
     if not kept or now - kept[-1][0] >= LOSS_SAMPLE_EVERY:
-        kept.append([now, total])
+        kept.append([now, total, low])
     # Keep the window, plus the newest sample before it as the baseline.
     start = max((i for i, s in enumerate(kept) if s[0] <= now - COVERAGE_WINDOW), default=0)
-    return kept[start:][-LOSS_SAMPLES_KEPT:], total, dropped
+    return kept[start:][-LOSS_SAMPLES_KEPT:], total, dropped, low_dropped
 
 
 def _kind_samples(
@@ -429,10 +438,10 @@ def _coverage(store, now, previous) -> dict:
     except Exception:  # noqa: BLE001 — an unreadable document is reported elsewhere
         pass
     budget_days = len({d for d in days if 0 <= today - d < round(COVERAGE_WINDOW / DAY)})
-    samples, total, dropped = _loss_samples(store, now, previous)
+    samples, total, dropped, low_value = _loss_samples(store, now, previous)
     kind_samples, by_kind = _kind_samples(store, now, previous)
     return {"read_3d": read, "filtered_3d": filtered, "dropped_3d": dropped,
-            "dropped_3d_by_kind": by_kind,
+            "dropped_3d_low_value": low_value, "dropped_3d_by_kind": by_kind,
             "dropped_total": total, "budget_skips_3d": len(skipped),
             "budget_spent_days_3d": budget_days, "samples": samples,
             "kind_samples": kind_samples}
@@ -472,33 +481,41 @@ def _learner_outcome(store, now, coverage) -> dict:
     )
     dropped = coverage["dropped_3d"]
     taken_in = coverage["read_3d"] + coverage["filtered_3d"] + (dropped or 0)
+    trimmed_note = ""
     if dropped and dropped >= MIN_NEW_ENTRIES and dropped >= DROPPED_SHARE * taken_in:
-        # The reap drops code cells and tool output first and keeps
-        # conversation and friction for last. When the per-kind split puts
-        # every dropped entry in LOW_VALUE_LOSS_KINDS, that is the reap
-        # working as designed (the learner filters most such entries as low
-        # value when it does read them), not a loss. A record without the
-        # split, or drops of other kinds, are judged on the total as before;
-        # only conversation or friction dropped unread notifies the owner.
+        # The reap drops successful code cells and tool calls first and keeps
+        # failed work, conversation and friction for last. When the loss
+        # record counts every dropped entry as such (``dropped_low_value``,
+        # measured against the same baseline), that is the reap working as
+        # designed, not a loss: the learner filters most of them as low value
+        # when it does read them. It is said, and the other learner checks
+        # still run. Anything else dropped is attention; only conversation
+        # or friction dropped unread notifies the owner.
         by_kind = coverage["dropped_3d_by_kind"] or {}
         high = sum(by_kind.get(k, 0) for k in JOURNAL_HIGH_VALUE_KINDS)
-        low = sum(by_kind.get(k, 0) for k in LOW_VALUE_LOSS_KINDS)
-        high_note = (
-            f" {high} user/assistant/friction"
-            f" {'entry' if high == 1 else 'entries'} dropped unread."
-            if high else ""
-        )
-        if low >= dropped:
+        low_value = coverage["dropped_3d_low_value"]
+        if not high and low_value is not None and low_value >= dropped:
+            trimmed_note = (
+                f" {dropped} low-value entries (successful code cells and tool calls) were "
+                "trimmed unread in the last 3 days; no conversation was lost.")
+        else:
+            high_note = (
+                f" {high} user/assistant/friction"
+                f" {'entry' if high == 1 else 'entries'} dropped unread."
+                if high else ""
+            )
             return _signal(
-                "learner", False,
+                "learner", True,
                 f"The learner read {coverage['read_3d']} of {taken_in} journal entries in the "
-                f"last 3 days; {dropped} low-value entries (code cells, tool output) were "
-                "trimmed unread and no conversation was lost." + budget_note, **detail)
-        return _signal(
-            "learner", True,
-            f"The learner read {coverage['read_3d']} of {taken_in} journal entries in the "
-            f"last 3 days; {dropped} were dropped unread." + high_note + budget_note,
-            alert=bool(high), **detail)
+                f"last 3 days; {dropped} were dropped unread." + high_note + budget_note,
+                alert=bool(high), **detail)
+    signal = _learner_state(store, now, detail, budget_note, pending, recent_user, passes, failed)
+    signal["reason"] += trimmed_note
+    return signal
+
+
+def _learner_state(store, now, detail, budget_note, pending, recent_user, passes, failed) -> dict:
+    """The learner's outcome apart from journal coverage."""
     try:
         spent_today = int(now // DAY) in store._facts.inference_budget_spent_days()
     except Exception:  # noqa: BLE001 — unreadable: say nothing about the budget
@@ -754,8 +771,16 @@ def run(store, *, now: float | None = None, learning_enabled: bool = True) -> di
         attention_since = None
     # Only an alert (see :func:`_signal`) starts a stretch the owner is told
     # about; other attention is shown in Settings, System without a bell.
-    alerting = bool(alert_signals(result))
+    alerting = alert_signals(result)
     alert_since = previous.get("alert_since") if alerting else None
+    if alerting and "alert_since" not in previous and previous.get("state") == "attention":
+        # A state from a build before alerts: when every signal alerting now
+        # was already in attention then, this is the stretch it announced
+        # (or still has to), so it carries over instead of a second bell.
+        before = {s.get("id") for s in previous.get("signals", [])
+                  if isinstance(s, dict) and s.get("state") == "attention"}
+        if {s["id"] for s in alerting} <= before:
+            alert_since = previous.get("attention_since")
     if alerting:
         alert_since = alert_since or now
     state = {
