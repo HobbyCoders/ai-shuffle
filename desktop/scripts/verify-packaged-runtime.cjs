@@ -21,5 +21,9 @@ module.exports = async function verifyPackagedRuntime(context) {
   const binary = path.join(worker, client.path);
   if (!(await fs.stat(binary)).isFile()) throw new Error('Packaged cloudflared is not a file.');
   const digest = createHash('sha256').update(await fs.readFile(binary)).digest('hex');
-  if (digest !== client.sha256) throw new Error('Packaged cloudflared checksum does not match the verified runtime.');
+  // Byte-exact on purpose: signing must leave this file alone (win.signExts),
+  // so a re-signed or otherwise changed copy never reaches an installer.
+  if (digest !== client.sha256) {
+    throw new Error('Packaged cloudflared checksum does not match the verified runtime. It must ship unmodified; was it re-signed (win.signExts)?');
+  }
 };

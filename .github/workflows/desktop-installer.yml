@@ -167,6 +167,15 @@ jobs:
             if (-not $signature.TimeStamperCertificate) { throw "$file has no timestamp" }
             Write-Host "Signed: $(Split-Path $file -Leaf) by $($signature.SignerCertificate.Subject)"
           }
+          # cloudflared is excluded from our signing (win.signExts) and must keep
+          # Cloudflare's own timestamped signature; afterPack already proved its bytes.
+          $worker = 'desktop/release/win-unpacked/resources/worker'
+          $client = Join-Path $worker (Get-Content (Join-Path $worker 'manifest.json') -Raw | ConvertFrom-Json).cloudflared.path
+          $signature = Get-AuthenticodeSignature $client
+          if ($signature.Status -ne 'Valid') { throw "cloudflared signature is $($signature.Status)" }
+          if (-not $signature.TimeStamperCertificate) { throw 'cloudflared has no timestamp' }
+          if ($signature.SignerCertificate.Subject -notmatch '(^|, )O="?Cloudflare, Inc\.') { throw "cloudflared is signed by $($signature.SignerCertificate.Subject), not Cloudflare" }
+          Write-Host "Vendor-signed: $(Split-Path $client -Leaf) by $($signature.SignerCertificate.Subject)"
       - name: Collect private installer candidate
         run: |
           $installer = @(Get-ChildItem desktop/release -Filter '*.exe' -File)
