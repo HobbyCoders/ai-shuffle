@@ -287,11 +287,48 @@ def _find_pull_for_branch(github_service: Any, repo: str, branch: str) -> Any:
     matching = [
         item for item in pulls if getattr(item, "head_branch", None) == branch
     ]
-    if not matching:
-        return None
-    open_ones = [p for p in matching if _github_state(p) == "open"]
-    pool = open_ones or matching
-    return max(pool, key=lambda p: p.number)
+    return _preferred_pull(matching)
+
+
+def _preferred_pull(pulls: list[Any]) -> Any:
+    open_ones = [p for p in pulls if _github_state(p) == "open"]
+    return max(open_ones or pulls, key=lambda p: p.number, default=None)
+
+
+def find_pull_for_checkout_fallback(
+    github_service: Any, repo: str, branch: str, working_dir: str
+) -> Any:
+    """After a local-branch miss, try its upstream, then its exact HEAD PR.
+
+    Blocking: callers must use ``asyncio.to_thread``. Keep the local lookup
+    first so existing branch identity wins and the usual case needs no extra
+    git/gh calls. An absent upstream is normal; other git/gh failures propagate
+    so callers retry rather than caching a false "no PR" answer.
+
+    Commit associations alone are not ownership: a new worktree starts at a
+    base commit that GitHub associates with someone else's merged PR. Require
+    the PR's own head SHA to equal HEAD, and ignore PRs targeting this branch.
+    """
+    from app.core.git_service import git_service
+
+    upstream = git_service._run_git(
+        working_dir, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], timeout=5
+    )
+    if upstream.returncode == 0:
+        # Split once: origin/feat/remote -> feat/remote, keeping branch slashes.
+        _, separator, upstream_branch = upstream.stdout.strip().partition("/")
+        if separator and upstream_branch and upstream_branch != branch:
+            pr = _find_pull_for_branch(github_service, repo, upstream_branch)
+            if pr is not None:
+                return pr
+
+    head = git_service._run_git(working_dir, ["rev-parse", "HEAD"], timeout=5, check=True)
+    head_sha = head.stdout.strip()
+    return _preferred_pull([
+        pr for pr in github_service.list_commit_pulls(repo, head_sha)
+        if getattr(pr, "head_sha", None) == head_sha
+        and getattr(pr, "base_branch", None) != branch
+    ])
 
 
 # Listed PRs still open are re-read at most this many per reconcile.
@@ -345,9 +382,11 @@ async def reconcile_session_pr(session_id: str) -> bool:
 
     Prefers an open PR on the session branch; otherwise the latest PR for
     that branch (so a second PR that is already merged replaces the previous
-    merged number). No branch: refresh the stored ``pr_number``. Unchanged
-    number+state is a no-op. Other PRs the chat lists as open (older ones,
-    sub-agents' ones) are re-read so a merge elsewhere reaches the sidebar.
+    merged number). A local-name miss tries the checkout's upstream, then a
+    PR whose head exactly matches HEAD. No branch: refresh the stored
+    ``pr_number``. Unchanged number+state is a no-op. Other open PRs the chat
+    lists (older ones and sub-agents' ones) are re-read so a merge elsewhere
+    reaches the sidebar.
 
     Canonical project-only sessions resolve through this runner's checkout;
     a legacy project alias is not required. No remote checkout is materialized.
@@ -409,6 +448,10 @@ async def reconcile_session_pr(session_id: str) -> bool:
                 pr = await asyncio.to_thread(
                     _find_pull_for_branch, github_service, repo, branch
                 )
+                if pr is None:
+                    pr = await asyncio.to_thread(
+                        find_pull_for_checkout_fallback, github_service, repo, branch, working_dir
+                    )
             elif pr_number:
                 pr = await asyncio.to_thread(github_service.get_pull, repo, int(pr_number))
         except GitHubCliError:
@@ -427,7 +470,7 @@ async def reconcile_session_pr(session_id: str) -> bool:
                 ok = await persist_pr_state(
                     session_id=session_id,
                     project_id=project_id,
-                    branch=branch or getattr(pr, "head_branch", None),
+                    branch=getattr(pr, "head_branch", None) or branch,
                     pr_number=pr.number,
                     pr_url=pr.url,
                     pr_state=state,

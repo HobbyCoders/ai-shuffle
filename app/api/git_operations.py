@@ -54,7 +54,11 @@ from app.api.git_ai import (
     generate_commit_message_for_dir,
     generate_pr_description_for_dir,
 )
-from app.core.session_pr_state import persist_pr_state, schedule_session_pr_reconcile
+from app.core.session_pr_state import (
+    find_pull_for_checkout_fallback,
+    persist_pr_state,
+    schedule_session_pr_reconcile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1259,8 +1263,9 @@ async def get_pr_state(
     verdict — None means still computing) so the UI can decide between
     Create-PR / Finish("Merge PR #N") / clean states. When no open PR exists,
     includes the latest merged PR's original head so squash-merged work is not
-    offered for shipping again. Degrades gracefully:
-    no git repo or no GitHub remote just yields ``has_github=False``.
+    offered for shipping again. A local-name miss also tries the checkout's
+    upstream and an exact-HEAD PR, as sidebar reconciliation does. Degrades
+    gracefully: no git repo or no GitHub remote just yields ``has_github=False``.
 
     Failure is reported, never invented. If GitHub cannot be
     reached the response carries ``pr_lookup_failed=True`` and — when a recent
@@ -1333,7 +1338,11 @@ async def _read_pr_state(working_dir: str, branch: str, cache_key: str, project_
                         and merged[0].head_branch == branch
                         and merged[0].state.lower() == "merged"
                     ):
-                        result["merged_head_sha"] = merged[0].head_sha
+                        pr = merged[0]
+                    else:
+                        pr = await asyncio.to_thread(
+                            find_pull_for_checkout_fallback, github_service, repo, branch, working_dir
+                        )
             except Exception as e:  # noqa: BLE001 — GitHubCliError, or anything else
                 # Couldn't ask gh — PR state is unknown for this cycle. has_github
                 # stays True because the repo IS known: a PR hiccup must not take
@@ -1343,7 +1352,9 @@ async def _read_pr_state(working_dir: str, branch: str, cache_key: str, project_
                 )
                 lookup_ok = False
             else:
-                if pr is not None:
+                if pr is not None and pr.state.lower() == "merged":
+                    result["merged_head_sha"] = pr.head_sha
+                elif pr is not None and pr.state.lower() == "open":
                     result["open_pr"] = {
                         "number": pr.number,
                         "title": pr.title,

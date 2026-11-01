@@ -80,6 +80,7 @@ def mock_github_service():
     m.get_repo_from_remote.return_value = "o/r"
     m.is_authenticated.return_value = True
     m.list_pulls.return_value = [_pr()]
+    m.list_commit_pulls.return_value = []
     return m
 
 
@@ -92,13 +93,21 @@ def pr_app():
 
 
 @pytest.fixture
-def pr_client(pr_app, mock_git_service, mock_github_service):
+def pr_checkout(tmp_path, monkeypatch):
+    from tests.git_repo_helpers import hermetic_git_env, init_repo
+
+    hermetic_git_env(monkeypatch, tmp_path)
+    return init_repo(tmp_path / "repo", branch="feat/x")
+
+
+@pytest.fixture
+def pr_client(pr_app, mock_git_service, mock_github_service, pr_checkout):
     with ExitStack() as stack:
         stack.enter_context(patch("app.api.git_owner.database.get_session", side_effect=lambda sid: {"id": sid, "project_id": "p1"}))
         stack.enter_context(patch.object(gitops, "git_service", mock_git_service))
         stack.enter_context(patch.object(gitops, "github_service", mock_github_service))
         stack.enter_context(patch.object(gitops, "check_project_access", MagicMock()))
-        stack.enter_context(patch.object(gitops, "get_working_dir_async", AsyncMock(return_value="/wd")))
+        stack.enter_context(patch.object(gitops, "get_working_dir_async", AsyncMock(return_value=str(pr_checkout))))
         with TestClient(pr_app) as client:
             yield client
 
@@ -293,7 +302,9 @@ class TestStaleWhileRevalidate:
     it never replaces a real PR with ``open_pr: None`` (the Merge-PR → Create-PR
     → Merge-PR flip), and it never writes that negative answer to the cache."""
 
-    KEY = "/wd:feat/x"
+    @property
+    def KEY(self):
+        return f"{gitops.get_working_dir_async.return_value}:feat/x"
 
     def test_failed_refresh_serves_last_known_good_flagged_stale(
         self, pr_client, mock_github_service
@@ -549,3 +560,63 @@ async def test_poll_after_invalidation_caches_new_flight_before_old_one_finishes
         finally:
             release.set()
             await asyncio.gather(old, return_exceptions=True)
+
+
+@pytest.mark.parametrize('lookup', ['upstream', 'commit'])
+@pytest.mark.parametrize('state', ['OPEN', 'MERGED'])
+def test_header_finds_pr_pushed_under_another_name(
+    pr_client, pr_checkout, mock_github_service, tmp_path, lookup, state,
+):
+    from tests.git_repo_helpers import commit_file, git
+
+    sha = commit_file(pr_checkout, 'feature.txt', 'feature', 'feature')
+    origin = tmp_path / 'origin.git'
+    git(tmp_path, 'init', '-q', '--bare', str(origin))
+    git(pr_checkout, 'remote', 'add', 'origin', str(origin))
+    flags = ['-u'] if lookup == 'upstream' else []
+    git(pr_checkout, 'push', '-q', *flags, 'origin', 'HEAD:feat/remote')
+    pr = _pr(head='feat/remote')
+    pr.state, pr.head_sha = state, sha
+    mock_github_service.list_pulls.side_effect = (
+        lambda repo, **kw: [pr] if kw['head'] == 'feat/remote' else []
+    )
+    mock_github_service.list_commit_pulls.return_value = [pr]
+
+    data = pr_client.get('/api/v1/projects/p1/git/pr-state').json()
+    assert data['current_branch'] == 'feat/x'  # still the local branch
+    assert data['pr_lookup_failed'] is False
+    if state == 'OPEN':
+        assert data['open_pr']['number'] == pr.number
+        assert data['merged_head_sha'] is None
+    else:
+        assert data['open_pr'] is None
+        assert data['merged_head_sha'] == sha
+    if lookup == 'upstream':
+        mock_github_service.list_commit_pulls.assert_not_called()
+    else:
+        mock_github_service.list_commit_pulls.assert_called_once_with('o/r', sha)
+
+
+def test_header_rejects_unrelated_commit_pr(pr_client, pr_checkout, mock_github_service):
+    from tests.git_repo_helpers import git
+
+    sha = git(pr_checkout, 'rev-parse', 'HEAD')
+    unrelated = _pr(head='feat/unrelated')
+    unrelated.state, unrelated.head_sha = 'MERGED', 'a' * 40
+    mock_github_service.list_pulls.return_value = []
+    mock_github_service.list_commit_pulls.return_value = [unrelated]
+
+    data = pr_client.get('/api/v1/projects/p1/git/pr-state').json()
+    assert data['pr_lookup_failed'] is False
+    assert data['open_pr'] is None
+    assert data['merged_head_sha'] is None
+    mock_github_service.list_commit_pulls.assert_called_once_with('o/r', sha)
+
+
+def test_header_commit_lookup_failure_is_not_cached(pr_client, mock_github_service):
+    mock_github_service.list_pulls.return_value = []
+    mock_github_service.list_commit_pulls.side_effect = GitHubCliError('offline')
+    data = pr_client.get('/api/v1/projects/p1/git/pr-state').json()
+    assert data['has_github'] is True
+    assert data['pr_lookup_failed'] is True
+    assert not gitops._pr_state_cache

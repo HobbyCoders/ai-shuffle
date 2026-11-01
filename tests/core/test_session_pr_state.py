@@ -2,7 +2,7 @@
 
 import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
 
@@ -89,6 +89,8 @@ async def test_reconcile_persists_open_pr_for_branch(mock_db):
     assert row['pr_number'] == 4
     assert row['pr_state'] == 'open'
     assert row['pr_url'] == 'https://github.com/o/r/pull/4'
+    gh.list_pulls.assert_called_once_with('o/r', state='all', limit=100, head='feat/x')
+    gh.list_commit_pulls.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -120,18 +122,19 @@ async def test_reconcile_merged_adopts_new_open_pr(mock_db):
 
 
 @pytest.mark.asyncio
-async def test_reconcile_merged_without_new_pr_keeps_state(mock_db):
+async def test_reconcile_merged_without_new_pr_keeps_state(mock_db, pr_checkout):
     sid = _mk(project_id='p1', worktree_branch='feat/x')
     database.update_session_pr_state(
         sid, pr_number=4, pr_url='https://github.com/o/r/pull/4', pr_state='merged'
     )
 
     with patch(
-        'app.api.git_helpers.get_working_dir_async', new=AsyncMock(return_value='/wd')
+        'app.api.git_helpers.get_working_dir_async', new=AsyncMock(return_value=str(pr_checkout))
     ), patch('app.core.github_service.github_service') as gh:
         gh.get_repo_from_remote.return_value = 'o/r'
         gh.list_pulls.return_value = []
-        await reconcile_session_pr(sid)
+        gh.list_commit_pulls.return_value = []
+        assert await reconcile_session_pr(sid)
         gh.get_pull.assert_not_called()
 
     row = database.get_session(sid)
@@ -424,3 +427,230 @@ async def test_reconcile_skips_listed_prs_from_another_repo(mock_db):
         gh.list_pulls.return_value = [same]
         assert await reconcile_session_pr(sid)
         gh.get_pull.assert_not_called()
+
+
+@pytest.fixture
+def pr_checkout(tmp_path, monkeypatch):
+    """A fresh linked worktree with a local bare origin, never the host repo."""
+    from tests.git_repo_helpers import git, hermetic_git_env, init_repo, make_origin
+
+    hermetic_git_env(monkeypatch, tmp_path)
+    repo = init_repo(tmp_path / 'repo')
+    make_origin(tmp_path, repo)
+    checkout = tmp_path / 'checkout'
+    git(repo, 'worktree', 'add', '-q', '-b', 'feat/local', str(checkout))
+    return checkout
+
+
+def _checkout_pull(number, state, head_sha, head='feat/remote'):
+    return SimpleNamespace(
+        number=number, state=state, head_branch=head, head_sha=head_sha,
+        base_branch='main', title='Renamed remote branch',
+        url=f'https://github.com/o/r/pull/{number}',
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('state', ['OPEN', 'MERGED'])
+async def test_reconcile_finds_differently_named_upstream(mock_db, pr_checkout, state):
+    from tests.git_repo_helpers import commit_file, git
+
+    sha = commit_file(pr_checkout, 'feature.txt', 'feature', 'feature')
+    git(pr_checkout, 'push', '-q', '-u', 'origin', 'HEAD:feat/remote')
+    assert git(pr_checkout, 'rev-parse', '--abbrev-ref', '@{u}') == 'origin/feat/remote'
+    sid = _mk(project_id='p1', worktree_branch='feat/local')
+    pr = _checkout_pull(12, state, sha)
+    sync, broadcast = _quiet_sync()
+    try:
+        with patch('app.api.git_helpers.get_working_dir_async',
+                   new=AsyncMock(return_value=str(pr_checkout))), \
+                patch('app.core.github_service.github_service') as gh:
+            gh.get_repo_from_remote.return_value = 'o/r'
+            gh.list_pulls.side_effect = [[], [pr]]
+            assert await reconcile_session_pr(sid)
+            assert gh.list_pulls.call_args_list == [
+                call('o/r', state='all', limit=100, head='feat/local'),
+                call('o/r', state='all', limit=100, head='feat/remote'),
+            ]
+            gh.list_commit_pulls.assert_not_called()
+    finally:
+        sync.stop()
+    row = database.get_session(sid)
+    assert (row['pr_number'], row['pr_state']) == (12, state.lower())
+    assert row['worktree_branch'] == 'feat/local'
+    entries = database.decode_pull_requests(row['pull_requests'])
+    assert entries[0]['branch'] == 'feat/remote'
+    payload = broadcast.broadcast_user_session_updated.await_args.kwargs['updates']
+    assert payload['pr_state'] == state.lower()
+    assert payload['pull_requests'][0]['branch'] == 'feat/remote'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('state', ['OPEN', 'MERGED'])
+async def test_reconcile_finds_head_pushed_without_upstream(mock_db, pr_checkout, state):
+    from tests.git_repo_helpers import commit_file, git
+
+    sha = commit_file(pr_checkout, 'feature.txt', 'feature', 'feature')
+    git(pr_checkout, 'push', '-q', 'origin', 'HEAD:feat/remote')
+    sid = _mk(project_id='p1', worktree_branch='feat/local')
+    # The commit can be in several PRs: prefer open, else the highest number.
+    prs = [_checkout_pull(99, 'MERGED', sha), _checkout_pull(12, state, sha)]
+    chosen = 12 if state == 'OPEN' else 99
+    sync, _ = _quiet_sync()
+    try:
+        with patch('app.api.git_helpers.get_working_dir_async',
+                   new=AsyncMock(return_value=str(pr_checkout))), \
+                patch('app.core.github_service.github_service') as gh:
+            gh.get_repo_from_remote.return_value = 'o/r'
+            gh.list_pulls.return_value = []
+            gh.list_commit_pulls.return_value = prs
+            assert await reconcile_session_pr(sid)
+            gh.list_commit_pulls.assert_called_once_with('o/r', sha)
+    finally:
+        sync.stop()
+    row = database.get_session(sid)
+    assert (row['pr_number'], row['pr_state']) == (chosen, state.lower())
+    assert database.decode_pull_requests(row['pull_requests'])[0]['branch'] == 'feat/remote'
+
+
+@pytest.mark.asyncio
+async def test_reconcile_fresh_worktree_does_not_adopt_main_tip_pr(mock_db, pr_checkout):
+    from tests.git_repo_helpers import git
+
+    sha = git(pr_checkout, 'rev-parse', 'HEAD')
+    assert sha == git(pr_checkout, 'rev-parse', 'origin/main')
+    sid = _mk(project_id='p1', worktree_branch='feat/local')
+    # A squash merge is associated with main's tip, but its PR head is different.
+    unrelated = _checkout_pull(99, 'MERGED', 'a' * 40, head='feat/unrelated')
+    with patch('app.api.git_helpers.get_working_dir_async',
+               new=AsyncMock(return_value=str(pr_checkout))), \
+            patch('app.core.github_service.github_service') as gh:
+        gh.get_repo_from_remote.return_value = 'o/r'
+        gh.list_pulls.return_value = []
+        gh.list_commit_pulls.return_value = [unrelated]
+        assert await reconcile_session_pr(sid)
+        gh.list_commit_pulls.assert_called_once_with('o/r', sha)
+    row = database.get_session(sid)
+    assert row['pr_number'] is None
+    assert database.decode_pull_requests(row['pull_requests']) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['upstream', 'commit'])
+async def test_reconcile_fallback_failure_keeps_stored_state(mock_db, pr_checkout, failure):
+    from app.core.github_service import GitHubCliError
+    from tests.git_repo_helpers import commit_file, git
+
+    commit_file(pr_checkout, 'feature.txt', 'feature', 'feature')
+    if failure == 'upstream':
+        git(pr_checkout, 'push', '-q', '-u', 'origin', 'HEAD:feat/remote')
+    sid = _mk(project_id='p1', worktree_branch='feat/local')
+    database.update_session_pr_state(sid, pr_number=4, pr_state='merged')
+    with patch('app.api.git_helpers.get_working_dir_async',
+               new=AsyncMock(return_value=str(pr_checkout))), \
+            patch('app.core.github_service.github_service') as gh:
+        gh.get_repo_from_remote.return_value = 'o/r'
+        gh.list_pulls.side_effect = [[], GitHubCliError('offline')] if failure == 'upstream' else None
+        gh.list_pulls.return_value = []
+        gh.list_commit_pulls.side_effect = GitHubCliError('offline')
+        assert not await reconcile_session_pr(sid)
+    assert database.get_session(sid)['pr_number'] == 4
+    assert database.get_session(sid)['pr_state'] == 'merged'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('upstream', ['feat/local', 'feat/unused'])
+async def test_reconcile_commit_fallback_after_upstream_miss(mock_db, pr_checkout, upstream):
+    from tests.git_repo_helpers import commit_file, git
+
+    sha = commit_file(pr_checkout, 'feature.txt', 'feature', 'feature')
+    git(pr_checkout, 'push', '-q', '-u', 'origin', f'HEAD:{upstream}')
+    sid = _mk(project_id='p1', worktree_branch='feat/local')
+    pr = _checkout_pull(12, 'OPEN', sha)
+    sync, _ = _quiet_sync()
+    try:
+        with patch('app.api.git_helpers.get_working_dir_async',
+                   new=AsyncMock(return_value=str(pr_checkout))), \
+                patch('app.core.github_service.github_service') as gh:
+            gh.get_repo_from_remote.return_value = 'o/r'
+            gh.list_pulls.return_value = []
+            gh.list_commit_pulls.return_value = [pr]
+            assert await reconcile_session_pr(sid)
+            expected = [call('o/r', state='all', limit=100, head='feat/local')]
+            if upstream != 'feat/local':
+                expected.append(call('o/r', state='all', limit=100, head=upstream))
+            assert gh.list_pulls.call_args_list == expected
+            gh.list_commit_pulls.assert_called_once_with('o/r', sha)
+    finally:
+        sync.stop()
+    assert database.get_session(sid)['pr_number'] == 12
+
+
+@pytest.mark.asyncio
+async def test_reconcile_commit_pr_targeting_local_branch_is_ignored(mock_db, pr_checkout):
+    from tests.git_repo_helpers import git
+
+    sha = git(pr_checkout, 'rev-parse', 'HEAD')
+    pr = _checkout_pull(12, 'OPEN', sha)
+    pr.base_branch = 'feat/local'
+    sid = _mk(project_id='p1', worktree_branch='feat/local')
+    with patch('app.api.git_helpers.get_working_dir_async',
+               new=AsyncMock(return_value=str(pr_checkout))), \
+            patch('app.core.github_service.github_service') as gh:
+        gh.get_repo_from_remote.return_value = 'o/r'
+        gh.list_pulls.return_value = []
+        gh.list_commit_pulls.return_value = [pr]
+        assert await reconcile_session_pr(sid)
+    assert database.get_session(sid)['pr_number'] is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_fallback_git_calls_are_bounded_and_off_loop(mock_db, pr_checkout):
+    import threading
+    from app.core.git_service import git_service
+
+    sid = _mk(project_id='p1', worktree_branch='feat/local')
+    loop_thread = threading.get_ident()
+    run_git = git_service._run_git
+    calls = []
+
+    def checked_git(working_dir, args, **kwargs):
+        assert threading.get_ident() != loop_thread
+        assert kwargs['timeout'] == 5
+        calls.append(args)
+        return run_git(working_dir, args, **kwargs)
+
+    def commit_pulls(*args):
+        assert threading.get_ident() != loop_thread
+        return []
+
+    with patch('app.api.git_helpers.get_working_dir_async',
+               new=AsyncMock(return_value=str(pr_checkout))), \
+            patch('app.core.github_service.github_service') as gh, \
+            patch.object(git_service, '_run_git', side_effect=checked_git):
+        gh.get_repo_from_remote.return_value = 'o/r'
+        gh.list_pulls.return_value = []
+        gh.list_commit_pulls.side_effect = commit_pulls
+        assert await reconcile_session_pr(sid)
+    assert calls == [
+        ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'],
+        ['rev-parse', 'HEAD'],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_git_timeout_returns_false(mock_db, pr_checkout):
+    import subprocess
+    from app.core.git_service import git_service
+
+    sid = _mk(project_id='p1', worktree_branch='feat/local')
+    database.update_session_pr_state(sid, pr_number=4, pr_state='merged')
+    with patch('app.api.git_helpers.get_working_dir_async',
+               new=AsyncMock(return_value=str(pr_checkout))), \
+            patch('app.core.github_service.github_service') as gh, \
+            patch.object(git_service, '_run_git', side_effect=subprocess.TimeoutExpired('git', 5)):
+        gh.get_repo_from_remote.return_value = 'o/r'
+        gh.list_pulls.return_value = []
+        assert not await reconcile_session_pr(sid)
+        gh.list_commit_pulls.assert_not_called()
+    assert database.get_session(sid)['pr_number'] == 4
