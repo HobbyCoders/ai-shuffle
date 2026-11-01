@@ -1,4 +1,4 @@
-"""Exercise the UI runner's deadlines and fail-closed pipeline without an SDK."""
+"""Exercise emulator runner permissions, deadlines and fail-closed pipelines without an SDK."""
 import json
 import os
 from pathlib import Path
@@ -15,7 +15,7 @@ BASH = str(Path(os.environ["ProgramFiles"]) / "Git/bin/bash.exe") if os.name == 
 
 
 class UiRunnerTest(unittest.TestCase):
-    def run_runner(self, mode="pass", phase="suite"):
+    def run_runner(self, mode="pass", phase="suite", runner="run-android-ui-tests.sh", api=34):
         with tempfile.TemporaryDirectory(prefix="ui runner ") as directory:
             root = Path(directory)
             (root / "ci").mkdir()
@@ -36,6 +36,12 @@ if name == "timeout":
     # Run the requested fake command with this interpreter, not Windows execvp
     # (which cannot execute an extensionless POSIX shebang script).
     sys.exit(subprocess.call([sys.executable, __file__, *args]))
+if args == ["-s", "emulator-5554", "shell", "getprop", "ro.build.version.sdk"]:
+    if os.environ["MODE"] == "sdk-error":
+        sys.exit(19)
+    print(os.environ["API_LEVEL"] + "\r")
+if "grant" in args and os.environ["MODE"] == "grant-error":
+    sys.exit(23)
 if "instrument" in args:
     suite = "notClass" in args
     mode = os.environ["MODE"] if suite == (os.environ["PHASE"] == "suite") else "pass"
@@ -64,20 +70,57 @@ if "instrument" in args:
             # as a POSIX shebang, and keep spaces in paths quoted.
             shell_env = root / "fake-tools.sh"
             shell_env.write_text(
+                'python3() { "$UI_RUNNER_TEST_PYTHON" "$@"; }\n'
                 'adb() { "$UI_RUNNER_TEST_PYTHON" "$UI_RUNNER_TEST_FAKE" adb "$@"; }\n'
                 'timeout() { "$UI_RUNNER_TEST_PYTHON" "$UI_RUNNER_TEST_FAKE" timeout "$@"; }\n',
                 encoding="utf-8", newline="\n")
             env = dict(os.environ, BASH_ENV=shell_env.as_posix(),
                        RUNNER_TEMP=str(root / "output"), CALLS=str(root / "calls"), MODE=mode, PHASE=phase,
+                       API_LEVEL=str(api),
                        GITHUB_STEP_SUMMARY=str(root / "summary"),
                        UI_RUNNER_TEST_PYTHON=Path(sys.executable).as_posix(),
                        UI_RUNNER_TEST_FAKE=(root / "fake.py").as_posix())
-            result = subprocess.run([BASH, str(CI / "run-android-ui-tests.sh")], cwd=root,
+            result = subprocess.run([BASH, str(CI / runner)], cwd=root,
                                     env=env, text=True, capture_output=True, timeout=10)
             self.assertTrue((root / "calls").exists(), result.stdout + result.stderr)
             calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]
-            self.summary = (root / "summary").read_text()
+            self.summary = (root / "summary").read_text() if runner == "run-android-ui-tests.sh" else ""
             return result, calls
+
+    def test_notifications_are_granted_after_install_and_before_launch_on_android_13_plus(self):
+        for runner in ("run-android-ui-tests.sh", "run-minified-smoke.sh"):
+            for api in (32, 33, 34, 36):
+                with self.subTest(runner=runner, api=api):
+                    result, calls = self.run_runner(runner=runner, api=api)
+                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                    grants = [i for i, call in enumerate(calls) if "grant" in call]
+                    if api < 33:
+                        self.assertEqual([], grants)
+                        continue
+                    self.assertEqual(1, len(grants))
+                    self.assertEqual(["adb", "-s", "emulator-5554", "shell", "pm", "grant",
+                                      "com.hobbycoders.aishuffle", "android.permission.POST_NOTIFICATIONS"],
+                                     calls[grants[0]])
+                    installs = [i for i, call in enumerate(calls) if "install" in call]
+                    self.assertEqual(2, len(installs))
+                    self.assertLess(max(installs), grants[0])
+                    launches = [i for i, call in enumerate(calls) if "am" in call]
+                    self.assertTrue(launches)
+                    self.assertLess(grants[0], min(launches))
+
+    def test_notification_grant_failure_stops_both_runners_before_launch(self):
+        for runner in ("run-android-ui-tests.sh", "run-minified-smoke.sh"):
+            with self.subTest(runner=runner):
+                result, calls = self.run_runner("grant-error", runner=runner)
+                self.assertEqual(23, result.returncode, result.stdout + result.stderr)
+                self.assertFalse(any("am" in call for call in calls))
+
+    def test_sdk_query_failure_stops_both_runners_before_launch(self):
+        for runner in ("run-android-ui-tests.sh", "run-minified-smoke.sh"):
+            with self.subTest(runner=runner):
+                result, calls = self.run_runner("sdk-error", runner=runner)
+                self.assertEqual(19, result.returncode, result.stdout + result.stderr)
+                self.assertFalse(any("grant" in call or "am" in call for call in calls))
 
     def test_both_runs_have_individual_and_host_deadlines(self):
         result, calls = self.run_runner()

@@ -33,6 +33,13 @@ python3 ci/prepare-android-ui.py
 adb -s emulator-5554 install -r instrumentation-apks/debug/app-debug.apk
 adb -s emulator-5554 install -r instrumentation-apks/androidTest/debug/app-debug-androidTest.apk
 
+# Push-enabled builds ask at chat startup; grant before either test can open it.
+# POST_NOTIFICATIONS is a runtime permission only on Android 13 (API 33)+.
+api_level="$(adb -s emulator-5554 shell getprop ro.build.version.sdk | tr -d '\r')"
+if (( api_level >= 33 )); then
+  adb -s emulator-5554 shell pm grant com.hobbycoders.aishuffle android.permission.POST_NOTIFICATIONS
+fi
+
 # Start chat in its own fresh app process: a previous WebView can hide startup
 # ordering bugs in document-start script registration (seen on WebView 151).
 adb -s emulator-5554 shell am force-stop com.hobbycoders.aishuffle
