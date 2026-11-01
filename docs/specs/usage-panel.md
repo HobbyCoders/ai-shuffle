@@ -21,13 +21,14 @@ place where the code currently differs.
 | Expanded rows show the windows/balances plus **only** a "Compare on the provider dashboard" link, no explanatory text blocks. | Long explanations were removed on request (2026-09-24). |
 | A stale reading is shown with "Last reported <age>", never silently as current. | Prevents trusting an old number. |
 | Nothing is estimated from this app's token costs. | Estimates live on the Stats card as "Estimated spend". |
+| A plan without a 5-hour window (Claude Ultra, every ChatGPT Pro tier: `pro`, `prolite`) shows **no 5-hour row**: no "not reported yet" placeholder, and a reported 5-hour window whose reset has passed is hidden too. A **live** 5-hour window (reset still ahead) is still shown, because provider data beats the plan rule. | Anthropic's Ultra has "No 5-hour limit for verified accounts" (newer accounts keep a temporary one until verified) and OpenAI says "Pro plans currently have no five-hour limit" ([claude.com/pricing](https://claude.com/pricing), [learn.chatgpt.com/docs/pricing](https://learn.chatgpt.com/docs/pricing), 2026-11-01). A permanent empty or stale 5-hour row was wrong for those plans. The Settings > Providers usage tabs (whose clock ticks while open, so a window that resets drops out) and the GetUsage tool follow the same rule; the tool applies the Claude plan only when the CLI status cache already holds it (no probe), and never deletes the cached reading. |
 
 ## Layout
 
 | Part | Collapsed | Expanded |
 | --- | --- | --- |
 | Context window (top) | One severity-colored bar with the total % | Segmented bar per category, rows with tokens and %, trailing model row |
-| Claude subscription row | The 5-hour window's **remaining %** | Every reported window (5-hour, weekly, weekly Opus/Sonnet, Fable) as "<n>% left" with reset countdowns |
+| Claude subscription row | The 5-hour window's **remaining %** (weekly on a plan without a 5-hour window) | Every reported window (5-hour, weekly, weekly Opus/Sonnet, Fable) as "<n>% left" with reset countdowns |
 | ChatGPT row | Weekly subscription window remaining | Windows plus extra credits only when the reported balance is > 0 (credits are not USD) |
 | SuperGrok row | Subscription window remaining | Windows and plan |
 | OpenRouter row | Account credit left (key spend limit only when there is no account balance) | Same, plus the dashboard link |
@@ -36,7 +37,18 @@ place where the code currently differs.
 
 The collapsed value of a multi-window row is the window a session most often
 hits first (5-hour for Claude), **not** the minimum of all windows (fixed in
-#1688).
+#1688). On a plan without a 5-hour window (above) the collapsed value never
+uses a hidden 5-hour window: Claude falls back to the weekly (all models)
+window, then the smallest remaining one; ChatGPT to its least remaining
+window (the weekly one).
+
+Which plan an install is on: Claude's comes from this install's own CLI
+sign-in (`claude auth status`, see the sources doc), so the plan rule applies
+to the self install's Claude section and to another device's section when that
+device reports the same Claude account key (the same subscription, whose
+windows the panel merges). A device on another account, or one with no account
+key, keeps every row. ChatGPT's comes from the provider's own `plan_type`. An
+unknown plan keeps every row.
 
 ## Interaction
 

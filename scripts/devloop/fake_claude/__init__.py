@@ -51,7 +51,9 @@ def install(directory: Path, *, python: str | None = None) -> Path:
         f"FAKE_CLAUDE_ROOT={shlex.quote(str(directory))}",
         f"FAKE_CLAUDE_LOG={shlex.quote(str(log_path(directory)))}",
         f"FAKE_CLAUDE_STARTUP_MS={shlex.quote(os.environ.get('DEVLOOP_CLAUDE_STARTUP_MS', '0'))}",
-        "export FAKE_CLAUDE_ROOT FAKE_CLAUDE_LOG FAKE_CLAUDE_STARTUP_MS",
+        # The plan tier ``auth status`` reports (DEVLOOP_CLAUDE_PLAN=ultra); empty: none.
+        f"FAKE_CLAUDE_PLAN={shlex.quote(os.environ.get('DEVLOOP_CLAUDE_PLAN', ''))}",
+        "export FAKE_CLAUDE_ROOT FAKE_CLAUDE_LOG FAKE_CLAUDE_STARTUP_MS FAKE_CLAUDE_PLAN",
         # -I: no PYTHON* variables, no user site, not the caller's directory.
         f"exec {shlex.quote(python or sys.executable)} -I {shlex.quote(str(CLI))} \"$@\"",
     ]

@@ -17,6 +17,20 @@ const API = new Map(Object.entries({
 	'/api/v1/model-providers': [],
 }));
 
+// The plan views (UsageRowsFixture.svelte) hydrate the model registry, whose
+// `claude` block carries this install's Claude plan. Other views get a 404,
+// as before, so the default fixture's Claude plan stays unknown.
+/** @type {Record<string, string>} */
+const CLAUDE_PLAN_BY_VIEW = { 'plan-ultra': 'ultra', 'plan-ultra-live': 'ultra', 'plan-max': 'max' };
+/** @param {import('node:http').IncomingMessage} req */
+function modelsFor(req) {
+	let view = null;
+	try { view = new URL(req.headers.referer ?? '').searchParams.get('view'); } catch { /* no referer */ }
+	const plan = view ? CLAUDE_PLAN_BY_VIEW[view] : undefined;
+	if (!plan) return null;
+	return { models: [], default: null, providers: [], claude: { auth_kind: 'subscription', plan_type: plan } };
+}
+
 export default mergeConfig(
 	base,
 	defineConfig({
@@ -33,6 +47,8 @@ export default mergeConfig(
 						if (path.startsWith('/api/')) {
 							res.setHeader('Content-Type', 'application/json');
 							if (API.has(path)) return res.end(JSON.stringify(API.get(path)));
+							const models = path === '/api/v1/models' ? modelsFor(req) : null;
+							if (models) return res.end(JSON.stringify(models));
 							res.statusCode = 404;
 							return res.end('{}');
 						}

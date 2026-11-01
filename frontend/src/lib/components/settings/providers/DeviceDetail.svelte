@@ -121,7 +121,7 @@
 		{#if tab === 'Models'}
 			{#key row.id}<ModelCuration {row} />{/key}
 		{:else if tab === 'Usage'}
-			<SubscriptionUsage {banked} {usageEntry} {signedIn} />
+			<SubscriptionUsage {banked} {usageEntry} {signedIn} plan={row.account_plan ?? null} />
 		{:else if reconnecting}
 			<RowGroup title="Reconnect" bare>
 				<DeviceCodeSetup

@@ -3,11 +3,12 @@
 	 * Claude subscription > Usage: unattended turns this hour (the loop guard's
 	 * budget), the plan windows the CLI reported (`/usage/limits`), and a link
 	 * to the plan's own usage page on claude.ai. Claude windows report quota
-	 * remaining; the meters show it as used.
+	 * remaining; the meters show it as used. On a plan without a 5-hour window
+	 * (Ultra) a 5-hour window past its reset is left out, as in the usage panel.
 	 */
 	import { ExternalLink } from 'lucide-svelte';
 	import { providers } from '$lib/stores/providers.svelte';
-	import { formatCountdown, windowLabel } from '$lib/stores/rate-limit';
+	import { formatCountdown, isRetiredFiveHourWindow, planHasNoFiveHourLimit, windowLabel } from '$lib/stores/rate-limit';
 	import RowGroup from '../../rows/RowGroup.svelte';
 	import SettingRow from '../../rows/SettingRow.svelte';
 	import Meter from '../../rows/Meter.svelte';
@@ -16,16 +17,30 @@
 
 	interface Props {
 		guard: LoopGuard;
+		/** This worker's Claude plan ("ultra", "max"), as `claude auth status` reports it. */
+		plan?: string | null;
 	}
 
-	let { guard }: Props = $props();
+	let { guard, plan = null }: Props = $props();
 
 	const CLAUDE_USAGE_URL = 'https://claude.ai/settings/usage';
 	const s = $derived(guard.status);
+	// Ticks while the tab is open (like the usage panel's clock), so
+	// countdowns stay current and a 5-hour window that resets drops out.
+	let now = $state(Date.now());
+	$effect(() => {
+		const clock = setInterval(() => {
+			now = Date.now();
+		}, 1000);
+		return () => clearInterval(clock);
+	});
+	const noFiveHour = $derived(planHasNoFiveHourLimit('claude', plan));
 	const windows = $derived(
-		(providers.current.usage?.windows ?? []).filter((w) => w.type !== 'window_0m' && Number.isFinite(w.utilization))
+		(providers.current.usage?.windows ?? []).filter(
+			(w) =>
+				w.type !== 'window_0m' && Number.isFinite(w.utilization) && !isRetiredFiveHourWindow(w, noFiveHour, now)
+		)
 	);
-	const now = Date.now();
 
 	function used(remaining: number): number {
 		return Math.round(Math.min(100, Math.max(0, 100 - remaining)));

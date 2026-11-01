@@ -5,13 +5,49 @@
 	import ContextUsageBar from '$lib/components/chat/ContextUsageBar.svelte';
 	import SettingsCard from '$lib/components/deck/cards/SettingsCard.svelte';
 	import { rateLimit } from '$lib/stores/rate-limit';
+	import { hydrateModelRegistry } from '$lib/constants/models';
 
 	const view = new URLSearchParams(location.search).get('view') ?? 'usage';
 	const now = Date.now();
 	const inAnHour = String(Math.floor(now / 1000) + 3600);
 	// view=claude-limits: the three Claude limits, the weekly Fable one past its
 	// reset and last reported six days ago (an Opus-only week never reports it).
-	if (view === 'claude-limits') rateLimit.applySnapshot({
+	// Plan views (controlled states for plans without a 5-hour window). The
+	// Claude plan comes from the stubbed /api/v1/models (vite.usage-rows.config.js):
+	//   plan-ultra:      Claude Ultra, a 5-hour window past its reset (reported
+	//                    before the plan changed) and a live weekly one; ChatGPT
+	//                    Pro and Plus rows with a weekly window only.
+	//   plan-max:        the same windows on Claude Max.
+	//   plan-ultra-live: Claude Ultra with a LIVE 5-hour window (an unverified
+	//                    Ultra account keeps a temporary one).
+	const planView = view.startsWith('plan-');
+	const twoDaysAgo = String(Math.floor(now / 1000) - 2 * 86400);
+	const inFiveDays = String(Math.floor(now / 1000) + 5 * 86400);
+	if (planView) {
+		void hydrateModelRegistry();
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			self_instance_id: 'self',
+			snapshots: [{
+				instance_id: 'self', available: true, fetched_at: now / 1000,
+				windows: [
+					view === 'plan-ultra-live'
+						? { type: 'five_hour', utilization: 72, resets_at: inAnHour, observed_at: now }
+						: { type: 'five_hour', utilization: 64, resets_at: twoDaysAgo, observed_at: now - 2 * 86_400_000 - 3_600_000 },
+					{ type: 'seven_day', utilization: 58, resets_at: inFiveDays, observed_at: now }
+				]
+			}],
+			providers: [
+				{ provider_id: 'codex-pro', provider_type: 'chatgpt', provider_name: 'ChatGPT', plan_type: 'pro',
+					status: 'fresh', fetched_at: now,
+					windows: [{ type: 'seven_day', utilization: 12, resets_at: inFiveDays }] },
+				{ provider_id: 'codex-plus', provider_type: 'chatgpt', provider_name: 'ChatGPT Plus', plan_type: 'plus',
+					status: 'fresh', fetched_at: now,
+					windows: [{ type: 'seven_day', utilization: 40, resets_at: inFiveDays }] }
+			]
+		});
+	} else if (view === 'claude-limits') rateLimit.applySnapshot({
 		available: true,
 		windows: [],
 		self_instance_id: 'self',

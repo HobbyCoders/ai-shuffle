@@ -499,7 +499,7 @@ function subscriptionCredential(claude: ClaudeAuthSummary, account: ClaudeSubscr
 export function claudePlan(plan: string | null | undefined): string | null {
 	const value = (plan ?? '').trim().toLowerCase();
 	if (!value) return null;
-	const known: Record<string, string> = { max: 'Max', pro: 'Pro', team: 'Team', enterprise: 'Enterprise' };
+	const known: Record<string, string> = { max: 'Max', ultra: 'Ultra', pro: 'Pro', team: 'Team', enterprise: 'Enterprise' };
 	return known[value] ?? plan!.trim();
 }
 

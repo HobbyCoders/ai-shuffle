@@ -349,6 +349,13 @@ before emitting its init/session-id frame; auth and version probes are not
 delayed. The default is zero. This composes with scenario `latency_ms` and
 with `--no-vite` to exercise the built frontend.
 
+To give the fake a Claude plan, launch with
+`DEVLOOP_CLAUDE_PLAN=ultra python -m scripts.devloop up` (or `max`, `pro`).
+`auth status --text` then prints the real CLI's `Login method: Claude Ultra
+account` line, so the app reads the tier through its normal status probe. The
+JSON form reports `max` for Ultra, as the real CLI does. Unset (the default),
+the fake prints JSON only and reports the placeholder plan `fake`.
+
 It speaks stream-json like Claude Code 2.1. It calls the hooks the app
 registers and obeys a PreToolUse deny. It asks `can_use_tool` unless the mode,
 `--allowed-tools` or a read-only tool allows the call, and removes

@@ -430,9 +430,36 @@ async def get_cached_usage_snapshot() -> UsageSnapshot:
     )
 
 
+def _cached_claude_plan() -> Optional[str]:
+    """This install's Claude plan ("ultra", "max") from the last CLI status.
+
+    Read from the status cache only (``peek``): a tool read never starts a
+    ``claude auth status`` probe. None before the first probe, and for a
+    sign-in that is not a claude.ai subscription.
+    """
+    try:
+        from app.core import claude_cli_status
+
+        status = claude_cli_status.peek()
+    except Exception:  # noqa: BLE001 - the plan is optional context
+        return None
+    if status is None or not status.signed_in or status.auth_method != "claude.ai" or not status.plan:
+        return None
+    return str(status.plan).strip().lower() or None
+
+
 async def get_cached_usage_payload() -> dict:
-    """JSON-safe cache-only usage payload for native/tool host callbacks."""
-    return (await get_cached_usage_snapshot()).model_dump(mode="json")
+    """JSON-safe cache-only usage payload for native/tool host callbacks.
+
+    ``claude_plan`` (this install's Claude plan, when the CLI status cache
+    holds one) lets GetUsage apply the usage panel's plan rule to the self
+    install's windows; see docs/specs/usage-panel.md.
+    """
+    payload = (await get_cached_usage_snapshot()).model_dump(mode="json")
+    plan = _cached_claude_plan()
+    if plan:
+        payload["claude_plan"] = plan
+    return payload
 
 
 # Why an API key's session gets no usage. Every snapshot row is the owner's

@@ -42,3 +42,13 @@ def test_launcher_knob_reaches_the_fake_process_without_delaying_auth(tmp_path, 
     assert frames[0]["subtype"] == "init" and frames[0]["session_id"]
     log = [json.loads(line) for line in fake_claude.log_path(tmp_path).read_text().splitlines()]
     assert [row["milliseconds"] for row in log if row["kind"] == "startup_delay"] == [300]
+
+
+@pytest.mark.parametrize(("value", "plan"), [("ultra", "ultra"), ("Max", "max"), ("", "fake"), ("x y", "fake")])
+def test_launcher_plan_knob_reaches_the_cli_status_probe(tmp_path, monkeypatch, value, plan):
+    from app.core import claude_cli_status
+
+    monkeypatch.setenv("DEVLOOP_CLAUDE_PLAN", value)
+    shim = fake_claude.install(tmp_path) / "claude"
+    status = claude_cli_status.probe(resolver=lambda: str(shim))
+    assert status.signed_in is True and status.plan == plan

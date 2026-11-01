@@ -99,6 +99,46 @@ def _window(raw: Any, *, source: str, remaining_input: bool) -> dict[str, Any] |
     return window
 
 
+def _no_five_hour_plan(provider: Any, plan: Any) -> bool:
+    """Whether a plan has no 5-hour window (Claude Ultra, ChatGPT Pro tiers).
+
+    Mirrors the usage panel's ``planHasNoFiveHourLimit``
+    (docs/specs/usage-panel.md). An unknown plan keeps every window.
+    """
+    value = str(plan or "").strip().lower()
+    if not value:
+        return False
+    kind = str(provider or "").strip().lower()
+    if kind in ("claude", "anthropic"):
+        return value == "ultra"
+    if kind == "chatgpt":
+        return value.startswith("pro")
+    return False
+
+
+def _plan_windows(windows: list[dict[str, Any]], no_five_hour: bool) -> list[dict[str, Any]]:
+    """Leave out a 5-hour window past its reset on a plan without one.
+
+    Presentation only, as in the usage panel: the cached observation is
+    kept, and a live 5-hour window (reset still ahead) is still reported.
+    """
+    if not no_five_hour:
+        return windows
+    return [w for w in windows if not (w.get("type") == "five_hour" and w.get("rolled_over"))]
+
+
+def _rechecked(window: dict[str, Any]) -> dict[str, Any]:
+    """A formatted window re-read against the clock now.
+
+    A replayed row was formatted when it was read; a reset that has passed
+    since then reads as refilled, exactly as ``_window`` would format it now.
+    """
+    if window.get("rolled_over") or not _reset_passed(window.get("resets_at")):
+        return window
+    return {**window, "left_percent": 100.0, "remaining_percent": 100.0,
+            "used_percent": 0.0, "rolled_over": True}
+
+
 def _epoch_seconds(value: Any) -> float | None:
     """Epoch seconds from an epoch-seconds or epoch-ms stamp, else None."""
     if value is None or isinstance(value, bool):
@@ -164,10 +204,31 @@ def _payload(raw: Any) -> dict[str, Any]:
         raise TypeError("usage snapshot callback returned an invalid value")
 
     claude_available = bool(raw.get("available"))
-    windows = [
+    # This install's Claude plan, when the host knows it without a probe. It
+    # describes the local sign-in only: the top-level windows and the self
+    # install's account, never another install's.
+    claude_plan = raw.get("claude_plan") if isinstance(raw.get("claude_plan"), str) else None
+    claude_no_five_hour = _no_five_hour_plan("claude", claude_plan)
+    self_instance_id = raw.get("self_instance_id")
+    windows = _plan_windows([
         item for value in raw.get("windows") or ()
         if (item := _window(value, source="claude_subscription", remaining_input=True))
-    ]
+    ], claude_no_five_hour)
+    # Another install signed in to the same subscription (equal, present
+    # account keys) has the same plan; an unknown or different key keeps
+    # every window.
+    self_account_key = next((
+        a.get("account_key") for a in raw.get("snapshots") or ()
+        if isinstance(a, dict) and self_instance_id is not None
+        and a.get("instance_id") == self_instance_id
+    ), None)
+
+    def _shares_self_plan(account: dict[str, Any]) -> bool:
+        if self_instance_id is not None and account.get("instance_id") == self_instance_id:
+            return True
+        key = account.get("account_key")
+        return isinstance(key, str) and bool(key) and key == self_account_key
+
     accounts: list[dict[str, Any]] = []
     for account in raw.get("snapshots") or ():
         if not isinstance(account, dict):
@@ -183,10 +244,10 @@ def _payload(raw: Any) -> dict[str, Any]:
                 available=bool(account.get("available")),
             ),
             "fetched_at": account_fetched_at,
-            "windows": [
+            "windows": _plan_windows([
                 item for value in account.get("windows") or ()
                 if (item := _window(value, source="claude_subscription", remaining_input=True))
-            ],
+            ], claude_no_five_hour and _shares_self_plan(account)),
         })
     claude_available = claude_available or any(
         account.get("available") is True for account in accounts
@@ -209,10 +270,10 @@ def _payload(raw: Any) -> dict[str, Any]:
             "freshness": status if status in {"fresh", "stale", "unavailable", "unknown"}
             else _freshness(fetched_at),
             "fetched_at": fetched_at,
-            "windows": [
+            "windows": _plan_windows([
                 item for value in provider.get("windows") or ()
                 if (item := _window(value, source="provider_snapshot", remaining_input=False))
-            ],
+            ], _no_five_hour_plan(provider.get("provider_type"), provider.get("plan_type"))),
         }
         # Credits are already a redacted API model; do not expose provider raw
         # blobs or any credential-shaped data if a host callback is extended.
@@ -231,6 +292,13 @@ def _payload(raw: Any) -> dict[str, Any]:
         providers = []
         for cached in _last_providers or ():
             entry = dict(cached)
+            # Re-check resets against now: a window that reset since the last
+            # read is refilled, and on a plan without a 5-hour window it is
+            # left out, as on a successful read.
+            entry["windows"] = _plan_windows(
+                [_rechecked(w) for w in entry.get("windows") or () if isinstance(w, dict)],
+                _no_five_hour_plan(entry.get("provider_type"), entry.get("plan_type")),
+            )
             entry["source"] = "last_known_provider_snapshot"
             entry["last_known"] = True
             if entry.get("freshness") == "fresh":
@@ -272,6 +340,7 @@ def _payload(raw: Any) -> dict[str, Any]:
         "windows": windows,
         "accounts": accounts,
         "providers": providers,
+        **({"claude_plan": claude_plan} if claude_plan else {}),
         "session_usage": raw.get("session_usage") if isinstance(raw.get("session_usage"), dict) else {
             "available": False,
             "reason": "host did not provide session usage in this snapshot",
