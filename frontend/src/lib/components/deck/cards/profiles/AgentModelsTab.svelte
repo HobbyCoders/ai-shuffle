@@ -120,10 +120,11 @@
 		</SettingRow>
 	{/each}
 	{#if showClaude}
+		<!-- Like every row above, any model: a Claude caller may pin this agent
+		     onto another provider (e.g. GPT on ChatGPT); dispatch honours it. -->
 		<SettingRow label="Claude" hint="Callers on native Claude.">
 			<ModelPicker
 				value={subagentPickerValue(NATIVE_PROVIDER_KEY, providerModels[NATIVE_PROVIDER_KEY])}
-				providerScope={NATIVE_PROVIDER_KEY}
 				allowEmpty
 				emptyLabel="Not offered"
 				allowCustom={false}
