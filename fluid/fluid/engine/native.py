@@ -124,7 +124,6 @@ from fluid.engine.base import EngineCaps, matches_tool_pattern
 from fluid.engine.guardrail import (
     GUARDRAIL_TOOL,
     anthropic_fallback,
-    blocked_message,
     prompt_input,
     same_model,
 )
@@ -6283,8 +6282,13 @@ class NativeLoop(BackgroundLifecycleMixin):
     async def _note_served_model(
         self, sid: str, turn_id: str, requested: str, served: str,
     ) -> None:
-        """Publish the model the provider says answered, once per change a turn."""
-        if served == self._turn_served_model:
+        """Publish the model the provider says answered, once per change a turn.
+
+        A turn whose calls are answered by exactly the requested id publishes
+        nothing: the host already shows that model.
+        """
+        if served == (self._turn_served_model or requested):
+            self._turn_served_model = served
             return
         self._turn_served_model = served
         rerouted = not same_model(requested, served)

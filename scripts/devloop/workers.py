@@ -178,7 +178,7 @@ def up_workers(args: argparse.Namespace) -> int:
     from app.preview_run import free_port, supervise
     from docker import container_runtime as runtime
     from scripts.devloop import fake_claude
-    from scripts.devloop.fake_ai import FakeAI
+    from scripts.devloop.fake_ai import DEV_MODELS, FakeAI
     from scripts.devloop.fake_voice import FakeVoice
     from scripts.devloop.guardian import spawn_guardian
 
@@ -224,7 +224,7 @@ def up_workers(args: argparse.Namespace) -> int:
             try:
                 status.update(0, status.workers[0])
                 fake = FakeAI(log_path=directory / "fake-ai-requests.jsonl",
-                              latency_ms=args.latency_ms, tps=args.tps)
+                              latency_ms=args.latency_ms, tps=args.tps, models=DEV_MODELS)
                 voice = FakeVoice(log_path=directory / "fake-voice.jsonl", host=str(args.fake_voice_host))
                 used = {p for p in (args.port, args.vite_port, urlsplit(fake.url).port, voice.port) if p}
                 for index, name in enumerate(WORKER_NAMES):

@@ -579,7 +579,7 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     from app.preview_run import free_port, supervise
     from docker import container_runtime as runtime
     from docker.container_runtime import stop_group
-    from scripts.devloop.fake_ai import FakeAI
+    from scripts.devloop.fake_ai import DEV_MODELS, FakeAI
     from scripts.devloop.fake_voice import FakeVoice
     from scripts.devloop.guardian import spawn_guardian
 
@@ -609,7 +609,7 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             # SIGKILLed (TaskStop does that a second after its SIGTERM).
             guardian = spawn_guardian(args.status, directory)
             fake = FakeAI(log_path=directory / "fake-ai-requests.jsonl",
-                          latency_ms=args.latency_ms, tps=args.tps)
+                          latency_ms=args.latency_ms, tps=args.tps, models=DEV_MODELS)
             # The app always reaches it over loopback; --fake-voice-host only
             # opens its log and scenario controls to another machine.
             fake_voice = FakeVoice(log_path=directory / "fake-voice.jsonl",

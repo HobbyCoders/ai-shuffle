@@ -52,7 +52,7 @@ ws.send(JSON.stringify({
 | `session_created` | New session created for an omitted `session_id` | `session_id`, `title`, `request_id` (echoed if sent) |
 | `tool_use` | A tool call started (for tracking pending tools) | `session_id`, `id`, `name`, `input` (replaced by a truncation marker when over 4 KB) |
 | `tool_result` | A tool call finished | `session_id`, `tool_use_id`, `name`, `output`, `is_error` |
-| `permission_request` | A tool needs approval. `deferrable: false` marks a request that can only be approved or denied (a Switch model prompt); it is absent otherwise. It does not say which `remember` values the request takes; read `remember_scopes` from `get_pending_permissions` | `session_id`, `request_id`, `tool_name`, `tool_input`, `queue_position`, `queue_total` |
+| `permission_request` | A tool needs approval. `deferrable: false` marks a request that can only be approved or denied (a Switch model prompt or a provider safety check); it is absent otherwise. It does not say which `remember` values the request takes; read `remember_scopes` from `get_pending_permissions` | `session_id`, `request_id`, `tool_name`, `tool_input`, `queue_position`, `queue_total` |
 | `user_question` | The agent asks the user a question | `session_id`, `request_id`, `tool_use_id`, `questions` |
 | `done` | Turn complete | `session_id`, `metadata` (`total_cost_usd`, `tokens_in`, `tokens_out`, `model`, `duration_ms`, ...) |
 | `interrupted` | Turn ended by an interrupt | `session_id`, `message` |
@@ -138,6 +138,10 @@ An agent-wide (`"profile"`) rule applies to every session on that agent, so only
 `get_pending_permissions` and `get_pending_questions` act on the session selected by the last `load_session` or `watch_session` on this socket. Send them after reconnecting to restore prompts that are still open. With no session selected, each replies with empty lists and a null `session_id`.
 
 `requeue_deferred_permissions` sends each deferred request again as a `permission_request`, then one `permission_queue_update` with the `requeued_ids` (empty when nothing was deferred) and the `remaining_count` of open requests.
+
+### Provider Safety Checks
+
+When the provider's safety check declines a request (Anthropic's refusal, an OpenAI or OpenRouter content filter), the turn pauses on a `permission_request` with `tool_name: "ModelGuardrail"`. Its `tool_input` names the `provider_label`, the `category`, the `requested_model`, the `suggested_model` to continue on and a plain `message`. Answer it with `decision: "allow"` to retry this turn on `suggested_model` (the next turn goes back to the chat's model), or `"deny"` to stop the turn. It is answered once (`remember_scopes` is `["none"]`), cannot be deferred, and no permission mode answers it, Bypass included. With nobody to answer (Away mode, an unattended run), the turn stops. Either way the session's event feed records a `guardrail_blocked` note. A provider that answers with another model than the one requested is shown in the `model_info` note's `served_model` and `rerouted` fields, and a `model_rerouted` note.
 
 ### Answering Questions
 

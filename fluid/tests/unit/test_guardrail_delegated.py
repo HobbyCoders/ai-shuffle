@@ -141,7 +141,9 @@ async def test_continue_resends_on_the_suggested_model_then_restores(tmp_path) -
         done = [e for e in events if isinstance(e, TurnComplete)]
         assert len(done) == 1 and done[0].stop_reason == "end_turn"
         served = [e for e in events if isinstance(e, ModelServed)]
-        assert [s.served_model for s in served] == ["claude-opus-5-5", "claude-opus-4-8"]
+        # The refused reply was answered by the requested id (no news); the
+        # retry's model is reported so the host labels the reply with it.
+        assert [s.served_model for s in served] == ["claude-opus-4-8"]
         assert not any(s.rerouted for s in served)  # the retry asked for 4.8
         users = [r for r in _records(record, "stdin") if r.get("frame", {}).get("type") == "user"]
         assert len(users) == 2  # the turn's message, sent again after the switch

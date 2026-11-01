@@ -1,0 +1,9 @@
+{
+  "description": "The reply says another model answered (a silent provider reroute): the model pill shows it and the chat gets one model_rerouted note.",
+  "steps": [
+    {
+      "served_model": "fake-ai-safe",
+      "text": "This reply was served by fake-ai-safe, not the model you picked."
+    }
+  ]
+}

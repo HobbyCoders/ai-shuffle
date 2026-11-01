@@ -49,22 +49,30 @@ _FAMILIES = ("opus", "sonnet", "haiku")
 
 _DATE_SUFFIX = re.compile(r"-(?:\d{8}|\d{4}-\d{2}-\d{2})$")
 
+# Words that make a longer id a smaller model, not a version of the same one
+# ("gpt-5.5-mini" is not "gpt-5.5"; "gemini-3-pro-preview" is "gemini-3-pro").
+_SMALLER_TIERS = frozenset({"mini", "nano", "lite", "small", "flash", "haiku", "turbo", "tiny"})
+
 
 def _base(model: str) -> str:
     m = (model or "").strip().lower()
     if "/" in m:
         m = m.rsplit("/", 1)[1]
     m = m.split("[", 1)[0]  # "claude-opus-5-5[1m]"
+    m = m.split(":", 1)[0]  # OpenRouter variants: "gpt-5.5:free"
     return _DATE_SUFFIX.sub("", m)
 
 
 def same_model(requested: str | None, served: str | None) -> bool:
     """Do these two ids name the same model?
 
-    Case, a provider prefix (``openai/``), a context-size suffix (``[1m]``) and
-    a dated snapshot suffix (``-20250929``, ``-2026-08-01``) are ignored, so a
-    pinned snapshot of the requested alias is not a reroute. Unknown on either
-    side counts as the same: no evidence of a reroute.
+    Case, a provider prefix (``openai/``), a context-size suffix (``[1m]``), an
+    OpenRouter variant (``:free``) and a dated snapshot suffix (``-20250929``,
+    ``-2026-08-01``) are ignored, so a pinned snapshot of the requested alias
+    is not a reroute; nor is a longer id of the same model
+    (``gemini-3-pro-preview``) unless the extra words name a smaller tier
+    (``-mini``, ``-flash``). Unknown on either side counts as the same: no
+    evidence of a reroute.
     """
     if not requested or not served:
         return True
@@ -74,7 +82,13 @@ def same_model(requested: str | None, served: str | None) -> bool:
         # dated id. A family alias matches any model of that family; anything
         # else gives no evidence either way.
         return want not in _FAMILIES or want in got
-    return want == got
+    if want == got:
+        return True
+    if got.startswith(want + "-"):
+        extra = got[len(want) + 1:].split("-")
+        # "claude-opus-5" → "claude-opus-5-5" is a newer version, not a label.
+        return not extra[0].isdigit() and not (_SMALLER_TIERS & set(extra))
+    return False
 
 
 def anthropic_fallback(model: str | None, category: str | None) -> str | None:
@@ -94,9 +108,15 @@ def provider_label(provider: str | None) -> str:
     return _PROVIDER_LABEL.get(key, provider or "The provider")
 
 
-def blocked_message(provider: str | None, category: str | None) -> str:
-    """One plain sentence: "Blocked by Anthropic's safety check (cyber)."."""
-    label = provider_label(provider)
+def blocked_message(
+    provider: str | None, category: str | None, *, label: str | None = None,
+) -> str:
+    """One plain sentence: "Blocked by Anthropic's safety check (cyber).".
+
+    ``label`` names the provider when the host knows it better (an account's
+    own name) than the client's ``provider``.
+    """
+    label = label or provider_label(provider)
     owner = f"{label}'s" if label != "The provider" else "the provider's"
     suffix = f" ({category.replace('_', ' ')})" if category else ""
     return f"Blocked by {owner} safety check{suffix}."

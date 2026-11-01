@@ -22,6 +22,14 @@ Reply selection is stateless and keyed off the request alone:
   ``Answer to your question:``) is not a new prompt: it counts as one more
   round of the scenario that asked, and ``{answer}`` in a step's text is
   replaced by it.
+* Provider safety checks: a step's ``served_model`` (or the tag option
+  ``served_model=ID``) makes the reply report another model than the one
+  requested, the way a provider reroute does; a step's ``refusal`` declines
+  the request the way each dialect's safety check does (Anthropic
+  ``stop_reason: "refusal"`` with ``stop_details``, a ``content_filter`` stop
+  for chat completions, ``incomplete: content_filter`` for Responses) when the
+  request asks for one of ``refuse_models`` (default ``fake-ai``), so a retry
+  on any other model gets the step's text.
 
 Every request is appended to a JSONL log (``--log``) for assertions.
 """
@@ -58,6 +66,10 @@ from scripts.devloop.fake_wire import (
 
 SCENARIOS_DIR = Path(__file__).resolve().parent / "scenarios"
 DEFAULT_MODEL = "fake-ai"
+# A second model the dev loop lists, so a safety-check prompt on the Fake AI
+# row has another model on the same account to offer.
+SAFE_MODEL = "fake-ai-safe"
+DEV_MODELS = (DEFAULT_MODEL, SAFE_MODEL)
 _TAG = re.compile(r"\[script:([A-Za-z0-9_.-]+)((?:\s+[A-Za-z_]+=[^\s\]]+)*)\s*\]")
 _REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
 _TOKEN = re.compile(r"\S+\s*|\s+")
@@ -221,10 +233,14 @@ def validate_scenario(name: str, data: Any) -> dict:
     for number, step in enumerate(data["steps"], 1):
         if not isinstance(step, dict):
             raise ScenarioError(f"{name} step {number}: must be an object")
-        kinds = [key for key in ("text", "tool_calls", "error") if key in step]
+        kinds = [key for key in ("text", "tool_calls", "error", "refusal") if key in step]
         if not kinds or ("error" in step and len(kinds) > 1):
             raise ScenarioError(f"{name} step {number}: needs text, tool_calls (with optional "
-                                "text) or error")
+                                "text), refusal or error")
+        if "refusal" in step:
+            _validate_refusal(f"{name} step {number}", step["refusal"])
+        if "served_model" in step and not isinstance(step["served_model"], str):
+            raise ScenarioError(f"{name} step {number}: served_model must be a string")
         for call in step.get("tool_calls") or []:
             if not isinstance(call, dict) or not isinstance(call.get("name"), str):
                 raise ScenarioError(f"{name} step {number}: each tool call needs a name")
@@ -234,6 +250,27 @@ def validate_scenario(name: str, data: Any) -> dict:
         if key in data and not isinstance(data[key], (int, float)):
             raise ScenarioError(f"{name}: {key} must be a number")
     return data
+
+
+def _validate_refusal(where: str, refusal: Any) -> None:
+    if not isinstance(refusal, dict):
+        raise ScenarioError(f"{where}: refusal must be an object")
+    for key in ("category", "explanation", "recommended_model"):
+        if key in refusal and refusal[key] is not None and not isinstance(refusal[key], str):
+            raise ScenarioError(f"{where}: refusal.{key} must be a string")
+    models = refusal.get("refuse_models", [DEFAULT_MODEL])
+    if not isinstance(models, list) or not all(isinstance(m, str) for m in models):
+        raise ScenarioError(f"{where}: refusal.refuse_models must be a list of model ids")
+
+
+def refuses(refusal: dict, model: Any) -> bool:
+    """Does this step's safety check decline a request for ``model``?
+
+    ``refuse_models`` lists the ids it declines (``"*"`` declines every
+    model); a request for any other model is answered normally, which is
+    what a retry on the offered model sends."""
+    models = refusal.get("refuse_models", [DEFAULT_MODEL])
+    return "*" in models or (model or DEFAULT_MODEL) in models
 
 
 class Scenarios:
@@ -276,6 +313,8 @@ class Plan:
     cut_after: int | None = None
     tps: float = 0.0
     latency_ms: float = 0.0
+    served_model: str | None = None  # the model the reply says answered
+    refusal: dict | None = None  # the safety check declined this request
 
 
 def _tokens(text: str) -> list[str]:
@@ -311,9 +350,33 @@ def _call_args(call: dict) -> str:
     return json.dumps(call.get("input") or {})
 
 
+def _stop_details(refusal: dict) -> dict:
+    """Anthropic's ``stop_details`` for a refusal (``recommended_model`` only
+    when the scenario names one: the API sends it only to a request that asked
+    for ``fallbacks``, which the app never does)."""
+    details: dict[str, Any] = {"type": "refusal", "category": refusal.get("category"),
+                               "explanation": refusal.get("explanation")}
+    if refusal.get("recommended_model"):
+        details["recommended_model"] = refusal["recommended_model"]
+    return details
+
+
 def frame_chat(plan: Plan, body: Any, stream: bool) -> Reply:
-    model = body.get("model") or DEFAULT_MODEL
+    model = plan.served_model or body.get("model") or DEFAULT_MODEL
     prompt_tokens, completion_tokens = _usage(body, plan.text)
+    if plan.refusal is not None:
+        # A content filter that stopped the reply before any output.
+        if not stream:
+            return Reply(content_type="application/json", frames=[json.dumps({
+                "id": "chatcmpl-" + uuid.uuid4().hex[:12], "object": "chat.completion",
+                "model": model, "choices": [{"index": 0, "finish_reason": "content_filter",
+                                             "message": {"role": "assistant", "content": None}}],
+                "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": 0,
+                          "total_tokens": prompt_tokens}})])
+        return Reply(frames=[Chat.chunk({"role": "assistant", "content": ""}, model=model),
+                             Chat.chunk({}, "content_filter", model=model),
+                             Chat.usage(prompt_tokens, 0, model=model), Chat.DONE],
+                     framing="close")
     calls = [{"id": c["id"], "name": c["name"], "args": _call_args(c)} for c in plan.calls]
     finish = "tool_calls" if calls else "stop"
     if not stream:
@@ -330,19 +393,37 @@ def frame_chat(plan: Plan, body: Any, stream: bool) -> Reply:
             "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
                       "total_tokens": prompt_tokens + completion_tokens}})])
     frames: list[Any] = [Chat.chunk({"role": "assistant", "content": ""}, model=model)]
-    text_frames, cut = _streamed(plan.text, plan, lambda t: Chat.chunk({"content": t}))
+    text_frames, cut = _streamed(plan.text, plan,
+                                 lambda t: Chat.chunk({"content": t}, model=model))
     frames += text_frames
     if not cut:
         if calls:
-            frames += Chat.tool_calls(calls, finish=None, usage=False, done=False)[1:]
-        frames += [Chat.chunk({}, finish), Chat.usage(prompt_tokens, completion_tokens), Chat.DONE]
+            frames += Chat.tool_calls(calls, finish=None, usage=False, done=False,
+                                      model=model)[1:]
+        frames += [Chat.chunk({}, finish, model=model),
+                   Chat.usage(prompt_tokens, completion_tokens, model=model), Chat.DONE]
     return Reply(frames=frames, framing="chunked" if cut else "close")
 
 
 def frame_messages(plan: Plan, body: Any, stream: bool) -> Reply:
-    model = body.get("model") or DEFAULT_MODEL
+    model = plan.served_model or body.get("model") or DEFAULT_MODEL
     input_tokens, output_tokens = _usage(body, plan.text)
     stop = "tool_use" if plan.calls else "end_turn"
+    if plan.refusal is not None:
+        details = _stop_details(plan.refusal)
+        if not stream:
+            return Reply(content_type="application/json", frames=[json.dumps({
+                "id": "msg_" + uuid.uuid4().hex[:12], "type": "message", "role": "assistant",
+                "model": model, "content": [], "stop_reason": "refusal",
+                "stop_sequence": None, "stop_details": details,
+                "usage": {"input_tokens": input_tokens, "output_tokens": 1}})])
+        return Reply(frames=[
+            Messages.start(input_tokens, model=model),
+            Messages.ev("message_delta", delta={"stop_reason": "refusal", "stop_sequence": None,
+                                                "stop_details": details},
+                        usage={"output_tokens": 1}),
+            Messages.ev("message_stop"),
+        ])
     if not stream:
         if plan.cut_after is not None:
             return Reply(frames=[CUT], framing="chunked", content_type="application/json")
@@ -353,7 +434,7 @@ def frame_messages(plan: Plan, body: Any, stream: bool) -> Reply:
             "id": "msg_" + uuid.uuid4().hex[:12], "type": "message", "role": "assistant",
             "model": model, "content": content, "stop_reason": stop, "stop_sequence": None,
             "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens}})])
-    frames: list[Any] = [Messages.start(input_tokens)]
+    frames: list[Any] = [Messages.start(input_tokens, model=model)]
     index = 0
     if plan.text:
         frames.append(Messages.ev("content_block_start", index=0,
@@ -372,8 +453,21 @@ def frame_messages(plan: Plan, body: Any, stream: bool) -> Reply:
 
 
 def frame_responses(plan: Plan, body: Any, stream: bool) -> Reply:
+    model = plan.served_model or body.get("model") or DEFAULT_MODEL
     input_tokens, output_tokens = _usage(body, plan.text)
     message_id = "msg_" + uuid.uuid4().hex[:12]
+    if plan.refusal is not None:
+        # The content filter ended the response before any output.
+        response = {"id": "resp_" + uuid.uuid4().hex[:12], "object": "response",
+                    "status": "incomplete", "model": model, "output": [],
+                    "incomplete_details": {"reason": "content_filter"},
+                    "usage": {"input_tokens": input_tokens, "output_tokens": 0,
+                              "total_tokens": input_tokens,
+                              "input_tokens_details": {"cached_tokens": 0}}}
+        if not stream:
+            return Reply(content_type="application/json", frames=[json.dumps(response)])
+        return Reply(frames=[Responses.created(),
+                             Responses.ev("response.incomplete", response=response)])
     items: list[dict] = []
     if plan.text:
         items.append({"type": "message", "id": message_id, "role": "assistant",
@@ -388,7 +482,7 @@ def frame_responses(plan: Plan, body: Any, stream: bool) -> Reply:
             return Reply(frames=[CUT], framing="chunked", content_type="application/json")
         return Reply(content_type="application/json", frames=[json.dumps({
             "id": "resp_" + uuid.uuid4().hex[:12], "object": "response", "status": "completed",
-            "model": body.get("model") or DEFAULT_MODEL, "output": items,
+            "model": model, "output": items,
             "usage": {**usage, "total_tokens": input_tokens + output_tokens,
                       "input_tokens_details": {"cached_tokens": 0}}})])
     frames: list[Any] = [Responses.created()]
@@ -409,7 +503,7 @@ def frame_responses(plan: Plan, body: Any, stream: bool) -> Reply:
         frames += Responses.function_call(f"fc_{call['id']}", call["id"], call["name"],
                                           _call_args(call), output_index=output_index + offset)
     return Reply(frames=frames + [Responses.completed(input_tokens, output_tokens,
-                                                      output=items)])
+                                                      output=items, model=model)])
 
 
 _FRAMERS = {"chat": frame_chat, "messages": frame_messages, "responses": frame_responses}
@@ -489,9 +583,13 @@ class FakeAI:
             latency_ms=_number(params.get("latency_ms"),
                                _number(scenario.get("latency_ms"), self.latency_ms)),
             cut_after=step.get("cut_after_chars"),
+            served_model=step.get("served_model") or params.get("served_model"),
         )
         if "error" in step:
             plan.error = step["error"]
+            return plan, facts
+        if step.get("refusal") is not None and refuses(step["refusal"], body.get("model")):
+            plan.refusal = step["refusal"]
             return plan, facts
         text = str(step.get("text") or "")
         text = text.replace("{summary}", summary(prompt) or "(empty)")
@@ -543,7 +641,8 @@ class FakeAI:
             body = recorded.body if isinstance(recorded.body, dict) else {}
             reply = _FRAMERS[dialect](plan, body, facts["stream"])
         reply.delay = plan.latency_ms / 1000
-        kind = ("error" if plan.error else "cut" if plan.cut_after is not None
+        kind = ("error" if plan.error else "refusal" if plan.refusal is not None
+                else "cut" if plan.cut_after is not None
                 else "tool_calls" if plan.calls else "text")
         self._log(recorded, **facts, reply=kind, status=reply.status,
                   tool_calls=[{"name": c["name"], "input": c["input"]} for c in plan.calls])

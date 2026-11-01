@@ -118,6 +118,11 @@ def test_same_model_ignores_snapshot_prefix_and_context_suffix() -> None:
     assert same_model("claude-opus-5-5[1m]", "claude-opus-5-5")
     assert same_model(None, "x") and same_model("x", "")
     assert not same_model("gpt-5.5", "gpt-5.2")
+    assert same_model("openai/gpt-5.5:free", "openai/gpt-5.5")
+    assert same_model("google/gemini-3-pro", "google/gemini-3-pro-preview-11-2026")
+    assert not same_model("gpt-5.5", "gpt-5.5-mini")
+    assert not same_model("claude-opus-5-5", "claude-opus-5")
+    assert not same_model("claude-opus-5", "claude-opus-5-5")
 
 
 def test_anthropic_fallback_follows_the_category_table() -> None:
@@ -189,6 +194,19 @@ def test_responses_terminal_reports_served_model() -> None:
     assert usage and usage[0].payload.get("served_model") == "gpt-5.2"
 
 
+def test_chat_completions_terminal_reports_served_model() -> None:
+    from fluid.providers._chat_completions import ChatCompletionsNormalizer
+
+    norm = ChatCompletionsNormalizer()
+    norm.consume("message", {"model": "fake-ai-2", "choices": [
+        {"index": 0, "delta": {"content": "hi"}, "finish_reason": "stop"},
+    ]})
+    out = norm.consume("message", {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 1}})
+    usage = next(c for c in out if c.kind == "usage")
+    assert usage.payload["served_model"] == "fake-ai-2"
+    assert next(c for c in out if c.kind == "message_stop").payload == {}
+
+
 # ─── native loop ─────────────────────────────────────────────────────────────
 
 
@@ -207,6 +225,24 @@ async def test_reroute_is_reported_once_and_not_blocked() -> None:
         assert next(e for e in events if isinstance(e, TurnComplete)).stop_reason == "end_turn"
     finally:
         await loop.aclose()
+
+
+@pytest.mark.asyncio
+async def test_served_model_is_reported_only_when_it_is_news() -> None:
+    provider = _Provider([_reply("hello", "claude-opus-5-5")])
+    loop = _loop(provider)
+    try:
+        events, _ = await _run(loop, None)
+        assert not any(isinstance(e, ModelServed) for e in events)
+    finally:
+        await loop.aclose()
+    snapshot = _loop(_Provider([_reply("hello", "claude-opus-5-5-20261001")]))
+    try:
+        events, _ = await _run(snapshot, None)
+        [served] = [e for e in events if isinstance(e, ModelServed)]
+        assert served.served_model == "claude-opus-5-5-20261001" and not served.rerouted
+    finally:
+        await snapshot.aclose()
 
 
 @pytest.mark.asyncio

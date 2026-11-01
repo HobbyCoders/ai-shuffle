@@ -472,6 +472,11 @@ class ChatCompletionsNormalizer:
             terminal: dict[str, Any] = {}
             if self.native_stop_reason:
                 terminal["native_stop_reason"] = self.native_stop_reason
+            served: dict[str, Any] = {}
+            if self._response_meta.get("effective_model"):
+                # The model the server says answered (the engine compares it
+                # with the requested one; see fluid.engine.guardrail).
+                served["served_model"] = self._response_meta["effective_model"]
             out.append(
                 StreamChunk(
                     "usage",
@@ -479,6 +484,7 @@ class ChatCompletionsNormalizer:
                         "usage": normalized,
                         "stop_reason": self._stop_reason,
                         **terminal,
+                        **served,
                     },
                 )
             )

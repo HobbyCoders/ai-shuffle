@@ -940,10 +940,12 @@ class StreamJsonMapper:
         """A ``ModelServed`` for ``served``, or nothing when it is no news."""
         from fluid.engine.guardrail import same_model
 
-        if served == self._served_model and reason is None:
+        requested = requested or self.requested_model or self.model
+        if served == (self._served_model or requested) and reason is None:
+            # No news: the same id as last time, or exactly what was asked for.
+            self._served_model = served
             return []
         self._served_model = served
-        requested = requested or self.requested_model or self.model
         rerouted = not same_model(requested, served)
         return [ModelServed(
             session_id=self.session_id, turn_id=self.turn_id,

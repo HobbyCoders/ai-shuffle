@@ -48,12 +48,15 @@ def is_deferrable(tool_name: Optional[str]) -> bool:
 
     A Switch model prompt's caller treats a defer as a refusal and does not
     come back, so a deferred one would be re-shown later with nobody waiting
-    for its answer: Approve would do nothing. It is answered yes or no only.
-    Such prompts carry ``deferrable: false`` in their payload and events.
+    for its answer: Approve would do nothing. A provider safety-check prompt
+    (``ModelGuardrail``) is the same: a deferred block ends the turn. Both are
+    answered yes or no only, and carry ``deferrable: false`` in their payload
+    and events.
     """
     from app.core.model_override import PROMPT_TOOL
+    from fluid.engine.guardrail import GUARDRAIL_TOOL
 
-    return tool_name != PROMPT_TOOL
+    return tool_name not in (PROMPT_TOOL, GUARDRAIL_TOOL)
 
 
 @dataclass
