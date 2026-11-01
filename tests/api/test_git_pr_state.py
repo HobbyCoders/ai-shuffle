@@ -56,7 +56,7 @@ def _pr(number=7, url="https://github.com/o/r/pull/7", head="feat/x",
     return SimpleNamespace(
         number=number, url=url, head_branch=head, state="open",
         title=title, body="", author="me", created_at="t", updated_at="t",
-        base_branch="main", draft=draft, mergeable=mergeable,
+        base_branch="main", head_repo="o/r", draft=draft, mergeable=mergeable,
     )
 
 
@@ -94,10 +94,13 @@ def pr_app():
 
 @pytest.fixture
 def pr_checkout(tmp_path, monkeypatch):
-    from tests.git_repo_helpers import hermetic_git_env, init_repo
+    from tests.git_repo_helpers import git, hermetic_git_env, init_repo, make_origin
 
     hermetic_git_env(monkeypatch, tmp_path)
-    return init_repo(tmp_path / "repo", branch="feat/x")
+    repo = init_repo(tmp_path / "repo")
+    make_origin(tmp_path, repo)
+    git(repo, "checkout", "-q", "-b", "feat/x", "origin/main")
+    return repo
 
 
 @pytest.fixture
@@ -570,9 +573,8 @@ def test_header_finds_pr_pushed_under_another_name(
     from tests.git_repo_helpers import commit_file, git
 
     sha = commit_file(pr_checkout, 'feature.txt', 'feature', 'feature')
-    origin = tmp_path / 'origin.git'
-    git(tmp_path, 'init', '-q', '--bare', str(origin))
-    git(pr_checkout, 'remote', 'add', 'origin', str(origin))
+    if lookup == 'commit':
+        git(pr_checkout, 'branch', '--unset-upstream')
     flags = ['-u'] if lookup == 'upstream' else []
     git(pr_checkout, 'push', '-q', *flags, 'origin', 'HEAD:feat/remote')
     pr = _pr(head='feat/remote')
@@ -610,13 +612,54 @@ def test_header_rejects_unrelated_commit_pr(pr_client, pr_checkout, mock_github_
     assert data['pr_lookup_failed'] is False
     assert data['open_pr'] is None
     assert data['merged_head_sha'] is None
-    mock_github_service.list_commit_pulls.assert_called_once_with('o/r', sha)
+    mock_github_service.list_commit_pulls.assert_not_called()
 
 
-def test_header_commit_lookup_failure_is_not_cached(pr_client, mock_github_service):
+def test_header_commit_lookup_failure_is_not_cached(pr_client, pr_checkout, mock_github_service):
+    from tests.git_repo_helpers import commit_file
+
+    commit_file(pr_checkout, 'own.txt', 'own work', 'session commit')
     mock_github_service.list_pulls.return_value = []
     mock_github_service.list_commit_pulls.side_effect = GitHubCliError('offline')
     data = pr_client.get('/api/v1/projects/p1/git/pr-state').json()
     assert data['has_github'] is True
     assert data['pr_lookup_failed'] is True
     assert not gitops._pr_state_cache
+
+
+@pytest.mark.parametrize('own_commit', [False, True])
+def test_header_does_not_lookup_default_upstream(pr_client, pr_checkout, mock_github_service, own_commit):
+    from tests.git_repo_helpers import commit_file, git
+
+    assert git(pr_checkout, 'rev-parse', '--abbrev-ref', '@{u}') == 'origin/main'
+    if own_commit:
+        commit_file(pr_checkout, 'own.txt', 'own work', 'session commit')
+    main_pr = _pr(head='main')
+    main_pr.base_branch = 'release'
+    main_pr.head_sha = git(pr_checkout, 'rev-parse', 'HEAD')
+    mock_github_service.list_pulls.side_effect = lambda repo, **kw: [main_pr] if kw['head'] == 'main' else []
+    mock_github_service.list_commit_pulls.return_value = [main_pr]
+    data = pr_client.get('/api/v1/projects/p1/git/pr-state').json()
+    assert data['open_pr'] is None
+    assert data['merged_head_sha'] is None
+    assert data['pr_lookup_failed'] is False
+    assert all(c.kwargs['head'] != 'main' for c in mock_github_service.list_pulls.call_args_list)
+
+
+def test_header_fallback_claims_are_scoped_per_session(pr_client, pr_checkout, mock_github_service):
+    from app.db import database
+    from tests.git_repo_helpers import commit_file
+
+    sha = commit_file(pr_checkout, 'own.txt', 'own work', 'session commit')
+    pr = _pr(head='feat/remote')
+    pr.head_sha = sha
+    mock_github_service.list_pulls.return_value = []
+    mock_github_service.list_commit_pulls.return_value = [pr]
+    owner = {'id': 'owner', 'project_id': 'p1', 'pr_number': pr.number, 'is_worker': False}
+    with patch.object(database, 'list_sessions_by_pr_number', return_value=[owner]), \
+            patch.object(gitops, 'schedule_session_pr_reconcile'):
+        own = pr_client.get('/api/v1/projects/p1/git/pr-state?session_id=owner').json()
+        assert own['open_pr']['number'] == pr.number
+        other = pr_client.get('/api/v1/projects/p1/git/pr-state?session_id=other').json()
+        assert other['open_pr'] is None
+        assert other['pr_lookup_failed'] is False
