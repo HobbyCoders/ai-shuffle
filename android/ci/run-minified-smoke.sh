@@ -15,6 +15,14 @@ trap on_exit EXIT
 python3 ci/prepare-android-ui.py
 adb -s emulator-5554 install -r -t minified-apks/releaseSmoke/app-releaseSmoke.apk
 adb -s emulator-5554 install -r -t minified-apks/tests/minified-smoke-debug.apk
+
+# Push-enabled builds ask at chat startup; grant before either test can open it.
+# POST_NOTIFICATIONS is a runtime permission only on Android 13 (API 33)+.
+api_level="$(adb -s emulator-5554 shell getprop ro.build.version.sdk | tr -d '\r')"
+if (( api_level >= 33 )); then
+  adb -s emulator-5554 shell pm grant com.hobbycoders.aishuffle android.permission.POST_NOTIFICATIONS
+fi
+
 adb -s emulator-5554 shell am force-stop com.hobbycoders.aishuffle
 timeout --kill-after=15s 300s adb -s emulator-5554 shell am instrument -w -r \
   -e timeout_msec 120000 \
