@@ -231,7 +231,7 @@ def test_health_flags_a_journal_dropping_entries_while_the_budget_is_spent(tmp_p
     first = memory_health.check(store, now=now - 3 * DAY)
     learner = first["signals"][0]
     assert learner["detail"]["dropped_3d"] is None
-    assert first["journal_loss_samples"] == [[now - 3 * DAY, 1_646]]
+    assert first["journal_loss_samples"] == [[now - 3 * DAY, 1_646, 0, ""]]
 
     _write_loss(store, 1_646 + 3 * 1_130)
     result = memory_health.check(store, now=now, previous=first)
@@ -269,7 +269,7 @@ def test_loss_samples_stay_bounded_to_the_window(tmp_path):
     previous = {"journal_loss_samples": [[now - h * 3600, 5] for h in range(1200, 0, -3)]}
     samples = memory_health.check(store, now=now, previous=previous)["journal_loss_samples"]
     assert len(samples) <= memory_health.LOSS_SAMPLES_KEPT
-    assert samples[-1] == [now, 5]
+    assert samples[-1][:3] == [now, 5, 0]
     # A record that was reset counts from zero instead of going negative.
     _write_loss(store, 2)
     state = memory_health.check(store, now=now + 7200, previous={"journal_loss_samples": samples})

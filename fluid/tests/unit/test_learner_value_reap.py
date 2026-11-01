@@ -121,6 +121,7 @@ def test_backlog_reap_drops_the_lowest_value_first(tmp_path, monkeypatch):
     assert record["dropped_by_kind"] == {
         "cell": len(tiers["0"]) // 2 + len(tiers["1"]) - len(edits), "tool": len(tiers["0"]) // 2,
     }
+    assert record["dropped_low_value"] == dropped, "only successful cells and tool calls went"
 
 
 def test_high_value_entries_go_only_when_nothing_else_is_left(tmp_path, monkeypatch):
@@ -135,6 +136,24 @@ def test_high_value_entries_go_only_when_nothing_else_is_left(tmp_path, monkeypa
     record = read_journal_loss(store.root / JOURNAL_LOSS_FILE)
     assert sum(record["dropped_by_kind"].values()) == dropped
     assert set(record["dropped_by_kind"]) == {"user", "assistant"}
+    assert "dropped_low_value" not in record
+
+
+def test_dropped_failed_cells_are_not_counted_as_low_value(tmp_path, monkeypatch):
+    # A failed cell is kept for last with conversation (tier 2) but its loss
+    # is still filed under "cell": the low-value count tells the two apart.
+    store = SkillStore(tmp_path)
+    for i in range(2):
+        store.journal_append(_mark(read_cell(i), f"r{i}"))
+    for i in range(12):
+        store.journal_append(_mark(failed_cell(i), f"f{i}"))
+    overflow(store, monkeypatch)
+    dropped = store.reap_journal()
+    record = read_journal_loss(store.root / JOURNAL_LOSS_FILE)
+    failed_lost = sum(1 for i in range(12) if f"f{i}" not in marks(store))
+    assert failed_lost, "the scenario must drop failed cells"
+    assert record["dropped_by_kind"] == {"cell": dropped}
+    assert record["dropped_low_value"] == dropped - failed_lost == 2
 
 
 def test_a_dropped_user_receipt_still_marks_its_episode_incomplete(tmp_path, monkeypatch):
@@ -319,7 +338,7 @@ def test_health_names_dropped_user_assistant_and_friction_entries(tmp_path):
     assert first["signals"][0]["detail"]["dropped_3d_by_kind"] is None
     _write_loss(store, 4_390, {"cell": 4_300, "tool": 82, "user": 5, "assistant": 2, "friction": 1})
     learner = memory_health.check(store, now=now, previous=first)["signals"][0]
-    assert learner["state"] == "attention"
+    assert learner["state"] == "attention" and learner["alert"], "conversation lost: notify"
     assert learner["detail"]["dropped_3d"] == 3_390
     assert learner["detail"]["dropped_3d_by_kind"] == {
         "cell": 3_300, "tool": 82, "user": 5, "assistant": 2, "friction": 1,
@@ -340,9 +359,169 @@ def test_health_without_high_value_loss_or_kind_history(tmp_path):
     assert learner["state"] == "attention" and learner["detail"]["dropped_3d"] == 3_390
     assert learner["detail"]["dropped_3d_by_kind"] is None
     assert "user/assistant/friction" not in learner["reason"]
+    assert not learner["alert"], "an unknown split is shown, not notified"
     second = memory_health.check(store, now=now + DAY, previous={**first, **memory_health.check(
         store, now=now, previous=first)})
     assert second["signals"][0]["detail"]["dropped_3d_by_kind"] == {}
+
+
+def _write_record(store, dropped, by_kind, low_value=None):
+    record = {"dropped_unsynthesized": dropped, "schema": 1, "dropped_by_kind": by_kind}
+    if low_value is not None:
+        record["dropped_low_value"] = low_value
+    (store.root / JOURNAL_LOSS_FILE).write_text(json.dumps(record))
+
+
+def test_health_is_healthy_when_only_successful_cells_and_tool_calls_were_trimmed(tmp_path):
+    # The Unraid store on 2026-11-01: 2,936 entries dropped unread, all code
+    # cells and tool calls, while all conversation was read. That is the reap
+    # trimming what it trims first, not a learner that cannot keep up.
+    now = MIDDAY
+    store = _busy_store(tmp_path, now)
+    _write_record(store, 38_403, {"cell": 145, "tool": 3_273})  # written before the count
+    first = memory_health.check(store, now=now - 3 * DAY)
+    assert first["journal_loss_samples"] == [[now - 3 * DAY, 38_403, 0, ""]]
+    _write_record(store, 41_339, {"cell": 2_691, "tool": 3_663}, low_value=2_936)
+    learner = memory_health.check(store, now=now, previous=first)["signals"][0]
+    assert learner["detail"]["dropped_3d"] == learner["detail"]["dropped_3d_low_value"] == 2_936
+    assert learner["state"] == "healthy" and not learner["alert"]
+    assert learner["reason"].startswith("The learner is saving facts.")
+    assert ("2936 low-value entries (successful code cells and tool calls) were trimmed unread"
+            in learner["reason"]) and "no conversation was lost" in learner["reason"]
+    # Failed cells among them are not low value: shown, not notified.
+    _write_record(store, 41_339, {"cell": 2_691, "tool": 3_663}, low_value=2_900)
+    learner = memory_health.check(store, now=now, previous=first)["signals"][0]
+    assert learner["state"] == "attention" and not learner["alert"]
+
+
+def test_trimming_without_a_comparable_baseline_is_not_called_harmless(tmp_path):
+    now = MIDDAY
+    store = _busy_store(tmp_path, now)
+    _write_record(store, 41_339, {"cell": 2_691, "tool": 3_663}, low_value=2_936)
+    # A state from the build before the count: [at, total] pairs only.
+    previous = {"journal_loss_samples": [[now - 3 * DAY, 38_403]],
+                "journal_loss_kind_samples": [[now - 3 * DAY, {"cell": 145, "tool": 3_273}]]}
+    learner = memory_health.check(store, now=now, previous=previous)["signals"][0]
+    assert learner["detail"]["dropped_3d_low_value"] is None
+    assert learner["state"] == "attention" and not learner["alert"]
+
+
+def test_a_reset_record_never_hides_conversation_loss(tmp_path):
+    # After a reset what was lost before it is unknown, so nothing is called
+    # harmless, and the conversation loss in the new record still alerts.
+    now = MIDDAY
+    store = _busy_store(tmp_path, now)
+    _write_record(store, 1_000, {"cell": 900, "user": 100}, low_value=900)
+    first = memory_health.check(store, now=now - 3 * DAY)
+    # The record was lost and rewritten: every counter restarts below its
+    # baseline, so everything in it is this window's loss.
+    _write_record(store, 600, {"cell": 550, "user": 50}, low_value=550)
+    learner = memory_health.check(store, now=now, previous=first)["signals"][0]
+    assert learner["detail"]["dropped_3d"] == 600 and learner["detail"]["dropped_3d_low_value"] is None
+    assert learner["state"] == "attention" and learner["alert"]
+    assert "50 user/assistant/friction entries dropped unread" in learner["reason"]
+
+
+def test_a_reset_after_growth_past_the_baseline_is_still_caught(tmp_path):
+    # Review of the fix: the rebuilt record's counters passed the 3-day
+    # baseline but sat below yesterday's reading, so a baseline-only check
+    # missed the reset and called 100 lost user entries harmless.
+    now = MIDDAY
+    store = _busy_store(tmp_path, now)
+    _write_record(store, 1_000, {"cell": 900, "user": 100}, low_value=900)
+    first = memory_health.check(store, now=now - 3 * DAY)
+    _write_record(store, 5_000, {"cell": 4_500, "user": 500}, low_value=4_500)
+    second = memory_health.check(store, now=now - DAY, previous=first)
+    _write_record(store, 1_600, {"cell": 1_500, "user": 100}, low_value=1_500)
+    learner = memory_health.check(store, now=now, previous=second)["signals"][0]
+    assert learner["detail"]["dropped_3d"] == 1_600 and learner["detail"]["dropped_3d_low_value"] is None
+    assert learner["state"] == "attention" and learner["alert"]
+    assert "100 user/assistant/friction entries dropped unread" in learner["reason"]
+    # Failed cells in a rebuilt record are not passed off as trimming either.
+    _write_record(store, 1_600, {"cell": 1_600}, low_value=1_550)
+    learner = memory_health.check(store, now=now, previous=second)["signals"][0]
+    assert learner["state"] == "attention" and not learner["alert"]
+
+
+def test_a_new_record_generation_is_a_reset_even_when_counts_grew(tmp_path):
+    now = MIDDAY
+    store = _busy_store(tmp_path, now)
+    record = {"dropped_unsynthesized": 100, "schema": 1, "dropped_by_kind": {"cell": 100},
+              "dropped_low_value": 100, "generation": "a" * 32}
+    (store.root / JOURNAL_LOSS_FILE).write_text(json.dumps(record))
+    first = memory_health.check(store, now=now - 3 * DAY)
+    record.update(dropped_unsynthesized=400, dropped_by_kind={"cell": 300, "user": 100},
+                  dropped_low_value=400, generation="b" * 32)
+    (store.root / JOURNAL_LOSS_FILE).write_text(json.dumps(record))
+    learner = memory_health.check(store, now=now, previous=first)["signals"][0]
+    assert learner["detail"]["dropped_3d_low_value"] is None
+    assert learner["state"] == "attention" and learner["alert"]
+
+
+def test_a_reset_without_kind_history_still_alerts_on_conversation(tmp_path):
+    # A legacy state has total samples but no kind samples yet.
+    now = MIDDAY
+    store = _busy_store(tmp_path, now)
+    _write_record(store, 1_600, {"cell": 1_500, "user": 100}, low_value=1_500)
+    previous = {"journal_loss_samples": [[now - 3 * DAY, 5_000]]}
+    learner = memory_health.check(store, now=now, previous=previous)["signals"][0]
+    assert learner["detail"]["dropped_3d_by_kind"] == {"cell": 1_500, "user": 100}
+    assert learner["state"] == "attention" and learner["alert"]
+
+
+def test_a_reset_seen_only_in_the_kind_split_blocks_the_harmless_verdict(tmp_path):
+    now = MIDDAY
+    store = _busy_store(tmp_path, now)
+    _write_record(store, 1_000, {"cell": 900, "user": 100}, low_value=900)
+    first = memory_health.check(store, now=now - 3 * DAY)
+    # Rebuilt: 1,500 successful and 100 failed cells; only "user" went down.
+    _write_record(store, 1_600, {"cell": 1_600}, low_value=1_500)
+    learner = memory_health.check(store, now=now, previous=first)["signals"][0]
+    assert learner["detail"]["dropped_3d_low_value"] is None
+    assert learner["state"] == "attention" and "trimmed" not in learner["reason"]
+
+
+def test_the_record_generation_survives_merges_in_any_order():
+    from fluid.codemode.skills import _merge_loss
+    older = {"first_at": 10.0, "generation": "c" * 32, "skipped_busy": 1}
+    record = _merge_loss({}, {"first_at": 20.0, "generation": "d" * 32,
+                              "dropped_unsynthesized": 5, "dropped_low_value": 5})
+    merged = _merge_loss(record, older)
+    assert merged["generation"] == "d" * 32 and merged["first_at"] == 10.0
+    assert _merge_loss(merged, {"generation": "e" * 32})["generation"] == "d" * 32
+    assert "generation" not in _merge_loss({"generation": "not-hex"}, {})
+
+
+def test_an_earlier_buffered_event_is_not_a_reset(tmp_path):
+    # first_at moving back after a merge of an older buffered event is normal.
+    now = MIDDAY
+    store = _busy_store(tmp_path, now)
+    record = {"dropped_unsynthesized": 1_000, "schema": 1, "dropped_by_kind": {"cell": 1_000},
+              "dropped_low_value": 1_000, "generation": "f" * 32, "first_at": now - DAY}
+    (store.root / JOURNAL_LOSS_FILE).write_text(json.dumps(record))
+    first = memory_health.check(store, now=now - 3 * DAY)
+    record.update(dropped_unsynthesized=1_400, dropped_low_value=1_400,
+                  dropped_by_kind={"cell": 1_400}, first_at=now - 5 * DAY)
+    (store.root / JOURNAL_LOSS_FILE).write_text(json.dumps(record))
+    learner = memory_health.check(store, now=now, previous=first)["signals"][0]
+    assert learner["detail"]["dropped_3d_low_value"] == 400 and learner["state"] == "healthy"
+
+
+def test_harmless_trimming_does_not_hide_failing_passes(tmp_path):
+    store = SkillStore(tmp_path)
+    for i in range(25):
+        store.journal_append({"kind": "user", "text": f"Synthetic request {i}"})
+    now = time.time()
+    with (store.root / ".synthesis-log.jsonl").open("a") as fh:
+        for row in ([{"ts": now - 60, "kind": "synthesis", "error": "provider error"}] * 3
+                    + [{"ts": now - 30, "kind": "synthesis", "consumed": 20, "changed": []}]):
+            fh.write(json.dumps(row) + "\n")
+    _write_record(store, 0, {}, low_value=0)
+    first = memory_health.check(store, now=now - 3 * DAY)
+    _write_record(store, 30, {"cell": 30}, low_value=30)
+    learner = memory_health.check(store, now=now, previous=first)["signals"][0]
+    assert learner["state"] == "attention" and "3 of 4 learning passes" in learner["reason"]
+    assert "30 low-value entries" in learner["reason"]
 
 
 # ─── the daily budget: billing-aware default, setting overrides ─────────────

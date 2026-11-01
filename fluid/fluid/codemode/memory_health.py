@@ -13,7 +13,9 @@ and unconfirmed harvests nobody used are mechanical; near-duplicates are
 only reported.
 
 Every signal is ``healthy`` or ``attention`` with one plain sentence. The
-thresholds below are first estimates, not tuned values.
+thresholds below are first estimates, not tuned values, so attention alone
+is shown in Settings, System; only an ``alert`` (memory lost or refused)
+raises a notification.
 """
 from __future__ import annotations
 
@@ -110,9 +112,20 @@ LABELS = {
 _WORD = re.compile(r"[a-z0-9]{4,}")
 
 
-def _signal(sid: str, attention: bool, reason: str, **detail) -> dict:
+def _signal(sid: str, attention: bool, reason: str, *, alert: bool = False, **detail) -> dict:
+    """``alert`` marks an attention the owner is notified about: memory was
+    lost or refused (user-saved facts gone, saves failing, the store full,
+    conversation dropped unread). Every other attention is shown in
+    Settings, System only. Raising the bell for each heuristic signal kept
+    notifying about things nobody could act on, one signal after another."""
     return {"id": sid, "label": LABELS[sid], "state": "attention" if attention else "healthy",
-            "reason": reason, "detail": detail}
+            "alert": bool(attention and alert), "reason": reason, "detail": detail}
+
+
+def alert_signals(state: dict) -> list[dict]:
+    """The signals in ``state`` that warrant a notification."""
+    return [s for s in state.get("signals", []) if isinstance(s, dict)
+            and s.get("state") == "attention" and s.get("alert")]
 
 
 def _plural(n: int, word: str, plural: str | None = None) -> str:
@@ -331,43 +344,62 @@ def check(store, *, now: float | None = None, learning_enabled: bool = True,
     }
 
 
-def _loss_samples(store, now, previous) -> tuple[list[list[float]], int, int | None]:
-    """``(samples, dropped_total, dropped_in_window)``.
+def _loss_samples(store, now, previous) -> tuple[list[list], int, int | None, int | None, bool]:
+    """``(samples, dropped_total, dropped_in_window, low_value_in_window, reset)``.
 
-    ``samples`` are the ``[at, dropped_unsynthesized]`` pairs to keep, this
-    run's reading included. ``dropped_in_window`` is the growth since the
-    newest sample at least COVERAGE_WINDOW old (or the oldest one, while the
-    history is shorter), None with no earlier sample to compare against.
+    ``samples`` are the ``[at, dropped_unsynthesized, dropped_low_value,
+    generation]`` readings to keep, this run's included (states written by
+    earlier builds hold ``[at, total]`` pairs). ``dropped_in_window`` is the
+    growth since the newest sample at least COVERAGE_WINDOW old (or the oldest
+    one, while the history is shorter), None with no earlier sample to compare
+    against. ``low_value_in_window`` is the growth of the low-value count
+    against that same baseline, None when the baseline predates it. ``reset``
+    says the record was rebuilt since the baseline; :func:`_coverage` then
+    distrusts both deltas.
     """
     record = read_journal_loss(Path(store.root) / JOURNAL_LOSS_FILE) or {}
     total = int(record.get("dropped_unsynthesized") or 0)
+    # A record without the key has had no drop by a build that counts them,
+    # so every drop measured from a sample this build took is counted.
+    low = int(record.get("dropped_low_value") or 0)
+    generation = record.get("generation") or ""
     kept = []
     for sample in previous.get("journal_loss_samples") or []:
-        if (isinstance(sample, list) and len(sample) == 2
-                and all(isinstance(v, (int, float)) for v in sample) and sample[0] <= now):
-            kept.append([float(sample[0]), int(sample[1])])
-    kept.sort()
-    baseline = None
+        if (isinstance(sample, list) and 2 <= len(sample) <= 4 and sample[0] <= now
+                and all(isinstance(v, (int, float)) for v in sample[:3])):
+            gen = sample[3] if len(sample) == 4 and isinstance(sample[3], str) else ""
+            kept.append([float(sample[0]), *(int(v) for v in sample[1:3]), *([gen] if len(sample) == 4 else [])])
+    kept.sort(key=lambda s: s[0])
+    dropped = low_dropped = None
+    reset = False
     if kept:
         older = [s for s in kept if s[0] <= now - COVERAGE_WINDOW]
         baseline = older[-1] if older else kept[0]
-    # A total below the baseline means the record was reset: count from zero.
-    dropped = None if baseline is None else (total - baseline[1] if total >= baseline[1] else total)
+        # Counters only grow while a record lives: any reading since the
+        # baseline above the current counts, or from another generation,
+        # means it was rebuilt.
+        reset = any(
+            total < s[1] or (len(s) >= 3 and low < s[2])
+            or (len(s) == 4 and s[3] and generation and s[3] != generation)
+            for s in kept if s[0] >= baseline[0])
+        dropped = total - baseline[1]
+        low_dropped = low - baseline[2] if len(baseline) >= 3 else None
     if not kept or now - kept[-1][0] >= LOSS_SAMPLE_EVERY:
-        kept.append([now, total])
+        kept.append([now, total, low, generation])
     # Keep the window, plus the newest sample before it as the baseline.
     start = max((i for i, s in enumerate(kept) if s[0] <= now - COVERAGE_WINDOW), default=0)
-    return kept[start:][-LOSS_SAMPLES_KEPT:], total, dropped
+    return kept[start:][-LOSS_SAMPLES_KEPT:], total, dropped, low_dropped, reset
 
 
 def _kind_samples(
     store: SkillStore, now: float, previous: dict,
-) -> tuple[list, dict[str, int] | None]:
-    """``(kind_samples, dropped_by_kind_in_window)``, kept like
-    :func:`_loss_samples` keeps totals: ``[at, {kind: dropped}]`` from
-    ``journal_loss.json``'s ``dropped_by_kind``. The window value is None
+) -> tuple[list, dict[str, int] | None, dict[str, int], bool]:
+    """``(kind_samples, dropped_by_kind_in_window, current_split, reset)``,
+    kept like :func:`_loss_samples` keeps totals: ``[at, {kind: dropped}]``
+    from ``journal_loss.json``'s ``dropped_by_kind``. The window value is None
     with no earlier sample; a store upgraded from a build without the split
-    starts counting from its first one."""
+    starts counting from its first one. ``reset`` is a kind count below any
+    reading since the baseline."""
     record = read_journal_loss(Path(store.root) / JOURNAL_LOSS_FILE) or {}
     split = record.get("dropped_by_kind") or {}
     current = {k: int(split.get(k) or 0) for k in JOURNAL_LOSS_KINDS}
@@ -382,17 +414,18 @@ def _kind_samples(
             ])
     kept.sort(key=lambda s: s[0])
     window = None
+    reset = False
     if kept:
         older = [s for s in kept if s[0] <= now - COVERAGE_WINDOW]
-        base = (older[-1] if older else kept[0])[1]
-        # A count below the baseline means the record was reset: count from zero.
-        reset = any(current[k] < base.get(k, 0) for k in JOURNAL_LOSS_KINDS)
-        window = {k: current[k] - (0 if reset else base.get(k, 0)) for k in JOURNAL_LOSS_KINDS}
+        baseline = older[-1] if older else kept[0]
+        reset = any(current[k] < s[1].get(k, 0)
+                    for s in kept if s[0] >= baseline[0] for k in JOURNAL_LOSS_KINDS)
+        window = {k: current[k] - baseline[1].get(k, 0) for k in JOURNAL_LOSS_KINDS}
         window = {k: v for k, v in window.items() if v}
     if not kept or now - kept[-1][0] >= LOSS_SAMPLE_EVERY:
         kept.append([now, {k: v for k, v in current.items() if v}])
     start = max((i for i, s in enumerate(kept) if s[0] <= now - COVERAGE_WINDOW), default=0)
-    return kept[start:][-LOSS_SAMPLES_KEPT:], window
+    return kept[start:][-LOSS_SAMPLES_KEPT:], window, {k: v for k, v in current.items() if v}, reset
 
 
 def _coverage(store, now, previous) -> dict:
@@ -412,10 +445,15 @@ def _coverage(store, now, previous) -> dict:
     except Exception:  # noqa: BLE001 — an unreadable document is reported elsewhere
         pass
     budget_days = len({d for d in days if 0 <= today - d < round(COVERAGE_WINDOW / DAY)})
-    samples, total, dropped = _loss_samples(store, now, previous)
-    kind_samples, by_kind = _kind_samples(store, now, previous)
+    samples, total, dropped, low_value, reset = _loss_samples(store, now, previous)
+    kind_samples, by_kind, split, kind_reset = _kind_samples(store, now, previous)
+    if reset or kind_reset:
+        # The record was rebuilt in the window: what it lost before that is
+        # unknown, so nothing is called harmless, and everything the new
+        # record holds counts, conversation included.
+        dropped, low_value, by_kind = total, None, split
     return {"read_3d": read, "filtered_3d": filtered, "dropped_3d": dropped,
-            "dropped_3d_by_kind": by_kind,
+            "dropped_3d_low_value": low_value, "dropped_3d_by_kind": by_kind,
             "dropped_total": total, "budget_skips_3d": len(skipped),
             "budget_spent_days_3d": budget_days, "samples": samples,
             "kind_samples": kind_samples}
@@ -455,20 +493,41 @@ def _learner_outcome(store, now, coverage) -> dict:
     )
     dropped = coverage["dropped_3d"]
     taken_in = coverage["read_3d"] + coverage["filtered_3d"] + (dropped or 0)
+    trimmed_note = ""
     if dropped and dropped >= MIN_NEW_ENTRIES and dropped >= DROPPED_SHARE * taken_in:
-        # The reap keeps conversation and friction for last, so a drop there
-        # is the loss to name.
+        # The reap drops successful code cells and tool calls first and keeps
+        # failed work, conversation and friction for last. When the loss
+        # record counts every dropped entry as such (``dropped_low_value``,
+        # measured against the same baseline), that is the reap working as
+        # designed, not a loss: the learner filters most of them as low value
+        # when it does read them. It is said, and the other learner checks
+        # still run. Anything else dropped is attention; only conversation
+        # or friction dropped unread notifies the owner.
         by_kind = coverage["dropped_3d_by_kind"] or {}
         high = sum(by_kind.get(k, 0) for k in JOURNAL_HIGH_VALUE_KINDS)
-        high_note = (
-            f" {high} user/assistant/friction"
-            f" {'entry' if high == 1 else 'entries'} dropped unread."
-            if high else ""
-        )
-        return _signal(
-            "learner", True,
-            f"The learner read {coverage['read_3d']} of {taken_in} journal entries in the "
-            f"last 3 days; {dropped} were dropped unread." + high_note + budget_note, **detail)
+        low_value = coverage["dropped_3d_low_value"]
+        if not high and low_value is not None and low_value >= dropped:
+            trimmed_note = (
+                f" {dropped} low-value entries (successful code cells and tool calls) were "
+                "trimmed unread in the last 3 days; no conversation was lost.")
+        else:
+            high_note = (
+                f" {high} user/assistant/friction"
+                f" {'entry' if high == 1 else 'entries'} dropped unread."
+                if high else ""
+            )
+            return _signal(
+                "learner", True,
+                f"The learner read {coverage['read_3d']} of {taken_in} journal entries in the "
+                f"last 3 days; {dropped} were dropped unread." + high_note + budget_note,
+                alert=bool(high), **detail)
+    signal = _learner_state(store, now, detail, budget_note, pending, recent_user, passes, failed)
+    signal["reason"] += trimmed_note
+    return signal
+
+
+def _learner_state(store, now, detail, budget_note, pending, recent_user, passes, failed) -> dict:
+    """The learner's outcome apart from journal coverage."""
     try:
         spent_today = int(now // DAY) in store._facts.inference_budget_spent_days()
     except Exception:  # noqa: BLE001 — unreadable: say nothing about the budget
@@ -585,15 +644,16 @@ def _capacity_signal(store, live, archived) -> dict:
               "bytes": size, "bytes_cap": facts.MAX_DOCUMENT_BYTES}
     if size >= DOCUMENT_FULL_SHARE * facts.MAX_DOCUMENT_BYTES:
         share = round(100 * size / facts.MAX_DOCUMENT_BYTES)
-        return _signal("capacity", True, f"The memory file is {share}% full; saves fail at the limit.", **detail)
+        return _signal("capacity", True, f"The memory file is {share}% full; saves fail at the limit.",
+                       alert=True, **detail)
     if user_saved >= facts.MAX_EXPLICIT:
         return _signal("capacity", True,
                        f"Memory is full: {user_saved} user-saved facts; new ones are refused "
-                       "until one is forgotten or merged.", **detail)
+                       "until one is forgotten or merged.", alert=True, **detail)
     if user_saved >= FULL_SHARE * facts.MAX_EXPLICIT:
         return _signal("capacity", True,
                        f"User-saved facts are at {user_saved} of {facts.MAX_EXPLICIT}; "
-                       "at the limit new ones are refused.", **detail)
+                       "at the limit new ones are refused.", alert=True, **detail)
     return _signal("capacity", False, f"{_plural(len(live), 'live fact')}; room to spare.", **detail)
 
 
@@ -652,11 +712,13 @@ def _protected_signal(doc, previous, now) -> tuple[dict, list[str], list[dict]]:
               "dropped_for_space": int(losses.get("explicit_dropped") or 0)}
     if missing:
         signal = _signal("protected", True,
-                         f"{_plural(missing, 'user-saved fact')} disappeared without a Forget.", **detail)
+                         f"{_plural(missing, 'user-saved fact')} disappeared without a Forget.",
+                         alert=True, **detail)
     elif dropped_at and now - dropped_at < PROTECTED_WINDOW:
         signal = _signal("protected", True,
                          f"{_plural(detail['dropped_for_space'], 'user-saved fact')} "
-                         f"{'was' if detail['dropped_for_space'] == 1 else 'were'} dropped for space.", **detail)
+                         f"{'was' if detail['dropped_for_space'] == 1 else 'were'} dropped for space.",
+                         alert=True, **detail)
     else:
         kept = ("No user-saved facts yet." if not current else "The one user-saved fact is kept."
                 if len(current) == 1 else f"All {len(current)} user-saved facts are kept.")
@@ -669,7 +731,8 @@ def _saves_signal(store, now) -> dict:
     recent = [t for t in record.get("storage_times", []) if isinstance(t, (int, float)) and now - t < SAVE_WINDOW]
     detail = {"failed_7d": len(recent), "rejected_total": int(record.get("rejected") or 0)}
     if recent:
-        return _signal("saves", True, f"{_plural(len(recent), 'save')} failed to write this week.", **detail)
+        return _signal("saves", True, f"{_plural(len(recent), 'save')} failed to write this week.",
+                       alert=True, **detail)
     return _signal("saves", False, "Saves are writing normally.", **detail)
 
 
@@ -703,7 +766,7 @@ def _proposals_signal(store, live, now) -> dict:
 
 def run(store, *, now: float | None = None, learning_enabled: bool = True) -> dict:
     """Repair, check and record. Returns the recorded state plus ``notify``:
-    True once per stretch of ``attention`` (and at most once a day), so the
+    True once per stretch of alerts (and at most once a day), so the
     host raises one notification, not one per check. Call
     :func:`mark_notified` after the notification is delivered."""
     now = time.time() if now is None else now
@@ -718,30 +781,46 @@ def run(store, *, now: float | None = None, learning_enabled: bool = True) -> di
         attention_since = attention_since or now
     else:
         attention_since = None
+    # Only an alert (see :func:`_signal`) starts a stretch the owner is told
+    # about; other attention is shown in Settings, System without a bell.
+    alerting = alert_signals(result)
+    alert_since = previous.get("alert_since") if alerting else None
+    if alerting and "alert_since" not in previous and previous.get("state") == "attention":
+        # A state from a build before alerts: when every signal alerting now
+        # was in attention then for the same reason, this is the stretch it
+        # announced (or still has to), so it carries over instead of a second
+        # bell. A signal with a new reason is new news and rings.
+        before = {(s.get("id"), s.get("reason")) for s in previous.get("signals", [])
+                  if isinstance(s, dict) and s.get("state") == "attention"}
+        if {(s["id"], s["reason"]) for s in alerting} <= before:
+            alert_since = previous.get("attention_since")
+    if alerting:
+        alert_since = alert_since or now
     state = {
         "schema": 1,
         **result,
         "repairs": events[-50:],
         "attention_since": attention_since,
+        "alert_since": alert_since,
         "notified_for": previous.get("notified_for"),
         "notified_at": previous.get("notified_at"),
     }
     _save_state(store, state)
     notified_at = float(state.get("notified_at") or 0)
     state["notify"] = bool(
-        attention_since and state.get("notified_for") != attention_since
+        alert_since and state.get("notified_for") != alert_since
         and now - notified_at >= RENOTIFY_AFTER
     )
     return state
 
 
 def mark_notified(store, *, now: float | None = None) -> None:
-    """Record that the current stretch of ``attention`` was announced."""
+    """Record that the current stretch of alerts was announced."""
     now = time.time() if now is None else now
     state = load_state(store)
-    if not state.get("attention_since"):
+    if not state.get("alert_since"):
         return
-    state.update(notified_for=state["attention_since"], notified_at=now)
+    state.update(notified_for=state["alert_since"], notified_at=now)
     _save_state(store, state)
 
 

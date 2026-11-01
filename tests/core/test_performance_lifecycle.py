@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -556,7 +557,9 @@ def test_saturated_journal_loss_history_survives_restart_rate_limited(
     assert set(record) == {
         "schema", "skipped_quota", "skipped_busy", "explicit_quota_failures",
         "explicit_busy_failures", "dropped_unsynthesized", "first_at", "last_at", "last_quota_at",
+        "generation",
     }
+    assert re.fullmatch(r"[0-9a-f]{32}", record["generation"]), "a random id, never content"
 
 
 def test_journal_loss_stays_buffered_while_record_is_busy_then_flushes(tmp_path, fresh_loss_buffer):

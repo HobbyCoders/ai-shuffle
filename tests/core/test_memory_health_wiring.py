@@ -22,9 +22,22 @@ def test_owner_health_without_a_store_is_healthy_and_creates_nothing():
     assert not (fluid_memory.skills_root() / "memories.json").exists()
 
 
+def test_sweep_does_not_announce_attention_without_a_loss(monkeypatch):
+    # The learner has not run: shown in Settings, System, but nothing was
+    # lost or refused, so no notification.
+    monkeypatch.setattr(settings, "fluid_continual", True)
+    _owner_store_needing_attention()
+    now = time.time()
+    assert fluid_memory.sweep_memories(now=now) == []
+    assert fluid_memory.owner_health()["state"] == "attention"
+    assert fluid_memory.sweep_memories(now=now + 2 * 86400) == []
+
+
 @pytest.mark.asyncio
 async def test_sweep_checks_health_and_announces_once(monkeypatch):
+    from fluid.codemode import facts
     monkeypatch.setattr(settings, "fluid_continual", True)
+    monkeypatch.setattr(facts, "MAX_EXPLICIT", 1)  # the one user-saved fact fills it
     _owner_store_needing_attention()
     now = time.time()
     announce = fluid_memory.sweep_memories(now=now)
@@ -37,7 +50,8 @@ async def test_sweep_checks_health_and_announces_once(monkeypatch):
     emit.assert_awaited_once()
     args, kwargs = emit.await_args
     assert args == ("admin",) and kwargs["category"] == "memory_health"
-    assert "Learning has not run" in kwargs["message"] and "Settings, System" in kwargs["message"]
+    assert kwargs["message"].startswith("Memory is full") and "Settings, System" in kwargs["message"]
+    assert "Learning has not run" not in kwargs["message"], "only alerts are named"
     # Not due again within the hour; when due, the same stretch stays quiet.
     assert fluid_memory.sweep_memories(now=now + 60) == []
     assert fluid_memory.sweep_memories(now=now + 2 * fluid_memory.HEALTH_INTERVAL_SECONDS) == []

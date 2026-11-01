@@ -31,6 +31,8 @@ Alongside the skills the store keeps:
   backlog overflow), so coverage loss outlives the process that saw it.
   Never content. Rewritten at most once per warning window per process.
   Backlog drops are also counted per journal kind (``dropped_by_kind``).
+  A random ``generation`` id, set when the record is created, tells a
+  rebuilt record from one that grew.
 - ``journal.jsonl.lease`` — while a synthesis pass waits for its model, the
   line range it read and how far a reap has moved it since (positions only),
   so the reap leaves that slice alone and the pass advances the cursor to
@@ -86,6 +88,7 @@ import stat
 import tempfile
 import threading
 import time
+import uuid
 from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
@@ -132,7 +135,7 @@ def _journal_window_count(path: str, kind: str, interval: float) -> int:
 
 def _journal_event(
     event: str, count: int = 1, journal: str | None = None,
-    by_kind: dict[str, int] | None = None,
+    by_kind: dict[str, int] | None = None, low_value: int = 0,
 ) -> None:
     global _JOURNAL_SATURATED_AT
     with _JOURNAL_METRICS_LOCK:
@@ -140,7 +143,7 @@ def _journal_event(
         if event in ("skipped_quota", "explicit_quota_failures"):
             _JOURNAL_SATURATED_AT = time.monotonic()
         if journal is not None and event in JOURNAL_LOSS_EVENTS:
-            _note_unpersisted_loss(journal, event, count, by_kind)
+            _note_unpersisted_loss(journal, event, count, by_kind, low_value)
 
 
 # ─── persisted journal loss history ──────────────────────────────────────────
@@ -164,9 +167,14 @@ JOURNAL_LOSS_EVENTS = (
 # last; a drop there is the loss worth naming (see memory_health).
 JOURNAL_LOSS_KINDS = ("cell", "tool", "user", "assistant", "friction", "other")
 JOURNAL_HIGH_VALUE_KINDS = ("user", "assistant", "friction")
+# ``dropped_low_value`` counts the share of ``dropped_unsynthesized`` that
+# was successful cells and tool calls (journal_drop_tier 0 and 1), which the
+# reap drops first by design. Failed work counts under its kind but not
+# here. Kept beside the total, so memory_health measures both against the
+# same baseline. Records from builds before it have no such key.
 _JOURNAL_LOSS_LIMIT = 512
 # journal backoff key -> {event: count, "dropped_by_kind": {kind: count},
-# "first_at", "last_at", "last_quota_at"}
+# "dropped_low_value", "generation", "first_at", "last_at", "last_quota_at"}
 _JOURNAL_UNPERSISTED: OrderedDict[str, dict] = OrderedDict()
 
 
@@ -177,16 +185,21 @@ def journal_loss_kind(kind: object) -> str:
 
 def _note_unpersisted_loss(
     journal: str, event: str, count: int, by_kind: dict[str, int] | None = None,
+    low_value: int = 0,
 ) -> None:
     # Called with _JOURNAL_METRICS_LOCK held.
     now = time.time()
-    pending = _JOURNAL_UNPERSISTED.pop(journal, None) or {"first_at": now}
+    pending = _JOURNAL_UNPERSISTED.pop(journal, None) or {
+        "first_at": now, "generation": uuid.uuid4().hex,
+    }
     pending[event] = pending.get(event, 0) + count
     if by_kind:
         kinds = pending.setdefault("dropped_by_kind", {})
         for kind, n in by_kind.items():
             key = journal_loss_kind(kind)
             kinds[key] = kinds.get(key, 0) + int(n)
+    if low_value > 0:
+        pending["dropped_low_value"] = pending.get("dropped_low_value", 0) + int(low_value)
     pending["last_at"] = now
     if event in ("skipped_quota", "explicit_quota_failures"):
         pending["last_quota_at"] = now
@@ -237,6 +250,9 @@ def read_journal_loss(path: Path) -> dict | None:
     return _merge_loss(doc, {})
 
 
+_LOSS_GENERATION = re.compile(r"[0-9a-f]{32}")
+
+
 def _merge_loss(record: dict, pending: dict) -> dict:
     merged = {}
     for name in JOURNAL_LOSS_EVENTS:
@@ -255,6 +271,17 @@ def _merge_loss(record: dict, pending: dict) -> dict:
                 kinds[kind] = kinds.get(kind, 0) + value
     if kinds:
         merged["dropped_by_kind"] = kinds
+    lows = [v for v in (record.get("dropped_low_value"), pending.get("dropped_low_value"))
+            if type(v) is int and v >= 0]
+    if lows:
+        merged["dropped_low_value"] = sum(lows)
+    # The record's identity, set when it is created and kept by every merge:
+    # a record rebuilt after it was lost gets a new one, so memory_health can
+    # tell a rebuild from growth. Records from before it adopt the next one.
+    generation = next((g for g in (record.get("generation"), pending.get("generation"))
+                       if isinstance(g, str) and _LOSS_GENERATION.fullmatch(g)), None)
+    if generation:
+        merged["generation"] = generation
     for name, pick in (("first_at", min), ("last_at", max), ("last_quota_at", max)):
         values = [
             v for v in (record.get(name), pending.get(name))
@@ -1297,9 +1324,12 @@ class SkillStore:
             lease = self._read_synth_lease()
             backlog: list[int] = []
             backlog_kinds: dict[str, int] = {}
+            backlog_low = 0
             if size > JOURNAL_MAX_BYTES * JOURNAL_OVERFLOW_FRACTION:
                 protect = range(lease["start"], lease["end"]) if lease else range(0)
-                backlog, backlog_kinds = self._backlog_to_drop(drop, size, target, protect)
+                backlog, backlog_kinds, backlog_low = self._backlog_to_drop(
+                    drop, size, target, protect,
+                )
             removed = set(range(drop)) | set(backlog)
             if removed:
                 from fluid.codemode.workflow_loss import record_loss
@@ -1332,7 +1362,7 @@ class SkillStore:
             if backlog:
                 _journal_event(
                     "dropped_unsynthesized", len(backlog), journal=self._journal_backoff_key,
-                    by_kind=backlog_kinds,
+                    by_kind=backlog_kinds, low_value=backlog_low,
                 )
                 _persist_journal_loss(self._journal_backoff_key)
                 _log.warning(
@@ -1347,9 +1377,10 @@ class SkillStore:
 
     def _backlog_to_drop(
         self, drop: int, size: int, target: int, protect: range = range(0),
-    ) -> tuple[list[int], dict[str, int]]:
-        """Line indices of unsynthesized entries to drop on overflow, and
-        their count per ``journal_loss.json`` kind.
+    ) -> tuple[list[int], dict[str, int], int]:
+        """Line indices of unsynthesized entries to drop on overflow, their
+        count per ``journal_loss.json`` kind, and how many of them were
+        successful cells or tool calls (``dropped_low_value``).
 
         Only called when the file is past the overflow line. Counts the bytes
         the consumed-prefix drop already frees; when that is not enough to
@@ -1357,7 +1388,7 @@ class SkillStore:
         the file would be under ``target``: tier by tier
         (:func:`journal_drop_tier`), oldest first within a tier, skipping
         explicit kinds and the ``protect`` range (a running pass's slice).
-        Returns ``([], {})`` when the consumed drop suffices.
+        Returns ``([], {}, 0)`` when the consumed drop suffices.
         """
         sizes: list[int] = []
         candidates: list[tuple[int, int, str]] = []  # (tier, index, loss kind)
@@ -1376,19 +1407,21 @@ class SkillStore:
                         continue
                     candidates.append((journal_drop_tier(entry), i, journal_loss_kind(kind)))
         except OSError:
-            return [], {}
+            return [], {}, 0
         remaining = size - sum(sizes[:drop])
         if remaining <= JOURNAL_MAX_BYTES * JOURNAL_OVERFLOW_FRACTION:
-            return [], {}
+            return [], {}, 0
         out: list[int] = []
         kinds: dict[str, int] = {}
-        for _, i, kind in sorted(candidates):
+        low = 0
+        for tier, i, kind in sorted(candidates):
             if remaining <= target:
                 break
             out.append(i)
             kinds[kind] = kinds.get(kind, 0) + 1
+            low += tier < 2
             remaining -= sizes[i]
-        return sorted(out), kinds
+        return sorted(out), kinds, low
 
     # ─── read lease: a running pass's slice ───────────────────────────────
     #
