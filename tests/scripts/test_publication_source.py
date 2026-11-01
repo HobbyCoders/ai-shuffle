@@ -107,7 +107,7 @@ def test_two_checkouts_publish_without_executing_candidate_helpers(tmp_path, wit
     # A small real control checkout, not a replacement publisher implementation.
     files = ["desktop/scripts/publish-source.mjs", "desktop/scripts/source-pointer.mjs", "desktop/scripts/trusted-keys.mjs",
              "desktop/scripts/launcher-contract.mjs", "desktop/scripts/release-repository.mjs",
-             "scripts/ci/publication_source.py", "scripts/ci/edge_publication_gate.py",
+             "desktop/scripts/nightly-version.mjs", "scripts/ci/publication_source.py", "scripts/ci/edge_publication_gate.py",
              "scripts/ci/public_cutover.py", "scripts/source_archive.py",
              "android/ci/resolve-version-name.py", "docker/update_contract.py"]
     for name in files:

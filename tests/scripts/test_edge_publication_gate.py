@@ -429,11 +429,19 @@ def test_workflow_wiring_matches_the_gate():
     assert config["env"]["SOURCE_CHANNEL"] == "nightly"
     steps = config["jobs"]["gate"]["steps"]
     assert steps[1]["run"] == "python3 scripts/ci/nightly_changed.py"
-    assert steps[-1]["if"] == "steps.changed.outputs.changed == 'true'"
-    assert steps[-1]["run"].endswith("edge_publication_gate.py --select")
+    select, pin = steps[-2], steps[-1]
+    assert select["if"] == "steps.changed.outputs.changed == 'true'"
+    assert select["run"].endswith("edge_publication_gate.py --select")
+    # The version is pinned once, by trusted control code, for the selected revision.
+    assert pin["if"] == "steps.ci.outputs.ready == 'true'"
+    assert pin["env"]["REVISION"] == "${{ steps.ci.outputs.revision }}"
+    assert "python -I scripts/ci/publication_source.py version" in pin["run"]
+    assert config["jobs"]["gate"]["outputs"]["version"] == "${{ steps.version.outputs.version }}"
+    assert config["jobs"]["ui"]["with"]["version"] == "${{ needs.gate.outputs.version }}"
     assert steps[0]["with"]["fetch-depth"] == "0"
     publish = config["jobs"]["publish"]
     assert publish["env"]["SOURCE_REVISION"] == "${{ needs.gate.outputs.revision }}"
+    assert publish["env"]["SOURCE_VERSION"] == "${{ needs.gate.outputs.version }}"
     assert publish["steps"][0]["with"]["ref"] == "${{ needs.gate.outputs.revision }}"
     assert publish["steps"][1]["with"]["ref"] == "${{ github.sha }}"
     assert publish["steps"][1]["with"]["path"] == ".publication-control"
