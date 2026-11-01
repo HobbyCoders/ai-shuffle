@@ -106,8 +106,11 @@ eSigner and similar) need their own signing tool and are not wired up here.
 | `AZURE_TRUSTED_SIGNING_PUBLISHER` | the certificate subject's common name, exactly, for example `HobbyCoders LLC` |
 
 electron-builder installs Microsoft's `TrustedSigning` PowerShell module on the
-runner and signs the app executable and the installer, timestamped by
-Microsoft's timestamp service.
+runner and signs the app executable, the installer and the bundled
+executables, timestamped by Microsoft's timestamp service. The one exception is
+cloudflared (`win.signExts` in `electron-builder.yml`): it ships byte-for-byte
+as downloaded, with Cloudflare's own signature, because the packaging check
+compares it with the pinned checksum and any re-signing changes the file.
 
 ### Option B: a PFX certificate
 
@@ -122,8 +125,8 @@ Set the secrets of one option only; both at once fails the build.
 
 After building, `desktop-installer.yml` requires `Get-AuthenticodeSignature`
 to report `Valid` with a timestamp for both the installer and
-`AI Shuffle.exe`, and the verify job checks the downloaded candidate is still
-signed. SmartScreen reputation is earned by the certificate over downloads;
+`AI Shuffle.exe`, and for the bundled cloudflared with Cloudflare as the
+signer. The verify job checks the downloaded candidate is still signed. SmartScreen reputation is earned by the certificate over downloads;
 the first releases may still show "Windows protected your PC" for a while.
 
 ## macOS: Developer ID signing and notarization

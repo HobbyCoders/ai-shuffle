@@ -31,6 +31,9 @@ publish: null
 win:
   executableName: AI Shuffle Preview
   icon: build/icon.png
+  # As in electron-builder.yml: cloudflared keeps Cloudflare's signature (#976).
+  signExts:
+    - '!cloudflared.exe'
   target:
     - target: nsis
       arch: [x64]

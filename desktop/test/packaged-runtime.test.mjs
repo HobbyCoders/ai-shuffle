@@ -22,6 +22,25 @@ test('standard and preview installers verify cloudflared after copying extraReso
   }
 });
 
+test('Windows signing skips cloudflared so the byte-exact check survives signed builds (#976)', async () => {
+  // electron-builder's own filter, applied to resources while extraResources
+  // are copied (before afterPack) and to the app directory afterwards.
+  const { WinPackager } = require('app-builder-lib');
+  const project = fileURLToPath(new URL('..', import.meta.url));
+  const resources = path.join('release', 'win-unpacked', 'resources');
+  for (const filename of ['electron-builder.yml', 'electron-builder.preview.yml']) {
+    const config = await getConfig(project, filename, null);
+    const signs = file => WinPackager.prototype.shouldSignFile.call({ platformSpecificBuildOptions: config.win }, file);
+    assert.equal(signs(path.join(resources, 'worker', 'server', 'downloads', 'cloudflared', '2026.8.3', 'cloudflared.exe')), false, filename);
+    for (const file of [path.join('release', 'win-unpacked', 'AI Shuffle.exe'), path.join(resources, 'worker', 'node', 'node.exe'),
+      path.join(resources, 'worker', 'bin', 'gh.exe'), path.join(resources, 'worker', 'python', 'python.exe'),
+      path.join(resources, 'postgres', 'bin', 'postgres.exe')]) {
+      assert.equal(signs(file), true, `${filename}: ${file}`);
+    }
+    assert.equal(signs(path.join(resources, 'worker', 'python', 'python313.dll')), false, `${filename}: DLLs stay unsigned`);
+  }
+});
+
 test('real installer resources require the verified client; explicit shell stubs may omit it', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'shuffle-package-'));
   const worker = path.join(dir, 'resources', 'worker');

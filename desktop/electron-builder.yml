@@ -50,6 +50,12 @@ win:
     - target: nsis
       arch: [x64]
   icon: build/icon.png
+  # Sign every other executable, but ship cloudflared exactly as verified:
+  # Cloudflare's release already carries their timestamped signature, and
+  # re-signing would change the bytes that scripts/verify-packaged-runtime.cjs
+  # compares with the pinned checksum (#976). A leading ! excludes by suffix.
+  signExts:
+    - '!cloudflared.exe'
 
 nsis:
   # Keep per-architecture installer naming for updater compatibility.

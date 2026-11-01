@@ -324,7 +324,9 @@ pins in `app/core/cloudflared.py`, runs that binary's version check, and records
 its path and hashes in the runtime manifest. A system client cannot substitute
 for the bundled file; missing or invalid downloads fail the build.
 Both installer configurations also verify the copied cloudflared binary in
-their final resources directory before producing an installer.
+their final resources directory before producing an installer. Signed Windows
+builds leave cloudflared out of code signing (`win.signExts`), so that check
+still compares the exact bytes Cloudflare published, with their signature.
 `npm run pack` builds an unpacked app in `release/`; `npm run dist` builds the
 installers. `python scripts/local_ci.py` runs the typecheck and unit tests
 before a push. `desktop.yml` is a manual `workflow_dispatch`: it packages a
