@@ -380,7 +380,7 @@ def test_health_is_healthy_when_only_successful_cells_and_tool_calls_were_trimme
     store = _busy_store(tmp_path, now)
     _write_record(store, 38_403, {"cell": 145, "tool": 3_273})  # written before the count
     first = memory_health.check(store, now=now - 3 * DAY)
-    assert first["journal_loss_samples"] == [[now - 3 * DAY, 38_403, 0, 0.0]]
+    assert first["journal_loss_samples"] == [[now - 3 * DAY, 38_403, 0, ""]]
     _write_record(store, 41_339, {"cell": 2_691, "tool": 3_663}, low_value=2_936)
     learner = memory_health.check(store, now=now, previous=first)["signals"][0]
     assert learner["detail"]["dropped_3d"] == learner["detail"]["dropped_3d_low_value"] == 2_936
@@ -447,15 +447,64 @@ def test_a_new_record_generation_is_a_reset_even_when_counts_grew(tmp_path):
     now = MIDDAY
     store = _busy_store(tmp_path, now)
     record = {"dropped_unsynthesized": 100, "schema": 1, "dropped_by_kind": {"cell": 100},
-              "dropped_low_value": 100, "first_at": now - 30 * DAY}
+              "dropped_low_value": 100, "generation": "a" * 32}
     (store.root / JOURNAL_LOSS_FILE).write_text(json.dumps(record))
     first = memory_health.check(store, now=now - 3 * DAY)
     record.update(dropped_unsynthesized=400, dropped_by_kind={"cell": 300, "user": 100},
-                  dropped_low_value=400, first_at=now - DAY)
+                  dropped_low_value=400, generation="b" * 32)
     (store.root / JOURNAL_LOSS_FILE).write_text(json.dumps(record))
     learner = memory_health.check(store, now=now, previous=first)["signals"][0]
     assert learner["detail"]["dropped_3d_low_value"] is None
     assert learner["state"] == "attention" and learner["alert"]
+
+
+def test_a_reset_without_kind_history_still_alerts_on_conversation(tmp_path):
+    # A legacy state has total samples but no kind samples yet.
+    now = MIDDAY
+    store = _busy_store(tmp_path, now)
+    _write_record(store, 1_600, {"cell": 1_500, "user": 100}, low_value=1_500)
+    previous = {"journal_loss_samples": [[now - 3 * DAY, 5_000]]}
+    learner = memory_health.check(store, now=now, previous=previous)["signals"][0]
+    assert learner["detail"]["dropped_3d_by_kind"] == {"cell": 1_500, "user": 100}
+    assert learner["state"] == "attention" and learner["alert"]
+
+
+def test_a_reset_seen_only_in_the_kind_split_blocks_the_harmless_verdict(tmp_path):
+    now = MIDDAY
+    store = _busy_store(tmp_path, now)
+    _write_record(store, 1_000, {"cell": 900, "user": 100}, low_value=900)
+    first = memory_health.check(store, now=now - 3 * DAY)
+    # Rebuilt: 1,500 successful and 100 failed cells; only "user" went down.
+    _write_record(store, 1_600, {"cell": 1_600}, low_value=1_500)
+    learner = memory_health.check(store, now=now, previous=first)["signals"][0]
+    assert learner["detail"]["dropped_3d_low_value"] is None
+    assert learner["state"] == "attention" and "trimmed" not in learner["reason"]
+
+
+def test_the_record_generation_survives_merges_in_any_order():
+    from fluid.codemode.skills import _merge_loss
+    older = {"first_at": 10.0, "generation": "c" * 32, "skipped_busy": 1}
+    record = _merge_loss({}, {"first_at": 20.0, "generation": "d" * 32,
+                              "dropped_unsynthesized": 5, "dropped_low_value": 5})
+    merged = _merge_loss(record, older)
+    assert merged["generation"] == "d" * 32 and merged["first_at"] == 10.0
+    assert _merge_loss(merged, {"generation": "e" * 32})["generation"] == "d" * 32
+    assert "generation" not in _merge_loss({"generation": "not-hex"}, {})
+
+
+def test_an_earlier_buffered_event_is_not_a_reset(tmp_path):
+    # first_at moving back after a merge of an older buffered event is normal.
+    now = MIDDAY
+    store = _busy_store(tmp_path, now)
+    record = {"dropped_unsynthesized": 1_000, "schema": 1, "dropped_by_kind": {"cell": 1_000},
+              "dropped_low_value": 1_000, "generation": "f" * 32, "first_at": now - DAY}
+    (store.root / JOURNAL_LOSS_FILE).write_text(json.dumps(record))
+    first = memory_health.check(store, now=now - 3 * DAY)
+    record.update(dropped_unsynthesized=1_400, dropped_low_value=1_400,
+                  dropped_by_kind={"cell": 1_400}, first_at=now - 5 * DAY)
+    (store.root / JOURNAL_LOSS_FILE).write_text(json.dumps(record))
+    learner = memory_health.check(store, now=now, previous=first)["signals"][0]
+    assert learner["detail"]["dropped_3d_low_value"] == 400 and learner["state"] == "healthy"
 
 
 def test_harmless_trimming_does_not_hide_failing_passes(tmp_path):

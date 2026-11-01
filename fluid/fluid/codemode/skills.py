@@ -31,6 +31,8 @@ Alongside the skills the store keeps:
   backlog overflow), so coverage loss outlives the process that saw it.
   Never content. Rewritten at most once per warning window per process.
   Backlog drops are also counted per journal kind (``dropped_by_kind``).
+  A random ``generation`` id, set when the record is created, tells a
+  rebuilt record from one that grew.
 - ``journal.jsonl.lease`` — while a synthesis pass waits for its model, the
   line range it read and how far a reap has moved it since (positions only),
   so the reap leaves that slice alone and the pass advances the cursor to
@@ -86,6 +88,7 @@ import stat
 import tempfile
 import threading
 import time
+import uuid
 from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
@@ -171,7 +174,7 @@ JOURNAL_HIGH_VALUE_KINDS = ("user", "assistant", "friction")
 # same baseline. Records from builds before it have no such key.
 _JOURNAL_LOSS_LIMIT = 512
 # journal backoff key -> {event: count, "dropped_by_kind": {kind: count},
-# "first_at", "last_at", "last_quota_at"}
+# "dropped_low_value", "generation", "first_at", "last_at", "last_quota_at"}
 _JOURNAL_UNPERSISTED: OrderedDict[str, dict] = OrderedDict()
 
 
@@ -186,7 +189,9 @@ def _note_unpersisted_loss(
 ) -> None:
     # Called with _JOURNAL_METRICS_LOCK held.
     now = time.time()
-    pending = _JOURNAL_UNPERSISTED.pop(journal, None) or {"first_at": now}
+    pending = _JOURNAL_UNPERSISTED.pop(journal, None) or {
+        "first_at": now, "generation": uuid.uuid4().hex,
+    }
     pending[event] = pending.get(event, 0) + count
     if by_kind:
         kinds = pending.setdefault("dropped_by_kind", {})
@@ -245,6 +250,9 @@ def read_journal_loss(path: Path) -> dict | None:
     return _merge_loss(doc, {})
 
 
+_LOSS_GENERATION = re.compile(r"[0-9a-f]{32}")
+
+
 def _merge_loss(record: dict, pending: dict) -> dict:
     merged = {}
     for name in JOURNAL_LOSS_EVENTS:
@@ -267,6 +275,13 @@ def _merge_loss(record: dict, pending: dict) -> dict:
             if type(v) is int and v >= 0]
     if lows:
         merged["dropped_low_value"] = sum(lows)
+    # The record's identity, set when it is created and kept by every merge:
+    # a record rebuilt after it was lost gets a new one, so memory_health can
+    # tell a rebuild from growth. Records from before it adopt the next one.
+    generation = next((g for g in (record.get("generation"), pending.get("generation"))
+                       if isinstance(g, str) and _LOSS_GENERATION.fullmatch(g)), None)
+    if generation:
+        merged["generation"] = generation
     for name, pick in (("first_at", min), ("last_at", max), ("last_quota_at", max)):
         values = [
             v for v in (record.get(name), pending.get(name))

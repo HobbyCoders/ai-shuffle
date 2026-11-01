@@ -231,7 +231,7 @@ def test_health_flags_a_journal_dropping_entries_while_the_budget_is_spent(tmp_p
     first = memory_health.check(store, now=now - 3 * DAY)
     learner = first["signals"][0]
     assert learner["detail"]["dropped_3d"] is None
-    assert first["journal_loss_samples"] == [[now - 3 * DAY, 1_646, 0, 0.0]]
+    assert first["journal_loss_samples"] == [[now - 3 * DAY, 1_646, 0, ""]]
 
     _write_loss(store, 1_646 + 3 * 1_130)
     result = memory_health.check(store, now=now, previous=first)
