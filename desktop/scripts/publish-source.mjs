@@ -21,6 +21,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { readLauncher } from './launcher-contract.mjs';
+import { nightlyVersion } from './nightly-version.mjs';
 import { releaseRepository } from './release-repository.mjs';
 import { publishSourcePointer } from './source-pointer.mjs';
 const { repository: repo, id: repositoryId } = await releaseRepository(process.env.GH_TOKEN);
@@ -79,6 +80,8 @@ if (channel === 'stable') {
 if (!/^[a-f0-9]{40}$/.test(revision ?? '')) throw new Error('Invalid source revision');
 // The runtime contract and this script are read from the checkout, so it must be the revision itself.
 if (git('rev-parse', 'HEAD') !== revision) throw new Error(`Check out ${revision} before publishing it`);
+// Sign the version the gate pinned for this run's UI bundle (nightly-version.mjs).
+if (channel !== 'stable') version = nightlyVersion({ resolved: version, pinned: process.env.SOURCE_VERSION ?? '', revision, git });
 if (!/^[0-9]+\.[0-9]+\.[0-9]+([.+-][A-Za-z0-9.+-]{1,60})?$/.test(version ?? '')) throw new Error(`Invalid release version ${version}`);
 const key = process.env.DESKTOP_APPLICATION_SIGNING_KEY, token = process.env.GH_TOKEN;
 const databaseId = process.env.ACCOUNT_HUB_DATABASE_ID;
