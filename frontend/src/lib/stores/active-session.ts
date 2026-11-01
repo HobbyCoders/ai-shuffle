@@ -172,8 +172,14 @@ export interface ActiveSessionState {
 	 *  `model_info` note). null = native Anthropic; non-null = a gateway provider
 	 *  session, in which case the composer suppresses the reroute pill (a provider
 	 *  model never matches a Claude family). Transient — same lifecycle as
-	 *  `liveModel`. */
+	 *  `liveModel`. Ignored when the note says `rerouted` itself. */
 	liveProvider: string | null;
+	/** The backend's `model_info.rerouted` for the same turn: null when the
+	 *  note did not carry it. Preferred over the family heuristic. Same
+	 *  lifecycle as `liveModel`. */
+	liveRerouted?: boolean | null;
+	/** `model_info.reroute_reason` (`refusal_fallback` | `availability`), else null. */
+	liveRerouteReason?: string | null;
 	/** Compaction in progress (or just failed) on the live turn, from the v2
 	 *  feed's `system.compaction_status`. Drives the "Compacting context…"
 	 *  indicator and the sidebar's "Compacting" word. Transient — same
@@ -390,6 +396,8 @@ function defaultState(): ActiveSessionState {
 		liveModel: null,
 		liveRequestedModel: null,
 		liveProvider: null,
+		liveRerouted: null,
+		liveRerouteReason: null,
 		liveCompaction: null,
 		wsConnected: false,
 		wsReconnectRequired: false,

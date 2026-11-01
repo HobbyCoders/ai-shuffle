@@ -1260,6 +1260,17 @@ def build_options_from_profile(
     _legacy_model = (_binding_row or {}).get("launched_model") or config.get("model")
     raw_model = _selected_model or _legacy_model
     model_to_use = raw_model
+    # A legacy fallback may itself be a ``prov:<pid>:<mid>`` composite (an
+    # agent whose config.model was picked from a provider, or a launched_model
+    # stamped from one). It must not REBIND the provider (see below), but when
+    # it names the provider this session is already bound to, only the bare
+    # model id may go on the wire — the composite is an app-side encoding a
+    # provider would reject, and it would hide the model from per-model
+    # checks such as the safety-check fallback.
+    if not _selected_model and provider_id:
+        _legacy_decoded = decode_provider_model(_legacy_model)
+        if _legacy_decoded is not None and _legacy_decoded[0] == provider_id:
+            model_to_use = _legacy_decoded[1]
 
     # ── The composer's model override may REBIND the provider ───────────────
     #

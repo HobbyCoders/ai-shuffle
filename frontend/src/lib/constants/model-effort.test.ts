@@ -112,4 +112,10 @@ describe('authoritative effort capabilities', () => {
   expect(resolveEffortModel('glm', 'glm', 'glm', 'or')).toBe('prov:or:glm');
   expect(resolveEffortModel('prov:other:glm', 'glm', 'glm', 'or')).toBe('prov:other:glm');
  });
+ it('prefers the backend rerouted flag over the family heuristic', () => {
+  // Same family, but the backend says a safety check moved the turn.
+  expect(resolveEffortModel('opus', 'claude-opus-4-7', 'opus', null, true)).toBe('claude-opus-4-7');
+  // Different family, but the backend says it was not a reroute.
+  expect(resolveEffortModel('opus', 'haiku', 'opus', null, false)).toBe('opus');
+ });
 });

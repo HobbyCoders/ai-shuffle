@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
+	import { isGuardrailRequest, guardrailSummary } from '$lib/utils/guardrail';
 	import PermissionRequest, { type PermissionRequestData } from './PermissionRequest.svelte';
 	import { focusTrap } from './ui/focus-trap';
 
@@ -147,6 +148,9 @@
 		armBulkAfter(BULK_RETRY_MS);
 		parkFocusBeforeAnswer();
 		for (const req of requests) {
+			// "Allow All" never moves a turn onto another model: a provider
+			// safety check needs its own Continue. "Deny All" (Stop) covers it.
+			if (decision === 'allow' && isGuardrailRequest(req)) continue;
 			onRespond?.({
 				request_id: req.request_id,
 				decision,
@@ -167,6 +171,7 @@
 	// Get a short summary for queued items
 	function getShortSummary(req: PermissionRequestData): string {
 		const input = req.tool_input;
+		if (isGuardrailRequest(req)) return guardrailSummary(req);
 		switch (req.tool_name) {
 			case 'Bash':
 				return String(input.command || '').split(' ')[0];
@@ -203,7 +208,8 @@
 		'WebSearch': 'tool-web',
 		'Task': 'tool-task',
 		'Agent': 'tool-task',
-		'NotebookEdit': 'tool-notebook'
+		'NotebookEdit': 'tool-notebook',
+		'ModelGuardrail': 'tool-write'
 	};
 
 	function getToolColor(name: string): string {
@@ -288,7 +294,7 @@
 							{#each requests.slice(1) as req, idx}
 								<div class="queue-item inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs border {getToolColor(req.tool_name)}">
 									<span class="font-mono text-[10px] opacity-60">{idx + 2}</span>
-									<span class="font-medium">{req.tool_name}</span>
+									<span class="font-medium">{isGuardrailRequest(req) ? 'Safety check' : req.tool_name}</span>
 									{#if getShortSummary(req)}
 										<span class="truncate max-w-[80px] sm:max-w-[120px] opacity-75" title={getShortSummary(req)}>
 											{getShortSummary(req)}

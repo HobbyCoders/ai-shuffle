@@ -1398,8 +1398,34 @@ def _approval_card(event: dict, earlier: list[dict]) -> Optional[dict]:
         if clean(confirm.get(key)):
             data[key] = clean(confirm.get(key))
     data.update(status="pending", attempt=attempt)
+    guardrail = _approval_guardrail(request)
+    if guardrail is not None:
+        data["guardrail"] = guardrail
     return {"id": card_id, "role": "system", "type": "system", "content": question,
             "systemSubtype": APPROVAL_CARD_SUBTYPE, "systemData": data}
+
+
+_GUARDRAIL_TEXT_FIELDS = ("provider", "provider_label", "category", "explanation",
+                          "requested_model", "suggested_model", "suggested_by")
+
+
+def _approval_guardrail(request: dict) -> Optional[dict]:
+    """The safety-check fields a ``ModelGuardrail`` card keeps, else None.
+
+    Mirrors ``approvalGuardrail`` (frontend/src/lib/utils/assistant-confirm.ts).
+    """
+    tool_input = request.get("tool_input")
+    if not isinstance(tool_input, dict) or (
+            request.get("tool_name") != "ModelGuardrail" and tool_input.get("guardrail") is not True):
+        return None
+    out: dict = {}
+    for key in _GUARDRAIL_TEXT_FIELDS:
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.split():
+            out[key] = " ".join(value.split())
+    if tool_input.get("partial_output_discarded") is True:
+        out["partial_output_discarded"] = True
+    return out
 
 
 def _approval_status(event: dict) -> Optional[str]:

@@ -22,7 +22,8 @@ export function resolveEffortModel(
 	selection: string | null,
 	liveModel: string | null,
 	liveRequestedModel: string | null,
-	liveProvider: string | null
+	liveProvider: string | null,
+	liveRerouted: boolean | null = null
 ): string {
 	const selected = selection || getDefaultModel();
 	const composite = decodeProviderModel(selected);
@@ -31,7 +32,7 @@ export function resolveEffortModel(
 		(!composite && !requested && normalizeModel(selected) === normalizeModel(liveRequestedModel)));
 	if (!sameRequest) return selected;
 	if (liveProvider && !composite) return encodeProviderModel(liveProvider, liveModel || selected);
-	if (isReroute(liveModel, liveRequestedModel, liveProvider)) return liveModel!;
+	if (isReroute(liveModel, liveRequestedModel, liveProvider, liveRerouted)) return liveModel!;
 	return selected;
 }
 

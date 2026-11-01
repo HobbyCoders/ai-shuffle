@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assistantConfirmationText, currentAssistantQuestion, isAssistantConfirm } from './assistant-confirm';
+import { approvalCardFromRequest, approvalGuardrail, assistantConfirmationText, currentAssistantQuestion, isAssistantConfirm } from './assistant-confirm';
 import type { PermissionRequest } from '$lib/api/client';
 
 describe('assistantConfirmationText', () => {
@@ -42,5 +42,47 @@ describe('currentAssistantQuestion', () => {
 	it('falls back to its own wording when the server sent none, and is empty without a marked request', () => {
 		expect(currentAssistantQuestion([req('x', {})])?.text).toBe('May I run `echo x`? Yes or no.');
 		expect(currentAssistantQuestion([req('card')])).toBeNull();
+	});
+});
+
+describe('approvalCardFromRequest — a provider safety check', () => {
+	// Mirrors tests/api/test_approval_transcript_fold.py (the REST fold), so a
+	// reload reads the same card as the live reducer.
+	const input = {
+		guardrail: true,
+		provider: 'anthropic',
+		provider_label: 'Anthropic',
+		category: 'cyber',
+		explanation: 'Flagged by  the\ncyber classifier.',
+		requested_model: 'claude-opus-4-8',
+		suggested_model: 'claude-opus-4-7',
+		suggested_by: 'provider',
+		request_id: 'req_1',
+		partial_output_discarded: true,
+		message: 'ignored'
+	};
+
+	it('keeps the safety-check fields on the card', () => {
+		const card = approvalCardFromRequest(
+			'guardrail-t1',
+			{ tool_name: 'ModelGuardrail', tool_input: input, assistant_confirm: { question: 'Continue?' } },
+			[]
+		);
+		expect(card?.guardrail).toEqual({
+			provider: 'anthropic',
+			provider_label: 'Anthropic',
+			category: 'cyber',
+			explanation: 'Flagged by the cyber classifier.',
+			requested_model: 'claude-opus-4-8',
+			suggested_model: 'claude-opus-4-7',
+			suggested_by: 'provider',
+			partial_output_discarded: true
+		});
+	});
+
+	it('adds nothing to an ordinary request', () => {
+		const card = approvalCardFromRequest('p', { tool_name: 'Bash', tool_input: { command: 'ls' }, assistant_confirm: { question: 'Q?' } }, []);
+		expect(card).not.toHaveProperty('guardrail');
+		expect(approvalGuardrail({ tool_name: 'Bash', tool_input: {} })).toBeNull();
 	});
 });

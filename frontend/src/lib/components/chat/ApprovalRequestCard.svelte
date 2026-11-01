@@ -15,6 +15,7 @@
 	 */
 	import '../deck/cards/card-design-system.css';
 	import type { ApprovalCardData, ApprovalStatus } from '$lib/utils/assistant-confirm';
+	import { GUARDRAIL_TOOL, guardrailView } from '$lib/utils/guardrail';
 
 	interface Props {
 		data: ApprovalCardData;
@@ -42,9 +43,27 @@
 		cancelled: 'card-badge--muted'
 	};
 
+	// A provider safety check reads as one, not as "use ModelGuardrail with {…}":
+	// yes continues this turn on the suggested model, no stops it.
+	const guardrail = $derived(
+		data.guardrail
+			? guardrailView({ tool_name: GUARDRAIL_TOOL, tool_input: data.guardrail as Record<string, unknown> })
+			: null
+	);
+	const GUARDRAIL_STATUS: Partial<Record<ApprovalStatus, string>> = {
+		approved: 'Continued',
+		declined: 'Stopped'
+	};
+
 	const status = $derived<ApprovalStatus>(data.status in STATUS ? data.status : 'pending');
 	const waiting = $derived(status === 'pending');
-	const label = $derived(waiting ? (active ? 'Waiting for you' : 'Next') : STATUS[status]);
+	const label = $derived(
+		waiting
+			? active
+				? 'Waiting for you'
+				: 'Next'
+			: (guardrail && GUARDRAIL_STATUS[status]) || STATUS[status]
+	);
 	// "run `ls -la`" → plain and code parts; the server's wording uses backticks.
 	const actionParts = $derived(splitCode(data.action || ''));
 
@@ -66,18 +85,23 @@
 <div
 	class="approval card-system"
 	class:is-active={waiting && active}
+	class:is-guardrail={!!guardrail}
 	data-status={status}
 	data-approval-card={data.request_id}
 	data-permission-request={data.request_id}
+	data-testid={guardrail ? 'guardrail-card' : undefined}
 	role="group"
-	aria-label="Approval request"
+	aria-label={guardrail ? 'Safety check' : 'Approval request'}
 >
 	<div class="head">
 		<span class="kicker">
 			<svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
 				<path d="M8 1.5 2.75 3.6v4.1c0 3.2 2.2 5.6 5.25 6.8 3.05-1.2 5.25-3.6 5.25-6.8V3.6L8 1.5Z" />
+				{#if guardrail}<path class="mark" d="M8 5v3.2M8 10.4v.1" />{/if}
 			</svg>
-			{#if data.asker}
+			{#if guardrail}
+				<span class="asker">Safety check{guardrail.category ? ` · ${guardrail.category}` : ''}</span>
+			{:else if data.asker}
 				<span class="asker" title={data.asker}>{data.asker}</span>
 			{:else}
 				<span class="asker">Approval needed</span>
@@ -94,7 +118,31 @@
 		</span>
 	</div>
 
-	{#if actionParts.length > 0}
+	{#if guardrail}
+		<p class="action g-title">{guardrail.heading}</p>
+		{#if guardrail.explanation}
+			<p class="g-why">{guardrail.explanation}</p>
+		{/if}
+		{#if guardrail.requestedLabel || guardrail.suggestedLabel}
+			<dl class="g-models">
+				{#if guardrail.requestedLabel}
+					<div>
+						<dt>Requested</dt>
+						<dd class="g-req" title={guardrail.requestedModel}>{guardrail.requestedLabel}</dd>
+					</div>
+				{/if}
+				{#if guardrail.suggestedLabel}
+					<div>
+						<dt>Suggested{guardrail.suggestedByApp ? ' by AI Shuffle' : ''}</dt>
+						<dd class="g-sug" title={guardrail.suggestedModel}>{guardrail.suggestedLabel}</dd>
+					</div>
+				{/if}
+			</dl>
+		{/if}
+		{#if guardrail.partialDiscarded}
+			<p class="hint">The partial reply was discarded.</p>
+		{/if}
+	{:else if actionParts.length > 0}
 		<p class="action">
 			<span class="verb">Wants to</span>
 			{#each actionParts as part, i (i)}
@@ -105,7 +153,12 @@
 		<p class="action question">{data.question}</p>
 	{/if}
 
-	{#if waiting && active}
+	{#if guardrail && waiting && active}
+		<p class="hint">
+			Reply <strong>yes</strong> to continue this turn on {guardrail.suggestedLabel || 'the suggested model'},
+			or <strong>no</strong> to stop. Your next message goes back to {guardrail.requestedLabel || 'the chat’s model'}.
+		</p>
+	{:else if waiting && active}
 		<p class="hint">Reply <strong>yes</strong> or <strong>no</strong> in the message box. Other messages go to the agent and leave this open.</p>
 	{:else if waiting}
 		<p class="hint">Asked after the request before it. Answer that one first.</p>
@@ -229,6 +282,86 @@
 	}
 
 	.hint strong { color: var(--foreground); font-weight: 600; }
+
+	/* ── A provider safety check ─────────────────────────────────────────
+	   Same card, with the theme's warning hue on the edge and the icon, so
+	   it reads as "the provider stopped this", not as a tool asking. */
+	.approval.is-guardrail {
+		border-left: 3px solid var(--warning);
+		padding-left: calc(0.75rem - 2px);
+	}
+
+	.approval.is-guardrail:not([data-status='pending']) {
+		border-left-color: color-mix(in oklab, var(--warning) 45%, var(--border));
+	}
+
+	.is-guardrail .kicker { color: var(--foreground); }
+	.is-guardrail .icon { stroke: var(--warning); }
+	.icon .mark { stroke-linecap: round; stroke-width: 1.75; }
+
+	.g-title { font-weight: 600; }
+
+	.g-why {
+		margin: 0;
+		font-size: 0.8125rem;
+		line-height: 1.5;
+		color: var(--muted-foreground);
+		overflow-wrap: anywhere;
+	}
+
+	.g-models {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: flex-end;
+		gap: 0.25rem 0.75rem;
+		margin: 0.125rem 0 0;
+	}
+
+	.g-models > div {
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		min-width: 0;
+	}
+
+	/* The arrow between Requested and Suggested; CSS keeps the <dl> valid. */
+	.g-models > div + div {
+		position: relative;
+		padding-left: 1.25rem;
+	}
+
+	.g-models > div + div::before {
+		content: '→';
+		position: absolute;
+		left: 0;
+		bottom: 0;
+		color: var(--muted-foreground);
+		font-size: 0.875rem;
+		line-height: 1.5;
+	}
+
+	.g-models dt {
+		font-size: 0.6875rem;
+		color: var(--muted-foreground);
+	}
+
+	.g-models dd {
+		margin: 0;
+		font-size: 0.875rem;
+		line-height: 1.5;
+		font-weight: 500;
+		overflow-wrap: anywhere;
+	}
+
+	.g-req {
+		color: var(--muted-foreground);
+		text-decoration: line-through;
+		text-decoration-color: color-mix(in oklab, var(--muted-foreground) 60%, transparent);
+	}
+
+	.g-sug { color: var(--foreground); }
+
+	.approval:not([data-status='pending']) .g-sug { color: var(--muted-foreground); }
 
 	@media (prefers-reduced-motion: reduce) {
 		.approval { transition: none; }
