@@ -10,7 +10,7 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 
 ## 1.2.1 (2026-11-01)
 
-Finishes the 1.2.0 release, which shipped only for Linux and Play internal testing. Everything listed under 1.2.0 is in this release.
+Finishes the 1.2.0 release, whose Windows installer, Android APK download and Docker image did not finish publishing. Everything listed under 1.2.0 is in this release.
 
 ### Fixed
 
