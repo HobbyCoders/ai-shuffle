@@ -134,8 +134,17 @@ export interface V2SessionState {
 	 *  same `model_info` note). null = native Anthropic; non-null = a gateway
 	 *  provider session (e.g. OpenRouter). A provider session can never be
 	 *  "rerouted" in the Anthropic-family sense, so the composer suppresses the
-	 *  reroute pill whenever this is non-null (R1). */
+	 *  reroute pill whenever this is non-null (R1) — unless the note itself
+	 *  says (`liveRerouted`). */
 	liveProvider: string | null;
+	/** The backend's own verdict from the same `model_info` note
+	 *  (`rerouted`, docs/internal/guardrail-contract.md): true/false when the
+	 *  provider reported the served model, null when the note did not say (an
+	 *  older backend). The composer prefers it over its family heuristic. */
+	liveRerouted: boolean | null;
+	/** Why, when known: `refusal_fallback` (a safety check moved the model)
+	 *  or `availability` (the requested model was unavailable). */
+	liveRerouteReason: string | null;
 	/** `transcript.rewound` bookkeeping: message id → seq of the event that
 	 *  CREATED it. A message absent from this map is optimistic (seeded outside
 	 *  the reducer, not yet reconciled to an event) and is EXEMPT from rewind
@@ -285,6 +294,8 @@ export function initialState(): V2SessionState {
 		liveModel: null,
 		liveRequestedModel: null,
 		liveProvider: null,
+		liveRerouted: null,
+		liveRerouteReason: null,
 		messageOriginSeq: own(new Map<string, number>()),
 		taskOriginSeq: {},
 		hasRetryCards: false,
@@ -1308,6 +1319,8 @@ function reduceInternal(
 				liveModel: null,
 				liveRequestedModel: null,
 				liveProvider: null,
+				liveRerouted: null,
+				liveRerouteReason: null,
 			};
 		}
 
@@ -2466,11 +2479,15 @@ function reduceInternal(
 				const model = str(obj(event.data)?.model);
 				const requested = str(obj(event.data)?.requested_model);
 				const provider = str(obj(event.data)?.provider);
+				const rerouted = obj(event.data)?.rerouted;
+				const reason = str(obj(event.data)?.reroute_reason);
 				return {
 					...state,
 					liveModel: model || null,
 					liveRequestedModel: requested || null,
 					liveProvider: provider || null,
+					liveRerouted: typeof rerouted === 'boolean' ? rerouted : null,
+					liveRerouteReason: reason || null,
 				};
 			}
 			let data = obj(event.data);

@@ -169,6 +169,48 @@ class TestSpawnResolvesFromBinding:
         assert env[BASE_URL_KEY] == "https://openrouter.ai/api"
         assert env[API_KEY] == ""
 
+    def test_legacy_composite_model_goes_on_the_wire_bare(self, mock_db, tmp_path):
+        """A chat started with no model pick falls back to the agent's
+        config.model. When that is a ``prov:`` composite for the bound
+        provider, only the bare model id may reach the provider — the
+        composite would 4xx upstream and hide the model from the safety-check
+        fallback (found in the dev loop: the fake provider received
+        ``prov:<id>:fake-ai``)."""
+        encryption.set_encryption_key("pw", db)
+        _mk_provider("op", token="gw-secret")
+        config = {"model": "prov:op:openai/gpt-5.6", "provider": "op"}
+        make_profile("prov", config)
+        db.create_session("s-legacy", profile_id="prov")  # no model: binding 'op'
+
+        opts = _build_options(
+            {"id": "prov", "config": {**config, "cwd": str(tmp_path)}},
+            session_id="s-legacy",
+            overrides={"cwd": str(tmp_path)},
+        )
+        assert opts.model == "openai/gpt-5.6"
+        assert opts.aih_provider_id == "op"
+
+    def test_legacy_composite_for_another_provider_never_rebinds(
+        self, mock_db, tmp_path
+    ):
+        """A legacy composite naming a DIFFERENT provider is not decoded: the
+        legacy chain may never move a session to another provider."""
+        encryption.set_encryption_key("pw", db)
+        _mk_provider("op", token="gw-secret")
+        make_profile("prov", {"model": "openai/gpt-5.6", "provider": "op"})
+        db.create_session("s-legacy2", profile_id="prov")
+
+        opts = _build_options(
+            {
+                "id": "prov",
+                "config": {"model": "prov:other:x", "provider": "op", "cwd": str(tmp_path)},
+            },
+            session_id="s-legacy2",
+            overrides={"cwd": str(tmp_path)},
+        )
+        assert opts.aih_provider_id == "op"
+        assert opts.model == "prov:other:x"
+
 
 # ---------------------------------------------------------------------------
 # Generation path threads an explicit binding

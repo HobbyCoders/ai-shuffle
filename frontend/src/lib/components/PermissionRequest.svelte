@@ -10,6 +10,7 @@
 		scopeLabel,
 		type RememberScope
 	} from './permission-scope';
+	import { guardrailView } from '$lib/utils/guardrail';
 
 	export interface PermissionRequestData {
 		request_id: string;
@@ -196,7 +197,13 @@
 	const scopes = $derived(availableScopes(request));
 	/** The lifetime that will actually be sent (falls back to once). */
 	const effectiveScope = $derived(rememberFor(scope, request));
-	const labels = $derived(decisionLabels(effectiveScope));
+	// A provider safety check (ModelGuardrail) gets its own card: what was
+	// blocked, which model it suggests, Continue / Stop. No remember choice
+	// and no tool-argument dump (docs/internal/guardrail-contract.md).
+	const guardrail = $derived(guardrailView(request));
+	const labels = $derived(
+		guardrail ? { allow: guardrail.continueLabel, deny: 'Stop' } : decisionLabels(effectiveScope)
+	);
 
 	/** The worker a relayed prompt came from: a subagent running on another
 	 *  worker. Only allow-once or deny travels back there and a person decides
@@ -433,6 +440,47 @@
 	aria-labelledby="permission-title"
 	tabindex="-1"
 >
+	{#if guardrail}
+	<div class="guardrail-head" data-testid="guardrail-card">
+		<div class="guardrail-icon" aria-hidden="true">
+			<svg class="w-4.5 h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6l7-3z" />
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 3.5h.01" />
+			</svg>
+		</div>
+		<div class="flex-1 min-w-0">
+			<p class="guardrail-kicker">Safety check{#if guardrail.category} · {guardrail.category}{/if}</p>
+			<h3 id="permission-title" class="guardrail-title">{guardrail.heading}</h3>
+		</div>
+		{#if queueCount > 1}
+			<span class="guardrail-queue" aria-label="{queueCount} requests waiting">{queueCount}</span>
+		{/if}
+	</div>
+	<div class="px-4 pt-3 pb-3 space-y-2.5">
+		{#if guardrail.explanation}
+			<p class="guardrail-explanation">{guardrail.explanation}</p>
+		{/if}
+		<dl class="guardrail-models" aria-label="Models">
+			<div>
+				<dt>Requested</dt>
+				<dd class="guardrail-requested" title={guardrail.requestedModel}>{guardrail.requestedLabel || 'Current model'}</dd>
+			</div>
+			<svg class="guardrail-arrow" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14m-5-5l5 5-5 5" />
+			</svg>
+			<div>
+				<dt>Suggested{#if guardrail.suggestedByApp}<span class="guardrail-by"> by AI Shuffle</span>{/if}</dt>
+				<dd class="guardrail-suggested" title={guardrail.suggestedModel}>{guardrail.suggestedLabel || 'Another model'}</dd>
+			</div>
+		</dl>
+		{#if guardrail.partialDiscarded}
+			<p class="guardrail-aside">The partial reply was discarded; the retry starts this turn over.</p>
+		{/if}
+	</div>
+	<div class="px-4 py-2.5 border-t border-border/40 bg-card/30">
+		<p class="guardrail-hint">{guardrail.hint}</p>
+	</div>
+	{:else}
 	<!-- Compact Header -->
 	<div class="flex items-center gap-3 px-4 py-3 border-b border-border/40">
 		<!-- Tool Icon -->
@@ -580,11 +628,14 @@
 			</div>
 		{/if}
 	</div>
+	{/if}
 
 	<!-- How long the answer lasts. It applies to whichever button is pressed.
 	     A relayed prompt, a model switch, and any request the server can only
 	     answer once offer no choice. -->
-	{#if request.tool_name === 'ModelSwitch'}
+	{#if guardrail}
+		<!-- Single use: the hint above says what Continue covers. -->
+	{:else if request.tool_name === 'ModelSwitch'}
 		<div class="px-4 py-3 border-t border-border/40 bg-card/30">
 			<p>A yes covers this model for this chat, including after app restarts.</p>
 		</div>
@@ -630,6 +681,7 @@
 				onclick={handleDeny}
 				disabled={answered}
 				class="deny-btn"
+				data-testid={guardrail ? 'guardrail-stop' : undefined}
 			>
 				{labels.deny}
 			</button>
@@ -641,6 +693,7 @@
 				disabled={answered}
 				class="allow-btn"
 				class:always={effectiveScope === 'profile'}
+				data-testid={guardrail ? 'guardrail-continue' : undefined}
 			>
 				{labels.allow}
 			</button>
@@ -981,6 +1034,132 @@
 		background: var(--muted);
 		border-radius: 0.375rem;
 		word-break: break-all;
+	}
+
+	/* Provider safety check (ModelGuardrail). Warning tone from the theme's
+	   own --warning, so it reads as "paused, your call", not as an error. */
+	.guardrail-head {
+		display: flex;
+		align-items: flex-start;
+		gap: 0.75rem;
+		padding: 0.875rem 1rem 0.75rem;
+		border-bottom: 1px solid color-mix(in oklab, var(--warning) 25%, var(--border));
+		background: linear-gradient(
+			180deg,
+			color-mix(in oklab, var(--warning) 10%, var(--card)),
+			var(--card)
+		);
+	}
+
+	.guardrail-icon {
+		flex-shrink: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 2.25rem;
+		height: 2.25rem;
+		border-radius: 0.75rem;
+		color: var(--warning);
+		border: 1px solid color-mix(in oklab, var(--warning) 40%, var(--border));
+		background: color-mix(in oklab, var(--warning) 14%, var(--card));
+	}
+
+	.guardrail-kicker {
+		margin: 0 0 0.125rem;
+		font-size: 0.6875rem;
+		font-weight: 600;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		color: color-mix(in oklab, var(--warning) 80%, var(--foreground));
+	}
+
+	.guardrail-title {
+		margin: 0;
+		font-size: 0.9375rem;
+		font-weight: 600;
+		line-height: 1.35;
+		color: var(--foreground);
+		text-wrap: balance;
+	}
+
+	.guardrail-queue {
+		flex-shrink: 0;
+		min-width: 1.5rem;
+		padding: 0.125rem 0.5rem;
+		border-radius: 999px;
+		font-size: 0.75rem;
+		font-weight: 600;
+		text-align: center;
+		color: var(--muted-foreground);
+		border: 1px solid var(--border);
+	}
+
+	.guardrail-explanation {
+		margin: 0;
+		font-size: 0.8125rem;
+		line-height: 1.5;
+		color: var(--foreground);
+		white-space: pre-line;
+		overflow-wrap: anywhere;
+	}
+
+	.guardrail-models {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+		align-items: center;
+		gap: 0.5rem;
+		margin: 0;
+		padding: 0.5rem 0.75rem;
+		border-radius: var(--radius, 0.75rem);
+		border: 1px solid var(--border);
+		background: color-mix(in oklch, var(--muted) 35%, var(--card));
+	}
+
+	.guardrail-models dt {
+		font-size: 0.625rem;
+		font-weight: 600;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
+		color: var(--muted-foreground);
+	}
+
+	.guardrail-by {
+		text-transform: none;
+		letter-spacing: 0;
+		font-weight: 500;
+	}
+
+	.guardrail-models dd {
+		margin: 0.125rem 0 0;
+		font-size: 0.875rem;
+		font-weight: 600;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.guardrail-requested {
+		color: var(--muted-foreground);
+		text-decoration: line-through;
+		text-decoration-color: color-mix(in oklab, var(--warning) 60%, transparent);
+	}
+
+	.guardrail-suggested {
+		color: var(--foreground);
+	}
+
+	.guardrail-arrow {
+		width: 1rem;
+		height: 1rem;
+		color: var(--muted-foreground);
+	}
+
+	.guardrail-aside,
+	.guardrail-hint {
+		margin: 0;
+		font-size: 0.75rem;
+		line-height: 1.45;
+		color: var(--muted-foreground);
 	}
 
 	@media (min-width: 640px) {

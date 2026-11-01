@@ -118,3 +118,39 @@ def test_one_card_per_request_id_and_ordinary_prompts_add_none(monkeypatch):
                                    "request": {"assistant_confirm": {"question": "?"}}}),
     ])
     assert [_shape(m) for m in messages] == [("card", "perm-a", "pending", 1)]
+
+
+# A provider safety check (docs/internal/guardrail-contract.md) asked in words
+# in an owner chat: the card keeps the safety-check fields so the chat can show
+# the check instead of "use ModelGuardrail with {…}". Mirrors
+# ``approvalGuardrail`` in frontend/src/lib/utils/assistant-confirm.ts.
+_GUARDRAIL_INPUT = {
+    "guardrail": True, "provider": "anthropic", "provider_label": "Anthropic",
+    "category": "cyber", "explanation": "Flagged by  the\ncyber classifier.",
+    "requested_model": "claude-opus-4-8", "suggested_model": "claude-opus-4-7",
+    "suggested_by": "provider", "request_id": "req_1", "partial_output_discarded": True,
+    "message": "ignored",
+}
+
+
+def test_a_safety_check_card_keeps_its_guardrail_fields(monkeypatch):
+    messages = _fold(monkeypatch, [
+        ("interaction.requested", {
+            "interaction_id": "i-g", "request_id": "guardrail-t1", "kind": "permission",
+            "request": {"request_id": "guardrail-t1", "tool_name": "ModelGuardrail",
+                        "tool_input": _GUARDRAIL_INPUT,
+                        "assistant_confirm": {"question": "Continue?", "action": "continue"}}}),
+        _answered("guardrail-t1", "allow"),
+    ])
+    assert [_shape(m) for m in messages] == [("card", "guardrail-t1", "approved", 1)]
+    assert messages[0]["systemData"]["guardrail"] == {
+        "provider": "anthropic", "provider_label": "Anthropic", "category": "cyber",
+        "explanation": "Flagged by the cyber classifier.",
+        "requested_model": "claude-opus-4-8", "suggested_model": "claude-opus-4-7",
+        "suggested_by": "provider", "partial_output_discarded": True,
+    }
+
+
+def test_an_ordinary_card_has_no_guardrail_fields(monkeypatch):
+    messages = _fold(monkeypatch, [_requested("perm-a", "ls", "Job")])
+    assert "guardrail" not in messages[0]["systemData"]

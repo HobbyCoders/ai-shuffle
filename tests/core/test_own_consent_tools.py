@@ -281,3 +281,19 @@ def test_the_screen_access_card_reads_plainly_in_words():
     from app.core import owner_confirm
     assert owner_confirm.describe(REQUEST_ACCESS, {"apps": ["Notepad", "Edge"]}) == (
         "control Notepad, Edge on this computer")
+
+
+def test_a_safety_check_is_asked_in_plain_words():
+    """An owner chat asks a provider safety check as one: never as
+    "use ModelGuardrail with {…}" (docs/internal/guardrail-contract.md)."""
+    from app.core import owner_confirm
+    data ={"guardrail": True, "provider": "anthropic", "provider_label": "Anthropic",
+            "category": "reasoning_extraction", "requested_model": "claude-opus-4-8",
+            "suggested_model": "claude-opus-4-7"}
+    assert owner_confirm.describe("ModelGuardrail", data) == (
+        "continue this turn on claude-opus-4-7; Anthropic's safety check blocked "
+        "claude-opus-4-8 (reasoning extraction)")
+    assert owner_confirm.describe("ModelGuardrail", {"guardrail": True}) == (
+        "continue this turn on another model; the provider's safety check blocked the model")
+    question = owner_confirm.question("ModelGuardrail", data)
+    assert "ModelGuardrail" not in question and "{" not in question

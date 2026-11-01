@@ -601,6 +601,8 @@ function transcriptPatch(
 		liveModel: rs.liveModel,
 		liveRequestedModel: rs.liveRequestedModel,
 		liveProvider: rs.liveProvider,
+		liveRerouted: rs.liveRerouted,
+		liveRerouteReason: rs.liveRerouteReason,
 		liveCompaction: rs.compaction ?? null,
 		activeTasks: deriveActiveTasks(rs.activeTaskSummaries),
 		// Passed through with the same "extra fields may be present" contract the

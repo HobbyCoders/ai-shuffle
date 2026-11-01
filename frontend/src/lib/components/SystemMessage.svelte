@@ -16,6 +16,7 @@
 	import { resumeSession } from '$lib/api/sessions';
 	import { LIMIT_RESUME_SUBTYPE, pausedLabel } from '$lib/components/chat/limit-resume';
 	import { formatTokenCount } from '$lib/components/chat/context-usage';
+	import { guardrailNoteView } from '$lib/utils/guardrail';
 
 	// Create a local marked instance to avoid mutating global config
 	const localMarked = new Marked({ breaks: true, gfm: true });
@@ -32,6 +33,16 @@
 	// (mirrors compact_boundary) so noisy PreToolUse hooks don't dominate
 	// the chat.
 	const isHookEvent = $derived(message.systemSubtype === 'hook_event');
+
+	// Provider safety checks (docs/internal/guardrail-contract.md): a
+	// `model_rerouted` / `guardrail_blocked` note is one compact line.
+	const guardrailNote = $derived(
+		guardrailNoteView(
+			message.systemSubtype,
+			message.systemData as Record<string, unknown> | undefined,
+			message.content
+		)
+	);
 
 	type HookEventData = {
 		hook_event_name: string | null;
@@ -1172,6 +1183,29 @@
 				{/if}
 			</details>
 		</div>
+	{:else if guardrailNote}
+		<div class="w-full sys-flat" data-testid="guardrail-note" data-kind={guardrailNote.kind}>
+			<div class="sys-row guardrail-note flex items-start gap-2 min-w-0" title={guardrailNote.detail}>
+				{#if guardrailNote.kind === 'rerouted'}
+					<svg class="w-4 h-4 mt-0.5 shrink-0 gn-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 3h5v5M21 3l-7 7M8 21H3v-5M3 21l7-7" />
+					</svg>
+				{:else}
+					<svg class="w-4 h-4 mt-0.5 shrink-0 gn-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6l7-3z" />
+						{#if guardrailNote.kind === 'continued'}
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4" />
+						{:else}
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.5 9.5l5 5m0-5l-5 5" />
+						{/if}
+					</svg>
+				{/if}
+				<p class="m-0 min-w-0 text-sm leading-snug whitespace-normal wrap-anywhere">
+					<span class="font-medium text-foreground">{guardrailNote.title}</span>
+					<span class="text-muted-foreground"> · {guardrailNote.text}</span>
+				</p>
+			</div>
+		</div>
 	{:else if message.systemSubtype === 'compact_boundary'}
 		<div class="w-full sys-flat" data-testid="compaction-card">
 			<div class="sys-row flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0">
@@ -1304,6 +1338,21 @@
 
 	.sys-row:hover {
 		background: var(--scrim);
+	}
+
+	/* Safety-check notes: the theme's warning tone on the icon only; a
+	   continued turn reads calmer than a stopped one. */
+	.guardrail-note .gn-icon {
+		color: var(--warning);
+	}
+
+	.guardrail-note[title] {
+		cursor: default;
+	}
+
+	[data-kind='continued'] .gn-icon,
+	[data-kind='rerouted'] .gn-icon {
+		color: color-mix(in oklab, var(--warning) 70%, var(--muted-foreground));
 	}
 
 	.sys-body {

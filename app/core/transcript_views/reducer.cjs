@@ -291,6 +291,26 @@ function assistantConfirmationText(request) {
   return `May I ${action(request)}? Yes or no.`;
 }
 var APPROVAL_CARD_SUBTYPE = "assistant_confirm_request";
+var GUARDRAIL_TEXT_FIELDS = [
+  "provider",
+  "provider_label",
+  "category",
+  "explanation",
+  "requested_model",
+  "suggested_model",
+  "suggested_by"
+];
+function approvalGuardrail(request) {
+  const input = record(request?.tool_input);
+  if (!input || text(request?.tool_name) !== "ModelGuardrail" && input.guardrail !== true) return null;
+  const out = {};
+  for (const key of GUARDRAIL_TEXT_FIELDS) {
+    const value = text(input[key]);
+    if (value) out[key] = value;
+  }
+  if (input.partial_output_discarded === true) out.partial_output_discarded = true;
+  return out;
+}
 function approvalCardId(requestId) {
   return `assistant-confirm-${requestId}`;
 }
@@ -320,6 +340,7 @@ function approvalCardFromRequest(requestId, request, earlier) {
     const card = approvalCardData(message);
     if (card?.question === question && RETRIED_STATUSES.has(card.status)) attempt++;
   }
+  const guardrail = approvalGuardrail(request);
   return {
     request_id: requestId,
     question,
@@ -327,7 +348,8 @@ function approvalCardFromRequest(requestId, request, earlier) {
     ...text(confirm.asker) ? { asker: text(confirm.asker) } : {},
     ...text(confirm.chat_session_id) ? { chat_session_id: text(confirm.chat_session_id) } : {},
     status: "pending",
-    attempt
+    attempt,
+    ...guardrail ? { guardrail } : {}
   };
 }
 function approvalStatusFromSettle(type, detail) {
@@ -395,6 +417,8 @@ function initialState() {
     liveModel: null,
     liveRequestedModel: null,
     liveProvider: null,
+    liveRerouted: null,
+    liveRerouteReason: null,
     messageOriginSeq: own(/* @__PURE__ */ new Map()),
     taskOriginSeq: {},
     hasRetryCards: false,
@@ -923,7 +947,9 @@ function reduceInternal(state, event, observe) {
         pumpAckBuffer: "",
         liveModel: null,
         liveRequestedModel: null,
-        liveProvider: null
+        liveProvider: null,
+        liveRerouted: null,
+        liveRerouteReason: null
       };
     }
     case "turn.parked": {
@@ -1726,11 +1752,15 @@ function reduceInternal(state, event, observe) {
         const model = str(obj(event.data)?.model);
         const requested = str(obj(event.data)?.requested_model);
         const provider = str(obj(event.data)?.provider);
+        const rerouted = obj(event.data)?.rerouted;
+        const reason = str(obj(event.data)?.reroute_reason);
         return {
           ...state,
           liveModel: model || null,
           liveRequestedModel: requested || null,
-          liveProvider: provider || null
+          liveProvider: provider || null,
+          liveRerouted: typeof rerouted === "boolean" ? rerouted : null,
+          liveRerouteReason: reason || null
         };
       }
       let data = obj(event.data);
@@ -2275,7 +2305,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "1d317f11e6fe074f477157c1dbaa5050413928ebf7ec1ac986b1f76b6e4fb79b";
+var REDUCER_FINGERPRINT = "7f3f68be315fd88a061266626d9e65d50d83a963ff73172d4944b72ebad643a4";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {

@@ -50,12 +50,37 @@ describe('isReroute — reroute guard', () => {
 		expect(isReroute('opus', null, null)).toBe(false);
 	});
 
-	it('R1: a provider session is NEVER rerouted, even when families differ', () => {
+	it('R1: without the backend flag a provider session is NEVER rerouted', () => {
 		// A gateway model id could substring-match a Claude family
 		// (`inferModelFamily` uses substrings), which would otherwise
-		// false-positive. The non-null provider short-circuits to false.
+		// false-positive. The non-null provider short-circuits to false —
+		// but only when the note did not carry `rerouted` (older backends).
 		expect(isReroute('openai/gpt-5.6', 'opus', 'prov-openrouter')).toBe(false);
 		expect(isReroute('sonnet-flavoured-gateway', 'opus', 'prov-1')).toBe(false);
+		expect(isReroute('openai/gpt-5.6', 'opus', 'prov-openrouter', null)).toBe(false);
+		expect(isReroute('openai/gpt-5.6', 'opus', 'prov-openrouter', undefined)).toBe(false);
+	});
+});
+
+describe('isReroute — backend `rerouted` flag (guardrail contract)', () => {
+	it('flags a provider/OpenAI session when the backend says rerouted', () => {
+		expect(isReroute('gpt-5.4-safe', 'gpt-5.5', 'openai', true)).toBe(true);
+		expect(isReroute('fake-ai-safe', 'fake-ai', 'fake-ai-account', true)).toBe(true);
+	});
+
+	it('flags a same-family Claude reroute the heuristic would miss', () => {
+		expect(isReroute('claude-opus-4-7', 'claude-opus-4-8', null, true)).toBe(true);
+	});
+
+	it('trusts rerouted=false over a family mismatch', () => {
+		// e.g. the session's model was switched deliberately; the backend knows.
+		expect(isReroute('sonnet', 'opus', null, false)).toBe(false);
+	});
+
+	it('never flags on null data, whatever the flag says', () => {
+		expect(isReroute(null, 'opus', null, true)).toBe(false);
+		expect(isReroute('opus', null, null, true)).toBe(false);
+		expect(isReroute('', '', 'openai', true)).toBe(false);
 	});
 });
 

@@ -55,6 +55,7 @@
 		isFastModeCapable,
 		isReroute
 	} from '$lib/constants/models';
+	import { rerouteTooltip } from '$lib/utils/guardrail';
 	import { getUsageLimits } from '$lib/api/client';
 	import {
 		rateLimit,
@@ -253,22 +254,19 @@
 	});
 
 	// Live reroute detection: the backend `model_info` note tells us which model
-	// the SDK's MAIN lane is ACTUALLY running. Compare at FAMILY level — exact-ID
-	// comparison false-flags when the SDK echoes a dated snapshot ID missing from
-	// the legacy map (inferModelFamily still classifies those via substring
-	// inference). Unknown/custom models never flag (deliberate: no reroute alarm
-	// we can't substantiate); same-family version reroutes are intentionally not
-	// flagged.
+	// the MAIN lane is ACTUALLY running, and (newer backends) whether that is a
+	// reroute (`rerouted`, with `reroute_reason`). The backend's verdict wins
+	// whenever it is present, for every provider; without it the old FAMILY
+	// comparison applies (exact-ID comparison false-flags dated snapshot ids),
+	// and a provider session is never flagged on that heuristic (R1). Unknown
+	// models never flag; a note missing either model never flags.
 	const liveModel = $derived($activeSession.liveModel);
 	const liveRequestedModel = $derived($activeSession.liveRequestedModel);
 	// Compare actual vs what was REQUESTED for that same turn (both from the
 	// model_info note) — never the live selection, which the user may have
-	// changed since. A provider session (model_info carried a non-null
-	// `provider`) is NEVER rerouted: its gateway model can't map to a Claude
-	// family, so the family comparison is meaningless and would false-positive
-	// (R1). `isReroute` short-circuits to false on a non-null provider.
+	// changed since.
 	const rerouted = $derived(
-		isReroute(liveModel, liveRequestedModel, $activeSession.liveProvider)
+		isReroute(liveModel, liveRequestedModel, $activeSession.liveProvider, $activeSession.liveRerouted)
 	);
 	const hasModelRoute = $derived(Boolean($activeSession.sessionId || getClaudeAuth().auth_kind || decodeProviderModel(modelValue)));
 	const selectedModelLabel = $derived(hasModelRoute ? getModelLabel(modelValue) : 'Select model');
@@ -279,11 +277,13 @@
 	const modelButtonLabel = $derived(modelLocked ? (voiceEngine ? voiceModelLabel(voiceEngine) : 'Voice model…') : voiceLane ? selectedModelLabel : rerouted ? actualModelLabel : selectedModelLabel);
 	const modelWarnTitle = $derived(
 		rerouted
-			? `Model rerouted: running ${actualModelLabel} (requested ${requestedModelLabel})`
+			? rerouteTooltip(actualModelLabel, requestedModelLabel, $activeSession.liveRerouteReason)
 			: undefined
 	);
 	const modelNotice = $derived(
-		rerouted ? `Running ${actualModelLabel} instead of ${requestedModelLabel}` : undefined
+		rerouted
+			? `${$activeSession.liveRerouteReason === 'refusal_fallback' ? 'Safety check: running' : 'Running'} ${actualModelLabel} instead of ${requestedModelLabel}`
+			: undefined
 	);
 
 	// Normal requests dedupe, but opening during a mount request must still force
@@ -427,7 +427,8 @@
 	const permissionModes = $derived(accessModes(accessContext));
 
 	const effortModel = $derived(voiceLane ? modelValue : resolveEffortModel(
-		$activeSession.modelOverride, liveModel, liveRequestedModel, $activeSession.liveProvider
+		$activeSession.modelOverride, liveModel, liveRequestedModel, $activeSession.liveProvider,
+		$activeSession.liveRerouted
 	));
 	const effortCapability = $derived(resolveModelEffort(effortModel));
 	const effortLevels = $derived(effortCapability.options);

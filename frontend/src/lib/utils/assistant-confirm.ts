@@ -103,6 +103,48 @@ export interface ApprovalCardData {
 	status: ApprovalStatus;
 	/** 1 for a first ask; 2+ when earlier cards asking the same thing were declined or expired. */
 	attempt: number;
+	/** A provider safety check (`ModelGuardrail`): what the card shows instead of the raw call. */
+	guardrail?: ApprovalGuardrail;
+}
+
+/** The safety-check fields an approval card keeps (docs/internal/guardrail-contract.md). */
+export interface ApprovalGuardrail {
+	provider?: string;
+	provider_label?: string;
+	category?: string;
+	explanation?: string;
+	requested_model?: string;
+	suggested_model?: string;
+	suggested_by?: string;
+	partial_output_discarded?: boolean;
+}
+
+const GUARDRAIL_TEXT_FIELDS = [
+	'provider',
+	'provider_label',
+	'category',
+	'explanation',
+	'requested_model',
+	'suggested_model',
+	'suggested_by'
+] as const;
+
+/**
+ * The safety-check part of a request, or null for any other request. Kept
+ * here (not in utils/guardrail.ts) because this module is bundled into the
+ * server's transcript reducer, which cannot load the model registry. Must
+ * match `_approval_guardrail` in app/api/sessions_helpers.py.
+ */
+export function approvalGuardrail(request: Record<string, unknown> | undefined): ApprovalGuardrail | null {
+	const input = record(request?.tool_input);
+	if (!input || (text(request?.tool_name) !== 'ModelGuardrail' && input.guardrail !== true)) return null;
+	const out: Record<string, unknown> = {};
+	for (const key of GUARDRAIL_TEXT_FIELDS) {
+		const value = text(input[key]);
+		if (value) out[key] = value;
+	}
+	if (input.partial_output_discarded === true) out.partial_output_discarded = true;
+	return out as ApprovalGuardrail;
 }
 
 /** One card per request id: the id is stable across live, replay and reload. */
@@ -158,6 +200,7 @@ export function approvalCardFromRequest(
 		const card = approvalCardData(message);
 		if (card?.question === question && RETRIED_STATUSES.has(card.status)) attempt++;
 	}
+	const guardrail = approvalGuardrail(request);
 	return {
 		request_id: requestId,
 		question,
@@ -165,7 +208,8 @@ export function approvalCardFromRequest(
 		...(text(confirm.asker) ? { asker: text(confirm.asker) } : {}),
 		...(text(confirm.chat_session_id) ? { chat_session_id: text(confirm.chat_session_id) } : {}),
 		status: 'pending',
-		attempt
+		attempt,
+		...(guardrail ? { guardrail } : {})
 	};
 }
 
