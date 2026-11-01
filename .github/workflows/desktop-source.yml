@@ -37,6 +37,7 @@ jobs:
     outputs:
       ready: ${{ steps.ci.outputs.ready }}
       revision: ${{ steps.ci.outputs.revision }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,6 +59,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python scripts/ci/edge_publication_gate.py --select
+      # One version per run: a release tag pushed while this run is in flight
+      # must not give the UI bundle and the signed manifest different names
+      # (desktop/scripts/nightly-version.mjs).
+      - name: Pin the display version for the UI build and the signer
+        if: steps.ci.outputs.ready == 'true'
+        id: version
+        env:
+          REVISION: ${{ steps.ci.outputs.revision }}
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/candidate" "$REVISION"
+          version=$(python -I scripts/ci/publication_source.py version --source-root "$RUNNER_TEMP/candidate" --revision "$REVISION" | python -I -c 'import json, sys; print(json.load(sys.stdin))')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
   ui:
     needs: gate
@@ -67,6 +80,7 @@ jobs:
     uses: ./.github/workflows/source-ui-bundle.yml
     with:
       source-ref: ${{ needs.gate.outputs.revision }}
+      version: ${{ needs.gate.outputs.version }}
 
   publish:
     needs: [gate, ui]
@@ -88,6 +102,7 @@ jobs:
         working-directory: .publication-control
     env:
       SOURCE_REVISION: ${{ needs.gate.outputs.revision }}
+      SOURCE_VERSION: ${{ needs.gate.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
