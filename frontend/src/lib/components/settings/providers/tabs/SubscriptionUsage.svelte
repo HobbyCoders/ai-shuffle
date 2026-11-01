@@ -60,9 +60,9 @@
 </script>
 
 <RowGroup title="Allowance">
-	{#each windows as w, i (w.type)}
+	{#each windows as w (w.type)}
 		<SettingRow
-			label={i === 0 && w.type === 'seven_day' ? 'Weekly use' : windowLabel(w.type)}
+			label={windowLabel(w.type)}
 			hint={resets(w.resets_at)}
 		>
 			<Meter used={Math.round(w.utilization)} cap={100} unit="%" label={windowLabel(w.type)} />

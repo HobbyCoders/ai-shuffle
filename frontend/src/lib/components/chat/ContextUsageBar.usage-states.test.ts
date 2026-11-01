@@ -366,6 +366,55 @@ describe('plans without a 5-hour window', () => {
 		expect(text).toContain('reset · awaiting next report');
 	});
 
+	// Two installs; the target ('worker-b') holds `targetKey`, this install
+	// holds 'acct'. A shared key merges the account's windows into the
+	// target's bucket, so it shows this install's own subscription.
+	function twoInstalls(targetKey: string | null, windows: ReturnType<typeof claudeWindows>) {
+		mocks.claudePlan = 'ultra';
+		mocks.usageTarget.set('worker-b');
+		const shared = targetKey === 'acct';
+		rateLimit.applySnapshot({
+			available: true, windows: [], self_instance_id: 'self',
+			snapshots: [
+				{ instance_id: 'self', device_name: 'Studio', available: true, fetched_at: T0, account_key: 'acct', windows },
+				{ instance_id: 'worker-b', device_name: 'Worker B', available: true, fetched_at: T0, account_key: targetKey,
+					windows: shared ? [] : windows },
+			],
+			accounts: shared
+				? [{ account_key: 'acct', instance_ids: ['self', 'worker-b'], available: true, fetched_at: T0,
+					windows: windows.map((w) => ({ ...w, instance_id: 'self', device_name: 'Studio' })) }]
+				: [],
+		});
+	}
+
+	it('Claude Ultra on another device signed in to the same account: the rolled-over 5-hour row is hidden', async () => {
+		twoInstalls('acct', claudeWindows(ago(2 * 86_400)));
+		const container = await open();
+		expect(skeleton(container, 'Claude')).toEqual(['header:section-device+section-account', 'row:Weekly (all models)', 'meta:1']);
+		expect(sectionText(container, 'Claude')).not.toContain('awaiting next report');
+		await collapse(container, 'Plan usage limits');
+		expect(summaryOf(container, 'Claude')).toBe('58% left');
+	});
+
+	it('Claude Ultra on another device signed in to the same account: a live 5-hour window still shows', async () => {
+		twoInstalls('acct', [
+			{ type: 'five_hour', utilization: 72, resets_at: ahead(3600), observed_at: T0 },
+			{ type: 'seven_day', utilization: 58, resets_at: ahead(5 * 86_400), observed_at: T0 },
+		]);
+		const container = await open();
+		expect(skeleton(container, 'Claude')).toEqual(['header:section-device+section-account', 'row:5-hour limit', 'row:Weekly (all models)', 'meta:1']);
+	});
+
+	it.each([
+		['another account', 'other-acct'],
+		['an unknown account', null],
+	])('Claude Ultra here, another device on %s: its rolled-over 5-hour row stays', async (_label, key) => {
+		twoInstalls(key, claudeWindows(ago(2 * 86_400)));
+		const text = sectionText(await open(), 'Claude');
+		expect(text).toContain('5-hour limit');
+		expect(text).toContain('reset · awaiting next report');
+	});
+
 	const chatgpt = (plan_type: string, windows: ProviderUsageEntry['windows']) => row({
 		provider_id: `codex-${plan_type}`, provider_type: 'chatgpt', plan_type, windows,
 	});

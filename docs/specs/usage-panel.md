@@ -44,8 +44,10 @@ window (the weekly one).
 
 Which plan an install is on: Claude's comes from this install's own CLI
 sign-in (`claude auth status`, see the sources doc), so the plan rule applies
-only to the self install's Claude section; another device's Claude section
-keeps every row. ChatGPT's comes from the provider's own `plan_type`. An
+to the self install's Claude section and to another device's section when that
+device reports the same Claude account key (the same subscription, whose
+windows the panel merges). A device on another account, or one with no account
+key, keeps every row. ChatGPT's comes from the provider's own `plan_type`. An
 unknown plan keeps every row.
 
 ## Interaction

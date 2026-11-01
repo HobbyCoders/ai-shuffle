@@ -102,6 +102,7 @@
 		resolveBucketKey,
 		selfBucketKey,
 		isSelfTarget,
+		sharesSelfClaudeAccount,
 		windowRolledOver,
 		claudeUsageSource,
 		type UsageBucket,
@@ -706,9 +707,14 @@
 	const isSelf = $derived(isSelfTarget($rateLimit, target) ||
 		(resolvedKey != null && resolvedKey === selfBucketKey($rateLimit)));
 	// A plan without a 5-hour window (Claude Ultra). The plan describes THIS
-	// install's sign-in only, like the header subtext, so another device's
-	// bucket keeps every row.
-	const claudeNoFiveHour = $derived(isSelf && planHasNoFiveHourLimit('claude', getClaudeAuth().plan_type));
+	// install's sign-in, so it applies to this install's bucket and to another
+	// device signed in to the same Claude account (same subscription; its
+	// bucket shows the merged account windows). A device on another account,
+	// or one whose account is unknown, keeps every row.
+	const claudeNoFiveHour = $derived(
+		(isSelf || sharesSelfClaudeAccount($rateLimit, resolvedKey)) &&
+			planHasNoFiveHourLimit('claude', getClaudeAuth().plan_type)
+	);
 	const items = $derived.by<WindowItem[]>(() =>
 		resolvedBucket ? itemsFor(resolvedBucket, claudeNoFiveHour) : []
 	);

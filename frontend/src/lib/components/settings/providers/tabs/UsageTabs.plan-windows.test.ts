@@ -96,8 +96,12 @@ describe('ChatGPT usage tab', () => {
 	it('Pro: a live 5-hour window drops out when it resets while the tab is open', async () => {
 		const { container } = render(SubscriptionUsage, { banked, usageEntry: entry('prolite', at(2)), signedIn: false });
 		expect(container.textContent).toContain('5-hour limit');
+		expect(container.textContent).toContain('Weekly (all models)');
 		await vi.advanceTimersByTimeAsync(3000);
 		expect(container.textContent).not.toContain('5-hour limit');
+		// The weekly row keeps its label when it becomes the only row.
+		expect(container.textContent).toContain('Weekly (all models)');
+		expect(container.textContent).not.toContain('Weekly use');
 	});
 
 	it('Plus keeps the 5-hour window after it resets', async () => {

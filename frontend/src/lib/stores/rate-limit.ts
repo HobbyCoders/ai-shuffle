@@ -642,6 +642,18 @@ export function resolveBucketKey(state: RateLimitState, instanceId: string | nul
 	return state.buckets[key] ? key : null;
 }
 
+/**
+ * Whether the bucket under `bucketKey` is signed in to the same Claude account
+ * as this install, so it shows the same subscription and plan. Both buckets
+ * must name an account key; an unknown key never matches.
+ */
+export function sharesSelfClaudeAccount(state: RateLimitState, bucketKey: string | null): boolean {
+	if (bucketKey == null) return false;
+	const accountKey = state.buckets[bucketKey]?.accountKey;
+	const selfAccountKey = state.buckets[selfBucketKey(state)]?.accountKey;
+	return !!accountKey && accountKey === selfAccountKey;
+}
+
 /** Whether a usage target (install or device id; null = local) is this install. */
 export function isSelfTarget(state: RateLimitState, target: string | null): boolean {
 	return target == null || target === state.selfInstanceId || (target != null && target === state.selfDeviceId);
