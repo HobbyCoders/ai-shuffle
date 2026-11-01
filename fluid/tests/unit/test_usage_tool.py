@@ -451,3 +451,40 @@ def test_replayed_provider_windows_are_rechecked_across_a_reset(monkeypatch, pla
     assert replayed["windows"][-1]["left_percent"] == 80
     # The cache keeps the values as read.
     assert usage._last_providers[0]["windows"][0]["left_percent"] == 10
+
+
+@pytest.mark.parametrize("self_key,peer_key,peer_types", [
+    ("acct-1", "acct-1", ["seven_day"]),
+    ("acct-1", "acct-2", ["five_hour", "seven_day"]),
+    ("acct-1", None, ["five_hour", "seven_day"]),
+    (None, None, ["five_hour", "seven_day"]),
+    ("", "", ["five_hour", "seven_day"]),
+])
+def test_claude_ultra_applies_to_installs_on_the_same_account(self_key, peer_key, peer_types) -> None:
+    snapshot = _plan_snapshot(claude_plan="ultra")
+    self_row, peer_row = snapshot["snapshots"]
+    if self_key is not None:
+        self_row["account_key"] = self_key
+    if peer_key is not None:
+        peer_row["account_key"] = peer_key
+    accounts = {a["instance_id"]: a for a in _payload(snapshot)["accounts"]}
+    assert _types(accounts["self"]["windows"]) == ["seven_day"]
+    assert _types(accounts["office-pc"]["windows"]) == peer_types
+
+
+def test_shared_account_keeps_a_live_five_hour_window() -> None:
+    snapshot = _plan_snapshot(claude_plan="ultra")
+    live = [{**snapshot["windows"][0], "resets_at": str(int(time.time()) + 3600)}, snapshot["windows"][1]]
+    for row in snapshot["snapshots"]:
+        row["account_key"] = "acct-1"
+    snapshot["snapshots"][1]["windows"] = live
+    accounts = {a["instance_id"]: a for a in _payload(snapshot)["accounts"]}
+    assert _types(accounts["office-pc"]["windows"]) == ["five_hour", "seven_day"]
+
+
+def test_shared_account_rule_needs_an_ultra_plan() -> None:
+    snapshot = _plan_snapshot(claude_plan="max")
+    for row in snapshot["snapshots"]:
+        row["account_key"] = "acct-1"
+    accounts = {a["instance_id"]: a for a in _payload(snapshot)["accounts"]}
+    assert _types(accounts["office-pc"]["windows"]) == ["five_hour", "seven_day"]

@@ -214,6 +214,21 @@ def _payload(raw: Any) -> dict[str, Any]:
         item for value in raw.get("windows") or ()
         if (item := _window(value, source="claude_subscription", remaining_input=True))
     ], claude_no_five_hour)
+    # Another install signed in to the same subscription (equal, present
+    # account keys) has the same plan; an unknown or different key keeps
+    # every window.
+    self_account_key = next((
+        a.get("account_key") for a in raw.get("snapshots") or ()
+        if isinstance(a, dict) and self_instance_id is not None
+        and a.get("instance_id") == self_instance_id
+    ), None)
+
+    def _shares_self_plan(account: dict[str, Any]) -> bool:
+        if self_instance_id is not None and account.get("instance_id") == self_instance_id:
+            return True
+        key = account.get("account_key")
+        return isinstance(key, str) and bool(key) and key == self_account_key
+
     accounts: list[dict[str, Any]] = []
     for account in raw.get("snapshots") or ():
         if not isinstance(account, dict):
@@ -232,8 +247,7 @@ def _payload(raw: Any) -> dict[str, Any]:
             "windows": _plan_windows([
                 item for value in account.get("windows") or ()
                 if (item := _window(value, source="claude_subscription", remaining_input=True))
-            ], claude_no_five_hour and self_instance_id is not None
-               and account.get("instance_id") == self_instance_id),
+            ], claude_no_five_hour and _shares_self_plan(account)),
         })
     claude_available = claude_available or any(
         account.get("available") is True for account in accounts
