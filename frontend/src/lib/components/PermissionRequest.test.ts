@@ -621,3 +621,53 @@ describe('PermissionRequest — relayed prompt from a subagent on another worker
 		expect(radio('Always for this agent')).toBeTruthy();
 	});
 });
+
+describe('PermissionRequest — provider safety check (ModelGuardrail)', () => {
+	const guardrail = (): PermissionRequestData => makeRequest({
+		request_id: 'g-1',
+		tool_name: 'ModelGuardrail',
+		tool_input: {
+			guardrail: true,
+			provider: 'anthropic',
+			provider_label: 'Anthropic',
+			category: 'cyber',
+			explanation: 'The request looked like exploit development.',
+			requested_model: 'claude-opus-5-5',
+			suggested_model: 'claude-opus-4-8',
+			suggested_by: 'app',
+			partial_output_discarded: true
+		},
+		// The backend offers no rule for a safety check; even a stray list is ignored.
+		remember_scopes: ['none', 'session', 'profile']
+	});
+
+	it('explains the block and offers Continue on the suggested model or Stop, without an argument dump', () => {
+		render(PermissionRequest, { props: { request: guardrail() } });
+
+		const card = screen.getByTestId('guardrail-card');
+		expect(card.textContent).toMatch(/Anthropic's safety check stopped this request/);
+		expect(card.textContent).toMatch(/Safety check\s*·\s*cybersecurity/);
+		expect(screen.getByText('The request looked like exploit development.')).toBeTruthy();
+		expect(screen.getByText(/by AI Shuffle/)).toBeTruthy();
+		expect(screen.getByText(/partial reply was discarded/)).toBeTruthy();
+		expect(screen.getByTestId('guardrail-continue').textContent?.trim()).toMatch(/^Continue on /);
+		expect(screen.getByTestId('guardrail-stop').textContent?.trim()).toBe('Stop');
+		// No remember choice, no raw tool input.
+		expect(screen.queryByRole('radio')).toBeNull();
+		expect(screen.queryByText(/ModelGuardrail/)).toBeNull();
+		expect(screen.queryByText(/"suggested_model"/)).toBeNull();
+	});
+
+	it('Continue answers this request once; Stop declines it', async () => {
+		const onRespond = vi.fn();
+		renderArmedForClicks({ request: guardrail(), onRespond });
+		await fireEvent.click(screen.getByTestId('guardrail-continue'));
+		expect(onRespond.mock.calls[0][0]).toMatchObject({ request_id: 'g-1', decision: 'allow', remember: 'none' });
+
+		cleanup();
+		const onStop = vi.fn();
+		renderArmedForClicks({ request: guardrail(), onRespond: onStop });
+		await fireEvent.click(screen.getByTestId('guardrail-stop'));
+		expect(onStop.mock.calls[0][0]).toMatchObject({ request_id: 'g-1', decision: 'deny', remember: 'none' });
+	});
+});
