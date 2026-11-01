@@ -8,20 +8,41 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
-## Unreleased
+## 1.2.0 (2026-10-31)
 
-### Fixed
+Several Claude sign-ins per provider, project setup across all your workers, and a steadier phone app and Windows updater.
 
-- Skipping an agent's question now moves on. With one question, **Skip this question** sends the skip and closes the question. With several, it jumps to the next unanswered one and sends everything once the last is answered or skipped. Before, a skipped question stayed open until you also pressed Send.
+### Updates
 
-### Removed
-
-- Removed the built-in Android emulator and Phone panel. Companion-app access to your real Android devices is unchanged.
+- Windows desktop updates no longer hang on "Downloading the desktop runtime".
 
 ### Security
 
 - Removed the Linux-only bubblewrap sandbox around agents' Python cells. Ask mode now asks before every Python cell on Linux too; Accept Edits also asks, while Bypass approves. In-process guards remain, but are not an OS security boundary. The sandbox setting and status row are gone.
 - Shared-folder grants no longer run commands. Folder list/read/write access is unchanged; commands run only on SSH machine grants.
+
+### Agents and providers
+
+- Save several Claude sign-ins and accounts per provider, and switch between them.
+- Each automation has its own permission mode.
+
+### Sessions and interface
+
+- Set a project up across all your workers from one screen.
+- Settings > Devices manages every worker's machine settings.
+
+### Android app
+
+- The phone picks an online worker and switches to another when it goes offline, sends a push only when a chat needs you, and keeps voice calls running when the screen is locked.
+
+### Removed
+
+- Removed the built-in Android emulator and Phone panel. Companion-app access to your real Android devices is unchanged.
+
+### Fixed
+
+- Skipping an agent's question now moves on. With one question, **Skip this question** sends the skip and closes the question. With several, it jumps to the next unanswered one and sends everything once the last is answered or skipped. Before, a skipped question stayed open until you also pressed Send.
+- Fixes to cross-worker sync, compaction, agent-message delivery and the chat view.
 
 ## 1.1.0
 
