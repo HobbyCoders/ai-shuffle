@@ -530,3 +530,31 @@ async def test_mark_parked_only_touches_a_pending_row(mock_db: sqlite3.Connectio
     assert not interactions.mark_interaction_parked(other["id"])
     assert not interactions.mark_interaction_released(other["id"])
     assert not interactions.mark_interaction_parked("missing")
+
+
+async def test_a_safety_check_is_never_let_go(
+    home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
+    """A provider safety check (``ModelGuardrail``, docs/internal/
+    guardrail-contract.md) is not let go "not run yet" by the owner's other
+    message: its caller would not come back, leaving a card asked with nobody
+    waiting. It keeps waiting, and a later yes still continues the turn."""
+    home_id, _ = home
+    _steers(monkeypatch)
+    kwargs = dict(request_id=f"guardrail-{uuid4().hex[:8]}", session_id=home_id,
+                  profile_id="assistant-agent", tool_name="ModelGuardrail",
+                  tool_input={"guardrail": True, "provider_label": "Anthropic",
+                              "requested_model": "claude-opus-4-8",
+                              "suggested_model": "claude-opus-4-7"},
+                  broadcast_func=AsyncMock(), skip_saved_rules=True)
+    task = asyncio.create_task(
+        approvals.route_permission(kwargs, ph.permission_handler.request_permission))
+    [request] = await _pending(home_id)
+    await owner_says(home_id, OTHER)
+    await asyncio.sleep(0.3)
+    assert not task.done()
+    [still] = confirm.pending_requests(home_id)
+    assert still["request_id"] == request["request_id"] and not still["parked"]
+    await owner_says(home_id, "yes")
+    result = await asyncio.wait_for(task, 12.0)
+    assert isinstance(result, PermissionResultAllow)
