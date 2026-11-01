@@ -334,29 +334,29 @@ async def generate_branch_name(
         prefix_instruction = (
             f'Use the prefix "{forced_prefix}/".'
             if forced_prefix
-            else 'Choose the most appropriate conventional prefix: feat/, fix/, refactor/, chore/, docs/, or test/.'
-        )
-
-        prompt = f"""Extract the core task from this chat message and generate a git branch name.
-
-{prefix_instruction}
-Format: prefix/lowercase-with-hyphens (e.g., feat/add-dark-mode, fix/login-timeout, refactor/extract-auth-service)
-Rules:
-- 3-5 descriptive words AFTER the prefix slash — focus on the technical task, not conversational filler
-- Max 50 characters total
-- Only lowercase letters, digits, hyphens, and one forward slash after prefix
-- Use action verbs: fix, add, update, refactor, remove, improve, etc.
-- Pick the prefix that best matches the intent:
+            else """Pick the prefix that fits the task:
   feat/ = new feature or enhancement
   fix/ = bug fix or correction
-  refactor/ = code restructuring without behavior change
-  chore/ = maintenance, deps, CI, formatting
-  docs/ = documentation changes
-  test/ = adding or updating tests
+  refactor/ = restructuring code without changing behavior
+  chore/ = maintenance, dependencies, CI, formatting
+  docs/ = documentation
+  test/ = adding or updating tests"""
+        )
+
+        prompt = f"""Find the core task in the chat message below and name a git branch for it.
+
+Format: prefix/lowercase-words-with-hyphens, e.g. feat/add-dark-mode, fix/login-timeout, refactor/extract-auth-service
+{prefix_instruction}
+
+Rules:
+- 3 to 5 words after the prefix, starting with an action verb (add, fix, update, remove, refactor, improve).
+- At most 50 characters in total; only lowercase letters, digits and hyphens after the prefix.
+- Keep it concise and true to what the user asked for; drop conversational filler.
+- The name is public. Leave out anything personal or private: device or host names, people's names, emails, IP addresses, file paths, codes, keys, tokens, IDs, or anything else that should not appear in a public repository. Describe the task in general words instead.
 
 Message: "{body.message[:500]}"
 
-Return ONLY the branch name, nothing else."""
+Reply with the branch name only."""
 
         # Use the Default AI profile's model (no explicit override).
         # Keeps the generation pool client reusable across all AI calls — any

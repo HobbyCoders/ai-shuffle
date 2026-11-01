@@ -8765,3 +8765,50 @@ def test_local_first_byte_setting_defaults_to_off_and_reads_env(monkeypatch):
     assert Settings.model_fields["provider_first_byte_timeout_local"].default == 0.0
     monkeypatch.setenv("PROVIDER_FIRST_BYTE_TIMEOUT_LOCAL", "180")
     assert Settings(_env_file=None).provider_first_byte_timeout_local == 180.0
+
+
+@pytest.mark.asyncio
+async def test_one_shot_generation_reaches_the_cli_with_nothing_of_ours(monkeypatch, tmp_path):
+    """A one-shot generation (commit message, branch name, reply hint) sends the
+    caller's prompt alone: no app text, no claude-mod, no attribution, and
+    DelegatedLoop(one_shot=True) replaces Claude Code's prompt with nothing."""
+    import app.core.provider.harness_adapter as ha
+    from fluid.tools.registry import ToolRegistry
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(
+        SessionOptions(
+            model="haiku",
+            system_prompt={"type": "preset", "preset": "claude_code", "append": "APPEND TEXT"},
+            cwd=str(tmp_path),
+            extra={"fluid_registry": ToolRegistry(), "one_shot": True},
+        )
+    )
+    captured = _CapturingLoop.captured
+    assert captured["one_shot"] is True
+    assert captured["system"] is None and captured["append_system_prompt"] is None
+    assert captured["claude_mod"] is False
+    assert captured["commit_attribution"] is False
+    # No settings file loads, so a project's local hooks cannot add context.
+    assert captured["setting_sources"] == ()
+    assert adapter._turn_context_note("hello") is None
+
+
+@pytest.mark.asyncio
+async def test_generation_options_project_the_one_shot_stamp(monkeypatch):
+    """build_generation_options stamps aih_one_shot; the projection carries it."""
+    captured = {}
+
+    async def _fake_connect(self, opts):
+        captured["opts"] = opts
+
+    monkeypatch.setattr(HarnessAdapter, "connect", _fake_connect, raising=True)
+    gen = _GenOptions("haiku")
+    gen.aih_one_shot = True
+    await HarnessAdapter().connect_with_sdk_options(gen)
+    assert captured["opts"].extra.get("one_shot") is True
+
+    plain = _GenOptions("haiku")
+    await HarnessAdapter().connect_with_sdk_options(plain)
+    assert "one_shot" not in captured["opts"].extra

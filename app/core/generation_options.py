@@ -421,5 +421,9 @@ def build_generation_options(
     # A custom row's wire format ('anthropic' default | 'openai') — decides
     # which native client serves it. None everywhere else.
     options.aih_provider_dialect = (main_provider_row or {}).get("api_dialect")
+    # A one-shot generation: on the Claude Code CLI leg the model gets an
+    # empty system prompt and no tools, skills, plugins or app context, so it
+    # reads only the caller's prompt (HarnessAdapter, ``extra["one_shot"]``).
+    options.aih_one_shot = True
 
     return options
