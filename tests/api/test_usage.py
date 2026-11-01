@@ -727,6 +727,33 @@ class TestCachedUsageToolSnapshot:
         monitor.get_cluster_snapshot.assert_not_awaited()
 
 
+    @pytest.mark.parametrize(
+        "status, expected",
+        [
+            (None, None),
+            ({"signed_in": True, "auth_method": "claude.ai", "plan": "Ultra"}, "ultra"),
+            ({"signed_in": True, "auth_method": "claude.ai", "plan": "max"}, "max"),
+            ({"signed_in": True, "auth_method": "api_key", "plan": None}, None),
+            ({"signed_in": False, "auth_method": "claude.ai", "plan": "ultra"}, None),
+        ],
+    )
+    def test_cached_payload_carries_the_cached_claude_plan_without_probing(self, status, expected):
+        from app.api.usage import get_cached_usage_payload
+        from app.core.claude_cli_status import ClaudeCliStatus
+
+        cached = {"windows": [], "available": False, "snapshots": []}
+        peeked = ClaudeCliStatus(**status) if status else None
+        with patch("app.api.usage.usage_limits_monitor") as monitor, \
+             patch("app.api.usage._load_provider_usage", new=AsyncMock(return_value=[])), \
+             patch("app.core.claude_cli_status.peek", return_value=peeked), \
+             patch("app.core.claude_cli_status.get_status",
+                   side_effect=AssertionError("a tool read must not probe the CLI")):
+            monitor.get_cached_cluster_snapshot = AsyncMock(return_value=cached)
+            payload = asyncio.run(get_cached_usage_payload())
+
+        assert payload.get("claude_plan") == expected
+
+
 class TestApiKeyUsage:
     """Usage rows are the owner's account data: an API key reads none of them."""
 

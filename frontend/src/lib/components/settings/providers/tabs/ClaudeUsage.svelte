@@ -25,7 +25,15 @@
 
 	const CLAUDE_USAGE_URL = 'https://claude.ai/settings/usage';
 	const s = $derived(guard.status);
-	const now = Date.now();
+	// Ticks while the tab is open (like the usage panel's clock), so
+	// countdowns stay current and a 5-hour window that resets drops out.
+	let now = $state(Date.now());
+	$effect(() => {
+		const clock = setInterval(() => {
+			now = Date.now();
+		}, 1000);
+		return () => clearInterval(clock);
+	});
 	const noFiveHour = $derived(planHasNoFiveHourLimit('claude', plan));
 	const windows = $derived(
 		(providers.current.usage?.windows ?? []).filter(

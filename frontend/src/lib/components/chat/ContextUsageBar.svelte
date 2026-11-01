@@ -67,6 +67,7 @@
 		getClaudeAuth,
 		type ProviderDisplay
 	} from '$lib/constants/models';
+	import { classifyRow } from '$lib/components/settings/providers/providers-model';
 	import { getContextUsage, type SdkContextUsage } from '$lib/api/sessions';
 	import {
 		computeContextBreakdown,
@@ -775,10 +776,22 @@
 	// derived from the row's auth_mode, so a `custom` row on Codex auth is
 	// classified correctly), falling back to the usage bucket's own fields when
 	// the registry hasn't hydrated.
+	/**
+	 * The usage kind of a provider section: the registry row classified the
+	 * way Settings does (`classifyRow`: `auth_mode` first, so a legacy
+	 * `custom` row signed in with ChatGPT is `chatgpt`), else the bucket's type.
+	 */
+	function providerUsageType(pb: { providerId: string; providerType: string | null }): string {
+		const entry = getProviders().find((p) => p.id === pb.providerId);
+		if (!entry) return pb.providerType ?? '';
+		const kind = classifyRow({ provider_type: entry.provider_type ?? null, auth_mode: entry.auth_mode ?? null });
+		return kind === 'custom' ? (entry.provider_type ?? pb.providerType ?? '') : kind;
+	}
+
 	/** A ChatGPT plan without a 5-hour window (Pro), from the registry row or the usage bucket. */
 	function providerNoFiveHour(pb: { providerId: string; providerType: string | null; planType: string | null }): boolean {
 		const entry = getProviders().find((p) => p.id === pb.providerId);
-		return planHasNoFiveHourLimit(entry?.provider_type ?? pb.providerType, entry?.plan_type ?? pb.planType);
+		return planHasNoFiveHourLimit(providerUsageType(pb), entry?.plan_type ?? pb.planType);
 	}
 
 	function providerDisplayFor(pb: {
@@ -866,7 +879,7 @@
 		providerType: string | null;
 	}): boolean {
 		const entry = getProviders().find((p) => p.id === pb.providerId);
-		const type = entry?.provider_type ?? pb.providerType ?? '';
+		const type = providerUsageType(pb);
 		if (type === 'grok' || type === 'openrouter') return true;
 		if (type !== 'chatgpt') return false;
 		const kind = entry?.auth_kind ?? 'subscription';

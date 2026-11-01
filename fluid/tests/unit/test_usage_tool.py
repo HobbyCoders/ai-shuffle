@@ -339,3 +339,80 @@ def test_provider_credits_carry_the_figures_the_panel_shows(monkeypatch) -> None
     }
     # Credit amounts stay amounts; the tool does not invent a percentage.
     assert not any(key.endswith("_percent") for key in out["providers"][0]["credits"])
+
+
+def _plan_snapshot(*, claude_plan=None, codex_plan="pro") -> dict:
+    now = int(time.time())
+    passed, ahead = str(now - 60), str(now + 3600)
+    claude_windows = [
+        {"type": "five_hour", "utilization": 64, "resets_at": passed},
+        {"type": "seven_day", "utilization": 58, "resets_at": str(now + 86_400)},
+    ]
+    snapshot = {
+        "available": True,
+        "fetched_at": now,
+        "self_instance_id": "self",
+        "windows": claude_windows,
+        "snapshots": [
+            {"instance_id": "self", "available": True, "fetched_at": now, "windows": claude_windows},
+            {"instance_id": "office-pc", "device_name": "Office PC", "available": True,
+             "fetched_at": now, "windows": claude_windows},
+        ],
+        "providers": [
+            {"provider_id": "codex", "provider_type": "chatgpt", "plan_type": codex_plan,
+             "status": "fresh", "fetched_at": now * 1000,
+             "windows": [
+                 {"type": "five_hour", "utilization": 90, "resets_at": passed},
+                 {"type": "seven_day", "utilization": 12, "resets_at": ahead},
+             ]},
+            {"provider_id": "codex-live", "provider_type": "chatgpt", "plan_type": codex_plan,
+             "status": "fresh", "fetched_at": now * 1000,
+             "windows": [{"type": "five_hour", "utilization": 30, "resets_at": ahead}]},
+        ],
+    }
+    if claude_plan:
+        snapshot["claude_plan"] = claude_plan
+    return snapshot
+
+
+def _types(windows: list[dict]) -> list[str]:
+    return [w["type"] for w in windows]
+
+
+@pytest.mark.parametrize("plan", ["pro", "prolite", "PRO"])
+def test_chatgpt_pro_leaves_out_a_passed_five_hour_window(plan: str) -> None:
+    providers = {p["provider_id"]: p for p in _payload(_plan_snapshot(codex_plan=plan))["providers"]}
+    assert _types(providers["codex"]["windows"]) == ["seven_day"]
+    # A live 5-hour window is still reported.
+    assert _types(providers["codex-live"]["windows"]) == ["five_hour"]
+
+
+@pytest.mark.parametrize("plan", ["plus", "team", None])
+def test_other_chatgpt_plans_keep_the_passed_five_hour_window(plan) -> None:
+    codex = _payload(_plan_snapshot(codex_plan=plan))["providers"][0]
+    assert _types(codex["windows"]) == ["five_hour", "seven_day"]
+    assert codex["windows"][0]["rolled_over"] is True
+
+
+def test_claude_ultra_applies_to_the_self_install_only() -> None:
+    payload = _payload(_plan_snapshot(claude_plan="ultra"))
+    assert payload["claude_plan"] == "ultra"
+    assert _types(payload["windows"]) == ["seven_day"]
+    accounts = {a["instance_id"]: a for a in payload["accounts"]}
+    assert _types(accounts["self"]["windows"]) == ["seven_day"]
+    # Another install's sign-in is not known: every window stays.
+    assert _types(accounts["office-pc"]["windows"]) == ["five_hour", "seven_day"]
+
+
+@pytest.mark.parametrize("plan", [None, "max", 7])
+def test_unknown_or_other_claude_plan_keeps_every_window(plan) -> None:
+    payload = _payload(_plan_snapshot(claude_plan=plan))
+    assert "claude_plan" not in payload or payload["claude_plan"] == "max"
+    assert _types(payload["windows"]) == ["five_hour", "seven_day"]
+    assert all(_types(a["windows"]) == ["five_hour", "seven_day"] for a in payload["accounts"])
+
+
+def test_claude_ultra_keeps_a_live_five_hour_window() -> None:
+    snapshot = _plan_snapshot(claude_plan="ultra")
+    snapshot["windows"][0] = {**snapshot["windows"][0], "resets_at": str(int(time.time()) + 3600)}
+    assert _types(_payload(snapshot)["windows"]) == ["five_hour", "seven_day"]

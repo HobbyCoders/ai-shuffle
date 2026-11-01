@@ -11,6 +11,8 @@ import ContextUsageBar from './ContextUsageBar.svelte';
 import { rateLimit, type ProviderUsageEntry } from '$lib/stores/rate-limit';
 import { usageSections } from '$lib/stores/expansion-preferences';
 import type { PreferenceAdapter } from '$lib/services/preference-sync';
+import { api } from '$lib/api/client';
+import { hydrateModelRegistry } from '$lib/constants/models';
 
 const mocks = vi.hoisted(() => {
 	const DEFAULT = {
@@ -390,6 +392,33 @@ describe('plans without a 5-hour window', () => {
 			{ type: 'seven_day', utilization: 12, resets_at: ahead(5 * 86_400) },
 		])]);
 		expect(skeleton(await open(), 'OpenAI')).toEqual(['header:section-device+section-account', 'row:5-hour limit', 'row:Weekly (all models)', 'meta:1']);
+	});
+
+	it('a legacy Codex row (registry type custom, auth_mode chatgpt) on Pro follows the same rule', async () => {
+		const registry = (providers: unknown[]) => {
+			const get = vi.spyOn(api, 'get').mockResolvedValue({ models: [], default: null, providers, claude: { auth_kind: 'subscription', plan_type: 'max' } });
+			return hydrateModelRegistry().finally(() => get.mockRestore());
+		};
+		await registry([{
+			id: 'codex-legacy', name: 'Codex', provider_type: 'custom', auth_mode: 'chatgpt',
+			auth_kind: 'subscription', plan_type: 'pro', models: [],
+		}]);
+		try {
+			snapshot([row({
+				provider_id: 'codex-legacy', provider_type: 'chatgpt', plan_type: 'pro',
+				windows: [
+					{ type: 'five_hour', utilization: 90, resets_at: ago(3600) },
+					{ type: 'seven_day', utilization: 12, resets_at: ahead(5 * 86_400) },
+				],
+			})]);
+			const container = await open();
+			expect(skeleton(container, 'Codex')).toEqual(['header:section-device+section-account', 'row:Weekly (all models)', 'meta:1']);
+			const text = sectionText(container, 'Codex');
+			// Subscription windows read as quota left, like a `chatgpt` row.
+			expect(text).toContain('88% left');
+		} finally {
+			await registry([]);
+		}
 	});
 
 	it('ChatGPT Plus keeps the 5-hour placeholder', async () => {

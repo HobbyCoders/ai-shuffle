@@ -223,7 +223,9 @@ probe also runs `claude auth status --text` and takes the tier from its
 probe that fails or prints another shape leaves the JSON `subscriptionType`.
 Both runs share the status cache (a minute while signed in). The usage panel
 uses the plan to leave out the 5-hour row on Ultra
-([usage-panel spec](specs/usage-panel.md)).
+([usage-panel spec](specs/usage-panel.md)). GetUsage's cache-only host
+payload carries it as `claude_plan` only when the status cache already holds
+it (`claude_cli_status.peek()`); a tool read never starts a probe.
 
 ### Claude resets
 

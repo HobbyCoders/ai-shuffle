@@ -26,7 +26,15 @@
 
 	let { banked, usageEntry, signedIn, plan = null }: Props = $props();
 
-	const now = Date.now();
+	// Ticks while the tab is open (like the usage panel's clock), so
+	// countdowns stay current and a 5-hour window that resets drops out.
+	let now = $state(Date.now());
+	$effect(() => {
+		const clock = setInterval(() => {
+			now = Date.now();
+		}, 1000);
+		return () => clearInterval(clock);
+	});
 	const noFiveHour = $derived(
 		planHasNoFiveHourLimit(usageEntry?.provider_type, usageEntry?.plan_type ?? plan)
 	);
