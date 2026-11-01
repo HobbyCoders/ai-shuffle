@@ -127,6 +127,18 @@ def _plan_windows(windows: list[dict[str, Any]], no_five_hour: bool) -> list[dic
     return [w for w in windows if not (w.get("type") == "five_hour" and w.get("rolled_over"))]
 
 
+def _rechecked(window: dict[str, Any]) -> dict[str, Any]:
+    """A formatted window re-read against the clock now.
+
+    A replayed row was formatted when it was read; a reset that has passed
+    since then reads as refilled, exactly as ``_window`` would format it now.
+    """
+    if window.get("rolled_over") or not _reset_passed(window.get("resets_at")):
+        return window
+    return {**window, "left_percent": 100.0, "remaining_percent": 100.0,
+            "used_percent": 0.0, "rolled_over": True}
+
+
 def _epoch_seconds(value: Any) -> float | None:
     """Epoch seconds from an epoch-seconds or epoch-ms stamp, else None."""
     if value is None or isinstance(value, bool):
@@ -266,6 +278,13 @@ def _payload(raw: Any) -> dict[str, Any]:
         providers = []
         for cached in _last_providers or ():
             entry = dict(cached)
+            # Re-check resets against now: a window that reset since the last
+            # read is refilled, and on a plan without a 5-hour window it is
+            # left out, as on a successful read.
+            entry["windows"] = _plan_windows(
+                [_rechecked(w) for w in entry.get("windows") or () if isinstance(w, dict)],
+                _no_five_hour_plan(entry.get("provider_type"), entry.get("plan_type")),
+            )
             entry["source"] = "last_known_provider_snapshot"
             entry["last_known"] = True
             if entry.get("freshness") == "fresh":

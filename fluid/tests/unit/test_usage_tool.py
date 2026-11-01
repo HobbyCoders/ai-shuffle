@@ -416,3 +416,38 @@ def test_claude_ultra_keeps_a_live_five_hour_window() -> None:
     snapshot = _plan_snapshot(claude_plan="ultra")
     snapshot["windows"][0] = {**snapshot["windows"][0], "resets_at": str(int(time.time()) + 3600)}
     assert _types(_payload(snapshot)["windows"]) == ["five_hour", "seven_day"]
+
+
+@pytest.mark.parametrize("plan,kept", [("pro", ["seven_day"]), ("plus", ["five_hour", "seven_day"])])
+def test_replayed_provider_windows_are_rechecked_across_a_reset(monkeypatch, plan, kept) -> None:
+    """A failed read after a reset must not replay the window as still live."""
+    import fluid.tools.builtins.usage as usage
+
+    monkeypatch.setattr(usage, "_last_providers", None, raising=False)
+    start = time.time()
+    reset = int(start) + 60
+    good = _payload({
+        "available": False, "fetched_at": None, "windows": [],
+        "providers": [{
+            "provider_id": "codex", "provider_type": "chatgpt", "plan_type": plan,
+            "fetched_at": start * 1000,
+            "windows": [
+                {"type": "five_hour", "utilization": 90, "resets_at": str(reset)},
+                {"type": "seven_day", "utilization": 20, "resets_at": str(reset + 86_400)},
+            ],
+        }],
+    })
+    assert _types(good["providers"][0]["windows"]) == ["five_hour", "seven_day"]
+    assert good["providers"][0]["windows"][0]["left_percent"] == 10
+
+    monkeypatch.setattr(usage.time, "time", lambda: reset + 1)
+    out = _payload({"available": False, "fetched_at": None, "windows": [], "providers": None})
+    (replayed,) = out["providers"]
+    assert replayed["last_known"] is True
+    assert _types(replayed["windows"]) == kept
+    if "five_hour" in kept:
+        assert replayed["windows"][0]["rolled_over"] is True
+        assert replayed["windows"][0]["left_percent"] == 100
+    assert replayed["windows"][-1]["left_percent"] == 80
+    # The cache keeps the values as read.
+    assert usage._last_providers[0]["windows"][0]["left_percent"] == 10
