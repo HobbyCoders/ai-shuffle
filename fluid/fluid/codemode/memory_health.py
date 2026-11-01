@@ -344,56 +344,68 @@ def check(store, *, now: float | None = None, learning_enabled: bool = True,
     }
 
 
-def _loss_samples(store, now, previous) -> tuple[list[list[float]], int, int | None, int | None]:
-    """``(samples, dropped_total, dropped_in_window, low_value_in_window)``.
+def _loss_samples(store, now, previous) -> tuple[list[list[float]], int, int | None, int | None, bool]:
+    """``(samples, dropped_total, dropped_in_window, low_value_in_window, reset)``.
 
-    ``samples`` are the ``[at, dropped_unsynthesized, dropped_low_value]``
-    triples to keep, this run's reading included (a state written before the
-    low-value count holds ``[at, total]`` pairs). ``dropped_in_window`` is the
-    growth since the newest sample at least COVERAGE_WINDOW old (or the oldest
-    one, while the history is shorter), None with no earlier sample to compare
-    against. ``low_value_in_window`` is the growth of the low-value count
-    against that same baseline and reset, None when the baseline predates it.
+    ``samples`` are the ``[at, dropped_unsynthesized, dropped_low_value,
+    first_at]`` readings to keep, this run's included (states written by
+    earlier builds hold ``[at, total]`` pairs or ``[at, total, low]``
+    triples). ``dropped_in_window`` is the growth since the newest sample at
+    least COVERAGE_WINDOW old (or the oldest one, while the history is
+    shorter), None with no earlier sample to compare against.
+    ``low_value_in_window`` is the growth of the low-value count against that
+    same baseline, None when the baseline predates it or the record was reset
+    in the window. ``reset`` says the record was rebuilt since the baseline.
     """
     record = read_journal_loss(Path(store.root) / JOURNAL_LOSS_FILE) or {}
     total = int(record.get("dropped_unsynthesized") or 0)
     # A record without the key has had no drop by a build that counts them,
     # so every drop measured from a sample this build took is counted.
     low = int(record.get("dropped_low_value") or 0)
+    # The record's first_at is its generation: a rebuilt record starts a new one.
+    first = record.get("first_at")
+    generation = float(first) if isinstance(first, (int, float)) and first > 0 else 0.0
     kept = []
     for sample in previous.get("journal_loss_samples") or []:
-        if (isinstance(sample, list) and len(sample) in (2, 3)
+        if (isinstance(sample, list) and 2 <= len(sample) <= 4
                 and all(isinstance(v, (int, float)) for v in sample) and sample[0] <= now):
-            kept.append([float(sample[0]), *(int(v) for v in sample[1:])])
+            kept.append([float(sample[0]), *(int(v) for v in sample[1:3]), *(float(v) for v in sample[3:])])
     kept.sort()
-    baseline = None
+    dropped = low_dropped = None
+    reset = False
     if kept:
         older = [s for s in kept if s[0] <= now - COVERAGE_WINDOW]
         baseline = older[-1] if older else kept[0]
-    dropped = low_dropped = None
-    if baseline is not None:
-        base_low = baseline[2] if len(baseline) == 3 else None
-        # A count below the baseline means the record was reset: count both
-        # from zero, so the two stay comparable.
-        if total < baseline[1] or (base_low is not None and low < base_low):
-            dropped, low_dropped = total, (None if base_low is None else low)
+        # Counters only grow while a record lives. Any reading since the
+        # baseline from another generation, or above the current counts,
+        # means it was rebuilt; what was lost before that is unknown.
+        for s in kept:
+            if s[0] < baseline[0]:
+                continue
+            if (total < s[1] or (len(s) >= 3 and low < s[2])
+                    or (len(s) == 4 and s[3] and generation and s[3] != generation)):
+                reset = True
+        if reset:
+            dropped = total
         else:
-            dropped, low_dropped = total - baseline[1], (None if base_low is None else low - base_low)
+            dropped = total - baseline[1]
+            low_dropped = low - baseline[2] if len(baseline) >= 3 else None
     if not kept or now - kept[-1][0] >= LOSS_SAMPLE_EVERY:
-        kept.append([now, total, low])
+        kept.append([now, total, low, generation])
     # Keep the window, plus the newest sample before it as the baseline.
     start = max((i for i, s in enumerate(kept) if s[0] <= now - COVERAGE_WINDOW), default=0)
-    return kept[start:][-LOSS_SAMPLES_KEPT:], total, dropped, low_dropped
+    return kept[start:][-LOSS_SAMPLES_KEPT:], total, dropped, low_dropped, reset
 
 
 def _kind_samples(
-    store: SkillStore, now: float, previous: dict,
+    store: SkillStore, now: float, previous: dict, reset: bool = False,
 ) -> tuple[list, dict[str, int] | None]:
     """``(kind_samples, dropped_by_kind_in_window)``, kept like
     :func:`_loss_samples` keeps totals: ``[at, {kind: dropped}]`` from
     ``journal_loss.json``'s ``dropped_by_kind``. The window value is None
     with no earlier sample; a store upgraded from a build without the split
-    starts counting from its first one."""
+    starts counting from its first one. After a reset (``reset``, or a kind
+    count below any reading since the baseline) it is the whole current split."""
     record = read_journal_loss(Path(store.root) / JOURNAL_LOSS_FILE) or {}
     split = record.get("dropped_by_kind") or {}
     current = {k: int(split.get(k) or 0) for k in JOURNAL_LOSS_KINDS}
@@ -410,10 +422,11 @@ def _kind_samples(
     window = None
     if kept:
         older = [s for s in kept if s[0] <= now - COVERAGE_WINDOW]
-        base = (older[-1] if older else kept[0])[1]
-        # A count below the baseline means the record was reset: count from zero.
-        reset = any(current[k] < base.get(k, 0) for k in JOURNAL_LOSS_KINDS)
-        window = {k: current[k] - (0 if reset else base.get(k, 0)) for k in JOURNAL_LOSS_KINDS}
+        baseline = older[-1] if older else kept[0]
+        reset = reset or any(current[k] < s[1].get(k, 0)
+                             for s in kept if s[0] >= baseline[0] for k in JOURNAL_LOSS_KINDS)
+        base = {} if reset else baseline[1]
+        window = {k: current[k] - base.get(k, 0) for k in JOURNAL_LOSS_KINDS}
         window = {k: v for k, v in window.items() if v}
     if not kept or now - kept[-1][0] >= LOSS_SAMPLE_EVERY:
         kept.append([now, {k: v for k, v in current.items() if v}])
@@ -438,8 +451,8 @@ def _coverage(store, now, previous) -> dict:
     except Exception:  # noqa: BLE001 — an unreadable document is reported elsewhere
         pass
     budget_days = len({d for d in days if 0 <= today - d < round(COVERAGE_WINDOW / DAY)})
-    samples, total, dropped, low_value = _loss_samples(store, now, previous)
-    kind_samples, by_kind = _kind_samples(store, now, previous)
+    samples, total, dropped, low_value, reset = _loss_samples(store, now, previous)
+    kind_samples, by_kind = _kind_samples(store, now, previous, reset)
     return {"read_3d": read, "filtered_3d": filtered, "dropped_3d": dropped,
             "dropped_3d_low_value": low_value, "dropped_3d_by_kind": by_kind,
             "dropped_total": total, "budget_skips_3d": len(skipped),
@@ -775,11 +788,12 @@ def run(store, *, now: float | None = None, learning_enabled: bool = True) -> di
     alert_since = previous.get("alert_since") if alerting else None
     if alerting and "alert_since" not in previous and previous.get("state") == "attention":
         # A state from a build before alerts: when every signal alerting now
-        # was already in attention then, this is the stretch it announced
-        # (or still has to), so it carries over instead of a second bell.
-        before = {s.get("id") for s in previous.get("signals", [])
+        # was in attention then for the same reason, this is the stretch it
+        # announced (or still has to), so it carries over instead of a second
+        # bell. A signal with a new reason is new news and rings.
+        before = {(s.get("id"), s.get("reason")) for s in previous.get("signals", [])
                   if isinstance(s, dict) and s.get("state") == "attention"}
-        if {s["id"] for s in alerting} <= before:
+        if {(s["id"], s["reason"]) for s in alerting} <= before:
             alert_since = previous.get("attention_since")
     if alerting:
         alert_since = alert_since or now

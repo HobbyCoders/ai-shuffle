@@ -387,6 +387,16 @@ def test_upgrade_carries_an_announced_stretch_over_without_a_second_bell(tmp_pat
     (tmp_path / memory_health.HEALTH_FILE).write_text(json.dumps(legacy))
     state = memory_health.run(store, now=now)
     assert not state["notify"] and state["alert_since"] == now - 2 * DAY
+    # The same signal with a new reason is new news.
+    legacy_reason = [s for s in legacy["signals"] if s["id"] == "capacity"][0]["reason"]
+    for s in legacy["signals"]:
+        if s["id"] == "capacity":
+            s["reason"] = "Learning has not run despite recent sessions."
+    (tmp_path / memory_health.HEALTH_FILE).write_text(json.dumps(legacy))
+    assert memory_health.run(store, now=now)["notify"]
+    for s in legacy["signals"]:
+        if s["id"] == "capacity":
+            s["reason"] = legacy_reason
     # A legacy stretch that was about something else does not swallow a new alert.
     for s in legacy["signals"]:
         if s["id"] == "capacity":
