@@ -37,12 +37,20 @@ _reconcile_slots = asyncio.Semaphore(4)
 _fallback_misses = TTLCache(ttl=300, max_entries=512, name="session-pr-fallback-misses")
 
 
+def invalidate_checkout_pr_fallback_cache(working_dir: Optional[str] = None) -> None:
+    """Forget discovery misses after a checkout/PR mutation."""
+    if working_dir is None:
+        _fallback_misses.invalidate()
+    else:
+        _fallback_misses.invalidate_where(lambda key: key[0] == working_dir)
+
+
 def schedule_session_pr_reconcile(
     session_id: str, *, force: bool = False
 ) -> Optional[asyncio.Task]:
     """Queue an owner-local refresh without blocking a turn or a Git poll.
 
-    A turn end bypasses the poll cooldown. If a pre-merge poll is still in
+    A turn end bypasses the poll cooldown and fallback misses. If a poll is in
     flight, force a trailing refresh rather than letting its old answer win.
     Failures retry twice; later polls can recover after that bounded attempt.
     """
@@ -58,17 +66,19 @@ def schedule_session_pr_reconcile(
         return None
 
     async def refresh() -> None:
+        refresh_forced = force
         while True:
             _reconcile_again.discard(session_id)
             for delay in (0, 2, 10):
                 if delay:
                     await asyncio.sleep(delay)
                 async with _reconcile_slots:
-                    if await reconcile_session_pr(session_id):
+                    if await reconcile_session_pr(session_id, force=refresh_forced):
                         break
             else:
                 logger.warning("PR reconcile exhausted retries for %s", session_id)
-            if session_id not in _reconcile_again:
+            refresh_forced = session_id in _reconcile_again
+            if not refresh_forced:
                 break
 
     def finished(task: asyncio.Task) -> None:
@@ -326,6 +336,7 @@ def _pull_claimed_elsewhere(pr: Any, session: dict, project_id: Optional[str]) -
 def find_pull_for_checkout_fallback(
     github_service: Any, repo: str, branch: str, working_dir: str, *,
     session_id: Optional[str] = None, project_id: Optional[str] = None,
+    bypass_negative_cache: bool = False,
 ) -> Any:
     """Discover only a PR containing work made AFTER this branch was created.
 
@@ -337,8 +348,9 @@ def find_pull_for_checkout_fallback(
 
     Local git gates precede gh calls. A five-minute negative cache is keyed by
     checkout, HEAD and upstream (plus branch/base identity); failures and primary
-    ownership rejections are never negative-cached. An unscoped call is only a
-    read-only discovery probe; production callers supply session/project scope.
+    ownership rejections are never negative-cached. Turn ends bypass misses.
+    An unscoped call is only a read-only discovery probe; production callers
+    supply session/project scope.
     """
     from app.core.git_service import git_service
     from app.db import database
@@ -383,7 +395,7 @@ def find_pull_for_checkout_fallback(
     upstream_name = upstream.stdout.strip() if upstream.returncode == 0 else ""
     upstream_branch = upstream_name.partition("/")[2]
     cache_key = (working_dir, head_sha, upstream_name, repo, branch, creation_sha, tuple(sorted(bases)))
-    if _fallback_misses.get(cache_key):
+    if not bypass_negative_cache and _fallback_misses.get(cache_key):
         return None
 
     ancestry: dict[str, bool] = {}
@@ -397,7 +409,14 @@ def find_pull_for_checkout_fallback(
                 or (getattr(pr, "head_repo", None) or "").lower() != repo.lower()):
             return False
         if sha not in ancestry:
-            ancestry[sha] = ancestor(creation_sha, sha) and ancestor(sha, head_sha)
+            # A bot/GitHub update or old PR may have a head we never fetched.
+            # That is not local ownership (nor a GitHub transport failure).
+            exists = git("cat-file", "-e", f"{sha}^{{commit}}")
+            if exists.returncode not in (0, 128):
+                exists.check_returncode()
+            ancestry[sha] = (
+                exists.returncode == 0 and ancestor(creation_sha, sha) and ancestor(sha, head_sha)
+            )
         return ancestry[sha]
 
     discovered = []
@@ -411,6 +430,7 @@ def find_pull_for_checkout_fallback(
     if not discovered:
         _fallback_misses.set(cache_key, True)
         return None
+    _fallback_misses.invalidate(cache_key)  # a forced lookup may supersede a miss
     return _preferred_pull([
         pr for pr in discovered if not _pull_claimed_elsewhere(pr, session, project_id)
     ])
@@ -462,7 +482,7 @@ async def _refresh_listed_open_prs(
     return ok
 
 
-async def reconcile_session_pr(session_id: str) -> bool:
+async def reconcile_session_pr(session_id: str, *, force: bool = False) -> bool:
     """Best-effort: if this session's branch has a GitHub PR, persist it.
 
     Prefers an open PR on the session branch; otherwise the latest PR for
@@ -477,6 +497,7 @@ async def reconcile_session_pr(session_id: str) -> bool:
     a legacy project alias is not required. No remote checkout is materialized.
     A failed lookup or write returns False so the scheduler can retry.
     An authoritative no-op returns True. Never clears state on failure.
+    ``force`` bypasses cached fallback misses after turn-end agent mutations.
     """
     try:
         from app.db import database
@@ -537,6 +558,7 @@ async def reconcile_session_pr(session_id: str) -> bool:
                     pr = await asyncio.to_thread(
                         find_pull_for_checkout_fallback, github_service, repo, branch, working_dir,
                         session_id=session_id, project_id=checkout_project_id,
+                        bypass_negative_cache=force,
                     )
             elif pr_number:
                 pr = await asyncio.to_thread(github_service.get_pull, repo, int(pr_number))

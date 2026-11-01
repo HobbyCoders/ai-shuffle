@@ -56,6 +56,7 @@ from app.api.git_ai import (
 )
 from app.core.session_pr_state import (
     find_pull_for_checkout_fallback,
+    invalidate_checkout_pr_fallback_cache,
     persist_pr_state,
     schedule_session_pr_reconcile,
 )
@@ -1218,7 +1219,7 @@ _pr_state_cache = TTLCache(
 
 
 def _invalidate_pr_state_cache(working_dir: Optional[str] = None) -> None:
-    """Drop cached PR state — after a PR create/merge, or for tests.
+    """Drop header state and fallback misses after Git/PR mutations, or for tests.
 
     With *working_dir*, only that checkout's entries are dropped (keys are
     ``"<working_dir>:<branch>"``, so this matches on the prefix); without it,
@@ -1226,6 +1227,7 @@ def _invalidate_pr_state_cache(working_dir: Optional[str] = None) -> None:
     """
     global _pr_state_generation
     _pr_state_generation += 1
+    invalidate_checkout_pr_fallback_cache(working_dir)
     if working_dir is None:
         _pr_state_cache.invalidate()
     else:

@@ -840,3 +840,52 @@ async def test_fallback_failures_are_not_negative_cached(pr_checkout):
         with pytest.raises(GitHubCliError):
             await asyncio.to_thread(find_pull_for_checkout_fallback, gh, 'o/r', 'feat/local', str(pr_checkout))
     assert gh.list_commit_pulls.call_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('lookup', ['upstream', 'commit'])
+async def test_fallback_skips_unfetched_head_and_keeps_valid_candidate(mock_db, pr_checkout, lookup):
+    from tests.git_repo_helpers import commit_file, git
+
+    sha = commit_file(pr_checkout, 'own.txt', 'own work', 'session commit')
+    if lookup == 'upstream':
+        git(pr_checkout, 'push', '-q', '-u', 'origin', 'HEAD:feat/remote')
+    sid = _mk(project_id='p1', worktree_branch='feat/local')
+    unknown = _checkout_pull(99, 'OPEN', 'b' * 40)
+    valid = _checkout_pull(12, 'OPEN', sha)
+    candidates = [unknown, valid]
+    ok, _ = await _reconcile_checkout(
+        sid, pr_checkout,
+        pulls=candidates if lookup == 'upstream' else (),
+        commit_pulls=candidates if lookup == 'commit' else (),
+    )
+    assert ok  # an unfetched PR head is not a GitHub/connectivity failure
+    assert database.get_session(sid)['pr_number'] == valid.number
+
+
+@pytest.mark.asyncio
+async def test_forced_turn_end_reconcile_bypasses_cached_fallback_miss(mock_db, pr_checkout):
+    from app.core.session_pr_state import schedule_session_pr_reconcile
+    from tests.git_repo_helpers import commit_file
+
+    sha = commit_file(pr_checkout, 'own.txt', 'own work', 'session commit')
+    sid = _mk(project_id='p1', worktree_branch='feat/local')
+    pr = _checkout_pull(12, 'OPEN', sha)
+    sync, _ = _quiet_sync()
+    try:
+        with patch('app.api.git_helpers.get_working_dir_async',
+                   new=AsyncMock(return_value=str(pr_checkout))), \
+                patch('app.core.github_service.github_service') as gh:
+            gh.get_repo_from_remote.return_value = 'o/r'
+            gh.list_pulls.return_value = []
+            gh.list_commit_pulls.return_value = []
+            assert await reconcile_session_pr(sid)  # header/poll after push, before gh pr create
+            gh.list_commit_pulls.return_value = [pr]  # gh pr create: unchanged HEAD/upstream
+            assert await reconcile_session_pr(sid)  # ordinary polls still reuse the miss
+            assert gh.list_commit_pulls.call_count == 1
+            assert database.get_session(sid)['pr_number'] is None
+            await schedule_session_pr_reconcile(sid, force=True)
+            assert database.get_session(sid)['pr_number'] == pr.number
+            assert gh.list_commit_pulls.call_count == 2
+    finally:
+        sync.stop()

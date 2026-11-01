@@ -663,3 +663,103 @@ def test_header_fallback_claims_are_scoped_per_session(pr_client, pr_checkout, m
         other = pr_client.get('/api/v1/projects/p1/git/pr-state?session_id=other').json()
         assert other['open_pr'] is None
         assert other['pr_lookup_failed'] is False
+
+
+@pytest.mark.parametrize('with_valid', [False, True])
+def test_header_unfetched_pr_head_is_not_a_github_failure(pr_client, pr_checkout, mock_github_service, with_valid):
+    from tests.git_repo_helpers import commit_file
+
+    sha = commit_file(pr_checkout, 'own.txt', 'own work', 'session commit')
+    unknown, valid = _pr(99, head='feat/remote'), _pr(12, head='feat/remote')
+    unknown.head_sha, valid.head_sha = 'b' * 40, sha
+    mock_github_service.list_pulls.return_value = []
+    mock_github_service.list_commit_pulls.return_value = [unknown, valid] if with_valid else [unknown]
+    data = pr_client.get('/api/v1/projects/p1/git/pr-state').json()
+    assert data['pr_lookup_failed'] is False
+    if with_valid:
+        assert data['open_pr']['number'] == valid.number
+    else:
+        assert data['open_pr'] is None
+
+
+@pytest.mark.parametrize('scoped', [False, True])
+def test_pr_state_invalidation_clears_fallback_miss(pr_client, pr_checkout, mock_github_service, scoped):
+    from tests.git_repo_helpers import commit_file
+
+    sha = commit_file(pr_checkout, 'own.txt', 'own work', 'session commit')
+    mock_github_service.list_pulls.return_value = []
+    mock_github_service.list_commit_pulls.return_value = []
+    assert pr_client.get('/api/v1/projects/p1/git/pr-state').json()['open_pr'] is None
+    pr = _pr(head='feat/remote')
+    pr.head_sha = sha
+    mock_github_service.list_commit_pulls.return_value = [pr]
+    gitops._invalidate_pr_state_cache(str(pr_checkout) if scoped else None)
+    data = pr_client.get('/api/v1/projects/p1/git/pr-state').json()
+    assert data['open_pr']['number'] == pr.number
+    assert mock_github_service.list_commit_pulls.call_count == 2
+
+
+@pytest.mark.parametrize('action', ['commit', 'push'])
+@pytest.mark.parametrize('success', [False, True])
+def test_commit_push_invalidate_pr_caches_only_on_success(pr_app, pr_client, pr_checkout, action, success):
+    from app.api import git as git_routes
+    from app.core.session_pr_state import _fallback_misses
+
+    pr_app.include_router(git_routes.router)
+    key = (str(pr_checkout), 'head', 'upstream')
+    other = (str(pr_checkout) + '-other', 'head', 'upstream')
+    header_key = f'{pr_checkout}:feat/x'
+    _fallback_misses.set(key, True)
+    _fallback_misses.set(other, True)
+    gitops._pr_state_cache.set(header_key, {})
+    service = MagicMock()
+    service.is_git_repo.return_value = True
+    service.get_status.return_value = {}
+    service.get_diff_stats.return_value = {}
+    service.push.return_value = (success, None if success else 'push failed')
+    try:
+        with patch.object(git_routes, 'check_project_access'), \
+                patch.object(git_routes, 'get_working_dir_async', AsyncMock(return_value=str(pr_checkout))), \
+                patch.object(git_routes, 'git_service', service), \
+                patch.object(git_routes, 'stage_and_commit', AsyncMock(return_value=(success, 'abc', 'commit_failed'))):
+            body = {'message': 'feature'} if action == 'commit' else {'branch': 'feat/x'}
+            response = pr_client.post(f'/api/v1/projects/p1/git/{action}', json=body)
+        assert response.status_code == (200 if success else 400), response.text
+        assert bool(_fallback_misses.get(key)) is not success
+        assert (gitops._pr_state_cache.peek(header_key) is None) is success
+        assert _fallback_misses.get(other) is True  # unrelated checkout stays cached
+    finally:
+        _fallback_misses.invalidate(key)
+        _fallback_misses.invalidate(other)
+
+
+@pytest.mark.parametrize('success', [False, True])
+@pytest.mark.parametrize('scoped', [False, True])
+def test_create_pr_invalidates_pr_caches_only_on_success(pr_app, pr_client, pr_checkout, success, scoped):
+    from app.api import github as github_routes
+    from app.core.session_pr_state import _fallback_misses
+
+    pr_app.include_router(github_routes.router)
+    key = (str(pr_checkout), 'head', 'upstream')
+    header_key = f'{pr_checkout}:feat/x'
+    _fallback_misses.set(key, True)
+    gitops._pr_state_cache.set(header_key, {})
+    try:
+        with patch.object(github_routes, 'check_project_access'), \
+                patch.object(github_routes, 'check_github_auth', AsyncMock()), \
+                patch('app.api.git_helpers.get_working_dir_async', AsyncMock(return_value=str(pr_checkout))), \
+                patch.object(github_routes, 'get_repo_for_project', AsyncMock(return_value='o/r')), \
+                patch.object(github_routes, 'github_service') as gh, \
+                patch.object(github_routes, '_broadcast_pr_changed', AsyncMock()), \
+                patch.object(github_routes, 'persist_pr_state', AsyncMock()):
+            gh.get_repo_from_remote.return_value = 'o/r'
+            gh.create_pull.return_value = (_pr() if success else None, 'failed')
+            body = {'title': 'Feature', 'head': 'feat/x', 'base': 'main'}
+            if scoped:
+                body['session_id'] = 'owner'
+            response = pr_client.post('/api/v1/projects/p1/github/pulls', json=body)
+        assert response.status_code == (201 if success else 400), response.text
+        assert bool(_fallback_misses.get(key)) is not success
+        assert (gitops._pr_state_cache.peek(header_key) is None) is success
+    finally:
+        _fallback_misses.invalidate(key)

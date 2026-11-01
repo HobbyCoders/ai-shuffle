@@ -344,6 +344,7 @@ async def create_pull_request(
     check_project_access(request, project_id)
     await check_github_auth()
 
+    working_dir = None
     if body.session_id:
         from app.api.git_helpers import get_working_dir_async
         working_dir = await get_working_dir_async(project_id, session_id=body.session_id)
@@ -385,6 +386,9 @@ async def create_pull_request(
         f"head={body.head} total={t_total_ms:.0f}ms gh_cli={t_gh_ms:.0f}ms"
     )
 
+    from app.api.git_operations import _invalidate_pr_state_cache
+    # GitHub-only projects may have no local checkout: invalidate all then.
+    _invalidate_pr_state_cache(working_dir)
     await _broadcast_pr_changed(request, project_id, body.head)
     await persist_pr_state(
         session_id=body.session_id,

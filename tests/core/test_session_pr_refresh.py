@@ -75,8 +75,8 @@ async def test_poll_coalescing_cooldown_and_forced_trailing_refresh(monkeypatch)
     started, release = asyncio.Event(), asyncio.Event()
     calls = []
 
-    async def reconcile(sid):
-        calls.append(sid)
+    async def reconcile(sid, *, force=False):
+        calls.append((sid, force))
         started.set()
         await release.wait()
         return True
@@ -88,10 +88,10 @@ async def test_poll_coalescing_cooldown_and_forced_trailing_refresh(monkeypatch)
     assert prs.schedule_session_pr_reconcile("s", force=True) is task
     release.set()
     await task
-    assert calls == ["s", "s"]  # pre-merge answer cannot consume turn-end refresh
+    assert calls == [("s", False), ("s", True)]  # trailing turn-end bypasses misses too
     assert prs.schedule_session_pr_reconcile("s") is None
     await prs.schedule_session_pr_reconcile("s", force=True)
-    assert calls == ["s", "s", "s"]
+    assert calls == [("s", False), ("s", True), ("s", True)]
 
 
 @pytest.mark.asyncio
@@ -115,7 +115,7 @@ async def test_failures_are_bounded_and_next_poll_can_recover(caplog):
 async def test_cancelled_refresh_releases_session_slot(before_start):
     started = asyncio.Event()
 
-    async def blocked(sid):
+    async def blocked(sid, *, force=False):
         started.set()
         await asyncio.Event().wait()
 
