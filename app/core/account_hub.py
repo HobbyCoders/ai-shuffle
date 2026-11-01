@@ -415,7 +415,15 @@ def require_active(owner):
     try:
         if leader:
             try:
-                result = call(binding, 'GET', suffix)
+                try:
+                    result = call(binding, 'GET', suffix)
+                except HubResponseError as exc:
+                    # The hub answered: the device (or this worker's link) is
+                    # revoked. call() reports it as 503, but it is not an outage.
+                    if exc.hub_status in (401, 403):
+                        _forget_verdict(key)
+                        raise HTTPException(status_code=401, detail='Account authorization revoked') from None
+                    raise
                 if (result.get('active') is not True or result.get('account_id') != owner['account_id']
                         or result.get('device_id') != owner['hub_device_id']):
                     _forget_verdict(key)

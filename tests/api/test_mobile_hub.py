@@ -552,6 +552,24 @@ def test_revocation_is_not_masked_by_cache_or_grace(setup, monkeypatch):
     assert failure.value.status_code == 503
 
 
+@pytest.mark.parametrize('hub_status', [401, 403])
+def test_hub_refusal_is_revocation_not_outage(setup, monkeypatch, hub_status):
+    # call() raises a 503 HubResponseError carrying the hub's own answer. A
+    # 401/403 there is a revocation: a stale paired cookie must not 503 every
+    # auth check (and block the local owner) for as long as the grace lasts.
+    bind()
+    insert()
+    owner = store.ownership(DEVICE)
+    _verdict_settings(monkeypatch, ttl=0, grace=600)
+    monkeypatch.setattr(account_hub, 'call', active)
+    account_hub.require_active(owner)
+    monkeypatch.setattr(account_hub, 'call', Mock(side_effect=account_hub.HubResponseError('refused', hub_status)))
+    with pytest.raises(HTTPException) as failure:
+        account_hub.require_active(owner)
+    assert failure.value.status_code == 401
+    assert account_hub._verdict_age(account_hub._verdict_key(owner)) is None
+
+
 def test_binding_deactivation_bypasses_cache(setup, monkeypatch):
     bind()
     insert()
