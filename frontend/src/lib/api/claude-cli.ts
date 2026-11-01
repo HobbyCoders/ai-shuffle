@@ -138,6 +138,7 @@ export function claudePlanLabel(plan: string | null | undefined): string | null 
 	const value = (plan ?? '').trim().toLowerCase();
 	if (!value) return null;
 	if (value === 'max') return 'Max';
+	if (value === 'ultra') return 'Ultra';
 	if (value === 'pro') return 'Pro';
 	if (value === 'team') return 'Team';
 	if (value === 'enterprise') return 'Enterprise';

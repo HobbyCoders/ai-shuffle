@@ -47,7 +47,25 @@ const mocks = vi.hoisted(() => {
 			},
 		},
 		getContextUsage: vi.fn(),
+		claudePlan: 'max' as string | null,
+		usageTarget: store<string | null>(null),
 	};
+
+	function store<T>(initial: T) {
+		let value = initial;
+		const fns = new Set<(v: T) => void>();
+		return {
+			subscribe(fn: (v: T) => void) {
+				fn(value);
+				fns.add(fn);
+				return () => fns.delete(fn);
+			},
+			set(v: T) {
+				value = v;
+				fns.forEach((f) => f(value));
+			},
+		};
+	}
 });
 
 vi.mock('$lib/services/preferences', () => ({
@@ -67,7 +85,11 @@ vi.mock('$lib/api/sessions', async (importOriginal) => {
 });
 vi.mock('$lib/constants/models', async (importOriginal) => {
 	const actual = await importOriginal<Record<string, unknown>>();
-	return { ...actual, getClaudeAuth: () => ({ auth_kind: 'subscription', plan_type: 'max' }) };
+	return { ...actual, getClaudeAuth: () => ({ auth_kind: 'subscription', plan_type: mocks.claudePlan }) };
+});
+vi.mock('$lib/stores/usage-target', async (importOriginal) => {
+	const actual = await importOriginal<Record<string, unknown>>();
+	return { ...actual, usageTargetInstance: mocks.usageTarget };
 });
 vi.mock('$lib/stores/auth.svelte', async (importOriginal) => {
 	const actual = await importOriginal<Record<string, unknown>>();
@@ -130,6 +152,8 @@ beforeEach(() => {
 	usageSections.set({});
 	rateLimit.__resetForTests();
 	mocks.activeSession.set({ ...mocks.DEFAULT });
+	mocks.claudePlan = 'max';
+	mocks.usageTarget.set(null);
 	mocks.getContextUsage.mockReset();
 	mocks.getContextUsage.mockResolvedValue({ available: false, reason: 'not_connected' });
 });
@@ -265,6 +289,114 @@ describe('Claude rows', () => {
 		] });
 		const container = await open();
 		expect(container.querySelector('.usage-meta-text')?.textContent).toBe('Checked 20m ago');
+	});
+});
+
+describe('plans without a 5-hour window', () => {
+	const ago = (sec: number) => String(Math.floor(T0 / 1000) - sec);
+	const ahead = (sec: number) => String(Math.floor(T0 / 1000) + sec);
+	const claudeWindows = (fiveHourResetsAt: string) => [
+		{ type: 'five_hour', utilization: 64, resets_at: fiveHourResetsAt, observed_at: T0 - 172_800_000 },
+		{ type: 'seven_day', utilization: 58, resets_at: ahead(5 * 86_400), observed_at: T0 },
+	];
+
+	async function collapse(container: HTMLElement, label: string) {
+		const button = container.querySelector(`button[aria-label="${label} — collapse"]`) as HTMLButtonElement;
+		await fireEvent.click(button);
+	}
+	const summaryOf = (container: HTMLElement, name: string) => {
+		const section = Array.from(container.querySelectorAll('.popover-section'))
+			.find((s) => s.querySelector('.section-device')?.textContent === name);
+		return section?.querySelector('.sec-summary')?.textContent ?? null;
+	};
+
+	it('Claude Ultra: a rolled-over 5-hour window is hidden and the summary is the weekly window', async () => {
+		mocks.claudePlan = 'ultra';
+		rateLimit.applySnapshot({ available: true, fetched_at: T0 / 1000, windows: claudeWindows(ago(2 * 86_400)) });
+		const container = await open();
+		expect(skeleton(container, 'Claude')).toEqual(['header:section-device+section-account', 'row:Weekly (all models)', 'meta:1']);
+		expect(sectionText(container, 'Claude')).not.toContain('awaiting next report');
+		await collapse(container, 'Plan usage limits');
+		expect(summaryOf(container, 'Claude')).toBe('58% left');
+	});
+
+	it('Claude Ultra before any report: no 5-hour placeholder', async () => {
+		mocks.claudePlan = 'ultra';
+		rateLimit.applySnapshot({ available: false, windows: [] });
+		expect(skeleton(await open(), 'Claude')).toEqual(['header:section-device+section-account', 'row:Weekly (all models)', 'meta:1']);
+	});
+
+	it('Claude Ultra: a live 5-hour window is still shown, first, and drives the summary', async () => {
+		mocks.claudePlan = 'ultra';
+		rateLimit.applySnapshot({ available: true, fetched_at: T0 / 1000, windows: [
+			{ type: 'seven_day', utilization: 58, resets_at: ahead(5 * 86_400), observed_at: T0 },
+			{ type: 'five_hour', utilization: 72, resets_at: ahead(3600), observed_at: T0 },
+		] });
+		const container = await open();
+		expect(skeleton(container, 'Claude')).toEqual(['header:section-device+section-account', 'row:5-hour limit', 'row:Weekly (all models)', 'meta:1']);
+		expect(sectionText(container, 'Claude')).toContain('resets in 1h 0m');
+		await collapse(container, 'Plan usage limits');
+		expect(summaryOf(container, 'Claude')).toBe('72% left');
+	});
+
+	it('Claude Max keeps the rolled-over 5-hour row and summarizes it', async () => {
+		rateLimit.applySnapshot({ available: true, fetched_at: T0 / 1000, windows: claudeWindows(ago(2 * 86_400)) });
+		const container = await open();
+		expect(skeleton(container, 'Claude')).toEqual(['header:section-device+section-account', 'row:5-hour limit', 'row:Weekly (all models)', 'meta:1']);
+		expect(sectionText(container, 'Claude')).toContain('reset · awaiting next report');
+		await collapse(container, 'Plan usage limits');
+		expect(summaryOf(container, 'Claude')).toBe('100% left');
+	});
+
+	it('the Ultra plan applies to this install only: another device keeps its 5-hour row', async () => {
+		mocks.claudePlan = 'ultra';
+		mocks.usageTarget.set('office-pc');
+		rateLimit.applySnapshot({
+			available: true, windows: [], self_instance_id: 'self',
+			snapshots: [
+				{ instance_id: 'self', available: false, fetched_at: T0 / 1000, windows: [] },
+				{ instance_id: 'office-pc', device_name: 'Office PC', available: true, fetched_at: T0 / 1000, windows: claudeWindows(ago(2 * 86_400)) },
+			],
+		});
+		const container = await open();
+		const text = container.textContent ?? '';
+		expect(text).toContain('5-hour limit');
+		expect(text).toContain('reset · awaiting next report');
+	});
+
+	const chatgpt = (plan_type: string, windows: ProviderUsageEntry['windows']) => row({
+		provider_id: `codex-${plan_type}`, provider_type: 'chatgpt', plan_type, windows,
+	});
+
+	it('ChatGPT Pro: no 5-hour placeholder, and a rolled-over 5-hour window is hidden', async () => {
+		snapshot([chatgpt('pro', [
+			{ type: 'five_hour', utilization: 90, resets_at: ago(3600) },
+			{ type: 'seven_day', utilization: 12, resets_at: ahead(5 * 86_400) },
+		])]);
+		const container = await open();
+		expect(skeleton(container, 'OpenAI')).toEqual(['header:section-device+section-account', 'row:Weekly (all models)', 'meta:1']);
+		await collapse(container, 'OpenAI usage');
+		expect(summaryOf(container, 'OpenAI')).toBe('88% left');
+	});
+
+	it('ChatGPT Pro Lite before the 5-hour window is reported: the weekly row only', async () => {
+		snapshot([chatgpt('prolite', [{ type: 'seven_day', utilization: 12, resets_at: ahead(5 * 86_400) }])]);
+		expect(skeleton(await open(), 'OpenAI')).toEqual(['header:section-device+section-account', 'row:Weekly (all models)', 'meta:1']);
+	});
+
+	it('ChatGPT Pro: a live 5-hour window is still shown', async () => {
+		snapshot([chatgpt('pro', [
+			{ type: 'five_hour', utilization: 30, resets_at: ahead(3600) },
+			{ type: 'seven_day', utilization: 12, resets_at: ahead(5 * 86_400) },
+		])]);
+		expect(skeleton(await open(), 'OpenAI')).toEqual(['header:section-device+section-account', 'row:5-hour limit', 'row:Weekly (all models)', 'meta:1']);
+	});
+
+	it('ChatGPT Plus keeps the 5-hour placeholder', async () => {
+		snapshot([chatgpt('plus', [{ type: 'seven_day', utilization: 40, resets_at: ahead(5 * 86_400) }])]);
+		const container = await open();
+		expect(skeleton(container, 'OpenAI')).toEqual(['header:section-device+section-account', 'row:5-hour limit', 'row:Weekly (all models)', 'meta:1']);
+		expect(sectionText(container, 'OpenAI')).toContain('not reported yet');
 	});
 });
 

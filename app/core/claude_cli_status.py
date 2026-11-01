@@ -11,6 +11,11 @@ code alone. ``orgId`` and ``configDirectory`` stay server-side (``to_dict``
 leaves them out); the Claude usage-reset client needs them. A missing binary, a CLI without the ``auth`` command, a timeout or
 garbage output all produce a status with ``error`` set instead of an exception.
 
+``subscriptionType`` is ``max`` for both Max and Ultra, so for a claude.ai
+sign-in the probe also runs ``claude auth status --text`` and takes the plan
+from its ``Login method: Claude <Tier> account`` line ("ultra"), keeping the
+JSON value when that run fails or prints another shape.
+
 The result is cached briefly: a positive answer for a minute, a negative one
 for a few seconds so a login done in another terminal shows up quickly.
 ``invalidate()`` drops the cache after a login or logout the app ran itself.
@@ -59,6 +64,12 @@ _METHOD_LABELS = {
 }
 
 _VERSION_RE = re.compile(r"\d+\.\d+\.\d+(?:[-+.][0-9A-Za-z.]+)?")
+# ``Login method: Claude Ultra account`` in ``claude auth status --text``. The
+# JSON form's ``subscriptionType`` is ``max`` for both Max and Ultra (CLI
+# 2.1.316), so the tier is read from this line.
+_TIER_RE = re.compile(
+    r"^\s*login method\s*:\s*claude\s+([a-z][a-z0-9]*)\s+account\s*$", re.IGNORECASE | re.MULTILINE
+)
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 
@@ -186,6 +197,25 @@ def parse_text_status(text: str, status: ClaudeCliStatus) -> None:
             status.org_name = value
         elif key in ("plan", "subscription") and value:
             status.plan = value
+    if status.plan is None:
+        status.plan = parse_text_tier(text)
+
+
+def parse_text_tier(text: str) -> Optional[str]:
+    """The plan tier in ``claude auth status --text`` ("ultra"), or None."""
+    match = _TIER_RE.search(text or "")
+    return match.group(1).lower() if match else None
+
+
+def _text_tier(binary: str, run: Callable) -> Optional[str]:
+    """The tier from the CLI's text status; None when it fails or reads otherwise."""
+    try:
+        result = run([binary, "auth", "status", "--text"])
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return parse_text_tier(result.stdout or "")
 
 
 def _supports_auth_status(binary: str, run: Optional[Callable] = None) -> bool:
@@ -262,6 +292,9 @@ def _probe(resolver: Optional[Callable[[], str]], run: Optional[Callable]) -> Cl
     data = _extract_json(output)
     if data is not None:
         parse_json_status(data, status)
+        if status.signed_in and status.auth_method == "claude.ai":
+            # Max and Ultra both read "max" in JSON; the text form names the tier.
+            status.plan = _text_tier(binary, run) or status.plan
     else:
         parse_text_status(output + "\n" + (result.stderr or ""), status)
     if status.signed_in is None and result.returncode in (0, 1):

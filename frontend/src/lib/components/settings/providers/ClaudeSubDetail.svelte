@@ -280,7 +280,7 @@
 		{:else if tab === 'Models'}
 			<BuiltInModels />
 		{:else if tab === 'Usage'}
-			<ClaudeUsage {guard} />
+			<ClaudeUsage {guard} plan={status?.plan ?? summaryCli?.plan ?? null} />
 		{:else if tab === 'Policy'}
 			<ClaudePolicy {guard} {mode} />
 		{:else if cli.terminalOpen}

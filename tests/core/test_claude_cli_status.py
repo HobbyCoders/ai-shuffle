@@ -17,10 +17,12 @@ class FakeCli:
     """Answers the three commands the probe runs."""
 
     def __init__(self, status_out="", status_code=0, auth_help="Commands:\n  login\n  logout\n  status",
-                 version="2.1.280 (Claude Code)", json_flag=True, status_err=""):
+                 version="2.1.280 (Claude Code)", json_flag=True, status_err="", text_out=None, text_code=0):
         self.calls = []
         self.status_out, self.status_code, self.status_err = status_out, status_code, status_err
         self.auth_help, self.version, self.json_flag = auth_help, version, json_flag
+        # ``auth status --text``: None answers like the plain command.
+        self.text_out, self.text_code = text_out, text_code
 
     def __call__(self, argv):
         self.calls.append(argv[1:])
@@ -28,6 +30,10 @@ class FakeCli:
             return _done(argv, self.version + "\n")
         if argv[1:] == ["auth", "--help"]:
             return _done(argv, self.auth_help)
+        if argv[1:] == ["auth", "status", "--text"] and self.text_out is not None:
+            if isinstance(self.text_out, BaseException):
+                raise self.text_out
+            return _done(argv, self.text_out, "", self.text_code)
         if argv[1:] == ["auth", "status", "--json"] and not self.json_flag:
             return _done(argv, "", "error: unknown option '--json'", 1)
         if argv[1:3] == ["auth", "status"]:
@@ -246,3 +252,96 @@ def test_probe_environment_follows_the_active_sign_in(monkeypatch):
     assert cs._probe_env()["CLAUDE_CONFIG_DIR"] == "/data/claude-logins/0123456789abcdef"
     # An explicit default folder leaves the worker's own setting alone.
     assert "CLAUDE_CONFIG_DIR" not in cs._probe_env({})
+
+
+# ─── Plan tier from `claude auth status --text` ─────────────────────────────
+
+_MAX_JSON = json.dumps({"loggedIn": True, "authMethod": "claude.ai", "email": "me@example.com",
+                        "subscriptionType": "max"})
+
+
+def _text(login_method):
+    return f"Login method: {login_method}\nOrganization: Me\nEmail: me@example.com\n"
+
+
+@pytest.mark.parametrize("line,tier", [
+    ("Login method: Claude Ultra account", "ultra"),
+    ("Login method: Claude Max account", "max"),
+    ("  login method:  claude PRO Account  ", "pro"),
+    ("Login method: Claude account", None),
+    ("Login method: API key", None),
+    ("Plan: Claude Ultra account", None),
+    ("", None),
+])
+def test_parse_text_tier(line, tier):
+    assert cs.parse_text_tier(f"Claude Code status\n{line}\nEmail: me@example.com") == tier
+
+
+def test_ultra_tier_replaces_the_json_max(fake):
+    """JSON says "max" for Max and Ultra alike; the text form names Ultra."""
+    cli = fake(status_out=_MAX_JSON, text_out=_text("Claude Ultra account"))
+    status = _probe()
+    assert ["auth", "status", "--text"] in cli.calls
+    assert status.plan == "ultra"
+    assert status.auth_method_label == "Claude account"  # the label stays the method's
+    assert status.to_dict()["plan"] == "ultra"
+
+
+def test_max_tier_stays_max(fake):
+    fake(status_out=_MAX_JSON, text_out=_text("Claude Max account"))
+    assert _probe().plan == "max"
+
+
+@pytest.mark.parametrize("text_out,text_code", [
+    ("Login method: Claude account\n", 0),                    # no tier in the line
+    ("something new entirely", 0),                             # another shape
+    ("Login method: Claude Ultra account\n", 2),              # the run failed
+    (subprocess.TimeoutExpired(["claude"], 15), 0),           # it timed out
+    (OSError("gone"), 0),
+])
+def test_unreadable_text_probe_keeps_the_json_plan(fake, text_out, text_code):
+    fake(status_out=_MAX_JSON, text_out=text_out, text_code=text_code)
+    status = _probe()
+    assert status.plan == "max" and status.signed_in is True and status.error is None
+
+
+@pytest.mark.parametrize("payload", [
+    {"loggedIn": False, "authMethod": "none"},
+    {"loggedIn": True, "authMethod": "oauth_token", "subscriptionType": "max"},
+    {"loggedIn": True, "authMethod": "api_key"},
+])
+def test_text_probe_runs_only_for_a_claude_ai_sign_in(fake, payload):
+    cli = fake(status_out=json.dumps(payload), text_out=_text("Claude Ultra account"),
+               status_code=0 if payload["loggedIn"] else 1)
+    status = _probe()
+    assert ["auth", "status", "--text"] not in cli.calls
+    assert status.plan != "ultra"
+
+
+def test_text_only_cli_reads_the_tier(fake):
+    fake(json_flag=False, status_out=_text("Claude Ultra account"))
+    status = _probe()
+    assert status.plan == "ultra" and status.auth_method_label == "Claude Ultra account"
+
+
+def test_tier_shares_the_status_cache(fake, monkeypatch):
+    """One probe per cache period: the text run does not add a probe per read."""
+    cli = fake(status_out=_MAX_JSON, text_out=_text("Claude Ultra account"))
+    monkeypatch.setattr(cs, "_default_resolver", lambda: "/home/appuser/.local/bin/claude")
+    monkeypatch.setattr(cs, "_announce_account_change", lambda: None)
+    cs.invalidate()
+    try:
+        assert cs.get_status().plan == "ultra"
+        assert cs.get_status().plan == "ultra"
+        assert cli.calls.count(["auth", "status", "--text"]) == 1
+    finally:
+        cs.invalidate()
+
+
+def test_saved_sign_in_reads_its_tier(monkeypatch):
+    cli = FakeCli(status_out=_MAX_JSON, text_out=_text("Claude Ultra account"))
+    monkeypatch.setattr(cs, "_run", lambda argv, env=None: cli(argv))
+    cs._auth_support.clear()
+    status = cs.probe_home({"CLAUDE_CONFIG_DIR": "/data/claude-logins/0123456789abcdef"},
+                           resolver=lambda: "/home/appuser/.local/bin/claude")
+    assert status.plan == "ultra"

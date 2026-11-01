@@ -213,6 +213,18 @@ The popover links to the user's own usage page,
 [claude.ai/settings/usage](https://claude.ai/settings/usage), for the full
 picture. Snapshots carry no Claude account identity or plan.
 
+### Claude plan
+
+The plan comes from the CLI's own `claude auth status`, never from a token
+or an Anthropic endpoint. Its JSON form reports `subscriptionType`, which is
+`max` for both Max and Ultra (CLI 2.1.316), so for a claude.ai sign-in the
+probe also runs `claude auth status --text` and takes the tier from its
+`Login method: Claude <Tier> account` line (`ultra`, `max`, `pro`). A text
+probe that fails or prints another shape leaves the JSON `subscriptionType`.
+Both runs share the status cache (a minute while signed in). The usage panel
+uses the plan to leave out the 5-hour row on Ultra
+([usage-panel spec](specs/usage-panel.md)).
+
 ### Claude resets
 
 AI Shuffle has no Claude reset controls. An earlier version read the Claude

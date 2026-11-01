@@ -40,6 +40,11 @@ import {
 	isSelfTarget,
 	SELF_BUCKET_KEY,
 	claudeUsageSource,
+	planHasNoFiveHourLimit,
+	isRetiredFiveHourWindow,
+	planDisplayWindows,
+	subscriptionBaselineWindows,
+	claudeSummaryRemaining,
 	type ClaudeUsageSourceState,
 	type UsageWindow,
 } from './rate-limit';
@@ -1180,5 +1185,70 @@ describe('installs sharing one Claude account (#1980)', () => {
 		// A later snapshot that has not seen the live reading yet keeps it.
 		sharedAccountSnapshot();
 		expect(resolveBucket(rateLimit.current, null)?.windows.five_hour.utilization).toBe(80);
+	});
+});
+
+describe('plans without a 5-hour window (Claude Ultra, ChatGPT Pro)', () => {
+	it.each([
+		['claude', 'ultra', true],
+		['claude', 'Ultra', true],
+		['anthropic', 'ultra', true],
+		['claude', 'max', false],
+		['claude', 'pro', false],
+		['claude', null, false],
+		['chatgpt', 'pro', true],
+		['chatgpt', 'prolite', true],
+		['chatgpt', 'PRO', true],
+		['chatgpt', 'plus', false],
+		['chatgpt', 'team', false],
+		['chatgpt', 'enterprise', false],
+		['chatgpt', '', false],
+		['grok', 'pro', false],
+		[null, 'ultra', false],
+	])('%s plan %s has no 5-hour limit: %s', (provider, plan, expected) => {
+		expect(planHasNoFiveHourLimit(provider, plan)).toBe(expected);
+	});
+
+	const NOW = Date.UTC(2026, 10, 1, 12, 0, 0);
+	const at = (offsetSec: number) => String(Math.floor(NOW / 1000) + offsetSec);
+	function win(type: string, resets_at: string | null, utilization = 40): UsageWindow {
+		return { type, utilization, resets_at, received_at: NOW, source: 'live' };
+	}
+
+	it('retires only a rolled-over 5-hour window, and only on such a plan', () => {
+		expect(isRetiredFiveHourWindow(win('five_hour', at(-60)), true, NOW)).toBe(true);
+		// Live (reset ahead) or undated: still shown, the provider's report wins.
+		expect(isRetiredFiveHourWindow(win('five_hour', at(3600)), true, NOW)).toBe(false);
+		expect(isRetiredFiveHourWindow(win('five_hour', null), true, NOW)).toBe(false);
+		expect(isRetiredFiveHourWindow({ type: 'five_hour' }, true, NOW)).toBe(false);
+		// Other windows and other plans are untouched.
+		expect(isRetiredFiveHourWindow(win('seven_day', at(-60)), true, NOW)).toBe(false);
+		expect(isRetiredFiveHourWindow(win('five_hour', at(-60)), false, NOW)).toBe(false);
+	});
+
+	it('planDisplayWindows drops a retired 5-hour window and keeps the rest in order', () => {
+		const stale = { five_hour: win('five_hour', at(-60)), seven_day: win('seven_day', at(86_400)) };
+		expect(planDisplayWindows(stale, true, NOW).map((w) => w.type)).toEqual(['seven_day']);
+		expect(planDisplayWindows(stale, false, NOW).map((w) => w.type)).toEqual(['five_hour', 'seven_day']);
+		const live = { seven_day: win('seven_day', at(86_400)), five_hour: win('five_hour', at(3600)) };
+		expect(planDisplayWindows(live, true, NOW).map((w) => w.type)).toEqual(['five_hour', 'seven_day']);
+	});
+
+	it('the baseline has no 5-hour placeholder on such a plan', () => {
+		expect(subscriptionBaselineWindows(true)).toEqual(['seven_day']);
+		expect(subscriptionBaselineWindows(false)).toEqual(['five_hour', 'seven_day']);
+	});
+
+	it('the Claude summary falls back to the weekly window, then the smallest', () => {
+		const rows = [
+			{ type: 'seven_day', pct: 58 },
+			{ type: 'seven_day_opus', pct: 30 },
+		];
+		expect(claudeSummaryRemaining(rows, true)).toBe(58);
+		// Without the plan rule, a missing 5-hour row means the smallest.
+		expect(claudeSummaryRemaining(rows, false)).toBe(30);
+		expect(claudeSummaryRemaining([{ type: 'five_hour', pct: 72 }, ...rows], true)).toBe(72);
+		expect(claudeSummaryRemaining([{ type: 'seven_day_opus', pct: 30 }], true)).toBe(30);
+		expect(claudeSummaryRemaining([], true)).toBeNull();
 	});
 });

@@ -3,10 +3,12 @@
 	 * ChatGPT / SuperGrok > Usage: the allowance windows the provider reports
 	 * (utilization is quota used) and the banked resets, each with Use behind
 	 * an inline confirm. A retry after a failed Use reuses its idempotency key.
+	 * On a plan without a 5-hour window (ChatGPT Pro) a 5-hour window past its
+	 * reset is left out, as in the usage panel.
 	 */
 	import { RefreshCw } from 'lucide-svelte';
 	import type { ProviderUsageEntry } from '$lib/stores/rate-limit';
-	import { formatCountdown, windowLabel } from '$lib/stores/rate-limit';
+	import { formatCountdown, isRetiredFiveHourWindow, planHasNoFiveHourLimit, windowLabel } from '$lib/stores/rate-limit';
 	import RowGroup from '../../rows/RowGroup.svelte';
 	import SettingRow from '../../rows/SettingRow.svelte';
 	import Meter from '../../rows/Meter.svelte';
@@ -18,14 +20,23 @@
 		banked: BankedResets;
 		usageEntry: ProviderUsageEntry | null;
 		signedIn: boolean;
+		/** The account's plan when the usage entry has none ("pro", "plus"). */
+		plan?: string | null;
 	}
 
-	let { banked, usageEntry, signedIn }: Props = $props();
+	let { banked, usageEntry, signedIn, plan = null }: Props = $props();
 
 	const now = Date.now();
+	const noFiveHour = $derived(
+		planHasNoFiveHourLimit(usageEntry?.provider_type, usageEntry?.plan_type ?? plan)
+	);
 	const windows = $derived(
 		(usageEntry?.windows ?? []).filter(
-			(w) => w.type !== 'window_0m' && w.type !== 'grok_build' && Number.isFinite(w.utilization)
+			(w) =>
+				w.type !== 'window_0m' &&
+				w.type !== 'grok_build' &&
+				Number.isFinite(w.utilization) &&
+				!isRetiredFiveHourWindow(w, noFiveHour, now)
 		)
 	);
 

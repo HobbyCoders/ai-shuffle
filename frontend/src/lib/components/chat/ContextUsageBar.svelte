@@ -83,7 +83,10 @@
 	} from './context-usage';
 	import {
 		rateLimit,
-		displayWindows,
+		planDisplayWindows,
+		planHasNoFiveHourLimit,
+		subscriptionBaselineWindows,
+		claudeSummaryRemaining,
 		windowLabel,
 		effectivePct,
 		reportedRemainingPct,
@@ -486,12 +489,16 @@
 
 	/**
 	 * Windows a section always shows, reported or not. Claude and ChatGPT/Codex
-	 * subscriptions report a 5-hour and a weekly window; SuperGrok a weekly one.
+	 * subscriptions report a 5-hour and a weekly window, minus the 5-hour one on
+	 * a plan without it (Claude Ultra, ChatGPT Pro); SuperGrok a weekly one.
 	 */
-	const CLAUDE_BASELINE_WINDOWS = ['five_hour', 'seven_day'] as const;
-	function providerBaselineWindows(pb: { providerType: string | null }, showsRemaining: boolean): readonly string[] {
+	function providerBaselineWindows(
+		pb: { providerType: string | null },
+		showsRemaining: boolean,
+		noFiveHourLimit: boolean
+	): readonly string[] {
 		if (!showsRemaining) return [];
-		if (pb.providerType === 'chatgpt') return CLAUDE_BASELINE_WINDOWS;
+		if (pb.providerType === 'chatgpt') return subscriptionBaselineWindows(noFiveHourLimit);
 		if (pb.providerType === 'grok') return ['seven_day'];
 		return [];
 	}
@@ -512,9 +519,12 @@
 				resetText: 'not reported yet',
 			}));
 		const slots = [...reported.map(toSlot), ...placeholders];
+		// The 5-hour window stays first even where it is not a baseline window
+		// (a live one on Claude Ultra / ChatGPT Pro).
+		const order = baseline.length ? [...new Set(['five_hour', ...baseline])] : [];
 		const rank = (type: string) => {
-			const i = baseline.indexOf(type);
-			return i < 0 ? baseline.length : i;
+			const i = order.indexOf(type);
+			return i < 0 ? order.length : i;
 		};
 		// Stable sort: baseline windows in their fixed order, then the rest as reported.
 		return slots
@@ -527,9 +537,10 @@
 		pb: { providerType: string | null },
 		windows: UsageWindow[],
 		showsRemaining: boolean,
+		noFiveHourLimit: boolean,
 		nowMs: number
 	): RowSlot[] {
-		return withBaseline(windows, providerBaselineWindows(pb, showsRemaining), (w) => {
+		return withBaseline(windows, providerBaselineWindows(pb, showsRemaining, noFiveHourLimit), (w) => {
 			const display = providerWindowPercent(w, nowMs, showsRemaining);
 			return { type: w.type, label: windowLabel(w.type), pct: display.pct, severity: display.severity, resetText: resetText(w, nowMs) };
 		});
@@ -566,8 +577,8 @@
 		return windowRolledOver(usageWindow, nowMs);
 	}
 
-	function itemsFor(bucket: UsageBucket): WindowItem[] {
-		return displayWindows(bucket.windows).map((usageWindow) => {
+	function itemsFor(bucket: UsageBucket, noFiveHourLimit: boolean): WindowItem[] {
+		return planDisplayWindows(bucket.windows, noFiveHourLimit, now).map((usageWindow) => {
 			const pct = reportedRemainingPct(usageWindow, now);
 			return {
 				pct,
@@ -690,11 +701,21 @@
 	const target = $derived($usageTargetInstance);
 	const resolvedBucket = $derived(resolveBucket($rateLimit, target));
 	const resolvedKey = $derived(resolveBucketKey($rateLimit, target));
-	const items = $derived.by<WindowItem[]>(() => (resolvedBucket ? itemsFor(resolvedBucket) : []));
-	// Claude plan rows: the 5-hour and weekly windows always hold a row (an
-	// API-key login reports none, so it gets no placeholders).
+	/** The resolved bucket is this install's own (see the header notes below). */
+	const isSelf = $derived(isSelfTarget($rateLimit, target) ||
+		(resolvedKey != null && resolvedKey === selfBucketKey($rateLimit)));
+	// A plan without a 5-hour window (Claude Ultra). The plan describes THIS
+	// install's sign-in only, like the header subtext, so another device's
+	// bucket keeps every row.
+	const claudeNoFiveHour = $derived(isSelf && planHasNoFiveHourLimit('claude', getClaudeAuth().plan_type));
+	const items = $derived.by<WindowItem[]>(() =>
+		resolvedBucket ? itemsFor(resolvedBucket, claudeNoFiveHour) : []
+	);
+	// Claude plan rows: the 5-hour and weekly windows always hold a row, the
+	// weekly one alone on a plan without a 5-hour window (an API-key login
+	// reports none, so it gets no placeholders).
 	const claudeSlots = $derived.by<RowSlot[]>(() =>
-		withBaseline(items, claudeDisplay.subtext === 'API' ? [] : CLAUDE_BASELINE_WINDOWS, (item) => ({
+		withBaseline(items, claudeDisplay.subtext === 'API' ? [] : subscriptionBaselineWindows(claudeNoFiveHour), (item) => ({
 			type: item.type,
 			label: item.label,
 			pct: item.pct,
@@ -725,8 +746,7 @@
 	//
 	// Without it the subtext falls back to the resolved install's device
 	// name / "Other device" hint rather than dropping that disambiguation.
-	const isSelf = $derived(isSelfTarget($rateLimit, target) ||
-		(resolvedKey != null && resolvedKey === selfBucketKey($rateLimit)));
+	// (`isSelf` is declared above, next to the resolved bucket.)
 	const selfClaude = $derived($claudeAuthenticated || getClaudeAuth().auth_kind === 'api');
 	// Empty usage buckets also exist on installs without Claude. Subscription
 	// display metadata defaults to "subscription", so it is not proof of a login.
@@ -755,6 +775,12 @@
 	// derived from the row's auth_mode, so a `custom` row on Codex auth is
 	// classified correctly), falling back to the usage bucket's own fields when
 	// the registry hasn't hydrated.
+	/** A ChatGPT plan without a 5-hour window (Pro), from the registry row or the usage bucket. */
+	function providerNoFiveHour(pb: { providerId: string; providerType: string | null; planType: string | null }): boolean {
+		const entry = getProviders().find((p) => p.id === pb.providerId);
+		return planHasNoFiveHourLimit(entry?.provider_type ?? pb.providerType, entry?.plan_type ?? pb.planType);
+	}
+
 	function providerDisplayFor(pb: {
 		providerId: string;
 		providerName: string | null;
@@ -907,13 +933,11 @@
 	// Claude plan-usage collapse: the rows follow the 'plan' section toggle.
 	const planRowsVisible = $derived(isSectionOpen('plan'));
 	// The collapsed Claude summary is the 5-hour window, the one a session is
-	// working against right now; the expanded rows keep every limit. Without a
-	// 5-hour reading it falls back to the smallest remaining percentage (null →
-	// omit for an empty bucket).
-	const planSummaryRemaining = $derived<number | null>(
-		items.find((it) => it.type === 'five_hour')?.pct ??
-			(items.length ? Math.min(...items.map((it) => it.pct)) : null)
-	);
+	// working against right now; the expanded rows keep every limit. On a plan
+	// without a 5-hour window it is the weekly one; otherwise, without a 5-hour
+	// reading, the smallest remaining percentage (null → omit for an empty
+	// bucket). `items` already leaves out a retired 5-hour window.
+	const planSummaryRemaining = $derived<number | null>(claudeSummaryRemaining(items, claudeNoFiveHour));
 
 	// ── Document-level click/tap-away + Escape ────────────────────────────
 	function handleClickOutside(e: MouseEvent) {
@@ -1023,9 +1047,11 @@
 
 <!-- ═══ Plan usage limits (Claude) ═══
      Brand + auth-kind subtext (plan / "API"), else the resolved device name or
-     "Other device". Collapsed: the 5-hour window's remaining quota ("—" before
-     a report). Expanded: the 5-hour and weekly rows always (placeholders until
-     reported), any other reported window, then the meta line. -->
+     "Other device". Collapsed: the 5-hour window's remaining quota (the weekly
+     one on a plan without a 5-hour window; "—" before a report). Expanded: the
+     5-hour and weekly rows always (placeholders until reported; no 5-hour row
+     on Ultra unless a live one is reported), any other reported window, then
+     the meta line. -->
 {#snippet claudeSummary()}
 	{#if planSummaryRemaining != null}
 		<span class="row-pct {remainingSeverity(planSummaryRemaining)} sec-summary">{planSummaryRemaining}% left</span>
@@ -1055,7 +1081,8 @@
 	{@const sectionId = `provider:${pb.providerId}`}
 	{@const pbDisplay = providerDisplayFor(pb)}
 	{@const pbOpen = isSectionOpen(sectionId)}
-	{@const pbWindows = displayWindows(pb.windows)}
+	{@const pbNoFiveHour = providerNoFiveHour(pb)}
+	{@const pbWindows = planDisplayWindows(pb.windows, pbNoFiveHour, now)}
 	{@const pbShowsRemaining = providerShowsRemaining(pb)}
 	{@const suffix = pbShowsRemaining ? ' left' : ''}
 	{#snippet providerSummary()}
@@ -1079,7 +1106,7 @@
 	{/snippet}
 	{@render sectionHeader(sectionId, pbDisplay.name, pbDisplay.subtext, pbOpen, `${pbDisplay.name} usage`, providerSummary)}
 	{#if pbOpen}
-		{#each providerSlots(pb, pbWindows, pbShowsRemaining, now) as slot (slot.type)}
+		{#each providerSlots(pb, pbWindows, pbShowsRemaining, pbNoFiveHour, now) as slot (slot.type)}
 			{@render windowRow(slot, suffix)}
 		{/each}
 		{@const credits = creditsLine(pb)}

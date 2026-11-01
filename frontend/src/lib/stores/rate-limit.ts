@@ -419,6 +419,43 @@ export function windowRolledOver(w: Pick<UsageWindow, 'resets_at'>, nowMs: numbe
 	return resetMs != null && resetMs <= nowMs;
 }
 
+/**
+ * Whether a subscription plan has no 5-hour window (as of 2026-11): Claude
+ * Ultra ("No 5-hour limit for verified accounts", claude.com/pricing) and
+ * every ChatGPT Pro tier, `pro` and `prolite` ("Pro plans currently have no
+ * five-hour limit", learn.chatgpt.com/docs/pricing). `provider` is `claude`
+ * (or `anthropic`) or a provider type such as `chatgpt`. An unknown plan or
+ * provider keeps the 5-hour window (false).
+ */
+export function planHasNoFiveHourLimit(
+	provider: string | null | undefined,
+	plan: string | null | undefined
+): boolean {
+	const value = (plan ?? '').trim().toLowerCase();
+	if (!value) return false;
+	const kind = (provider ?? '').trim().toLowerCase();
+	if (kind === 'claude' || kind === 'anthropic') return value === 'ultra';
+	if (kind === 'chatgpt') return value.startsWith('pro');
+	return false;
+}
+
+/**
+ * Whether a reported window is a 5-hour window the plan no longer has: on a
+ * plan without one (`planHasNoFiveHourLimit`), a `five_hour` window whose
+ * reset has passed is a leftover (reported before the plan changed, or
+ * awaiting a report that will not come) and is not drawn. A LIVE one (reset
+ * still ahead, or no reset time) is drawn: an Ultra account keeps a
+ * temporary 5-hour limit until it is verified, and the provider's report
+ * beats the plan rule.
+ */
+export function isRetiredFiveHourWindow(
+	w: { type: string; resets_at?: string | null },
+	noFiveHourLimit: boolean,
+	nowMs: number
+): boolean {
+	return noFiveHourLimit && w.type === 'five_hour' && windowRolledOver({ resets_at: w.resets_at ?? null }, nowMs);
+}
+
 /** Used quota as last reported; 0 once the window has reset. */
 export function effectivePct(w: UsageWindow, nowMs: number): number {
 	if (windowRolledOver(w, nowMs)) return 0;
@@ -487,6 +524,45 @@ function orderedWindows(windows: Record<string, UsageWindow>): UsageWindow[] {
  *  localStorage buckets may still carry it until the next poll. */
 export function displayWindows(windows: Record<string, UsageWindow>): UsageWindow[] {
 	return orderedWindows(windows).filter((w) => w.type !== 'window_0m' && w.type !== 'grok_build');
+}
+
+/**
+ * The windows a plan's usage rows draw: `displayWindows` minus a 5-hour
+ * window the plan no longer has (`isRetiredFiveHourWindow`).
+ */
+export function planDisplayWindows(
+	windows: Record<string, UsageWindow>,
+	noFiveHourLimit: boolean,
+	nowMs: number
+): UsageWindow[] {
+	return displayWindows(windows).filter((w) => !isRetiredFiveHourWindow(w, noFiveHourLimit, nowMs));
+}
+
+/**
+ * The windows every row of a section shows, reported or not: the 5-hour and
+ * weekly ones for a Claude or ChatGPT/Codex plan, the weekly one alone on a
+ * plan without a 5-hour window (Claude Ultra, ChatGPT Pro).
+ */
+export function subscriptionBaselineWindows(noFiveHourLimit: boolean): readonly string[] {
+	return noFiveHourLimit ? ['seven_day'] : ['five_hour', 'seven_day'];
+}
+
+/**
+ * A Claude section's collapsed "% left" from its drawn rows (`planDisplayWindows`
+ * already left out a retired 5-hour window): the 5-hour window, the one a
+ * session works against right now; on a plan without one, the weekly (all
+ * models) window; else the smallest remaining. Null without any row.
+ */
+export function claudeSummaryRemaining(
+	rows: { type: string; pct: number }[],
+	noFiveHourLimit: boolean
+): number | null {
+	const pick = (type: string) => rows.find((r) => r.type === type)?.pct;
+	return (
+		pick('five_hour') ??
+		(noFiveHourLimit ? pick('seven_day') : undefined) ??
+		(rows.length ? Math.min(...rows.map((r) => r.pct)) : null)
+	);
 }
 
 /** The key of the self (local install's) bucket for the given state. */
