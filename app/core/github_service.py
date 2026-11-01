@@ -136,6 +136,8 @@ class PullRequest:
     head_sha: Optional[str] = None
     # Set by list_commit_pulls: the commit GitHub lists as part of this PR.
     contains_commit: Optional[str] = None
+    # Full owner/name of the head repository; None is not proof of ownership.
+    head_repo: Optional[str] = None
 
 
 @dataclass
@@ -581,7 +583,7 @@ class GitHubService:
                 '--repo', repo,
                 '--state', state,
                 '--limit', str(limit),
-                '--json', 'number,title,body,state,headRefName,headRefOid,baseRefName,author,url,createdAt,updatedAt,mergeable',
+                '--json', 'number,title,body,state,headRefName,headRefOid,headRepository,baseRefName,author,url,createdAt,updatedAt,mergeable',
             ]
             if head:
                 cmd.extend(['--head', head])
@@ -614,6 +616,7 @@ class GitHubService:
                 updated_at=pr_data.get('updatedAt', ''),
                 mergeable=_parse_mergeable(pr_data.get('mergeable')),
                 head_sha=pr_data.get('headRefOid'),
+                head_repo=(pr_data.get('headRepository') or {}).get('nameWithOwner'),
             ))
 
         return pulls
@@ -648,6 +651,7 @@ class GitHubService:
                 author=(pr.get('user') or {}).get('login', 'unknown'), url=pr.get('html_url', ''),
                 created_at=pr.get('created_at', ''), updated_at=pr.get('updated_at', ''),
                 head_sha=head.get('sha'), contains_commit=sha,
+                head_repo=(head.get('repo') or {}).get('full_name'),
             ))
         return pulls
 

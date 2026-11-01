@@ -54,7 +54,12 @@ from app.api.git_ai import (
     generate_commit_message_for_dir,
     generate_pr_description_for_dir,
 )
-from app.core.session_pr_state import persist_pr_state, schedule_session_pr_reconcile
+from app.core.session_pr_state import (
+    find_pull_for_checkout_fallback,
+    invalidate_checkout_pr_fallback_cache,
+    persist_pr_state,
+    schedule_session_pr_reconcile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1214,7 +1219,7 @@ _pr_state_cache = TTLCache(
 
 
 def _invalidate_pr_state_cache(working_dir: Optional[str] = None) -> None:
-    """Drop cached PR state — after a PR create/merge, or for tests.
+    """Drop header state and fallback misses after Git/PR mutations, or for tests.
 
     With *working_dir*, only that checkout's entries are dropped (keys are
     ``"<working_dir>:<branch>"``, so this matches on the prefix); without it,
@@ -1222,6 +1227,7 @@ def _invalidate_pr_state_cache(working_dir: Optional[str] = None) -> None:
     """
     global _pr_state_generation
     _pr_state_generation += 1
+    invalidate_checkout_pr_fallback_cache(working_dir)
     if working_dir is None:
         _pr_state_cache.invalidate()
     else:
@@ -1259,8 +1265,9 @@ async def get_pr_state(
     verdict — None means still computing) so the UI can decide between
     Create-PR / Finish("Merge PR #N") / clean states. When no open PR exists,
     includes the latest merged PR's original head so squash-merged work is not
-    offered for shipping again. Degrades gracefully:
-    no git repo or no GitHub remote just yields ``has_github=False``.
+    offered for shipping again. A local-name miss also tries the checkout's
+    upstream and a PR containing its own commits, as sidebar reconciliation
+    does. Degrades gracefully: no git repo or remote yields ``has_github=False``.
 
     Failure is reported, never invented. If GitHub cannot be
     reached the response carries ``pr_lookup_failed=True`` and — when a recent
@@ -1277,7 +1284,7 @@ async def get_pr_state(
     if not branch or not await run_git(git_service.is_git_repo, working_dir):
         return PrStateResponse(current_branch=None, has_github=False, open_pr=None)
 
-    cache_key = f"{working_dir}:{branch}"
+    cache_key = f"{working_dir}:{branch}" + (f":session:{session_id}" if session_id else "")
     cached = _pr_state_cache.get_or_miss(cache_key)
     if cached is not CACHE_MISS:
         # Repair the sidebar on the owning worker, even on header-cache hits.
@@ -1291,7 +1298,9 @@ async def get_pr_state(
     flight_key = (asyncio.get_running_loop(), cache_key, generation)
     flight = _pr_state_refreshes.get(flight_key)
     if flight is None:
-        flight = asyncio.create_task(_read_pr_state(working_dir, branch, cache_key, project_id, generation))
+        flight = asyncio.create_task(
+            _read_pr_state(working_dir, branch, cache_key, project_id, generation, session_id)
+        )
         _pr_state_refreshes[flight_key] = flight
         flight.add_done_callback(lambda done: _pr_state_refreshes.pop(flight_key, None))
     answer = await asyncio.shield(flight)
@@ -1300,7 +1309,8 @@ async def get_pr_state(
     return answer
 
 
-async def _read_pr_state(working_dir: str, branch: str, cache_key: str, project_id: str, generation: int):
+async def _read_pr_state(working_dir: str, branch: str, cache_key: str, project_id: str, generation: int,
+                         session_id: Optional[str] = None):
     # Base shape when there's nothing to say about GitHub.
     result: Dict[str, Any] = {
         "current_branch": branch,
@@ -1333,7 +1343,12 @@ async def _read_pr_state(working_dir: str, branch: str, cache_key: str, project_
                         and merged[0].head_branch == branch
                         and merged[0].state.lower() == "merged"
                     ):
-                        result["merged_head_sha"] = merged[0].head_sha
+                        pr = merged[0]
+                    else:
+                        pr = await asyncio.to_thread(
+                            find_pull_for_checkout_fallback, github_service, repo, branch, working_dir,
+                            session_id=session_id, project_id=project_id,
+                        )
             except Exception as e:  # noqa: BLE001 — GitHubCliError, or anything else
                 # Couldn't ask gh — PR state is unknown for this cycle. has_github
                 # stays True because the repo IS known: a PR hiccup must not take
@@ -1343,7 +1358,9 @@ async def _read_pr_state(working_dir: str, branch: str, cache_key: str, project_
                 )
                 lookup_ok = False
             else:
-                if pr is not None:
+                if pr is not None and pr.state.lower() == "merged":
+                    result["merged_head_sha"] = pr.head_sha
+                elif pr is not None and pr.state.lower() == "open":
                     result["open_pr"] = {
                         "number": pr.number,
                         "title": pr.title,

@@ -33,6 +33,16 @@ _reconcile_tasks: dict[str, asyncio.Task] = {}
 _reconcile_again: set[str] = set()
 _reconcile_recent = TTLCache(ttl=60, max_entries=256, name="session-pr-reconcile")
 _reconcile_slots = asyncio.Semaphore(4)
+# Cache discovery misses only, never failures or session-ownership rejections.
+_fallback_misses = TTLCache(ttl=300, max_entries=512, name="session-pr-fallback-misses")
+
+
+def invalidate_checkout_pr_fallback_cache(working_dir: Optional[str] = None) -> None:
+    """Forget discovery misses after a checkout/PR mutation."""
+    if working_dir is None:
+        _fallback_misses.invalidate()
+    else:
+        _fallback_misses.invalidate_where(lambda key: key[0] == working_dir)
 
 
 def schedule_session_pr_reconcile(
@@ -40,7 +50,7 @@ def schedule_session_pr_reconcile(
 ) -> Optional[asyncio.Task]:
     """Queue an owner-local refresh without blocking a turn or a Git poll.
 
-    A turn end bypasses the poll cooldown. If a pre-merge poll is still in
+    A turn end bypasses the poll cooldown and fallback misses. If a poll is in
     flight, force a trailing refresh rather than letting its old answer win.
     Failures retry twice; later polls can recover after that bounded attempt.
     """
@@ -56,17 +66,19 @@ def schedule_session_pr_reconcile(
         return None
 
     async def refresh() -> None:
+        refresh_forced = force
         while True:
             _reconcile_again.discard(session_id)
             for delay in (0, 2, 10):
                 if delay:
                     await asyncio.sleep(delay)
                 async with _reconcile_slots:
-                    if await reconcile_session_pr(session_id):
+                    if await reconcile_session_pr(session_id, force=refresh_forced):
                         break
             else:
                 logger.warning("PR reconcile exhausted retries for %s", session_id)
-            if session_id not in _reconcile_again:
+            refresh_forced = session_id in _reconcile_again
+            if not refresh_forced:
                 break
 
     def finished(task: asyncio.Task) -> None:
@@ -194,6 +206,7 @@ async def persist_pr_state(
     project_id: Optional[str] = None,
     branch: Optional[str] = None,
     pr_title: Optional[str] = None,
+    pr_branch: Optional[str] = None,
 ) -> bool:
     """Write PR fields onto matching sessions and broadcast a sidebar patch.
 
@@ -204,7 +217,8 @@ async def persist_pr_state(
     updated and keep their primary. A delegated worker's PR is also listed on
     every chat above it. No-ops when nothing matches. Never raises. Does not
     change ``is_active``. Returns False on a failed write so reconciliation
-    can retry.
+    can retry. ``branch`` is LOCAL and controls sibling matching; ``pr_branch``
+    only records GitHub's head name in list entries, never the fan-out target.
     """
     state = _normalize_pr_state(pr_state)
     if state is None:
@@ -252,7 +266,7 @@ async def persist_pr_state(
                 pr_url=entry["pr_url"],
                 pr_state=state,
                 pr_title=pr_title,
-                pr_branch=entry.get("branch") or branch,
+                pr_branch=entry.get("branch") or pr_branch or branch,
                 pr_source=entry.get("source") or "session",
                 primary=primary,
             )
@@ -266,7 +280,7 @@ async def persist_pr_state(
                 inherited = {
                     "pr_number": number,
                     "pr_url": entry["pr_url"] or row.get("pr_url"),
-                    "branch": branch or row.get("branch") or row.get("worktree_branch"),
+                    "branch": pr_branch or branch or row.get("branch") or row.get("worktree_branch"),
                     "source": "subagent",
                 }
                 for parent_id in await asyncio.to_thread(_ancestor_session_ids, row):
@@ -287,11 +301,139 @@ def _find_pull_for_branch(github_service: Any, repo: str, branch: str) -> Any:
     matching = [
         item for item in pulls if getattr(item, "head_branch", None) == branch
     ]
-    if not matching:
+    return _preferred_pull(matching)
+
+
+def _preferred_pull(pulls: list[Any]) -> Any:
+    open_ones = [p for p in pulls if _github_state(p) == "open"]
+    return max(open_ones or pulls, key=lambda p: p.number, default=None)
+
+
+def _pull_claimed_elsewhere(pr: Any, session: dict, project_id: Optional[str]) -> bool:
+    """Another live chat's primary PR is not this chat's fallback to adopt.
+
+    Only worker descendants may report a PR back to this chat. Blocking DB
+    reads; the checkout lookup runs in a worker thread.
+    """
+    from app.db import database
+
+    v2_id = session.get("project_v2_id")
+    legacy_id = session.get("project_id") or project_id
+    if not v2_id and not legacy_id:
+        return False  # unscoped, read-only discovery probe
+    for row in database.list_sessions_by_pr_number(pr.number):
+        if row.get("id") == session.get("id") or row.get("status") == "archived":
+            continue
+        same_project = (
+            row.get("project_v2_id") == v2_id if v2_id
+            else legacy_id and legacy_id in (row.get("project_id"), row.get("project_v2_id"))
+        )
+        if same_project and session.get("id") not in _ancestor_session_ids(row):
+            return True
+    return False
+
+
+def find_pull_for_checkout_fallback(
+    github_service: Any, repo: str, branch: str, working_dir: str, *,
+    session_id: Optional[str] = None, project_id: Optional[str] = None,
+    bypass_negative_cache: bool = False,
+) -> Any:
+    """Discover only a PR containing work made AFTER this branch was created.
+
+    Blocking: call through ``asyncio.to_thread``. Upstream and commit matches
+    have the SAME proof: a same-repository PR head between the branch's creation
+    point (exclusive) and HEAD (inclusive). No creation reflog: no fallback.
+    Inherited main/parent commits are not this session's work. A PR head may
+    precede HEAD because the agent made more local commits after its last push.
+
+    Local git gates precede gh calls. A five-minute negative cache is keyed by
+    checkout, HEAD and upstream (plus branch/base identity); failures and primary
+    ownership rejections are never negative-cached. Turn ends bypass misses.
+    An unscoped call is only a read-only discovery probe; production callers
+    supply session/project scope.
+    """
+    from app.core.git_service import git_service
+    from app.db import database
+
+    def git(*args: str, check: bool = False):
+        return git_service._run_git(working_dir, list(args), timeout=5, check=check)
+
+    head_sha = git("rev-parse", "HEAD", check=True).stdout.strip()
+    reflog = git("reflog", "show", "--format=%H%x00%gs", f"refs/heads/{branch}")
+    entries = reflog.stdout.splitlines() if reflog.returncode == 0 else []
+    creation_sha, _, message = entries[-1].partition("\0") if entries else ("", "", "")
+    prefix = "branch: Created from "
+    if not message.startswith(prefix) or head_sha == creation_sha:
         return None
-    open_ones = [p for p in matching if _github_state(p) == "open"]
-    pool = open_ones or matching
-    return max(pool, key=lambda p: p.number)
+
+    def ancestor(older: str, newer: str) -> bool:
+        result = git("merge-base", "--is-ancestor", older, newer)
+        if result.returncode not in (0, 1):
+            result.check_returncode()
+        return result.returncode == 0
+
+    if not ancestor(creation_sha, head_sha):
+        return None  # rewritten history: do not guess ownership
+    session = database.get_session(session_id) if session_id else {}
+    if session_id and not session:
+        return None
+    session = session or {}
+    default_branch = git_service.get_default_branch(working_dir)
+    # Reflog records the actual start ref even after the upstream is renamed.
+    start = message.removeprefix(prefix).removeprefix("refs/heads/")
+    if start.startswith("refs/remotes/"):
+        start = start.removeprefix("refs/remotes/").partition("/")[2]
+    else:
+        start = start.removeprefix("origin/")
+    bases = {default_branch, start}
+    if session.get("worktree_id"):
+        worktree = database.get_worktree(session["worktree_id"])
+        if worktree and worktree.get("base_branch"):
+            bases.add(worktree["base_branch"].removeprefix("origin/"))
+
+    upstream = git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    upstream_name = upstream.stdout.strip() if upstream.returncode == 0 else ""
+    upstream_branch = upstream_name.partition("/")[2]
+    cache_key = (working_dir, head_sha, upstream_name, repo, branch, creation_sha, tuple(sorted(bases)))
+    if not bypass_negative_cache and _fallback_misses.get(cache_key):
+        return None
+
+    ancestry: dict[str, bool] = {}
+
+    def owned(pr: Any) -> bool:
+        sha = getattr(pr, "head_sha", None)
+        head_branch = getattr(pr, "head_branch", None)
+        if (not sha or sha == creation_sha or not head_branch or head_branch in bases
+                or head_branch == getattr(pr, "base_branch", None)
+                or getattr(pr, "base_branch", None) == branch
+                or (getattr(pr, "head_repo", None) or "").lower() != repo.lower()):
+            return False
+        if sha not in ancestry:
+            # A bot/GitHub update or old PR may have a head we never fetched.
+            # That is not local ownership (nor a GitHub transport failure).
+            exists = git("cat-file", "-e", f"{sha}^{{commit}}")
+            if exists.returncode not in (0, 128):
+                exists.check_returncode()
+            ancestry[sha] = (
+                exists.returncode == 0 and ancestor(creation_sha, sha) and ancestor(sha, head_sha)
+            )
+        return ancestry[sha]
+
+    discovered = []
+    if upstream_branch and upstream_branch != branch and upstream_branch not in bases:
+        discovered = [
+            pr for pr in github_service.list_pulls(repo, state="all", limit=100, head=upstream_branch)
+            if getattr(pr, "head_branch", None) == upstream_branch and owned(pr)
+        ]
+    if not discovered:
+        discovered = [pr for pr in github_service.list_commit_pulls(repo, head_sha) if owned(pr)]
+    if not discovered:
+        _fallback_misses.set(cache_key, True)
+        return None
+    _fallback_misses.invalidate(cache_key)  # a forced lookup may supersede a miss
+    return _preferred_pull([
+        pr for pr in discovered if not _pull_claimed_elsewhere(pr, session, project_id)
+    ])
 
 
 # Listed PRs still open are re-read at most this many per reconcile.
@@ -340,19 +482,22 @@ async def _refresh_listed_open_prs(
     return ok
 
 
-async def reconcile_session_pr(session_id: str) -> bool:
+async def reconcile_session_pr(session_id: str, *, force: bool = False) -> bool:
     """Best-effort: if this session's branch has a GitHub PR, persist it.
 
     Prefers an open PR on the session branch; otherwise the latest PR for
     that branch (so a second PR that is already merged replaces the previous
-    merged number). No branch: refresh the stored ``pr_number``. Unchanged
-    number+state is a no-op. Other PRs the chat lists as open (older ones,
-    sub-agents' ones) are re-read so a merge elsewhere reaches the sidebar.
+    merged number). A local-name miss tries the checkout's upstream, then a
+    PR containing this branch's own commits. No branch: refresh the stored
+    ``pr_number``. Unchanged number+state is a no-op. Other open PRs the chat
+    lists (older ones and sub-agents' ones) are re-read so a merge elsewhere
+    reaches the sidebar.
 
     Canonical project-only sessions resolve through this runner's checkout;
     a legacy project alias is not required. No remote checkout is materialized.
     A failed lookup or write returns False so the scheduler can retry.
     An authoritative no-op returns True. Never clears state on failure.
+    ``force`` bypasses cached fallback misses after turn-end agent mutations.
     """
     try:
         from app.db import database
@@ -409,6 +554,12 @@ async def reconcile_session_pr(session_id: str) -> bool:
                 pr = await asyncio.to_thread(
                     _find_pull_for_branch, github_service, repo, branch
                 )
+                if pr is None:
+                    pr = await asyncio.to_thread(
+                        find_pull_for_checkout_fallback, github_service, repo, branch, working_dir,
+                        session_id=session_id, project_id=checkout_project_id,
+                        bypass_negative_cache=force,
+                    )
             elif pr_number:
                 pr = await asyncio.to_thread(github_service.get_pull, repo, int(pr_number))
         except GitHubCliError:
@@ -427,7 +578,8 @@ async def reconcile_session_pr(session_id: str) -> bool:
                 ok = await persist_pr_state(
                     session_id=session_id,
                     project_id=project_id,
-                    branch=branch or getattr(pr, "head_branch", None),
+                    branch=branch,
+                    pr_branch=getattr(pr, "head_branch", None),
                     pr_number=pr.number,
                     pr_url=pr.url,
                     pr_state=state,

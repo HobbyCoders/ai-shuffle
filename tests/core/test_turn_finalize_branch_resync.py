@@ -219,7 +219,8 @@ async def test_turn_end_runs_the_resync_before_the_pr_reconcile(monkeypatch):
 
     import app.core.session_pr_state as pr_state
 
-    async def fake_reconcile(session_id):
+    async def fake_reconcile(session_id, *, force=False):
+        assert force  # turn end must bypass a pre-create PR discovery miss
         order.append("reconcile")
         return True
 
@@ -250,7 +251,7 @@ async def test_a_failing_resync_never_breaks_turn_teardown(monkeypatch):
 
     import app.core.session_pr_state as pr_state
 
-    async def noop_reconcile(session_id):
+    async def noop_reconcile(session_id, *, force=False):
         return True
 
     monkeypatch.setattr(pr_state, "reconcile_session_pr", noop_reconcile)

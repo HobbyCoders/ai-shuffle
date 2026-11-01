@@ -1296,6 +1296,8 @@ async def create_commit(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
 
     commit_sha = sha_or_error
+    from app.api.git_operations import _invalidate_pr_state_cache
+    _invalidate_pr_state_cache(working_dir)
 
     # Fetch inline git state for instant frontend update
     t_refresh_start = time.perf_counter()
@@ -1370,6 +1372,9 @@ async def push_commits(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=error_msg or "Failed to push commits"
         )
+
+    from app.api.git_operations import _invalidate_pr_state_cache
+    _invalidate_pr_state_cache(working_dir)
 
     # Fetch inline git state for instant frontend update
     t_refresh_start = time.perf_counter()

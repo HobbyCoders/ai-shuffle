@@ -59,6 +59,7 @@ def sample_pr_data():
         "state": "OPEN",
         "headRefName": "fix-auth-bug",
         "headRefOid": "a" * 40,
+        "headRepository": {"nameWithOwner": "owner/repo"},
         "baseRefName": "main",
         "author": {"login": "testuser"},
         "url": "https://github.com/owner/repo/pull/42",
@@ -472,6 +473,24 @@ class TestGetRepoInfo:
 # Pull Request Tests
 # =============================================================================
 
+
+
+class TestCommitPullHeadRepository:
+    @pytest.mark.parametrize('head_repo', ['owner/repo', 'someone/fork', None])
+    def test_commit_lookup_retains_head_repository(self, service, mock_completed_process, head_repo):
+        data = [{
+            'number': 42, 'state': 'open',
+            'head': {'ref': 'feature', 'sha': 'a' * 40,
+                     'repo': {'full_name': head_repo} if head_repo else None},
+            'base': {'ref': 'main'},
+        }]
+        with patch.object(service, '_run_gh', return_value=mock_completed_process(
+            stdout=json.dumps(data),
+        )):
+            pr = service.list_commit_pulls('owner/repo', 'a' * 40)[0]
+        assert pr.head_repo == head_repo
+
+
 class TestListPulls:
     """Test list_pulls method."""
 
@@ -491,6 +510,7 @@ class TestListPulls:
             assert pr.title == "Fix bug in authentication"
             assert pr.head_branch == "fix-auth-bug"
             assert pr.head_sha == "a" * 40
+            assert pr.head_repo == "owner/repo"
             assert "headRefOid" in mock_run.call_args[0][0][mock_run.call_args[0][0].index("--json") + 1]
             assert pr.base_branch == "main"
             assert pr.author == "testuser"
