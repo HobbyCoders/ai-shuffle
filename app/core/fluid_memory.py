@@ -320,7 +320,8 @@ def owner_health() -> dict:
 
 
 def _health_notification(state: dict) -> str:
-    reasons = [s["reason"] for s in state.get("signals", []) if s.get("state") == "attention"]
+    from fluid.codemode import memory_health
+    reasons = [s["reason"] for s in memory_health.alert_signals(state)]
     text = " ".join(reasons[:2])
     if len(reasons) > 2:
         text += f" ({len(reasons) - 2} more.)"
@@ -328,7 +329,8 @@ def _health_notification(state: dict) -> str:
 
 
 async def _announce_health(owner: str, store, state: dict) -> None:
-    """One bell notification per stretch of attention; never raises."""
+    """One bell notification per stretch of alerts (memory lost or
+    refused, see ``memory_health._signal``); never raises."""
     import logging
     try:
         from fluid.codemode import memory_health

@@ -13,7 +13,9 @@ and unconfirmed harvests nobody used are mechanical; near-duplicates are
 only reported.
 
 Every signal is ``healthy`` or ``attention`` with one plain sentence. The
-thresholds below are first estimates, not tuned values.
+thresholds below are first estimates, not tuned values, so attention alone
+is shown in Settings, System; only an ``alert`` (memory lost or refused)
+raises a notification.
 """
 from __future__ import annotations
 
@@ -50,6 +52,10 @@ MIN_PASSES_TO_JUDGE = 4
 # and beside them (time, {kind: total}) samples of its dropped_by_kind split.
 COVERAGE_WINDOW = 3 * DAY
 DROPPED_SHARE = 0.1
+# The reap drops these first (successful cells and tool calls; see
+# skills.journal_drop_tier). Their loss alone is the reap working as
+# designed, not a learner that cannot keep up.
+LOW_VALUE_LOSS_KINDS = ("cell", "tool")
 LOSS_SAMPLE_EVERY = 3 * 3600.0
 LOSS_SAMPLES_KEPT = 64
 # Usage: share of settled facts (older than USAGE_GRACE) never recalled and
@@ -110,9 +116,20 @@ LABELS = {
 _WORD = re.compile(r"[a-z0-9]{4,}")
 
 
-def _signal(sid: str, attention: bool, reason: str, **detail) -> dict:
+def _signal(sid: str, attention: bool, reason: str, *, alert: bool = False, **detail) -> dict:
+    """``alert`` marks an attention the owner is notified about: memory was
+    lost or refused (user-saved facts gone, saves failing, the store full,
+    conversation dropped unread). Every other attention is shown in
+    Settings, System only. Raising the bell for each heuristic signal kept
+    notifying about things nobody could act on, one signal after another."""
     return {"id": sid, "label": LABELS[sid], "state": "attention" if attention else "healthy",
-            "reason": reason, "detail": detail}
+            "alert": bool(attention and alert), "reason": reason, "detail": detail}
+
+
+def alert_signals(state: dict) -> list[dict]:
+    """The signals in ``state`` that warrant a notification."""
+    return [s for s in state.get("signals", []) if isinstance(s, dict)
+            and s.get("state") == "attention" and s.get("alert")]
 
 
 def _plural(n: int, word: str, plural: str | None = None) -> str:
@@ -456,19 +473,32 @@ def _learner_outcome(store, now, coverage) -> dict:
     dropped = coverage["dropped_3d"]
     taken_in = coverage["read_3d"] + coverage["filtered_3d"] + (dropped or 0)
     if dropped and dropped >= MIN_NEW_ENTRIES and dropped >= DROPPED_SHARE * taken_in:
-        # The reap keeps conversation and friction for last, so a drop there
-        # is the loss to name.
+        # The reap drops code cells and tool output first and keeps
+        # conversation and friction for last. When the per-kind split puts
+        # every dropped entry in LOW_VALUE_LOSS_KINDS, that is the reap
+        # working as designed (the learner filters most such entries as low
+        # value when it does read them), not a loss. A record without the
+        # split, or drops of other kinds, are judged on the total as before;
+        # only conversation or friction dropped unread notifies the owner.
         by_kind = coverage["dropped_3d_by_kind"] or {}
         high = sum(by_kind.get(k, 0) for k in JOURNAL_HIGH_VALUE_KINDS)
+        low = sum(by_kind.get(k, 0) for k in LOW_VALUE_LOSS_KINDS)
         high_note = (
             f" {high} user/assistant/friction"
             f" {'entry' if high == 1 else 'entries'} dropped unread."
             if high else ""
         )
+        if low >= dropped:
+            return _signal(
+                "learner", False,
+                f"The learner read {coverage['read_3d']} of {taken_in} journal entries in the "
+                f"last 3 days; {dropped} low-value entries (code cells, tool output) were "
+                "trimmed unread and no conversation was lost." + budget_note, **detail)
         return _signal(
             "learner", True,
             f"The learner read {coverage['read_3d']} of {taken_in} journal entries in the "
-            f"last 3 days; {dropped} were dropped unread." + high_note + budget_note, **detail)
+            f"last 3 days; {dropped} were dropped unread." + high_note + budget_note,
+            alert=bool(high), **detail)
     try:
         spent_today = int(now // DAY) in store._facts.inference_budget_spent_days()
     except Exception:  # noqa: BLE001 — unreadable: say nothing about the budget
@@ -585,15 +615,16 @@ def _capacity_signal(store, live, archived) -> dict:
               "bytes": size, "bytes_cap": facts.MAX_DOCUMENT_BYTES}
     if size >= DOCUMENT_FULL_SHARE * facts.MAX_DOCUMENT_BYTES:
         share = round(100 * size / facts.MAX_DOCUMENT_BYTES)
-        return _signal("capacity", True, f"The memory file is {share}% full; saves fail at the limit.", **detail)
+        return _signal("capacity", True, f"The memory file is {share}% full; saves fail at the limit.",
+                       alert=True, **detail)
     if user_saved >= facts.MAX_EXPLICIT:
         return _signal("capacity", True,
                        f"Memory is full: {user_saved} user-saved facts; new ones are refused "
-                       "until one is forgotten or merged.", **detail)
+                       "until one is forgotten or merged.", alert=True, **detail)
     if user_saved >= FULL_SHARE * facts.MAX_EXPLICIT:
         return _signal("capacity", True,
                        f"User-saved facts are at {user_saved} of {facts.MAX_EXPLICIT}; "
-                       "at the limit new ones are refused.", **detail)
+                       "at the limit new ones are refused.", alert=True, **detail)
     return _signal("capacity", False, f"{_plural(len(live), 'live fact')}; room to spare.", **detail)
 
 
@@ -652,11 +683,13 @@ def _protected_signal(doc, previous, now) -> tuple[dict, list[str], list[dict]]:
               "dropped_for_space": int(losses.get("explicit_dropped") or 0)}
     if missing:
         signal = _signal("protected", True,
-                         f"{_plural(missing, 'user-saved fact')} disappeared without a Forget.", **detail)
+                         f"{_plural(missing, 'user-saved fact')} disappeared without a Forget.",
+                         alert=True, **detail)
     elif dropped_at and now - dropped_at < PROTECTED_WINDOW:
         signal = _signal("protected", True,
                          f"{_plural(detail['dropped_for_space'], 'user-saved fact')} "
-                         f"{'was' if detail['dropped_for_space'] == 1 else 'were'} dropped for space.", **detail)
+                         f"{'was' if detail['dropped_for_space'] == 1 else 'were'} dropped for space.",
+                         alert=True, **detail)
     else:
         kept = ("No user-saved facts yet." if not current else "The one user-saved fact is kept."
                 if len(current) == 1 else f"All {len(current)} user-saved facts are kept.")
@@ -669,7 +702,8 @@ def _saves_signal(store, now) -> dict:
     recent = [t for t in record.get("storage_times", []) if isinstance(t, (int, float)) and now - t < SAVE_WINDOW]
     detail = {"failed_7d": len(recent), "rejected_total": int(record.get("rejected") or 0)}
     if recent:
-        return _signal("saves", True, f"{_plural(len(recent), 'save')} failed to write this week.", **detail)
+        return _signal("saves", True, f"{_plural(len(recent), 'save')} failed to write this week.",
+                       alert=True, **detail)
     return _signal("saves", False, "Saves are writing normally.", **detail)
 
 
@@ -703,7 +737,7 @@ def _proposals_signal(store, live, now) -> dict:
 
 def run(store, *, now: float | None = None, learning_enabled: bool = True) -> dict:
     """Repair, check and record. Returns the recorded state plus ``notify``:
-    True once per stretch of ``attention`` (and at most once a day), so the
+    True once per stretch of alerts (and at most once a day), so the
     host raises one notification, not one per check. Call
     :func:`mark_notified` after the notification is delivered."""
     now = time.time() if now is None else now
@@ -718,30 +752,37 @@ def run(store, *, now: float | None = None, learning_enabled: bool = True) -> di
         attention_since = attention_since or now
     else:
         attention_since = None
+    # Only an alert (see :func:`_signal`) starts a stretch the owner is told
+    # about; other attention is shown in Settings, System without a bell.
+    alerting = bool(alert_signals(result))
+    alert_since = previous.get("alert_since") if alerting else None
+    if alerting:
+        alert_since = alert_since or now
     state = {
         "schema": 1,
         **result,
         "repairs": events[-50:],
         "attention_since": attention_since,
+        "alert_since": alert_since,
         "notified_for": previous.get("notified_for"),
         "notified_at": previous.get("notified_at"),
     }
     _save_state(store, state)
     notified_at = float(state.get("notified_at") or 0)
     state["notify"] = bool(
-        attention_since and state.get("notified_for") != attention_since
+        alert_since and state.get("notified_for") != alert_since
         and now - notified_at >= RENOTIFY_AFTER
     )
     return state
 
 
 def mark_notified(store, *, now: float | None = None) -> None:
-    """Record that the current stretch of ``attention`` was announced."""
+    """Record that the current stretch of alerts was announced."""
     now = time.time() if now is None else now
     state = load_state(store)
-    if not state.get("attention_since"):
+    if not state.get("alert_since"):
         return
-    state.update(notified_for=state["attention_since"], notified_at=now)
+    state.update(notified_for=state["alert_since"], notified_at=now)
     _save_state(store, state)
 
 

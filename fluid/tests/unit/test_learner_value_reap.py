@@ -319,7 +319,7 @@ def test_health_names_dropped_user_assistant_and_friction_entries(tmp_path):
     assert first["signals"][0]["detail"]["dropped_3d_by_kind"] is None
     _write_loss(store, 4_390, {"cell": 4_300, "tool": 82, "user": 5, "assistant": 2, "friction": 1})
     learner = memory_health.check(store, now=now, previous=first)["signals"][0]
-    assert learner["state"] == "attention"
+    assert learner["state"] == "attention" and learner["alert"], "conversation lost: notify"
     assert learner["detail"]["dropped_3d"] == 3_390
     assert learner["detail"]["dropped_3d_by_kind"] == {
         "cell": 3_300, "tool": 82, "user": 5, "assistant": 2, "friction": 1,
@@ -340,9 +340,32 @@ def test_health_without_high_value_loss_or_kind_history(tmp_path):
     assert learner["state"] == "attention" and learner["detail"]["dropped_3d"] == 3_390
     assert learner["detail"]["dropped_3d_by_kind"] is None
     assert "user/assistant/friction" not in learner["reason"]
+    assert not learner["alert"], "an unknown split is shown, not notified"
     second = memory_health.check(store, now=now + DAY, previous={**first, **memory_health.check(
         store, now=now, previous=first)})
     assert second["signals"][0]["detail"]["dropped_3d_by_kind"] == {}
+
+
+def test_health_is_healthy_when_only_cells_and_tool_output_were_trimmed(tmp_path):
+    # The Unraid store on 2026-11-01: 2,936 entries dropped unread, every one
+    # a code cell or tool call, while all conversation was read. That is the
+    # reap trimming what it trims first, not a learner that cannot keep up.
+    now = MIDDAY
+    store = _busy_store(tmp_path, now)
+    _write_loss(store, 38_403, {"cell": 145, "tool": 3_273})
+    first = memory_health.check(store, now=now - 3 * DAY)
+    _write_loss(store, 41_339, {"cell": 2_691, "tool": 3_663})
+    result = memory_health.check(store, now=now, previous=first)
+    learner = result["signals"][0]
+    assert learner["detail"]["dropped_3d"] == 2_936
+    assert learner["detail"]["dropped_3d_by_kind"] == {"cell": 2_546, "tool": 390}
+    assert learner["state"] == "healthy" and not learner["alert"]
+    assert "2936 low-value entries (code cells, tool output) were trimmed unread" in learner["reason"]
+    assert "no conversation was lost" in learner["reason"]
+    # One unattributed drop ("other") is not known to be low value.
+    _write_loss(store, 41_340, {"cell": 2_691, "tool": 3_663, "other": 1})
+    learner = memory_health.check(store, now=now, previous=first)["signals"][0]
+    assert learner["state"] == "attention" and not learner["alert"]
 
 
 # ─── the daily budget: billing-aware default, setting overrides ─────────────

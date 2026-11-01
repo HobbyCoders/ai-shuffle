@@ -337,31 +337,70 @@ def test_an_index_line_is_not_a_use_but_a_full_text_line_is(tmp_path):
 
 # ─── the scheduled run ─────────────────────────────────────────────────────
 
-def test_run_notifies_once_per_stretch_of_attention(tmp_path):
+def _nearly_full(tmp_path, monkeypatch):
+    """A store whose user-saved facts are near their cap: an alert."""
+    monkeypatch.setattr(facts, "MAX_EXPLICIT", 10)
     store = SkillStore(tmp_path)
-    _active(store)  # the learner has not run: attention
+    for i in range(9):
+        store.save_memory(f"User preference {i}", protected=True)
+    return store
+
+
+def test_run_notifies_once_per_stretch_of_alerts(tmp_path, monkeypatch):
+    store = _nearly_full(tmp_path, monkeypatch)
     now = time.time()
     first = memory_health.run(store, now=now)
     assert first["state"] == "attention" and first["notify"]
     memory_health.mark_notified(store, now=now)
     again = memory_health.run(store, now=now + 3600)
     assert again["state"] == "attention" and not again["notify"]
-    # Healthy clears the stretch; a new stretch the next day notifies again.
-    healthy = memory_health.run(store, now=now + 7200, learning_enabled=False)
+    # Room again clears the stretch; a new stretch the next day notifies again.
+    monkeypatch.setattr(facts, "MAX_EXPLICIT", 100)
+    healthy = memory_health.run(store, now=now + 7200)
     assert healthy["state"] == "healthy" and not healthy["notify"]
-    assert memory_health.load_state(store)["attention_since"] is None
+    assert memory_health.load_state(store)["alert_since"] is None
+    monkeypatch.setattr(facts, "MAX_EXPLICIT", 10)
     later = memory_health.run(store, now=now + 2 * DAY)
     assert later["notify"]
 
 
-def test_run_flaps_do_not_notify_twice_in_a_day(tmp_path):
-    store = SkillStore(tmp_path)
-    _active(store)
+def test_run_flaps_do_not_notify_twice_in_a_day(tmp_path, monkeypatch):
+    store = _nearly_full(tmp_path, monkeypatch)
     now = time.time()
     memory_health.run(store, now=now)
     memory_health.mark_notified(store, now=now)
-    memory_health.run(store, now=now + 60, learning_enabled=False)
+    monkeypatch.setattr(facts, "MAX_EXPLICIT", 100)
+    memory_health.run(store, now=now + 60)
+    monkeypatch.setattr(facts, "MAX_EXPLICIT", 10)
     assert not memory_health.run(store, now=now + 120)["notify"]
+
+
+def test_heuristic_attention_is_shown_but_never_notifies(tmp_path):
+    # Settings shows a learner that has not run, but nothing was lost or
+    # refused, so the owner is not notified (the alarm used to ring for each
+    # heuristic signal in turn).
+    store = SkillStore(tmp_path)
+    _active(store)
+    now = time.time()
+    state = memory_health.run(store, now=now)
+    assert state["state"] == "attention" and signal(state, "learner")["state"] == "attention"
+    assert not state["notify"] and memory_health.alert_signals(state) == []
+    assert not memory_health.run(store, now=now + 2 * DAY)["notify"]
+    assert memory_health.summary(state)["state"] == "attention"
+
+
+def test_loss_and_refusal_signals_are_alerts(tmp_path, monkeypatch):
+    store = _nearly_full(tmp_path, monkeypatch)
+    assert signal(memory_health.check(store), "capacity")["alert"]
+    edit(store, lambda doc: doc.update(losses={"explicit_dropped": 1,
+                                               "last_explicit_dropped_at": time.time()}))
+    assert signal(memory_health.check(store), "protected")["alert"]
+    monkeypatch.setattr(facts, "MAX_DOCUMENT_BYTES", 10)
+    with pytest.raises(ValueError):
+        store.save_memory("A fact that no longer fits")
+    result = memory_health.check(store)
+    assert signal(result, "saves")["alert"] and signal(result, "capacity")["alert"]
+    assert not any(s["alert"] for s in memory_health.check(SkillStore(tmp_path / "empty"))["signals"])
 
 
 def test_run_records_repairs_in_plain_words(tmp_path):
