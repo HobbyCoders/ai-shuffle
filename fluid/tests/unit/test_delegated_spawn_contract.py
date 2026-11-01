@@ -385,6 +385,37 @@ def test_a_one_shot_loop_replaces_the_prompt_with_nothing_and_drops_tools() -> N
     assert loop._tmpdir is None  # no prompt file was written
 
 
+@pytest.mark.parametrize(
+    ("version", "tools", "slash"),
+    [
+        ("2.0.30 (Claude Code)", False, False),
+        ("2.0.31 (Claude Code)", True, False),
+        ("2.0.59 (Claude Code)", True, False),
+        ("2.0.60 (Claude Code)", True, True),
+        ("2.1.287 (Claude Code)", True, True),
+        (None, True, True),
+    ],
+)
+def test_a_one_shot_loop_only_passes_flags_its_cli_knows(version, tools, slash) -> None:
+    # --tools arrived in CLI 2.0.31, --disable-slash-commands in 2.0.60 (both
+    # checked against the published npm bundles). An older CLI would reject
+    # the unknown flag and fail the whole generation, so it runs without it;
+    # the empty system prompt goes out either way.
+    loop = DelegatedLoop(store=MemoryStore(), model="m", one_shot=True)
+    loop.cli_version = version
+    argv = loop._build_argv()
+    assert ("--tools" in argv) is tools
+    assert ("--disable-slash-commands" in argv) is slash
+    assert _flag(argv, "--system-prompt") == ""
+
+
+def test_an_empty_setting_sources_list_still_reaches_the_cli() -> None:
+    # A one-shot call loads no settings file. () must become
+    # `--setting-sources ""`, not drop the flag (which would load them all).
+    loop = DelegatedLoop(store=MemoryStore(), model="m", one_shot=True, setting_sources=())
+    assert _flag(loop._build_argv(), "--setting-sources") == ""
+
+
 def test_an_ordinary_loop_keeps_its_tools_and_skills() -> None:
     loop = DelegatedLoop(store=MemoryStore(), model="m", append_system_prompt="APPEND")
     loop.cli_version = "2.0.0 (Claude Code)"

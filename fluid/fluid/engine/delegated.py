@@ -352,6 +352,11 @@ def _cli_permission_mode(mode: str, cli_version: str | None) -> str:
 # assumed to be newer: the installed CLI is unpinned and current ones have
 # both. A known older CLI keeps the old argv.
 _CLI_FLAGS_SINCE = "2.1.0"
+#: First CLI releases with the flags a one-shot loop uses to drop its tool and
+#: skill listings (checked against the published npm bundles). An older CLI
+#: still gets the empty system prompt; it just keeps those listings.
+_TOOLS_FLAG_SINCE = "2.0.31"
+_DISABLE_SLASH_COMMANDS_SINCE = "2.0.60"
 
 # AI Shuffle's Claude Code mod (``claude_mod/``, a plugin of function hooks,
 # Claude Code's documented "mods"): it keeps the bash-first steer from reaching
@@ -1711,11 +1716,19 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         deferred-tool, agent and skill listings the CLI attaches to the first
         message); ``--disable-slash-commands`` drops the skill listing that
         would otherwise remain. The bridge serves no tool either
-        (_bridge_tool_permitted), so the request carries no tool at all.
+        (_bridge_tool_permitted), so the request carries no tool at all. A CLI
+        too old for a flag (``_TOOLS_FLAG_SINCE``,
+        ``_DISABLE_SLASH_COMMANDS_SINCE``) runs without it rather than failing.
         """
         if not getattr(self, "one_shot", False):
             return []
-        return ["--tools", "", "--disable-slash-commands"]
+        version = getattr(self, "cli_version", None)
+        argv: list[str] = []
+        if not _cli_older_than(version, _TOOLS_FLAG_SINCE):
+            argv += ["--tools", ""]
+        if not _cli_older_than(version, _DISABLE_SLASH_COMMANDS_SINCE):
+            argv += ["--disable-slash-commands"]
+        return argv
 
     def _claude_mod_argv(self) -> list[str]:
         """``--plugin-dir`` with this session's copy of the mod, or nothing.

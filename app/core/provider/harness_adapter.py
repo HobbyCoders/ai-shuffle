@@ -760,7 +760,10 @@ class HarnessAdapter(ProviderAdapter):
                 # Reasoning depth (profile config or chat override) → CLI
                 # --effort. Validated app-side to the CLI's vocabulary.
                 effort=_valid_effort(getattr(options, "effort", None)),
-                setting_sources=_fluid_setting_sources(options),
+                # A one-shot call loads no settings file: a project's local
+                # hooks (UserPromptSubmit and the like) would otherwise run and
+                # add their own context to the caller's prompt.
+                setting_sources=() if one_shot else _fluid_setting_sources(options),
                 # The CLI turns attribution into a reminder on the first
                 # message; a one-shot call runs no git, so it carries none.
                 commit_attribution=attribution_enabled and not one_shot,

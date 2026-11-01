@@ -8790,6 +8790,8 @@ async def test_one_shot_generation_reaches_the_cli_with_nothing_of_ours(monkeypa
     assert captured["system"] is None and captured["append_system_prompt"] is None
     assert captured["claude_mod"] is False
     assert captured["commit_attribution"] is False
+    # No settings file loads, so a project's local hooks cannot add context.
+    assert captured["setting_sources"] == ()
     assert adapter._turn_context_note("hello") is None
 
 
