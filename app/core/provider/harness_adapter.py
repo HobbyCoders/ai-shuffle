@@ -622,7 +622,12 @@ class HarnessAdapter(ProviderAdapter):
         self._worker_identity = await asyncio.to_thread(
             _session_identity_text, (options.extra or {}).get("session_runtime")
         )
-        self._delegated_replaces_preset = self._is_delegated and system is not None
+        # A one-shot generation sends the caller's prompt alone: no system
+        # prompt, no app text, no per-turn notes (see _turn_context_note).
+        one_shot = bool((options.extra or {}).get("one_shot"))
+        self._delegated_replaces_preset = (
+            self._is_delegated and system is not None and not one_shot
+        )
 
         if self._is_delegated:
             cli_session_id = await self._resolve_cli_session_id(fluid_session_id, options)
@@ -636,10 +641,14 @@ class HarnessAdapter(ProviderAdapter):
             # The "# Workspace facts" card, as on the native leg: it carries
             # the session's preview link (owner sessions only), the agent
             # browser's one door to this worker's running UI (#1789).
-            self._workspace_card = await asyncio.to_thread(
+            self._workspace_card = None if one_shot else await asyncio.to_thread(
                 self._build_workspace_card, options
             )
-            if system is None:
+            if one_shot:
+                # DelegatedLoop(one_shot=True) passes an empty --system-prompt.
+                delegated_system = None
+                delegated_append = None
+            elif system is None:
                 # discover_agents walks .fluid/agents, .agents/agents and
                 # plugin dirs (rglob): disk IO, so it runs in a worker thread.
                 delegated_system = None
@@ -752,7 +761,9 @@ class HarnessAdapter(ProviderAdapter):
                 # --effort. Validated app-side to the CLI's vocabulary.
                 effort=_valid_effort(getattr(options, "effort", None)),
                 setting_sources=_fluid_setting_sources(options),
-                commit_attribution=attribution_enabled,
+                # The CLI turns attribution into a reminder on the first
+                # message; a one-shot call runs no git, so it carries none.
+                commit_attribution=attribution_enabled and not one_shot,
                 # Per-session fast mode → the CLI's ``fastMode`` setting,
                 # handed over as a --settings JSON blob. Only sent when the user
                 # turned it on: an explicit ``{"fastMode": false}`` would be the
@@ -801,7 +812,10 @@ class HarnessAdapter(ProviderAdapter):
                 ),
                 # AI Shuffle's Claude Code mod (--plugin-dir on CLI 2.1.287+);
                 # FLUID_CLAUDE_MOD=false turns it off.
-                claude_mod=settings.fluid_claude_mod,
+                # Not on a one-shot generation: the mod's guidance and hooks
+                # are session machinery.
+                claude_mod=settings.fluid_claude_mod and not one_shot,
+                one_shot=one_shot,
                 # AI Shuffle's compaction instead of the CLI's own summary
                 # (the owner's Claude compaction setting, on by default). A CLI
                 # without the mod compacts on its own, as with it off.
@@ -1378,6 +1392,10 @@ class HarnessAdapter(ProviderAdapter):
             opts.extra["app_session_id"] = app_session_id
         if getattr(sdk_options, "aih_worker_run", False):
             opts.extra["worker_run"] = True
+        # A session-less one-shot generation (generation_options): the
+        # delegated leg sends the caller's prompt with no system prompt.
+        if getattr(sdk_options, "aih_one_shot", False) is True:
+            opts.extra["one_shot"] = True
         if getattr(sdk_options, "aih_automatic_workflows", False):
             opts.extra["automatic_workflows"] = True
         profile_id = getattr(sdk_options, "aih_profile_id", None)
@@ -2010,7 +2028,12 @@ class HarnessAdapter(ProviderAdapter):
 
         Blocking (a JSON read for the memory store), so callers hand it to a
         thread. Never raises: a turn is never worth losing over a reminder.
+        A one-shot generation on the delegated leg gets none.
         """
+        if getattr(self, "_is_delegated", False) and (
+            getattr(self._options, "extra", None) or {}
+        ).get("one_shot"):
+            return None
         blocks = [self._env_note(), self._memory_turn_note(query), self._working_record_note(),
                   self._away_note(), self._scratch_note()]
         present = [block for block in blocks if block]

@@ -853,8 +853,15 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         ] | None = None,
         fresh_context: Callable[[list[Any], tuple[int, int] | None], Awaitable[str | None]] | None = None,
         bridge_deferred: Callable[[str], bool] | None = None,
+        one_shot: bool = False,
     ) -> None:
         self.store = store
+        # A one-shot text generation (commit message, branch name, reply
+        # hint): the CLI runs with an empty system prompt, no tools, no
+        # skills or slash commands, no MCP servers and no plugins, so the
+        # model reads the caller's prompt and nothing else (see
+        # _one_shot_argv). ``system`` and ``append_system_prompt`` are ignored.
+        self.one_shot = one_shot
         self.model = model
         self.bus = bus or EventBus()
         if self.store is not None and self.bus.replay_source is None:
@@ -1563,7 +1570,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         a pattern written against either spelling counts. The CLI's own
         ``--disallowed-tools`` flag never reaches a bridge tool on its own:
         it matches the registry name while the CLI calls the prefixed one.
+        A one-shot loop permits no tool at all.
         """
+        if getattr(self, "one_shot", False):
+            return False
         spellings = (name, _BUNDLED_PREFIX + name)
         if self.disallowed_tools and any(
             matches_tool_pattern(s, self.disallowed_tools) for s in spellings
@@ -1636,7 +1646,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 self._socket_path = f"tcp:127.0.0.1:{port}"
         write_bundled_config(
             self.registry, self._mcp_config_path,
-            socket_path=self._socket_path, user_servers=self.mcp_servers,
+            # A one-shot loop connects none of the user's own servers either.
+            socket_path=self._socket_path,
+            user_servers=None if getattr(self, "one_shot", False) else self.mcp_servers,
             token=self._bridge_token, tool_filter=self._bridge_tool_permitted,
             cli_env=self._child_env(),
         )
@@ -1674,6 +1686,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # ones its own settings files name.
             argv += ["--mcp-config", self._mcp_config_path, "--strict-mcp-config"]
         argv += self._prompt_argv()
+        argv += self._one_shot_argv()
         for d in self.add_dirs or ():
             argv += ["--add-dir", d]
         granted = list(dict.fromkeys(self.permission_grants))
@@ -1690,6 +1703,19 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if self.partial:
             argv += ["--include-partial-messages"]
         return argv
+
+    def _one_shot_argv(self) -> list[str]:
+        """A one-shot loop's CLI surface: no built-in tools, no skills.
+
+        ``--tools ""`` drops every built-in tool definition (and with them the
+        deferred-tool, agent and skill listings the CLI attaches to the first
+        message); ``--disable-slash-commands`` drops the skill listing that
+        would otherwise remain. The bridge serves no tool either
+        (_bridge_tool_permitted), so the request carries no tool at all.
+        """
+        if not getattr(self, "one_shot", False):
+            return []
+        return ["--tools", "", "--disable-slash-commands"]
 
     def _claude_mod_argv(self) -> list[str]:
         """``--plugin-dir`` with this session's copy of the mod, or nothing.
@@ -2054,7 +2080,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         206, reported as a failed spawn), and an npm ``claude.cmd`` shim cuts
         every argument at its first newline. A file has neither limit. Only a
         CLI known to be older than ``_CLI_FLAGS_SINCE`` gets the text inline.
+        A one-shot loop replaces Claude Code's prompt with an empty one.
         """
+        if getattr(self, "one_shot", False):
+            return ["--system-prompt", ""]
         if self.append_system_prompt:
             flag, text = "--append-system-prompt", self.append_system_prompt
         elif self.system:
@@ -2147,18 +2176,24 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         )
         guard = os.path.join(self._ensure_tmpdir(), "tool-output-guard")
         guard_staged = False
-        try:
-            shutil.copytree(
-                TOOL_OUTPUT_GUARD_SOURCE, guard, dirs_exist_ok=True,
-                ignore=shutil.ignore_patterns("tests", "types", "tsconfig.json", "__pycache__"),
-            )
-        except OSError:
-            # No readiness receipt: the separate unavailable-guard policy
-            # decides whether tools are denied or warned about, never silence.
-            pass
-        else:
-            guard_staged = True
-            argv += ["--plugin-dir", guard]
+        # A one-shot loop runs no tool (_one_shot_argv), so it has no output
+        # to guard and stages no guard plugin. The guard stays required: a
+        # tool call that still reached PreToolUse would meet the
+        # missing-guard policy.
+        one_shot = getattr(self, "one_shot", False)
+        if not one_shot:
+            try:
+                shutil.copytree(
+                    TOOL_OUTPUT_GUARD_SOURCE, guard, dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("tests", "types", "tsconfig.json", "__pycache__"),
+                )
+            except OSError:
+                # No readiness receipt: the separate unavailable-guard policy
+                # decides whether tools are denied or warned about, never silence.
+                pass
+            else:
+                guard_staged = True
+                argv += ["--plugin-dir", guard]
         # Staging the mod registers its recall tools before the bridge decides
         # which tools to expose. The first spawn has no MCP config until now.
         await self._start_bundled_server()
@@ -2230,7 +2265,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                         "the tool deny policy could not be enforced; the turn "
                         "was not started"
                     )
-                if not guard_staged:
+                if one_shot:
+                    pass  # no tool runs, so no hook or guard has work to do
+                elif not guard_staged:
                     await self._report_missing_output_guard(blocked=False)
                 else:
                     # SDK callbacks and the plugin's function hooks are
@@ -3522,10 +3559,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     held = held_snapshots.pop(event.raw.get("model_call_index"), None)
                     if held is not None:
                         await self._emit(held)
-            if mapped.opened_call is not None:
+            if mapped.opened_call is not None and not getattr(self, "one_shot", False):
                 # A model call started. Its context snapshot is asked now,
                 # while its Usage waits for the final token counts; a reply
                 # that beats that Usage is held (see _emit_usage_snapshot).
+                # A one-shot loop skips it: the CLI prices the breakdown with
+                # a burst of token-count calls, and nothing reads a
+                # throwaway call's context.
                 await self._ask_usage_snapshot(*mapped.opened_call)
             if mapped.message is not None and mapped.node_id is not None:
                 if self.claude_mod_compaction and isinstance(frame.get("uuid"), str):

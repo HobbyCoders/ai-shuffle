@@ -370,6 +370,53 @@ async def test_the_bridge_config_and_prompt_share_one_directory(tmp_path) -> Non
         await loop.aclose()
 
 
+# ─── One-shot generations send the caller's prompt alone ────────────────────
+
+
+def test_a_one_shot_loop_replaces_the_prompt_with_nothing_and_drops_tools() -> None:
+    loop = DelegatedLoop(store=MemoryStore(), model="m", one_shot=True,
+                         system="ignored", append_system_prompt="ignored too")
+    argv = loop._build_argv()
+    assert _flag(argv, "--system-prompt") == ""
+    assert "--system-prompt-file" not in argv and "--append-system-prompt-file" not in argv
+    assert "--append-system-prompt" not in argv
+    assert _flag(argv, "--tools") == ""
+    assert "--disable-slash-commands" in argv
+    assert loop._tmpdir is None  # no prompt file was written
+
+
+def test_an_ordinary_loop_keeps_its_tools_and_skills() -> None:
+    loop = DelegatedLoop(store=MemoryStore(), model="m", append_system_prompt="APPEND")
+    loop.cli_version = "2.0.0 (Claude Code)"
+    argv = loop._build_argv()
+    assert "--tools" not in argv and "--disable-slash-commands" not in argv
+    assert "--system-prompt" not in argv
+
+
+async def test_a_one_shot_spawn_serves_no_tool_and_stages_no_guard(tmp_path) -> None:
+    from fluid.tools.registry import ToolOutcome, ToolRegistry, ToolSpec
+
+    async def handler(input, ctx):
+        return ToolOutcome(text="ok")
+
+    registry = ToolRegistry()
+    registry.register_builtin(ToolSpec(name="Recall", description="r", input_schema={}), handler)
+    user_server = {"theirs": {"command": "their-mcp", "args": []}}
+    loop, record = _scripted(tmp_path, registry=registry, one_shot=True,
+                             mcp_servers=user_server)
+    try:
+        await _turn(loop)
+        [start] = _records(record, "start")
+        argv = start["argv"]
+        assert not any("tool-output-guard" in a for a in argv)
+        assert "--strict-mcp-config" in argv
+        config = json.loads(Path(_flag(argv, "--mcp-config")).read_text(encoding="utf-8"))
+        assert "theirs" not in json.dumps(config)
+        assert "Recall" not in json.dumps(config)
+    finally:
+        await loop.aclose()
+
+
 def test_the_cli_older_than_gate() -> None:
     older = delegated_mod._cli_older_than
     assert older("2.0.9", "2.1.0") and not older("2.1.0", "2.1.0")

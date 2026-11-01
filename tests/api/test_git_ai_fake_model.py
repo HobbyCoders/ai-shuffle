@@ -231,6 +231,22 @@ def test_branch_name_documented_example(env):
     assert 'Use the prefix "fix/".' in env.model.prompts[0]
 
 
+def test_branch_name_prompt_lists_prefixes_and_keeps_private_details_out(env):
+    env.model.reply = "fix/login-page-timeout"
+
+    assert _branch_name(env, message="The login page times out").status_code == 200
+    assert _branch_name(env, message="The login page times out", prefix="fix").status_code == 200
+
+    free, forced = env.model.prompts
+    assert "feat/ = new feature" in free and "test/ = adding or updating tests" in free
+    # A forced prefix replaces the list rather than competing with it.
+    assert 'Use the prefix "fix/".' in forced and "feat/ = new feature" not in forced
+    for prompt in (free, forced):
+        assert "start" in prompt and "action verb" in prompt
+        assert "The name is public" in prompt
+        assert "device or host names" in prompt and "keys, tokens" in prompt
+
+
 def test_branch_name_ai_unavailable_falls_back_to_message_words(env):
     env.model.config_error = ProviderConfigError("no provider")
 
