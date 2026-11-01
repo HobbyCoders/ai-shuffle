@@ -125,6 +125,17 @@ def test_same_model_ignores_snapshot_prefix_and_context_suffix() -> None:
     assert not same_model("claude-opus-5", "claude-opus-5-5")
 
 
+def test_same_model_reads_a_bare_alias_answered_by_another_bare_name() -> None:
+    # An alias resolving to a pinned id is no reroute; another bare name is.
+    assert same_model("default", "claude-opus-5-5")
+    assert same_model("mistral-large-latest", "mistral-large-2411")
+    assert same_model("opus", "claude-opus-5-5-20260801")
+    assert not same_model("opus", "claude-sonnet-5")
+    assert same_model("fake-ai", "fake-ai")
+    assert not same_model("deepseek-chat", "deepseek-reasoner")
+    assert not same_model("fake-ai", "fake-ai-safe")
+
+
 def test_anthropic_fallback_follows_the_category_table() -> None:
     assert anthropic_fallback("claude-opus-5-5", "cyber") == "claude-opus-4-8"
     assert anthropic_fallback("claude-opus-5-5", "bio") == "claude-opus-5"

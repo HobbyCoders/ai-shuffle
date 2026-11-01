@@ -80,8 +80,12 @@ def same_model(requested: str | None, served: str | None) -> bool:
     if not any(ch.isdigit() for ch in want):
         # An alias ("opus", "sonnet", "default"): the CLI resolves it to a
         # dated id. A family alias matches any model of that family; anything
-        # else gives no evidence either way.
-        return want not in _FAMILIES or want in got
+        # else gives no evidence either way, unless the served id is no
+        # pinned version either: an alias never resolves to another bare
+        # name ("deepseek-chat" answered by "deepseek-reasoner").
+        if want in _FAMILIES:
+            return want in got
+        return want == got or any(ch.isdigit() for ch in got)
     if want == got:
         return True
     if got.startswith(want + "-"):
