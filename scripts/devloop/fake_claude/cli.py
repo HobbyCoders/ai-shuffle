@@ -1009,10 +1009,26 @@ Commands:
 """
 
 
+def fake_plan() -> str:
+    """The plan tier the launcher asked for (DEVLOOP_CLAUDE_PLAN), or ""."""
+    plan = (os.environ.get("FAKE_CLAUDE_PLAN") or "").strip().lower()
+    return plan if plan.isalnum() else ""
+
+
 def auth_status() -> dict:
+    # Like the real CLI, the JSON form reads "max" for both Max and Ultra;
+    # only the text form names the tier.
+    plan = fake_plan()
+    subscription = ("max" if plan == "ultra" else plan) or "fake"
     return {"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty",
             "email": FAKE_EMAIL, "orgName": "Dev loop fake Claude CLI (no account)",
-            "subscriptionType": "fake", "configDirectory": None}
+            "subscriptionType": subscription, "configDirectory": None}
+
+
+def auth_status_text() -> str:
+    """``claude auth status --text`` when a plan is set: its tier line."""
+    return (f"Login method: Claude {fake_plan().capitalize()} account\n"
+            f"Email: {FAKE_EMAIL}\nOrganization: Dev loop fake Claude CLI (no account)\n")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1024,6 +1040,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args[:1] == ["auth"]:
         if args[1:2] == ["status"]:
+            if "--text" in args and fake_plan():
+                print(auth_status_text(), end="")
+                return 0
             print(json.dumps(auth_status(), indent=2))
             return 0
         if args[1:2] in ([], ["--help"], ["-h"]):
