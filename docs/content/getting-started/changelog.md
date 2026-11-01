@@ -8,6 +8,14 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
+## 1.2.1 (2026-11-01)
+
+Finishes the 1.2.0 release, whose Windows installer, Android APK download and Docker image did not finish publishing. Everything listed under 1.2.0 is in this release.
+
+### Fixed
+
+- The signed Windows installer builds again, the Android release checks pass, and nightly updates no longer fail when a release is tagged mid-run.
+
 ## 1.2.0 (2026-10-31)
 
 Several Claude sign-ins per provider, project setup across all your workers, and a steadier phone app and Windows updater.
