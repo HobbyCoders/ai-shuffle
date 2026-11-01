@@ -56,4 +56,15 @@ describe('the Claude caller row', () => {
 			__native__: encodeProviderModel('chatgpt-row', 'gpt-6.1-sol')
 		});
 	});
+
+	it('shows a saved cross-provider pin when the agent is reopened', () => {
+		render(AgentModelsTab, {
+			providerModels: { __native__: encodeProviderModel('chatgpt-row', 'gpt-6.1-sol') },
+			subagentDefault: { model: 'opus' },
+			onModelsChange: vi.fn(),
+			onDefaultModel: vi.fn()
+		});
+		const row = screen.getByText('Callers on native Claude.').closest('.st-row') as HTMLElement;
+		expect(within(row).getByRole('button', { name: /GPT 6\.1 Sol/ })).toBeTruthy();
+	});
 });
