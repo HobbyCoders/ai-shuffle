@@ -101,6 +101,7 @@ from fluid.events.model import (
     ContextCompaction,
     DelegatedSurface,
     Event,
+    ModelServed,
     PermissionRequest,
     RateLimit,
     TextDelta,
@@ -140,9 +141,15 @@ _UNREADABLE_RATE_LIMIT_SHAPES: set[frozenset[str]] = set()
 #   its own turns, so a background job's between-turn report would go unread.
 # * ``CLAUDE_CODE_THRIFTY_SONIC``: turns off the CLI's "do your work through
 #   Bash" steer (see ``DelegatedLoop._child_env``).
+# * ``CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK``: when a safety check declines a
+#   reply, Claude Code 2.1.3xx retries it on another model on its own and keeps
+#   the session there. The person approves that switch first instead: the CLI
+#   reports the refusal (``system/model_refusal_no_fallback``) and the loop
+#   asks (see ``fluid.engine.guardrail``).
 FORCED_CHILD_ENV: dict[str, str] = {
     "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
     "CLAUDE_CODE_THRIFTY_SONIC": "0",
+    "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK": "1",
 }
 
 # ─── Pure helpers ────────────────────────────────────────────────────────────
@@ -535,6 +542,11 @@ class Mapped:
 # ─── Stateful mapper ─────────────────────────────────────────────────────────
 
 
+# Claude Code's refusal and fallback system frames (see _on_model_guardrail).
+_GUARDRAIL_SUBTYPES = frozenset({
+    "model_refusal_no_fallback", "model_refusal_fallback", "model_fallback",
+})
+
 # How Claude Code opens the line it prints for a compaction it skipped.
 _NOT_COMPACTED = "Not compacted \u00b7 "
 
@@ -656,6 +668,16 @@ class StreamJsonMapper:
         # per-block frame of a message repeats that message's usage verbatim, so
         # without this a two-block message double-counts its tokens and cost.
         self._usage_msg_id: str | None = None
+        # A safety check declined a main-thread reply this turn: ``category``,
+        # ``explanation``, ``requested_model``, ``request_id`` from the CLI's
+        # ``model_refusal_no_fallback`` frame or the refused assistant frame.
+        # The loop takes it at the result and asks the person (cleared then).
+        self.refusal: dict[str, Any] | None = None
+        # The served model last reported this turn (``ModelServed`` dedupe),
+        # and the model this turn asked for when it differs from ``model`` (an
+        # approved safety-check retry runs on another model).
+        self._served_model: str | None = None
+        self.requested_model: str | None = None
 
     @property
     def produced_nodes(self) -> bool:
@@ -863,6 +885,8 @@ class StreamJsonMapper:
         subtype = frame.get("subtype")
         if subtype == "compact_boundary":
             return self._on_compact_boundary(frame)
+        if subtype in _GUARDRAIL_SUBTYPES:
+            return self._on_model_guardrail(frame, subtype)
         if subtype != "init":
             return Mapped()
         self.cli_session_id = frame.get("session_id") or self.cli_session_id
@@ -908,6 +932,62 @@ class StreamJsonMapper:
             child_env_overrides=dict(FORCED_CHILD_ENV),
             **self.cli_init,
         )])
+
+    def _served(
+        self, served: str, *, reason: str | None = None, category: str | None = None,
+        requested: str | None = None,
+    ) -> list[Event]:
+        """A ``ModelServed`` for ``served``, or nothing when it is no news."""
+        from fluid.engine.guardrail import same_model
+
+        if served == self._served_model and reason is None:
+            return []
+        self._served_model = served
+        requested = requested or self.requested_model or self.model
+        rerouted = not same_model(requested, served)
+        return [ModelServed(
+            session_id=self.session_id, turn_id=self.turn_id,
+            requested_model=requested, served_model=served, provider=self.provider,
+            rerouted=rerouted, reason=reason if rerouted else None,
+            category=category if rerouted else None,
+        )]
+
+    def _on_model_guardrail(self, frame: dict[str, Any], subtype: str) -> Mapped:
+        """The CLI's refusal and fallback reports (Claude Code 2.1.3xx).
+
+        ``model_refusal_no_fallback``: a reply was declined and not retried;
+        the loop asks the person at the turn's result. ``model_refusal_fallback``
+        (a CLI that ignored the opt-out) and ``model_fallback`` (the model was
+        unavailable): the CLI already answered on another model, reported as a
+        reroute. A subagent's local fallback is not the turn's model.
+        """
+        def text(key: str) -> str | None:
+            value = frame.get(key)
+            return value if isinstance(value, str) and value else None
+
+        if subtype == "model_refusal_no_fallback":
+            self.refusal = {
+                "category": text("api_refusal_category"),
+                "explanation": text("api_refusal_explanation"),
+                "requested_model": (
+                    text("original_model") or self.requested_model or self.model
+                ),
+                "request_id": text("request_id"),
+            }
+            return Mapped()
+        if frame.get("scope") == "local":
+            return Mapped()
+        target = text("fallback_model")
+        if target is None:
+            return Mapped()
+        if subtype == "model_refusal_fallback":
+            reason, category = "refusal_fallback", text("api_refusal_category")
+        else:
+            reason, category = "availability", None
+        return Mapped(events=self._served(
+            target, reason=reason, category=category,
+            requested=text("original_model"),
+        ))
 
     def _on_compact_boundary(self, frame: dict[str, Any]) -> Mapped:
         """The CLI compacted its own context — report it the way the native leg does.
@@ -993,6 +1073,23 @@ class StreamJsonMapper:
             and not frame.get("parent_tool_use_id")
         ):
             self.reported_model = model
+        main_thread = not frame.get("parent_tool_use_id")
+        if main_thread and isinstance(model, str) and model and model != "<synthetic>":
+            events.extend(self._served(model))
+        if main_thread and msg.get("stop_reason") == "refusal" and self.refusal is None:
+            # The refused reply itself; older CLIs send no structured frame.
+            details = msg.get("stop_details")
+            details = details if isinstance(details, dict) else {}
+            category = details.get("category")
+            explanation = details.get("explanation")
+            self.refusal = {
+                "category": category if isinstance(category, str) and category else None,
+                "explanation": (
+                    explanation if isinstance(explanation, str) and explanation else None
+                ),
+                "requested_model": self.requested_model or self.model,
+                "request_id": None,
+            }
         usage = msg.get("usage")
         msg_id = msg.get("id")
         pending = self._pending_call

@@ -114,6 +114,7 @@ from fluid.events.model import (
     DelegatedSurface,
     ErrorEvent,
     Event,
+    GuardrailBlocked,
     HookEvent,
     Interrupted,
     PermissionRequest,
@@ -122,6 +123,11 @@ from fluid.events.model import (
     TurnComplete,
     TurnStarted,
     Usage,
+)
+from fluid.engine.guardrail import (
+    GUARDRAIL_TOOL,
+    anthropic_fallback,
+    prompt_input,
 )
 from fluid.events.ops import (
     AgentMessage,
@@ -1137,6 +1143,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # the CLI may be on the new value while ``model`` / ``permission_mode``
         # keep the old one. The next turn re-sends the recorded value first.
         self._unconfirmed_settings: set[str] = set()
+        # Safety-check prompts raised in the running turn: {turn_id: count}.
+        self._turn_guardrail_prompts: dict[str, int] = {}
         # Loop time until which a Stop that cut a switch short still stops the
         # next UserTurn (see ``_STOP_CARRYOVER``).
         self._stop_carryover_until: float | None = None
@@ -3537,6 +3545,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # still being persisted, and an answer with no waiter was
                 # dropped, leaving the call parked for PERMISSION_TIMEOUT.
                 self._arm_permission(mapped.permission)
+            guardrail: tuple[dict[str, Any], TurnComplete | None] | None = None
+            if mapped.is_result and mapper.refusal is not None and not self._interrupted.is_set():
+                # A safety check declined the reply: hold the turn's end until
+                # the person decides (see _guardrail_answer).
+                held = next((e for e in mapped.events if isinstance(e, TurnComplete)), None)
+                mapped.events = [e for e in mapped.events if not isinstance(e, TurnComplete)]
+                guardrail, mapper.refusal = (mapper.refusal, held), None
             for event in mapped.events:
                 if isinstance(event, ContextCompaction):
                     # The main conversation's (subagents' were dropped above).
@@ -3615,6 +3630,25 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # turn — their Usage event already reported context_usage=None.
                 self._pending_usage_snapshots.clear()
                 self._snapshot_call_index.clear()
+                if guardrail is not None:
+                    self._proc_results += 1
+                    if await self._guardrail_answer(
+                        sid, turn_id, guardrail[0], user_node, mapper,
+                    ):
+                        continue  # the same turn, re-sent on the approved model
+                    held = guardrail[1]
+                    await self._emit_terminal_with_park(TurnComplete(
+                        session_id=sid, node_id=mapper.last_node_id, turn_id=turn_id,
+                        stop_reason="refusal",
+                        num_model_calls=(
+                            held.num_model_calls if held is not None
+                            else mapper.model_calls or 1
+                        ),
+                        usage=dict(held.usage) if held is not None else dict(mapper.failed_usage),
+                        cost_usd=held.cost_usd if held is not None else mapper.failed_cost_usd,
+                    ))
+                    self._journal_turn_end(last_assistant)
+                    return None
                 if mapped.error is not None:
                     self._hook_stop_reason = None
                     if not self._interrupted.is_set():
@@ -3631,6 +3665,110 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 self._proc_results += 1
                 self._journal_turn_end(last_assistant)
                 return None
+
+    # ─── provider safety check ───────────────────────────────────────────
+
+    async def _guardrail_answer(
+        self, sid: str, turn_id: str, refusal: dict[str, Any], user_node: SessionNode,
+        mapper: StreamJsonMapper,
+    ) -> bool:
+        """Ask the person what to do with a reply Anthropic's safety check declined.
+
+        The CLI has finished its turn (its auto fallback is off, see
+        ``FORCED_CHILD_ENV``), so stdout is quiet and the turn's reader can wait
+        here. On an allow the CLI is switched to the approved model and the
+        turn's user message is sent again; the reader then maps that run as
+        the rest of this turn, and True is returned. The switch lasts this
+        turn only: ``set_model`` is left unconfirmed, so the next turn's drain
+        puts the CLI back on the session's model (``self.model`` never
+        changes). Anything else (deny, Stop, no answer in time, nothing to
+        retry on, a second block) records the stop and returns False.
+        """
+        requested = refusal.get("requested_model") or self.model
+        category = refusal.get("category")
+        explanation = refusal.get("explanation")
+        request_id = refusal.get("request_id")
+        suggested = anthropic_fallback(requested, category)
+
+        async def stopped(reason: str) -> bool:
+            await self._emit(GuardrailBlocked(
+                session_id=sid, turn_id=turn_id, provider="anthropic",
+                requested_model=requested, outcome="stopped", category=category,
+                explanation=explanation, suggested_model=suggested, reason=reason,
+                request_id=request_id,
+            ))
+            return False
+
+        asked = self._turn_guardrail_prompts.get(turn_id, 0)
+        if asked >= 2:
+            return await stopped("blocked again after a retry")
+        self._turn_guardrail_prompts = {turn_id: asked + 1}
+        payload = prompt_input(
+            provider="anthropic", requested_model=requested, category=category,
+            explanation=explanation, suggested_model=suggested, request_id=request_id,
+        )
+        fluid_request_id = new_id("perm")
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending_permissions[fluid_request_id] = fut
+        watched = self._session is None or self.bus.subscriber_count(self.session_id) > 0
+        timeout = PERMISSION_TIMEOUT if watched else min(
+            PERMISSION_TIMEOUT, UNWATCHED_PERMISSION_TIMEOUT,
+        )
+        interrupt_wait = asyncio.create_task(self._interrupted.wait())
+        try:
+            await self._emit(PermissionRequest(
+                session_id=sid, turn_id=turn_id, request_id=fluid_request_id,
+                tool_use_id=new_id("guardrail"), name=GUARDRAIL_TOOL, input=payload,
+                risk="safe", reason=payload["message"],
+            ))
+            done, _ = await asyncio.wait(
+                {fut, interrupt_wait}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            interrupt_wait.cancel()
+            self._pending_permissions.pop(fluid_request_id, None)
+        if fut not in done:
+            if interrupt_wait in done:
+                return await stopped("interrupted while awaiting permission")
+            return await stopped(
+                f"permission request timed out after {timeout:.0f}s with no decision"
+            )
+        resp: RespondPermission = fut.result()
+        if resp.decision not in ("allow", "allow_always"):
+            return await stopped(resp.message or "declined")
+        chosen = (resp.updated_input or {}).get("model") or suggested
+        if not isinstance(chosen, str) or not chosen.strip():
+            return await stopped("no model to retry on")
+        chosen = chosen.strip()
+        request_no = self._next_req_id()
+        reply: asyncio.Future = asyncio.get_running_loop().create_future()
+        # The reader resolves it when the CLI acknowledges; nobody awaits it.
+        # A refused switch leaves the CLI on the declined model, and the
+        # re-sent turn comes back to a second prompt, which then stops.
+        self._pending_controls[request_no] = reply
+        reply.add_done_callback(lambda _f: self._pending_controls.pop(request_no, None))
+        self._unconfirmed_settings.add("set_model")
+        try:
+            await self._write_frame({
+                "type": "control_request", "request_id": request_no,
+                "request": {"subtype": "set_model", "model": chosen},
+            })
+            await self._write_frame({"type": "user", "message": {
+                "role": "user", "content": _content_to_cli(list(user_node.message.content)),
+            }})
+        except (OSError, RuntimeError) as exc:
+            self._pending_controls.pop(request_no, None)
+            return await stopped(f"could not switch the Claude CLI: {exc!r}")
+        self._peer_admission_open = not self._interrupted.is_set()
+        self._stdin_lane_closed = False
+        mapper.requested_model = chosen  # the retry asked for this model
+        await self._emit(GuardrailBlocked(
+            session_id=sid, turn_id=turn_id, provider="anthropic",
+            requested_model=requested, outcome="continued", category=category,
+            explanation=explanation, suggested_model=suggested, retry_model=chosen,
+            request_id=request_id,
+        ))
+        return True
 
     # ─── permission bridge ───────────────────────────────────────────────
 
