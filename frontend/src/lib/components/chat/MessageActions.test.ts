@@ -87,6 +87,30 @@ describe('MessageActions gating', () => {
 			expect(onRewindComplete).toHaveBeenCalledOnce();
 		} finally { vi.useRealTimers(); }
 	});
+	it('saves the words before dropping the note after a lost answer', async () => {
+		activeSession.newChat();
+		activeSession.current.sessionId = 's1';
+		activeSession.setDraft('');
+		const removeItem = Storage.prototype.removeItem;
+		let savedWhenNoteWent: string | null | undefined;
+		const spy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(function (this: Storage, key: string) {
+			if (key === 'restore-note:s1:unsent-id') savedWhenNoteWent = readDraft('s1');
+			removeItem.call(this, key);
+		});
+		try {
+			rewind.mockRejectedValue(new TypeError('Failed to fetch'));
+			render(MessageActions, {...base, notSentMessageId:'unsent-id', onRewindComplete: (_warning?: string, prompt?: string, uploads?: string[]) => {
+				activeSession.setPendingRestorePrompt(prompt ?? '', uploads);
+			}});
+			await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
+			await waitFor(() => expect(savedWhenNoteWent).toBeDefined());
+			expect(savedWhenNoteWent).toContain(base.messageContent);
+			expect(activeSession.current.pendingRestorePrompt).toBeNull();
+		} finally {
+			spy.mockRestore();
+			activeSession.newChat();
+		}
+	});
 	it('saves the words to the chat\'s draft when no composer is on screen to take them', async () => {
 		vi.useFakeTimers();
 		try {

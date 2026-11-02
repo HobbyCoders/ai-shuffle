@@ -12,11 +12,13 @@ import {
 	countUserRows,
 	expect,
 	holdBootLoad,
+	gotoApp,
 	openFromSidebar,
 	openNewChat,
 	scriptTag,
 	scrollTranscriptTo,
 	seededChatId,
+	settleServiceWorker,
 	showSidebar,
 	stopButton,
 	transcriptScroll,
@@ -275,15 +277,28 @@ await runJourney({
 				expect(composed.split(`queued ${lost}`).length === 2, 'the words arrived once');
 
 				await mark('reload while the answer is still on its way');
+				// The server commits and the page goes without hearing back. The answer
+				// stays held until the page has gone: unrouting first lets the held
+				// request through, and then its reply can land before the reload.
+				let letGo;
+				const heldUntilGone = new Promise((done) => { letGo = done; });
+				let committed;
+				const serverCommitted = new Promise((done) => { committed = done; });
 				await page.route(REWIND, async (route) => {
 					await route.fetch();
-					await new Promise((done) => setTimeout(done, 60_000));
+					committed();
+					await heldUntilGone;
+					await route.abort('connectionreset').catch(() => {});
 				});
+				const heard = [];
+				const noteAnswer = (response) => { if (response.url().includes('/rewind/execute/')) heard.push(response.status()); };
+				page.on('response', noteAnswer);
 				await restoreButton(reloaded).click();
-				await page.waitForTimeout(1500);
-				// Removing the route can deliver the held reply. Reload first so this
-				// page really leaves before the restore answers, as this step requires.
+				await serverCommitted;
 				await page.reload({ waitUntil: 'domcontentloaded' });
+				page.off('response', noteAnswer);
+				expect(heard.length === 0, `the page heard no answer before it went (heard ${heard})`);
+				letGo();
 				await page.unrouteAll({ behavior: 'ignoreErrors' });
 				await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
 				await mark('page reloaded');
@@ -293,8 +308,9 @@ await runJourney({
 				expect((await notSent(unheard).getByRole('button', { name: 'Restore to composer' }).count()) === 1, 'the other row was left alone');
 				await page.waitForTimeout(1500);
 				const afterReload = await page.locator('[contenteditable="true"]').first().innerText();
-				expect(afterReload.split(`queued ${reloaded}`).length === 2, 'the words came back once');
-				expect(afterReload.split(`queued ${lost}`).length <= 2, 'the earlier lost reply did not bring its words back again');
+				for (const words of [switched, lost, reloaded]) {
+					expect(afterReload.split(`queued ${words}`).length === 2, `"queued ${words}" is in the composer once after the reload: ${JSON.stringify(afterReload)}`);
+				}
 
 				await mark('restore the server never heard');
 				await page.route(REWIND, (route) => route.abort('connectionreset'));
@@ -388,6 +404,118 @@ await runJourney({
 				await page.waitForTimeout(1500);
 				await expectOnce([`queued ${lost}`, `queued ${answered}`, duringBoot, typed]);
 				expect((await notSent(answered).count()) === 0, 'the answered row stayed gone');
+			},
+		},
+		{
+			// The other ordering: the answer does land, and the page goes right after.
+			// Nothing is left to recover from then, so the composer's reload copy has
+			// to hold everything. The reload is asked for in the very task that handles
+			// the answer, so this does not depend on who wins a race.
+			name: 'restore-answer-landing-just-before-a-reload',
+			allow: [
+				{ kind: 'layout_shift', reason: 'two reloads each refill the composer with a growing draft, which lifts the chat as the page boots; this case is about the words, not that move' }
+			],
+			async setup(ctx) {
+				await gotoApp(ctx.page, ctx.status);
+				await settleServiceWorker(ctx.page, ctx.status);
+				await openNewChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant }) {
+				const opening = `opening tok-${uniq()}`;
+				const earlier = `tok-${uniq()}`;
+				const landed = `tok-${uniq()}`;
+				const arrived = `tok-${uniq()}`;
+				const left = `tok-${uniq()}`;
+				const typed = `half-typed tok-${uniq()}`;
+				const notSent = (text) => page.locator('[data-not-sent="true"]').filter({ hasText: text });
+				const restoreButton = (text) => notSent(text).getByRole('button', { name: /^Restore/ });
+				const composerHas = (text) => page.waitForFunction(
+					(t) => document.querySelector('[contenteditable="true"]')?.innerText.includes(t), text, { timeout: 15_000 });
+				const composerHoldsOnce = async (...all) => {
+					const text = await page.locator('[contenteditable="true"]').first().innerText();
+					for (const words of all) expect(text.split(words).length === 2, `"${words}" is in the composer once: ${JSON.stringify(text)}`);
+				};
+				const noNoteLeft = async () => expect(
+					await page.evaluate(() => !Object.keys(sessionStorage).some((k) => k.startsWith('restore-note:'))), 'no note is left over');
+				const nextPage = async () => {
+					await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+					await mark('page reloaded');
+					await notSent(left).waitFor({ timeout: 60_000 });
+				};
+				const nextNavigation = () => page.waitForEvent('framenavigated', { predicate: (frame) => frame === page.mainFrame(), timeout: 30_000 });
+				const REWIND = '**/rewind/execute/**';
+
+				await mark('send');
+				await typeAndSend(page, `${opening} ${scriptTag(variant, 'slow', { tps: 2 })}`);
+				await page.getByText(SLOW_REPLY.start, { exact: false }).first().waitFor({ timeout: 60_000 });
+				await waitChat(page, { streaming: 'true' });
+				for (const words of [earlier, landed, arrived, left]) {
+					await typeAndSend(page, `queued ${words}`);
+					await page.locator('.pending-messages [role="article"]').filter({ hasText: words }).waitFor({ timeout: 5000 });
+				}
+				await mark('stop');
+				await stopButton(page).click();
+				await notSent(left).waitFor({ timeout: 15_000 });
+
+				await mark('an earlier restore');
+				await restoreButton(earlier).click();
+				await composerHas(`queued ${earlier}`);
+				await notSent(earlier).waitFor({ state: 'detached', timeout: 15_000 });
+
+				await mark('type, restore, and reload as the answer lands');
+				await page.locator('[contenteditable="true"]').first().click();
+				await page.keyboard.press('ControlOrMeta+End');
+				await page.keyboard.type(typed);
+				// The page is told to reload the moment the note goes, ahead of every timer
+				// and the next frame: the latest a reload can land with the answer handled
+				// and the note, which held the words until then, already gone.
+				await page.evaluate(() => {
+					const removeItem = Storage.prototype.removeItem;
+					Storage.prototype.removeItem = function (key) {
+						if (this !== sessionStorage || !String(key).startsWith('restore-note:')) return removeItem.call(this, key);
+						Storage.prototype.removeItem = removeItem;
+						removeItem.call(this, key);
+						location.reload();
+					};
+				});
+				const answer = page.waitForResponse(REWIND);
+				const reloading = nextNavigation();
+				await restoreButton(landed).click();
+				expect((await answer).status() === 200, 'the answer reached the page before it went');
+				await reloading;
+				await page.waitForLoadState('domcontentloaded');
+				await nextPage();
+				await composerHas(`queued ${landed}`);
+				await page.waitForTimeout(1500);
+				await composerHoldsOnce(`queued ${earlier}`, `queued ${landed}`, typed);
+				expect((await notSent(landed).count()) === 0, 'the row the server dropped stayed gone');
+				await noNoteLeft();
+
+				await mark('reload the moment the answer arrives');
+				// Earlier still: the reload is asked for before the app has read the
+				// answer, so the words may be saved or left to the note. Either way once.
+				await page.evaluate(() => {
+					const realFetch = window.fetch;
+					window.fetch = function (input, init) {
+						const asked = realFetch.call(this, input, init);
+						if (String(input?.url ?? input).includes('/rewind/execute/')) {
+							window.fetch = realFetch;
+							asked.then(() => location.reload());
+						}
+						return asked;
+					};
+				});
+				const reloadingAgain = nextNavigation();
+				await restoreButton(arrived).click();
+				await reloadingAgain;
+				await page.waitForLoadState('domcontentloaded');
+				await nextPage();
+				await composerHas(`queued ${arrived}`);
+				await page.waitForTimeout(1500);
+				await composerHoldsOnce(`queued ${earlier}`, `queued ${landed}`, `queued ${arrived}`, typed);
+				expect((await notSent(arrived).count()) === 0, 'the row the server dropped stayed gone');
+				await noNoteLeft();
 			}
 		},
 		{
