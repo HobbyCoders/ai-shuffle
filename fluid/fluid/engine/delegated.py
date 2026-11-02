@@ -735,8 +735,21 @@ def _with_forced_env(settings: dict[str, Any]) -> dict[str, Any]:
 
 #: How long the CLI's leftover process group gets after SIGTERM before SIGKILL.
 _GROUP_TERM_GRACE_S = 2.0
+#: How long the CLI gets to exit once its stdin closes.
+_CLI_EXIT_GRACE_S = 5.0
+#: The same, when a close was cancelled before it reached the CLI at all.
+_CANCELLED_EXIT_GRACE_S = 1.0
 # How long a cancelled close waits to reap the CLI after killing its tree.
 _CANCELLED_KILL_WAIT_S = 2.0
+# How long an uncancelled close waits for the same.
+_KILLED_CLI_WAIT_S = 5.0
+
+# uvloop keeps a TCP server alive until it is closed, but not a unix one. If the
+# garbage collector takes an open unix server, Python's socket finalizer closes
+# the descriptor and then uvloop's handle closes the same number again, which
+# can land on a file another thread has just opened. Holding every open bridge
+# here means an owner that forgets to close one costs a leak, never that.
+_OPEN_BRIDGE_SERVERS: set[Any] = set()
 
 
 async def _end_process_group(pid: int | None, *, grace: float = _GROUP_TERM_GRACE_S) -> None:
@@ -781,6 +794,21 @@ async def _end_process_group(pid: int | None, *, grace: float = _GROUP_TERM_GRAC
         os.killpg(pid, signal.SIGKILL)
     except OSError:
         pass
+
+
+async def _kill_cli_tree(proc: asyncio.subprocess.Process, *, group_grace: float = _GROUP_TERM_GRACE_S) -> None:
+    """Kill the CLI and what it started, whether or not the CLI has exited.
+
+    ``proc.wait()`` also waits for the pipes, so a child holding stdout keeps it
+    pending after the CLI itself is gone. ``kill_tree`` does nothing for an
+    exited process, which would leave that child running.
+    """
+    from fluid.tools.builtins.bash import kill_tree
+
+    if proc.returncode is None:
+        await kill_tree(proc)
+    else:
+        await _end_process_group(proc.pid, grace=group_grace)
 
 
 def _settings_json(settings: dict[str, Any]) -> str:
@@ -1451,11 +1479,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 await self._stop_live_work()
             finally:
                 self._release_bridge_resources()
-                if self._journal is not None:
-                    try:
-                        await self._journal.aclose()
-                    except Exception:
-                        logger.debug("closing the continual journal failed", exc_info=True)
+            # Only ever reached inside the caller's deadline: its drain has a
+            # much longer budget of its own, so a cancelled close must not start it.
+            if self._journal is not None:
+                try:
+                    await self._journal.aclose()
+                except Exception:
+                    logger.debug("closing the continual journal failed", exc_info=True)
             if self._socket_server is not None:
                 try:
                     await self._socket_server.wait_closed()
@@ -1480,26 +1510,37 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             await self.bus.close()
 
     async def _stop_live_work(self) -> None:
-        """Settle waiters, end the running turn, and stop the CLI."""
-        self._peer_admission_open = False
-        self._drop_pending_peers()
-        await self._close_background_lifecycle()
-        self._interrupted.set()
-        # Settle anyone parked on a control reply: the CLI is going away, so
-        # they get "unavailable" now instead of waiting out the timeout.
-        for request_id, fut in list(self._pending_controls.items()):
-            if not fut.done():
-                fut.set_result(ControlReply(
-                    request_id=request_id, ok=False, error="engine closed",
-                ))
-        if self._turn_task and not self._turn_task.done():
-            self._turn_task.cancel()
-            try:
-                await self._turn_task
-            except asyncio.CancelledError:
-                pass
-        await self._emit_session_end()
-        await self._stop_process()
+        """Settle waiters, end the running turn, and stop the CLI.
+
+        The CLI is stopped however the steps before it end: nothing else holds
+        its handle once the loop is dropped. A cancelled close gives it only a
+        moment to exit, because the caller's deadline has already passed.
+        """
+        grace = _CLI_EXIT_GRACE_S
+        try:
+            self._peer_admission_open = False
+            self._drop_pending_peers()
+            await self._close_background_lifecycle()
+            self._interrupted.set()
+            # Settle anyone parked on a control reply: the CLI is going away, so
+            # they get "unavailable" now instead of waiting out the timeout.
+            for request_id, fut in list(self._pending_controls.items()):
+                if not fut.done():
+                    fut.set_result(ControlReply(
+                        request_id=request_id, ok=False, error="engine closed",
+                    ))
+            if self._turn_task and not self._turn_task.done():
+                self._turn_task.cancel()
+                try:
+                    await self._turn_task
+                except asyncio.CancelledError:
+                    pass
+            await self._emit_session_end()
+        except asyncio.CancelledError:
+            grace = _CANCELLED_EXIT_GRACE_S
+            raise
+        finally:
+            await self._stop_process(grace=grace)
 
     def _release_bridge_resources(self) -> None:
         """Close the bridge server and remove this loop's files.
@@ -1512,6 +1553,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 self._socket_server.close()
             except Exception:
                 logger.warning("closing the bundled tool server failed", exc_info=True)
+            _OPEN_BRIDGE_SERVERS.discard(self._socket_server)
         # A "tcp:..." bridge address names no file — closing the server above is
         # the whole cleanup; only real paths get unlinked.
         for path in (self._socket_path, self._mcp_config_path, self._prompt_file):
@@ -1599,7 +1641,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         env.update(FORCED_CHILD_ENV)
         return env
 
-    async def _stop_process(self, *, grace: float = 5.0) -> None:
+    async def _stop_process(self, *, grace: float = _CLI_EXIT_GRACE_S) -> None:
         """End the CLI process and everything it spawned.
 
         Closing stdin is the stream-json CLI's own exit signal, and the clean
@@ -1644,8 +1686,6 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 proc.stdin.close()
         except Exception:  # noqa: BLE001 — a closed pipe is the goal
             pass
-        from fluid.tools.builtins.bash import kill_tree
-
         try:
             await asyncio.wait_for(proc.wait(), timeout=grace)
             await _end_process_group(proc.pid)
@@ -1657,14 +1697,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # what it started must still go: nothing else holds their handle.
             logger.info("ending the claude CLI tree: its close was cancelled during the exit grace")
             try:
-                await asyncio.wait_for(kill_tree(proc), timeout=_CANCELLED_KILL_WAIT_S)
+                await asyncio.wait_for(_kill_cli_tree(proc, group_grace=0), timeout=_CANCELLED_KILL_WAIT_S)
             except Exception:  # best effort; the cancel still goes on
                 logger.debug("killing the claude CLI tree failed", exc_info=True)
             raise
         logger.info("ending the claude CLI tree: still running %.1fs after its stdin closed", grace)
-        await kill_tree(proc)
         try:
-            await asyncio.wait_for(proc.wait(), timeout=5)
+            await asyncio.wait_for(_kill_cli_tree(proc), timeout=_KILLED_CLI_WAIT_S)
         except Exception:  # noqa: BLE001 — best effort; the loop is closing
             pass
 
@@ -1744,6 +1783,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 deferred=self.bridge_deferred,
                 agent_id_for_tool=self._bridge_agent_id,
             )
+            _OPEN_BRIDGE_SERVERS.add(self._socket_server)
             self._usage_route = usage_route
             self._compaction_route = compaction_route
             if not use_unix:

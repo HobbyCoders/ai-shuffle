@@ -1201,6 +1201,8 @@ class SessionPool:
                 await graceful_disconnect(state.adapter, session_id)
             except Exception as e:
                 logger.warning(f"[Pool] Error during eviction disconnect for {session_id}: {e}")
+        else:
+            await graceful_disconnect(state.adapter, session_id, preserve_session=True)
         await reap_closed_subprocess(pid, descendants)
         logger.info(f"[Pool] Evicted session {session_id} (pool size: {len(self._pool)})")
         if self._eviction_callback is not None:
@@ -1253,6 +1255,8 @@ class SessionPool:
                 )
             except Exception as e:
                 logger.warning(f"[Pool] Error disconnecting session {session_id}: {e}")
+        else:
+            await graceful_disconnect(state.adapter, session_id, preserve_session=True)
         await reap_closed_subprocess(pid, descendants)
         logger.info(f"[Pool] Removed session {session_id} (pool size: {len(self._pool)})")
         return state
@@ -1260,17 +1264,29 @@ class SessionPool:
     async def remove_dead(
         self, session_id: str, *, expected_context=_ANY_GENERATION_CONTEXT,
     ) -> Optional[SessionState]:
-        """Remove a dead session entry without attempting disconnect.
+        """Remove a dead session entry and close what its adapter still holds.
 
-        Used when the subprocess has already died and we just need to clean up the entry.
-        Turn-owned cleanup can supply its binding to leave a reused client alone.
+        Used when the subprocess has already died and the caller wants a fresh
+        client now, so the close runs in the background. A dead CLI does not
+        release the parent's side: the engine's tool server is still open.
+        Session-owned workflows are left running. Turn-owned cleanup can supply
+        its binding to leave a reused client alone.
         """
         state = self._pop_session(session_id, expected_context=expected_context)
         if state is None:
             return None
         state.is_connected = False
+        self._close_transport_in_background(session_id, state)
         logger.info(f"[Pool] Removed dead session {session_id} (pool size: {len(self._pool)})")
         return state
+
+    def _close_transport_in_background(self, session_id: str, state: SessionState) -> None:
+        """Close a dropped client's transport without holding up the caller."""
+        task = asyncio.create_task(
+            graceful_disconnect(state.adapter, session_id, preserve_session=True)
+        )
+        self._background_teardowns.add(task)
+        task.add_done_callback(self._background_teardowns.discard)
 
     async def remove_broken(
         self, session_id: str, *, expected_context=_ANY_GENERATION_CONTEXT,
@@ -1681,6 +1697,7 @@ class SessionPool:
                 was_streaming = state.is_streaming
                 pid = subprocess_pid(state)
                 self._pop_session(session_id)
+                self._close_transport_in_background(session_id, state)
                 # Subprocess is already dead, so its descendants are already
                 # orphaned (reparented to init). Best-effort record so the
                 # reaper still tries; descendants may be empty here.
