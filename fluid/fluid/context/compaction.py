@@ -452,7 +452,8 @@ class Promotion:
     measured_prompt_tokens: int = 0
     # Renderer version the decision was made under (fluid.context.steer_render).
     # The default is the current version, because the promotions that omit it
-    # are the ones Compactor.apply and escalate make now. A decision read back
+    # are the ones Compactor.apply and escalate make now (overflow's last rung
+    # may name an older one). A decision read back
     # from a ContextCompaction event passes the event's value, which is 1 for
     # an event written before the field existed, so it renders as it did then.
     # Compactor.rehydrate never replays above the compactor's own version.
@@ -2842,12 +2843,26 @@ class Compactor:
                     target=digest_target,
                     keep_recent=keep,
                 )
+                version = self.config.render_version
+                if not promoted and keep == 0 and version > RENDER_VERSION_V2:
+                    # Overflow's last rung, and a verbatim brief is all that is
+                    # left to save. A rejected request costs more than its end,
+                    # so this one span renders as it did before version 3.
+                    version = RENDER_VERSION_V2
+                    promoted = self._digest_until(
+                        nodes,
+                        overhead_tokens=overhead_tokens,
+                        target=digest_target,
+                        keep_recent=keep,
+                        render_version=version,
+                    )
                 if not promoted:
                     return None
                 return Promotion(
                     tier=2,
                     reason="overflow",
                     spans=tuple((s, e, SPAN_DIGEST) for s, e in promoted),
+                    render_version=version,
                 )
             return rung
 
@@ -3435,6 +3450,7 @@ class Compactor:
         target: int,
         keep_recent: int | None = None,
         eligible: list[list[SessionNode]] | None = None,
+        render_version: int | None = None,
     ) -> list[tuple[str, str]]:
         """Promote eligible spans oldest-first until the estimate reaches
         target (target=0 → promote everything eligible). Incremental
@@ -3459,7 +3475,8 @@ class Compactor:
             for start, end in list(self._digested):
                 if start in span_ids and end in span_ids:
                     self._retire((start, end))
-            self._mark_span(*key, SPAN_DIGEST, pin_end=nodes[-1].node_id)
+            self._mark_span(*key, SPAN_DIGEST, pin_end=nodes[-1].node_id,
+                            render_version=render_version)
             after = self._estimate(nodes, overhead_tokens)
             if after >= current:
                 restore()

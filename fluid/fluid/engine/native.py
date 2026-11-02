@@ -3645,10 +3645,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             first_changed_message=promo.first_changed_message,
             token_basis=promo.token_basis,
             measured_prompt_tokens=promo.measured_prompt_tokens,
-            # The compactor's version, not promo.render_version: apply and
-            # escalate build their promotions without the field. Resume reads
-            # it back, so a session renders the same bytes after a restart.
-            render_version=self._compactor.render_version,
+            # Capped at the compactor's version: apply and escalate build most
+            # promotions without the field, and its default is the newest. Resume
+            # reads it back, so a session renders the same bytes after a restart.
+            render_version=min(promo.render_version, self._compactor.render_version),
             **(schedule or {}),
             rewrite_tail_tokens_est=(
                 rewrite_tail_tokens_est
