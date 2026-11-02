@@ -1994,14 +1994,16 @@ class SkillStore:
                 out_of_scope += 1
                 continue
             if entry.superseded_by:
-                # Never inject an old value beside its replacement. An explicit
-                # fact is retained verbatim in storage; its unresolved pair uses
-                # the existing Recall conflict-resolution path, not deletion.
+                # Confirmed replacements omit the predecessor. An unconfirmed
+                # proposal is not authority to withhold an owner-kept fact.
                 if entry.protected and not entry.supersession_confirmed:
+                    findings = screen_findings(entry.text) + screen_findings(entry.when or "")
+                    text = "[withheld — suspected injection]" if findings else entry.text
                     pinned.append((entry, (
-                        f"- [{entry.id} r{entry.revision}; conflict] User-kept fact has a newer "
-                        f"replacement [{entry.superseded_by}]; unresolved conflict. "
-                        "Recall the pair and ask the owner to resolve it; do not use the old value."
+                        f"- [{entry.id} r{entry.revision}; conflict] {text} "
+                        f"(Unconfirmed replacement proposal [{entry.superseded_by}]; unresolved conflict. "
+                        "Both facts remain usable; neither overrides the other. "
+                        "Recall the pair and ask the owner to resolve it.)"
                     )))
                 continue
             if entry.conflicted:

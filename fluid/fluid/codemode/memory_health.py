@@ -317,13 +317,14 @@ def check(store, *, now: float | None = None, learning_enabled: bool = True,
     learner = _learner_signal(store, now, learning_enabled, previous)
     samples = learner.pop("samples", previous.get("journal_loss_samples") or [])
     kind_samples = learner.pop("kind_samples", previous.get("journal_loss_kind_samples") or [])
+    archive_samples, archive_loss = _archive_loss_samples(doc, now, previous)
     signals = [
         learner,
         _usage_signal(live, plans, now),
         _unconfirmed_signal(live, now),
         _duplicates_signal(live),
         # Capacity is the whole document, every worker's facts included.
-        _capacity_signal(store, doc["entries"], doc["archived"]),
+        _capacity_signal(store, doc["entries"], doc["archived"], archive_loss),
         _snapshot_signal(plans),
         _curation_signal(store, now),
     ]
@@ -341,6 +342,7 @@ def check(store, *, now: float | None = None, learning_enabled: bool = True,
         "lost_protected": lost,
         "journal_loss_samples": samples,
         "journal_loss_kind_samples": kind_samples,
+        "archive_loss_samples": archive_samples,
     }
 
 
@@ -630,7 +632,39 @@ def _duplicates_signal(live) -> dict:
     return _signal("duplicates", False, "No duplicates to merge.", **detail)
 
 
-def _capacity_signal(store, live, archived) -> dict:
+def _archive_loss_samples(doc, now, previous):
+    """Local observations of a store counter, NOT a count of unique lost facts.
+
+    Replayed replicas can reintroduce then re-trim the same fact. Report the
+    counter as an upper bound; never sum it across workers. A reset or a long
+    gap is unknown growth, not zero or a negative number. Keep bounded history.
+    """
+    losses = doc.get("losses") or {}
+    total = max(0, int(losses.get("archive_dropped", 0) or 0))
+    last = float(losses.get("last_archive_dropped_at", 0) or 0)
+    samples = [s for s in previous.get("archive_loss_samples", [])
+               if isinstance(s, list) and len(s) == 2
+               and isinstance(s[0], (int, float)) and isinstance(s[1], (int, float))
+               and now - COVERAGE_WINDOW <= s[0] < now]
+    reset = bool(samples and total < samples[-1][1])
+    if reset:
+        samples = []
+    growth = max(0, total - samples[0][1]) if samples else None
+    if not samples or now - samples[-1][0] >= LOSS_SAMPLE_EVERY:
+        samples.append([now, total])
+    samples = samples[-LOSS_SAMPLES_KEPT:]
+    return samples, {
+        "archive_dropped_total": total, "archive_dropped_in_window": growth,
+        "archive_loss_window_days": COVERAGE_WINDOW / DAY,
+        "archive_loss_counter_reset": reset, "last_archive_dropped_at": last or None,
+        "archive_loss_recent": bool(total and (growth or now - COVERAGE_WINDOW <= last <= now)),
+        "archive_loss_time_unknown": bool(total and not last),
+    }
+
+
+def _capacity_signal(store, live, archived, archive_loss=None) -> dict:
+    from fluid.codemode import skills
+
     tiers = {name: sum(1 for e in live if facts.tier(e) == name) for name in ("explicit", "durable", "inferred")}
     archived_explicit = sum(1 for e in archived if e.get("protected"))
     try:
@@ -641,7 +675,21 @@ def _capacity_signal(store, live, archived) -> dict:
     detail = {**tiers, "explicit_cap": facts.MAX_EXPLICIT, "durable_cap": facts.MAX_DURABLE,
               "inferred_cap": MAX_MEMORIES, "archived": len(archived),
               "archived_explicit": archived_explicit, "user_saved": user_saved,
-              "bytes": size, "bytes_cap": facts.MAX_DOCUMENT_BYTES}
+              "bytes": size, "bytes_cap": facts.MAX_DOCUMENT_BYTES,
+              "archive_cap": skills.MAX_ARCHIVED_MEMORIES, **(archive_loss or {})}
+    if detail.get("archive_loss_recent") or detail.get("archive_loss_time_unknown"):
+        growth = detail["archive_dropped_in_window"]
+        observed = (f"{growth} more archive drops observed in the last {COVERAGE_WINDOW / DAY:g} days"
+                    if growth is not None else "recent archive drops; no earlier sample to measure growth")
+        headline = "Facts are being permanently removed from the archive"
+        if detail.get("archive_loss_time_unknown") and not detail.get("archive_loss_recent"):
+            headline = "Facts have been permanently removed from the archive"
+            observed = "loss timing is unavailable on this older store"
+        return _signal("capacity", True,
+                       f"{headline}: {observed}. "
+                       f"Lifetime counter {detail['archive_dropped_total']} (upper bound; replay can recount). "
+                       "Review memory retention; increasing capacity alone only delays loss.",
+                       alert=True, **detail)
     if size >= DOCUMENT_FULL_SHARE * facts.MAX_DOCUMENT_BYTES:
         share = round(100 * size / facts.MAX_DOCUMENT_BYTES)
         return _signal("capacity", True, f"The memory file is {share}% full; saves fail at the limit.",
@@ -654,6 +702,14 @@ def _capacity_signal(store, live, archived) -> dict:
         return _signal("capacity", True,
                        f"User-saved facts are at {user_saved} of {facts.MAX_EXPLICIT}; "
                        "at the limit new ones are refused.", alert=True, **detail)
+    full = [name for name, cap in (("durable", facts.MAX_DURABLE), ("inferred", MAX_MEMORIES))
+            if tiers[name] >= FULL_SHARE * cap]
+    if len(archived) - archived_explicit >= FULL_SHARE * skills.MAX_ARCHIVED_MEMORIES:
+        full.append("archive")
+    if full:
+        return _signal("capacity", True,
+                       f"Memory tiers near capacity: {', '.join(full)}; "
+                       "no recent permanent archive loss observed.", **detail)
     return _signal("capacity", False, f"{_plural(len(live), 'live fact')}; room to spare.", **detail)
 
 

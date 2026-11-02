@@ -37,13 +37,18 @@ def replacement_evidence(old: dict, new: dict, *, proposed: bool = False) -> boo
         return False
     if new.get("updated_at", 0) <= old.get("updated_at", 0):
         return False
+    # A learner's assertion is not owner replacement evidence. In particular,
+    # long owner rules share product/model names across unrelated subjects.
+    # Protected facts use the same explicit-value test as automatic linking;
+    # unprotected learner proposals retain their existing conservative screen.
     if (_EXCEPTION.search(old["text"]) or _EXCEPTION.search(new["text"])
-            or _UNCERTAIN.search(new["text"]) or (not proposed and not has_replacement_signal(new["text"]))):
+            or _UNCERTAIN.search(new["text"])
+            or ((not proposed or old.get("protected")) and not has_replacement_signal(new["text"]))):
         return False
     # Do not use keys alone: alias keys are common, while similar keys can
     # describe different subjects. At least two content terms must agree.
     shared = subject_terms(old["text"]) & subject_terms(new["text"])
-    if proposed:
+    if proposed and not old.get("protected"):
         return len(shared) >= 3
     old_text = " ".join(old["text"].casefold().split())
     for match in _REPLACEMENT.finditer(new["text"]):

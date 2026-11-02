@@ -159,7 +159,10 @@ def _tags(entry: Any, archived: bool, successor: dict[str, str]) -> list[str]:
         tags.append("harvested from tool output, unconfirmed — confirm with Remember if still true")
     if entry.superseded_by:
         shown = successor.get(entry.superseded_by, entry.superseded_by)
-        tags.append(f"superseded by [{shown}]; not current")
+        if entry.protected and not entry.supersession_confirmed:
+            tags.append(f"unconfirmed replacement proposal [{shown}]; both facts remain usable; ask the owner")
+        else:
+            tags.append(f"superseded by [{shown}]; not current")
     if archived:
         tags.append("archived")
     if entry.scope != "global":
@@ -193,8 +196,9 @@ def _lookup(query: str, limit: int, store: Any, project: str | None) -> ToolOutc
                  and score(e.text + " " + (e.key or ""))]
     for entry in conflicts[:limit]:
         if entry.superseded_by:
-            lines.append(f"- [{entry.id}] Superseded by [{entry.superseded_by}]; both facts are retained. "
-                         "The old value is not current. Resolve this user-kept pair with the owner.")
+            lines.append(f"- [{entry.id}] Unconfirmed replacement proposal [{entry.superseded_by}]; "
+                         "both facts remain usable; neither overrides the other. "
+                         "Resolve this user-kept pair with the owner.")
         lines.append(f"- [{entry.id}] Unresolved conflict; revision: {entry.revision}; key: {entry.key or 'unspecified'}. "
                      "Ask the user for the current fact, then correct this ID and revision with Remember. Do not guess a value.")
     if memory_hits:

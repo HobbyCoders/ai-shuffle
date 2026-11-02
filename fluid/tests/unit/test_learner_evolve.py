@@ -284,31 +284,24 @@ def test_routing_reads_jobs_clause_by_clause():
     assert model_routing(WEBSITE) == model_routing(SCHEDULE) == {}
 
 
-def test_the_routing_contradiction_is_flagged_and_unrelated_facts_are_not(tmp_path):
+def test_routing_overlap_without_explicit_replacement_keeps_every_owner_rule(tmp_path):
     store, saved = routing_store(tmp_path)
     before = {m.id: m.text for m in store.memories()}
-    changed = curate_protected_conflicts(store)
-    assert changed == [f"conflict-memory:{saved['old'].id}"]
-    live = {m.id: m for m in store.memories()}
-    assert {i: m.text for i, m in live.items()} == before, "nothing rewritten or archived"
-    assert live[saved["old"].id].superseded_by and not live[saved["old"].id].supersession_confirmed
-    for name in ("website", "schedule", "frontend", "review", "new"):
-        assert not live[saved[name].id].superseded_by, name
-    section = store.render_memory_section(None)
-    assert "Recall the pair and ask the owner to resolve it" in section
-    listed = {line[3:].split(" ", 1)[0] for line in section.splitlines() if line.startswith("- [")}
-    assert f"[{saved['old'].id} r2; conflict]" in section and saved["new"].id in listed
-    assert {saved["website"].id, saved["schedule"].id} <= listed
-    # Asked once: resolving the pair (here: the owner keeps both) does not
-    # bring the same question back.
-    with file_transaction(store._facts.lock):
-        doc = store._facts._load()
-        for e in doc["entries"]:
-            if e["id"] == saved["old"].id:
-                e.pop("superseded_by")
-        store._facts._write(doc)
-    curate_protected_conflicts(store)
-    assert not next(m for m in store.memories() if m.id == saved["old"].id).superseded_by
+    # Typed routing overlap was still not owner evidence of replacement (#958).
+    for _ in range(2):
+        assert curate_protected_conflicts(store) == []
+        live = {m.id: m for m in store.memories()}
+        assert {i: m.text for i, m in live.items()} == before
+        assert all(not m.superseded_by for m in live.values())
+        section = store.render_memory_section(None)
+        assert "unresolved conflict" not in section
+        assert all(saved[name].id in section for name in saved)
+    # An explicit correction is still applied, without deleting the old text.
+    corrected = store.save_memory(
+        "Owner code work goes to Opus, replacing sol; reviews go to Opus.", protected=True)
+    old = next(m for m in store.memories() if m.id == saved["old"].id)
+    assert old.superseded_by and old.supersession_confirmed
+    assert old.text == before[old.id] and corrected.text in store.render_memory_section()
 
 
 def test_a_newer_fact_about_one_job_never_hides_a_wider_rule(tmp_path):
@@ -329,7 +322,9 @@ def test_open_conflicts_are_capped(tmp_path):
     curate_protected_conflicts(store)
     curate_protected_conflicts(store)
     waiting = [m for m in store.memories() if m.superseded_by and not m.supersession_confirmed]
-    assert len(waiting) == MAX_OPEN_CONFLICTS
+    assert waiting == [], "even a large candidate pool needs explicit owner replacement evidence"
+    assert len(store.memories()) == 2 * (MAX_OPEN_CONFLICTS + 2)
+    assert all(m.text in store.render_memory_section() for m in store.memories())
 
 
 def test_the_learner_cannot_link_a_user_kept_fact_without_the_conflict_path(tmp_path):
@@ -344,7 +339,9 @@ async def test_consolidation_runs_conflict_curation(tmp_path, monkeypatch):
     store, saved = routing_store(tmp_path)
     synth = Synthesizer(Answer(), "gpt-test", store)
     changed = await synth.consolidate()
-    assert f"conflict-memory:{saved['old'].id}" in changed
+    assert not any(item.startswith("conflict-memory:") for item in changed)
+    assert all(not m.superseded_by for m in store.memories() if m.protected)
+    assert saved["old"].text in store.render_memory_section()
 
 
 # ─── 4. health says what is waiting ─────────────────────────────────────────
@@ -357,6 +354,7 @@ def test_health_names_open_questions_in_plain_words(tmp_path):
     PreferenceProposals(store).propose("ci_policy", "Tests run on GitHub CI, not on the machines.")
     signal = next(s for s in memory_health.check(store)["signals"] if s["id"] == "proposals")
     assert signal["state"] == "healthy"
-    assert signal["reason"] == ("1 proposed preference update and 1 pair of saved facts that disagree "
-                                "are waiting for your answer; sessions ask you about them.")
+    assert signal["reason"] == ("1 proposed preference update "
+                                "is waiting for your answer; sessions ask you about them.")
+    assert signal["detail"]["conflicts"] == 0
     assert signal["detail"]["topics"] == ["ci_policy"]

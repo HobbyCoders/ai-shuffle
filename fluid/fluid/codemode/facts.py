@@ -467,6 +467,14 @@ class FactStore:
                         break  # an intermediate retracted leaf is repaired first
                     if target is None:
                         break  # archive pruning is not a retraction
+                    # Legacy protected proposals used word overlap alone. On
+                    # every read/merge, withdraw unsupported metadata edges,
+                    # never either fact. Confirmed owner links remain binding.
+                    if (node.get("protected") and not node.get("supersession_confirmed")
+                            and not replacement_evidence(dict(node, superseded_by=None), target,
+                                                         proposed=True)):
+                        plans.append((node, None, False))
+                        break
                     old_scope, target_scope = old.get("scope", "global"), target.get("scope", "global")
                     compatible_scope = old_scope == target_scope or (target_scope == "global" and old_scope.startswith("project:"))
                     if (not compatible_scope or old.get("worker") != target.get("worker")
