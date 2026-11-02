@@ -5,7 +5,7 @@ import type { ChatMessage } from '$lib/stores/types';
 import WorkLogGroup from './WorkLogGroup.svelte';
 import TranscriptItems from './test-fixtures/TranscriptItems.svelte';
 import QueuedWorkLog from './test-fixtures/QueuedWorkLog.svelte';
-import { buildTranscriptModel, type DisplayItem } from '$lib/utils/work-log';
+import { buildTranscriptModel, createTranscriptModelBuilder, type DisplayItem } from '$lib/utils/work-log';
 import { createFoldState } from '$lib/stores/session/fold-state';
 import { deriveUserTurnNavigationItems, turnAnchorId } from '$lib/utils/transcript-navigation';
 import { readFileSync } from 'node:fs';
@@ -422,9 +422,9 @@ describe('WorkLogGroup', () => {
 			{ ...message, id: 'read-b', content: 'Read B' },
 			{ id: 'answer', role: 'assistant', type: 'text', content: 'Done.' }
 		];
-		// Live, the answer is still streaming: finished prose would end the run
-		// and fold `read-b`, while these tests want it in the current, open run.
-		const liveTurn = turn.map((m) => (m.id === 'answer' ? { ...m, streaming: true } : m));
+		// Live, the answer has not started: prose, finished or arriving, would end
+		// the run and fold `read-b`, while these tests want it in the current, open run.
+		const liveTurn = turn.filter((m) => m.id !== 'answer');
 		const logOf = (isStreaming: boolean, messages = isStreaming ? liveTurn : turn) => {
 			const item = buildTranscriptModel(messages, { isStreaming, groupingEnabled: true }).items
 				.find((entry) => entry.kind === 'work_log') as WorkLog;
@@ -456,7 +456,7 @@ describe('WorkLogGroup', () => {
 			render(WorkLogGroup, { ...logOf(true), folds: createFoldState(memoryStorage()) });
 			expect(screen.getByRole('button', { name: 'Show work details: Read 1 file' })).toBeTruthy();
 			expect(rowEl('read-a')).toBeNull();
-			expect(['finding', 'read-b', 'answer'].map(shown)).toEqual([true, true, true]);
+			expect(['finding', 'read-b'].map(shown)).toEqual([true, true]);
 		});
 
 		it('keeps a row expanded live still expanded after the turn settles', async () => {
@@ -833,10 +833,11 @@ describe('WorkLogGroup', () => {
 			expect(shown('read-x')).toBe(true);
 			expect(folds.current).toEqual({ 'prompt:run-read-x..prose-a': true });
 
-			// B streams: A still ends the run.
+			// B starts: the run now runs through A to B, same key, still open.
 			await view.rerender(logOf(true, [prompt, read, proseA, { ...proseB, streaming: true }]));
 			expect(shown('read-x')).toBe(true);
-			// B finishes: the run now runs through A to B, same key, still open.
+			expect(folds.current).toEqual({ 'prompt:run-read-x..prose-b': true });
+			// B finishes: nothing moves.
 			await view.rerender(logOf(true, [prompt, read, proseA, proseB]));
 			expect(shown('read-x')).toBe(true);
 			expect(shown('prose-a')).toBe(true);
@@ -847,6 +848,42 @@ describe('WorkLogGroup', () => {
 			render(WorkLogGroup, { ...logOf(true, [prompt, read, proseA, proseB]), folds: createFoldState(storage) });
 			expect(shown('read-x')).toBe(true);
 			expect(screen.getByRole('button', { name: 'Hide work details: Read 1 file' })).toBeTruthy();
+		});
+
+		// A row sent in mid-paragraph must not bring the folded work back on screen,
+		// through the builder a live chat keeps as well as a fresh build.
+		describe.each([
+			['the live builder', () => createTranscriptModelBuilder()],
+			['a fresh build', () => buildTranscriptModel]
+		])('a row sent in mid-paragraph, through %s', (_name, makeBuilder) => {
+			const prompt = turn[0];
+			const read = { ...message, id: 'read-a', content: 'Read A' };
+			const started: ChatMessage = { id: 'prose', role: 'assistant', type: 'text', content: 'Found it:\n- partial', streaming: true };
+			const grown = { ...started, content: 'Found it:\n- partial, and growing' };
+			const finished = { ...grown, streaming: false };
+			const steer: ChatMessage = { id: 'steer', role: 'user', content: 'Also check prod', turnId: 'turn-1' };
+			const queued: ChatMessage = { id: 'peer', role: 'system', type: 'system', systemSubtype: 'agent_message', content: '', systemData: { sender: 'Reviewer', content: 'Done.', delivery: 'queued' } };
+
+			it.each([['a steer', steer], ['a queued peer message', queued]])('keeps the work hidden through %s', async (_label, row) => {
+				const build = makeBuilder();
+				const props = (messages: ChatMessage[]) => {
+					const item = build(messages, { isStreaming: true, latestTurnUnsettled: true, groupingEnabled: true, sessionId: 's1' }).items
+						.find((entry) => entry.kind === 'work_log') as WorkLog;
+					return { ...item, row: expandableRow };
+				};
+				const view = render(WorkLogGroup, { ...props([prompt, read, started]), folds: createFoldState(memoryStorage()) });
+				const label = () => screen.getByRole('button', { name: 'Show work details: Read 1 file' });
+				const before = label();
+				const steps = [[prompt, read, started, row], [prompt, read, grown, row], [prompt, read, finished, row]];
+				expect(rowEl('read-a')).toBeNull();
+				for (const step of steps) {
+					await view.rerender(props(step));
+					// Same fold row, never unmounted and never opened: no flicker to see.
+					expect(label()).toBe(before);
+					expect(rowEl('read-a')).toBeNull();
+				}
+				expect(shown('prose')).toBe(true);
+			});
 		});
 
 		// Re-review of #2297: runs merge when newer prose replaces the prose
@@ -868,9 +905,11 @@ describe('WorkLogGroup', () => {
 			await fireEvent.click(labels[1]);
 			expect(shown('read-b')).toBe(true);
 
+			// B starts: A no longer ends a run, so the two runs merge.
 			await view.rerender(logOf(true, [...before, { ...proseB, streaming: true }]));
 			expect(shown('read-b')).toBe(true);
-			// B finishes: A no longer ends a run, so the two runs merge.
+			expect(screen.getAllByRole('button', { name: /^Hide work details:/ })).toHaveLength(1);
+			// B finishes: nothing moves.
 			await view.rerender(logOf(true, [...before, proseB]));
 			expect(screen.getAllByRole('button', { name: /^Hide work details:/ })).toHaveLength(1);
 			expect(shown('read-b')).toBe(true);
