@@ -960,6 +960,21 @@ async def test_a_lost_frame_does_not_lose_the_count(owner, monkeypatch):
     count.assert_awaited_once()
 
 
+async def test_a_chip_mirrored_from_the_owning_worker_reaches_sidebars_here(owner, monkeypatch):
+    from app.core.global_events import global_events
+    from app.core.sync_engine import sync_engine
+
+    chip_id = await recorded()
+    count = AsyncMock()
+    monkeypatch.setattr(sync_engine, "broadcast_event", AsyncMock())
+    monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", count)
+    monkeypatch.setattr(global_events, "_loop", asyncio.get_running_loop(), raising=False)
+    task_chips.notify_mirrored(chip_id)
+    await asyncio.sleep(0)
+    await asyncio.gather(*task_chips._background)
+    count.assert_awaited_once_with(user_id="admin", session_id="root", updates={"pending_task_chips": 1})
+
+
 async def test_a_failed_count_read_never_raises_and_a_gone_chat_sends_nothing(owner, monkeypatch):
     from app.core.sync_engine import sync_engine
 
