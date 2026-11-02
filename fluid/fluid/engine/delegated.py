@@ -735,6 +735,8 @@ def _with_forced_env(settings: dict[str, Any]) -> dict[str, Any]:
 
 #: How long the CLI's leftover process group gets after SIGTERM before SIGKILL.
 _GROUP_TERM_GRACE_S = 2.0
+# How long a cancelled close waits to reap the CLI after killing its tree.
+_CANCELLED_KILL_WAIT_S = 2.0
 
 
 async def _end_process_group(pid: int | None, *, grace: float = _GROUP_TERM_GRACE_S) -> None:
@@ -761,12 +763,20 @@ async def _end_process_group(pid: int | None, *, grace: float = _GROUP_TERM_GRAC
     except OSError:
         return  # no such group (nothing left) or not ours to signal
     deadline = time.monotonic() + grace
-    while time.monotonic() < deadline:
-        await asyncio.sleep(0.05)
+    try:
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+            try:
+                os.killpg(pid, 0)
+            except OSError:
+                return
+    except asyncio.CancelledError:
+        # No more time to wait, and no one else will end this group.
         try:
-            os.killpg(pid, 0)
+            os.killpg(pid, signal.SIGKILL)
         except OSError:
-            return
+            pass
+        raise
     try:
         os.killpg(pid, signal.SIGKILL)
     except OSError:
@@ -1426,6 +1436,51 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         return {**parsed, "attribution": cli_attribution(self.commit_attribution)}
 
     async def aclose(self) -> None:
+        """End the session and give back everything the loop holds.
+
+        A caller may close the loop under a deadline, so the steps that only
+        wait can be cancelled, and any step can fail. What holds an OS resource
+        is released regardless. A bridge server left open matters beyond a
+        leak: uvloop keeps only TCP servers alive, so the garbage collector
+        takes a dropped unix one, and its descriptor is closed twice. The second
+        close can land on a file another thread has just opened with that
+        number, which then reads short or gets another file's bytes.
+        """
+        try:
+            try:
+                await self._stop_live_work()
+            finally:
+                self._release_bridge_resources()
+                if self._journal is not None:
+                    try:
+                        await self._journal.aclose()
+                    except Exception:
+                        logger.debug("closing the continual journal failed", exc_info=True)
+            if self._socket_server is not None:
+                try:
+                    await self._socket_server.wait_closed()
+                except Exception:
+                    pass
+            # A steer check still reading a transcript gets a moment to report.
+            if self._steer_scans:
+                try:
+                    await asyncio.wait(set(self._steer_scans), timeout=2)
+                except Exception:
+                    logger.debug("waiting for the steer check failed", exc_info=True)
+                for task in list(self._steer_scans):
+                    task.cancel()
+            # Let any in-flight resume-handle write land — losing it here is exactly
+            # the restart case this persistence exists for.
+            if self._cli_id_writes:
+                try:
+                    await asyncio.wait(set(self._cli_id_writes), timeout=5)
+                except Exception:
+                    logger.debug("draining cli_session_id writes failed", exc_info=True)
+        finally:
+            await self.bus.close()
+
+    async def _stop_live_work(self) -> None:
+        """Settle waiters, end the running turn, and stop the CLI."""
         self._peer_admission_open = False
         self._drop_pending_peers()
         await self._close_background_lifecycle()
@@ -1445,17 +1500,18 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 pass
         await self._emit_session_end()
         await self._stop_process()
-        if self._journal is not None:
-            try:
-                await self._journal.aclose()
-            except Exception:
-                logger.debug("closing the continual journal failed", exc_info=True)
+
+    def _release_bridge_resources(self) -> None:
+        """Close the bridge server and remove this loop's files.
+
+        Synchronous on purpose: with no await in it, a cancelled close cannot
+        stop part way through.
+        """
         if self._socket_server is not None:
-            self._socket_server.close()
             try:
-                await self._socket_server.wait_closed()
+                self._socket_server.close()
             except Exception:
-                pass
+                logger.warning("closing the bundled tool server failed", exc_info=True)
         # A "tcp:..." bridge address names no file — closing the server above is
         # the whole cleanup; only real paths get unlinked.
         for path in (self._socket_path, self._mcp_config_path, self._prompt_file):
@@ -1477,22 +1533,6 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             except OSError:
                 pass
             self._tmpdir = None
-        # A steer check still reading a transcript gets a moment to report.
-        if self._steer_scans:
-            try:
-                await asyncio.wait(set(self._steer_scans), timeout=2)
-            except Exception:
-                logger.debug("waiting for the steer check failed", exc_info=True)
-            for task in list(self._steer_scans):
-                task.cancel()
-        # Let any in-flight resume-handle write land — losing it here is exactly
-        # the restart case this persistence exists for.
-        if self._cli_id_writes:
-            try:
-                await asyncio.wait(set(self._cli_id_writes), timeout=5)
-            except Exception:
-                logger.debug("draining cli_session_id writes failed", exc_info=True)
-        await self.bus.close()
 
     # ─── process lifecycle ───────────────────────────────────────────────
 
@@ -1604,14 +1644,24 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 proc.stdin.close()
         except Exception:  # noqa: BLE001 — a closed pipe is the goal
             pass
+        from fluid.tools.builtins.bash import kill_tree
+
         try:
             await asyncio.wait_for(proc.wait(), timeout=grace)
             await _end_process_group(proc.pid)
             return
         except (TimeoutError, ProcessLookupError):
             pass
-        from fluid.tools.builtins.bash import kill_tree
-
+        except asyncio.CancelledError:
+            # The caller's deadline came before the grace ran out. The CLI and
+            # what it started must still go: nothing else holds their handle.
+            logger.info("ending the claude CLI tree: its close was cancelled during the exit grace")
+            try:
+                await asyncio.wait_for(kill_tree(proc), timeout=_CANCELLED_KILL_WAIT_S)
+            except Exception:  # best effort; the cancel still goes on
+                logger.debug("killing the claude CLI tree failed", exc_info=True)
+            raise
+        logger.info("ending the claude CLI tree: still running %.1fs after its stdin closed", grace)
         await kill_tree(proc)
         try:
             await asyncio.wait_for(proc.wait(), timeout=5)
