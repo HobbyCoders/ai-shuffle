@@ -73,7 +73,8 @@ def schedule_session_pr_reconcile(
                 if delay:
                     await asyncio.sleep(delay)
                 async with _reconcile_slots:
-                    if await reconcile_session_pr(session_id, force=refresh_forced):
+                    result = await reconcile_session_pr(session_id, force=refresh_forced)
+                    if result is not False:
                         break
             else:
                 logger.warning("PR reconcile exhausted retries for %s", session_id)
@@ -482,7 +483,7 @@ async def _refresh_listed_open_prs(
     return ok
 
 
-async def reconcile_session_pr(session_id: str, *, force: bool = False) -> bool:
+async def reconcile_session_pr(session_id: str, *, force: bool = False) -> Optional[bool]:
     """Best-effort: if this session's branch has a GitHub PR, persist it.
 
     Prefers an open PR on the session branch; otherwise the latest PR for
@@ -498,8 +499,10 @@ async def reconcile_session_pr(session_id: str, *, force: bool = False) -> bool:
     If its checkout is refused, the base supplies only repository identity:
     the saved branch/PR remains authoritative.
     A failed lookup or write returns False so the scheduler can retry.
-    An authoritative no-op returns True. Never clears state on failure.
-    ``force`` bypasses cached fallback misses after turn-end agent mutations.
+    An authoritative no-op returns True. None means the local checkout cannot
+    supply repository identity: leave state unknown and do not retry this attempt.
+    Never clears state on failure. ``force`` bypasses cached fallback misses
+    after turn-end agent mutations.
     """
     try:
         from app.db import database
@@ -547,7 +550,7 @@ async def reconcile_session_pr(session_id: str, *, force: bool = False) -> bool:
                 "project_v2_id": session.get("project_v2_id"), "project_id": project_id,
             })
             if not working_dir:
-                return True
+                return None
         except Exception:
             logger.debug("PR reconcile: working dir for %s failed", session_id, exc_info=True)
             return False

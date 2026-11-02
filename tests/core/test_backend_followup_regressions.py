@@ -164,6 +164,24 @@ async def test_unavailable_checkout_does_not_adopt_base_head_pr(repo, monkeypatc
     assert "exhausted retries" not in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_no_base_checkout_leaves_pr_unknown_without_retrying(mock_db, monkeypatch, caplog):
+    from app.db import projects_v2
+    from app.core.github_service import github_service
+    project = projects_v2.upsert_project("local:no-pr-checkout", name="Repo")
+    database.create_session("no-pr-checkout", "default", project_v2_id=project["id"])
+    database.set_session_branch("no-pr-checkout", "feat/missing")
+    monkeypatch.setattr(github_service, "get_repo_from_remote", lambda *args: pytest.fail("no validated repo"))
+    reconcile = AsyncMock(wraps=session_pr_state.reconcile_session_pr)
+    monkeypatch.setattr(session_pr_state, "reconcile_session_pr", reconcile)
+    assert await reconcile("no-pr-checkout") is None
+    reconcile.reset_mock()
+    await session_pr_state.schedule_session_pr_reconcile("no-pr-checkout", force=True)
+    reconcile.assert_awaited_once()
+    assert database.get_session("no-pr-checkout")["pr_state"] is None
+    assert "exhausted retries" not in caplog.text
+
+
 @pytest.mark.parametrize("listed", [False, True])
 @pytest.mark.asyncio
 async def test_refused_checkout_still_refreshes_known_or_listed_pr(repo, monkeypatch, listed):
