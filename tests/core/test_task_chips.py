@@ -939,10 +939,11 @@ async def test_every_change_reaches_sidebars_with_the_count_after_it(owner, monk
     assert (await _published(monkeypatch))["updates"]["pending_task_chips"] == 0
 
 
-async def test_each_count_is_stamped_later_than_the_last_even_in_one_millisecond(owner, monkeypatch):
-    monkeypatch.setattr(task_chips.time, "time_ns", lambda: 5_000_000)
-    stamps = [(await _published(monkeypatch))["updates"]["pending_task_chips_at"] for _ in range(3)]
-    assert stamps == sorted(set(stamps))
+async def test_each_count_gets_a_higher_number_in_this_run_of_the_worker(owner, monkeypatch):
+    seqs = [(await _published(monkeypatch))["updates"]["pending_task_chips_seq"] for _ in range(3)]
+    runs = {seq.rsplit(":", 1)[0] for seq in seqs}
+    numbers = [int(seq.rsplit(":", 1)[1]) for seq in seqs]
+    assert len(runs) == 1 and numbers == sorted(set(numbers))
 
 
 async def test_the_frame_and_the_count_both_go_out_for_one_change(owner, monkeypatch):

@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { acceptUserEvent, resetUserEventDedupe } from './user-event-dedupe';
 
-const count = (value: number, at: number, session_id = 'chat') => ({
+const count = (value: number, at: number, session_id = 'chat', run = 'run-a') => ({
 	type: 'user_session_updated',
 	session_id,
-	updates: { pending_task_chips: value, pending_task_chips_at: at }
+	updates: { pending_task_chips: value, pending_task_chips_seq: `${run}:${at}` }
 });
 
 /** What a row ends up showing after these deliveries, in this order. */
@@ -49,6 +49,36 @@ describe('task chip counts heard on two sockets', () => {
 	it('keeps each chat apart', () => {
 		expect(acceptUserEvent(count(1, 9, 'a'), 'chat')).toBe(true);
 		expect(acceptUserEvent(count(1, 3, 'b'), 'chat')).toBe(true);
+	});
+
+	it('takes a restarted worker\'s lower numbers, whatever its clock did', () => {
+		expect(acceptUserEvent(count(1, 10_000), 'chat')).toBe(true);
+		expect(acceptUserEvent(count(0, 1, 'chat', 'run-b'), 'chat')).toBe(true);
+		expect(acceptUserEvent(count(1, 2, 'chat', 'run-b'), 'chat')).toBe(true);
+	});
+
+	it('still drops copies and late counts inside the new run', () => {
+		expect(acceptUserEvent(count(1, 10_000), 'chat')).toBe(true);
+		expect(acceptUserEvent(count(1, 2, 'chat', 'run-b'), 'chat')).toBe(true);
+		expect(acceptUserEvent(count(1, 2, 'chat', 'run-b'), 'global')).toBe(false);
+		expect(acceptUserEvent(count(0, 1, 'chat', 'run-b'), 'global')).toBe(false);
+	});
+
+	it('does not let a late copy from before the restart back in', () => {
+		expect(acceptUserEvent(count(1, 5), 'chat')).toBe(true);
+		expect(acceptUserEvent(count(0, 1, 'chat', 'run-b'), 'chat')).toBe(true);
+		expect(acceptUserEvent(count(1, 5), 'global')).toBe(false);
+	});
+
+	it('forgets the longest-quiet chats rather than growing without limit', () => {
+		expect(acceptUserEvent(count(1, 7, 'first'), 'chat')).toBe(true);
+		expect(acceptUserEvent(count(1, 7, 'active'), 'chat')).toBe(true);
+		for (let chat = 0; chat < 998; chat++) acceptUserEvent(count(1, 1, `chat-${chat}`), 'chat');
+		// Hearing a chat again keeps it, so the quieter one goes first.
+		expect(acceptUserEvent(count(0, 8, 'active'), 'chat')).toBe(true);
+		acceptUserEvent(count(1, 1, 'one-more'), 'chat');
+		expect(acceptUserEvent(count(1, 7, 'first'), 'global')).toBe(true);
+		expect(acceptUserEvent(count(0, 8, 'active'), 'global')).toBe(false);
 	});
 
 	it('leaves other row updates to the existing copy check', () => {

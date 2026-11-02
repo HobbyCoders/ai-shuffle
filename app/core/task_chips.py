@@ -20,9 +20,10 @@ and passes the suggestion on, up to the worker that owns the top-level chat.
 """
 import asyncio
 import hashlib
+import itertools
 import json
 import logging
-import time
+import uuid
 from typing import Any, Dict, Optional, Set
 
 from fluid.tools.builtins.session_orchestration import EFFORT_PROPERTY
@@ -703,26 +704,29 @@ async def _broadcast(session_id: str) -> None:
 # One read-and-send at a time, so a slower read of an older count can never be
 # sent after a newer one and leave the row showing a chip that is gone.
 _publish_lock = asyncio.Lock()
-_last_count_stamp = 0
+# Orders one chat's counts for a browser: this run of the worker, then a number
+# that only rises in it. No clock, so a clock set back cannot make a new count
+# look old, and a restart is a new run rather than a lower number.
+_count_run = uuid.uuid4().hex[:12]
+_count_seq = itertools.count(1)
 
 
 async def _publish_waiting(session_id: str) -> None:
     """Tell every device of the user the chat's count. Sidebars do not watch the chat, so the frame misses them.
 
-    A device can hear this on two sockets, in any order between them. The stamp
-    only ever rises, so it can drop a copy or a late count (user-event-dedupe.ts).
+    A device can hear this on two sockets, in any order between them. The sequence
+    lets it drop a copy or a late count (user-event-dedupe.ts).
     """
     from app.core.sync_engine import sync_engine
 
-    global _last_count_stamp
     try:
         async with _publish_lock:
             row = (await run_sync(store.waiting_counts, [session_id])).get(session_id)
             if row is not None:
-                _last_count_stamp = max(_last_count_stamp + 1, time.time_ns() // 1_000_000)
                 await sync_engine.broadcast_user_session_updated(
                     user_id=row["api_user_id"] or "admin", session_id=session_id,
-                    updates={"pending_task_chips": row["pending_task_chips"], "pending_task_chips_at": _last_count_stamp},
+                    updates={"pending_task_chips": row["pending_task_chips"],
+                             "pending_task_chips_seq": f"{_count_run}:{next(_count_seq)}"},
                 )
     except Exception:  # noqa: BLE001 — the next list read still shows it
         log.warning("Task chip count broadcast failed for %s", session_id, exc_info=True)
