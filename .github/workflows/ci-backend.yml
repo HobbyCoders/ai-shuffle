@@ -370,7 +370,7 @@ jobs:
           AI_SHUFFLE_TRANSCRIPT_PRODUCER: '1'
           AI_SHUFFLE_ENV_FILE: /dev/null
           PYTHONPATH: .
-          CONTENTION_ATTEMPTS: ${{ github.ref == 'refs/heads/main' && '5' || '1' }}
+          CONTENTION_ATTEMPTS: '50'  # Temporary hosted reliability proof for #965.
         run: |
           for attempt in $(seq 1 "$CONTENTION_ATTEMPTS"); do
             python -m pytest --durations=50 tests/test_transcript_projection_ingest_budget.py \
