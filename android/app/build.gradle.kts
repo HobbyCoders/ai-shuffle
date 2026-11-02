@@ -19,6 +19,9 @@ extra["license"] = "AGPL-3.0-only"
 val playStoreBuild = System.getenv("ANDROID_PLAY_STORE_BUILD") == "true" ||
     project.findProperty("playStoreBuild")?.toString() == "true"
 val minifiedSmoke = project.findProperty("minifiedSmoke")?.toString() == "true"
+// A separate CI-only debug build exercises the real startup prompt without
+// publisher Firebase credentials. Release PUSH_ENABLED still depends on config.
+val notificationSmoke = project.findProperty("notificationSmoke")?.toString() == "true"
 
 android {
     namespace = "com.hobbycoders.aishuffle"
@@ -57,7 +60,16 @@ android {
         }
     }
 
+    if (notificationSmoke) {
+        sourceSets.getByName("androidTest").apply {
+            java.setSrcDirs(listOf("src/notificationSmokeTest/java"))
+            manifest.srcFile("src/notificationSmokeTest/AndroidManifest.xml")
+        }
+    }
     buildTypes {
+        if (notificationSmoke) {
+            getByName("debug").buildConfigField("boolean", "PUSH_ENABLED", "true")
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true

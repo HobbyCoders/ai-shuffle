@@ -63,3 +63,18 @@ timeout --kill-after=15s 1200s adb -s emulator-5554 shell am instrument -w -r \
   -e additionalTestOutputDir /sdcard/Android/media/com.hobbycoders.aishuffle/ui-smoke \
   com.hobbycoders.aishuffle.test/androidx.test.runner.AndroidJUnitRunner | tee "$out/runner.txt"
 python3 ci/check-instrumentation.py "$out/runner.txt"
+
+# Deliberately NOT granted POST_NOTIFICATIONS. Clear data/permission flags before
+# each decision; never retry a failed test. The debug-only push build has no FCM
+# secrets and the tests use local worker responses, but the OS prompt is real.
+adb -s emulator-5554 install -r notification-instrumentation-apks/debug/app-debug.apk
+adb -s emulator-5554 install -r notification-instrumentation-apks/androidTest/debug/app-debug-androidTest.apk
+for decision in allowing denying; do
+  adb -s emulator-5554 shell pm clear com.hobbycoders.aishuffle
+  adb -s emulator-5554 shell pm clear-permission-flags com.hobbycoders.aishuffle android.permission.POST_NOTIFICATIONS user-set user-fixed
+  timeout --kill-after=15s 180s adb -s emulator-5554 shell am instrument -w -r \
+    -e timeout_msec 120000 \
+    -e class "com.hobbycoders.aishuffle.NotificationPermissionSmokeTest#${decision}StartupNotificationsLeavesChatUsable" \
+    com.hobbycoders.aishuffle.test/androidx.test.runner.AndroidJUnitRunner | tee "$out/notification-$decision.txt"
+  python3 ci/check-instrumentation.py "$out/notification-$decision.txt"
+done

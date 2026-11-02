@@ -43,8 +43,10 @@ if args == ["-s", "emulator-5554", "shell", "getprop", "ro.build.version.sdk"]:
 if "grant" in args and os.environ["MODE"] == "grant-error":
     sys.exit(23)
 if "instrument" in args:
-    suite = "notClass" in args
-    mode = os.environ["MODE"] if suite == (os.environ["PHASE"] == "suite") else "pass"
+    phase = ("suite" if "notClass" in args else
+             "allowing" if any("#allowingStartup" in arg for arg in args) else
+             "denying" if any("#denyingStartup" in arg for arg in args) else "cold")
+    mode = os.environ["MODE"] if phase == os.environ["PHASE"] else "pass"
     if mode == "timeout":
         sys.exit(124)
     if mode == "adb-error":
@@ -101,7 +103,8 @@ if "instrument" in args:
                     self.assertEqual(["adb", "-s", "emulator-5554", "shell", "pm", "grant",
                                       "com.hobbycoders.aishuffle", "android.permission.POST_NOTIFICATIONS"],
                                      calls[grants[0]])
-                    installs = [i for i, call in enumerate(calls) if "install" in call]
+                    installs = [i for i, call in enumerate(calls) if "install" in call and
+                                not any("notification-instrumentation-apks/" in arg for arg in call)]
                     self.assertEqual(2, len(installs))
                     self.assertLess(max(installs), grants[0])
                     launches = [i for i, call in enumerate(calls) if "am" in call]
@@ -122,19 +125,35 @@ if "instrument" in args:
                 self.assertEqual(19, result.returncode, result.stdout + result.stderr)
                 self.assertFalse(any("grant" in call or "am" in call for call in calls))
 
-    def test_both_runs_have_individual_and_host_deadlines(self):
+    def test_all_runs_have_individual_and_host_deadlines(self):
         result, calls = self.run_runner()
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         runs = [call for call in calls if call[0] == "timeout" and "instrument" in call]
-        self.assertEqual(2, len(runs))
-        for call, host, per_test in zip(runs, ("180s", "1200s"), ("120000", "180000")):
+        self.assertEqual(4, len(runs))
+        for call, host, per_test in zip(runs, ("180s", "1200s", "180s", "180s"),
+                                         ("120000", "180000", "120000", "120000")):
             self.assertEqual(["--kill-after=15s", host], call[1:3])
             self.assertEqual(per_test, call[call.index("timeout_msec") + 1])
-        self.assertEqual(2, result.stdout.count("1 passed; no failed or skipped tests"))
+        self.assertEqual(4, result.stdout.count("1 passed; no failed or skipped tests"))
         self.assertIn("Android emulator verification: PASSED", self.summary)
         excluded = runs[1][runs[1].index("notClass") + 1]
         self.assertEqual("com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#"
                          "realSystemSaveDialogReturnsToChatAndCompletesTransfer", excluded)
+
+    def test_notification_decisions_start_clean_without_pregrant_or_retries(self):
+        result, calls = self.run_runner()
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        smoke_installs = [i for i, call in enumerate(calls) if "install" in call and
+                          any("notification-instrumentation-apks/" in arg for arg in call)]
+        self.assertEqual(2, len(smoke_installs))
+        smoke_calls = calls[max(smoke_installs) + 1:]
+        self.assertFalse(any("grant" in call for call in smoke_calls))
+        self.assertEqual(2, sum("clear" in call for call in smoke_calls))
+        self.assertEqual(2, sum("clear-permission-flags" in call for call in smoke_calls))
+        runs = [call for call in smoke_calls if call[0] == "adb" and "instrument" in call]
+        self.assertEqual(["allowing", "denying"],
+                         [next(word for word in ("allowing", "denying") if any("#" + word in arg for arg in call))
+                          for call in runs])
 
     def test_exit_zero_test_failure_is_not_hidden_by_tee(self):
         result, _ = self.run_runner("failure")
@@ -142,7 +161,7 @@ if "instrument" in args:
         self.assertIn("Failed, skipped or unknown test status: -2", result.stderr)
 
     def test_app_defects_and_unrecovered_webview_crashes_fail_without_retries(self):
-        for phase in ("cold", "suite"):
+        for phase in ("cold", "suite", "allowing", "denying"):
             for mode in ("app-crash", "app-anr", "failure", "webview-sigtrap", "adb-error", "timeout"):
                 with self.subTest(phase=phase, mode=mode):
                     result, calls = self.run_runner(mode, phase)
@@ -150,7 +169,7 @@ if "instrument" in args:
                     self.assertIn(f"Android emulator verification: FAILED (exit {result.returncode})", self.summary)
                     self.assertIn("No app failure was retried or excused", self.summary)
                     runs = [call for call in calls if call[0] == "adb" and "instrument" in call]
-                    self.assertEqual(1 if phase == "cold" else 2, len(runs))
+                    self.assertEqual({"cold": 1, "suite": 2, "allowing": 3, "denying": 4}[phase], len(runs))
                     if mode in ("app-crash", "app-anr", "webview-sigtrap"):
                         self.assertIn("Incomplete or unsuccessful instrumentation run", result.stderr)
 
