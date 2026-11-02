@@ -6,6 +6,7 @@ vi.mock('$lib/api/client', async (importOriginal) => ({ ...(await importOriginal
 const nav = vi.hoisted(() => ({ openSettings: vi.fn() }));
 vi.mock('$lib/settings/navigation.svelte', () => nav);
 import { aiContentPrefill, supportCaps } from '$lib/stores/support-report.svelte';
+import { activeSession } from '$lib/stores/active-session';
 import { readDraft } from '$lib/stores/session/draft-persistence';
 import { takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
 import MessageActions from './MessageActions.svelte';
@@ -85,6 +86,31 @@ describe('MessageActions gating', () => {
 			expect(sessionStorage.getItem('restore-note:s1:unsent-id')).toBeNull();
 			expect(onRewindComplete).toHaveBeenCalledOnce();
 		} finally { vi.useRealTimers(); }
+	});
+	it('saves the words to the chat\'s draft when no composer is on screen to take them', async () => {
+		vi.useFakeTimers();
+		try {
+			activeSession.newChat();
+			activeSession.current.sessionId = 's1';
+			activeSession.setDraft('');
+			rewind.mockRejectedValue(new TypeError('Failed to fetch'));
+			const onRewindComplete = vi.fn((_warning?: string, prompt?: string, uploads?: string[]) => {
+				activeSession.setPendingRestorePrompt(prompt ?? '', uploads);
+			});
+			render(MessageActions, {...base, notSentMessageId:'unsent-id', onRewindComplete});
+			window.dispatchEvent(new Event('beforeunload'));
+			await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(onRewindComplete).toHaveBeenCalledOnce();
+			expect(sessionStorage.getItem('restore-note:s1:unsent-id')).toBeNull();
+			expect(activeSession.current.pendingRestorePrompt).toBeNull();
+			const words = base.messageContent;
+			expect(activeSession.current.draft).toContain(words);
+			expect(readDraft('s1')).toContain(words);
+		} finally {
+			activeSession.newChat();
+			vi.useRealTimers();
+		}
 	});
 	it('waits to see whether the page really goes, and hands the words over once if it stays', async () => {
 		vi.useFakeTimers();

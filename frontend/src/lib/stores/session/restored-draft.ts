@@ -12,14 +12,16 @@ import { sessionEphemeralCache } from '$lib/stores/session-cache';
 import { hasComposerDraft } from './composer-suggestion';
 import { readDraft, writeDraft } from './draft-persistence';
 
-export function addRestoredWordsToDraft(sessionId: string, prompt: string, uploadPaths: string[] = []): void {
-	if (!prompt && uploadPaths.length === 0) return;
+export function addRestoredWordsToDraft(sessionId: string, prompt: string, uploadPaths: string[] = [], openDraft = ''): string {
+	// Same preference as opening the chat: the open chat's draft, then memory,
+	// then the reload mirror.
+	const existing = openDraft || sessionEphemeralCache.peekDraft(sessionId) || readDraft(sessionId) || '';
+	if (!prompt && uploadPaths.length === 0) return existing;
 	const restored = JSON.stringify(restoreMessageDocument(prompt, uploadPaths));
-	// Same preference as opening the chat: memory first, then the reload mirror.
-	const existing = sessionEphemeralCache.peekDraft(sessionId) || readDraft(sessionId) || '';
 	const draft = hasComposerDraft(existing) ? joinDrafts(restored, existing) : restored;
 	sessionEphemeralCache.patchDraft(sessionId, draft);
 	writeDraft(sessionId, draft);
+	return draft;
 }
 
 /**

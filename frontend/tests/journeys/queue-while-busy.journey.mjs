@@ -16,6 +16,7 @@ import {
 	scriptTag,
 	scrollTranscriptTo,
 	seededChatId,
+	showSidebar,
 	stopButton,
 	transcriptScroll,
 	typeAndSend,
@@ -299,6 +300,92 @@ await runJourney({
 				await page.unroute(REWIND);
 				await notSent(unheard).getByRole('alert').filter({ hasText: "Couldn't confirm the restore" }).waitFor({ timeout: 5000 });
 				expect(await notSent(unheard).getByRole('button', { name: 'Restored' }).isDisabled(), 'a second click cannot copy the words again');
+			}
+		},
+		{
+			name: 'restore-finishing-with-no-composer-on-screen',
+			allow: [{ kind: 'failed_requests', url: /\/commands\/rewind\/execute\//, reason: 'this case cuts the connection to a restore on purpose' }],
+			async setup(ctx) {
+				await openNewChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant }) {
+				const opening = `opening tok-${uniq()}`;
+				const answered = `tok-${uniq()}`;
+				const departed = `tok-${uniq()}`;
+				const notSent = (text) => page.locator('[data-not-sent="true"]').filter({ hasText: text });
+				const composerHas = (text) => page.waitForFunction(
+					(t) => document.querySelector('[contenteditable="true"]')?.innerText.includes(t), text, { timeout: 15_000 });
+				const REWIND = '**/rewind/execute/**';
+				const openSettings = async () => {
+					const sessions = await showSidebar(page);
+					await sessions.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'Settings', exact: true }).click();
+					await page.getByRole('navigation', { name: 'Settings' }).waitFor({ timeout: 15_000 });
+				};
+				// The server commits, then the answer is held until released and lost.
+				const holdAnswer = async () => {
+					let release;
+					const held = new Promise((done) => { release = done; });
+					const committed = new Promise((done) => {
+						page.route(REWIND, async (route) => {
+							await route.fetch();
+							done();
+							await held;
+							await route.abort('connectionreset');
+						});
+					});
+					return { release, committed };
+				};
+				const restoreBehindSettings = async (words, beforeRelease) => {
+					const lost = page.waitForEvent('requestfailed', (r) => r.url().includes('/rewind/execute/'));
+					const { release, committed } = await holdAnswer();
+					await notSent(words).getByRole('button', { name: /^Restore/ }).click();
+					await committed;
+					await openSettings();
+					expect((await page.locator('[contenteditable="true"]').count()) === 0, 'no composer is on screen');
+					await beforeRelease?.();
+					release();
+					await lost;
+					await page.unrouteAll({ behavior: 'ignoreErrors' });
+				};
+
+				await mark('send');
+				await typeAndSend(page, `${opening} ${scriptTag(variant, 'slow', { tps: 2 })}`);
+				await page.getByText(SLOW_REPLY.start, { exact: false }).first().waitFor({ timeout: 60_000 });
+				await waitChat(page, { streaming: 'true' });
+				const { title } = await api(page, 'GET', `/sessions/${await chatIdByToken(page, opening)}`);
+				for (const words of [answered, departed]) {
+					await typeAndSend(page, `queued ${words}`);
+					await page.locator('.pending-messages [role="article"]').filter({ hasText: words }).waitFor({ timeout: 5000 });
+				}
+				await mark('stop');
+				await stopButton(page).click();
+				await notSent(departed).waitFor({ timeout: 15_000 });
+
+				await mark('the answer is lost while Settings is open');
+				await restoreBehindSettings(answered);
+				await mark('another chat and back');
+				await page.waitForTimeout(300);
+				await openFromSidebar(page, SEEDED.no_project);
+				await waitChatOpen(page, { messagesAtLeast: 2, hold: 500 });
+				await openFromSidebar(page, title);
+				await notSent(departed).waitFor({ timeout: 30_000 });
+				await composerHas(`queued ${answered}`);
+
+				await mark('same, with the departure cancelled first');
+				await restoreBehindSettings(departed, () => page.evaluate(() => window.dispatchEvent(new Event('beforeunload'))));
+				// Past the wait for the page to go, when the words are handed over.
+				await page.waitForTimeout(1500);
+				await mark('another chat and back');
+				await openFromSidebar(page, SEEDED.no_project);
+				await waitChatOpen(page, { messagesAtLeast: 2, hold: 500 });
+				await openFromSidebar(page, title);
+				await composerHas(`queued ${departed}`);
+				await notSent(departed).waitFor({ state: 'detached', timeout: 30_000 });
+				const composed = await page.locator('[contenteditable="true"]').first().innerText();
+				expect(composed.split(`queued ${answered}`).length === 2, 'the first words arrived once');
+				expect(composed.split(`queued ${departed}`).length === 2, 'the second words arrived once');
+				expect(await page.evaluate(() => !Object.keys(sessionStorage).some((k) => k.startsWith('restore-note:'))), 'no note is left over');
 			}
 		},
 		{

@@ -175,7 +175,18 @@
 			activeSession.setPendingRestorePrompt(prompt ?? '', uploads);
 		} else {
 			addRestoredWordsToDraft(requestedSessionId, prompt ?? '', uploads);
+			return;
 		}
+		// A composer takes waiting words at once. If none did, none is on screen
+		// (Settings, say). Waiting words last only until the chat changes or the
+		// page reloads, and the server has dropped the row, so save them.
+		void tick().then(() => {
+			const state = get(activeSession);
+			if (state.sessionId !== requestedSessionId) return;
+			if (!state.pendingRestorePrompt && !state.pendingRestoreUploadPaths?.length) return;
+			activeSession.setDraft(addRestoredWordsToDraft(requestedSessionId, state.pendingRestorePrompt ?? '', state.pendingRestoreUploadPaths, state.draft));
+			activeSession.clearPendingRestorePrompt();
+		});
 	}
 
 	async function handleRewindConfirm() {
