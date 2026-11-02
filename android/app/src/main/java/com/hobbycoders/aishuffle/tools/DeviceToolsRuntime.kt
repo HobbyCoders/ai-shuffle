@@ -24,7 +24,7 @@ object DeviceToolsRuntime {
     private var retiring: Job? = null
     private var unavailable: Job? = null
     private var generation = 0L
-    // Only the app's own launch may defer pause-driven shutdown, through result delivery.
+    // A launch or locally cancelled approval may defer pause shutdown only through result delivery.
     private var handoffInFlight = false
     private val mutableAvailability = MutableStateFlow("foreground_required")
     val availability: StateFlow<String> = mutableAvailability
@@ -62,8 +62,10 @@ object DeviceToolsRuntime {
     }
     fun detach(activity: Activity) {
         if (this.activity.get() !== activity) return
-        ToolApprovals.detach(activity)
+        // Clear the execution host BEFORE resolving consent: the continuation may resume inline.
         this.activity.clear()
+        if (ToolApprovals.pending.value != null) handoffInFlight = true
+        ToolApprovals.detach(activity)
         if (handoffInFlight) {
             mutableAvailability.value = "handoff_result_pending"
             return

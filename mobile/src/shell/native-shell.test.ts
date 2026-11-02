@@ -40,12 +40,12 @@ describe('native shell messages', () => {
 		expect(postMessage.mock.calls.map(([raw]) => JSON.parse(raw))).toEqual([{ type: 'app-settings' }]);
 	});
 
-	it('does not leave chat for Workers in an app from before app-settings', () => {
+	it('keeps the Workers-to-Settings fallback until a minimum app build is enforced', () => {
 		const postMessage = vi.fn();
 		inApp({ postMessage }, ['worker-switch']);
-		expect(nativeAppSettingsRoute()).toBeNull();
-		expect(openNativeAppSettings()).toBe(false);
-		expect(postMessage).not.toHaveBeenCalled();
+		expect(nativeAppSettingsRoute()).toBe('workers');
+		expect(openNativeAppSettings()).toBe(true);
+		expect(postMessage.mock.calls.map(([raw]) => JSON.parse(raw))).toEqual([{ type: 'workers' }]);
 	});
 
 	it('does nothing in an app without the bridge', () => {

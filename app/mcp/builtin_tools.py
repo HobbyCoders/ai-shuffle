@@ -1718,11 +1718,12 @@ def create_builtin_tools_server(
     async def android_devices(args: dict) -> dict:
         from app.services import mobile_tools
         try:
-            return _ok(await asyncio.to_thread(mobile_tools.list_devices, session_id))
+            outcome = await asyncio.to_thread(mobile_tools.list_devices, session_id)
+            return _ok({**outcome, "success": not bool(outcome.get("error"))})
         except mobile_tools.CommandError as exc:
-            return _ok({"error": str(exc)})
+            return _ok({"success": False, "error": str(exc)})
         except Exception:
-            return _ok({"error": "android_service_unavailable"})
+            return _ok({"success": False, "error": "android_service_unavailable"})
 
     from app.services.mobile_tools import FIELDS as android_fields
     android_variants = []

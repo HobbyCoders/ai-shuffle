@@ -27,7 +27,7 @@ internal object DeviceToolsApi {
     internal fun checkStatus(path: String, status: Int) {
         if (status in setOf(401, 403)) throw ToolsAuthorizationRevoked()
         // A missing command is final for that result, not an unsupported worker.
-        if ((status == 404 && !path.endsWith("/result")) || status in setOf(405, 501)) throw ToolsUnsupported()
+        if ((status in setOf(404, 405) && !path.endsWith("/result")) || status == 501) throw ToolsUnsupported()
         if (status !in 200..299) throw ToolsHttpFailure(status)
     }
     suspend fun request(server: Server, path: String, body: JSONObject? = null): JSONObject {

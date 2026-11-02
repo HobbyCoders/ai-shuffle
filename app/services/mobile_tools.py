@@ -164,6 +164,22 @@ def _unknown_outcome(error):
                        'cancellation cannot undo an action already performed.'}
 
 
+def _stopped_outcome(error, previous):
+    if previous and previous.get('claimed'):
+        return _unknown_outcome(error)
+    return {'success': False, 'error': 'command_not_delivered', 'reason': error,
+            'outcome_unknown': False, 'safe_to_retry': True,
+            'message': 'The command was not delivered; no action was performed. It is safe to retry.'}
+
+
+def _completed_outcome(command_id, name, row):
+    result = json.loads(row['result'])
+    # An OS intent proves only launch, not that the user saved/completed the action.
+    if name in HANDOFFS and not result.get('error') and (result.get('success') is True or result.get('status') in ('completed', 'launched', 'launched_confirmation')):
+        result = dict(result, status='launched_confirmation')
+    return {'command_id': command_id, 'result': result}
+
+
 async def execute(session_id, device_id, name, arguments, timeout=MAX_WAIT_SECONDS):
     command_id = None
     try:
@@ -187,15 +203,19 @@ async def execute(session_id, device_id, name, arguments, timeout=MAX_WAIT_SECON
                 raise CommandError('device_not_authorized')
             row = await asyncio.to_thread(queue.outcome, command_id, session_id)
             if row and row['status'] == 'completed':
-                result = json.loads(row['result'])
-                # OS intents only launch confirmation; they cannot prove an external action completed.
-                if name in HANDOFFS and not result.get('error') and (result.get('success') is True or result.get('status') in ('completed', 'launched', 'launched_confirmation')):
-                    result = dict(result, status='launched_confirmation')
-                return {'command_id': command_id, 'result': result}
+                return _completed_outcome(command_id, name, row)
             if not row or row['status'] in ('expired', 'cancelled'):
-                return _unknown_outcome('command_expired_or_cancelled')
+                previous = await asyncio.to_thread(queue.cancel, command_id, session_id)
+                settled_id, command_id = command_id, None
+                if previous and previous['status'] == 'completed':
+                    return _completed_outcome(settled_id, name, previous)
+                return _stopped_outcome('command_expired_or_cancelled', previous)
             await asyncio.sleep(min(0.25, max(0, deadline - asyncio.get_running_loop().time())))
-        return _unknown_outcome('device_timeout')
+        previous = await asyncio.to_thread(queue.cancel, command_id, session_id)
+        settled_id, command_id = command_id, None
+        if previous and previous['status'] == 'completed':
+            return _completed_outcome(settled_id, name, previous)
+        return _stopped_outcome('device_timeout', previous)
     except CommandError as exc:
         return {'error': str(exc)}
     finally:

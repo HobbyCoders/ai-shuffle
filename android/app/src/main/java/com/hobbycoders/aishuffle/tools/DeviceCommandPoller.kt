@@ -15,12 +15,16 @@ internal class DeviceCommandPoller(
 ) {
     private suspend fun postResult(key: String, id: String, result: JSONObject) {
         try {
-            val response = request("$id/result", JSONObject().put("result", result))
+            val response = request("$id/result", JSONObject().put("result", ToolResultBounds.fit(result)))
             check(response.optBoolean("ok"))
+        } catch (failure: ToolsAuthorizationRevoked) {
+            // This result is final too, but authorization loss must still stop this worker.
+            withContext(NonCancellable + Dispatchers.IO) { journal.posted(key) }
+            throw failure
         } catch (failure: ToolsHttpFailure) {
             // Definitive per-command rejection: erase the output, keep the claim
             // tombstone (never execute again), and continue this poll iteration.
-            if (failure.statusCode !in setOf(404, 409, 410)) throw failure
+            if (failure.statusCode !in 400..499 || failure.statusCode in setOf(408, 425, 429)) throw failure
         }
         withContext(NonCancellable + Dispatchers.IO) { journal.posted(key) }
     }
@@ -33,7 +37,6 @@ internal class DeviceCommandPoller(
         val commands = request("pending", null).optJSONArray("commands") ?: JSONArray()
         for (i in 0 until minOf(commands.length(), 32)) {
             currentCoroutineContext().ensureActive()
-            if (!canExecute()) break
             val command = commands.optJSONObject(i) ?: continue
             val id = command.optString("id")
             if (!id.matches(Regex("[A-Za-z0-9_-]{1,128}"))) continue
@@ -44,14 +47,15 @@ internal class DeviceCommandPoller(
             // Claim even expired/unsupported/disabled requests so they receive one factual result.
             val claimed = withContext(Dispatchers.IO) { journal.claim(key, id, scopeId, expires.coerceAtLeast(now), now) }
             if (!claimed) { queueFull(); continue }
-            val result = when {
+            val result = ToolResultBounds.fit(when {
+                !canExecute() -> ToolRegistry.error("foreground_required", "Open AI Shuffle and retry; no action was performed.")
                 !CommandJournal.validExpiry(expires, now) -> ToolRegistry.error("expired", "Command expired or has an invalid expiry (maximum lifetime: five minutes).")
                 !enabled -> ToolRegistry.error("disabled", "Android tools are disabled.")
                 command.optJSONObject("arguments") == null -> ToolRegistry.error("invalid_arguments", "arguments must be an object.")
                 else -> withTimeoutOrNull((expires - now).coerceAtMost(30_000)) {
                     execute(command.optString("name"), command.getJSONObject("arguments"), expires)
                 } ?: ToolRegistry.error("expired", "Execution deadline elapsed. Verify device state; this command will not be repeated.")
-            }
+            })
             withContext(NonCancellable + Dispatchers.IO) { journal.finish(key, result) }
             currentCoroutineContext().ensureActive()
             postResult(key, id, result)

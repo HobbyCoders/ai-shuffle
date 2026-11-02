@@ -8,7 +8,7 @@ from app.mcp import builtin_tools, inproc
 from tests.mcp.tool_helpers import tool_result_json
 
 
-def _android_action():
+def _handler(name="AndroidAction"):
     captured = {}
     real_create = inproc.create_tool_server
 
@@ -18,7 +18,7 @@ def _android_action():
 
     with patch.object(inproc, 'create_tool_server', side_effect=capture):
         builtin_tools.create_builtin_tools_server(session_id='android-action-test')
-    return captured['AndroidAction'].handler
+    return captured[name].handler
 
 
 @pytest.mark.asyncio
@@ -34,7 +34,7 @@ async def test_action_preserves_actual_device_outcome(monkeypatch, outcome, succ
     execute = AsyncMock(return_value=outcome)
     monkeypatch.setattr(mobile_tools, 'execute', execute)
     args = {'device_id': 'phone', 'name': 'open_url', 'arguments': {'url': 'https://example.com'}}
-    result = tool_result_json(await _android_action()(args))
+    result = tool_result_json(await _handler()(args))
     assert result == {**outcome, 'success': success}
     execute.assert_awaited_once_with('android-action-test', 'phone', 'open_url', args['arguments'], 25)
 
@@ -43,9 +43,25 @@ async def test_action_preserves_actual_device_outcome(monkeypatch, outcome, succ
 async def test_service_failure_warns_that_side_effect_may_have_run(monkeypatch):
     from app.services import mobile_tools
     monkeypatch.setattr(mobile_tools, 'execute', AsyncMock(side_effect=RuntimeError('offline')))
-    result = tool_result_json(await _android_action()({
+    result = tool_result_json(await _handler()({
         'device_id': 'phone', 'name': 'open_url', 'arguments': {'url': 'https://example.com'},
     }))
     assert result['success'] is False
     assert result['outcome_unknown'] is True
     assert 'Verify device state before retrying' in result['message']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['no_devices', 'database', 'authorization'])
+async def test_device_listing_errors_are_not_success(monkeypatch, failure):
+    from app.services import mobile_tools
+    def listing(_):
+        if failure == 'database':
+            raise RuntimeError('database offline')
+        if failure == 'authorization':
+            raise mobile_tools.CommandError('controller_context_missing')
+        return {'devices': [], 'error': 'no_devices'}
+    monkeypatch.setattr(mobile_tools, 'list_devices', listing)
+    result = tool_result_json(await _handler('AndroidDevices')({}))
+    assert result['success'] is False
+    assert result['error']

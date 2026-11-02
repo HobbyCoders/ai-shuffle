@@ -266,15 +266,49 @@ async def test_execute_handoff_status(wired, result, status):
     assert out["result"].get("status") == (status or result.get("status"))
 
 
-@pytest.mark.parametrize("row", [None, {"status": "expired"}, {"status": "cancelled"}])
+@pytest.mark.parametrize("row", [{"status": "expired"}, {"status": "cancelled"}])
 async def test_execute_expired_or_cancelled(wired, monkeypatch, row):
     monkeypatch.setattr(service.queue, "outcome", lambda cid, sid: row)
+    def cancel(cid, sid):
+        wired["cancelled"].append(cid)
+        return dict(row, result=None, claimed=True)
+    monkeypatch.setattr(service.queue, "cancel", cancel)
     result = await service.execute("s", "dev", "read_screen", {}, timeout=5)
     assert result["error"] == "command_expired_or_cancelled"
     assert result["success"] is False
     assert result["outcome_unknown"] is True
     assert "verify" in result["message"].lower()
     assert wired["cancelled"] == ["cmd-1"]
+
+
+@pytest.mark.parametrize("status", [None, "pending", "cancelled", "expired"])
+async def test_never_delivered_commands_are_safe_to_retry(wired, monkeypatch, status):
+    monkeypatch.setattr(service.queue, "outcome", lambda *a: {"status": status} if status else None)
+    monkeypatch.setattr(service.queue, "cancel", lambda *a: {"status": status, "claimed": False} if status else None)
+    result = await service.execute("s", "dev", "read_screen", {}, timeout=0.01)
+    assert result["error"] == "command_not_delivered"
+    assert result["outcome_unknown"] is False
+    assert result["safe_to_retry"] is True
+    assert "safe to retry" in result["message"].lower()
+
+
+async def test_timeout_uses_atomic_cancel_not_the_last_poll(wired, monkeypatch):
+    # The phone can claim between the last read and timeout cancellation.
+    monkeypatch.setattr(service.queue, "outcome", lambda *a: {"status": "pending"})
+    monkeypatch.setattr(service.queue, "cancel", lambda *a: {"status": "claimed", "claimed": True})
+    result = await service.execute("s", "dev", "read_screen", {}, timeout=0.01)
+    assert result["error"] == "device_timeout"
+    assert result["outcome_unknown"] is True
+
+
+@pytest.mark.parametrize("last_status", ["pending", "expired", "cancelled"])
+async def test_completed_result_winning_timeout_is_returned(wired, monkeypatch, last_status):
+    monkeypatch.setattr(service.queue, "outcome", lambda *a: {"status": last_status})
+    monkeypatch.setattr(service.queue, "cancel", lambda *a: {
+        "status": "completed", "claimed": True, "result": '{"ok":true,"status":"launched_confirmation"}',
+    })
+    result = await service.execute("s", "dev", "set_timer", {"seconds": 5}, timeout=0.01)
+    assert result == {"command_id": "cmd-1", "result": {"ok": True, "status": "launched_confirmation"}}
 
 
 async def test_execute_revocation_during_wait(wired, monkeypatch):

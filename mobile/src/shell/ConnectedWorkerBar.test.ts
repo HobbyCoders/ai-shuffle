@@ -104,12 +104,13 @@ describe('ConnectedWorkerBar in the Android app', () => {
 		expect(posted().at(-1)).toEqual({ type: 'app-settings' });
 	});
 
-	it('hides App settings on older apps instead of leaving chat for Workers', async () => {
+	it('keeps older apps connected to a healthy worker able to reach native Settings', async () => {
 		inApp(['worker-switch']);
 		render(ConnectedWorkerBar);
 		await fireEvent.click(await chip());
-		expect(screen.queryByRole('button', { name: 'App settings' })).toBeNull();
-		expect(posted()).not.toContainEqual({ type: 'workers' });
+		expect(screen.getByText('Via app Workers')).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'App settings' }));
+		expect(posted().at(-1)).toEqual({ type: 'workers' });
 	});
 
 	it('gives the bar back when the app does not switch', async () => {

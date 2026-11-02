@@ -40,6 +40,7 @@ class DeviceToolExecutor(context: Context) {
             val intent = withContext(Dispatchers.IO) { intentFor(name, args) }
             if (name !in setOf("place_call", "send_sms", "create_calendar_event", "create_reminder")) {
                 if (!ToolApprovals.request("Allow Android action?", "$name\n${args.toString().take(1000)}", deadline)) {
+                    if (!DeviceToolsRuntime.hasForegroundActivity()) return@withLock ToolRegistry.error("foreground_required", "Open AI Shuffle and retry; no action was performed.")
                     return@withLock ToolRegistry.error("denied", "Local approval was denied, dismissed or expired; no action was performed.")
                 }
             }

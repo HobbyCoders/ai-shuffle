@@ -85,8 +85,9 @@ class DeviceToolsRuntimeTest {
                     else {
                         assertTrue("Shutdown must follow the result POST", command.isActive)
                         assertEquals(target, field("server").get(null))
-                        assertEquals("launched_confirmation", body!!.getJSONObject("result").getString("status"))
-                        assertEquals("launched_confirmation", journal.get(CommandJournal.key("scope", "first"))!!.getJSONObject("result").getString("status"))
+                        val expected = if (path == "first/result") "launched_confirmation" else "foreground_required"
+                        assertEquals(expected, body!!.getJSONObject("result").getString("status"))
+                        assertEquals(expected, journal.get(CommandJournal.key("scope", path.substringBefore('/')))!!.getJSONObject("result").getString("status"))
                         if (offline) throw IOException("offline")
                         JSONObject().put("ok", true)
                     }

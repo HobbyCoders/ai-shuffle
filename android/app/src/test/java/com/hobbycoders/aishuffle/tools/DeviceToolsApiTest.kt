@@ -5,7 +5,7 @@ import org.junit.Test
 
 class DeviceToolsApiTest {
     @Test fun resultRejectionsRetainTheirHttpStatus() {
-        for (status in listOf(404, 409, 410, 429, 500)) {
+        for (status in listOf(400, 404, 405, 409, 410, 413, 422, 425, 429, 500)) {
             try {
                 DeviceToolsApi.checkStatus("command/result", status)
                 fail("HTTP $status must not be acknowledged")

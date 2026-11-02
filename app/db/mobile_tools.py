@@ -198,6 +198,22 @@ def outcome(command_id, session_id):
 
 
 def cancel(command_id, session_id):
+    """Atomically stop delivery and return the prior outcome, including durable claim history.
+
+    The row lock serializes with claim() and submit_result(): a pending cancellation
+    cannot race into delivery, and a completed result winning the deadline is preserved.
+    claimed_at survives expiry/capability cancellation, so only delivered work is uncertain.
+    """
     with get_db() as conn:
-        conn.cursor().execute("""UPDATE mobile_tool_commands SET status='cancelled', arguments='{}'
-            WHERE id=%s AND session_id=%s AND status IN ('pending','claimed')""", (command_id, session_id))
+        cur = conn.cursor()
+        cur.execute("""SELECT status,result,claimed_at FROM mobile_tool_commands
+            WHERE id=%s AND session_id=%s FOR UPDATE""", (command_id, session_id))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        previous = {'status': row['status'], 'result': row['result'],
+                    'claimed': row['claimed_at'] is not None}
+        if row['status'] in ('pending', 'claimed'):
+            cur.execute("""UPDATE mobile_tool_commands SET status='cancelled', arguments='{}'
+                WHERE id=%s AND session_id=%s""", (command_id, session_id))
+        return previous
