@@ -21,7 +21,7 @@ class UiRunnerTest(unittest.TestCase):
             (root / "ci").mkdir()
             (root / "ci/prepare-android-ui.py").write_text("pass\n")
             # Even failing evidence collection must not mask the test's status.
-            (root / "ci/emulator-diagnostics.sh").write_text("exit 7\n")
+            (root / "ci/emulator-diagnostics.sh").write_text('printf "%s" "$1" > "$DIAGNOSTIC_PHASE"\nexit 7\n')
             shutil.copy(CI / "check-instrumentation.py", root / "ci")
             fake = r'''
 import json, os, subprocess, sys
@@ -45,7 +45,8 @@ if "grant" in args and os.environ["MODE"] == "grant-error":
 if "instrument" in args:
     phase = ("suite" if "notClass" in args else
              "allowing" if any("#allowingStartup" in arg for arg in args) else
-             "denying" if any("#denyingStartup" in arg for arg in args) else "cold")
+             "denying" if any("#denyingStartup" in arg for arg in args) else
+             "minified" if any("MinifiedReleaseSmokeTest" in arg for arg in args) else "cold")
     mode = os.environ["MODE"] if phase == os.environ["PHASE"] else "pass"
     if mode == "timeout":
         sys.exit(124)
@@ -78,7 +79,7 @@ if "instrument" in args:
                 encoding="utf-8", newline="\n")
             env = dict(os.environ, BASH_ENV=shell_env.as_posix(),
                        RUNNER_TEMP=str(root / "output"), CALLS=str(root / "calls"), MODE=mode, PHASE=phase,
-                       API_LEVEL=str(api),
+                       API_LEVEL=str(api), DIAGNOSTIC_PHASE=str(root / "diagnostic-phase"),
                        GITHUB_STEP_SUMMARY=str(root / "summary"),
                        UI_RUNNER_TEST_PYTHON=Path(sys.executable).as_posix(),
                        UI_RUNNER_TEST_FAKE=(root / "fake.py").as_posix())
@@ -87,6 +88,7 @@ if "instrument" in args:
             self.assertTrue((root / "calls").exists(), result.stdout + result.stderr)
             calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]
             self.summary = (root / "summary").read_text() if runner == "run-android-ui-tests.sh" else ""
+            self.diagnostic_phase = (root / "diagnostic-phase").read_text() if (root / "diagnostic-phase").exists() else ""
             return result, calls
 
     def test_notifications_are_granted_after_install_and_before_launch_on_android_13_plus(self):
@@ -194,6 +196,13 @@ if "instrument" in args:
     def test_host_timeout_is_not_hidden_by_tee_or_diagnostics(self):
         result, _ = self.run_runner("timeout")
         self.assertEqual(124, result.returncode)
+
+    def test_minified_failures_request_a_supported_diagnostic_phase(self):
+        result, calls = self.run_runner("app-crash", phase="minified", runner="run-minified-smoke.sh")
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual("test-failure", self.diagnostic_phase)
+        self.assertEqual(1, sum(call[0] == "adb" and "instrument" in call for call in calls))
+        self.assertIn("Incomplete or unsuccessful instrumentation run", result.stderr)
 
 
 if __name__ == "__main__":

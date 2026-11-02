@@ -92,6 +92,9 @@ jobs:
         with:
           name: android-minified-smoke-apks
           path: android/minified-apks
+      - name: Download verified official AOSP WebView for API 36
+        if: matrix.api == 36
+        run: python3 ci/ci_webview.py "$RUNNER_TEMP/ci-webview.apk"
       - name: Free disk for the disposable AVD
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL /usr/local/lib/android/sdk/ndk
@@ -112,6 +115,8 @@ jobs:
           bash ci/emulator-storage.sh check
       - name: Run black-box tests against non-debuggable minified code
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          CI_WEBVIEW_APK: ${{ runner.temp }}/ci-webview.apk
         with:
           api-level: ${{ matrix.api }}
           target: default
