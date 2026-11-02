@@ -23,7 +23,7 @@
 //                       callout shows, Send reads "Set up & send", the setup
 //                       fails and the reason shows with the draft kept.
 import { runJourney } from './runner.mjs';
-import { PROJECT, expect, gotoApp, isPhone, openNewChat, showSidebar, uniq, waitChat } from './lib/app.mjs';
+import { PROJECT, expect, gotoApp, holdBootLoad, isPhone, openNewChat, showSidebar, uniq, waitChat } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 /**
@@ -203,6 +203,36 @@ await runJourney({
 				// The 2 s poll carries it to ready.
 				await chips.getByRole('button', { name: 'pop-os: pop-os has this project' }).waitFor({ timeout: 20_000 });
 				await page.waitForTimeout(1500);
+			}
+		},
+		{
+			// #975: bootstrap used the user-facing New Chat handler, dismissing a
+			// phone drawer opened while its startup data was still loading.
+			name: 'drawer-survives-bootstrap',
+			viewports: ['phone'],
+			recorder: { selectors: ['sessions=[aria-label="Sessions"]', 'workspace=[aria-label="Workspace"]'] },
+			async setup({ page, status }) {
+				await simulateWorkers(page);
+				await holdBootLoad(page, '/api/v1/tags', 30_000, { releaseOnSignal: true });
+				await gotoApp(page, status);
+				await page.waitForFunction(() => typeof window.__journeyBootHold?.release === 'function');
+			},
+			async act({ page, mark }) {
+				await mark('open drawer before bootstrap settles');
+				const sessions = await showSidebar(page);
+				const before = await page.evaluate(() => ({
+					held: window.__journeyBootHold?.releasedAt === null,
+					view: JSON.parse(localStorage.getItem('ai-shuffle-layout') || 'null')?.activeView
+				}));
+				expect(before.held && before.view == null, 'the fresh landing is still awaiting its startup data');
+
+				await mark('finish bootstrap with the drawer open');
+				await page.evaluate(() => window.__journeyBootHold.release());
+				await page.waitForFunction(() => JSON.parse(localStorage.getItem('ai-shuffle-layout') || 'null')?.activeView != null);
+				expect(await sessions.isVisible(), 'bootstrap must not dismiss the drawer the user opened');
+				// Click directly: reopening with showSidebar here would hide the bug.
+				await page.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'Projects', exact: true }).click();
+				await page.locator('[data-ui-projects="overview"]').waitFor({ timeout: 30_000 });
 			}
 		},
 		{

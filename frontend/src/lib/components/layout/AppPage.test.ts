@@ -49,7 +49,7 @@ vi.mock('$lib/components/ImportSessionModal.svelte', () => ({ default: () => ({}
 vi.mock('$lib/components/TagManager.svelte', () => ({ default: () => ({}) }));
 vi.mock('$lib/components/SpotlightSearch.svelte', () => ({ default: () => ({}) }));
 import AppPage from './AppPage.svelte';
-import { activeView } from '$lib/stores/layout.svelte';
+import { activeView, layout, sidebarCollapsed, sidebarOverlay } from '$lib/stores/layout.svelte';
 import { activeSession } from '$lib/stores/active-session';
 import { isAdmin } from '$lib/stores/auth.svelte';
 import { sessions as sessionList } from '$lib/stores/app-data.svelte';
@@ -57,6 +57,8 @@ import { backgroundPermissions } from '$lib/stores/active-session';
 const active = activeSession as unknown as Writable<{ sessionId: string | null; draft: string; project: null }>;
 const admin = isAdmin as unknown as Writable<boolean>;
 const views = activeView as unknown as Writable<ActiveView | null>;
+const collapsed = sidebarCollapsed as unknown as Writable<boolean>;
+const overlay = sidebarOverlay as unknown as Writable<boolean>;
 const shell = createRawSnippet<[AppShellProps]>(props => ({
  render: () => '<div><button>New conversation</button></div>',
  setup: element => { (element.querySelector('button') as HTMLButtonElement).onclick = () => props().onNewSession(); },
@@ -66,6 +68,7 @@ const emptyView: ActiveView = { type: 'session', sessionId: null };
 beforeEach(() => {
  vi.clearAllMocks(); window.history.replaceState({}, '', '/');
  admin.set(true); active.set({ sessionId: null, draft: '', project: null }); views.set(emptyView);
+ collapsed.set(false); overlay.set(false);
  mocks.init.mockResolvedValue(undefined); mocks.load.mockResolvedValue(undefined);
  mocks.initGlobalStt.mockReturnValue(vi.fn()); mocks.reconcileSessionMode.mockReturnValue('code');
  mocks.newChat.mockImplementation(() => active.set({ sessionId: null, draft: '', project: null }));
@@ -108,6 +111,25 @@ describe('AppPage initial landing', () => {
   views.set(null); await boot();
   expect(mocks.newChat).toHaveBeenCalledOnce(); expect(mocks.openChat).toHaveBeenCalledWith(null);
   expect(mocks.openFeaturePage).not.toHaveBeenCalled(); expect(get(activeView)).toEqual(emptyView);
+ });
+ // #975: opening the phone drawer is not a New conversation navigation.
+ it('keeps a drawer opened during bootstrap, but still closes it for explicit New conversation', async () => {
+  let release!: () => void;
+  mocks.load.mockReturnValue(new Promise<void>(resolve => { release = resolve; }));
+  views.set(null); overlay.set(true); collapsed.set(true);
+  render(AppPage, { shell });
+  await waitFor(() => expect(mocks.load).toHaveBeenCalled());
+  collapsed.set(false); await tick();
+  release(); await waitFor(() => expect(mocks.initGlobalStt).toHaveBeenCalledOnce());
+  expect(mocks.newChat).toHaveBeenCalledOnce();
+  expect(get(activeView)).toEqual(emptyView);
+  expect(layout.setSidebarCollapsed).not.toHaveBeenCalled();
+
+  await fireEvent.click(screen.getByRole('button', { name: 'New conversation' }));
+  expect(layout.setSidebarCollapsed).toHaveBeenCalledExactlyOnceWith(true);
+  expect(mocks.newChat).toHaveBeenCalledTimes(2);
+  // The explicit navigation follows on rAF: settle it before the next test.
+  await waitFor(() => expect(mocks.openChat).toHaveBeenCalledTimes(2));
  });
  it('keeps an owner already on the empty composer there', async () => {
   await boot();

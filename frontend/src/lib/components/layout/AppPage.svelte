@@ -295,7 +295,10 @@
 				// loads (#930), just because the layout snapshot is absent.
 				layout.openChat(null);
 			} else {
-				handleNewSession();
+				// This is the initial landing, not a user navigation. The New Chat
+				// handler would dismiss a phone drawer opened during the loads (#975).
+				activeSession.newChat();
+				layout.openChat(null);
 			}
 		} else if ($activeView.type === 'session' && currentViewSessionId === null && (restoredSessionId || layoutNewChatWon)) {
 			// Layout says "new chat" but backend has a session — the user explicitly
