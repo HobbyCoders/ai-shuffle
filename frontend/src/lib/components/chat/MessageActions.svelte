@@ -15,7 +15,7 @@
 	import { getContext, onDestroy, tick } from 'svelte';
 	import { get, readable } from 'svelte/store';
 	import { activeSession } from '$lib/stores/active-session';
-	import { addRestoredWordsToDraft, noteRestoreFinished, noteRestoreStarted, pageIsLeaving } from '$lib/stores/session/restored-draft';
+	import { addRestoredWordsToDraft, LEAVING_MS, noteRestoreFinished, noteRestoreStarted, pageIsLeaving } from '$lib/stores/session/restored-draft';
 	import { TRANSCRIPT_ACTIONS, type TranscriptActions } from './TranscriptHydrationBoundary.svelte';
 	import { Ellipsis, Flag } from 'lucide-svelte';
 	import { executeRewind } from '$lib/api/client';
@@ -202,7 +202,7 @@
 		const notSentRequest = !!notSentMessageId;
 		const unsentUploads = notSentUploadPaths;
 		const restoringRowId = notSentMessageId;
-		let pageLeft = false;
+		let answerLost = false;
 		isRewinding = true;
 		rewindError = null;
 		if (restoringRowId) noteRestoreStarted(requestedSessionId, restoringRowId, removedPrompt ?? '', unsentUploads);
@@ -241,15 +241,23 @@
 			// No answer means the server may have dropped the row all the same, so
 			// the copy on screen is handed over. If the server did drop it, the row
 			// and this note leave together; if not, the note explains why it stayed.
-			if (notSentRequest && outcomeUnknown(e)) {
-				// The next page takes over from the note this restore left.
-				if (pageIsLeaving()) {
-					pageLeft = true;
-					return;
-				}
+			if (restoringRowId && outcomeUnknown(e)) {
+				answerLost = true;
 				restored = true;
-				rewindError = RESTORE_UNCONFIRMED;
-				handBackRestoredWords(requestedSessionId, complete, undefined, removedPrompt, unsentUploads);
+				const handOver = () => {
+					rewindError = RESTORE_UNCONFIRMED;
+					handBackRestoredWords(requestedSessionId, complete, undefined, removedPrompt, unsentUploads);
+				};
+				// A reload is what cuts requests off, too, and a page that is going
+				// takes its composer with it. Only a page still alive after the wait
+				// hands the words over or drops the note; otherwise the note is what
+				// the next page recovers them from.
+				const wasLeaving = pageIsLeaving();
+				if (!wasLeaving) handOver();
+				setTimeout(() => {
+					if (wasLeaving) handOver();
+					noteRestoreFinished(requestedSessionId, restoringRowId);
+				}, LEAVING_MS);
 				return;
 			}
 			if (sessionId !== requestedSessionId || !canAct(requestedSessionId)) return;
@@ -257,7 +265,7 @@
 			rewindError = e instanceof Error ? e.message : 'Unknown error';
 		} finally {
 			isRewinding = false;
-			if (restoringRowId && !pageLeft) noteRestoreFinished(requestedSessionId, restoringRowId);
+			if (restoringRowId && !answerLost) noteRestoreFinished(requestedSessionId, restoringRowId);
 		}
 	}
 

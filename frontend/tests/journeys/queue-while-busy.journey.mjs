@@ -15,6 +15,7 @@ import {
 	openNewChat,
 	scriptTag,
 	scrollTranscriptTo,
+	seededChatId,
 	stopButton,
 	transcriptScroll,
 	typeAndSend,
@@ -298,6 +299,45 @@ await runJourney({
 				await page.unroute(REWIND);
 				await notSent(unheard).getByRole('alert').filter({ hasText: "Couldn't confirm the restore" }).waitFor({ timeout: 5000 });
 				expect(await notSent(unheard).getByRole('button', { name: 'Restored' }).isDisabled(), 'a second click cannot copy the words again');
+			}
+		},
+		{
+			// A note is planted here, because a chat cannot be stopped down to a
+			// single not-sent row from the UI. What it proves is the next page's
+			// side: a chat with no rows at all, whose layout has no transcript.
+			name: 'reload-after-restoring-the-only-row',
+			async setup(ctx) {
+				await openNewChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, status }) {
+				const words = `only row tok-${uniq()}`;
+				const chatId = seededChatId(status, 'cleared');
+				const composer = page.locator('[contenteditable="true"]').first();
+
+				await mark('open the empty chat');
+				await openFromSidebar(page, SEEDED.cleared);
+				await waitChat(page, { surface: 'cleared', loading: 'false' });
+				await page.evaluate(([id, text]) => sessionStorage.setItem(`restore-note:${id}:only-row`,
+					JSON.stringify({ rowId: 'only-row', prompt: text, uploadPaths: [], page: 'an-earlier-page' })), [chatId, words]);
+
+				await mark('reload');
+				await page.reload({ waitUntil: 'domcontentloaded' });
+				await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+				await mark('page reloaded');
+				await page.waitForFunction(
+					(t) => document.querySelector('[contenteditable="true"]')?.innerText.includes(t), words, { timeout: 30_000 });
+				await waitChat(page, { surface: 'cleared', loading: 'false' });
+				await page.waitForTimeout(1500);
+				expect((await composer.innerText()).split(words).length === 2, 'the words came back once');
+				expect(await page.evaluate((id) => sessionStorage.getItem(`restore-note:${id}:only-row`) === null, chatId), 'the note is used up');
+
+				// This is a shared seeded chat: leave its composer as it was found.
+				await mark('clear the composer');
+				await composer.click();
+				await page.keyboard.press('ControlOrMeta+A');
+				await page.keyboard.press('Backspace');
+				await page.waitForTimeout(1000);
 			}
 		}
 	],

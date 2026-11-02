@@ -33,7 +33,6 @@
 	import { X } from 'lucide-svelte';
 	import { derived as derivedStore, get } from 'svelte/store';
 	import { activeSession as liveActiveSession, backgroundPermissions } from '$lib/stores/active-session';
-	import { takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
 	import { TRANSCRIPT_PRESENTATION, type TranscriptPresentation } from './TranscriptHydrationBoundary.svelte';
 	import TranscriptLoadingSkeleton from './TranscriptLoadingSkeleton.svelte';
 	import { sessionEphemeralCache } from '$lib/stores/session-cache';
@@ -207,22 +206,6 @@
 			handleRewindComplete(warning, prompt, uploads, unsentRestored);
 		};
 	}
-
-	// A restore cut off by a reload: once this chat's messages are in, a row the
-	// server dropped hands its words back. Checked once per opening, so a row its
-	// own restore is removing right now is left to that restore.
-	let unfinishedRestoresCheckedFor: string | null = null;
-	$effect(() => {
-		const { sessionId, messages, isLoadingSession, isRestoringSession } = $liveActiveSession;
-		if (sessionId === unfinishedRestoresCheckedFor) return;
-		unfinishedRestoresCheckedFor = null;
-		if (!sessionId || isLoadingSession || isRestoringSession || messages.length === 0) return;
-		unfinishedRestoresCheckedFor = sessionId;
-		const onScreen = new Set(messages.map((m) => m.metadata?.not_sent_id).filter((id): id is string => typeof id === 'string'));
-		const notes = takeUnfinishedRestores(sessionId, onScreen);
-		if (notes.length === 0) return;
-		liveActiveSession.setPendingRestorePrompt(notes.map((n) => n.prompt).filter(Boolean).join('\n\n'), notes.flatMap((n) => n.uploadPaths));
-	});
 
 	let containerRef = $state<HTMLDivElement | null>(null);
 	let shouldAutoScroll = $state(true); // Start with auto-scroll enabled

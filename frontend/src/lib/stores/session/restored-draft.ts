@@ -42,12 +42,13 @@ const noteKey = (sessionId: string, rowId: string) => `restore-note:${sessionId}
 
 // A reload rejects the requests it cuts off, so a lost answer can mean the page
 // is going away rather than a bad connection. Its composer goes with it.
+export const LEAVING_MS = 1000;
 let leaving = false;
 if (typeof window !== 'undefined') {
 	const markLeaving = () => {
 		leaving = true;
 		// Still here: the departure was cancelled, or the page came back from cache.
-		setTimeout(() => { leaving = false; }, 1000);
+		setTimeout(() => { leaving = false; }, LEAVING_MS);
 	};
 	window.addEventListener('beforeunload', markLeaving);
 	window.addEventListener('pagehide', markLeaving);

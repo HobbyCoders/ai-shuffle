@@ -38,6 +38,7 @@
 	import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
 	import { attachComposerDictation, detachComposerDictation, startComposerDictation } from '$lib/services/composerDictation';
 	import { flushPendingDraft, holdPendingDraft, readDraft, releasePendingDraft, writeDraft } from '$lib/stores/session/draft-persistence';
+	import { takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
 	import { promptStash } from '$lib/stores/session/prompt-stash';
 	import { promptHistory, createPromptRecall } from '$lib/stores/session/prompt-recall';
 	import { pastedTextFile } from './tiptap/large-paste';
@@ -476,6 +477,24 @@
 		recall.reset();
 		tick().then(() => editorRef?.focus());
 		activeSession.clearPendingRestorePrompt();
+	});
+
+	// A restore cut off by a reload: once this chat's history is in, a row the
+	// server dropped hands its words back. It may have been the chat's only row,
+	// so an empty history counts, and this lives here because an empty chat shows
+	// no transcript. Checked once per opening: a row its own restore is removing
+	// right now is left to that restore.
+	let unfinishedRestoresCheckedFor: string | null = null;
+	$effect(() => {
+		const { sessionId, messages, isLoadingSession, isRestoringSession, error, wsReconnectRequired, historyStall } = $activeSession;
+		if (sessionId === unfinishedRestoresCheckedFor) return;
+		unfinishedRestoresCheckedFor = null;
+		if (!sessionId || !ownsComposer() || isLoadingSession || isRestoringSession || error || wsReconnectRequired || historyStall) return;
+		unfinishedRestoresCheckedFor = sessionId;
+		const onScreen = new Set(messages.map((m) => m.metadata?.not_sent_id).filter((id): id is string => typeof id === 'string'));
+		const notes = takeUnfinishedRestores(sessionId, onScreen);
+		if (notes.length === 0) return;
+		activeSession.setPendingRestorePrompt(notes.map((n) => n.prompt).filter(Boolean).join('\n\n'), notes.flatMap((n) => n.uploadPaths));
 	});
 
 	// Text handed over from another surface (the terminal's "Send selection to

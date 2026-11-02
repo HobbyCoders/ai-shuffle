@@ -71,15 +71,22 @@ describe('MessageActions gating', () => {
 		await waitFor(() => expect(sessionStorage.getItem('restore-note:s1:unsent-id')).toBeNull());
 		expect(takeUnfinishedRestores('s1', new Set(), 'a-later-page')).toEqual([]);
 	});
-	it('clears the note after a lost answer once the composer has the words', async () => {
-		rewind.mockRejectedValue(new TypeError('Failed to fetch'));
-		const onRewindComplete = vi.fn();
-		render(MessageActions, {...base, notSentMessageId:'unsent-id', onRewindComplete});
-		await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
-		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledOnce());
-		await waitFor(() => expect(sessionStorage.getItem('restore-note:s1:unsent-id')).toBeNull());
+	it('clears the note a moment after a lost answer, once the page has plainly stayed', async () => {
+		vi.useFakeTimers();
+		try {
+			rewind.mockRejectedValue(new TypeError('Failed to fetch'));
+			const onRewindComplete = vi.fn();
+			render(MessageActions, {...base, notSentMessageId:'unsent-id', onRewindComplete});
+			await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
+			await vi.advanceTimersByTimeAsync(0);
+			expect(onRewindComplete).toHaveBeenCalledOnce();
+			expect(sessionStorage.getItem('restore-note:s1:unsent-id')).not.toBeNull();
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(sessionStorage.getItem('restore-note:s1:unsent-id')).toBeNull();
+			expect(onRewindComplete).toHaveBeenCalledOnce();
+		} finally { vi.useRealTimers(); }
 	});
-	it('leaves the words to the next page when a reload is what cut the request off', async () => {
+	it('waits to see whether the page really goes, and hands the words over once if it stays', async () => {
 		vi.useFakeTimers();
 		try {
 			rewind.mockRejectedValue(new TypeError('Failed to fetch'));
@@ -91,6 +98,9 @@ describe('MessageActions gating', () => {
 			expect(onRewindComplete).not.toHaveBeenCalled();
 			expect(sessionStorage.getItem('restore-note:s1:unsent-id')).not.toBeNull();
 			await vi.advanceTimersByTimeAsync(1000);
+			expect(onRewindComplete).toHaveBeenCalledOnce();
+			expect(sessionStorage.getItem('restore-note:s1:unsent-id')).toBeNull();
+			expect(screen.getByRole('alert').textContent).toContain("Couldn't confirm");
 		} finally { vi.useRealTimers(); }
 	});
 	it.each([
