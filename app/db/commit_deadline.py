@@ -6,6 +6,7 @@ It never calls connection.cancel()/close(), which can themselves block in libpq.
 """
 from __future__ import annotations
 
+import errno
 import logging
 import socket
 import threading
@@ -17,6 +18,58 @@ import psycopg2.extensions
 
 logger = logging.getLogger("app.db")
 COMMIT_TIMEOUT_SECONDS = 30.0
+_CLOSE_FAILURE_LOG_WINDOW_S = 30.0
+_close_failure_log: tuple[float | None, int] = (None, 0)
+_close_failure_lock = threading.Lock()
+
+
+def _close_duplicate(sock: socket.socket) -> int | None:
+    """Close the private duplicate, returning the errno if that failed.
+
+    Nothing about the commit depends on this descriptor once the wait is over:
+    libpq reports the outcome on its own socket. EBADF means other code in this
+    process closed this descriptor number, and raising here would turn a finished
+    commit into a failure, hide a real commit error, or end the watchdog's thread
+    and with it every later deadline. CPython forgets the descriptor before calling
+    close(2), so a failure cannot leak it or close it twice.
+    """
+    try:
+        sock.close()
+    except OSError as exc:
+        return exc.errno if isinstance(exc.errno, int) else -1
+    return None
+
+
+def _warn_best_effort(message: str, *args: object) -> None:
+    """A log handler's error reaches its caller; here that must not be a commit.
+
+    It would replace the commit's outcome or end the watchdog's only thread, so a
+    failing sink costs the line and nothing else.
+    """
+    try:
+        logger.warning(message, *args)
+    except Exception:  # noqa: BLE001 - a diagnostic never decides a commit's outcome
+        pass
+
+
+def _report_close_failure(code: int) -> None:
+    """Keep a stray close visible without one line per commit. Errno only. Never raises."""
+    global _close_failure_log
+    try:
+        now = time.monotonic()
+        with _close_failure_lock:
+            last, suppressed = _close_failure_log
+            if last is not None and now - last < _CLOSE_FAILURE_LOG_WINDOW_S:
+                _close_failure_log = (last, suppressed + 1)
+                return
+            _close_failure_log = (now, 0)
+        _warn_best_effort(
+            "Commit deadline descriptor close failed: errno=%s suppressed=%d; the commit outcome "
+            "is unaffected, but EBADF means other code in this process closed this descriptor",
+            errno.errorcode.get(code, code), suppressed,
+        )
+    except Exception:  # noqa: BLE001 - same rule for the limiter's own work
+        pass
 
 
 class _CommitWatchdog:
@@ -55,12 +108,15 @@ class _CommitWatchdog:
             self._pending.pop(sock, None)
             expired = sock in self._expired
             self._expired.discard(sock)
-            sock.close()
+            close_failure = _close_duplicate(sock)
             self._condition.notify()
-            return expired
+        if close_failure is not None:
+            _report_close_failure(close_failure)
+        return expired
 
     def _run(self) -> None:
         while True:
+            close_failure = None
             with self._condition:
                 if not self._pending:
                     self._condition.wait()
@@ -78,7 +134,9 @@ class _CommitWatchdog:
                 except OSError:
                     pass  # Already disconnected by PostgreSQL/the network.
                 finally:
-                    sock.close()
+                    close_failure = _close_duplicate(sock)
+            if close_failure is not None:
+                _report_close_failure(close_failure)
 
 
 _watchdog = _CommitWatchdog()
@@ -99,7 +157,7 @@ def bounded_commit(conn: psycopg2.extensions.connection) -> Iterator[None]:
         if expired:
             # The driver call has unwound on this thread: close is now safe.
             conn.close()
-            logger.warning(
+            _warn_best_effort(
                 "PostgreSQL commit deadline exceeded; disconnected; outcome may be unknown"
             )
     if expired:
