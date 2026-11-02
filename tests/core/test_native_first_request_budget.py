@@ -38,7 +38,8 @@ from fluid.store.base import MemoryStore
 # agent choose the new chat's model (required ``model``, optional shared ``effort``),
 # which adds ~147 more on that one schema: JSON path 14,060 -> 14,207.
 # Its anti-offloading limits (Nov 2026, owner approved) add 125 to that schema and
-# 20 to the rule, measured: tool rows 10,197 -> 10,322, JSON path 14,377 on Linux.
+# 20 to the rule, measured. Largest tool rows (JSON path pinned to Windows): 10,197
+# -> 10,322. Whole JSON path pinned to Linux: 14,377.
 TOOL_ROWS_BUDGET = 10_350
 # Budget the priced prefix separately from the first turn's own content.
 # The latter contains host paths, so measure its real producers with fixed
