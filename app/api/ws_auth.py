@@ -9,7 +9,14 @@ from app.core import mobile_tool_identity as identity
 
 
 async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> tuple[bool, Optional[dict]]:
-    from app.core import owner_auth
+    from app.core import owner_auth, preview_access
+    # A preview cookie restricts whatever else the socket presents. One that
+    # cannot be checked says "retry later" before any credential below can stand
+    # in for it with the owner's authority.
+    try:
+        await run_sync(preview_access.settle, websocket)
+    except Exception as exc:
+        raise WebSocketException(code=1013, reason='Preview access could not be checked; retry later') from exc
     # Only the actual local listener can establish a passwordless owner:
     # loopback (with the desktop listener token when there is one), or the
     # LAN when the owner turned on trusted LAN. Browsers must send a matching
@@ -24,7 +31,6 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
         return True, None
     if not token:
         # The agent browser's session-scoped preview cookie (app.core.preview_access).
-        from app.core import preview_access
         if preview_access.grant(websocket) is not None:
             try:
                 owner_auth.same_origin(websocket)

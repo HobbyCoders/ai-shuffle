@@ -411,6 +411,24 @@ def cookie_token(cookies) -> Optional[str]:
     return cookies.get(cookie_name()) or legacy
 
 
+def _remember(conn, found: Optional[Grant]) -> None:
+    conn.state.preview_grant = found
+    conn.scope[_DECISION_SCOPE_KEY] = found
+
+
+def settle(conn) -> None:
+    """Decide a connection's preview cookie before its other credentials count.
+
+    For socket authentication, which offers several credentials and has no
+    ``enforce_limits`` in front of it. :func:`grant` then reuses this answer, so
+    a later failure cannot read as "no preview here". Raises when it cannot
+    tell. A connection without a preview cookie does no key or database work.
+    """
+    token = cookie_token(conn.cookies)
+    if token and _DECISION_SCOPE_KEY not in conn.scope:
+        _remember(conn, verify(token))
+
+
 def enforce_limits(request) -> None:
     """A valid preview cookie restricts all HTTP and voice WebSocket auth paths.
 
@@ -430,8 +448,7 @@ def enforce_limits(request) -> None:
     except Exception as exc:  # noqa: BLE001 — never bypass limits on key failure
         logger.debug("preview access: restriction check unavailable", exc_info=True)
         raise HTTPException(503, "Preview access could not be checked. Try again later.") from exc
-    request.state.preview_grant = found
-    request.scope[_DECISION_SCOPE_KEY] = found
+    _remember(request, found)
     # WebSockets have no HTTP method: never treat an audio upgrade as a safe GET.
     method = "WEBSOCKET" if request.scope.get("type") == "websocket" else request.method
     if found is not None and not mutation_allowed(request.url.path, method):

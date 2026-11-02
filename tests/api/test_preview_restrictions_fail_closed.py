@@ -17,11 +17,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Request, WebSocketDisconnect
 from fastapi.testclient import TestClient
 
 from app.api import (
     auth,
+    browser_panel,
     chat_access,
     generation_choices,
     plugin_oauth,
@@ -30,12 +31,16 @@ from app.api import (
     sessions_create,
     settings_updates,
     settings_workers,
+    stt_realtime,
     support_reports,
     terminals,
     tools,
     voice,
+    websocket as chat_socket,
+    ws_sync,
 )
 from app.core import owner_auth, preview_access
+from app.core.session_modes import CALLER_AUTHENTICATED, CALLER_PREVIEW, caller_of
 from app.core.config import settings
 from app.db import database, sessions
 from app.serve import IngressApplication
@@ -432,6 +437,137 @@ def test_mutation_ceiling_holds_when_the_lookup_fails(lookup, session):
     client = _client(api, LOCAL, session=session)
     lookup.arm(ALWAYS)
     assert client.post("/api/v1/settings/test-only").status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Sockets: several credentials, and no enforce_limits in front of them
+# ---------------------------------------------------------------------------
+
+RETRY_LATER = 1013
+CHAT = "/api/v1/ws/chat?device_id=device"
+#: Every socket authenticated by ``authenticate_websocket`` alone: voice checks
+#: first (below), terminals have their own check, the peer panel is worker-only.
+SOCKETS = {
+    "chat": CHAT,
+    "session-sync": f"/ws/sessions/{SESSION}?device_id=device&token=unused",
+    "global-sync": "/ws/global?device_id=device",
+    "transcription": "/transcribe/stream",
+    "browser-panel": f"/api/v1/ws/browser/{SESSION}",
+}
+
+
+@pytest.fixture
+def socket_app():
+    api = FastAPI()
+    for router in (
+        chat_socket.router,
+        ws_sync.router,
+        stt_realtime.stt_stream_router,
+        browser_panel.router,
+        voice.router,
+    ):
+        api.include_router(router)
+    return api
+
+
+@pytest.fixture
+def opened_chats(monkeypatch):
+    """Who each chat socket that got past authentication was treated as."""
+    callers = []
+
+    class Handler:
+        def __init__(self, websocket, *args, **kwargs):
+            self.websocket = websocket
+
+        async def run(self):
+            callers.append(caller_of(self.websocket.state.mobile_tool_principal))
+            await self.websocket.close(code=1000)
+
+    monkeypatch.setattr(chat_socket, "ChatWebSocketHandler", Handler)
+    return callers
+
+
+def _close_code(client, path):
+    # ``websocket_connect`` ignores the client's base_url for a relative path.
+    url = f"ws://{client.base_url.netloc.decode()}{path}"
+    with pytest.raises(WebSocketDisconnect) as closed:
+        with client.websocket_connect(url) as socket:
+            socket.receive_text()
+    return closed.value.code
+
+
+@pytest.mark.parametrize("path", SOCKETS.values(), ids=SOCKETS.keys())
+@pytest.mark.parametrize(
+    "port, fail",
+    [(LOCAL, (1,)), (PREVIEW, (2,))],
+    ids=["local-listener", "preview-listener-after-admission"],
+)
+@pytest.mark.parametrize("session", [OWNER_COOKIE, None], ids=["owner-session", "no-login"])
+def test_socket_says_retry_later_when_the_cookie_cannot_be_checked(
+    lookup, socket_app, opened_chats, path, port, fail, session
+):
+    client = _client(socket_app, port, session=session)
+    lookup.arm(fail)
+    assert _close_code(client, path) == RETRY_LATER
+    assert opened_chats == []
+
+
+def test_chat_socket_token_does_not_stand_in_for_an_unreadable_cookie(
+    lookup, socket_app, opened_chats
+):
+    client = _client(socket_app, LOCAL)
+    lookup.arm(ALWAYS)
+    assert _close_code(client, f"{CHAT}&token={OWNER_COOKIE}") == RETRY_LATER
+    assert opened_chats == []
+
+
+def test_chat_socket_is_still_a_preview_when_the_cookie_checks_out(lookup, socket_app, opened_chats):
+    client = _client(socket_app, LOCAL, session=OWNER_COOKIE)
+    lookup.arm(())
+    assert _close_code(client, CHAT) == 1000
+    assert opened_chats == [CALLER_PREVIEW]
+    # One answer for the whole connection, not a recheck that could differ.
+    assert lookup.calls == 1
+
+
+def test_chat_socket_reconnects_as_the_preview_once_the_check_recovers(
+    lookup, socket_app, opened_chats
+):
+    client = _client(socket_app, LOCAL, session=OWNER_COOKIE)
+    lookup.arm((1,))
+    assert _close_code(client, CHAT) == RETRY_LATER
+    assert _close_code(client, CHAT) == 1000
+    assert opened_chats == [CALLER_PREVIEW]
+
+
+@pytest.mark.parametrize(
+    "session", [OWNER_COOKIE, None], ids=["owner-session", "local-listener"]
+)
+def test_chat_socket_keeps_the_owner_while_lookups_are_failing(
+    lookup, socket_app, opened_chats, session
+):
+    client = _client(socket_app, LOCAL, preview=False, session=session)
+    lookup.arm(ALWAYS)
+    assert _close_code(client, CHAT) == 1000
+    assert opened_chats == [CALLER_AUTHENTICATED]
+    assert lookup.calls == 0
+
+
+def test_chat_socket_ignores_a_dead_cookie_while_lookups_are_failing(
+    lookup, socket_app, opened_chats
+):
+    client = _client(socket_app, LOCAL, preview=False, session=OWNER_COOKIE)
+    client.cookies.set(preview_access.cookie_name(), preview_access.mint(SESSION, ttl_seconds=60, now=0))
+    lookup.arm(ALWAYS)
+    assert _close_code(client, CHAT) == 1000
+    assert opened_chats == [CALLER_AUTHENTICATED]
+    assert lookup.calls == 0
+
+
+def test_voice_socket_stays_closed_when_the_cookie_cannot_be_checked(lookup, socket_app):
+    client = _client(socket_app, LOCAL, session=OWNER_COOKIE)
+    lookup.arm(ALWAYS)
+    assert _close_code(client, f"/api/v1/voice/sessions/{SESSION}/audio") == 4403
 
 
 # ---------------------------------------------------------------------------
