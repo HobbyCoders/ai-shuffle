@@ -24,7 +24,9 @@ import pytest
 
 def _held_prepare_frames(owner, entered, release, *args, **kwargs):
     """Hold the real CPU operation in its child until live ingestion finishes."""
-    from app.core.transcript_views.producer import _prepare_frames
+    # Import the lightweight defining module, not the serving actor/config.
+    # The credential-free Windows child intentionally has no USERPROFILE.
+    from app.core.transcript_views.preprocess import _prepare_frames
 
     assert os.getpid() != owner, "large preparation must not share the serving process/GIL"
     entered.touch()
