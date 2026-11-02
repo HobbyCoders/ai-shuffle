@@ -758,6 +758,7 @@ async def search_sessions(
         filter_api_user_id = None
 
     results = await run_sync(
+        fetch_and_enrich_search_results,
         database.search_sessions,
         query=q,
         project_id=project_id,

@@ -3,7 +3,7 @@ import asyncio
 import json
 import re
 import subprocess
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -902,6 +902,125 @@ async def test_the_change_frame_carries_no_chip_text(owner, monkeypatch):
     await task_chips._broadcast("root")
     assert sent[0].event_type == "stream_frame"
     assert sent[0].data == {"type": "task_chips_changed", "session_id": "root"}
+
+
+# --- The count sidebars read: chips waiting on the owner
+
+
+async def _published(monkeypatch):
+    """What one change tells every device of the user, the chat not open anywhere."""
+    from app.core.sync_engine import sync_engine
+
+    send = AsyncMock()
+    monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", send)
+    await task_chips._publish_waiting("root")
+    send.assert_awaited_once()
+    return send.await_args.kwargs
+
+
+async def test_only_chips_the_owner_can_act_on_count_as_waiting(owner, monkeypatch):
+    assert store.waiting_counts(["root"])["root"]["pending_task_chips"] == 0
+    chips = [await recorded(title=f"Task {i}", request_id=f"r{i}") for i in range(4)]
+    assert store.waiting_counts(["root"])["root"]["pending_task_chips"] == 4
+    await task_chips.dismiss("root", chips[0])
+    assert store.claim("root", chips[1])["state"] == "starting"  # the app's turn, not the owner's
+    claimed = store.claim("root", chips[2])
+    store.mark_failed(chips[2], claimed["attempt"], "No model")  # shows Retry: the owner's turn again
+    assert store.waiting_counts(["root"])["root"]["pending_task_chips"] == 2
+    assert (await _published(monkeypatch))["updates"]["pending_task_chips"] == 2
+
+
+async def test_every_change_reaches_sidebars_with_the_count_after_it(owner, monkeypatch):
+    chip_id = await recorded()
+    published = await _published(monkeypatch)
+    assert (published["user_id"], published["session_id"]) == ("admin", "root")
+    assert published["updates"] == {"pending_task_chips": 1}
+    await task_chips.dismiss("root", chip_id)
+    assert (await _published(monkeypatch))["updates"]["pending_task_chips"] == 0
+
+
+async def test_the_frame_and_the_count_both_go_out_for_one_change(owner, monkeypatch):
+    from app.core.sync_engine import sync_engine
+
+    frame, count = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(sync_engine, "broadcast_event", frame)
+    monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", count)
+    await task_chips._broadcast("root")
+    frame.assert_awaited_once()
+    count.assert_awaited_once()
+
+
+async def test_a_lost_frame_does_not_lose_the_count(owner, monkeypatch):
+    from app.core.sync_engine import sync_engine
+
+    count = AsyncMock()
+    monkeypatch.setattr(sync_engine, "broadcast_event", AsyncMock(side_effect=RuntimeError("socket gone")))
+    monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", count)
+    with pytest.raises(RuntimeError):
+        await task_chips._broadcast("root")
+    count.assert_awaited_once()
+
+
+async def test_a_chip_mirrored_from_the_owning_worker_reaches_sidebars_here(owner, monkeypatch):
+    from app.core.global_events import global_events
+    from app.core.sync_engine import sync_engine
+
+    chip_id = await recorded()
+    count = AsyncMock()
+    monkeypatch.setattr(sync_engine, "broadcast_event", AsyncMock())
+    monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", count)
+    monkeypatch.setattr(global_events, "_loop", asyncio.get_running_loop(), raising=False)
+    task_chips.notify_mirrored(chip_id)
+    await asyncio.sleep(0)
+    await asyncio.gather(*task_chips._background)
+    count.assert_awaited_once()
+    assert count.await_args.kwargs["updates"]["pending_task_chips"] == 1
+
+
+async def test_a_failed_count_read_never_raises_and_a_gone_chat_sends_nothing(owner, monkeypatch):
+    from app.core.sync_engine import sync_engine
+
+    send = AsyncMock()
+    monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", send)
+    await task_chips._publish_waiting("no-such-chat")
+    monkeypatch.setattr(store, "waiting_counts", lambda ids: (_ for _ in ()).throw(RuntimeError("db down")))
+    await task_chips._publish_waiting("root")
+    send.assert_not_awaited()
+
+
+async def test_the_session_list_carries_the_count(owner):
+    from app.api import sessions_helpers
+
+    await recorded()
+    chat("other")
+    rows = sessions_helpers.enrich_sessions_with_tags([sessions.get_session("root"), sessions.get_session("other")])
+    assert {row["id"]: row["pending_task_chips"] for row in rows} == {"root": 1, "other": 0}
+    results = sessions_helpers.enrich_search_results_with_tags([{"id": "root", "instance_id": None}])
+    assert results[0]["pending_task_chips"] == 1
+
+
+async def test_both_search_routes_carry_the_count(owner):
+    """Through the routes themselves: helper tests cannot see a route that skips the helper."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api import sessions as sessions_api
+    from app.api.auth import require_auth
+
+    await recorded()
+    found = {**sessions.get_session("root"), "snippet": "...", "match_type": "title"}
+    app = FastAPI()
+    app.include_router(sessions_api.router)
+    app.dependency_overrides[require_auth] = lambda: "test-token"
+    with patch.object(database, "search_sessions", return_value=[found]), \
+            patch.object(database, "search_sessions_paginated", return_value=([found], 1)), \
+            TestClient(app) as client:
+        plain = client.get("/api/v1/sessions/search/query?q=root")
+        paged = client.get("/api/v1/sessions/search/paginated?q=root")
+    assert plain.status_code == 200, plain.text
+    assert paged.status_code == 200, paged.text
+    assert plain.json()[0]["pending_task_chips"] == 1
+    assert paged.json()["items"][0]["pending_task_chips"] == 1
 
 
 # --- Routing

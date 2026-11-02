@@ -81,6 +81,7 @@
 		isVisibleSidebarSession,
 		isArchived,
 		sidebarGroup,
+		waitingTaskChips,
 		openSessionNeeds,
 		sessionNeedsInput,
 		liveProjectKeys,
@@ -395,14 +396,15 @@
 			.sort((a, b) => b.ts - a.ts)
 	);
 
-	// "Needs you" lifts every ACTIVE row parked on a prompt out of Active, so
-	// an active row moves when it starts or stops waiting on the user — never
-	// on unrelated activity. Settling is the user saying "not now" (#2324): a
-	// settled row always lands in Settled, keeping its amber badge if the
-	// server still reports a wait.
-	const needsYouRows = $derived(rows.filter((r) => sidebarGroup(r.status, !!r.session.is_active) === 'needs'));
-	const activeRows = $derived(rows.filter((r) => sidebarGroup(r.status, !!r.session.is_active) === 'active'));
-	const settledRows = $derived(rows.filter((r) => sidebarGroup(r.status, !!r.session.is_active) === 'settled'));
+	// "Needs you" lifts every ACTIVE row parked on a prompt or holding a task
+	// chip out of Active, so an active row moves when it starts or stops waiting
+	// on the user — never on unrelated activity. Settling is the user saying "not
+	// now" (#2324): a settled row always lands in Settled, keeping its amber badge
+	// if the server still reports a wait.
+	const laneOf = (r: CardRow) => sidebarGroup(r.status, !!r.session.is_active, waitingTaskChips(r.session));
+	const needsYouRows = $derived(rows.filter((r) => laneOf(r) === 'needs'));
+	const activeRows = $derived(rows.filter((r) => laneOf(r) === 'active'));
+	const settledRows = $derived(rows.filter((r) => laneOf(r) === 'settled'));
 	let settledLimit = $state(SETTLED_LIMIT);
 	const visibleSettledRows = $derived(settledRows.slice(0, settledLimit));
 	const hiddenSettled = $derived(Math.max(0, settledRows.length - visibleSettledRows.length));
@@ -433,8 +435,9 @@
 
 	// Keep the ticker in step with what's actually on screen. The prompt-parked
 	// states keep their live timer too — a session blocked on you is still live.
+	// A finished chat waiting only on a task chip is not, so it ticks nothing.
 	$effect(() => {
-		retick(needsYouRows.length > 0 || activeRows.some((row) => LIVE_TICK_STATUSES.has(row.status)));
+		retick([...needsYouRows, ...activeRows].some((row) => LIVE_TICK_STATUSES.has(row.status)));
 	});
 
 	// --- rail ----------------------------------------------------------------

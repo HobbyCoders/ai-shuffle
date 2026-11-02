@@ -172,7 +172,11 @@
 			"globs": [
 				"frontend/src/lib/components/chat/TaskChipTray.svelte",
 				"frontend/src/lib/stores/session/task-chips.ts",
+				"frontend/src/lib/components/layout/session-card-data*",
+				"frontend/src/lib/components/layout/Sidebar.svelte",
+				"frontend/src/lib/components/layout/SessionCard.svelte",
 				"app/core/task_chips.py",
+				"app/db/task_chips.py",
 				"frontend/tests/journeys/task-chips.journey.mjs"
 			]
 		},

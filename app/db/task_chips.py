@@ -20,6 +20,9 @@ FAILED = "failed"
 REMOVED = "removed"
 
 OPEN_STATES = (PENDING, STARTING, FAILED)
+# Only the owner can move these on: a suggestion to start, a failed start to
+# retry or dismiss. A ``starting`` chip is the app's turn, not the owner's.
+WAITING_STATES = (PENDING, FAILED)
 MAX_OPEN = 10
 # A claim older than this has no live start behind it, whatever the process did.
 STALE_CLAIM_SECONDS = 300
@@ -115,6 +118,26 @@ def list_for_session(session_id: str) -> List[Dict[str, Any]]:
         cursor.execute(f"SELECT {_COLUMNS} FROM session_task_chips WHERE session_id=%s AND state<>%s "
                        "ORDER BY created_at, id", (session_id, REMOVED))
         return [dict(row) for row in cursor.fetchall()]
+
+
+def waiting_counts(session_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """How many chips wait on the owner per chat, and whose chat it is, in one query.
+
+    Every chat that exists gets an entry, zero included, so a caller can publish
+    the count dropping to nothing.
+    """
+    ids = list(dict.fromkeys(session_ids))
+    if not ids:
+        return {}
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT s.id, s.api_user_id, COUNT(c.id) AS waiting FROM sessions s "
+            "LEFT JOIN session_task_chips c ON c.session_id=s.id AND c.state IN (%s, %s) "
+            f"WHERE s.id IN ({', '.join(['%s'] * len(ids))}) GROUP BY s.id, s.api_user_id",
+            (*WAITING_STATES, *ids))
+        return {row["id"]: {"api_user_id": row["api_user_id"], "pending_task_chips": int(row["waiting"])}
+                for row in cursor.fetchall()}
 
 
 def source_of(started_session_id: str) -> Optional[Dict[str, Any]]:

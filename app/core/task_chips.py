@@ -690,10 +690,38 @@ def _finished(task: asyncio.Task) -> None:
 async def _broadcast(session_id: str) -> None:
     from app.core.sync_engine import SyncEvent, sync_engine
 
-    await sync_engine.broadcast_event(SyncEvent(
-        event_type="stream_frame", session_id=session_id,
-        data={"type": FRAME_TYPE, "session_id": session_id},
-    ))
+    try:
+        await sync_engine.broadcast_event(SyncEvent(
+            event_type="stream_frame", session_id=session_id,
+            data={"type": FRAME_TYPE, "session_id": session_id},
+        ))
+    finally:
+        await _publish_waiting(session_id)
+
+
+# One read-and-send at a time, so a slower read of an older count can never be
+# sent after a newer one and leave the row showing a chip that is gone.
+_publish_lock = asyncio.Lock()
+
+
+async def _publish_waiting(session_id: str) -> None:
+    """Tell every device of the user the chat's count. Sidebars do not watch the chat, so the frame misses them.
+
+    Browsers hear this on two sockets and take it from their global one only, which
+    keeps these in the order sent here (user-event-dedupe.ts).
+    """
+    from app.core.sync_engine import sync_engine
+
+    try:
+        async with _publish_lock:
+            row = (await run_sync(store.waiting_counts, [session_id])).get(session_id)
+            if row is not None:
+                await sync_engine.broadcast_user_session_updated(
+                    user_id=row["api_user_id"] or "admin", session_id=session_id,
+                    updates={"pending_task_chips": row["pending_task_chips"]},
+                )
+    except Exception:  # noqa: BLE001 — the next list read still shows it
+        log.warning("Task chip count broadcast failed for %s", session_id, exc_info=True)
 
 
 def list_chips(session_id: str) -> Dict[str, Any]:

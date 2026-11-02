@@ -205,6 +205,8 @@ Chips live on the worker that owns the chat and are mirrored to other workers. S
 
 Rewinding past the turn that suggested a chip, or clearing the chat, removes it while it is still `pending`. A chip that has been acted on stays.
 
+A session row in the list and search responses carries `pending_task_chips`: how many of its chips are `pending` or `failed`, the two states only the owner can move on. Other responses that return a session, including session detail, do not read it and return `null`. Whenever it changes, an admin's or API user's devices get the new count in `user_session_updated`, without watching the chat. Managed accounts and direct-paired clients get `resources_changed` for `sessions` on `/api/v1/ws/global` instead, and read the count by reloading the list. A client connected on both sockets should take it from `/api/v1/ws/global` alone: one socket keeps the order the counts were sent in, and nothing orders the two against each other. In the app, an active chat with a count above zero moves to **Needs you** in the sidebar and counts in the tab title, whatever it is doing, and its status word stays what it really is. A settled chat stays in Settled, still marked. Chips send no phone alert.
+
 ### GET /api/v1/sessions/{session_id}/task-chips
 
 **Auth:** Required, with the same session access checks as session detail.

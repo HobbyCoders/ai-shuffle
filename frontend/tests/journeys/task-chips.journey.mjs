@@ -18,6 +18,9 @@
 //   survives   reload and switching keep each chat's own chips, with no frame
 //              of the wrong chat's, and a chip dismissed while the socket was
 //              down is gone after the reconnect and stays gone after a reload
+//   sidebar    a chip waiting on a chat moves its row to Needs you and counts in
+//              the tab title, live on a chat that is not open and after a reload;
+//              dismissing or starting it moves the row back
 //   no-tools   a chat whose agent has lost every tool says so on its chip
 //   denied     a subagent whose agent denies tools says the new chat has more
 //   chat-tools an ordinary chat on the chat lane's tools does not read as
@@ -461,6 +464,119 @@ const SURVIVES = {
 	}
 };
 
+/** The sidebar lane this chat's row sits in. The phone drawer has to be open to have one. */
+async function waitLane(page, id, lane, timeout = 30_000) {
+	// Just after a reload neither is on screen yet.
+	await page.getByRole('complementary', { name: 'Sessions' })
+		.or(page.getByRole('button', { name: 'Show sidebar' }))
+		.first().waitFor({ timeout: 60_000 });
+	await showSidebar(page);
+	await page.waitForFunction(({ id, lane }) => {
+		const card = document.querySelector(`[data-session-card="${id}"]`);
+		return card?.closest('[data-group]')?.getAttribute('data-group') === lane;
+	}, { id, lane }, { timeout });
+}
+
+const CARD = (id) => `[data-session-card="${id}"]`;
+/** Open the chat from its row, which also closes the phone drawer `waitLane` opened. */
+const openRow = (page, id) => page.locator(CARD(id)).getByRole('button').first().click();
+const titleCount = (page) => page.evaluate(() => Number(/^\((\d+)\)/.exec(document.title)?.[1] ?? 0));
+
+const SIDEBAR = {
+	name: 'sidebar',
+	viewports: mobileShell ? ['desktop'] : undefined,
+	async setup(ctx) {
+		ctx.chat = await openedChat(ctx);
+	},
+	async act({ page, mark, log, variant, chat }) {
+		// Seeded chats can hold chips of their own, so the title is read relative to here.
+		const before = await titleCount(page);
+		await mark('ask for a suggestion that arrives late, and leave the chat before it does');
+		await typeAndSend(page, `suggest ${scriptTag(variant, 'tool-suggest-task-late')}`);
+		await showSidebar(page);
+		await page.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'New session', exact: true }).click();
+		await waitChat(page, { surface: 'new' });
+		expect(await tray(page).count() === 0, 'the new chat shows no tray, so only the sidebar can say a chip arrived');
+
+		await mark('the chip arrives on a chat that is not open');
+		// The tab title says so first: on a phone the drawer is shut while it arrives.
+		await page.waitForFunction((n) => Number(/^\((\d+)\)/.exec(document.title)?.[1] ?? 0) === n, before + 1, { timeout: 60_000 });
+		await waitLane(page, chat.id, 'needs-you');
+		const card = page.locator(CARD(chat.id));
+		const said = await card.locator('[data-task-chip-count]').innerText();
+		log(`row says: ${said}`);
+		expect(said === 'Task suggested', `the row says why it needs you (got "${said}")`);
+		expect(await titleCount(page) === before + 1, `the tab title counts it (got "${await page.title()}", ${before} before)`);
+
+		await mark('reload: the list read says the same');
+		await reload(page, mark);
+		await waitLane(page, chat.id, 'needs-you');
+		expect(await titleCount(page) === before + 1, 'the tab title still counts it after a reload');
+
+		await mark('open the chat: the chip is in its tray');
+		await openRow(page, chat.id);
+		await dismissButton(page, LATE).waitFor({ timeout: 60_000 });
+		await waitChat(page, { surface: 'active', loading: 'false', messagesAtLeast: 1 }, { timeout: 60_000 });
+		// The button can be seen before the recorder's next sample. Without this the
+		// chip is first logged inside the dismiss step and reads as a flash.
+		await page.waitForTimeout(200);
+
+		await mark('dismiss the chip');
+		await dismissButton(page, LATE).click();
+		await tray(page).waitFor({ state: 'detached', timeout: 15_000 });
+		await waitLane(page, chat.id, 'active');
+		expect(await page.locator(`${CARD(chat.id)} [data-task-chip-count]`).count() === 0, 'the row stops saying so');
+		await page.waitForFunction((n) => Number(/^\((\d+)\)/.exec(document.title)?.[1] ?? 0) === n, before, { timeout: 15_000 });
+
+		await mark('a new chip: starting it also clears the row');
+		await openRow(page, chat.id);
+		await waitChat(page, { streaming: 'false' }, { timeout: 90_000 });
+		await typeAndSend(page, `suggest ${scriptTag(variant, 'tool-suggest-task')}`);
+		await startButton(page, DOCS).waitFor({ timeout: 60_000 });
+		await waitLane(page, chat.id, 'needs-you');
+		await openRow(page, chat.id);
+		await waitChat(page, { streaming: 'false' }, { timeout: 60_000 });
+		await startButton(page, DOCS).click();
+		await openChatLink(page, DOCS).waitFor({ timeout: 60_000 });
+		await waitLane(page, chat.id, 'active');
+		await page.waitForTimeout(800);
+	}
+};
+
+// The longest row there is: a question, several chips, and the timer. The words
+// give way, because a timer pushed out of view looks like a chat that stopped.
+const ROW_FITS = {
+	name: 'row-fits',
+	viewports: mobileShell ? ['desktop'] : undefined,
+	async setup(ctx) {
+		ctx.chat = await openedChat(ctx);
+	},
+	async act({ page, mark, log, variant, chat }) {
+		await mark('several chips, then a question on the same chat');
+		await typeAndSend(page, `suggest ${scriptTag(variant, 'tool-suggest-task-crowded')}`);
+		await waitChat(page, { streaming: 'false' }, { timeout: 90_000 });
+		await typeAndSend(page, `ask ${scriptTag(variant, 'ask-question')}`);
+		await waitLane(page, chat.id, 'needs-you');
+		const card = page.locator(CARD(chat.id));
+		await card.getByText('Has question').waitFor({ timeout: 60_000 });
+
+		await mark('the row holds the status, the words and the timer');
+		const fit = await card.evaluate((el) => {
+			const line = el.querySelector('.l2');
+			const box = line.getBoundingClientRect();
+			const timer = line.querySelector('.timer').getBoundingClientRect();
+			const words = line.querySelector('[data-task-chip-count]');
+			return { spill: line.scrollWidth - line.clientWidth, timerPast: timer.right - box.right, wordsWidth: words.getBoundingClientRect().width, title: words.title };
+		});
+		log(`row fit: ${JSON.stringify(fit)}`);
+		expect(fit.timerPast <= 1, `the timer stays inside the row (${fit.timerPast}px past its edge)`);
+		expect(fit.spill <= 1, `nothing spills out of the row (${fit.spill}px)`);
+		expect(fit.wordsWidth > 0, 'the words keep some room');
+		expect(fit.title === '4 tasks suggested', `the full words are one hover away (got "${fit.title}")`);
+	},
+	allow: [{ kind: 'layout_shift', reason: 'the chips and the question lift the composer, and the row joins the Needs you lane, which is what this case sets up to measure' }]
+};
+
 /** The access line under a chip, once it has arrived; in view without scrolling the tray. */
 async function accessText(page, title) {
 	const line = row(page, title).locator('[data-chip-access]');
@@ -528,5 +644,5 @@ const CHAT_TOOLS = {
 await runJourney({
 	name: 'task-chips',
 	allow: [...DEV_INSTANCE_NOISE],
-	cases: [STREAM, SUBAGENT, NESTED, FAILED, CLICK, CROWDED, SURVIVES, NO_TOOLS, DENIED, CHAT_TOOLS]
+	cases: [STREAM, SUBAGENT, NESTED, FAILED, CLICK, CROWDED, SURVIVES, SIDEBAR, ROW_FITS, NO_TOOLS, DENIED, CHAT_TOOLS]
 });

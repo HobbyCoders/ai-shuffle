@@ -595,6 +595,8 @@ describe('Sidebar session groups', () => {
 describe('Sidebar Needs you lane', () => {
 	const labels = sectLabels;
 	const lane = () => document.querySelector('[data-group="needs-you"]');
+	const withTaskChips = (id: string, count: number) => mocks.sessions.set(
+		(mocks.sessions.current as Array<{ id: string }>).map((s) => (s.id === id ? { ...s, pending_task_chips: count } : s)));
 
 	// #1807: a private-access request blocks the agent on the owner like a
 	// permission prompt, so it lifts the row the same way.
@@ -624,6 +626,49 @@ describe('Sidebar Needs you lane', () => {
 		await tick();
 		expect(labels()).toEqual(['Active 1', 'Settled 1']);
 		expect(lane()).toBeNull();
+	});
+
+	it('lifts a mirrored row holding a task chip, whose status comes from its owner', async () => {
+		mocks.sessions.set([
+			session('remote', 'Remote chat', 'visible-project', true, false, {
+				is_remote: true, instance_id: 'laptop', device_name: 'Laptop', remote_runtime_state: 'idle', pending_task_chips: 1
+			})
+		]);
+		render(Sidebar, { props: sidebarProps });
+		await tick();
+		expect(lane()?.textContent).toContain('Remote chat');
+		expect(cardFrame('Remote chat').querySelector('[data-task-chip-count]')?.textContent).toBe('Task suggested');
+	});
+
+	it('lifts a row holding a task chip, says so, and moves it back when the chip is gone', async () => {
+		const patch = (count: number) => withTaskChips('active', count);
+		render(Sidebar, { props: sidebarProps });
+		patch(1);
+		await tick();
+		expect(labels()).toEqual(['Needs you 1', 'Active 0', 'Settled 1']);
+		expect(lane()?.textContent).toContain('Active chat');
+		const words = () => cardFrame('Active chat').querySelector('[data-task-chip-count]')?.textContent;
+		expect(words()).toBe('Task suggested');
+		// The runtime status stays what the chat is really doing.
+		expect(cardFrame('Active chat').textContent).toContain('Done');
+
+		patch(2);
+		await tick();
+		expect(words()).toBe('2 tasks suggested');
+
+		patch(0);
+		await tick();
+		expect(labels()).toEqual(['Active 1', 'Settled 1']);
+		expect(cardFrame('Active chat').querySelector('[data-task-chip-count]')).toBeNull();
+	});
+
+	it('keeps a settled row with a task chip under Settled, still marked', async () => {
+		withTaskChips('settled', 1);
+		render(Sidebar, { props: sidebarProps });
+		await tick();
+		expect(labels()).toEqual(['Active 1', 'Settled 1']);
+		expect(lane()).toBeNull();
+		expect(cardFrame('Settled chat').querySelector('[data-task-chip-count]')?.textContent).toBe('Task suggested');
 	});
 
 	// #2324: settling is the user saying "not now" — a settled row never sits
