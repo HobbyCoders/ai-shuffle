@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 
 import pytest
+from fastapi import HTTPException
 from starlette.requests import Request
 
 from app.core import preview_access
@@ -49,7 +50,15 @@ def test_session_lookup_error_fails_closed(monkeypatch):
 
     monkeypatch.setattr(sessions, "get_session", boom)
     token = preview_access.mint(SESSION)
-    assert preview_access.verify(token) is None
+    # "Could not tell" must stay distinct from "no grant": restrictions key off it.
+    with pytest.raises(RuntimeError):
+        preview_access.verify(token)
+    cookies = {preview_access.cookie_name(): token}
+    assert preview_access.grant(_request(cookies=cookies)) is None
+    restricted = _request(cookies=cookies)
+    with pytest.raises(HTTPException) as refused:
+        preview_access.enforce_limits(restricted)
+    assert refused.value.status_code == 503
 
 
 def test_deleted_session_invalidates_its_token(monkeypatch):

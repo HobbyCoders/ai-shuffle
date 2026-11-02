@@ -122,8 +122,11 @@ def _saved_access() -> dict | None:
         saved = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if isinstance(saved, dict) and preview_access.verify(saved.get("token")) is not None:
-        return saved
+    try:
+        if isinstance(saved, dict) and preview_access.verify(saved.get("token")) is not None:
+            return saved
+    except Exception:  # noqa: BLE001 - unverifiable: mint a fresh link instead
+        logger.debug("Could not verify the saved preview link", exc_info=True)
     return None
 
 

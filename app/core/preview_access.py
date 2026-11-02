@@ -43,6 +43,9 @@ Threat model, and what the token is NOT:
   ``same_origin`` check the local owner is held to. Account-preference writes
   are also refused by the preferences API, even if the browser independently
   qualifies as a direct LAN owner; test clicks must not sync to the user's UI.
+* A cookie that cannot be checked (unreadable key, failed session lookup) is
+  never read as "no preview here": :func:`verify` raises, ``enforce_limits``
+  answers 503, and its one decision is what the request's later checks reuse.
 * The URL that carries the token lands in the session's system prompt (the
   "# Workspace facts" card) and therefore in transcripts. That is accepted:
   the token is useless off the LAN, dies with the session, and can do nothing
@@ -174,6 +177,11 @@ class Grant:
     expires_at: int
 
 
+#: ``enforce_limits``' decision for one request. ASGI scope, not a header or
+#: cookie, so a client cannot set it; it dies with the request.
+_DECISION_SCOPE_KEY = "shuffle.preview_decision"
+
+
 def _key_path() -> Path:
     from app.core.config import settings
 
@@ -277,8 +285,10 @@ def session_token_with_expiry(session_id: str, *, now: float | None = None) -> t
 
 
 def _session_exists(session_id: str) -> bool:
-    """Whether the bound session is a real row the OWNER runs. Fail closed on
-    lookup errors.
+    """Whether the bound session is a real row the OWNER runs.
+
+    A failed lookup raises rather than answering "no": callers applying
+    restrictions must not read it as an absent grant (see :func:`cookie_token`).
 
     A grant authenticates as the owner (``is_admin``, no ``api_user``), so a
     session that runs as an API key (its own ``api_user_id`` or a worker under
@@ -289,24 +299,24 @@ def _session_exists(session_id: str) -> bool:
     Without a managed database (unit tests, isolated runs) there is no row to
     check and the signature alone decides.
     """
-    try:
-        from app.core.config import settings
+    from app.core.config import settings
 
-        if not settings.managed_database_available():
-            return True
-        from app.core.api_user_scope import session_api_user_id
-        from app.db.sessions import get_session
+    if not settings.managed_database_available():
+        return True
+    from app.core.api_user_scope import session_api_user_id
+    from app.db.sessions import get_session
 
-        row = get_session(session_id)
-        return row is not None and session_api_user_id(row) is None
-    except Exception:  # noqa: BLE001 — an unreadable DB is a denial, not a grant
-        logger.debug("preview access: session lookup failed", exc_info=True)
-        return False
+    row = get_session(session_id)
+    return row is not None and session_api_user_id(row) is None
 
 
 def verify(token: Optional[str], *, now: Optional[float] = None) -> Optional[Grant]:
     """The grant a token carries, or None for anything malformed, forged,
-    expired or bound to a session that no longer exists."""
+    expired or bound to a session that no longer exists.
+
+    Raises when it cannot tell (unreadable key, failed session lookup), so each
+    caller decides what "unknown" means: a denial when admitting, a refusal when
+    restricting. Treating it as None would lift every restriction."""
     if not token or not isinstance(token, str) or len(token) > 512:
         return None
     parts = token.split(".")
@@ -408,6 +418,9 @@ def enforce_limits(request) -> None:
     cookie is used to admit a request. Even a separately authenticated owner,
     paired client or API user must not bypass the cookie's mutation ceiling.
     Invalid/expired cookies neither grant access nor restrict ordinary clients.
+    A cookie that cannot be checked is refused as retryable, and the decision
+    is kept for the rest of this request: :func:`grant` reuses it, so a guard
+    denying on a present grant cannot be undone by a later failed lookup.
     """
     from fastapi import HTTPException
 
@@ -418,6 +431,7 @@ def enforce_limits(request) -> None:
         logger.debug("preview access: restriction check unavailable", exc_info=True)
         raise HTTPException(503, "Preview access could not be checked. Try again later.") from exc
     request.state.preview_grant = found
+    request.scope[_DECISION_SCOPE_KEY] = found
     # WebSockets have no HTTP method: never treat an audio upgrade as a safe GET.
     method = "WEBSOCKET" if request.scope.get("type") == "websocket" else request.method
     if found is not None and not mutation_allowed(request.url.path, method):
@@ -430,19 +444,25 @@ def grant(request) -> Optional[Grant]:
     """The preview grant riding this request's cookie, if every check passes.
 
     Works for HTTP requests and WebSockets alike (both carry ``scope``,
-    ``headers``, ``client`` and ``cookies``). Never raises.
+    ``headers``, ``client`` and ``cookies``). Never raises: a failed check is
+    None, which denies admission. A guard that denies on a present grant is
+    safe only behind ``require_auth``/``require_admin``, whose
+    :func:`enforce_limits` has already refused an uncheckable cookie and whose
+    decision is reused here.
     """
     try:
-        cookies = getattr(request, "cookies", None) or {}
-        token = cookie_token(cookies)
-        if not token:
-            return None
-        if not _private_peer(request):
-            return None
-        found = verify(token)
-        if found is None:
-            return None
         scope = getattr(request, "scope", {}) or {}
+        if _DECISION_SCOPE_KEY in scope:
+            found = scope[_DECISION_SCOPE_KEY]
+            if found is None or not _private_peer(request):
+                return None
+        else:
+            token = cookie_token(getattr(request, "cookies", None) or {})
+            if not token or not _private_peer(request):
+                return None
+            found = verify(token)
+            if found is None:
+                return None
         method = str(scope.get("method") or "GET")
         path = str(scope.get("path") or "/")
         if not mutation_allowed(path, method):
