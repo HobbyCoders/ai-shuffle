@@ -1763,6 +1763,10 @@ function reduceInternal(state, event, observe) {
           liveRerouteReason: reason || null
         };
       }
+      if (str(event.subtype) === "attempt_discarded") {
+        state = foldDroppedAttempt(closeOpen(state)).state;
+        return markAttemptBoundary(state, seq);
+      }
       let data = obj(event.data);
       if (str(event.subtype) === "provider_retry") {
         let superseded = null;
@@ -2305,7 +2309,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "7f3f68be315fd88a061266626d9e65d50d83a963ff73172d4944b72ebad643a4";
+var REDUCER_FINGERPRINT = "33aacc18122069fd93ec488506383c5d0e11a3d6a3ba4261d46bd70d6ec391b0";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {

@@ -130,6 +130,7 @@ from fluid.engine.guardrail import (
 from fluid.events.bus import EventBus
 from fluid.events.model import (
     AssistantTextSanitized,
+    AttemptDiscarded,
     BlockStart,
     BlockStop,
     CacheMissAlert,
@@ -4128,6 +4129,13 @@ class NativeLoop(BackgroundLifecycleMixin):
                         name=result.arg_stream_tool["name"], input={},
                     ))
             if _is_guardrail_block(result):
+                # What the declined call streamed live is never the turn's
+                # reply, whichever way the person answers: hosts drop it now,
+                # before the prompt, and a reload drops it again.
+                await self._emit(AttemptDiscarded(
+                    session_id=sid, node_id=parent.node_id, turn_id=turn_id,
+                    reason="guardrail",
+                ))
                 if await self._guardrail_pause(
                     sid, turn_id, parent, result, num_calls, projected_prompt, total_usage,
                 ):

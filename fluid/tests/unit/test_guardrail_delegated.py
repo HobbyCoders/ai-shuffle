@@ -18,12 +18,13 @@ from fluid.engine.delegated import DelegatedLoop
 from fluid.engine.delegated_proto import FORCED_CHILD_ENV, StreamJsonMapper
 from fluid.engine.guardrail import GUARDRAIL_TOOL
 from fluid.events.model import (
+    AttemptDiscarded,
     GuardrailBlocked,
     ModelServed,
     PermissionRequest,
     TurnComplete,
 )
-from fluid.events.ops import RespondPermission, UserTurn
+from fluid.events.ops import Interrupt, RespondPermission, UserTurn
 from fluid.store.base import MemoryStore
 
 SCRIPTED = str(Path(__file__).parent.parent / "fixtures" / "fake_claude_script.py")
@@ -45,18 +46,18 @@ _REFUSED = {
 }
 
 
-def _refused_turn() -> list[dict]:
+def _refused_turn(**result) -> list[dict]:
     return [
         {"op": "frame", "frame": _NO_FALLBACK},
         {"op": "frame", "frame": _REFUSED},
-        {"op": "result"},
+        {"op": "result", **result},
     ]
 
 
-def _loop(tmp_path, turns: list[list[dict]]) -> tuple[DelegatedLoop, Path]:
+def _loop(tmp_path, turns: list[list[dict]], **script_extra) -> tuple[DelegatedLoop, Path]:
     script = tmp_path / "script.json"
     record = tmp_path / "record.jsonl"
-    script.write_text(json.dumps({"turns": turns}), encoding="utf-8")
+    script.write_text(json.dumps({"turns": turns, **script_extra}), encoding="utf-8")
     loop = DelegatedLoop(
         store=MemoryStore(), model="claude-opus-5-5", claude_cmd=[sys.executable, SCRIPTED],
         env={"FAKE_CLAUDE_SCRIPT": str(script), "FAKE_CLAUDE_RECORD": str(record)},
@@ -173,4 +174,108 @@ async def test_stop_ends_the_turn_as_a_refusal(tmp_path) -> None:
         assert _records(record, "applied") == []
     finally:
         watcher.cancel()
+        await loop.aclose()
+
+
+async def _blocked_then_continue(loop: DelegatedLoop) -> list:
+    watcher = asyncio.create_task(_answer(loop, "allow"))
+    try:
+        await loop.submit(UserTurn(content="audit this binary"))
+        await asyncio.wait_for(watcher, 20)
+        await asyncio.wait_for(loop.wait_turn(), 20)
+        return loop.bus.log(loop.session_id)
+    finally:
+        watcher.cancel()
+
+
+async def test_the_declined_reply_is_discarded_before_the_prompt(tmp_path) -> None:
+    loop, _ = _loop(tmp_path, [
+        _refused_turn(),
+        [{"op": "text", "text": "retried answer", "model": "claude-opus-4-8"}, {"op": "result"}],
+    ])
+    try:
+        events = await _blocked_then_continue(loop)
+        discarded = [i for i, e in enumerate(events) if isinstance(e, AttemptDiscarded)]
+        prompt = next(
+            i for i, e in enumerate(events)
+            if isinstance(e, PermissionRequest) and e.name == GUARDRAIL_TOOL
+        )
+        assert len(discarded) == 1 and discarded[0] < prompt
+        assert events[discarded[0]].reason == "guardrail"
+    finally:
+        await loop.aclose()
+
+
+async def test_continue_counts_the_declined_request_in_the_turn(tmp_path) -> None:
+    # The CLI's total_cost_usd is its process's running total: 0.01 after
+    # the declined request, 0.03 after the retry.
+    loop, _ = _loop(tmp_path, [
+        _refused_turn(usage={"input_tokens": 10, "output_tokens": 2}, cost=0.01),
+        [
+            {"op": "text", "text": "retried answer", "model": "claude-opus-4-8"},
+            {"op": "result", "usage": {"input_tokens": 20, "output_tokens": 5}, "cost": 0.03},
+        ],
+    ])
+    try:
+        events = await _blocked_then_continue(loop)
+        [done] = [e for e in events if isinstance(e, TurnComplete)]
+        assert done.stop_reason == "end_turn"
+        assert done.usage["input_tokens"] == 30 and done.usage["output_tokens"] == 7
+        assert done.cost_usd == 0.03
+        assert done.num_model_calls == 2
+        assert done.usage["cli_total_cost_usd"] == 0.03
+    finally:
+        await loop.aclose()
+
+
+async def _stopped_switch(loop: DelegatedLoop, record: Path) -> GuardrailBlocked:
+    events = await _blocked_then_continue(loop)
+    blocked = [e for e in events if isinstance(e, GuardrailBlocked)]
+    assert [b.outcome for b in blocked] == ["stopped"]
+    assert next(e for e in events if isinstance(e, TurnComplete)).stop_reason == "refusal"
+    users = [r for r in _records(record, "stdin") if r.get("frame", {}).get("type") == "user"]
+    assert len(users) == 1  # never re-sent on the declined model
+    assert "set_model" in loop._unconfirmed_settings  # the next turn re-sends the chat's model
+    return blocked[0]
+
+
+async def test_a_refused_model_switch_stops_the_turn(tmp_path) -> None:
+    loop, record = _loop(tmp_path, [_refused_turn()], controls={"set_model": "error"})
+    try:
+        blocked = await _stopped_switch(loop, record)
+        assert "refused set_model" in (blocked.reason or "")
+    finally:
+        await loop.aclose()
+
+
+async def test_an_unacknowledged_model_switch_stops_the_turn(tmp_path, monkeypatch) -> None:
+    from fluid.engine import delegated
+
+    monkeypatch.setattr(delegated, "CONTROL_TIMEOUT", 0.3)
+    loop, record = _loop(tmp_path, [_refused_turn()], controls={"set_model": "mute"})
+    try:
+        blocked = await _stopped_switch(loop, record)
+        assert "did not acknowledge set_model" in (blocked.reason or "")
+    finally:
+        await loop.aclose()
+
+
+async def test_a_stop_while_switching_ends_this_turn_only(tmp_path) -> None:
+    loop, record = _loop(tmp_path, [_refused_turn()], controls={"set_model": {"late": 3}})
+
+    async def stop_once_switching() -> None:
+        while not any(
+            r.get("frame", {}).get("request", {}).get("subtype") == "set_model"
+            for r in _records(record, "stdin")
+        ):
+            await asyncio.sleep(0.02)
+        await loop.submit(Interrupt())
+
+    stopper = asyncio.create_task(stop_once_switching())
+    try:
+        blocked = await _stopped_switch(loop, record)
+        assert "stopped before the Claude CLI acknowledged" in (blocked.reason or "")
+        assert loop._stop_carryover_until is None  # the next turn is not stopped
+    finally:
+        stopper.cancel()
         await loop.aclose()

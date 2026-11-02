@@ -2490,6 +2490,16 @@ function reduceInternal(
 					liveRerouteReason: reason || null,
 				};
 			}
+			// `attempt_discarded`: the engine dropped the model call that just
+			// streamed (a provider safety check declined it; see
+			// docs/internal/guardrail-contract.md). Its text, thinking and
+			// tool cards leave the transcript, the same fold a connection-drop
+			// retry does, but nothing is kept: no card. Persisted, so a replay
+			// drops the same messages. The next attempt starts after it.
+			if (str(event.subtype) === 'attempt_discarded') {
+				state = foldDroppedAttempt(closeOpen(state)).state;
+				return markAttemptBoundary(state, seq);
+			}
 			let data = obj(event.data);
 			// `provider_retry` arrives once per attempt while the engine
 			// re-sends an empty completion — up to ten of them in a row. They

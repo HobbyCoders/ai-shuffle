@@ -663,6 +663,24 @@ class GuardrailBlocked(Event):
 
 
 @dataclass(frozen=True, kw_only=True)
+class AttemptDiscarded(Event):
+    """The model call that just streamed is dropped from the transcript.
+
+    Whatever that call published live (text, thinking, tool calls that never
+    ran) is not part of the conversation: the engine never stores it, and a
+    host takes it out of what it shows, back to the last attempt boundary (the
+    turn start, a user message, a tool result or a retry note). Its usage is
+    still billed and reported. ``reason`` says why: ``"guardrail"`` when a
+    provider safety check declined the call (see :class:`GuardrailBlocked`).
+    Emitted before anything else about the declined call, so a prompt that
+    follows already shows a transcript without it. Persisted, so a reload
+    drops the same content.
+    """
+
+    reason: str = "guardrail"
+
+
+@dataclass(frozen=True, kw_only=True)
 class DelegatedSurface(Event):
     """The tool surface a delegated CLI announced in its ``init`` frame.
 
@@ -914,7 +932,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
         ToolUse, ToolResult, SteerDelivered,
         PermissionRequest, QuestionRequest, QuestionAnswered, QuestionDelivered, HandoffCreated,
         ContextCompaction, ContextCompacting, Usage, RateLimit, ProviderRetry, ProviderAlive,
-        ModelServed, GuardrailBlocked,
+        ModelServed, GuardrailBlocked, AttemptDiscarded,
         SubagentEvent, HookEvent, AssistantTextSanitized,
         CacheMissAlert,
         ContinualUpdate, DelegatedSurface, DelegatedDiagnostic, SwarmUpdated,

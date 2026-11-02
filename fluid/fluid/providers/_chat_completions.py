@@ -440,23 +440,7 @@ class ChatCompletionsNormalizer:
         usage = data.get("usage")
         if usage is not None:
             if self._content_filtered and not self._order:
-                # The filter ended the response before any output. A reply
-                # with nothing in it would render blank and say nothing about
-                # why; an error names the cause.
-                self.errored = True
-                out.append(
-                    StreamChunk(
-                        "error",
-                        {
-                            "message": (
-                                "the provider's content filter stopped the "
-                                "response before any output"
-                            ),
-                            "retriable": False,
-                            "native_stop_reason": "content_filter",
-                        },
-                    )
-                )
+                out.append(self._filtered_before_output())
                 return out
             if self._content_filtered and not self.native_stop_reason:
                 self.native_stop_reason = "content_filter"
@@ -492,6 +476,27 @@ class ChatCompletionsNormalizer:
             self.finished = True
         return out
 
+    def _filtered_before_output(self) -> StreamChunk:
+        """The error for a content filter that fired before any output.
+
+        A reply with nothing in it would render blank and say nothing about
+        why; an error names the cause, and its ``content_filter`` verdict is
+        what the engine reads as a provider safety check declining the call
+        (fluid.engine.native ``_is_guardrail_block``).
+        """
+        self.errored = True
+        return StreamChunk(
+            "error",
+            {
+                "message": (
+                    "the provider's content filter stopped the "
+                    "response before any output"
+                ),
+                "retriable": False,
+                "native_stop_reason": "content_filter",
+            },
+        )
+
     def finish_without_usage(self) -> list[StreamChunk]:
         """Terminal chunks for a stream that ended on ``[DONE]`` after a
         ``finish_reason`` but never sent the ``include_usage`` chunk.
@@ -501,13 +506,21 @@ class ChatCompletionsNormalizer:
         complete, the usage is just unknown, so it closes like any other
         response with an empty usage object. Empty when the stream is not in
         that state; also empty when the provider gave its own upstream verdict
-        (``native_finish_reason``) or a content filter fired, which keep the
+        (``native_finish_reason``) other than a content filter, which keeps the
         truncated-stream error.
+
+        A content filter ends the same way it does with a usage chunk: before
+        any output it is the filter error (the safety-check path), after some
+        it closes the reply with its ``content_filter`` verdict.
         """
-        if (
-            self.finished or self.errored or not self._finish_seen
-            or self.native_stop_reason is not None or self._content_filtered
-        ):
+        if self.finished or self.errored or not self._finish_seen:
+            return []
+        if self._content_filtered:
+            if not self._order:
+                return [self._filtered_before_output()]
+            if not self.native_stop_reason:
+                self.native_stop_reason = "content_filter"
+        elif self.native_stop_reason is not None:
             return []
         out = [
             StreamChunk("block_stop", {"index": self._index_of[key]})
@@ -516,8 +529,13 @@ class ChatCompletionsNormalizer:
         usage: dict[str, Any] = {}
         if self._response_meta:
             usage["provider_response"] = dict(self._response_meta)
-        out.append(StreamChunk("usage", {"usage": usage, "stop_reason": self._stop_reason}))
-        out.append(StreamChunk("message_stop", {}))
+        terminal: dict[str, Any] = {}
+        if self.native_stop_reason:
+            terminal["native_stop_reason"] = self.native_stop_reason
+        out.append(StreamChunk(
+            "usage", {"usage": usage, "stop_reason": self._stop_reason, **terminal},
+        ))
+        out.append(StreamChunk("message_stop", dict(terminal)))
         self.finished = True
         return out
 

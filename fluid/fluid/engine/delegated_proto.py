@@ -268,6 +268,37 @@ def _merge_counts(target: dict[str, Any], update: dict[str, Any]) -> None:
             target[key] = value
 
 
+# Turn-usage fields that are a running snapshot, not this request's own count:
+# the later value stands (the CLI's process total, the mapper's tool mix).
+_SNAPSHOT_USAGE_KEYS = frozenset({"cli_total_cost_usd", "bash_file_ops", "dedicated_file_ops"})
+
+
+def _sum_usage(earlier: dict[str, Any], later: dict[str, Any]) -> dict[str, Any]:
+    """Two CLI requests' turn usage as one: their counts summed.
+
+    Each request bills its own tokens, so numbers add (nested blocks such as
+    ``cache_creation`` too). Snapshot fields keep the later value; a flag
+    that either side raised (``cost_from_table``) stays raised; anything
+    else is the later value, or the earlier one when the later has none.
+    """
+    total = dict(later)
+    for key, value in earlier.items():
+        current = total.get(key)
+        if key in _SNAPSHOT_USAGE_KEYS:
+            total.setdefault(key, value)
+        elif isinstance(value, bool):
+            total[key] = bool(current) or value
+        elif isinstance(value, (int, float)):
+            if isinstance(current, bool) or not isinstance(current, (int, float)):
+                current = 0
+            total[key] = current + value
+        elif isinstance(value, dict) and isinstance(current, dict):
+            total[key] = _sum_usage(value, current)
+        elif current is None:
+            total[key] = value
+    return total
+
+
 def _dict_field(frame: dict[str, Any], key: str) -> dict[str, Any]:
     """``frame[key]`` when it is an object, else ``{}``: a frame whose body
     has the wrong shape maps to nothing instead of raising into the turn."""
@@ -621,6 +652,10 @@ class StreamJsonMapper:
         # reported, for the loop's next baseline.
         self.cost_baseline = cost_baseline
         self.cli_total_cost_usd: float | None = None
+        # A turn re-sent after a safety check declined it (see
+        # ``carry_attempt``): what the declined CLI request(s) billed, added
+        # to every later result of the same turn.
+        self._carried: tuple[dict[str, Any], float | None, int] | None = None
         # The model the CLI said answered the turn (the first main-thread
         # assistant ``message.model``), used to price a turn from the table.
         # A subagent's frames (``parent_tool_use_id`` set) may name a cheaper
@@ -861,6 +896,35 @@ class StreamJsonMapper:
         if total >= baseline:
             return round(total - baseline, 10), False
         return total, False
+
+    def carry_attempt(
+        self, usage: dict[str, Any], cost_usd: float | None, num_model_calls: int,
+    ) -> None:
+        """The turn is re-sent after its result: count that result in the next.
+
+        A safety-check retry runs the same turn as a second CLI request on this
+        mapper, whose next result reports only its own tokens and calls. The
+        declined request was billed too, so its totals (which already include
+        any earlier carry) are added to every later result. The cost baseline
+        moves to the total the CLI just reported, so the next result's cost is
+        its own request's and the two are summed once.
+        """
+        self._carried = (dict(usage), cost_usd, int(num_model_calls or 0))
+        if self.cli_total_cost_usd is not None:
+            self.cost_baseline = self.cli_total_cost_usd
+
+    def _with_carried(
+        self, usage: dict[str, Any], cost: float | None, calls: int,
+    ) -> tuple[dict[str, Any], float | None, int]:
+        """A result's turn totals plus what a declined earlier request billed."""
+        if self._carried is None:
+            return usage, cost, calls
+        carried_usage, carried_cost, carried_calls = self._carried
+        if cost is None or carried_cost is None:
+            cost = cost if carried_cost is None else carried_cost
+        else:
+            cost = round(cost + carried_cost, 10)
+        return _sum_usage(carried_usage, usage), cost, calls + carried_calls
 
     def _log_tool_mix(self, frame: dict[str, Any]) -> None:
         mix = self.tool_mix
@@ -1276,6 +1340,8 @@ class StreamJsonMapper:
             turn_usage["cli_total_cost_usd"] = self.cli_total_cost_usd
         if cost_from_table:
             turn_usage["cost_from_table"] = True
+        num_turns = frame.get("num_turns") or 1
+        turn_usage, cost, num_turns = self._with_carried(turn_usage, cost, int(num_turns))
         result_text = frame.get("result")
         self.result_text = result_text.strip() if isinstance(result_text, str) else ""
         if frame.get("is_error") and subtype != "error_max_turns":
@@ -1294,11 +1360,10 @@ class StreamJsonMapper:
             return Mapped(events=events, is_result=True, error=result_error_message(frame))
         turn_usage["bash_file_ops"] = self.tool_mix.bash_file_ops
         turn_usage["dedicated_file_ops"] = self.tool_mix.dedicated_file_ops
-        num_turns = frame.get("num_turns") or 1
         events.append(TurnComplete(
             session_id=self.session_id, node_id=self._last_node_id, turn_id=self.turn_id,
             stop_reason=stop_reason_from_subtype(subtype),
-            num_model_calls=int(num_turns),
+            num_model_calls=num_turns,
             usage=turn_usage,
             cost_usd=cost,
             outcome=context_outcome(frame),

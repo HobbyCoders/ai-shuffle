@@ -2401,6 +2401,43 @@ describe('system + unknown events', () => {
 		});
 	});
 
+	describe('attempt discarded by a safety check', () => {
+		const blockedTurn = () => [
+			ev('turn.started'),
+			ev('message.user', { content: 'go' }),
+			ev('assistant.text_delta', { text: 'Before the tools.' }),
+			ev('tool.use', { tool_use_id: 'done', name: 'Read', input: { file_path: 'a' } }),
+			ev('tool.result', { tool_use_id: 'done', content_preview: 'ok' }),
+			// The declined call: text, thinking and a tool call that never ran.
+			ev('assistant.thinking_delta', { text: 'hmm' }),
+			ev('assistant.text_delta', { text: 'Partial answer' }),
+			ev('tool.input_delta', { tool_use_id: 'cut', partial_json: '{"code":', name: 'run_python' }),
+			ev('system.note', { id: 'ad1', subtype: 'attempt_discarded', data: { reason: 'guardrail' } }),
+		];
+		const texts = (s: ReturnType<typeof fold>) =>
+			s.messages.filter((m) => m.role === 'assistant' && m.type === 'text').map((m) => m.content);
+
+		it('drops the declined output and keeps earlier output, with no card (Stop)', () => {
+			const s = fold([...blockedTurn(), ev('turn.completed', { stop_reason: 'refusal' })]);
+			expect(texts(s)).toEqual(['Before the tools.']);
+			expect(s.messages.some((m) => m.type === 'thinking' && m.content === 'hmm')).toBe(false);
+			expect(s.messages.some((m) => m.toolId === 'cut')).toBe(false);
+			expect(s.messages.find((m) => m.toolId === 'done')?.toolStatus).toBe('complete');
+			expect(s.messages.some((m) => m.systemSubtype === 'attempt_discarded')).toBe(false);
+		});
+
+		it('shows only the replacement answer after Continue', () => {
+			const s = fold([...blockedTurn(), ev('assistant.text_delta', { text: 'Full answer' })]);
+			expect(texts(s)).toEqual(['Before the tools.', 'Full answer']);
+		});
+
+		it('folds the same way live and on a reload from scratch', () => {
+			const events = [...blockedTurn(), ev('assistant.text_delta', { text: 'Full answer' })];
+			const live = events.reduce((state, event) => reduceAll([event], state), reduceAll([]));
+			expect(live.messages).toEqual(reduceAll(events).messages);
+		});
+	});
+
 	it('a provider_retry after an unrelated message appends a new card', () => {
 		const s = fold([
 			ev('turn.started'),

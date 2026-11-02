@@ -3110,6 +3110,17 @@ async def _stream_to_websocket_impl(
                         "data": relabel_blocked_note(message.data, session_provider),
                     }
 
+                elif message.subtype == "attempt_discarded":
+                    # The main conversation's model call just streamed is not
+                    # kept (fluid AttemptDiscarded): a persisted note with no
+                    # card, which the transcript reducer folds by taking that
+                    # call's output out. Never a subagent's, so never gated.
+                    yield {
+                        "type": "system",
+                        "subtype": "attempt_discarded",
+                        "data": message.data if isinstance(message.data, dict) else {},
+                    }
+
                 else:
                     # Forward all system messages to frontend except noisy internal ones.
                     # A whitelist would silently drop errors/warnings with new

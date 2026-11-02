@@ -61,6 +61,10 @@ _CLOSE_TEXT = {
 }
 
 
+# System notes that end a model attempt (the reducer's markAttemptBoundary).
+_ATTEMPT_NOTES = ("provider_retry", "attempt_discarded")
+
+
 def _tail(cursor, session_id, *, lifecycle_only=False):
     """Newest surviving events first, bounded pages; skip rewound branches."""
     before = None
@@ -93,12 +97,12 @@ def _tail(cursor, session_id, *, lifecycle_only=False):
 
 
 def _attempt_start(cursor, session_id, retry_seq):
-    """The reducer's attemptStartSeq: user, turn start, result or retry note."""
+    """The reducer's attemptStartSeq: user, turn start, result, retry or discard note."""
     for seq, kind, payload in _tail(cursor, session_id):
         if seq >= retry_seq:
             continue
         if kind in ("turn.started", "message.user", "tool.result") or (
-            kind == "system.note" and payload.get("subtype") == "provider_retry"
+            kind == "system.note" and payload.get("subtype") in _ATTEMPT_NOTES
         ):
             return seq
     return 0
@@ -174,6 +178,9 @@ def trailing_question_seq(cursor, session_id):
         if kind == "system.note" and payload.get("subtype") == "provider_retry":
             if (payload.get("data") or {}).get("cause") == "connection_dropped":
                 dropped_since = _attempt_start(cursor, session_id, seq)
+        if kind == "system.note" and payload.get("subtype") == "attempt_discarded":
+            # A declined call's output (a provider safety check) is gone too.
+            dropped_since = _attempt_start(cursor, session_id, seq)
         hidden = dropped_since is not None and seq > dropped_since
         if kind in ("tool.use", "tool.input_delta") and payload.get("name") in ("AskUser", "AskUserQuestion"):
             if not hidden:

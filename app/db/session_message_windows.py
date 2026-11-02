@@ -2,9 +2,10 @@
 
 Only summarize *boundaries*, never message payloads. PostgreSQL counts the cold
 prefix's bubbles/assistant turns; Python runs the SAME fold over a complete
-suffix. Rewinds and approval retry cards need nonlocal reducer state and fail
-closed to full replay. No derived state, source-rewrite assumptions or rollout
-of the default-off canonical transcript producer is involved.
+suffix. Rewinds, discarded model attempts and approval retry cards need
+nonlocal reducer state and fail closed to full replay. No derived state,
+source-rewrite assumptions or rollout of the default-off canonical transcript
+producer is involved.
 """
 from __future__ import annotations
 
@@ -72,6 +73,9 @@ def read_event_message_window(session_id: str, limit: int, before: int | None) -
                     -- which is not the SQL extraction's interpretation.
                     jsonb_typeof(payload) IS DISTINCT FROM 'object'
                         OR event_type = 'transcript.rewound'
+                        -- A discarded model attempt removes earlier bubbles.
+                        OR (event_type = 'system.note'
+                            AND payload->>'subtype' = 'attempt_discarded')
                         OR (event_type = 'interaction.requested'
                             AND payload->>'kind' = 'permission'
                             AND jsonb_typeof(payload->'request'->'assistant_confirm') = 'object')

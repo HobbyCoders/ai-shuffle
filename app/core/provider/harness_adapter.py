@@ -4141,6 +4141,16 @@ class HarnessAdapter(ProviderAdapter):
                 data=guardrail_blocked_note(event),
             )]
 
+        if cls == "AttemptDiscarded":
+            # The model call that just streamed is not part of the transcript
+            # (a safety check declined it). A persisted note with no card:
+            # the transcript reducer takes that call's text, thinking and
+            # tool cards out, live and on every replay. Usage is untouched.
+            return [SystemMessage(
+                subtype="attempt_discarded",
+                data={"reason": getattr(event, "reason", None) or "guardrail"},
+            )]
+
         if cls == "BlockStart":
             self._block_types[event.index] = event.block_type
             self._block_buffers[event.index] = []

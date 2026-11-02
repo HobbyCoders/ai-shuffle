@@ -4,6 +4,7 @@ from fluid.events.model import (
     WAKE_NOT_APPLICABLE,
     WAKE_SUPPRESSED,
     AssistantTextSanitized,
+    AttemptDiscarded,
     BlockStart,
     BlockStop,
     CompactionCheckpoint,
@@ -62,6 +63,7 @@ from fluid.events.ops import (
 __all__ = [
     "AgentMessage",
     "AssistantTextSanitized",
+    "AttemptDiscarded",
     "BackgroundTaskFinished",
     "BlockStart",
     "BlockStop",

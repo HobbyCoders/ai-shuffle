@@ -27,7 +27,7 @@ from app.core.provider.events import AssistantMessage, SystemMessage, TextBlock
 from app.core.provider.harness_adapter import HarnessAdapter
 from app.core.provider.types import PermissionRequestEvent
 from fluid.engine.guardrail import GUARDRAIL_TOOL, prompt_input
-from fluid.events import GuardrailBlocked, ModelServed
+from fluid.events import AttemptDiscarded, GuardrailBlocked, ModelServed
 from tests.core.engine_harness import StubPool, collect, make_state, stream_response
 from tests.core.helpers import new_session
 from tests.core.test_model_info_event import _engine_patches
@@ -339,3 +339,22 @@ async def test_guardrail_blocked_note_is_forwarded(mock_db, tmp_path):
     ], tmp_path, model="opus", provider=None)
     [card] = _system(events, "guardrail_blocked")
     assert card["data"]["content"] == "Blocked by Anthropic's safety check (cyber). The turn stopped."
+
+
+def test_a_discarded_attempt_maps_to_a_persisted_note_without_a_card():
+    [msg] = HarnessAdapter()._translate(
+        AttemptDiscarded(session_id="s", turn_id="t", reason="guardrail"),
+    )
+    assert isinstance(msg, SystemMessage)
+    assert msg.subtype == "attempt_discarded"
+    assert msg.data == {"reason": "guardrail"}
+
+
+async def test_attempt_discarded_note_is_forwarded(mock_db, tmp_path):
+    events = await _frames([
+        SystemMessage(subtype="init", data={"session_id": "sdk-1"}),
+        _asst("opus", "a-1"),
+        SystemMessage(subtype="attempt_discarded", data={"reason": "guardrail"}),
+    ], tmp_path, model="opus", provider=None)
+    [note] = _system(events, "attempt_discarded")
+    assert note["data"] == {"reason": "guardrail"}

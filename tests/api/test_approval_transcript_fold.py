@@ -154,3 +154,36 @@ def test_a_safety_check_card_keeps_its_guardrail_fields(monkeypatch):
 def test_an_ordinary_card_has_no_guardrail_fields(monkeypatch):
     messages = _fold(monkeypatch, [_requested("perm-a", "ls", "Job")])
     assert "guardrail" not in messages[0]["systemData"]
+
+
+def _assistant_shape(messages):
+    return [(m["type"], m.get("content") or m.get("toolName"))
+            for m in messages if m["role"] == "assistant" and m["type"] in ("text", "thinking", "tool_use")]
+
+
+def _blocked_attempt():
+    return [
+        ("turn.started", {}),
+        _user("go"),
+        ("assistant.text_delta", {"text": "Before the tools."}),
+        ("tool.use", {"tool_use_id": "done", "name": "Read", "input": {"file_path": "a"}}),
+        ("tool.result", {"tool_use_id": "done", "content_preview": "ok"}),
+        # The call a safety check declines: thinking, text, a tool call.
+        ("assistant.thinking_delta", {"text": "hmm"}),
+        ("assistant.text_delta", {"text": "Partial answer"}),
+        ("tool.use", {"tool_use_id": "cut", "name": "Bash", "input": {"command": "ls"}}),
+        ("system.note", {"subtype": "attempt_discarded", "data": {"reason": "guardrail"}}),
+    ]
+
+
+def test_a_reload_drops_a_declined_attempt_on_stop(monkeypatch):
+    messages = _fold(monkeypatch, [*_blocked_attempt(), ("turn.completed", {"stop_reason": "refusal"})])
+    assert _assistant_shape(messages) == [("text", "Before the tools."), ("tool_use", "Read")]
+    assert not any(m.get("systemSubtype") == "attempt_discarded" for m in messages)
+
+
+def test_a_reload_after_continue_shows_only_the_replacement(monkeypatch):
+    messages = _fold(monkeypatch, [*_blocked_attempt(), ("assistant.text_delta", {"text": "Full answer"})])
+    assert _assistant_shape(messages) == [
+        ("text", "Before the tools."), ("tool_use", "Read"), ("text", "Full answer"),
+    ]

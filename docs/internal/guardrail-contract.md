@@ -175,10 +175,33 @@ send `fallbacks`.
   a delegated turn nobody is watching (the unwatched permission timeout).
 - An unanswered prompt expires on the normal permission timeout and stops the
   turn. An interrupt while the card is open ends the turn as interrupted.
-- Claude CLI: Continue sends `set_model` to the CLI and re-sends the turn's
-  user message, and the next turn's settings resync puts the chat's model
-  back. If the CLI declines the switch, the retry is blocked again, the card
-  shows a second time, and then the turn stops.
+- Claude CLI: Continue sends `set_model` to the CLI and waits for the CLI to
+  acknowledge it (the usual setting timeout) before re-sending the turn's user
+  message; the next turn's settings resync puts the chat's model back. If the
+  CLI refuses the switch, does not answer in time, exits, or the person
+  presses Stop meanwhile, the turn is not re-sent: it stops with the §4 note,
+  and its `reason` says what happened to the switch. A Stop here ends this
+  turn only.
+- Usage: the declined call is billed and counted. On Continue the turn's
+  totals (tokens, cost, model calls) are the declined call's plus the retry's,
+  on every provider and the Claude CLI.
+
+## 3b. `attempt_discarded`: the declined reply leaves the transcript (persisted)
+
+Whatever the declined call streamed (text, thinking, tool calls that never ran)
+is not the turn's reply, whichever way the person answers. Before the card is
+shown the feed records:
+
+```json
+{"type": "system", "subtype": "attempt_discarded", "data": {"reason": "guardrail"}}
+```
+
+It has no card of its own. Clients remove every assistant text, thinking and
+tool message that came after the last attempt boundary (the turn start, a user
+message, a tool result or a `provider_retry` note), the same fold as a
+connection-drop retry, live and on reload. The REST transcript, the session
+list's open-question marker and the web reducer all apply it, so every client
+and the other worker's view drop the same content. Usage is not changed.
 
 ## 4. `guardrail_blocked`: the outcome (persisted)
 
@@ -222,6 +245,9 @@ It is the main conversation's note even while a subagent is running.
   not a block, unless its `scope` is `"local"`: that is a subagent's own
   fallback, not the turn's model, and it is ignored.
 
+A chat-completions stream that ends on `[DONE]` without a usage chunk is read
+the same way: a filter before any output is a block.
+
 A content filter that cuts a reply after some text has streamed is left as
 the existing truncated-reply handling. It does not raise a card.
 
@@ -234,6 +260,8 @@ For fluid hosts other than the app:
 - `PermissionRequest(name="ModelGuardrail", input=<the tool_input above, without suggested_by>, risk="safe", reason=<message>)`.
   Answer it with `RespondPermission(decision="allow" | "deny", updated_input={"model": …}?)`.
 - `GuardrailBlocked(provider, requested_model, outcome, category, explanation, suggested_model, retry_model, reason, request_id)`.
+- `AttemptDiscarded(reason="guardrail")` before the prompt: drop what the
+  declined call streamed (§3b).
 - `TurnComplete(stop_reason="refusal")` after a stop.
 
 ## Trying it

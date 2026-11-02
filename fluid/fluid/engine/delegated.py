@@ -106,6 +106,7 @@ from fluid.engine.delegated_proto import (
 )
 from fluid.events.bus import EventBus
 from fluid.events.model import (
+    AttemptDiscarded,
     CompactionCheckpoint,
     ContextArchived,
     ContextCompaction,
@@ -3632,11 +3633,25 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 self._snapshot_call_index.clear()
                 if guardrail is not None:
                     self._proc_results += 1
+                    # The declined reply is not the turn's, whatever the
+                    # person picks: hosts take it out now (as the native loop).
+                    await self._emit(AttemptDiscarded(
+                        session_id=sid, node_id=mapper.last_node_id, turn_id=turn_id,
+                        reason="guardrail",
+                    ))
+                    held = guardrail[1]
                     if await self._guardrail_answer(
                         sid, turn_id, guardrail[0], user_node, mapper,
                     ):
-                        continue  # the same turn, re-sent on the approved model
-                    held = guardrail[1]
+                        # The same turn, re-sent on the approved model. The
+                        # declined request was billed: its totals ride into
+                        # the turn's next result.
+                        mapper.carry_attempt(
+                            dict(held.usage) if held is not None else dict(mapper.failed_usage),
+                            held.cost_usd if held is not None else mapper.failed_cost_usd,
+                            held.num_model_calls if held is not None else mapper.model_calls or 1,
+                        )
+                        continue
                     await self._emit_terminal_with_park(TurnComplete(
                         session_id=sid, node_id=mapper.last_node_id, turn_id=turn_id,
                         stop_reason="refusal",
@@ -3676,13 +3691,15 @@ class DelegatedLoop(BackgroundLifecycleMixin):
 
         The CLI has finished its turn (its auto fallback is off, see
         ``FORCED_CHILD_ENV``), so stdout is quiet and the turn's reader can wait
-        here. On an allow the CLI is switched to the approved model and the
-        turn's user message is sent again; the reader then maps that run as
-        the rest of this turn, and True is returned. The switch lasts this
+        here. On an allow the CLI is switched to the approved model and, once
+        it acknowledges the switch, the turn's user message is sent again; the
+        reader then maps that run as the rest of this turn, and True is
+        returned. The switch lasts this
         turn only: ``set_model`` is left unconfirmed, so the next turn's drain
         puts the CLI back on the session's model (``self.model`` never
         changes). Anything else (deny, Stop, no answer in time, nothing to
-        retry on, a second block) records the stop and returns False.
+        retry on, a switch the CLI refused or never acknowledged, a second
+        block) records the stop and returns False.
         """
         requested = refusal.get("requested_model") or self.model
         category = refusal.get("category")
@@ -3740,25 +3757,41 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if not isinstance(chosen, str) or not chosen.strip():
             return await stopped("no model to retry on")
         chosen = chosen.strip()
-        request_no = self._next_req_id()
-        reply: asyncio.Future = asyncio.get_running_loop().create_future()
-        # The reader resolves it when the CLI acknowledges; nobody awaits it.
-        # A refused switch leaves the CLI on the declined model, and the
-        # re-sent turn comes back to a second prompt, which then stops.
-        self._pending_controls[request_no] = reply
-        reply.add_done_callback(lambda _f: self._pending_controls.pop(request_no, None))
-        self._unconfirmed_settings.add("set_model")
+        if self._interrupted.is_set():
+            return await stopped("interrupted while awaiting permission")
+        # The turn is re-sent only on a switch the CLI acknowledged, the same
+        # rule as every other setting (_apply_setting): a refused, unanswered
+        # or stopped switch would re-send it on the declined model. This
+        # reader owns stdout and is parked here, so a side reader routes the
+        # reply and queues anything else for it (_watch_parked_stdout).
+        watch = asyncio.create_task(self._watch_parked_stdout(""))
+        switch = asyncio.create_task(self._apply_setting(
+            {"subtype": "set_model", "model": chosen}, stop_carries_over=False,
+        ))
         try:
-            await self._write_frame({
-                "type": "control_request", "request_id": request_no,
-                "request": {"subtype": "set_model", "model": chosen},
-            })
+            await asyncio.wait({switch, watch}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            watch.cancel()
+            if not switch.done():
+                switch.cancel()
+            await asyncio.gather(watch, switch, return_exceptions=True)
+        failure: str | None = None
+        if switch.cancelled():
+            failure = "the Claude CLI exited before acknowledging the model switch"
+        elif switch.exception() is not None:
+            failure = str(switch.exception())
+        if failure is None and self._interrupted.is_set():
+            failure = "interrupted while switching the model"
+        # This turn only: the next turn's drain re-sends the session's model.
+        self._unconfirmed_settings.add("set_model")
+        if failure is not None:
+            return await stopped(failure)
+        try:
             await self._write_frame({"type": "user", "message": {
                 "role": "user", "content": _content_to_cli(list(user_node.message.content)),
             }})
         except (OSError, RuntimeError) as exc:
-            self._pending_controls.pop(request_no, None)
-            return await stopped(f"could not switch the Claude CLI: {exc!r}")
+            return await stopped(f"could not re-send the turn to the Claude CLI: {exc!r}")
         self._peer_admission_open = not self._interrupted.is_set()
         self._stdin_lane_closed = False
         mapper.requested_model = chosen  # the retry asked for this model
@@ -5062,7 +5095,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if fut is not None and not fut.done():
             fut.set_result(reply)
 
-    async def _apply_setting(self, request: dict[str, Any]) -> None:
+    async def _apply_setting(
+        self, request: dict[str, Any], *, stop_carries_over: bool = True,
+    ) -> None:
         """Send a ``set_model`` / ``set_permission_mode`` control_request and
         wait for the CLI's acknowledgement.
 
@@ -5073,6 +5108,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         the same value tries again instead of skipping a switch that never
         happened. With no CLI running the value just applies to the next spawn
         (its ``--model`` / ``--permission-mode`` argv), as before.
+
+        ``stop_carries_over=False`` is for a switch made inside a running turn
+        (the safety-check retry): a Stop then ends that turn, not the next.
         """
         if self._proc is None or self._proc.returncode is not None:
             return
@@ -5094,7 +5132,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # is unknown until the next turn re-sends the recorded one. The
             # Stop is also meant for the turn this switch was preparing.
             self._unconfirmed_settings.add(str(subtype))
-            self._stop_carryover_until = asyncio.get_running_loop().time() + _STOP_CARRYOVER
+            if stop_carries_over:
+                self._stop_carryover_until = asyncio.get_running_loop().time() + _STOP_CARRYOVER
             raise RuntimeError(f"stopped before the Claude CLI acknowledged {subtype}")
         try:
             reply = roundtrip.result()

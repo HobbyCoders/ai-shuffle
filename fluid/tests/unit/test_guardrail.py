@@ -22,6 +22,7 @@ from fluid.engine.guardrail import (
     same_model,
 )
 from fluid.events.model import (
+    AttemptDiscarded,
     GuardrailBlocked,
     ModelServed,
     PermissionRequest,
@@ -168,6 +169,8 @@ def test_new_events_round_trip_and_old_rows_load() -> None:
         outcome="stopped", category="cyber",
     )
     assert event_from_dict(event_to_dict(blocked)) == blocked
+    discarded = AttemptDiscarded(session_id="s", turn_id="t", reason="guardrail")
+    assert event_from_dict(event_to_dict(discarded)) == discarded
 
 
 def test_anthropic_stream_carries_stop_details_and_no_fallback_is_requested() -> None:
@@ -216,6 +219,66 @@ def test_chat_completions_terminal_reports_served_model() -> None:
     usage = next(c for c in out if c.kind == "usage")
     assert usage.payload["served_model"] == "fake-ai-2"
     assert next(c for c in out if c.kind == "message_stop").payload == {}
+
+
+def test_chat_completions_filter_without_a_usage_chunk_keeps_its_verdict() -> None:
+    from fluid.providers._chat_completions import ChatCompletionsNormalizer
+
+    # Before any output: the filter error the engine reads as a safety check.
+    norm = ChatCompletionsNormalizer()
+    norm.consume("message", {"choices": [{"index": 0, "delta": {}, "finish_reason": "content_filter"}]})
+    [error] = norm.finish_without_usage()
+    assert error.kind == "error" and error.payload["native_stop_reason"] == "content_filter"
+    assert norm.errored and not norm.finished
+    # After some output: the reply closes, naming the filter.
+    norm = ChatCompletionsNormalizer()
+    norm.consume("message", {"choices": [
+        {"index": 0, "delta": {"content": "part"}, "finish_reason": "content_filter"},
+    ]})
+    out = norm.finish_without_usage()
+    usage = next(c for c in out if c.kind == "usage")
+    assert usage.payload["native_stop_reason"] == "content_filter"
+    assert next(c for c in out if c.kind == "message_stop").payload == {
+        "native_stop_reason": "content_filter",
+    }
+    assert norm.finished
+    # Another upstream verdict still keeps the truncated-stream error.
+    norm = ChatCompletionsNormalizer()
+    norm.consume("message", {"choices": [
+        {"index": 0, "delta": {"content": "x"}, "finish_reason": "stop", "native_finish_reason": "abort"},
+    ]})
+    assert norm.finish_without_usage() == []
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_filter_ending_on_done_raises_the_prompt() -> None:
+    import httpx
+    from fluid.providers._chat_completions import stream_chat_completions
+    from fluid.providers._retry import RetryPolicy
+
+    body = (
+        'data: {"choices": [{"index": 0, "delta": {}, "finish_reason": "content_filter"}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+    client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda _r: httpx.Response(200, text=body, headers={"content-type": "text/event-stream"}),
+    ))
+    try:
+        chunks = [c async for c in stream_chat_completions(
+            "http://fake/v1/chat/completions", {"model": "m"}, {},
+            http_client=client, timeout=5, retry=RetryPolicy(max_retries=0),
+        )]
+    finally:
+        await client.aclose()
+    errors = [c for c in chunks if c.kind == "error"]
+    assert len(errors) == 1 and errors[0].payload["native_stop_reason"] == "content_filter"
+
+    loop = _loop(_Provider([chunks], name="openrouter"), model="openai/gpt-5.5")
+    try:
+        _, prompt = await _run(loop, "deny")
+        assert prompt is not None and prompt.input["category"] == "content_filter"
+    finally:
+        await loop.aclose()
 
 
 # ─── native loop ─────────────────────────────────────────────────────────────
@@ -275,7 +338,10 @@ async def test_refusal_continue_retries_on_suggested_model_for_this_turn_only() 
         assert provider.models == ["claude-opus-5-5", "claude-opus-4-8"]
         # The retry re-sends the same history: the declined reply is not in it.
         assert len(provider.histories[1]) == len(provider.histories[0])
-        assert next(e for e in events if isinstance(e, TurnComplete)).stop_reason == "end_turn"
+        done = next(e for e in events if isinstance(e, TurnComplete))
+        assert done.stop_reason == "end_turn"
+        # The declined call's tokens are billed with the turn.
+        assert done.usage["input_tokens"] == 10 and done.usage["output_tokens"] == 3
         assert loop.model == "claude-opus-5-5"  # back on the chat's model
 
         await loop.submit(UserTurn(content="thanks"))
@@ -359,5 +425,26 @@ async def test_content_filter_error_raises_the_same_prompt() -> None:
         assert prompt is not None and prompt.input["category"] == "content_filter"
         assert prompt.input["suggested_model"] is None
         assert next(e for e in events if isinstance(e, TurnComplete)).stop_reason == "refusal"
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.parametrize("decision", ["allow", "deny"])
+@pytest.mark.asyncio
+async def test_the_declined_call_is_discarded_before_the_prompt(decision: str) -> None:
+    provider = _Provider([
+        _refusal("claude-opus-5-5", {"category": "cyber"}),
+        _reply("retried answer", "claude-opus-4-8"),
+    ])
+    loop = _loop(provider)
+    try:
+        events, _ = await _run(loop, decision)
+        discarded = [i for i, e in enumerate(events) if isinstance(e, AttemptDiscarded)]
+        prompt = next(i for i, e in enumerate(events) if isinstance(e, PermissionRequest))
+        partial = max(
+            i for i, e in enumerate(events) if getattr(e, "text", None) == "Partial answer"
+        )
+        assert len(discarded) == 1 and partial < discarded[0] < prompt
+        assert events[discarded[0]].reason == "guardrail"
     finally:
         await loop.aclose()
