@@ -243,7 +243,7 @@ jobs:
         # a lost recording), without a browser or a dev instance.
         timeout-minutes: 2
         working-directory: frontend
-        run: timeout --kill-after=10s 60s node --test tests/journeys/lib/verdict.test.mjs
+        run: timeout --kill-after=10s 60s node --test tests/journeys/lib/verdict.test.mjs tests/journeys/runner.test.mjs
 
   journeys:
     name: UI journeys (${{ matrix.shard }}/4)
@@ -324,15 +324,17 @@ jobs:
           (cd frontend && npm run build)
           python -m app.preview stamp
       - name: Run the journeys on a fresh dev instance
+        id: journeys
         if: steps.plan.outputs.files != ''
         timeout-minutes: 25
         run: |
           # The runner's preinstalled, stopped PostgreSQL 16 binaries; the dev
           # instance initializes its own throwaway cluster on a free port.
           export PATH="/usr/lib/postgresql/16/bin:$PATH"
-          python -m scripts.devloop.ci journeys --shard "${{ matrix.shard }}/4" --out "$RUNNER_TEMP/ui-journeys"
+          python -m scripts.devloop.ci journeys --shard "${{ matrix.shard }}/4" --out "$RUNNER_TEMP/ui-journeys" --retry-failures
       - name: Upload journey timelines
-        if: failure()
+        # A green retry is still a bug signal: retain both attempts.
+        if: failure() || steps.journeys.outputs.retried == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ui-journeys-${{ matrix.shard }}

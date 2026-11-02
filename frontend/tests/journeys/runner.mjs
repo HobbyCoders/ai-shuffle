@@ -7,7 +7,8 @@
 // each case's acting part with the flight recorder and fails on any anomaly
 // the journey did not explicitly allow.
 //
-//   node tests/journeys/<name>.journey.mjs [--only=<substring>] [--list]
+//   node tests/journeys/<name>.journey.mjs [--only=<substring>] [--case=<exact-id>] [--list]
+// --case is repeatable, fails closed for unknown IDs, and cannot combine with --only.
 //
 // Every journey writes <JOURNEY_OUT>/<name>/summary.json (one entry per case)
 // for run-all.mjs.
@@ -156,11 +157,13 @@ function matches(rule, anomaly) {
 }
 
 function parseArgs(argv) {
-	const args = { only: process.env.JOURNEY_ONLY || '', list: false };
+	const args = { only: process.env.JOURNEY_ONLY || '', cases: [], list: false };
 	for (const arg of argv) {
 		if (arg.startsWith('--only=')) args.only = arg.slice(7);
+		else if (arg.startsWith('--case=')) args.cases.push(arg.slice(7));
 		else if (arg === '--list') args.list = true;
 	}
+	if (args.only && args.cases.length) throw new Error('cannot combine --case with --only / JOURNEY_ONLY');
 	return args;
 }
 
@@ -225,9 +228,13 @@ export async function runJourney(spec) {
 			for (const throttle of testCase.throttles || spec.throttles || Object.keys(THROTTLES)) {
 				const id = `${testCase.name}@${viewport}-${throttle}`;
 				if (args.only && !id.includes(args.only)) continue;
+				if (args.cases.length && !args.cases.includes(id)) continue;
 				plan.push({ id, testCase, viewport, throttle });
 			}
 		}
+	}
+	for (const id of args.cases) {
+		if (plan.filter((item) => item.id === id).length !== 1) throw new Error(`unknown or ambiguous exact case ID: ${JSON.stringify(id)}`);
 	}
 	if (args.list) {
 		for (const item of plan) console.log(item.id);
