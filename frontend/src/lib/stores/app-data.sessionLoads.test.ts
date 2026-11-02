@@ -356,6 +356,47 @@ describe('optimistic edits vs in-flight loads (S12)', () => {
 			expect(chips()).toBe(1);
 		});
 
+		describe('on a row a refresh dropped while a rename was failing', () => {
+			async function renameFailsAfter(rowId: string, row: Row, refresh: () => Promise<unknown>) {
+				let fail!: (reason: Error) => void;
+				mocks.renameSession.mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; }));
+				const rename = appData.renameSession('s3', 'Renamed').catch(() => undefined);
+				appData.mergeSessionPatch(rowId, { pending_task_chips: 1 });
+				serverCount(1, row);
+				await refresh();
+				expect(appData.current.sessions.some((s) => s.id === rowId)).toBe(false);
+				fail(new Error('offline'));
+				await rename;
+			}
+
+			it('keeps the count of an older row a capped refresh left out', async () => {
+				const older = page2[20];
+				await appData.loadSessions(null);
+				await appData.loadMoreSessions();
+
+				await renameFailsAfter(older.id, older, () => appData.loadSessions('some-tag'));
+
+				expect(chips(older.id)).toBe(1);
+				await appData.loadSessions(null);
+			});
+
+			it('keeps the count of an active row whose separate read failed', async () => {
+				await appData.loadSessions(null);
+				expect(appData.current.sessions.some((s) => s.id === oldActive.id)).toBe(true);
+				const lists = mocks.get.getMockImplementation()!;
+				mocks.get.mockImplementation(async (url: string) => {
+					if (url.includes('active_only=true')) throw new Error('offline');
+					return lists(url);
+				});
+
+				await renameFailsAfter(oldActive.id, oldActive, () => appData.loadSessions(null));
+
+				expect(chips(oldActive.id)).toBe(1);
+				mocks.get.mockImplementation(lists);
+				await appData.loadSessions(null);
+			});
+		});
+
 		it('is not pinned by a rename still waiting on the server', async () => {
 			serverCount(1);
 			await appData.loadSessions();

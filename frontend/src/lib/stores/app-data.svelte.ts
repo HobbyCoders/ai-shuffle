@@ -241,6 +241,8 @@ function retireSupersededEdits(loadRequestId: number): void {
  * from. Counts repeat (1, 0, 1), so only the order they were learned in says which
  * is newest. A list read started after a count knows more than it, because the
  * server reads the count after the change it reports. One started before knows less.
+ * An entry never outranks a newer read, so old ones are harmless, and a rollback may
+ * still need one for a row the list has since dropped. It holds one per chat seen.
  */
 const _chipCounts = new Map<string, { count: number | null; learnedAt: number }>();
 let _chipCountClock = 0;
@@ -260,14 +262,6 @@ function withNewestChipCounts(rows: Session[], readAt: number): Session[] {
 /** Put back a snapshot taken before a failed change, keeping the counts since. */
 function restoredRows(snapshot: Session[]): Session[] {
 	return withNewestChipCounts(snapshot, 0);
-}
-
-/** Any later read knows more than these, so only chats still in the list stay. */
-function forgetChipCountsOutside(rows: Session[], readAt: number): void {
-	const listed = new Set(rows.map(row => row.id));
-	for (const [id, known] of _chipCounts) {
-		if (known.learnedAt < readAt && !listed.has(id)) _chipCounts.delete(id);
-	}
 }
 
 // ─── Commit Helpers ──────────────────────────────────────────────────────────
@@ -499,7 +493,6 @@ async function fetchSessionList(tagId?: string | null, requestedPages?: number) 
 		// then retire the ones this load is known to already carry.
 		const rows = applyPendingEdits(withNewestChipCounts(all, readAt));
 		retireSupersededEdits(requestId);
-		forgetChipCountsOutside(all, readAt);
 
 		_loadedSessionPages = Math.max(INITIAL_SESSION_PAGES, pagesFetched);
 		sessionListCommits++;
