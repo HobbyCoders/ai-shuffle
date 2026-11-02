@@ -226,3 +226,28 @@ def test_refresh_cli_dispatches_run_ids(monkeypatch):
     monkeypatch.setattr(ci, "refresh_weights", lambda ids: refreshed.extend(ids))
     assert ci.main(["refresh-weights", "20", "10"]) == 0
     assert refreshed == [20, 10]
+
+
+@pytest.mark.parametrize("crashed", [False, True])
+def test_refresh_refuses_retried_green_run_with_clear_reason_without_writing(tmp_path, monkeypatch, crashed):
+    path = _weights(tmp_path, {"unchanged.journey.mjs": 123})
+    original = path.read_bytes()
+    first = ("2026-10-30T00:00:00Z [ci] running a.journey.mjs\n" if crashed
+             else _log("a", 30, 3, passed=2))
+    selection = "(whole journey)" if crashed else "copy@desktop-fast"
+    retried = (first + f"2026-10-30T00:01:00Z [ci] retrying a.journey.mjs: {selection} (budget 180s)\n"
+               + "2026-10-30T00:01:30Z a: 1/1 passed; timelines in /tmp/attempt-2/a\n"
+               + "2026-10-30T00:01:30Z ::warning title=UI journey passed on retry::a recovered\n")
+
+    def gh(command, **kwargs):
+        if command[:3] == ["gh", "repo", "view"]:
+            return "owner/repo\n"
+        if command[:3] == ["gh", "run", "view"]:
+            return json.dumps({"status": "completed", "conclusion": "success"})
+        # Validate a clean run first too: no partial refresh may be written.
+        return _archive(_log("clean", 30, 3) if command[2].endswith("/10/logs") else retried)
+
+    monkeypatch.setattr(ci.subprocess, "check_output", gh)
+    with pytest.raises(ValueError, match="Run 20 contained retries.*cannot be used for runtime weights"):
+        ci.refresh_weights([10, 20], path)
+    assert path.read_bytes() == original
