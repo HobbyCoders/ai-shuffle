@@ -29,7 +29,7 @@ These workflows retain manual dispatch and also run on unfiltered
   credentials; it never installs or updates a production CLI.
 - `ci-frontend.yml`: four full frontend Vitest shards, production build (including
   mobile postbuild), frontend/mobile typechecks, mobile tests, contracts/docs/audit,
-  tools/WebCrypto vectors, Browser MCP, the four `UI journeys (N/4)` shards
+  tools/WebCrypto vectors, Browser MCP, the five `UI journeys (N/5)` shards
   and `Visual regression (4 viewports)` run in parallel. The stable
   `JavaScript package checks` aggregate requires every branch to succeed, so
   the journeys and the visual comparison are required for merge (see
@@ -865,17 +865,17 @@ path filter (no frontend job does).
 
 ### UI journeys
 
-`UI journeys (N/4)`: each shard installs the Python and JavaScript
+`UI journeys (N/5)`: each shard installs the Python and JavaScript
 dependencies (pip/npm caches) and Chromium (browser-mcp's pinned
 playwright-core build, cached), builds and stamps the desktop UI, then runs
-`python -m scripts.devloop.ci journeys --shard N/4 --retry-failures`. That starts a fresh dev
+`python -m scripts.devloop.ci journeys --shard N/5 --retry-failures`. That starts a fresh dev
 instance (`python -m scripts.devloop up --ci`: real app, its own throwaway
 PostgreSQL 16 from the runner's `/usr/lib/postgresql/16/bin`, seed data, the
 scripted fake AI, loopback only), waits for its ready line and `status`, runs
 the shard's `frontend/tests/journeys/*.journey.mjs` files in Chromium, then
-`down`. The plan step splits the journey files across the four shards by
+`down`. The plan step splits the journey files across the five shards by
 measured hosted runtime, longest first, each file exactly once
-(`python -m scripts.devloop.ci plan --shards 4`). The checked-in medians are
+(`python -m scripts.devloop.ci plan --shards 5`). The checked-in medians are
 in `scripts/devloop/journey_weights.json`; an unmeasured journey uses its
 `--list` case count times the measured median seconds per case. Adding short
 cases to a measured journey therefore cannot reshuffle all the slow journeys
@@ -902,7 +902,8 @@ runs whose journey inventory matches this checkout. Failed, incomplete,
 duplicate, partial or retried measurements are refused with a clear message
 before replacing the file. Estimates are not first-attempt time limits: keep
 measurements current and check headroom against the unchanged 25-minute journey
-step on the four standard hosted runners.
+step on the five standard hosted runners. A shard's first pass must finish
+within 19 minutes to keep the full retry budget.
 
 After the shard finishes, CI retries only failed cases, once, on the same
 instance. It passes exact `--case=<id>` selectors (including viewport and
@@ -910,9 +911,9 @@ throttle), never substring `--only`. A journey without a usable per-case
 summary is a whole-file retry target. Exact-case groups run before whole-file
 groups, regardless of shard order. Known-bug verdicts keep their existing
 meaning and are not retry targets. More than **3 failed cases/crashed files
-across the shard** skips retry and fails immediately. The measured hosted
-median is 11.17 seconds/case, so three ordinary retries are about 34 seconds,
-not another 22–25 minute shard. Crashed files count as one target, but all
+across the shard** skips retry and fails immediately. Three ordinary retries
+take far less time than re-running a shard (the current per-case median is
+`seconds_per_case` in the weights file). Crashed files count as one target, but all
 retries share a hard **180-second phase budget**, further limited by the
 remaining 25-minute step budget with **180 seconds reserved for teardown**.
 A whole-file retry is skipped when its measured estimate in
