@@ -1,9 +1,11 @@
-"""A small concurrent-ingest ratchet, on the configured isolated test DB.
+"""Concurrent-ingest ratchets on the configured isolated test DB.
 
-Real-PG CI/probes use the same test; the ordinary isolated SQLite job also
-catches accidental event-loop stalls. No source append hook calls the actor.
-The large-record case proves preparation and ingestion are independent by order,
-not a millisecond deadline on a shared runner; p95 remains diagnostic telemetry.
+Real-PG CI/probes and the isolated SQLite job use the same tests. Ingest p95 is
+printed telemetry, not a shared-runner deadline. The small case asserts median
+maximum heartbeat gaps during repeated real folds of a separate, stable session:
+a blocking fold stalls the loop repeatedly; isolated scheduling/DB outliers do
+not. The large-record case additionally proves preparation/ingest independence
+by order. No source append hook calls the actor.
 """
 from __future__ import annotations
 
@@ -11,6 +13,7 @@ import asyncio
 import math
 import os
 import time
+from statistics import median
 from uuid import uuid4
 
 import pytest
@@ -36,13 +39,60 @@ def _held_prepare_frames(owner, entered, release, *args, **kwargs):
     return _prepare_frames(*args, **kwargs)
 
 
+async def _measure_loop_gap(operation):
+    """Include stalls anywhere in an operation, even before its first await."""
+    loop = asyncio.get_running_loop()
+    last = loop.time()
+    longest = 0.0
+
+    def tick():
+        nonlocal last, longest, handle
+        now = loop.time()
+        longest = max(longest, now - last)
+        last = now
+        handle = loop.call_later(.001, tick)
+
+    handle = loop.call_soon(tick)
+    try:
+        result = await operation
+    finally:
+        longest = max(longest, loop.time() - last)
+        handle.cancel()
+    return result, longest
+
+
+def _assert_nonblocking_folds(baseline_gaps, fold_gaps):
+    before, during = median(baseline_gaps), median(fold_gaps)
+    # A synchronous 10-100ms fold spoils each fold's maximum heartbeat gap.
+    # Its median catches repeated blocking, not a handful of runner/DB outliers;
+    # retain the original 1.35x/+3ms allowance rather than widening the budget.
+    limit = max(before * 1.35, before + .003)
+    print(f'projection loop gap median: baseline={before * 1000:.3f}ms '
+          f'fold={during * 1000:.3f}ms limit={limit * 1000:.3f}ms '
+          f'samples={len(fold_gaps)}')
+    assert during <= limit
+
+
+@pytest.mark.parametrize('outlier', [.00730, .007460238, .0176, .05008375, .11785])
+def test_fold_budget_tolerates_isolated_runner_noise(outlier):
+    _assert_nonblocking_folds([.001] * 75, [.0015] * 28 + [outlier] * 2)
+
+
+@pytest.mark.parametrize('stall', [.010, .050, .100])
+def test_fold_budget_rejects_repeated_blocking(stall):
+    with pytest.raises(AssertionError):
+        _assert_nonblocking_folds([.001] * 75, [.0015] * 2 + [stall] * 28)
+
+
 @pytest.mark.asyncio
 async def test_background_projection_preserves_ingest_p95(monkeypatch):
     monkeypatch.setenv('AI_SHUFFLE_TRANSCRIPT_PRODUCER', '1')
     store.initialize()
     create_profile('ingest-fixture', 'Fixture', None, {}, if_absent=True)
     sid = f'projection-ingest-fixture-{uuid4()}'
-    create_session(sid, 'ingest-fixture', derive_provider_from_profile=False)
+    ingest_sid = f'concurrent-ingest-fixture-{uuid4()}'
+    for session_id in (sid, ingest_sid):
+        create_session(session_id, 'ingest-fixture', derive_provider_from_profile=False)
     seed = []
     for index in range(64):
         seed += [{'type': 'message.user', 'payload': {'content': f'Request {index}'}},
@@ -52,48 +102,62 @@ async def test_background_projection_preserves_ingest_p95(monkeypatch):
     source.append_events(sid, seed)
     bridge = ReducerBridge()
     actor = ProjectionActor(bridge)
-    stop = asyncio.Event()
-    quanta = 0
     task = None
+    fold_gaps = []
+    measuring = False
+    fold = actor._fold
+
+    async def measured_fold(*args, **kwargs):
+        if not measuring:
+            return await fold(*args, **kwargs)
+        result, gap = await _measure_loop_gap(fold(*args, **kwargs))
+        fold_gaps.append(gap)
+        return result
+
+    monkeypatch.setattr(actor, '_fold', measured_fold)
+
     async def ingest():
-        values = []
+        values, gaps = [], []
         for _ in range(75):
             start = time.perf_counter()
-            await database(source.append_events, sid, [{'type': 'assistant.text_delta', 'payload': {'text': 'small delta'}}])
+            _, gap = await _measure_loop_gap(database(source.append_events, ingest_sid, [
+                {'type': 'assistant.text_delta', 'payload': {'text': 'small delta'}}]))
             values.append(time.perf_counter() - start)
-        return values
+            gaps.append(gap)
+        return values, gaps
+
     async def background():
-        nonlocal quanta
-        for _ in range(2000):
-            if stop.is_set():
-                return
-            await actor.process(sid)
-            quanta += 1
+        more, completed = False, 0
+        for _ in range(75):
+            # Re-fold a stable session: appending to the actor's own source can
+            # keep it chasing watermarks without ever reaching an actual fold.
+            more = await actor.process(sid, recheck=not more)
+            completed += not more
             await asyncio.sleep(0)
+        assert completed >= 5, 'must exercise repeated complete folds'
+        print(f'projection ingest quanta=75 completed={completed}')
+
     try:
         for _ in range(32):
             if not await actor.process(sid):
                 break
         assert store.load(sid).ready
-        baseline = await ingest()
+        baseline, baseline_gaps = await ingest()
+        measuring = True
         task = asyncio.create_task(background())
-        concurrent = await ingest()
-        stop.set()
+        concurrent, _ = await ingest()
         await task
-        assert quanta > 0
+        assert len(fold_gaps) >= 5
         p95 = lambda values: sorted(values)[math.ceil(len(values) * .95) - 1]
-        before, during = p95(baseline), p95(concurrent)
-        # Tight absolute allowance catches a blocking 10-100ms fold while
-        # accommodating the scheduler noise of free shared CI runners.
-        limit = max(before * 1.35, before + .003)
-        print(f'projection ingest p95: baseline={before * 1000:.3f}ms '
-              f'concurrent={during * 1000:.3f}ms limit={limit * 1000:.3f}ms quanta={quanta}')
-        assert during <= limit
+        print(f'projection ingest p95: baseline={p95(baseline) * 1000:.3f}ms '
+              f'concurrent={p95(concurrent) * 1000:.3f}ms')
+        _assert_nonblocking_folds(baseline_gaps, fold_gaps)
     finally:
-        stop.set()
-        if task is not None:
-            await task
-        await bridge.close()
+        try:
+            if task is not None:
+                await task
+        finally:
+            await bridge.close()
 
 
 @pytest.mark.asyncio
