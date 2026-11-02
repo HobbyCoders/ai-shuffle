@@ -6,7 +6,6 @@ from app.core.config import settings
 
 
 def test_database_sessions_fail_closed_without_identity(monkeypatch, tmp_path):
-    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: True)
     monkeypatch.setattr(settings, "fluid_skills_dir", str(tmp_path))
     with pytest.raises(ValueError, match="without a session"):
         session_memory(None)
@@ -16,7 +15,6 @@ def test_database_sessions_fail_closed_without_identity(monkeypatch, tmp_path):
 
 
 def test_owner_and_project_follow_database_ids_not_paths(monkeypatch, tmp_path):
-    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: True)
     monkeypatch.setattr(settings, "fluid_skills_dir", str(tmp_path))
     sessions = {
         "a1": {"api_user_id": "alice", "project_v2_id": "shared-project"},

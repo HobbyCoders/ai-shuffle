@@ -14,6 +14,17 @@ from unittest.mock import patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _owner_session(monkeypatch):
+    """No database, so no session row: these tests run as the installation owner."""
+    from fluid.codemode.skills import project_key_for
+
+    from app.core import fluid_memory
+
+    monkeypatch.setattr(fluid_memory, "session_memory", lambda _session_id, cwd=None: (
+        fluid_memory.store_for_owner("local"), project_key_for(cwd)))
+
+
 def _bridge_tools(session_id="session-1", cwd=None):
     import app.mcp.inproc as sdk
 

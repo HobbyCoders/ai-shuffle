@@ -30,7 +30,6 @@ def state_fixture(tmp_path, monkeypatch, mock_db):
     monkeypatch.setenv("LOCAL_MODE", "1")
     monkeypatch.setattr(settings, "fluid_projects_dir", str(home / ".fluid/projects"))
     monkeypatch.setattr(settings, "data_dir", tmp_path / "data")
-    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: True)
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)

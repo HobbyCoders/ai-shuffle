@@ -40,10 +40,8 @@ def project_state_root(row: Mapping[str, Any] | None = None, cwd: str | None = N
 
 
 def session_state_root(session_id: str | None, cwd: str | None = None) -> Path:
-    from app.core.config import settings
-
     row = None
-    if session_id and settings.managed_database_available():
+    if session_id:
         from app.db.sessions import get_session, get_session_by_sdk_id
         row = get_session(session_id) or get_session_by_sdk_id(session_id)
     return project_state_root(row, cwd)
