@@ -369,18 +369,23 @@ describe('optimistic edits vs in-flight loads (S12)', () => {
 				await rename;
 			}
 
-			it('keeps the count of an older row a capped refresh left out', async () => {
+			it('leaves an older row a capped refresh left out, with its count for when it returns', async () => {
 				const older = page2[20];
 				await appData.loadSessions(null);
 				await appData.loadMoreSessions();
 
 				await renameFailsAfter(older.id, older, () => appData.loadSessions('some-tag'));
 
+				// The refused rename touched one row; it does not undo the refresh.
+				expect(appData.current.sessions.some((s) => s.id === older.id)).toBe(false);
+				await appData.loadSessions(null);
+				await appData.loadMoreSessions();
 				expect(chips(older.id)).toBe(1);
+				await appData.loadSessions('some-tag');
 				await appData.loadSessions(null);
 			});
 
-			it('keeps the count of an active row whose separate read failed', async () => {
+			it('leaves an active row whose separate read failed, with its count for when it returns', async () => {
 				await appData.loadSessions(null);
 				expect(appData.current.sessions.some((s) => s.id === oldActive.id)).toBe(true);
 				const lists = mocks.get.getMockImplementation()!;
@@ -391,9 +396,10 @@ describe('optimistic edits vs in-flight loads (S12)', () => {
 
 				await renameFailsAfter(oldActive.id, oldActive, () => appData.loadSessions(null));
 
-				expect(chips(oldActive.id)).toBe(1);
+				expect(appData.current.sessions.some((s) => s.id === oldActive.id)).toBe(false);
 				mocks.get.mockImplementation(lists);
 				await appData.loadSessions(null);
+				expect(chips(oldActive.id)).toBe(1);
 			});
 		});
 
@@ -451,6 +457,269 @@ describe('optimistic edits vs in-flight loads (S12)', () => {
 			expect(chips(older.id)).toBe(1);
 			await appData.loadSessions(null);
 		});
+	});
+});
+
+describe('a refused change gives back only what it touched (#1034)', () => {
+	const row = (id: string) => appData.current.sessions.find((s) => s.id === id);
+	const ids = () => appData.current.sessions.map((s) => s.id);
+
+	/** Held open until the case refuses or accepts it. */
+	function hold<T>(api: { mockImplementationOnce: (fn: () => Promise<T>) => unknown }) {
+		let refuse!: (reason: Error) => void;
+		let accept!: (value: T) => void;
+		api.mockImplementationOnce(() => new Promise<T>((resolve, reject) => { refuse = reject; accept = resolve; }));
+		return { refuse: () => refuse(new Error('refused')), accept: (value?: T) => accept(value as T) };
+	}
+
+	beforeEach(async () => {
+		await appData.loadSessions(null);
+	});
+
+	// Edits a case leaves confirmed retire on the next load; leave none for the next case.
+	afterEach(async () => {
+		await appData.loadSessions(null);
+	});
+
+	const CHANGES = [
+		['settle', () => appData.setSessionActive('s0', false), mocks.setSessionActive],
+		['archive', () => appData.setSessionArchived('s0', true), mocks.setSessionArchived],
+		['rename', () => appData.renameSession('s0', 'Refused'), mocks.renameSession],
+		['delete', () => appData.deleteSession('s0'), mocks.delete],
+	] as const;
+
+	it.each(CHANGES)('%s: a push to another row while the request is out stays', async (_name, change, api) => {
+		const held = hold(api);
+		const failing = change().catch(() => undefined);
+		await vi.waitFor(() => expect(mocks.get).toHaveBeenCalled());
+
+		appData.mergeSessionPatch('s1', { is_active: true, title: 'Pushed' });
+		held.refuse();
+		await failing;
+
+		expect(row('s1')?.is_active).toBe(true);
+		expect(row('s1')?.title).toBe('Pushed');
+		expect(row('s0')).toMatchObject({ title: 'Session 0', is_active: true });
+	});
+
+	it.each(CHANGES)('%s: rows a list read brought in while the request is out stay', async (_name, change, api) => {
+		const held = hold(api);
+		const failing = change().catch(() => undefined);
+		await appData.loadMoreSessions();
+		const loaded = ids().filter((id) => id !== 's0');
+		expect(loaded).toContain('s120');
+
+		held.refuse();
+		await failing;
+
+		for (const id of loaded) expect(ids()).toContain(id);
+	});
+
+	it('gives back a value a push set on the touched field, not the one from before the click', async () => {
+		const held = hold(mocks.renameSession);
+		const failing = appData.renameSession('s0', 'Refused').catch(() => undefined);
+
+		appData.mergeSessionPatch('s0', { title: 'From the other device' });
+		held.refuse();
+		await failing;
+
+		expect(row('s0')?.title).toBe('From the other device');
+	});
+
+	it('gives back what a list read said the server holds', async () => {
+		const held = hold(mocks.renameSession);
+		const failing = appData.renameSession('s0', 'Refused').catch(() => undefined);
+		const lists = mocks.get.getMockImplementation()!;
+		mocks.get.mockImplementation(async (url: string) => {
+			const page = (await lists(url)) as { items: Row[] };
+			return { ...page, items: page.items.map((r) => (r.id === 's0' ? { ...r, title: 'Read since' } : r)) };
+		});
+		await appData.loadSessions(null);
+		expect(row('s0')?.title).toBe('Refused');
+
+		held.refuse();
+		await failing;
+		mocks.get.mockImplementation(lists);
+
+		expect(row('s0')?.title).toBe('Read since');
+	});
+
+	it("a refused settle leaves the row's other fields where they have got to", async () => {
+		const held = hold(mocks.setSessionActive);
+		const failing = appData.setSessionActive('s0', false).catch(() => undefined);
+
+		appData.mergeSessionPatch('s0', { title: 'Renamed elsewhere' });
+		held.refuse();
+		await failing;
+
+		expect(row('s0')).toMatchObject({ is_active: true, title: 'Renamed elsewhere' });
+	});
+
+	it('a push during a refused change is still held over a read that started before it', async () => {
+		const held = hold(mocks.setSessionActive);
+		const failing = appData.setSessionActive('s0', false).catch(() => undefined);
+		appData.mergeSessionPatch('s1', { title: 'Pushed' });
+
+		let release!: () => void;
+		const lists = mocks.get.getMockImplementation()!;
+		mocks.get.mockImplementationOnce(async (url: string) => {
+			await new Promise<void>((resolve) => { release = resolve; });
+			return lists(url);
+		});
+		const read = appData.loadSessions(null);
+		await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+		held.refuse();
+		await failing;
+		release();
+		await read;
+
+		expect(row('s1')?.title).toBe('Pushed');
+	});
+
+	describe('two changes out on one row', () => {
+		it('both refused, newest first: back to the start', async () => {
+			const first = hold(mocks.renameSession);
+			const one = appData.renameSession('s0', 'One').catch(() => undefined);
+			const second = hold(mocks.renameSession);
+			const two = appData.renameSession('s0', 'Two').catch(() => undefined);
+
+			second.refuse();
+			await two;
+			expect(row('s0')?.title).toBe('One');
+			first.refuse();
+			await one;
+
+			expect(row('s0')?.title).toBe('Session 0');
+		});
+
+		it('both refused, oldest first: back to the start', async () => {
+			const first = hold(mocks.renameSession);
+			const one = appData.renameSession('s0', 'One').catch(() => undefined);
+			const second = hold(mocks.renameSession);
+			const two = appData.renameSession('s0', 'Two').catch(() => undefined);
+
+			first.refuse();
+			await one;
+			expect(row('s0')?.title).toBe('Two');
+			second.refuse();
+			await two;
+
+			expect(row('s0')?.title).toBe('Session 0');
+		});
+
+		it('the newer accepted, the older refused late: the newer stands', async () => {
+			const first = hold(mocks.renameSession);
+			const one = appData.renameSession('s0', 'One').catch(() => undefined);
+			const second = hold(mocks.renameSession);
+			const two = appData.renameSession('s0', 'Two');
+
+			second.accept();
+			await two;
+			first.refuse();
+			await one;
+
+			expect(row('s0')?.title).toBe('Two');
+		});
+
+		it('different fields: the refused one goes back and the other stays optimistic', async () => {
+			const rename = hold(mocks.renameSession);
+			const renaming = appData.renameSession('s0', 'Kept').catch(() => undefined);
+			const settle = hold(mocks.setSessionActive);
+			const settling = appData.setSessionActive('s0', false).catch(() => undefined);
+
+			settle.refuse();
+			await settling;
+			expect(row('s0')).toMatchObject({ is_active: true, title: 'Kept' });
+			await appData.loadSessions(null);
+			expect(row('s0')?.title).toBe('Kept');
+
+			rename.accept();
+			await renaming;
+		});
+
+		it('a rename refused while the row is being deleted: a refused delete brings the old title back', async () => {
+			const rename = hold(mocks.renameSession);
+			const renaming = appData.renameSession('s0', 'Refused').catch(() => undefined);
+			const remove = hold(mocks.delete);
+			const removing = appData.deleteSession('s0').catch(() => undefined);
+
+			rename.refuse();
+			await renaming;
+			expect(row('s0')).toBeUndefined();
+			remove.refuse();
+			await removing;
+
+			expect(row('s0')?.title).toBe('Session 0');
+		});
+	});
+
+	describe('a refused delete', () => {
+		it('puts the row back where it was and restores the count', async () => {
+			const before = ids();
+			const total = appData.current.sessionsTotal;
+			const held = hold(mocks.delete);
+			const failing = appData.deleteSession('s5').catch(() => undefined);
+			expect(ids()).not.toContain('s5');
+
+			let release!: () => void;
+			const lists = mocks.get.getMockImplementation()!;
+			mocks.get.mockImplementationOnce(async (url: string) => {
+				await new Promise<void>((resolve) => { release = resolve; });
+				return lists(url);
+			});
+			held.refuse();
+			await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+			expect(ids()).toEqual(before);
+			expect(appData.current.sessionsTotal).toBe(total);
+			release();
+			await failing;
+		});
+
+		it('carries a push that arrived while the row was gone', async () => {
+			const held = hold(mocks.delete);
+			const failing = appData.deleteSession('s0').catch(() => undefined);
+			expect(appData.mergeSessionPatch('s0', { title: 'Pushed while gone' })).toBe(false);
+
+			let release!: () => void;
+			const lists = mocks.get.getMockImplementation()!;
+			mocks.get.mockImplementationOnce(async (url: string) => {
+				await new Promise<void>((resolve) => { release = resolve; });
+				return lists(url);
+			});
+			held.refuse();
+			await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+			expect(row('s0')?.title).toBe('Pushed while gone');
+			release();
+			await failing;
+		});
+
+		it('does not bring back a row a complete read has shown is gone', async () => {
+			const lists = mocks.get.getMockImplementation()!;
+			const held = hold(mocks.delete);
+			const failing = appData.deleteSession('s0').catch(() => undefined);
+			mocks.get.mockImplementation(async (url: string) => {
+				const page = (await lists(url)) as { items: Row[]; has_more: boolean };
+				return { ...page, has_more: false, items: page.items.filter((r) => r.id !== 's0') };
+			});
+			await appData.loadSessions(null);
+
+			held.refuse();
+			await failing;
+
+			expect(row('s0')).toBeUndefined();
+			mocks.get.mockImplementation(lists);
+		});
+	});
+
+	it('an accepted settle stays accepted if the reload after it fails', async () => {
+		const lists = mocks.get.getMockImplementation()!;
+		mocks.get.mockImplementation(async () => { throw new Error('offline'); });
+		mocks.setSessionActive.mockResolvedValueOnce(undefined);
+
+		await appData.setSessionActive('s0', false);
+
+		expect(row('s0')?.is_active).toBe(false);
+		mocks.get.mockImplementation(lists);
 	});
 });
 
