@@ -39,7 +39,8 @@ describe('task chip counts heard on two sockets', () => {
 	it('leaves a worker restart to the global socket\'s reconnect, not the chat socket', () => {
 		// The chat socket reconnected first and says 1 while the old global socket
 		// drains its last 0. The row shows 0 until the global socket's reconnect
-		// reloads the list (live-sync.ts), which is what corrects it.
+		// reloads the list, and that load outranks the late count
+		// (app-data.sessionLoads.test.ts).
 		expect(replay([['chat', 1], ['global', 0]])).toBe(0);
 	});
 

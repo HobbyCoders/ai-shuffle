@@ -265,6 +265,52 @@ describe('optimistic edits vs in-flight loads (S12)', () => {
 		await staleLoad;
 		expect(appData.current.sessions.find((s) => s.id === 's3')?.is_active).toBe(true);
 	});
+
+	describe('a pushed task chip count', () => {
+		const chips = () => appData.current.sessions.find((s) => s.id === 's3')?.pending_task_chips;
+		const serverCount = (value: number) => {
+			(page1[3] as Row & { pending_task_chips?: number }).pending_task_chips = value;
+		};
+		afterEach(() => { delete (page1[3] as Row & { pending_task_chips?: number }).pending_task_chips; });
+
+		it('gives way to a list read started after it, which repairs a late count', async () => {
+			serverCount(1);
+			await appData.loadSessions();
+			// A socket on its way out delivers its last count after the chip came back.
+			appData.mergeSessionPatch('s3', { pending_task_chips: 0 });
+			expect(chips()).toBe(0);
+
+			await appData.loadSessions();
+
+			expect(chips()).toBe(1);
+		});
+
+		it('survives a list read started before it', async () => {
+			serverCount(0);
+			await appData.loadSessions();
+
+			listDelayMs = 20;
+			const staleLoad = appData.loadSessions();
+			await new Promise((r) => setTimeout(r, 0));
+			appData.mergeSessionPatch('s3', { pending_task_chips: 1 });
+			serverCount(1);
+			await staleLoad;
+
+			expect(chips()).toBe(1);
+		});
+
+		it('leaves the other fields of the same push protected as before', async () => {
+			serverCount(1);
+			await appData.loadSessions();
+			appData.mergeSessionPatch('s3', { pending_task_chips: 0, title: 'Pushed' });
+
+			await appData.loadSessions();
+
+			const row = appData.current.sessions.find((s) => s.id === 's3');
+			expect(row?.pending_task_chips).toBe(1);
+			expect(row?.title).toBe('Pushed');
+		});
+	});
 });
 
 describe('"Load older sessions" paging', () => {

@@ -225,6 +225,17 @@ function applyPendingEdits(rows: Session[]): Session[] {
 	return out;
 }
 
+/** The server reads a chip count after the change it reports, so a load started
+ *  after a count knows at least as much as that count, which may be the late last
+ *  word of a socket being replaced. Other pushed fields get their usual re-apply. */
+function dropChipCountsCarriedBy(loadRequestId: number): void {
+	for (const edit of _pendingEdits.values()) {
+		if (edit.patch && edit.supersedeAtLoadId !== null && loadRequestId >= edit.supersedeAtLoadId) {
+			delete edit.patch.pending_task_chips;
+		}
+	}
+}
+
 /** Retire the edits a just-committed load is known to already carry. */
 function retireSupersededEdits(loadRequestId: number): void {
 	for (const [id, edit] of _pendingEdits) {
@@ -460,6 +471,7 @@ async function fetchSessionList(tagId?: string | null, requestedPages?: number) 
 
 		// Re-apply optimistic local edits the server hasn't caught up with yet,
 		// then retire the ones this load is known to already carry.
+		dropChipCountsCarriedBy(requestId);
 		const rows = applyPendingEdits(all);
 		retireSupersededEdits(requestId);
 
