@@ -283,12 +283,16 @@ class TestRunsOnAnotherWorker:
 
     def test_a_preview_cookie_still_creates_a_chat_here(self, client, db, monkeypatch):
         from types import SimpleNamespace
-        from app.core import preview_access
+        from app.core import mobile_tool_identity as identity, preview_access
         monkeypatch.setattr(preview_access, "grant", lambda request: SimpleNamespace(session_id="preview"))
+        bound = MagicMock()
+        monkeypatch.setattr(identity, "_bind_current", bound)
         response = client.post("/api/v1/sessions", json={"profile_id": "agent-a"})
 
         assert response.status_code == 200
         assert _created(db)["target_instance_id"] is None
+        # The chat is recorded as the preview's, so it keeps the limits on every turn.
+        assert bound.call_args.args[1]["principal_id"] == identity.PREVIEW_PRINCIPAL_ID
 
     def test_this_worker_as_the_target_runs_here(self, client, db):
         from app.core.config import settings
