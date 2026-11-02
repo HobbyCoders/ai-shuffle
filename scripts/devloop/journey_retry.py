@@ -13,8 +13,8 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-# Hosted median: 11.17s/case (journey_weights.json). Three failures normally add
-# ~34s, not another 22-25 minute shard. A crashed file counts as one target, but
+# Three failures normally add under a minute (seconds_per_case in
+# journey_weights.json), not another whole shard. A crashed file counts as one target, but
 # shares the same hard phase budget: even a whole-file retry cannot run long.
 MAX_FAILURES = 3
 RETRY_SECONDS = 180

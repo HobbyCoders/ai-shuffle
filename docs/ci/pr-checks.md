@@ -902,7 +902,8 @@ runs whose journey inventory matches this checkout. Failed, incomplete,
 duplicate, partial or retried measurements are refused with a clear message
 before replacing the file. Estimates are not first-attempt time limits: keep
 measurements current and check headroom against the unchanged 25-minute journey
-step on the four standard hosted runners.
+step on the five standard hosted runners. A shard's first pass must finish
+within 19 minutes to keep the full retry budget.
 
 After the shard finishes, CI retries only failed cases, once, on the same
 instance. It passes exact `--case=<id>` selectors (including viewport and
@@ -910,9 +911,9 @@ throttle), never substring `--only`. A journey without a usable per-case
 summary is a whole-file retry target. Exact-case groups run before whole-file
 groups, regardless of shard order. Known-bug verdicts keep their existing
 meaning and are not retry targets. More than **3 failed cases/crashed files
-across the shard** skips retry and fails immediately. The measured hosted
-median is 11.17 seconds/case, so three ordinary retries are about 34 seconds,
-not another 22–25 minute shard. Crashed files count as one target, but all
+across the shard** skips retry and fails immediately. Three ordinary retries
+take far less time than re-running a shard (the current per-case median is
+`seconds_per_case` in the weights file). Crashed files count as one target, but all
 retries share a hard **180-second phase budget**, further limited by the
 remaining 25-minute step budget with **180 seconds reserved for teardown**.
 A whole-file retry is skipped when its measured estimate in
