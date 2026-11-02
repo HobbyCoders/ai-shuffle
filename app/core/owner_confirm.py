@@ -43,7 +43,9 @@ message arrives, but its outcome row is written right AFTER the owner's message
 in the transcript, so the log reads request, answer, outcome (#484).
 
 What needs a decision at all is unchanged (permission modes and saved rules).
-Entering a secret still uses the private access card.
+Entering a secret still uses the private access card, and a provider safety
+check (``ModelGuardrail``) keeps its Continue / Stop buttons: it is never asked
+in words, so typed text never settles it (:func:`asks_in_words`).
 """
 from __future__ import annotations
 
@@ -78,15 +80,6 @@ PARKED_KEY = "parked"
 RELEASED_KEY = "released"
 # A provider safety-check prompt (fluid.engine.guardrail.GUARDRAIL_TOOL).
 _GUARDRAIL_TOOL = "ModelGuardrail"
-# The safety-check categories in the same plain words the chat card uses
-# (frontend/src/lib/utils/guardrail.ts CATEGORY_WORDS).
-_GUARDRAIL_CATEGORY_WORDS = {
-    "cyber": "cybersecurity",
-    "bio": "biology",
-    "frontier_llm": "frontier AI research",
-    "reasoning_extraction": "requests for its hidden reasoning",
-    "content_filter": "content policy",
-}
 # Turn payload key on a wake: the call a yes given outside the chat admits once.
 PASS_KEY = APPROVAL_PASS_KEY
 
@@ -188,10 +181,6 @@ def describe(tool_name: str, tool_input: Any) -> str:
     if isinstance(data.get("model_switch"), str) and data["model_switch"].strip():
         # app.core.model_override: "start ... on <model> instead of <model>".
         return _short(data["model_switch"], 240)
-    if name == _GUARDRAIL_TOOL or data.get("guardrail") is True:
-        # A provider safety check (docs/internal/guardrail-contract.md): yes
-        # continues this turn on the suggested model, no stops it.
-        return _guardrail_action(data)
     if name.endswith("computer-use__request_access"):
         # The screen-access card itself, asked in words in an owner chat.
         apps = [str(app) for app in data.get("apps") or [] if app]
@@ -207,23 +196,21 @@ def describe(tool_name: str, tool_input: Any) -> str:
     return f"use {name}" + (f" with {detail}" if detail else "")
 
 
-def _guardrail_action(data: Dict[str, Any]) -> str:
-    """"continue this turn on <suggested> — <Provider>'s safety check blocked …"."""
-    def field(key: str) -> str:
-        value = data.get(key)
-        return " ".join(value.split()) if isinstance(value, str) else ""
+def is_guardrail(tool_name: Any, tool_input: Any) -> bool:
+    """True for a provider safety-check prompt (docs/internal/guardrail-contract.md)."""
+    return tool_name == _GUARDRAIL_TOOL or (
+        isinstance(tool_input, dict) and tool_input.get("guardrail") is True)
 
-    provider = field("provider_label") or field("provider")
-    owner = (f"{provider}'" if provider.lower().endswith("s") else f"{provider}'s") if provider \
-        else "the provider's"
-    raw_category = field("category")
-    category = _GUARDRAIL_CATEGORY_WORDS.get(raw_category) or re.sub(r"[_-]+", " ", raw_category)
-    blocked = f"{owner} safety check blocked {field('requested_model') or 'the model'}"
-    if category:
-        blocked += f" ({category})"
-    suggested = field("suggested_model")
-    target = f"continue this turn on {suggested}" if suggested else "continue this turn on another model"
-    return _short(f"{target}; {blocked}", 240)
+
+def asks_in_words(tool_name: Any, tool_input: Any) -> bool:
+    """Whether an owner chat asks this request in words (``assistant_confirm``).
+
+    Every request does except a provider safety check: it keeps its Continue /
+    Stop buttons, answered by request id, so a typed "yes" or "no" meant for
+    the agent can never settle it (owner decision). A message typed while it
+    waits is an ordinary message, as in any chat.
+    """
+    return not is_guardrail(tool_name, tool_input)
 
 
 def question(tool_name: str, tool_input: Any, *, chat_title: Optional[str] = None,
@@ -408,6 +395,8 @@ def pending_requests(session_id: Optional[str]) -> List[Dict[str, Any]]:
         confirm = payload.get(SUBTYPE)
         if row.get("kind") != PERMISSION_KIND or not isinstance(confirm, dict):
             continue
+        if not asks_in_words(payload.get("tool_name"), payload.get("tool_input")):
+            continue  # Answered on its own buttons only, never by typed text.
         out.append({
             "request_id": payload.get("request_id"), "interaction_id": row["id"],
             "question": confirm.get("question"), "action": confirm.get("action"),
@@ -525,14 +514,8 @@ async def on_owner_message(session_id: Optional[str], text: Optional[str]) -> Op
             # wait, and the loop reaches the owner's message only once all of
             # them have a result. A worker's or started chat's request blocks
             # its own loop, not this one, so it is left as it is.
-            # A provider safety check is never let go: its caller does not
-            # come back for a "not run yet" (like a defer, it would end the
-            # turn), so the card would stay asked with nobody waiting and a
-            # later yes would continue nothing. It keeps waiting for a firm
-            # yes or no; the message reaches the agent once it is answered.
             park_ids = [item["interaction_id"] for item in pending
-                        if item["own"] and not item["parked"]
-                        and item.get("tool_name") != _GUARDRAIL_TOOL]
+                        if item["own"] and not item["parked"]]
             return {"decision": HELD, "park": park_ids} if park_ids else None
         from app.core.permission_handler import permission_handler
 

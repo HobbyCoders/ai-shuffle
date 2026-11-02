@@ -291,26 +291,6 @@ function assistantConfirmationText(request) {
   return `May I ${action(request)}? Yes or no.`;
 }
 var APPROVAL_CARD_SUBTYPE = "assistant_confirm_request";
-var GUARDRAIL_TEXT_FIELDS = [
-  "provider",
-  "provider_label",
-  "category",
-  "explanation",
-  "requested_model",
-  "suggested_model",
-  "suggested_by"
-];
-function approvalGuardrail(request) {
-  const input = record(request?.tool_input);
-  if (!input || text(request?.tool_name) !== "ModelGuardrail" && input.guardrail !== true) return null;
-  const out = {};
-  for (const key of GUARDRAIL_TEXT_FIELDS) {
-    const value = text(input[key]);
-    if (value) out[key] = value;
-  }
-  if (input.partial_output_discarded === true) out.partial_output_discarded = true;
-  return out;
-}
 function approvalCardId(requestId) {
   return `assistant-confirm-${requestId}`;
 }
@@ -340,7 +320,6 @@ function approvalCardFromRequest(requestId, request, earlier) {
     const card = approvalCardData(message);
     if (card?.question === question && RETRIED_STATUSES.has(card.status)) attempt++;
   }
-  const guardrail = approvalGuardrail(request);
   return {
     request_id: requestId,
     question,
@@ -348,8 +327,7 @@ function approvalCardFromRequest(requestId, request, earlier) {
     ...text(confirm.asker) ? { asker: text(confirm.asker) } : {},
     ...text(confirm.chat_session_id) ? { chat_session_id: text(confirm.chat_session_id) } : {},
     status: "pending",
-    attempt,
-    ...guardrail ? { guardrail } : {}
+    attempt
   };
 }
 function approvalStatusFromSettle(type, detail) {
@@ -2309,7 +2287,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "33aacc18122069fd93ec488506383c5d0e11a3d6a3ba4261d46bd70d6ec391b0";
+var REDUCER_FINGERPRINT = "044ec586c69ac4a67d597de1443c5e15cff741f1402d2ef222cdb0ea5db1e434";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {
