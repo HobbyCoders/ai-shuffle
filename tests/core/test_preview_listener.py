@@ -28,7 +28,7 @@ WS = f"ws://172.17.0.2:{PREVIEW}/ws"
 @pytest.fixture(autouse=True)
 def _isolated_key(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
-    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: False)
+    monkeypatch.setattr(preview_access, "_session_exists", lambda session_id: True)
     monkeypatch.setattr(settings, "shuffle_local_access", True)
     monkeypatch.setattr(owner_auth, "trusted_lan", lambda: True)
 

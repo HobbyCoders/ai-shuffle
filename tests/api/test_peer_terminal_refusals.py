@@ -128,7 +128,10 @@ def _caller(c, label):
 @pytest.mark.parametrize("label", ["anonymous-lan", "passwordless-loopback", "owner-cookie-on-remote-listener",
                                    "member-paired-device", "api-key", "peer-worker-token",
                                    "preview-cookie", "preview-cookie-with-owner"])
-def test_every_peer_route_refuses_callers_without_terminal_permission(wired, label):
+def test_every_peer_route_refuses_callers_without_terminal_permission(wired, label, monkeypatch):
+    from app.core import preview_access
+
+    monkeypatch.setattr(preview_access, "_session_exists", lambda session_id: True)
     pending = _request(owner(wired.ctx))
     authorization_id, request_id = pending["authorization_id"], pending["request_id"]
     calls, owners = len(wired.calls), dict(relay._owners)

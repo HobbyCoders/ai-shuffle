@@ -55,10 +55,7 @@ class Surface:
 def app(mock_db, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     monkeypatch.setattr(settings, "cookie_secure", False)
-    # No managed DB here: the preview token's signature alone decides.
-    monkeypatch.setattr(
-        type(settings), "managed_database_available", lambda self: False
-    )
+    monkeypatch.setattr(preview_access, "_session_exists", lambda session_id: True)
     monkeypatch.setattr(owner_auth.settings, "shuffle_local_access", True)
     monkeypatch.setattr(owner_auth, "trusted_lan", lambda: False)
     monkeypatch.setattr(auth, "is_github_authenticated_cached", lambda *args: False)
