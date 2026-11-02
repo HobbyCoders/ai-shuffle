@@ -383,6 +383,11 @@ def _task_chip_handler():
     return handle_control
 
 
+def _task_chip_suggest_handler():
+    from app.core.task_chips import handle_relayed
+    return handle_relayed
+
+
 def _rewind_handler():
     from app.api.rewind_owner import handle_rewind
     return handle_rewind
@@ -610,6 +615,7 @@ _LAZY_HANDLERS = {
     "generation": _generation_handler,
     "rewind": _rewind_handler,
     "task-chip": _task_chip_handler,
+    "task-chip-suggest": _task_chip_suggest_handler,
     "session-git": _session_git_handler,
     "project-git": _project_git_handler,
     "git-state": _git_state_handler,

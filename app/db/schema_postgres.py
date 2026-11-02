@@ -2068,6 +2068,8 @@ def create_postgres_schema(cursor: Any) -> None:
             base_commit TEXT,
             project_v2_id TEXT,
             origin_label TEXT,
+            origin_mode TEXT,
+            origin_tools_limited BOOLEAN NOT NULL DEFAULT FALSE,
             model TEXT NOT NULL,
             provider_id TEXT,
             model_label TEXT,

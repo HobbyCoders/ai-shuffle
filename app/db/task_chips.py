@@ -25,7 +25,8 @@ STALE_CLAIM_SECONDS = 300
 
 _OPEN_IN = "(%s, %s, %s)"
 _COLUMNS = ("id, session_id, origin_session_id, origin_seq, request_id, title, summary, prompt, base, "
-            "base_commit, project_v2_id, origin_label, model, provider_id, model_label, effort, state, attempt, error, started_session_id, started_title, "
+            "base_commit, project_v2_id, origin_label, origin_mode, origin_tools_limited, model, provider_id, model_label, effort, "
+            "state, attempt, error, started_session_id, started_title, "
             "created_at, updated_at, claimed_at")
 
 
@@ -37,7 +38,8 @@ def create(session_id: str, *, origin_session_id: str, origin_seq: int, request_
            summary: str, prompt: str, base: str, base_commit: Optional[str],
            project_v2_id: Optional[str], model: str, provider_id: Optional[str] = None,
            model_label: Optional[str] = None, effort: Optional[str] = None,
-           origin_label: Optional[str] = None, chip_id: Optional[str] = None) -> Dict[str, Any]:
+           origin_label: Optional[str] = None, origin_mode: Optional[str] = None,
+           origin_tools_limited: bool = False, chip_id: Optional[str] = None) -> Dict[str, Any]:
     """Insert a chip, or return the open one it duplicates.
 
     ``{"chip": row, "created": bool}``; ``chip`` is None with ``"limit": True``
@@ -65,12 +67,12 @@ def create(session_id: str, *, origin_session_id: str, origin_seq: int, request_
             return {"chip": None, "created": False, "limit": True}
         cursor.execute(
             f"INSERT INTO session_task_chips (id, session_id, origin_session_id, origin_seq, request_id, "
-            f"title, summary, prompt, base, base_commit, project_v2_id, origin_label, model, provider_id, "
-            f"model_label, effort, state) "
-            f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_COLUMNS}",
+            f"title, summary, prompt, base, base_commit, project_v2_id, origin_label, origin_mode, "
+            f"origin_tools_limited, model, provider_id, model_label, effort, state) "
+            f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_COLUMNS}",
             (chip_id or str(uuid4()), session_id, origin_session_id, origin_seq, request_id, title, summary,
-             prompt, base, base_commit, project_v2_id, origin_label, model, provider_id, model_label, effort,
-             PENDING))
+             prompt, base, base_commit, project_v2_id, origin_label, origin_mode, origin_tools_limited, model,
+             provider_id, model_label, effort, PENDING))
         return {"chip": dict(cursor.fetchone()), "created": True}
 
 

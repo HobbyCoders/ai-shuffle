@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import re
+from types import SimpleNamespace
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from fluid.context.peer import format_peer_message
@@ -1742,8 +1743,41 @@ def _suggested_task_text(parent, chip):
     return defang_harness_markers(
         f"Task suggested by the chat \u201c{title}\u201d ({parent['id']}). The owner started it by "
         "clicking its chip there. The brief below was written by that chat's agent, not typed by "
-        "the owner, and grants no extra permissions. This chat is independent: that chat gets no "
+        "the owner. This chat is independent: that chat gets no "
         f"report from it, so tell the owner your result here.\n\n{chip['prompt']}")
+
+
+def chip_lane_refusal(model, provider_id):
+    """Why a chip's chat could not run on this worker now, in plain words, else None.
+
+    The check its first turn would make, so a chat that could only be refused
+    is never created: Claude turned off or signed out, or a provider row without
+    its credential.
+    """
+    from app.core import credential_gate
+    from app.core.task_dispatch import _credential_gap
+    leg = credential_gate.leg_for_options(SimpleNamespace(model=model, aih_provider_id=provider_id))
+    return credential_gate.turn_refusal(leg) or _credential_gap(provider_id)
+
+
+def chip_permission_mode(chip, parent, overrides):
+    """The permission mode a chip's chat would run in if it started now.
+
+    The chat's own binding comes from :func:`_started_permission_mode`, and each
+    of its turns resolves from that the way this does. ``auto`` exists only on
+    the Claude CLI leg, so the chip's model can lower it.
+    """
+    from app.core import credential_gate
+    from app.core.session_modes import effective_permission_mode, turn_permission_mode
+    from app.db import database
+    profile = database.get_profile(parent.get("profile_id")) if parent.get("profile_id") else None
+    mode = turn_permission_mode(
+        {"_permission_ceiling": (overrides or {}).get("_permission_ceiling")},
+        {"permission_mode": _started_permission_mode(parent, overrides)},
+        (profile or {}).get("config") if profile else None)
+    leg = credential_gate.leg_for_options(
+        SimpleNamespace(model=chip["model"], aih_provider_id=chip.get("provider_id")))
+    return effective_permission_mode(mode, delegated=leg == "delegated")
 
 
 def _chip_model_plan(chip, parent, overrides):
@@ -1763,12 +1797,21 @@ def _chip_model_plan(chip, parent, overrides):
     if picked.model != model_override.active_account_model(model):
         raise ValueError(f"{name}, the model this task was suggested for, is not available now. "
                          "Nothing was started.")
+    refusal = chip_lane_refusal(picked.model, picked.provider_id)
+    if refusal:
+        raise ValueError(f"{name}, the model this task was suggested for, cannot run now: {refusal} "
+                         "Nothing was started.")
     return {"model": picked.model, "provider_id": picked.provider_id, "model_id": picked.model_id,
             "baseline": _inherited_model(parent, overrides), "source": model_override.CHIP_APPROVED}
 
 
-def start_suggested_task(chip):
+def start_suggested_task(chip, shown_access):
     """Start a chip's chat because the owner clicked it. Returns the new chat's id.
+
+    ``shown_access`` is the permission mode the chip showed at the click. The
+    chat runs with the parent's access, not the suggesting agent's, so a mode
+    broader than that refuses the start; a narrower one just runs narrower.
+    The lock and recheck below catch a change made after this check.
 
     StartSession's creation path, with these differences because a person asked
     for it and not the chain: it always gets its own checkout in a Git project,
@@ -1801,6 +1844,8 @@ def start_suggested_task(chip):
     orchestration_limits.assert_can_start(parent_id)  # The owner's daily spending limit.
     overrides = context.get("overrides") or {}
     plan = _chip_model_plan(chip, parent, overrides)
+    from app.core.task_chips import refuse_if_widened
+    refuse_if_widened(shown_access, chip_permission_mode(chip, parent, overrides))
     started_mode = _started_permission_mode(parent, overrides)
     # Deterministic per attempt: a retry after a failure needs a new branch
     # name, since the failed attempt may have left its branch behind.

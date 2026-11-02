@@ -13,7 +13,7 @@ import uuid
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Body, HTTPException, Depends, Query, Response, status, Request
-from pydantic import TypeAdapter
+from pydantic import BaseModel, TypeAdapter
 
 from app.core.cli_sessions import (
     rename_session as sdk_rename_session,
@@ -871,32 +871,40 @@ async def list_task_chips(
     request: Request, session_id: str, token: str = Depends(require_auth),
 ):
     """This chat's suggested tasks, plus the chip that started this chat when one did."""
-    await require_transcript_session(request, session_id)
+    session = await require_transcript_session(request, session_id)
     from app.core import task_chips
 
-    return await run_sync(task_chips.list_chips, session_id)
+    return await task_chips.list_view(session)
 
 
-async def _task_chip_action(request: Request, session_id: str, chip_id: str, action: str) -> dict:
+async def _task_chip_action(request: Request, session_id: str, chip_id: str, action: str,
+                            shown_access: Optional[str] = None) -> dict:
     session = await require_transcript_session(request, session_id)
     from app.core import task_chips
 
     try:
-        return await task_chips.act(session, chip_id, action)
+        return await task_chips.act(session, chip_id, action, shown_access)
     except task_chips.ChipError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.message) from exc
 
 
+class TaskChipStart(BaseModel):
+    """``shown_access`` is the chip's ``access.mode`` as shown when the owner clicked."""
+    shown_access: Optional[str] = None
+
+
 @router.post("/{session_id}/task-chips/{chip_id}/start")
 async def start_task_chip(
-    request: Request, session_id: str, chip_id: str, token: str = Depends(require_auth),
+    request: Request, session_id: str, chip_id: str, body: Optional[TaskChipStart] = None,
+    token: str = Depends(require_auth),
 ):
     """Start this suggestion in its own chat. Idempotent: every caller gets the one chat.
 
     A start that fails returns 200 with the chip in ``failed``: the reason is
-    chip state every client shows, and starting it again retries.
+    chip state every client shows, and starting it again retries. So does one
+    that would run with broader access than ``shown_access``.
     """
-    return await _task_chip_action(request, session_id, chip_id, "start")
+    return await _task_chip_action(request, session_id, chip_id, "start", body.shown_access if body else None)
 
 
 @router.post("/{session_id}/task-chips/{chip_id}/dismiss")

@@ -447,11 +447,11 @@
 	}
 
 	.start:hover:not([aria-disabled='true']) {
-		background: color-mix(in oklch, var(--primary) 88%, var(--foreground));
+		background: color-mix(in oklab, var(--primary) 88%, var(--foreground));
 	}
 
 	.start:active:not([aria-disabled='true']) {
-		background: color-mix(in oklch, var(--primary) 78%, var(--foreground));
+		background: color-mix(in oklab, var(--primary) 78%, var(--foreground));
 	}
 
 	.start[aria-disabled='true'] {
