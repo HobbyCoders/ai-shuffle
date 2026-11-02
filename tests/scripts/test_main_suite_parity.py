@@ -39,7 +39,7 @@ def test_root_calls_existing_workflows_and_requires_all_parity_jobs():
     gate = jobs["main-suite"]
     assert gate["name"] == "Main suite"
     assert gate["if"] == "always()"
-    assert set(gate["needs"]) == set(suite.REQUIRED) == set(jobs) - {"main-suite"}
+    assert set(gate["needs"]) == set(suite.REQUIRED) == set(jobs) - {"main-suite", "journey-issues"}
     expected = {
         "backend": "ci-backend", "javascript": "ci-frontend", "fluid": "ci-fluid",
         "windows": "windows-suite", "browser-workspace": "ci-browser-workspace",
@@ -66,10 +66,39 @@ def test_main_suite_has_no_test_secrets_or_paid_runners():
     for name in ["main-suite.yml", "ci-artifact-policy.yml"]:
         config = workflow(name)
         assert "secrets" not in (ROOT / ".github/workflows" / name).read_text()
-        for job in config["jobs"].values():
-            assert "environment" not in job and "continue-on-error" not in job
+        for name, job in config["jobs"].items():
+            assert "environment" not in job
+            if name == "journey-issues":
+                assert job["continue-on-error"] == "true"
+            else:
+                assert "continue-on-error" not in job
             if "uses" not in job:
                 assert job["runs-on"] == "ubuntu-latest"
+
+
+def test_journey_reporter_is_main_push_only_advisory_and_has_the_only_issue_write_permission():
+    config = workflow()
+    jobs = config["jobs"]
+    reporter = jobs["journey-issues"]
+    assert reporter["if"] == "always() && github.event_name == 'push' && github.ref == 'refs/heads/main'"
+    assert reporter["needs"] == ["javascript"]
+    assert reporter["continue-on-error"] == "true"
+    assert reporter["permissions"] == {"contents": "read", "actions": "read", "issues": "write"}
+    assert [name for name, job in jobs.items() if job.get("permissions", {}).get("issues") == "write"] == ["journey-issues"]
+    assert "journey-issues" not in jobs["main-suite"]["needs"]
+    step = reporter["steps"][1]
+    assert step["run"] == "python3 -m scripts.devloop.journey_issues"
+    assert step["continue-on-error"] == "true"
+    assert int(step["timeout-minutes"]) < int(reporter["timeout-minutes"]) <= 3
+    assert reporter["steps"][-1]["if"] == "always() && (failure() || steps.report.outcome == 'failure')"
+    assert "::warning" in reporter["steps"][-1]["run"]
+    # Publishing still checks the whole workflow, making job-level tolerance
+    # essential even though the reporter is excluded from the final aggregate.
+    assert "github.event.workflow_run.conclusion == 'success'" in workflow("desktop-source.yml")["jobs"]["gate"]["if"]
+    uploader = next(step for step in workflow("ci-frontend.yml")["jobs"]["journeys"]["steps"]
+                    if step.get("name") == "Upload journey timelines")
+    assert uploader["with"]["name"] == "ui-journeys-${{ matrix.shard }}"
+    assert uploader["with"]["path"] == "${{ runner.temp }}/ui-journeys/"
 
 
 def test_parity_jobs_reuse_local_commands_and_strict_reach(monkeypatch):

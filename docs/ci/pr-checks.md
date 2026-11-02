@@ -96,8 +96,9 @@ and its README; the app still checks `docs/content` against the frontend copy.
 A dispatch on another ref skips the suites and fails the aggregate. Superseded
 main runs may be cancelled. The root workflow calls the same checked-in reusable
 CI workflows; their PR triggers, matrices, full test selection and gates remain
-in force. No test job has signing secrets; permissions are `contents: read`,
-using only standard free hosted runners. Windows calls select the existing
+in force. No test job has signing secrets; workflow-default permissions are
+`contents: read`, using only standard free hosted runners. The separate,
+non-blocking main-push journey reporter alone can write issues (see below). Windows calls select the existing
 three desktop shards, not the separate stable-release portability matrix.
 
 | Local `full` stage | Hosted job / reusable workflow |
@@ -940,8 +941,44 @@ and the CI driver without the flag still run once.
 
 **Main retries too:** `main-suite.yml` calls `ci-frontend.yml` with the same
 retry behavior. A main run that passes only on retry can authorize nightly
-publication; its warning and summary are the only retry signals on that run.
-There is no automatic notification or issue creation for a recovered retry.
+publication. On **push-to-main runs only**, the advisory `journey-issues` job
+reads the root `summary.json` receipts from the existing `ui-journeys-<N>`
+artifacts and opens one issue per recovered journey + full case ID (including
+viewport/throttle). A crashed file without per-case evidence retains the
+receipt's `(whole journey)` identity. A first-pass success, an unrecovered
+failure, or a skipped retry does not file an issue. The runner's accepted
+`known-bug` verdict on retry remains accepted and is reported as such.
+
+A stable hidden case marker finds open **and closed** issues without relying
+on the title or label. Each new workflow run adds a comment with the latest
+run link and commit; a closed issue is reopened with a note that it came back.
+Run-ID markers in the issue body/comments deduplicate reruns, regardless of
+run attempt. The existing `bug` label is used if present; no label is created
+or required. Public issue text contains only journey/case IDs, both attempt
+outcomes, the run link and commit, **never raw logs, errors or evidence paths**.
+The full evidence still expires after 3 days.
+
+The reporter waits only for the reusable JavaScript workflow and uses
+`always()`, so a recovered case is still reported when another shard/job is
+red. It is excluded from `Main suite`'s required dependency inventory and is
+non-blocking at both step and job level: an API/reporting failure emits a
+warning and cannot make the full workflow red or prevent nightly publication.
+Only this new job has `issues: write` (and `actions: read` to fetch artifacts);
+workflow defaults and all PR jobs remain read-only. Reporting has a two-minute
+step deadline, no dependency installation, and does not run any tests again.
+
+Read-only end-to-end reporting probe against a real main run (no issues or
+comments are written):
+
+```sh
+python -m scripts.devloop.journey_issues --repository HobbyCoders/ai-shuffle --run-id <run-id> --dry-run
+```
+
+This reads real run metadata, artifacts and matching issues. For an already
+downloaded artifact directory, add `--receipts <directory>` with `--dry-run`;
+its immediate `ui-journeys-<N>/summary.json` files are read, not nested
+per-attempt summaries. Missing/malformed evidence is warned about and skipped.
+A clean run without any journey artifacts is an ordinary no-op.
 
 Run locally with
 `python -m scripts.devloop.ci journeys --build` (see
