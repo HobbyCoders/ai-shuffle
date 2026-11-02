@@ -79,6 +79,24 @@ async def test_connect_without_a_session_needs_no_admission():
     assert admission.holds(adapter) is False
 
 
+async def test_a_new_chats_engine_holds_the_id_it_made():
+    """Nothing could be admitted before the id existed, but the turn is just as live."""
+
+    async def make_the_id(_options):
+        adapter._sdk_session_id = "ses_made_by_the_engine"
+
+    adapter = _Adapter(make_the_id)
+    await adapter.connect(_options(session_id=None, resume_session_id=None))
+    state = SessionState(adapter=adapter, is_connected=True, is_streaming=True)
+    admission.bind_state(adapter, state)
+
+    with pytest.raises(SessionBusyError):
+        admission.admit("ses_made_by_the_engine", object())
+
+    state.is_streaming = False
+    admission.admit("ses_made_by_the_engine", object())
+
+
 async def test_mid_turn_engine_refuses_a_newcomer_and_an_idle_one_does_not():
     running, idle_after = _Adapter(), _Adapter()
     state = await _start_turn(running)
@@ -347,7 +365,7 @@ async def test_rewind_is_refused_while_an_engine_connects_and_touches_nothing(mo
     response, reseed, pool = await _rewind(monkeypatch, rewind=rewind)
 
     assert response.success is False and response.message == "Rewind refused"
-    assert response.error == str(SessionBusyError())
+    assert "still running" in response.error
     rewind.assert_not_called()
     reseed.assert_not_called()
     pool.remove.assert_not_called()

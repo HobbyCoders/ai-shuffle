@@ -689,7 +689,7 @@ curl -X POST http://localhost:8000/api/v1/commands/rewind/execute/sess_abc123 \
 | `target_content` | string | | With `target_occurrence`, finds a message that has no `uuid` yet by its text |
 | `target_occurrence` | integer | | 0-based position among the user messages with that exact text |
 
-Returns `success`, `message`, `chat_rewound`, `files_rewound`, `messages_removed`, `error`, `partial_success` and `warning`. When the target cannot be found, the rewind is refused with `success: false` and `error`.
+Returns `success`, `message`, `chat_rewound`, `files_rewound`, `messages_removed`, `error`, `partial_success` and `warning`. When the target cannot be found, the rewind is refused with `success: false` and `error`. It is refused the same way while a response is running or connecting in that chat; stop it or wait for it to finish, then rewind.
 
 ## Swarms
 

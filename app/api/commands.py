@@ -729,8 +729,15 @@ async def _execute_rewind(
     if fluid_session and request.restore_chat:
         try:
             session_admission.admit(sdk_session_id, lease)
-        except SessionBusyError as busy:
-            return RewindResponseV2(success=False, message="Rewind refused", error=str(busy))
+        except SessionBusyError:
+            return RewindResponseV2(
+                success=False,
+                message="Rewind refused",
+                error=(
+                    "A response is still running in this chat. "
+                    "Stop it or wait for it to finish, then rewind."
+                ),
+            )
 
     logger.info(
         f"Rewind requested: session={session_id}, sdk_session={sdk_session_id}, "

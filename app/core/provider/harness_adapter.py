@@ -608,6 +608,12 @@ class HarnessAdapter(ProviderAdapter):
             session_admission.admit(admitted, self)
         try:
             await self._connect_engine(options)
+            # A new chat has no id until its engine makes one, and that engine
+            # holds the session like any other from here on. An id nobody has
+            # seen yet cannot be busy.
+            started = self._sdk_session_id
+            if isinstance(started, str) and started and started != admitted:
+                session_admission.admit(started, self)
         except BaseException:
             session_admission.release(self)
             raise
