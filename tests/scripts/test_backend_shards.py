@@ -193,7 +193,7 @@ def test_all_security_commands_flags_and_timing_artifacts_remain_unconditional()
         assert len(uploads) == 1 and uploads[0]["if"] == "always()"
 
 
-def test_large_fold_ratchets_run_once_per_pr_and_repeat_only_on_main():
+def test_large_fold_ratchets_repeat_on_main_but_controls_run_once():
     steps = workflow()["jobs"]["backend-security"]["steps"]
     step = next(s for s in steps if s.get("name") == "Measure large-fold contention on both databases")
     assert "if" not in step and "continue-on-error" not in step
@@ -201,6 +201,10 @@ def test_large_fold_ratchets_run_once_per_pr_and_repeat_only_on_main():
     assert step["env"]["CONTENTION_ATTEMPTS"] == "${{ github.ref == 'refs/heads/main' && '5' || '1' }}"
     run = step["run"]
     assert 'for attempt in $(seq 1 "$CONTENTION_ATTEMPTS"); do' in run
+    assert 'selection=()' in run
+    assert 'if [ "$attempt" -gt 1 ]; then' in run
+    assert "selection=(-k 'test_background_projection or test_large_preparation')" in run
+    assert run.count('"${selection[@]}"') == 2
     assert "tests/test_transcript_projection_ingest_budget.py" in run
     assert "tests/db/test_transcript_projection_ingest_postgres.py" in run
     assert "ALLOW_REAL_PG=1 TEST_POSTGRES_DSN=" in run
