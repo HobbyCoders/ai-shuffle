@@ -25,7 +25,7 @@
 //   JOURNEY_CONSOLE    regex: page console lines that match are added to the
 //                      report (diagnosis, e.g. JOURNEY_CONSOLE='feedController')
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -317,6 +317,15 @@ export async function runJourney(spec) {
 				judge(recording.recording, recording.anomalies);
 				phase = 'verify';
 				if (item.testCase.verify) await item.testCase.verify({ ...ctx, recording: recording.recording });
+				// TEMPORARY CI PROOF: remove after red + green retry evidence.
+				if (spec.name === 'project-workers') {
+					const marker = join(tmpdir(), 'ui-journey-retry-first-attempt-proof');
+					if (item.id === 'fail-open@desktop-fast' && !existsSync(marker)) {
+						writeFileSync(marker, 'first attempt failed');
+						throw new Error('CI retry proof: first-attempt-only failure');
+					}
+					if (item.id === 'fail-open@phone-fast') throw new Error('CI retry proof: always-failing case');
+				}
 				result.ok = result.anomalies.length === 0;
 				if (process.env.JOURNEY_SHEETS === '1') {
 					await contactSheet(recording.keyframes, join(out, `${item.id}.jpg`), { title: item.id }).catch(() => {});
