@@ -189,6 +189,16 @@ describe('TaskChipTray', () => {
 		expect(container.querySelector('[role="status"]')?.textContent).toBe('');
 	});
 
+	it('takes less room when told something else is waiting beside the composer', () => {
+		const { container } = show([chip('a')], { crowded: true });
+		expect(container.querySelector('.chip-tray')?.classList.contains('crowded')).toBe(true);
+	});
+
+	it('marks itself so tapping a chip leaves the composer and phone keyboard alone', () => {
+		const { container } = show([chip('a')]);
+		expect(container.querySelector('.chip-tray')?.hasAttribute('data-keeps-composer')).toBe(true);
+	});
+
 	it('carries the session its chips belong to for the flight recorder', () => {
 		const { container } = show([chip('a'), chip('b', { state: 'failed' }), chip('c'), chip('d')], { errors: { c: 'No connection.' }, busy: { d: 'start' } });
 		const tray = container.querySelector<HTMLElement>('[data-ui-state="task-chips"]')!;

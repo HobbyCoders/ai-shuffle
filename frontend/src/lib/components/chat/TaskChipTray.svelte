@@ -20,6 +20,8 @@
 		errors?: Record<string, string>;
 		/** The list has been read for this chat, so a chip that appears now is new. */
 		loaded?: boolean;
+		/** Something else is waiting beside the composer (an open question), so the chips take less room. */
+		crowded?: boolean;
 		hrefFor: (sessionId: string) => string;
 		onStart: (chip: TaskChip) => void;
 		onDismiss: (chip: TaskChip) => void;
@@ -29,7 +31,7 @@
 		onOpenChat: (event: MouseEvent, sessionId: string, chip?: TaskChip) => void;
 	}
 
-	let { sessionId, chips, source = null, busy = {}, errors = {}, loaded = true, hrefFor, onStart, onDismiss, onClear, onOpenChat }: Props = $props();
+	let { sessionId, chips, source = null, busy = {}, errors = {}, loaded = true, crowded = false, hrefFor, onStart, onDismiss, onClear, onOpenChat }: Props = $props();
 
 	const VISIBLE = 3;
 	let showAll = $state(false);
@@ -122,7 +124,9 @@
 	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 	<section
 		class="chip-tray"
+		class:crowded
 		aria-label="Suggested tasks"
+		data-keeps-composer
 		data-ui-state="task-chips"
 		data-ui-chip-session={uiSessionTag(sessionId)}
 		data-ui-chips={chips.map((chip) => (isStarting(chip) ? 'starting' : errors[chip.id] ? 'not-sent' : chip.state)).join(',')}
@@ -275,13 +279,13 @@
 	}
 
 	/* An open question is the owner's next job: the chips scroll so the chat keeps a few lines. */
-	:global(.input-slot:has(.question-tray-dock:not([hidden]))) ul {
+	.crowded ul {
 		max-height: min(18dvh, 8rem);
 	}
 
 	/* One scrolling row on a short screen: a small phone with a question open, or any phone on its side. */
 	@media (max-height: 700px) {
-		:global(.input-slot:has(.question-tray-dock:not([hidden]))) ul {
+		.crowded ul {
 			max-height: 4rem;
 		}
 	}

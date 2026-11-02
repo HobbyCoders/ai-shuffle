@@ -578,6 +578,7 @@
 		<div class="input-slot" bind:clientHeight={composerHeight} class:composer-overflow={surfaceHeight > 0 && composerHeight > surfaceHeight} class:input-wrapper={!showEmptyHero} class:empty-input-layout={showEmptyHero}>
 			<TaskChipTray
 				sessionId={chipSession}
+				crowded={openQuestions.length > 0 || (!!PromptDock && showPermissionModal)}
 				chips={chipView?.chips ?? []}
 				source={chipView?.source ?? null}
 				busy={chipView?.busy ?? {}}

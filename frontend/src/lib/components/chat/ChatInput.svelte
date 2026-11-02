@@ -849,6 +849,9 @@
 
 	function handleDocumentPointerDown(event: PointerEvent) {
 		if (!compact || !isMobileComposerViewport()) return;
+		// A surface that acts beside the composer: tapping it neither closes the
+		// keyboard nor opens or collapses the composer under the finger.
+		if (event.target instanceof Element && event.target.closest('[data-keeps-composer]')) return;
 		if (isComposerOwnedNode(event.target)) {
 			armExpandPointerGuard();
 			composerInteractionOwned = isComposerActionNode(event.target);

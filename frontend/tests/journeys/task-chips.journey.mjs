@@ -321,7 +321,8 @@ const CROWDED = {
 	async act({ page, mark, variant }) {
 		await typeAndSend(page, `crowd it ${scriptTag(variant, 'tool-suggest-task-crowded')}`);
 		await mark('sent');
-		const questions = page.getByRole('region', { name: 'Questions for you' });
+		// The mobile shell asks in its own dock.
+		const questions = page.getByRole('region', { name: inMobileShell(variant) ? 'Waiting on you' : 'Questions for you' });
 		await questions.waitFor({ timeout: 30_000 });
 		await waitChips(page, 'pending,pending,pending,pending');
 		await waitTurnSettled(page);
@@ -337,7 +338,7 @@ const CROWDED = {
 				sideways: document.documentElement.scrollWidth - innerWidth,
 				leaving: [...document.querySelectorAll('[data-ui-state="task-chips"] *')].filter((el) => box(el).right > innerWidth + 0.5).length,
 				trayBottom: box(document.querySelector('[data-ui-state="task-chips"]')).bottom,
-				questionTop: box(document.querySelector('.question-tray')).top,
+				questionTop: box(document.querySelector('section[aria-label="Questions for you"], section[aria-label="Waiting on you"]')).top,
 				composerTop: box(composer).top,
 				composerBottom: box(composer).bottom,
 				height: innerHeight
