@@ -612,6 +612,26 @@ async def test_replaced_client_mid_turn_still_counts_as_alive_and_stays_pooled()
     assert is_subprocess_alive(state) is True
 
 
+async def test_gate_asks_nothing_of_a_missing_or_mid_turn_client():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.core.session_pool import retire_if_replaced
+
+    check = AsyncMock(return_value=True)
+    client = SimpleNamespace(
+        is_streaming=True, adapter=SimpleNamespace(replaced_by_another_engine=check),
+    )
+    held = {"mid-turn": client}
+    pool = SimpleNamespace(get=held.get, remove=AsyncMock())
+
+    await retire_if_replaced(pool, "no-client")
+    await retire_if_replaced(pool, "mid-turn")
+
+    check.assert_not_awaited()
+    pool.remove.assert_not_awaited()
+
+
 async def test_turn_starting_during_the_check_keeps_its_client():
     from types import SimpleNamespace
 
