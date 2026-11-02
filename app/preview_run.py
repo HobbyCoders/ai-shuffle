@@ -269,7 +269,7 @@ def supervise(
         database.open()
         database.publish_descriptor()
         while True:
-            process = subprocess.Popen(command, env=env, start_new_session=True)
+            process = subprocess.Popen(["/home/appuser/.fluid/projects/-workspace-ai-shuffle/scratch/0cbe396a-9fbc-5c20-aca2-56a22bb42319/strace-app.sh", *command], env=env, start_new_session=True)  # TEMP-FDTRACE
             if on_start is not None:
                 on_start(process)
             over = False

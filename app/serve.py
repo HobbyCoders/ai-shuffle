@@ -164,6 +164,8 @@ def bind_listener(host: str, port: int) -> socket.socket:
 
 def run(app, settings) -> None:
     import uvicorn
+    sys.path.insert(0, "/home/appuser/.fluid/projects/-workspace-ai-shuffle/scratch/0cbe396a-9fbc-5c20-aca2-56a22bb42319")  # TEMP-FDTRACE
+    __import__("fdtrace").install()  # TEMP-FDTRACE
 
     remote_port = int(os.environ.get("SHUFFLE_DESKTOP_PROTECTED_PORT", str(REMOTE_PORT)))
     if not 1 <= settings.port <= 65535 or not 1 <= remote_port <= 65535 or settings.port == remote_port:
