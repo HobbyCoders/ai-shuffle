@@ -261,6 +261,14 @@ const scratchCase = {
 		}
 		let copies = await scratchCopies(status, token);
 		expect(JSON.stringify(copies) === '[1,0,0]', `one scratch block per CLI segment, got ${JSON.stringify(copies)}`);
+		// Manual compaction correctly skips a tiny echo-only conversation. As
+		// in the existing manual-compaction cases, create reclaimable output
+		// through the real tool path before asking it to fold this segment.
+		for (let i = 0; i < 2; i++) {
+			await mark(`grow scratch segment ${i}`);
+			await typeAndSend(page, `read scratch fixture ${i} [script:bulk-read]`);
+			await waitTurnSettled(page, { text: READ_REPLY, messagesAtLeast: 8 + 2 * i });
+		}
 		await mark('compact scratch segment');
 		await typeAndSend(page, '/compact');
 		await waitTurnSettled(page, { text: 'Context was compacted manually' });
