@@ -242,6 +242,22 @@ async def test_write_refused_mid_turn_fails_the_turn_and_stops_it():
     adapter._engine.submit.assert_awaited_once()
 
 
+async def test_turn_stops_at_the_first_event_after_a_refused_write():
+    """It does not run on to its end, spending tools and tokens on unsaved work."""
+
+    def more():
+        raise AssertionError("the turn ran on after losing the session")
+
+    class Events(list):
+        def __iter__(self):
+            yield _delta_event()
+            more()
+
+    adapter = await _adapter_streaming(_Store(lost=True), Events())
+    with pytest.raises(SessionReplacedError):
+        await _drain(adapter)
+
+
 async def test_takeover_seen_only_at_the_end_fails_the_turn_instead_of_success():
     """The last writes may not have been refused yet: this asks the database."""
     from app.core.provider.events import ResultMessage
@@ -399,3 +415,44 @@ async def test_headless_resume_is_refused_before_it_stores_the_prompt(monkeypatc
 
     database.add_session_message.assert_not_called()
     make_adapter.assert_not_called()
+
+
+async def test_headless_turn_holds_the_session_until_it_is_over(monkeypatch):
+    """Nothing in the pool can say it is running, so its lease has to."""
+    from app.core import query_engine as qe
+
+    outcome: dict = {}
+
+    class Headless(_Adapter):
+        async def send_query(self, prompt):
+            try:
+                await _Adapter().connect(_options())
+            except SessionBusyError:
+                outcome["refused"] = True
+
+        async def receive_events(self):
+            return
+            yield  # pragma: no cover
+
+    database = MagicMock(
+        get_session=MagicMock(return_value={"id": "app-id", "sdk_session_id": SID}),
+    )
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(qe, "database", database)
+    monkeypatch.setattr(qe, "get_profile", lambda _id: {"id": "p", "name": "P"})
+    monkeypatch.setattr(qe, "reconcile_memory", _noop)
+    monkeypatch.setattr(qe, "push_memory", _noop)
+    monkeypatch.setattr(qe, "_persist_turn_results", MagicMock(side_effect=_noop))
+    adapter = Headless()
+    adapter.connect_with_sdk_options = adapter.connect
+    options = _options(cwd=None)
+
+    with patch("app.core.provider.factory.make_adapter", return_value=adapter), patch(
+        "app.core.sdk_options.build_options_from_profile", return_value=(options, None),
+    ):
+        await qe.execute_query("hello", "p", session_id="app-id")
+
+    assert outcome == {"refused": True}
+    await _Adapter().connect(_options())  # released with its disconnect
