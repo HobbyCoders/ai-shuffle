@@ -67,6 +67,47 @@ async def test_producing_turn_waits_before_lease_and_recovers(
                 await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.asyncio
+async def test_producing_turn_runs_beside_a_checkout_that_never_returns(
+    mock_db: object, retaining_pool: tuple, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
+    """#1020: one retained connection held every new turn in Queued for good."""
+    pool, _ = retaining_pool
+    pool._reserved = 2
+    monkeypatch.setattr(base, "_close_connection", lambda conn: None)
+    retained = pool.getconn()
+    pool._held_since[id(retained)] -= base._RETAINED_HOLD_SECONDS
+    gate = start_admission.StartAdmission()
+    monkeypatch.setattr(start_admission, "admission", gate)
+    with patch.multiple(
+        start_admission.settings, db_start_sustain_seconds=0.0,
+        db_start_recovery_seconds=0.0, db_start_interval_seconds=0.02,
+        db_start_poll_seconds=0.01, db_start_wait_seconds=2.0,
+    ), _runtime_env(pump=make_pump([{"type": "done"}])):
+        turn = turns_db.enqueue_turn("retained-worker", "worker", prompt="hello")
+        try:
+            result = await asyncio.wait_for(session_runtime.SessionRuntime(turn).execute(), 3)
+            assert result == "completed"
+            assert turns_db.get_turn(turn["id"])["state"] == "completed"
+            stats = start_admission.snapshot()
+            assert stats["oldest"] == 0 and stats["utilization"] > 0
+        finally:
+            pool.putconn(retained)
+
+
+def test_only_writes_that_can_still_finish_count_as_event_pressure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A durable event write that never returns stops counting the same way."""
+    now = time.monotonic()
+    active = {"stuck": now - base._RETAINED_HOLD_SECONDS - 1}
+    monkeypatch.setattr(base, "_event_active", active)
+    assert start_admission.snapshot()["oldest"] == 0
+    assert base.event_pressure_stats()["oldest_write_seconds"] >= base._RETAINED_HOLD_SECONDS
+    active["young"] = now - 5
+    assert 5 <= start_admission.snapshot()["oldest"] < 6
+
+
 @pytest.fixture
 def quick_gate(monkeypatch: pytest.MonkeyPatch) -> tuple:
     stats = {"utilization": 1.0, "waiting": 1, "oldest": 10.0, "latency": 0.0}

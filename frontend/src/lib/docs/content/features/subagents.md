@@ -54,6 +54,13 @@ Administrators can tune `DB_START_UTILIZATION` (0.85),
 `DB_START_WAIT_SECONDS` (300), then restart the candidate worker. These do not
 increase pool capacity or allow starts to borrow lease-reserved connections.
 
+A checkout older than 60 seconds stops counting as a stall. Every ordinary
+database operation has ended or been disconnected by then (30-second statement
+limit plus 30-second commit deadline), so an older one is a maintenance job or a
+borrower that will never return, and queueing does not relieve it. New turns start
+again, its slot still counts toward utilization, and the worker logs one warning
+naming where that thread is.
+
 ## Checkout setup and review commits
 
 Local coding workers receive a receipt with their actual base commit, an existing Python interpreter (the project's `.venv`/`venv`, otherwise the worker interpreter), and ready-to-run `Monitor` inputs for `npm ci` in each checkout-local package folder with a lockfile. SvelteKit packages also run `npx svelte-kit sync`. Dependencies and credentials are never copied or linked. An interpreter's presence is not proof that every test dependency is installed; do not install packages into the parent's environment.

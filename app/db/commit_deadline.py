@@ -3,15 +3,25 @@
 COMMIT can wait in WAL/fsync where statement_timeout is not a reliable bound.
 One watchdog disconnects overdue sockets (never retries an uncertain commit).
 It never calls connection.cancel()/close(), which can themselves block in libpq.
+
+Descriptor numbers are not identities. A stray close elsewhere in the process can
+free either number the deadline relies on, and the next open reuses it. So every
+use re-checks the open file behind the number: a stranger on that number is never
+shut down or closed. Shutting one down breaks an unrelated socket, and closing one
+is itself the stray close that wedges the next connection (#1020).
 """
 from __future__ import annotations
 
 import errno
 import logging
+import os
 import socket
+import sys
 import threading
 import time
+import traceback
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Iterator
 
 import psycopg2.extensions
@@ -23,7 +33,36 @@ _close_failure_log: tuple[float | None, int] = (None, 0)
 _close_failure_lock = threading.Lock()
 
 
-def _close_duplicate(sock: socket.socket) -> int | None:
+def _identity(fd: int) -> tuple[int, int] | None:
+    """The open file behind a number now; None if none, or on Windows sockets."""
+    try:
+        info = os.fstat(fd)
+    except OSError:
+        return None
+    return info.st_dev, info.st_ino
+
+
+def owner_frames(thread_id: int) -> str:
+    """Where a thread is, as file:line:function only: no locals, source text or SQL."""
+    frame = sys._current_frames().get(thread_id)
+    if frame is None:
+        return "thread-gone"
+    stack = traceback.StackSummary.extract(
+        traceback.walk_stack(frame), limit=12, lookup_lines=False)
+    return " <- ".join(f"{item.filename}:{item.lineno}:{item.name}" for item in stack)
+
+
+@dataclass
+class _Armed:
+    deadline: float
+    fd: int
+    # None where the platform cannot say (Windows): the numbers are then trusted.
+    identity: tuple[int, int] | None
+    thread_id: int
+    thread_name: str
+
+
+def _close_duplicate(sock: socket.socket, identity: tuple[int, int] | None) -> int | None:
     """Close the private duplicate, returning the errno if that failed.
 
     Nothing about the commit depends on this descriptor once the wait is over:
@@ -32,7 +71,13 @@ def _close_duplicate(sock: socket.socket) -> int | None:
     commit into a failure, hide a real commit error, or end the watchdog's thread
     and with it every later deadline. CPython forgets the descriptor before calling
     close(2), so a failure cannot leak it or close it twice.
+
+    If the number now names another open file, the duplicate was already closed
+    for us and this number is someone else's: forget it without closing it.
     """
+    if identity is not None and _identity(sock.fileno()) != identity:
+        sock.detach()
+        return errno.EBADF
     try:
         sock.close()
     except OSError as exc:
@@ -72,10 +117,43 @@ def _report_close_failure(code: int) -> None:
         pass
 
 
+def _shutdown_quietly(sock: socket.socket) -> str:
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError as exc:  # Already disconnected by PostgreSQL/the network.
+        return errno.errorcode.get(exc.errno or 0, "failed")
+    return "ok"
+
+
+def _disconnect(sock: socket.socket, armed: _Armed) -> tuple[str, str]:
+    """Shut down the armed transport through whichever number still names it.
+
+    Returns the shutdown result and what libpq's own number names now. When that
+    number was replaced libpq polls a stranger: shutting down the real transport
+    still ends the server's transaction, but nothing can wake that poll, so the
+    borrower keeps its checkout until the stranger's peer closes (see
+    ``_RETAINED_HOLD_SECONDS`` in base.py for what limits the damage).
+    """
+    if armed.identity is None:
+        return _shutdown_quietly(sock), "unknown"
+    libpq_intact = _identity(armed.fd) == armed.identity
+    transport = "intact" if libpq_intact else "replaced"
+    if _identity(sock.fileno()) == armed.identity:
+        return _shutdown_quietly(sock), transport
+    if not libpq_intact:
+        return "unreachable", transport
+    # The duplicate was lost, not the transport: without this the commit has no bound.
+    try:
+        with socket.socket(fileno=socket.dup(armed.fd)) as fresh:
+            return _shutdown_quietly(fresh), transport
+    except OSError as exc:
+        return errno.errorcode.get(exc.errno or 0, "failed"), transport
+
+
 class _CommitWatchdog:
     def __init__(self) -> None:
         self._condition = threading.Condition()
-        self._pending: dict[socket.socket, float] = {}
+        self._pending: dict[socket.socket, _Armed] = {}
         self._expired: set[socket.socket] = set()
         self._started = False
 
@@ -93,8 +171,10 @@ class _CommitWatchdog:
         except BaseException:
             socket.close(duplicate_fd)
             raise
+        thread = threading.current_thread()
+        armed = _Armed(time.monotonic() + seconds, fd, _identity(fd), thread.ident or 0, thread.name)
         with self._condition:
-            self._pending[duplicate] = time.monotonic() + seconds
+            self._pending[duplicate] = armed
             if not self._started:
                 threading.Thread(target=self._run, name="db-commit-deadline", daemon=True).start()
                 self._started = True
@@ -105,10 +185,11 @@ class _CommitWatchdog:
         # Serialize with shutdown: once disarmed, a returned pooled connection
         # cannot be disconnected by its previous borrower's deadline.
         with self._condition:
-            self._pending.pop(sock, None)
+            armed = self._pending.pop(sock, None)
             expired = sock in self._expired
             self._expired.discard(sock)
-            close_failure = _close_duplicate(sock)
+            # An expired duplicate was closed or forgotten by the watchdog.
+            close_failure = None if armed is None else _close_duplicate(sock, armed.identity)
             self._condition.notify()
         if close_failure is not None:
             _report_close_failure(close_failure)
@@ -116,27 +197,40 @@ class _CommitWatchdog:
 
     def _run(self) -> None:
         while True:
-            close_failure = None
             with self._condition:
                 if not self._pending:
                     self._condition.wait()
                     continue
-                deadline = min(self._pending.values())
-                sock = next(s for s, value in self._pending.items() if value == deadline)
-                remaining = deadline - time.monotonic()
+                sock, armed = min(self._pending.items(), key=lambda item: item[1].deadline)
+                remaining = armed.deadline - time.monotonic()
                 if remaining > 0:
                     self._condition.wait(remaining)
                     continue
                 self._pending.pop(sock)
                 self._expired.add(sock)
-                try:
-                    sock.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass  # Already disconnected by PostgreSQL/the network.
-                finally:
-                    close_failure = _close_duplicate(sock)
+                shutdown, transport = _disconnect(sock, armed)
+                close_failure = _close_duplicate(sock, armed.identity)
             if close_failure is not None:
                 _report_close_failure(close_failure)
+            # Otherwise the borrower wakes now and reports the deadline itself.
+            if shutdown != "ok" or transport == "replaced":
+                self._report_expiry(armed, shutdown, transport, close_failure)
+
+    @staticmethod
+    def _report_expiry(
+        armed: _Armed, shutdown: str, transport: str, close_failure: int | None,
+    ) -> None:
+        """A borrower this deadline could not wake, named while it is stuck. Never raises."""
+        try:
+            _warn_best_effort(
+                "Commit deadline expired: shutdown=%s transport=%s duplicate_close=%s "
+                "thread=%s frames=%s",
+                shutdown, transport,
+                "ok" if close_failure is None else errno.errorcode.get(close_failure, close_failure),
+                armed.thread_name, owner_frames(armed.thread_id),
+            )
+        except Exception:  # noqa: BLE001 - a diagnostic never stops later deadlines
+            pass
 
 
 _watchdog = _CommitWatchdog()

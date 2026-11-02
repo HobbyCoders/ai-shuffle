@@ -24,7 +24,7 @@ import psycopg2.extras
 import psycopg2.extensions
 
 from app.core.config import settings
-from app.db.commit_deadline import bounded_commit
+from app.db.commit_deadline import bounded_commit, owner_frames
 
 logger = logging.getLogger("app.db")
 
@@ -119,6 +119,10 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         # Only live physical connections and active checkouts; bounded by maxconn.
         self._physical = set()
         self._held_since = {}
+        # Who holds each checkout, and which were already named as retained.
+        self._held_by = {}
+        self._retained_reported = set()
+        self._backend_pids = {}
         # When each connection last became idle in the pool. Read on checkout to
         # decide whether the socket is old enough to be worth probing; see
         # _get_pg_connection. Entries are dropped when a connection is discarded.
@@ -208,14 +212,26 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
                 )
 
     def pressure_stats(self):
+        now = time.monotonic()
         with self._pressure_lock:
             stats = dict(self._pressure)
             stats["ordinary_capacity"] = self.maxconn - self._reserved
             stats["oldest_hold_seconds"] = (
-                time.monotonic() - min(self._held_since.values())
-                if self._held_since else 0.0
+                now - min(self._held_since.values()) if self._held_since else 0.0
             )
-            return stats
+            live = _live_ages(self._held_since.values(), now)
+            stats["oldest_live_hold_seconds"] = max(live, default=0.0)
+            stats["retained_holds"] = len(self._held_since) - len(live)
+            due = []
+            if stats["retained_holds"]:
+                due = [(key, now - started, self._held_by.get(key), self._backend_pids.get(key))
+                       for key, started in self._held_since.items()
+                       if now - started >= _RETAINED_HOLD_SECONDS
+                       and key not in self._retained_reported]
+                self._retained_reported.update(item[0] for item in due)
+        for _, age, owner, backend_pid in due:
+            _report_retained_hold(age, owner, backend_pid)
+        return stats
 
     def _duration(self, prefix, elapsed):
         # Caller holds _pressure_lock.
@@ -247,6 +263,9 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
             self._physical.add(id(conn))
             self._last_returned[id(conn)] = time.monotonic()
             self._pressure["connections_opened"] += 1
+            # Cached while libpq is idle: reading it later can wait on a busy connection.
+            self._backend_pids[id(conn)] = getattr(
+                getattr(conn, "info", None), "backend_pid", None)
         return conn
 
     def _getconn(self, key=None):
@@ -260,7 +279,10 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
             raise psycopg2.pool.PoolError("connection pool exhausted")
         conn = super()._getconn(key)
         with self._pressure_lock:
-            self._held_since.setdefault(id(conn), time.monotonic())
+            if id(conn) not in self._held_since:
+                self._held_since[id(conn)] = time.monotonic()
+                thread = threading.current_thread()
+                self._held_by[id(conn)] = (thread.ident, thread.name)
         return conn
 
     def idle_seconds(self, conn) -> float:
@@ -284,11 +306,14 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         # Called under the driver's lock, including the force-reclaim path.
         with self._pressure_lock:
             started = self._held_since.pop(id(conn), None)
+            self._held_by.pop(id(conn), None)
+            self._retained_reported.discard(id(conn))
             if started is not None:
                 self._pressure["holds"] += 1
                 self._duration("hold", time.monotonic() - started)
             if discarded:
                 self._last_returned.pop(id(conn), None)
+                self._backend_pids.pop(id(conn), None)
                 if id(conn) in self._physical:
                     self._physical.remove(id(conn))
                     self._pressure["connections_discarded"] += 1
@@ -447,6 +472,33 @@ class _PgDictConnection:
 # =============================================================================
 # Connection management
 # =============================================================================
+
+# No ordinary checkout can still be working past this: the server's 30 s
+# statement_timeout plus the 30 s commit deadline. An older checkout is a
+# maintenance job or a borrower that will never return, for example one polling a
+# descriptor number that now names someone else's socket, which nothing can wake.
+# Either way waiting does not relieve it, so it stops counting as pressure.
+_RETAINED_HOLD_SECONDS = 60.0
+
+
+def _live_ages(started_times, now: float) -> list:
+    """Ages of work that can still be pressure; see _RETAINED_HOLD_SECONDS."""
+    ages = (now - started for started in started_times)
+    return [age for age in ages if age < _RETAINED_HOLD_SECONDS]
+
+
+def _report_retained_hold(age: float, owner, backend_pid) -> None:
+    """Name a checkout once, past the point it can return. A log sink cannot stop admission."""
+    try:
+        thread_id, thread_name = owner or (0, "unknown")
+        logger.warning(
+            "Database connection retained %.1fs, no longer counted as pressure: "
+            "thread=%s backend_pid=%s frames=%s",
+            age, thread_name, backend_pid, owner_frames(thread_id),
+        )
+    except Exception:  # noqa: BLE001 - a diagnostic never decides whether a turn starts
+        pass
+
 
 # Application callers wait in FIFO order, bounded by the existing deadline.
 _POOL_ACQUIRE_MAX_WAIT_SECONDS = 2.0
@@ -639,6 +691,8 @@ def pressure_stats() -> Optional[Dict[str, Any]]:
     check — a rising count means the server is dropping idle connections
     (restart, failover, an idle NAT timeout shorter than the keepalive).
     Hold durations include return/rollback cleanup, but not acquisition waits.
+    ``oldest_hold_seconds`` is the true age; ``oldest_live_hold_seconds`` leaves
+    out ``retained_holds``, checkouts past ``_RETAINED_HOLD_SECONDS``.
     Snapshots are copies; a new pool starts fresh and shutdown returns None.
     """
     pool = _pg_pool
@@ -731,6 +785,7 @@ def event_pressure_stats() -> Dict[str, float]:
             "active": len(_event_active),
             "oldest_wait_seconds": now - min(_event_waiting.values(), default=now),
             "oldest_write_seconds": now - min(_event_active.values(), default=now),
+            "oldest_live_write_seconds": max(_live_ages(_event_active.values(), now), default=0.0),
         }
 
 
