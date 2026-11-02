@@ -61,9 +61,13 @@ class NotificationPermissionSmokeTest {
                 // A native app rationale must not satisfy the system-dialog assertion.
                 val system = root.packageName?.toString()?.endsWith(".permissioncontroller") == true
                 if (permission && !system) return@await false
-                val nodes = root.findAccessibilityNodeInfosByText(text)
+                // Android transforms permission-button labels (including all caps).
+                // Match the controller's semantic resource ID, not rendered English.
+                val nodes = if (permission) root.findAccessibilityNodeInfosByViewId(
+                    "${root.packageName}:id/permission_${if (text == "Allow") "allow" else "deny"}_button")
+                    else root.findAccessibilityNodeInfosByText(text)
                 val found = nodes.firstOrNull { it.isClickable && it.isVisibleToUser &&
-                    (it.text?.toString() == text || it.contentDescription?.toString() == text) }
+                    (permission || it.text?.toString() == text || it.contentDescription?.toString() == text) }
                 target = found
                 nodes.filter { it !== found }.forEach { it.recycle() }
                 found != null
@@ -109,6 +113,9 @@ class NotificationPermissionSmokeTest {
         assertEquals("The runner must not pre-grant notifications", PackageManager.PERMISSION_DENIED,
             context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS))
         assertFalse(NotificationManagerCompat.from(context).areNotificationsEnabled())
+        automation.serviceInfo = automation.serviceInfo.apply {
+            flags = flags or android.accessibilityservice.AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
+        }
         context.getSharedPreferences("needs_you_permission", 0).edit().clear().commit()
         val server = Server.create("Notification fixture", "https://notification-fixture.example", "fixture-key")
         val sessions = AtomicInteger()

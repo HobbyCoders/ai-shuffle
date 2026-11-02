@@ -257,6 +257,7 @@ jobs:
       - name: Check emulator readiness and instrumentation result parsers
         run: |
           python3 ci/test-emulator-readiness.py
+          python3 ci/test-ci-webview.py
           python3 ci/test-instrumentation-parser.py
           python3 ci/test-ui-runner.py
       - name: Enable emulator acceleration

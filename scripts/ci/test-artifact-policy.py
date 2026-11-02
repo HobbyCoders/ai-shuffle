@@ -149,9 +149,18 @@ class ArtifactPolicyTests(unittest.TestCase):
         jobs = workflow("android.yml")["jobs"]
         build = jobs["build"]
         exported = {s["with"]["name"]: s for s in uploads(build)}
-        self.assertEqual(set(exported), {"android-instrumentation-apks", "android-download"})
-        self.assertEqual(exported["android-instrumentation-apks"]["with"]["retention-days"], "1")
-        self.assertNotIn("if", exported["android-instrumentation-apks"])
+        self.assertEqual(set(exported), {"android-instrumentation-apks", "android-notification-smoke-apks", "android-download"})
+        for name in ("android-instrumentation-apks", "android-notification-smoke-apks"):
+            self.assertEqual(exported[name]["with"]["retention-days"], "1")
+            self.assertNotIn("if", exported[name])
+            self.assertEqual(exported[name]["with"]["path"].splitlines(), [
+                "android/app/build/outputs/apk/debug/app-debug.apk",
+                "android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk",
+            ])
+        smoke_build = next(s for s in build["steps"] if s.get("name") == "Build push-enabled notification permission smoke APKs")
+        self.assertIn("-PnotificationSmoke=true assembleDebug assembleDebugAndroidTest", smoke_build["run"])
+        self.assertLess(build["steps"].index(exported["android-instrumentation-apks"]), build["steps"].index(smoke_build))
+        self.assertLess(build["steps"].index(smoke_build), build["steps"].index(exported["android-notification-smoke-apks"]))
         for name in ["Decode release keystore", "Build release APK", "Verify APK is signed with the release key", "Prepare public APK download", "Upload public download files"]:
             step = next(s for s in build["steps"] if s.get("name") == name)
             self.assertEqual(step["if"], jobs["publish"]["if"])
