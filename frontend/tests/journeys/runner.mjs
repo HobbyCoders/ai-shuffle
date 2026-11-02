@@ -324,7 +324,6 @@ export async function runJourney(spec) {
 						writeFileSync(marker, 'first attempt failed');
 						throw new Error('CI retry proof: first-attempt-only failure');
 					}
-					if (item.id === 'fail-open@phone-fast') throw new Error('CI retry proof: always-failing case');
 				}
 				result.ok = result.anomalies.length === 0;
 				if (process.env.JOURNEY_SHEETS === '1') {
