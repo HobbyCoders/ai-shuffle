@@ -99,6 +99,11 @@ from app.core.provider.fluid_credentials import (
     ProviderCredentialError,
     resolve_provider_credentials,
 )
+from app.core.guardrail_prompt import (
+    GUARDRAIL_NO_APPROVER_REASON,
+    GUARDRAIL_TOOL,
+    guardrail_blocked_note,
+)
 from app.core.provider.protocol import ProviderAdapter
 from app.core.provider.delegated_saved_rules import SAVED_RULE_DENIAL
 from app.core.session_modes import (
@@ -2683,6 +2688,15 @@ class HarnessAdapter(ProviderAdapter):
                     continue
                 if (
                     isinstance(translated, PermissionRequestEvent)
+                    and translated.name == GUARDRAIL_TOOL
+                ):
+                    # A safety-check prompt with no one to ask: no mode
+                    # approves switching models on its own, so the turn ends
+                    # with the blocked note instead of waiting out a timeout.
+                    await self._deny_guardrail_without_approver(translated)
+                    continue
+                if (
+                    isinstance(translated, PermissionRequestEvent)
                     and self._is_delegated
                     and getattr(translated, "risk", None) != "question"
                 ):
@@ -3446,6 +3460,22 @@ class HarnessAdapter(ProviderAdapter):
                 ev.tool_use_id, exc_info=True,
             )
 
+    async def _deny_guardrail_without_approver(self, ev: PermissionRequestEvent) -> None:
+        """Answer a ``ModelGuardrail`` prompt no approver can see: Stop."""
+        logger.info(
+            "[HarnessAdapter] no approver for the safety-check prompt %s; stopping the turn",
+            ev.tool_use_id,
+        )
+        try:
+            await self.respond_to_permission(
+                ev.tool_use_id, False, message=GUARDRAIL_NO_APPROVER_REASON,
+            )
+        except Exception:
+            logger.warning(
+                "[HarnessAdapter] failed to submit the safety-check decision for %s",
+                ev.tool_use_id, exc_info=True,
+            )
+
     async def _allow_without_approver(self, ev: PermissionRequestEvent) -> None:
         """Approve a native prompt the session's mode approves on its own —
         unless a saved Deny rule names the call. The same order the watched
@@ -4083,6 +4113,43 @@ class HarnessAdapter(ProviderAdapter):
                     },
                 )
             ]
+
+        if cls == "ModelServed":
+            # The model the provider says answered (fluid >= the guardrail
+            # contract). Later AssistantMessages carry it, so the main lane's
+            # model_info note shows the served id, not the requested one;
+            # query_engine turns the system message into that note and, on a
+            # reroute, a persisted ``model_rerouted`` card.
+            served = getattr(event, "served_model", None)
+            if not served:
+                return []
+            self._current_model = served
+            return [SystemMessage(subtype="model_served", data={
+                "requested_model": getattr(event, "requested_model", None),
+                "served_model": served,
+                "provider": getattr(event, "provider", None),
+                "rerouted": bool(getattr(event, "rerouted", False)),
+                "reason": getattr(event, "reason", None),
+                "category": getattr(event, "category", None),
+            })]
+
+        if cls == "GuardrailBlocked":
+            # A provider safety check declined a call and the person (or the
+            # absence of one) decided: a persisted card either way.
+            return [SystemMessage(
+                subtype="guardrail_blocked",
+                data=guardrail_blocked_note(event),
+            )]
+
+        if cls == "AttemptDiscarded":
+            # The model call that just streamed is not part of the transcript
+            # (a safety check declined it). A persisted note with no card:
+            # the transcript reducer takes that call's text, thinking and
+            # tool cards out, live and on every replay. Usage is untouched.
+            return [SystemMessage(
+                subtype="attempt_discarded",
+                data={"reason": getattr(event, "reason", None) or "guardrail"},
+            )]
 
         if cls == "BlockStart":
             self._block_types[event.index] = event.block_type

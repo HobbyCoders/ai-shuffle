@@ -394,3 +394,33 @@ describe('private access', () => {
 		expect(screen.queryByRole('region', { name: 'Waiting on you' })).toBeNull();
 	});
 });
+
+describe('provider safety check', () => {
+	const guardrail = {
+		request_id: 'g1', tool_name: 'ModelGuardrail', remember_scopes: ALL_SCOPES,
+		tool_input: {
+			guardrail: true, provider: 'openai', provider_label: 'OpenAI', category: 'content_filter',
+			explanation: 'The reply was filtered.', requested_model: 'gpt-5.5', suggested_model: 'gpt-5.2'
+		}
+	};
+
+	it('docks the safety-check card with Continue / Stop and no rule choice or command', async () => {
+		const { onPermission } = renderDock({ permissions: [guardrail] });
+		const card = screen.getByTestId('guardrail-card');
+		expect(card.textContent).toMatch(/OpenAI's safety check stopped this request/);
+		expect(screen.getByText('Flagged as content policy')).toBeTruthy();
+		expect(screen.getByText('The reply was filtered.')).toBeTruthy();
+		expect(screen.queryByRole('radiogroup')).toBeNull();
+		expect(document.querySelector('.cmd')).toBeNull();
+		expect(screen.getByRole('button', { name: /^Stop/ })).toBeTruthy();
+		await slide(160);
+		expect(onPermission).toHaveBeenCalledExactlyOnceWith({ request_id: 'g1', decision: 'allow', remember: 'none' });
+		expect((await screen.findByRole('status')).textContent).toMatch(/Continuing on /);
+	});
+
+	it('Stop declines it once', async () => {
+		const { onPermission } = renderDock({ permissions: [guardrail] });
+		await slide(-160);
+		expect(onPermission).toHaveBeenCalledExactlyOnceWith({ request_id: 'g1', decision: 'deny', remember: 'none' });
+	});
+});

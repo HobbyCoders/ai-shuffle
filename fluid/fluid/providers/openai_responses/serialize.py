@@ -511,6 +511,11 @@ class ResponsesStreamNormalizer:
         reason = _incomplete_reason(response)
         if reason is not None:
             payload["native_stop_reason"] = f"incomplete:{reason}"
+        # The model that actually answered. A cyber safety check can serve a
+        # different one than the request named (Codex compares the two).
+        served = response.get("model")
+        if isinstance(served, str) and served:
+            payload["served_model"] = served
         return [StreamChunk("usage", payload), StreamChunk("message_stop", {})]
 
     def _open(

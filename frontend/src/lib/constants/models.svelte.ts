@@ -724,20 +724,28 @@ export function getProviderContextWindow(
 /**
  * Live-reroute predicate for the composer's model pill.
  *
- * A "reroute" means the SDK's MAIN lane is running a DIFFERENT Claude family
- * than was requested for that turn. It compares at FAMILY level (an exact-id
- * check false-flags dated snapshot ids). When `providerId` is non-null the
- * session targets a non-Anthropic gateway (e.g. `openai/gpt-5.6`), which never
- * maps to a Claude family and would otherwise false-positive — so a provider
- * session is NEVER considered rerouted (R1, deterministic guard).
+ * The backend's `model_info.rerouted` (docs/internal/guardrail-contract.md)
+ * is the answer whenever it is present: the backend compares the served
+ * model with the requested one for every provider (Claude, OpenAI, provider
+ * rows), so it flags provider sessions too. Even then a note without both
+ * models never flags: there is nothing to show.
+ *
+ * Without the flag (an older backend, or a note the provider sent no served
+ * model for) the old heuristic applies: a "reroute" means the MAIN lane is
+ * running a DIFFERENT Claude family than was requested for that turn,
+ * compared at FAMILY level (an exact-id check false-flags dated snapshot ids).
+ * A non-null `providerId` (a non-Anthropic gateway, whose ids never map to a
+ * Claude family) is then NEVER considered rerouted (R1, deterministic guard).
  */
 export function isReroute(
 	actualModel: string | null | undefined,
 	requestedModel: string | null | undefined,
-	providerId: string | null | undefined
+	providerId: string | null | undefined,
+	rerouted?: boolean | null
 ): boolean {
+	if (!actualModel || !requestedModel) return false;
+	if (typeof rerouted === 'boolean') return rerouted;
 	if (providerId) return false;
-	if (actualModel == null || requestedModel == null) return false;
 	const actualFamily = inferModelFamily(actualModel);
 	const requestedFamily = inferModelFamily(requestedModel);
 	if (actualFamily == null || requestedFamily == null) return false;

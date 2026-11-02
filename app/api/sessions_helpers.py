@@ -1383,6 +1383,10 @@ def _approval_card(event: dict, earlier: list[dict]) -> Optional[dict]:
     card_id = _approval_card_id(event.get("request_id"))
     if event.get("kind") != "permission" or not isinstance(confirm, dict) or card_id is None:
         return None
+    # A safety check keeps its buttons, even on a row an earlier build marked.
+    from app.core.owner_confirm import is_guardrail
+    if is_guardrail(request.get("tool_name"), request.get("tool_input")):
+        return None
 
     def clean(value: Any) -> str:
         return " ".join(value.split()) if isinstance(value, str) else ""
@@ -1598,6 +1602,7 @@ def project_event_messages(session_id: str, rows, *, epoch=None) -> list[dict]:
     import re
     from urllib.parse import quote
     from app.api.events import _wire
+    from app.db.session_questions import is_transcript_only_turn
 
     messages: list[dict] = []
     tools: dict[str, dict] = {}
@@ -1606,6 +1611,12 @@ def project_event_messages(session_id: str, rows, *, epoch=None) -> list[dict]:
     origins: dict[str, int] = {}
     open_message = None
     current_profile = None
+    # The reducer's attemptStartSeq: the last event that ended a model
+    # attempt. A discarded attempt's output is what came after it, apart from
+    # transcript-only turns (voice, briefs): they run beside the attempt, so
+    # they never move this and a discard leaves their messages.
+    attempt_start = 0
+    transcript_only: set[str] = set()
 
     def append(event: dict, **fields) -> dict:
         msg = {
@@ -1624,6 +1635,8 @@ def project_event_messages(session_id: str, rows, *, epoch=None) -> list[dict]:
             msg["profile_id"] = msg["profileId"] = profile
         messages.append(msg)
         origins[msg["id"]] = event["seq"]
+        if is_transcript_only_turn(event.get("turn_id")):
+            transcript_only.add(msg["id"])
         return msg
 
     for row in rows:
@@ -1632,6 +1645,11 @@ def project_event_messages(session_id: str, rows, *, epoch=None) -> list[dict]:
         # Exactly the envelope/reminder projection used by SSE replay.
         event = _wire(row)
         kind = event["type"]
+        if not is_transcript_only_turn(event.get("turn_id")) and (
+            kind in ("turn.started", "message.user", "tool.result")
+            or (kind == "system.note" and event.get("subtype") == "provider_retry")
+        ):
+            attempt_start = event["seq"]
         if kind == "turn.started":
             open_message = None
             current_profile = event.get("profile_id")
@@ -1704,6 +1722,22 @@ def project_event_messages(session_id: str, rows, *, epoch=None) -> list[dict]:
                     tool["toolScreenshot"] = f"/api/v1/artifacts/{digest}?session_id={quote(session_id, safe='')}"
         elif kind == "system.note":
             if event.get("subtype") in ("background_tasks_changed", "model_info"):
+                continue
+            if event.get("subtype") == "attempt_discarded":
+                # A model call the engine dropped (a provider safety check
+                # declined it): its text, thinking and tool cards go, as in
+                # the UI reducer. No card of its own.
+                since = attempt_start
+                attempt_start = event["seq"]
+                open_message = None
+                messages = [
+                    m for m in messages
+                    if not (m["role"] == "assistant" and m["type"] in ("text", "thinking", "tool_use")
+                            and origins[m["id"]] > since and m["id"] not in transcript_only)
+                ]
+                origins = {m["id"]: origins[m["id"]] for m in messages}
+                tools = {m["toolId"]: m for m in messages if m.get("toolId")}
+                approvals = {k: m for k, m in approvals.items() if k in origins}
                 continue
             open_message = None
             data = event.get("data") or {}

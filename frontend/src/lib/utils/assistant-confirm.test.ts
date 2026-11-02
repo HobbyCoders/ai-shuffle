@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assistantConfirmationText, currentAssistantQuestion, isAssistantConfirm } from './assistant-confirm';
+import { approvalCardFromRequest, assistantConfirmationText, currentAssistantQuestion, isAssistantConfirm } from './assistant-confirm';
 import type { PermissionRequest } from '$lib/api/client';
 
 describe('assistantConfirmationText', () => {
@@ -19,6 +19,28 @@ describe('assistantConfirmationText', () => {
 		const sentence = assistantConfirmationText({ tool_name: 'Bash', tool_input: { command: `echo \`x\` ${'y'.repeat(300)}` } });
 		expect(sentence.length).toBeLessThan(150);
 		expect(sentence.match(/`/g)).toHaveLength(2);
+	});
+});
+
+describe('a safety check an earlier build marked assistant_confirm', () => {
+	const confirm = { question: 'May I continue this turn on another model? Yes or no.' };
+	const byTool: PermissionRequest = { request_id: 'g1', tool_name: 'ModelGuardrail', tool_input: {}, assistant_confirm: confirm };
+	const byInput: PermissionRequest = { request_id: 'g2', tool_name: 'Other', tool_input: { guardrail: true }, assistant_confirm: confirm };
+	const ordinary: PermissionRequest = { request_id: 'b1', tool_name: 'Bash', tool_input: { command: 'ls' }, assistant_confirm: confirm };
+
+	it.each([['tool name', byTool], ['input marker', byInput]])('keeps its buttons, by %s', (_how, request) => {
+		// Not asked in words, so ChatView's dialog filter keeps it...
+		expect(isAssistantConfirm(request)).toBe(false);
+		expect([request].filter((r) => !isAssistantConfirm(r))).toEqual([request]);
+		// ...nothing marks it as the question on screen...
+		expect(currentAssistantQuestion([request])).toBeNull();
+		// ...and the transcript raises no in-words card for it.
+		expect(approvalCardFromRequest(request.request_id, { ...request }, [])).toBeNull();
+	});
+
+	it('does not stand in front of an ordinary approval asked in words', () => {
+		expect(currentAssistantQuestion([byTool, ordinary])?.request.request_id).toBe('b1');
+		expect(approvalCardFromRequest('b1', { ...ordinary }, [])).not.toBeNull();
 	});
 });
 

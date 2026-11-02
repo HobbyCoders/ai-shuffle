@@ -340,6 +340,7 @@ def test_delegated_child_env_applies_every_forced_override_last(monkeypatch) -> 
 
     assert FORCED_CHILD_ENV == {
         "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1", "CLAUDE_CODE_THRIFTY_SONIC": "0",
+        "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK": "1",
     }
     for name in FORCED_CHILD_ENV:
         monkeypatch.setenv(name, "host")
@@ -498,3 +499,11 @@ def test_trampoline_needs_a_command():
 
     with pytest.raises(SystemExit):
         child_env.run_trampoline([], {})
+
+
+def test_delegated_child_env_turns_off_the_clis_own_refusal_fallback(monkeypatch) -> None:
+    """A safety-check decline must reach the person, not switch models silently."""
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK", "0")
+    loop = DelegatedLoop.__new__(DelegatedLoop)
+    loop.env = {"CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK": "0"}
+    assert loop._child_env()["CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK"] == "1"

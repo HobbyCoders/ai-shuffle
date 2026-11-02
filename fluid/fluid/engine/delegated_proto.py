@@ -101,6 +101,7 @@ from fluid.events.model import (
     ContextCompaction,
     DelegatedSurface,
     Event,
+    ModelServed,
     PermissionRequest,
     RateLimit,
     TextDelta,
@@ -140,9 +141,15 @@ _UNREADABLE_RATE_LIMIT_SHAPES: set[frozenset[str]] = set()
 #   its own turns, so a background job's between-turn report would go unread.
 # * ``CLAUDE_CODE_THRIFTY_SONIC``: turns off the CLI's "do your work through
 #   Bash" steer (see ``DelegatedLoop._child_env``).
+# * ``CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK``: when a safety check declines a
+#   reply, Claude Code 2.1.3xx retries it on another model on its own and keeps
+#   the session there. The person approves that switch first instead: the CLI
+#   reports the refusal (``system/model_refusal_no_fallback``) and the loop
+#   asks (see ``fluid.engine.guardrail``).
 FORCED_CHILD_ENV: dict[str, str] = {
     "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
     "CLAUDE_CODE_THRIFTY_SONIC": "0",
+    "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK": "1",
 }
 
 # ─── Pure helpers ────────────────────────────────────────────────────────────
@@ -259,6 +266,37 @@ def _merge_counts(target: dict[str, Any], update: dict[str, Any]) -> None:
             target[key] = max(current, value)
         elif value is not None and key not in target:
             target[key] = value
+
+
+# Turn-usage fields that are a running snapshot, not this request's own count:
+# the later value stands (the CLI's process total, the mapper's tool mix).
+_SNAPSHOT_USAGE_KEYS = frozenset({"cli_total_cost_usd", "bash_file_ops", "dedicated_file_ops"})
+
+
+def _sum_usage(earlier: dict[str, Any], later: dict[str, Any]) -> dict[str, Any]:
+    """Two CLI requests' turn usage as one: their counts summed.
+
+    Each request bills its own tokens, so numbers add (nested blocks such as
+    ``cache_creation`` too). Snapshot fields keep the later value; a flag
+    that either side raised (``cost_from_table``) stays raised; anything
+    else is the later value, or the earlier one when the later has none.
+    """
+    total = dict(later)
+    for key, value in earlier.items():
+        current = total.get(key)
+        if key in _SNAPSHOT_USAGE_KEYS:
+            total.setdefault(key, value)
+        elif isinstance(value, bool):
+            total[key] = bool(current) or value
+        elif isinstance(value, (int, float)):
+            if isinstance(current, bool) or not isinstance(current, (int, float)):
+                current = 0
+            total[key] = current + value
+        elif isinstance(value, dict) and isinstance(current, dict):
+            total[key] = _sum_usage(value, current)
+        elif current is None:
+            total[key] = value
+    return total
 
 
 def _dict_field(frame: dict[str, Any], key: str) -> dict[str, Any]:
@@ -535,6 +573,11 @@ class Mapped:
 # ─── Stateful mapper ─────────────────────────────────────────────────────────
 
 
+# Claude Code's refusal and fallback system frames (see _on_model_guardrail).
+_GUARDRAIL_SUBTYPES = frozenset({
+    "model_refusal_no_fallback", "model_refusal_fallback", "model_fallback",
+})
+
 # How Claude Code opens the line it prints for a compaction it skipped.
 _NOT_COMPACTED = "Not compacted \u00b7 "
 
@@ -609,6 +652,10 @@ class StreamJsonMapper:
         # reported, for the loop's next baseline.
         self.cost_baseline = cost_baseline
         self.cli_total_cost_usd: float | None = None
+        # A turn re-sent after a safety check declined it (see
+        # ``carry_attempt``): what the declined CLI request(s) billed, added
+        # to every later result of the same turn.
+        self._carried: tuple[dict[str, Any], float | None, int] | None = None
         # The model the CLI said answered the turn (the first main-thread
         # assistant ``message.model``), used to price a turn from the table.
         # A subagent's frames (``parent_tool_use_id`` set) may name a cheaper
@@ -656,6 +703,16 @@ class StreamJsonMapper:
         # per-block frame of a message repeats that message's usage verbatim, so
         # without this a two-block message double-counts its tokens and cost.
         self._usage_msg_id: str | None = None
+        # A safety check declined a main-thread reply this turn: ``category``,
+        # ``explanation``, ``requested_model``, ``request_id`` from the CLI's
+        # ``model_refusal_no_fallback`` frame or the refused assistant frame.
+        # The loop takes it at the result and asks the person (cleared then).
+        self.refusal: dict[str, Any] | None = None
+        # The served model last reported this turn (``ModelServed`` dedupe),
+        # and the model this turn asked for when it differs from ``model`` (an
+        # approved safety-check retry runs on another model).
+        self._served_model: str | None = None
+        self.requested_model: str | None = None
 
     @property
     def produced_nodes(self) -> bool:
@@ -840,6 +897,35 @@ class StreamJsonMapper:
             return round(total - baseline, 10), False
         return total, False
 
+    def carry_attempt(
+        self, usage: dict[str, Any], cost_usd: float | None, num_model_calls: int,
+    ) -> None:
+        """The turn is re-sent after its result: count that result in the next.
+
+        A safety-check retry runs the same turn as a second CLI request on this
+        mapper, whose next result reports only its own tokens and calls. The
+        declined request was billed too, so its totals (which already include
+        any earlier carry) are added to every later result. The cost baseline
+        moves to the total the CLI just reported, so the next result's cost is
+        its own request's and the two are summed once.
+        """
+        self._carried = (dict(usage), cost_usd, int(num_model_calls or 0))
+        if self.cli_total_cost_usd is not None:
+            self.cost_baseline = self.cli_total_cost_usd
+
+    def _with_carried(
+        self, usage: dict[str, Any], cost: float | None, calls: int,
+    ) -> tuple[dict[str, Any], float | None, int]:
+        """A result's turn totals plus what a declined earlier request billed."""
+        if self._carried is None:
+            return usage, cost, calls
+        carried_usage, carried_cost, carried_calls = self._carried
+        if cost is None or carried_cost is None:
+            cost = cost if carried_cost is None else carried_cost
+        else:
+            cost = round(cost + carried_cost, 10)
+        return _sum_usage(carried_usage, usage), cost, calls + carried_calls
+
     def _log_tool_mix(self, frame: dict[str, Any]) -> None:
         mix = self.tool_mix
         model = self._priced_model(frame)
@@ -863,6 +949,8 @@ class StreamJsonMapper:
         subtype = frame.get("subtype")
         if subtype == "compact_boundary":
             return self._on_compact_boundary(frame)
+        if subtype in _GUARDRAIL_SUBTYPES:
+            return self._on_model_guardrail(frame, subtype)
         if subtype != "init":
             return Mapped()
         self.cli_session_id = frame.get("session_id") or self.cli_session_id
@@ -908,6 +996,64 @@ class StreamJsonMapper:
             child_env_overrides=dict(FORCED_CHILD_ENV),
             **self.cli_init,
         )])
+
+    def _served(
+        self, served: str, *, reason: str | None = None, category: str | None = None,
+        requested: str | None = None,
+    ) -> list[Event]:
+        """A ``ModelServed`` for ``served``, or nothing when it is no news."""
+        from fluid.engine.guardrail import same_model
+
+        requested = requested or self.requested_model or self.model
+        if served == (self._served_model or requested) and reason is None:
+            # No news: the same id as last time, or exactly what was asked for.
+            self._served_model = served
+            return []
+        self._served_model = served
+        rerouted = not same_model(requested, served)
+        return [ModelServed(
+            session_id=self.session_id, turn_id=self.turn_id,
+            requested_model=requested, served_model=served, provider=self.provider,
+            rerouted=rerouted, reason=reason if rerouted else None,
+            category=category if rerouted else None,
+        )]
+
+    def _on_model_guardrail(self, frame: dict[str, Any], subtype: str) -> Mapped:
+        """The CLI's refusal and fallback reports (Claude Code 2.1.3xx).
+
+        ``model_refusal_no_fallback``: a reply was declined and not retried;
+        the loop asks the person at the turn's result. ``model_refusal_fallback``
+        (a CLI that ignored the opt-out) and ``model_fallback`` (the model was
+        unavailable): the CLI already answered on another model, reported as a
+        reroute. A subagent's local fallback is not the turn's model.
+        """
+        def text(key: str) -> str | None:
+            value = frame.get(key)
+            return value if isinstance(value, str) and value else None
+
+        if subtype == "model_refusal_no_fallback":
+            self.refusal = {
+                "category": text("api_refusal_category"),
+                "explanation": text("api_refusal_explanation"),
+                "requested_model": (
+                    text("original_model") or self.requested_model or self.model
+                ),
+                "request_id": text("request_id"),
+            }
+            return Mapped()
+        if frame.get("scope") == "local":
+            return Mapped()
+        target = text("fallback_model")
+        if target is None:
+            return Mapped()
+        if subtype == "model_refusal_fallback":
+            reason, category = "refusal_fallback", text("api_refusal_category")
+        else:
+            reason, category = "availability", None
+        return Mapped(events=self._served(
+            target, reason=reason, category=category,
+            requested=text("original_model"),
+        ))
 
     def _on_compact_boundary(self, frame: dict[str, Any]) -> Mapped:
         """The CLI compacted its own context — report it the way the native leg does.
@@ -993,6 +1139,23 @@ class StreamJsonMapper:
             and not frame.get("parent_tool_use_id")
         ):
             self.reported_model = model
+        main_thread = not frame.get("parent_tool_use_id")
+        if main_thread and isinstance(model, str) and model and model != "<synthetic>":
+            events.extend(self._served(model))
+        if main_thread and msg.get("stop_reason") == "refusal" and self.refusal is None:
+            # The refused reply itself; older CLIs send no structured frame.
+            details = msg.get("stop_details")
+            details = details if isinstance(details, dict) else {}
+            category = details.get("category")
+            explanation = details.get("explanation")
+            self.refusal = {
+                "category": category if isinstance(category, str) and category else None,
+                "explanation": (
+                    explanation if isinstance(explanation, str) and explanation else None
+                ),
+                "requested_model": self.requested_model or self.model,
+                "request_id": None,
+            }
         usage = msg.get("usage")
         msg_id = msg.get("id")
         pending = self._pending_call
@@ -1177,6 +1340,8 @@ class StreamJsonMapper:
             turn_usage["cli_total_cost_usd"] = self.cli_total_cost_usd
         if cost_from_table:
             turn_usage["cost_from_table"] = True
+        num_turns = frame.get("num_turns") or 1
+        turn_usage, cost, num_turns = self._with_carried(turn_usage, cost, int(num_turns))
         result_text = frame.get("result")
         self.result_text = result_text.strip() if isinstance(result_text, str) else ""
         if frame.get("is_error") and subtype != "error_max_turns":
@@ -1195,11 +1360,10 @@ class StreamJsonMapper:
             return Mapped(events=events, is_result=True, error=result_error_message(frame))
         turn_usage["bash_file_ops"] = self.tool_mix.bash_file_ops
         turn_usage["dedicated_file_ops"] = self.tool_mix.dedicated_file_ops
-        num_turns = frame.get("num_turns") or 1
         events.append(TurnComplete(
             session_id=self.session_id, node_id=self._last_node_id, turn_id=self.turn_id,
             stop_reason=stop_reason_from_subtype(subtype),
-            num_model_calls=int(num_turns),
+            num_model_calls=num_turns,
             usage=turn_usage,
             cost_usd=cost,
             outcome=context_outcome(frame),

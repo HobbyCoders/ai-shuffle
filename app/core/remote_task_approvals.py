@@ -466,11 +466,14 @@ def _proxy_tag(request: _Request, route) -> Dict[str, Any]:
 
 
 def _confirm_marker(request: _Request, route) -> Optional[Dict[str, Any]]:
-    """The ``assistant_confirm`` marker when the root is an owner chat. Never raises."""
+    """The ``assistant_confirm`` marker when the root is an owner chat, except
+    for a provider safety check (it keeps its buttons). Never raises."""
     try:
         from app.core import owner_confirm
         from app.core.session_orchestration import is_owner_session
 
+        if not owner_confirm.asks_in_words(request.tool_name, request.tool_input):
+            return None
         if not is_owner_session(request.root_session_id):
             return None
         return owner_confirm.marker(request.tool_name, request.tool_input,

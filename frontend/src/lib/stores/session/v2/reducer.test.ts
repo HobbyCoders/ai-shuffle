@@ -2401,6 +2401,102 @@ describe('system + unknown events', () => {
 		});
 	});
 
+	describe('attempt discarded by a safety check', () => {
+		const blockedTurn = () => [
+			ev('turn.started'),
+			ev('message.user', { content: 'go' }),
+			ev('assistant.text_delta', { text: 'Before the tools.' }),
+			ev('tool.use', { tool_use_id: 'done', name: 'Read', input: { file_path: 'a' } }),
+			ev('tool.result', { tool_use_id: 'done', content_preview: 'ok' }),
+			// The declined call: text, thinking and a tool call that never ran.
+			ev('assistant.thinking_delta', { text: 'hmm' }),
+			ev('assistant.text_delta', { text: 'Partial answer' }),
+			ev('tool.input_delta', { tool_use_id: 'cut', partial_json: '{"code":', name: 'run_python' }),
+			ev('system.note', { id: 'ad1', subtype: 'attempt_discarded', data: { reason: 'guardrail' } }),
+		];
+		const texts = (s: ReturnType<typeof fold>) =>
+			s.messages.filter((m) => m.role === 'assistant' && m.type === 'text').map((m) => m.content);
+
+		it('drops the declined output and keeps earlier output, with no card (Stop)', () => {
+			const s = fold([...blockedTurn(), ev('turn.completed', { stop_reason: 'refusal' })]);
+			expect(texts(s)).toEqual(['Before the tools.']);
+			expect(s.messages.some((m) => m.type === 'thinking' && m.content === 'hmm')).toBe(false);
+			expect(s.messages.some((m) => m.toolId === 'cut')).toBe(false);
+			expect(s.messages.find((m) => m.toolId === 'done')?.toolStatus).toBe('complete');
+			expect(s.messages.some((m) => m.systemSubtype === 'attempt_discarded')).toBe(false);
+		});
+
+		it('shows only the replacement answer after Continue', () => {
+			const s = fold([...blockedTurn(), ev('assistant.text_delta', { text: 'Full answer' })]);
+			expect(texts(s)).toEqual(['Before the tools.', 'Full answer']);
+		});
+
+		it('folds the same way live and on a reload from scratch', () => {
+			const events = [...blockedTurn(), ev('assistant.text_delta', { text: 'Full answer' })];
+			const live = events.reduce((state, event) => reduceAll([event], state), reduceAll([]));
+			expect(live.messages).toEqual(reduceAll(events).messages);
+		});
+
+		// A voice exchange or a brief is written beside the agent's model call:
+		// it neither ends that call nor belongs to it.
+		describe.each(['voice-1', 'brief-1'])('with a transcript-only turn (%s) in between', (turn_id) => {
+			const aside = () => [
+				ev('turn.started', { turn_id }),
+				ev('message.user', { turn_id, content: 'Aside question', source: 'voice' }),
+				ev('message.assistant', { turn_id, content: 'Aside reply' }),
+				ev('turn.completed', { turn_id, stop_reason: 'end_turn' }),
+			];
+			const researchCard = () => [
+				ev('turn.started', { turn_id }),
+				ev('tool.use', { turn_id, tool_use_id: 'said', name: 'web_search', input: { query: 'q' } }),
+				ev('tool.result', { turn_id, tool_use_id: 'said', content_preview: 'found' }),
+				ev('turn.completed', { turn_id, stop_reason: 'tool_result' }),
+			];
+			const start = () => [ev('turn.started', { turn_id: 't1' }), ev('message.user', { turn_id: 't1', content: 'go' })];
+			const chunk = (text: string) => ev('assistant.text_delta', { turn_id: 't1', text });
+			const discard = () => ev('system.note', { subtype: 'attempt_discarded', data: { reason: 'guardrail' } });
+			const stop = () => ev('turn.completed', { turn_id: 't1', stop_reason: 'refusal' });
+			const users = (s: ReturnType<typeof fold>) => s.messages.filter((m) => m.role === 'user').map((m) => m.content);
+
+			it.each([
+				['before', () => [...start(), ...aside(), chunk('Blocked one'), chunk(' Blocked two'), discard(), stop()]],
+				['between', () => [...start(), chunk('Blocked one'), ...aside(), chunk(' Blocked two'), discard(), stop()]],
+				['after', () => [...start(), chunk('Blocked one'), chunk(' Blocked two'), ...aside(), discard(), stop()]],
+			])('%s the blocked chunks: only the aside survives', (_where, build) => {
+				const events = build();
+				const s = fold(events);
+				expect(texts(s)).toEqual(['Aside reply']);
+				expect(users(s)).toEqual(['go', 'Aside question']);
+				const live = events.reduce((state, event) => reduceAll([event], state), reduceAll([]));
+				expect(live.messages).toEqual(s.messages);
+			});
+
+			it('keeps a research card from the aside and the discarded chunks around it stay gone', () => {
+				const s = fold([...start(), chunk('Blocked one'), ...researchCard(), chunk('Blocked two'), discard(), stop()]);
+				expect(texts(s)).toEqual([]);
+				expect(s.messages.find((m) => m.toolId === 'said')?.toolStatus).toBe('complete');
+			});
+
+			it('leaves the boundary where the attempt began, so Continue is unaffected', () => {
+				const opening = start();
+				const s = fold([...opening, chunk('Blocked one'), ...aside(), ...researchCard()]);
+				expect(s.attemptStartSeq).toBe(fold(opening).attemptStartSeq);
+				const after = fold([...start(), chunk('Blocked one'), ...aside(), discard(), chunk('Full answer')]);
+				expect(texts(after)).toEqual(['Aside reply', 'Full answer']);
+			});
+
+			it('a connection-drop retry folds the whole attempt onto its card and leaves the aside', () => {
+				const s = fold([
+					...start(), chunk('Dropped one'), ...aside(), chunk(' Dropped two'),
+					ev('system.note', { id: 'r1', subtype: 'provider_retry', data: { cause: 'connection_dropped', attempt: 1 } }),
+				]);
+				expect(texts(s)).toEqual(['Aside reply']);
+				const card = s.messages.find((m) => m.systemSubtype === 'provider_retry');
+				expect((card?.systemData as { superseded?: { text: string } }).superseded?.text).toBe('Dropped one Dropped two');
+			});
+		});
+	});
+
 	it('a provider_retry after an unrelated message appends a new card', () => {
 		const s = fold([
 			ev('turn.started'),

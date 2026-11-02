@@ -1,0 +1,13 @@
+{
+  "description": "The provider's safety check declines the request on fake-ai (Anthropic: stop_reason refusal with stop_details; chat completions: finish_reason content_filter; Responses: incomplete content_filter). A retry on any other model, such as the offered fake-ai-safe, gets the text.",
+  "steps": [
+    {
+      "refusal": {
+        "category": "cyber",
+        "explanation": "This request looks like offensive security work.",
+        "refuse_models": ["fake-ai"]
+      },
+      "text": "Answered on the model you approved."
+    }
+  ]
+}

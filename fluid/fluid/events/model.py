@@ -599,6 +599,88 @@ class ProviderAlive(Event):
 
 
 @dataclass(frozen=True, kw_only=True)
+class ModelServed(Event):
+    """Which model the provider says answered a main-lane model call.
+
+    ``requested_model`` is the model the call asked for; ``served_model`` is the
+    id the provider reported (Anthropic ``message_start.message.model``, OpenAI
+    Responses ``response.model``, the Claude CLI's assistant ``message.model``).
+    ``rerouted`` is True when they name different models (a dated snapshot of
+    the requested alias is the same model, see
+    :func:`fluid.engine.guardrail.same_model`). A reroute is the provider's
+    own decision: a safety check that answers with another model (OpenAI's
+    cyber downgrade), or a fallback the provider ran (``reason`` says which
+    when the provider said: ``"refusal_fallback"``, ``"availability"``).
+
+    Emitted on a turn's first call that reports a model and again whenever the
+    served model changes within the turn, so a host can label each reply with
+    the model that wrote it. Every field after ``served_model`` is optional so
+    a row written before one existed still loads.
+    """
+
+    requested_model: str
+    served_model: str
+    provider: str | None = None
+    rerouted: bool = False
+    reason: str | None = None
+    category: str | None = None
+
+
+#: ``GuardrailBlocked.outcome`` values.
+GUARDRAIL_OUTCOMES = ("continued", "stopped")
+
+
+@dataclass(frozen=True, kw_only=True)
+class GuardrailBlocked(Event):
+    """A provider safety check declined a model call, and what happened next.
+
+    Emitted once per blocked call after the person (or the host's policy)
+    decided: ``outcome`` is ``"continued"`` when the call was retried on
+    ``retry_model`` for the rest of the turn, ``"stopped"`` when the turn ended
+    here (declined, no answer in time, no person to ask, or no model to retry
+    on; ``reason`` says which). The prompt itself is the ordinary
+    :class:`PermissionRequest` under the pseudo-tool
+    :data:`fluid.engine.guardrail.GUARDRAIL_TOOL`, whose ``input`` carries the
+    same facts.
+
+    ``category`` is the provider's policy area (Anthropic ``stop_details.category``:
+    ``cyber``, ``bio``, ``frontier_llm``, ``reasoning_extraction``; ``content_filter``
+    for an OpenAI or chat-completions content filter), None when it named
+    none. ``explanation`` is the provider's own text, for display only.
+    ``suggested_model`` is what was offered: the provider's recommendation, else
+    the host's. Persisted, so the transcript shows the block after a reload.
+    """
+
+    provider: str
+    requested_model: str
+    outcome: str
+    category: str | None = None
+    explanation: str | None = None
+    suggested_model: str | None = None
+    retry_model: str | None = None
+    reason: str | None = None
+    request_id: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class AttemptDiscarded(Event):
+    """The model call that just streamed is dropped from the transcript.
+
+    Whatever that call published live (text, thinking, tool calls that never
+    ran) is not part of the conversation: the engine never stores it, and a
+    host takes it out of what it shows, back to the last attempt boundary (the
+    turn start, a user message, a tool result or a retry note). Its usage is
+    still billed and reported. ``reason`` says why: ``"guardrail"`` when a
+    provider safety check declined the call (see :class:`GuardrailBlocked`).
+    Emitted before anything else about the declined call, so a prompt that
+    follows already shows a transcript without it. Persisted, so a reload
+    drops the same content.
+    """
+
+    reason: str = "guardrail"
+
+
+@dataclass(frozen=True, kw_only=True)
 class DelegatedSurface(Event):
     """The tool surface a delegated CLI announced in its ``init`` frame.
 
@@ -850,6 +932,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
         ToolUse, ToolResult, SteerDelivered,
         PermissionRequest, QuestionRequest, QuestionAnswered, QuestionDelivered, HandoffCreated,
         ContextCompaction, ContextCompacting, Usage, RateLimit, ProviderRetry, ProviderAlive,
+        ModelServed, GuardrailBlocked, AttemptDiscarded,
         SubagentEvent, HookEvent, AssistantTextSanitized,
         CacheMissAlert,
         ContinualUpdate, DelegatedSurface, DelegatedDiagnostic, SwarmUpdated,

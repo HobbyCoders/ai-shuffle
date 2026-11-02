@@ -203,6 +203,11 @@ def sse_to_chunk(event_name: str, data: dict[str, Any]) -> StreamChunk | None:
     if t == "message_delta":
         payload: dict[str, Any] = {"usage": _with_ttl_split(data.get("usage", {}))}
         payload["stop_reason"] = data.get("delta", {}).get("stop_reason")
+        # A classifier refusal names its policy area here (``category``,
+        # ``explanation``, ``recommended_model``); null for every other stop.
+        stop_details = data.get("delta", {}).get("stop_details")
+        if isinstance(stop_details, dict):
+            payload["stop_details"] = stop_details
         return StreamChunk("usage", payload)
     if t == "message_stop":
         return StreamChunk("message_stop", {})

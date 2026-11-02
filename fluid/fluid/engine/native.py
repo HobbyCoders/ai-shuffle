@@ -121,9 +121,16 @@ from fluid.context.trim import (
 from fluid.context.usage import MemoryFileUsage, build_context_usage, memory_file_usage
 from fluid.engine.background import BackgroundLifecycleMixin
 from fluid.engine.base import EngineCaps, matches_tool_pattern
+from fluid.engine.guardrail import (
+    GUARDRAIL_TOOL,
+    anthropic_fallback,
+    prompt_input,
+    same_model,
+)
 from fluid.events.bus import EventBus
 from fluid.events.model import (
     AssistantTextSanitized,
+    AttemptDiscarded,
     BlockStart,
     BlockStop,
     CacheMissAlert,
@@ -135,6 +142,8 @@ from fluid.events.model import (
     HandoffCreated,
     HookEvent,
     Interrupted,
+    GuardrailBlocked,
+    ModelServed,
     PermissionRequest,
     ProviderAlive,
     ProviderRetry,
@@ -437,6 +446,37 @@ class _CallResult:
     # again even though no local tool ran (a native image generation that
     # may already have produced a billed image).
     replay_safe: bool = True
+    # The model id the provider reported for this call (``message_start``
+    # ``message.model``; Responses ``response.model``), None when it gave none.
+    served_model: str | None = None
+    # Anthropic ``stop_details`` on a ``refusal`` stop: ``category``,
+    # ``explanation`` and, with server-side fallback, ``recommended_model``.
+    stop_details: dict[str, Any] | None = None
+
+
+# Guardrail prompts one turn may raise. A retry the next model also declines
+# asks once more (it may offer yet another model); a third block ends the turn.
+GUARDRAIL_MAX_PROMPTS_PER_TURN = 2
+
+
+def _is_guardrail_block(result: _CallResult) -> bool:
+    """Did a provider safety check decline this call?
+
+    Anthropic's classifiers answer with ``stop_reason: "refusal"``; an OpenAI
+    or chat-completions content filter that fired before any output comes back
+    as an error whose upstream verdict names ``content_filter``.
+    """
+    if result.interrupted:
+        return False
+    if result.stop_reason == "refusal":
+        return True
+    return (
+        result.stop_reason == "error"
+        and "content_filter" in (result.native_stop_reason or "")
+        and not any(
+            isinstance(block, Text) and block.text for block in result.message.content
+        )
+    )
 
 
 # Provider error-message markers that mean "the prompt no longer fits" — the
@@ -703,6 +743,8 @@ def _is_empty_completion(result: _CallResult) -> bool:
     """
     if result.interrupted or result.tool_uses or result.arg_stream_error:
         return False
+    if result.stop_reason == "refusal":
+        return False  # a safety check's verdict, asked about, never re-sent blind
     for block in result.message.content:
         if isinstance(block, (Text, Thinking)) and block.text:
             return False
@@ -1178,6 +1220,13 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._turn_task: asyncio.Task | None = None
         self._pending_permissions: dict[str, asyncio.Future] = {}
         self.permission_timeout: float | None = PERMISSION_TIMEOUT_S
+        # Served-model reporting (ModelServed): the last id published this turn.
+        self._turn_served_model: str | None = None
+        # A guardrail retry the person approved: (session model, retry model).
+        # The turn runs on the retry model; _run_turn puts the session model
+        # back when the turn ends, unless something else changed it meanwhile.
+        self._guardrail_restore: tuple[str, str] | None = None
+        self._turn_guardrail_prompts = 0
         # Turn watchdog: bounds a turn whose tool call never returns and whose
         # stream makes no progress. ``_turn_progress_at`` moves on every emitted event; the watchdog
         # task cancels the turn after ``turn_watchdog_seconds`` of silence
@@ -2434,6 +2483,8 @@ class NativeLoop(BackgroundLifecycleMixin):
     async def _run_turn(self, op: UserTurn | Resume) -> None:
         self._turn_cancel_reason = None
         self._turn_progress_at = time.monotonic()
+        self._turn_served_model = None
+        self._turn_guardrail_prompts = 0
         self._start_turn_watchdog()
         try:
             await self._run_turn_inner(op)
@@ -2484,6 +2535,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             self._pending_steers.clear()
             self._pending_peer_write = None
             self._active_turn_id = None
+            restore, self._guardrail_restore = self._guardrail_restore, None
+            if restore is not None and self.model == restore[1]:
+                # An approved guardrail retry lasts for its own turn only.
+                self.model = restore[0]
 
     def _start_turn_watchdog(self) -> None:
         limit = self.turn_watchdog_seconds
@@ -4073,6 +4128,32 @@ class NativeLoop(BackgroundLifecycleMixin):
                         tool_use_id=result.arg_stream_tool["tool_use_id"],
                         name=result.arg_stream_tool["name"], input={},
                     ))
+            if _is_guardrail_block(result):
+                # What the declined call streamed live is never the turn's
+                # reply, whichever way the person answers: hosts drop it now,
+                # before the prompt, and a reload drops it again.
+                await self._emit(AttemptDiscarded(
+                    session_id=sid, node_id=parent.node_id, turn_id=turn_id,
+                    reason="guardrail",
+                ))
+                if await self._guardrail_pause(
+                    sid, turn_id, parent, result, num_calls, projected_prompt, total_usage,
+                ):
+                    continue  # the same history, on the model the person chose
+                if self._interrupted.is_set():
+                    # Stop pressed while the prompt was open.
+                    partial, partial_cost = self._partial_usage(total_usage)
+                    await self._emit_terminal_with_park(Interrupted(
+                        session_id=sid, node_id=parent.node_id, turn_id=turn_id,
+                        usage=partial, cost_usd=partial_cost,
+                        num_model_calls=num_calls,
+                    ))
+                    return
+                final_stop = "refusal"
+                # Partial output a declined call streamed is discarded, never
+                # kept as the turn's reply.
+                result.message = Message(role="assistant", content=[])
+                break
             if result.stop_reason != "error":
                 drop_retries = 0
                 last_drop_long = False
@@ -5281,6 +5362,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         tool_uses: list[dict[str, Any]] = []
         stop_reason = "end_turn"
         native_stop_reason: str | None = None
+        served_model: str | None = None
+        stop_details: dict[str, Any] | None = None
         interrupted = False
         arg_abort: tuple[int, str] | None = None
         alive_published = False
@@ -5319,6 +5402,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                     ))
             if chunk.kind == "message_start":
                 self._merge_usage(usage_totals, payload.get("usage", {}))
+                message_meta = payload.get("message")
+                served = message_meta.get("model") if isinstance(message_meta, dict) else None
+                if isinstance(served, str) and served:
+                    served_model = served
+                    await self._note_served_model(sid, turn_id, request.model, served)
             elif chunk.kind == "provider_retry":
                 # The client gave up on an attempt before any content and is
                 # re-sending the request itself (an in-stream error, or only
@@ -5429,6 +5517,12 @@ class NativeLoop(BackgroundLifecycleMixin):
                 self._merge_usage(usage_totals, payload.get("usage", {}))
                 if payload.get("stop_reason"):
                     stop_reason = payload["stop_reason"]
+                if isinstance(payload.get("stop_details"), dict):
+                    stop_details = payload["stop_details"]
+                late_served = payload.get("served_model")
+                if isinstance(late_served, str) and late_served:
+                    served_model = late_served
+                    await self._note_served_model(sid, turn_id, request.model, late_served)
             elif chunk.kind == "error":
                 if payload.get("transport_failure"):
                     usage_totals["transport_failure"] = payload["transport_failure"]
@@ -5483,6 +5577,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                         provider_message if isinstance(provider_message, str) else None
                     ),
                     native_stop_reason=native_stop_reason,
+                    served_model=served_model,
                     cut_in_tool_args=any(
                         b["type"] == "tool_use" and "input" not in b
                         for b in blocks.values()
@@ -5580,6 +5675,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             native_stop_reason=native_stop_reason,
             arg_stream_error=arg_stream_error,
             arg_stream_tool=arg_stream_tool,
+            served_model=served_model,
+            stop_details=stop_details,
         )
 
     def _arg_stream_verdict(
@@ -6189,6 +6286,123 @@ class NativeLoop(BackgroundLifecycleMixin):
         if user_answered:
             answers["__user_answered__"] = True
         return answers
+
+    async def _note_served_model(
+        self, sid: str, turn_id: str, requested: str, served: str,
+    ) -> None:
+        """Publish the model the provider says answered, once per change a turn.
+
+        A turn whose calls are answered by exactly the requested id publishes
+        nothing: the host already shows that model.
+        """
+        if served == (self._turn_served_model or requested):
+            self._turn_served_model = served
+            return
+        self._turn_served_model = served
+        rerouted = not same_model(requested, served)
+        if rerouted:
+            log.warning(
+                "session %s: asked %s for %s, it answered with %s",
+                sid, self.provider.name, requested, served,
+            )
+        await self._emit(ModelServed(
+            session_id=sid, turn_id=turn_id, requested_model=requested,
+            served_model=served, provider=self.provider.name, rerouted=rerouted,
+            reason="provider_reroute" if rerouted else None,
+        ))
+
+    async def _guardrail_pause(
+        self, sid: str, turn_id: str, parent: SessionNode, result: _CallResult,
+        num_calls: int, projected_prompt: int, total_usage: dict[str, Any],
+    ) -> bool:
+        """Ask the person what to do with a call a provider safety check declined.
+
+        Returns True when the turn retries the same history on the model they
+        approved (``self.model`` is switched for the rest of the turn), False
+        when the turn ends here. The declined call is billed and recorded but
+        never appended: its partial output is discarded. See
+        :mod:`fluid.engine.guardrail`.
+        """
+        self._fold_call_usage(total_usage, result.usage)
+        usage_raw = dict(result.usage)
+        usage_raw["model_call_index"] = num_calls
+        usage_raw["projected_prompt_tokens"] = projected_prompt
+        usage_raw["guardrail_blocked"] = True
+        usage_raw.update(self._cache_probe_fields(result.usage))
+        await self._emit(Usage(
+            session_id=sid, node_id=parent.node_id, turn_id=turn_id,
+            input_tokens=result.usage.get("input_tokens", 0),
+            output_tokens=result.usage.get("output_tokens", 0),
+            cache_read_tokens=result.usage.get("cache_read_input_tokens", 0),
+            cache_creation_tokens=result.usage.get("cache_creation_input_tokens", 0),
+            raw=usage_raw,
+        ))
+        for tu in result.tool_uses:
+            # The ToolUse went out live; the declined reply never runs it.
+            await self._emit(ToolResult(
+                session_id=sid, turn_id=turn_id,
+                tool_use_id=tu["tool_use_id"], name=tu["name"],
+                output="Not run: the reply was blocked by a safety check.",
+                is_error=True,
+            ))
+        details = result.stop_details or {}
+        category = details.get("category") if isinstance(details.get("category"), str) else None
+        if category is None and result.stop_reason == "error":
+            category = "content_filter"
+        explanation = details.get("explanation")
+        explanation = explanation if isinstance(explanation, str) and explanation else None
+        provider = self.provider.name
+        requested = self.model
+        suggested = details.get("recommended_model")
+        if not (isinstance(suggested, str) and suggested):
+            suggested = anthropic_fallback(requested, category) if provider == "anthropic" else None
+        partial = any(
+            isinstance(block, Text) and block.text for block in result.message.content
+        )
+        request_id = None
+        meta = result.usage.get("provider_response")
+        if isinstance(meta, dict) and isinstance(meta.get("request_id"), str):
+            request_id = meta["request_id"]
+
+        async def stopped(reason: str) -> bool:
+            await self._emit(GuardrailBlocked(
+                session_id=sid, turn_id=turn_id, provider=provider,
+                requested_model=requested, outcome="stopped", category=category,
+                explanation=explanation, suggested_model=suggested,
+                reason=reason, request_id=request_id,
+            ))
+            return False
+
+        if self._turn_guardrail_prompts >= GUARDRAIL_MAX_PROMPTS_PER_TURN:
+            return await stopped("blocked again after a retry")
+        self._turn_guardrail_prompts += 1
+        payload = prompt_input(
+            provider=provider, requested_model=requested, category=category,
+            explanation=explanation, suggested_model=suggested,
+            request_id=request_id, partial_output=partial,
+        )
+        verdict, deny_message, updated = await self._await_permission(
+            sid, turn_id, GUARDRAIL_TOOL, new_id("guardrail"), payload, "safe",
+            reason=payload["message"],
+        )
+        if verdict != "allow":
+            return await stopped(deny_message or "declined")
+        chosen = (updated or {}).get("model") or suggested
+        if not isinstance(chosen, str) or not chosen.strip():
+            return await stopped("no model to retry on")
+        chosen = chosen.strip()
+        if self._guardrail_restore is None:
+            self._guardrail_restore = (requested, chosen)
+        else:
+            self._guardrail_restore = (self._guardrail_restore[0], chosen)
+        self.model = chosen
+        await self._emit(GuardrailBlocked(
+            session_id=sid, turn_id=turn_id, provider=provider,
+            requested_model=requested, outcome="continued", category=category,
+            explanation=explanation, suggested_model=suggested, retry_model=chosen,
+            request_id=request_id,
+        ))
+        return True
 
     async def _await_permission(
         self, sid: str, turn_id: str, name: str, tool_use_id: str,

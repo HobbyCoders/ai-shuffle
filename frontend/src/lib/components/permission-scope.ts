@@ -33,7 +33,9 @@ function isScope(value: unknown): value is RememberScope {
 /** The lifetimes this request can be answered with, in display order.
  *  Always starts with `none`. */
 export function availableScopes(request: ScopedRequest): RememberScope[] {
-	if (request.tool_name === 'ModelSwitch') return ['none'];
+	// A model switch and a provider safety check (ModelGuardrail) are
+	// single-use: no saved rule ever answers them.
+	if (request.tool_name === 'ModelSwitch' || request.tool_name === 'ModelGuardrail') return ['none'];
 	if (request.provider_agent?.remote_approval_id) return ['none'];
 	const offered = Array.isArray(request.remember_scopes) ? request.remember_scopes.filter(isScope) : [];
 	return SCOPE_ORDER.filter((scope) => scope === 'none' || offered.includes(scope));

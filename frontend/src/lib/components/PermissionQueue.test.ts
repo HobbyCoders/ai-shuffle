@@ -375,3 +375,48 @@ describe('PermissionQueue keeps focus inside the modal after an answer (R10-17)'
 		expect(document.activeElement).toBe(composer);
 	});
 });
+
+describe('PermissionQueue with a provider safety check queued', () => {
+	const bash = { request_id: 'req-1', tool_name: 'Bash', tool_input: { command: 'ls' } };
+	const safety = {
+		request_id: 'g-1',
+		tool_name: 'ModelGuardrail',
+		tool_input: {
+			guardrail: true,
+			provider: 'anthropic',
+			provider_label: 'Anthropic',
+			category: 'cyber',
+			requested_model: 'claude-opus-5-5',
+			suggested_model: 'claude-opus-4-8'
+		}
+	};
+	const ids = (fn: ReturnType<typeof vi.fn>) => fn.mock.calls.map(([r]) => [r.request_id, r.decision]);
+
+	it('Allow All never continues a safety check on another model; Deny All stops it', async () => {
+		vi.useFakeTimers();
+		const onRespond = vi.fn();
+		render(PermissionQueue, { props: { requests: [bash, safety], onRespond } });
+		await settle();
+		vi.advanceTimersByTime(600);
+
+		await fireEvent.click(screen.getByRole('button', { name: 'Allow All' }));
+		expect(ids(onRespond)).toEqual([['req-1', 'allow']]);
+
+		onRespond.mockClear();
+		vi.advanceTimersByTime(5000);
+		await fireEvent.click(screen.getByRole('button', { name: 'Deny All' }));
+		expect(ids(onRespond)).toEqual([
+			['req-1', 'deny'],
+			['g-1', 'deny']
+		]);
+	});
+
+	it('names a queued safety check in plain words, not by its pseudo-tool', async () => {
+		render(PermissionQueue, { props: { requests: [bash, safety], onRespond: vi.fn() } });
+		await settle();
+		await fireEvent.click(screen.getByRole('button', { name: /View Queue/ }));
+		await settle();
+		expect(screen.getByText('Safety check')).toBeTruthy();
+		expect(screen.queryByText('ModelGuardrail')).toBeNull();
+	});
+});

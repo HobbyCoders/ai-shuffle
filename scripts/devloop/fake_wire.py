@@ -132,7 +132,8 @@ class Chat:
         return sse(body)
 
     @staticmethod
-    def usage(prompt: int = 10, completion: int = 5, cached: int = 0, **extra: Any) -> bytes:
+    def usage(prompt: int = 10, completion: int = 5, cached: int = 0, *,
+              model: str | None = None, **extra: Any) -> bytes:
         usage: dict[str, Any] = {
             "prompt_tokens": prompt, "completion_tokens": completion,
             "total_tokens": prompt + completion,
@@ -141,7 +142,7 @@ class Chat:
             usage["prompt_tokens_details"] = {"cached_tokens": cached}
         usage.update(extra)
         return sse({"id": "chatcmpl-fake", "object": "chat.completion.chunk",
-                    "model": Chat.MODEL, "choices": [], "usage": usage})
+                    "model": model or Chat.MODEL, "choices": [], "usage": usage})
 
     DONE = sse("[DONE]")
 
@@ -163,13 +164,15 @@ class Chat:
     def tool_calls(cls, calls: list[dict], *, pieces: int = 3, text: str = "",
                    finish: str | None = "tool_calls", usage: bool = True,
                    prompt: int = 10, completion: int = 5, with_ids: bool = True,
-                   done: bool = True) -> list[Any]:
+                   done: bool = True, model: str | None = None) -> list[Any]:
         """``calls``: [{"id", "name", "args": dict | raw str}]. Each call's
         argument JSON is split into ``pieces`` fragments, interleaved call by
-        call as parallel calls stream in practice."""
-        frames: list[Any] = [cls.chunk({"role": "assistant", "content": None})]
+        call as parallel calls stream in practice. ``model`` is the id every
+        chunk reports (default :attr:`MODEL`)."""
+        stamp = {"model": model} if model else {}
+        frames: list[Any] = [cls.chunk({"role": "assistant", "content": None}, **stamp)]
         if text:
-            frames.append(cls.chunk({"content": text}))
+            frames.append(cls.chunk({"content": text}, **stamp))
         for i, call in enumerate(calls):
             head: dict[str, Any] = {
                 "index": i, "type": "function",
@@ -177,7 +180,7 @@ class Chat:
             }
             if with_ids:
                 head["id"] = call["id"]
-            frames.append(cls.chunk({"tool_calls": [head]}))
+            frames.append(cls.chunk({"tool_calls": [head]}, **stamp))
         fragments = [
             _split(c["args"] if isinstance(c["args"], str) else json.dumps(c["args"]), pieces)
             for c in calls
@@ -187,11 +190,11 @@ class Chat:
                 if step < len(frags):
                     frames.append(cls.chunk({"tool_calls": [
                         {"index": i, "function": {"arguments": frags[step]}}
-                    ]}))
+                    ]}, **stamp))
         if finish is not None:
-            frames.append(cls.chunk({}, finish))
+            frames.append(cls.chunk({}, finish, **stamp))
         if usage:
-            frames.append(cls.usage(prompt, completion))
+            frames.append(cls.usage(prompt, completion, model=model))
         if done:
             frames.append(cls.DONE)
         return frames
@@ -210,9 +213,11 @@ class Messages:
         return sse({"type": kind, **body}, event=kind)
 
     @classmethod
-    def start(cls, input_tokens: int = 10, cache_read: int = 0) -> bytes:
+    def start(cls, input_tokens: int = 10, cache_read: int = 0, *,
+              model: str | None = None) -> bytes:
         return cls.ev("message_start", message={
-            "id": "msg_fake", "type": "message", "role": "assistant", "model": cls.MODEL,
+            "id": "msg_fake", "type": "message", "role": "assistant",
+            "model": model or cls.MODEL,
             "content": [], "stop_reason": None, "stop_sequence": None,
             "usage": {"input_tokens": input_tokens, "output_tokens": 1,
                       "cache_read_input_tokens": cache_read,

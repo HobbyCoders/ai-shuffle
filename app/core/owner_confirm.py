@@ -43,7 +43,9 @@ message arrives, but its outcome row is written right AFTER the owner's message
 in the transcript, so the log reads request, answer, outcome (#484).
 
 What needs a decision at all is unchanged (permission modes and saved rules).
-Entering a secret still uses the private access card.
+Entering a secret still uses the private access card, and a provider safety
+check (``ModelGuardrail``) keeps its Continue / Stop buttons: it is never asked
+in words, so typed text never settles it (:func:`asks_in_words`).
 """
 from __future__ import annotations
 
@@ -76,6 +78,8 @@ HELD = "held"
 # yet" (written by park), and the one its waiter writes when it really did.
 PARKED_KEY = "parked"
 RELEASED_KEY = "released"
+# A provider safety-check prompt (fluid.engine.guardrail.GUARDRAIL_TOOL).
+_GUARDRAIL_TOOL = "ModelGuardrail"
 # Turn payload key on a wake: the call a yes given outside the chat admits once.
 PASS_KEY = APPROVAL_PASS_KEY
 
@@ -190,6 +194,23 @@ def describe(tool_name: str, tool_input: Any) -> str:
         return f"use {name} on {_short(data['url'])}"
     detail = _short(data) if data else ""
     return f"use {name}" + (f" with {detail}" if detail else "")
+
+
+def is_guardrail(tool_name: Any, tool_input: Any) -> bool:
+    """True for a provider safety-check prompt (docs/internal/guardrail-contract.md)."""
+    return tool_name == _GUARDRAIL_TOOL or (
+        isinstance(tool_input, dict) and tool_input.get("guardrail") is True)
+
+
+def asks_in_words(tool_name: Any, tool_input: Any) -> bool:
+    """Whether an owner chat asks this request in words (``assistant_confirm``).
+
+    Every request does except a provider safety check: it keeps its Continue /
+    Stop buttons, answered by request id, so a typed "yes" or "no" meant for
+    the agent can never settle it (owner decision). A message typed while it
+    waits is an ordinary message, as in any chat.
+    """
+    return not is_guardrail(tool_name, tool_input)
 
 
 def question(tool_name: str, tool_input: Any, *, chat_title: Optional[str] = None,
@@ -374,6 +395,8 @@ def pending_requests(session_id: Optional[str]) -> List[Dict[str, Any]]:
         confirm = payload.get(SUBTYPE)
         if row.get("kind") != PERMISSION_KIND or not isinstance(confirm, dict):
             continue
+        if not asks_in_words(payload.get("tool_name"), payload.get("tool_input")):
+            continue  # Answered on its own buttons only, never by typed text.
         out.append({
             "request_id": payload.get("request_id"), "interaction_id": row["id"],
             "question": confirm.get("question"), "action": confirm.get("action"),

@@ -884,5 +884,284 @@
         "question_seq": null
       }
     ]
+  },
+  {
+    "name": "a declined attempt's question is discarded when the turn stops",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.assistant",
+        "payload": {
+          "content": "Shall I go on?"
+        },
+        "question_seq": 2
+      },
+      {
+        "type": "system.note",
+        "payload": {
+          "subtype": "attempt_discarded",
+          "data": {
+            "reason": "guardrail"
+          }
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": null
+      }
+    ]
+  },
+  {
+    "name": "the reply after a declined attempt can ask again",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Shall I?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "system.note",
+        "payload": {
+          "subtype": "attempt_discarded",
+          "data": {
+            "reason": "guardrail"
+          }
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.assistant",
+        "payload": {
+          "content": "Want more?"
+        },
+        "question_seq": 4
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": 4
+      }
+    ]
+  },
+  {
+    "name": "a declined attempt keeps prose before the last tool result",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.assistant",
+        "payload": {
+          "content": "First?"
+        },
+        "question_seq": 2
+      },
+      {
+        "type": "tool.use",
+        "payload": {
+          "name": "Read",
+          "tool_use_id": "read-1",
+          "input": {}
+        },
+        "question_seq": 2
+      },
+      {
+        "type": "tool.result",
+        "payload": {
+          "tool_use_id": "read-1"
+        },
+        "question_seq": 2
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Discard me?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "system.note",
+        "payload": {
+          "subtype": "attempt_discarded",
+          "data": {
+            "reason": "guardrail"
+          }
+        },
+        "question_seq": 2
+      }
+    ]
+  },
+  {
+    "name": "a voice question before a declined attempt survives the discard",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start",
+          "turn_id": "t1"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Hello",
+          "turn_id": "voice-1",
+          "source": "voice"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.assistant",
+        "payload": {
+          "content": "Still there?",
+          "turn_id": "voice-1"
+        },
+        "question_seq": 3
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Shall I?",
+          "turn_id": "t1"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "system.note",
+        "payload": {
+          "subtype": "attempt_discarded",
+          "data": {
+            "reason": "guardrail"
+          }
+        },
+        "question_seq": 3
+      }
+    ]
+  },
+  {
+    "name": "a voice question after a declined chunk survives the discard",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start",
+          "turn_id": "t1"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Shall I?",
+          "turn_id": "t1"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Hello",
+          "turn_id": "voice-1",
+          "source": "voice"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.assistant",
+        "payload": {
+          "content": "Still there?",
+          "turn_id": "voice-1"
+        },
+        "question_seq": 4
+      },
+      {
+        "type": "system.note",
+        "payload": {
+          "subtype": "attempt_discarded",
+          "data": {
+            "reason": "guardrail"
+          }
+        },
+        "question_seq": 4
+      }
+    ]
+  },
+  {
+    "name": "a voice statement between declined chunks does not bring their question back",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start",
+          "turn_id": "t1"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Shall I?",
+          "turn_id": "t1"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Hello",
+          "turn_id": "voice-1",
+          "source": "voice"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.assistant",
+        "payload": {
+          "content": "Noted.",
+          "turn_id": "voice-1"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": " Go on?",
+          "turn_id": "t1"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "system.note",
+        "payload": {
+          "subtype": "attempt_discarded",
+          "data": {
+            "reason": "guardrail"
+          }
+        },
+        "question_seq": null
+      }
+    ]
   }
 ]

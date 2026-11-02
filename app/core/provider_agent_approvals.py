@@ -387,13 +387,16 @@ def _assistant_confirm(
 ) -> Optional[Dict[str, Any]]:
     """The ``assistant_confirm`` marker when the prompt lands on an owner chat:
     the owner answers it in the conversation (app/core/owner_confirm).
-    None for every other session. Never raises."""
+    None for every other session, and for a provider safety check, which
+    keeps its buttons (``owner_confirm.asks_in_words``). Never raises."""
     if not target:
         return None
     try:
         from app.core import owner_confirm
         from app.core.session_orchestration import is_owner_session
 
+        if not owner_confirm.asks_in_words(kwargs.get("tool_name"), kwargs.get("tool_input")):
+            return None
         if not is_owner_session(target):
             return None
         chat = job = None

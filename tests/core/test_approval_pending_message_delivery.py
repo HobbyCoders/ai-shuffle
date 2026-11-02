@@ -530,3 +530,137 @@ async def test_mark_parked_only_touches_a_pending_row(mock_db: sqlite3.Connectio
     assert not interactions.mark_interaction_parked(other["id"])
     assert not interactions.mark_interaction_released(other["id"])
     assert not interactions.mark_interaction_parked("missing")
+
+
+# A provider safety check (``ModelGuardrail``, docs/internal/
+# guardrail-contract.md) keeps its Continue / Stop buttons in an owner chat:
+# it is never asked in words, so typed text never settles it (owner decision).
+_GUARDRAIL_INPUT = {"guardrail": True, "provider": "anthropic", "provider_label": "Anthropic",
+                    "category": "cyber", "requested_model": "claude-opus-4-8",
+                    "suggested_model": "claude-opus-4-7"}
+
+
+def _safety_check(home_id: str, tool_use_id: str = "t1") -> "asyncio.Task[Any]":
+    """The owner chat's own safety-check prompt, through the production entry
+    (``guardrail_prompt.ask`` into ``route_permission``)."""
+    from app.core import guardrail_prompt
+
+    async def request(**kwargs: Any) -> Any:
+        return await approvals.route_permission(kwargs, ph.permission_handler.request_permission)
+
+    return asyncio.create_task(guardrail_prompt.ask(
+        dict(_GUARDRAIL_INPUT), session_id=home_id, profile_id="assistant-agent",
+        provider_id=None, broadcast_func=AsyncMock(), tool_use_id=tool_use_id,
+        request_permission=request))
+
+
+async def _card(home_id: str, tool_name: str = "ModelGuardrail") -> Dict[str, Any]:
+    for _ in range(300):
+        rows = [r for r in ph.permission_handler.get_pending_requests(home_id)
+                if r.get("tool_name") == tool_name]
+        if rows:
+            return rows[0]
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"expected a pending {tool_name} request")
+
+
+def _owner_turn(turn_id: Any) -> Dict[str, Any]:
+    return turns.get_turn(turn_id)
+
+
+@pytest.mark.parametrize("text", ["yes", "no", "Yes, I authorize it.", OTHER])
+async def test_a_typed_message_leaves_a_safety_check_waiting(
+    home: Home, monkeypatch: pytest.MonkeyPatch, text: str,  # noqa: F811
+) -> None:
+    """A typed yes or no is an ordinary message while the card waits: the
+    card stays pending, nothing is let go "not run yet", and the text reaches
+    the agent as the owner's own turn, as in any chat with a button card."""
+    home_id, _ = home
+    steers = _steers(monkeypatch)
+    task = _safety_check(home_id)
+    card = await _card(home_id)
+    # A button card: no question asked in words, nothing owner_confirm answers.
+    assert not card.get("assistant_confirm")
+    assert confirm.pending_requests(home_id) == []
+    turn_id = await owner_says(home_id, text)
+    await asyncio.sleep(0.3)
+    assert not task.done() and steers == []
+    turn = _owner_turn(turn_id)
+    assert turn["prompt"] == text and confirm.ANSWER_KEY not in (turn["payload"] or {})
+    assert _answers(home_id) == [] and _outcomes(home_id) == []
+    [still] = ph.permission_handler.get_pending_requests(home_id)
+    assert still["request_id"] == card["request_id"]
+    [row] = interactions.get_pending_interactions(home_id)
+    assert not (row["payload"] or {}).get(confirm.PARKED_KEY)
+    # The buttons still answer it.
+    await ph.permission_handler.respond(card["request_id"], home_id, "deny")
+    assert isinstance(await asyncio.wait_for(task, 12.0), PermissionResultDeny)
+
+
+@pytest.mark.parametrize("decision", ["allow", "deny"])
+async def test_the_buttons_settle_exactly_that_request(
+    home: Home, monkeypatch: pytest.MonkeyPatch, decision: str,  # noqa: F811
+) -> None:
+    """Continue / Stop answer the safety check by its own request id, and an
+    ordinary approval waiting in the same chat is still answered by typing."""
+    home_id, _ = home
+    _steers(monkeypatch)
+    check = _safety_check(home_id)
+    card = await _card(home_id)
+    call = _own_call(home_id)
+    [asked] = await _pending(home_id)
+    assert asked["tool_name"] == "Bash"  # the only request asked in words
+    # A typed yes answers the ordinary approval, never the safety check.
+    await owner_says(home_id, "yes")
+    assert isinstance(await asyncio.wait_for(call, 12.0), PermissionResultAllow)
+    assert [a["request_id"] for a in _answers(home_id)] == [asked["request_id"]]
+    assert not check.done()
+    result = await ph.permission_handler.respond(card["request_id"], home_id, decision)
+    assert result.get("resolved")
+    answered = await asyncio.wait_for(check, 12.0)
+    if decision == "allow":
+        assert isinstance(answered, PermissionResultAllow)
+        assert answered.updated_input["model"] == "claude-opus-4-7"
+    else:
+        assert isinstance(answered, PermissionResultDeny)
+    assert ph.permission_handler.get_pending_requests(home_id) == []
+    # A second answer to the same id finds nothing to settle.
+    assert not (await ph.permission_handler.respond(card["request_id"], home_id, "allow")).get("resolved")
+
+
+def test_a_safety_check_is_never_asked_in_words(home: Home) -> None:  # noqa: F811
+    """No route marks a safety check ``assistant_confirm``; every other request
+    in an owner chat still is."""
+    from app.core import remote_task_approvals
+    from types import SimpleNamespace
+
+    home_id, _ = home
+    assert not confirm.asks_in_words("ModelGuardrail", {})
+    assert not confirm.asks_in_words("Anything", {"guardrail": True})
+    assert confirm.asks_in_words("Bash", {"command": "ls"})
+    guardrail = {"tool_name": "ModelGuardrail", "tool_input": dict(_GUARDRAIL_INPUT)}
+    assert approvals._assistant_confirm(home_id, guardrail, None) is None
+    assert approvals._assistant_confirm(
+        home_id, {"tool_name": "Bash", "tool_input": {"command": "ls"}}, None)
+    remote = SimpleNamespace(root_session_id=home_id, worker_session_id=None, **guardrail)
+    route = SimpleNamespace(label="Job")
+    assert remote_task_approvals._confirm_marker(remote, route) is None
+    assert remote_task_approvals._confirm_marker(
+        SimpleNamespace(root_session_id=home_id, worker_session_id=None, tool_name="Bash",
+                        tool_input={"command": "ls"}), route)
+
+
+async def test_a_marked_safety_check_row_is_still_not_answered_by_text(
+    home: Home,  # noqa: F811
+) -> None:
+    """Even a row that carries the marker (written by an earlier build) is
+    never settled by typed text."""
+    home_id, _ = home
+    row = interactions.create_interaction(home_id, ph.PERMISSION_KIND, {
+        "request_id": "guardrail-old", "tool_name": "ModelGuardrail",
+        "tool_input": dict(_GUARDRAIL_INPUT), confirm.SUBTYPE: {"question": "Continue?"},
+    }, 600)
+    assert confirm.pending_requests(home_id) == []
+    await owner_says(home_id, "yes")
+    assert interactions.get_interaction(row["id"])["state"] == "pending"
+    assert _answers(home_id) == [] and _outcomes(home_id) == []

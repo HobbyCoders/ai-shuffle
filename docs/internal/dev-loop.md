@@ -216,6 +216,23 @@ It is chosen by the request alone, so it behaves the same after restarts:
   skipped this question.` for a skip. Native (Dev agent) chats only: the fake
   `claude` CLI does not play `AskUserQuestion`. `question-tray.journey.mjs`
   plays both.
+* `[script:guardrail-refusal]` plays a provider safety-check block on
+  `fake-ai`: Anthropic `stop_reason: "refusal"` with `stop_details`
+  (category `cyber`), a `content_filter` stop on chat completions, and
+  `incomplete: content_filter` on Responses. The chat pauses on a **Safety
+  check** prompt offering `fake-ai-safe` (the dev loop lists both models on the
+  Fake AI row). Continue retries this turn on `fake-ai-safe`, which answers;
+  Stop ends the turn with a "Blocked by … safety check" note. The next turn is
+  back on `fake-ai`. Native (Dev agent) chats only.
+  `[script:guardrail-refusal-partial]` streams part of a reply before the
+  block. It needs the Anthropic dialect (set the Fake AI row's dialect to
+  Anthropic): chat-completions and Responses filters only block before any
+  output. The declined text must leave the chat on Continue, Stop and reload.
+* `[script:guardrail-reroute]` answers while reporting `fake-ai-safe` as the
+  model that served it (a silent reroute): the model pill shows the served
+  model and the chat gets one `model_rerouted` note. Any scenario can do the
+  same with the tag option `served_model=ID`, e.g.
+  `[script:default served_model=other-ai]`.
 * Options ride in the tag: `[script:slow tps=2 latency_ms=1500]`.
 
 A scenario is a list of `steps`. The step played is the number of tool rounds
@@ -232,7 +249,13 @@ step 2 (whose request contains the tool result) can answer:
 A step has `text` (with `{summary}`, `{round}`, `{scenarios}` and `{answer}`,
 the latest question-tray answer, filled in),
 optional `tool_calls`, or `error` (`{"status": 429, "message": "...",
-"retry_after": "1"}`); `cut_after_chars` drops the stream mid-reply. Top-level
+"retry_after": "1"}`); `cut_after_chars` drops the stream mid-reply.
+`served_model` names the model the reply reports; `refusal`
+(`{"category", "explanation", "recommended_model", "refuse_models"}`) declines
+a request for one of `refuse_models` (default `["fake-ai"]`, `"*"` for all)
+and answers any other model with the step's `text`. `recommended_model` is
+sent only when set, as Anthropic only sends it to a request that asked for
+fallbacks. See `docs/internal/guardrail-contract.md`. Top-level
 `tps` and `latency_ms` set its pace. When the request offers the tool directly
 it is called directly; when the engine runs in code mode (only `run_python`
 offered, the native default) the calls go into one Python cell, the way a real

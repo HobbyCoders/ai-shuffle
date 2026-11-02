@@ -364,3 +364,154 @@ def test_queue_mode_get_does_not_eat_scripted_replies() -> None:
         assert httpx.get(server.url + "/elsewhere").status_code == 404
         reply = httpx.post(server.url + "/v1/chat/completions", json={})
         assert _chat_text(reply) == "only"
+
+
+# ─── provider safety checks (docs/internal/guardrail-contract.md) ──────────
+
+
+def _refusal_prompt() -> list[dict]:
+    return [{"role": "user", "content": "[script:guardrail-refusal] audit this"}]
+
+
+def test_refusal_on_messages_carries_anthropic_stop_details(fake: FakeAI) -> None:
+    response = httpx.post(fake.url + "/v1/messages", json={
+        "model": "fake-ai", "stream": True, "max_tokens": 64, "messages": _refusal_prompt()},
+        timeout=10)
+    events = _sse(response.text)
+    delta = next(e for e in events if e.get("type") == "message_delta")
+    assert delta["delta"]["stop_reason"] == "refusal"
+    assert delta["delta"]["stop_details"] == {
+        "type": "refusal", "category": "cyber",
+        "explanation": "This request looks like offensive security work.",
+    }
+    assert not any(e.get("type") == "content_block_start" for e in events)
+    assert _log(fake)[-1]["reply"] == "refusal"
+
+
+def test_refusal_can_stream_part_of_a_reply_first(fake: FakeAI) -> None:
+    response = httpx.post(fake.url + "/v1/messages", json={
+        "model": "fake-ai", "stream": True, "max_tokens": 64,
+        "messages": [{"role": "user", "content": "[script:guardrail-refusal-partial] audit"}]},
+        timeout=10)
+    events = _sse(response.text)
+    text = "".join(e["delta"]["text"] for e in events if e.get("type") == "content_block_delta")
+    assert text.startswith("Here is the start of an answer")
+    kinds = [e.get("type") for e in events]
+    assert kinds.index("content_block_stop") < kinds.index("message_delta")
+    delta = next(e for e in events if e.get("type") == "message_delta")
+    assert delta["delta"]["stop_reason"] == "refusal"
+
+
+def test_refusal_spares_a_retry_on_another_model(fake: FakeAI) -> None:
+    response = httpx.post(fake.url + "/v1/messages", json={
+        "model": "fake-ai-safe", "stream": False, "max_tokens": 64,
+        "messages": _refusal_prompt()}, timeout=10)
+    body = response.json()
+    assert body["stop_reason"] == "end_turn"
+    assert body["content"][0]["text"] == "Answered on the model you approved."
+
+
+def test_refusal_on_chat_is_a_content_filter_stop(fake: FakeAI) -> None:
+    from fluid.providers._chat_completions import ChatCompletionsNormalizer
+
+    response = _chat(fake, _refusal_prompt())
+    norm = ChatCompletionsNormalizer()
+    chunks = [c for event in _sse(response.text) for c in norm.consume("message", event)]
+    assert _chat_text(response) == ""
+    [error] = [c for c in chunks if c.kind == "error"]
+    assert error.payload["native_stop_reason"] == "content_filter"
+
+
+def test_refusal_on_responses_is_incomplete_content_filter(fake: FakeAI) -> None:
+    response = httpx.post(fake.url + "/v1/responses", json={
+        "model": "fake-ai", "stream": True, "input": "[script:guardrail-refusal] audit this"},
+        timeout=10)
+    [terminal] = [e for e in _sse(response.text) if e.get("type") == "response.incomplete"]
+    assert terminal["response"]["incomplete_details"] == {"reason": "content_filter"}
+    assert terminal["response"]["output"] == []
+
+
+def test_served_model_is_stamped_on_every_dialect(fake: FakeAI) -> None:
+    from fluid.providers._chat_completions import ChatCompletionsNormalizer
+
+    chat = _chat(fake, [{"role": "user", "content": "[script:guardrail-reroute] hi"}])
+    norm = ChatCompletionsNormalizer()
+    chunks = [c for event in _sse(chat.text) for c in norm.consume("message", event)]
+    usage = next(c for c in chunks if c.kind == "usage")
+    assert usage.payload["served_model"] == "fake-ai-safe"
+
+    messages = _sse(httpx.post(fake.url + "/v1/messages", json={
+        "model": "fake-ai", "stream": True, "max_tokens": 64,
+        "messages": [{"role": "user", "content": "[script:default served_model=other-ai] hi"}]},
+        timeout=10).text)
+    assert messages[0]["message"]["model"] == "other-ai"
+
+    responses = _sse(httpx.post(fake.url + "/v1/responses", json={
+        "model": "fake-ai", "stream": True, "input": "[script:guardrail-reroute] hi"},
+        timeout=10).text)
+    assert responses[-1]["response"]["model"] == "fake-ai-safe"
+
+
+def test_refusal_step_shape_is_validated(tmp_path: Path) -> None:
+    (tmp_path / "bad.json").write_text(json.dumps({
+        "steps": [{"refusal": {"refuse_models": "fake-ai"}, "text": "x"}]}))
+    with pytest.raises(ScenarioError, match="refuse_models"):
+        Scenarios(tmp_path).load()
+
+
+@pytest.mark.parametrize("dialect", ["anthropic", "openrouter", "responses"])
+async def test_fluid_pauses_on_the_fake_refusal_and_continues_on_the_approved_model(
+    fake: FakeAI, dialect: str,
+) -> None:
+    """The whole native path against the fake: block → prompt → Continue →
+    the retry on fake-ai-safe answers → the next turn is back on fake-ai."""
+    import asyncio
+
+    from fluid.engine.guardrail import GUARDRAIL_TOOL
+    from fluid.engine.native import NativeLoop
+    from fluid.events.model import GuardrailBlocked, PermissionRequest, TurnComplete
+    from fluid.events.ops import RespondPermission, UserTurn
+    from fluid.providers.anthropic.client import AnthropicClient
+    from fluid.providers.openai_responses.client import OpenAIResponsesClient
+    from fluid.providers.openrouter.client import OpenRouterClient
+    from fluid.store.base import MemoryStore
+
+    provider = {
+        "anthropic": lambda: AnthropicClient(api_key="k", base_url=fake.url + "/v1/messages"),
+        "openrouter": lambda: OpenRouterClient(api_key="k",
+                                               base_url=fake.url + "/v1/chat/completions"),
+        "responses": lambda: OpenAIResponsesClient(api_key="k",
+                                                   base_url=fake.url + "/v1/responses"),
+    }[dialect]()
+    loop = NativeLoop(provider=provider, store=MemoryStore(), model="fake-ai")
+
+    async def answer() -> PermissionRequest:
+        while True:
+            log = loop.bus.log(loop.session_id) if loop._session is not None else []
+            prompt = next((e for e in log if isinstance(e, PermissionRequest)), None)
+            if prompt is not None:
+                await loop.submit(RespondPermission(
+                    request_id=prompt.request_id, decision="allow",
+                    updated_input={**prompt.input, "model": "fake-ai-safe"}))
+                return prompt
+            await asyncio.sleep(0.01)
+
+    watcher = asyncio.create_task(answer())
+    try:
+        await loop.submit(UserTurn(content="[script:guardrail-refusal] audit this"))
+        prompt = await asyncio.wait_for(watcher, 20)
+        await asyncio.wait_for(loop.wait_turn(), 20)
+        events = loop.bus.log(loop.session_id)
+        assert prompt.name == GUARDRAIL_TOOL
+        expected = "cyber" if dialect == "anthropic" else "content_filter"
+        assert prompt.input["category"] == expected
+        [blocked] = [e for e in events if isinstance(e, GuardrailBlocked)]
+        assert blocked.outcome == "continued" and blocked.retry_model == "fake-ai-safe"
+        [done] = [e for e in events if isinstance(e, TurnComplete)]
+        assert done.stop_reason == "end_turn"
+        assert loop.model == "fake-ai"  # this turn only
+        models = [r["model"] for r in _log(fake) if r.get("method") == "POST"]
+        assert models[-2:] == ["fake-ai", "fake-ai-safe"]
+    finally:
+        watcher.cancel()
+        await loop.aclose()

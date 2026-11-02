@@ -16,7 +16,7 @@
 	 */
 	import { untrack } from 'svelte';
 	import { get } from 'svelte/store';
-	import { ChevronRight, KeyRound, MessageCircleQuestionMark, Pencil, SendHorizontal, Terminal, Check, X } from 'lucide-svelte';
+	import { ChevronRight, KeyRound, ShieldAlert, MessageCircleQuestionMark, Pencil, SendHorizontal, Terminal, Check, X } from 'lucide-svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import type { QuestionDraft, QuestionResponse, UserQuestionData } from '$lib/components/UserQuestion.svelte';
 	import type { PermissionRequestData } from '$lib/components/PermissionRequest.svelte';
@@ -25,6 +25,7 @@
 	import { sentQuestions } from '$lib/stores/session/sent-questions';
 	import type { PromptDockProps } from '$lib/components/chat/composer-shell';
 	import SlideToAnswer from './SlideToAnswer.svelte';
+	import { guardrailView } from '$lib/utils/guardrail';
 	import {
 		availableScopes,
 		decisionLabels,
@@ -182,7 +183,13 @@
 			decision,
 			remember: rememberFor(scope, request)
 		});
-		showResult(decision === 'allow', decision === 'allow' ? 'Approved' : 'Denied');
+		const guardrail = guardrailView(request);
+		showResult(
+			decision === 'allow',
+			guardrail
+				? decision === 'allow' ? guardrail.continueLabel.replace(/^Continue/, 'Continuing') : 'Stopped'
+				: decision === 'allow' ? 'Approved' : 'Denied'
+		);
 	}
 
 	// ── Private access ────────────────────────────────────────────────────
@@ -247,6 +254,32 @@
 				</div>
 			{:else if current.kind === 'permission'}
 				{@const request = current.request}
+				{@const guardrail = guardrailView(request)}
+				{#if guardrail}
+					<!-- A provider safety check: Continue on the suggested model for
+					     this turn, or Stop (docs/internal/guardrail-contract.md). -->
+					{#if request.answer_error && !answered}<p class="p-error" role="alert">{request.answer_error}</p>{/if}
+					<div class="p-head" data-testid="guardrail-card">
+						<ShieldAlert size={17} class="t-ico keyc" aria-hidden="true" />
+						<strong class="g-title">{guardrail.heading}</strong>
+						{#if queue.length > 1}
+							<button type="button" class="count" onclick={next} aria-label={`${position} of ${queue.length}. Show the next request`}>{position} of {queue.length}<ChevronRight size={14} aria-hidden="true" /></button>
+						{/if}
+					</div>
+					{#if guardrail.category}<p class="g-cat">Flagged as {guardrail.category}</p>{/if}
+					{#if guardrail.explanation}<p class="g-why">{guardrail.explanation}</p>{/if}
+					<p class="g-models">
+						<span class="g-req">{guardrail.requestedLabel || 'Current model'}</span>
+						<span aria-hidden="true">→</span>
+						<span class="g-sr">, suggested:</span>
+						<strong>{guardrail.suggestedLabel || 'another model'}</strong>
+						{#if guardrail.suggestedByApp}<small>suggested by AI Shuffle</small>{/if}
+					</p>
+					<p class="p-note">{guardrail.hint}{#if guardrail.partialDiscarded} The partial reply was discarded.{/if}</p>
+					<SlideToAnswer approveLabel={guardrail.continueLabel} denyLabel="Stop" disabled={answered} {armed}
+						onApprove={() => answerPermission(request, 'allow')}
+						onDeny={() => answerPermission(request, 'deny')} />
+				{:else}
 				{@const command = preview(request)}
 				{@const labels = decisionLabels(rememberFor(scope, request))}
 				{#if request.answer_error && !answered}<p class="p-error" role="alert">{request.answer_error}</p>{/if}
@@ -286,6 +319,7 @@
 				<SlideToAnswer approveLabel={labels.allow} denyLabel={labels.deny} disabled={answered} {armed}
 					onApprove={() => answerPermission(request, 'allow')}
 					onDeny={() => answerPermission(request, 'deny')} />
+				{/if}
 			{:else if current.kind === 'access'}
 				{@const item = current.item}
 				<div class="p-head">
@@ -413,6 +447,15 @@
 	.p-body { margin: 4px 2px 6px; font-size: 13.5px; line-height: 1.45; overflow-wrap: anywhere; }
 	.q-text { font-weight: 550; }
 	.p-note { margin: 6px 2px 0; font-size: 12.5px; color: var(--muted-foreground); }
+	/* Provider safety check: the heading wraps (it is the message), the
+	   models line reads requested → suggested. */
+	.p-head strong.g-title { flex: 1 1 auto; min-width: 0; line-height: 1.3; }
+	.g-cat { margin: 2px 2px 0 27px; font-size: 12px; font-weight: 600; color: color-mix(in oklab, var(--warning) 80%, var(--foreground)); }
+	.g-why { margin: 6px 2px 0; font-size: 13px; line-height: 1.45; color: var(--foreground); overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 4; line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+	.g-models { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; margin: 8px 2px 0; padding: 7px 10px; border-radius: 10px; border: 1px solid var(--border); background: color-mix(in oklch, var(--muted) 35%, var(--card)); font-size: 13px; }
+	.g-req { color: var(--muted-foreground); text-decoration: line-through; text-decoration-color: color-mix(in oklab, var(--warning) 60%, transparent); }
+	.g-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+	.g-models small { flex-basis: 100%; font-size: 11.5px; color: var(--muted-foreground); }
 	/* How long the answer lasts: three chips, one 44px row. */
 	.scope-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; margin: 8px 0 2px; padding: 3px; border: 1px solid var(--border); border-radius: var(--radius); background: color-mix(in oklch, var(--muted) 60%, var(--card)); }
 	.scope-chip { min-height: 40px; padding: 0 6px; border: 1px solid transparent; border-radius: calc(var(--radius) - 3px); background: transparent; color: var(--muted-foreground); font: inherit; font-size: 13px; font-weight: 550; cursor: pointer; -webkit-tap-highlight-color: transparent; }

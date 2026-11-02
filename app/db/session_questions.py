@@ -61,11 +61,24 @@ _CLOSE_TEXT = {
 }
 
 
+# System notes that end a model attempt (the reducer's markAttemptBoundary).
+_ATTEMPT_NOTES = ("provider_retry", "attempt_discarded")
+
+
+def is_transcript_only_turn(turn_id) -> bool:
+    """A turn written for the transcript only (a voice exchange, a brief).
+
+    The reducer's isTranscriptOnlyTurn: it can land in the middle of the agent's
+    model call, is no part of it, and survives that call being dropped.
+    """
+    return isinstance(turn_id, str) and turn_id.startswith(("voice-", "brief-"))
+
+
 def _tail(cursor, session_id, *, lifecycle_only=False):
     """Newest surviving events first, bounded pages; skip rewound branches."""
     before = None
     while True:
-        sql = "SELECT seq, event_type, payload FROM session_events WHERE session_id = %s"
+        sql = "SELECT seq, event_type, payload, turn_id FROM session_events WHERE session_id = %s"
         params = [session_id]
         if lifecycle_only:
             sql += " AND event_type IN ('turn.started', 'turn.parked', 'turn.completed', 'turn.aborted', 'transcript.rewound')"
@@ -89,16 +102,16 @@ def _tail(cursor, session_id, *, lifecycle_only=False):
                 if isinstance(cut, int) and not isinstance(cut, bool):
                     before = min(before, cut)
                 continue
-            yield seq, row["event_type"], payload
+            yield seq, row["event_type"], payload, row["turn_id"]
 
 
 def _attempt_start(cursor, session_id, retry_seq):
-    """The reducer's attemptStartSeq: user, turn start, result or retry note."""
-    for seq, kind, payload in _tail(cursor, session_id):
-        if seq >= retry_seq:
+    """The reducer's attemptStartSeq: user, turn start, result, retry or discard note."""
+    for seq, kind, payload, turn_id in _tail(cursor, session_id):
+        if seq >= retry_seq or is_transcript_only_turn(turn_id):
             continue
         if kind in ("turn.started", "message.user", "tool.result") or (
-            kind == "system.note" and payload.get("subtype") == "provider_retry"
+            kind == "system.note" and payload.get("subtype") in _ATTEMPT_NOTES
         ):
             return seq
     return 0
@@ -119,7 +132,7 @@ def trailing_question_seq(cursor, session_id):
     # Marker-less legacy/voice messages AFTER a terminal boundary are fresh
     # prose, not part of that old turn (including after settle + reopen).
     inactive_through = 0
-    for seq, kind, _ in _tail(cursor, session_id, lifecycle_only=True):
+    for seq, kind, _, _ in _tail(cursor, session_id, lifecycle_only=True):
         if kind == "turn.started":
             return None
         if kind in ("turn.parked", "turn.aborted"):
@@ -140,7 +153,7 @@ def trailing_question_seq(cursor, session_id):
         return True, position if closed and origin > inactive_through and not answered_mid_stream and asks_question(text) else None
 
     dismissed_through = 0
-    for seq, kind, payload in _tail(cursor, session_id):
+    for seq, kind, payload, turn_id in _tail(cursor, session_id):
         if seq <= dismissed_through:
             return finish()[1] if pieces else None
         if kind == "system.note" and payload.get("subtype") in ("background_tasks_changed", "model_info"):
@@ -174,7 +187,10 @@ def trailing_question_seq(cursor, session_id):
         if kind == "system.note" and payload.get("subtype") == "provider_retry":
             if (payload.get("data") or {}).get("cause") == "connection_dropped":
                 dropped_since = _attempt_start(cursor, session_id, seq)
-        hidden = dropped_since is not None and seq > dropped_since
+        if kind == "system.note" and payload.get("subtype") == "attempt_discarded":
+            # A declined call's output (a provider safety check) is gone too.
+            dropped_since = _attempt_start(cursor, session_id, seq)
+        hidden = dropped_since is not None and seq > dropped_since and not is_transcript_only_turn(turn_id)
         if kind in ("tool.use", "tool.input_delta") and payload.get("name") in ("AskUser", "AskUserQuestion"):
             if not hidden:
                 return None

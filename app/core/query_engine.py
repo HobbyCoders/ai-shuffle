@@ -43,6 +43,7 @@ _SERVER_TOOL_TYPES: tuple = (ServerToolUseBlock,)
 _SERVER_TOOL_RESULT_TYPES: tuple = (ServerToolResultBlock,)
 from app.core.agent_types import PermissionResultAllow, PermissionResultDeny
 from fluid.engine.delegated import ClaudeCliMissingError
+from fluid.engine.guardrail import GUARDRAIL_TOOL
 
 from app.db import database
 from app.db import turns as turns_db
@@ -2035,6 +2036,9 @@ async def _stream_to_websocket_impl(
                     "config": config,
                     "session_id": session_id,
                     "user_id": user_id,
+                    # The provider row this turn runs on (the safety-check
+                    # prompt offers a model from the same account).
+                    "provider_id": getattr(options, "aih_provider_id", None),
                     # Reset the outstanding-prompt counter at the start of each turn so a
                     # prior turn that was hard-cancelled mid-prompt (its finally clear
                     # interrupted) can't leave a leaked count that pins the indicator on.
@@ -2115,6 +2119,7 @@ async def _stream_to_websocket_impl(
             "config": config,
             "session_id": session_id,
             "user_id": user_id,
+            "provider_id": getattr(options, "aih_provider_id", None),
             # Reference count of prompts (questions + permissions) this session is
             # currently blocked on. Drives the user-level "awaiting input" indicator.
             "attention_count": 0,
@@ -2179,10 +2184,13 @@ async def _stream_to_websocket_impl(
                 # bare ``in``.
                 from app.core.tool_access import matches_any
 
-                if _disallowed and matches_any(tool_name, _disallowed):
+                # A provider safety-check prompt is not a tool: no profile list
+                # names it and no chat fence applies (app.core.guardrail_prompt).
+                _guardrail = tool_name == GUARDRAIL_TOOL
+                if _disallowed and not _guardrail and matches_any(tool_name, _disallowed):
                     logger.debug(f"[WS] Tool {tool_name} blocked by profile disallowed_tools")
                     return PermissionResultDeny(message=f"Tool '{tool_name}' is disabled in this profile")
-                if _allowed and not matches_any(tool_name, _allowed):
+                if _allowed and not _guardrail and not matches_any(tool_name, _allowed):
                     logger.debug(f"[WS] Tool {tool_name} blocked by profile allowed_tools (not in whitelist)")
                     return PermissionResultDeny(message=f"Tool '{tool_name}' is not enabled in this profile")
 
@@ -2200,7 +2208,7 @@ async def _stream_to_websocket_impl(
                 # grant (delegated) — see ``app.core.session_modes``. Both of
                 # those funnel the calls they cannot decide to HERE, which is
                 # why the same predicate has to answer in all three places.
-                if refs.get("session_mode") == "chat":
+                if refs.get("session_mode") == "chat" and not _guardrail:
                     from app.core.session_modes import (
                         CHAT_MODE_READ_TOOLS,
                         chat_mode_read_permitted,
@@ -2324,6 +2332,19 @@ async def _stream_to_websocket_impl(
                         )
                     finally:
                         await _bump_attention(-1, "permission")
+
+                if _guardrail:
+                    # A provider's safety check declined a call: ask in every
+                    # mode, Bypass included (a mode never switches models on
+                    # its own); an unanswered prompt ends the turn.
+                    from app.core import guardrail_prompt
+
+                    return await guardrail_prompt.ask(
+                        tool_input, session_id=_sid, profile_id=_profile_id,
+                        provider_id=refs.get("provider_id"),
+                        broadcast_func=_broadcast, tool_use_id=_ctx_tool_use_id,
+                        request_permission=_request_permission,
+                    )
 
                 # Handle AskUserQuestion (SDK) and AskUser (fluid)
                 # specially — post durable questions without holding the turn.
@@ -2788,16 +2809,24 @@ async def _stream_to_websocket_impl(
         # false-flags and mis-sizes the bar.
         session_provider = getattr(options, "aih_provider_id", None)
 
+        # Served-model reports this turn (``model_served``), by served id:
+        # whether the provider said it rerouted, and why. A model_info note for
+        # that id carries them, so the pill no longer has to guess by family.
+        served_reports: Dict[str, Dict[str, Any]] = {}
+
         def _model_info_frame(model: str) -> dict:
-            return {
-                "type": "system",
-                "subtype": "model_info",
-                "data": {
-                    "model": model,
-                    "requested_model": requested_model,
-                    "provider": session_provider,
-                },
+            data: Dict[str, Any] = {
+                "model": model,
+                "requested_model": requested_model,
+                "provider": session_provider,
             }
+            report = served_reports.get(model)
+            if report is not None:
+                data["served_model"] = model
+                data["rerouted"] = report["rerouted"]
+                if report.get("reason"):
+                    data["reroute_reason"] = report["reason"]
+            return {"type": "system", "subtype": "model_info", "data": data}
 
         include_partial = options.include_partial_messages  # Track if streaming events are enabled
         has_visible_content = False  # Track if any content was yielded to the frontend
@@ -3040,6 +3069,57 @@ async def _stream_to_websocket_impl(
                     if init_model:
                         last_model_info = init_model
                         yield _model_info_frame(init_model)
+
+                elif message.subtype == "model_served":
+                    # The model the provider says answered this call (fluid
+                    # ModelServed via the adapter). The main lane's model_info
+                    # note follows it; a reroute also leaves a persisted
+                    # ``model_rerouted`` card, once per served model a turn.
+                    from app.core.guardrail_prompt import model_rerouted_note
+
+                    served_data = message.data if isinstance(message.data, dict) else {}
+                    served = served_data.get("served_model")
+                    if served:
+                        first_report = served not in served_reports
+                        served_reports[served] = {
+                            "rerouted": bool(served_data.get("rerouted")),
+                            "reason": served_data.get("reason"),
+                        }
+                        if served != last_model_info:
+                            last_model_info = served
+                            yield _model_info_frame(served)
+                        if first_report and served_data.get("rerouted"):
+                            has_visible_content = True
+                            yield {
+                                "type": "system",
+                                "subtype": "model_rerouted",
+                                "data": model_rerouted_note(served_data, session_provider),
+                            }
+
+                elif message.subtype == "guardrail_blocked":
+                    # A provider safety check declined a call (fluid
+                    # GuardrailBlocked via the adapter): a persisted card,
+                    # named for the session's provider account. Always the
+                    # main conversation's, even while a subagent is tracked.
+                    from app.core.guardrail_prompt import relabel_blocked_note
+
+                    has_visible_content = True
+                    yield {
+                        "type": "system",
+                        "subtype": "guardrail_blocked",
+                        "data": relabel_blocked_note(message.data, session_provider),
+                    }
+
+                elif message.subtype == "attempt_discarded":
+                    # The main conversation's model call just streamed is not
+                    # kept (fluid AttemptDiscarded): a persisted note with no
+                    # card, which the transcript reducer folds by taking that
+                    # call's output out. Never a subagent's, so never gated.
+                    yield {
+                        "type": "system",
+                        "subtype": "attempt_discarded",
+                        "data": message.data if isinstance(message.data, dict) else {},
+                    }
 
                 else:
                     # Forward all system messages to frontend except noisy internal ones.
