@@ -31,6 +31,7 @@ import { readFileSync } from 'node:fs';
 import { SEEDED, PROJECT, expect, gotoApp, openFromSidebar, showSidebar, seededChatId, waitChat, waitChatOpen, pickAgent, pickProject, pickAccess, typeAndSend, scriptTag, waitTurnSettled, scrollTranscriptTo, transcriptScroll, uniq } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { anyFrame, expectComposerPositions } from './lib/timeline.mjs';
+import { installSwitchGraceClock, framesDuringSwitchGrace } from './lib/switch-grace.mjs';
 
 // Hosted journeys build shared desktop UI only. Explicitly opt into the native
 // phone shell locally, matching transcript-reader's --mobile-shell convention.
@@ -89,48 +90,8 @@ const viaDeepLink = (target) => async ({ page, status, mark, variant }) => {
 // --mobile-shell they open the REAL /mobile/ app instead. Hold only delivery of
 // an actual native SSE response: no reducer, content or loading flag is fabricated.
 async function holdIncomingHistory(page, target, delayMs) {
-	await page.addInitScript(({ target, delayMs, graceMs }) => {
-		// The product's notice deadline is a real setTimeout(graceMs). A case that
-		// must act "within the grace" arms this gate: grace-length timers created
-		// while armed still run their real clock, but a callback that comes due
-		// before release() waits for it. The deadline therefore cannot pass
-		// before the case's own action, however slow the runner. Each gated
-		// timer records whether the product cleared it, so the case can check
-		// the product cancelled it. Other delays, and every timer while disarmed,
-		// are untouched.
-		const realSetTimeout = window.setTimeout.bind(window);
-		const realClearTimeout = window.clearTimeout.bind(window);
-		const gate = window.__switchGraceGate = {
-			armed: false, registered: [], deferred: new Map(),
-			arm() { this.armed = true; this.registered = []; },
-			release() {
-				this.armed = false;
-				const due = [...this.deferred.values()];
-				this.deferred.clear();
-				for (const run of due) realSetTimeout(run, 0);
-				return due.length;
-			}
-		};
-		window.setTimeout = function (handler, delay, ...args) {
-			if (!gate.armed || typeof handler !== 'function' || Number(delay) !== graceMs) {
-				return realSetTimeout(handler, delay, ...args);
-			}
-			const entry = { at: performance.now() };
-			const run = () => handler(...args);
-			const id = realSetTimeout(() => {
-				if (gate.armed) gate.deferred.set(id, run);
-				else run();
-			}, delay);
-			entry.id = id;
-			entry.cleared = false;
-			gate.registered.push(entry);
-			return id;
-		};
-		window.clearTimeout = function (id) {
-			gate.deferred.delete(id);
-			for (const entry of gate.registered) if (entry.id === id) entry.cleared = true;
-			return realClearTimeout(id);
-		};
+	await page.addInitScript(installSwitchGraceClock, { graceMs: SWITCH_GRACE_MS });
+	await page.addInitScript(({ target, delayMs }) => {
 		const fetchOriginal = window.fetch.bind(window);
 		const hold = window.__switchHydrationHold = { started: null, released: null };
 		window.fetch = async (input, init) => {
@@ -143,7 +104,7 @@ async function holdIncomingHistory(page, target, delayMs) {
 			}
 			return response;
 		};
-	}, { target, delayMs, graceMs: SWITCH_GRACE_MS });
+	}, { target, delayMs });
 }
 
 // #913: hold B's first native history response until the case releases it, or
@@ -151,6 +112,7 @@ async function holdIncomingHistory(page, target, delayMs) {
 // hydration ceiling through the app's test hook so the case runs in seconds.
 // Requests after the release pass through untouched (a Retry, a reconnect).
 async function holdHistoryPastCeiling(page, target, { fail = false } = {}) {
+	await page.addInitScript(installSwitchGraceClock, { graceMs: SWITCH_GRACE_MS });
 	await page.addInitScript(({ target, fail, ceilingMs }) => {
 		window.__SHUFFLE_HYDRATION_CEILING_MS__ = ceilingMs;
 		const fetchOriginal = window.fetch.bind(window);
@@ -208,17 +170,21 @@ async function sampleSwitchFrames(page) {
 		const log = document.querySelector('[role="log"][aria-label="Conversation messages"]');
 		const firstRow = log?.querySelector('.msg-virtualized');
 		window.__switchHydrationFrames = [];
+		window.__switchGraceClock.timers = [];
 		window.__switchHydrationSampling = true;
-		let loadingStarted = null;
-		const sample = t => {
+		const record = rafTime => {
 			if (!window.__switchHydrationSampling) return;
+			// rAF's timestamp precedes earlier callbacks/layout work in the same
+			// frame. Read the clock when the DOM is actually sampled (#941).
+			const t = performance.now();
+			const grace = window.__switchGraceClock.timers.at(-1);
+			const loadingStarted = grace?.at ?? null;
 			const chat = document.querySelector('[data-ui-state="chat"]');
-			if (chat?.dataset.uiLoading === 'true' && loadingStarted === null) loadingStarted = t;
 			const pending = !!document.querySelector('[data-transcript-pending="true"]');
 			const loader = document.querySelector('.loading-transcript');
 			const rows = [...document.querySelectorAll('[role="log"] .msg-virtualized')];
 			window.__switchHydrationFrames.push({
-				t, pending, loadingStarted, heldAt: window.__switchHydrationHold.started,
+				t, rafTime, pending, loadingStarted, graceFiredAt: grace?.firedAt ?? null, heldAt: window.__switchHydrationHold.started,
 				loader: !!loader && getComputedStyle(loader).visibility !== 'hidden',
 				visibleRows: rows.filter(row => getComputedStyle(row).visibility !== 'hidden').length,
 				outgoingConnected: !!firstRow?.isConnected,
@@ -234,6 +200,26 @@ async function sampleSwitchFrames(page) {
 				target: chat?.dataset.uiTargetSession,
 				loading: chat?.dataset.uiLoading
 			});
+		};
+		// Observe the real loading DOM commit as well as painted frames. A slow
+		// style/layout pass may consume the entire grace before the first rAF;
+		// that must not reset the clock or make the positive observation vacuous.
+		let committedGrace = null;
+		const observer = new MutationObserver(() => {
+			if (!window.__switchHydrationSampling) { observer.disconnect(); return; }
+			const grace = window.__switchGraceClock.timers.at(-1);
+			if (grace && grace !== committedGrace
+				&& document.querySelector('[data-ui-state="chat"]')?.dataset.uiLoading === 'true') {
+				committedGrace = grace;
+				record(null);
+			}
+		});
+		observer.observe(document.querySelector('[data-ui-state="chat"]'), {
+			attributes: true, attributeFilter: ['data-ui-loading', 'data-ui-target-session']
+		});
+		const sample = rafTime => {
+			if (!window.__switchHydrationSampling) { observer.disconnect(); return; }
+			record(rafTime);
 			requestAnimationFrame(sample);
 		};
 		requestAnimationFrame(sample);
@@ -248,10 +234,10 @@ async function finishSwitchFrames(page, log, { slow = false } = {}) {
 	// Use the pre-existing live loading signature, not the new wrapper's pending
 	// attribute, so this ratchet also measures (and fails on) the rollback build.
 	const pending = frames.filter(frame => frame.loading === 'true' && frame.loadingStarted !== null);
-	// Time starts at the first painted loading frame, not response headers: a
-	// slow network can deliver headers after the production grace has elapsed.
-	const underGrace = pending.filter(frame => frame.t - frame.loadingStarted < 100);
-	const ready = frames.find(frame => frame.loadingStarted !== null && frame.loading === 'false');
+	// Check all commits/frames inside the actual production grace, not an
+	// invented 100 ms window starting at a late first rAF. Timers are unchanged.
+	const underGrace = framesDuringSwitchGrace(frames, SWITCH_GRACE_MS);
+	const ready = frames.find(frame => frame.rafTime !== null && frame.loadingStarted !== null && frame.loading === 'false');
 	const duration = predicate => frames.reduce((sum, frame, index) => sum +
 		(predicate(frame) ? Math.max(0, (frames[index + 1]?.t ?? frame.t) - frame.t) : 0), 0);
 	log(`switch-metric ${JSON.stringify({

@@ -15,12 +15,37 @@ const BOOT_HOLD = { path: '/api/v1/preferences/all', ms: 12_000 };
 await runJourney({
 	name: 'send-during-init',
 	recorder: { selectors: [STOP_SELECTOR] },
-	cases: [{
-		name: 'first-send',
+	cases: [...['first-send', 'first-send-late-catalog'].map(name => ({
+		name,
 		async setup(ctx) {
 			const { page, status } = ctx;
 			await openNewChat(ctx);
 			await settleServiceWorker(page, status);
+			if (name === 'first-send-late-catalog') {
+				// Regression for #984: an independent boot load completes AFTER
+				// preferences, beyond the old two-second sleep. Keep the real response.
+				// Intercept the page's real fetch, including a service-worker response.
+				await page.addInitScript(() => {
+					if (sessionStorage.getItem('__journeyLateCatalogDone')) return;
+					const hold = window.__journeyLateCatalog = { startedAt: null, releasedAt: null };
+					const original = window.fetch.bind(window);
+					window.fetch = async (input, init) => {
+						const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+						if ((init?.method || input?.method || 'GET').toUpperCase() !== 'GET'
+							|| url.pathname !== '/api/v1/tags' || hold.startedAt !== null) return original(input, init);
+						hold.startedAt = performance.now();
+						const response = await original(input, init);
+						await new Promise(resolve => {
+							hold.release = () => setTimeout(() => {
+								sessionStorage.setItem('__journeyLateCatalogDone', 'true');
+								hold.releasedAt = performance.now();
+								resolve();
+							}, 3000);
+						});
+						return response;
+					};
+				});
+			}
 			await holdBootLoad(page, BOOT_HOLD.path, BOOT_HOLD.ms, { releaseOnSignal: true });
 			ctx.closed = [];
 			page.on('websocket', socket => socket.on('framesent', ({ payload }) => {
@@ -46,13 +71,28 @@ await runJourney({
 			expect(beforeRelease.releasedAt === null, 'the first turn finished before preference hydration (not just isStreaming protection)');
 			await mark('preference hydration finishes');
 			await page.evaluate(() => window.__journeyBootHold.release());
+			if (name === 'first-send-late-catalog') {
+				await page.waitForFunction(() => typeof window.__journeyLateCatalog?.release === 'function');
+				await page.evaluate(() => window.__journeyLateCatalog.release());
+			}
 			await page.waitForFunction(() => window.__journeyBootHold?.releasedAt != null, null, { timeout: BOOT_HOLD.ms + 30_000 });
-			await page.waitForTimeout(2000);
+			// Preference delivery is not boot reconciliation: tags/catalog loads
+			// also precede createdChatToFollow. Wait for that producer's persisted
+			// view, rather than assuming two seconds is enough on a hosted phone.
+			await page.waitForFunction(() => {
+				const view = JSON.parse(localStorage.getItem('ai-shuffle-layout') || 'null')?.activeView;
+				return view?.type === 'session' && typeof view.sessionId === 'string';
+			}, null, { timeout: BOOT_HOLD.ms + 30_000 });
 			expect(ctx.closed.length === 0, `boot must not send close_session: ${JSON.stringify(ctx.closed)}`);
 			await waitChat(page, { surface: 'active', session: /^s:/, streaming: 'false', messagesAtLeast: 2 }, { timeout: 5000 });
 			expect(await countUserRows(page, token) === 1, 'the first message stays in the transcript exactly once');
 			const view = await page.evaluate(() => JSON.parse(localStorage.getItem('ai-shuffle-layout') || 'null')?.activeView);
 			expect(view?.type === 'session' && typeof view.sessionId === 'string', `layout follows the created chat: ${JSON.stringify(view)}`);
+			if (name === 'first-send-late-catalog') {
+				const holds = await page.evaluate(() => ({ prefs: window.__journeyBootHold, catalog: window.__journeyLateCatalog }));
+				expect(holds.catalog.releasedAt - holds.prefs.releasedAt > 2000,
+					'the real catalog response followed preference hydration beyond the old fixed sleep');
+			}
 			log(`first send and settled reply completed while preferences were held; released explicitly, no close_session`);
 			const session = await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-session');
 			await mark('reload the created chat');
@@ -71,7 +111,7 @@ await runJourney({
 			expect(ctx.closed.length === 0, 'reload must not close the created chat either');
 		},
 		verify: ({ recording }) => expectStopFollowsStreaming(recording, { from: markTime(recording, 'send immediately during init') })
-	}, {
+	})), {
 		name: 'pick-project',
 		async setup(ctx) {
 			const { page } = ctx;
