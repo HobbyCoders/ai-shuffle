@@ -13,7 +13,9 @@
 	 * on mobile) and reserves its space so revealing it never reflows the chat.
 	 */
 	import { getContext, onDestroy, tick } from 'svelte';
-	import { readable } from 'svelte/store';
+	import { get, readable } from 'svelte/store';
+	import { activeSession } from '$lib/stores/active-session';
+	import { addRestoredWordsToDraft, noteRestoreFinished, noteRestoreStarted, pageIsLeaving } from '$lib/stores/session/restored-draft';
 	import { TRANSCRIPT_ACTIONS, type TranscriptActions } from './TranscriptHydrationBoundary.svelte';
 	import { Ellipsis, Flag } from 'lucide-svelte';
 	import { executeRewind } from '$lib/api/client';
@@ -156,6 +158,26 @@
 		rewindError = null;
 	}
 
+	// A row whose chat has left the screen never calls its callback: the parent
+	// would hand the words to whichever composer is open now. They still have to
+	// land somewhere, because the server has dropped the row.
+	function handBackRestoredWords(
+		requestedSessionId: string,
+		complete: Props['onRewindComplete'],
+		warning: string | undefined,
+		prompt: string | undefined,
+		uploads: string[] | undefined
+	) {
+		if (sessionId === requestedSessionId && canAct(requestedSessionId)) {
+			complete?.(warning, prompt, uploads, true);
+		} else if (get(activeSession).sessionId === requestedSessionId) {
+			// Back on that chat and still loading: its composer takes them once ready.
+			activeSession.setPendingRestorePrompt(prompt ?? '', uploads);
+		} else {
+			addRestoredWordsToDraft(requestedSessionId, prompt ?? '', uploads);
+		}
+	}
+
 	async function handleRewindConfirm() {
 		if (!sessionId || !rewindEligible || !canAct()) return;
 
@@ -179,8 +201,11 @@
 		const removedPrompt = messageRole === 'user' ? messageContent : undefined;
 		const notSentRequest = !!notSentMessageId;
 		const unsentUploads = notSentUploadPaths;
+		const restoringRowId = notSentMessageId;
+		let pageLeft = false;
 		isRewinding = true;
 		rewindError = null;
+		if (restoringRowId) noteRestoreStarted(requestedSessionId, restoringRowId, removedPrompt ?? '', unsentUploads);
 
 		try {
 			// For user messages: include_response=false removes this message and everything after.
@@ -192,12 +217,10 @@
 				? await executeRewind(requestedSessionId, '', includeResponse, 'user', userPromptOccurrence, messageContent)
 				: await executeRewind(requestedSessionId, messageUuid!, includeResponse, messageRole);
 
-			// The server has dropped the row, so these words have nowhere else to
-			// be: they go to the chat they came from, whichever chat is open now.
-			if (result.unsent_restored) {
+			if (notSentRequest && result.unsent_restored) {
 				showRewindDialog = false;
 				restored = true;
-				complete?.(result.warning ?? undefined, result.restored_prompt ?? removedPrompt, result.restored_upload_paths, true);
+				handBackRestoredWords(requestedSessionId, complete, result.warning ?? undefined, result.restored_prompt ?? removedPrompt, result.restored_upload_paths);
 				return;
 			}
 			// The API may finish after this row unmounts or the user changes chats.
@@ -219,9 +242,14 @@
 			// the copy on screen is handed over. If the server did drop it, the row
 			// and this note leave together; if not, the note explains why it stayed.
 			if (notSentRequest && outcomeUnknown(e)) {
+				// The next page takes over from the note this restore left.
+				if (pageIsLeaving()) {
+					pageLeft = true;
+					return;
+				}
 				restored = true;
 				rewindError = RESTORE_UNCONFIRMED;
-				complete?.(undefined, removedPrompt, unsentUploads, true);
+				handBackRestoredWords(requestedSessionId, complete, undefined, removedPrompt, unsentUploads);
 				return;
 			}
 			if (sessionId !== requestedSessionId || !canAct(requestedSessionId)) return;
@@ -229,6 +257,7 @@
 			rewindError = e instanceof Error ? e.message : 'Unknown error';
 		} finally {
 			isRewinding = false;
+			if (restoringRowId && !pageLeft) noteRestoreFinished(requestedSessionId, restoringRowId);
 		}
 	}
 

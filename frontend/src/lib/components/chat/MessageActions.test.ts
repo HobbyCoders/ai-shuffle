@@ -6,9 +6,11 @@ vi.mock('$lib/api/client', async (importOriginal) => ({ ...(await importOriginal
 const nav = vi.hoisted(() => ({ openSettings: vi.fn() }));
 vi.mock('$lib/settings/navigation.svelte', () => nav);
 import { aiContentPrefill, supportCaps } from '$lib/stores/support-report.svelte';
+import { readDraft } from '$lib/stores/session/draft-persistence';
+import { takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
 import MessageActions from './MessageActions.svelte';
 
-beforeEach(() => { rewind.mockReset(); vi.spyOn(console, 'error').mockImplementation(() => {}); });
+beforeEach(() => { sessionStorage.clear(); rewind.mockReset(); vi.spyOn(console, 'error').mockImplementation(() => {}); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 const base = { sessionId: 's1', messageContent: '**Fix** the `build`', messageRole: 'user' as const };
@@ -38,7 +40,7 @@ describe('MessageActions gating', () => {
 		await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('The unsent row is missing'));
 		expect(onRewindComplete).not.toHaveBeenCalled();
 	});
-	it('still hands over restored words when the owner changed chats while it was restoring', async () => {
+	it('keeps restored words in their own chat when the owner changed chats while it was restoring', async () => {
 		let answer!: (value: unknown) => void;
 		rewind.mockReturnValue(new Promise(resolve => { answer = resolve; }));
 		const onRewindComplete = vi.fn();
@@ -46,7 +48,8 @@ describe('MessageActions gating', () => {
 		await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
 		await view.rerender({sessionId:'another-chat'});
 		answer({success:true, unsent_restored:true, restored_prompt:'kept words', restored_upload_paths:[]});
-		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledWith(undefined, 'kept words', [], true));
+		await waitFor(() => expect(readDraft('s1')).toContain('kept words'));
+		expect(onRewindComplete).not.toHaveBeenCalled();
 	});
 	it('still hands over restored words when the row unmounted while it was restoring', async () => {
 		let answer!: (value: unknown) => void;
@@ -57,6 +60,38 @@ describe('MessageActions gating', () => {
 		view.unmount();
 		answer({success:true, unsent_restored:true, restored_prompt:'kept words', restored_upload_paths:[]});
 		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledWith(undefined, 'kept words', [], true));
+	});
+	it('notes the words before asking and clears the note once the server answers', async () => {
+		let answer!: (value: unknown) => void;
+		rewind.mockReturnValue(new Promise(resolve => { answer = resolve; }));
+		render(MessageActions, {...base, notSentMessageId:'unsent-id', notSentUploadPaths:['/uploads/proof.png'], onRewindComplete: vi.fn()});
+		await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
+		expect(sessionStorage.getItem('restore-note:s1:unsent-id')).toContain('/uploads/proof.png');
+		answer({success:true, unsent_restored:true, restored_prompt:'kept words', restored_upload_paths:[]});
+		await waitFor(() => expect(sessionStorage.getItem('restore-note:s1:unsent-id')).toBeNull());
+		expect(takeUnfinishedRestores('s1', new Set(), 'a-later-page')).toEqual([]);
+	});
+	it('clears the note after a lost answer once the composer has the words', async () => {
+		rewind.mockRejectedValue(new TypeError('Failed to fetch'));
+		const onRewindComplete = vi.fn();
+		render(MessageActions, {...base, notSentMessageId:'unsent-id', onRewindComplete});
+		await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
+		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledOnce());
+		await waitFor(() => expect(sessionStorage.getItem('restore-note:s1:unsent-id')).toBeNull());
+	});
+	it('leaves the words to the next page when a reload is what cut the request off', async () => {
+		vi.useFakeTimers();
+		try {
+			rewind.mockRejectedValue(new TypeError('Failed to fetch'));
+			const onRewindComplete = vi.fn();
+			render(MessageActions, {...base, notSentMessageId:'unsent-id', onRewindComplete});
+			window.dispatchEvent(new Event('beforeunload'));
+			await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
+			await vi.advanceTimersByTimeAsync(0);
+			expect(onRewindComplete).not.toHaveBeenCalled();
+			expect(sessionStorage.getItem('restore-note:s1:unsent-id')).not.toBeNull();
+			await vi.advanceTimersByTimeAsync(1000);
+		} finally { vi.useRealTimers(); }
 	});
 	it.each([
 		['a dropped connection', new TypeError('Failed to fetch')],

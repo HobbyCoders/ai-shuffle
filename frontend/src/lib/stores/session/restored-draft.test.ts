@@ -8,7 +8,7 @@ vi.mock('$lib/stores/session-cache', () => ({
 	},
 }));
 
-import { addRestoredWordsToDraft } from './restored-draft';
+import { addRestoredWordsToDraft, noteRestoreFinished, noteRestoreStarted, takeUnfinishedRestores } from './restored-draft';
 import { readDraft, writeDraft } from './draft-persistence';
 
 const doc = (text: string) => JSON.stringify({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });
@@ -53,5 +53,36 @@ describe('addRestoredWordsToDraft', () => {
 	it('leaves the draft alone when there is nothing to restore', () => {
 		addRestoredWordsToDraft('s1', '');
 		expect(readDraft('s1')).toBeNull();
+	});
+});
+
+describe('restores a reload cut off', () => {
+	const LATER_PAGE = 'a-later-page';
+	beforeEach(() => sessionStorage.clear());
+
+	it('hands back the words once, when an earlier page noted them and the row has gone', () => {
+		noteRestoreStarted('s1', 'row-1', 'kept words', ['/uploads/proof.png']);
+		expect(takeUnfinishedRestores('s1', new Set(), LATER_PAGE)).toMatchObject([{ rowId: 'row-1', prompt: 'kept words', uploadPaths: ['/uploads/proof.png'] }]);
+		expect(takeUnfinishedRestores('s1', new Set(), LATER_PAGE)).toEqual([]);
+	});
+
+	it('keeps the note while the row is still on screen, in case the request lands late', () => {
+		noteRestoreStarted('s1', 'row-1', 'kept words');
+		expect(takeUnfinishedRestores('s1', new Set(['row-1']), LATER_PAGE)).toEqual([]);
+		expect(takeUnfinishedRestores('s1', new Set(), LATER_PAGE)).toHaveLength(1);
+	});
+
+	it('leaves this page\'s own restores alone: their answers are still coming', () => {
+		noteRestoreStarted('s1', 'row-1', 'kept words');
+		expect(takeUnfinishedRestores('s1', new Set())).toEqual([]);
+		expect(takeUnfinishedRestores('s1', new Set(), LATER_PAGE)).toHaveLength(1);
+	});
+
+	it('forgets a finished restore, and never reads another chat\'s note', () => {
+		noteRestoreStarted('s1', 'row-1', 'kept words');
+		noteRestoreStarted('s2', 'row-2', 'other words');
+		noteRestoreFinished('s1', 'row-1');
+		expect(takeUnfinishedRestores('s1', new Set(), LATER_PAGE)).toEqual([]);
+		expect(takeUnfinishedRestores('s2', new Set(), LATER_PAGE)).toMatchObject([{ rowId: 'row-2' }]);
 	});
 });
