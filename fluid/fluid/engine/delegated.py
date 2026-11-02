@@ -1525,6 +1525,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         The CLI is stopped however the steps before it end: nothing else holds
         its handle once the loop is dropped. A cancelled close gives it only a
         moment to exit, because the caller's deadline has already passed.
+
+        Anything still running is cancelled first, however this ends: a resumed
+        turn would read the CLI's exit as a refused ``--resume``, wipe the valid
+        handle and start another CLI.
         """
         grace = _CLI_EXIT_GRACE_S
         try:
@@ -1547,6 +1551,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             grace = _CANCELLED_EXIT_GRACE_S
             raise
         finally:
+            self._cancel_running_work()
             await self._stop_process(grace=grace)
 
     async def release_abandoned(self) -> None:
@@ -1574,8 +1579,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             finally:
                 self._release_bridge_resources()
 
-    async def _cancel_abandoned_work(self) -> None:
-        """End the running turn and any wake; never held up past a short wait."""
+    def _cancel_running_work(self) -> set[asyncio.Task]:
+        """Cancel the running turn and any wake; returns those still finishing.
+
+        Synchronous, so it cannot be cut short, and a turn waiting on the CLI
+        takes this cancellation ahead of any end of output that follows.
+        """
         if self._background_wake_retry is not None:
             self._background_wake_retry.cancel()
             self._background_wake_retry = None
@@ -1586,6 +1595,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         }
         for task in running:
             task.cancel()
+        return running
+
+    async def _cancel_abandoned_work(self) -> None:
+        """End the running turn and any wake; never held up past a short wait."""
+        running = self._cancel_running_work()
         if running:
             await asyncio.wait(running, timeout=_CANCELLED_EXIT_GRACE_S)
 

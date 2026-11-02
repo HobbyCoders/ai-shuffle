@@ -19,6 +19,7 @@ import signal
 import sys
 import time
 import warnings
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -357,15 +358,9 @@ async def test_dropping_a_dead_session_frees_its_engine_and_publishes_nothing(mo
     assert not published
 
 
-@posix_only
-@pytest.mark.asyncio
-async def test_dropping_a_session_mid_turn_keeps_its_resume_handle(monkeypatch):
-    """Stopping the CLI under a resumed turn must not look like a refused resume.
-
-    The turn sees end of output before any frame, which is how a rejected
-    ``--resume`` looks. If it took that at face value it would clear a good
-    handle and leave a new CLI running after the session was dropped.
-    """
+@asynccontextmanager
+async def _resumed_turn_reading_its_cli(monkeypatch):
+    """A resumed turn waiting on its CLI's first frame, as a rejected handle looks."""
     store = MemoryStore()
     sid = (await store.create_session()).session_id
     await store.set_cli_session_id(sid, "good-handle")
@@ -374,7 +369,6 @@ async def test_dropping_a_session_mid_turn_keeps_its_resume_handle(monkeypatch):
         session_id=sid, cli_session_id="good-handle",
     )
     await loop._start_bundled_server()
-    socket_path, tmpdir = loop._socket_path, loop._tmpdir
     spawned = []
 
     async def fake_ensure_process():
@@ -383,13 +377,7 @@ async def test_dropping_a_session_mid_turn_keeps_its_resume_handle(monkeypatch):
             spawned.append(await _spawn(loop, "import sys\nsys.stdin.read()\n"))
         return loop._proc
 
-    flushes = []
-
-    async def spy_flush(session_id):
-        flushes.append(session_id)
-
     monkeypatch.setattr(loop, "_ensure_process", fake_ensure_process)
-    monkeypatch.setattr(loop, "_flush_events", spy_flush)
     await loop.submit(UserTurn(content="hello"))
     turn = loop._turn_task
     try:
@@ -397,18 +385,7 @@ async def test_dropping_a_session_mid_turn_keeps_its_resume_handle(monkeypatch):
             while loop._live_mapper is None:
                 assert not turn.done(), f"the turn never reached its CLI: {loop.bus.log(sid)}"
                 await asyncio.sleep(0.01)
-        published = len(loop.bus.log(sid))
-
-        adapter = HarnessAdapter()
-        adapter._engine = loop
-        pool = SessionPool()
-        pool.put("dead", SessionState(adapter=adapter, is_connected=True))
-        await pool.remove_dead("dead")
-        await asyncio.gather(*pool._background_teardowns)
-        # A turn wrongly left running gets its chance to retry before the checks.
-        await asyncio.sleep(0.2)
-        turn_ended, cli_count = turn.cancelled(), len(spawned)
-        first_cli_exit = spawned[0].returncode
+        yield SimpleNamespace(loop=loop, store=store, sid=sid, turn=turn, spawned=spawned)
     finally:
         # Here, so a failure cannot hang on what it left running.
         turn.cancel()
@@ -419,16 +396,88 @@ async def test_dropping_a_session_mid_turn_keeps_its_resume_handle(monkeypatch):
                 await proc.wait()
         loop._release_bridge_resources()
 
-    assert turn_ended, "the abandoned turn outlived its session"
-    assert cli_count == 1, "dropping the session started another CLI"
-    assert first_cli_exit is not None
-    assert loop._proc is None
-    assert loop.cli_session_id == "good-handle"
-    await asyncio.gather(*loop._cli_id_writes)
-    assert (await store.get_session(sid)).cli_session_id == "good-handle"
-    assert len(loop.bus.log(sid)) == published
-    assert not flushes
-    _assert_released(loop, socket_path, tmpdir)
+
+async def _assert_only_the_turn_ended(run: SimpleNamespace) -> None:
+    # A turn wrongly left running gets its chance to retry before the checks.
+    await asyncio.sleep(0.2)
+    assert run.turn.cancelled(), "the turn outlived the close"
+    assert len(run.spawned) == 1, "stopping the CLI started another one"
+    assert run.spawned[0].returncode is not None
+    assert run.loop._proc is None
+    assert run.loop.cli_session_id == "good-handle"
+    await asyncio.gather(*run.loop._cli_id_writes)
+    assert (await run.store.get_session(run.sid)).cli_session_id == "good-handle"
+
+
+@posix_only
+@pytest.mark.asyncio
+async def test_dropping_a_session_mid_turn_keeps_its_resume_handle(monkeypatch):
+    """Stopping the CLI under a resumed turn must not look like a refused resume.
+
+    The turn sees end of output before any frame, which is how a rejected
+    ``--resume`` looks. If it took that at face value it would clear a good
+    handle and leave a new CLI running after the session was dropped.
+    """
+    async with _resumed_turn_reading_its_cli(monkeypatch) as run:
+        loop = run.loop
+        socket_path, tmpdir = loop._socket_path, loop._tmpdir
+        flushes = []
+
+        async def spy_flush(session_id):
+            flushes.append(session_id)
+
+        monkeypatch.setattr(loop, "_flush_events", spy_flush)
+        published = len(loop.bus.log(run.sid))
+        adapter = HarnessAdapter()
+        adapter._engine = loop
+        pool = SessionPool()
+        pool.put("dead", SessionState(adapter=adapter, is_connected=True))
+        await pool.remove_dead("dead")
+        await asyncio.gather(*pool._background_teardowns)
+
+        await _assert_only_the_turn_ended(run)
+        assert len(loop.bus.log(run.sid)) == published
+        assert not flushes
+        _assert_released(loop, socket_path, tmpdir)
+
+
+@posix_only
+@pytest.mark.asyncio
+async def test_a_deadline_during_background_cleanup_still_ends_the_turn_first(monkeypatch):
+    """The close's turn cancel comes after background cleanup, which a deadline can
+    cut short. The CLI is still stopped then, so the turn must not be left reading it."""
+    async with _resumed_turn_reading_its_cli(monkeypatch) as run:
+        await run.loop._background_lock.acquire()  # holds the close in its cleanup
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(run.loop.aclose(), timeout=0.2)
+        await _assert_only_the_turn_ended(run)
+
+
+@pytest.mark.asyncio
+async def test_a_deadline_during_background_cleanup_still_ends_a_wake():
+    """A wake runs a turn, which would start a CLI on a loop already being dropped."""
+
+    async def slow_to_cancel():
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            await asyncio.sleep(60)
+
+    loop = await _loop_with_bridge()
+    question_wake = asyncio.create_task(slow_to_cancel())
+    await asyncio.sleep(0)
+    wake = asyncio.create_task(asyncio.sleep(60))
+    loop._question_wake_task = question_wake
+    loop._background_wake_task = wake
+    try:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(loop.aclose(), timeout=0.2)
+        await asyncio.sleep(0)
+        assert wake.cancelled(), "the wake outlived the close"
+    finally:
+        wake.cancel()
+        question_wake.cancel()
+        await asyncio.gather(wake, question_wake, return_exceptions=True)
 
 
 @posix_only
