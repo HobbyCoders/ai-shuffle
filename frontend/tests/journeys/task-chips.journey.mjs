@@ -517,6 +517,9 @@ const SIDEBAR = {
 		await openRow(page, chat.id);
 		await dismissButton(page, LATE).waitFor({ timeout: 60_000 });
 		await waitChat(page, { surface: 'active', loading: 'false', messagesAtLeast: 1 }, { timeout: 60_000 });
+		// The button can be seen before the recorder's next sample. Without this the
+		// chip is first logged inside the dismiss step and reads as a flash.
+		await page.waitForTimeout(200);
 
 		await mark('dismiss the chip');
 		await dismissButton(page, LATE).click();
@@ -538,6 +541,40 @@ const SIDEBAR = {
 		await waitLane(page, chat.id, 'active');
 		await page.waitForTimeout(800);
 	}
+};
+
+// The longest row there is: a question, several chips, and the timer. The words
+// give way, because a timer pushed out of view looks like a chat that stopped.
+const ROW_FITS = {
+	name: 'row-fits',
+	viewports: mobileShell ? ['desktop'] : undefined,
+	async setup(ctx) {
+		ctx.chat = await openedChat(ctx);
+	},
+	async act({ page, mark, log, variant, chat }) {
+		await mark('several chips, then a question on the same chat');
+		await typeAndSend(page, `suggest ${scriptTag(variant, 'tool-suggest-task-crowded')}`);
+		await waitChat(page, { streaming: 'false' }, { timeout: 90_000 });
+		await typeAndSend(page, `ask ${scriptTag(variant, 'ask-question')}`);
+		await waitLane(page, chat.id, 'needs-you');
+		const card = page.locator(CARD(chat.id));
+		await card.getByText('Has question').waitFor({ timeout: 60_000 });
+
+		await mark('the row holds the status, the words and the timer');
+		const fit = await card.evaluate((el) => {
+			const line = el.querySelector('.l2');
+			const box = line.getBoundingClientRect();
+			const timer = line.querySelector('.timer').getBoundingClientRect();
+			const words = line.querySelector('[data-task-chip-count]');
+			return { spill: line.scrollWidth - line.clientWidth, timerPast: timer.right - box.right, wordsWidth: words.getBoundingClientRect().width, title: words.title };
+		});
+		log(`row fit: ${JSON.stringify(fit)}`);
+		expect(fit.timerPast <= 1, `the timer stays inside the row (${fit.timerPast}px past its edge)`);
+		expect(fit.spill <= 1, `nothing spills out of the row (${fit.spill}px)`);
+		expect(fit.wordsWidth > 0, 'the words keep some room');
+		expect(fit.title === '4 tasks suggested', `the full words are one hover away (got "${fit.title}")`);
+	},
+	allow: [{ kind: 'layout_shift', reason: 'the chips and the question lift the composer, and the row joins the Needs you lane, which is what this case sets up to measure' }]
 };
 
 /** The access line under a chip, once it has arrived; in view without scrolling the tray. */
@@ -607,5 +644,5 @@ const CHAT_TOOLS = {
 await runJourney({
 	name: 'task-chips',
 	allow: [...DEV_INSTANCE_NOISE],
-	cases: [STREAM, SUBAGENT, NESTED, FAILED, CLICK, CROWDED, SURVIVES, SIDEBAR, NO_TOOLS, DENIED, CHAT_TOOLS]
+	cases: [STREAM, SUBAGENT, NESTED, FAILED, CLICK, CROWDED, SURVIVES, SIDEBAR, ROW_FITS, NO_TOOLS, DENIED, CHAT_TOOLS]
 });

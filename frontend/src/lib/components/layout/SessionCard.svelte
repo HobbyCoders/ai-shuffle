@@ -698,7 +698,7 @@
 						</span>{/if}</span>
 					{#if taskChipText}
 						<span class="dot" aria-hidden="true"></span>
-						<span class="st amber" data-task-chip-count>{taskChipText}</span>
+						<span class="st amber" data-task-chip-count title={taskChipText}>{taskChipText}</span>
 					{/if}
 					{#if showPr}
 						<span class="dot" aria-hidden="true"></span>
@@ -730,7 +730,7 @@
 				{/if}
 				{#if compact && taskChipText}
 					<span class="dot" aria-hidden="true"></span>
-					<span class="st amber" data-task-chip-count>{taskChipText}</span>
+					<span class="st amber" data-task-chip-count title={taskChipText}>{taskChipText}</span>
 				{/if}
 				{#if compact && stageWord}
 					<span class="dot" aria-hidden="true"></span>
@@ -994,6 +994,9 @@
 	/* A long PR label ellipsizes before it can push the timer off the line. */
 	.l2 .st.pr,
 	.l3 .st.pr { flex: 0 1 auto; min-width: 0; white-space: nowrap; }
+	/* So do a chip's words, or a live timer pushed out of view looks stopped.
+	   They give way first; the status word beside them is the row's truth. */
+	.st[data-task-chip-count] { flex: 0 1 auto; min-width: 0; }
 	/* Several PRs: each count keeps its state's tone; the chip opens the list. */
 	/* A button that reads as inline text: no box, no font or line-height of
 	   its own, so the row keeps its height in the normal and compact lines. */

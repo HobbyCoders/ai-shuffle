@@ -3,7 +3,7 @@ import asyncio
 import json
 import re
 import subprocess
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -927,15 +927,22 @@ async def test_only_chips_the_owner_can_act_on_count_as_waiting(owner, monkeypat
     claimed = store.claim("root", chips[2])
     store.mark_failed(chips[2], claimed["attempt"], "No model")  # shows Retry: the owner's turn again
     assert store.waiting_counts(["root"])["root"]["pending_task_chips"] == 2
-    assert (await _published(monkeypatch))["updates"] == {"pending_task_chips": 2}
+    assert (await _published(monkeypatch))["updates"]["pending_task_chips"] == 2
 
 
 async def test_every_change_reaches_sidebars_with_the_count_after_it(owner, monkeypatch):
     chip_id = await recorded()
-    assert (await _published(monkeypatch)) == {
-        "user_id": "admin", "session_id": "root", "updates": {"pending_task_chips": 1}}
+    published = await _published(monkeypatch)
+    assert (published["user_id"], published["session_id"]) == ("admin", "root")
+    assert published["updates"]["pending_task_chips"] == 1
     await task_chips.dismiss("root", chip_id)
-    assert (await _published(monkeypatch))["updates"] == {"pending_task_chips": 0}
+    assert (await _published(monkeypatch))["updates"]["pending_task_chips"] == 0
+
+
+async def test_each_count_is_stamped_later_than_the_last_even_in_one_millisecond(owner, monkeypatch):
+    monkeypatch.setattr(task_chips.time, "time_ns", lambda: 5_000_000)
+    stamps = [(await _published(monkeypatch))["updates"]["pending_task_chips_at"] for _ in range(3)]
+    assert stamps == sorted(set(stamps))
 
 
 async def test_the_frame_and_the_count_both_go_out_for_one_change(owner, monkeypatch):
@@ -972,7 +979,8 @@ async def test_a_chip_mirrored_from_the_owning_worker_reaches_sidebars_here(owne
     task_chips.notify_mirrored(chip_id)
     await asyncio.sleep(0)
     await asyncio.gather(*task_chips._background)
-    count.assert_awaited_once_with(user_id="admin", session_id="root", updates={"pending_task_chips": 1})
+    count.assert_awaited_once()
+    assert count.await_args.kwargs["updates"]["pending_task_chips"] == 1
 
 
 async def test_a_failed_count_read_never_raises_and_a_gone_chat_sends_nothing(owner, monkeypatch):
@@ -995,6 +1003,30 @@ async def test_the_session_list_carries_the_count(owner):
     assert {row["id"]: row["pending_task_chips"] for row in rows} == {"root": 1, "other": 0}
     results = sessions_helpers.enrich_search_results_with_tags([{"id": "root", "instance_id": None}])
     assert results[0]["pending_task_chips"] == 1
+
+
+async def test_both_search_routes_carry_the_count(owner):
+    """Through the routes themselves: helper tests cannot see a route that skips the helper."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api import sessions as sessions_api
+    from app.api.auth import require_auth
+
+    await recorded()
+    found = {**sessions.get_session("root"), "snippet": "...", "match_type": "title"}
+    app = FastAPI()
+    app.include_router(sessions_api.router)
+    app.dependency_overrides[require_auth] = lambda: "test-token"
+    with patch.object(database, "search_sessions", return_value=[found]), \
+            patch.object(database, "search_sessions_paginated", return_value=([found], 1)), \
+            TestClient(app) as client:
+        plain = client.get("/api/v1/sessions/search/query?q=root")
+        paged = client.get("/api/v1/sessions/search/paginated?q=root")
+    assert plain.status_code == 200, plain.text
+    assert paged.status_code == 200, paged.text
+    assert plain.json()[0]["pending_task_chips"] == 1
+    assert paged.json()["items"][0]["pending_task_chips"] == 1
 
 
 # --- Routing

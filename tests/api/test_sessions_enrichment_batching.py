@@ -352,6 +352,7 @@ class TestListEndpointsOffloadTheWholePipeline:
             mock_db.search_sessions_paginated.return_value = (
                 [dict(row, match_type="title")], 1
             )
+            mock_db.search_sessions.return_value = [dict(row, match_type="title")]
             mock_db.get_installs_map.return_value = {}
             mock_db.get_project.return_value = None
 
@@ -366,6 +367,7 @@ class TestListEndpointsOffloadTheWholePipeline:
         "/api/v1/sessions/paginated",
         "/api/v1/sessions/cursor",
         "/api/v1/sessions/search/paginated?q=hello",
+        "/api/v1/sessions/search/query?q=hello",
     ])
     def test_one_run_sync_call_per_listing(self, client, path):
         """The enrichment used to run on the event loop; now it rides the

@@ -628,6 +628,18 @@ describe('Sidebar Needs you lane', () => {
 		expect(lane()).toBeNull();
 	});
 
+	it('lifts a mirrored row holding a task chip, whose status comes from its owner', async () => {
+		mocks.sessions.set([
+			session('remote', 'Remote chat', 'visible-project', true, false, {
+				is_remote: true, instance_id: 'laptop', device_name: 'Laptop', remote_runtime_state: 'idle', pending_task_chips: 1
+			})
+		]);
+		render(Sidebar, { props: sidebarProps });
+		await tick();
+		expect(lane()?.textContent).toContain('Remote chat');
+		expect(cardFrame('Remote chat').querySelector('[data-task-chip-count]')?.textContent).toBe('Task suggested');
+	});
+
 	it('lifts a row holding a task chip, says so, and moves it back when the chip is gone', async () => {
 		const patch = (count: number) => withTaskChips('active', count);
 		render(Sidebar, { props: sidebarProps });

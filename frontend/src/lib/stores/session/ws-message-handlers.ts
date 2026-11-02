@@ -194,6 +194,7 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	// A task chip was suggested or acted on (any chat, any device): sidebars
 	// are not watching that chat, so this is what lifts the row to Needs you.
 	'pending_task_chips',
+	'pending_task_chips_at',
 	'work_ms',
 	'work_started_at',
 	// A context-window pick made on another tab or device (#1895).
