@@ -53,19 +53,36 @@ class NotificationPermissionSmokeTest {
         }
     }
 
+    private fun permissionButtons(root: AccessibilityNodeInfo, id: String): List<AccessibilityNodeInfo> {
+        val matches = mutableListOf<AccessibilityNodeInfo>()
+        fun visit(node: AccessibilityNodeInfo) {
+            // Google PermissionController may retain AOSP's resource namespace:
+            // the APK/window package is not necessarily the resource package.
+            if (node.packageName == root.packageName && node.viewIdResourceName?.substringAfterLast('/') == id)
+                matches += AccessibilityNodeInfo.obtain(node)
+            for (index in 0 until node.childCount) {
+                val child = node.getChild(index) ?: continue
+                try { visit(child) } finally { child.recycle() }
+            }
+        }
+        visit(root)
+        return matches
+    }
+
     private fun tap(text: String, permission: Boolean = false) {
         var target: AccessibilityNodeInfo? = null
         await("Missing ${if (permission) "system notification permission" else "chat"} control: $text") {
             val root = automation.rootInActiveWindow ?: return@await false
             try {
                 // A native app rationale must not satisfy the system-dialog assertion.
-                val system = root.packageName?.toString()?.endsWith(".permissioncontroller") == true
+                val system = root.packageName?.toString() in setOf(
+                    "com.android.permissioncontroller", "com.google.android.permissioncontroller")
                 if (permission && !system) return@await false
                 if (!permission && root.packageName?.toString() != context.packageName) return@await false
                 // Android transforms permission-button labels (including all caps).
                 // Match the controller's semantic resource ID, not rendered English.
-                val nodes = if (permission) root.findAccessibilityNodeInfosByViewId(
-                    "${root.packageName}:id/permission_${if (text == "Allow") "allow" else "deny"}_button")
+                val nodes = if (permission) permissionButtons(root,
+                    "permission_${if (text == "Allow") "allow" else "deny"}_button")
                     else root.findAccessibilityNodeInfosByText(text)
                 val label = nodes.firstOrNull { it.isEnabled && it.isVisibleToUser &&
                     (!permission || it.isClickable) &&
@@ -88,6 +105,7 @@ class NotificationPermissionSmokeTest {
             } finally { root.recycle() }
         }
         val node = requireNotNull(target)
+        if (permission) println("NOTIFICATION_PERMISSION_CONTROLLER: package=${node.packageName}; button=${node.viewIdResourceName}")
         val bounds = Rect()
         try { node.getBoundsInScreen(bounds) } finally { node.recycle() }
         val now = SystemClock.uptimeMillis()
