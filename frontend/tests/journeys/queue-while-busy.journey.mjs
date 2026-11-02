@@ -11,6 +11,7 @@ import {
 	chatIdByToken,
 	countUserRows,
 	expect,
+	holdBootLoad,
 	openFromSidebar,
 	openNewChat,
 	scriptTag,
@@ -300,6 +301,91 @@ await runJourney({
 				await page.unroute(REWIND);
 				await notSent(unheard).getByRole('alert').filter({ hasText: "Couldn't confirm the restore" }).waitFor({ timeout: 5000 });
 				expect(await notSent(unheard).getByRole('button', { name: 'Restored' }).isDisabled(), 'a second click cannot copy the words again');
+			}
+		},
+		{
+			// #1031: a restore is already in the chat's saved draft by the time it
+			// is done, so a reload has to bring it back, once, with whatever else was
+			// in the composer. Boot is held so the composer always saves its empty
+			// first state before boot says which chat this tab was on, the order that
+			// used to wipe the draft. The Stop that stages the rows is unrecorded here:
+			// stop-keeps-queued-text and the case above record it.
+			name: 'restored-words-survive-a-reload-after-the-answer',
+			allow: [{ kind: 'failed_requests', url: /\/commands\/rewind\/execute\//, reason: 'this case cuts the connection to a restore on purpose' }],
+			async setup(ctx) {
+				const { page, variant } = ctx;
+				await openNewChat(ctx);
+				await page.waitForTimeout(800);
+				ctx.rows = { lost: `tok-${uniq()}`, answered: `tok-${uniq()}`, unheard: `tok-${uniq()}` };
+				await typeAndSend(page, `opening tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 2 })}`);
+				await page.getByText(SLOW_REPLY.start, { exact: false }).first().waitFor({ timeout: 60_000 });
+				await waitChat(page, { streaming: 'true' });
+				for (const words of [ctx.rows.lost, ctx.rows.answered, ctx.rows.unheard]) {
+					await typeAndSend(page, `queued ${words}`);
+					await page.locator('.pending-messages [role="article"]').filter({ hasText: words }).waitFor({ timeout: 5000 });
+				}
+				await stopButton(page).click();
+				await page.locator('[data-not-sent="true"]').filter({ hasText: ctx.rows.unheard }).waitFor({ timeout: 15_000 });
+				await holdBootLoad(page, '/api/v1/preferences/all', 30_000, { releaseOnSignal: true });
+			},
+			async act({ page, mark, rows: { lost, answered, unheard } }) {
+				const duringBoot = `mid-boot tok-${uniq()}`;
+				const typed = `half-typed tok-${uniq()}`;
+				const notSent = (text) => page.locator('[data-not-sent="true"]').filter({ hasText: text });
+				const restoreButton = (text) => notSent(text).getByRole('button', { name: /^Restore/ });
+				const editor = () => page.locator('[contenteditable="true"]').first();
+				const composerHas = (text) => page.waitForFunction(
+					(t) => document.querySelector('[contenteditable="true"]')?.innerText.includes(t), text, { timeout: 15_000 });
+				const expectOnce = async (words) => {
+					const composed = await editor().innerText();
+					for (const text of words) expect(composed.split(text).length === 2, `"${text}" is in the composer once (${composed.replace(/\s+/g, ' ')})`);
+				};
+				// The composer is up and past its 100 ms draft save, and boot has not yet
+				// said which chat it is on.
+				const reloadWithBootHeld = async (name) => {
+					await page.reload({ waitUntil: 'domcontentloaded' });
+					await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+					await mark(name);
+					await editor().waitFor({ timeout: 60_000 });
+					await page.waitForFunction(() => typeof window.__journeyBootHold?.release === 'function', null, { timeout: 60_000 });
+					await page.waitForTimeout(400);
+				};
+				const finishBoot = async () => {
+					await page.evaluate(() => window.__journeyBootHold.release());
+					await notSent(unheard).waitFor({ timeout: 60_000 });
+				};
+
+				await mark('restore with a lost answer, reload at once, and type during boot');
+				const REWIND = '**/rewind/execute/**';
+				await page.route(REWIND, async (route) => { await route.fetch(); await route.abort('connectionreset'); });
+				await restoreButton(lost).click();
+				await composerHas(`queued ${lost}`);
+				await reloadWithBootHeld('page reloaded after the lost answer');
+				await page.unroute(REWIND);
+				await editor().click();
+				await page.keyboard.type(duringBoot);
+				await finishBoot();
+				await composerHas(`queued ${lost}`);
+				await composerHas(duringBoot);
+				// Long enough for a second hand-back to have shown.
+				await page.waitForTimeout(1500);
+				await expectOnce([`queued ${lost}`, duringBoot]);
+				expect((await notSent(lost).count()) === 0, 'the lost-answer row stayed gone');
+
+				await mark('restore over a draft, and reload as the answer lands');
+				await editor().click();
+				// The click lands mid-text once the words wrap on a phone.
+				await page.keyboard.press('Control+End');
+				await page.keyboard.type(` ${typed}`);
+				await restoreButton(answered).click();
+				await composerHas(`queued ${answered}`);
+				await reloadWithBootHeld('page reloaded after the answer');
+				await finishBoot();
+				await composerHas(`queued ${answered}`);
+				await composerHas(typed);
+				await page.waitForTimeout(1500);
+				await expectOnce([`queued ${lost}`, `queued ${answered}`, duringBoot, typed]);
+				expect((await notSent(answered).count()) === 0, 'the answered row stayed gone');
 			}
 		},
 		{
