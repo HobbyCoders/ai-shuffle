@@ -1,0 +1,14 @@
+{
+  "description": "Like guardrail-refusal, but on the Anthropic dialect part of a reply streams before the safety check declines it. The declined text must leave the chat whichever way the prompt is answered.",
+  "steps": [
+    {
+      "refusal": {
+        "category": "cyber",
+        "explanation": "This request looks like offensive security work.",
+        "refuse_models": ["fake-ai"],
+        "partial_text": "Here is the start of an answer that the safety check will decline."
+      },
+      "text": "Answered on the model you approved."
+    }
+  ]
+}

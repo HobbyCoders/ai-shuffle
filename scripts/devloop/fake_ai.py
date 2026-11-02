@@ -29,7 +29,9 @@ Reply selection is stateless and keyed off the request alone:
   ``stop_reason: "refusal"`` with ``stop_details``, a ``content_filter`` stop
   for chat completions, ``incomplete: content_filter`` for Responses) when the
   request asks for one of ``refuse_models`` (default ``fake-ai``), so a retry
-  on any other model gets the step's text.
+  on any other model gets the step's text. ``refusal.partial_text`` streams
+  that much of a reply first (Anthropic dialect only: the other two dialects'
+  filters count as a block only before any output).
 
 Every request is appended to a JSONL log (``--log``) for assertions.
 """
@@ -255,7 +257,7 @@ def validate_scenario(name: str, data: Any) -> dict:
 def _validate_refusal(where: str, refusal: Any) -> None:
     if not isinstance(refusal, dict):
         raise ScenarioError(f"{where}: refusal must be an object")
-    for key in ("category", "explanation", "recommended_model"):
+    for key in ("category", "explanation", "recommended_model", "partial_text"):
         if key in refusal and refusal[key] is not None and not isinstance(refusal[key], str):
             raise ScenarioError(f"{where}: refusal.{key} must be a string")
     models = refusal.get("refuse_models", [DEFAULT_MODEL])
@@ -417,8 +419,13 @@ def frame_messages(plan: Plan, body: Any, stream: bool) -> Reply:
                 "model": model, "content": [], "stop_reason": "refusal",
                 "stop_sequence": None, "stop_details": details,
                 "usage": {"input_tokens": input_tokens, "output_tokens": 1}})])
+        frames = [Messages.start(input_tokens, model=model)]
+        partial = plan.refusal.get("partial_text")
+        if partial:
+            # The classifier fired after part of the reply had streamed.
+            frames += Messages.text_block(0, partial)
         return Reply(frames=[
-            Messages.start(input_tokens, model=model),
+            *frames,
             Messages.ev("message_delta", delta={"stop_reason": "refusal", "stop_sequence": None,
                                                 "stop_details": details},
                         usage={"output_tokens": 1}),

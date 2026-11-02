@@ -388,6 +388,20 @@ def test_refusal_on_messages_carries_anthropic_stop_details(fake: FakeAI) -> Non
     assert _log(fake)[-1]["reply"] == "refusal"
 
 
+def test_refusal_can_stream_part_of_a_reply_first(fake: FakeAI) -> None:
+    response = httpx.post(fake.url + "/v1/messages", json={
+        "model": "fake-ai", "stream": True, "max_tokens": 64,
+        "messages": [{"role": "user", "content": "[script:guardrail-refusal-partial] audit"}]},
+        timeout=10)
+    events = _sse(response.text)
+    text = "".join(e["delta"]["text"] for e in events if e.get("type") == "content_block_delta")
+    assert text.startswith("Here is the start of an answer")
+    kinds = [e.get("type") for e in events]
+    assert kinds.index("content_block_stop") < kinds.index("message_delta")
+    delta = next(e for e in events if e.get("type") == "message_delta")
+    assert delta["delta"]["stop_reason"] == "refusal"
+
+
 def test_refusal_spares_a_retry_on_another_model(fake: FakeAI) -> None:
     response = httpx.post(fake.url + "/v1/messages", json={
         "model": "fake-ai-safe", "stream": False, "max_tokens": 64,

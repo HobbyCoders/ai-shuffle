@@ -224,6 +224,10 @@ It is chosen by the request alone, so it behaves the same after restarts:
   Fake AI row). Continue retries this turn on `fake-ai-safe`, which answers;
   Stop ends the turn with a "Blocked by … safety check" note. The next turn is
   back on `fake-ai`. Native (Dev agent) chats only.
+  `[script:guardrail-refusal-partial]` streams part of a reply before the
+  block. It needs the Anthropic dialect (set the Fake AI row's dialect to
+  Anthropic): chat-completions and Responses filters only block before any
+  output. The declined text must leave the chat on Continue, Stop and reload.
 * `[script:guardrail-reroute]` answers while reporting `fake-ai-safe` as the
   model that served it (a silent reroute): the model pill shows the served
   model and the chat gets one `model_rerouted` note. Any scenario can do the
