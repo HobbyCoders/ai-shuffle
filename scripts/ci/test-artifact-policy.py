@@ -221,11 +221,23 @@ class ArtifactPolicyTests(unittest.TestCase):
             "${{ runner.temp }}/android-emulator/launcher-recovery*/",
         ])
 
+    def test_journey_retry_evidence_survives_green_without_uploading_clean_runs(self):
+        job = workflow("ci-frontend.yml")["jobs"]["journeys"]
+        run = next(s for s in job["steps"] if s.get("id") == "journeys")
+        self.assertIn("--retry-failures", run["run"])
+        self.assertNotIn("continue-on-error", run)
+        self.assertEqual(run["timeout-minutes"], "25")
+        self.assertEqual(job["timeout-minutes"], "35")
+        step = uploads(job)[0]
+        self.assertEqual(step["if"], "failure() || steps.journeys.outputs.retried == 'true'")
+        self.assertEqual(step["with"]["name"], "ui-journeys-${{ matrix.shard }}")
+        self.assertEqual(step["with"]["path"], "${{ runner.temp }}/ui-journeys/")
+        self.assertEqual(step["with"]["retention-days"], "3")
+
     def test_ci_diagnostics_upload_only_on_failure(self):
         diagnostics = {
             ("android.yml", "android-ui"): "android-ui-verification-api-${{ matrix.api }}",
             ("ci-browser-workspace.yml", "workspace"): "browser-workspace-screenshots-${{ matrix.chrome-mode }}",
-            ("ci-frontend.yml", "journeys"): "ui-journeys-${{ matrix.shard }}",
             ("ci-frontend.yml", "visual"): "visual-regression-${{ github.sha }}",
             ("container-postgres.yml", "container-postgres"): "container-postgres-${{ github.sha }}",
             ("build-branch.yml", "build"): "container-postgres-${{ github.sha }}",

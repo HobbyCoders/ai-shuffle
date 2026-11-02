@@ -16,9 +16,14 @@ journeys use their case count (``--list``) times the measured per-case median.
 
 Outputs under ``--out``: ``devloop.log`` (the instance's whole log),
 ``logs/<journey>.log``, and the runner's per-case text timelines (and contact
-sheets) under ``journeys/``. The failing timelines are printed in the log and
-in ``$GITHUB_STEP_SUMMARY``. Exit 1 if any journey failed or the instance
-could not be used.
+sheets) under ``journeys/``. With ``--retry-failures``, the whole shard runs
+first, then up to three failed cases/crashed files retry once on that same
+instance. Evidence is separated under ``attempt-1/`` and ``attempt-2/``;
+``summary.json`` records both verdicts. The retry shares a 180s budget and
+reserves teardown time inside the existing 25-minute CI step. Local runs do
+not retry unless opted in. Failing timelines and visible pass-on-retry signals
+go to the log and ``$GITHUB_STEP_SUMMARY``. Exit 1 if a failure remains or the
+instance could not be used.
 """
 from __future__ import annotations
 
@@ -352,13 +357,24 @@ def summarize(label: str, results: list[dict], reports: list[dict], problem: str
 
 
 def journeys(args: argparse.Namespace) -> int:
+    from scripts.devloop import journey_retry as retry
+
+    started = retry.time.monotonic()
     index, shards = args.shard
     out = args.out.resolve()
-    (out / "logs").mkdir(parents=True, exist_ok=True)
-    (out / "journeys").mkdir(parents=True, exist_ok=True)
+    attempt_out = out
+    if args.retry_failures:
+        # Never consume stale summaries or overwrite earlier evidence.
+        attempt_out = out / "attempt-1"
+        attempt_out.mkdir(parents=True, exist_ok=False)
+        if (out / "attempt-2").exists():
+            raise ValueError("retry output already exists; use a fresh --out directory")
+    (attempt_out / "logs").mkdir(parents=True, exist_ok=True)
+    (attempt_out / "journeys").mkdir(parents=True, exist_ok=True)
     label = f"shard {index}/{shards}"
     mine = plan(shards)[index - 1]
-    commands = commands_for(mine, shards)
+    commands = ([["node", str(JOURNEYS / name)] for name in mine]
+                if args.retry_failures else commands_for(mine, shards))
     print(f"[ci] {label}: {', '.join(' '.join(Path(part).name for part in c[1:]) for c in commands) or 'nothing'}",
           flush=True)
     if not commands:
@@ -368,6 +384,8 @@ def journeys(args: argparse.Namespace) -> int:
         build_frontend()
     instance = None
     results: list[dict] = []
+    attempts: list[dict] = []
+    receipt = None
     problem = None
 
     def stop(signum, frame):
@@ -378,7 +396,9 @@ def journeys(args: argparse.Namespace) -> int:
         instance = DevInstance(out, args.ttl_seconds)
         problem = instance.wait_ready(args.ready_timeout)
         env = {**os.environ, "DEVLOOP_STATUS": str(instance.status),
-               "JOURNEY_OUT": str(out / "journeys")}
+               "JOURNEY_OUT": str(attempt_out / "journeys")}
+        if args.retry_failures:
+            env.pop("JOURNEY_ONLY", None)  # a developer filter must not narrow a CI shard
         env.setdefault("JOURNEY_SHEETS", "1")
         for command in commands:
             name = " ".join(Path(part).name for part in command[1:])
@@ -388,9 +408,16 @@ def journeys(args: argparse.Namespace) -> int:
                 results.append({"name": name, "code": None, "seconds": 0.0})
                 continue
             print(f"[ci] running {name}", flush=True)
-            code, seconds = run_command(command, env, out / "logs" / f"{Path(command[1]).stem}.log",
+            code, seconds = run_command(command, env, attempt_out / "logs" / f"{Path(command[1]).stem}.log",
                                         args.journey_timeout)
             results.append({"name": name, "code": code, "seconds": seconds})
+            if args.retry_failures:
+                attempts.append(retry.read_attempt(name, attempt_out, code, seconds))
+        if args.retry_failures:
+            receipt = retry.retry_failed(attempts, out, env, run_command, directory=JOURNEYS,
+                                         timeout=args.journey_timeout, started=started,
+                                         alive=lambda: problem is None and instance.alive())
+            retry.write_receipt(out, receipt)
     finally:
         if instance is not None:
             if problem is not None:
@@ -399,13 +426,17 @@ def journeys(args: argparse.Namespace) -> int:
             instance.down()
         for sig, handler in old.items():
             signal.signal(sig, handler)
-    reports = case_reports(out / "journeys")
-    summary = summarize(label, results, reports, problem)
+    if receipt is not None:
+        summary = retry.summarize(label, receipt)
+        if problem:
+            summary += f"\n**The dev instance could not be used:** {problem}\n"
+        failed = problem is not None or any(r["status"] in retry.BAD for r in receipt["rows"])
+    else:
+        reports = case_reports(out / "journeys")
+        summary = summarize(label, results, reports, problem)
+        failed = problem is not None or any(result["code"] != 0 for result in results)
     _write_summary(summary)
-    failed = problem is not None or any(result["code"] != 0 for result in results)
-    print(f"[ci] {label}: {'FAILED' if failed else 'passed'}; "
-          f"{sum(r['ok'] for r in reports)}/{len(reports)} cases passed; output in {out}",
-          flush=True)
+    print(f"[ci] {label}: {'FAILED' if failed else 'passed'}; output in {out}", flush=True)
     return 1 if failed else 0
 
 
@@ -454,6 +485,8 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--ttl-seconds", type=int, default=3600)
     run.add_argument("--ready-timeout", type=float, default=READY_SECONDS)
     run.add_argument("--journey-timeout", type=float, default=JOURNEY_SECONDS)
+    run.add_argument("--retry-failures", action="store_true",
+                     help="CI only: retry up to three failed cases/crashed files once, in the same instance")
     args = parser.parse_args(argv)
     if args.command == "plan":
         print(json.dumps(plan(args.shards)))
