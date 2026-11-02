@@ -10,7 +10,7 @@
             "file_path": "/fake/big-file.txt"
           },
           "result_chars": 3000,
-          "delay_ms": 700
+          "delay_ms": 2500
         }
       ]
     },

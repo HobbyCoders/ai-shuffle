@@ -40,7 +40,7 @@ tokens, literal ids, private addresses or the owner's names in them.
 | `compact_metadata` | `trigger` (`auto`/`manual`), `pre_tokens`, `post_tokens`, `cumulative_dropped_tokens` (running total of what compaction removed), `duration_ms`; through the summarizer also `preserved_segment {head_uuid, anchor_uuid, tail_uuid}` and `preserved_messages {anchor_uuid, uuids}` (the kept tail: 2 to 19 messages, median 4, anchored at the summary), sometimes `pre_compact_discovered_tools`. |
 | `logical_parent_uuid` | The uuid of the last message before the compaction. In the transcripts that is usually not a user or assistant message: 402 of 524 summarizer boundaries point at an attachment (a token-count reminder), 70 at a system entry, 14 at a user message. The rows the mod posts carry the same uuids as handles. |
 | summary | Summarizer only: one `user` frame whose `message.content` is the summary as a string (1.5k to 30k characters in the transcripts, median 16k), flagged `isCompactSummary` and `isVisibleInTranscriptOnly`. |
-| replay | The mod's path only: every row of Fluid's answer, printed as an ordinary `user` or `assistant` frame with a **fresh uuid** and the same tool ids (#679). |
+| replay | The mod's path only: every row of Fluid's answer, printed as an ordinary `user` or `assistant` frame with a **fresh uuid** and the same tool ids (#679). | What is attached to a row (hook context on a tool result, for example) comes back only if that row is handed back with its handle and the same content.
 
 The session id does not change across a compaction (582 of 582). On
 `--resume` the CLI prints only `system/init`; it never prints the history.
@@ -95,8 +95,40 @@ events, then the next call (`scenarios/compact-after-tool.json` plays it).
 - That `compact_result: failed` means a failure: a `skipped: ...` error is the
   mod leaving the conversation as it is, a no-op.
 - That the boundary comes before the closing status. It comes after.
+- That `logical_parent_uuid` names a row the mod posted. On 97 of 105 mechanical
+  boundaries (2.1.312 to 2.1.316) it does not: it names an attachment, a stop-hook
+  entry or a uuid not in the transcript. Prefer the answer it names, else take
+  the newest open answer. A boundary with preserved rows or a summary is the
+  summarizer's, and every open answer closes unapplied.
+- That a `compacting` frame read after a bridge answer means the answer was not
+  applied. The answer comes over HTTP and frames over stdout, so the frame may
+  have been printed first.
+- That hook context reaches the model whole. Over 10,000 characters (2.1.316,
+  `SIt` in the bundle) it is saved to a file and the model gets a 2 KB preview, so
+  the leg never answers with more than 9,500: an overlong restoration note goes
+  out in parts, on later tool results or the next turn. One peer message that
+  long still goes out, as holding it would lose it, and the preview names the file.
 - That replayed rows are new work. They carry fresh uuids and old tool ids
   (the leg's `ReplayFilter`).
+
+## What survives a compaction
+
+| What the agent was told | Where it lives after a compaction |
+| --- | --- |
+| A message on a tool result (PostToolUse hook, deny, stdin lane) | Stored on that tool result's node (`delivered_steers`), as native does. A fold renders it from there. Repeated by the restoration note when the answer dropped it. |
+| A message that opened a turn (wake, queued row) | Pinned in its own budget in an epoch (`peer_pin_chars`), and a larger digest cap, from render version 3. |
+| The session's opening request | Up to `brief_text_cap`, line breaks kept, in digest and epoch; on a model-written checkpoint too. |
+| Any of them, with Claude Code's summarizer | The restoration note repeats them, as nothing says what the summary kept: one extra copy at most. |
+| Any of them, on a re-seed to another worker | Added as a last row when the entries no longer show them. |
+
+Older persisted decisions keep their render version, so old sessions render
+byte for byte as they did.
+
+The restoration note is a queue under one `compaction_id`, which the boundary,
+the checkpoint and each `compaction_restoration` diagnostic share. A section is
+credited when its last part is in a hook answer; `pending`, `cut` and `omitted`
+stay uncredited and the rest is re-sent. It always ends: the queue holds a bounded
+total, and a section that cannot fit ends `cut` and uncredited.
 
 ## Not verified
 
@@ -108,6 +140,9 @@ compaction on a release candidate; that is where to confirm them:
 - whether the CLI prints the `@internal` `compact_progress` events in
   stream-json (the app ignores them either way);
 - the exact extra keys on the summary `user` frame;
+- the attachment rule and the 10,000-character limit above under a running fix:
+  they come from the 2.1.316 bundle and from transcripts, and one live note was
+  seen arriving as a 2 KB preview, but no real CLI has run this fix;
 - whether a typed `/compact` also prints its own `<command-name>` and
   `<local-command-stdout>` user lines, and whether the summarizer path of a
   typed `/compact` prints the kept tail again with the old uuids. The app

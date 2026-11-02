@@ -365,6 +365,7 @@ class DevClaude(script.Fake):
         self.model_calls = 0
         self.dropped_tokens = 0  # what compaction removed so far (cumulative_dropped_tokens)
         self.summarizer_keep: int | None = None  # a scenario's rows beside the summary
+        self.no_answer = False  # a scenario's: the mod has no answer, so the summarizer runs
         self.mcp: dict[str, McpServer] = {}
         self.transcript = self._transcript_path()
         self.mod_loaded = False
@@ -819,6 +820,7 @@ class DevClaude(script.Fake):
                 break
             if step.get("compact"):
                 self.summarizer_keep = step.get("summarizer_keep")
+                self.no_answer = bool(step.get("summarizer"))
                 self.compact("auto", None)
             self.poll(latency / 1000 if latency else 0.01)
             self.start_message()
@@ -976,7 +978,7 @@ class DevClaude(script.Fake):
         # outcome of a trigger (a test checks it): the typed command's
         # "compacting" status; nothing for an automatic compaction.
         self.play_compaction(prelude, ctx)
-        if outcome != "skip":
+        if outcome != "skip" and not self.no_answer:
             try:
                 answer = self.ask_bridge(trigger)
             except BridgeError as exc:

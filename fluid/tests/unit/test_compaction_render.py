@@ -923,4 +923,5 @@ def test_a_message_delivered_on_a_tool_result_survives_digest_and_epoch() -> Non
     """Native records these on the result, and delegated now does too."""
     nodes = _pair(0, BRIEF) + _told(1, RULE)
     assert RULE in render_span_digest(nodes[2:], CompactionConfig()).content[0].text
-    assert RULE in _epoch_text(render_epoch_stub(split_spans(nodes), CompactionConfig()))
+    stub = render_epoch_stub(split_spans(nodes), CompactionConfig())
+    assert RULE in "".join(block.text for block in stub.content)
