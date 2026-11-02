@@ -82,7 +82,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from fluid.engine import delegated_guard_policy as guard_policy
-from fluid.engine.background import BackgroundLifecycleMixin
+from fluid.engine.background import BackgroundLifecycleMixin, await_cancelled_child
 from fluid.engine.base import EngineCaps, matches_tool_pattern
 from fluid.engine.claude_mod_usage import USAGE_PATH, PlanUsageReport, parse_plan_usage_report
 from fluid.engine.claude_mod_compaction import (
@@ -737,7 +737,7 @@ def _with_forced_env(settings: dict[str, Any]) -> dict[str, Any]:
 _GROUP_TERM_GRACE_S = 2.0
 #: How long the CLI gets to exit once its stdin closes.
 _CLI_EXIT_GRACE_S = 5.0
-#: The same, when a close was cancelled before it reached the CLI at all.
+#: The same, when the close has no time left or the session was given up on.
 _CANCELLED_EXIT_GRACE_S = 1.0
 # How long a cancelled close waits to reap the CLI after killing its tree.
 _CANCELLED_KILL_WAIT_S = 2.0
@@ -1531,16 +1531,27 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     ))
             if self._turn_task and not self._turn_task.done():
                 self._turn_task.cancel()
-                try:
-                    await self._turn_task
-                except asyncio.CancelledError:
-                    pass
+                await await_cancelled_child(self._turn_task)
             await self._emit_session_end()
         except asyncio.CancelledError:
             grace = _CANCELLED_EXIT_GRACE_S
             raise
         finally:
             await self._stop_process(grace=grace)
+
+    async def release_abandoned(self) -> None:
+        """Give back the OS resources of a session already given up on.
+
+        For a loop whose owner has moved on, so a replacement engine may be
+        writing this session's events by now. That rules out ``aclose()``: its
+        ``SessionEnd`` hook and journal drain would make this loop a second
+        writer, and sequence numbers would collide. So this stops the CLI and
+        frees the bridge, and publishes nothing.
+        """
+        try:
+            await self._stop_process(grace=_CANCELLED_EXIT_GRACE_S)
+        finally:
+            self._release_bridge_resources()
 
     def _release_bridge_resources(self) -> None:
         """Close the bridge server and remove this loop's files.

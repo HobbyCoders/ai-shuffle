@@ -38,6 +38,23 @@ _BACKGROUND_WAKE_MAX_ATTEMPTS = 3
 _BACKGROUND_WAKE_RETRY_BASE_SECONDS = 0.5
 
 
+async def await_cancelled_child(task: asyncio.Task[Any]) -> None:
+    """Wait for a child task this caller just cancelled.
+
+    The child's cancellation ends here, but one aimed at the caller, such as a
+    close deadline firing during the child's cleanup, must carry on. Compared
+    against the count at entry, because a close can run from a task already being
+    cancelled.
+    """
+    current = asyncio.current_task()
+    cancels_before = current.cancelling() if current is not None else 0
+    try:
+        await task
+    except asyncio.CancelledError:
+        if current is not None and current.cancelling() > cancels_before:
+            raise
+
+
 class BackgroundLifecycleMixin(QuestionLifecycleMixin):
     """Engine mixin implementing durable background-task park and wake.
 
@@ -491,10 +508,7 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         wake = self._background_wake_task
         if wake is not None and not wake.done():
             wake.cancel()
-            try:
-                await wake
-            except asyncio.CancelledError:
-                pass
+            await await_cancelled_child(wake)
 
         spawns = set(self._background_spawn_tasks)
         if spawns:

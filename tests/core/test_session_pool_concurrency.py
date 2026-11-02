@@ -48,7 +48,7 @@ def _make_state(
     adapter.is_connected.return_value = connected
     adapter.subprocess_pid.return_value = None
     adapter.disconnect = AsyncMock()
-    adapter.disconnect_transport = AsyncMock()
+    adapter.release_dead_transport = AsyncMock()
 
     last_activity = datetime.now(timezone.utc) - timedelta(seconds=idle_seconds)
     started = datetime.now(timezone.utc) if is_streaming else None
@@ -121,7 +121,7 @@ async def test_remove_dead_invalidates_retained_state():
     assert pool.peek("dead") is None
     await asyncio.gather(*pool._background_teardowns)
     state.adapter.disconnect.assert_not_awaited()
-    state.adapter.disconnect_transport.assert_awaited_once()
+    state.adapter.release_dead_transport.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -302,16 +302,32 @@ async def test_a_child_holding_the_exited_clis_stdout_still_goes(ends_by):
 @posix_only
 @pytest.mark.asyncio
 @pytest.mark.parametrize("removal", ["remove_dead", "evict_dead", "remove", "evict"])
-async def test_dropping_a_dead_session_closes_its_engine(monkeypatch, removal):
-    """A dead CLI does not close the parent's side of the bridge."""
+async def test_dropping_a_dead_session_frees_its_engine_and_publishes_nothing(monkeypatch, removal):
+    """A dead CLI does not close the parent's side of the bridge.
+
+    A replacement engine may already be numbering this session's events, so the
+    old one must not write any: not from the journal, and not from a hook.
+    """
     ended_workflows = []
+    published = []
 
     async def fake_close(session_id):
         ended_workflows.append(session_id)
 
+    async def spy_emit(event):
+        published.append(event)
+
+    async def spy_session_end():
+        published.append("session end")
+
     monkeypatch.setattr("app.core.swarm.close", fake_close)
     loop = await _loop_with_bridge()
     socket_path, tmpdir = loop._socket_path, loop._tmpdir
+    loop._journal = journal = _SlowJournal()
+    monkeypatch.setattr(loop, "_emit", spy_emit)
+    monkeypatch.setattr(loop, "_emit_session_end", spy_session_end)
+    proc = await _spawn(loop, _STUBBORN)
+    await proc.stdout.readline()
     adapter = HarnessAdapter()
     adapter._engine = loop
     assert not adapter.is_alive()
@@ -331,8 +347,70 @@ async def test_dropping_a_dead_session_closes_its_engine(monkeypatch, removal):
         await asyncio.gather(*pool._background_teardowns)
 
     _assert_released(loop, socket_path, tmpdir)
-    assert adapter._engine is None
+    assert proc.returncode is not None, "the CLI outlived the session being dropped"
     assert not ended_workflows
+    assert not journal.started
+    assert not published
+
+
+async def _turn_with_slow_cleanup() -> None:
+    try:
+        await asyncio.sleep(30)
+    except asyncio.CancelledError:
+        await asyncio.sleep(0.4)
+        raise
+
+
+@posix_only
+@pytest.mark.asyncio
+async def test_a_deadline_during_the_turns_cleanup_is_not_swallowed():
+    loop = await _loop_with_bridge()
+    socket_path, tmpdir = loop._socket_path, loop._tmpdir
+    loop._journal = journal = _SlowJournal()
+    loop._turn_task = asyncio.create_task(_turn_with_slow_cleanup())
+    await asyncio.sleep(0)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(loop.aclose(), timeout=0.05)
+
+    assert not journal.started
+    _assert_released(loop, socket_path, tmpdir)
+    loop._turn_task.cancel()
+    await asyncio.gather(loop._turn_task, return_exceptions=True)
+
+
+@posix_only
+@pytest.mark.asyncio
+async def test_a_close_from_an_already_cancelled_task_still_finishes():
+    """A turn's ``finally`` can close the loop; only a new cancel may cut it short."""
+    loop = await _loop_with_bridge()
+    loop._journal = journal = _SlowJournal()
+    journal.aclose = _noted_quick_close(journal)
+    loop._turn_task = asyncio.create_task(asyncio.sleep(30))
+    await asyncio.sleep(0)
+
+    async def closer():
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            await loop.aclose()
+            raise
+
+    task = asyncio.create_task(closer())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert loop._turn_task.cancelled()
+    assert journal.finished
+
+
+def _noted_quick_close(journal: _SlowJournal):
+    async def aclose() -> None:
+        journal.started = journal.finished = True
+
+    return aclose
 
 
 @posix_only
