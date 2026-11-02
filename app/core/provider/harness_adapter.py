@@ -3788,7 +3788,18 @@ class HarnessAdapter(ProviderAdapter):
         self._record_applied("model", requested)
 
     async def set_run_settings(self, *, effort: Optional[str], fast: bool) -> dict:
-        """Apply at the next model-call boundary without restarting a live turn."""
+        """Apply a session's effort and Fast mode without restarting a live turn.
+
+        When it lands depends on the lane:
+
+        * Delegated (the Claude CLI): acknowledged at once, but Fast mode takes
+          effect when the next turn starts. Every remaining request of a
+          running turn keeps the speed the turn began with
+          (:meth:`fast_waits_for_next_turn`).
+        * Native (OpenAI Responses): the next request of the turn reads the new
+          values, so a running turn switches at its next model call. A request
+          already in flight keeps its parameters.
+        """
         if self._engine is None or self._options is None:
             raise RuntimeError("Adapter not connected")
         normalized = _effective_effort(self._options, effort, self._provider_kind)
@@ -3818,6 +3829,14 @@ class HarnessAdapter(ProviderAdapter):
         if ctx is not None:
             ctx.extra["app_caller_effort"] = normalized
         return {"effort": normalized, "fast": fast}
+
+    def fast_waits_for_next_turn(self) -> bool:
+        """True when a running turn's speed differs from the Fast setting.
+
+        Only the delegated lane: a native turn switches at its next request.
+        """
+        waits = getattr(self._engine, "fast_waits_for_next_turn", None) if self._is_delegated else None
+        return waits is not None and waits() is True
 
     async def set_permission_mode(self, mode: str) -> None:
         requested = mode
@@ -4131,6 +4150,19 @@ class HarnessAdapter(ProviderAdapter):
                 "rerouted": bool(getattr(event, "rerouted", False)),
                 "reason": getattr(event, "reason", None),
                 "category": getattr(event, "category", None),
+            })]
+
+        if cls == "FastModeOutcome":
+            # How the turn's requests really ran; query_engine turns it into a
+            # persisted ``fast_outcome`` note.
+            return [SystemMessage(subtype="fast_outcome", data={
+                "requested": bool(getattr(event, "requested", False)),
+                "requested_at_end": bool(getattr(event, "requested_at_end", False)),
+                "fast_calls": getattr(event, "fast_calls", 0),
+                "standard_calls": getattr(event, "standard_calls", 0),
+                "unknown_calls": getattr(event, "unknown_calls", 0),
+                "state": getattr(event, "state", None),
+                "disabled_reason": getattr(event, "disabled_reason", None),
             })]
 
         if cls == "GuardrailBlocked":

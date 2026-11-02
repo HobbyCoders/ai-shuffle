@@ -1,0 +1,34 @@
+{
+  "description": "Three model calls in one turn, two of them with a scripted Bash result, so a setting can change between requests. Tag options: tps, fast_refused=REASON, fast_cooldown=1, speed=null, speed=missing.",
+  "steps": [
+    {
+      "text": "First request of this turn, checking the project before doing anything else with it.",
+      "tool_calls": [
+        {
+          "name": "Bash",
+          "input": {
+            "command": "pwd",
+            "description": "Show the directory"
+          },
+          "result": "/workspace"
+        }
+      ]
+    },
+    {
+      "text": "Second request of this turn, looking through what that first command printed for us.",
+      "tool_calls": [
+        {
+          "name": "Bash",
+          "input": {
+            "command": "ls",
+            "description": "List the files"
+          },
+          "result": "README.md"
+        }
+      ]
+    },
+    {
+      "text": "Third request of this turn. All three requests are finished."
+    }
+  ]
+}

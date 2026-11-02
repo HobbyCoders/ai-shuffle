@@ -67,6 +67,7 @@
 	import ProviderGlyph from '$lib/components/settings/ProviderGlyph.svelte';
 	import type { PickerGroup } from '$lib/constants/model-picker';
 	import type { ComposerSheetProps as Props } from '$lib/components/chat/composer-shell';
+	import { fastAppliesNotice } from '$lib/utils/fast-outcome';
 	import EffortMeter from './EffortMeter.svelte';
 	import {
 		ACCESS_HELP, ACCESS_LABEL, ACCESS_SHORT, BYPASS, VelocityTracker, dragAxis, settlesClosed,
@@ -78,7 +79,7 @@
 		modelOptions, modelGroups, modelValue, modelLabel, modelNotice, onModelSelect, modelLocked = false,
 		contextChoice, onContextChoiceSelect, contextStandardTokens, onContextStandardChange, effortOptions, effortValue, onEffortSelect,
 		effortExplanation, effortKnown = true, effortDefaultValue = null,
-		fastSupported = false, fastEnabled = false, fastPending = false, onToggleFast, showCodeControls = true,
+		fastSupported = false, fastEnabled = false, fastPending = false, fastWaitsForNextMessage = false, onToggleFast, showCodeControls = true,
 		showSetup = true, permissionOptions, permissionValue, permissionPending = false, permissionUpdating = false, onPermissionSelect,
 		awayEnabled = false, awayAvailable = false, awayBusy = false, onToggleAway,
 		onUsageOpenChange, callAction, browserOpen = false, onBrowserToggle, onBrowserPreload, terminal
@@ -1034,6 +1035,7 @@
 								</button>
 							{/if}
 						</div>
+						{#if fastShown && fastWaitsForNextMessage}<p class="mcp-note" data-testid="fast-applies-notice" role="status">{fastAppliesNotice(fastEnabled)}</p>{/if}
 						{#if modelNotice}<p class="mcp-note warn">{modelNotice}</p>{/if}
 
 						{#if accessShown}

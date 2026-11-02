@@ -626,6 +626,32 @@ class ModelServed(Event):
     category: str | None = None
 
 
+@dataclass(frozen=True, kw_only=True)
+class FastModeOutcome(Event):
+    """What a delegated turn asked of Fast mode and how its requests really ran.
+
+    Published with the turn's result when Fast was asked for at any point in
+    the turn or a request ran fast; an ordinary turn has none. Claude Code
+    reads the Fast setting once when a turn starts, so ``requested`` and
+    ``requested_at_end`` differ when it was toggled during the turn.
+
+    The counts cover the main conversation's model calls: ``usage.speed`` of
+    ``fast`` or ``standard``, and ``unknown_calls`` for a call whose records
+    all left it null or out. ``state`` and ``disabled_reason`` are the result's
+    ``fast_mode_state`` and ``fast_mode_disabled_reason``, verbatim. The reason
+    says why Fast cannot serve right now, not why a given request ran standard,
+    and a chat with Fast off is told one as well.
+    """
+
+    requested: bool
+    requested_at_end: bool
+    fast_calls: int = 0
+    standard_calls: int = 0
+    unknown_calls: int = 0
+    state: str | None = None
+    disabled_reason: str | None = None
+
+
 #: ``GuardrailBlocked.outcome`` values.
 GUARDRAIL_OUTCOMES = ("continued", "stopped")
 
@@ -932,7 +958,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
         ToolUse, ToolResult, SteerDelivered,
         PermissionRequest, QuestionRequest, QuestionAnswered, QuestionDelivered, HandoffCreated,
         ContextCompaction, ContextCompacting, Usage, RateLimit, ProviderRetry, ProviderAlive,
-        ModelServed, GuardrailBlocked, AttemptDiscarded,
+        ModelServed, GuardrailBlocked, AttemptDiscarded, FastModeOutcome,
         SubagentEvent, HookEvent, AssistantTextSanitized,
         CacheMissAlert,
         ContinualUpdate, DelegatedSurface, DelegatedDiagnostic, SwarmUpdated,

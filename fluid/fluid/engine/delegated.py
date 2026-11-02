@@ -998,6 +998,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # read yet. Kept across drains: a Stop ends the drain, not the wake,
         # and the next drain must still wait for that result.
         self._wake_in_flight = False
+        # The mapper of the turn the CLI is running: from sending it until its
+        # result. None between turns.
+        self._live_mapper: StreamJsonMapper | None = None
         # Peer input may not start a CLI cycle after the admitted host turn ends.
         self._peer_admission_open = False
         # Peer messages and user steers admitted to the running turn and
@@ -1351,6 +1354,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     async def set_run_settings(self, *, effort: str | None, fast: bool) -> None:
         """Session-only flag settings; never write account/project configuration.
 
+        The CLI acknowledges the change at once but reads Fast mode once, when
+        a turn starts: a change during a running turn takes effect on the next
+        turn, and every remaining request of this one keeps the speed it began
+        with (Claude Code 2.1.316). :meth:`fast_waits_for_next_turn` reports
+        that state.
+
         The payload keeps the settings' ``env`` block with ``FORCED_CHILD_ENV``
         on top, as ``--settings`` does, so a re-sent flag layer never drops
         the steer override.
@@ -1362,9 +1371,29 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 "cannot be merged into them"
             )
         settings = _with_forced_env({**base, "effortLevel": effort, "fastMode": fast})
-        await self._apply_setting({"subtype": "apply_flag_settings", "settings": settings})
+        # Told to the running turn before the answer: its result can arrive
+        # first, and then has to report the setting the CLI already holds.
+        mapper = self._live_mapper
+        before = mapper.fast_now if mapper is not None else False
+        if mapper is not None:
+            mapper.fast_now = fast
+        try:
+            await self._apply_setting({"subtype": "apply_flag_settings", "settings": settings})
+        except BaseException:
+            if mapper is not None:
+                mapper.fast_now = before
+            raise
         self.effort = effort
         self.settings = _settings_json(settings)
+
+    def fast_waits_for_next_turn(self) -> bool:
+        """True while the running turn's speed differs from the Fast setting."""
+        mapper = self._live_mapper
+        return mapper is not None and mapper.fast_now != mapper.fast_at_start
+
+    def _fast_setting(self) -> bool:
+        """The Fast setting a turn sent now starts with."""
+        return (self._settings_object() or {}).get("fastMode") is True
 
     def _settings_object(self) -> dict[str, Any] | None:
         """Host settings with owned attribution, or None for non-object input.
@@ -2565,21 +2594,26 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 session_id=sid, turn_id=turn_id, model=self.model,
                 provider=self.provider, user_node_id=user_node.node_id,
                 cost_baseline=self._cli_cost_total,
+                fast_requested=self._fast_setting(),
             )
             failure: str | None
+            self._live_mapper = mapper
             try:
-                await self._write_frame({"type": "user", "message": {
-                    "role": "user", "content": _content_to_cli(content),
-                }})
-            except (OSError, RuntimeError) as exc:
-                # The CLI closed stdin before reading a turn: with a resume
-                # handle in play that is the rejected-handle exit.
-                failure = f"claude stdin closed before the turn was sent: {exc!r}"
-            else:
-                self._peer_admission_open = not self._interrupted.is_set()
-                self._stdin_lane_closed = False  # a retried attempt reopens it
-                async with self._stdout_lock:
-                    failure = await self._read_until_result(sid, turn_id, mapper, user_node)
+                try:
+                    await self._write_frame({"type": "user", "message": {
+                        "role": "user", "content": _content_to_cli(content),
+                    }})
+                except (OSError, RuntimeError) as exc:
+                    # The CLI closed stdin before reading a turn: with a resume
+                    # handle in play that is the rejected-handle exit.
+                    failure = f"claude stdin closed before the turn was sent: {exc!r}"
+                else:
+                    self._peer_admission_open = not self._interrupted.is_set()
+                    self._stdin_lane_closed = False  # a retried attempt reopens it
+                    async with self._stdout_lock:
+                        failure = await self._read_until_result(sid, turn_id, mapper, user_node)
+            finally:
+                self._live_mapper = None
             if failure is None:
                 return mapper
             self._peer_admission_open = False

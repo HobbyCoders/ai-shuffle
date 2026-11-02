@@ -106,6 +106,14 @@ describe('quick bar', () => {
 		expect(bar().querySelectorAll('p, small')).toHaveLength(0);
 	});
 
+	it('says at the switch when Fast waits for the next message', async () => {
+		const shown = { fastSupported: true, fastEnabled: true, open: true };
+		const view = render(MobileComposerControlsSheet, { props: props(shown) });
+		expect(screen.queryByTestId('fast-applies-notice')).toBeNull();
+		await view.rerender(props({ ...shown, fastWaitsForNextMessage: true }));
+		expect(screen.getByTestId('fast-applies-notice').textContent).toMatch(/starts with your next message/);
+	});
+
 	it('styles Bypass like every other mode and names saving', () => {
 		render(MobileComposerControlsSheet, { props: props({ permissionValue: 'bypassPermissions', permissionUpdating: true }) });
 		const access = cell(/^Tool access: Bypass, saving$/);

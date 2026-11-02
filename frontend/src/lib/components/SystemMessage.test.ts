@@ -48,6 +48,15 @@ it('labels peer receipts as automatically delivered, without an Interrupt action
 });
 
 
+it('shows a fast_outcome note as one line with its outcome', () => {
+	render(SystemMessage, { message: makeMessage({ systemSubtype: 'fast_outcome', systemData: {
+		content: 'Ran at standard speed. Fast mode needs usage credits.', outcome: 'standard',
+	} }) });
+	const note = screen.getByTestId('fast-outcome-note');
+	expect(note.getAttribute('data-outcome')).toBe('standard');
+	expect(note.textContent).toContain('Ran at standard speed. Fast mode needs usage credits.');
+});
+
 describe('SystemMessage — compact_boundary', () => {
 	const sizes = { pre_tokens: 182_000, post_tokens: 41_000, context_window: 200_000 };
 	it.each([

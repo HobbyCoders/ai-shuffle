@@ -450,6 +450,43 @@ describe('per-model fast mode selection', () => {
 });
 
 describe('live effort and Fast mode selection', () => {
+	describe('the worker says a Fast change waits for the next message', () => {
+		afterEach(() => {
+			vi.restoreAllMocks();
+			Object.assign(activeSession.current, { sessionId: null, isStreaming: false, fastAppliesNextIn: null });
+		});
+		const start = (extra = {}) => Object.assign(activeSession.current, {
+			sessionId: 'waits', modelOverride: 'opus', fastMode: false, isStreaming: true, fastAppliesNextIn: null, ...extra
+		});
+
+		it('records only what the worker answered', async () => {
+			start();
+			vi.spyOn(api, 'put').mockResolvedValueOnce({ effort: 'high', fast: true });
+			await activeSession.setFastMode(true);
+			expect(activeSession.current.fastAppliesNextIn ?? null).toBeNull();
+			vi.spyOn(api, 'put').mockResolvedValueOnce({ effort: 'high', fast: false, fast_applies: 'next_message' });
+			await activeSession.setFastMode(false);
+			expect(activeSession.current.fastAppliesNextIn).toBe('waits');
+		});
+
+		it('clears when a later answer no longer waits, and a window answer leaves it', async () => {
+			start({ fastAppliesNextIn: 'waits' });
+			vi.spyOn(api, 'put').mockResolvedValueOnce({ context_window: 200_000 });
+			await activeSession.setContextWindowChoice('standard');
+			expect(activeSession.current.fastAppliesNextIn).toBe('waits');
+			vi.spyOn(api, 'put').mockResolvedValueOnce({ effort: 'high', fast: false });
+			await activeSession.setFastMode(false);
+			expect(activeSession.current.fastAppliesNextIn ?? null).toBeNull();
+		});
+
+		it('ends with the turn, even when the answer lands after it', async () => {
+			start({ isStreaming: false });
+			vi.spyOn(api, 'put').mockResolvedValueOnce({ effort: 'high', fast: true, fast_applies: 'next_message' });
+			await activeSession.setFastMode(true);
+			expect(activeSession.current.fastAppliesNextIn ?? null).toBeNull();
+		});
+	});
+
 	describe('context window selection', () => {
 		it('saves the pin without sending a message and waits for acknowledgement', async () => {
 			Object.assign(activeSession.current, { modelOverride: 'fable', contextWindowChoice: '1m' });

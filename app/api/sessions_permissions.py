@@ -70,9 +70,11 @@ def _inherited_fast_skip(session: dict) -> Optional[str]:
 async def propagate_fast(session_id: str, fast: bool, _seen: Optional[set] = None) -> None:
     """Hand a fast-mode change down to the session's subagents.
 
-    Every delegated worker under ``session_id`` takes the same setting from
-    its next model request, as the parent does, except one the owner pinned
-    in its own chat and one whose model has no fast mode. A worker run by
+    Every delegated worker under ``session_id`` takes the same setting, as
+    the parent does, except one the owner pinned in its own chat and one whose
+    model has no fast mode. A worker in the middle of a turn finishes that turn
+    at the speed it began with and says so in its own chat; the answer to the
+    parent's toggle speaks only for the parent. A worker run by
     another worker gets it through that worker's ``run-settings`` action,
     which hands it on to its own subagents there. Never raises: a subagent
     that cannot take the change keeps its setting.
@@ -120,6 +122,12 @@ async def apply_run_settings(session_id: str, body: RunSettingsUpdate, *,
     fast mode, and a subagent the owner pinned, or one whose model has no
     fast mode, answers ``{"skipped": reason}`` and is left unchanged. The
     owner's own change to a subagent pins it.
+
+    ``fast_applies: "next_message"`` in the answer means the session's running
+    turn keeps another speed than the one now set, so the setting takes effect
+    with the next message. It is absent when the setting already holds: nothing
+    is running, or the lane switches at its next request (see
+    ``HarnessAdapter.set_run_settings``).
     """
     result = await _apply_run_settings(session_id, body, inherited=inherited)
     if propagate and "fast" in body.model_fields_set and "skipped" not in result:
@@ -207,6 +215,8 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
         if connected and state.connect_options is not None:
             state.connect_options.effort = selected["effort"]
             state.connect_options.aih_fast = selected["fast"]
+        if connected and state.adapter.fast_waits_for_next_turn():
+            return {**selected, "fast_applies": "next_message"}
         return selected
 
 

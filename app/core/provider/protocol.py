@@ -201,6 +201,10 @@ class ProviderAdapter(ABC):
         """Acknowledge session-only effort/Fast changes, or refuse if unsupported."""
         raise NotImplementedError("Live effort/Fast changes are not supported by this adapter")
 
+    def fast_waits_for_next_turn(self) -> bool:
+        """True when a running turn keeps a speed other than the Fast setting."""
+        return False
+
     # ─── Session Identity ─────────────────────────────────────────────
 
     @property

@@ -3096,6 +3096,19 @@ async def _stream_to_websocket_impl(
                                 "data": model_rerouted_note(served_data, session_provider),
                             }
 
+                elif message.subtype == "fast_outcome":
+                    # How this turn's requests ran against the Fast setting
+                    # (fluid FastModeOutcome via the adapter): a persisted
+                    # note. It says nothing about the reply, so it does not
+                    # count as visible content for an empty turn.
+                    from app.core.fast_outcome import fast_outcome_note
+
+                    yield {
+                        "type": "system",
+                        "subtype": "fast_outcome",
+                        "data": fast_outcome_note(message.data if isinstance(message.data, dict) else {}),
+                    }
+
                 elif message.subtype == "guardrail_blocked":
                     # A provider safety check declined a call (fluid
                     # GuardrailBlocked via the adapter): a persisted card,

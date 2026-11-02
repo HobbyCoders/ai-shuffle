@@ -409,7 +409,16 @@ Claude Code 2.1.312 and real transcripts; see
 new CLI that prints compaction differently changes a fixture, not the fake's
 code.
 | `exit-error` | the process exits 1 with stderr mid-turn; the next message resumes |
+| `fast-multi` | three model calls in one turn, so Fast mode can be toggled between requests |
 | `error-500`, `long`, `slow`, ... | the fake AI's scenarios, played by the CLI |
+
+Fast mode follows Claude Code 2.1.316: `--settings` and `apply_flag_settings`
+change the setting at once, and a turn reads it once when it starts, so a
+mid-turn toggle reaches the next turn. Every assistant record reports
+`usage.speed`, and the result reports `fast_mode_state` and
+`fast_mode_disabled_reason`. Tag options play the other outcomes:
+`speed=null`, `speed=missing`, `fast_refused=REASON` and `fast_cooldown=1`, for
+example `[script:fast-multi fast_refused=free]`.
 
 A step may add `"result": "..."` or `"result_chars": N` to a tool call,
 `"compact": true`, or `"exit": {"code": 1, "stderr": "..."}`. An MCP call

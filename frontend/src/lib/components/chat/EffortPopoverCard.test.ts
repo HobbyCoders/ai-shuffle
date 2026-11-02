@@ -126,6 +126,18 @@ describe('EffortPopoverCard', () => {
 		expect(onSelect).toHaveBeenCalledWith('high');
 	});
 
+	it('says when a toggle waits for the next message, only when the worker said so', async () => {
+		const base = { options, value: 'high', onSelect: vi.fn(), fastSupported: true, onToggleFast: vi.fn() };
+		const view = render(EffortPopoverCard, { props: { ...base, fastEnabled: true } });
+		expect(screen.queryByTestId('fast-applies-notice')).toBeNull();
+		await view.rerender({ ...base, fastEnabled: true, fastWaitsForNextMessage: true });
+		expect(screen.getByTestId('fast-applies-notice').textContent).toMatch(/starts with your next message/);
+		await view.rerender({ ...base, fastEnabled: false, fastWaitsForNextMessage: true });
+		expect(screen.getByTestId('fast-applies-notice').textContent).toMatch(/stops with your next message/);
+		await view.rerender({ ...base, fastSupported: false, fastWaitsForNextMessage: true });
+		expect(screen.queryByTestId('fast-applies-notice')).toBeNull();
+	});
+
 	it('shows the fast toggle only when the model carries the tier', () => {
 		const onToggleFast = vi.fn();
 		const { unmount } = render(EffortPopoverCard, {

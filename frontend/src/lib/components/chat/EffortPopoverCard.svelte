@@ -14,6 +14,7 @@
 	 * sits on the declared default (or first stop) without selecting it; the first
 	 * drag pins a level.
 	 */
+	import { fastAppliesNotice } from '$lib/utils/fast-outcome';
 	import { Zap } from 'lucide-svelte';
 	import { NO_ADJUSTABLE_EFFORT } from '$lib/constants/model-effort';
 
@@ -35,6 +36,8 @@
 		fastEnabled?: boolean;
 		/** The chat's own Fast setting has not loaded yet (#418). */
 		fastPending?: boolean;
+		/** The worker said the running turn keeps its speed until the next message. */
+		fastWaitsForNextMessage?: boolean;
 		onToggleFast?: () => void;
 	}
 
@@ -48,6 +51,7 @@
 		fastSupported = false,
 		fastEnabled = false,
 		fastPending = false,
+		fastWaitsForNextMessage = false,
 		onToggleFast
 	}: Props = $props();
 
@@ -88,6 +92,12 @@
 			>
 				<Zap size={13} strokeWidth={2} aria-hidden="true" />
 			</button>
+		{/if}
+	</div>
+
+	<div aria-live="polite">
+		{#if fastSupported && fastWaitsForNextMessage}
+			<p class="fast-applies" data-testid="fast-applies-notice">{fastAppliesNotice(fastEnabled)}</p>
 		{/if}
 	</div>
 
@@ -132,6 +142,12 @@
 
 <style>
 	.effort-explanation { font-size: 12px; color: var(--muted-foreground); }
+	.fast-applies {
+		margin: 0 0 10px;
+		font-size: 12px;
+		line-height: 1.4;
+		color: var(--muted-foreground);
+	}
 	.single-effort { padding: 6px 12px; border-radius: 6px; background: var(--muted); color: var(--foreground); }
 	.single-effort:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 	.effort-pop-card {
