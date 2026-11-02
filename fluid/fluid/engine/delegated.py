@@ -1181,6 +1181,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # next UserTurn clears it).
         self._stop_pulse = asyncio.Event()
         self._turn_task: asyncio.Task | None = None
+        # Set by release_abandoned(): another engine may own this session now.
+        self._abandoned = False
         self._pending_permissions: dict[str, asyncio.Future] = {}
         # Loop-issued control_requests awaiting their control_response, by
         # request_id (the outbound mirror of _pending_permissions).
@@ -1273,7 +1275,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         Unlike NativeLoop, a failed write is not downgraded for deltas: it
         raises into the turn, which ends on an ErrorEvent. The rejected
         deltas stay batched, so that terminal write retries them first.
+
+        An abandoned loop writes nothing: a tool call still in flight when it was
+        given up on must not number events against its replacement.
         """
+        if self._abandoned:
+            return event
         if isinstance(event, (TurnComplete, Interrupted, ErrorEvent)):
             self._peer_admission_open = False
             self._stdin_lane_closed = True
@@ -1342,6 +1349,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if isinstance(op, BackgroundTaskFinished):
             await self._finish_background_task(op)
         elif isinstance(op, UserTurn):
+            if self._abandoned:
+                raise RuntimeError("this engine was released; start a new one")
             if self._turn_task and not self._turn_task.done():
                 raise RuntimeError("a turn is already running; Interrupt it first")
             self._interrupted.clear()
@@ -1547,11 +1556,35 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         ``SessionEnd`` hook and journal drain would make this loop a second
         writer, and sequence numbers would collide. So this stops the CLI and
         frees the bridge, and publishes nothing.
+
+        Whatever is still running is cancelled before the CLI stops. A resumed
+        turn waiting on its first frame would otherwise read that stop as the
+        CLI refusing ``--resume``, wipe the valid handle and start another CLI.
         """
+        self._abandoned = True
+        self._background_closed = True  # no new wake, which would spawn a CLI
         try:
-            await self._stop_process(grace=_CANCELLED_EXIT_GRACE_S)
+            await self._cancel_abandoned_work()
         finally:
-            self._release_bridge_resources()
+            try:
+                await self._stop_process(grace=_CANCELLED_EXIT_GRACE_S)
+            finally:
+                self._release_bridge_resources()
+
+    async def _cancel_abandoned_work(self) -> None:
+        """End the running turn and any wake; never held up past a short wait."""
+        if self._background_wake_retry is not None:
+            self._background_wake_retry.cancel()
+            self._background_wake_retry = None
+        running = {
+            task
+            for task in (self._turn_task, self._background_wake_task, self._question_wake_task)
+            if task is not None and not task.done()
+        }
+        for task in running:
+            task.cancel()
+        if running:
+            await asyncio.wait(running, timeout=_CANCELLED_EXIT_GRACE_S)
 
     def _release_bridge_resources(self) -> None:
         """Close the bridge server and remove this loop's files.
@@ -2631,8 +2664,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 self.cli_session_id = mapper.cli_session_id
                 self._persist_cli_session_id(sid, mapper.cli_session_id)
             # Last: a second cancel landing on this await must not cost the
-            # resume handle above.
-            await self._flush_events(sid)
+            # resume handle above. An abandoned turn leaves its held deltas
+            # uncommitted, as a crash does: their numbers may be its replacement's.
+            if not self._abandoned:
+                await self._flush_events(sid)
 
     async def _fresh_turn_content(
         self, content: list[Any], context_pin: tuple[int, int] | None,

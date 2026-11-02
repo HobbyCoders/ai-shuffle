@@ -24,6 +24,8 @@ from pathlib import Path
 import pytest
 from fluid.engine import delegated
 from fluid.engine.delegated import DelegatedLoop
+from fluid.events.model import ErrorEvent
+from fluid.events.ops import UserTurn
 from fluid.store.base import MemoryStore
 from fluid.tools.registry import ToolOutcome, ToolRegistry, ToolSpec
 
@@ -351,6 +353,103 @@ async def test_dropping_a_dead_session_frees_its_engine_and_publishes_nothing(mo
     assert not ended_workflows
     assert not journal.started
     assert not published
+
+
+@posix_only
+@pytest.mark.asyncio
+async def test_dropping_a_session_mid_turn_keeps_its_resume_handle(monkeypatch):
+    """Stopping the CLI under a resumed turn must not look like a refused resume.
+
+    The turn sees end of output before any frame, which is how a rejected
+    ``--resume`` looks. If it took that at face value it would clear a good
+    handle and leave a new CLI running after the session was dropped.
+    """
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    await store.set_cli_session_id(sid, "good-handle")
+    loop = DelegatedLoop(
+        store=store, model="opus", registry=_registry(), claude_cmd=["claude"],
+        session_id=sid, cli_session_id="good-handle",
+    )
+    await loop._start_bundled_server()
+    socket_path, tmpdir = loop._socket_path, loop._tmpdir
+    spawned = []
+
+    async def fake_ensure_process():
+        if loop._proc is None:
+            loop._spawn_resume = loop.cli_session_id
+            spawned.append(await _spawn(loop, "import sys\nsys.stdin.read()\n"))
+        return loop._proc
+
+    flushes = []
+
+    async def spy_flush(session_id):
+        flushes.append(session_id)
+
+    monkeypatch.setattr(loop, "_ensure_process", fake_ensure_process)
+    monkeypatch.setattr(loop, "_flush_events", spy_flush)
+    await loop.submit(UserTurn(content="hello"))
+    turn = loop._turn_task
+    while loop._live_mapper is None:
+        await asyncio.sleep(0.01)
+    published = len(loop.bus.log(sid))
+
+    adapter = HarnessAdapter()
+    adapter._engine = loop
+    pool = SessionPool()
+    pool.put("dead", SessionState(adapter=adapter, is_connected=True))
+    await pool.remove_dead("dead")
+    await asyncio.gather(*pool._background_teardowns)
+    # A turn wrongly left running gets its chance to retry before the checks.
+    await asyncio.sleep(0.2)
+    turn_ended, cli_count = turn.cancelled(), len(spawned)
+    first_cli_exit = spawned[0].returncode
+    # Checked after this, so a failure here cannot hang on what it left running.
+    turn.cancel()
+    await asyncio.gather(turn, return_exceptions=True)
+    for proc in spawned:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+
+    assert turn_ended, "the abandoned turn outlived its session"
+    assert cli_count == 1, "dropping the session started another CLI"
+    assert first_cli_exit is not None
+    assert loop._proc is None
+    assert loop.cli_session_id == "good-handle"
+    await asyncio.gather(*loop._cli_id_writes)
+    assert (await store.get_session(sid)).cli_session_id == "good-handle"
+    assert len(loop.bus.log(sid)) == published
+    assert not flushes
+    _assert_released(loop, socket_path, tmpdir)
+
+
+@posix_only
+@pytest.mark.asyncio
+async def test_an_abandoned_loop_starts_and_publishes_nothing_more():
+    loop = await _loop_with_bridge()
+    meta = await loop._ensure_session()
+    wake = asyncio.create_task(asyncio.sleep(60))
+    loop._background_wake_task = wake
+    question_wake = asyncio.create_task(asyncio.sleep(60))
+    loop._question_wake_task = question_wake
+    retry = asyncio.get_running_loop().call_later(60, lambda: None)
+    loop._background_wake_retry = retry
+    loop._background_completions = {"task": object()}
+
+    await loop.release_abandoned()
+
+    assert wake.cancelled() and question_wake.cancelled()
+    assert retry.cancelled() and loop._background_wake_retry is None
+    loop._background_wake_task = None
+    loop._kick_background_wake()
+    assert loop._background_wake_task is None, "a wake could still spawn a CLI"
+    with pytest.raises(RuntimeError, match="released"):
+        await loop.submit(UserTurn(content="hello"))
+    assert loop._turn_task is None
+    before = len(loop.bus.log(meta.session_id))
+    await loop._emit(ErrorEvent(session_id=meta.session_id, turn_id="turn", message="late"))
+    assert len(loop.bus.log(meta.session_id)) == before
 
 
 async def _turn_with_slow_cleanup() -> None:
