@@ -415,6 +415,22 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       return match[1];
     }
     const body = (result: McpToolResult) => JSON.parse(firstText(result));
+    async function trackSamplingWaits(page: Page) {
+      // Observe the actual sampling scheduler, not CDP/runner wall-clock speed.
+      // Settle polling also uses setTimeout, but only after sampling is false.
+      await page.evaluate((key) => {
+        const w = window as unknown as Record<string, unknown>;
+        const schedule = window.setTimeout.bind(window);
+        w.sampleWaits = 0;
+        window.setTimeout = ((handler, delay, ...args) => {
+          if ((w[key] as { sampling?: boolean } | undefined)?.sampling) {
+            w.sampleWaits = Number(w.sampleWaits) + 1;
+          }
+          return schedule(handler, delay, ...args);
+        }) as typeof window.setTimeout;
+      }, WATCH_KEY);
+      return () => page.evaluate(() => (window as unknown as { sampleWaits: number }).sampleWaits);
+    }
     it.each([
       ["open", false], ["open", true], ["closed", false], ["closed", true],
     ] as const)("FOLLOWUP %s shadow slotted clipped frames (absolute: %s) stay hidden from read_text", async (mode, absolute) => {
@@ -712,19 +728,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     it("does not resample a mature plain page across repeated actions", async () => {
       const page = await load('<button>Plain</button><label>Name<input></label>');
       const target = await ref("Plain"), field = await ref("Name");
-      // Observe the actual sampling scheduler, not CDP/runner wall-clock speed.
-      // Settle polling also uses setTimeout, but only after sampling is false.
-      await page.evaluate((key) => {
-        const w = window as unknown as Record<string, unknown>;
-        const schedule = window.setTimeout.bind(window);
-        w.sampleWaits = 0;
-        window.setTimeout = ((handler, delay, ...args) => {
-          if ((w[key] as { sampling?: boolean } | undefined)?.sampling) {
-            w.sampleWaits = Number(w.sampleWaits) + 1;
-          }
-          return schedule(handler, delay, ...args);
-        }) as typeof window.setTimeout;
-      }, WATCH_KEY);
+      const sampleWaits = await trackSamplingWaits(page);
       // Positive control: exercise the watcher's captured sampling scheduler.
       // Do not require a fresh install to finish within its 100ms window just
       // to prove the instrument works on an overloaded runner.
@@ -737,7 +741,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
         try { await new Promise<void>(resolve => state.schedule(resolve, 0)); }
         finally { state.sampling = false; }
       }, WATCH_KEY);
-      expect(await page.evaluate(() => (window as unknown as { sampleWaits: number }).sampleWaits)).toBe(1);
+      expect(await sampleWaits()).toBe(1);
       await session.beginWatch(true, false);
       await page.evaluate(async (key) => {
         const w = window as unknown as Record<string, unknown>;
@@ -753,7 +757,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       ] as const) {
         const result = body(await runAct(session, input));
         expect(result).toMatchObject({ ok: true, text_churn_ignored: false });
-        expect(await page.evaluate(() => (window as unknown as { sampleWaits: number }).sampleWaits)).toBe(0);
+        expect(await sampleWaits()).toBe(0);
       }
     });
     it("does not ignore a newly started ticker that has never mutated before dispatch", async () => {
@@ -875,12 +879,15 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
         crossframe: `<iframe src="${new URL("inner-observation", httpUrl).href.replace("127.0.0.1", "localhost")}"></iframe>`,
       };
       const page = await load('<button>Shape action</button>' + shapes[kind]);
+      const sampleWaits = await trackSamplingWaits(page);
       await page.waitForTimeout(400);
       const rows = [];
       for (let i = 0; i < 3; i++) {
         await page.waitForTimeout(1000);
-        const result = body(await runAct(session, { kind: "click", ref: await ref("Shape action") }));
-        rows.push({ dispatch: Math.round(result.timings.dispatch_ms), settle: Math.round(result.timings.settle_ms), capped: result.settle_capped, dom: result.dom_mutated, stale: result.snapshot_stale });
+        const target = await ref("Shape action");
+        const before = await sampleWaits();
+        const result = body(await runAct(session, { kind: "click", ref: target }));
+        rows.push({ sampleWaits: await sampleWaits() - before, dispatch: Math.round(result.timings.dispatch_ms), settle: Math.round(result.timings.settle_ms), capped: result.settle_capped, dom: result.dom_mutated, stale: result.snapshot_stale });
       }
       console.info("ROOT_DISPATCH", JSON.stringify({ kind, rows }));
       await page.goto("about:blank");
@@ -888,8 +895,8 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
         expect(rows[i]).toMatchObject({ capped: false, stale: false });
         // Frame tickers prove their baseline afresh each action; static frames
         // sample once, and passive/empty roots do not pay repeated samples.
-        if (kind === "frame") expect(rows[i].dispatch).toBeLessThan(450);
-        else if (i > 0 || kind !== "staticframe") expect(rows[i].dispatch).toBeLessThan(90);
+        if (kind === "frame") expect(rows[i].sampleWaits).toBeGreaterThan(0);
+        else if (i > 0 || kind !== "staticframe") expect(rows[i].sampleWaits).toBe(0);
       }
     }, 15000);
     for (const where of ["top", "frame"]) it(`REVIEWSTALE ${where} once-churned node later streams`, async () => {
@@ -984,9 +991,11 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     });
     it.each(["light", "shadow"])("skips whitespace-only frames but samples a script-filled %s blank frame when text arrives", async kind => {
       const page = await load('<button>Blank frame</button><iframe srcdoc="   "></iframe>');
+      const sampleWaits = await trackSamplingWaits(page);
       await page.waitForTimeout(400);
       const first = body(await runAct(session, { kind: "click", ref: await ref("Blank frame") }));
-      expect(first.timings.dispatch_ms).toBeLessThan(90);
+      expect(first).toMatchObject({ ok: true, settle_capped: false, snapshot_stale: false });
+      expect(await sampleWaits()).toBe(0);
       await page.mainFrame().childFrames()[0].evaluate(kind => {
         const root = kind === "shadow" ? document.body.attachShadow({ mode: "open" }) : document.body;
         root.innerHTML = '<p id="clock">Clock</p>';
@@ -994,8 +1003,8 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       }, kind);
       await page.waitForTimeout(400);
       const second = body(await runAct(session, { kind: "click", ref: await ref("Blank frame") }));
-      expect(second).toMatchObject({ settle_capped: false, snapshot_stale: false, text_churn_ignored: true });
-      expect(second.timings.dispatch_ms).toBeGreaterThanOrEqual(100);
+      expect(second).toMatchObject({ ok: true, settle_capped: false, snapshot_stale: false, text_churn_ignored: true });
+      expect(await sampleWaits()).toBeGreaterThan(0);
       await page.goto("about:blank");
     });
     it("finishes a new frame sample discovered during the initial sample wait", async () => {
