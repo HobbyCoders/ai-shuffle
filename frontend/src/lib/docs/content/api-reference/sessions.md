@@ -188,7 +188,7 @@ Chips live on the worker that owns the chat and are mirrored to other workers. S
 | Field | Meaning |
 |---|---|
 | `mode` | The permission mode the chat would run in, for example `bypassPermissions`. Null when it could not be checked |
-| `summary` | That in plain words, for example `Runs with this chat's access: full permissions` |
+| `summary` | That in plain words, for example `Runs with this chat's access: full permissions`. It ends `; standard chat tools` when the chat has what its chat mode gives any agent, `; can use only some tools` when it has less, and `; can use no tools` when it has none. Words alone: `fingerprint` still covers the exact tools |
 | `elevated` | True for full permissions, or when it could not be checked |
 | `wider_than_source` | The chat would run with more than the subagent that suggested it could do |
 | `source_note` | Says how, when `wider_than_source` is true; otherwise null |

@@ -197,7 +197,7 @@ It is chosen by the request alone, so it behaves the same after restarts:
   `default`, `long`, `slow`, `tool-bash`, `tool-multi`, `tool-background-stream`, `tool-suggest-task`,
   `tool-suggest-task-slow`, `tool-suggest-task-other-model`, `tool-suggest-task-claude`,
   `tool-suggest-task-current`, `tool-suggest-task-bad-model`, `tool-task-suggest-task`,
-  `tool-task-current-suggest-task`, `tool-task-nested-suggest-task`, `tool-task-late-suggest-task`,
+  `tool-task-current-suggest-task`, `tool-task-nested-suggest-task`, `tool-task-denied-suggest-task`, `tool-task-late-suggest-task`,
   `tool-task-late-suggest-task-streaming`, `tool-suggest-task-late`, `tool-suggest-task-crowded`, `tool-suggest-task-then-fail`,
   `tool-task-fail-suggest-task`, `tool-task-stop-suggest-task`, `tool-swarm-suggest-task`, `error-500`,
   `rate-limit-429`, `cut`, `ask-question` and `ask-questions` (below), and
@@ -222,6 +222,10 @@ It is chosen by the request alone, so it behaves the same after restarts:
   subagent's subagent (**Dev helper** then **Dev nested**), `tool-swarm-suggest-task` from a
   Swarm task and `tool-task-current-suggest-task` from a subagent with `base="current"`. `tool-task-late-suggest-task` raises
   it while the root chat is parked on the subagent, and `-streaming` while the root still streams.
+  `tool-task-denied-suggest-task` does it from **Dev denied**, whose agent denies Bash, Write and Edit,
+  so under a chat with all its tools the chip says the new chat has more than the subagent. The seeded
+  **Agent with no tools** chat runs on **Dev no tools** and already holds a chip, written by the seed
+  because an agent with no tools cannot call `SuggestTask`; its access line is worked out when read.
   `tool-task-fail-suggest-task` has the subagent suggest and then fail, `tool-task-stop-suggest-task`
   suggest and keep running until you stop it, so you can start the chip after either.
   Every call names a model: `tool-suggest-task-other-model` names `fake-ai-safe`,

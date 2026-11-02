@@ -1386,11 +1386,202 @@ def test_a_damaged_record_of_a_subagents_tools_reads_as_no_tools(recorded_value)
     (dict(allowed=["mcp__x__y"]), dict(disallowed=["mcp__x__*"]), True),
     (dict(disallowed=["mcp__x__y"]), dict(disallowed=["mcp__x__*"]), True),
     (dict(disallowed=["mcp__x__*"]), dict(disallowed=["mcp__x__y"]), False),
+    # A pattern is not a tool name: its own "*" must not satisfy another's "?".
+    (dict(disallowed=["mcp__x__?"]), dict(disallowed=["mcp__x__*"]), True),
+    (dict(disallowed=["mcp__x__[ab]"]), dict(disallowed=["mcp__x__*"]), True),
+    (dict(disallowed=["mcp__x__[ab]"]), dict(disallowed=["mcp__x__[abc]"]), True),
+    (dict(disallowed=["mcp__x__?"]), dict(disallowed=["mcp__x__y"]), False),
+    (dict(allowed=["mcp__x__*"]), dict(allowed=["mcp__x__?"]), True),
+    (dict(allowed=["mcp__x__*"]), dict(allowed=["mcp__x__[ab]"]), True),
+    (dict(allowed=["mcp__x__foobar"]), dict(allowed=["mcp__x__???"]), True),
+    (dict(allowed=["mcp__xy__*"]), dict(allowed=["mcp__x__*"]), True),
+    (dict(allowed=["mcp__x__?"]), dict(disallowed=["mcp__x__*"]), True),
+    (dict(allowed=["mcp__a__?"]), dict(disallowed=["mcp__a__[xy]"]), True),
+    # What cannot be proved warns, even where the sets happen to fit.
+    (dict(allowed=["mcp__x__[ab]"]), dict(allowed=["mcp__x__[abc]"]), True),
+    (dict(disallowed=["mcp__x__[abc]"]), dict(disallowed=["mcp__x__[ab]"]), True),
+    # What must not warn: the same lists, and a prefix that really covers.
+    (dict(allowed=["Read", "mcp__x__*"], disallowed=["run_python"]),
+     dict(allowed=["Read", "mcp__x__*"], disallowed=["run_python"]), False),
+    (dict(allowed=["mcp__x__?"]), dict(allowed=["mcp__x__?"]), False),
+    (dict(allowed=["mcp__x__[ab]"]), dict(allowed=["mcp__x__[ab]"]), False),
+    (dict(disallowed=["mcp__x__?"]), dict(disallowed=["mcp__x__?"]), False),
+    (dict(allowed=["mcp__x__?"]), dict(allowed=["mcp__x__*"]), False),
+    (dict(allowed=["mcp__x__[ab]"]), dict(allowed=["mcp__x__*"]), False),
+    (dict(allowed=["mcp__x__foo"]), dict(allowed=["mcp__x__???"]), False),
+    (dict(disallowed=["mcp__x__*"]), dict(disallowed=["mcp__x__?"]), False),
+    (dict(disallowed=["mcp__x__*"]), dict(disallowed=["mcp__x__[ab]"]), False),
+    # Tools it cannot use add nothing, and a limit it cannot reach is no limit.
+    (dict(allowed=["mcp__x__?"], disallowed=["mcp__x__*"]), dict(allowed=["Read"]), False),
+    (dict(allowed=["Read", "mcp__a__*"]), dict(disallowed=["mcp__x__*"]), False),
+    (dict(allowed=["mcp__a__?"]), dict(disallowed=["mcp__b__[xy]"]), False),
 ])
 def test_what_counts_as_more_tools(access, limit, exceeds):
     from app.core.tool_access import ToolAccess, tool_access_exceeds
 
     assert tool_access_exceeds(ToolAccess(**access), ToolAccess(**limit)) is exceeds
+
+
+def test_a_tool_really_added_is_always_said_to_be_more():
+    """Whatever the lists, "not more" is only ever said when it is true."""
+    from itertools import product
+
+    from app.core.tool_access import ToolAccess, tool_access_exceeds, tool_permitted
+
+    names = ["Read", "Bash", "mcp__x__a", "mcp__x__b", "mcp__x__c", "mcp__x__foo", "mcp__xy__a", "mcp__a__a"]
+    entries = ["Read", "mcp__x__a", "mcp__x__*", "mcp__x__?", "mcp__x__[ab]", "mcp__xy__*", "mcp__*", "*"]
+    lists = [None, *([entry] for entry in entries), ["Read", "mcp__x__?"], ["mcp__x__[ab]", "mcp__x__foo"]]
+    for allowed, disallowed, limit_allowed, limit_disallowed in product(lists, repeat=4):
+        access, limit = ToolAccess(allowed, disallowed), ToolAccess(limit_allowed, limit_disallowed)
+        if not tool_access_exceeds(access, limit):
+            added = [name for name in names if tool_permitted(name, allowed, disallowed)
+                     and not tool_permitted(name, limit_allowed, limit_disallowed)]
+            assert not added, (access, limit, added)
+
+
+async def test_a_subagent_denied_a_whole_server_shows_the_chat_has_more_than_a_pattern_denies(owner):
+    """The reported case, through the chip: the chat can use ``mcp__x__foo``, the subagent could not."""
+    database.create_profile("denied", "Denied", None, {
+        "model": "sonnet", "tool_selection_mode": "disallow", "disallowed_tools": ["mcp__x__*"]})
+    chat("narrow", parent_session_id="root", is_worker=True)
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET profile_id='denied' WHERE id='narrow'")
+    chip_id = await recorded("narrow")
+    database.update_profile("agent", config={
+        "model": "sonnet", "tool_selection_mode": "disallow", "disallowed_tools": ["mcp__x__?"]})
+    access = shown("root", chip_id)
+    assert access["wider_than_source"] is True and access["elevated"] is True
+    assert access["source_note"] == "More than the subagent that suggested it, which could use only some tools."
+
+
+def auto_subagent(sid="auto-helper"):
+    chat(sid, parent_session_id="root", is_worker=True)
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET permission_mode='auto', permission_ceiling='auto' WHERE id=%s", (sid,))
+
+
+async def test_auto_on_a_native_provider_is_recorded_as_the_ask_it_really_runs_as(owner, monkeypatch):
+    """Only the Claude CLI has an Auto mode, so the chat on it really has more than this subagent."""
+    composite = lane_provider(monkeypatch)
+    set_mode("root", "auto")
+    auto_subagent()
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET provider_id='lane', model=%s WHERE id='auto-helper'", (composite,))
+    chip_id = await recorded("auto-helper")
+    assert store.get("root", chip_id)["origin_mode"] == "default"
+    access = shown("root", chip_id)
+    assert access["mode"] == "auto" and access["wider_than_source"] is True
+    assert access["source_note"] == "More than the subagent that suggested it, which asks before using tools."
+
+
+async def test_auto_on_the_claude_cli_stays_auto(owner):
+    set_mode("root", "auto")
+    auto_subagent()
+    chip_id = await recorded("auto-helper")
+    assert store.get("root", chip_id)["origin_mode"] == "auto"
+    assert shown("root", chip_id)["wider_than_source"] is False
+
+
+async def test_a_turn_choosing_a_native_provider_records_its_mode_on_that_provider(owner, monkeypatch):
+    """The turn's own model picks the leg, not only what the row was created with."""
+    composite = lane_provider(monkeypatch)
+    set_mode("root", "auto")
+    auto_subagent()
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET overrides=%s WHERE session_id='auto-helper'",
+                              (json.dumps({"model": composite}),))
+    assert store.get("root", await recorded("auto-helper"))["origin_mode"] == "default"
+
+
+async def test_a_leg_that_cannot_be_worked_out_records_the_narrower_mode(owner, monkeypatch):
+    from app.core import limit_resume
+
+    set_mode("root", "auto")
+    auto_subagent()
+    monkeypatch.setattr(limit_resume, "session_leg", lambda row: None)
+    assert store.get("root", await recorded("auto-helper"))["origin_mode"] == "default"
+
+
+def chat_lane_root(repo, sid="lane-root"):
+    """An owner's project chat in chat mode, with the seeded agent's tools untouched."""
+    row = chat(sid, project_v2_id=repo["project"], mode="chat")
+    assert row["mode"] == "chat"
+    return row
+
+
+async def test_an_ordinary_chat_does_not_read_as_restricted(owner, repo):
+    chat_lane_root(repo)
+    access = shown("lane-root", await recorded("lane-root"))
+    assert access["summary"] == "Runs with this chat's access: asks you before using tools; standard chat tools"
+    assert access["wider_than_source"] is False and access["source_note"] is None and access["elevated"] is False
+
+
+@pytest.mark.parametrize("config,suffix", [
+    ({"tool_selection_mode": "allow", "allowed_tools": ["Read"]}, "; can use only some tools"),
+    ({"tool_selection_mode": "disallow", "disallowed_tools": ["Read"]}, "; can use only some tools"),
+    ({"tool_selection_mode": "none"}, "; can use no tools"),
+    # Bash is not a chat tool anyway: nothing is lost that the chat would have had.
+    ({"tool_selection_mode": "allow", "allowed_tools": ["*"]}, "; standard chat tools"),
+])
+async def test_a_chat_restricted_beyond_its_lane_says_so(owner, repo, config, suffix):
+    chat_lane_root(repo)
+    chip_id = await recorded("lane-root")
+    database.update_profile("agent", config={"model": "sonnet", **config})
+    assert shown("lane-root", chip_id)["summary"].endswith(suffix)
+
+
+@pytest.mark.parametrize("config,suffix", [
+    ({}, ""),
+    ({"tool_selection_mode": "allow", "allowed_tools": ["Read"]}, "; can use only some tools"),
+    ({"tool_selection_mode": "none"}, "; can use no tools"),
+])
+async def test_a_lane_that_limits_nothing_only_mentions_real_limits(owner, config, suffix):
+    chip_id = await recorded()
+    database.update_profile("agent", config={"model": "sonnet", **config})
+    assert shown("root", chip_id)["summary"] == f"Runs with this chat's access: asks you before using tools{suffix}"
+
+
+async def test_the_chat_tools_wording_is_display_only(owner, repo, monkeypatch):
+    from app.core import session_modes
+    from app.core.tool_access import ToolAccess
+
+    chat_lane_root(repo)
+    chip_id = await recorded("lane-root")
+    before = shown("lane-root", chip_id)
+    monkeypatch.setattr(session_modes, "lane_baseline_tools", lambda *args, **kwargs: ToolAccess(None, None))
+    after = shown("lane-root", chip_id)
+    assert after["summary"].endswith("; can use only some tools") and before["summary"] != after["summary"]
+    assert after["fingerprint"] == before["fingerprint"]
+
+
+async def test_an_ordinary_subagent_of_an_ordinary_chat_is_not_called_narrower(owner, repo):
+    """The chat lane's limit is the new chat's, not a limit of the subagent's."""
+    chat_lane_root(repo)
+    chat("helper", parent_session_id="lane-root", is_worker=True, project_v2_id=repo["project"])
+    access = shown("lane-root", await recorded("helper"))
+    assert access["summary"].endswith("; standard chat tools")
+    assert access["wider_than_source"] is False and access["source_note"] is None
+
+
+def test_a_lanes_own_tools_only_count_where_they_really_differ():
+    from app.core.session_modes import lane_baseline_tools
+    from app.core.tool_access import tool_access_exceeds
+
+    owner_chat, basic_chat = lane_baseline_tools("chat", owner_session=True), lane_baseline_tools("chat")
+    code = lane_baseline_tools("code")
+    assert code.allowed is None and not code.disallowed
+    for tools in (owner_chat, basic_chat, code):
+        assert tool_access_exceeds(tools, tools) is False
+    assert tool_access_exceeds(owner_chat, code) is False and tool_access_exceeds(code, owner_chat) is True
+    assert tool_access_exceeds(basic_chat, owner_chat) is False and tool_access_exceeds(owner_chat, basic_chat) is True
+
+
+async def test_a_subagent_on_chat_tools_is_narrower_than_a_chat_with_all_of_them(owner, repo):
+    """Still true when the limit is the lane's: the new chat can do what that subagent could not."""
+    chat("lane-helper", parent_session_id="root", is_worker=True, project_v2_id=repo["project"], mode="chat")
+    access = shown("root", await recorded("lane-helper"))
+    assert access["wider_than_source"] is True
+    assert access["source_note"] == "More than the subagent that suggested it, which could use only some tools."
 
 
 async def test_an_access_that_cannot_be_read_never_reads_as_safe(owner, monkeypatch):

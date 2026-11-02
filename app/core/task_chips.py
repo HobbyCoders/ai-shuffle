@@ -152,11 +152,24 @@ def _source_note(chip: Dict[str, Any], mode: str, tools: ToolAccess) -> Optional
     return "More than the subagent that suggested it, which " + " and ".join(limits) + "."
 
 
-def _tool_words(tools: ToolAccess) -> str:
-    """What a limited tool list adds to the mode's words; nothing when every tool is on."""
+def _same_tools(first: ToolAccess, second: ToolAccess) -> bool:
+    def names(tools: ToolAccess) -> tuple:
+        return None if tools.allowed is None else set(tools.allowed), set(tools.disallowed or ())
+
+    return names(first) == names(second)
+
+
+def _tool_words(tools: ToolAccess, baseline: ToolAccess) -> str:
+    """What the chat's tools add to the mode's words, judged against what its lane gives anyone.
+
+    An ordinary chat keeps to the chat lane's tools and must not read as
+    restricted; on a lane that limits nothing, an unlimited agent needs no words.
+    """
     if DENY_ALL in (tools.disallowed or ()):
         return "; can use no tools"
-    return "; can use only some tools" if tools.allowed or tools.disallowed else ""
+    if not _same_tools(tools, baseline):
+        return "; can use only some tools"
+    return "; standard chat tools" if tools.allowed or tools.disallowed else ""
 
 
 def _access(chip: Dict[str, Any], scope: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
@@ -170,7 +183,8 @@ def _access(chip: Dict[str, Any], scope: Optional[Dict[str, Any]] = None) -> Opt
         access = orch.chip_access_now(chip, scope["row"], scope["overrides"])
         mode, tools = access["mode"], access["tools"]
         source_note = _source_note(chip, mode, tools)
-        return {"mode": mode, "summary": f"Runs with this chat's access: {_ACCESS_WORDS[mode]}{_tool_words(tools)}",
+        words = _ACCESS_WORDS[mode] + _tool_words(tools, access["baseline_tools"])
+        return {"mode": mode, "summary": f"Runs with this chat's access: {words}",
                 "elevated": mode == "bypassPermissions" or source_note is not None,
                 "wider_than_source": source_note is not None, "source_note": source_note,
                 "project_note": _project_note(chip, scope["row"]), "fingerprint": access["fingerprint"]}
@@ -329,7 +343,9 @@ def _origin_limits(origin: Dict[str, Any], root: Dict[str, Any]) -> Dict[str, An
     running it. The chat itself has no limits of its own to report.
     """
     from app.core import session_orchestration as orch
-    from app.core.session_modes import runtime_session_mode, turn_caller, turn_permission_mode, turn_tool_access
+    from app.core.limit_resume import session_leg
+    from app.core.session_modes import (
+        effective_permission_mode, runtime_session_mode, turn_caller, turn_permission_mode, turn_tool_access)
 
     if origin["id"] == root["id"]:
         return {"origin_mode": None, "origin_tools": None}
@@ -340,7 +356,12 @@ def _origin_limits(origin: Dict[str, Any], root: Dict[str, Any]) -> Dict[str, An
     else:
         lane = runtime_session_mode(origin, caller=turn_caller(overrides))
         tools = turn_tool_access(config, overrides, lane, owner_session=lane == "chat" and orch.is_owner_session(origin))
-    return {"origin_mode": turn_permission_mode(overrides, origin, config), "origin_tools": _tools_json(tools)}
+    # As its turns run: ``auto`` is Ask on every leg but the Claude CLI. A leg
+    # that cannot be worked out counts as not that, so the chip says more.
+    leg = session_leg({**origin, "model": overrides.get("model") or origin.get("model"),
+                       "provider_id": overrides.get("provider") or origin.get("provider_id")})
+    mode = effective_permission_mode(turn_permission_mode(overrides, origin, config), delegated=leg == "delegated")
+    return {"origin_mode": mode, "origin_tools": _tools_json(tools)}
 
 
 def _chosen_model(data: Dict[str, Any], origin: Dict[str, Any], root: Dict[str, Any]) -> Dict[str, Any]:

@@ -34,6 +34,7 @@ Kept deliberately free of app imports (no db, no fluid) so the v82 migration in
 from __future__ import annotations
 
 import fnmatch
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -303,24 +304,59 @@ def tool_permitted(
     return True
 
 
-def tool_access_exceeds(access: "ToolAccess", limit: "ToolAccess") -> bool:
-    """Whether ``access`` permits something ``limit`` does not. Deny lists count.
+def _is_pattern(text: str) -> bool:
+    return "*" in text or "?" in text or "[" in text
 
-    Entries may be patterns on either side, so each side's entries are put to
-    the other's lists: ``mcp__x__*`` against ``mcp__x__foo`` exceeds it, the
-    reverse does not.
+
+def _covers(pattern: str, entry: str) -> bool:
+    """Whether every tool ``entry`` can name is provably one ``pattern`` names too.
+
+    Provable means the same text, a real name the matcher itself accepts, or a
+    plain ``prefix*`` over an entry starting with that prefix. Anything else
+    between two patterns, ``[ab]`` inside ``[abc]`` included, is not proved.
     """
-    if DENY_ALL in (access.disallowed or ()):
+    if pattern == entry:
+        return True
+    if not _is_pattern(entry):
+        return matches_any(entry, (pattern,))
+    return pattern.endswith("*") and not _is_pattern(pattern[:-1]) and entry.startswith(pattern[:-1])
+
+
+def _apart(first: str, second: str) -> bool:
+    """Whether no tool can be named by both: a name the other refuses, or fixed starts that differ."""
+    if not _is_pattern(first):
+        return not matches_any(first, (second,))
+    if not _is_pattern(second):
+        return not matches_any(second, (first,))
+    starts = [re.split(r"[*?\[]", text, maxsplit=1)[0] for text in (first, second)]
+    return not (starts[0].startswith(starts[1]) or starts[1].startswith(starts[0]))
+
+
+def tool_access_exceeds(access: "ToolAccess", limit: "ToolAccess") -> bool:
+    """Whether ``access`` may permit something ``limit`` does not. Deny lists count.
+
+    Entries may be patterns on either side, and a pattern is not a tool name: a
+    deny of ``mcp__x__?`` does not cover ``mcp__x__*``, although that text
+    matches it. So this answers False only when the lists prove it, and anything
+    it cannot prove counts as exceeding, for a caller warning the owner, who
+    would rather be told too much than too little.
+    """
+    denied = access.disallowed or ()
+    if DENY_ALL in denied:
         return False
     if DENY_ALL in (limit.disallowed or ()):
         return True
     if limit.allowed and not access.allowed:
         return True
-    if any(tool_permitted(entry, access.allowed, access.disallowed)
-           and not tool_permitted(entry, limit.allowed, limit.disallowed)
-           for entry in access.allowed or ()):
+    usable = [entry for entry in access.allowed or () if not any(_covers(block, entry) for block in denied)]
+    if limit.allowed and not all(any(_covers(name, entry) for name in limit.allowed) for entry in usable):
         return True
-    return any(tool_permitted(entry, access.allowed, access.disallowed) for entry in limit.disallowed or ())
+    for block in limit.disallowed or ():
+        if any(_covers(own, block) for own in denied):
+            continue
+        if not access.allowed or not all(_apart(entry, block) for entry in usable):
+            return True
+    return False
 
 
 def matches_any(name: str, patterns: Iterable[str]) -> bool:
@@ -329,7 +365,7 @@ def matches_any(name: str, patterns: Iterable[str]) -> bool:
         text = str(pattern)
         if text == name:
             return True
-        if ("*" in text or "?" in text or "[" in text) and fnmatch.fnmatchcase(name, text):
+        if _is_pattern(text) and fnmatch.fnmatchcase(name, text):
             return True
     return False
 

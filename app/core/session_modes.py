@@ -839,6 +839,11 @@ def turn_tool_access(config: Optional[Mapping[str, Any]], overrides: Optional[Ma
     return ToolAccess(allowed=surface, disallowed=disallowed)
 
 
+def lane_baseline_tools(session_mode: Any, *, owner_session: bool = False) -> ToolAccess:
+    """What :func:`turn_tool_access` gives an agent with nothing restricted on this lane."""
+    return turn_tool_access({"tool_selection_mode": "all"}, None, session_mode, owner_session=owner_session)
+
+
 def install_proactive_registry_guard(
     registry: Any, metadata: dict[str, Any], session_id: str
 ) -> Any:

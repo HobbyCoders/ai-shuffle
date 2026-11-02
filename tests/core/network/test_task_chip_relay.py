@@ -293,6 +293,24 @@ def test_the_worker_running_the_subagent_says_what_it_could_do(linked):
     assert access["wider_than_source"] is True and "only some tools" in access["source_note"]
 
 
+def test_the_worker_running_the_subagent_records_auto_as_its_provider_runs_it(linked):
+    """Its leg is decided over there, where its session and provider row live."""
+    a, b, _, child = linked
+    with a.active():
+        database.create_model_provider("lane", "Lane", "openai", "https://example.invalid/v1",
+                                       models=[{"id": "astra", "label": "Astra"}])
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE sessions SET permission_mode='auto', permission_ceiling='auto' WHERE id=%s", (child,))
+            cursor.execute("UPDATE turns SET overrides=%s WHERE session_id=%s", ("{}", child))
+    relay_from(a, child)
+    with a.active(), get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET provider_id='lane', model='prov:lane:astra' WHERE id=%s", (child,))
+    relay_from(a, child, request_id="r2", title="Another task")
+    claude, native = sorted(chips_on(b), key=lambda chip: chip["title"] == BRIEF["title"], reverse=True)
+    assert claude["origin_mode"] == "auto" and native["origin_mode"] == "default"
+
+
 def test_unreadable_tools_from_a_worker_read_as_a_subagent_with_none(linked):
     a, b, _, child = linked
     signed(a, b, "task-chip-suggest", body_from(child, origin_tools="not json"))

@@ -18,6 +18,10 @@
 //   survives   reload and switching keep each chat's own chips, with no frame
 //              of the wrong chat's, and a chip dismissed while the socket was
 //              down is gone after the reconnect and stays gone after a reload
+//   no-tools   a chat whose agent has lost every tool says so on its chip
+//   denied     a subagent whose agent denies tools says the new chat has more
+//   chat-tools an ordinary chat on the chat lane's tools does not read as
+//              restricted
 //
 // Hosted journeys build only the shared desktop UI and run it at desktop and
 // phone widths. `--mobile-shell` opens the phone variants in the separately
@@ -27,7 +31,7 @@
 import { runJourney } from './runner.mjs';
 import {
 	CHAT, PROJECT, api, chatIdByToken, chatState, composer, expect, openFromSidebar, openNewChat, pickAccess, scriptTag,
-	scrollTranscriptTo, showSidebar, transcriptScroll, typeAndSend, uniq, waitChat, waitTurnSettled
+	scrollTranscriptTo, seededChatId, showSidebar, transcriptScroll, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
@@ -38,6 +42,7 @@ const DOCS = 'Check the docs heading';
 const OTHER = 'Check on the safe model';
 const LATE = 'Check after a pause';
 const SLOW_END = 'When this last sentence arrives';
+const NO_TOOLS_CHIP = 'Check the agent with no tools';
 
 const tray = (page) => page.getByRole('region', { name: 'Suggested tasks' });
 const row = (page, title) => tray(page).getByRole('listitem').filter({ hasText: title });
@@ -456,8 +461,67 @@ const SURVIVES = {
 	}
 };
 
+/** The access line under a chip, once it has arrived; in view without scrolling the tray. */
+async function accessText(page, title) {
+	const line = row(page, title).locator('[data-chip-access]');
+	await line.waitFor({ timeout: 60_000 });
+	expect(await inTrayView(line.locator('.access-summary')), 'the access line shows without scrolling the tray');
+	return line.innerText();
+}
+
+async function openSeededChat({ page, status, variant }, key) {
+	const prefix = inMobileShell(variant) ? '/mobile/' : '/';
+	await page.goto(new URL(`${prefix}?session=${encodeURIComponent(seededChatId(status, key))}`, status.urls.ui).toString());
+	await waitChatOpen(page);
+}
+
+const NO_TOOLS = {
+	name: 'no-tools',
+	// The seed writes this chip (scripts/devloop/seed.py): an agent with no tools cannot suggest one.
+	setup: (ctx) => openSeededChat(ctx, 'no_tools'),
+	async act({ page, mark, log }) {
+		await mark('read the chip of a chat whose agent has no tools');
+		const text = await accessText(page, NO_TOOLS_CHIP);
+		log(`access: ${text}`);
+		expect(text.endsWith('; can use no tools'), `the chip says the chat has no tools: ${text}`);
+	}
+};
+
+const DENIED = {
+	name: 'denied',
+	// Only for the chip's own arrival: the note is one more line, which on a phone
+	// lifts the composer just past the limit. Any other shift still fails.
+	allow: [...SUBAGENT.allow, { kind: 'layout_shift', message: /biggest 0\.05\d? at .*moved: div\.input-slot in ChatView/, reason: 'the chip and its note arrive above the composer, which has no space reserved for them' }],
+	setup: async (ctx) => { await openedChat(ctx); },
+	async act({ page, mark, log, variant }) {
+		await mark('a subagent whose agent denies tools suggests');
+		await typeAndSend(page, `delegate ${scriptTag(variant, 'tool-task-denied-suggest-task')}`);
+		await startButton(page, DOCS).waitFor({ timeout: 60_000 });
+		await waitChat(page, { streaming: 'false' }, { timeout: 60_000 });
+		const text = await accessText(page, DOCS);
+		log(`access: ${text}`);
+		expect(text.includes(FULL_ACCESS), `the chip says what the new chat runs with: ${text}`);
+		expect(text.includes('More than the subagent that suggested it') && text.includes('could use only some tools'),
+			`the chip says the new chat has more than the subagent: ${text}`);
+	}
+};
+
+const CHAT_TOOLS = {
+	name: 'chat-tools',
+	setup: async (ctx) => { await openNewChat(ctx); },
+	async act({ page, mark, log, variant }) {
+		await mark('an unmodified agent in an ordinary chat suggests');
+		await typeAndSend(page, `suggest ${scriptTag(variant, 'tool-suggest-task')}`);
+		await startButton(page, DOCS).waitFor({ timeout: 60_000 });
+		await waitTurnSettled(page);
+		const text = await accessText(page, DOCS);
+		log(`access: ${text}`);
+		expect(text.endsWith('; standard chat tools'), `the chip does not call the chat restricted: ${text}`);
+	}
+};
+
 await runJourney({
 	name: 'task-chips',
 	allow: [...DEV_INSTANCE_NOISE],
-	cases: [STREAM, SUBAGENT, NESTED, FAILED, CLICK, CROWDED, SURVIVES]
+	cases: [STREAM, SUBAGENT, NESTED, FAILED, CLICK, CROWDED, SURVIVES, NO_TOOLS, DENIED, CHAT_TOOLS]
 });

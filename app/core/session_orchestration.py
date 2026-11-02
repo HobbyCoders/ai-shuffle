@@ -1799,7 +1799,7 @@ def chip_access_reads(chip, parent, overrides):
 
 
 def chip_access(chip, parent, overrides, config, reads):
-    """What a chip's chat would run with: ``{mode, tools, fingerprint}``. Reads nothing.
+    """What a chip's chat would run with: ``{mode, tools, baseline_tools, fingerprint}``. Reads nothing.
 
     The mode and tools come from the resolvers its turns use
     (:func:`~app.core.session_modes.turn_permission_mode`,
@@ -1807,8 +1807,10 @@ def chip_access(chip, parent, overrides, config, reads):
     from the run. ``auto`` exists only on the Claude CLI leg, so the chip's
     model can lower it. The fingerprint covers everything the click approves;
     a chip's ``attempt`` is left out, since a retry approves the same thing.
+    ``baseline_tools`` is only for choosing the chip's words, and is not in it.
     """
-    from app.core.session_modes import effective_permission_mode, turn_permission_mode, turn_tool_access
+    from app.core.session_modes import (
+        effective_permission_mode, lane_baseline_tools, turn_permission_mode, turn_tool_access)
     if config is None:
         raise LookupError("The agent this chat runs on no longer exists.")
     overrides = overrides or {}
@@ -1825,7 +1827,8 @@ def chip_access(chip, parent, overrides, config, reads):
                 "allowed": None if tools.allowed is None else sorted(set(tools.allowed)),
                 "disallowed": sorted(set(tools.disallowed or ()))}
     fingerprint = hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
-    return {"mode": mode, "tools": tools, "fingerprint": fingerprint}
+    return {"mode": mode, "tools": tools, "fingerprint": fingerprint,
+            "baseline_tools": lane_baseline_tools(reads["lane"], owner_session=reads["owner_session"])}
 
 
 def chip_access_now(chip, parent, overrides):

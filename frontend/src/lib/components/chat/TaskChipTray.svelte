@@ -532,8 +532,15 @@
 		margin: 0;
 	}
 
+	/* The warning colour is too faint for 11.5px text in the light theme: it
+	   marks the line beside the text, which stays readable in the foreground. */
+	.access.elevated {
+		padding-left: 8px;
+		box-shadow: inset 2px 0 0 var(--warning);
+	}
+
 	.access.elevated .access-summary {
-		color: var(--warning);
+		color: var(--foreground);
 		font-weight: 500;
 	}
 
