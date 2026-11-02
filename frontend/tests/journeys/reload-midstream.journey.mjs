@@ -9,9 +9,6 @@
 // Cases:
 //   reload         a plain reload (F5) of the open chat
 //   link-reload    the chat opened by a link (/?session=<id>), then reloaded
-import { existsSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { runJourney } from './runner.mjs';
 import {
 	SLOW_REPLY,
@@ -47,15 +44,6 @@ function reloadCase(name, { viaLink }) {
 		// its link, which the app consumes and strips from the address).
 		async setup(ctx) {
 			const { page, variant, status } = ctx;
-			// TEMPORARY hosted-path proof: one later exact case fails only once.
-			if (process.env.GITHUB_ACTIONS === 'true' && name === 'reload'
-				&& variant.viewport === 'desktop' && variant.throttleName === 'fast') {
-				const marker = join(tmpdir(), 'ui-journey-retry-proof-reload');
-				if (!existsSync(marker)) {
-					writeFileSync(marker, 'failed once\n', { flag: 'wx' });
-					throw new Error('temporary retry proof: reload@desktop-fast failed once');
-				}
-			}
 			await openNewChat(ctx);
 			await page.waitForTimeout(800);
 			ctx.token = `tok-${uniq()}`;

@@ -10,21 +10,9 @@
 // Cases:
 //   no-reload   load the app, let the service worker install and take
 //               control, and check the page loaded one document, with no banner
-import { existsSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { runJourney } from './runner.mjs';
 import { expect, gotoApp } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
-
-// TEMPORARY hosted-path proof: deterministic crash before any case summary.
-if (process.env.GITHUB_ACTIONS === 'true' && !process.argv.includes('--list')) {
-	const marker = join(tmpdir(), 'ui-journey-retry-proof-first-visit');
-	if (!existsSync(marker)) {
-		writeFileSync(marker, 'crashed once\n', { flag: 'wx' });
-		throw new Error('temporary retry proof: first-visit crashed once before summary');
-	}
-}
 
 /** After the claim: long enough for the version check and any reload it would start. */
 const AFTER_CLAIM_MS = 3000;
