@@ -260,15 +260,18 @@
 					handBackRestoredWords(requestedSessionId, complete, undefined, removedPrompt, unsentUploads);
 				};
 				// A reload is what cuts requests off, too, and a page that is going
-				// takes its composer with it. Only a page still alive after the wait
-				// hands the words over or drops the note; otherwise the note is what
-				// the next page recovers them from.
-				const wasLeaving = pageIsLeaving();
-				if (!wasLeaving) handOver();
-				setTimeout(() => {
-					if (wasLeaving) handOver();
-					noteRestoreFinished(requestedSessionId, restoringRowId);
-				}, LEAVING_MS);
+				// takes its composer with it, so a page already leaving waits: only if
+				// it is still alive afterwards does it hand the words over, and
+				// otherwise the note is what the next page recovers them from. Words
+				// handed over are saved in the draft, so their note goes with them: a
+				// later reload must not hand them back a second time (#1031).
+				const dropNote = () => noteRestoreFinished(requestedSessionId, restoringRowId);
+				if (pageIsLeaving()) {
+					setTimeout(() => { handOver(); void tick().then(dropNote); }, LEAVING_MS);
+				} else {
+					handOver();
+					void tick().then(dropNote);
+				}
 				return;
 			}
 			if (sessionId !== requestedSessionId || !canAct(requestedSessionId)) return;
