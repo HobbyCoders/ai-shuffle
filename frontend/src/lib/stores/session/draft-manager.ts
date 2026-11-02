@@ -42,7 +42,16 @@ export function createDraftManager(deps: DraftManagerDeps) {
 		},
 
 		setPendingRestorePrompt(prompt: string, uploadPaths?: string[]) {
-			update(s => ({ ...s, pendingRestorePrompt: prompt, pendingRestoreUploadPaths: uploadPaths }));
+			// Adds to words not yet taken: two restores can finish before a composer
+			// runs, and by then the server has dropped both rows.
+			update(s => {
+				const paths = [...(s.pendingRestoreUploadPaths ?? []), ...(uploadPaths ?? [])];
+				return {
+					...s,
+					pendingRestorePrompt: [s.pendingRestorePrompt, prompt].filter(Boolean).join('\n\n'),
+					pendingRestoreUploadPaths: paths.length > 0 ? paths : undefined
+				};
+			});
 		},
 
 		clearPendingRestorePrompt() {

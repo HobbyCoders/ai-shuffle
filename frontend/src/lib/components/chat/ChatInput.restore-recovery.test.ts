@@ -4,8 +4,14 @@
  * counts: the restored row may have been the chat's only one.
  */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { cleanup, render, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { tick } from 'svelte';
+const rewind = vi.hoisted(() => vi.fn());
+vi.mock('$lib/api/client', async (original) => ({ ...(await original<object>()), executeRewind: rewind }));
+vi.mock('$lib/settings/navigation.svelte', () => ({ openSettings: vi.fn() }));
 import ChatInput from './ChatInput.svelte';
+import MessageActions from './MessageActions.svelte';
+import { readDraft } from '$lib/stores/session/draft-persistence';
 import { activeSession } from '$lib/stores/active-session';
 import { auth } from '$lib/stores/auth.svelte';
 import '$lib/test-stubs/composer-dom';
@@ -83,4 +89,37 @@ it('leaves a note alone while its row is still on screen', async () => {
 	await settle();
 	expect(editorText(view)).toBe('');
 	expect(sessionStorage.getItem(NOTE_KEY)).not.toBeNull();
+});
+
+it.each([
+	['with a composer on screen', true],
+	['with no composer on screen', false]
+])('keeps both restores when their answers land together, %s', async (_name, composerShown) => {
+	openChat({});
+	activeSession.setDraft('');
+	const composer = composerShown ? render(ChatInput) : null;
+	await tick();
+	const answers: Array<(result: unknown) => void> = [];
+	rewind.mockImplementation(() => new Promise((resolve) => answers.push(resolve)));
+	const onRewindComplete = (_warning?: string, prompt?: string, uploads?: string[]) => {
+		activeSession.setPendingRestorePrompt(prompt ?? '', uploads);
+	};
+	const row = { sessionId: 'chat', messageRole: 'user', onRewindComplete } as const;
+	render(MessageActions, { ...row, messageContent: 'first words', notSentMessageId: 'row-first' });
+	render(MessageActions, { ...row, messageContent: 'second words', notSentMessageId: 'row-second' });
+	const buttons = screen.getAllByRole('button', { name: 'Restore to composer' });
+	await fireEvent.click(buttons[0]);
+	await fireEvent.click(buttons[1]);
+	expect(answers).toHaveLength(2);
+
+	for (const answer of answers) answer({ success: true, unsent_restored: true });
+	await tick();
+	await tick();
+
+	const kept = (composer ? editorText(composer) : readDraft('chat')) ?? '';
+	expect(kept).toContain('first words');
+	expect(kept).toContain('second words');
+	expect(kept.split('first words')).toHaveLength(2);
+	expect(kept.split('second words')).toHaveLength(2);
+	expect(activeSession.current.pendingRestorePrompt).toBeNull();
 });
