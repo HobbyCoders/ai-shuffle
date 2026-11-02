@@ -105,6 +105,8 @@ from app.core.guardrail_prompt import (
     guardrail_blocked_note,
 )
 from app.core.provider.protocol import ProviderAdapter
+from app.core.provider import session_admission
+from app.core.provider.session_admission import SessionReplacedError
 from app.core.provider.delegated_saved_rules import SAVED_RULE_DENIAL
 from app.core.session_modes import (
     bypass_refuses,
@@ -190,6 +192,8 @@ if TYPE_CHECKING:  # pragma: no cover — annotation-only; the DB import below i
 logger = logging.getLogger(__name__)
 
 _ENGINE_CLOSE_GRACE_SECONDS = 5.0
+# A turn another install took over fails whether or not the stop gets through.
+_REPLACED_INTERRUPT_SECONDS = 2.0
 # The bound of each small section a delegated leg puts back after a Claude
 # Code compaction (date and branch, Away mode, scratch); they are a few
 # hundred characters, so the bound only stops a broken one crowding out the
@@ -597,6 +601,19 @@ class HarnessAdapter(ProviderAdapter):
     # ─── Connection Lifecycle ─────────────────────────────────────────
 
     async def connect(self, options: SessionOptions) -> None:
+        """Connect, unless another engine here is connecting to or running the
+        session (:mod:`~app.core.provider.session_admission`)."""
+        admitted = options.session_id or options.resume_session_id
+        if isinstance(admitted, str) and admitted:
+            session_admission.admit(admitted, self)
+        try:
+            await self._connect_engine(options)
+        except BaseException:
+            session_admission.release(self)
+            raise
+        session_admission.connected(self)
+
+    async def _connect_engine(self, options: SessionOptions) -> None:
         """Build the fluid engine from SessionOptions and prime its session."""
         from fluid.tools.child_env import scrub_claude_auth_env
 
@@ -1573,6 +1590,7 @@ class HarnessAdapter(ProviderAdapter):
             # timed-out engine close may still be finishing durable writes.
             self._store = None
             self._registry = None
+            session_admission.release(self)
 
     async def release_dead_transport(self) -> None:
         """Free the delegated engine's CLI and bridge; a native one holds neither."""
@@ -1589,6 +1607,36 @@ class HarnessAdapter(ProviderAdapter):
         """
         check = getattr(self._store, "check_ownership", None)
         return inspect.iscoroutinefunction(check) and await check() is True
+
+    async def _end_replaced_turn(self) -> None:
+        """Stop a turn another install took over, and fail it.
+
+        Finishing it normally would report success for output that was not
+        saved. A client this process already evicted no longer holds the session
+        and was stopped on purpose, so it has nothing to report.
+        """
+        if not session_admission.holds(self):
+            return
+        try:
+            await asyncio.wait_for(self.interrupt(), timeout=_REPLACED_INTERRUPT_SECONDS)
+        except Exception as exc:  # the turn fails either way
+            logger.warning("[HarnessAdapter] could not interrupt a replaced turn: %r", exc)
+        raise SessionReplacedError()
+
+    async def _fail_turn_if_replaced(self) -> None:
+        """Before a turn reports its end: did another install take over meanwhile?
+
+        A write refused during the turn is seen event by event, but the last
+        events' writes can still be running, and a failed check must not be what
+        fails a finished turn.
+        """
+        try:
+            replaced = await self.replaced_by_another_engine()
+        except Exception:
+            logger.warning("[HarnessAdapter] could not check who owns the session", exc_info=True)
+            return
+        if replaced:
+            await self._end_replaced_turn()
 
     def is_alive(self) -> bool:
         """Whether the engine exists, is connected, and can still send.
@@ -2775,6 +2823,10 @@ class HarnessAdapter(ProviderAdapter):
             if getattr(event, "seq", -1) >= 0:
                 self._event_cursor = event.seq
 
+            lost = getattr(self._store, "lost_ownership", None)
+            if lost is not None and lost() is True:
+                await self._end_replaced_turn()
+
             if (
                 self._context_overhead is None
                 and not self._context_overhead_loaded
@@ -2891,6 +2943,7 @@ class HarnessAdapter(ProviderAdapter):
                     )
                     continue
                 if isinstance(translated, ResultMessage):
+                    await self._fail_turn_if_replaced()
                     release = getattr(self._store, "release_resume_memory", None)
                     if release is not None:
                         await release()
@@ -3222,6 +3275,8 @@ class HarnessAdapter(ProviderAdapter):
         # The window the CLI is pinned to: a transcript over what it compacts
         # at is compacted before it is written (fluid_transcript._fit_window).
         window = await asyncio.to_thread(_delegated_context_window, options)
+        # This thread outlives a timed-out connect, so its writes carry the claim.
+        claimed = getattr(self._store, "claimed_generation", None)
         result = await asyncio.to_thread(
             fluid_transcript.reseed_delegated_cli_session,
             fluid_session_id,
@@ -3229,6 +3284,7 @@ class HarnessAdapter(ProviderAdapter):
             fluid_transcript.cli_projects_root(options.env),
             force=True,
             context_window=window,
+            generation=claimed(fluid_session_id) if claimed is not None else None,
         )
         if result.status != "reseeded" or not result.cli_session_id:
             logger.warning(

@@ -16,6 +16,8 @@ from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 
 from app.core.detached_tasks import spawn_detached
+from app.core.provider import session_admission
+from app.core.provider.session_admission import SessionBusyError
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_auth
@@ -635,6 +637,16 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     - restore_files: Not supported; reported as an error while the chat rewind still runs
     - include_response: Keep Claude's response to target message
     """
+    lease = object()
+    try:
+        return await _execute_rewind(session_id, request, http_request, lease)
+    finally:
+        session_admission.release(lease)
+
+
+async def _execute_rewind(
+    session_id: str, request: RewindRequestV2, http_request: Optional[Request], lease: object,
+):
     # Authorize and route before inspecting local provider state or resolving a
     # checkout. A mirrored session intentionally has no local resume pointer.
     def _load_session():
@@ -710,6 +722,15 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
                    "Send a message to recover a missing checkout, or restore the bound branch, "
                    "then retry rewind."),
         )
+
+    # A rewind takes the session from whatever engine holds it, so one connecting
+    # or mid-turn here makes it wait its turn like a message would. Held until the
+    # re-seed is done: a connect in between would resume the pre-rewind history.
+    if fluid_session and request.restore_chat:
+        try:
+            session_admission.admit(sdk_session_id, lease)
+        except SessionBusyError as busy:
+            return RewindResponseV2(success=False, message="Rewind refused", error=str(busy))
 
     logger.info(
         f"Rewind requested: session={session_id}, sdk_session={sdk_session_id}, "
@@ -904,7 +925,8 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
             # (nothing stored to re-seed). Best-effort: a failure downgrades to
             # the divergence warning below, it never fails the rewind.
             reseed_result = await asyncio.to_thread(
-                reseed_delegated_cli_session, sdk_session_id, working_dir
+                reseed_delegated_cli_session, sdk_session_id, working_dir,
+                generation=fluid_result.writer_generation,
             )
             logger.info(
                 f"Fluid rewind CLI re-seed: session={session_id}, "

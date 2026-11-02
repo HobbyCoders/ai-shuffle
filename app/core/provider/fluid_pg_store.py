@@ -1683,6 +1683,10 @@ class PgFluidStore:
             self._claim_when_found.discard(session_id)
             self._generations[session_id] = generation
 
+    def claimed_generation(self, session_id: str) -> Optional[int]:
+        """The generation this store writes the session under, once claimed."""
+        return self._generations.get(session_id)
+
     def lost_ownership(self) -> bool:
         """Whether a write here was refused because another writer took over."""
         return bool(self._replaced)

@@ -34,6 +34,8 @@ import pytest
 
 import app.core.query_engine as qe
 import app.core.query_background as qb
+from app.core.provider import session_admission
+from app.core.provider.session_admission import SessionBusyError
 from app.core.session_pool import SessionState
 from app.db import session_events as se
 from app.db import sessions as sessions_db
@@ -622,3 +624,137 @@ async def test_background_applies_permission_mode_on_reuse_without_respawn(mock_
     state.adapter.set_model.assert_not_awaited()
     assert pool.state is state, "reuse must not evict/replace the pooled client"
     assert state.is_streaming is False  # claim-guard released it on the raise
+
+
+# ─── Cold admission: the gates above only see a client that is already pooled ─
+
+
+def _holding_another_engine(state: SessionState, session_id: str = "ses_held") -> None:
+    """``state`` is pooled and idle while another engine connects to its session."""
+    session_admission.admit(session_id, state.adapter)
+    session_admission.connected(state.adapter)
+    session_admission.bind_state(state.adapter, state)
+    session_admission.admit(session_id, object())
+
+
+async def test_reuse_gates_refuse_while_another_engine_connects(mock_db):
+    """Reusing the idle client would start a turn the connecting engine's claim ends."""
+    for name, drive in {
+        "chat": lambda: qe._stream_to_websocket_impl("hi", "sess-busy", "claude-code"),
+        "rest": lambda: qe.stream_query("hi", "claude-code", session_id="sess-busy"),
+    }.items():
+        session_admission.clear()
+        state = _fake_state()
+        _holding_another_engine(state)
+        with ExitStack() as stack:
+            (_chat_patches if name == "chat" else _rest_patches)(stack, StubPool(state))
+            events = await collect(drive())
+        assert any("busy" in e.get("message", "").lower() for e in events), (name, events)
+        state.adapter.send_query.assert_not_awaited()
+        assert state.is_streaming is False
+
+
+async def test_background_reuse_gate_refuses_while_another_engine_connects(mock_db):
+    state = _fake_state()
+    _holding_another_engine(state)
+    sessions_db.create_session("sess-busy", "default")
+
+    await _background_turn(StubPool(state), "sess-busy")
+
+    state.adapter.send_query.assert_not_awaited()
+    assert state.is_streaming is False
+    assert "busy" in (se.get_events("sess-busy")[-1]["payload"].get("message") or "").lower()
+
+
+async def _background_turn(pool, session_id: str, *, connecting=None) -> None:
+    async def _fake_run_sync(fn, *a, **k):
+        return {"id": "row-1"}
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(qb, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)))
+        stack.enter_context(patch.object(qb, "sync_engine", new=_fake_sync_engine()))
+        stack.enter_context(patch(
+            "app.core.sdk_options.build_options_from_profile", return_value=(MagicMock(), None),
+        ))
+        stack.enter_context(patch.object(qb, "get_session_pool", return_value=pool))
+        stack.enter_context(patch.object(qb, "is_subprocess_alive", return_value=True))
+        stack.enter_context(patch.object(qb, "requires_reconnect", return_value=False))
+        if connecting is not None:
+            stack.enter_context(patch(
+                "app.core.provider.factory.make_adapter", return_value=connecting,
+            ))
+        await qb._run_background_query(
+            session_id, "hello", {"id": "claude-code"}, None, None, None, None, None,
+        )
+
+
+def _refused_connect() -> MagicMock:
+    adapter = mock_adapter()
+    adapter.connect_with_sdk_options = AsyncMock(side_effect=SessionBusyError())
+    return adapter
+
+
+async def test_cold_routes_give_the_busy_error_when_connect_is_refused(mock_db):
+    """The same words as the gates, rather than a connection-failure message."""
+    busy = str(SessionBusyError())
+    for name, drive in {
+        "chat": lambda: qe._stream_to_websocket_impl("hi", "sess-cold", "claude-code"),
+        "rest": lambda: qe.stream_query("hi", "claude-code", session_id="sess-cold"),
+    }.items():
+        with ExitStack() as stack:
+            (_chat_patches if name == "chat" else _rest_patches)(stack, StubPool())
+            stack.enter_context(patch(
+                "app.core.provider.factory.make_adapter", return_value=_refused_connect(),
+            ))
+            events = await collect(drive())
+        assert [e["message"] for e in events if e.get("type") == "error"] == [busy], (name, events)
+        assert not any(e.get("type") == "done" for e in events), name
+
+    sessions_db.create_session("sess-cold", "default")
+    await _background_turn(StubPool(), "sess-cold", connecting=_refused_connect())
+    assert se.get_events("sess-cold")[-1]["payload"].get("message") == busy
+
+
+async def test_two_cold_streams_never_displace_the_turn_that_got_there_first():
+    """Both pass the empty-pool check. The first connects and streams; the second
+    is refused before it can claim the session, so the first keeps its turn."""
+    from app.core.provider.harness_adapter import HarnessAdapter
+
+    entered, proceed = asyncio.Event(), asyncio.Event()
+    engines: list = []
+
+    class Adapter(HarnessAdapter):
+        async def _connect_engine(self, options):
+            engines.append(self)
+            entered.set()
+            await proceed.wait()
+
+        def is_alive(self):
+            return True
+
+        async def send_query(self, prompt):
+            return None
+
+        async def receive_events(self):
+            if False:  # pragma: no cover
+                yield None
+
+    def adapter_for_route():
+        adapter = Adapter()
+        adapter.connect_with_sdk_options = adapter.connect
+        return adapter
+
+    pool = StubPool()
+    with ExitStack() as stack:
+        options = _rest_patches(stack, pool)
+        options.session_id, options.resume_session_id = None, "ses_race"
+        stack.enter_context(patch(
+            "app.core.provider.factory.make_adapter", side_effect=adapter_for_route,
+        ))
+        first = asyncio.ensure_future(collect(qe.stream_query("one", "claude-code", session_id="sess-race")))
+        await asyncio.wait_for(entered.wait(), 5)
+        second = await collect(qe.stream_query("two", "claude-code", session_id="sess-race"))
+        assert [e["message"] for e in second if e.get("type") == "error"] == [str(SessionBusyError())]
+        assert len(engines) == 1, "the refused request must never reach its claim"
+        proceed.set()
+        await asyncio.wait_for(first, 5)

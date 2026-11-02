@@ -50,6 +50,8 @@ from app.db import turns as turns_db
 from app.db.async_database import run_sync
 from pathlib import Path
 from app.core.config import settings
+from app.core.provider import session_admission
+from app.core.provider.session_admission import SessionBusyError
 from app.core.session_pool import (
     SessionState, get_session_pool, is_subprocess_alive, retire_if_replaced,
     requires_reconnect, reconnect_option_names, mark_subprocess_oom_killable,
@@ -566,6 +568,8 @@ async def execute_query(
             archive_guard.log_dropped(session_id, "api", "execute_query refused")
             raise archive_guard.SessionArchived(session_id)
         resume_id = session.get("sdk_session_id")
+        # Connect would refuse too, but only after this prompt is in the history.
+        session_admission.refuse_if_busy(resume_id)
     else:
         session_id = str(uuid.uuid4())
         # Generate title from first message (truncate to 50 chars)
@@ -681,6 +685,7 @@ async def execute_query(
 
     try:
         await adapter.connect_with_sdk_options(options)
+        session_admission.hold_for_unpooled_turn(adapter)
         # Headless metadata is created before connect, unlike the pooled paths.
         # Book the credential account actually bound by lazy client construction.
         metadata[USAGE_PROVIDER_KEY] = getattr(options, "aih_provider_id", None)
@@ -1166,7 +1171,7 @@ async def stream_query(
     if existing_state and existing_state.is_connected and is_subprocess_alive(existing_state):
         # Busy-write guard backstop: never write a second prompt into a client
         # that is mid-turn (kills the CLI, loses the whole in-flight turn).
-        if existing_state.is_streaming:
+        if existing_state.is_streaming or session_admission.held_by_another(existing_state.adapter):
             logger.warning(
                 f"Pooled client for session {session_id} is mid-turn — "
                 f"refusing concurrent query (busy-write guard)"
@@ -1288,6 +1293,10 @@ async def stream_query(
             # Timeout prevents hanging if MCP servers are unreachable
             await asyncio.wait_for(adapter.connect_with_sdk_options(options), timeout=60.0)
             logger.debug(f"Connected to Claude SDK for session {session_id}")
+        except SessionBusyError as e:
+            logger.warning(f"Refused a second connect to busy session {session_id} (busy-write guard)")
+            yield {"type": "error", "message": str(e)}
+            return
         except asyncio.TimeoutError:
             logger.error(f"Timed out connecting to Claude SDK for session {session_id} (60s)")
             yield {"type": "error", "message": "Connection timed out — an MCP server may be unreachable"}
@@ -1993,7 +2002,7 @@ async def _stream_to_websocket_impl(
         # in message reader" and the whole in-flight turn is lost. The WS
         # handlers enqueue instead of racing us, but this gate is the last line
         # of defence for any caller (REST, background, unpark races).
-        if existing_state.is_streaming:
+        if existing_state.is_streaming or session_admission.held_by_another(existing_state.adapter):
             logger.warning(
                 f"[WS] Pooled client for session {session_id} is mid-turn — "
                 f"refusing concurrent query (busy-write guard)"
@@ -2681,6 +2690,10 @@ async def _stream_to_websocket_impl(
             await asyncio.wait_for(adapter.connect_with_sdk_options(options), timeout=60.0)
             _connect_elapsed = time.monotonic() - _connect_start
             logger.info(f"[WS] SDK connect for session {session_id}: {_connect_elapsed:.1f}s (reuse=False)")
+        except SessionBusyError as e:
+            logger.warning(f"[WS] Refused a second connect to busy session {session_id} (busy-write guard)")
+            yield {"type": "error", "message": str(e)}
+            return
         except ClaudeCliMissingError as e:
             # Setup problem, not a crash: no traceback, the message is the fix.
             logger.warning(f"[WS] Claude CLI missing for session {session_id}: {e}")

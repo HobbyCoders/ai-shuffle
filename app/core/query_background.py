@@ -23,6 +23,8 @@ from app.db import database
 from app.db import turns as turns_db
 from app.db.async_database import run_sync
 from app.core.session_title import derive_session_title
+from app.core.provider import session_admission
+from app.core.provider.session_admission import SessionBusyError
 from app.core.session_pool import (
     SessionState, get_session_pool, is_subprocess_alive, retire_if_replaced,
     requires_reconnect,
@@ -221,7 +223,7 @@ async def _run_background_query_impl(
         # that is mid-turn (kills the CLI, loses the whole in-flight turn).
         # Fail safe like the connect-failure path — but do NOT cleanup the live
         # session store here: the active turn owns it and is still streaming.
-        if existing_state.is_streaming:
+        if existing_state.is_streaming or session_admission.held_by_another(existing_state.adapter):
             error_msg = (
                 "Session is busy with another response. "
                 "Wait for it to finish, then send your message again."
@@ -346,6 +348,12 @@ async def _run_background_query_impl(
         try:
             await asyncio.wait_for(adapter.connect_with_sdk_options(options), timeout=60.0)
             logger.debug(f"[Background] Connected to Claude SDK for session {session_id}")
+        except SessionBusyError as e:
+            # Same as the gate above: the turn already running owns the store.
+            logger.warning(f"[Background] Refused a second connect to busy session {session_id}")
+            if recorder:
+                await recorder.on_event({"type": "error", "message": str(e)})
+            return
         except asyncio.TimeoutError:
             logger.error(f"[Background] Timed out connecting to Claude SDK for session {session_id} (60s)")
             raise RuntimeError("Connection timed out — an MCP server may be unreachable")

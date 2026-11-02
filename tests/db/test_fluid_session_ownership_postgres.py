@@ -16,6 +16,7 @@ import contextvars
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
@@ -96,7 +97,7 @@ async def _session() -> tuple[object, str]:
     from app.core.provider.fluid_pg_store import PgFluidStore
 
     store = PgFluidStore()
-    meta = await store.create_session(f"own-{uuid4().hex[:10]}")
+    meta = await store.create_session(f"ses_{uuid4().hex[:10]}")
     await _take_over(store, meta.session_id)
     await store.get_session(meta.session_id)
     await store.append_event(meta.session_id, _event(meta.session_id, 1, "first"))
@@ -768,20 +769,313 @@ async def test_rewind_ends_the_previous_engines_ownership():
     await old.append(sid, _node("n1", None))
     await old.append(sid, _node("n2", "n1"))
 
-    await asyncio.to_thread(fluid_transcript._set_head, sid, "n1")
+    result = await asyncio.to_thread(fluid_transcript.rewind_fluid_session, sid, "n1", False)
+    assert result.success is True and result.writer_generation is not None
 
     await old.append(sid, _node("late", "n2"))
-    assert _session_row(sid)["head_node_id"] == "n1"
+    head = _session_row(sid)["head_node_id"]
+    assert head != "late"
     assert old.lost_ownership() is True
 
 
-async def test_rewind_and_reseed_handle_writes_are_not_fenced():
-    """The request-path handle writer has no engine behind it and must still land."""
+async def test_rewind_reads_the_old_engines_last_commit_before_cutting():
+    """The claim waits for a write that is already committing."""
+    from app.core.provider import fluid_transcript
+
+    old, sid = await _session()
+    await old.append(sid, _node("n1", None))
+    write, hold = await _held(old.append(sid, _node("n2", "n1")), "commit")
+
+    rewind = asyncio.ensure_future(
+        asyncio.to_thread(fluid_transcript.rewind_fluid_session, sid, "n2", True),
+    )
+    await asyncio.sleep(0.2)
+    assert not rewind.done(), "a rewind must wait for the write holding the row"
+
+    hold.release.set()
+    await write
+    result = await rewind
+    assert result.success is True, result.error
+
+
+async def test_rewind_left_running_cannot_move_the_head_under_a_newer_connect(monkeypatch):
+    """Its request was cancelled; its thread was not. The newer engine stands."""
+    from app.core.provider import fluid_transcript
+    from app.core.provider.fluid_pg_store import PgFluidStore
+
+    old, sid = await _session()
+    await old.append(sid, _node("n1", None))
+    await old.append(sid, _node("n2", "n1"))
+
+    claimed, proceed = threading.Event(), threading.Event()
+    real = fluid_transcript.compute_rewind_keep_count
+
+    def held(*args, **kwargs):
+        claimed.set()
+        assert proceed.wait(30)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(fluid_transcript, "compute_rewind_keep_count", held)
+    rewind = asyncio.ensure_future(
+        asyncio.to_thread(fluid_transcript.rewind_fluid_session, sid, "n1", False),
+    )
+    while not claimed.is_set():
+        await asyncio.sleep(0.005)
+
+    newer = PgFluidStore()
+    await _take_over(newer, sid)
+    await newer.get_session(sid)
+    proceed.set()
+    result = await rewind
+
+    assert result.success is False and "continued" in result.error
+    await newer.append(sid, _node("n3", "n2"))
+    assert newer.lost_ownership() is False
+    assert _session_row(sid)["head_node_id"] == "n3"
+
+
+async def _store_owning(sid: str):
+    from app.core.provider.fluid_pg_store import PgFluidStore
+
+    store = PgFluidStore()
+    await _take_over(store, sid)
+    await store.get_session(sid)
+    return store
+
+
+async def test_abandoned_reseed_cannot_overwrite_the_retrys_handle(monkeypatch, tmp_path):
+    """A connect timed out mid re-seed, a retry claimed and saved its handle, and
+    then the first re-seed reached its own handle write."""
+    from app.core.provider import fluid_transcript
+
+    first, sid = await _session()
+    await first.append(sid, _node("n1", None))
+    abandoned = first.claimed_generation(sid)
+
+    writing, proceed = threading.Event(), threading.Event()
+    real = fluid_transcript._write_cli_transcript
+
+    def held(*args, **kwargs):
+        writing.set()
+        assert proceed.wait(30)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(fluid_transcript, "_write_cli_transcript", held)
+    reseed = asyncio.ensure_future(asyncio.to_thread(
+        fluid_transcript.reseed_delegated_cli_session, sid, str(tmp_path), tmp_path,
+        force=True, generation=abandoned,
+    ))
+    while not writing.is_set():
+        await asyncio.sleep(0.005)
+
+    retry = await _store_owning(sid)
+    await retry.set_cli_session_id(sid, "cli-from-the-retry")
+    proceed.set()
+    result = await reseed
+
+    assert result.status == "superseded" and result.cli_session_id is None
+    assert _session_row(sid)["cli_session_id"] == "cli-from-the-retry"
+
+
+async def test_abandoned_reseed_of_an_empty_session_cannot_clear_the_handle(tmp_path):
+    from app.core.provider import fluid_transcript
+
+    first, sid = await _session()
+    abandoned = first.claimed_generation(sid)
+    retry = await _store_owning(sid)
+    await retry.set_cli_session_id(sid, "cli-from-the-retry")
+
+    result = await asyncio.to_thread(
+        fluid_transcript.reseed_delegated_cli_session, sid, str(tmp_path), tmp_path,
+        force=True, generation=abandoned,
+    )
+
+    assert result.status == "superseded"
+    assert _session_row(sid)["cli_session_id"] == "cli-from-the-retry"
+
+
+def _archive_row() -> dict:
+    return {"node_id": "archived", "role": "user", "text": "kept for HistoryExpand"}
+
+
+async def test_abandoned_reseed_cannot_take_an_event_number_from_its_replacement():
+    """Its replacement seeds its numbering from the stored maximum, then issues
+    numbers in memory, so a late archive event would take one and drop its event."""
+    from app.core.provider import fluid_transcript
+
+    first, sid = await _session()
+    abandoned = first.claimed_generation(sid)
+    retry = await _store_owning(sid)
+    before = _events_raw(sid)
+
+    with pytest.raises(fluid_transcript.SessionSuperseded):
+        await asyncio.to_thread(
+            fluid_transcript._append_archive, sid, [_archive_row()], generation=abandoned,
+        )
+
+    assert _events_raw(sid) == before
+    await retry.append_event(sid, _event(sid, before[-1][0] + 1, "from the retry"))
+    assert len(_events_raw(sid)) == len(before) + 1
+
+
+async def test_a_claim_waits_for_an_archive_event_still_committing(monkeypatch):
+    """So the replacement's numbering starts after it rather than on top of it."""
+    from app.core.provider import fluid_transcript
+    from app.db import base
+
+    first, sid = await _session()
+    generation = first.claimed_generation(sid)
+    hold = Hold("commit")
+    real = base.get_db
+
+    @contextmanager
+    def held_db(*args, **kwargs):
+        with real(*args, **kwargs) as conn:
+            yield conn
+            if threading.current_thread() is not threading.main_thread():
+                hold.stop("commit")
+
+    monkeypatch.setattr(base, "get_db", held_db)
+    archive = asyncio.ensure_future(asyncio.to_thread(
+        fluid_transcript._append_archive, sid, [_archive_row()], generation=generation,
+    ))
+    while not hold.reached.is_set():
+        await asyncio.sleep(0.005)
+    monkeypatch.setattr(base, "get_db", real)
+
+    from app.core.provider.fluid_pg_store import PgFluidStore
+
+    retry = PgFluidStore()
+    claim = asyncio.ensure_future(_take_over(retry, sid))
+    await asyncio.sleep(0.2)
+    assert not claim.done(), "the claim must wait for the archive's transaction"
+
+    hold.release.set()
+    await archive
+    await claim
+    assert len(_events_raw(sid)) == 2
+
+
+async def test_abandoned_reseed_stops_at_compaction_and_writes_no_transcript(monkeypatch, tmp_path):
+    """"Writing it whole" is for a failed compaction, not for a session it lost."""
+    from fluid.engine import claude_mod_compaction
+
+    from app.core.provider import fluid_transcript
+
+    first, sid = await _session()
+    await first.append(sid, _node("n1", None))
+    await first.append(sid, _node("n2", "n1"))
+    abandoned = first.claimed_generation(sid)
+    retry = await _store_owning(sid)
+    await retry.set_cli_session_id(sid, "cli-from-the-retry")
+    before = _events_raw(sid)
+
+    def compact(rows, nodes, *, context_window, trigger, archive):
+        archive.append(_archive_row())
+        return rows[-1:]
+
+    monkeypatch.setattr(claude_mod_compaction, "compact_messages", compact)
+    monkeypatch.setattr(fluid_transcript, "reseed_compaction_threshold", lambda _window: 1)
+    written = MagicMock()
+    monkeypatch.setattr(fluid_transcript, "_write_cli_transcript", written)
+
+    result = await asyncio.to_thread(
+        fluid_transcript.reseed_delegated_cli_session, sid, str(tmp_path), tmp_path,
+        force=True, context_window=1000, generation=abandoned,
+    )
+
+    assert result.status == "superseded"
+    written.assert_not_called()
+    assert _events_raw(sid) == before
+    assert _session_row(sid)["cli_session_id"] == "cli-from-the-retry"
+
+
+async def test_current_owner_reseeds_and_archives(monkeypatch, tmp_path):
+    """The same path with a live claim, so the refusals above mean something."""
+    from fluid.engine import claude_mod_compaction
+
+    from app.core.provider import fluid_transcript
+
+    owner, sid = await _session()
+    await owner.append(sid, _node("n1", None))
+    await owner.append(sid, _node("n2", "n1"))
+
+    def compact(rows, nodes, *, context_window, trigger, archive):
+        archive.append(_archive_row())
+        return rows[-1:]
+
+    monkeypatch.setattr(claude_mod_compaction, "compact_messages", compact)
+    monkeypatch.setattr(fluid_transcript, "reseed_compaction_threshold", lambda _window: 1)
+
+    result = await asyncio.to_thread(
+        fluid_transcript.reseed_delegated_cli_session, sid, str(tmp_path), tmp_path,
+        force=True, context_window=1000, generation=owner.claimed_generation(sid),
+    )
+
+    assert result.status == "reseeded"
+    assert _session_row(sid)["cli_session_id"] == result.cli_session_id
+    assert len(_events_raw(sid)) == 2
+
+
+async def test_connect_reseeds_under_its_own_claim(monkeypatch):
+    """The generation that reaches the re-seed is this connect's."""
+    from types import SimpleNamespace
+
+    from app.core.provider import fluid_transcript, harness_adapter
+
+    owner, sid = await _session()
+    seen: dict = {}
+
+    def reseed(*_args, **kwargs):
+        seen.update(kwargs)
+        return fluid_transcript.ReseedResult(status="failed", error="stop here")
+
+    monkeypatch.setattr(fluid_transcript, "reseed_delegated_cli_session", reseed)
+    monkeypatch.setattr(harness_adapter, "_delegated_context_window", lambda _options: 1000)
+    adapter = _adapter_with(owner)
+
+    await adapter._reseed_cli_session(sid, SimpleNamespace(cwd="/tmp", env={}))
+
+    assert seen["generation"] == owner.claimed_generation(sid)
+    assert seen["generation"] is not None
+
+
+async def test_handle_write_without_a_claim_still_lands():
+    """A fork's re-seed: nothing else can reach its brand-new session."""
     from app.core.provider import fluid_transcript
 
     _, sid = await _session()
     await asyncio.to_thread(fluid_transcript._set_cli_session_id, sid, "cli-reseeded")
     assert _session_row(sid)["cli_session_id"] == "cli-reseeded"
+
+
+async def test_engine_loses_a_turn_to_another_install_and_says_so():
+    """Admission cannot see another install. Real stores: nothing here refuses, the
+    takeover lands mid-turn, and the turn must not finish as a success."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from fluid.events.model import TurnComplete
+
+    from app.core.provider import session_admission
+    from app.core.provider.session_admission import SessionReplacedError
+
+    owner, sid = await _session()
+    adapter = _adapter_with(owner)
+    session_admission.admit(sid, adapter)
+
+    async def stream(since_seq=0):
+        await _store_owning(sid)  # another install, on the same database
+        yield TurnComplete(
+            session_id=sid, turn_id="t1", seq=9, stop_reason="end_turn", num_model_calls=1,
+        )
+
+    adapter._engine = SimpleNamespace(events=stream, submit=AsyncMock())
+
+    with pytest.raises(SessionReplacedError):
+        async for _ in adapter.receive_events():
+            pass
+    adapter._engine.submit.assert_awaited_once()
 
 
 def test_handoff_never_carries_the_generation():

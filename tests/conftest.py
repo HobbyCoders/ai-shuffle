@@ -179,6 +179,15 @@ def _no_real_claude_on_path():
 
 
 @pytest.fixture(autouse=True)
+def _no_session_admission_across_tests():
+    """Which engine holds a session is per process; a test's engines end with it."""
+    admission = sys.modules.get("app.core.provider.session_admission")
+    if admission is not None:
+        admission.clear()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _no_real_claude_on_path_each_test():
     """Re-apply the session guard before every test.
 
