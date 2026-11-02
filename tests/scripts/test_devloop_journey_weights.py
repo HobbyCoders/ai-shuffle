@@ -149,6 +149,21 @@ def _archive(log):
     return buffer.getvalue()
 
 
+@pytest.fixture
+def refresh_inventory(tmp_path, monkeypatch):
+    directory = tmp_path / "journeys"
+    directory.mkdir()
+    for stem in ("a", "b"):
+        (directory / f"{stem}.journey.mjs").touch()
+    monkeypatch.setattr(ci, "JOURNEYS", directory)
+
+
+def _run_state(command, *, attempt=1, conclusion="success"):
+    state = {"status": "completed", "conclusion": conclusion, "attempt": attempt}
+    # Emulate gh: fields not requested by the implementation are not returned.
+    return json.dumps({field: state[field] for field in command[-1].split(",")})
+
+
 def test_log_parser_times_each_journey_including_last_without_teardown():
     log = (_log("compaction", 30, 3) + _log("transcript-reader", 90, 6)
            + "2026-10-30T00:10:00.1234567Z [devloop] stopping (signal 15)\n"
@@ -170,7 +185,7 @@ def test_incomplete_or_failed_journeys_cannot_become_weights(log):
         ci.parse_journey_log(log)
 
 
-def test_refresh_produces_medians_from_green_archived_job_logs(tmp_path, monkeypatch):
+def test_refresh_produces_medians_from_green_archived_job_logs(tmp_path, monkeypatch, refresh_inventory):
     archives = {10: _archive(_log("a", 30, 3) + _log("b", 10, 2)),
                 20: _archive(_log("a", 50, 5) + _log("b", 30, 3))}
     calls = []
@@ -180,7 +195,7 @@ def test_refresh_produces_medians_from_green_archived_job_logs(tmp_path, monkeyp
         if command[:3] == ["gh", "repo", "view"]:
             return "owner/repo\n"
         if command[:3] == ["gh", "run", "view"]:
-            return json.dumps({"status": "completed", "conclusion": "success"})
+            return _run_state(command)
         assert command[:2] == ["gh", "api"]
         assert command[2].startswith("repos/owner/repo/actions/runs/")
         return archives[int(command[2].split("/")[-2])]
@@ -208,7 +223,7 @@ def test_bad_refresh_leaves_existing_measurements_untouched(tmp_path, monkeypatc
         if command[:3] == ["gh", "repo", "view"]:
             return "owner/repo\n"
         if command[:3] == ["gh", "run", "view"]:
-            return json.dumps({"status": "completed", "conclusion": "failure" if failure == "red" else "success"})
+            return _run_state(command, conclusion="failure" if failure == "red" else "success")
         if failure == "no-samples":
             return _archive("no journeys\n")
         if failure == "incomplete":
@@ -226,3 +241,113 @@ def test_refresh_cli_dispatches_run_ids(monkeypatch):
     monkeypatch.setattr(ci, "refresh_weights", lambda ids: refreshed.extend(ids))
     assert ci.main(["refresh-weights", "20", "10"]) == 0
     assert refreshed == [20, 10]
+
+
+@pytest.mark.parametrize("crashed", [False, True])
+def test_refresh_refuses_retried_green_run_with_clear_reason_without_writing(
+        tmp_path, monkeypatch, refresh_inventory, crashed):
+    path = _weights(tmp_path, {"unchanged.journey.mjs": 123})
+    original = path.read_bytes()
+    first = ("2026-10-30T00:00:00Z [ci] running a.journey.mjs\n" if crashed
+             else _log("a", 30, 3, passed=2))
+    selection = "(whole journey)" if crashed else "copy@desktop-fast"
+    retried = (first + f"2026-10-30T00:01:00Z [ci] retrying a.journey.mjs: {selection} (budget 180s)\n"
+               + "2026-10-30T00:01:30Z a: 1/1 passed; timelines in /tmp/attempt-2/a\n"
+               + "2026-10-30T00:01:30Z ::warning title=UI journey passed on retry::a recovered\n")
+
+    def gh(command, **kwargs):
+        if command[:3] == ["gh", "repo", "view"]:
+            return "owner/repo\n"
+        if command[:3] == ["gh", "run", "view"]:
+            return _run_state(command)
+        # Validate a clean run first too: no partial refresh may be written.
+        return _archive(_log("a", 30, 3) + _log("b", 10, 2)
+                        if command[2].endswith("/10/logs") else retried)
+
+    monkeypatch.setattr(ci.subprocess, "check_output", gh)
+    with pytest.raises(ValueError, match="Run 20 contained retries.*cannot be used for runtime weights"):
+        ci.refresh_weights([10, 20], path)
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("attempt", [2, 3])
+def test_refresh_refuses_reruns_before_downloading_partial_logs(
+        tmp_path, monkeypatch, refresh_inventory, attempt):
+    path = _weights(tmp_path, {"a.journey.mjs": 123, "b.journey.mjs": 456})
+    original = path.read_bytes()
+    calls = []
+
+    def gh(command, **kwargs):
+        calls.append(command)
+        if command[:3] == ["gh", "repo", "view"]:
+            return "owner/repo\n"
+        if command[:3] == ["gh", "run", "view"]:
+            return _run_state(command, attempt=attempt)
+        return _archive(_log("a", 30, 3))  # Latest-attempt archive hides prior jobs/retries.
+
+    monkeypatch.setattr(ci.subprocess, "check_output", gh)
+    with pytest.raises(ValueError, match=rf"Run 10.*attempt {attempt}.*not 1.*re-run"):
+        ci.refresh_weights([10], path)
+    assert path.read_bytes() == original
+    assert not any(command[:2] == ["gh", "api"] for command in calls)
+
+
+@pytest.mark.parametrize("stems", [("a",), ("a", "c")])
+def test_refresh_refuses_partial_or_wrong_inventory_even_after_a_complete_run(
+        tmp_path, monkeypatch, refresh_inventory, stems):
+    # The existing weights may already be partial: expected coverage comes from files.
+    path = _weights(tmp_path, {"a.journey.mjs": 123})
+    original = path.read_bytes()
+
+    def gh(command, **kwargs):
+        if command[:3] == ["gh", "repo", "view"]:
+            return "owner/repo\n"
+        if command[:3] == ["gh", "run", "view"]:
+            return _run_state(command)
+        selected = ("a", "b") if command[2].endswith("/10/logs") else stems
+        return _archive("".join(_log(stem, 30, 3) for stem in selected))
+
+    monkeypatch.setattr(ci.subprocess, "check_output", gh)
+    with pytest.raises(ValueError, match=r"Run 20.*journey coverage.*missing.*b\.journey\.mjs") as error:
+        ci.refresh_weights([10, 20], path)
+    if "c" in stems:
+        assert "unexpected" in str(error.value) and "c.journey.mjs" in str(error.value)
+    assert path.read_bytes() == original
+
+
+def test_refresh_must_not_merge_partial_runs_into_full_coverage(tmp_path, monkeypatch, refresh_inventory):
+    path = _weights(tmp_path, {"a.journey.mjs": 123, "b.journey.mjs": 456})
+    original = path.read_bytes()
+
+    def gh(command, **kwargs):
+        if command[:3] == ["gh", "repo", "view"]:
+            return "owner/repo\n"
+        if command[:3] == ["gh", "run", "view"]:
+            return _run_state(command)
+        return _archive(_log("a" if command[2].endswith("/10/logs") else "b", 30, 3))
+
+    monkeypatch.setattr(ci.subprocess, "check_output", gh)
+    with pytest.raises(ValueError, match=r"Run 10.*journey coverage.*missing.*b\.journey\.mjs"):
+        ci.refresh_weights([10, 20], path)
+    assert path.read_bytes() == original
+
+
+def test_refresh_detects_retry_after_unterminated_output_line(tmp_path, monkeypatch, refresh_inventory):
+    path = _weights(tmp_path, {"a.journey.mjs": 123, "b.journey.mjs": 456})
+    original = path.read_bytes()
+    log = ("2026-10-30T00:00:00Z [ci] running a.journey.mjs\n"
+           "2026-10-30T00:01:00Z partial output[ci] retrying a.journey.mjs: (whole journey) (budget 180s)\n"
+           "2026-10-30T00:02:00Z a: 1/1 passed; timelines in /tmp/attempt-2/a\n"
+           + _log("b", 10, 2))
+
+    def gh(command, **kwargs):
+        if command[:3] == ["gh", "repo", "view"]:
+            return "owner/repo\n"
+        if command[:3] == ["gh", "run", "view"]:
+            return _run_state(command)
+        return _archive(log)
+
+    monkeypatch.setattr(ci.subprocess, "check_output", gh)
+    with pytest.raises(ValueError, match="Run 10 contained retries.*cannot be used for runtime weights"):
+        ci.refresh_weights([10], path)
+    assert path.read_bytes() == original

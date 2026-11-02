@@ -19,8 +19,10 @@ Outputs under ``--out``: ``devloop.log`` (the instance's whole log),
 sheets) under ``journeys/``. With ``--retry-failures``, the whole shard runs
 first, then up to three failed cases/crashed files retry once on that same
 instance. Evidence is separated under ``attempt-1/`` and ``attempt-2/``;
-``summary.json`` records both verdicts. The retry shares a 180s budget and
-reserves teardown time inside the existing 25-minute CI step. Local runs do
+``summary.json`` records both verdicts. Exact cases retry before whole files;
+a whole file needs a measured estimate that fits the remaining retry time.
+The retry shares a 180s budget and reserves teardown time inside the existing
+25-minute CI step. Local runs do
 not retry unless opted in. Failing timelines and visible pass-on-retry signals
 go to the log and ``$GITHUB_STEP_SUMMARY``. Exit 1 if a failure remains or the
 instance could not be used.
@@ -157,7 +159,8 @@ def parse_journey_log(log: str) -> list[tuple[str, float, int]]:
 
 
 def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS) -> None:
-    """Recompute medians from completed green runs using the GitHub CLI's auth."""
+    """Recompute medians from complete, clean first-attempt runs matching this checkout."""
+    expected = {path.name for path in journey_files(JOURNEYS)}
     repo = subprocess.check_output(["gh", "repo", "view", "--json", "nameWithOwner",
                                     "--jq", ".nameWithOwner"], cwd=ROOT, text=True, timeout=120).strip()
     durations = defaultdict(list)
@@ -165,22 +168,37 @@ def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS) -> None:
     run_ids = sorted(set(run_ids))
     for run_id in run_ids:
         state = json.loads(subprocess.check_output(
-            ["gh", "run", "view", str(run_id), "--repo", repo, "--json", "status,conclusion"],
+            ["gh", "run", "view", str(run_id), "--repo", repo, "--json", "status,conclusion,attempt"],
             cwd=ROOT, text=True, timeout=120))
-        if state != {"status": "completed", "conclusion": "success"}:
+        if state.get("status") != "completed" or state.get("conclusion") != "success":
             raise ValueError(f"Run {run_id} must be completed and green: {state}")
+        if state.get("attempt") != 1:
+            raise ValueError(f"Run {run_id} cannot be used for runtime weights: "
+                             f"attempt {state.get('attempt')} is not 1; re-run logs omit earlier jobs. "
+                             "Choose a clean first-attempt run.")
         logs = subprocess.check_output(
             ["gh", "api", f"repos/{repo}/actions/runs/{run_id}/logs"], cwd=ROOT, timeout=120)
         samples = []
         with zipfile.ZipFile(io.BytesIO(logs)) as archive:
-            for name in sorted(archive.namelist()):
-                # The archive includes both whole-job logs and copies per step.
-                if "/" not in name and "UI journeys" in name and name.endswith(".txt"):
-                    samples.extend(parse_journey_log(archive.read(name).decode("utf-8-sig")))
+            # The archive includes both whole-job logs and copies per step.
+            job_logs = [archive.read(name).decode("utf-8-sig") for name in sorted(archive.namelist())
+                        if "/" not in name and "UI journeys" in name and name.endswith(".txt")]
+        # Check the entire run before parsing attempt 1's failed/incomplete footer.
+        # A whole-file retry's footer must never be mistaken for attempt 1's runtime.
+        if any(re.search(r"\[ci\] retrying \S+\.journey\.mjs:", log) for log in job_logs):
+            raise ValueError(f"Run {run_id} contained retries and cannot be used for runtime weights; "
+                             "choose a clean first-pass run")
+        for log in job_logs:
+            samples.extend(parse_journey_log(log))
         if not samples:
             raise ValueError(f"Run {run_id} has no completed UI journey measurements")
-        if len({name for name, _, _ in samples}) != len(samples):
+        measured = {name for name, _, _ in samples}
+        if len(measured) != len(samples):
             raise ValueError(f"Run {run_id} has duplicate journey measurements")
+        if measured != expected:
+            raise ValueError(f"Run {run_id} has mismatched journey coverage: "
+                             f"missing {sorted(expected - measured)}; unexpected {sorted(measured - expected)}. "
+                             "Choose a complete run matching this checkout.")
         for name, seconds, cases in samples:
             durations[name].append(seconds)
             per_case.append(seconds / cases)
@@ -416,7 +434,8 @@ def journeys(args: argparse.Namespace) -> int:
         if args.retry_failures:
             receipt = retry.retry_failed(attempts, out, env, run_command, directory=JOURNEYS,
                                          timeout=args.journey_timeout, started=started,
-                                         alive=lambda: problem is None and instance.alive())
+                                         alive=lambda: problem is None and instance.alive(),
+                                         weights_path=WEIGHTS)
             retry.write_receipt(out, receipt)
     finally:
         if instance is not None:

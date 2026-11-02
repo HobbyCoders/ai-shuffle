@@ -7,6 +7,7 @@ from an exit code, an absent summary, or a substring matching another case.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from collections import defaultdict
@@ -67,8 +68,23 @@ def _escape(value: str) -> str:
     return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
+def _whole_file_skip(name: str, remaining: float, weights_path: Path) -> str | None:
+    """No Node/--list fallback: an unmeasured crashed file must stay red and bounded."""
+    try:
+        estimate = json.loads(weights_path.read_text(encoding="utf-8"))["seconds"][name]
+    except (OSError, ValueError, KeyError, TypeError):
+        estimate = None
+    if (isinstance(estimate, bool) or not isinstance(estimate, (int, float))
+            or not math.isfinite(estimate) or estimate <= 0):
+        return f"No usable whole-file runtime estimate in {weights_path.name}; leaving journey crashed."
+    if estimate > remaining:
+        return (f"Estimated whole-file runtime {estimate:.1f}s exceeds {remaining:.1f}s remaining; "
+                "leaving journey crashed.")
+    return None
+
+
 def retry_failed(first: list[dict], out: Path, env: dict, run, *, directory: Path,
-                 timeout: float, started: float, alive) -> dict:
+                 timeout: float, started: float, alive, weights_path: Path) -> dict:
     """One retry phase after the whole shard. No instance is started or restarted."""
     rows = []
     for attempt in first:
@@ -90,15 +106,22 @@ def retry_failed(first: list[dict], out: Path, env: dict, run, *, directory: Pat
     groups = defaultdict(list)
     for row in failures:
         groups[row["journey"]].append(row)
-    for journey, failed in groups.items():
+    # Exact-case groups get the shared headroom before potentially long whole files.
+    for journey, failed in sorted(groups.items(), key=lambda group: group[1][0]["status"] == "crashed"):
         remaining = deadline - time.monotonic()
         if remaining <= 0 or not alive():
             receipt["skipped"] = "No retry headroom before teardown, or the dev instance died."
             break
-        attempt_out = out / "attempt-2"
-        (attempt_out / "logs").mkdir(parents=True, exist_ok=True)
         ids = None if failed[0]["status"] == "crashed" else [r["case"] for r in failed]
         name = f"{journey}.journey.mjs"
+        if ids is None:
+            reason = _whole_file_skip(name, min(timeout, remaining), weights_path)
+            if reason:
+                failed[0]["retry_skipped"] = reason
+                print(f"[ci] retry skipped {name}: {reason}", flush=True)
+                continue
+        attempt_out = out / "attempt-2"
+        (attempt_out / "logs").mkdir(parents=True, exist_ok=True)
         command = ["node", str(directory / name), *[f"--case={id}" for id in ids or []]]
         print(f"[ci] retrying {name}: {', '.join(ids) if ids else '(whole journey)'} "
               f"(budget {remaining:.0f}s)", flush=True)
@@ -128,8 +151,11 @@ def summarize(label: str, receipt: dict) -> str:
     lines = [f"### UI journeys ({label})", "",
              f"Retried {receipt['retried']} failed case(s)/crashed file(s), once; "
              f"retry time {receipt['retry_seconds']:.1f}s. Both attempts are kept separately.", ""]
-    if receipt["skipped"]:
-        lines += [f"**Retry skipped:** {receipt['skipped']}", ""]
+    skipped = [receipt["skipped"]] if receipt["skipped"] else []
+    skipped += [f"{row['journey']}: {row['retry_skipped']}"
+                for row in receipt["rows"] if row.get("retry_skipped")]
+    if skipped:
+        lines += ["**Retry skipped:**", *[f"- {reason}" for reason in skipped], ""]
     recovered = [r for r in receipt["rows"] if r["status"] == "passed-on-retry"]
     if recovered:
         lines += ["### Passed on retry (flaky journeys)", "",

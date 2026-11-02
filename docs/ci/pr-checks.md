@@ -891,21 +891,35 @@ timestamped whole-job logs from the runs' logs archives, measures each
 `[ci] running <file>` through its own passing case-count footer (including
 the last journey, excluding instance teardown), and stores median seconds per
 journey. The fallback is the median of each sample's seconds divided by its
-case count. Failed, incomplete or duplicate measurements are refused before
-replacing the file. Estimates are not time limits: keep measurements current
-and check headroom against the unchanged 25-minute journey step on the four
-standard hosted runners.
+case count. Use completed green runs on **attempt 1**, with no journey retries.
+All re-runs (`attempt != 1`) are refused: GitHub's logs archive contains only
+the latest attempt's jobs, so it cannot prove earlier attempts had no retries.
+A retry marker anywhere in a journey log, including after unterminated output,
+also refuses the run. Each run must measure every `*.journey.mjs` in the current
+checkout exactly once, with no extra journeys; missing coverage cannot be
+filled by another run or by an already-incomplete weights file. Use complete
+runs whose journey inventory matches this checkout. Failed, incomplete,
+duplicate, partial or retried measurements are refused with a clear message
+before replacing the file. Estimates are not first-attempt time limits: keep
+measurements current and check headroom against the unchanged 25-minute journey
+step on the four standard hosted runners.
 
 After the shard finishes, CI retries only failed cases, once, on the same
 instance. It passes exact `--case=<id>` selectors (including viewport and
 throttle), never substring `--only`. A journey without a usable per-case
-summary is retried as a whole file. Known-bug verdicts keep their existing
+summary is a whole-file retry target. Exact-case groups run before whole-file
+groups, regardless of shard order. Known-bug verdicts keep their existing
 meaning and are not retry targets. More than **3 failed cases/crashed files
 across the shard** skips retry and fails immediately. The measured hosted
 median is 11.17 seconds/case, so three ordinary retries are about 34 seconds,
 not another 22–25 minute shard. Crashed files count as one target, but all
 retries share a hard **180-second phase budget**, further limited by the
 remaining 25-minute step budget with **180 seconds reserved for teardown**.
+A whole-file retry is skipped when its measured estimate in
+`journey_weights.json` exceeds the time left (also capped by the journey
+timeout), or when it has no usable measured estimate. There is no case-count
+fallback for a crashed file: skipping leaves it **crashed and the job red**,
+records the reason in the summary, and leaves time for other retry targets.
 No step/job timeout was increased. A retry that crashes, times out, omits a
 selected case or runs extra cases cannot turn the job green.
 
@@ -921,7 +935,14 @@ when green, the shard uploads `ui-journeys-<N>` (3 days): separate
 screenshots and `logs/<journey>.log`; root `summary.json` records both
 verdicts, and `devloop.log` is the instance's whole log. A clean first pass
 does not upload an artifact. The retry flag is opt-in: local `run-all.mjs`
-and the CI driver without the flag still run once. Run locally with
+and the CI driver without the flag still run once.
+
+**Main retries too:** `main-suite.yml` calls `ci-frontend.yml` with the same
+retry behavior. A main run that passes only on retry can authorize nightly
+publication; its warning and summary are the only retry signals on that run.
+There is no automatic notification or issue creation for a recovered retry.
+
+Run locally with
 `python -m scripts.devloop.ci journeys --build` (see
 [the dev loop](../internal/dev-loop.md#ci-mode-and-the-journey-driver)), or
 one journey against your own instance as its README says.

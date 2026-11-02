@@ -27,6 +27,9 @@ def driver(tmp_path, monkeypatch):
     monkeypatch.setenv("JOURNEY_ONLY", "a developer's substring")
     files = ["flow.journey.mjs", "other.journey.mjs"]
     monkeypatch.setattr(ci, "plan", lambda _: [files, [], [], []])
+    weights = tmp_path / "weights.json"
+    weights.write_text(json.dumps({"seconds": {name: 10 for name in files}}))
+    monkeypatch.setattr(ci, "WEIGHTS", weights)
 
     class Instance:
         def __init__(self, *args):
@@ -227,3 +230,71 @@ def test_known_bug_on_retry_keeps_the_runner_verdict(driver):
                {"flow.journey.mjs": [case(status="known-bug")]}) == 0
     rows = json.loads((out / "summary.json").read_text())["rows"]
     assert rows[0]["attempts"][1]["status"] == "known-bug"
+
+
+@pytest.mark.parametrize("crash_first", [True, False])
+def test_exact_cases_retry_before_whole_files_regardless_of_shard_order(driver, monkeypatch, crash_first):
+    run, calls, out, summary, *_ = driver
+    files = ["flow.journey.mjs", "other.journey.mjs"]
+    monkeypatch.setattr(ci, "plan", lambda _: [files if crash_first else files[::-1], [], [], []])
+    assert run({"flow.journey.mjs": None, "other.journey.mjs": [case()]},
+               {"flow.journey.mjs": [case(status="pass")],
+                "other.journey.mjs": [case(status="pass")]}) == 0
+    assert [(name, ids) for attempt, name, ids, *_ in calls if attempt == 2] == [
+        ("other.journey.mjs", ["copy@desktop-fast"]), ("flow.journey.mjs", [])]
+    rows = json.loads((out / "summary.json").read_text())["rows"]
+    assert all(row["status"] == "passed-on-retry" for row in rows)
+    assert "Passed on retry (flaky journeys)" in summary.read_text()
+
+
+@pytest.mark.parametrize("estimate", [461.66, 170])
+def test_whole_file_over_remaining_estimate_is_skipped_and_stays_red(driver, monkeypatch, estimate):
+    from scripts.devloop import journey_retry as retry
+    run, calls, out, summary, *_ = driver
+    ci.WEIGHTS.write_text(json.dumps({"seconds": {"flow.journey.mjs": estimate}}))
+    # The exact case takes 20s of the 180s phase: even a 170s file no longer fits.
+    clock = iter([0, 10, 10, 30])
+    monkeypatch.setattr(retry.time, "monotonic", lambda: next(clock, 30))
+    assert run({"flow.journey.mjs": None, "other.journey.mjs": [case()]},
+               {"flow.journey.mjs": [case(status="pass")],
+                "other.journey.mjs": [case(status="pass")]}) == 1
+    assert [(name, ids) for attempt, name, ids, *_ in calls if attempt == 2] == [
+        ("other.journey.mjs", ["copy@desktop-fast"])]
+    receipt = json.loads((out / "summary.json").read_text())
+    crash, exact = receipt["rows"]
+    assert crash["status"] == "crashed" and len(crash["attempts"]) == 1
+    assert exact["status"] == "passed-on-retry" and receipt["retried"] == 1
+    reason = f"Estimated whole-file runtime {estimate:.1f}s exceeds 160.0s remaining"
+    assert reason in crash["retry_skipped"]
+    assert "Retry skipped" in summary.read_text() and reason in summary.read_text()
+    assert not (out / "attempt-2/logs/flow.journey.log").exists()
+
+
+@pytest.mark.parametrize("estimate", [None, 0, -1, float("nan"), float("inf"), True, "slow"])
+def test_whole_file_without_usable_estimate_skips_without_running_and_stays_red(driver, estimate):
+    run, calls, out, summary, *_ = driver
+    measured = {} if estimate is None else {"flow.journey.mjs": estimate}
+    ci.WEIGHTS.write_text(json.dumps({"seconds": measured}))
+    assert run({"flow.journey.mjs": None, "other.journey.mjs": [case()]},
+               {"other.journey.mjs": [case(status="pass")]}) == 1
+    assert [(name, ids) for attempt, name, ids, *_ in calls if attempt == 2] == [
+        ("other.journey.mjs", ["copy@desktop-fast"])]
+    receipt = json.loads((out / "summary.json").read_text())
+    crash = receipt["rows"][0]
+    assert crash["status"] == "crashed" and len(crash["attempts"]) == 1
+    assert "No usable whole-file runtime estimate" in crash["retry_skipped"]
+    assert "flow" in summary.read_text() and crash["retry_skipped"] in summary.read_text()
+    assert receipt["retried"] == 1
+
+
+def test_skipping_long_crash_does_not_block_short_crash(driver):
+    run, calls, out, summary, *_ = driver
+    ci.WEIGHTS.write_text(json.dumps({"seconds": {"flow.journey.mjs": 461.66,
+                                               "other.journey.mjs": 5.52}}))
+    assert run({"flow.journey.mjs": None, "other.journey.mjs": None},
+               {"other.journey.mjs": [case(status="pass")]}) == 1
+    assert [(name, ids) for attempt, name, ids, *_ in calls if attempt == 2] == [
+        ("other.journey.mjs", [])]
+    rows = json.loads((out / "summary.json").read_text())["rows"]
+    assert [row["status"] for row in rows] == ["crashed", "passed-on-retry"]
+    assert "Estimated whole-file runtime 461.7s exceeds" in summary.read_text()
