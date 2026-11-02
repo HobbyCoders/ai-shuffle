@@ -1807,6 +1807,13 @@ async def on_agent_message(
         if (task_registry.stop_invalidated(session_id, generation)
                 or (reply_to and task_registry.stop_invalidated(reply_to, owner_generation))):
             return None
+        # Task rows can still say running after eviction or checkout cleanup.
+        # Availability belongs to admission, not to that stale snapshot.
+        from app.core.worker_checkout import restore_worker_checkout, WorkerCheckoutError
+
+        restored, note = await asyncio.to_thread(restore_worker_checkout, session_id)
+        if not restored:
+            raise WorkerCheckoutError(note or "Its dedicated checkout could not be restored; dispatch a new Task instead")
         return await _on_agent_message_locked(
             session_id, sender, text, reply_to=reply_to, urgent=urgent,
             continuation_payload=extra_payload, kind=kind,

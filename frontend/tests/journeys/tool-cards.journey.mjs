@@ -9,7 +9,7 @@
 //   bash    [script:tool-bash]: one Bash call (echo), then the answer
 //   multi   [script:tool-multi]: two parallel calls, one more, then the answer
 import { fakeAiTag, runJourney } from './runner.mjs';
-import { PROJECT, countUserRows, expect, openNewChat, pickAccess, typeAndSend, uniq, waitTurnSettled, watchRowFlicker } from './lib/app.mjs';
+import { PROJECT, api, chatIdByToken, countUserRows, expect, openNewChat, pickAccess, typeAndSend, uniq, waitTurnSettled, watchRowFlicker } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { STOP_SELECTOR, expectNeverDecreases, expectStopFollowsStreaming, markTime } from './lib/timeline.mjs';
 
@@ -85,11 +85,71 @@ function toolCase(name) {
 	};
 }
 
+const workerFollowup = {
+	name: 'worker-followup',
+	allow: [{
+		kind: 'failed_requests', status: 409, url: /\/git\/fetch(\?|$)/,
+		reason: 'background fetch is refused while the scripted worker/follow-up uses the Git target (require_idle_git_target)'
+	}],
+	async setup(ctx) {
+		await openNewChat(ctx, { project: PROJECT });
+		await pickAccess(ctx.page, 'Bypass');
+	},
+	async act({ page, mark, variant, log }) {
+		const fetchRefusals = [];
+		page.on('response', (response) => {
+			if (response.status() === 409 && response.url().includes('/git/fetch'))
+				fetchRefusals.push(response.json());
+		});
+		const token = `followup-${uniq()}`;
+		await mark('start an untouched worker then send its follow-up');
+		await typeAndSend(page, `${token} ${fakeAiTag(variant, 'tool-worker-followup')}`);
+		await waitTurnSettled(page, { text: 'Follow-up dispatched.', messagesAtLeast: 2 });
+		const id = await chatIdByToken(page, token);
+		const session = await api(page, 'GET', `/sessions/${id}`);
+		const messages = JSON.stringify(session.messages);
+		expect(messages.includes('Resume queued for script-tool-bash'), `the real SendMessage admits a continuation: ${messages.slice(-6000)}`);
+		expect(!messages.includes('Could not resume'), 'the follow-up was not refused');
+		const result = session.messages.find((m) => m.type === 'subagent' && m.content);
+		expect(!!result, 'the real Task has a persisted worker receipt');
+		const worker = JSON.parse(result.content);
+		await page.waitForFunction(async (id) => {
+			const response = await fetch(`/api/v1/sessions/${id}`);
+			const child = await response.json();
+			return child.messages.filter((m) => m.tool_name === 'Bash' && m.toolStatus === 'completed').length >= 2;
+		}, worker.worker_session_id, { timeout: 30_000, polling: 500 });
+		log('worker executed Bash on its first turn and its resumed turn');
+		for (const refusal of await Promise.all(fetchRefusals))
+			expect(refusal.detail === 'A session using this worktree or branch is active. Stop it or wait before changing Git state.', 'only the active Git target safety refusal is expected');
+	}
+};
+
+const nativeModel = {
+	name: 'native-model',
+	async setup(ctx) {
+		await openNewChat(ctx, { project: PROJECT });
+		await pickAccess(ctx.page, 'Bypass');
+	},
+	async act({ page, mark, variant, log }) {
+		const token = `native-model-${uniq()}`;
+		await mark('resolve an explicit native Claude model through StartSession');
+		await typeAndSend(page, `${token} Use claude-opus-5-5 for the new chat. ${fakeAiTag(variant, 'tool-native-model-override')}`);
+		await waitTurnSettled(page, { text: 'Native model chat created.', messagesAtLeast: 2 });
+		const parent = await api(page, 'GET', `/sessions/${await chatIdByToken(page, token)}`);
+		const result = parent.messages.find((m) => m.tool_name === 'StartSession' && m.toolResult);
+		expect(result?.toolStatus !== 'error' && !!result?.toolResult, `StartSession succeeded: ${JSON.stringify(result)}`);
+		const created = JSON.parse(result.toolResult);
+		const child = await api(page, 'GET', `/sessions/${created.session_id}`);
+		expect(child.model === 'opus' && !child.provider_id, `native routing retained: ${JSON.stringify({ model: child.model, provider: child.provider_id })}`);
+		log(`native override resolved to ${child.model}`);
+	}
+};
+
 await runJourney({
 	name: 'tool-cards',
 	recorder: {
 		selectors: [STOP_SELECTOR, 'worklog=[role="region"][aria-label="Work log"]']
 	},
-	cases: [toolCase('bash'), toolCase('multi')],
+	cases: [toolCase('bash'), toolCase('multi'), workerFollowup, nativeModel],
 	allow: [...DEV_INSTANCE_NOISE]
 });

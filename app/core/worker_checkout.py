@@ -358,6 +358,23 @@ def _reclaim(main_dir: str, project_id: str, path: Optional[str], branch: str, b
         return False
 
 
+async def reclaim_finished_worker_checkout(worker_session_id: str, checkout: Optional[WorkerCheckout] = None) -> bool:
+    """Serialize finisher reclamation with message admission, then recheck busy.
+
+    A report can wake the parent before cleanup. Never remove a checkout a
+    continuation admitted since settlement now needs.
+    """
+    import asyncio
+    from app.core import turn_scheduler
+    from app.db import turns
+
+    async with turn_scheduler.message_resume_lock(worker_session_id):
+        if (await asyncio.to_thread(turns.session_has_unsettled_turns, worker_session_id)
+                or await asyncio.to_thread(turn_scheduler._session_has_parked_turn, worker_session_id)):
+            return False
+        return await asyncio.to_thread(reclaim_untouched_worker_checkout, worker_session_id, checkout)
+
+
 def reclaim_untouched_worker_checkout(
     worker_session_id: str, checkout: Optional[WorkerCheckout] = None,
 ) -> bool:
@@ -511,6 +528,12 @@ def restore_worker_checkout(worker_session_id: str) -> Tuple[bool, Optional[str]
                                "part-way, or a restore retained the snapshot. The folder may not contain all "
                                f"the saved work; {worktree_reclaim.archive_note(base_path, branch)}. "
                                "Dispatch a new Task instead")
+            try:
+                checkout_manager._require_branch_binding(path, branch)
+            except checkout_manager.WorktreeError:
+                return False, ("its dedicated checkout is no longer on its assigned branch. "
+                               f"Switch that checkout back to '{branch}' without discarding work, "
+                               "or dispatch a new Task instead")
             return True, None
         if not project:
             return False, None

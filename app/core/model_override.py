@@ -300,12 +300,9 @@ def _entries(row: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def _catalog() -> Dict[str, Tuple[str, ...]]:
     """Every eligible model's app id and the names it goes by."""
-    from app.core.model_registry import API_MODEL_IDS, MODELS
+    from app.core.model_registry import native_override_names
 
-    names: Dict[str, Tuple[str, ...]] = {}
-    for option in MODELS:
-        names[option.value] = tuple(filter(None, (
-            option.value, option.label, f"claude {option.value}", API_MODEL_IDS.get(option.value))))
+    names = native_override_names()
     for row in _provider_rows():
         for entry in _entries(row):
             model_id = str(entry["id"])

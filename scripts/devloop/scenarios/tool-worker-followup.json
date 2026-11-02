@@ -1,0 +1,32 @@
+{
+  "description": "A real Task finishes without changes, then receives a follow-up after its disposable checkout has been reclaimed.",
+  "steps": [
+    {
+      "tool_calls": [
+        {
+          "name": "Task",
+          "input": {
+            "agent": "dev-helper",
+            "prompt": "[script:tool-bash]",
+            "mode": "sync"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "SendMessage",
+          "input": {
+            "to": "script-tool-bash",
+            "message": "[script:tool-bash]",
+            "kind": "result"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Follow-up dispatched."
+    }
+  ]
+}

@@ -186,6 +186,18 @@ def display_provider_model_label(
     return rest or label
 
 
+def native_override_names() -> Dict[str, Tuple[str, ...]]:
+    """Names for existing aliases; registered versions do not add runnable models."""
+    names = {option.value: [option.value, option.label, f"claude {option.value}",
+                            API_MODEL_IDS[option.value]] for option in MODELS}
+    for option in _VERSIONED_MODELS:
+        names[option.family].extend((option.value, option.label,
+                                     option.value.removeprefix("claude-")))
+    for value, alias in LEGACY_MODEL_MAP.items():
+        names[alias].append(value)
+    return {alias: tuple(dict.fromkeys(spellings)) for alias, spellings in names.items()}
+
+
 def get_model_family(value: Optional[str]) -> Optional[ModelFamily]:
     """Resolved family, or ``None`` for unknown/custom values."""
     match = get_model(value)
