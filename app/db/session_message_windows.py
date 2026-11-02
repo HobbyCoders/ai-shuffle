@@ -73,9 +73,10 @@ def read_event_message_window(session_id: str, limit: int, before: int | None) -
                     -- which is not the SQL extraction's interpretation.
                     jsonb_typeof(payload) IS DISTINCT FROM 'object'
                         OR event_type = 'transcript.rewound'
-                        -- A discarded model attempt removes earlier bubbles.
+                        -- A discarded model attempt, or a stopped message given
+                        -- back to the composer, removes earlier bubbles.
                         OR (event_type = 'system.note'
-                            AND payload->>'subtype' = 'attempt_discarded')
+                            AND payload->>'subtype' IN ('attempt_discarded', 'unsent_restored'))
                         OR (event_type = 'interaction.requested'
                             AND payload->>'kind' = 'permission'
                             AND jsonb_typeof(payload->'request'->'assistant_confirm') = 'object')

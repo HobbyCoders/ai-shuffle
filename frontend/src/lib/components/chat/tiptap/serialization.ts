@@ -41,6 +41,18 @@ export function extractAtMentionQuery(input: string): { query: string; atIndex: 
 	};
 }
 
+/** Two composer drafts as one, earlier first. Drafts are Tiptap JSON, or
+ *  plain text when no editor was mounted. */
+export function joinDrafts(earlier: string, later: string): string {
+	try {
+		const a = JSON.parse(earlier), b = JSON.parse(later);
+		if (a?.type === 'doc' && b?.type === 'doc') {
+			return JSON.stringify({ ...a, content: [...(a.content ?? []), ...(b.content ?? [])] });
+		}
+	} catch { /* plain text */ }
+	return [earlier, later].join('\n\n');
+}
+
 /** Restore serialized @path mentions as chips in place, preserving surrounding text. */
 export function restoreMessageDocument(text: string, uploadPaths: string[] = []): JSONContent {
 	const paths = [...new Set(uploadPaths.filter(Boolean))].sort((a, b) => b.length - a.length);

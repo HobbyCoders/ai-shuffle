@@ -110,6 +110,8 @@ def _attempt_start(cursor, session_id, retry_seq):
     for seq, kind, payload, turn_id in _tail(cursor, session_id):
         if seq >= retry_seq or is_transcript_only_turn(turn_id):
             continue
+        if kind == "message.user" and payload.get("not_sent"):
+            continue
         if kind in ("turn.started", "message.user", "tool.result") or (
             kind == "system.note" and payload.get("subtype") in _ATTEMPT_NOTES
         ):

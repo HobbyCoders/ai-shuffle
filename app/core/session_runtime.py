@@ -896,7 +896,7 @@ class SessionRuntime:
         from app.core.task_registry import task_registry
         self._stop_generation = task_registry.stop_generation(sid)
         if task_registry.is_user_stopped(sid):
-            await asyncio.to_thread(turns_db.remove_queued_turn, tid)
+            await asyncio.to_thread(turns_db.remove_queued_turn, tid, keep_unsent_words=True)
             return None
 
         # Wait before DB reads/lease ownership. Re-read placement, archive and
@@ -913,7 +913,7 @@ class SessionRuntime:
                 turn_scheduler._kick_at_reset(sid, time.time())
             return None
         if task_registry.stop_invalidated(sid, self._stop_generation):
-            await asyncio.to_thread(turns_db.remove_queued_turn, tid)
+            await asyncio.to_thread(turns_db.remove_queued_turn, tid, keep_unsent_words=True)
             return None
 
         # 0. Placement gate. A session explicitly placed on ANOTHER
@@ -976,7 +976,7 @@ class SessionRuntime:
             return None
 
         if task_registry.stop_invalidated(sid, self._stop_generation):
-            await asyncio.to_thread(turns_db.remove_queued_turn, tid)
+            await asyncio.to_thread(turns_db.remove_queued_turn, tid, keep_unsent_words=True)
             return None
 
         # 0b. Another turn already holds the live slot: stay queued without
@@ -1054,7 +1054,7 @@ class SessionRuntime:
         settled_here = False
         try:
             if task_registry.stop_invalidated(sid, self._stop_generation):
-                await asyncio.to_thread(turns_db.remove_queued_turn, tid)
+                await asyncio.to_thread(turns_db.remove_queued_turn, tid, keep_unsent_words=True)
                 return None
             # 2. Take the session's single live slot.
             started = await asyncio.to_thread(
@@ -1077,7 +1077,10 @@ class SessionRuntime:
             if task_registry.stop_invalidated(sid, self._stop_generation):
                 # Stop may have cleared the queue while start_turn was in flight.
                 # Do not re-arm input or connect a provider for this obsolete turn.
-                await asyncio.to_thread(turns_db.settle_turn, tid, "aborted", "interrupted")
+                # The sweep no longer sees it and nothing has recorded it yet.
+                await asyncio.to_thread(
+                    turns_db.settle_turn, tid, "aborted", "interrupted", keep_unsent_words=True,
+                )
                 return "aborted"
 
             # Register as the session's live runtime the instant we own it, so
@@ -1468,12 +1471,15 @@ class SessionRuntime:
             await self._persist_user_message(prompt, source=app_source)
         done_event = None
         try:
+            turn_payload = self.turn.get("payload") or {}
             await recorder.start(
                 prompt,
                 profile_id=self.turn.get("profile_id"),
                 record_user=not resume and not already_recorded,
                 source=fluid_turn_source(app_source),
-                **({"continued": True} if (self.turn.get("payload") or {}).get("continued_turn") else {}),
+                **({"continued": True} if turn_payload.get("continued_turn") else {}),
+                **({"accepted_input_id": turn_payload["accepted_input_id"]}
+                   if turn_payload.get("accepted_input_id") else {}),
             )
             if self._abort_reason == "recording_failed":
                 return

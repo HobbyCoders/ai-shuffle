@@ -6,9 +6,12 @@ vi.mock('$lib/api/client', async (importOriginal) => ({ ...(await importOriginal
 const nav = vi.hoisted(() => ({ openSettings: vi.fn() }));
 vi.mock('$lib/settings/navigation.svelte', () => nav);
 import { aiContentPrefill, supportCaps } from '$lib/stores/support-report.svelte';
+import { activeSession } from '$lib/stores/active-session';
+import { readDraft } from '$lib/stores/session/draft-persistence';
+import { takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
 import MessageActions from './MessageActions.svelte';
 
-beforeEach(() => { rewind.mockReset(); vi.spyOn(console, 'error').mockImplementation(() => {}); });
+beforeEach(() => { sessionStorage.clear(); rewind.mockReset(); vi.spyOn(console, 'error').mockImplementation(() => {}); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 const base = { sessionId: 's1', messageContent: '**Fix** the `build`', messageRole: 'user' as const };
@@ -21,11 +24,132 @@ describe('MessageActions gating', () => {
 			restored_prompt:prompt, restored_upload_paths:['/uploads/proof.png']});
 		const onRewindComplete = vi.fn();
 		render(MessageActions, {...base, notSentMessageId:'unsent-id', onRewindComplete});
-		await fireEvent.click(screen.getByTitle('Restore unsent draft'));
-		expect(dialog()!.textContent).toContain('Sent history is unchanged');
-		await fireEvent.click(screen.getByRole('button', {name:'Rewind'}));
-		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledWith(undefined, prompt, ['/uploads/proof.png']));
+		await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
+		expect(dialog()).toBeNull();
+		expect(rewindButton()).toBeNull();
+		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledWith(undefined, prompt, ['/uploads/proof.png'], true));
+		// The row leaves on its feed event; a second click in between must not
+		// hand the same words to the composer again.
+		expect((screen.getByRole('button', {name:'Restored'}) as HTMLButtonElement).disabled).toBe(true);
 		expect(rewind).toHaveBeenCalledWith('s1', '', false, 'user', null, null, 'unsent-id');
+	});
+	it('keeps a not-sent row and says why when the restore fails', async () => {
+		rewind.mockResolvedValue({success:false, error:'The unsent row is missing'});
+		const onRewindComplete = vi.fn();
+		render(MessageActions, {...base, notSentMessageId:'unsent-id', onRewindComplete});
+		await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
+		await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('The unsent row is missing'));
+		expect(onRewindComplete).not.toHaveBeenCalled();
+	});
+	it('keeps restored words in their own chat when the owner changed chats while it was restoring', async () => {
+		let answer!: (value: unknown) => void;
+		rewind.mockReturnValue(new Promise(resolve => { answer = resolve; }));
+		const onRewindComplete = vi.fn();
+		const view = render(MessageActions, {...base, notSentMessageId:'unsent-id', onRewindComplete});
+		await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
+		await view.rerender({sessionId:'another-chat'});
+		answer({success:true, unsent_restored:true, restored_prompt:'kept words', restored_upload_paths:[]});
+		await waitFor(() => expect(readDraft('s1')).toContain('kept words'));
+		expect(onRewindComplete).not.toHaveBeenCalled();
+	});
+	it('still hands over restored words when the row unmounted while it was restoring', async () => {
+		let answer!: (value: unknown) => void;
+		rewind.mockReturnValue(new Promise(resolve => { answer = resolve; }));
+		const onRewindComplete = vi.fn();
+		const view = render(MessageActions, {...base, notSentMessageId:'unsent-id', onRewindComplete});
+		await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
+		view.unmount();
+		answer({success:true, unsent_restored:true, restored_prompt:'kept words', restored_upload_paths:[]});
+		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledWith(undefined, 'kept words', [], true));
+	});
+	it('notes the words before asking and clears the note once the server answers', async () => {
+		let answer!: (value: unknown) => void;
+		rewind.mockReturnValue(new Promise(resolve => { answer = resolve; }));
+		render(MessageActions, {...base, notSentMessageId:'unsent-id', notSentUploadPaths:['/uploads/proof.png'], onRewindComplete: vi.fn()});
+		await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
+		expect(sessionStorage.getItem('restore-note:s1:unsent-id')).toContain('/uploads/proof.png');
+		answer({success:true, unsent_restored:true, restored_prompt:'kept words', restored_upload_paths:[]});
+		await waitFor(() => expect(sessionStorage.getItem('restore-note:s1:unsent-id')).toBeNull());
+		expect(takeUnfinishedRestores('s1', new Set(), 'a-later-page')).toEqual([]);
+	});
+	it('clears the note a moment after a lost answer, once the page has plainly stayed', async () => {
+		vi.useFakeTimers();
+		try {
+			rewind.mockRejectedValue(new TypeError('Failed to fetch'));
+			const onRewindComplete = vi.fn();
+			render(MessageActions, {...base, notSentMessageId:'unsent-id', onRewindComplete});
+			await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
+			await vi.advanceTimersByTimeAsync(0);
+			expect(onRewindComplete).toHaveBeenCalledOnce();
+			expect(sessionStorage.getItem('restore-note:s1:unsent-id')).not.toBeNull();
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(sessionStorage.getItem('restore-note:s1:unsent-id')).toBeNull();
+			expect(onRewindComplete).toHaveBeenCalledOnce();
+		} finally { vi.useRealTimers(); }
+	});
+	it('saves the words to the chat\'s draft when no composer is on screen to take them', async () => {
+		vi.useFakeTimers();
+		try {
+			activeSession.newChat();
+			activeSession.current.sessionId = 's1';
+			activeSession.setDraft('');
+			rewind.mockRejectedValue(new TypeError('Failed to fetch'));
+			const onRewindComplete = vi.fn((_warning?: string, prompt?: string, uploads?: string[]) => {
+				activeSession.setPendingRestorePrompt(prompt ?? '', uploads);
+			});
+			render(MessageActions, {...base, notSentMessageId:'unsent-id', onRewindComplete});
+			window.dispatchEvent(new Event('beforeunload'));
+			await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(onRewindComplete).toHaveBeenCalledOnce();
+			expect(sessionStorage.getItem('restore-note:s1:unsent-id')).toBeNull();
+			expect(activeSession.current.pendingRestorePrompt).toBeNull();
+			const words = base.messageContent;
+			expect(activeSession.current.draft).toContain(words);
+			expect(readDraft('s1')).toContain(words);
+		} finally {
+			activeSession.newChat();
+			vi.useRealTimers();
+		}
+	});
+	it('waits to see whether the page really goes, and hands the words over once if it stays', async () => {
+		vi.useFakeTimers();
+		try {
+			rewind.mockRejectedValue(new TypeError('Failed to fetch'));
+			const onRewindComplete = vi.fn();
+			render(MessageActions, {...base, notSentMessageId:'unsent-id', onRewindComplete});
+			window.dispatchEvent(new Event('beforeunload'));
+			await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
+			await vi.advanceTimersByTimeAsync(0);
+			expect(onRewindComplete).not.toHaveBeenCalled();
+			expect(sessionStorage.getItem('restore-note:s1:unsent-id')).not.toBeNull();
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(onRewindComplete).toHaveBeenCalledOnce();
+			expect(sessionStorage.getItem('restore-note:s1:unsent-id')).toBeNull();
+			expect(screen.getByRole('alert').textContent).toContain("Couldn't confirm");
+		} finally { vi.useRealTimers(); }
+	});
+	it.each([
+		['a dropped connection', new TypeError('Failed to fetch')],
+		['a server error', {detail:'boom', status:502}],
+	])('copies the words to the composer once when the outcome is unknown after %s', async (_label, failure) => {
+		rewind.mockRejectedValue(failure);
+		const onRewindComplete = vi.fn();
+		render(MessageActions, {...base, notSentMessageId:'unsent-id', notSentUploadPaths:['/uploads/proof.png'], onRewindComplete});
+		await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
+		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledTimes(1));
+		expect(onRewindComplete).toHaveBeenCalledWith(undefined, base.messageContent, ['/uploads/proof.png'], true);
+		expect(screen.getByRole('alert').textContent).toContain("Couldn't confirm");
+		expect((screen.getByRole('button', {name:'Restored'}) as HTMLButtonElement).disabled).toBe(true);
+	});
+	it('leaves the row and the composer alone when the server refuses the restore', async () => {
+		rewind.mockRejectedValue({detail:'Not allowed', status:403, message:'Not allowed'});
+		const onRewindComplete = vi.fn();
+		render(MessageActions, {...base, notSentMessageId:'unsent-id', onRewindComplete});
+		await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
+		await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
+		expect(onRewindComplete).not.toHaveBeenCalled();
+		expect((screen.getByRole('button', {name:'Restore to composer'}) as HTMLButtonElement).disabled).toBe(false);
 	});
 	it('disables rewind for a steer with an explanation while preserving copy', async () => {
 		render(MessageActions, { ...base, rewindEligible: false, messageUuid: 'not-a-checkpoint' });

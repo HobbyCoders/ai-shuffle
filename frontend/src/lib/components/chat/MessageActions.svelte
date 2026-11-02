@@ -13,7 +13,9 @@
 	 * on mobile) and reserves its space so revealing it never reflows the chat.
 	 */
 	import { getContext, onDestroy, tick } from 'svelte';
-	import { readable } from 'svelte/store';
+	import { get, readable } from 'svelte/store';
+	import { activeSession } from '$lib/stores/active-session';
+	import { addRestoredWordsToDraft, LEAVING_MS, noteRestoreFinished, noteRestoreStarted, pageIsLeaving } from '$lib/stores/session/restored-draft';
 	import { TRANSCRIPT_ACTIONS, type TranscriptActions } from './TranscriptHydrationBoundary.svelte';
 	import { Ellipsis, Flag } from 'lucide-svelte';
 	import { executeRewind } from '$lib/api/client';
@@ -27,6 +29,7 @@
 		 *  source verbatim (assistant replies, so formatting survives a paste). */
 		copyAs?: 'plain' | 'markdown';
 		notSentMessageId?: string | null;
+		notSentUploadPaths?: string[];
 		messageUuid?: string | null;  // Direct UUID from JSONL - preferred for rewind
 		userPromptOccurrence?: number | null;  // 0-based occurrence among identical-content user prompts — content-anchored rewind fallback when uuid is absent
 		rewindEligible?: boolean;
@@ -36,7 +39,7 @@
 		onCopy?: (content: string) => void;
 		onRead?: () => void;
 		isReading?: boolean;
-		onRewindComplete?: (warning?: string, rewoundPrompt?: string, uploadPaths?: string[]) => void;  // Optional warning for partial success + the removed user message's text (chat-input restore)
+		onRewindComplete?: (warning?: string, rewoundPrompt?: string, uploadPaths?: string[], unsentRestored?: boolean) => void;  // Optional warning for partial success + the removed user message's text (chat-input restore)
 	}
 
 	let {
@@ -45,6 +48,7 @@
 		messageRole,
 		copyAs = 'plain',
 		notSentMessageId = null,
+		notSentUploadPaths = [],
 		messageUuid = null,  // If provided, use directly for rewind (no text matching needed)
 		userPromptOccurrence = null,
 		rewindEligible = true,
@@ -67,7 +71,17 @@
 	let copyError = $state('');
 	let showRewindDialog = $state(false);
 	let isRewinding = $state(false);
+	// A restored not-sent row leaves on its own feed event; until then a second
+	// click would hand the same words to the composer again.
+	let restored = $state(false);
 	let rewindError = $state<string | null>(null);
+
+	const RESTORE_UNCONFIRMED = "Couldn't confirm the restore with the server, so your words were copied to the composer. The not-sent row may stay until you reload.";
+	/** A failed request the server may still have carried out. A 4xx is a refusal. */
+	function outcomeUnknown(error: unknown): boolean {
+		const status = (error as { status?: unknown } | null)?.status;
+		return typeof status !== 'number' || status === 0 || status >= 500;
+	}
 
 	/**
 	 * Portal action: moves the element to document.body so it escapes
@@ -144,6 +158,37 @@
 		rewindError = null;
 	}
 
+	// A row whose chat has left the screen never calls its callback: the parent
+	// would hand the words to whichever composer is open now. They still have to
+	// land somewhere, because the server has dropped the row.
+	function handBackRestoredWords(
+		requestedSessionId: string,
+		complete: Props['onRewindComplete'],
+		warning: string | undefined,
+		prompt: string | undefined,
+		uploads: string[] | undefined
+	) {
+		if (sessionId === requestedSessionId && canAct(requestedSessionId)) {
+			complete?.(warning, prompt, uploads, true);
+		} else if (get(activeSession).sessionId === requestedSessionId) {
+			// Back on that chat and still loading: its composer takes them once ready.
+			activeSession.setPendingRestorePrompt(prompt ?? '', uploads);
+		} else {
+			addRestoredWordsToDraft(requestedSessionId, prompt ?? '', uploads);
+			return;
+		}
+		// A composer takes waiting words at once. If none did, none is on screen
+		// (Settings, say). Waiting words last only until the chat changes or the
+		// page reloads, and the server has dropped the row, so save them.
+		void tick().then(() => {
+			const state = get(activeSession);
+			if (state.sessionId !== requestedSessionId) return;
+			if (!state.pendingRestorePrompt && !state.pendingRestoreUploadPaths?.length) return;
+			activeSession.setDraft(addRestoredWordsToDraft(requestedSessionId, state.pendingRestorePrompt ?? '', state.pendingRestoreUploadPaths, state.draft));
+			activeSession.clearPendingRestorePrompt();
+		});
+	}
+
 	async function handleRewindConfirm() {
 		if (!sessionId || !rewindEligible || !canAct()) return;
 
@@ -165,8 +210,13 @@
 		const requestedSessionId = sessionId;
 		const complete = onRewindComplete;
 		const removedPrompt = messageRole === 'user' ? messageContent : undefined;
+		const notSentRequest = !!notSentMessageId;
+		const unsentUploads = notSentUploadPaths;
+		const restoringRowId = notSentMessageId;
+		let answerLost = false;
 		isRewinding = true;
 		rewindError = null;
+		if (restoringRowId) noteRestoreStarted(requestedSessionId, restoringRowId, removedPrompt ?? '', unsentUploads);
 
 		try {
 			// For user messages: include_response=false removes this message and everything after.
@@ -178,6 +228,12 @@
 				? await executeRewind(requestedSessionId, '', includeResponse, 'user', userPromptOccurrence, messageContent)
 				: await executeRewind(requestedSessionId, messageUuid!, includeResponse, messageRole);
 
+			if (notSentRequest && result.unsent_restored) {
+				showRewindDialog = false;
+				restored = true;
+				handBackRestoredWords(requestedSessionId, complete, result.warning ?? undefined, result.restored_prompt ?? removedPrompt, result.restored_upload_paths);
+				return;
+			}
 			// The API may finish after this row unmounts or the user changes chats.
 			// Never hand an outgoing result to the incoming session's composer/store.
 			if (sessionId !== requestedSessionId || !canAct(requestedSessionId)) return;
@@ -187,22 +243,40 @@
 				// the parent so the composer is refilled for editing/resending.
 				// Assistant-message rewinds keep their preceding prompt in the
 				// transcript, so there is nothing to restore.
-				const rewoundPrompt = removedPrompt;
 				// Pass warning to parent to show as system message (for partial success)
-				if (result.unsent_restored) {
-					complete?.(result.warning ?? undefined, result.restored_prompt ?? rewoundPrompt, result.restored_upload_paths);
-				} else {
-					complete?.(result.warning ?? undefined, rewoundPrompt);
-				}
+				complete?.(result.warning ?? undefined, removedPrompt);
 			} else {
 				rewindError = result.error || 'Rewind failed';
 			}
 		} catch (e) {
+			// No answer means the server may have dropped the row all the same, so
+			// the copy on screen is handed over. If the server did drop it, the row
+			// and this note leave together; if not, the note explains why it stayed.
+			if (restoringRowId && outcomeUnknown(e)) {
+				answerLost = true;
+				restored = true;
+				const handOver = () => {
+					rewindError = RESTORE_UNCONFIRMED;
+					handBackRestoredWords(requestedSessionId, complete, undefined, removedPrompt, unsentUploads);
+				};
+				// A reload is what cuts requests off, too, and a page that is going
+				// takes its composer with it. Only a page still alive after the wait
+				// hands the words over or drops the note; otherwise the note is what
+				// the next page recovers them from.
+				const wasLeaving = pageIsLeaving();
+				if (!wasLeaving) handOver();
+				setTimeout(() => {
+					if (wasLeaving) handOver();
+					noteRestoreFinished(requestedSessionId, restoringRowId);
+				}, LEAVING_MS);
+				return;
+			}
 			if (sessionId !== requestedSessionId || !canAct(requestedSessionId)) return;
 			console.error('Rewind error:', e);
 			rewindError = e instanceof Error ? e.message : 'Unknown error';
 		} finally {
 			isRewinding = false;
+			if (restoringRowId && !answerLost) noteRestoreFinished(requestedSessionId, restoringRowId);
 		}
 	}
 
@@ -387,13 +461,27 @@
 		</button>
 	{/if}
 
+	<!-- A not-sent row returns its words to the composer. Nothing is removed from
+	     sent history or sent automatically, so it needs no confirmation. -->
+	{#if notSentMessageId}
+		{#if sessionId && !isStreaming}
+			<button
+				type="button"
+				class="restore-btn"
+				onclick={handleRewindConfirm}
+				disabled={isRewinding || restored}
+			>
+				{isRewinding ? 'Restoring…' : restored ? 'Restored' : 'Restore to composer'}
+			</button>
+			{#if rewindError}<span class="restore-error" role="alert">{rewindError}</span>{/if}
+		{/if}
 	<!-- Rewind button - only available for user messages -->
-	{#if sessionId && !isStreaming && messageRole === 'user'}
+	{:else if sessionId && !isStreaming && messageRole === 'user'}
 		<button
 			class="action-btn disabled:opacity-40 disabled:cursor-not-allowed"
 			onclick={handleRewindClick}
 			disabled={!rewindEligible}
-			title={notSentMessageId ? "Restore unsent draft" : rewindEligible ? "Rewind to before this message" : "Mid-turn messages have no independent rewind checkpoint"}
+			title={rewindEligible ? "Rewind to before this message" : "Mid-turn messages have no independent rewind checkpoint"}
 		>
 			<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0019 16V8a1 1 0 00-1.6-.8l-5.333 4zM4.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0011 16V8a1 1 0 00-1.6-.8l-5.334 4z" />
@@ -432,12 +520,10 @@
 			class="relative bg-card border border-border rounded-lg shadow-lg max-w-md w-full mx-4 p-4"
 			aria-labelledby="rewind-dialog-title"
 		>
-			<h3 id="rewind-dialog-title" class="text-lg font-semibold text-foreground mb-2">{notSentMessageId ? 'Restore unsent draft?' : 'Rewind Conversation?'}</h3>
+			<h3 id="rewind-dialog-title" class="text-lg font-semibold text-foreground mb-2">Rewind Conversation?</h3>
 
 			<p class="text-sm text-muted-foreground mb-3">
-				{#if notSentMessageId}
-					Only this not-sent row is removed. Its text and attachments return to the composer. Sent history is unchanged and nothing is sent automatically.
-				{:else if messageRole === 'user'}
+				{#if messageRole === 'user'}
 					This will remove this message and all messages after it. Cannot be undone.
 				{:else}
 					This will keep this response and remove all messages after it. Cannot be undone.
@@ -482,6 +568,29 @@
 {/if}
 
 <style>
+	.restore-btn {
+		padding: 0.125rem 0.5rem;
+		min-height: 1.75rem;
+		border: 1px solid var(--border);
+		border-radius: 0.375rem;
+		background: transparent;
+		color: var(--foreground);
+		font-size: 0.75rem;
+		white-space: nowrap;
+	}
+
+	.restore-btn:hover:not(:disabled) { background: var(--accent); }
+	.restore-btn:disabled { opacity: 0.6; cursor: default; }
+
+	@media (max-width: 639px) {
+		.restore-btn { min-height: 2.75rem; padding-inline: 0.75rem; }
+	}
+
+	.restore-error {
+		color: var(--destructive);
+		font-size: 0.75rem;
+	}
+
 	.action-btn {
 		display: flex;
 		align-items: center;

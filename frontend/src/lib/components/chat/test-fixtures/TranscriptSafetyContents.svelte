@@ -11,8 +11,8 @@
 		options: {}, quick_settings: {}, schema: { fields: [] }, available: true, verified: true,
 		price: { currency: 'USD', unit: 'item', amount: '0', total: '0', status: 'included' }
 	}];
-	let { mode, role, onRewindComplete }: {
-		mode: 'message' | 'tasks' | 'media' | 'generation' | 'generation-save'; role: 'user' | 'assistant';
+	let { mode, role, notSentMessageId, onRewindComplete }: {
+		mode: 'message' | 'tasks' | 'media' | 'generation' | 'generation-save'; role: 'user' | 'assistant'; notSentMessageId?: string;
 		onRewindComplete?: (warning?: string, prompt?: string, uploads?: string[]) => void;
 	} = $props();
 	const presentation = getContext<TranscriptPresentation>(TRANSCRIPT_PRESENTATION);
@@ -25,5 +25,5 @@
 	<MediaLightbox />
 {:else}
 	<MessageActions sessionId={$presentation.sessionId} messageContent="Outgoing prompt"
-		messageRole={role} messageUuid="checkpoint-a" {onRewindComplete} />
+		messageRole={role} messageUuid="checkpoint-a" {notSentMessageId} {onRewindComplete} />
 {/if}

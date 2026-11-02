@@ -38,10 +38,11 @@
 	import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
 	import { attachComposerDictation, detachComposerDictation, startComposerDictation } from '$lib/services/composerDictation';
 	import { flushPendingDraft, holdPendingDraft, readDraft, releasePendingDraft, writeDraft } from '$lib/stores/session/draft-persistence';
+	import { takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
 	import { promptStash } from '$lib/stores/session/prompt-stash';
 	import { promptHistory, createPromptRecall } from '$lib/stores/session/prompt-recall';
 	import { pastedTextFile } from './tiptap/large-paste';
-	import { restoreMessageDocument } from './tiptap/serialization';
+	import { joinDrafts, restoreMessageDocument } from './tiptap/serialization';
 	import { composerInsert, completeComposerInsert } from '$lib/stores/composer-insert';
 	import PromptStashMenu from './PromptStashMenu.svelte';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
@@ -476,6 +477,24 @@
 		recall.reset();
 		tick().then(() => editorRef?.focus());
 		activeSession.clearPendingRestorePrompt();
+	});
+
+	// A restore cut off by a reload: once this chat's history is in, a row the
+	// server dropped hands its words back. It may have been the chat's only row,
+	// so an empty history counts, and this lives here because an empty chat shows
+	// no transcript. Checked once per opening: a row its own restore is removing
+	// right now is left to that restore.
+	let unfinishedRestoresCheckedFor: string | null = null;
+	$effect(() => {
+		const { sessionId, messages, isLoadingSession, isRestoringSession, error, wsReconnectRequired, historyStall } = $activeSession;
+		if (sessionId === unfinishedRestoresCheckedFor) return;
+		unfinishedRestoresCheckedFor = null;
+		if (!sessionId || !ownsComposer() || isLoadingSession || isRestoringSession || error || wsReconnectRequired || historyStall) return;
+		unfinishedRestoresCheckedFor = sessionId;
+		const onScreen = new Set(messages.map((m) => m.metadata?.not_sent_id).filter((id): id is string => typeof id === 'string'));
+		const notes = takeUnfinishedRestores(sessionId, onScreen);
+		if (notes.length === 0) return;
+		activeSession.setPendingRestorePrompt(notes.map((n) => n.prompt).filter(Boolean).join('\n\n'), notes.flatMap((n) => n.uploadPaths));
 	});
 
 	// Text handed over from another surface (the terminal's "Send selection to
@@ -1060,18 +1079,6 @@
 		const ready = await newChatSetup.run(need);
 		if (!ownsComposer() || getInitGeneration() !== navigation || get(activeSession).sessionId) return false;
 		return ready;
-	}
-
-	/** Two composer drafts as one, earlier first. Drafts are Tiptap JSON, or
-	 *  plain text when no editor was mounted. */
-	function joinDrafts(earlier: string, later: string): string {
-		try {
-			const a = JSON.parse(earlier), b = JSON.parse(later);
-			if (a?.type === 'doc' && b?.type === 'doc') {
-				return JSON.stringify({ ...a, content: [...(a.content ?? []), ...(b.content ?? [])] });
-			}
-		} catch { /* plain text */ }
-		return [earlier, later].join('\n\n');
 	}
 
 	// Actually send the message. There is no send-later fork: a send during a live

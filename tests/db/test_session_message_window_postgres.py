@@ -168,7 +168,7 @@ def test_differential_streams_tools_answers_compaction_cost_and_user_occurrences
             assert_route_parity(client, chat, limit, before)
 
 
-@pytest.mark.parametrize("reason", ["rewind", "discarded", "approval", "reopened-tool", "reminder", "oversize"])
+@pytest.mark.parametrize("reason", ["rewind", "discarded", "restored", "approval", "reopened-tool", "reminder", "oversize"])
 def test_nonlocal_or_oversize_event_shapes_fall_back_without_changing_pages(chat, api, monkeypatch, reason):
     from app.api.sessions_helpers import load_event_message_window
     from app.db import session_message_windows
@@ -184,6 +184,10 @@ def test_nonlocal_or_oversize_event_shapes_fall_back_without_changing_pages(chat
     elif reason == "discarded":
         # A safety check declined the call that streamed "after".
         rows += [("system.note", {"subtype": "attempt_discarded", "data": {"reason": "guardrail"}}, "b"),
+                 ("message.assistant", {"content": "replacement"}, "b")]
+    elif reason == "restored":
+        # A stopped message went back to the composer: its row must go too.
+        rows += [("system.note", {"subtype": "unsent_restored", "data": {"message_id": "stopped-row"}}, "b"),
                  ("message.assistant", {"content": "replacement"}, "b")]
     elif reason == "approval":
         rows += [("interaction.requested", {"kind": "permission", "request_id": "r1",

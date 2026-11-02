@@ -92,6 +92,17 @@ describe('dark transcript projection protocol', () => {
 		store.assertFullParity();
 	});
 
+	it('finds implicit interrupt prose past a not-sent row beyond the visible margin', () => {
+		const event = makeEvents(), store = new Store();
+		store.append([event('message.user', { content: 'First' }),
+			event('assistant.text_delta', { text: 'Answer' })]);
+		store.append([event('message.user', { content: 'Queued', not_sent: true })]);
+		ingest(store, Array.from({ length: 120 }, () => event('system.note', { subtype: 'info', content: 'notice' })));
+		store.append([event('turn.aborted', { reason: 'interrupt' })]);
+		expect(store.assertFullParity().messages.find(message => message.role === 'assistant' && message.type === 'text')?.content)
+			.toBe('Answer\n\n[Stopped]');
+	});
+
 	it('fails closed before later implicit work when a deep rewind loses the known suffix', () => {
 		const event = makeEvents(), store = new Store();
 		ingest(store, ordinaryHistory(event));

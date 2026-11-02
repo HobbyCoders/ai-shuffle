@@ -736,7 +736,7 @@ def build_context_seed(session_id: str) -> str:
         content = (row.get("content") or "").strip()
         if role not in ("user", "assistant") or not content:
             continue
-        if is_backend_note(content):
+        if is_backend_note(content) or (row.get("metadata") or {}).get("not_sent"):
             continue
         lines.append(f"{'User' if role == 'user' else 'Assistant'}: {content}")
 

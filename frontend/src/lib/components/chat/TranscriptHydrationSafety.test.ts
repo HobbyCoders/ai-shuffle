@@ -5,12 +5,13 @@ import type { Writable } from 'svelte/store';
 import { activeSession, type ActiveSessionState } from '$lib/stores/active-session';
 import { runningTasksOpen } from '$lib/stores/expansion-preferences';
 import { openLightbox, closeLightbox } from '$lib/stores/lightbox';
+import { readDraft } from '$lib/stores/session/draft-persistence';
 import Harness from './test-fixtures/TranscriptSafetyHarness.svelte';
 
-const mocks = vi.hoisted(() => ({ rewind: vi.fn(), report: vi.fn(), stop: vi.fn(), save: vi.fn(), send: vi.fn() }));
+const mocks = vi.hoisted(() => ({ rewind: vi.fn(), report: vi.fn(), stop: vi.fn(), save: vi.fn(), send: vi.fn(), pendingRestore: vi.fn() }));
 vi.mock('$lib/stores/active-session', async () => {
 	const { writable } = await import('svelte/store');
-	return { activeSession: Object.assign(writable({}), { sendMessage: mocks.send }) };
+	return { activeSession: Object.assign(writable({}), { sendMessage: mocks.send, setPendingRestorePrompt: mocks.pendingRestore }) };
 });
 vi.mock('$lib/api/client', async (original) => ({ ...(await original<object>()), executeRewind: mocks.rewind }));
 vi.mock('$lib/stores/support-report.svelte', () => ({ canReportAiContent: () => true, reportAiContent: mocks.report }));
@@ -46,7 +47,7 @@ function state(id: string, loading = false, taskCount = 0): ActiveSessionState {
 	} as unknown as ActiveSessionState;
 }
 beforeEach(() => {
-	vi.clearAllMocks(); mocks.rewind.mockReset(); mocks.save.mockReset(); mocks.send.mockReset();
+	vi.clearAllMocks(); mocks.rewind.mockReset(); mocks.save.mockReset(); mocks.send.mockReset(); sessionStorage.clear();
 	live.set(state('A')); runningTasksOpen.set(true); closeLightbox();
 });
 afterEach(() => { cleanup(); closeLightbox(); });
@@ -84,6 +85,34 @@ describe('retained transcript action lifetime', () => {
 		await tick(); await tick();
 		expect(complete).not.toHaveBeenCalled();
 		expect(screen.queryByRole('dialog')).toBeNull();
+		expect(readDraft('A')).toBeNull();
+	});
+
+	it('keeps a late restore in A’s own draft and away from B’s composer', async () => {
+		let finish!: (value: unknown) => void;
+		mocks.rewind.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+		const complete = vi.fn();
+		render(Harness, { notSentMessageId: 'row-a', onRewindComplete: complete });
+		await fireEvent.click(screen.getByRole('button', { name: 'Restore to composer' }));
+		live.set(state('B')); await tick();
+		finish({ success: true, unsent_restored: true, restored_prompt: 'A words' });
+		await waitFor(() => expect(readDraft('A')).toContain('A words'));
+		expect(complete).not.toHaveBeenCalled();
+		expect(mocks.pendingRestore).not.toHaveBeenCalled();
+		expect(readDraft('B')).toBeNull();
+	});
+
+	it('gives a late restore to A’s composer when A is back on screen but still loading', async () => {
+		let finish!: (value: unknown) => void;
+		mocks.rewind.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+		const complete = vi.fn();
+		render(Harness, { notSentMessageId: 'row-a', onRewindComplete: complete });
+		await fireEvent.click(screen.getByRole('button', { name: 'Restore to composer' }));
+		live.set(state('B')); await tick();
+		live.set(state('A', true)); await tick();
+		finish({ success: true, unsent_restored: true, restored_prompt: 'A words', restored_upload_paths: ['/uploads/a.png'] });
+		await waitFor(() => expect(mocks.pendingRestore).toHaveBeenCalledWith('A words', ['/uploads/a.png']));
+		expect(complete).not.toHaveBeenCalled();
 	});
 
 	it('closes the body-portaled message menu without reporting an outgoing reply', async () => {

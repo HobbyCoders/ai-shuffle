@@ -1497,7 +1497,8 @@ export function buildTranscriptModel(
 		rewindEligible[index] = canRewindUserMessage(message, !!realTurnId && promptTurnIds.has(realTurnId));
 		if (message.role === 'user' && message.type !== 'command' && !agentDelivery(message)) {
 			if (realTurnId) promptTurnIds.add(realTurnId);
-			if (message.id) latestUserTurnId = message.id;
+			// A not-sent row never ran, so it is not the turn the viewport follows.
+			if (message.id && !message.metadata?.not_sent) latestUserTurnId = message.id;
 		}
 		if (rewindEligible[index] && !message.metadata?.not_sent) {
 			const key = (message.content ?? '').trim();

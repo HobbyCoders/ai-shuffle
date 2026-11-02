@@ -112,7 +112,7 @@ def test_stop_locks_counter_before_session_and_notifies_only_after_commit(compac
 
     monkeypatch.setattr(turns, "get_db", traced_db)
     monkeypatch.setattr(session_events, "notify_session_write", notified)
-    turns.remove_queued_turn(pair["queued_turn_id"], preserve_compact_first=True)
+    turns.remove_queued_turn(pair["queued_turn_id"], keep_unsent_words=True)
     counter = next(i for i, sql in enumerate(trace) if "FROM session_event_counters" in sql and "FOR UPDATE" in sql)
     session = next(i for i, sql in enumerate(trace) if "FROM sessions" in sql and "FOR UPDATE" in sql)
     abort = next(i for i, sql in enumerate(trace) if "UPDATE turns SET state='aborted'" in sql)

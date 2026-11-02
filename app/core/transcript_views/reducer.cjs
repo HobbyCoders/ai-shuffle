@@ -1046,7 +1046,7 @@ function reduceInternal(state, event, observe) {
         let target = -1;
         for (let i = msgs.length - 1; i >= 0; i--) {
           const m = msgs[i];
-          if (m.role === "user") break;
+          if (m.role === "user" && !m.metadata?.not_sent) break;
           if (m.role === "assistant" && m.type === "text" && m.content.trim()) {
             target = i;
             break;
@@ -1129,9 +1129,9 @@ function reduceInternal(state, event, observe) {
       };
     // ── User message (+ optimistic reconcile) ───────────────────────
     case "message.user": {
-      const startsAgentTurn = state.pendingAgentWake;
+      const startsAgentTurn = state.pendingAgentWake && !event.not_sent;
       if (startsAgentTurn) state = { ...state, pendingAgentWake: false };
-      if (!syntheticTranscript) state = markAttemptBoundary(state, seq);
+      if (!syntheticTranscript && !event.not_sent) state = markAttemptBoundary(state, seq);
       const content = str(event.content);
       if (content.includes("<task-notification>")) {
         const { blocks, outside } = splitTaggedBlocks(content, "task-notification");
@@ -1165,7 +1165,7 @@ function reduceInternal(state, event, observe) {
         const held = heldAgentDeliveries(content);
         if (held) return appendAgentDeliveries(state, held, event.id, stampTs(event, createdAt), seq, true, startsAgentTurn);
       }
-      const superseded = supersedeRetryCards(state.messages, state.hasRetryCards);
+      const superseded = event.not_sent ? state.messages : supersedeRetryCards(state.messages, state.hasRetryCards);
       if (superseded !== state.messages) state = { ...state, messages: superseded };
       const commandId = typeof event.command_id === "string" ? event.command_id : null;
       const reconcilable = state.messages.length !== state.messageOriginSeq.size || state.messageOriginSeq.has(event.id);
@@ -1199,7 +1199,11 @@ function reduceInternal(state, event, observe) {
         ...turnId2 ? { turnId: turnId2 } : {},
         ...startsAgentTurn || event.not_sent ? { metadata: {
           ...startsAgentTurn ? { agent_wake: true } : {},
-          ...event.not_sent ? { not_sent: true, not_sent_id: event.id } : {}
+          ...event.not_sent ? {
+            not_sent: true,
+            not_sent_id: event.id,
+            ...Array.isArray(event.upload_paths) && event.upload_paths.length ? { upload_paths: event.upload_paths } : {}
+          } : {}
         } } : {},
         ...typeof event.queued_turn_id === "string" ? { queuedTurnId: event.queued_turn_id } : {},
         ...str(event.uuid) ? { jsonlUuid: str(event.uuid) } : {},
@@ -2217,7 +2221,7 @@ function finish(input, loaded, seal) {
   const upserts = [];
   const kept = [];
   const margin = new Set(carry.state.messages.slice(-PROJECTION_LIMITS.marginRows).map((message) => message.id));
-  const userAnchor = carry.state.messages.findLast((message) => message.role === "user");
+  const userAnchor = carry.state.messages.findLast((message) => message.role === "user" && !message.metadata?.not_sent);
   const proseAnchor = carry.state.messages.findLast((message) => message.role === "assistant" && message.type === "text" && message.content.trim());
   if (userAnchor) margin.add(userAnchor.id);
   if (proseAnchor) margin.add(proseAnchor.id);
@@ -2297,7 +2301,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "22f8525556a76a9d66a43539ab51f49f2eda4711a37b977879e9d0ee24d0c246";
+var REDUCER_FINGERPRINT = "94f3dd580678fa42f3d6da3cd6774e089d172c94e8d40e5684f52605f88fddc6";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {

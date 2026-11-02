@@ -41,6 +41,14 @@ describe('draft manager — ephemeral state', () => {
 		expect(h.state.pendingRestoreUploadPaths).toBeUndefined();
 	});
 
+	it('adds to a restore no composer has taken yet, keeping both sets of words and uploads', () => {
+		const h = harness();
+		h.dm.setPendingRestorePrompt('first words', ['/uploads/one.png']);
+		h.dm.setPendingRestorePrompt('second words', ['/uploads/two.png']);
+		expect(h.state.pendingRestorePrompt).toBe('first words\n\nsecond words');
+		expect(h.state.pendingRestoreUploadPaths).toEqual(['/uploads/one.png', '/uploads/two.png']);
+	});
+
 	it('clears an attachments-only restore as well as its empty text', () => {
 		const h = harness();
 		h.dm.setPendingRestorePrompt('', ['/uploads/proof.png']);

@@ -1031,6 +1031,10 @@ def start_turn(
                         payload.setdefault("agent_message_reply_to", reply_to)
                     payload["continued_turn"] = True
                     payload["continuation_command_id"] = queued.get("command_id")
+                    # This id is shared with the parked prompt, so an event under
+                    # it does not prove this input was recorded. The recording
+                    # carries this receipt (see _already_in_transcript).
+                    payload["accepted_input_id"] = queued["id"]
                     payload["parked_usage"] = (previous.get("payload") or {}).get("parked_usage", {})
                     cursor.execute(
                         "UPDATE turns SET state='running', run_id=%s, instance_id=%s, "
@@ -1207,6 +1211,8 @@ def settle_turn(
     stop_reason: Optional[str] = None,
     error: Optional[str] = None,
     run_id: Optional[str] = None,
+    *,
+    keep_unsent_words: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Settle a turn to a terminal ``outcome`` (``'completed'`` or
     ``'aborted'``). Idempotent: a turn already in a terminal state
@@ -1215,6 +1221,10 @@ def settle_turn(
     ``run_id`` narrows the settle to a turn still bound to that run: a runner
     that lost its lease must not settle a row the reap sweep requeued or a new
     owner started.
+
+    ``keep_unsent_words`` is for Stop catching a turn that has started but not
+    recorded its message: the queue sweep can no longer see it, so its words
+    become a "Not sent" row here, as in ``remove_queued_turn``.
 
     Returns the settled turn row on the transition that actually settles it.
     """
@@ -1229,9 +1239,15 @@ def settle_turn(
         sql += "AND run_id=%s "
         params += (run_id,)
     cancelled_peer = False
+    kept_words = False
     with get_db() as conn:
         cursor = conn.cursor()
         queued_peer = False
+        if keep_unsent_words:
+            cursor.execute("SELECT session_id FROM turns WHERE id=%s", (turn_id,))
+            target = cursor.fetchone()
+            if target:
+                _lock_for_event_write(cursor, target["session_id"])
         if outcome == "aborted" and run_id is None:
             cursor.execute("SELECT source, state FROM turns WHERE id=%s", (turn_id,))
             target = cursor.fetchone()
@@ -1249,8 +1265,10 @@ def settle_turn(
         else:
             cursor.execute(sql + "RETURNING *", params)
             row = cursor.fetchone()
+            if row and keep_unsent_words:
+                kept_words = _keep_unsent_words(cursor, conn, _row(row))
     result = _row(row)
-    if cancelled_peer:
+    if cancelled_peer or kept_words:
         from app.db import session_events
         session_events.notify_session_write(result["session_id"], "session_events")
     # A queued row settled without ever starting has no interval to bank.
@@ -1258,17 +1276,78 @@ def settle_turn(
     return result
 
 
-def _owner_compact_follow_up(row: Optional[Dict[str, Any]]) -> bool:
-    """A compact-first follow-up carrying words the owner sent (not the app's
-    own continuation or resume prompt, which must never read as Not sent)."""
-    payload = (row or {}).get("payload") or {}
-    return bool(payload.get("compact_before_turn_id")) and (
-        (row or {}).get("source") not in AUTOMATIC_PAIR_SOURCES
-    )
+def _holds_unsent_owner_words(row: Optional[Dict[str, Any]]) -> bool:
+    """Whether Stop aborting this queued row would lose words the owner wrote.
+
+    True for the rows the composer's queue shows and for compact-first
+    follow-ups. Never for the app's own continuation or resume prompt, for a
+    bare ``/compact`` (the instruction half of a pair, no words to give back),
+    or for a re-queued steer or voice caption already in the transcript.
+    """
+    row = row or {}
+    payload = row.get("payload") or {}
+    source = row.get("source")
+    if payload.get("user_message_already_recorded"):
+        return False
+    if payload.get("compact_before_turn_id"):
+        return source not in AUTOMATIC_PAIR_SOURCES
+    if (row.get("prompt") or "").strip() == "/compact":
+        return False
+    return source in ("user", "queue")
+
+
+def _already_in_transcript(cursor: Any, row: Dict[str, Any]) -> bool:
+    """Whether a run of this row already recorded its message (crash recovery
+    puts a started turn back in the queue with no other mark of that).
+
+    A parked turn resumed by new input keeps its id, so the older prompt's event
+    sits under the same turn: only the input's own receipt counts there.
+    """
+    sql = ("SELECT 1 FROM session_events WHERE session_id=%s AND turn_id=%s "
+           "AND event_type='message.user'")
+    params = [row["session_id"], row["id"]]
+    accepted = (row.get("payload") or {}).get("accepted_input_id")
+    if accepted:
+        sql += " AND payload->>'accepted_input_id'=%s"
+        params.append(accepted)
+    cursor.execute(sql + " LIMIT 1", params)
+    return cursor.fetchone() is not None
+
+
+def _lock_for_event_write(cursor: Any, session_id: str) -> None:
+    """Event writes use counter -> session -> turn lock order, including
+    cancellation, so Stop and message delivery cannot deadlock."""
+    cursor.execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,0) "
+                   "ON CONFLICT (session_id) DO NOTHING", (session_id,))
+    cursor.execute("SELECT next_seq FROM session_event_counters WHERE session_id=%s FOR UPDATE", (session_id,))
+    cursor.fetchone()
+    cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+    cursor.fetchone()
+
+
+def _keep_unsent_words(cursor: Any, conn: Any, row: Dict[str, Any]) -> bool:
+    """Write the row Stop just aborted as a restorable "Not sent" message, in the
+    abort's transaction, when it holds words no transcript has. True if written;
+    the caller owns the post-commit notification."""
+    if not _holds_unsent_owner_words(row) or _already_in_transcript(cursor, row):
+        return False
+    from app.db import sessions, session_events
+    payload = row["payload"]
+    content = row.get("prompt") or ""
+    metadata = {"not_sent": True, "queued_turn_id": row["id"],
+                "upload_paths": payload.get("upload_paths") or [],
+                "upload_blob_ids": payload.get("upload_blob_ids") or []}
+    sessions.add_session_message(row["session_id"], "user", content,
+                                 profile_id=row.get("profile_id"), metadata=metadata, _conn=conn)
+    session_events.append_events(row["session_id"], [{
+        "type": "message.user", "turn_id": row["id"], "command_id": row.get("command_id"),
+        "payload": {"content": content, "profile_id": row.get("profile_id"), **metadata},
+    }], _conn=conn)
+    return True
 
 
 def remove_queued_turn(
-    turn_id: str, stop_reason: str = "removed_from_queue", *, preserve_compact_first: bool = False,
+    turn_id: str, stop_reason: str = "removed_from_queue", *, keep_unsent_words: bool = False,
     _conn: Any = None,
 ) -> Optional[Dict[str, Any]]:
     """Atomically abort a still-``queued`` turn (queue-chip removal).
@@ -1276,6 +1355,10 @@ def remove_queued_turn(
     The ``state='queued'`` guard lives in the UPDATE itself so a turn that
     races to ``running`` between the caller's intent and this statement is
     left alone (``None`` returned) instead of being aborted mid-flight.
+
+    ``keep_unsent_words`` is Stop's: the owner's words stay in the transcript as
+    a restorable "Not sent" row, written in the abort's own transaction so the
+    queue chip can never vanish without it. A dropped chip passes False.
     """
     notify_events = False
     # A caller-owned transaction also owns the post-commit session notification.
@@ -1283,16 +1366,8 @@ def remove_queued_turn(
         cursor = conn.cursor()
         cursor.execute("SELECT session_id, source FROM turns WHERE id=%s", (turn_id,))
         target = cursor.fetchone()
-        if target and (preserve_compact_first or target["source"] == "agent_message"):
-            # Event writes use counter -> session -> turn lock order, including
-            # cancellation, so Stop and message delivery cannot deadlock.
-            sid = target["session_id"]
-            cursor.execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,0) "
-                           "ON CONFLICT (session_id) DO NOTHING", (sid,))
-            cursor.execute("SELECT next_seq FROM session_event_counters WHERE session_id=%s FOR UPDATE", (sid,))
-            cursor.fetchone()
-            cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (sid,))
-            cursor.fetchone()
+        if target and (keep_unsent_words or target["source"] == "agent_message"):
+            _lock_for_event_write(cursor, target["session_id"])
         cursor.execute(
             "UPDATE turns SET state='aborted', stop_reason=%s, "
             "ended_at=NOW() "
@@ -1311,23 +1386,10 @@ def remove_queued_turn(
                 "payload": {"cancelled_turn_ids": [row["id"]]},
             }], _conn=conn)
             notify_events = True
-        preserve_compact_first = preserve_compact_first and _owner_compact_follow_up(row)
-        if (row and preserve_compact_first
-                and (row.get("payload") or {}).get("compact_before_turn_id")):
-            from app.db import sessions, session_events
-            payload = row["payload"]
-            content = row.get("prompt") or ""
-            metadata = {"not_sent": True, "queued_turn_id": row["id"],
-                        "upload_paths": payload.get("upload_paths") or [],
-                        "upload_blob_ids": payload.get("upload_blob_ids") or []}
-            sessions.add_session_message(row["session_id"], "user", content,
-                                         profile_id=row.get("profile_id"), metadata=metadata, _conn=conn)
-            session_events.append_events(row["session_id"], [{
-                "type": "message.user", "turn_id": row["id"], "command_id": row.get("command_id"),
-                "payload": {"content": content, "profile_id": row.get("profile_id"), **metadata},
-            }], _conn=conn)
+        if row and keep_unsent_words and _keep_unsent_words(cursor, conn, row):
             notify_events = True
     if notify_events and _conn is None:
+        from app.db import session_events
         session_events.notify_session_write(row["session_id"], "session_events")
     return row
 

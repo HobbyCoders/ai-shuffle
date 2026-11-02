@@ -92,6 +92,11 @@ class SessionEphemeralCache {
 		if (entry) entry.draft = draft;
 	}
 
+	/** A cached session's draft, without touching its place in the cache. */
+	peekDraft(sessionId: string): string | undefined {
+		return this.cache.get(sessionId)?.draft;
+	}
+
 	/**
 	 * Update just the reading position of an already-cached session, in place.
 	 *

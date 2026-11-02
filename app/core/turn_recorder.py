@@ -766,6 +766,7 @@ class TurnRecorder:
         record_user: bool = True,
         source: str | None = None,
         continued: bool = False,
+        accepted_input_id: str | None = None,
     ) -> None:
         """Append ``turn.started`` then ``message.user``.
 
@@ -775,6 +776,8 @@ class TurnRecorder:
         ``record_user=False`` appends only ``turn.started`` — a resumed turn
         re-runs from the head node and adds no new user message. ``source``
         is what started the turn, in fluid's vocabulary; None leaves it off.
+        ``accepted_input_id`` marks the message as the record of the input that
+        resumed a parked turn, whose id it shares with the older prompt.
         """
         try:
             started: Dict[str, Any] = {"profile_id": profile_id}
@@ -789,7 +792,10 @@ class TurnRecorder:
                     contract.MessageUser,
                     content=user_message or "",
                     profile_id=profile_id,
-                    extra_payload={"source": source} if source is not None else None,
+                    extra_payload={
+                        **({"source": source} if source is not None else {}),
+                        **({"accepted_input_id": accepted_input_id} if accepted_input_id else {}),
+                    } or None,
                 ))
             await self._append(events)
         except Exception:

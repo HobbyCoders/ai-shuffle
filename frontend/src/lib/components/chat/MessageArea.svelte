@@ -173,7 +173,7 @@
 	 * post-rewind state (which may be empty if all messages were rewound).
 	 * @param warning - Optional warning message for partial success (e.g., file restore failed)
 	 */
-	function handleRewindComplete(warning?: string, rewoundPrompt?: string, uploadPaths?: string[]) {
+	function handleRewindComplete(warning?: string, rewoundPrompt?: string, uploadPaths?: string[], unsentRestored = false) {
 		// If there's a warning (partial success), show it as a system message
 		if (warning) {
 			liveActiveSession.addSystemMessage(warning, 'rewind_warning');
@@ -186,6 +186,10 @@
 			liveActiveSession.setPendingRestorePrompt(rewoundPrompt ?? '', uploadPaths);
 		}
 
+		// Giving back a not-sent row changes no other message: its own feed event
+		// removes the row, so the transcript stays on screen.
+		if (unsentRestored) return;
+
 		// Clear stale messages from the store before reloading.
 		// Without this, the defensive check in the history handler would
 		// preserve old (broken) messages when the reload returns fewer/zero.
@@ -197,9 +201,9 @@
 	// Capture the originating session when the callback is handed to a row, not
 	// when an async rewind later completes against a possibly different target.
 	function rewindCompleteFor(sessionId: string | null | undefined) {
-		return (warning?: string, prompt?: string, uploads?: string[]) => {
+		return (warning?: string, prompt?: string, uploads?: string[], unsentRestored?: boolean) => {
 			if (!sessionId || get(liveActiveSession).sessionId !== sessionId) return;
-			handleRewindComplete(warning, prompt, uploads);
+			handleRewindComplete(warning, prompt, uploads, unsentRestored);
 		};
 	}
 
@@ -2425,6 +2429,7 @@
 			rewindEligible={rewindEligible[messageIndex]}
 			notSent={!!message.metadata?.not_sent}
 			notSentMessageId={typeof message.metadata?.not_sent_id === 'string' ? message.metadata.not_sent_id : null}
+			notSentUploadPaths={Array.isArray(message.metadata?.upload_paths) ? message.metadata.upload_paths as string[] : []}
 			midTurn={!!message.id && midTurnUserIds.has(message.id)}
 			onRewindComplete={presentedRewindComplete}
 		/>

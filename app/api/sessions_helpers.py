@@ -1645,7 +1645,8 @@ def project_event_messages(session_id: str, rows, *, epoch=None) -> list[dict]:
         # Exactly the envelope/reminder projection used by SSE replay.
         event = _wire(row)
         kind = event["type"]
-        if not is_transcript_only_turn(event.get("turn_id")) and (
+        not_sent = kind == "message.user" and bool(event.get("not_sent"))
+        if not is_transcript_only_turn(event.get("turn_id")) and not not_sent and (
             kind in ("turn.started", "message.user", "tool.result")
             or (kind == "system.note" and event.get("subtype") == "provider_retry")
         ):
@@ -1653,6 +1654,14 @@ def project_event_messages(session_id: str, rows, *, epoch=None) -> list[dict]:
         if kind == "turn.started":
             open_message = None
             current_profile = event.get("profile_id")
+        elif not_sent:
+            # Written as Stop lands: what the stopped turn is still flushing
+            # keeps growing its own row above this one, as in the reducer.
+            row_message = append(event, role="user", content=event.get("content") or "")
+            row_message["metadata"] = {
+                **row_message.get("metadata", {}), "not_sent": True, "not_sent_id": event["id"],
+                "upload_paths": event.get("upload_paths") or [],
+            }
         elif kind == "message.user":
             open_message = None
             # A steered user message can have a different sender; it must
@@ -1739,8 +1748,15 @@ def project_event_messages(session_id: str, rows, *, epoch=None) -> list[dict]:
                 tools = {m["toolId"]: m for m in messages if m.get("toolId")}
                 approvals = {k: m for k, m in approvals.items() if k in origins}
                 continue
-            open_message = None
             data = event.get("data") or {}
+            if event.get("subtype") == "unsent_restored":
+                # The row went back to the composer, as in the UI reducer.
+                restored = data.get("message_id")
+                messages = [m for m in messages
+                            if not ((m.get("metadata") or {}).get("not_sent") and m["id"] == restored)]
+                origins.pop(restored, None)
+                continue
+            open_message = None
             append(event, role="system", type="system", content=data.get("content") or data.get("text") or "",
                    systemSubtype=event.get("subtype"), systemData=data)
         elif kind == "system.compaction_boundary":
