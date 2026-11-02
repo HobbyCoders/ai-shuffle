@@ -6,6 +6,9 @@ import pytest
 
 from scripts.measure_prompt_catalog import compile_fixture, measure
 
+# Baselines move only by a measured reason. SuggestTask (background-task chips)
+# added exactly 318 characters of ADJACENT_WORK_RULE to every field that counts
+# the system prompt, and 1554 to delegated_loaded_tools for the tool itself.
 FIXTURE = json.loads((Path(__file__).parents[1] / "fixtures" / "agent_tool_prefix_budget.json").read_text())
 
 
