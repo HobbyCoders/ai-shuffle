@@ -40,21 +40,36 @@ def _close_duplicate(sock: socket.socket) -> int | None:
     return None
 
 
+def _warn_best_effort(message: str, *args: object) -> None:
+    """A log handler's error reaches its caller; here that must not be a commit.
+
+    It would replace the commit's outcome or end the watchdog's only thread, so a
+    failing sink costs the line and nothing else.
+    """
+    try:
+        logger.warning(message, *args)
+    except Exception:  # noqa: BLE001 - a diagnostic never decides a commit's outcome
+        pass
+
+
 def _report_close_failure(code: int) -> None:
-    """Keep a stray close visible without one line per commit. Errno only."""
+    """Keep a stray close visible without one line per commit. Errno only. Never raises."""
     global _close_failure_log
-    now = time.monotonic()
-    with _close_failure_lock:
-        last, suppressed = _close_failure_log
-        if last is not None and now - last < _CLOSE_FAILURE_LOG_WINDOW_S:
-            _close_failure_log = (last, suppressed + 1)
-            return
-        _close_failure_log = (now, 0)
-    logger.warning(
-        "Commit deadline descriptor close failed: errno=%s suppressed=%d; the commit outcome "
-        "is unaffected, but EBADF means other code in this process closed this descriptor",
-        errno.errorcode.get(code, code), suppressed,
-    )
+    try:
+        now = time.monotonic()
+        with _close_failure_lock:
+            last, suppressed = _close_failure_log
+            if last is not None and now - last < _CLOSE_FAILURE_LOG_WINDOW_S:
+                _close_failure_log = (last, suppressed + 1)
+                return
+            _close_failure_log = (now, 0)
+        _warn_best_effort(
+            "Commit deadline descriptor close failed: errno=%s suppressed=%d; the commit outcome "
+            "is unaffected, but EBADF means other code in this process closed this descriptor",
+            errno.errorcode.get(code, code), suppressed,
+        )
+    except Exception:  # noqa: BLE001 - same rule for the limiter's own work
+        pass
 
 
 class _CommitWatchdog:
@@ -142,7 +157,7 @@ def bounded_commit(conn: psycopg2.extensions.connection) -> Iterator[None]:
         if expired:
             # The driver call has unwound on this thread: close is now safe.
             conn.close()
-            logger.warning(
+            _warn_best_effort(
                 "PostgreSQL commit deadline exceeded; disconnected; outcome may be unknown"
             )
     if expired:

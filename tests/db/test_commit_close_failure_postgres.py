@@ -14,6 +14,7 @@ import logging
 import os
 import socket
 import time
+from typing import Iterator
 
 import psycopg2
 import pytest
@@ -168,6 +169,119 @@ def test_a_healthy_commit_logs_nothing(private_pool, caplog) -> None:
     with base.get_db() as conn:
         conn.cursor().execute("SELECT 1")
     assert not [r for r in caplog.records if r.name == commit_deadline.logger.name]
+
+
+# ---------------------------------------------------------------------------
+# A failing log sink changes nothing either
+# ---------------------------------------------------------------------------
+
+class _BrokenSink(logging.Handler):
+    """A handler whose emit raises reaches the caller: logging only guards its own."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.WARNING)
+        self.calls = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        # base.py shares this logger; only this module's lines are under test.
+        if record.module == "commit_deadline":
+            self.calls += 1
+            raise OSError(errno.ENOSPC, "log sink failed")
+
+
+@pytest.fixture
+def broken_log_sink() -> Iterator[_BrokenSink]:
+    sink = _BrokenSink()
+    commit_deadline.logger.addHandler(sink)
+    try:
+        yield sink
+    finally:
+        commit_deadline.logger.removeHandler(sink)
+
+
+def _wait_until(predicate, timeout: float = 10.0) -> None:
+    limit = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < limit, "timed out"
+        time.sleep(0.005)
+
+
+def test_broken_log_sink_leaves_a_finished_commit_committed(
+    private_pool, stray_close_on_arm, broken_log_sink,
+) -> None:
+    with base.get_db() as conn:
+        conn.cursor().execute("CREATE TABLE IF NOT EXISTS close_probe (id int PRIMARY KEY)")
+        conn.cursor().execute("TRUNCATE close_probe")
+
+    stray_close_on_arm.update(arms=0, target=1)
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO close_probe VALUES (2)")
+    assert stray_close_on_arm["closed"] == 1
+    assert broken_log_sink.calls == 1
+
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM close_probe")
+        assert cursor.fetchall() == [{"id": 2}]
+
+
+def test_broken_log_sink_does_not_hide_a_real_commit_error(
+    private_pool, stray_close_on_arm, broken_log_sink,
+) -> None:
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE IF NOT EXISTS close_parent (id int PRIMARY KEY)")
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS close_child (parent int REFERENCES close_parent(id) "
+            "DEFERRABLE INITIALLY DEFERRED)")
+
+    stray_close_on_arm.update(arms=0, target=1)
+    with pytest.raises(psycopg2.errors.ForeignKeyViolation):
+        with base.get_db() as conn:
+            conn.cursor().execute("INSERT INTO close_child VALUES (404)")
+    assert stray_close_on_arm["closed"] == 1
+    assert broken_log_sink.calls == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="closes a raw socket descriptor by number")
+def test_broken_log_sink_at_expiry_leaves_later_deadlines_working(
+    private_db, broken_log_sink, monkeypatch,
+) -> None:
+    """Own watchdog: on the old code this kills its only thread, which must not be the app's."""
+    watchdog = commit_deadline._CommitWatchdog()
+    monkeypatch.setattr(commit_deadline, "_watchdog", watchdog)
+    monkeypatch.setattr(commit_deadline, "COMMIT_TIMEOUT_SECONDS", 0.01)
+    real_arm = watchdog.arm
+    arms = []
+
+    def arm(fd: int, seconds: float) -> socket.socket:
+        sock = real_arm(fd, seconds)
+        arms.append(sock)
+        if len(arms) == 1:
+            _close_behind(sock)
+        return sock
+
+    monkeypatch.setattr(watchdog, "arm", arm)
+
+    first = lifecycle.pg_connect(private_db)
+    with pytest.raises(psycopg2.OperationalError, match="commit deadline exceeded"):
+        with commit_deadline.bounded_commit(first):
+            # The close failure's report runs after its close, so a reused number is safe.
+            _wait_until(lambda: broken_log_sink.calls == 1)
+    assert first.closed
+    assert broken_log_sink.calls == 2  # the close failure, then the deadline line
+
+    second = lifecycle.pg_connect(private_db)
+    with pytest.raises(psycopg2.OperationalError, match="commit deadline exceeded"):
+        with commit_deadline.bounded_commit(second):
+            _wait_until(lambda: arms[1] in watchdog._expired)
+    assert second.closed
+    assert broken_log_sink.calls == 3
+
+
+def test_failing_limiter_state_does_not_escape_the_report(monkeypatch) -> None:
+    monkeypatch.setattr(commit_deadline, "_close_failure_log", None)
+    commit_deadline._report_close_failure(errno.EBADF)
 
 
 # ---------------------------------------------------------------------------
