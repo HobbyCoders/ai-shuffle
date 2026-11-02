@@ -126,7 +126,7 @@ jobs:
     if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [javascript]
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
     # The publisher checks the WHOLE workflow conclusion, not just Main suite.
     # Keep this advisory job outside the aggregate AND non-fatal at job level.
     continue-on-error: true

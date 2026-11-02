@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 import zipfile
 
@@ -55,12 +57,13 @@ class FakeGitHub:
         if route == f"actions/runs/{RUN.id}":
             return self.metadata
         if route == "issues":
-            return {"number": 17, "state": "open", **data}
+            return {"number": 17, "state": "open", "user": {"login": "github-actions[bot]"}, **data}
         return {"body": data.get("body", "")}
 
 
-def existing(state="open", body=None):
-    return {"number": 17, "state": state, "body": CASE.marker if body is None else body}
+def existing(state="open", body=None, *, number=17, login="github-actions[bot]"):
+    return {"number": number, "state": state, "body": CASE.marker if body is None else body,
+            "title": CASE.title, "user": {"login": login}}
 
 
 def test_new_issue_contains_only_structured_fields_and_existing_label():
@@ -99,9 +102,46 @@ def test_recurrence_comments_and_reopens_closed_issue(state, methods):
 @pytest.mark.parametrize("where", ["body", "comment"])
 def test_same_run_dedupes_even_after_closure(state, where):
     issue = existing(state, CASE.marker + (RUN.marker if where == "body" else ""))
-    api = FakeGitHub([issue], [{"body": RUN.marker}] if where == "comment" else [])
+    api = FakeGitHub([issue], [{"body": RUN.marker, "user": {"login": "github-actions[bot]"}}]
+                     if where == "comment" else [])
     reporter.report(api, RUN, [receipt()])
     assert api.calls == []
+
+
+def test_stranger_issue_cannot_claim_case_or_run_markers():
+    issue = existing(body=CASE.marker + RUN.marker, login="someone-else")
+    api = FakeGitHub([issue])
+    reporter.report(api, RUN, [receipt()])
+    assert api.calls[0][0:2] == ("issues", "POST")
+    assert reporter.decide(CASE, RUN, issue, []).action == "create"
+
+
+@pytest.mark.parametrize("user", [{"login": "someone-else"}, {}, None])
+def test_stranger_comment_cannot_suppress_reporting(user):
+    comment = {"body": CASE.marker + RUN.marker, "user": user}
+    api = FakeGitHub([existing()], [comment])
+    reporter.report(api, RUN, [receipt()])
+    assert api.calls[0][0:2] == ("issues/17/comments", "POST")
+    assert reporter.decide(CASE, RUN, existing(), [comment]).action == "comment"
+
+
+@pytest.mark.parametrize("issues,target,methods", [
+    ([existing(number=30), existing(number=12)], 12, ["POST"]),
+    ([existing(number=30), existing("closed", number=12)], 30, ["POST"]),
+    ([existing("closed", number=30), existing("closed", number=12)], 12, ["PATCH", "POST"]),
+])
+def test_multiple_bot_matches_warn_and_choose_deterministically(issues, target, methods, capsys):
+    api = FakeGitHub(issues)
+    reporter.report(api, RUN, [receipt()])
+    assert [method for _, method, _ in api.calls] == methods
+    assert api.calls[-1][0] == f"issues/{target}/comments"
+    assert "::warning" in capsys.readouterr().out
+
+
+def test_removed_body_marker_falls_back_to_exact_bot_title():
+    api = FakeGitHub([existing(body="Marker removed during editing")])
+    reporter.report(api, RUN, [receipt()])
+    assert api.calls[0][0:2] == ("issues/17/comments", "POST")
 
 
 def test_duplicate_receipts_and_variants_have_stable_distinct_identities():
@@ -130,6 +170,19 @@ def test_malformed_receipt_is_nonfatal_and_never_files(value, capsys):
     reporter.report(api, RUN, [value])
     assert api.calls == []
     assert "::warning" in capsys.readouterr().out
+
+
+def test_bad_rows_do_not_discard_valid_siblings(capsys):
+    good = receipt()["rows"][0]
+    invalid = receipt(reporter.FlakyCase("copy", "@someone", "fail", "pass"))["rows"][0]
+    data = {"rows": [None, good, invalid, {"status": "passed-on-retry"}]}
+    assert reporter.recovered(data) == [CASE]
+    output = capsys.readouterr().out
+    assert output.count("::warning") == 3
+    assert "@someone" not in output
+    api = FakeGitHub()
+    reporter.report(api, RUN, [data])
+    assert api.calls[0][0:2] == ("issues", "POST")
 
 
 def test_missing_or_invalid_local_receipt_is_nonfatal(tmp_path, capsys):
@@ -178,6 +231,19 @@ def test_non_main_push_sources_are_rejected(key, value):
     assert reporter.eligible_run(RUN.repository, RUN.id, {**METADATA, key: value}) is None
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_ineligible_real_run_warns_but_dry_run_is_plain_log(dry_run, monkeypatch, capsys):
+    api = FakeGitHub()
+    api.metadata["name"] = "renamed-main-suite"
+    monkeypatch.setattr(reporter, "GitHub", lambda _: api)
+    args = ["--repository", RUN.repository, "--run-id", str(RUN.id)]
+    assert reporter.main(args + (["--dry-run"] if dry_run else [])) == 0
+    output = capsys.readouterr().out
+    assert ("::warning" in output) is not dry_run
+    assert "Not a push-to-main main-suite run" in output
+    assert [method for _, method, _ in api.calls] == ["GET"]
+
+
 def test_dry_run_uses_real_decisions_but_never_writes(monkeypatch, capsys):
     api = FakeGitHub([existing("closed")])
     monkeypatch.setattr(reporter, "GitHub", lambda _: api)
@@ -222,11 +288,25 @@ def test_artifacts_use_reusable_workflow_names_latest_id_and_only_root_receipt(m
     assert calls[0][1] == {"pages": True}
 
 
-def test_artifact_without_receipt_warns_and_continues(monkeypatch, capsys):
+def test_artifact_without_receipt_is_a_quiet_noop(monkeypatch, capsys):
     api = reporter.GitHub(RUN.repository)
     monkeypatch.setattr(api, "request", lambda route, **kwargs:
         [{"artifacts": [{"name": "ui-journeys-1", "id": 1, "expired": False}]}]
         if "artifacts?" in route else archive())
+    assert list(api.receipts(RUN.id)) == []
+    output = capsys.readouterr().out
+    assert "no root retry receipt" in output and "::warning" not in output
+
+
+@pytest.mark.parametrize("problem", ["corrupt", "oversized", "expired"])
+def test_invalid_artifact_still_warns(problem, monkeypatch, capsys):
+    api = reporter.GitHub(RUN.repository)
+    def request(route, **kwargs):
+        if "artifacts?" in route:
+            return [{"artifacts": [{"name": "ui-journeys-1", "id": 1, "expired": problem == "expired"}]}]
+        assert problem != "expired"
+        return b"not a zip" if problem == "corrupt" else archive({"padding": "x" * 2_000_001})
+    monkeypatch.setattr(api, "request", request)
     assert list(api.receipts(RUN.id)) == []
     assert "::warning" in capsys.readouterr().out
 
@@ -246,10 +326,15 @@ def test_gh_transport_is_bounded_paginated_and_uses_json_stdin_not_shell(monkeyp
     assert calls[-1][0][-2:] == ["--input", "-"]
 
 
-def test_existing_producer_writes_consumable_recovered_receipt(tmp_path, monkeypatch, capsys):
-    """Drive retry_failed -> write_receipt, not just a hand-seeded consumer field."""
+@pytest.mark.parametrize("crash_first", [False, True])
+def test_existing_producer_writes_consumable_recovered_receipt(crash_first, tmp_path, monkeypatch, capsys):
+    """Drive exact-case AND whole-file retry_failed -> write_receipt -> recovered."""
     first = [{"name": "copy.journey.mjs", "code": 1, "seconds": 1, "log": "logs/copy.log",
-              "cases": [{"id": CASE.case, "status": "fail", "detail": "first error"}]}]
+              "cases": None if crash_first else [{"id": CASE.case, "status": "fail", "detail": "first error"}],
+              "error": "first attempt crashed"}]
+    weights = tmp_path / "weights.json"
+    weights.write_text(json.dumps({"seconds": {"copy.journey.mjs": 1}}))
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
     def retry_command(argv, env, log, timeout):
         path = Path(env["JOURNEY_OUT"]) / "copy"
         path.mkdir(parents=True)
@@ -258,7 +343,32 @@ def test_existing_producer_writes_consumable_recovered_receipt(tmp_path, monkeyp
         return 0, 1.0
     monkeypatch.setattr(journey_retry.time, "monotonic", lambda: 1.0)
     data = journey_retry.retry_failed(first, tmp_path, {}, retry_command, directory=tmp_path,
-        timeout=60, started=0, alive=lambda: True, weights_path=tmp_path / "unused.json")
+        timeout=60, started=0, alive=lambda: True, weights_path=weights)
     journey_retry.write_receipt(tmp_path, data)
     assert "::warning title=UI journey passed on retry::" in capsys.readouterr().out
-    assert reporter.recovered(json.loads((tmp_path / "summary.json").read_text())) == [CASE]
+    expected = reporter.FlakyCase("copy", "(whole journey)" if crash_first else CASE.case,
+                                 "crashed" if crash_first else "fail", "pass")
+    assert reporter.recovered(json.loads((tmp_path / "summary.json").read_text())) == [expected]
+
+
+def test_all_real_journey_case_ids_including_dynamic_overlays_are_reportable(tmp_path):
+    """--list plans actual cases without Playwright, an app, or a data directory."""
+    root = Path(__file__).resolve().parents[2]
+    journeys = sorted((root / "frontend/tests/journeys").glob("*.journey.mjs"))
+    assert journeys
+    overlays = []
+    for path in journeys:
+        # Mobile-shell planning expands the overlay-* template; no shell/app is launched.
+        args = ["--mobile-shell"] if path.name == "transcript-reader.journey.mjs" else []
+        result = subprocess.run(["node", str(path), "--list", *args], cwd=root,
+            env={**os.environ, "JOURNEY_ONLY": "", "DEVLOOP_STATUS": str(tmp_path / "must-not-read-status.json")},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10, check=True)
+        ids = result.stdout.splitlines()
+        assert ids, path.name
+        journey = path.name.removesuffix(".journey.mjs")
+        data = {"rows": [{"journey": journey, "case": id, "status": "passed-on-retry",
+                          "attempts": [{"status": "fail"}, {"status": "pass"}]} for id in ids]}
+        assert [case.case for case in reporter.recovered(data)] == ids, path.name
+        overlays.extend(id for id in ids if id.startswith("overlay-"))
+    assert overlays, "the dynamic overlay-* template must be included in the contract"
+    assert "overlay-usage-opening-reading-growth@phone-slow" in overlays

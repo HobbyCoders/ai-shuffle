@@ -25,6 +25,10 @@ class FlakyCase:
     retry: str
 
     @property
+    def title(self) -> str:
+        return f"Flaky UI journey: {self.journey} / {self.case} passed only on retry"
+
+    @property
     def marker(self) -> str:
         identity = json.dumps([self.journey, self.case], separators=(",", ":"))
         return f"<!-- ui-journey-flake:v1:{hashlib.sha256(identity.encode()).hexdigest()} -->"
@@ -53,33 +57,43 @@ class Decision:
     body: str = ""
 
 
+def _recovered_row(row: dict) -> FlakyCase | None:
+    if not isinstance(row, dict):
+        raise ValueError("malformed row")
+    if row.get("status") != "passed-on-retry":
+        return None
+    journey, case = row.get("journey"), row.get("case")
+    if not isinstance(journey, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}", journey):
+        raise ValueError("invalid journey ID")
+    # @ is only allowed inside a case ID, not as an @-mention. Markdown,
+    # controls and arbitrary receipt text cannot enter titles or bodies.
+    if not isinstance(case, str) or not (case == "(whole journey)" or re.fullmatch(
+            r"[a-zA-Z0-9][a-zA-Z0-9_.:+/-]*@[a-zA-Z0-9][a-zA-Z0-9_.:+-]*", case)) or len(case) > 120:
+        raise ValueError("invalid case ID")
+    attempts = row.get("attempts")
+    if (not isinstance(attempts, list) or len(attempts) != 2
+            or any(not isinstance(a, dict) for a in attempts)):
+        raise ValueError("missing attempt outcomes")
+    first, retry = (a.get("status") for a in attempts)
+    # known-bug is an accepted runner verdict, not a new definition of pass.
+    if first not in {"fail", "crashed"} or retry not in {"pass", "known-bug"}:
+        raise ValueError("inconsistent retry outcomes")
+    return FlakyCase(journey, case, first, retry)
+
+
 def recovered(receipt: dict) -> list[FlakyCase]:
-    """Accept only consistent fail/crash -> accepted retry rows, keeping full IDs."""
+    """Keep every valid recovered row even if a sibling row is malformed."""
     if not isinstance(receipt, dict) or not isinstance(receipt.get("rows"), list):
         raise ValueError("missing rows")
     cases = []
     for row in receipt["rows"]:
-        if not isinstance(row, dict):
-            raise ValueError("malformed row")
-        if row.get("status") != "passed-on-retry":
+        try:
+            case = _recovered_row(row)
+        except (ValueError, TypeError):
+            warning("A malformed journey retry row was skipped.")
             continue
-        journey, case = row.get("journey"), row.get("case")
-        if not isinstance(journey, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}", journey):
-            raise ValueError("invalid journey ID")
-        # @ is only allowed inside a case ID, not as an @-mention. Markdown,
-        # controls and arbitrary receipt text cannot enter titles or bodies.
-        if not isinstance(case, str) or not (case == "(whole journey)" or re.fullmatch(
-                r"[a-zA-Z0-9][a-zA-Z0-9_.:+/-]*@[a-zA-Z0-9][a-zA-Z0-9_.:+-]*", case)) or len(case) > 120:
-            raise ValueError("invalid case ID")
-        attempts = row.get("attempts")
-        if (not isinstance(attempts, list) or len(attempts) != 2
-                or any(not isinstance(a, dict) for a in attempts)):
-            raise ValueError("missing attempt outcomes")
-        first, retry = (a.get("status") for a in attempts)
-        # known-bug is an accepted runner verdict, not a new definition of pass.
-        if first not in {"fail", "crashed"} or retry not in {"pass", "known-bug"}:
-            raise ValueError("inconsistent retry outcomes")
-        cases.append(FlakyCase(journey, case, first, retry))
+        if case is not None:
+            cases.append(case)
     return cases
 
 
@@ -96,9 +110,16 @@ def eligible_run(repository: str, run_id: int, metadata: dict) -> Run | None:
     return Run(repository, run_id, commit)
 
 
+def bot_authored(entry: dict) -> bool:
+    return (entry.get("user") or {}).get("login") == "github-actions[bot]"
+
+
 def decide(case: FlakyCase, run: Run, issue: dict | None, comments: list[dict]) -> Decision:
-    """A run marker in either the original body or ANY comment deduplicates reruns."""
-    if issue is not None and any(run.marker in (entry.get("body") or "") for entry in [issue, *comments]):
+    """Only the bot's own issue body/comments can deduplicate a workflow run."""
+    if issue is not None and not bot_authored(issue):
+        issue = None
+    if issue is not None and any(bot_authored(entry) and run.marker in (entry.get("body") or "")
+                                 for entry in [issue, *comments]):
         return Decision("skip")
     action = "create" if issue is None else "reopen" if issue["state"] == "closed" else "comment"
     lead = ("This flaky UI journey came back after this issue was closed; reopening it."
@@ -110,7 +131,7 @@ def decide(case: FlakyCase, run: Run, issue: dict | None, comments: list[dict]) 
         "Only structured outcomes are reported here; logs and error text are not copied into public issues.",
         "", case.marker, run.marker,
     ])
-    return Decision(action, f"Flaky UI journey: {case.journey} / {case.case} passed only on retry", body)
+    return Decision(action, case.title, body)
 
 
 def warning(message: str) -> None:
@@ -164,6 +185,9 @@ class GitHub:
                 # Read ONLY the root receipt, never nested per-attempt summaries,
                 # never extract paths or execute anything supplied by an artifact.
                 with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                    if "summary.json" not in archive.namelist():
+                        print("Journey artifact has no root retry receipt; no accepted retry was recorded.", flush=True)
+                        continue
                     if archive.getinfo("summary.json").file_size > 2_000_000:
                         raise ValueError("oversized receipt")
                     yield json.loads(archive.read("summary.json"))
@@ -186,11 +210,13 @@ def report(api: GitHub, run: Run, receipts, *, dry_run: bool = False) -> None:
     labels = None
     for case in cases.values():
         try:
-            matches = [issue for issue in issues if case.marker in (issue.get("body") or "")]
+            matches = [issue for issue in issues if bot_authored(issue) and case.marker in (issue.get("body") or "")]
+            if not matches:
+                # An edited-out marker must not make a second bot issue.
+                matches = [issue for issue in issues if bot_authored(issue) and issue.get("title") == case.title]
             if len(matches) > 1:
-                warning("Multiple issues match a flaky case; skipped rather than creating another duplicate.")
-                continue
-            issue = matches[0] if matches else None
+                warning("Multiple bot issues match a flaky case; using the lowest-numbered open issue, else the lowest-numbered closed issue.")
+            issue = min(matches, key=lambda item: (item["state"] != "open", item["number"])) if matches else None
             comments = api.comments(issue["number"]) if issue else []
             decision = decide(case, run, issue, comments)
             print(json.dumps({"action": decision.action, "journey": case.journey, "case": case.case,
@@ -237,7 +263,10 @@ def main(argv=None) -> int:
         api = GitHub(args.repository)
         run = eligible_run(args.repository, args.run_id, api.request(f"actions/runs/{args.run_id}"))
         if run is None:
-            print("Not a push-to-main main-suite run; no issues reported.")
+            if args.dry_run:
+                print("Not a push-to-main main-suite run; no issues reported.")
+            else:
+                warning("Not a push-to-main main-suite run; issue reporting is disabled.")
             return 0
         receipts = local_receipts(args.receipts) if args.receipts else api.receipts(run.id)
         report(api, run, receipts, dry_run=args.dry_run)

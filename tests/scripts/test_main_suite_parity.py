@@ -89,7 +89,8 @@ def test_journey_reporter_is_main_push_only_advisory_and_has_the_only_issue_writ
     step = reporter["steps"][1]
     assert step["run"] == "python3 -m scripts.devloop.journey_issues"
     assert step["continue-on-error"] == "true"
-    assert int(step["timeout-minutes"]) < int(reporter["timeout-minutes"]) <= 3
+    assert step["timeout-minutes"] == "2"
+    assert reporter["timeout-minutes"] == "5"
     assert reporter["steps"][-1]["if"] == "always() && (failure() || steps.report.outcome == 'failure')"
     assert "::warning" in reporter["steps"][-1]["run"]
     # Publishing still checks the whole workflow, making job-level tolerance

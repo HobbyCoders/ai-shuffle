@@ -949,12 +949,15 @@ receipt's `(whole journey)` identity. A first-pass success, an unrecovered
 failure, or a skipped retry does not file an issue. The runner's accepted
 `known-bug` verdict on retry remains accepted and is reported as such.
 
-A stable hidden case marker finds open **and closed** issues without relying
-on the title or label. Each new workflow run adds a comment with the latest
-run link and commit; a closed issue is reopened with a note that it came back.
-Run-ID markers in the issue body/comments deduplicate reruns, regardless of
-run attempt. The existing `bug` label is used if present; no label is created
-or required. Public issue text contains only journey/case IDs, both attempt
+A stable hidden case marker finds open **and closed** issues authored by
+`github-actions[bot]`; if the marker was removed, the exact generated title
+is a fallback. Markers in anyone else's issues/comments are ignored. If more
+than one bot issue matches, reporting warns and uses the lowest-numbered open
+issue, or the lowest-numbered closed issue if none is open. Each new workflow
+run adds a comment with the latest run link and commit; a closed issue is
+reopened with a note that it came back. Run-ID markers in the bot's own issue
+body/comments deduplicate reruns, regardless of run attempt. The existing
+`bug` label is used if present; no label is created or required. Public issue text contains only journey/case IDs, both attempt
 outcomes, the run link and commit, **never raw logs, errors or evidence paths**.
 The full evidence still expires after 3 days.
 
@@ -965,7 +968,9 @@ non-blocking at both step and job level: an API/reporting failure emits a
 warning and cannot make the full workflow red or prevent nightly publication.
 Only this new job has `issues: write` (and `actions: read` to fetch artifacts);
 workflow defaults and all PR jobs remain read-only. Reporting has a two-minute
-step deadline, no dependency installation, and does not run any tests again.
+step deadline within a five-minute job timeout, no dependency installation,
+and does not run any tests again. An unexpectedly ineligible non-dry-run
+execution warns rather than silently disabling reporting.
 
 Read-only end-to-end reporting probe against a real main run (no issues or
 comments are written):
@@ -977,8 +982,10 @@ python -m scripts.devloop.journey_issues --repository HobbyCoders/ai-shuffle --r
 This reads real run metadata, artifacts and matching issues. For an already
 downloaded artifact directory, add `--receipts <directory>` with `--dry-run`;
 its immediate `ui-journeys-<N>/summary.json` files are read, not nested
-per-attempt summaries. Missing/malformed evidence is warned about and skipped.
-A clean run without any journey artifacts is an ordinary no-op.
+per-attempt summaries. A malformed row is warned about and skipped without
+losing valid rows in the same receipt. Corrupt, oversized or expired artifacts
+also warn. An artifact without a root retry receipt is a plain-log no-op, as
+is a clean run without any journey artifacts.
 
 Run locally with
 `python -m scripts.devloop.ci journeys --build` (see
