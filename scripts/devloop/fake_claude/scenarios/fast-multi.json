@@ -1,5 +1,5 @@
 {
-  "description": "Three model calls in one turn, two of them with a scripted Bash result, so a setting can change between requests. Tag options: tps, fast_refused=REASON, fast_cooldown=1, speed=null, speed=missing.",
+  "description": "Three model calls in one turn, two of them with a scripted Bash result, so a setting can change between requests. Tag options: tps, fast_refused=REASON, fast_cooldown=1, speed=null, speed=missing, refuse_first=CATEGORY.",
   "steps": [
     {
       "text": "First request of this turn, checking the project before doing anything else with it.",

@@ -111,7 +111,7 @@ describe('quick bar', () => {
 		const view = render(MobileComposerControlsSheet, { props: props(shown) });
 		expect(screen.queryByTestId('fast-applies-notice')).toBeNull();
 		await view.rerender(props({ ...shown, fastWaitsForNextMessage: true }));
-		expect(screen.getByTestId('fast-applies-notice').textContent).toMatch(/starts with your next message/);
+		expect(screen.getByTestId('fast-applies-notice').textContent).toMatch(/turns on with your next message/);
 	});
 
 	it('styles Bypass like every other mode and names saving', () => {

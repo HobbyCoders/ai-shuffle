@@ -16,9 +16,12 @@
 //   midturn   Fast off, turn running, toggle on; the next turn runs Fast
 //   idle      toggling between turns says nothing; Fast off shows no speed line
 //   refused   Fast on, the CLI refuses it; a known and an unknown reason
+//   reload    the notice is rebuilt from the worker after a reload mid-turn, both ways
+//   retried   a safety-check retry runs standard after a Fast request: one note, partly Fast
 import { runJourney } from './runner.mjs';
 import {
 	PROJECT,
+	chatState,
 	expect,
 	gotoApp,
 	openPopup,
@@ -36,7 +39,7 @@ import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const CLAUDE_AGENT = 'Dev (Claude Code)';
 const FIRST_REQUEST = 'First request of this turn';
 const LAST_REQUEST = 'All three requests are finished.';
-const NEXT_MESSAGE = /starts with your next message/i;
+const WILL_TURN = (state) => `Fast mode turns ${state} with your next message. This turn finishes at its current speed.`;
 
 const speedNote = (page) => page.locator('[data-testid="fast-outcome-note"]');
 const notice = (page) => page.locator('[data-testid="fast-applies-notice"]');
@@ -98,7 +101,7 @@ const midturn = {
 		await notice(page).waitFor({ timeout: 10_000 });
 		const said = (await notice(page).innerText()).trim();
 		log(`toggle notice: ${said}`);
-		expect(NEXT_MESSAGE.test(said), `the toggle says when Fast starts ("${said}")`);
+		expect(said === WILL_TURN('on'), `the toggle says when the setting changes ("${said}")`);
 		await closePopover(page);
 
 		await mark('the turn ends at standard speed');
@@ -108,7 +111,10 @@ const midturn = {
 		log(`after the toggled turn: ${JSON.stringify(notes)}`);
 		expect(notes.length === 1, `one speed note on the toggled turn (${notes.length})`);
 		expect(/standard speed/i.test(notes[0]), `the toggled turn says it ran at standard speed: "${notes[0]}"`);
-		expect(/during this turn/i.test(notes[0]), `and why: "${notes[0]}"`);
+		expect(
+			notes[0].endsWith('Fast mode was turned on during this turn, so it applies from your next message.'),
+			`and why: "${notes[0]}"`
+		);
 
 		await mark('the next message runs Fast');
 		await typeAndSend(page, `again ${uniq()} ${scriptTag(variant, 'default')}`);
@@ -185,8 +191,86 @@ const refused = {
 	}
 };
 
+/** Reload a chat whose turn is still running, then read the toggle again. */
+async function reloadMidTurn(page, mark, wantOn) {
+	await mark('reload while the turn runs');
+	await page.reload({ waitUntil: 'domcontentloaded' });
+	await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+	await mark('page reloaded: the notice comes back from the worker');
+	await waitChat(page, { surface: 'active', loading: 'false', session: /^s:/ }, { timeout: 60_000 });
+	await openPopup(effortButton(page), fastToggle(page));
+	await page.locator(`button[aria-label="Fast mode"][aria-pressed="${wantOn}"]`).waitFor({ timeout: 10_000 });
+	await notice(page).waitFor({ timeout: 15_000 });
+	const said = (await notice(page).innerText()).trim();
+	expect(said === WILL_TURN(wantOn ? 'on' : 'off'), `the notice survives the reload ("${said}")`);
+	await closePopover(page);
+}
+
+const reloadCase = {
+	name: 'reload',
+	setup: openClaudeOpusChat,
+	async act({ page, mark, variant, log }) {
+		await mark('Fast off: start a long turn and turn Fast on');
+		await typeAndSend(page, `long ${uniq()} ${scriptTag(variant, 'fast-multi', { tps: 2 })}`);
+		await page.getByText(FIRST_REQUEST).first().waitFor({ timeout: 60_000 });
+		await toggleFast(page, true);
+		await notice(page).waitFor({ timeout: 10_000 });
+		await closePopover(page);
+		await reloadMidTurn(page, mark, true);
+
+		await mark('the notice ends with the turn it was about');
+		await waitTurnSettled(page, { text: LAST_REQUEST, timeout: 180_000 });
+		await openPopup(effortButton(page), fastToggle(page));
+		expect((await notice(page).count()) === 0, 'no notice once the turn has ended');
+		await closePopover(page);
+
+		await mark('Fast on: start a long turn and turn Fast off');
+		const before = Number((await chatState(page)).messages);
+		await typeAndSend(page, `long again ${uniq()} ${scriptTag(variant, 'fast-multi', { tps: 2 })}`);
+		// The finished turn has folded its first request away, so wait on the
+		// new turn's own message rather than a second copy of that text.
+		await waitChat(page, { streaming: 'true', messagesAtLeast: before + 2 }, { timeout: 60_000 });
+		await toggleFast(page, false);
+		await notice(page).waitFor({ timeout: 10_000 });
+		const said = (await notice(page).innerText()).trim();
+		log(`off notice: ${said}`);
+		expect(said === WILL_TURN('off'), `the off notice claims no speed ("${said}")`);
+		await closePopover(page);
+		await reloadMidTurn(page, mark, false);
+	}
+};
+
+const retried = {
+	name: 'retried',
+	// Staging, not judged: the declined request's API-error text is painted for
+	// one frame before the safety-check card replaces it. That flash belongs to
+	// the safety-check flow, and this case is about the speed note after it.
+	async setup({ page, status, variant }) {
+		await openClaudeOpusChat({ page, status });
+		await toggleFast(page, true);
+		await closePopover(page);
+		await typeAndSend(page, `audit ${uniq()} ${scriptTag(variant, 'default', { refuse_first: 'cyber' })}`);
+		await page.locator('[data-testid="guardrail-card"]').waitFor({ timeout: 60_000 });
+	},
+	async act({ page, mark, log }) {
+		expect((await speedNote(page).count()) === 0, 'no speed note while the turn waits on the decision');
+
+		await mark('continue: the retry runs standard, in the same turn');
+		await page.getByRole('button', { name: /^Continue/ }).first().click();
+		await speedNote(page).first().waitFor({ timeout: 60_000 });
+		await waitTurnSettled(page, {});
+		const notes = await noteText(page);
+		log(`retried: ${JSON.stringify(notes)}`);
+		expect(notes.length === 1, `one note for one turn: ${JSON.stringify(notes)}`);
+		expect(
+			notes[0].startsWith('Ran on Fast for 1 of 2 requests; the other 1 ran at standard speed.'),
+			`the note counts both attempts: "${notes[0]}"`
+		);
+	}
+};
+
 await runJourney({
 	name: 'fast-midturn',
-	cases: [midturn, idle, refused],
+	cases: [midturn, idle, refused, reloadCase, retried],
 	allow: [...DEV_INSTANCE_NOISE]
 });

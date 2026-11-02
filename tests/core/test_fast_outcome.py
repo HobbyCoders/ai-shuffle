@@ -1,4 +1,5 @@
 """Fast mode on the app layer: the toggle's answer and the chat's note (issue 991)."""
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -12,6 +13,9 @@ from app.core.provider.harness_adapter import HarnessAdapter
 from app.core.provider.types import SessionOptions
 from app.core.session_pool import SessionState
 from app.db import database as db
+
+
+TURN = SimpleNamespace(turn_id="turn-1", turn={})
 
 
 def _adapter(*, delegated: bool, waits: bool = False) -> HarnessAdapter:
@@ -36,7 +40,9 @@ def live(monkeypatch):
                              connect_options=adapter._sdk_options)
         monkeypatch.setattr("app.core.session_pool.get_session_pool",
                             lambda: SimpleNamespace(peek=lambda sid: state))
-        monkeypatch.setattr("app.core.session_runtime.get_live_runtime", lambda sid: None)
+        monkeypatch.setattr("app.core.session_runtime.get_live_runtime",
+                            lambda sid: TURN if streaming else None)
+        monkeypatch.setattr(api, "_store_live_overrides", AsyncMock())
         monkeypatch.setattr(api.control, "_require_owned",
                             lambda sid: {"id": sid, "model": adapter._options.model, "effort": "high"})
         monkeypatch.setattr(db, "set_session_run_binding", MagicMock())
@@ -50,14 +56,14 @@ async def test_delegated_toggle_during_a_turn_answers_next_message(live):
     live(_adapter(delegated=True, waits=True))
     answer = await api.apply_run_settings("s", api.RunSettingsUpdate(fast=True), propagate=False)
     assert answer["fast"] is True
-    assert answer["fast_applies"] == "next_message"
+    assert answer["fast_applies_turn"] == "turn-1"
 
 
 @pytest.mark.asyncio
 async def test_delegated_toggle_between_turns_has_no_notice(live):
     live(_adapter(delegated=True, waits=False), streaming=False)
     answer = await api.apply_run_settings("s", api.RunSettingsUpdate(fast=True), propagate=False)
-    assert "fast_applies" not in answer
+    assert "fast_applies_turn" not in answer
 
 
 @pytest.mark.asyncio
@@ -65,7 +71,7 @@ async def test_native_lane_switches_inside_the_turn_and_has_no_notice(live):
     adapter = _adapter(delegated=False)
     live(adapter, streaming=True)
     answer = await api.apply_run_settings("s", api.RunSettingsUpdate(fast=True), propagate=False)
-    assert "fast_applies" not in answer
+    assert "fast_applies_turn" not in answer
     assert adapter._engine.request_extra == {"service_tier": "priority"}
 
 
@@ -86,12 +92,12 @@ async def test_no_live_adapter_has_no_notice(monkeypatch):
 async def test_the_peer_action_carries_the_owner_workers_answer(live):
     live(_adapter(delegated=True, waits=True))
     answer = await api.handle_run_settings({"session_id": "s", "fast": True}, "other-worker")
-    assert answer["fast_applies"] == "next_message"
+    assert answer["fast_applies_turn"] == "turn-1"
 
 
 @pytest.mark.asyncio
 async def test_the_route_returns_a_remote_owners_answer_unchanged(monkeypatch):
-    remote = {"effort": "high", "fast": True, "fast_applies": "next_message"}
+    remote = {"effort": "high", "fast": True, "fast_applies_turn": "turn-1"}
     call = AsyncMock(return_value=remote)
     monkeypatch.setattr(api.control, "owner_of", lambda session: "worker-2")
     monkeypatch.setattr(api.control, "call", call)
@@ -115,7 +121,9 @@ async def test_a_parents_answer_speaks_only_for_the_parent(live, monkeypatch):
     }
     monkeypatch.setattr("app.core.session_pool.get_session_pool",
                         lambda: SimpleNamespace(peek=states.get))
-    monkeypatch.setattr("app.core.session_runtime.get_live_runtime", lambda sid: None)
+    monkeypatch.setattr("app.core.session_runtime.get_live_runtime",
+                        lambda sid: TURN if sid == "child" else None)
+    monkeypatch.setattr(api, "_store_live_overrides", AsyncMock())
     monkeypatch.setattr(api.control, "_require_owned",
                         lambda sid: {"id": sid, "model": "opus", "effort": "high"})
     monkeypatch.setattr(api.control, "owner_of", lambda session: None)
@@ -124,12 +132,88 @@ async def test_a_parents_answer_speaks_only_for_the_parent(live, monkeypatch):
     monkeypatch.setattr(db, "list_worker_children",
                         lambda sid: [{"id": "child"}] if sid == "parent" else [])
     answer = await api.apply_run_settings("parent", api.RunSettingsUpdate(fast=True), propagate=False)
-    assert "fast_applies" not in answer
+    assert "fast_applies_turn" not in answer
     await api.propagate_fast("parent", True)
     child_adapter._engine.set_run_settings.assert_awaited_once()
     child_answer = await api.apply_run_settings(
         "child", api.RunSettingsUpdate(fast=True), inherited=True, propagate=False)
-    assert child_answer["fast_applies"] == "next_message"
+    assert child_answer["fast_applies_turn"] == "turn-1"
+
+
+# ── The wait, read again: reloads and other devices ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_toggle_succeeds_even_if_the_wait_cannot_be_read(live):
+    adapter = _adapter(delegated=True)
+
+    def broken():
+        raise RuntimeError("no idea")
+
+    adapter._engine.fast_waits_for_next_turn = broken
+    live(adapter)
+    answer = await api.apply_run_settings("s", api.RunSettingsUpdate(fast=True), propagate=False)
+    assert answer["fast"] is True and "fast_applies_turn" not in answer
+
+
+def test_an_adapter_that_cannot_say_has_nothing_to_report(live):
+    state = live(_adapter(delegated=True, waits=True))
+    state.adapter = SimpleNamespace()  # a provider without the query
+    assert api.fast_waiting_turn("s") is None
+
+
+def test_the_wait_names_the_running_turn(live):
+    live(_adapter(delegated=True, waits=True))
+    assert api.fast_waiting_turn("s") == "turn-1"
+
+
+def test_no_running_turn_means_no_wait(live):
+    live(_adapter(delegated=True, waits=True), streaming=False)
+    assert api.fast_waiting_turn("s") is None
+
+
+def test_the_native_lane_never_waits(live):
+    live(_adapter(delegated=False))
+    assert api.fast_waiting_turn("s") is None
+
+
+@pytest.mark.asyncio
+async def test_a_chat_on_another_worker_asks_its_owner(monkeypatch):
+    call = AsyncMock(return_value={"fast_applies_turn": "turn-9"})
+    monkeypatch.setattr(api.control, "owner_of", lambda session: "worker-2")
+    monkeypatch.setattr(api.control, "call", call)
+    assert await api.read_fast_waiting_turn({"id": "s"}, "s") == "turn-9"
+    call.assert_awaited_once_with("worker-2", "fast-wait", {"session_id": "s"})
+    assert api.control.known_action("fast-wait")
+
+
+@pytest.mark.parametrize("failure", [TimeoutError(), RuntimeError("unknown action"), ConnectionError()])
+@pytest.mark.asyncio
+async def test_an_owner_that_cannot_answer_means_no_notice(monkeypatch, failure):
+    monkeypatch.setattr(api.control, "owner_of", lambda session: "worker-2")
+    monkeypatch.setattr(api.control, "call", AsyncMock(side_effect=failure))
+    assert await api.read_fast_waiting_turn({"id": "s"}, "s") is None
+
+
+@pytest.mark.asyncio
+async def test_a_slow_owner_cannot_hold_the_chat_open(monkeypatch):
+    async def never(*_args):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(api, "_FAST_WAIT_READ_SECONDS", 0.01)
+    monkeypatch.setattr(api.control, "owner_of", lambda session: "worker-2")
+    monkeypatch.setattr(api.control, "call", never)
+    assert await api.read_fast_waiting_turn({"id": "s"}, "s") is None
+
+
+@pytest.mark.asyncio
+async def test_the_peer_read_refuses_a_chat_this_worker_does_not_run(monkeypatch):
+    def refuse(_sid):
+        raise ValueError("not here")
+
+    monkeypatch.setattr(api.control, "_require_owned", refuse)
+    with pytest.raises(ValueError):
+        await api.handle_fast_wait({"session_id": "s"}, "other-worker")
 
 
 def test_the_engines_outcome_reaches_the_app_as_a_system_message():
@@ -178,16 +262,24 @@ def test_a_request_with_no_speed_is_never_counted_as_either():
         "Ran at standard speed for 1 of 2 requests; 1 didn't report a speed")
 
 
+def test_a_refused_fast_turn_toggled_off_claims_no_speed_it_never_ran():
+    note = fast_outcome_note({"requested": True, "requested_at_end": False, "standard_calls": 2,
+                              "state": "off", "disabled_reason": "extra_usage_disabled"})
+    assert note["content"].startswith("Ran at standard speed.")
+    assert note["content"].endswith("Fast mode was turned off during this turn, so it applies from your next message.")
+    assert "stops" not in note["content"]
+
+
 def test_turned_on_during_the_turn():
     note = fast_outcome_note({"requested": False, "requested_at_end": True, "standard_calls": 3, "state": "off"})
     assert note["content"] == (
-        "Ran at standard speed. Fast mode was turned on during this turn, so it starts with your next message.")
+        "Ran at standard speed. Fast mode was turned on during this turn, so it applies from your next message.")
 
 
 def test_turned_off_during_the_turn():
     note = fast_outcome_note({"requested": True, "requested_at_end": False, "fast_calls": 2, "state": "on"})
     assert note["content"] == (
-        "Ran on Fast. Fast mode was turned off during this turn, so it stops with your next message.")
+        "Ran on Fast. Fast mode was turned off during this turn, so it applies from your next message.")
 
 
 def test_turned_on_midway_does_not_blame_a_reason_for_this_turn():

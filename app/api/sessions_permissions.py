@@ -15,6 +15,7 @@ from app.network import control
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+_FAST_WAIT_READ_SECONDS = 1.5
 _locks = WeakValueDictionary()
 #: Running fast-mode hand-downs (strong references until they finish).
 _fast_propagations: set = set()
@@ -123,11 +124,12 @@ async def apply_run_settings(session_id: str, body: RunSettingsUpdate, *,
     fast mode, answers ``{"skipped": reason}`` and is left unchanged. The
     owner's own change to a subagent pins it.
 
-    ``fast_applies: "next_message"`` in the answer means the session's running
-    turn keeps another speed than the one now set, so the setting takes effect
-    with the next message. It is absent when the setting already holds: nothing
-    is running, or the lane switches at its next request (see
-    ``HarnessAdapter.set_run_settings``).
+    ``fast_applies_turn`` in the answer names the running turn when that turn
+    began under another Fast setting, so the new one takes effect with the next
+    message. It is absent when the setting already holds: nothing is running,
+    or the lane switches at its next request (see
+    ``HarnessAdapter.set_run_settings``). ``GET /live`` reports the same, so a
+    reload or another device can say so too.
     """
     result = await _apply_run_settings(session_id, body, inherited=inherited)
     if propagate and "fast" in body.model_fields_set and "skipped" not in result:
@@ -215,9 +217,58 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
         if connected and state.connect_options is not None:
             state.connect_options.effort = selected["effort"]
             state.connect_options.aih_fast = selected["fast"]
-        if connected and state.adapter.fast_waits_for_next_turn():
-            return {**selected, "fast_applies": "next_message"}
-        return selected
+        waiting = fast_waiting_turn(session_id)
+        return {**selected, "fast_applies_turn": waiting} if waiting else selected
+
+
+def fast_waiting_turn(session_id: str) -> Optional[str]:
+    """The running turn a Fast change is waiting out on this worker, or None.
+
+    A change has already been applied when this is asked and a chat can be
+    opened while it runs, so no adapter or runtime that cannot say may fail
+    either: it just has nothing to report.
+    """
+    from app.core.session_pool import get_session_pool
+    from app.core.session_runtime import get_live_runtime
+
+    try:
+        state = get_session_pool().peek(session_id)
+        runtime = get_live_runtime(session_id)
+        if state is None or not state.is_connected or runtime is None:
+            return None
+        waits = getattr(state.adapter, "fast_waits_for_next_turn", None)
+        if waits is None or waits() is not True:
+            return None
+        turn_id = getattr(runtime, "turn_id", None)
+        return turn_id if isinstance(turn_id, str) and turn_id else None
+    except Exception:  # noqa: BLE001 - a notice is never worth a failed request
+        logger.warning("Could not read the Fast wait of %s", session_id, exc_info=True)
+        return None
+
+
+async def handle_fast_wait(body: dict, from_device: str) -> dict:
+    """Peer read of :func:`fast_waiting_turn` for a chat this worker runs."""
+    session_id = body.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise ValueError("session_id is required")
+    await run_sync(control._require_owned, session_id)
+    return {"fast_applies_turn": fast_waiting_turn(session_id)}
+
+
+async def read_fast_waiting_turn(session: dict, session_id: str) -> Optional[str]:
+    """:func:`fast_waiting_turn` wherever the chat runs. Bounded, and never raises:
+    an owner that is slow, unreachable or too old to answer means no notice."""
+    try:
+        owner = await run_sync(control.owner_of, session)
+        if owner is None:
+            return fast_waiting_turn(session_id)
+        answer = await asyncio.wait_for(
+            control.call(owner, "fast-wait", {"session_id": session_id}), _FAST_WAIT_READ_SECONDS)
+        turn_id = answer.get("fast_applies_turn") if isinstance(answer, dict) else None
+        return turn_id if isinstance(turn_id, str) and turn_id else None
+    except Exception:  # noqa: BLE001 - see the docstring
+        logger.debug("Could not read the Fast wait of %s", session_id, exc_info=True)
+        return None
 
 
 async def _announce_context_window(session_id: str, result: dict) -> None:

@@ -131,9 +131,9 @@ describe('EffortPopoverCard', () => {
 		const view = render(EffortPopoverCard, { props: { ...base, fastEnabled: true } });
 		expect(screen.queryByTestId('fast-applies-notice')).toBeNull();
 		await view.rerender({ ...base, fastEnabled: true, fastWaitsForNextMessage: true });
-		expect(screen.getByTestId('fast-applies-notice').textContent).toMatch(/starts with your next message/);
+		expect(screen.getByTestId('fast-applies-notice').textContent).toMatch(/turns on with your next message/);
 		await view.rerender({ ...base, fastEnabled: false, fastWaitsForNextMessage: true });
-		expect(screen.getByTestId('fast-applies-notice').textContent).toMatch(/stops with your next message/);
+		expect(screen.getByTestId('fast-applies-notice').textContent).toMatch(/turns off with your next message/);
 		await view.rerender({ ...base, fastSupported: false, fastWaitsForNextMessage: true });
 		expect(screen.queryByTestId('fast-applies-notice')).toBeNull();
 	});

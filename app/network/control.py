@@ -521,6 +521,11 @@ def _run_settings_handler():
     return handle_run_settings
 
 
+def _fast_wait_handler():
+    from app.api.sessions_permissions import handle_fast_wait
+    return handle_fast_wait
+
+
 def _away_mode_handler():
     from app.api.sessions_permissions import handle_away_mode
     return handle_away_mode
@@ -576,6 +581,7 @@ _LAZY_HANDLERS = {
     "chat-access": _chat_access_handler,
     "chat-access-changed": _chat_access_changed_handler,
     "run-settings": _run_settings_handler,
+    "fast-wait": _fast_wait_handler,
     "permission-mode": _permission_mode_handler,
     "away-mode": _away_mode_handler,
     "session-active": _session_active_handler,

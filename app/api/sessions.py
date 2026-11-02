@@ -1487,6 +1487,15 @@ async def get_live_session(
         "session_meta": session_meta,
     }
 
+    # A running turn's Fast change that waits for the next message, so a reload
+    # or another device can say so. Only while waiting: the wire shape is pinned.
+    if result["is_streaming"]:
+        from app.api.sessions_permissions import read_fast_waiting_turn
+
+        fast_applies_turn = await read_fast_waiting_turn(session, session_id)
+        if fast_applies_turn:
+            result["fast_applies_turn"] = fast_applies_turn
+
     # Live ProviderAgent worker attribution: per-turn worker token/spend grouped by the worker's PROVIDER, while
     # the turn is still running. Attached ONLY when workers are actually live,
     # so the pinned /live wire shape is unchanged for every ordinary session.

@@ -2,8 +2,8 @@
  * Fast mode on a Claude Code chat (issue 991).
  *
  * Claude Code reads the Fast setting once, when a turn starts. The worker tells
- * the toggle when that makes a change wait (`fast_applies` on the run-settings
- * answer), and records how each turn really ran in a `fast_outcome` note.
+ * the toggle when that makes a change wait (`fast_applies_turn` on the run-settings
+ * answer and on `/live`), and records how each turn really ran in a `fast_outcome` note.
  * Sentences about a finished turn come from the worker (app/core/fast_outcome.py).
  */
 
@@ -31,9 +31,24 @@ export function fastOutcomeNoteView(
 	return { outcome: outcome as FastOutcome, text: content };
 }
 
-/** What the toggle says while the running turn keeps its speed. */
+/**
+ * Whether the toggle should say a change waits. The worker names the turn it is
+ * waiting out, so the answer holds whatever order things reach this device in:
+ * that turn ended, another began in the same feed flush, or the worker's answer
+ * only arrived after the next turn had started.
+ */
+export function fastChangeWaits(state: {
+	isStreaming: boolean;
+	liveTurnId: string | null;
+	fastAppliesTurnId?: string | null;
+}): boolean {
+	return state.isStreaming && !!state.fastAppliesTurnId && state.fastAppliesTurnId === state.liveTurnId;
+}
+
+/**
+ * What the toggle says while a change waits. It speaks of the setting only: the
+ * running turn may not be on the speed the setting suggests (Fast can be refused).
+ */
 export function fastAppliesNotice(fastEnabled: boolean): string {
-	return fastEnabled
-		? 'This turn keeps running at standard speed. Fast mode starts with your next message.'
-		: 'This turn keeps running on Fast. Fast mode stops with your next message.';
+	return `Fast mode turns ${fastEnabled ? 'on' : 'off'} with your next message. This turn finishes at its current speed.`;
 }

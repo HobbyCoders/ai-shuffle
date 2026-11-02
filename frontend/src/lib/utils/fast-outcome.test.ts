@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fastAppliesNotice, fastOutcomeNoteView } from './fast-outcome';
+import { fastAppliesNotice, fastChangeWaits, fastOutcomeNoteView } from './fast-outcome';
 
 describe('fastOutcomeNoteView', () => {
 	it('is only for fast_outcome rows', () => {
@@ -22,8 +22,27 @@ describe('fastOutcomeNoteView', () => {
 });
 
 describe('fastAppliesNotice', () => {
-	it('says when the setting starts or stops', () => {
-		expect(fastAppliesNotice(true)).toMatch(/starts with your next message/);
-		expect(fastAppliesNotice(false)).toMatch(/stops with your next message/);
+	it('says when the setting changes and claims no speed for the turn', () => {
+		expect(fastAppliesNotice(true)).toBe('Fast mode turns on with your next message. This turn finishes at its current speed.');
+		expect(fastAppliesNotice(false)).toBe('Fast mode turns off with your next message. This turn finishes at its current speed.');
+	});
+});
+
+describe('fastChangeWaits', () => {
+	const state = (over = {}) => ({ isStreaming: true, liveTurnId: 't1', fastAppliesTurnId: 't1', ...over });
+
+	it('holds while the turn the worker named is the one running', () => {
+		expect(fastChangeWaits(state())).toBe(true);
+	});
+
+	it('ends when that turn is over or another is running', () => {
+		expect(fastChangeWaits(state({ isStreaming: false }))).toBe(false);
+		expect(fastChangeWaits(state({ liveTurnId: 't2' }))).toBe(false);
+		expect(fastChangeWaits(state({ liveTurnId: null }))).toBe(false);
+	});
+
+	it('is false when the worker named nothing', () => {
+		expect(fastChangeWaits(state({ fastAppliesTurnId: null, liveTurnId: null }))).toBe(false);
+		expect(fastChangeWaits({ isStreaming: true, liveTurnId: 't1' })).toBe(false);
 	});
 });

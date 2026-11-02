@@ -32,6 +32,7 @@
 	 */
 	import { onDestroy, tick, type Snippet } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
+	import { fastChangeWaits } from '$lib/utils/fast-outcome';
 	import { standardContextCap } from '$lib/stores/session/context-window';
 	import { contextCapRevision } from '$lib/stores/composer-preferences';
 	import { notify } from '$lib/stores/notifications';
@@ -246,9 +247,7 @@
 	const fastSupported = $derived(isFastModeCapable(modelValue));
 	// The worker's answer, not a guess from the model name: this chat's running
 	// turn keeps its speed and the Fast setting waits for the next message.
-	const fastWaitsForNextMessage = $derived(
-		$activeSession.isStreaming && !!$activeSession.sessionId && $activeSession.fastAppliesNextIn === $activeSession.sessionId
-	);
+	const fastWaitsForNextMessage = $derived(fastChangeWaits($activeSession));
 
 	// Each model remembers its own pick (composerPreferences.fastForModel), which
 	// a model switch restores. Switching to a model without the tier must not

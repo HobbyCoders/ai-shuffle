@@ -115,6 +115,7 @@ from fluid.events.model import (
     DelegatedSurface,
     ErrorEvent,
     Event,
+    FastModeOutcome,
     GuardrailBlocked,
     HookEvent,
     Interrupted,
@@ -1142,6 +1143,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # Loop-issued control_requests awaiting their control_response, by
         # request_id (the outbound mirror of _pending_permissions).
         self._pending_controls: dict[str, asyncio.Future] = {}
+        self._control_acks: dict[str, Callable[[], None]] = {}
         # set_model / set_permission_mode switches whose outcome is unknown: the
         # frame reached the CLI, but a Stop or the deadline ended the wait, so
         # the CLI may be on the new value while ``model`` / ``permission_mode``
@@ -1360,6 +1362,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         with (Claude Code 2.1.316). :meth:`fast_waits_for_next_turn` reports
         that state.
 
+        Only an acknowledged change reaches the running turn's record. A result
+        that lands first reports no change, and a refused or unanswered change
+        leaves nothing to take back.
+
         The payload keeps the settings' ``env`` block with ``FORCED_CHILD_ENV``
         on top, as ``--settings`` does, so a re-sent flag layer never drops
         the steer override.
@@ -1371,25 +1377,27 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 "cannot be merged into them"
             )
         settings = _with_forced_env({**base, "effortLevel": effort, "fastMode": fast})
-        # Told to the running turn before the answer: its result can arrive
-        # first, and then has to report the setting the CLI already holds.
-        mapper = self._live_mapper
-        before = mapper.fast_now if mapper is not None else False
-        if mapper is not None:
-            mapper.fast_now = fast
-        try:
-            await self._apply_setting({"subtype": "apply_flag_settings", "settings": settings})
-        except BaseException:
-            if mapper is not None:
-                mapper.fast_now = before
-            raise
-        self.effort = effort
-        self.settings = _settings_json(settings)
+        sent_during = self._live_mapper
+
+        def acknowledged() -> None:
+            self.effort = effort
+            self.settings = _settings_json(settings)
+            if sent_during is not None:
+                sent_during.fast_acked = fast
+            live = self._live_mapper
+            if live is not None and live is not sent_during:
+                # Stdin is ordered: a turn that began while this waited for its
+                # answer was sent after it, so it started with this setting.
+                live.fast_at_start = live.fast_acked = fast
+
+        await self._apply_setting(
+            {"subtype": "apply_flag_settings", "settings": settings}, on_ack=acknowledged,
+        )
 
     def fast_waits_for_next_turn(self) -> bool:
         """True while the running turn's speed differs from the Fast setting."""
         mapper = self._live_mapper
-        return mapper is not None and mapper.fast_now != mapper.fast_at_start
+        return mapper is not None and mapper.fast_waits
 
     def _fast_setting(self) -> bool:
         """The Fast setting a turn sent now starts with."""
@@ -3581,11 +3589,16 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # dropped, leaving the call parked for PERMISSION_TIMEOUT.
                 self._arm_permission(mapped.permission)
             guardrail: tuple[dict[str, Any], TurnComplete | None] | None = None
+            held_fast: list[Event] = []
             if mapped.is_result and mapper.refusal is not None and not self._interrupted.is_set():
                 # A safety check declined the reply: hold the turn's end until
                 # the person decides (see _guardrail_answer).
                 held = next((e for e in mapped.events if isinstance(e, TurnComplete)), None)
-                mapped.events = [e for e in mapped.events if not isinstance(e, TurnComplete)]
+                # The speed summary too: one app turn reports once, at its end.
+                held_fast = [e for e in mapped.events if isinstance(e, FastModeOutcome)]
+                mapped.events = [
+                    e for e in mapped.events if not isinstance(e, (TurnComplete, FastModeOutcome))
+                ]
                 guardrail, mapper.refusal = (mapper.refusal, held), None
             for event in mapped.events:
                 if isinstance(event, ContextCompaction):
@@ -3686,6 +3699,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                             held.num_model_calls if held is not None else mapper.model_calls or 1,
                         )
                         continue
+                    for event in held_fast:
+                        await self._emit(event)
                     await self._emit_terminal_with_park(TurnComplete(
                         session_id=sid, node_id=mapper.last_node_id, turn_id=turn_id,
                         stop_reason="refusal",
@@ -5127,10 +5142,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         """
         fut = self._pending_controls.get(reply.request_id)
         if fut is not None and not fut.done():
+            on_ack = self._control_acks.pop(reply.request_id, None)
+            if reply.ok and on_ack is not None:
+                on_ack()
             fut.set_result(reply)
 
     async def _apply_setting(
         self, request: dict[str, Any], *, stop_carries_over: bool = True,
+        on_ack: Callable[[], None] | None = None,
     ) -> None:
         """Send a ``set_model`` / ``set_permission_mode`` control_request and
         wait for the CLI's acknowledgement.
@@ -5145,15 +5164,22 @@ class DelegatedLoop(BackgroundLifecycleMixin):
 
         ``stop_carries_over=False`` is for a switch made inside a running turn
         (the safety-check retry): a Stop then ends that turn, not the next.
+
+        ``on_ack`` runs once if the value is accepted, as the reply is read: a
+        turn's result can be the very next frame, read before this caller wakes.
         """
         if self._proc is None or self._proc.returncode is not None:
+            if on_ack is not None:
+                on_ack()
             return
         subtype = request.get("subtype")
         # A Stop landing while the switch is unanswered ends the wait at once
         # (the old value stays, as for silence): the user asked for the loop to
         # stop, not to sit out the acknowledgement deadline.
         stop = asyncio.ensure_future(self._stop_pulse.wait())
-        roundtrip = asyncio.ensure_future(self._control_roundtrip(request, CONTROL_TIMEOUT))
+        roundtrip = asyncio.ensure_future(
+            self._control_roundtrip(request, CONTROL_TIMEOUT, on_ack=on_ack),
+        )
         try:
             await asyncio.wait({roundtrip, stop}, return_when=asyncio.FIRST_COMPLETED)
         finally:
@@ -5180,13 +5206,18 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             raise RuntimeError(f"the Claude CLI refused {subtype}: {reply.error or 'no reason given'}")
         self._unconfirmed_settings.discard(str(subtype))
 
-    async def _control_roundtrip(self, request: dict[str, Any], timeout: float) -> ControlReply:
+    async def _control_roundtrip(
+        self, request: dict[str, Any], timeout: float, *,
+        on_ack: Callable[[], None] | None = None,
+    ) -> ControlReply:
         """Write a control_request and wait for its reply (TimeoutError when
         none arrives). The pending entry is removed on every path, so a late
         reply simply finds nothing to resolve."""
         request_id = self._next_req_id()
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending_controls[request_id] = fut
+        if on_ack is not None:
+            self._control_acks[request_id] = on_ack
         try:
             await self._write_frame({
                 "type": "control_request",
@@ -5197,6 +5228,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             return fut.result()
         finally:
             self._pending_controls.pop(request_id, None)
+            self._control_acks.pop(request_id, None)
 
     async def _request_control(
         self, request: dict[str, Any], *, timeout: float = CONTROL_TIMEOUT,

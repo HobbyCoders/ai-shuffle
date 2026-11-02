@@ -601,9 +601,12 @@ class StreamJsonMapper:
         # requests run with, and the setting now (the loop updates it when a
         # toggle lands during the turn).
         self.fast_at_start = fast_requested
-        self.fast_now = fast_requested
+        self.fast_acked = fast_requested
+        self._fast_attempt_open = True
         # Main-conversation model calls of this turn: id → ``usage.speed``.
         self._call_speeds: dict[str, str | None] = {}
+        self._attempt_speeds: list[str | None] = []
+        self._carried_speeds: list[str | None] = []
         self.model = model
         self.provider = provider
         self.user_node_id = user_node_id
@@ -839,20 +842,37 @@ class StreamJsonMapper:
         speed = speed if speed in ("fast", "standard") else None
         self._call_speeds[key] = speed or self._call_speeds.get(key)
 
+    @property
+    def fast_waits(self) -> bool:
+        """The CLI holds a Fast setting the attempt now running did not start with.
+
+        A setting it has not acknowledged does not count. Neither does one set
+        after the attempt's result: the next request starts with it.
+        """
+        return self._fast_attempt_open and self.fast_acked != self.fast_at_start
+
     def _fast_outcome(self, frame: dict[str, Any], usage: dict[str, Any]) -> list[Event]:
         """The turn's :class:`FastModeOutcome`, when it has anything to report.
 
         A result can carry usage no assistant frame did; with no record of any
         call, that usage stands in for the turn's one call. A result that ran
         no model (``num_turns`` 0: a local command, a setup failure) says
-        nothing about speed. The tally restarts here because a long-lived
-        mapper can read another result.
+        nothing about speed.
+
+        ``requested``/``requested_at_end`` compare what the last attempt started
+        with against what the CLI had acknowledged by this result, so a toggle
+        still unanswered here is not reported: if it is refused, nothing false
+        was said, and the next turn's own note says what ran. The speeds cover
+        every attempt ``carry_attempt`` has kept in this app turn.
         """
         if not self._call_speeds and usage and frame.get("num_turns"):
             self._note_speed(None, usage)
-        speeds = list(self._call_speeds.values())
+        speeds = [*self._carried_speeds, *self._call_speeds.values()]
+        self._attempt_speeds = speeds
+        self._carried_speeds = []
         self._call_speeds = {}
-        requested, at_end = self.fast_at_start, self.fast_now
+        self._fast_attempt_open = False
+        requested, at_end = self.fast_at_start, self.fast_acked
         self.fast_at_start = at_end
         fast = speeds.count("fast")
         if not speeds or not (requested or at_end or fast):
@@ -956,9 +976,14 @@ class StreamJsonMapper:
         declined request was billed too, so its totals (which already include
         any earlier carry) are added to every later result. The cost baseline
         moves to the total the CLI just reported, so the next result's cost is
-        its own request's and the two are summed once.
+        its own request's and the two are summed once. The speeds of its calls
+        carry the same way, and the re-sent request reads the Fast setting the
+        CLI holds now.
         """
         self._carried = (dict(usage), cost_usd, int(num_model_calls or 0))
+        self._carried_speeds = self._attempt_speeds
+        self.fast_at_start = self.fast_acked
+        self._fast_attempt_open = True
         if self.cli_total_cost_usd is not None:
             self.cost_baseline = self.cli_total_cost_usd
 

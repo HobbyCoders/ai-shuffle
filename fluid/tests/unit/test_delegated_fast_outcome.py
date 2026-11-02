@@ -16,10 +16,13 @@ from pathlib import Path
 
 import pytest
 
+from fluid.engine import delegated as delegated_module
 from fluid.engine.delegated import DelegatedLoop
 from fluid.engine.delegated_proto import StreamJsonMapper
+from fluid.engine.guardrail import GUARDRAIL_TOOL
 from fluid.events import ErrorEvent, FastModeOutcome, TurnComplete, UserTurn
-from fluid.events.model import Interrupted
+from fluid.events.model import AttemptDiscarded, Interrupted, PermissionRequest
+from fluid.events.ops import RespondPermission
 from fluid.store.base import MemoryStore
 
 FAKE = Path(__file__).parent.parent / "fixtures" / "fake_claude_script.py"
@@ -52,7 +55,7 @@ def _outcomes(frames: list[dict], *, fast=False, toggled_to=None) -> list[FastMo
     mapper = StreamJsonMapper(session_id="s", turn_id="t", model="claude-opus-4-7",
                               user_node_id="n", fast_requested=fast)
     if toggled_to is not None:
-        mapper.fast_now = toggled_to
+        mapper.fast_acked = toggled_to
     return [e for frame in frames for e in mapper.feed(frame).events if isinstance(e, FastModeOutcome)]
 
 
@@ -132,7 +135,7 @@ def test_a_toggle_during_the_turn_is_kept_apart_from_what_the_turn_started_with(
 
 def test_a_second_result_on_one_mapper_starts_from_the_setting_the_first_ended_with():
     mapper = StreamJsonMapper(session_id="s", turn_id="t", model="m", user_node_id="n", fast_requested=False)
-    mapper.fast_now = True
+    mapper.fast_acked = True
     feed = lambda frame: [e for e in mapper.feed(frame).events if isinstance(e, FastModeOutcome)]
     assert feed(_assistant("m1", "standard")) == []
     [first] = feed(_result())
@@ -149,11 +152,11 @@ def _step(msg_id: str, speed: str) -> dict:
     return {"op": "frame", "frame": _assistant(msg_id, speed)}
 
 
-def _loop(tmp_path: Path, turns: list[list[dict]], *, fast=False) -> DelegatedLoop:
+def _loop(tmp_path: Path, turns: list[list[dict]], *, fast=False, model="claude-opus-4-7") -> DelegatedLoop:
     script = tmp_path / "script.json"
     script.write_text(json.dumps({"turns": turns}), encoding="utf-8")
     return DelegatedLoop(
-        store=MemoryStore(), model="claude-opus-4-7", permission_mode="default",
+        store=MemoryStore(), model=model, permission_mode="default",
         claude_cmd=[sys.executable, str(FAKE)], env={"FAKE_CLAUDE_SCRIPT": str(script)},
         settings=json.dumps({"fastMode": fast}),
     )
@@ -295,3 +298,182 @@ async def test_a_refused_toggle_leaves_the_turn_as_it_was(tmp_path):
         assert [e for e in seen if isinstance(e, FastModeOutcome)] == []
     finally:
         await loop.aclose()
+
+
+# ── A toggle the CLI answers only after the result ─────────────────────────
+
+
+def _late_answer_loop(tmp_path: Path, how: str | None, *, fast=False) -> DelegatedLoop:
+    # The fake answers nothing during ``sleep``: the toggle reaches it inside the
+    # turn and its answer leaves after the result.
+    turn = [_step("m1", "fast" if fast else "standard"), {"op": "sleep", "s": 0.5},
+            {"op": "frame", "frame": _result(state="on" if fast else "off")}]
+    script = tmp_path / "script.json"
+    script.write_text(json.dumps({
+        "turns": [turn], **({"controls": {"apply_flag_settings": how}} if how else {}),
+    }), encoding="utf-8")
+    return DelegatedLoop(
+        store=MemoryStore(), model="claude-opus-4-7", permission_mode="default",
+        claude_cmd=[sys.executable, str(FAKE)], env={"FAKE_CLAUDE_SCRIPT": str(script)},
+        settings=json.dumps({"fastMode": fast}),
+    )
+
+
+async def _toggle_answered_after_result(loop: DelegatedLoop, *, to: bool) -> tuple[list, asyncio.Task]:
+    sid = (await loop.store.create_session()).session_id
+    loop._session_id = sid
+    tasks: list[asyncio.Task] = []
+
+    async def toggle() -> None:
+        tasks.append(asyncio.create_task(loop.set_run_settings(effort=None, fast=to)))
+        await asyncio.sleep(0)
+
+    seen = await _send(loop, sid, during=toggle)
+    await asyncio.wait(tasks, timeout=20)
+    return seen, tasks[0]
+
+
+@pytest.mark.parametrize("how", ["error", "mute"])
+async def test_a_failed_toggle_answered_after_the_result_leaves_no_false_note(tmp_path, monkeypatch, how):
+    monkeypatch.setattr(delegated_module, "CONTROL_TIMEOUT", 1.0)
+    loop = _late_answer_loop(tmp_path, how)
+    try:
+        seen, toggle = await _toggle_answered_after_result(loop, to=True)
+        # Fast off throughout, as far as anyone confirmed: no note to take back.
+        assert [e for e in seen if isinstance(e, FastModeOutcome)] == []
+        assert isinstance(toggle.exception(), RuntimeError)
+        assert loop.fast_waits_for_next_turn() is False
+        assert loop._fast_setting() is False
+    finally:
+        await loop.aclose()
+
+
+async def test_a_toggle_acknowledged_after_the_result_is_not_called_mid_turn(tmp_path):
+    loop = _late_answer_loop(tmp_path, None)
+    try:
+        seen, toggle = await _toggle_answered_after_result(loop, to=True)
+        assert [e for e in seen if isinstance(e, FastModeOutcome)] == []
+        assert toggle.exception() is None
+        # The turn is over, so the change waits for nothing; the next turn has it.
+        assert loop.fast_waits_for_next_turn() is False
+        assert loop._fast_setting() is True
+    finally:
+        await loop.aclose()
+
+
+async def test_turning_fast_off_unanswered_at_the_result_reports_no_change(tmp_path):
+    loop = _late_answer_loop(tmp_path, "error", fast=True)
+    try:
+        seen, toggle = await _toggle_answered_after_result(loop, to=False)
+        [ran] = [e for e in seen if isinstance(e, FastModeOutcome)]
+        assert (ran.requested, ran.requested_at_end, ran.fast_calls) == (True, True, 1)
+        assert isinstance(toggle.exception(), RuntimeError)
+        assert loop._fast_setting() is True
+    finally:
+        await loop.aclose()
+
+
+async def test_a_turn_begun_while_the_answer_was_pending_started_with_the_setting(tmp_path):
+    loop = _loop(tmp_path, [])
+    make = lambda: StreamJsonMapper(session_id="s", turn_id="t", model="m", user_node_id="n")
+    first, second = make(), make()
+    loop._live_mapper = first
+
+    async def answered_during_the_next_turn(_request, *, on_ack) -> None:
+        loop._live_mapper = second
+        on_ack()
+
+    loop._apply_setting = answered_during_the_next_turn
+    await loop.set_run_settings(effort=None, fast=True)
+    assert (second.fast_at_start, second.fast_acked) == (True, True)
+    assert loop.fast_waits_for_next_turn() is False
+
+
+# ── A safety-check retry is one app turn ───────────────────────────────────
+
+
+def _refused_step(speed: str) -> list[dict]:
+    refusal = {"type": "system", "subtype": "model_refusal_no_fallback", "uuid": "u-1",
+               "original_model": "claude-opus-5-5", "request_id": "req_1",
+               "api_refusal_category": "cyber", "api_refusal_explanation": None,
+               "refused_user_message_uuid": "u-0", "content": "Declined by the safety check"}
+    refused = _assistant("msg_refused", speed, model="claude-opus-5-5")
+    refused["isApiErrorMessage"] = True
+    refused["message"].update(stop_reason="refusal", stop_details={
+        "type": "refusal", "category": "cyber", "explanation": None})
+    return [{"op": "frame", "frame": refusal}, {"op": "frame", "frame": refused},
+            {"op": "frame", "frame": _result(state="on")}]
+
+
+async def _answer_guardrail(loop: DelegatedLoop, sid: str, decision: str) -> None:
+    while True:
+        event = next((e for e in loop.bus.log(sid)
+                      if isinstance(e, PermissionRequest) and e.name == GUARDRAIL_TOOL), None)
+        if event is not None:
+            break
+        await asyncio.sleep(0.02)
+    await loop.submit(RespondPermission(request_id=event.request_id, decision=decision))
+
+
+async def _guardrail_turn(tmp_path: Path, retry: list[dict], decision: str) -> tuple:
+    loop = _loop(tmp_path, [_refused_step("fast"), retry], fast=True, model="claude-opus-5-5")
+    try:
+        sid = (await loop.store.create_session()).session_id
+        loop._session_id = sid
+        answer = asyncio.create_task(_answer_guardrail(loop, sid, decision))
+        seen = await _send(loop, sid)
+        await answer
+        return seen, loop.fast_waits_for_next_turn()
+    finally:
+        await loop.aclose()
+
+
+async def test_a_retried_turn_sums_its_attempts_into_one_note(tmp_path):
+    seen, _ = await _guardrail_turn(
+        tmp_path, [_step("m2", "standard"), {"op": "frame", "frame": _result(reason="model_not_allowed")}], "allow")
+    [ran] = [e for e in seen if isinstance(e, FastModeOutcome)]
+    assert (ran.fast_calls, ran.standard_calls, ran.unknown_calls) == (1, 1, 0)
+    assert (ran.requested, ran.requested_at_end) == (True, True)
+    assert ran.disabled_reason == "model_not_allowed"
+    [done] = [e for e in seen if isinstance(e, TurnComplete)]
+    assert done.num_model_calls == 2
+    # Taken out of the transcript with the declined attempt, it could not have
+    # gone out earlier and stayed.
+    assert any(isinstance(e, AttemptDiscarded) for e in seen)
+    assert seen.index(ran) < seen.index(done)
+
+
+async def test_a_turn_stopped_at_the_safety_check_still_reports_what_ran(tmp_path):
+    seen, _ = await _guardrail_turn(tmp_path, [], "deny")
+    [ran] = [e for e in seen if isinstance(e, FastModeOutcome)]
+    assert (ran.fast_calls, ran.standard_calls) == (1, 0)
+    [done] = [e for e in seen if isinstance(e, TurnComplete)]
+    assert done.stop_reason == "refusal"
+
+
+def test_a_toggle_before_the_retry_was_read_by_the_retry():
+    mapper = StreamJsonMapper(session_id="s", turn_id="t", model="m", user_node_id="n", fast_requested=True)
+    assert [e for e in mapper.feed(_assistant("m1", "fast")).events if isinstance(e, FastModeOutcome)] == []
+    mapper.feed(_result(state="on"))
+    # While the person decides, a toggle waits for nothing: the retry reads it.
+    mapper.fast_acked = False
+    assert mapper.fast_waits is False
+    mapper.carry_attempt({}, None, 1)
+    assert mapper.fast_waits is False
+    mapper.feed(_assistant("m2", "standard"))
+    [ran] = [e for e in mapper.feed(_result()).events if isinstance(e, FastModeOutcome)]
+    assert (ran.requested, ran.requested_at_end) == (False, False)
+    assert (ran.fast_calls, ran.standard_calls) == (1, 1)
+
+
+def test_a_toggle_during_the_retry_waits_like_any_other():
+    mapper = StreamJsonMapper(session_id="s", turn_id="t", model="m", user_node_id="n", fast_requested=False)
+    mapper.feed(_assistant("m1", "standard"))
+    mapper.feed(_result())
+    mapper.carry_attempt({}, None, 1)
+    mapper.feed(_assistant("m2", "standard"))
+    mapper.fast_acked = True
+    assert mapper.fast_waits is True
+    [ran] = [e for e in mapper.feed(_result()).events if isinstance(e, FastModeOutcome)]
+    assert (ran.requested, ran.requested_at_end, ran.standard_calls) == (False, True, 2)
+    assert mapper.fast_waits is False

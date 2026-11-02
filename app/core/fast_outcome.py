@@ -90,9 +90,9 @@ def fast_outcome_note(data: Dict[str, Any]) -> Dict[str, Any]:
 
     parts = [_ran(fast, standard, unknown)]
     if at_end and not requested:
-        parts.append("Fast mode was turned on during this turn, so it starts with your next message.")
+        parts.append("Fast mode was turned on during this turn, so it applies from your next message.")
     elif requested and not at_end:
-        parts.append("Fast mode was turned off during this turn, so it stops with your next message.")
+        parts.append("Fast mode was turned off during this turn, so it applies from your next message.")
     # Only for a turn that asked for Fast throughout. With the setting off,
     # Claude Code reports a reason on every turn, which refuses nothing; and a
     # reason on a turn that only turned it on midway says nothing about the

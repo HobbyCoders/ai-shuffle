@@ -370,6 +370,7 @@ class DevClaude(script.Fake):
         self.fast_flag = _launch_fast()
         self.turn_fast = False
         self.turn_tag: dict[str, str] = {}
+        self.refused_once = False
 
     # ── transcript ──
     def _config_dir(self) -> Path:
@@ -592,7 +593,9 @@ class DevClaude(script.Fake):
     def speed_field(self) -> dict:
         """``usage.speed``. The tag's ``speed=null`` / ``speed=missing`` play the
         records that report none; ``fast_refused=REASON`` and ``fast_cooldown=1``
-        a turn that asked for Fast and ran standard."""
+        a turn that asked for Fast and ran standard. ``refuse_first=CATEGORY``
+        declines the turn's first request on the safety check; the re-sent
+        request runs standard, which is how one app turn comes out partly Fast."""
         how = self.turn_tag.get("speed")
         if how == "missing":
             return {}
@@ -693,16 +696,22 @@ class DevClaude(script.Fake):
         blocks = [b for b in content or [] if isinstance(b, dict)]
         texts = [str(b.get("text") or "") for b in blocks if b.get("type") == "text"]
         command = _COMPACT.match(texts[-1].strip()) if texts else None
-        self.turn_fast = self.fast_flag
         try:
             self.turn_tag = fake_ai.parse_tag(fake_ai.visible("\n".join(texts)))[1]
         except ValueError:
             self.turn_tag = {}
+        category = self.turn_tag.get("refuse_first")
+        retried = bool(category) and self.refused_once
+        self.turn_fast = self.fast_flag and not retried
         log("turn", session_id=self.sid, prompt=fake_ai.visible("\n".join(texts))[:300],
             compact=bool(command), fast=self.turn_fast)
         if command:
             if not self.compact("manual", command.group(1)):  # a skip printed its own result
                 self.result_frame("", num_turns=0)
+            return
+        if category and not retried:
+            self.refused_once = True
+            self.refuse(category)
             return
         full = "\n".join(texts)
         stored = [b if b.get("type") == "text" else {"type": "text", "text": f"[{b.get('type')}]"}
@@ -723,6 +732,25 @@ class DevClaude(script.Fake):
             self._add("user", {"role": "user", "content": prompt},
                       {"role": "user", "text": prompt, "toolUses": []})
         self.result_frame(self.last_text)
+
+    def refuse(self, category: str) -> None:
+        """A request the safety check declined, as Claude Code 2.1.3xx reports it."""
+        self.model_calls += 1
+        self.emit({"type": "system", "subtype": "model_refusal_no_fallback",
+                   "uuid": str(uuid.uuid4()), "original_model": self.model,
+                   "request_id": "req_fake_" + uuid.uuid4().hex[:12],
+                   "api_refusal_category": category, "api_refusal_explanation": None,
+                   "refused_user_message_uuid": str(uuid.uuid4()),
+                   "content": "Declined by the safety check"})
+        text = "API Error: the request was declined"
+        self.emit({"type": "assistant", "isApiErrorMessage": True, "session_id": self.sid,
+                   "parent_tool_use_id": None, "uuid": str(uuid.uuid4()), "message": {
+                       "id": "msg_fake_" + uuid.uuid4().hex[:20], "type": "message",
+                       "role": "assistant", "model": self.model,
+                       "content": [{"type": "text", "text": text}], "stop_reason": "refusal",
+                       "stop_details": {"type": "refusal", "category": category, "explanation": None},
+                       "usage": self.usage()}})
+        self.result_frame(text)
 
     def scenario(self, prompt: str) -> bool:
         """Play the prompt's scenario. True when it already ended the turn."""

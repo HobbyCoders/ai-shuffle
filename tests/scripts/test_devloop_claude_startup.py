@@ -21,6 +21,7 @@ def test_startup_delay_precedes_the_init_frame(monkeypatch, value, seconds):
     monkeypatch.setattr(cli.script.Fake, "init_frame", lambda self: events.append(("init", None)) or {})
     fake = object.__new__(cli.DevClaude)
     fake.model, fake.mcp, fake.disallowed = cli.MODEL, {}, []
+    fake.fast_flag, fake.turn_tag = False, {}
     frame = fake.init_frame()
     assert events == ([("sleep", seconds)] if seconds else []) + [("init", None)]
     assert frame["model"] == cli.MODEL

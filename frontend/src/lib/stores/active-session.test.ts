@@ -49,6 +49,7 @@ vi.mock('./session/ws-connection', () => ({
 
 vi.mock('$app/navigation', () => ({ goto: hoisted.goto }));
 
+import { fastChangeWaits } from '$lib/utils/fast-outcome';
 import { activeSession } from './active-session';
 import { api, recheckAuthOn401 } from '$lib/api/client';
 import { appData } from './app-data.svelte';
@@ -453,37 +454,56 @@ describe('live effort and Fast mode selection', () => {
 	describe('the worker says a Fast change waits for the next message', () => {
 		afterEach(() => {
 			vi.restoreAllMocks();
-			Object.assign(activeSession.current, { sessionId: null, isStreaming: false, fastAppliesNextIn: null });
+			Object.assign(activeSession.current, {
+				sessionId: null, isStreaming: false, liveTurnId: null, fastAppliesTurnId: null
+			});
 		});
 		const start = (extra = {}) => Object.assign(activeSession.current, {
-			sessionId: 'waits', modelOverride: 'opus', fastMode: false, isStreaming: true, fastAppliesNextIn: null, ...extra
+			sessionId: 'waits', modelOverride: 'opus', fastMode: false, isStreaming: true,
+			liveTurnId: 't1', fastAppliesTurnId: null, ...extra
 		});
+		const waits = () => fastChangeWaits(activeSession.current);
 
 		it('records only what the worker answered', async () => {
 			start();
 			vi.spyOn(api, 'put').mockResolvedValueOnce({ effort: 'high', fast: true });
 			await activeSession.setFastMode(true);
-			expect(activeSession.current.fastAppliesNextIn ?? null).toBeNull();
-			vi.spyOn(api, 'put').mockResolvedValueOnce({ effort: 'high', fast: false, fast_applies: 'next_message' });
+			expect(waits()).toBe(false);
+			vi.spyOn(api, 'put').mockResolvedValueOnce({ effort: 'high', fast: false, fast_applies_turn: 't1' });
 			await activeSession.setFastMode(false);
-			expect(activeSession.current.fastAppliesNextIn).toBe('waits');
+			expect(waits()).toBe(true);
 		});
 
 		it('clears when a later answer no longer waits, and a window answer leaves it', async () => {
-			start({ fastAppliesNextIn: 'waits' });
+			start({ fastAppliesTurnId: 't1' });
 			vi.spyOn(api, 'put').mockResolvedValueOnce({ context_window: 200_000 });
 			await activeSession.setContextWindowChoice('standard');
-			expect(activeSession.current.fastAppliesNextIn).toBe('waits');
+			expect(waits()).toBe(true);
 			vi.spyOn(api, 'put').mockResolvedValueOnce({ effort: 'high', fast: false });
 			await activeSession.setFastMode(false);
-			expect(activeSession.current.fastAppliesNextIn ?? null).toBeNull();
+			expect(waits()).toBe(false);
+		});
+
+		it('ends with its turn when the next turn starts in the same feed flush', () => {
+			start({ fastAppliesTurnId: 't1' });
+			expect(waits()).toBe(true);
+			// T1's end and T2's start landed together: streaming never went false.
+			Object.assign(activeSession.current, { isStreaming: true, liveTurnId: 't2' });
+			expect(waits()).toBe(false);
+		});
+
+		it('ignores an answer about a turn that has since ended', async () => {
+			start({ liveTurnId: 't2' });
+			vi.spyOn(api, 'put').mockResolvedValueOnce({ effort: 'high', fast: true, fast_applies_turn: 't1' });
+			await activeSession.setFastMode(true);
+			expect(waits()).toBe(false);
 		});
 
 		it('ends with the turn, even when the answer lands after it', async () => {
-			start({ isStreaming: false });
-			vi.spyOn(api, 'put').mockResolvedValueOnce({ effort: 'high', fast: true, fast_applies: 'next_message' });
+			start({ isStreaming: false, liveTurnId: null });
+			vi.spyOn(api, 'put').mockResolvedValueOnce({ effort: 'high', fast: true, fast_applies_turn: 't1' });
 			await activeSession.setFastMode(true);
-			expect(activeSession.current.fastAppliesNextIn ?? null).toBeNull();
+			expect(waits()).toBe(false);
 		});
 	});
 

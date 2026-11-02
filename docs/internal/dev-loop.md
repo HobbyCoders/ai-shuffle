@@ -418,7 +418,9 @@ mid-turn toggle reaches the next turn. Every assistant record reports
 `usage.speed`, and the result reports `fast_mode_state` and
 `fast_mode_disabled_reason`. Tag options play the other outcomes:
 `speed=null`, `speed=missing`, `fast_refused=REASON` and `fast_cooldown=1`, for
-example `[script:fast-multi fast_refused=free]`.
+example `[script:fast-multi fast_refused=free]`. `refuse_first=CATEGORY` declines the
+turn's first request on the safety check; the request re-sent after Continue
+runs standard, which is the one way a Claude Code turn comes out partly Fast.
 
 A step may add `"result": "..."` or `"result_chars": N` to a tool call,
 `"compact": true`, or `"exit": {"code": 1, "stderr": "..."}`. An MCP call
