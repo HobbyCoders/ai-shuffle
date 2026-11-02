@@ -21,18 +21,11 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
     # whatever else it presents, so it is read before any credential is, and on
     # the same terms as HTTP (``preview_access.enforce_limits``).
     preview = preview_access.grant(websocket) is not None
-    if not token and preview:
-        try:
-            owner_auth.same_origin(websocket)
-        except Exception:
-            return False, None
-        websocket.state.mobile_tool_principal = identity.preview_principal()
-        return True, None
     # Only the actual local listener can establish a passwordless owner:
     # loopback (with the desktop listener token when there is one), or the
     # LAN when the owner turned on trusted LAN. Browsers must send a matching
     # Origin, preventing cross-site WebSocket use.
-    if not token and not websocket.cookies.get('session') and owner_auth.local_access(websocket):
+    if not preview and not token and not websocket.cookies.get('session') and owner_auth.local_access(websocket):
         try:
             owner_auth.same_origin(websocket)
         except Exception:
@@ -83,4 +76,14 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
             websocket.state.mobile_tool_principal = (
                 identity.preview_limited(value) if preview else value)
             return True, user
+    # The cookie admits a socket no credential did, but never stands in for an
+    # explicit credential that failed. A session cookie that fell through here
+    # is obsolete, typically another install's on the same host.
+    if not token and preview:
+        try:
+            owner_auth.same_origin(websocket)
+        except Exception:
+            return False, None
+        websocket.state.mobile_tool_principal = identity.preview_principal()
+        return True, None
     return False, None

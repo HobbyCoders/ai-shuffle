@@ -50,6 +50,7 @@ CREDENTIALS = {
     "owner-token": (OWNER, None),
     "owner-cookie": (None, OWNER),
     "paired-token": (PAIRED, None),
+    "paired-cookie": (None, PAIRED),
     "api-key": (API_KEY, None),
 }
 
@@ -247,6 +248,44 @@ def test_paired_device_stays_that_device_on_both_transports(api, opened):
     assert rest["recorded"] == PAIRED_ID
 
 
+def test_paired_browser_stays_that_device_on_both_transports(api, opened):
+    """Browser pairing carries the device's credential in the session cookie."""
+    assert _socket_close(_client(api, session=PAIRED)) == 1000
+    assert (opened[0]["kind"], opened[0]["principal_id"]) == ("paired", PAIRED_ID)
+    rest = _rest(api, session=PAIRED).json()
+    assert (rest["kind"], rest["principal_id"]) == ("paired", PAIRED_ID)
+
+
+@pytest.mark.parametrize("token, session", [(PAIRED, None), (None, PAIRED)], ids=["token", "cookie"])
+def test_paired_device_can_continue_its_own_chat_under_the_cookie(api, opened, token, session):
+    """Its recorded chat still recognises it, and a revoked device is noticed."""
+    assert _socket_close(_client(api, session=session), token) == 1000
+    value = opened[0]
+    sessions.create_session("sess-own", "default")
+    identity.bind_session("sess-own", value, new=True)
+    identity.bind_session("sess-own", value)
+    identity.revalidate(value)
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE paired_clients SET revoked_at = %s WHERE id = %s",
+                              (datetime.now(timezone.utc).isoformat(), PAIRED_ID))
+    with pytest.raises(PermissionError):
+        identity.revalidate(value)
+
+
+def test_api_key_in_the_session_cookie_stays_its_user_on_the_socket(api, opened):
+    assert _socket_close(_client(api, session=API_KEY)) == 1000
+    assert [caller_of(value) for value in opened] == [CALLER_PREVIEW]
+    assert (opened[0]["kind"], opened[0]["principal_id"]) == ("api_user", API_USER)
+
+
+def test_obsolete_session_cookie_does_not_stop_the_cookie(api, opened):
+    """Another install's cookie on this host, as in an isolated preview."""
+    for stale in ("another-install-session", "shc_another-install-device"):
+        assert _socket_close(_client(api, session=stale)) == 1000
+    assert [caller_of(value) for value in opened] == [CALLER_PREVIEW, CALLER_PREVIEW]
+    assert all(value["kind"] == "admin" for value in opened)
+
+
 def test_api_key_stays_its_user_on_both_transports(api, opened):
     assert _socket_close(_client(api), API_KEY) == 1000
     assert (opened[0]["kind"], opened[0]["principal_id"]) == ("api_user", API_USER)
@@ -272,9 +311,10 @@ def test_chat_created_with_the_cookie_is_recorded_as_the_preview(api, token, ses
     assert _rest(api, token=token, session=session).json()["recorded"] == identity.PREVIEW_PRINCIPAL_ID
 
 
-def test_owner_token_with_the_cookie_still_answers_to_logout(api, opened):
+@pytest.mark.parametrize("token, session", [(OWNER, None), (None, OWNER)], ids=["token", "cookie"])
+def test_owner_login_with_the_cookie_still_answers_to_logout(api, opened, token, session):
     """It stays tied to the login it presented, not to the local listener."""
-    assert _socket_close(_client(api), OWNER) == 1000
+    assert _socket_close(_client(api, session=session), token) == 1000
     assert opened[0]["credential_hash"] == identity.digest(OWNER)
 
 
