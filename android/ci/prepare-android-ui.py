@@ -7,7 +7,7 @@ KeyguardService bind times out while the cold image is still optimizing; runs
 each once, before any Shuffle code is installed. Never dismiss an application
 ANR, never recover during instrumentation, and never turn off Android's dialogs.
 
-Then verify/update the known old emulator WebView (configure_webview) before
+Then verify the stock emulator WebView (configure_webview) before
 the app is installed, keeping all Chromium crash checks enabled.
 """
 
@@ -121,40 +121,26 @@ def prepare(adb, out: Path, *, deadline_seconds=120, required_samples=3, sleep=t
     raise RuntimeError("Emulator never reached a stable unlocked launcher before app verification")
 
 
-# The API 36 AOSP image ships WebView 133, whose intercepted-request lifetime
-# bug aborts Chrome_IOThread during navigation/teardown. Disabling its dangling
-# pointer check merely turned SIGTRAP into a later basic_string SIGABRT (runs
-# 41509192630 and 41509957738). Use the official AOSP QPR1 provider instead; keep
-# every Chromium crash check enabled. Chromium's request WeakPtr fix is 74beb528.
-def install_webview(adb):
-    from ci_webview import verify
-    apk = os.environ.get("CI_WEBVIEW_APK")
-    if not apk:
-        raise RuntimeError("API 36 WebView 133 requires a verified CI_WEBVIEW_APK")
-    verify(apk)
-    adb("install", "-r", apk)
-    adb("shell", "cmd", "webviewupdate", "set-webview-implementation", "com.android.webview")
-
-
-def configure_webview(adb, out: Path, installer=install_webview):
-    from ci_webview import VERSION
+# The API 36 default/AOSP image ships WebView 133. Suppressing its dangling
+# pointer check only moved the native abort to basic_string SIGABRT (runs
+# 41509192630 and 41509957738). Both API 36 jobs now use the stock google_apis
+# image, not a differently signed replacement APK or disabled Chromium checks.
+# Require a provider containing Chromium's intercepted-request WeakPtr fix
+# (74beb528, present in 136) before installing any app under test.
+def configure_webview(adb, out: Path):
     out.mkdir(parents=True, exist_ok=True)
     sdk = adb("shell", "getprop", "ro.build.version.sdk").strip()
-    build_id = adb("shell", "getprop", "ro.build.id").strip()
     provider = adb("shell", "dumpsys", "webviewupdate")
-    (out / "webview-before.txt").write_text(provider, encoding="utf-8")
-    current = re.findall(r"^\s*Current WebView package \(name, version\): \(com\.android\.webview, 133\.0\.6943\.137\)\s*$",
-                         provider, re.MULTILINE)
-    if sdk == "36" and build_id == "BE2A.250530.026.D1" and len(current) == 1:
-        installer(adb)
-        provider = adb("shell", "dumpsys", "webviewupdate")
-        expected = f"Current WebView package (name, version): (com.android.webview, {VERSION})"
-        if provider.count(expected) != 1:
-            raise RuntimeError(f"AOSP WebView update did not become the current provider: {provider}")
-        report_workaround(adb, f"Updated emulator AOSP WebView 133 to pinned {VERSION}; all crash checks enabled")
-    else:
-        print(f"No WebView update for SDK {sdk!r}, build {build_id!r}; keeping crash checks enabled", flush=True)
     (out / "webview.txt").write_text(provider, encoding="utf-8")
+    if sdk == "36":
+        current = re.findall(r"^\s*Current WebView package \(name, version\): \((com\.(?:android|google\.android)\.webview), (\d+)\.\d+\.\d+\.\d+\)\s*$",
+                             provider, re.MULTILINE)
+        if len(current) != 1 or int(current[0][1]) < 136:
+            raise RuntimeError("API 36 requires a stock SDK WebView >= 136; the old AOSP 133 provider is unsafe. "
+                               "Use the google_apis image; no crash check may be suppressed. " + provider.strip())
+        report_workaround(adb, "Stock API 36 WebView contains the request-lifetime fix; all crash checks enabled")
+    else:
+        print(f"SDK {sdk!r}: keeping stock WebView and all crash checks enabled", flush=True)
 
 
 def main():

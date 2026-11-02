@@ -176,16 +176,17 @@ class ArtifactPolicyTests(unittest.TestCase):
             self.assertNotIn("continue-on-error", step)
         self.assertEqual(jobs["publish"]["needs"], ["build", "android-ui"])
 
-    def test_api36_provider_is_staged_for_both_readiness_callers(self):
+    def test_both_api36_readiness_callers_use_the_stock_google_image(self):
         for filename, jobname in (("android.yml", "android-ui"), ("ci-android-minified.yml", "smoke")):
             with self.subTest(workflow=filename):
-                steps = workflow(filename)["jobs"][jobname]["steps"]
-                download = next(s for s in steps if s.get("name") == "Download verified official AOSP WebView for API 36")
-                self.assertEqual("matrix.api == 36", download["if"])
-                self.assertEqual('python3 ci/ci_webview.py "$RUNNER_TEMP/ci-webview.apk"', download["run"])
+                job = workflow(filename)["jobs"][jobname]
+                images = {int(entry["api"]): entry["target"] for entry in job["strategy"]["matrix"]["include"]}
+                self.assertEqual({34: "default", 36: "google_apis"}, images)
+                steps = job["steps"]
                 emulator = next(s for s in steps if s.get("uses", "").startswith("reactivecircus/android-emulator-runner@"))
-                self.assertEqual("${{ runner.temp }}/ci-webview.apk", emulator["env"]["CI_WEBVIEW_APK"])
-                self.assertLess(steps.index(download), steps.index(emulator))
+                self.assertEqual("${{ matrix.target }}", emulator["with"]["target"])
+                avd = next(s for s in steps if "avdmanager create avd" in s.get("run", ""))
+                self.assertIn(";${{ matrix.target }};x86_64", avd["run"])
 
     def test_manual_only_binary_upload_gates_execute(self):
         android = workflow("android.yml")["jobs"]["publish"]["if"]

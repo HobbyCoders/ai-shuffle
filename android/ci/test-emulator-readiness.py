@@ -153,61 +153,53 @@ class EmulatorReadinessTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "never reached"):
             self.run_preparation([HOME, HOME, "mCurrentFocus=null", HOME, HOME, "mCurrentFocus=null"])
 
-    def run_webview(self, sdk=SDK, build_id=BUILD_ID, provider=SYNTHETIC_PROVIDER, update=True):
-        from ci_webview import VERSION as FIXED_VERSION
-        commands, installed = [], []
-        updated = f"Current WebView package (name, version): (com.android.webview, {FIXED_VERSION})\n"
+    def run_webview(self, sdk=SDK, provider=SYNTHETIC_PROVIDER):
+        commands = []
 
         def adb(*args):
             commands.append(args)
             if args[:2] == ("shell", "getprop"):
-                return {"ro.build.version.sdk": sdk, "ro.build.id": build_id}[args[2]] + "\n"
+                return {"ro.build.version.sdk": sdk, "ro.build.id": BUILD_ID}[args[2]] + "\n"
             if args == ("shell", "dumpsys", "webviewupdate"):
-                return updated if installed and update else provider
+                return provider
             return ""
-
-        def installer(connection):
-            self.assertIs(connection, adb)
-            installed.append(True)
 
         self.webview_log = io.StringIO()
         with tempfile.TemporaryDirectory() as folder, redirect_stdout(self.webview_log):
             summary = Path(folder) / "summary"
             with patch.dict("os.environ", {"GITHUB_STEP_SUMMARY": str(summary)}):
-                configure_webview(adb, Path(folder), installer=installer)
-            self.before = (Path(folder) / "webview-before.txt").read_text()
+                configure_webview(adb, Path(folder))
             evidence = (Path(folder) / "webview.txt").read_text()
             self.summary = summary.read_text() if summary.exists() else ""
-        return commands, installed, evidence
+        return commands, evidence
 
-    def test_known_webview_is_updated_without_disabling_crash_checks(self):
-        commands, installed, evidence = self.run_webview()
-        self.assertEqual([True], installed)
-        self.assertIn("136.0.7103.129", evidence)
-        self.assertIn("133.0.6943.137", self.before)
-        self.assertIn("all crash checks enabled", self.webview_log.getvalue())
-        self.assertIn("all crash checks enabled", self.summary)
-        self.assertIn("SDK 36, build BE2A.250530.026.D1", self.summary)
-        self.assertIn("com.android.webview, 136.0.7103.129", self.summary)
-        self.assertFalse(any("disable-features" in " ".join(command) or "webview-command-line" in " ".join(command)
-                             or "force-stop" in command or "kill" in " ".join(command) for command in commands))
+    def test_stock_fixed_providers_keep_every_crash_check(self):
+        for package in ("com.android.webview", "com.google.android.webview"):
+            for version in ("136.0.7103.129", "151.0.0.0"):
+                with self.subTest(package=package, version=version):
+                    provider = f"Current WebView package (name, version): ({package}, {version})\n"
+                    commands, evidence = self.run_webview(provider=provider)
+                    self.assertEqual(provider, evidence)
+                    self.assertIn("all crash checks enabled", self.webview_log.getvalue())
+                    self.assertIn("all crash checks enabled", self.summary)
+                    self.assertIn(f"{package}, {version}", self.summary)
+                    self.assertFalse(any("disable-features" in " ".join(command) or "webview-command-line" in " ".join(command)
+                                         or "force-stop" in command or "kill" in " ".join(command) or "install" in command
+                                         for command in commands))
 
-    def test_other_images_and_providers_keep_all_crash_checks(self):
+    def test_api34_keeps_the_original_stock_image(self):
+        commands, evidence = self.run_webview(sdk="34")
+        self.assertEqual(SYNTHETIC_PROVIDER, evidence)
+        self.assertIn("keeping stock WebView and all crash checks enabled", self.webview_log.getvalue())
+        self.assertEqual([("shell", "getprop", "ro.build.version.sdk"), ("shell", "dumpsys", "webviewupdate")], commands)
+
+    def test_old_or_ambiguous_api36_providers_fail_closed(self):
         known = SYNTHETIC_PROVIDER
-        for overrides in ({"sdk": "34"}, {"sdk": ""}, {"build_id": "new-image"},
-                          {"provider": known.replace("133.0.6943.137", "134.0.0.0")},
-                          {"provider": known.replace("com.android.webview", "com.google.android.webview")},
-                          {"provider": ""}, {"provider": known * 2},
-                          {"provider": known.replace("Current WebView", "Preferred WebView")}):
-            with self.subTest(overrides=overrides):
-                commands, installed, _ = self.run_webview(**overrides)
-                self.assertEqual([], installed)
-                self.assertFalse(any("webview-command-line" in " ".join(command) for command in commands))
-                self.assertIn("keeping crash checks enabled", self.webview_log.getvalue())
-
-    def test_provider_update_fails_closed(self):
-        with self.assertRaisesRegex(RuntimeError, "did not become the current provider"):
-            self.run_webview(update=False)
+        for provider in (known, known.replace("133.0.6943.137", "134.0.0.0"), "", known * 2,
+                         known.replace("Current WebView", "Preferred WebView"),
+                         known.replace("com.android.webview", "com.unknown.provider")):
+            with self.subTest(provider=provider), self.assertRaisesRegex(RuntimeError, "stock SDK WebView >= 136"):
+                self.run_webview(provider=provider)
 
 
 if __name__ == "__main__":
