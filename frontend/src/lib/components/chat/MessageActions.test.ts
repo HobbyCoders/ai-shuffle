@@ -72,7 +72,7 @@ describe('MessageActions gating', () => {
 		await waitFor(() => expect(sessionStorage.getItem('restore-note:s1:unsent-id')).toBeNull());
 		expect(takeUnfinishedRestores('s1', new Set(), 'a-later-page')).toEqual([]);
 	});
-	it('clears the note a moment after a lost answer, once the page has plainly stayed', async () => {
+	it('drops the note as soon as a lost answer has handed the words over, so a reload cannot hand them back again', async () => {
 		vi.useFakeTimers();
 		try {
 			rewind.mockRejectedValue(new TypeError('Failed to fetch'));
@@ -81,9 +81,9 @@ describe('MessageActions gating', () => {
 			await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
 			await vi.advanceTimersByTimeAsync(0);
 			expect(onRewindComplete).toHaveBeenCalledOnce();
-			expect(sessionStorage.getItem('restore-note:s1:unsent-id')).not.toBeNull();
-			await vi.advanceTimersByTimeAsync(1000);
 			expect(sessionStorage.getItem('restore-note:s1:unsent-id')).toBeNull();
+			expect(takeUnfinishedRestores('s1', new Set(), 'a-later-page')).toEqual([]);
+			await vi.advanceTimersByTimeAsync(1000);
 			expect(onRewindComplete).toHaveBeenCalledOnce();
 		} finally { vi.useRealTimers(); }
 	});

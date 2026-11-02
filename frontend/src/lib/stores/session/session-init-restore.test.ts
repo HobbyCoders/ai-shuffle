@@ -12,6 +12,8 @@ vi.mock('./v2/feed-controller', () => ({
 
 import { bumpInitGeneration, claimBootSend, createSessionInit, finishBootReconciliation, getInitGeneration, hasBootSendClaim, releaseBootSend, setSkipRestore, tabWillRestoreChat, type SessionInitDeps } from './session-init';
 import { feedController } from './v2/feed-controller';
+import { holdPendingDraft, releasePendingDraft, writeDraft } from './draft-persistence';
+import { bindSessionOwner } from '../session-owner';
 import type { ActiveSessionState, PersistedSession } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 
@@ -177,6 +179,71 @@ describe('session-init · deep link replaces the restored chat (#1923 follow-up)
 		const { init, getState } = makeInit(null);
 		await init({ deepLinkSessionId: 'chat-b' });
 		expect(getState().sessionId).toBe('chat-b');
+	});
+});
+
+describe('session-init · the saved draft of the chat a reload adopts (#1031)', () => {
+	const EMPTY_DOC = JSON.stringify({ type: 'doc', content: [{ type: 'paragraph' }] });
+	const doc = (text: string) => JSON.stringify({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });
+	const persisted = { sessionId: 'chat-a', title: 'Chat' } as PersistedSession;
+	const adopt = async (draft: string) => {
+		const made = makeInit(persisted);
+		made.deps.setState({ ...made.getState(), draft });
+		await made.init();
+		return made.getState().draft;
+	};
+	beforeEach(() => sessionStorage.clear());
+
+	it('is not hidden by the empty document a composer mounted first has saved', async () => {
+		writeDraft('chat-a', doc('saved words'));
+		expect(await adopt(EMPTY_DOC)).toBe(doc('saved words'));
+	});
+
+	it('is kept next to words typed while boot loaded, earlier words first', async () => {
+		writeDraft('chat-a', doc('saved words'));
+		const draft = await adopt(doc('typed during boot'));
+		expect(draft.indexOf('saved words')).toBeGreaterThan(-1);
+		expect(draft.indexOf('saved words')).toBeLessThan(draft.indexOf('typed during boot'));
+	});
+
+	it('takes words still inside the composer\'s debounce along with it', async () => {
+		writeDraft('chat-a', doc('saved words'));
+		const made = makeInit(persisted);
+		const save = () => { made.deps.setState({ ...made.getState(), draft: doc('just typed') }); };
+		holdPendingDraft(save);
+		await made.init();
+		releasePendingDraft(save);
+		expect(made.getState().draft).toContain('saved words');
+		expect(made.getState().draft).toContain('just typed');
+	});
+
+	it('leaves a chat with no saved draft empty, and keeps typed words without one', async () => {
+		expect(await adopt(EMPTY_DOC)).toBe('');
+		expect(await adopt(doc('typed during boot'))).toBe(doc('typed during boot'));
+	});
+
+	it('is not added again when boot runs again on the chat already open', async () => {
+		writeDraft('chat-a', doc('saved words'));
+		const made = makeInit(persisted);
+		await made.init();
+		const once = made.getState().draft;
+		await made.init();
+		expect(made.getState().draft).toBe(once);
+		expect(once.split('saved words')).toHaveLength(2);
+	});
+
+	it('does not bring back a draft another account left in this tab', async () => {
+		writeDraft('chat-a', doc('the other account'));
+		bindSessionOwner('admin:first', 'admin:second');
+		expect(await adopt(EMPTY_DOC)).toBe('');
+	});
+
+	it('a deep link is adopted the same way', async () => {
+		writeDraft('chat-b', doc('linked chat words'));
+		const made = makeInit(null);
+		made.deps.setState({ ...made.getState(), draft: EMPTY_DOC });
+		await made.init({ deepLinkSessionId: 'chat-b' });
+		expect(made.getState().draft).toBe(doc('linked chat words'));
 	});
 });
 
