@@ -5701,6 +5701,7 @@ def _workflow_prompt_blocks(
     swarm_available: Optional[bool] = None,
     task_available: Optional[bool] = None,
     monitor_available: Optional[bool] = None,
+    suggest_task_available: Optional[bool] = None,
 ) -> List[str]:
     """App-owned additions, generated from the same final manifest as schemas.
 
@@ -5709,7 +5710,7 @@ def _workflow_prompt_blocks(
     surface, while delegated compilation supplies its CLI permission surface.
     ``permitted=None`` means every tool is available. The keyword overrides,
     when given, replace that inference for one tool: the delegated leg decides
-    Swarm, Task and Monitor from what its bridge serves.
+    Swarm, Task, Monitor and SuggestTask from what its bridge serves.
     """
     extra = getattr(options, "extra", None) or {}
     if not extra.get("automatic_workflows", False):
@@ -5720,6 +5721,7 @@ def _workflow_prompt_blocks(
     leaves = None if permitted is None else {name.rsplit("__", 1)[-1] for name in permitted}
     overrides = {
         "Swarm": swarm_available, "Task": task_available, "Monitor": monitor_available,
+        "SuggestTask": suggest_task_available,
     }
 
     def available(name):
@@ -5736,7 +5738,8 @@ def _workflow_prompt_blocks(
         )),
     )
     worker = subagent_system_prompt(
-        extra.get("app_session_id"), task_available=available("Task")
+        extra.get("app_session_id"), task_available=available("Task"),
+        suggest_task_available=available("SuggestTask"),
     )
     return [text for text in (parent, worker) if text]
 
@@ -8034,6 +8037,7 @@ def _delegated_append_text(
         options, _delegated_permitted_names(options, registry),
         swarm_available=offered("Swarm"), task_available=task_offered,
         monitor_available=offered("Monitor"),
+        suggest_task_available=offered("SuggestTask"),
     ))
     parts.extend(_delegated_fluid_context(options))
     parts.extend(_learned_guidance_blocks(options.model))
