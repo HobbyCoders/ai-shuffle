@@ -410,7 +410,7 @@ async def test_owner_pick_in_a_subagents_chat_pins_it(tree):
 
 
 @pytest.mark.asyncio
-async def test_running_subagent_takes_the_change_on_its_next_request(tree, monkeypatch):
+async def test_running_subagent_takes_the_change_without_a_restart(tree, monkeypatch):
     adapter = HarnessAdapter()
     adapter._is_delegated = True
     adapter._options = SessionOptions(model="opus", effort="high", fast=False)

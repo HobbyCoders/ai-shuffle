@@ -242,6 +242,10 @@ class Fake:
                 else:
                     self.mode = req.get("mode") or self.mode
                     self.record("applied", subtype=subtype, value=self.mode)
+        elif subtype == "apply_flag_settings":
+            how = (self.script.get("controls") or {}).get(subtype)
+            if isinstance(how, dict) and self.served[subtype] == 1:
+                time.sleep(float(how.get("late", 0)))
         elif subtype == "get_context_usage":
             how = self.script.get("context_usage", "answer")
             if how == "mute":

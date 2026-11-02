@@ -101,6 +101,7 @@ from fluid.events.model import (
     ContextCompaction,
     DelegatedSurface,
     Event,
+    FastModeOutcome,
     ModelServed,
     PermissionRequest,
     RateLimit,
@@ -592,9 +593,23 @@ class StreamJsonMapper:
         provider: str = "claude",
         user_node_id: str,
         cost_baseline: float | None = 0.0,
+        fast_requested: bool = False,
     ) -> None:
         self.session_id = session_id
         self.turn_id = turn_id
+        # The Fast setting this turn started with, which is the one its
+        # requests run with, and the setting now (the loop updates it when a
+        # toggle lands during the turn).
+        self.fast_at_start = fast_requested
+        self.fast_acked = fast_requested
+        self._fast_attempt_open = True
+        # Where the running attempt's user frame sits on stdin; the loop sets it
+        # when it writes the frame.
+        self.fast_sent_at = 0
+        # Main-conversation model calls of this turn: id → ``usage.speed``.
+        self._call_speeds: dict[str, str | None] = {}
+        self._attempt_speeds: list[str | None] = []
+        self._carried_speeds: list[str | None] = []
         self.model = model
         self.provider = provider
         self.user_node_id = user_node_id
@@ -819,6 +834,63 @@ class StreamJsonMapper:
             events.extend(self._flush_call())
         return events
 
+    def _note_speed(self, msg_id: Any, usage: dict[str, Any]) -> None:
+        """Record a main-conversation call's reported speed.
+
+        One call can have several records, some with no speed; any record that
+        names one settles it. Anything else stays unknown, never a guess.
+        """
+        key = msg_id if isinstance(msg_id, str) and msg_id else f"call-{len(self._call_speeds)}"
+        speed = usage.get("speed")
+        speed = speed if speed in ("fast", "standard") else None
+        self._call_speeds[key] = speed or self._call_speeds.get(key)
+
+    @property
+    def fast_waits(self) -> bool:
+        """The CLI holds a Fast setting the attempt now running did not start with.
+
+        A setting it has not acknowledged does not count. Neither does one set
+        after the attempt's result: the next request starts with it.
+        """
+        return self._fast_attempt_open and self.fast_acked != self.fast_at_start
+
+    def _fast_outcome(self, frame: dict[str, Any], usage: dict[str, Any]) -> list[Event]:
+        """The turn's :class:`FastModeOutcome`, when it has anything to report.
+
+        A result can carry usage no assistant frame did; with no record of any
+        call, that usage stands in for the turn's one call. A result that ran
+        no model (``num_turns`` 0: a local command, a setup failure) says
+        nothing about speed.
+
+        ``requested``/``requested_at_end`` compare what the last attempt started
+        with against what the CLI had acknowledged by this result, so a toggle
+        still unanswered here is not reported: if it is refused, nothing false
+        was said, and the next turn's own note says what ran. The speeds cover
+        every attempt ``carry_attempt`` has kept in this app turn.
+        """
+        if not self._call_speeds and usage and frame.get("num_turns"):
+            self._note_speed(None, usage)
+        speeds = [*self._carried_speeds, *self._call_speeds.values()]
+        self._attempt_speeds = speeds
+        self._carried_speeds = []
+        self._call_speeds = {}
+        self._fast_attempt_open = False
+        requested, at_end = self.fast_at_start, self.fast_acked
+        self.fast_at_start = at_end
+        fast = speeds.count("fast")
+        if not speeds or not (requested or at_end or fast):
+            return []
+        def text(key: str) -> str | None:
+            value = frame.get(key)
+            return value if isinstance(value, str) and value else None
+        return [FastModeOutcome(
+            session_id=self.session_id, turn_id=self.turn_id,
+            requested=requested, requested_at_end=at_end,
+            fast_calls=fast, standard_calls=speeds.count("standard"),
+            unknown_calls=speeds.count(None),
+            state=text("fast_mode_state"), disabled_reason=text("fast_mode_disabled_reason"),
+        )]
+
     def _flush_call(self, *, turn_output: int | None = None) -> list[Event]:
         """Emit the held call's Usage (priced from its counts), if any.
 
@@ -907,9 +979,14 @@ class StreamJsonMapper:
         declined request was billed too, so its totals (which already include
         any earlier carry) are added to every later result. The cost baseline
         moves to the total the CLI just reported, so the next result's cost is
-        its own request's and the two are summed once.
+        its own request's and the two are summed once. The speeds of its calls
+        carry the same way, and the re-sent request reads the Fast setting the
+        CLI holds now.
         """
         self._carried = (dict(usage), cost_usd, int(num_model_calls or 0))
+        self._carried_speeds = self._attempt_speeds
+        self.fast_at_start = self.fast_acked
+        self._fast_attempt_open = True
         if self.cli_total_cost_usd is not None:
             self.cost_baseline = self.cli_total_cost_usd
 
@@ -1158,6 +1235,8 @@ class StreamJsonMapper:
             }
         usage = msg.get("usage")
         msg_id = msg.get("id")
+        if main_thread and isinstance(usage, dict) and model != "<synthetic>":
+            self._note_speed(msg_id, usage)
         pending = self._pending_call
         opened: tuple[str, int] | None = None
         if usage and isinstance(usage, dict):
@@ -1334,6 +1413,7 @@ class StreamJsonMapper:
                 cost_usd=None if cost_from_table else cost,
             ))
         self._log_tool_mix(frame)
+        events.extend(self._fast_outcome(frame, usage))
         turn_usage = dict(usage)
         if self.cli_total_cost_usd is not None:
             # The CLI's own running total, kept for audits.

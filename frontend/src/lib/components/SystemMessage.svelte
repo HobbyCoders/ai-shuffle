@@ -17,6 +17,7 @@
 	import { LIMIT_RESUME_SUBTYPE, pausedLabel } from '$lib/components/chat/limit-resume';
 	import { formatTokenCount } from '$lib/components/chat/context-usage';
 	import { guardrailNoteView } from '$lib/utils/guardrail';
+	import { fastOutcomeNoteView } from '$lib/utils/fast-outcome';
 
 	// Create a local marked instance to avoid mutating global config
 	const localMarked = new Marked({ breaks: true, gfm: true });
@@ -38,6 +39,15 @@
 	// `model_rerouted` / `guardrail_blocked` note is one compact line.
 	const guardrailNote = $derived(
 		guardrailNoteView(
+			message.systemSubtype,
+			message.systemData as Record<string, unknown> | undefined,
+			message.content
+		)
+	);
+
+	// How a turn really ran against Fast mode: one quiet line (app/core/fast_outcome.py).
+	const fastOutcomeNote = $derived(
+		fastOutcomeNoteView(
 			message.systemSubtype,
 			message.systemData as Record<string, unknown> | undefined,
 			message.content
@@ -1183,6 +1193,15 @@
 				{/if}
 			</details>
 		</div>
+	{:else if fastOutcomeNote}
+		<div class="w-full sys-flat" data-testid="fast-outcome-note" data-outcome={fastOutcomeNote.outcome}>
+			<div class="sys-row fast-outcome-note flex items-start gap-2 min-w-0">
+				<svg class="w-4 h-4 mt-0.5 shrink-0 fo-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" />
+				</svg>
+				<p class="m-0 min-w-0 text-sm leading-snug whitespace-normal wrap-anywhere text-muted-foreground">{fastOutcomeNote.text}</p>
+			</div>
+		</div>
 	{:else if guardrailNote}
 		<div class="w-full sys-flat" data-testid="guardrail-note" data-kind={guardrailNote.kind}>
 			<div class="sys-row guardrail-note flex items-start gap-2 min-w-0" title={guardrailNote.detail}>
@@ -1338,6 +1357,20 @@
 
 	.sys-row:hover {
 		background: var(--scrim);
+	}
+
+	/* Fast-mode notes: the icon carries the tone, the sentence stays quiet. */
+	.fast-outcome-note .fo-icon {
+		color: var(--muted-foreground);
+	}
+
+	[data-outcome='fast'] .fo-icon {
+		color: var(--primary);
+	}
+
+	[data-outcome='partial'] .fo-icon,
+	[data-outcome='standard'] .fo-icon {
+		color: color-mix(in oklab, var(--warning) 70%, var(--muted-foreground));
 	}
 
 	/* Safety-check notes: the theme's warning tone on the icon only; a

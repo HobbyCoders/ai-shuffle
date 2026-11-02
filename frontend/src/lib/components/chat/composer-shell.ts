@@ -119,6 +119,8 @@ export interface ComposerSheetProps {
 	fastEnabled?: boolean;
 	/** The chat's own Fast setting has not loaded yet (#418): show it loading and hold the toggle. */
 	fastPending?: boolean;
+	/** The worker said the running turn keeps its speed until the next message. */
+	fastWaitsForNextMessage?: boolean;
 	onToggleFast?: () => void;
 	showCodeControls?: boolean;
 	/** Agent, workspace, branch and runner selectors. */

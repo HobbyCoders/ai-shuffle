@@ -87,6 +87,8 @@ export interface SessionSwitcherDeps {
 
 /** Minimal shape of the one-shot `/live` metadata snapshot used on switch-in. */
 interface LiveSnapshot {
+	/** The running turn a Fast change is waiting out, only while it does. */
+	fast_applies_turn?: string;
 	usage?: {
 		input_tokens?: number;
 		output_tokens?: number;
@@ -753,6 +755,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// #585: the leaving session's live turn id must not bleed into the
 			// target — the target feed re-derives it from its own turn.* events.
 			liveTurnId: null,
+			fastAppliesTurnId: null,
 			turnParked: false,
 			// Same for the live model: the leaving session's rerouted-model note
 			// must not flag a phantom reroute on the target before its feed replays.
@@ -910,6 +913,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const initialEffort = getState().effortLevelOverride;
 		const initialContextChoice = getState().contextWindowChoice;
 		const initialContextPin = getState().contextWindowPin;
+		const initialFastMode = getState().fastMode;
 		const initialBinding = {
 			profile: getState().profile,
 			permissionModeOverride: getState().permissionModeOverride,
@@ -981,6 +985,12 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const snapshotTasks = runningSnapshotTasks(snap);
 		if (!feedController.reconcileRunningTasks(sessionId, snapshotTasks) && snapshotTasks.length > 0) {
 			patch.activeTasks = snapshotTasks;
+		}
+
+		// A Fast change still waiting out the running turn. Not over a pick made
+		// during this fetch, whose own answer speaks for itself.
+		if (getState().fastMode === initialFastMode) {
+			patch.fastAppliesTurnId = snap.fast_applies_turn ?? null;
 		}
 
 		const meta = snap.session_meta;
@@ -1159,6 +1169,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			historyStall: null,
 			// #585: reset the live turn id on newChat (mirrors defaultState).
 			liveTurnId: null,
+			fastAppliesTurnId: null,
 			turnParked: false,
 			// Reset the live model too so no stale reroute flag survives into the
 			// fresh compose screen (mirrors defaultState).

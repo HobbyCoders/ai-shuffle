@@ -225,6 +225,9 @@ export interface ActiveSessionState {
 	bindingUnhydrated?: ComposerBindingFlags;
 	/** Agent / access / Fast fields changed locally and not sent yet. */
 	bindingPicks?: ComposerBindingFlags;
+	/** The running turn a Fast change is waiting out, as the worker named it
+	 *  (the run-settings answer, or `/live` on a reload). See `fastChangeWaits`. */
+	fastAppliesTurnId?: string | null;
 	/** Additional projects for this chat only. The main project remains its cwd. */
 	workspaceProjectIds?: string[];
 	/** Semantic 1M vs model-family standard-window choice for eligible GPT/Claude models. */
@@ -474,7 +477,7 @@ const { subscribe: _subscribe, notifySubscribers: _notifySubscribers, createDeri
 
 function _update(fn: (s: ActiveSessionState) => ActiveSessionState) {
 	const prev = untrack(() => _state);
-	const next = fn(prev);
+	let next = fn(prev);
 	if (next === _state) {
 		// Diagnostic: detect skipped streaming→ended transitions
 		if (prev.isStreaming && !next.isStreaming) {
@@ -848,6 +851,7 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 	const stateKey = field === 'effort' ? 'effortLevelOverride' : field === 'fast' ? 'fastMode' : 'contextWindowChoice';
 	let selected = value;
 	let savedWindow: number | null = null;
+	let fastAppliesTurn: string | null = null;
 	if (sessionId) {
 		// Serialize picks for the same owner/session so a slow earlier request
 		// cannot overwrite a newer pick at the running worker.
@@ -855,7 +859,7 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 		const previous = runSettingQueues.get(queueKey);
 		const apply = () => {
 			if (sessionOwnerEpoch() !== ownerEpoch) return null;
-			return api.put<{ effort: string | null; fast: boolean; context_window: number }>(
+			return api.put<{ effort: string | null; fast: boolean; context_window: number; fast_applies_turn?: string | null }>(
 				`/sessions/${sessionId}/run-settings`, { [field]: value }
 			);
 		};
@@ -865,6 +869,7 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 			const saved = await pending;
 			if (!saved || sessionOwnerEpoch() !== ownerEpoch) return;
 			selected = field === 'context_window' ? contextChoiceFromWindow(saved.context_window, selectedModel) : saved[field];
+			fastAppliesTurn = saved.fast_applies_turn ?? null;
 			if (field === 'context_window' && selected) {
 				savedWindow = saved.context_window;
 				// Navigation reads the sidebar row before its /live refresh. Keep
@@ -903,6 +908,8 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 		...s, [stateKey]: selected,
 		// An acknowledged (or new-compose) Fast pick is a real value (#418).
 		...(field === 'fast' ? markBindingHydrated(s, 'fast') : {}),
+		// A context-window answer says nothing about Fast.
+		...(field !== 'context_window' ? { fastAppliesTurnId: fastAppliesTurn } : {}),
 		...(field === 'context_window' && sessionId && savedWindow != null ? { contextWindowPin: savedWindow } : {})
 	}));
 	persistSession();
