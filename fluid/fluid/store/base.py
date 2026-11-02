@@ -86,6 +86,13 @@ async def persist_event(store: SessionStore, event: Event) -> None:
         await store.append_event(event.session_id, event)
 
 
+def discard_events(store: SessionStore, session_id: str) -> None:
+    """Forget deltas ``persist_event`` left batched; a no-op for other stores."""
+    discard = getattr(store, "discard_pending_events", None)
+    if callable(discard):
+        discard(session_id)
+
+
 async def flush_events(store: SessionStore, session_id: str) -> None:
     """Commit any deltas ``persist_event`` left batched; a no-op for other stores."""
     flush = getattr(store, "flush_events", None)

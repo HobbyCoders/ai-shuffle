@@ -59,6 +59,13 @@ class ProviderAdapter(ABC):
         """Replace a connection without ending application-owned session work."""
         await self.disconnect(session_id=session_id)
 
+    async def release_dead_transport(self) -> None:
+        """Free OS resources of a client being dropped as dead, without closing it.
+
+        A replacement client may already own the session, so this must not
+        publish events or end session work. Nothing to do for most adapters.
+        """
+
     @abstractmethod
     def is_alive(self) -> bool:
         """Check if the backend process is still running.

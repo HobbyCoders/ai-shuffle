@@ -1548,6 +1548,12 @@ class HarnessAdapter(ProviderAdapter):
             self._store = None
             self._registry = None
 
+    async def release_dead_transport(self) -> None:
+        """Free the delegated engine's CLI and bridge; a native one holds neither."""
+        release = getattr(self._engine, "release_abandoned", None)
+        if release is not None:
+            await release()
+
     def is_alive(self) -> bool:
         """Whether the engine exists, is connected, and can still send.
 
