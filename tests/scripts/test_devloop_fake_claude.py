@@ -362,7 +362,8 @@ def test_compact_posts_to_the_bridge_then_replays_the_answer_with_fresh_uuids(tm
     statuses = [f.get("status") for f in frames if f.get("subtype") == "status"]
     assert statuses == ["compacting", None]
     boundary = next(f for f in frames if f.get("subtype") == "compact_boundary")
-    assert boundary["logical_parent_uuid"] == handles[-1]
+    # As on real CLIs, the boundary follows an entry the mod does not post.
+    assert boundary["logical_parent_uuid"] and boundary["logical_parent_uuid"] not in handles
     replayed = [f for f in frames[frames.index(boundary) + 1:] if f["type"] in ("user", "assistant")]
     assert [f["type"] for f in replayed] == ["user", "assistant", "assistant", "user", "assistant"]
     assert not {f["uuid"] for f in replayed} & set(handles)

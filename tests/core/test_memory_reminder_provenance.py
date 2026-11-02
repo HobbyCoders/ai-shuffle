@@ -186,9 +186,14 @@ async def test_a_memory_snapshot_cut_from_the_put_back_is_not_credited(monkeypat
         loop._track_main_compaction(compacting)
         result = await loop._cli_session_start({"source": "compact"})
         context = result["hookSpecificOutput"]["additionalContext"]
-        assert "[memory cut:" in context and "Today's date" in context
+        assert "[memory continues" in context and "Today's date" in context
         assert adapter._memory_put_back is None
         assert not loop._compaction_context_restored
+        statuses = {s["name"]: s["status"] for s in loop.last_restoration["sections"]}
+        assert statuses["memory"] == "pending" and statuses["environment"] == "delivered"
+        # Too long to ever go out whole: it stays uncredited for the next message.
+        assert await loop._finish_restoration() == ""
+        assert adapter._memory_put_back is None
         statuses = {s["name"]: s["status"] for s in loop.last_restoration["sections"]}
         assert statuses["memory"] == "cut" and statuses["environment"] == "delivered"
     finally:

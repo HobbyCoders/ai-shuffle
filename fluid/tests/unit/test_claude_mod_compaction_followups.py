@@ -446,18 +446,37 @@ def _pairs(emitted: list) -> list[tuple[str, str]]:
 
 
 async def test_no_checkpoint_for_an_answer_claude_code_did_not_apply():
-    """A boundary that names another conversation was not this answer's (it
-    fell back, or another compaction ran), so nothing is written."""
+    """Rows kept beside a summary are Claude Code's summarizer standing in: it
+    fell back, so nothing is written and the answer closes."""
     chat = Chat()
     chat.grow(24)
     loop, sid = await _loop_with(chat)
     try:
         status, body = await _request(loop, {'v': 1, 'trigger': 'manual', 'messages': chat.cli})
         assert status == 200
-        emitted = await _read(loop, sid, [COMPACTING, _boundary('not-a-posted-row')])
+        fell_back = {**_boundary('not-a-posted-row'), 'compact_metadata': {
+            **BOUNDARY['compact_metadata'], 'preserved_segment': {'head_uuid': 'a', 'tail_uuid': 'b'},
+        }}
+        emitted = await _read(loop, sid, [COMPACTING, fell_back])
         [event] = [e for e in emitted if isinstance(e, ContextCompaction)]
         assert event.compaction_id.startswith('cmp_') and event.compaction_id != body['compaction_id']
         assert not [e for e in emitted if isinstance(e, CompactionCheckpoint)]
+        assert loop._open_txns == []
+    finally:
+        await loop.aclose()
+
+
+async def test_a_boundary_naming_a_row_the_mod_never_posted_applied_the_answer():
+    """#755: real boundaries name an attachment or a stop-hook entry (97 of 105,
+    2.1.312-2.1.316), so an unknown parent says nothing about whose it was."""
+    chat = Chat()
+    chat.grow(24)
+    loop, sid = await _loop_with(chat)
+    try:
+        _, body = await _request(loop, {'v': 1, 'trigger': 'auto', 'messages': chat.cli})
+        emitted = await _read(loop, sid, [COMPACTING, _boundary('an-attachment-entry')])
+        cid = body['compaction_id']
+        assert _pairs(emitted) == [('ContextCompaction', cid), ('CompactionCheckpoint', cid)]
     finally:
         await loop.aclose()
 

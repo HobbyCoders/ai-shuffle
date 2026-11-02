@@ -68,6 +68,7 @@ from fluid.context.recall import parse_ref
 from fluid.context.steer_render import (
     CURRENT_RENDER_VERSION,
     RENDER_VERSION_LEGACY,
+    RENDER_VERSION_V2,
     SteerRenderConfig,
     render_steers,
 )
@@ -206,6 +207,14 @@ class CompactionConfig:
     # a real user's turn-start text gets ``user_turn_text_cap`` instead.
     user_text_cap: int = 600
     user_turn_text_cap: int = 2_000
+    # Render version 3 (#996). The session's opening request is the agent's
+    # brief: it digests and pins at this cap. A delivered agent's message that
+    # opened a turn digests at ``peer_turn_text_cap``, and an epoch stub keeps
+    # the newest such messages, verbatim, in ``peer_pin_chars`` of its own, so
+    # they never push a person's request out of the intent pin.
+    brief_text_cap: int = 12_000
+    peer_turn_text_cap: int = 6_000
+    peer_pin_chars: int = 12_000
     assistant_text_cap: int = 400
     tool_line_cap: int = 120
     error_text_cap: int = 2_000
@@ -702,6 +711,138 @@ def is_wake_text(text: str) -> bool:
     )
 
 
+def _opens_session(node: SessionNode) -> bool:
+    """This node opened the session: an agent's brief, a person's or another
+    agent's. A harness wake or a task notification is no brief, even first."""
+    if node.parent_id is not None or node.message.role != "user":
+        return False
+    text = _user_text(node)
+    return bool(text) and (text.startswith(PEER_OPEN_PREFIX) or not is_wake_text(text))
+
+
+def _peer_pin(
+    spans: list[list[SessionNode]], config: CompactionConfig, *, steers: bool = False,
+) -> list[str]:
+    """The agents' messages that opened folded turns, newest first while they
+    fit ``peer_pin_chars``, in delivery order. Each stays whole (a message too
+    long for what is left is named for recall), and the session's opening
+    message is left out, because the intent pin already carries it.
+
+    ``steers`` adds what was delivered on tool results, for a render that does
+    not carry those itself. A harness notice is no instruction: it stays out.
+    """
+    opening = spans[0][0] if spans and spans[0] else None
+    found: list[tuple[str, str]] = []
+    for span in spans:
+        for node in span:
+            if is_turn_start(node):
+                text = _user_text(node)
+                if text.startswith(PEER_OPEN_PREFIX) and not (
+                    node is opening and _opens_session(node)
+                ):
+                    found.append((node.node_id, text))
+            elif steers:
+                found.extend(
+                    (node.node_id, steer.render().strip())
+                    for block in node.message.content if isinstance(block, ToolResultBlock)
+                    for steer in block.delivered_steers if steer.origin != "system"
+                )
+    room = config.peer_pin_chars
+    kept: list[str] = []
+    left_out = 0
+    for node_id, text in reversed(found):
+        if len(text) > room:
+            left_out += 1
+            continue
+        room -= len(text)
+        kept.append(f"agent message ({node_id}):\n{text}")
+    kept.reverse()
+    if left_out:
+        kept.insert(0, f"({left_out} older agent message(s) not kept here for space"
+                    + ("; HistoryExpand the epoch to read them)" if config.recall_tools else ")"))
+    return kept
+
+
+def _instructions_pin(nodes: list[SessionNode], config: CompactionConfig) -> list[str]:
+    """What a model-written checkpoint carries verbatim from render version 3:
+    the brief and every message delivered in the run it replaced. The model may
+    paraphrase or drop them, and nothing else on the path repeats them (#996).
+    A person's later requests stay the checkpoint's own first section."""
+    if config.render_version <= RENDER_VERSION_V2 or not nodes:
+        return []
+    lines: list[str] = []
+    if _opens_session(nodes[0]):
+        lines += [f"original request, verbatim ({nodes[0].node_id}):",
+                  _clip_verbatim(_user_text(nodes[0]), config.brief_text_cap)]
+    pinned = _peer_pin(split_spans(nodes), config, steers=True)
+    return [*lines, *pinned]
+
+
+INSTRUCTIONS_LEAD = (
+    "What you were told before this compaction, repeated because the compacted "
+    "conversation may no longer show it. It still stands unless a later message changed it."
+)
+INSTRUCTIONS_BRIEF_CHARS = 12_000  # as much as a fold keeps (``brief_text_cap``)
+INSTRUCTIONS_MAX_CHARS = 15_000
+
+
+def told_on_path(nodes: list[SessionNode]) -> tuple[str, list[tuple[str | None, str]]]:
+    """What this path told the agent: its brief (the session's opening request,
+    "" for none) and each message delivered to it as the model read it, once, in
+    order, beside the tool result that carried it (None for a turn of its own).
+    Harness notices are not instructions: they stay out, as does a session
+    opened by a typed /compact."""
+    brief = ""
+    told: list[tuple[str | None, str]] = []
+    seen: set[str] = set()
+
+    def add(carrier: str | None, text: str) -> None:
+        if text not in seen:
+            seen.add(text)
+            told.append((carrier, text))
+
+    for node in nodes:
+        if is_turn_start(node) and node.message.role == "user":
+            text = _user_text(node)
+            if _opens_session(node):
+                brief = "" if text.startswith("/compact") else text
+            elif text.startswith(PEER_OPEN_PREFIX):
+                add(None, text)
+            continue
+        for block in node.message.content:
+            if isinstance(block, ToolResultBlock):
+                for steer in block.delivered_steers:
+                    if steer.origin != "system":
+                        add(block.tool_use_id, steer.render().strip())
+    return brief, told
+
+
+def render_told(brief: str, messages: list[str]) -> str | None:
+    """A note repeating ``brief`` and ``messages``, or None for neither. Bounded,
+    newest messages first, and names what did not fit."""
+    if not brief and not messages:
+        return None
+    lines = [INSTRUCTIONS_LEAD]
+    room = INSTRUCTIONS_MAX_CHARS
+    if brief:
+        clipped = brief[:INSTRUCTIONS_BRIEF_CHARS]
+        if len(clipped) < len(brief):
+            clipped += f"… (+{len(brief) - len(clipped)} chars; HistorySearch finds the rest)"
+        lines += ["Your original brief:", clipped]
+        room -= len(clipped)
+    chosen: list[str] = []
+    for text in reversed(messages):
+        if len(text) <= room:
+            room -= len(text)
+            chosen.append(text)
+    if len(chosen) < len(messages):
+        lines.append(f"({len(messages) - len(chosen)} older message(s) not repeated for "
+                     "space; HistorySearch finds them)")
+    if chosen:
+        lines += ["Messages delivered to you:", *reversed(chosen)]
+    return "\n".join(lines)
+
+
 def _clip_verbatim(text: str, cap: int) -> str:
     """Like ``_clip`` but keeps the text's own line breaks and spacing."""
     if len(text) <= cap:
@@ -718,20 +859,30 @@ def _intent_pin(
     real user requests newest-first, each clipped to ``user_turn_text_cap``,
     while they fit in ``intent_pin_tokens``. Wake and harness notices are
     left out, so they can never push a user's request out of the budget.
+
+    From render version 3 the session's opening request is the brief: it is
+    pinned even when an agent sent it, at ``brief_text_cap``, with the ref to
+    read the rest when it is longer still.
     """
-    requests = [
-        (node.node_id, text)
+    v3 = config.render_version > RENDER_VERSION_V2
+    found = [
+        (node, text)
         for span in spans
         for node in span
         if is_turn_start(node)
-        and not is_wake_text(text := _user_text(node))
+        and ((v3 and node is spans[0][0] and _opens_session(node))
+             or not is_wake_text(_user_text(node)))
+        and (text := _user_text(node))
     ]
-    if not requests:
+    if not found:
         return []
+    requests = [(node.node_id, text) for node, text in found]
     cap = config.user_turn_text_cap
     budget = config.intent_pin_tokens * 4
     first_id, first_text = requests[0]
-    first = _clip_verbatim(first_text, cap)
+    opens = v3 and found[0][0] is spans[0][0] and _opens_session(found[0][0])
+    first_cap = config.brief_text_cap if opens else cap
+    first = _clip_verbatim(first_text, first_cap)
     budget -= len(first)
     lines = [
         "Pinned intent: the user's own requests in these folded turns, "
@@ -849,6 +1000,7 @@ def render_span_digest(
     """
     steer_cfg = _steer_config(config)
     v2 = config.render_version > RENDER_VERSION_LEGACY
+    v3 = config.render_version > RENDER_VERSION_V2
     calls = {
         block.id: block
         for node in span if node.message.role == "assistant"
@@ -905,9 +1057,13 @@ def render_span_digest(
                 cap = config.user_text_cap
                 if steer_cfg is not None and not is_wake_text(user_text):
                     cap = config.user_turn_text_cap
-                lines.append(
-                    f"user ({node.node_id}): {_clip(user_text, cap)}"
-                )
+                if v3 and _opens_session(node):
+                    line = _clip_verbatim(user_text, config.brief_text_cap)
+                elif v3 and user_text.startswith(PEER_OPEN_PREFIX):
+                    line = _clip_verbatim(user_text, config.peer_turn_text_cap)
+                else:
+                    line = _clip(user_text, cap)
+                lines.append(f"user ({node.node_id}): {line}")
         elif message.role == "assistant":
             texts = [b for b in message.content if isinstance(b, Text)]
             if texts:  # the last text block is the conclusion
@@ -977,6 +1133,7 @@ def render_epoch_stub(
         text = "\n".join([
             text, _outrank_line(config), *_call_inventory(spans),
             *_intent_pin(spans, config),
+            *(_peer_pin(spans, config) if config.render_version > RENDER_VERSION_V2 else []),
         ])
     deliveries = [Text(s) for span in spans for node in span
                   for block in node.message.content if isinstance(block, ToolResultBlock)
@@ -1344,7 +1501,7 @@ class Compactor:
                 end, text = summary
                 j = index[end]
                 out.append((i, j, _carry_pins(
-                    self._summary_message(node.node_id, end, text), pins, i, j,
+                    self._summary_message(node.node_id, end, text, nodes[i:j + 1]), pins, i, j,
                     as_of(node.node_id, end),
                 )))
                 i = j + 1
@@ -2847,7 +3004,11 @@ class Compactor:
                 promotions.append(promo)
         return promotions
 
-    def _summary_message(self, start: str, end: str, text: str) -> Message:
+    def _summary_message(
+        self, start: str, end: str, text: str, folded: list[SessionNode] | None = None,
+    ) -> Message:
+        """The checkpoint for ``start..end``. ``folded`` is that run of nodes, for
+        the instructions it keeps verbatim, by the version the span was decided at."""
         ref = start if start == end else f"{start}..{end}"
         header = (
             f"[checkpoint summary of {ref} — written by the model from the compacted history; "
@@ -2857,7 +3018,9 @@ class Compactor:
             "the originals are not recoverable in this session, so do not reconstruct "
             "their detail from memory]"
         )
-        return Message(role="user", content=[Text(text=f"{header}\n{_outrank_line(self.config)}\n{text}")])
+        pinned = _instructions_pin(folded or [], self._config_at(start, end))
+        body = "\n".join([header, _outrank_line(self.config), text, *pinned])
+        return Message(role="user", content=[Text(text=body)])
 
     def summary_region(
         self, nodes: list[SessionNode], *, context_window: int | None = None,
@@ -2977,7 +3140,7 @@ class Compactor:
         # A ready checkpoint has an exact rendered estimate. Otherwise reserve
         # the configured output budget plus its recoverability header.
         text = pending[2] if pending and pending[:2] == (start, end) else ""
-        summary_tokens = (estimate_tokens_of_messages([candidate._summary_message(start, end, text)])
+        summary_tokens = (estimate_tokens_of_messages([candidate._summary_message(start, end, text, nodes[:stop])])
                           + (0 if text else self.config.summary_max_output_tokens / max(scale, 0.01)))
         projected = overhead_tokens + summary_tokens + estimate_tokens_of_messages(candidate.view(nodes[stop:]))
         return int(min(ladder, projected) * scale)

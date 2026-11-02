@@ -88,9 +88,10 @@ from fluid.engine.claude_mod_usage import USAGE_PATH, PlanUsageReport, parse_pla
 from fluid.engine.claude_mod_compaction import (
     COMPACT_PATH, MAX_COMPACT_BODY_BYTES, NothingToCompact, ReplayFilter, compact_messages,
 )
+from fluid.context.compaction import render_told, told_on_path
 from fluid.context.recall import HistoryRecall
 from fluid.engine.compact_restore import (
-    DELIVERED, RestorationSection, as_sections, pack_sections,
+    SEPARATOR, RestorationQueue, RestorationSection, as_sections,
 )
 from fluid.engine.delegated_proto import (
     FORCED_CHILD_ENV,
@@ -157,6 +158,7 @@ from fluid.hooks.bus import (
     TURN_START,
 )
 from fluid.messages import Image, Message, Text
+from fluid.messages.content import SteerDelivery, ToolResultBlock
 from fluid.providers._retry import is_usage_limit_text
 from fluid.store.base import (
     SessionMeta,
@@ -244,6 +246,13 @@ _COMPACT_HOOK_EVENTS = ("SessionStart",)
 # how many characters its sections may add together (``compact_restore``).
 COMPACT_CONTEXT_TIMEOUT = 5.0
 COMPACT_CONTEXT_MAX_CHARS = 24_000
+# Claude Code saves hook context over 10,000 characters to a file and shows the
+# model a 2 KB preview (2.1.316, ``USe``), so one answer stays under that. A note
+# longer than this goes out in parts (``RestorationQueue``).
+HOOK_CONTEXT_INLINE_CHARS = 9_500
+# What the "instructions" section may repeat: the brief, then messages, newest first.
+# Delivered messages a running leg remembers for that section.
+MAX_REMEMBERED_DELIVERIES = 200
 # Callback ids name their event, so an answer never depends on registration
 # order surviving a respawn.
 _HOOK_CALLBACK_PREFIX = "fluid_"
@@ -567,12 +576,35 @@ class _CompactionTxn:
     # never (``MOD_COMPACT_WAIT_S``).
     answered: float = field(default_factory=time.monotonic)
 
+    def shows(self) -> tuple[str, set[str]]:
+        """What this answer leaves readable: its rows' text (whitespace
+        collapsed, as a digest collapses it), and the tool calls whose rows stay
+        with their handle, so the hook context grouped on them stays too."""
+        texts: list[str] = []
+        kept: set[str] = set()
+        for row in self.rows:
+            texts.append(str(row.get("text") or ""))
+            for result in row.get("toolResults") or []:
+                texts.append(str(result.get("text") or ""))
+                if row.get("handle"):
+                    kept.add(str(result.get("tool_use_id") or ""))
+        return " ".join(" ".join(texts).split()), kept
+
     def names(self, parent: str) -> int:
         """2 when ``parent`` is the last row this answer compacted, 1 when it
         is one of its rows, else 0."""
         if self.handles and self.handles[-1] == parent:
             return 2
         return 1 if parent in self.handles else 0
+
+
+def _summarizer_boundary(frame: dict[str, Any]) -> bool:
+    """Only Claude Code's own summarizer keeps rows beside its summary; the mod's
+    mechanical boundary has none (2.1.312-2.1.316)."""
+    metadata = frame.get("compact_metadata")
+    return isinstance(metadata, dict) and bool(
+        metadata.get("preserved_segment") or metadata.get("preserved_messages")
+    )
 
 
 def _posted_handles(rows: Any) -> tuple[str, ...]:
@@ -2159,6 +2191,25 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     time.monotonic() - started)
         return {"messages": messages, "compaction_id": compaction_id}
 
+    # The sections of the newest note not all out yet (#755), the provider call
+    # that outlived its time, and the id of a compaction no Fluid answer carries,
+    # set when its note goes out. Class defaults: a loop built without
+    # ``__init__`` has them too, as it has ``_replay_filter``.
+    _restoration: RestorationQueue | None = None
+    _restoration_late: asyncio.Future[Any] | None = None
+    _unanswered_compaction_id: str = ""
+
+    @property
+    def _boundary_steers(self) -> dict[str, list[SteerDelivery]]:
+        """Steers a tool-boundary answer carried, by tool call, until that call's
+        result is stored."""
+        return self.__dict__.setdefault("_boundary_steers_by_call", {})
+
+    @property
+    def _delivered(self) -> list[tuple[str | None, SteerDelivery]]:
+        """What this leg delivered, with the call it rode, for the put-back."""
+        return self.__dict__.setdefault("_delivered_steers", [])
+
     @property
     def _replay_filter(self) -> ReplayFilter:
         """This leg's :class:`ReplayFilter` (made on first use for a loop
@@ -2194,44 +2245,45 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._compaction_context_restored = False
 
     def _bind_compaction(self, frame: dict[str, Any], summary: str) -> str:
-        """The transaction id of the compaction this main ``compact_boundary``
-        reports; a fresh one for a compaction Fluid did not answer.
+        """The compaction id of this main ``compact_boundary``: the id of the
+        Fluid answer it applied, else the one its restoration note already used,
+        else a fresh one.
 
-        A boundary with Claude Code's own summary came from its summarizer,
-        never from a Fluid answer; the answers it names leave the open list
-        unapplied. Otherwise the boundary's
-        ``logical_parent_uuid`` names the answer it applied (see
-        ``_CompactionTxn``): the newest answer whose last row it is (a retry
-        of the same compaction supersedes an earlier answer), else the oldest
-        answer that holds it (a kept row can reappear in a later answer).
-        A CLI that sends no ``logical_parent_uuid`` takes the newest open
-        answer. The applied answer and every older one leave the open list:
-        compactions in one CLI run one at a time, so an older answer can
-        never apply later.
+        ``logical_parent_uuid`` is only a preference among several open answers:
+        on real workers it is almost never a row the mod posted (an attachment or
+        a stop-hook entry the mod's projection skips, or a uuid not in the
+        transcript: 97 of 105 mechanical boundaries, Claude Code 2.1.312-2.1.316).
+        The order of frames says nothing either, as a bridge answer can be given
+        before stdout is read, so a ``compacting`` frame read after it may have
+        been printed before it.
+
+        A boundary from Claude Code's own summarizer has a summary or preserved
+        rows, and every answer still open will never apply: compactions in one
+        CLI run one at a time. Any other main boundary applied the answer it
+        names, else the newest one the mod could still be applying. The applied
+        answer and every older one leave the open list.
         """
         txns = self._open_txns
+        if summary or _summarizer_boundary(frame):
+            if txns:
+                logger.info("compaction %s was summarized by Claude Code instead; "
+                            "its Fluid answer was not applied", txns[-1].compaction_id)
+                txns.clear()
+            return self._take_unanswered_id()
         parent = frame.get("logical_parent_uuid")
-        if not isinstance(parent, str):
-            parent = ""
-        named: int | None = None
-        if txns and parent:
+        chosen: int | None = None
+        if txns and isinstance(parent, str) and parent:
             last = [i for i, txn in enumerate(txns) if txn.names(parent) == 2]
             held = [i for i, txn in enumerate(txns) if txn.names(parent) == 1]
-            named = last[-1] if last else held[0] if held else None
-        if summary:
-            if named is not None:
-                # The summarizer stood in for the compaction these answers
-                # were for (the mod fell back): none of them will apply.
-                logger.info("compaction %s was summarized by Claude Code instead; "
-                            "its Fluid answer was not applied", txns[named].compaction_id)
-                del txns[: named + 1]
-            return new_id("cmp")
-        chosen = named if parent else (len(txns) - 1 if txns else None)
+            chosen = last[-1] if last else held[0] if held else None
+        if chosen is None and self._latest_compaction_answer() is not None:
+            chosen = len(txns) - 1
         if chosen is None:
             if txns:
-                logger.info("a compaction boundary names none of the %d open Fluid answers; "
-                            "it is not theirs and gets no checkpoint", len(txns))
-            return new_id("cmp")
+                logger.info("a compaction boundary came after the mod stopped waiting for "
+                            "the %d open Fluid answers; it gets no checkpoint", len(txns))
+                txns.clear()
+            return self._take_unanswered_id()
         txn = txns[chosen]
         del txns[: chosen + 1]
         # The rows Claude Code may print next are this answer's (#679).
@@ -2241,7 +2293,15 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             applied[txn.compaction_id] = txn
             for stale in list(applied)[:-MAX_OPEN_COMPACTIONS]:
                 applied.pop(stale, None)
+        self._unanswered_compaction_id = ""
         return txn.compaction_id
+
+    def _take_unanswered_id(self) -> str:
+        """The id of a compaction Fluid did not answer: its note (SessionStart
+        comes before the boundary) named it first, so both carry one id."""
+        compaction_id = self._unanswered_compaction_id or new_id("cmp")
+        self._unanswered_compaction_id = ""
+        return compaction_id
 
     async def _emit_compaction_checkpoint(self, event: ContextCompaction) -> None:
         """After Claude Code reports a compaction: persist the portable form
@@ -2695,10 +2755,15 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         compaction lost context after the host planned this turn's note.
         """
         fresh = self._spawn_resume is None and not self._proc_results
-        if (not fresh and not self._context_restore_pending) or self.fresh_context is None:
-            return content, context_pin
-        note = await self.fresh_context(content, context_pin)
-        self._context_restore_pending = False
+        due = fresh or self._context_restore_pending
+        rest = await self._finish_restoration()
+        note = None
+        if due and self.fresh_context is not None:
+            note = await self.fresh_context(content, context_pin)
+            self._context_restore_pending = False
+        if rest:
+            self._context_restore_pending = False
+        note = SEPARATOR.join(part for part in (note, rest) if part)
         if not note:
             return content, context_pin
         restored = [*content, Text(note)]
@@ -3064,6 +3129,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if op.origin != "user":
             self._unacked_notices.append((record, False))
             return
+        self._delivered_on(None, [SteerDelivery(id=op.id, text=op.text)])
         await self._emit(SteerDelivered(
             session_id=self.session_id, turn_id=self._active_turn_id,
             steers=[record],
@@ -3237,7 +3303,16 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             return []  # a subagent's call, whatever id it reuses
         if asyncio.get_running_loop().time() - asked_at > PEER_BOUNDARY_HOOK_BUDGET:
             return []
-        peers, self._pending_peers = self._pending_peers, []
+        # One answer stays inline: over the CLI's limit the model would read only
+        # a preview. The rest wait for the next boundary, in order. A single
+        # message over it still goes (its whole text is saved to the CLI's file).
+        peers, room = [], HOOK_CONTEXT_INLINE_CHARS
+        for op in self._pending_peers:
+            room -= len(self._boundary_text([op])) + 2
+            if peers and room < 0:
+                break
+            peers.append(op)
+        self._pending_peers = self._pending_peers[len(peers):]
         context = self._boundary_text(peers)
         specific = output.get("hookSpecificOutput")
         if not isinstance(specific, dict):
@@ -3305,6 +3380,29 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         peers, self._pending_peers = self._pending_peers, []
         return peers
 
+    def _delivered_on(
+        self, tool_use_id: str | None, deliveries: list[SteerDelivery],
+    ) -> None:
+        """Remember what a tool boundary carried (#996). The CLI keeps it as an
+        attachment grouped on a row, which a compaction loses with that row, so
+        the stored result carries it too, as NativeLoop's does. The CLI finishes
+        the hook before it prints the result, so the node is written after this."""
+        if tool_use_id:
+            self._boundary_steers.setdefault(tool_use_id, []).extend(deliveries)
+        self._delivered.extend((tool_use_id, delivery) for delivery in deliveries)
+        del self._delivered[:-MAX_REMEMBERED_DELIVERIES]
+
+    def _record_boundary_steers(self, message: Message) -> None:
+        """Put the steers carried by a tool's boundary on its stored result."""
+        if not self._boundary_steers or message.role != "user":
+            return
+        for block in message.content:
+            if isinstance(block, ToolResultBlock):
+                carried = self._boundary_steers.pop(block.tool_use_id, None)
+                if carried:
+                    block.delivered_steers = [*block.delivered_steers, *carried]
+                    block.delivery_metadata_version = 1
+
     def _forget_boundary(self, peers: list[AgentMessage | Steer]) -> None:
         """The CLI never got ``peers``: no receipt, and the host's queued row
         runs through ordinary scheduling."""
@@ -3322,6 +3420,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         stream-json, so this receipt is the only record that places it in
         the transcript.
         """
+        deliveries = [
+            SteerDelivery(id=op.id, text=op.text)
+            if isinstance(op, Steer)
+            else SteerDelivery(id=op.id, text=op.text, sender=op.sender, origin=op.provenance)
+            for op in peers
+        ]
+        self._delivered_on(tool_use_id, deliveries)
         await self._emit(SteerDelivered(
             session_id=self.session_id, turn_id=self._active_turn_id,
             steers=[
@@ -3806,6 +3911,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if mapped.message is not None and mapped.node_id is not None:
                 if self.claude_mod_compaction and isinstance(frame.get("uuid"), str):
                     mapped.message.provider_meta["claude_uuid"] = frame["uuid"]
+                self._record_boundary_steers(mapped.message)
                 node = SessionNode(
                     node_id=mapped.node_id, parent_id=parent.node_id, message=mapped.message,
                 )
@@ -4419,6 +4525,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             else:
                 output = await self._run_cli_hook(event, request.input, request.tool_use_id)
                 peers = self._peer_boundary(request, event, output, mapper, asked_at)
+                await self._restoration_boundary(request, event, output, mapper, asked_at)
             response = {
                 "subtype": "success",
                 "request_id": request.cli_request_id,
@@ -4863,17 +4970,21 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             ledger = self._ledger_context()
             if ledger:
                 parts.append(ledger)
-            if self._main_compaction_running() and not data.get("agent_id"):
-                note = await self._compact_context_note()
-                if note:
-                    parts.append(note)
+        hook_context = ""
         if self.hooks is not None:
             decision = await self.hooks.emit(
                 SESSION_START, self._cli_hook_payload(data, source=source),
             )
             await self._report_hook_warnings(SESSION_START, decision)
-            if decision.additional_context:
-                parts.append(decision.additional_context)
+            hook_context = decision.additional_context or ""
+        if source == "compact" and self._main_compaction_running() and not data.get("agent_id"):
+            # Last, as it fits in what the rest of this answer leaves.
+            taken = sum(len(part) + 2 for part in [*parts, hook_context] if part)
+            note = await self._compact_context_note(HOOK_CONTEXT_INLINE_CHARS - taken)
+            if note:
+                parts.append(note)
+        if hook_context:
+            parts.append(hook_context)
         if not parts:
             return {}
         return {"hookSpecificOutput": {
@@ -4924,6 +5035,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             self._main_boundary_due = True
         elif result is not None:
             self._main_boundary_due = False
+            self._unanswered_compaction_id = ""
             self._compact_noop = (
                 reported.startswith(COMPACT_SKIPPED_PREFIX)
                 and reported[len(COMPACT_SKIPPED_PREFIX):].strip() == NOTHING_TO_COMPACT
@@ -5067,7 +5179,15 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         Read from the CLI's transcript, retried for up to
         ``COMPACTION_SUMMARY_ATTEMPTS * COMPACTION_SUMMARY_INTERVAL`` seconds in
         case the frame beat the file write. "" when it cannot be read.
+
+        A Fluid answer the mod is applying has no summary to wait for, so that
+        case reads once and says nothing: a summary found still means the
+        summarizer stood in after all. A summarizer boundary with no preserved
+        rows whose summary is not written yet is then taken for the answer, and
+        its checkpoint holds the answer's rows, which are valid context.
         """
+        settled = (self._latest_compaction_answer() is not None
+                   and not _summarizer_boundary(frame))
         frame_sid = frame.get("session_id")
         cli_session_id = (
             (frame_sid if isinstance(frame_sid, str) and frame_sid else None)
@@ -5098,6 +5218,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 return ""  # no transcript here: nothing will appear
             if summary:
                 return summary
+            if settled:
+                return ""
             if attempt + 1 < COMPACTION_SUMMARY_ATTEMPTS:
                 await asyncio.sleep(COMPACTION_SUMMARY_INTERVAL)
         logger.warning(
@@ -5145,74 +5267,213 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         except Exception:  # noqa: BLE001 — the log line already said it
             logger.debug("could not publish the compaction failure", exc_info=True)
 
-    async def _compact_context_note(self) -> str | None:
-        """The host's note for after a compaction, bounded, or None.
+    async def _compact_context_note(
+        self, room: int = HOOK_CONTEXT_INLINE_CHARS,
+    ) -> str | None:
+        """The first part of what goes back after a compaction, or None.
 
-        The provider gets ``COMPACT_CONTEXT_TIMEOUT``; one that fails, overruns
-        or returns nothing is logged and skipped, never failing the hook. Its
-        sections are packed by priority into ``COMPACT_CONTEXT_MAX_CHARS``
-        (:func:`fluid.engine.compact_restore.pack_sections`; a plain string is
-        one cuttable section). Each section delivered whole calls its
-        ``on_delivered``; the context counts as restored only when every
-        section went out whole. Otherwise the next turn's tail puts it back
-        (``fresh_context``), as after a compaction with no put-back at all.
-        What went out is logged, kept in ``last_restoration`` and recorded as
-        a ``compaction_restoration`` diagnostic (#755).
+        What goes back is the host's note (``compact_context``) and whatever the
+        agent was told that the compacted conversation no longer shows
+        (:meth:`_instructions_section`). Its sections are queued by priority in
+        ``COMPACT_CONTEXT_MAX_CHARS`` (:class:`RestorationQueue`, a plain string
+        is one cuttable section) and this answer carries as many as fit ``room``.
+        The rest go out at the main thread's next tool results
+        (:meth:`_restoration_boundary`) or on the next turn's tail
+        (:meth:`_finish_restoration`). A section is credited only when all of it
+        went out. The provider gets ``COMPACT_CONTEXT_TIMEOUT``, and one that
+        overruns is left to finish: its sections join the queue when ready. What
+        went out is logged, kept in ``last_restoration`` and recorded as a
+        ``compaction_restoration`` diagnostic per part (#755).
         """
+        txns = self._open_txns
+        if txns:
+            compaction_id = txns[-1].compaction_id
+        else:
+            self._unanswered_compaction_id = self._unanswered_compaction_id or new_id("cmp")
+            compaction_id = self._unanswered_compaction_id
+        if self._restoration_late is not None:
+            self._restoration_late.cancel()  # for the compaction this one replaces
+            self._restoration_late = None
+        queue = RestorationQueue(compaction_id, COMPACT_CONTEXT_MAX_CHARS)
+        self._restoration = queue
+        instructions = await self._instructions_section(txns[-1] if txns else None)
+        if instructions is not None:
+            queue.add([instructions])
+        late = False
         provider = self.compact_context
-        if provider is None:
+        if provider is not None:
+            task = asyncio.ensure_future(provider())
+            try:
+                done, _ = await asyncio.wait({task}, timeout=COMPACT_CONTEXT_TIMEOUT)
+            except asyncio.CancelledError:
+                task.cancel()
+                raise
+            if done:
+                self._queue_provided(queue, task)
+            else:
+                late = True
+                self._restoration_late = task
+                logger.warning(
+                    "the compaction note was not ready within %.0fs; it follows when it is",
+                    COMPACT_CONTEXT_TIMEOUT,
+                )
+        text = queue.take(max(0, room))
+        if not queue.receipts() and not late:
+            self._restoration = None
             return None
+        complete = await self._report_restoration(queue, text, late=late)
+        self._compaction_context_restored = complete
+        return text or None
+
+    @staticmethod
+    def _queue_provided(queue: RestorationQueue, task: asyncio.Future[Any]) -> None:
+        """Queue the sections a finished provider call gave, if it did."""
         try:
-            note = await asyncio.wait_for(provider(), COMPACT_CONTEXT_TIMEOUT)
+            queue.add(as_sections(task.result()))
         except asyncio.CancelledError:
-            raise
-        except TimeoutError:
-            logger.warning(
-                "the compaction note was not ready within %.0fs; skipped",
-                COMPACT_CONTEXT_TIMEOUT,
-            )
-            return None
+            logger.debug("the compaction note was cancelled")
         except Exception:  # noqa: BLE001 — a reminder never fails a hook
             logger.warning("the compaction note failed; skipped", exc_info=True)
-            return None
-        sections = as_sections(note)
-        text, receipts = pack_sections(sections, COMPACT_CONTEXT_MAX_CHARS)
-        if not receipts:
-            return None
-        complete = all(r.status == DELIVERED for r in receipts)
-        by_name = {s.name: s for s in sections}
-        for receipt in receipts:
-            callback = by_name[receipt.name].on_delivered
-            if receipt.status != DELIVERED or callback is None:
-                continue
-            try:
-                callback()
-            except Exception:  # noqa: BLE001 — a host's bookkeeping never fails a hook
-                logger.warning("the %s section's delivery callback failed", receipt.name,
-                               exc_info=True)
-        txns = self._open_txns
+
+    async def _report_restoration(
+        self, queue: RestorationQueue, text: str, *, late: bool = False,
+    ) -> bool:
+        """Record where each section stands; True, and the put-back is over,
+        when the last of them went out whole."""
+        receipts = queue.receipts()
+        complete = queue.complete and not late
         record = {
-            "compaction_id": txns[-1].compaction_id if txns else "",
+            "compaction_id": queue.compaction_id,
             "complete": complete,
             "sections": [r.to_dict() for r in receipts],
+            **({"provider": "late"} if late else {}),
         }
         self.last_restoration = record
         summary = ", ".join(f"{r.name}={r.status}" for r in receipts)
         if complete:
             logger.info("put back after the compaction (%d chars): %s", len(text), summary)
         else:
-            logger.warning("put back after the compaction only in part (%d chars, %d "
-                           "limit): %s; the next turn puts the rest back", len(text),
-                           COMPACT_CONTEXT_MAX_CHARS, summary)
+            logger.warning("put back after the compaction only in part (%d chars this time, "
+                           "%d limit): %s; the rest follows", len(text),
+                           HOOK_CONTEXT_INLINE_CHARS, summary)
         await self._record_restoration(record)
+        queue.settled = not queue.waiting and not late
         if complete:
-            self._compaction_context_restored = True
             self._context_restore_pending = False
-        else:
-            # Never credit a cut or partial note: the boundary leaves the
-            # put-back pending for the next turn's tail.
-            self._compaction_context_restored = False
-        return text or None
+            self._restoration = None
+        # Otherwise nothing is credited: the boundary leaves the put-back
+        # pending for the next turn's tail.
+        return complete
+
+    async def _restoration_boundary(
+        self, request: HookCallbackRequest, event: str | None, output: dict[str, Any],
+        mapper: StreamJsonMapper | None, asked_at: float,
+    ) -> None:
+        """Carry the next part of an unfinished put-back on this tool result.
+
+        Long single-turn work has no next turn to put it back on. Same guards as
+        :meth:`_peer_boundary`, and each part is smaller than what is left, so
+        this always ends and never adds more than the one note.
+        """
+        queue = self._restoration
+        if queue is None or mapper is None or event not in _PEER_BOUNDARY_HOOK_EVENTS:
+            return
+        if (
+            not self._peer_admission_open
+            or self._interrupted.is_set()
+            or self._hook_stop_reason is not None
+            or output.get("continue") is False
+            or mapper.turn_id != self._active_turn_id
+            or request.input.get("agent_id")
+        ):
+            return
+        tool_use_id = request.tool_use_id or request.input.get("tool_use_id")
+        if not tool_use_id or tool_use_id not in mapper.main_tool_use_ids:
+            return
+        if asyncio.get_running_loop().time() - asked_at > PEER_BOUNDARY_HOOK_BUDGET:
+            return
+        late = self._restoration_late
+        if late is not None and late.done():
+            self._restoration_late = None
+            self._queue_provided(queue, late)
+            late = None
+            queue.settled = False
+        if not queue.waiting:
+            if late is None and not queue.settled:
+                await self._report_restoration(queue, "")
+            return
+        specific = output.get("hookSpecificOutput")
+        if not isinstance(specific, dict):
+            specific = {"hookEventName": event}
+            output["hookSpecificOutput"] = specific
+        existing = specific.get("additionalContext") or ""
+        taken = len(existing) + 2 if existing else 0
+        part = queue.take(HOOK_CONTEXT_INLINE_CHARS - taken)
+        if not part:
+            return
+        specific["additionalContext"] = f"{existing}\n\n{part}" if existing else part
+        await self._report_restoration(queue, part, late=late is not None)
+
+    async def _finish_restoration(self) -> str:
+        """What the next turn's tail must carry of an unfinished put-back."""
+        queue = self._restoration
+        if queue is None:
+            return ""
+        late, self._restoration_late = self._restoration_late, None
+        if late is not None:
+            if late.done():
+                self._queue_provided(queue, late)
+            else:
+                late.cancel()
+        self._restoration = None
+        text = queue.finish(COMPACT_CONTEXT_MAX_CHARS)
+        await self._report_restoration(queue, text)
+        self._restoration = None
+        return text
+
+    async def _instructions_section(
+        self, answer: _CompactionTxn | None,
+    ) -> RestorationSection | None:
+        """What the agent was told that the compacted conversation may not show
+        (#996), as a section, or None when it all still shows.
+
+        The session's opening request (its brief) and the messages delivered to
+        it, from the stored path and what this leg delivered. With a Fluid answer
+        only what that answer no longer shows repeats: not its text, nor on a row
+        that keeps its handle. Claude Code's summarizer may paraphrase anything,
+        so with no answer it all repeats. It is the same bounded text each time,
+        so it never accumulates. Never raises: a put-back never fails a hook.
+        """
+        if self._session is None:
+            return None
+        try:
+            nodes = await self.store.load_path(self._session.session_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.warning("could not read the path for the put-back", exc_info=True)
+            nodes = []
+        shown, kept = answer.shows() if answer is not None else ("", set())
+
+        def missing(text: str, carrier: str | None = None) -> bool:
+            if answer is None:
+                return True
+            return carrier not in kept and " ".join(text.split()) not in shown
+
+        brief, told = told_on_path(nodes)
+        seen = {text for _, text in told}
+        for carrier, steer in self._delivered:
+            text = steer.render().strip()
+            if steer.origin != "system" and text not in seen:
+                seen.add(text)
+                told.append((carrier, text))
+        text = render_told(
+            brief if brief and missing(brief) else "",
+            [text for carrier, text in told if missing(text, carrier)],
+        )
+        if text is None:
+            return None
+        return RestorationSection(name="instructions", text=text, priority=0, cuttable=True)
 
     async def _record_restoration(self, record: dict[str, Any]) -> None:
         """Persist what a SessionStart(compact) put back, for audits. Never raises."""

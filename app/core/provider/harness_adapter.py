@@ -2384,7 +2384,8 @@ class HarnessAdapter(ProviderAdapter):
         ]
         return [
             RestorationSection(name=name, text=text, priority=priority,
-                               max_chars=bound, cuttable=cuttable)
+                               max_chars=bound, cuttable=cuttable,
+                               next_turn_covers=name == "memory")  # _fresh_memory_note
             for name, text, priority, bound, cuttable in parts if text
         ]
 

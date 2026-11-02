@@ -1,0 +1,23 @@
+{
+  "description": "A tool that takes a moment (a message sent meanwhile rides its PostToolUse answer), then Claude Code compacts at once, and its own summarizer, when it stands in, keeps no rows beside the summary (8 of 58 real summarizer boundaries).",
+  "steps": [
+    {
+      "text": "Working through the long file.",
+      "tool_calls": [
+        {
+          "name": "Read",
+          "input": {
+            "file_path": "/fake/big-file.txt"
+          },
+          "result_chars": 3000,
+          "delay_ms": 700
+        }
+      ]
+    },
+    {
+      "compact": true,
+      "text": "Compacted right after that tool result.",
+      "summarizer_keep": 0
+    }
+  ]
+}
