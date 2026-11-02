@@ -95,7 +95,7 @@ def _capture_and_dismiss(session_id, broker, expected_revision):
         boundary = next(_tail(cur, session_id, lifecycle_only=True), None)
         parked_prose = False
         if boundary is not None and boundary[1] == "turn.parked":
-            for seq, kind, payload in _tail(cur, session_id):
+            for seq, kind, payload, _ in _tail(cur, session_id):
                 if seq >= boundary[0]:
                     continue
                 if kind in ("turn.started", "turn.completed", "turn.aborted", "turn.parked"):

@@ -198,6 +198,8 @@ export interface V2SessionState {
 	 *  turn start, a user message, a tool result, a provider retry. Messages
 	 *  created after it are the current attempt's output, which a
 	 *  connection-drop retry folds into its card (see foldDroppedAttempt).
+	 *  A transcript-only turn (`voice-`, `brief-`) runs beside the agent's
+	 *  attempt, so it never moves this.
 	 *  Optional so a cached state from before the field reads as 0. */
 	attemptStartSeq?: number;
 	/** A compaction of the main conversation in progress (`running`) or one
@@ -563,6 +565,15 @@ function retireAbandonedToolCards(messages: ChatMessage[]): ChatMessage[] {
 	);
 }
 
+/**
+ * A turn written for the transcript only (a voice exchange, a brief), not run
+ * by the agent. It can land in the middle of the agent's model call, is no part
+ * of it, and survives that call being dropped.
+ */
+function isTranscriptOnlyTurn(turnId: string | undefined): boolean {
+	return !!turnId && (turnId.startsWith('voice-') || turnId.startsWith('brief-'));
+}
+
 /** Mark `seq` as the end of a model attempt's streamed output. */
 function markAttemptBoundary(state: V2SessionState, seq: number): V2SessionState {
 	return state.attemptStartSeq === seq ? state : { ...state, attemptStartSeq: seq };
@@ -591,6 +602,7 @@ function foldDroppedAttempt(state: V2SessionState): {
 	const dropped = (m: ChatMessage): boolean => {
 		if (m.role !== 'assistant') return false;
 		if (m.type !== 'text' && m.type !== 'thinking' && m.type !== 'tool_use' && m.type) return false;
+		if (isTranscriptOnlyTurn(m.turnId)) return false;
 		const origin = state.messageOriginSeq.get(m.id);
 		return origin !== undefined && origin > since;
 	};
@@ -1255,7 +1267,7 @@ function reduceInternal(
 	// Briefs the backend posts between turns (`brief-` turns, e.g. background
 	// research results in the assistant home) are persisted the same way.
 	const turnId = str(event.turn_id);
-	const syntheticTranscript = turnId.startsWith('voice-') || turnId.startsWith('brief-');
+	const syntheticTranscript = isTranscriptOnlyTurn(turnId);
 	if (syntheticTranscript &&['turn.started', 'turn.completed', 'turn.aborted'].includes(event.type)) {
 		return state;
 	}
@@ -1622,7 +1634,7 @@ function reduceInternal(
 		case 'message.user': {
 			const startsAgentTurn = state.pendingAgentWake;
 			if (startsAgentTurn) state = { ...state, pendingAgentWake: false };
-			state = markAttemptBoundary(state, seq);
+			if (!syntheticTranscript) state = markAttemptBoundary(state, seq);
 			const content = str(event.content);
 
 			// Background-task wake turns persist their synthesized prompt as a
@@ -1979,6 +1991,8 @@ function reduceInternal(
 				timestamp: stampTs(event, createdAt) || undefined,
 				...(input ? { toolInput: input } : {}),
 				...(screenshot ? { toolScreenshot: screenshot } : {}),
+				// A voice research card outlives a dropped agent attempt.
+				...(syntheticTranscript ? { turnId } : {}),
 			};
 			return appendMessage(next, msg, seq);
 		}
@@ -2024,13 +2038,14 @@ function reduceInternal(
 				streaming: true,
 				partialToolInput: partial,
 				timestamp: createdAt || undefined,
+				...(syntheticTranscript ? { turnId } : {}),
 			};
 			return appendMessage(next, msg, seq);
 		}
 
 		case 'tool.result': {
 			// Results come after a model attempt completed: the next one starts here.
-			state = markAttemptBoundary(state, seq);
+			if (!syntheticTranscript) state = markAttemptBoundary(state, seq);
 			const toolUseId = str(event.tool_use_id);
 			if (!toolUseId) return state;
 			const existing = findByToolId(state.messages, toolUseId, state.messageOriginSeq);

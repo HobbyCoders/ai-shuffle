@@ -145,7 +145,9 @@ request id: `owner_confirm.asks_in_words` is false for it, so it never carries
 the `assistant_confirm` marker and is never in the typed approval set. A message
 typed while the card waits is an ordinary message, as in any chat: it queues
 behind the live turn (Interrupt / Unsend), never settles the card, and runs as
-its own turn on the chat's model once the card is answered.
+its own turn on the chat's model once the card is answered. A safety-check row
+that an earlier build marked `assistant_confirm` is treated the same way: clients
+ignore the marker and show the buttons.
 
 ### How the suggested model is chosen
 
@@ -210,6 +212,10 @@ message, a tool result or a `provider_retry` note), the same fold as a
 connection-drop retry, live and on reload. The REST transcript, the session
 list's open-question marker and the web reducer all apply it, so every client
 and the other worker's view drop the same content. Usage is not changed.
+
+The boundary belongs to the agent's model call. A transcript-only turn (`voice-`
+and `brief-` turn ids) can land in the middle of that call: it never moves the
+boundary, and a discard or a connection-drop fold leaves its messages in place.
 
 ## 4. `guardrail_blocked`: the outcome (persisted)
 

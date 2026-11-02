@@ -21,11 +21,11 @@ def test_lifecycle_lookup_fetches_one_row_and_repeats_only_after_rewind():
     from unittest.mock import Mock
     cursor = Mock()
     cursor.fetchall.side_effect = [
-        [{"seq": 9, "event_type": "transcript.rewound", "payload": {"from_seq": 5}}],
-        [{"seq": 4, "event_type": "turn.completed", "payload": {}}],
+        [{"seq": 9, "event_type": "transcript.rewound", "payload": {"from_seq": 5}, "turn_id": "t1"}],
+        [{"seq": 4, "event_type": "turn.completed", "payload": {}, "turn_id": "t1"}],
     ]
     boundary = next(questions._tail(cursor, "question", lifecycle_only=True))
-    assert boundary == (4, "turn.completed", {})
+    assert boundary == (4, "turn.completed", {}, "t1")
     assert cursor.execute.call_count == 2
     for call in cursor.execute.call_args_list:
         assert call.args[0].endswith("ORDER BY seq DESC LIMIT 1")
@@ -46,7 +46,8 @@ EVENT_CASES = json.loads((Path(__file__).parents[1] / "fixtures/prose_question_e
 @pytest.mark.parametrize("case", EVENT_CASES, ids=lambda case: case["name"])
 def test_shared_event_sequence_parity(chat, case):
     for index, step in enumerate(case["events"], 1):
-        session_events.append_events(chat, [{"type": step["type"], "payload": step["payload"]}])
+        session_events.append_events(chat, [{"type": step["type"], "payload": step["payload"],
+                                             "turn_id": step["payload"].get("turn_id")}])
         saved = row()
         question_seq = saved["last_assistant_question_seq"]
         user_seq = saved["last_user_message_seq"]
@@ -63,6 +64,22 @@ def test_shared_event_sequence_parity(chat, case):
 
 def event(event_type="message.assistant", **payload):
     return {"type": event_type, "payload": payload}
+
+
+@pytest.mark.parametrize("turn_id", ["voice-1", "brief-1"])
+def test_a_voice_question_between_declined_chunks_survives_the_discard(chat, turn_id):
+    """Only the settled result: while the agent still streams, the reducer and
+    this scan read a question in a transcript-only turn differently."""
+    def step(kind, turn, **payload):
+        session_events.append_events(chat, [{"type": kind, "payload": payload, "turn_id": turn}])
+
+    step("message.user", "t1", content="Start")
+    step("assistant.text_delta", "t1", text="Shall I?")
+    step("message.user", turn_id, content="Hello", source="voice")
+    step("message.assistant", turn_id, content="Still there?")
+    step("assistant.text_delta", "t1", text=" Go on?")
+    step("system.note", "t1", subtype="attempt_discarded", data={"reason": "guardrail"})
+    assert row()["last_assistant_question_seq"] == 4
 
 
 def row():

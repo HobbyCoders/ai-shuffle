@@ -290,6 +290,9 @@ function action(request) {
 function assistantConfirmationText(request) {
   return `May I ${action(request)}? Yes or no.`;
 }
+function isSafetyCheck(toolName, toolInput) {
+  return toolName === "ModelGuardrail" || record(toolInput)?.guardrail === true;
+}
 var APPROVAL_CARD_SUBTYPE = "assistant_confirm_request";
 function approvalCardId(requestId) {
   return `assistant-confirm-${requestId}`;
@@ -309,7 +312,7 @@ function approvalCardData(message) {
 var RETRIED_STATUSES = /* @__PURE__ */ new Set(["declined", "expired"]);
 function approvalCardFromRequest(requestId, request, earlier) {
   const confirm = record(request?.assistant_confirm);
-  if (!requestId || !confirm) return null;
+  if (!requestId || !confirm || isSafetyCheck(request?.tool_name, request?.tool_input)) return null;
   const question = text(confirm.question) || assistantConfirmationText({
     tool_name: text(request?.tool_name),
     tool_input: record(request?.tool_input) ?? {}
@@ -539,6 +542,9 @@ function retireAbandonedToolCards(messages) {
     (m) => isAbandonedToolCard(m) ? { ...m, streaming: false, toolStatus: "error" } : m
   );
 }
+function isTranscriptOnlyTurn(turnId) {
+  return !!turnId && (turnId.startsWith("voice-") || turnId.startsWith("brief-"));
+}
 function markAttemptBoundary(state, seq) {
   return state.attemptStartSeq === seq ? state : { ...state, attemptStartSeq: seq };
 }
@@ -547,6 +553,7 @@ function foldDroppedAttempt(state) {
   const dropped = (m) => {
     if (m.role !== "assistant") return false;
     if (m.type !== "text" && m.type !== "thinking" && m.type !== "tool_use" && m.type) return false;
+    if (isTranscriptOnlyTurn(m.turnId)) return false;
     const origin = state.messageOriginSeq.get(m.id);
     return origin !== void 0 && origin > since;
   };
@@ -890,7 +897,7 @@ function reduceInternal(state, event, observe) {
   const withSeq = seq > state.lastSeq ? { ...state, lastSeq: seq } : state;
   state = withSeq;
   const turnId = str(event.turn_id);
-  const syntheticTranscript = turnId.startsWith("voice-") || turnId.startsWith("brief-");
+  const syntheticTranscript = isTranscriptOnlyTurn(turnId);
   if (syntheticTranscript && ["turn.started", "turn.completed", "turn.aborted"].includes(event.type)) {
     return state;
   }
@@ -1124,7 +1131,7 @@ function reduceInternal(state, event, observe) {
     case "message.user": {
       const startsAgentTurn = state.pendingAgentWake;
       if (startsAgentTurn) state = { ...state, pendingAgentWake: false };
-      state = markAttemptBoundary(state, seq);
+      if (!syntheticTranscript) state = markAttemptBoundary(state, seq);
       const content = str(event.content);
       if (content.includes("<task-notification>")) {
         const { blocks, outside } = splitTaggedBlocks(content, "task-notification");
@@ -1365,7 +1372,9 @@ function reduceInternal(state, event, observe) {
         streaming: true,
         timestamp: stampTs(event, createdAt) || void 0,
         ...input ? { toolInput: input } : {},
-        ...screenshot ? { toolScreenshot: screenshot } : {}
+        ...screenshot ? { toolScreenshot: screenshot } : {},
+        // A voice research card outlives a dropped agent attempt.
+        ...syntheticTranscript ? { turnId } : {}
       };
       return appendMessage(next, msg, seq);
     }
@@ -1402,12 +1411,13 @@ function reduceInternal(state, event, observe) {
         toolStatus: "running",
         streaming: true,
         partialToolInput: partial,
-        timestamp: createdAt || void 0
+        timestamp: createdAt || void 0,
+        ...syntheticTranscript ? { turnId } : {}
       };
       return appendMessage(next, msg, seq);
     }
     case "tool.result": {
-      state = markAttemptBoundary(state, seq);
+      if (!syntheticTranscript) state = markAttemptBoundary(state, seq);
       const toolUseId = str(event.tool_use_id);
       if (!toolUseId) return state;
       const existing = findByToolId(state.messages, toolUseId, state.messageOriginSeq);
@@ -2287,7 +2297,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "044ec586c69ac4a67d597de1443c5e15cff741f1402d2ef222cdb0ea5db1e434";
+var REDUCER_FINGERPRINT = "a0bdf0c52a31d73eb42fcf2aef2ad183edc94ad2e241ebdc1f0dd660f4a4b786";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {

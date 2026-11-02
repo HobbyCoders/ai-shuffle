@@ -59,9 +59,21 @@ export function assistantConfirmationText(request: Pick<PermissionRequest, 'tool
 	return `May I ${action(request)}? Yes or no.`;
 }
 
+/**
+ * A provider safety check keeps its Continue / Stop buttons, even on a row an
+ * earlier build marked `assistant_confirm`: the server never takes a typed answer
+ * for it, so hiding the buttons would leave nothing to answer it with. Spelled
+ * out here because `./guardrail` loads the model registry, which the server's
+ * transcript reducer cannot.
+ */
+function isSafetyCheck(toolName: unknown, toolInput: unknown): boolean {
+	return toolName === 'ModelGuardrail' || record(toolInput)?.guardrail === true;
+}
+
 /** A request the assistant asks in words; it never opens the approval dialog. */
-export function isAssistantConfirm(request: Pick<PermissionRequest, 'assistant_confirm'>): boolean {
-	return !!request.assistant_confirm && typeof request.assistant_confirm === 'object';
+export function isAssistantConfirm(request: Pick<PermissionRequest, 'assistant_confirm' | 'tool_name' | 'tool_input'>): boolean {
+	return !!request.assistant_confirm && typeof request.assistant_confirm === 'object' &&
+		!isSafetyCheck(request.tool_name, request.tool_input);
 }
 
 /**
@@ -145,7 +157,7 @@ export function approvalCardFromRequest(
 	earlier: readonly ChatMessage[]
 ): ApprovalCardData | null {
 	const confirm = record(request?.assistant_confirm);
-	if (!requestId || !confirm) return null;
+	if (!requestId || !confirm || isSafetyCheck(request?.tool_name, request?.tool_input)) return null;
 	const question =
 		text(confirm.question) ||
 		assistantConfirmationText({
