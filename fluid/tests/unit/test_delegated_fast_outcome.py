@@ -152,9 +152,11 @@ def _step(msg_id: str, speed: str) -> dict:
     return {"op": "frame", "frame": _assistant(msg_id, speed)}
 
 
-def _loop(tmp_path: Path, turns: list[list[dict]], *, fast=False, model="claude-opus-4-7") -> DelegatedLoop:
+def _loop(
+    tmp_path: Path, turns: list[list[dict]], *, fast=False, model="claude-opus-4-7", controls=None,
+) -> DelegatedLoop:
     script = tmp_path / "script.json"
-    script.write_text(json.dumps({"turns": turns}), encoding="utf-8")
+    script.write_text(json.dumps({"turns": turns, **({"controls": controls} if controls else {})}), encoding="utf-8")
     return DelegatedLoop(
         store=MemoryStore(), model=model, permission_mode="default",
         claude_cmd=[sys.executable, str(FAKE)], env={"FAKE_CLAUDE_SCRIPT": str(script)},
@@ -373,19 +375,110 @@ async def test_turning_fast_off_unanswered_at_the_result_reports_no_change(tmp_p
         await loop.aclose()
 
 
-async def test_a_turn_begun_while_the_answer_was_pending_started_with_the_setting(tmp_path):
+def _stdin_order(loop: DelegatedLoop) -> list[tuple[str, bool]]:
+    """Each user and setting frame as it is written, and whether a setting's
+    answer was still outstanding at that moment."""
+    order: list[tuple[str, bool]] = []
+    write = loop._write_frame
+
+    async def spy(frame: dict) -> None:
+        subtype = (frame.get("request") or {}).get("subtype")
+        if frame.get("type") == "user" or subtype == "apply_flag_settings":
+            order.append((subtype or "user", bool(loop._control_acks)))
+        await write(frame)
+
+    loop._write_frame = spy
+    return order
+
+
+async def _started(loop: DelegatedLoop, sid: str) -> None:
+    """A first turn, so the CLI is running and the next one is a queued turn."""
+    await _send(loop, sid)
+
+
+async def test_a_turn_sent_after_the_setting_starts_with_it_while_its_answer_is_pending(tmp_path):
+    # The fake answers late, so the turn is on stdin before the answer is read.
+    loop = _loop(tmp_path, [
+        [_step("m1", "standard"), {"op": "frame", "frame": _result()}],
+        [_step("m2", "fast"), {"op": "frame", "frame": _result(state="on")}],
+    ], controls={"apply_flag_settings": {"late": 0.5}})
+    waiting: list[bool] = []
+
+    async def check() -> None:
+        waiting.append(loop.fast_waits_for_next_turn())
+
+    try:
+        sid = (await loop.store.create_session()).session_id
+        loop._session_id = sid
+        await _started(loop, sid)
+        order = _stdin_order(loop)
+        toggle = asyncio.create_task(loop.set_run_settings(effort=None, fast=True))
+        while not order:
+            await asyncio.sleep(0)
+        seen = await _send(loop, sid, during=check)
+        await toggle
+
+        assert order == [("apply_flag_settings", True), ("user", True)]
+        assert waiting == [False]
+        [ran] = [e for e in seen if isinstance(e, FastModeOutcome)]
+        assert (ran.requested, ran.requested_at_end) == (True, True)
+        assert (ran.fast_calls, ran.standard_calls) == (1, 0)
+    finally:
+        await loop.aclose()
+
+
+async def test_a_turn_sent_while_the_setting_was_on_its_way_keeps_its_start_speed(tmp_path):
+    # The toggle is called before the turn is sent, and its frame lands after:
+    # the CLI started the turn without it. The second setting holds the turn open
+    # until the first has been read back.
+    serve = {"op": "serve", "subtype": "apply_flag_settings", "count": 2, "timeout": 15}
+    loop = _loop(tmp_path, [
+        [_step("m1", "standard"), {"op": "frame", "frame": _result()}],
+        [_step("m2", "standard"), serve, _step("m3", "standard"), {"op": "frame", "frame": _result()}],
+        [_step("m4", "fast"), {"op": "frame", "frame": _result(state="on")}],
+    ])
+    waiting: list[bool] = []
+    try:
+        sid = (await loop.store.create_session()).session_id
+        loop._session_id = sid
+        await _started(loop, sid)
+        order = _stdin_order(loop)
+        roundtrip = loop._control_roundtrip
+
+        async def after_the_turn(*args, **kwargs):
+            while not order:
+                await asyncio.sleep(0)
+            return await roundtrip(*args, **kwargs)
+
+        loop._control_roundtrip = after_the_turn
+        toggle = asyncio.create_task(loop.set_run_settings(effort=None, fast=True))
+        await asyncio.sleep(0)
+
+        async def check() -> None:
+            await toggle
+            waiting.append(loop.fast_waits_for_next_turn())
+            await loop.set_run_settings(effort=None, fast=True)
+
+        seen = await _send(loop, sid, during=check)
+
+        assert [name for name, _ in order[:2]] == ["user", "apply_flag_settings"]
+        assert waiting == [True]
+        assert loop.fast_waits_for_next_turn() is False
+        [ran] = [e for e in seen if isinstance(e, FastModeOutcome)]
+        assert (ran.requested, ran.requested_at_end) == (False, True)
+        assert (ran.fast_calls, ran.standard_calls) == (0, 2)
+
+        [next_turn] = [e for e in await _send(loop, sid) if isinstance(e, FastModeOutcome)]
+        assert (next_turn.requested, next_turn.requested_at_end) == (True, True)
+        assert next_turn.fast_calls == 1
+    finally:
+        await loop.aclose()
+
+
+async def test_a_setting_with_no_cli_running_applies_to_the_next_spawn(tmp_path):
     loop = _loop(tmp_path, [])
-    make = lambda: StreamJsonMapper(session_id="s", turn_id="t", model="m", user_node_id="n")
-    first, second = make(), make()
-    loop._live_mapper = first
-
-    async def answered_during_the_next_turn(_request, *, on_ack) -> None:
-        loop._live_mapper = second
-        on_ack()
-
-    loop._apply_setting = answered_during_the_next_turn
     await loop.set_run_settings(effort=None, fast=True)
-    assert (second.fast_at_start, second.fast_acked) == (True, True)
+    assert loop._fast_setting() is True
     assert loop.fast_waits_for_next_turn() is False
 
 
@@ -449,6 +542,43 @@ async def test_a_turn_stopped_at_the_safety_check_still_reports_what_ran(tmp_pat
     assert (ran.fast_calls, ran.standard_calls) == (1, 0)
     [done] = [e for e in seen if isinstance(e, TurnComplete)]
     assert done.stop_reason == "refusal"
+
+
+async def test_a_setting_written_before_the_retry_is_read_by_it_while_its_answer_is_pending(tmp_path):
+    # One mapper spans both attempts, so only stdin order can tell them apart.
+    # The setting goes out right behind the model switch, whose answer releases
+    # the re-send; the fake answers the setting late, so the re-send overtakes it.
+    retry = [_step("m2", "standard"), {"op": "frame", "frame": _result()}]
+    loop = _loop(tmp_path, [_refused_step("fast"), retry], fast=True, model="claude-opus-5-5",
+                 controls={"apply_flag_settings": {"late": 0.5}})
+    tasks: list[asyncio.Task] = []
+    order: list[tuple[str, bool]] = []
+    write = loop._write_frame
+
+    async def spy(frame: dict) -> None:
+        subtype = (frame.get("request") or {}).get("subtype")
+        if frame.get("type") == "user" or subtype == "apply_flag_settings":
+            order.append((subtype or "user", bool(loop._control_acks)))
+        await write(frame)
+        if subtype == "set_model":
+            tasks.append(asyncio.create_task(loop.set_run_settings(effort=None, fast=False)))
+
+    loop._write_frame = spy
+    try:
+        sid = (await loop.store.create_session()).session_id
+        loop._session_id = sid
+        answer = asyncio.create_task(_answer_guardrail(loop, sid, "allow"))
+        seen = await _send(loop, sid)
+        await answer
+        await asyncio.wait(tasks, timeout=20)
+        assert tasks[0].exception() is None
+
+        assert order == [("user", False), ("apply_flag_settings", True), ("user", True)]
+        [ran] = [e for e in seen if isinstance(e, FastModeOutcome)]
+        assert (ran.requested, ran.requested_at_end) == (False, False)
+        assert (ran.fast_calls, ran.standard_calls) == (1, 1)
+    finally:
+        await loop.aclose()
 
 
 def test_a_toggle_before_the_retry_was_read_by_the_retry():

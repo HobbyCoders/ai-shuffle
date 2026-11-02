@@ -78,6 +78,7 @@ import tempfile
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from fluid.engine import delegated_guard_policy as guard_policy
@@ -1002,6 +1003,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # The mapper of the turn the CLI is running: from sending it until its
         # result. None between turns.
         self._live_mapper: StreamJsonMapper | None = None
+        # Positions on stdin of the frames whose order decides what Fast setting
+        # a turn started with (_stdin_mark).
+        self._stdin_marks = 0
         # Peer input may not start a CLI cycle after the admitted host turn ends.
         self._peer_admission_open = False
         # Peer messages and user steers admitted to the running turn and
@@ -1364,7 +1368,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
 
         Only an acknowledged change reaches the running turn's record. A result
         that lands first reports no change, and a refused or unanswered change
-        leaves nothing to take back.
+        leaves nothing to take back. Whether a change came before or after the
+        attempt now running is read from their order on stdin, because that is
+        what the CLI saw: a turn can be sent between this call and its frame.
 
         The payload keeps the settings' ``env`` block with ``FORCED_CHILD_ENV``
         on top, as ``--settings`` does, so a re-sent flag layer never drops
@@ -1377,18 +1383,18 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 "cannot be merged into them"
             )
         settings = _with_forced_env({**base, "effortLevel": effort, "fastMode": fast})
-        sent_during = self._live_mapper
 
-        def acknowledged() -> None:
+        def acknowledged(sent_at: int) -> None:
             self.effort = effort
             self.settings = _settings_json(settings)
-            if sent_during is not None:
-                sent_during.fast_acked = fast
             live = self._live_mapper
-            if live is not None and live is not sent_during:
-                # Stdin is ordered: a turn that began while this waited for its
-                # answer was sent after it, so it started with this setting.
-                live.fast_at_start = live.fast_acked = fast
+            if live is None:
+                return
+            live.fast_acked = fast
+            if sent_at < live.fast_sent_at:
+                # The attempt's user frame came after this one, even if its
+                # answer did not, so the attempt started with this setting.
+                live.fast_at_start = fast
 
         await self._apply_setting(
             {"subtype": "apply_flag_settings", "settings": settings}, on_ack=acknowledged,
@@ -2608,6 +2614,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             self._live_mapper = mapper
             try:
                 try:
+                    mapper.fast_sent_at = self._stdin_mark()
                     await self._write_frame({"type": "user", "message": {
                         "role": "user", "content": _content_to_cli(content),
                     }})
@@ -3836,6 +3843,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if failure is not None:
             return await stopped(failure)
         try:
+            mapper.fast_sent_at = self._stdin_mark()
             await self._write_frame({"type": "user", "message": {
                 "role": "user", "content": _content_to_cli(list(user_node.message.content)),
             }})
@@ -5149,7 +5157,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
 
     async def _apply_setting(
         self, request: dict[str, Any], *, stop_carries_over: bool = True,
-        on_ack: Callable[[], None] | None = None,
+        on_ack: Callable[[int], None] | None = None,
     ) -> None:
         """Send a ``set_model`` / ``set_permission_mode`` control_request and
         wait for the CLI's acknowledgement.
@@ -5167,10 +5175,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
 
         ``on_ack`` runs once if the value is accepted, as the reply is read: a
         turn's result can be the very next frame, read before this caller wakes.
+        It gets the request's position on stdin (:meth:`_stdin_mark`).
         """
         if self._proc is None or self._proc.returncode is not None:
             if on_ack is not None:
-                on_ack()
+                on_ack(self._stdin_mark())
             return
         subtype = request.get("subtype")
         # A Stop landing while the switch is unanswered ends the wait at once
@@ -5208,7 +5217,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
 
     async def _control_roundtrip(
         self, request: dict[str, Any], timeout: float, *,
-        on_ack: Callable[[], None] | None = None,
+        on_ack: Callable[[int], None] | None = None,
     ) -> ControlReply:
         """Write a control_request and wait for its reply (TimeoutError when
         none arrives). The pending entry is removed on every path, so a late
@@ -5217,7 +5226,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending_controls[request_id] = fut
         if on_ack is not None:
-            self._control_acks[request_id] = on_ack
+            self._control_acks[request_id] = partial(on_ack, self._stdin_mark())
         try:
             await self._write_frame({
                 "type": "control_request",
@@ -5538,6 +5547,15 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 self._proc.send_signal(signal.SIGINT)
             except (ProcessLookupError, OSError):
                 pass
+
+    def _stdin_mark(self) -> int:
+        """The position of the frame about to be written, among marked frames.
+
+        Take it with no ``await`` before the write. Both then happen in one step
+        of the event loop, so the positions follow the order on stdin.
+        """
+        self._stdin_marks += 1
+        return self._stdin_marks
 
     async def _write_frame(self, frame: dict[str, Any]) -> None:
         """Write one JSON line to the CLI's stdin.

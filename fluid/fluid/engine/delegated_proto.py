@@ -603,6 +603,9 @@ class StreamJsonMapper:
         self.fast_at_start = fast_requested
         self.fast_acked = fast_requested
         self._fast_attempt_open = True
+        # Where the running attempt's user frame sits on stdin; the loop sets it
+        # when it writes the frame.
+        self.fast_sent_at = 0
         # Main-conversation model calls of this turn: id → ``usage.speed``.
         self._call_speeds: dict[str, str | None] = {}
         self._attempt_speeds: list[str | None] = []
