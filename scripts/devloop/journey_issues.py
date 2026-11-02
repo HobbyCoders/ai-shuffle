@@ -29,9 +29,13 @@ class FlakyCase:
         return f"Flaky UI journey: {self.journey} / {self.case} passed only on retry"
 
     @property
-    def marker(self) -> str:
+    def identity_hash(self) -> str:
         identity = json.dumps([self.journey, self.case], separators=(",", ":"))
-        return f"<!-- ui-journey-flake:v1:{hashlib.sha256(identity.encode()).hexdigest()} -->"
+        return hashlib.sha256(identity.encode()).hexdigest()
+
+    @property
+    def marker(self) -> str:
+        return f"<!-- ui-journey-flake:v1:{self.identity_hash} -->"
 
 
 @dataclass(frozen=True)
@@ -44,10 +48,10 @@ class Run:
     def url(self) -> str:
         return f"https://github.com/{self.repository}/actions/runs/{self.id}"
 
-    @property
-    def marker(self) -> str:
-        # Attempts of the same workflow run are deliberately NOT new occurrences.
-        return f"<!-- ui-journey-flake-run:{self.id} -->"
+
+def run_marker(case: FlakyCase, run: Run) -> str:
+    # Attempts of the same workflow run are NOT new occurrences of this case.
+    return f"<!-- ui-journey-flake-run:{run.id}:{case.identity_hash} -->"
 
 
 @dataclass(frozen=True)
@@ -122,15 +126,16 @@ def matches_case(case: FlakyCase, issue: dict) -> bool:
     return case.marker in markers if markers else issue.get("title") == case.title
 
 
-def already_reported(run: Run, entries: list[dict]) -> bool:
-    return any(bot_authored(entry) and run.marker in (entry.get("body") or "") for entry in entries)
+def already_reported(case: FlakyCase, run: Run, entries: list[dict]) -> bool:
+    marker = run_marker(case, run)
+    return any(bot_authored(entry) and marker in (entry.get("body") or "") for entry in entries)
 
 
 def decide(case: FlakyCase, run: Run, issue: dict | None, comments: list[dict]) -> Decision:
-    """Only the bot's own issue body/comments can deduplicate a workflow run."""
+    """Only the bot's own issue body/comments can deduplicate a case in a run."""
     if issue is not None and not bot_authored(issue):
         issue = None
-    if issue is not None and already_reported(run, [issue, *comments]):
+    if issue is not None and already_reported(case, run, [issue, *comments]):
         return Decision("skip")
     action = "create" if issue is None else "reopen" if issue["state"] == "closed" else "comment"
     lead = ("This flaky UI journey came back after this issue was closed; reopening it."
@@ -140,7 +145,7 @@ def decide(case: FlakyCase, run: Run, issue: dict | None, comments: list[dict]) 
         f"- Attempt 1: `{case.first}`", f"- Attempt 2: `{case.retry}`",
         f"- Run: [{run.id}]({run.url})", f"- Commit: `{run.commit}`", "",
         "Only structured outcomes are reported here; logs and error text are not copied into public issues.",
-        "", case.marker, run.marker,
+        "", case.marker, run_marker(case, run),
     ])
     return Decision(action, case.title, body)
 
@@ -228,7 +233,7 @@ def report(api: GitHub, run: Run, receipts, *, dry_run: bool = False) -> None:
             # attempts. Deduplicate across ALL matches before choosing any target.
             histories = {match["number"]: api.comments(match["number"]) for match in matches}
             entries = [entry for match in matches for entry in [match, *histories[match["number"]]]]
-            if already_reported(run, entries):
+            if already_reported(case, run, entries):
                 issue, decision = None, Decision("skip")
             else:
                 issue = min(matches, key=lambda item: (item["state"] != "open", item["number"])) if matches else None

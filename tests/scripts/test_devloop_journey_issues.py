@@ -113,9 +113,20 @@ def test_damaged_marker_preserves_rerun_history_and_reopens_for_later_run(damage
         assert api.calls[0][2] == {"state": "open"}
         assert "came back" in api.calls[-1][2]["body"]
         assert CASE.marker in api.calls[-1][2]["body"]
-        assert run.marker in api.calls[-1][2]["body"]
+        assert reporter.run_marker(CASE, run) in api.calls[-1][2]["body"]
     else:
         assert api.calls == [], "a damaged case marker must not hide the already-reported run"
+
+
+def test_case_run_marker_uses_stable_case_identity_and_run_id():
+    marker = reporter.run_marker(CASE, RUN)
+    assert marker == f"<!-- ui-journey-flake-run:{RUN.id}:{CASE.identity_hash} -->"
+    changed_outcomes = reporter.FlakyCase(CASE.journey, CASE.case, "crashed", "known-bug")
+    assert reporter.run_marker(changed_outcomes, RUN) == marker
+    assert reporter.run_marker(CASE, reporter.Run(RUN.repository, RUN.id, "b" * 40)) == marker
+    other = reporter.FlakyCase("copy", "copy@desktop-slow", "fail", "pass")
+    assert reporter.run_marker(other, RUN) != marker
+    assert reporter.run_marker(CASE, reporter.Run(RUN.repository, RUN.id + 1, RUN.commit)) != marker
 
 
 def test_new_issue_contains_only_structured_fields_and_existing_label():
@@ -125,7 +136,7 @@ def test_new_issue_contains_only_structured_fields_and_existing_label():
     assert (route, method) == ("issues", "POST")
     assert data["title"] == "Flaky UI journey: copy / copy@phone-slow passed only on retry"
     assert data["labels"] == ["bug"]
-    for value in [CASE.marker, RUN.marker, RUN.commit, RUN.url, "`fail`", "`pass`", CASE.case]:
+    for value in [CASE.marker, reporter.run_marker(CASE, RUN), RUN.commit, RUN.url, "`fail`", "`pass`", CASE.case]:
         assert value in data["body"]
     assert "DO NOT PUBLISH" not in json.dumps(data)
     assert "private-detail" not in json.dumps(data)
@@ -139,29 +150,29 @@ def test_label_is_optional_and_no_new_label_is_created():
 
 @pytest.mark.parametrize("state,methods", [("open", ["POST"]), ("closed", ["PATCH", "POST"])])
 def test_recurrence_comments_and_reopens_closed_issue(state, methods):
-    api = FakeGitHub([existing(state)], [{"body": "Previous occurrence " + reporter.Run(RUN.repository, 400, RUN.commit).marker}])
+    api = FakeGitHub([existing(state)], [{"body": "Previous occurrence " + reporter.run_marker(CASE, reporter.Run(RUN.repository, 400, RUN.commit))}])
     reporter.report(api, RUN, [receipt()])
     assert [method for _, method, _ in api.calls] == methods
     if state == "closed":
         assert api.calls[0] == ("issues/17", "PATCH", {"state": "open"})
         assert "came back" in api.calls[-1][2]["body"]
     assert api.calls[-1][0] == "issues/17/comments"
-    assert RUN.marker in api.calls[-1][2]["body"]
+    assert reporter.run_marker(CASE, RUN) in api.calls[-1][2]["body"]
     assert RUN.url in api.calls[-1][2]["body"]
 
 
 @pytest.mark.parametrize("state", ["open", "closed"])
 @pytest.mark.parametrize("where", ["body", "comment"])
 def test_same_run_dedupes_even_after_closure(state, where):
-    issue = existing(state, CASE.marker + (RUN.marker if where == "body" else ""))
-    api = FakeGitHub([issue], [{"body": RUN.marker, "user": {"login": "github-actions[bot]"}}]
+    issue = existing(state, CASE.marker + (reporter.run_marker(CASE, RUN) if where == "body" else ""))
+    api = FakeGitHub([issue], [{"body": reporter.run_marker(CASE, RUN), "user": {"login": "github-actions[bot]"}}]
                      if where == "comment" else [])
     reporter.report(api, RUN, [receipt()])
     assert api.calls == []
 
 
 def test_stranger_issue_cannot_claim_case_or_run_markers():
-    issue = existing(body=CASE.marker + RUN.marker, login="someone-else")
+    issue = existing(body=CASE.marker + reporter.run_marker(CASE, RUN), login="someone-else")
     api = FakeGitHub([issue])
     reporter.report(api, RUN, [receipt()])
     assert api.calls[0][0:2] == ("issues", "POST")
@@ -170,11 +181,48 @@ def test_stranger_issue_cannot_claim_case_or_run_markers():
 
 @pytest.mark.parametrize("user", [{"login": "someone-else"}, {}, None])
 def test_stranger_comment_cannot_suppress_reporting(user):
-    comment = {"body": CASE.marker + RUN.marker, "user": user}
+    comment = {"body": CASE.marker + reporter.run_marker(CASE, RUN), "user": user}
     api = FakeGitHub([existing()], [comment])
     reporter.report(api, RUN, [receipt()])
     assert api.calls[0][0:2] == ("issues/17/comments", "POST")
     assert reporter.decide(CASE, RUN, existing(), [comment]).action == "comment"
+
+
+@pytest.mark.parametrize("reverse_cases", [False, True])
+def test_shared_issue_reports_both_cases_then_deduplicates_rerun(reverse_cases, monkeypatch, capsys):
+    other = reporter.FlakyCase("copy", "copy@desktop-slow", "fail", "pass")
+    api = FakeGitHub([existing(number=12, body=CASE.marker + "\n" + other.marker)])
+    original_request = api.request
+    def request(route, *, method="GET", data=None):
+        response = original_request(route, method=method, data=data)
+        if method == "POST" and route.endswith("/comments"):
+            api.history.append({"body": data["body"], "user": {"login": "github-actions[bot]"}})
+        return response
+    monkeypatch.setattr(api, "request", request)
+    cases = [other, CASE] if reverse_cases else [CASE, other]
+    reporter.report(api, RUN, [receipt(case) for case in cases])
+    assert [(route, method) for route, method, _ in api.calls] == [("issues/12/comments", "POST")] * 2
+    for (_, _, data), case in zip(api.calls, cases):
+        assert case.marker in data["body"]
+        assert f"- Case (including viewport/variant): `{case.case}`" in data["body"]
+    api.calls.clear()
+    capsys.readouterr()
+    reporter.report(api, RUN, [receipt(case) for case in cases])
+    assert api.calls == []
+    assert capsys.readouterr().out.count('"action": "skip"') == 2
+
+
+@pytest.mark.parametrize("where", ["body", "comment"])
+def test_other_cases_run_marker_cannot_suppress_reporting(where):
+    other = reporter.FlakyCase("copy", "copy@desktop-slow", "fail", "pass")
+    prior_body = reporter.decide(other, RUN, None, []).body
+    issue = existing(body=CASE.marker + ("\n" + prior_body if where == "body" else ""))
+    comments = [{"body": prior_body, "user": {"login": "github-actions[bot]"}}] if where == "comment" else []
+    api = FakeGitHub([issue], comments)
+    reporter.report(api, RUN, [receipt()])
+    assert [(route, method) for route, method, _ in api.calls] == [("issues/17/comments", "POST")]
+    assert CASE.marker in api.calls[0][2]["body"]
+    assert reporter.decide(CASE, RUN, issue, comments).action == "comment"
 
 
 @pytest.mark.parametrize("later_run", [False, True])
@@ -284,7 +332,7 @@ def test_rerun_reads_title_only_duplicate_history_after_case_marker_removed(othe
 
 
 def test_unselected_bot_issue_body_also_deduplicates_run():
-    api = FakeGitHub([existing("closed", number=12, body=CASE.marker + RUN.marker), existing(number=30)])
+    api = FakeGitHub([existing("closed", number=12, body=CASE.marker + reporter.run_marker(CASE, RUN)), existing(number=30)])
     reporter.report(api, RUN, [receipt()])
     assert api.calls == []
 
@@ -292,7 +340,7 @@ def test_unselected_bot_issue_body_also_deduplicates_run():
 def test_stranger_run_marker_on_unselected_issue_does_not_deduplicate(monkeypatch):
     api = FakeGitHub([existing("closed", number=12), existing(number=30)])
     monkeypatch.setattr(api, "comments", lambda number:
-        [{"body": RUN.marker, "user": {"login": "someone-else"}}] if number == 12 else [])
+        [{"body": reporter.run_marker(CASE, RUN), "user": {"login": "someone-else"}}] if number == 12 else [])
     reporter.report(api, RUN, [receipt()])
     assert api.calls[-1][0:2] == ("issues/30/comments", "POST")
 
