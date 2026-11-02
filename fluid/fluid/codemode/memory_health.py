@@ -662,6 +662,30 @@ def _archive_loss_samples(doc, now, previous):
     }
 
 
+def _archive_loss_reason(detail):
+    """Owner-facing explanation; counters/replication stay in diagnostic detail."""
+    total = detail.get("archive_dropped_total", 0)
+    reset = detail.get("archive_loss_counter_reset")
+    parts = []
+    if reset:
+        parts.append("The deletion record restarted, so earlier losses are unknown.")
+    if total:
+        period = "Since that restart, automatic" if reset else "Automatic"
+        parts.append(f"{period} archive cleanup has permanently deleted up to "
+                     f"{_plural(total, 'older fact')} on this worker. Recall can no longer find those facts.")
+        if detail.get("archive_loss_time_unknown"):
+            parts.append("We do not know when this happened.")
+        elif detail.get("archive_loss_recent"):
+            parts.append(f"It last happened within the past {COVERAGE_WINDOW / DAY:g} days.")
+        elif not reset:
+            parts.append(f"No further archive deletions were recorded in the past {COVERAGE_WINDOW / DAY:g} days.")
+    elif reset:
+        parts.append("No automatic archive deletions are recorded since the restart.")
+    parts.append("Facts you asked to keep are excluded from this automatic cleanup.")
+    parts.append("There is no retention setting yet; there is nothing to change here.")
+    return " ".join(parts)
+
+
 def _capacity_signal(store, live, archived, archive_loss=None) -> dict:
     from fluid.codemode import skills
 
@@ -677,19 +701,10 @@ def _capacity_signal(store, live, archived, archive_loss=None) -> dict:
               "archived_explicit": archived_explicit, "user_saved": user_saved,
               "bytes": size, "bytes_cap": facts.MAX_DOCUMENT_BYTES,
               "archive_cap": skills.MAX_ARCHIVED_MEMORIES, **(archive_loss or {})}
-    if detail.get("archive_loss_recent") or detail.get("archive_loss_time_unknown"):
-        growth = detail["archive_dropped_in_window"]
-        observed = (f"{growth} more archive drops observed in the last {COVERAGE_WINDOW / DAY:g} days"
-                    if growth is not None else "recent archive drops; no earlier sample to measure growth")
-        headline = "Facts are being permanently removed from the archive"
-        if detail.get("archive_loss_time_unknown") and not detail.get("archive_loss_recent"):
-            headline = "Facts have been permanently removed from the archive"
-            observed = "loss timing is unavailable on this older store"
-        return _signal("capacity", True,
-                       f"{headline}: {observed}. "
-                       f"Lifetime counter {detail['archive_dropped_total']} (upper bound; replay can recount). "
-                       "Review memory retention; increasing capacity alone only delays loss.",
-                       alert=True, **detail)
+    loss_reason = (_archive_loss_reason(detail)
+                   if detail.get("archive_dropped_total") or detail.get("archive_loss_counter_reset") else "")
+    if any(detail.get(key) for key in ("archive_loss_recent", "archive_loss_time_unknown", "archive_loss_counter_reset")):
+        return _signal("capacity", True, loss_reason, alert=True, **detail)
     if size >= DOCUMENT_FULL_SHARE * facts.MAX_DOCUMENT_BYTES:
         share = round(100 * size / facts.MAX_DOCUMENT_BYTES)
         return _signal("capacity", True, f"The memory file is {share}% full; saves fail at the limit.",
@@ -707,10 +722,16 @@ def _capacity_signal(store, live, archived, archive_loss=None) -> dict:
     if len(archived) - archived_explicit >= FULL_SHARE * skills.MAX_ARCHIVED_MEMORIES:
         full.append("archive")
     if full:
-        return _signal("capacity", True,
-                       f"Memory tiers near capacity: {', '.join(full)}; "
-                       "no recent permanent archive loss observed.", **detail)
-    return _signal("capacity", False, f"{_plural(len(live), 'live fact')}; room to spare.", **detail)
+        reason = "Some automatically saved facts are near their storage limit. "
+        reason += loss_reason or (
+            "Older facts may be permanently deleted by automatic archive cleanup. "
+            "Facts you asked to keep are excluded from this automatic cleanup. "
+            "There is no retention setting yet; there is nothing to change here.")
+        return _signal("capacity", True, reason, **detail)
+    reason = f"{_plural(len(live), 'live fact')}; room to spare."
+    if loss_reason:
+        reason += " " + loss_reason
+    return _signal("capacity", False, reason, **detail)
 
 
 def _snapshot_signal(plans) -> dict:
