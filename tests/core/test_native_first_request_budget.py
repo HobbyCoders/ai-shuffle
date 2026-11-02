@@ -32,16 +32,19 @@ from fluid.store.base import MemoryStore
 # Reported "System tools" + "MCP tools" (what every first request pays for tool
 # docs or schemas). Measured ~8.4k (code mode) / ~9.6k (JSON path, which
 # also keeps the frequently used tools loaded: NATIVE_JSON_EAGER_TOOLS).
-TOOL_ROWS_BUDGET = 10_000
+# SuggestTask (background-task chips, always loaded at the owner's request) adds
+# ~220 of these and ~80 prompt tokens for its rule: 13,626 -> 13,926 (code mode),
+# 13,759 -> 14,060 (JSON path) pinned to Linux.
+TOOL_ROWS_BUDGET = 10_100
 # Budget the priced prefix separately from the first turn's own content.
 # The latter contains host paths, so measure its real producers with fixed
 # path inputs rather than making a whole-request ceiling depend on the host.
-# Together these retain the previous 14.3k ceiling without a path-length margin.
+# Together these retain a ceiling of about 14.6k without a path-length margin.
 # The prefix's host facts are pinned per platform (_pin_host). A Windows host
 # also carries its Git Bash notes in the Bash tool and the shell line: ~155
 # tokens measured (JSON path 13,694 pinned to Linux, 13,849 to Windows).
 WINDOWS_GUIDANCE_BUDGET = 160
-FIRST_REQUEST_BUDGET = {"linux": 13_800, "windows": 13_800 + WINDOWS_GUIDANCE_BUDGET}
+FIRST_REQUEST_BUDGET = {"linux": 14_100, "windows": 14_100 + WINDOWS_GUIDANCE_BUDGET}
 TURN_REMINDERS_BUDGET = 500
 # The breakdown before the first turn prices everything the first request
 # carries except the turn itself: the user's text, the host's note appended to

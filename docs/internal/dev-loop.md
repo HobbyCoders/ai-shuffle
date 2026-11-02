@@ -194,7 +194,8 @@ It is chosen by the request alone, so it behaves the same after restarts:
 
 * Plain messages get a short streamed echo of what you wrote.
 * `[script:NAME]` anywhere in your message plays `scripts/devloop/scenarios/NAME.json`:
-  `default`, `long`, `slow`, `tool-bash`, `tool-multi`, `tool-background-stream`, `error-500`,
+  `default`, `long`, `slow`, `tool-bash`, `tool-multi`, `tool-background-stream`, `tool-suggest-task`,
+  `tool-suggest-task-slow`, `tool-task-suggest-task`, `error-500`,
   `rate-limit-429`, `cut`, `ask-question` and `ask-questions` (below), and
   for voice calls `voice-reply` (a three-paragraph reply) and `voice-wait`
   (an update, a background job and a wait; the job's output tags its wake
@@ -208,6 +209,16 @@ It is chosen by the request alone, so it behaves the same after restarts:
   reply are active. Stop or archive the session afterwards to reap the shell;
   otherwise it exits after two minutes. The usual tag options can stretch the
   stream further.
+* `[script:tool-suggest-task]` makes a real `SuggestTask` call, so the chat gets
+  a background-task chip through the real tool path (a repeat in the same chat
+  returns the same chip). `[script:tool-suggest-task-slow]` then keeps streaming
+  for about a minute, so the parent is still mid-turn when you click the chip.
+  `[script:tool-task-suggest-task]` makes the same call from a Task subagent, so
+  the chip attaches to the root chat. Read chips at
+  `GET /api/v1/sessions/{id}/task-chips`. Use a native **Dev agent** chat (its
+  Task target is the seeded **Dev helper** agent) or, for
+  `[script:tool-suggest-task]`, a **Dev (Claude Code)** chat, where the fake CLI calls the
+  tool on the app's MCP bridge; the new chat's fake reply is the default one.
 * `[script:ask-question]` asks one question in the question tray (`AskUser`,
   two options) and ends its turn; `[script:ask-questions]` asks two in one
   request. The app queues the answer as a user message (`Answer to your

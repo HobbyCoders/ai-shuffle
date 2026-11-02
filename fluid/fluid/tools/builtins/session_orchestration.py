@@ -19,6 +19,14 @@ def _handler(action):
     return handle
 
 
+async def _suggest_task(data, ctx):
+    host = ctx.extra.get("task_chips")
+    if host is None:
+        return ToolOutcome(text="Suggested tasks are unavailable in this session; mention the issue in "
+                                "your final report instead.", is_error=True)
+    return await host("suggest", data, ctx)
+
+
 # One bulk call covers five ListSessions pages (the 202-chat cleanup that
 # prompted bulk support fits in one) while every item still gets its own
 # checks and, for a networked archive, possibly an owner round trip; that
@@ -161,6 +169,21 @@ SPECS = (
             "required": ["session_id", "message", "request_id", "kind"], "additionalProperties": False},
         risk="write", requires_extra=("session_orchestration",)), _handler("message")),
     (start_session_spec(), _handler("start")),
+    (ToolSpec(name="SuggestTask", description=(
+        "Show the owner a chip for work outside your task; one click starts it in a separate chat with "
+        "its own worktree. Starts nothing now: do not fix it here, carry on."),
+        input_schema={"type": "object", "properties": {
+            "title": {"type": "string", "maxLength": 80},
+            "summary": {"type": "string", "maxLength": 240, "description": "What is wrong and why it matters."},
+            "prompt": {"type": "string", "maxLength": 8000, "description": "Standalone brief; the new chat has no transcript."},
+            "base": {"type": "string", "enum": ["default", "current"],
+                     "description": "default: fresh default branch. current: this chat's committed HEAD, only if the work needs unmerged work here."},
+            "request_id": {"type": "string", "maxLength": 120, "description": "Same on retries."}},
+            "required": ["title", "summary", "prompt", "request_id"], "additionalProperties": False},
+        risk="safe", requires_extra=("task_chips",),
+        # A Python cell always asks in Ask mode; a chip never should, so this
+        # one tool is called directly and never from a cell.
+        code_mode_allowed=False), _suggest_task),
     _management_tool("SettleSession", "settle",
         "Move a chat from Active to Settled, dismissing pending owner prompts without stopping other work. "
         "This also works offline; the execution worker dismisses its waits on reconnect."),

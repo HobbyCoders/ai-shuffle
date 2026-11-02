@@ -44,11 +44,19 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 # Emulator and sandbox removal (Oct 2026): remeasured the combined tree with
 # scripts/measure_prompt_catalog.py on 2026-10-29, without the retired Android
 # tools. Folder file-only/SSH-command guidance replaces the sandbox promises.
+# Background-task chips (Nov 2026): the owner asked for SuggestTask to be
+# always loaded and for one adjacent-work rule on both lanes, so agents stop
+# fixing unrelated problems mid-task. Wording was tightened first; what is left
+# is one tool (a direct schema on the native surface, so it costs the first
+# request rather than the code-mode catalog; 919 chars as a delegated bridge
+# schema) and the rule (318 chars). combined_full 133,634 -> 133,952, eager
+# 53,138 -> 53,456, delegated append 14,877 -> 15,195, delegated loaded
+# 7,327 -> 8,246.
 # These are actual character counts, not tokenizer or provider billing counts.
-MEASURED_FULL = 132_755
-MEASURED_EAGER = 53_138
-MEASURED_DELEGATED_APPEND = 14_877
-MEASURED_DELEGATED_LOADED_TOOLS = 7_327
+MEASURED_FULL = 133_952
+MEASURED_EAGER = 53_456
+MEASURED_DELEGATED_APPEND = 15_195
+MEASURED_DELEGATED_LOADED_TOOLS = 8_246
 
 
 @pytest.mark.parametrize("native", [True, False])
@@ -202,7 +210,7 @@ def test_measurement_is_repeatable_and_deferred_catalog_is_not_sent() -> None:
     assert measure() == first
     compiled, catalog, specs = compile_fixture()
     # Project tools remain deferred; the two Android emulator schemas are gone.
-    assert len(specs) == 111
+    assert len(specs) == 112
     for leaf in (
         "CreateWatch", "ListWatches", "PauseWatch", "StopWatch", "WorkingRecord",
         "generationPreferences", "listProjects", "createProject",

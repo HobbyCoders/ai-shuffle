@@ -502,6 +502,7 @@ TOOL_LEVELS: Dict[str, Level] = {
     "ListSessions": LOW,
     "MessageSession": LOW,
     "StartSession": _start_session_rule,
+    "SuggestTask": LOW,
     "SettleSession": LOW,
     "UnsettleSession": LOW,
     "ArchiveSession": LOW,

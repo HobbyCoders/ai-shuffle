@@ -1488,6 +1488,18 @@
           "past_bug": "Each source update reinstalled frontend dependencies and rebuilt identical desktop/phone UI; sharing unsigned or mismatched build output would risk stale or untrusted application assets."
         },
         {
+          "id": "harness-basics.suggest-task-chip-real-providers",
+          "check": "A suggested task starts in its own chat on every runtime and worker",
+          "kind": "owner",
+          "needs": [
+            "provider"
+          ],
+          "two_worker": true,
+          "how": "In a throwaway owner chat on a real native provider, then a Claude Code chat on the cheapest model, ask it to fix one thing and mention an unrelated small problem, so it calls SuggestTask. Check Ask mode raises no approval. While the turn runs, start the chip from the chat, then from the other worker's view of that chat. Repeat in a chat on a feature branch and on the main checkout.",
+          "pass_when": "The chip appears on both workers. One click creates exactly one new chat on the owning worker with its own worktree and branch, the same agent, model and project, and a brief attributed to the source chat. Clicking again returns the same chat. The source chat's turn continues and it receives no message or report.",
+          "past_bug": "Sessions spent ages fixing adjacent issues in place; Fake AI runs cannot show that real models use the tool or that real providers start the child."
+        },
+        {
           "id": "harness-basics.swarm-restart-settle",
           "check": "A swarm cut off by an app restart settles and can be cancelled",
           "kind": "owner",

@@ -94,7 +94,7 @@ CHAT_MODE_BASIC_TOOL_SURFACE: List[str] = [
 
 # Owner top-level chats coordinate work without acquiring worker execution.
 CHAT_MODE_ORCHESTRATION_TOOLS = [
-    "ListSessions", "SessionView", "SessionSearch", "StartSession", "MessageSession",
+    "ListSessions", "SessionView", "SessionSearch", "StartSession", "SuggestTask", "MessageSession",
     "SettleSession", "UnsettleSession", "ArchiveSession", "HandOffSession",
     "ListAgents", "Task", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "SendMessage",
 ]
@@ -722,7 +722,7 @@ def chat_mode_read_permitted(tool_name: str, tool_input: Any) -> bool:
 PROACTIVE_TOOL_SURFACE = ["WebSearch", "WebFetch"]
 PROACTIVE_DENIED_TOOLS = [
     "Bash", "Monitor", "Write", "Edit", "NotebookEdit", "Read", "Grep", "Glob",
-    "Task", "Agent", "Swarm", "StartSession", "MessageSession", "RemoteTrigger",
+    "Task", "Agent", "Swarm", "StartSession", "SuggestTask", "MessageSession", "RemoteTrigger",
     "SettleSession", "UnsettleSession", "ArchiveSession",
     "TaskStop", "Remember", "Forget", "NotifyDevices", "ScheduleWakeup",
     "CronCreate", "CronDelete", "RequestChatAccess", "ChatRunCommand",

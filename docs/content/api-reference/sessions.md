@@ -173,6 +173,44 @@ Returns `{ "session_id": "…", "turn_id": "…", "suggestion": "…" }`, or `nu
 
 With **Suggest next reply** enabled (**Settings → General**), the latest generated hint is saved per code session, even if no browser is watching. The empty composer loads it on return/reconnect and after a turn completes. Switching sessions or reloading does not regenerate it. Starting or continuing a turn, or sending another user message, clears the hint on every watching device. Only the latest completed eligible turn can supply a new hint; reloading cannot restore a superseded hint. A cleared/rewound answer or disabling the feature also prevents the stale hint from being shown. An existing draft is never replaced. Pressing Tab or double-clicking/double-tapping the empty composer accepts the gray hint into the draft; it does not send the message. A single click/tap only focuses the input. Enter does not accept the hint. Escape dismisses it for that browser's current visit.
 
+## Suggested Tasks (Task Chips)
+
+An agent that spots work outside its task records a suggestion with its `SuggestTask` tool instead of doing it. The owner can start it in a separate chat with its own worktree; the chat it was suggested in keeps running undisturbed. A subagent's suggestion attaches to the top-level chat at the root of its ancestry.
+
+Chips live on the worker that owns the chat and are mirrored to other workers. Starting or dismissing from another worker's UI runs on the owner.
+
+**Chip fields:** `id`, `session_id` (the chat showing the chip), `origin_session_id` (the chat or subagent that suggested it), `title`, `summary`, `prompt` (the agent's brief, model-written), `base` (`default` or `current`), `state`, `error` (plain words, set in `failed`), `retryable` (true in `failed`), `started_session_id`, `started_session_title`, `created_at`, `updated_at`.
+
+| State | Meaning | Next |
+|---|---|---|
+| `pending` | Waiting for the owner | `starting`, `dismissed` |
+| `starting` | A start is running | `started`, `failed` |
+| `started` | The chat exists; `started_session_id` links to it | Final |
+| `failed` | The start did not happen; `error` says why | `starting` (retry), `dismissed` |
+| `dismissed` | The owner hid it | Final |
+
+Rewinding past the turn that suggested a chip, or clearing the chat, removes it while it is still `pending`. A chip that has been acted on stays.
+
+### GET /api/v1/sessions/{session_id}/task-chips
+
+**Auth:** Required, with the same session access checks as session detail.
+
+Returns `{ "chips": [ … ], "source": null }`, oldest first. When a chip started this chat, `source` is `{ "chip_id": "…", "session_id": "…", "title": "…" }`, naming the chat it was suggested in.
+
+### POST /api/v1/sessions/{session_id}/task-chips/{chip_id}/start
+
+**Auth:** Required, with the same session access checks as session detail.
+
+Starts the chat and returns the chip. Idempotent: a double click, a second device or a retry after a lost response all get the same chat. Parents in a Git project always give the new chat its own worktree and branch, from a fresh copy of the default branch (`base: default`) or the commit the chat was on when it suggested the task (`base: current`). The chat inherits the parent's agent, provider, model, effort, permission mode and project, and its first message is attributed to the suggesting chat, not to you.
+
+A start that could not happen still returns `200`, with the chip in `failed` and the reason in `error`; call this route again to retry. Errors: `404` for an unknown chip, `409` for a dismissed chip, or `503` when the owning worker is offline (nothing changes).
+
+### POST /api/v1/sessions/{session_id}/task-chips/{chip_id}/dismiss
+
+**Auth:** Required, with the same session access checks as session detail.
+
+Hides the chip and returns it. Dismissing again is a no-op. Errors: `404` for an unknown chip, `409` for a chip that has started or is starting.
+
 ## List Sessions
 
 ### GET /api/v1/sessions

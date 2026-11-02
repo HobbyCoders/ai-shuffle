@@ -188,6 +188,7 @@ def publish_owned(*, ctx: Optional[engine.NetworkContext] = None,
     published += publish_runtime(ctx, session_ids=ids)
     published += _publish_child_rows("session_tags", ctx, session_ids=ids)
     published += _publish_child_rows("pending_interactions", ctx, session_ids=ids)
+    published += _publish_child_rows("session_task_chips", ctx, session_ids=ids)
     global _events_backlog
     deadline = time.monotonic() + EVENT_PASS_SECONDS
     backlog = False

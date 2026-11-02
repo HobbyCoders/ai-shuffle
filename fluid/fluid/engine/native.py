@@ -4909,10 +4909,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self._codemode is not None:
             # Code-mode replaces N schemas with the four-tool surface; the
             # work-tools stay in the registry (reachable via host calls) but
-            # never enter the prompt schema.
+            # never enter the prompt schema. A tool code mode cannot call has
+            # no other way in, so its own schema stays on the surface.
             specs = [
                 s for s in self.registry.list_tools(loaded_only=True)
-                if s.source == "codemode"
+                if s.source == "codemode" or not s.code_mode_allowed
             ]
         else:
             specs = self.registry.list_tools(loaded_only=True)

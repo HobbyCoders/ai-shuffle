@@ -898,6 +898,9 @@ class HarnessAdapter(ProviderAdapter):
                 native_ctx.extra["agent_message"] = make_message(self._resolve_app_session_id)
                 from app.core.session_orchestration import make_handler as session_orchestration_handler
                 native_ctx.extra["session_orchestration"] = session_orchestration_handler(self._resolve_app_session_id)
+                from app.core.task_chips import offered_to as task_chips_offered
+                if task_chips_offered(self._resolve_app_session_id()):
+                    native_ctx.extra["task_chips"] = native_ctx.extra["session_orchestration"]
                 native_ctx.extra["task_dispatch"] = make_fluid_dispatcher(
                     self._resolve_app_session_id,
                     profile_id=(options.extra or {}).get("profile_id"),
@@ -5156,6 +5159,12 @@ class HarnessAdapter(ProviderAdapter):
                 sections.append(
                     PromptSection(kind="extra", text=_context_section(permitted))
                 )
+                # Same reason for the adjacent-work rule: only where SuggestTask
+                # is callable, so API-user and automation chats never read it.
+                if _suggest_task_offered(registry, permitted):
+                    from fluid.cli.prompt import ADJACENT_WORK_RULE
+
+                    sections.append(PromptSection(kind="extra", text=ADJACENT_WORK_RULE))
                 # fluid's model-family guidance ("Act, don't narrate",
                 # "## Execution discipline"). fluid only ever emits these from
                 # its own ``compose_base_prompt``, which the app replaces with
@@ -6980,6 +6989,8 @@ _CODE_MODE_CATALOG_SKIP = frozenset({
     # Loads schemas for the JSON-tool path; under code mode every deferred
     # tool is already importable and read_tool_docs serves its docs.
     "ToolSearch",
+    # Sent as its own schema even under code mode, so docs here would repeat it.
+    "SuggestTask",
 })
 
 
@@ -7540,6 +7551,13 @@ CONTEXT_BLOCK_NO_RECALL = """# Context window
 - The latest user message outranks any digest."""
 
 
+def _suggest_task_offered(registry: Any, permitted: Optional[frozenset]) -> bool:
+    """Whether this native surface can call SuggestTask."""
+    if permitted is not None:
+        return "SuggestTask" in permitted
+    return registry is not None and registry.get("SuggestTask") is not None
+
+
 def _context_section(tools: Optional[frozenset[str]] = None) -> str:
     """The context note for this tool surface (None means unrestricted)."""
     if tools is None or {"HistoryExpand", "HistorySearch"} <= tools:
@@ -7839,6 +7857,9 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
             )
     if notes:
         blocks.append("# App tools on this session\n" + "\n".join(notes))
+    if offered("SuggestTask"):
+        from fluid.cli.prompt import ADJACENT_WORK_RULE
+        blocks.append(ADJACENT_WORK_RULE)
     if recall:
         blocks.append(RECALL_BLOCK)
     if memory:

@@ -27,6 +27,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 DEV_AGENT_ID = "dev-agent"
+#: A second Fake AI agent, because an agent is never in its own Task roster.
+DEV_HELPER_AGENT_ID = "dev-helper"
 PROVIDER_NAME = "Fake AI (dev)"
 MAIN_PROJECT = "dev-sandbox"
 OTHER_PROJECT = "dev-other"
@@ -263,7 +265,7 @@ async def seed_default() -> dict:
     from app.core.models import ProjectCreate, ProjectSettings
     from app.db import database
     from app.db.async_database import run_sync
-    from app.db.profiles import get_profile, update_profile
+    from app.db.profiles import create_profile, get_profile, update_profile
 
     _id_counters.clear()
     fake_url = os.environ.get("SHUFFLE_DEV_FAKE_AI_URL")
@@ -276,6 +278,11 @@ async def seed_default() -> dict:
     config = dict((get_profile(DEV_AGENT_ID) or {}).get("config") or {})
     config.update(provider=provider_id, model=composite)
     update_profile(DEV_AGENT_ID, config=config)
+    if get_profile(DEV_HELPER_AGENT_ID) is None:
+        create_profile(
+            DEV_HELPER_AGENT_ID, "Dev helper", "Seeded by the dev loop. A Task target on the Fake AI provider.",
+            config, if_absent=True,
+        )
     await run_sync(make_dev_agent_the_default)
 
     workspace = Path(settings.effective_workspace_dir).resolve()

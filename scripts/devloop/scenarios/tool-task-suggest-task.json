@@ -1,0 +1,20 @@
+{
+  "description": "The chat calls Task once; the subagent plays tool-suggest-task, so its chip attaches to this root chat.",
+  "steps": [
+    {
+      "text": "Delegating this.",
+      "tool_calls": [
+        {
+          "name": "Task",
+          "input": {
+            "agent": "dev-helper",
+            "prompt": "[script:tool-suggest-task]"
+          }
+        }
+      ]
+    },
+    {
+      "text": "The subagent finished."
+    }
+  ]
+}

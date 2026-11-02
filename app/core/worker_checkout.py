@@ -279,6 +279,41 @@ def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allo
                           runtime_receipt(parent_path, path), base_note)
 
 
+def default_branch_commit(parent_row) -> Optional[str]:
+    """The fresh tip of the project's default branch, whatever ``parent_row`` is on.
+
+    ``None`` when there is no Git checkout to read. A failed fetch (offline, no
+    remote) uses the refs already here: a slightly stale base beats no chat.
+    """
+    from app.core.git_fork_base import fetch_base
+    from app.core.git_service import git_service
+
+    if not (parent_row.get("project_v2_id") or parent_row.get("project_id")):
+        return None
+    path = _caller_checkout(parent_row, parent_row.get("branch") or parent_row.get("worktree_branch"))
+    if not path:
+        return None
+    branch, _fetched = fetch_base(path)
+    for ref in (f"refs/remotes/origin/{branch}", f"refs/heads/{branch}"):
+        tip = git_service._run_git(path, ["rev-parse", "--verify", f"{ref}^{{commit}}"], timeout=5)
+        if tip.returncode == 0 and _SHA.fullmatch(tip.stdout.strip()):
+            return tip.stdout.strip()
+    return None
+
+
+def origin_head_commit(row) -> Optional[str]:
+    """The committed HEAD of the chat ``row``'s own checkout, ``None`` without Git."""
+    from app.core.git_service import git_service
+
+    if not (row.get("project_v2_id") or row.get("project_id")):
+        return None
+    path = _caller_checkout(row, row.get("branch") or row.get("worktree_branch"))
+    if not path:
+        return None
+    tip = git_service._run_git(path, ["rev-parse", "--verify", "HEAD^{commit}"], timeout=5)
+    return tip.stdout.strip() if tip.returncode == 0 and _SHA.fullmatch(tip.stdout.strip()) else None
+
+
 def _reclaim(main_dir: str, project_id: str, path: Optional[str], branch: str, base_commit: str,
              head_commit: Optional[str] = None) -> bool:
     """Remove a worker checkout and branch only while they hold no work.
