@@ -353,27 +353,6 @@ def get_pending_interactions(session_id: str) -> List[Dict[str, Any]]:
     return [r for r in (_parse_row(row) for row in rows) if r is not None]
 
 
-def latest_interaction_since_owner(session_id: str, kind: str) -> Optional[Dict[str, Any]]:
-    """The session's newest ``kind`` row, when the owner has sent nothing since.
-
-    "Sent nothing" means no ``user`` or ``queue`` turn was created after the
-    row. Any state. None when there is no such row or the owner already wrote
-    again (an older row cannot qualify then either: it is older still).
-    """
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT i.* FROM pending_interactions i "
-            "WHERE i.session_id=%s AND i.kind=%s AND NOT EXISTS ("
-            "SELECT 1 FROM turns t WHERE t.session_id=i.session_id "
-            "AND t.source IN ('user','queue') AND t.created_at > i.created_at) "
-            "ORDER BY i.created_at DESC LIMIT 1",
-            (session_id, kind),
-        )
-        row = cursor.fetchone()
-    return _parse_row(dict(row) if row else None)
-
-
 def get_interaction(interaction_id: str) -> Optional[Dict[str, Any]]:
     """Fetch a single interaction by id, or None."""
     with get_db() as conn:

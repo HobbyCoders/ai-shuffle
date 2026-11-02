@@ -139,23 +139,6 @@ Send the ordinary `permission_response`:
 the `suggested_model` shown. The engine already accepts a different choice
 through `updated_input.model`, if the respond API ever carries one.
 
-**Typed answers in an owner chat** (`owner_confirm.answer_guardrail_in_place`,
-called from `turn_manager.submit_async` before anything else): a bare firm yes
-or no (`owner_confirm.classify`) that answers the chat's own pending prompt is
-the answer and nothing more. It is recorded on the paused turn as a
-`message.user`, then the prompt settles (yes = Continue, no = Stop), then the
-outcome row is written, so live, reload and the other worker all read
-request → answer → outcome. No turn is queued for it, so the agent never sees
-it: a "no" turn would re-send the blocked request on the original model, and a
-"yes" turn would follow the resumed answer. When the prompt is already settled
-(it expired, or was answered on the card or another device) and the owner has
-sent nothing since, a bare "no", or a "yes" to a prompt that was allowed, is
-kept as a `reply-<uuid>` synthetic turn (`turn.started` / `message.user` /
-`turn.completed`, no `turns` row) that the reducer draws as history without
-touching the live turn. A "yes" to a declined or expired prompt, a reply with
-anything more in it, an unclear reply, and a prompt whose turn runs on another
-runner all go on as an ordinary message. Ordinary tool approvals are unchanged.
-
 ### How the suggested model is chosen
 
 1. **The provider's recommendation.** This is Anthropic `stop_details.recommended_model`

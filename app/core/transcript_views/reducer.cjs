@@ -912,7 +912,7 @@ function reduceInternal(state, event, observe) {
   const withSeq = seq > state.lastSeq ? { ...state, lastSeq: seq } : state;
   state = withSeq;
   const turnId = str(event.turn_id);
-  const syntheticTranscript = turnId.startsWith("voice-") || turnId.startsWith("brief-") || turnId.startsWith("reply-");
+  const syntheticTranscript = turnId.startsWith("voice-") || turnId.startsWith("brief-");
   if (syntheticTranscript && ["turn.started", "turn.completed", "turn.aborted"].includes(event.type)) {
     return state;
   }
@@ -2309,7 +2309,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "bd804abfa001ff4ad5d6076f2fb9d68098971c9a3f59a75aeb20dca8c2878f88";
+var REDUCER_FINGERPRINT = "33aacc18122069fd93ec488506383c5d0e11a3d6a3ba4261d46bd70d6ec391b0";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {

@@ -94,39 +94,6 @@ describe('streaming tail lookup', () => {
 	});
 });
 
-describe('an owner reply that starts no turn', () => {
-	// A bare "no" sent after a safety-check prompt was already settled is kept
-	// as a `reply-` synthetic turn (turn_recorder.record_owner_reply).
-	it('shows the message without starting, ending or re-using a turn', () => {
-		const before = fold([
-			ev('turn.started', { turn_id: 'chat-turn' }),
-			ev('message.user', { turn_id: 'chat-turn', content: 'audit this' }),
-			ev('turn.usage', { turn_id: 'chat-turn', usage: { input_tokens: 40 } }),
-			ev('turn.completed', { turn_id: 'chat-turn', stop_reason: 'refusal', usage: { input_tokens: 40 } }),
-		]);
-		const after = reduceAll([
-			ev('turn.started', { turn_id: 'reply-1', command_id: 'c1' }),
-			ev('message.user', { turn_id: 'reply-1', command_id: 'c1', content: 'no' }),
-			ev('turn.completed', { turn_id: 'reply-1', command_id: 'c1', usage: {} }),
-		], before);
-		expect(after.isStreaming).toBe(false);
-		expect(after.liveTurnId).toBe(before.liveTurnId);
-		expect(after.usage).toEqual(before.usage);
-		expect(after.messages.filter(m => m.role === 'user').map(m => m.content)).toEqual(['audit this', 'no']);
-	});
-
-	it('never takes over a live turn it arrives during', () => {
-		const state = fold([
-			ev('turn.started', { turn_id: 'chat-turn' }),
-			ev('turn.started', { turn_id: 'reply-2' }),
-			ev('message.user', { turn_id: 'reply-2', content: 'no' }),
-			ev('turn.completed', { turn_id: 'reply-2' }),
-		]);
-		expect(state.liveTurnId).toBe('chat-turn');
-		expect(state.isStreaming).toBe(true);
-	});
-});
-
 describe('voice transcript alongside a working chat agent', () => {
 	it('does not steal the live turn, close its text or settle its tasks', () => {
 		const events = [

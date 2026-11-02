@@ -1253,12 +1253,9 @@ function reduceInternal(
 	// They can arrive while a chat turn is streaming or parked on agents:
 	// their lifecycle must never replace its Stop target or settle its tasks.
 	// Briefs the backend posts between turns (`brief-` turns, e.g. background
-	// research results in the assistant home) are persisted the same way, and
-	// so is an owner's reply that starts no turn (`reply-` turns: a bare yes or
-	// no sent after a safety-check prompt was already settled).
+	// research results in the assistant home) are persisted the same way.
 	const turnId = str(event.turn_id);
-	const syntheticTranscript =
-		turnId.startsWith('voice-') || turnId.startsWith('brief-') || turnId.startsWith('reply-');
+	const syntheticTranscript = turnId.startsWith('voice-') || turnId.startsWith('brief-');
 	if (syntheticTranscript &&['turn.started', 'turn.completed', 'turn.aborted'].includes(event.type)) {
 		return state;
 	}

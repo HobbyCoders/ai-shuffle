@@ -770,8 +770,6 @@ class SessionRuntime:
         self._unowned = False
         self._lease_finalizing = False
         self._recorder_closing = False
-        # This turn's recorder once ``execute`` builds it (record_owner_reply).
-        self._recorder: Optional[TurnRecorder] = None
         # Queued turn ids already handed to the engine as steers THIS turn.
         # ``try_steer_pending`` fires once per send, so without this a message
         # still awaiting its receipt would be submitted again by the next send.
@@ -1235,7 +1233,6 @@ class SessionRuntime:
             # driving (same cancel path as interrupt escalation).
             recorder.on_superseded = self._on_recorder_superseded
             recorder.on_recording_failed = self._on_recorder_recording_failed
-            self._recorder = recorder
 
             # 6/7. Pump under the reader token, then ALWAYS finalize. A pump
             #    crash is absorbed (``_terminal`` stays ``None`` → finalize
@@ -2588,31 +2585,6 @@ class SessionRuntime:
                 "SessionRuntime: could not flag re-delivery on turn %s", row_id,
                 exc_info=True,
             )
-
-    async def record_owner_reply(
-        self, content: str, *, profile_id: Optional[str] = None,
-        command_id: Optional[str] = None, source: str = "user", persist: bool = True,
-    ) -> bool:
-        """Record the owner's message on THIS live turn without sending it on.
-
-        For a bare yes or no that answers the turn's own provider safety-check
-        prompt (``owner_confirm.answer_guardrail_in_place``): the message is
-        the answer, so it belongs in the transcript where the owner sent it,
-        but it must never reach the model or start a turn of its own.
-        ``persist`` also writes the legacy message-store row (False when the
-        sender already did). Returns True when the ``message.user`` was
-        appended.
-        """
-        recorder = self._recorder
-        if recorder is None or self._recorder_closing or self._unowned:
-            return False
-        recorded = await recorder.record_steered_user_message(
-            content, profile_id=profile_id or self.turn.get("profile_id"),
-            command_id=command_id, source=source,
-        )
-        if recorded and persist:
-            await self._persist_user_message(content, profile_id=profile_id, source=source)
-        return recorded
 
     async def _persist_user_message(
         self, content: str, *, profile_id: Optional[str] = None,
