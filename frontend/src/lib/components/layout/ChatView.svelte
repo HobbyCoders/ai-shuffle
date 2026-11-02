@@ -10,10 +10,13 @@
 	import { finishJourneyAfterPaint } from '$lib/services/journey-timing';
 	import { activeSession, activeWsConnected, streamingSessions } from '$lib/stores/active-session';
 	import { sessions } from '$lib/stores/app-data.svelte';
-	import { openSession } from '$lib/services/session-navigation';
+	import { openSession, openSessionLink, sessionHref } from '$lib/services/session-navigation';
 	import { interruptSession, stopSessionTask } from '$lib/api/sessions';
 	import { buildBackgroundJobs, type BackgroundJob } from '$lib/utils/background-work';
 	import BackgroundWorkStrip from '$lib/components/chat/BackgroundWorkStrip.svelte';
+	import TaskChipTray from '$lib/components/chat/TaskChipTray.svelte';
+	import { taskChips } from '$lib/stores/session/task-chips';
+	import type { TaskChip } from '$lib/api/sessions';
 	import { isAssistantConfirm } from '$lib/utils/assistant-confirm';
 	import { sessionOwnerBoundary } from '$lib/stores/session-owner';
 	import { notify } from '$lib/stores/notifications';
@@ -182,6 +185,17 @@
 			notify.error('Could not stop that job. It may have finished.');
 			return false;
 		}
+	}
+	// Scalar, so a streaming tick does not re-run these. The guard covers the one
+	// render between a switch and observe(): another chat's chips never paint here.
+	const chipSession = $derived($activeSession.sessionId);
+	const chipView = $derived($taskChips.sessionId === chipSession ? $taskChips : null);
+	$effect(() => { taskChips.observe(chipSession); });
+	function openChipChat(event: MouseEvent, sessionId: string, chip?: TaskChip) {
+		// A new-tab gesture has not opened the chat here; only a real open clears it.
+		const ordinary = !(event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) && event.button === 0;
+		openSessionLink(event, sessionId);
+		if (chip && ordinary) taskChips.clear(chip.id);
 	}
 	// The bound hero's heading: the header's rule (chatHeaderTitle), so a chat
 	// whose name is not known yet reads "Loading…", never "New Chat" (the
@@ -562,6 +576,19 @@
 	     never remount it. All three lanes keep this same editor. -->
 	{#if showComposer}
 		<div class="input-slot" bind:clientHeight={composerHeight} class:composer-overflow={surfaceHeight > 0 && composerHeight > surfaceHeight} class:input-wrapper={!showEmptyHero} class:empty-input-layout={showEmptyHero}>
+			<TaskChipTray
+				sessionId={chipSession}
+				chips={chipView?.chips ?? []}
+				source={chipView?.source ?? null}
+				busy={chipView?.busy ?? {}}
+				errors={chipView?.errors ?? {}}
+				loaded={chipView?.loaded ?? false}
+				hrefFor={(id) => sessionHref(id)}
+				onStart={(chip) => void taskChips.start(chip.id)}
+				onDismiss={(chip) => void taskChips.dismiss(chip.id)}
+				onClear={(chip) => taskChips.clear(chip.id)}
+				onOpenChat={openChipChat}
+			/>
 			{#if voiceCallActive && $activeSession.sessionId}
 				<div class="call-dock-slot" bind:clientHeight={callDockHeight}><VoiceCallPanel sessionId={$activeSession.sessionId} compact /></div>
 			{/if}

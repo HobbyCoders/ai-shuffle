@@ -536,3 +536,60 @@ export interface ResumeSessionResponse {
 export async function resumeSession(sessionId: string): Promise<ResumeSessionResponse> {
 	return api.post<ResumeSessionResponse>(`/sessions/${sessionId}/resume`);
 }
+
+// ============================================================================
+// Background-task chips
+// ============================================================================
+
+export type TaskChipState = 'pending' | 'starting' | 'started' | 'failed' | 'dismissed';
+
+/** Work an agent suggested for a separate chat; the owner's click starts it. */
+export interface TaskChip {
+	id: string;
+	session_id: string;
+	origin_session_id: string;
+	/** The subagent that raised it; null when the main chat itself did. */
+	origin_label: string | null;
+	title: string;
+	summary: string;
+	prompt: string;
+	model: string;
+	provider_id: string | null;
+	model_label: string | null;
+	effort: string | null;
+	base: 'default' | 'current';
+	state: TaskChipState;
+	error: string | null;
+	retryable: boolean;
+	started_session_id: string | null;
+	started_session_title: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
+/** The chat a chip started this chat from. */
+export interface TaskChipSource {
+	chip_id: string;
+	session_id: string;
+	title: string | null;
+}
+
+export interface TaskChipList {
+	chips: TaskChip[];
+	source: TaskChipSource | null;
+}
+
+const taskChipsPath = (sessionId: string) => `/sessions/${encodeURIComponent(sessionId)}/task-chips`;
+
+export function listTaskChips(sessionId: string): Promise<TaskChipList> {
+	return api.get<TaskChipList>(taskChipsPath(sessionId));
+}
+
+/** Idempotent. A start that could not happen resolves with the chip in `failed`. */
+export function startTaskChip(sessionId: string, chipId: string): Promise<TaskChip> {
+	return api.post<TaskChip>(`${taskChipsPath(sessionId)}/${encodeURIComponent(chipId)}/start`);
+}
+
+export function dismissTaskChip(sessionId: string, chipId: string): Promise<TaskChip> {
+	return api.post<TaskChip>(`${taskChipsPath(sessionId)}/${encodeURIComponent(chipId)}/dismiss`);
+}

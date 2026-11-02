@@ -526,6 +526,7 @@ type ToolAction =
 	| 'delegate'
 	| 'message'
 	| 'task-check'
+	| 'suggest-task'
 	| 'image-gen'
 	| 'image-edit'
 	| 'video-gen'
@@ -554,6 +555,7 @@ function toolAction(message: ChatMessage): ToolAction {
 	// subagents, and checks on background tasks. Neither reads a file.
 	if (['SendMessage', 'MessageSession'].includes(name)) return 'message';
 	if (['TaskGet', 'TaskOutput'].includes(name)) return 'task-check';
+	if (name === 'SuggestTask') return 'suggest-task';
 	if (['Read', 'BashOutput'].includes(name)) return 'read';
 	if (['Write', 'Edit', 'NotebookEdit'].includes(name)) return 'edit';
 	if (['Bash', 'KillShell', 'SlashCommand', 'Monitor', 'TaskStop'].includes(name)) return 'command';
@@ -594,6 +596,8 @@ function actionLabel(action: ToolAction, count: number): string {
 			return `Delegated ${count} ${count === 1 ? 'task' : 'tasks'}`;
 		case 'message':
 			return `Sent ${count} ${count === 1 ? 'message' : 'messages'}`;
+		case 'suggest-task':
+			return `Suggested ${count} ${count === 1 ? 'task' : 'tasks'}`;
 		case 'task-check':
 			return `Checked ${count} ${count === 1 ? 'task' : 'tasks'}`;
 		case 'image-gen':
@@ -631,6 +635,7 @@ const COMPACT_ACTION_LABELS: Record<ToolAction, (count: number) => string> = {
 	delegate: (n) => `Delegated ${n}`,
 	message: (n) => `Sent ${n}`,
 	'task-check': (n) => `Checked ${n}`,
+	'suggest-task': (n) => `Suggested ${n}`,
 	'image-gen': (n) => `Images ${n}`,
 	'image-edit': (n) => `ImgEdits ${n}`,
 	'video-gen': (n) => `Videos ${n}`,

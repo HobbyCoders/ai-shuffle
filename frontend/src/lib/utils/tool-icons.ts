@@ -58,6 +58,7 @@ const TOOL_ICON_MAP: Record<string, IconType> = {
 	// Worktree
 	EnterWorktree: 'branch', ExitWorktree: 'branch',
 	// Monitor / background tasks
+	SuggestTask: 'branch',
 	Monitor: 'eye', TaskOutput: 'eye', TaskStop: 'stop', TaskList: 'list', TaskGet: 'list',
 	// Notifications
 	NotifyDevices: 'bell',

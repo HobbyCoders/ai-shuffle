@@ -1,0 +1,99 @@
+{
+  "description": "Crowds the composer: four SuggestTask calls with long titles (one word far too long to wrap), a running Monitor shell for the background-work strip, then a question in the question tray. For checking that the tray, the strip, the question tray and the composer fit together at every width. Answer the question, then stop or archive the chat to reap the shell.",
+  "steps": [
+    {
+      "text": "Suggesting a few things.",
+      "tool_calls": [
+        {
+          "name": "SuggestTask",
+          "input": {
+            "title": "Work out why the settings page takes so long to load on slow phone connections",
+            "summary": "Settings loads every provider and every worker before showing anything at all, so on a slow connection the owner stares at an empty page for a long time.",
+            "prompt": "Fake-AI brief. Crowded tray check, first chip. Change nothing.",
+            "model": "fake-ai",
+            "base": "default",
+            "request_id": "fake-ai-crowded-v2-1"
+          }
+        },
+        {
+          "name": "SuggestTask",
+          "input": {
+            "title": "src/lib/components/settings/AccountCredentialSwitcherPanelContentsDialog.svelte",
+            "summary": "One long path with no spaces, to check it wraps inside the chip and never pushes the page sideways.",
+            "prompt": "Fake-AI brief. Crowded tray check, second chip. Change nothing.",
+            "model": "fake-ai-safe",
+            "effort": "low",
+            "base": "current",
+            "request_id": "fake-ai-crowded-v2-2"
+          }
+        },
+        {
+          "name": "SuggestTask",
+          "input": {
+            "title": "Check the docs heading",
+            "summary": "A short one.",
+            "prompt": "Fake-AI brief. Crowded tray check, third chip. Change nothing.",
+            "model": "fake-ai",
+            "base": "default",
+            "request_id": "fake-ai-crowded-v2-3"
+          }
+        },
+        {
+          "name": "SuggestTask",
+          "input": {
+            "title": "A fourth suggestion that starts out folded",
+            "summary": "Behind the and-more control until the owner opens it.",
+            "prompt": "Fake-AI brief. Crowded tray check, fourth chip. Change nothing.",
+            "model": "fake-ai",
+            "base": "default",
+            "request_id": "fake-ai-crowded-v2-4"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Starting a background shell.",
+      "tool_calls": [
+        {
+          "name": "Monitor",
+          "input": {
+            "command": "sleep 120",
+            "wait_seconds": 0
+          }
+        }
+      ]
+    },
+    {
+      "text": "One decision from you too.",
+      "tool_calls": [
+        {
+          "name": "AskUser",
+          "input": {
+            "questions": [
+              {
+                "question": "Which colour should the banner use?",
+                "header": "Colour",
+                "options": [
+                  {
+                    "label": "Teal",
+                    "description": "The current accent colour."
+                  },
+                  {
+                    "label": "Amber",
+                    "description": "A warmer accent."
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "text": "I've asked in the question tray. I'll wait for your answer."
+    },
+    {
+      "text": "Thanks. I received:\n\n{answer}\n\nDone."
+    }
+  ]
+}

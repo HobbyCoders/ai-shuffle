@@ -167,6 +167,16 @@
 			]
 		},
 		{
+			"why": "background-task chips: the tray beside the composer, Start, failures, and chips across reloads and chat switches",
+			"journeys": ["task-chips"],
+			"globs": [
+				"frontend/src/lib/components/chat/TaskChipTray.svelte",
+				"frontend/src/lib/stores/session/task-chips.ts",
+				"app/core/task_chips.py",
+				"frontend/tests/journeys/task-chips.journey.mjs"
+			]
+		},
+		{
 			"why": "tool calls and the work log",
 			"journeys": ["tool-cards"],
 			"globs": [

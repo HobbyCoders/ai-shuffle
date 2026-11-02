@@ -198,7 +198,7 @@ It is chosen by the request alone, so it behaves the same after restarts:
   `tool-suggest-task-slow`, `tool-suggest-task-other-model`, `tool-suggest-task-claude`,
   `tool-suggest-task-current`, `tool-suggest-task-bad-model`, `tool-task-suggest-task`,
   `tool-task-current-suggest-task`, `tool-task-nested-suggest-task`, `tool-task-late-suggest-task`,
-  `tool-task-late-suggest-task-streaming`, `tool-suggest-task-late`, `tool-suggest-task-then-fail`,
+  `tool-task-late-suggest-task-streaming`, `tool-suggest-task-late`, `tool-suggest-task-crowded`, `tool-suggest-task-then-fail`,
   `tool-task-fail-suggest-task`, `tool-task-stop-suggest-task`, `tool-swarm-suggest-task`, `error-500`,
   `rate-limit-429`, `cut`, `ask-question` and `ask-questions` (below), and
   for voice calls `voice-reply` (a three-paragraph reply) and `voice-wait`
