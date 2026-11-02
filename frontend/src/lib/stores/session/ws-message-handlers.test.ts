@@ -1952,6 +1952,34 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe.each(['session_updated', 'user_session_updated'])('%s handler (task chips)', (type) => {
+		it.each([2, 0])('patches pending_task_chips=%s without a list reload', async (count) => {
+			vi.useFakeTimers();
+			try {
+				deps = createMockDeps();
+				handlers = createMessageHandlers(deps);
+
+				const updates = { pending_task_chips: count };
+				handlers.handleMessage(type === 'session_updated' ? {
+					event_type: type,
+					session_id: 'session-1',
+					data: { updates },
+				} : {
+					type,
+					session_id: 'session-1',
+					updates,
+				});
+
+				expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', { pending_task_chips: count });
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+				expect(deps.appLoadSessions).not.toHaveBeenCalled();
+				expect(deps.appLoadApiUserSessions).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+	});
+
 	describe.each(['session_updated', 'user_session_updated'])('%s handler (running tasks)', (type) => {
 		it.each([true, false])('patches has_running_tasks=%s without a list reload', async (hasRunningTasks) => {
 			vi.useFakeTimers();

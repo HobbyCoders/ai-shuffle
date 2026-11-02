@@ -904,6 +904,84 @@ async def test_the_change_frame_carries_no_chip_text(owner, monkeypatch):
     assert sent[0].data == {"type": "task_chips_changed", "session_id": "root"}
 
 
+# --- The count sidebars read: chips waiting on the owner
+
+
+async def _published(monkeypatch):
+    """What one change tells every device of the user, the chat not open anywhere."""
+    from app.core.sync_engine import sync_engine
+
+    send = AsyncMock()
+    monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", send)
+    await task_chips._publish_waiting("root")
+    send.assert_awaited_once()
+    return send.await_args.kwargs
+
+
+async def test_only_chips_the_owner_can_act_on_count_as_waiting(owner, monkeypatch):
+    assert store.waiting_counts(["root"])["root"]["pending_task_chips"] == 0
+    chips = [await recorded(title=f"Task {i}", request_id=f"r{i}") for i in range(4)]
+    assert store.waiting_counts(["root"])["root"]["pending_task_chips"] == 4
+    await task_chips.dismiss("root", chips[0])
+    assert store.claim("root", chips[1])["state"] == "starting"  # the app's turn, not the owner's
+    claimed = store.claim("root", chips[2])
+    store.mark_failed(chips[2], claimed["attempt"], "No model")  # shows Retry: the owner's turn again
+    assert store.waiting_counts(["root"])["root"]["pending_task_chips"] == 2
+    assert (await _published(monkeypatch))["updates"] == {"pending_task_chips": 2}
+
+
+async def test_every_change_reaches_sidebars_with_the_count_after_it(owner, monkeypatch):
+    chip_id = await recorded()
+    assert (await _published(monkeypatch)) == {
+        "user_id": "admin", "session_id": "root", "updates": {"pending_task_chips": 1}}
+    await task_chips.dismiss("root", chip_id)
+    assert (await _published(monkeypatch))["updates"] == {"pending_task_chips": 0}
+
+
+async def test_the_frame_and_the_count_both_go_out_for_one_change(owner, monkeypatch):
+    from app.core.sync_engine import sync_engine
+
+    frame, count = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(sync_engine, "broadcast_event", frame)
+    monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", count)
+    await task_chips._broadcast("root")
+    frame.assert_awaited_once()
+    count.assert_awaited_once()
+
+
+async def test_a_lost_frame_does_not_lose_the_count(owner, monkeypatch):
+    from app.core.sync_engine import sync_engine
+
+    count = AsyncMock()
+    monkeypatch.setattr(sync_engine, "broadcast_event", AsyncMock(side_effect=RuntimeError("socket gone")))
+    monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", count)
+    with pytest.raises(RuntimeError):
+        await task_chips._broadcast("root")
+    count.assert_awaited_once()
+
+
+async def test_a_failed_count_read_never_raises_and_a_gone_chat_sends_nothing(owner, monkeypatch):
+    from app.core.sync_engine import sync_engine
+
+    send = AsyncMock()
+    monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", send)
+    await task_chips._publish_waiting("no-such-chat")
+    monkeypatch.setattr(store, "waiting_counts", lambda ids: (_ for _ in ()).throw(RuntimeError("db down")))
+    await task_chips._publish_waiting("root")
+    send.assert_not_awaited()
+
+
+async def test_the_session_list_carries_the_count(owner):
+    from app.api import sessions_helpers
+
+    await recorded()
+    chat("other")
+    rows = sessions_helpers.enrich_sessions_with_tags([sessions.get_session("root"), sessions.get_session("other")])
+    assert {row["id"]: row["pending_task_chips"] for row in rows} == {"root": 1, "other": 0}
+    results = sessions_helpers.enrich_search_results_with_tags([{"id": "root", "instance_id": None}])
+    assert results[0]["pending_task_chips"] == 1
+
+
 # --- Routing
 
 

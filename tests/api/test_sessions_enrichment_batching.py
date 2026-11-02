@@ -93,6 +93,7 @@ class TestEnrichmentOutputIsUnchanged:
             "api_user_id": "user-0",
             "api_user_name": "Ada",
             "has_running_tasks": False,
+            "pending_task_chips": 0,
             "tags": [{"id": "t1", "name": "Bug"}],
             "has_forks": True,
             "is_remote": False,

@@ -62,6 +62,8 @@
 		isLiveStatus,
 		isTurnLiveStatus,
 		isWorkCountingStatus,
+		taskChipWords,
+		waitingTaskChips,
 		sessionWorkMs,
 		formatElapsed,
 		formatAge,
@@ -152,9 +154,12 @@
 	const statusWord = $derived(runtimeStatusWord(status, compacting));
 	const statusTone = $derived(RUNTIME_STATUS_TONES[status]);
 	const attention = $derived(isAttentionStatus(status));
+	const taskChips = $derived(waitingTaskChips(session));
+	const taskChipText = $derived(taskChips > 0 ? taskChipWords(taskChips) : '');
 	// In-flight (working) rows that aren't the open session recede so the list
-	// triages at a glance; prompt-parked / PR / done rows stay prominent.
-	const receded = $derived(status === 'working' && !active);
+	// triages at a glance; prompt-parked / PR / done rows, and a row holding a
+	// task chip for the owner, stay prominent.
+	const receded = $derived(status === 'working' && !active && taskChips === 0);
 
 	// ── Git state ───────────────────────────────────────────────────────
 	// The session open in the main panel already has its checkout loaded by the
@@ -658,7 +663,7 @@
 				<span class="title">
 					{#if status === 'working'}
 						<span class="pip" aria-hidden="true"></span>
-					{:else if attention}
+					{:else if attention || taskChips > 0}
 						<TriangleAlert size={12} strokeWidth={2.2} class="warn" aria-hidden="true" />
 					{/if}{#if compact && (status === 'working' || attention)}<span class="sr-only">{`${statusWord}: `}</span>{/if}{title}
 				</span>
@@ -691,6 +696,10 @@
 					<span class="st {statusTone}">{statusWord}{#if status === 'working'}<span class="working-dots" aria-hidden="true">
 							<span></span><span></span><span></span>
 						</span>{/if}</span>
+					{#if taskChipText}
+						<span class="dot" aria-hidden="true"></span>
+						<span class="st amber" data-task-chip-count>{taskChipText}</span>
+					{/if}
 					{#if showPr}
 						<span class="dot" aria-hidden="true"></span>
 						{#if multiPr}
@@ -718,6 +727,10 @@
 				{#if !compact}
 					<span class="dot" aria-hidden="true"></span>
 					<span class="seg proj-seg"><span class="proj">{projectLabel}</span></span>
+				{/if}
+				{#if compact && taskChipText}
+					<span class="dot" aria-hidden="true"></span>
+					<span class="st amber" data-task-chip-count>{taskChipText}</span>
 				{/if}
 				{#if compact && stageWord}
 					<span class="dot" aria-hidden="true"></span>

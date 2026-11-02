@@ -39,6 +39,8 @@ export interface Session {
 	parked_task_kind?: string | null;
 	/** Running durable tasks, including non-park-gating Monitor commands. */
 	has_running_tasks?: boolean;
+	/** Task chips waiting on the owner to start, retry or dismiss. */
+	pending_task_chips?: number;
 	/** Read-only state sampled on the owning worker, never local runner state. */
 	remote_runtime_state?: 'working' | 'parked' | 'permission' | 'question' | 'idle' | 'offline' | 'unknown' | null;
 	is_active: boolean;

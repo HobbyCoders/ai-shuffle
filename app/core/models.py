@@ -379,6 +379,7 @@ class Session(SessionBase):
     is_active: bool = False
     parked_task_kind: Optional[str] = None
     has_running_tasks: bool = False
+    pending_task_chips: int = 0
     remote_runtime_state: Optional[str] = None
     api_user_id: Optional[str] = None
     api_user_name: Optional[str] = None
