@@ -61,15 +61,29 @@ class NotificationPermissionSmokeTest {
                 // A native app rationale must not satisfy the system-dialog assertion.
                 val system = root.packageName?.toString()?.endsWith(".permissioncontroller") == true
                 if (permission && !system) return@await false
+                if (!permission && root.packageName?.toString() != context.packageName) return@await false
                 // Android transforms permission-button labels (including all caps).
                 // Match the controller's semantic resource ID, not rendered English.
                 val nodes = if (permission) root.findAccessibilityNodeInfosByViewId(
                     "${root.packageName}:id/permission_${if (text == "Allow") "allow" else "deny"}_button")
                     else root.findAccessibilityNodeInfosByText(text)
-                val found = nodes.firstOrNull { it.isClickable && it.isVisibleToUser &&
+                val label = nodes.firstOrNull { it.isEnabled && it.isVisibleToUser &&
+                    (!permission || it.isClickable) &&
                     (permission || it.text?.toString() == text || it.contentDescription?.toString() == text) }
+                // PopupMenu exposes its label as a non-clickable TextView. Tap
+                // the enabled, visible clickable row, not a fake menu callback.
+                var found = label?.let { AccessibilityNodeInfo.obtain(it) }
+                while (found != null && !found.isClickable) {
+                    val parent = found.parent
+                    found.recycle()
+                    found = parent
+                }
+                if (found?.isEnabled != true || found?.isVisibleToUser != true) {
+                    found?.recycle()
+                    found = null
+                }
                 target = found
-                nodes.filter { it !== found }.forEach { it.recycle() }
+                nodes.forEach { it.recycle() }
                 found != null
             } finally { root.recycle() }
         }
