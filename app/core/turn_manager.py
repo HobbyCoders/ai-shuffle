@@ -588,6 +588,16 @@ async def submit_async(
         # (#484) however long the turn waits to start.
         from app.core import owner_confirm
 
+        # A bare yes or no to a provider safety-check prompt is the answer and
+        # nothing more: it is recorded where the owner sent it, the prompt is
+        # settled, and no turn runs for it (the turn it answers resumes or
+        # stops on its own). The returned id is the turn that holds it.
+        taken = await owner_confirm.answer_guardrail_in_place(
+            session_id, prompt, command_id=command_id, profile_id=profile_id,
+            source=source, persist=bool((payload or {}).get("deferred_user_record")),
+        )
+        if taken:
+            return taken
         answered = await owner_confirm.on_owner_message(session_id, prompt)
         if answered is not None and answered.get("decision") == owner_confirm.HELD:
             # Not an answer: the requests stay pending, and the calls this chat

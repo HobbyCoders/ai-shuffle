@@ -1730,6 +1730,67 @@ async def record_voice_exchange(
         return None
 
 
+REPLY_TURN_PREFIX = "reply-"
+
+
+async def record_owner_reply(
+    session_id: str,
+    content: str,
+    *,
+    command_id: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    source: str = "user",
+    persist: bool = True,
+) -> Optional[str]:
+    """Persist an owner's message that starts no turn, as a synthetic turn.
+
+    A bare yes or no sent after a provider safety-check prompt was already
+    settled (``owner_confirm.answer_guardrail_in_place``) answers nothing the
+    model could act on, so no turn runs for it, yet the owner's words stay in
+    the transcript. Same shape as :func:`record_voice_exchange`: one unfenced
+    ``turn.started`` / ``message.user`` / ``turn.completed`` batch under a
+    ``reply-<uuid>`` id with no ``turns`` row, which the frontend reducer
+    renders as plain history. ``command_id`` is the client's message id, so the
+    composer's optimistic echo reconciles onto this row. ``persist`` also
+    writes the legacy message-store row (False when the sender already did).
+    Returns the synthetic
+    turn id, or None when nothing was written. Never raises.
+    """
+    try:
+        if not (content or "").strip():
+            return None
+        turn_id = f"{REPLY_TURN_PREFIX}{uuid.uuid4()}"
+        await _append_unfenced(session_id, [
+            _build_event(contract.TurnStarted, session_id, turn_id=turn_id, command_id=command_id),
+            _build_event(
+                contract.MessageUser, session_id, turn_id=turn_id, command_id=command_id,
+                content=content, profile_id=profile_id, checkpoint_backed=False,
+                extra_payload={"source": source},
+            ),
+            _build_event(
+                contract.TurnCompleted, session_id, turn_id=turn_id, command_id=command_id,
+                stop_reason="end_turn", usage={},
+            ),
+        ])
+        try:
+            from app.db import database as database_mod
+
+            if persist:
+                await asyncio.to_thread(
+                    database_mod.add_session_message, session_id=session_id, role="user",
+                content=content, metadata={"source": source}, profile_id=profile_id,
+            )
+        except Exception:
+            # The event log is the transcript authority.
+            logger.warning("[TurnRecorder] owner reply side write failed for %s",
+                           session_id, exc_info=True)
+        return turn_id
+    except Exception:
+        logger.warning("[TurnRecorder] record_owner_reply failed for %s", session_id,
+                       exc_info=True)
+        return None
+
+
 async def record_voice_tool_exchange(
     session_id: str,
     call_id: str,
