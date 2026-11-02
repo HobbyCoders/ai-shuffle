@@ -120,6 +120,35 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python scripts/ci/main_suite.py update-reach
 
+  journey-issues:
+    name: Report recovered UI journeys (non-blocking)
+    # A red sibling shard must not suppress recovered cases from another shard.
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [javascript]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # The publisher checks the WHOLE workflow conclusion, not just Main suite.
+    # Keep this advisory job outside the aggregate AND non-fatal at job level.
+    continue-on-error: true
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Open or update flaky journey issues
+        id: report
+        timeout-minutes: 2
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -m scripts.devloop.journey_issues
+      - name: Warn if reporting could not finish
+        if: always() && (failure() || steps.report.outcome == 'failure')
+        run: echo "::warning title=UI journey issue reporting::Reporting could not finish; suite and publication results are unchanged."
+
   main-suite:
     name: Main suite
     if: always()
