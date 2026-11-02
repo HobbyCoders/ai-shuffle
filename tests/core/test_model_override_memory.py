@@ -223,15 +223,32 @@ async def test_only_facts_saved_at_the_users_request_count(world, kwargs):
     assert not result["ok"] and len(prompts) == 1
 
 
+async def test_unsupported_owner_link_does_not_remove_routing_authority(world):
+    _, prompts = world
+    memory = _save("Bounded backend work runs on GPT 6.1 Sol")
+    newer = _save("The one speed sprint job uses Opus")
+    from fluid.codemode.facts import global_id
+    doc = store_for_owner("local")._load_memories()
+    _edit(memory.id, superseded_by=global_id(next(
+        e for e in doc["entries"] if e["id"] == newer.id)))
+    result = await _task("gpt 6.1 sol")
+    assert result["ok"] and not prompts
+    override = result["model_override"]
+    assert override["source"] == mo.REMEMBERED and override["memory_id"] == memory.id
+    current = next(e for e in store_for_owner("local").memories() if e.id == memory.id)
+    assert not current.superseded_by
+
+
 @pytest.mark.parametrize("change", ["superseded", "archived", "conflicted", "other_worker", "injection"])
 async def test_a_memory_that_is_not_live_and_clean_does_not_count(world, change):
     _, prompts = world
     memory = _save("Bounded backend work runs on GPT 6.1 Sol")
     if change == "superseded":
-        newer = _save("Bounded backend work runs on Opus now")
-        from fluid.codemode.facts import global_id
-        doc = store_for_owner("local")._load_memories()
-        _edit(memory.id, superseded_by=global_id(next(e for e in doc["entries"] if e["id"] == newer.id)))
+        # Drive an owner-confirmed replacement, not unsupported metadata that
+        # the read-side repair must withdraw to preserve the owner's rule.
+        store_for_owner("local").save_memory(
+            "Bounded backend work runs on Opus now", protected=True,
+            replaces=[memory.id])
     elif change == "archived":
         _edit(memory.id, archive=True)
     elif change == "conflicted":
