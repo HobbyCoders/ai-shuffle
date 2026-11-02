@@ -1759,14 +1759,20 @@ def create_builtin_tools_server(
     async def android_action(args: dict) -> dict:
         from app.services import mobile_tools
         if set(args) - {"device_id", "name", "arguments", "timeout_seconds"}:
-            return _ok({"error": "invalid_arguments"})
+            return _ok({"success": False, "error": "invalid_arguments"})
         try:
-            return _ok(await mobile_tools.execute(
+            outcome = await mobile_tools.execute(
                 session_id, args.get("device_id"), args.get("name"), args.get("arguments"),
                 args.get("timeout_seconds", 25),
-            ))
+            )
+            result = outcome.get("result", {})
+            success = (not outcome.get("error") and not result.get("error")
+                       and result.get("ok") is not False and result.get("success") is not False)
+            return _ok({**outcome, "success": success})
         except Exception:
-            return _ok({"error": "android_service_unavailable"})
+            return _ok({"success": False, "error": "android_service_unavailable",
+                        "outcome_unknown": True,
+                        "message": "The action may have run. Verify device state before retrying."})
 
     all_tools.extend([android_devices, android_action])
 

@@ -269,9 +269,11 @@ async def test_execute_handoff_status(wired, result, status):
 @pytest.mark.parametrize("row", [None, {"status": "expired"}, {"status": "cancelled"}])
 async def test_execute_expired_or_cancelled(wired, monkeypatch, row):
     monkeypatch.setattr(service.queue, "outcome", lambda cid, sid: row)
-    assert await service.execute("s", "dev", "read_screen", {}, timeout=5) == {
-        "error": "command_expired_or_cancelled",
-    }
+    result = await service.execute("s", "dev", "read_screen", {}, timeout=5)
+    assert result["error"] == "command_expired_or_cancelled"
+    assert result["success"] is False
+    assert result["outcome_unknown"] is True
+    assert "verify" in result["message"].lower()
     assert wired["cancelled"] == ["cmd-1"]
 
 

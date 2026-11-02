@@ -158,6 +158,12 @@ def list_devices(session_id):
     return {'devices': result, **({'error': 'no_devices'} if not result else {})}
 
 
+def _unknown_outcome(error):
+    return {'success': False, 'error': error, 'outcome_unknown': True,
+            'message': 'The device may have performed this action. Verify device state before retrying; '
+                       'cancellation cannot undo an action already performed.'}
+
+
 async def execute(session_id, device_id, name, arguments, timeout=MAX_WAIT_SECONDS):
     command_id = None
     try:
@@ -187,9 +193,9 @@ async def execute(session_id, device_id, name, arguments, timeout=MAX_WAIT_SECON
                     result = dict(result, status='launched_confirmation')
                 return {'command_id': command_id, 'result': result}
             if not row or row['status'] in ('expired', 'cancelled'):
-                return {'error': 'command_expired_or_cancelled'}
+                return _unknown_outcome('command_expired_or_cancelled')
             await asyncio.sleep(min(0.25, max(0, deadline - asyncio.get_running_loop().time())))
-        return {'error': 'device_timeout'}
+        return _unknown_outcome('device_timeout')
     except CommandError as exc:
         return {'error': str(exc)}
     finally:

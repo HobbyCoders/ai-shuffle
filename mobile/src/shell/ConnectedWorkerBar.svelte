@@ -96,8 +96,8 @@
 	// The app hides its own worker-name bar while this one is on screen.
 	const canManage = hasShellBridge();
 	// With that bar hidden, this sheet is the way into the app's own Settings
-	// (account, sign out, phone tools). An app from before the `app-settings`
-	// message reaches them through its Workers screen.
+	// (account, sign out, phone tools). Hide this row on older builds rather than
+	// send it to Workers, which removes chat from the Back stack.
 	const appSettingsRoute = nativeAppSettingsRoute();
 	$effect(() => {
 		announceWorkerBar(true);
@@ -251,7 +251,7 @@
 					<button type="button" class="manage" aria-label="App settings" aria-describedby="conn-app-settings" disabled={!!connecting} onclick={appSettings}>
 						<Smartphone size={16} aria-hidden="true" />
 						<span>App settings</span>
-						<small id="conn-app-settings">{appSettingsRoute === 'settings' ? 'Account, sign out' : 'Workers > Settings'}</small>
+						<small id="conn-app-settings">Account, sign out</small>
 					</button>
 				{/if}
 			</div>

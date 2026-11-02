@@ -99,9 +99,10 @@ def capabilities(device_id, enabled, tools):
             RETURNING device_id""", (device_id, enabled, json.dumps(tools), at))
         if cur.fetchone() is None:
             return
-        # Capability changes invalidate outstanding deliveries, including already claimed work.
+        # Only undelivered work can be cancelled safely. A claimed command may
+        # already have launched another app; accept its result until expires_at.
         cur.execute("""UPDATE mobile_tool_commands SET status='cancelled', arguments='{}', result=NULL
-            WHERE device_id=%s AND status IN ('pending','claimed') AND expires_at>%s""", (device_id, at))
+            WHERE device_id=%s AND status='pending' AND expires_at>%s""", (device_id, at))
 
 
 def state(device_id):

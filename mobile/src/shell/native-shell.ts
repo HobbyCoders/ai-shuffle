@@ -57,18 +57,15 @@ export const APP_SETTINGS_CAPABILITY = 'app-settings';
 
 /**
  * Where "App settings" lands in the app showing this page: `settings` when it
- * opens its own Settings screen directly, `workers` for an app from before
- * that message (its Workers screen has the Settings button), or null outside
- * the app.
+ * opens its own Settings screen directly, or null outside the app and on older
+ * builds. Do not fall back to Workers: CLEAR_TOP would leave chat, so Back
+ * could not return to it. Older builds can still use Manage workers > Settings.
  */
-export function nativeAppSettingsRoute(): 'settings' | 'workers' | null {
-	if (!hasShellBridge()) return null;
-	return nativeCapability(APP_SETTINGS_CAPABILITY) ? 'settings' : 'workers';
+export function nativeAppSettingsRoute(): 'settings' | null {
+	return hasShellBridge() && nativeCapability(APP_SETTINGS_CAPABILITY) ? 'settings' : null;
 }
 
 /** Open the app's own Settings screen (account, sign out, phone tools). */
 export function openNativeAppSettings(): boolean {
-	const route = nativeAppSettingsRoute();
-	if (route === 'settings') return post({ type: 'app-settings' });
-	return route === 'workers' ? openNativeWorkers() : false;
+	return nativeAppSettingsRoute() === 'settings' ? post({ type: 'app-settings' }) : false;
 }

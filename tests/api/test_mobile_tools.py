@@ -185,13 +185,22 @@ def test_unchanged_capabilities_preserve_pending_and_claimed_commands(isolated):
     assert queue.submit_result('a', cmd, '{}') is None
 
 
-def test_disable_cancels_claimed(isolated):
+@pytest.mark.parametrize('enabled,tools', [(False, []), (True, ['read_screen'])])
+def test_capability_change_preserves_claimed_but_cancels_pending(client, isolated, enabled, tools):
     enable()
-    cmd = enqueue()
-    queue.claim('a')
-    queue.capabilities('a', False, [])
-    assert queue.submit_result('a', cmd, '{}') == 'not_claimed'
-    assert queue.outcome(cmd, 'sa')['status'] == 'cancelled'
+    claimed = enqueue()
+    assert client.get('/api/v1/mobile/tools/pending').json()['commands'][0]['id'] == claimed
+    pending = enqueue()
+    base = '/api/v1/mobile/tools'
+    assert client.post(base + '/capabilities', json={'enabled': enabled, 'tools': tools}).json() == {'ok': True}
+    assert queue.outcome(pending, 'sa')['status'] == 'cancelled'
+    assert queue.outcome(claimed, 'sa')['status'] == 'claimed'
+    result = {'ok': True, 'status': 'launched_confirmation'}
+    assert client.post(base + '/' + claimed + '/result', json={'result': result}).json() == {'ok': True}
+    assert queue.outcome(claimed, 'sa')['status'] == 'completed'
+    assert client.post(base + '/' + claimed + '/result', json={'result': result}).status_code == 200
+    assert client.post(base + '/' + claimed + '/result', json={'result': {}}).status_code == 409
+    assert client.get(base + '/pending').json() == {'commands': []}
 
 
 @pytest.mark.asyncio
@@ -302,4 +311,12 @@ async def test_runtime_registration_discovery(monkeypatch):
     monkeypatch.setattr(service, 'device_authorizer', None)
     response = await tools['AndroidDevices'].handler({})
     assert 'controller_context_missing' in response['content'][0]['text']
+    for outcome in ({'error': 'device_timeout'}, {'result': {'ok': False, 'error': 'denied'}},
+                    {'result': {'ok': True, 'status': 'launched_confirmation'}}):
+        async def execute(*args):
+            return outcome
+        monkeypatch.setattr(service, 'execute', execute)
+        response = await tools['AndroidAction'].handler({'device_id': 'a', 'name': 'set_timer', 'arguments': {'seconds': 1}})
+        payload = json.loads(response['content'][0]['text'])
+        assert payload['success'] is (not outcome.get('error') and not outcome.get('result', {}).get('error'))
 
