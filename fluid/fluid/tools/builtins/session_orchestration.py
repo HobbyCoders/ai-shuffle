@@ -144,7 +144,8 @@ def suggest_task_spec(model_examples=(), current_model=None) -> ToolSpec:
                 "The new chat's model: choose it for this job following the owner's saved model-routing "
                 "memory or roster; if nothing directs a choice, name your own current model"
                 + (f" ({current_model})" if current_model else "") + ". Never "
-                "fabricate an id. Claude names (opus), display names and prov:<providerId>:<modelId> work."
+                "fabricate an id. Claude: opus, sonnet or haiku, never a full id. Others: display name or "
+                "prov:<providerId>:<modelId>."
                 + (f" Examples: {', '.join(examples[:8])}." if examples else ""))},
             "effort": dict(EFFORT_PROPERTY),
             "base": {"type": "string", "enum": ["default", "current"],
