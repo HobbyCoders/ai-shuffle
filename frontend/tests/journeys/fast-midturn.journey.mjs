@@ -251,6 +251,13 @@ const retried = {
 		await closePopover(page);
 		await typeAndSend(page, `audit ${uniq()} ${scriptTag(variant, 'default', { refuse_first: 'cyber' })}`);
 		await page.locator('[data-testid="guardrail-card"]').waitFor({ timeout: 60_000 });
+		// The card ignores clicks for its first 300ms so a stray tap can't answer
+		// it. Its screen-reader announcement comes after that, so wait for it: a
+		// click sent sooner is dropped and the turn waits forever.
+		await page
+			.getByRole('status')
+			.filter({ hasText: /^Press Enter to / })
+			.waitFor({ state: 'attached', timeout: 10_000 });
 	},
 	async act({ page, mark, log }) {
 		expect((await speedNote(page).count()) === 0, 'no speed note while the turn waits on the decision');
