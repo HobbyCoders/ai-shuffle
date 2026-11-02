@@ -225,15 +225,17 @@ CALLERS: frozenset[str] = frozenset({CALLER_AUTHENTICATED, CALLER_PREVIEW, CALLE
 def caller_of(principal: Optional[Mapping[str, Any]]) -> str:
     """The :data:`CALLER_KEY` value for a turn sent by ``principal``.
 
-    The agent browser's preview cookie is :data:`CALLER_PREVIEW`; no principal
-    is :data:`CALLER_UNKNOWN`; any other authenticated principal is
-    :data:`CALLER_AUTHENTICATED` (the owner checks that follow still decide
-    whether its chat is the owner's).
+    The agent browser's preview cookie is :data:`CALLER_PREVIEW`, and so is any
+    credential sent with one; no principal is :data:`CALLER_UNKNOWN`; any other
+    authenticated principal is :data:`CALLER_AUTHENTICATED` (the owner checks
+    that follow still decide whether its chat is the owner's).
     """
-    from app.core.mobile_tool_identity import PREVIEW_PRINCIPAL_ID
+    from app.core.mobile_tool_identity import PREVIEW_LIMITED_KEY, PREVIEW_PRINCIPAL_ID
 
     if not principal:
         return CALLER_UNKNOWN
+    if principal.get(PREVIEW_LIMITED_KEY):
+        return CALLER_PREVIEW
     if principal.get("kind") == "admin" and principal.get("principal_id") == PREVIEW_PRINCIPAL_ID:
         return CALLER_PREVIEW
     return CALLER_AUTHENTICATED

@@ -2,7 +2,7 @@
 import hashlib
 from typing import Any, Dict, Optional
 from app.db import mobile_tool_identity as store, pairing, mobile, mobile_hub
-from app.core import account_hub
+from app.core import account_hub, preview_access
 
 
 CONTROLLER_RECOVERY = (
@@ -22,6 +22,10 @@ class ControllerCredentialError(PermissionError):
 #: sends keeps the no-project ceiling instead of the owner's full surface
 #: (``session_modes.owner_workspace_chat``, #641).
 PREVIEW_PRINCIPAL_ID = 'preview'
+#: Set on a paired device's or API key's principal while a live preview cookie
+#: rides the same connection. Only for this connection: :func:`bind_session`
+#: stores named fields and this is not one of them.
+PREVIEW_LIMITED_KEY = 'preview_limited'
 
 
 def preview_principal() -> Dict[str, Any]:
@@ -29,6 +33,16 @@ def preview_principal() -> Dict[str, Any]:
     from app.core import owner_auth
     return principal('admin', PREVIEW_PRINCIPAL_ID,
                      'local-transport:' + owner_auth.settings.effective_instance_id)
+
+
+def preview_limited(value: Dict[str, Any]) -> Dict[str, Any]:
+    """``value`` with its sends held to a preview cookie's limits.
+
+    For a credential with its own identity and scope. Replacing it with
+    :func:`preview_principal` would drop that scope, as HTTP does not: there a
+    paired device or API key stays itself under the cookie's ceiling.
+    """
+    return {**value, PREVIEW_LIMITED_KEY: True}
 
 
 def digest(token):
@@ -123,9 +137,37 @@ def request_principal(request):
 
 
 def request_is_preview(request: Any) -> bool:
-    """True when a REST request authenticated with the agent browser's preview cookie."""
+    """True when a REST request acts as the agent browser's preview cookie.
+
+    It authenticated with the cookie, or the cookie rides along with the owner's
+    login or the local listener: ``require_auth`` admits those first, and the
+    cookie limits them all the same. A paired device or API key is not the
+    preview, it is itself under the limit (:func:`request_preview_limited`).
+    """
+    state = getattr(request, 'state', None)
+    token = getattr(state, 'auth_token', None)
+    if isinstance(token, str) and token.startswith('preview:'):
+        return True
+    if getattr(state, 'api_user', None) or getattr(state, 'paired_client', None):
+        return False
+    return request_preview_limited(request)
+
+
+def request_preview_limited(request: Any) -> bool:
+    """Whether a live preview cookie rides this request, whoever it authenticated as."""
+    return preview_access.grant(request) is not None
+
+
+def request_preview_principal(request: Any) -> Dict[str, Any]:
+    """The principal a :func:`request_is_preview` request acts as.
+
+    Tied to the owner login it came with, when there is one, as the chat socket
+    has it: it still answers to that login's logout.
+    """
     token = getattr(getattr(request, 'state', None), 'auth_token', None)
-    return isinstance(token, str) and token.startswith('preview:')
+    if isinstance(token, str) and token != 'local-owner' and not token.startswith('preview:'):
+        return principal('admin', PREVIEW_PRINCIPAL_ID, token)
+    return preview_principal()
 
 
 def record_creator(session_id: str, request: Any, *, conn: Any = None) -> Optional[Dict[str, Any]]:
@@ -140,7 +182,7 @@ def record_creator(session_id: str, request: Any, *, conn: Any = None) -> Option
     """
     value = request_principal(request)
     if not value and request_is_preview(request):
-        value = preview_principal()
+        value = request_preview_principal(request)
     if value:
         _bind_current(session_id, value, new=True, conn=conn)
     return value

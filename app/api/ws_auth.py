@@ -17,6 +17,17 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
         await run_sync(preview_access.settle, websocket)
     except Exception as exc:
         raise WebSocketException(code=1013, reason='Preview access could not be checked; retry later') from exc
+    # The agent browser's session-scoped preview cookie. It limits this socket
+    # whatever else it presents, so it is read before any credential is, and on
+    # the same terms as HTTP (``preview_access.enforce_limits``).
+    preview = preview_access.grant(websocket) is not None
+    if not token and preview:
+        try:
+            owner_auth.same_origin(websocket)
+        except Exception:
+            return False, None
+        websocket.state.mobile_tool_principal = identity.preview_principal()
+        return True, None
     # Only the actual local listener can establish a passwordless owner:
     # loopback (with the desktop listener token when there is one), or the
     # LAN when the owner turned on trusted LAN. Browsers must send a matching
@@ -29,15 +40,6 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
         websocket.state.mobile_tool_principal = identity.principal(
             'admin', 'install', 'local-transport:' + owner_auth.settings.effective_instance_id)
         return True, None
-    if not token:
-        # The agent browser's session-scoped preview cookie (app.core.preview_access).
-        if preview_access.grant(websocket) is not None:
-            try:
-                owner_auth.same_origin(websocket)
-            except Exception:
-                return False, None
-            websocket.state.mobile_tool_principal = identity.preview_principal()
-            return True, None
     # Keep the legacy return contract; authority travels only on trusted state.
     websocket.state.mobile_tool_principal = None
     for candidate, ambient in ((token, False), (websocket.cookies.get('session'), True)):
@@ -56,7 +58,8 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
                 client = await run_sync(get_paired_client_from_token, candidate)
                 if client:
                     value = await run_sync(identity.principal, 'paired', client['id'], candidate)
-                    websocket.state.mobile_tool_principal = value
+                    websocket.state.mobile_tool_principal = (
+                        identity.preview_limited(value) if preview else value)
                     return True, None
             except HTTPException as exc:
                 if exc.status_code >= 500:
@@ -70,11 +73,14 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
             continue
         # An owner password session (cookie, or the token as a query credential).
         if await run_sync(owner_auth.owner_session, websocket, candidate):
-            websocket.state.mobile_tool_principal = identity.principal('admin', 'install', candidate)
+            websocket.state.mobile_tool_principal = identity.principal(
+                'admin', identity.PREVIEW_PRINCIPAL_ID if preview else 'install', candidate)
             return True, None
         user = await run_sync(
             database.get_api_user_by_key_hash, hashlib.sha256(candidate.encode()).hexdigest())
         if user and user.get('is_active', True):
-            websocket.state.mobile_tool_principal = identity.principal('api_user', user['id'], candidate)
+            value = identity.principal('api_user', user['id'], candidate)
+            websocket.state.mobile_tool_principal = (
+                identity.preview_limited(value) if preview else value)
             return True, user
     return False, None

@@ -11,14 +11,16 @@ def _request_query_principal(request: Request):
     from app.core import mobile_tool_identity as identity
     from app.core.config import settings
 
-    paired = identity.request_principal(request)
-    if paired:
-        return paired
+    # A paired device or API key stays itself, under a preview cookie's limits
+    # when one rides this request, as the socket authenticator has it.
+    value = identity.request_principal(request)
     user = get_api_user_from_request(request)
-    if user:
-        return identity.principal("api_user", user["id"], get_api_key(request))
+    if not value and user:
+        value = identity.principal("api_user", user["id"], get_api_key(request))
+    if value:
+        return identity.preview_limited(value) if identity.request_preview_limited(request) else value
     if identity.request_is_preview(request):
-        return identity.preview_principal()
+        return identity.request_preview_principal(request)
     token = getattr(request.state, "auth_token", None)
     if token == "local-owner":
         token = "local-transport:" + settings.effective_instance_id

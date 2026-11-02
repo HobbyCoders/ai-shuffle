@@ -62,6 +62,15 @@ samples and client-secret minting, even if the browser is independently the
 owner. Read-only voice discovery stays available. The remote listener ignores
 it entirely. It is not a login: the local owner boundary above is unchanged.
 
+A chat sent from a browser holding a live cookie is the preview's, whatever else
+that browser presents, on the WebSocket and over REST alike. So if you open a
+preview link in your own browser, chats you send from it on the local listener
+keep the preview's limits until the cookie expires (within a day) or the bound
+session is deleted: a chat without a project stays read-only, and you can't send
+to a chat another worker runs. A paired device or API key used with the cookie
+keeps its own identity and scope under those same limits, and a credential that
+fails is never replaced by the cookie.
+
 On owner-only routes the cookie only reads. One exception: on a launcher-owned
 throwaway instance (the dev loop and `python -m app.preview run`, whose marked
 data directory an installed worker never has), it may also manage projects

@@ -43,6 +43,11 @@ Threat model, and what the token is NOT:
   ``same_origin`` check the local owner is held to. Account-preference writes
   are also refused by the preferences API, even if the browser independently
   qualifies as a direct LAN owner; test clicks must not sync to the user's UI.
+* A chat a browser with a live cookie sends is the preview's, whatever else
+  the browser presents (``session_modes.caller_of``): the local listener, an
+  owner login, a paired device or an API key, on a socket or over REST. A
+  credential that fails is not replaced by the cookie, and a paired device's
+  or API key's token keeps its own identity and scope under the limit.
 * A cookie that cannot be checked (unreadable key, failed session lookup) is
   never read as "no preview here": :func:`verify` raises, ``enforce_limits``
   answers 503, and its one decision is what the request's later checks reuse.
