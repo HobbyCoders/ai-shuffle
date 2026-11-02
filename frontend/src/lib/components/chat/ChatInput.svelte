@@ -41,7 +41,7 @@
 	import { promptStash } from '$lib/stores/session/prompt-stash';
 	import { promptHistory, createPromptRecall } from '$lib/stores/session/prompt-recall';
 	import { pastedTextFile } from './tiptap/large-paste';
-	import { restoreMessageDocument } from './tiptap/serialization';
+	import { joinDrafts, restoreMessageDocument } from './tiptap/serialization';
 	import { composerInsert, completeComposerInsert } from '$lib/stores/composer-insert';
 	import PromptStashMenu from './PromptStashMenu.svelte';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
@@ -1060,18 +1060,6 @@
 		const ready = await newChatSetup.run(need);
 		if (!ownsComposer() || getInitGeneration() !== navigation || get(activeSession).sessionId) return false;
 		return ready;
-	}
-
-	/** Two composer drafts as one, earlier first. Drafts are Tiptap JSON, or
-	 *  plain text when no editor was mounted. */
-	function joinDrafts(earlier: string, later: string): string {
-		try {
-			const a = JSON.parse(earlier), b = JSON.parse(later);
-			if (a?.type === 'doc' && b?.type === 'doc') {
-				return JSON.stringify({ ...a, content: [...(a.content ?? []), ...(b.content ?? [])] });
-			}
-		} catch { /* plain text */ }
-		return [earlier, later].join('\n\n');
 	}
 
 	// Actually send the message. There is no send-later fork: a send during a live

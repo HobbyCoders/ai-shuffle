@@ -33,6 +33,7 @@
 	import { X } from 'lucide-svelte';
 	import { derived as derivedStore, get } from 'svelte/store';
 	import { activeSession as liveActiveSession, backgroundPermissions } from '$lib/stores/active-session';
+	import { addRestoredWordsToDraft } from '$lib/stores/session/restored-draft';
 	import { TRANSCRIPT_PRESENTATION, type TranscriptPresentation } from './TranscriptHydrationBoundary.svelte';
 	import TranscriptLoadingSkeleton from './TranscriptLoadingSkeleton.svelte';
 	import { sessionEphemeralCache } from '$lib/stores/session-cache';
@@ -202,8 +203,14 @@
 	// when an async rewind later completes against a possibly different target.
 	function rewindCompleteFor(sessionId: string | null | undefined) {
 		return (warning?: string, prompt?: string, uploads?: string[], unsentRestored?: boolean) => {
-			if (!sessionId || get(liveActiveSession).sessionId !== sessionId) return;
-			handleRewindComplete(warning, prompt, uploads, unsentRestored);
+			if (!sessionId) return;
+			if (get(liveActiveSession).sessionId === sessionId) {
+				handleRewindComplete(warning, prompt, uploads, unsentRestored);
+			} else if (unsentRestored) {
+				// The owner moved on while it was restoring and the row is gone from
+				// the server: the words wait in that chat's own draft.
+				addRestoredWordsToDraft(sessionId, prompt ?? '', uploads);
+			}
 		};
 	}
 
@@ -2429,6 +2436,7 @@
 			rewindEligible={rewindEligible[messageIndex]}
 			notSent={!!message.metadata?.not_sent}
 			notSentMessageId={typeof message.metadata?.not_sent_id === 'string' ? message.metadata.not_sent_id : null}
+			notSentUploadPaths={Array.isArray(message.metadata?.upload_paths) ? message.metadata.upload_paths as string[] : []}
 			midTurn={!!message.id && midTurnUserIds.has(message.id)}
 			onRewindComplete={presentedRewindComplete}
 		/>

@@ -745,3 +745,24 @@ def test_common_term_over_long_transcripts_reads_bounded_buffers(recall, monkeyp
     assert indexed * 5 < legacy, (indexed, legacy)
     hits = recall._search_sync(["commonword"], 5, None)
     assert hits and all(h.session_id.startswith(PREFIX + "big") for h in hits)
+
+
+def test_stopped_words_are_no_ones_history_on_either_search_path(recall):
+    from app.db import base
+
+    sid = PREFIX + "stopped"
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO sessions(id,sdk_session_id,title,owner_device_id) VALUES (%s,%s,%s,%s)",
+                    (sid, None, "t", "test-remote"))
+        cur.execute(
+            "INSERT INTO session_events(id,session_id,seq,event_type,payload) VALUES (%s,%s,%s,%s,%s),(%s,%s,%s,%s,%s)",
+            (PREFIX + "real", sid, 1, "message.user", Json({"content": "deliveredneedle"}),
+             PREFIX + "kept", sid, 2, "message.user", Json({"content": "stoppedneedle", "not_sent": True})),
+        )
+    legacy = [(recall._search_sync([term], 5, None), term) for term in ("deliveredneedle", "stoppedneedle")]
+    _backfill_all()
+    indexed = [(recall._search_sync([term], 5, None), term) for term in ("deliveredneedle", "stoppedneedle")]
+    for found in (legacy, indexed):
+        assert [h.session_id for h in found[0][0]] == [sid]
+        assert found[1][0] == []

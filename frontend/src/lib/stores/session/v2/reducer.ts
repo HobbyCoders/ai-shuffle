@@ -1633,9 +1633,12 @@ function reduceInternal(
 
 		// ── User message (+ optimistic reconcile) ───────────────────────
 		case 'message.user': {
-			const startsAgentTurn = state.pendingAgentWake;
+			// A not-sent row was never given to the model: it starts no turn and
+			// ends no attempt, so what was streaming when Stop landed can still be
+			// discarded after it.
+			const startsAgentTurn = state.pendingAgentWake && !event.not_sent;
 			if (startsAgentTurn) state = { ...state, pendingAgentWake: false };
-			if (!syntheticTranscript) state = markAttemptBoundary(state, seq);
+			if (!syntheticTranscript && !event.not_sent) state = markAttemptBoundary(state, seq);
 			const content = str(event.content);
 
 			// Background-task wake turns persist their synthesized prompt as a
@@ -1776,7 +1779,10 @@ function reduceInternal(
 				...(turnId ? { turnId } : {}),
 				...((startsAgentTurn || event.not_sent) ? { metadata: {
 					...(startsAgentTurn ? { agent_wake: true } : {}),
-					...(event.not_sent ? { not_sent: true, not_sent_id: event.id } : {}),
+					...(event.not_sent ? {
+						not_sent: true, not_sent_id: event.id,
+						...(Array.isArray(event.upload_paths) && event.upload_paths.length ? { upload_paths: event.upload_paths } : {}),
+					} : {}),
 				} } : {}),
 				...(typeof event.queued_turn_id === 'string' ? { queuedTurnId: event.queued_turn_id } : {}),
 				...(str(event.uuid) ? { jsonlUuid: str(event.uuid) } : {}),

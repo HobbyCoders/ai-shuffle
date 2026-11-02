@@ -22,10 +22,11 @@
 		onRewindComplete?: (warning?: string, rewoundPrompt?: string, uploadPaths?: string[], unsentRestored?: boolean) => void;  // Optional warning for partial success
 		notSent?: boolean;
 		notSentMessageId?: string | null;
+		notSentUploadPaths?: string[];
 		midTurn?: boolean;  // Steered into a turn already under way: the time line says so
 	}
 
-	let { content, timestamp, sessionId = null, messageUuid = null, userPromptOccurrence = null, rewindEligible = true, streaming = false, onRewindComplete, midTurn = false, notSent = false, notSentMessageId = null }: Props = $props();
+	let { content, timestamp, sessionId = null, messageUuid = null, userPromptOccurrence = null, rewindEligible = true, streaming = false, onRewindComplete, midTurn = false, notSent = false, notSentMessageId = null, notSentUploadPaths = [] }: Props = $props();
 
 	let isHovered = $state(false);
 	let expanded = $state(false);
@@ -69,6 +70,7 @@
 				messageRole="user"
 				{messageUuid}
 				{notSentMessageId}
+				{notSentUploadPaths}
 				{userPromptOccurrence}
 				{rewindEligible}
 				{onRewindComplete}

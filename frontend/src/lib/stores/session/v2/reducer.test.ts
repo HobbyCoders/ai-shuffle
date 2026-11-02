@@ -47,6 +47,28 @@ it('preserves not_sent metadata while keeping original user text', () => {
 	expect(state.messages[0].metadata?.not_sent).toBe(true);
 });
 
+it('carries a not-sent row\'s uploads for a restore that gets no server answer', () => {
+	const state = fold([ev('message.user', { content: 'see this', not_sent: true, upload_paths: ['/uploads/a.png'] })]);
+	expect(state.messages[0].metadata?.upload_paths).toEqual(['/uploads/a.png']);
+});
+
+it('lets a late discard remove the stopped attempt behind a not-sent row', () => {
+	const state = fold([
+		ev('message.user', { id: 'asked', content: 'real question' }),
+		ev('assistant.text_delta', { id: 'partial', text: 'declined output' }),
+		ev('message.user', { id: 'unsent', content: 'queued words', not_sent: true }),
+		ev('system.note', { subtype: 'attempt_discarded', data: { reason: 'guardrail' } }),
+	]);
+	expect(state.messages.map(m => m.content)).toEqual(['real question', 'queued words']);
+});
+
+it('does not let a not-sent row use up the wake of the next real message', () => {
+	const held = reduce({ ...initialState(), pendingAgentWake: true },
+		ev('message.user', { id: 'unsent', content: 'queued words', not_sent: true }));
+	expect(held.pendingAgentWake).toBe(true);
+	expect(held.messages[0].metadata?.agent_wake).toBeUndefined();
+});
+
 it('replays an unsent-only removal without dropping sent history', () => {
 	const events = [ev('message.user', {id:'earlier', content:'earlier'}),
 		ev('message.user', {id:'unsent', content:'not sent', not_sent:true}),

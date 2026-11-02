@@ -980,11 +980,16 @@ def _indexed_event_candidates(conn, cur, me: str, excluded: List[str],
     # Each text event's first row (piece 0 or its overflow marker) carries
     # what the fold reads, so a whole session folds without touching
     # session_events or decoding JSON. Plain tuples: these are the bulk of a
-    # broad search's rows.
+    # broad search's rows. Only a user message asks session_events anything:
+    # the projection has no "Not sent" mark, and that is no one's history.
     tuples = conn.cursor(cursor_factory=psycopg2.extensions.cursor)
     tuples.execute(
-        "SELECT session_id, event_type, raw, stamp, ts FROM session_recall_text "
-        f"WHERE source = %s AND part <= 0 AND session_id IN ({_in(ids)}) ORDER BY session_id, seq",
+        "SELECT r.session_id, r.event_type, r.raw, r.stamp, r.ts FROM session_recall_text r "
+        f"WHERE r.source = %s AND r.part <= 0 AND r.session_id IN ({_in(ids)}) "
+        "AND NOT (r.event_type = 'message.user' AND EXISTS ("
+        "SELECT 1 FROM session_events e WHERE e.session_id = r.session_id AND e.seq = r.seq "
+        "AND e.payload->>'not_sent' = 'true')) "
+        "ORDER BY r.session_id, r.seq",
         [session_recall.EVENT, *ids],
     )
     events = [

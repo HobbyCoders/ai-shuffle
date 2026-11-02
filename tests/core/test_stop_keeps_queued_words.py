@@ -106,3 +106,152 @@ async def test_a_claim_pass_that_reaches_a_stopped_row_keeps_its_words(mock_db):
 
     assert {turns.get_turn(t["id"])["state"] for t in (head, behind)} == {"aborted"}
     assert sorted(r["content"] for r in _rows("s-race")) == ["behind it", "head of the queue"]
+
+
+def _running(session_id: str, prompt: str = "words in flight") -> dict:
+    """A turn past start_turn, with nothing recorded yet."""
+    queued = turns.enqueue_turn(session_id, "user", prompt=prompt)
+    return turns.start_turn(queued["id"], "run-1", "runner-1")
+
+
+def _resumed_parked(session_id: str, prompt: str = "the new words") -> dict:
+    """A parked turn that recorded its own prompt, resumed by newer input: the
+    same turn id now holds words nothing has recorded."""
+    from app.core.session_runtime import SessionRuntime
+
+    original = _running(session_id, "the older prompt")
+    session_events.append_events(session_id, [{
+        "type": "message.user", "turn_id": original["id"], "payload": {"content": "the older prompt"},
+    }])
+    assert turns.park_turn(original["id"], ["task-1"])
+    queued = turns.enqueue_turn(session_id, "user", prompt=prompt)
+    resumed = turns.start_turn(queued["id"], "run-2", "runner-1", can_resume=SessionRuntime._can_resume_parked)
+    assert resumed["id"] == original["id"], "the new input must resume the parked turn"
+    return resumed
+
+
+def test_stop_during_the_start_keeps_the_words_of_a_turn_it_can_no_longer_sweep(mock_db):
+    _chat("s-started")
+    row = _running("s-started")
+    settled = turns.settle_turn(row["id"], "aborted", "interrupted", keep_unsent_words=True)
+    assert settled["state"] == "aborted"
+    assert [r["content"] for r in _rows("s-started")] == ["words in flight"]
+    # A second settle changes nothing, so it can never add a second row.
+    assert turns.settle_turn(row["id"], "aborted", "interrupted", keep_unsent_words=True) is None
+    assert len(_rows("s-started")) == 1
+
+
+def test_an_ordinary_settle_writes_no_row(mock_db):
+    _chat("s-plain")
+    row = _running("s-plain")
+    turns.settle_turn(row["id"], "aborted", "interrupted")
+    assert _rows("s-plain") == []
+
+
+async def test_the_start_guard_keeps_the_words(mock_db, monkeypatch):
+    """Stop lands while start_turn is off-thread: the runtime wakes up owning a
+    turn the sweep already passed over."""
+    from app.core import session_runtime
+    from tests.core.test_session_runtime import _runtime_env
+
+    async def pump(**kwargs):
+        raise AssertionError("a stopped session must not run")
+        yield  # pragma: no cover
+
+    _chat("s-guard")
+    row = turns.enqueue_turn("s-guard", "user", prompt="caught mid start")
+    real_start = turns.start_turn
+    stopped = []
+
+    def start_then_stop(*args, **kwargs):
+        started = real_start(*args, **kwargs)
+        stopped.append(True)
+        return started
+
+    monkeypatch.setattr(turns, "start_turn", start_then_stop)
+    with _runtime_env(pump=pump) as env:
+        # Only the guard after the start may see the stop; the ones before it
+        # abort a still-queued row, which has its own test above.
+        env["registry"].stop_invalidated.side_effect = lambda *_: bool(stopped)
+        await session_runtime.SessionRuntime(row).execute()
+
+    assert turns.get_turn(row["id"])["state"] == "aborted"
+    assert [r["content"] for r in _rows("s-guard")] == ["caught mid start"]
+
+
+async def test_an_older_prompt_under_a_resumed_turn_does_not_hide_the_new_words(mock_db):
+    # Crash after the resume and before the recording; recovery requeues the
+    # same id; Stop then finds the older prompt's event under it.
+    _chat("s-resumed")
+    resumed = _resumed_parked("s-resumed")
+    assert resumed["payload"]["accepted_input_id"]
+    _force_queued(resumed["id"])
+    await enter_user_stop("s-resumed")
+    assert [r["content"] for r in _rows("s-resumed")] == ["the new words"]
+
+
+async def test_a_resumed_turn_recorded_before_the_crash_gets_no_second_row(mock_db):
+    _chat("s-receipt")
+    resumed = _resumed_parked("s-receipt")
+    session_events.append_events("s-receipt", [{
+        "type": "message.user", "turn_id": resumed["id"],
+        "payload": {"content": "the new words", "accepted_input_id": resumed["payload"]["accepted_input_id"]},
+    }])
+    _force_queued(resumed["id"])
+    await enter_user_stop("s-receipt")
+    assert _rows("s-receipt") == []
+
+
+async def test_the_recording_carries_the_resumed_inputs_receipt(mock_db):
+    from app.core.turn_recorder import TurnRecorder
+
+    _chat("s-carry")
+    recorder = TurnRecorder("s-carry", None, None, None, "runner-1")
+    await recorder.start("the new words", accepted_input_id="input-1", source="user")
+    event = next(e for e in session_events.get_events("s-carry") if e["event_type"] == "message.user")
+    assert event["payload"]["accepted_input_id"] == "input-1"
+    assert event["payload"]["source"] == "user"
+
+
+def _force_queued(turn_id: str) -> None:
+    """What reap_expired does to a dead runner's turn: same id, back in the queue."""
+    from app.db.base import get_db
+
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET state='queued', run_id=NULL, instance_id=NULL WHERE id=%s", (turn_id,))
+
+
+def _note(message_id: str) -> dict:
+    return {"id": "unsent-restored-" + message_id, "type": "system.note",
+            "payload": {"subtype": "unsent_restored", "data": {"message_id": message_id}}}
+
+
+def test_rest_history_marks_a_stopped_row_and_drops_it_once_restored(mock_db):
+    from app.api.sessions_helpers import project_event_messages
+
+    _chat("s-rest")
+    row = turns.enqueue_turn("s-rest", "user", prompt="kept words",
+                             payload={"upload_paths": ["/uploads/a.png"]})
+    turns.remove_queued_turn(row["id"], "interrupted", keep_unsent_words=True)
+    event = next(e for e in session_events.get_events("s-rest") if e["event_type"] == "message.user")
+
+    shown = project_event_messages("s-rest", session_events.get_events("s-rest"))
+    assert [m["content"] for m in shown] == ["kept words"]
+    assert shown[0]["metadata"]["not_sent"] is True
+    assert shown[0]["metadata"]["not_sent_id"] == event["id"]
+    assert shown[0]["metadata"]["upload_paths"] == ["/uploads/a.png"]
+
+    session_events.append_events("s-rest", [_note(event["id"])])
+    assert project_event_messages("s-rest", session_events.get_events("s-rest")) == []
+
+
+def test_a_restore_note_only_removes_the_row_it_names(mock_db):
+    from app.api.sessions_helpers import project_event_messages
+
+    _chat("s-rest-two")
+    session_events.append_events("s-rest-two", [
+        {"id": "real", "type": "message.user", "turn_id": "t1", "payload": {"content": "a real message"}},
+        _note("real"),
+    ])
+    assert [m["content"] for m in project_event_messages("s-rest-two", session_events.get_events("s-rest-two"))] \
+        == ["a real message"]

@@ -27,6 +27,7 @@
 		 *  source verbatim (assistant replies, so formatting survives a paste). */
 		copyAs?: 'plain' | 'markdown';
 		notSentMessageId?: string | null;
+		notSentUploadPaths?: string[];
 		messageUuid?: string | null;  // Direct UUID from JSONL - preferred for rewind
 		userPromptOccurrence?: number | null;  // 0-based occurrence among identical-content user prompts — content-anchored rewind fallback when uuid is absent
 		rewindEligible?: boolean;
@@ -45,6 +46,7 @@
 		messageRole,
 		copyAs = 'plain',
 		notSentMessageId = null,
+		notSentUploadPaths = [],
 		messageUuid = null,  // If provided, use directly for rewind (no text matching needed)
 		userPromptOccurrence = null,
 		rewindEligible = true,
@@ -71,6 +73,13 @@
 	// click would hand the same words to the composer again.
 	let restored = $state(false);
 	let rewindError = $state<string | null>(null);
+
+	const RESTORE_UNCONFIRMED = "Couldn't confirm the restore with the server, so your words were copied to the composer. The not-sent row may stay until you reload.";
+	/** A failed request the server may still have carried out. A 4xx is a refusal. */
+	function outcomeUnknown(error: unknown): boolean {
+		const status = (error as { status?: unknown } | null)?.status;
+		return typeof status !== 'number' || status === 0 || status >= 500;
+	}
 
 	/**
 	 * Portal action: moves the element to document.body so it escapes
@@ -168,6 +177,8 @@
 		const requestedSessionId = sessionId;
 		const complete = onRewindComplete;
 		const removedPrompt = messageRole === 'user' ? messageContent : undefined;
+		const notSentRequest = !!notSentMessageId;
+		const unsentUploads = notSentUploadPaths;
 		isRewinding = true;
 		rewindError = null;
 
@@ -181,6 +192,14 @@
 				? await executeRewind(requestedSessionId, '', includeResponse, 'user', userPromptOccurrence, messageContent)
 				: await executeRewind(requestedSessionId, messageUuid!, includeResponse, messageRole);
 
+			// The server has dropped the row, so these words have nowhere else to
+			// be: they go to the chat they came from, whichever chat is open now.
+			if (result.unsent_restored) {
+				showRewindDialog = false;
+				restored = true;
+				complete?.(result.warning ?? undefined, result.restored_prompt ?? removedPrompt, result.restored_upload_paths, true);
+				return;
+			}
 			// The API may finish after this row unmounts or the user changes chats.
 			// Never hand an outgoing result to the incoming session's composer/store.
 			if (sessionId !== requestedSessionId || !canAct(requestedSessionId)) return;
@@ -190,18 +209,21 @@
 				// the parent so the composer is refilled for editing/resending.
 				// Assistant-message rewinds keep their preceding prompt in the
 				// transcript, so there is nothing to restore.
-				const rewoundPrompt = removedPrompt;
 				// Pass warning to parent to show as system message (for partial success)
-				if (result.unsent_restored) {
-					restored = true;
-					complete?.(result.warning ?? undefined, result.restored_prompt ?? rewoundPrompt, result.restored_upload_paths, true);
-				} else {
-					complete?.(result.warning ?? undefined, rewoundPrompt);
-				}
+				complete?.(result.warning ?? undefined, removedPrompt);
 			} else {
 				rewindError = result.error || 'Rewind failed';
 			}
 		} catch (e) {
+			// No answer means the server may have dropped the row all the same, so
+			// the copy on screen is handed over. If the server did drop it, the row
+			// and this note leave together; if not, the note explains why it stayed.
+			if (notSentRequest && outcomeUnknown(e)) {
+				restored = true;
+				rewindError = RESTORE_UNCONFIRMED;
+				complete?.(undefined, removedPrompt, unsentUploads, true);
+				return;
+			}
 			if (sessionId !== requestedSessionId || !canAct(requestedSessionId)) return;
 			console.error('Rewind error:', e);
 			rewindError = e instanceof Error ? e.message : 'Unknown error';

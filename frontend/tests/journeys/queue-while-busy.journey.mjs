@@ -5,9 +5,13 @@
 // delivered row together, or two rows), and nothing may remount.
 import { fakeAiTag, runJourney } from './runner.mjs';
 import {
+	SEEDED,
 	SLOW_REPLY,
+	api,
+	chatIdByToken,
 	countUserRows,
 	expect,
+	openFromSidebar,
 	openNewChat,
 	scriptTag,
 	scrollTranscriptTo,
@@ -16,6 +20,7 @@ import {
 	typeAndSend,
 	uniq,
 	waitChat,
+	waitChatOpen,
 	waitTurnSettled,
 	watchUserText
 } from './lib/app.mjs';
@@ -199,6 +204,79 @@ await runJourney({
 			},
 			verify({ recording }) {
 				expectStopFollowsStreaming(recording, { from: markTime(recording, 'send') });
+			}
+		},
+		{
+			// The server drops a restored row whether or not this page hears back, so
+			// the words must reach this chat's composer in every one of these cases.
+			name: 'restore-survives-a-chat-switch-and-a-lost-reply',
+			allow: [{ kind: 'failed_requests', url: /\/commands\/rewind\/execute\//, reason: 'this case cuts the connection to a restore on purpose' }],
+			async setup(ctx) {
+				await openNewChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant }) {
+				const opening = `opening tok-${uniq()}`;
+				const switched = `tok-${uniq()}`;
+				const lost = `tok-${uniq()}`;
+				const unheard = `tok-${uniq()}`;
+				const notSent = (text) => page.locator('[data-not-sent="true"]').filter({ hasText: text });
+				const restoreButton = (text) => notSent(text).getByRole('button', { name: /^Restore/ });
+				const composerHas = (text) => page.waitForFunction(
+					(t) => document.querySelector('[contenteditable="true"]')?.innerText.includes(t), text, { timeout: 15_000 });
+				const REWIND = '**/rewind/execute/**';
+
+				await mark('send');
+				await typeAndSend(page, `${opening} ${scriptTag(variant, 'slow', { tps: 2 })}`);
+				await page.getByText(SLOW_REPLY.start, { exact: false }).first().waitFor({ timeout: 60_000 });
+				await waitChat(page, { streaming: 'true' });
+				const { title } = await api(page, 'GET', `/sessions/${await chatIdByToken(page, opening)}`);
+				for (const words of [switched, lost, unheard]) {
+					await typeAndSend(page, `queued ${words}`);
+					await page.locator('.pending-messages [role="article"]').filter({ hasText: words }).waitFor({ timeout: 5000 });
+				}
+				await mark('stop');
+				await stopButton(page).click();
+				await notSent(unheard).waitFor({ timeout: 15_000 });
+
+				await mark('restore and leave before the reply');
+				let release;
+				const held = new Promise((done) => { release = done; });
+				await page.route(REWIND, async (route) => { await held; await route.continue(); });
+				await restoreButton(switched).click();
+				await page.waitForFunction(() => [...document.querySelectorAll('[data-not-sent="true"] button')].some((b) => b.textContent.includes('Restoring')));
+				await openFromSidebar(page, SEEDED.no_project);
+				await waitChatOpen(page, { messagesAtLeast: 2, hold: 500 });
+				const elsewhere = page.waitForResponse(REWIND);
+				release();
+				await elsewhere;
+				await page.unroute(REWIND);
+				expect(!(await page.locator('[contenteditable="true"]').first().innerText()).includes(switched),
+					'the words did not land in the chat on screen');
+
+				await mark('back to the first chat');
+				await openFromSidebar(page, title);
+				await notSent(lost).waitFor({ timeout: 30_000 });
+				await composerHas(`queued ${switched}`);
+				expect((await notSent(switched).count()) === 0, 'the restored row is gone');
+
+				await mark('restore with a lost reply');
+				await page.route(REWIND, async (route) => { await route.fetch(); await route.abort('connectionreset'); });
+				await restoreButton(lost).click();
+				await composerHas(`queued ${lost}`);
+				await page.unroute(REWIND);
+				await notSent(lost).waitFor({ state: 'detached', timeout: 15_000 });
+				const composed = await page.locator('[contenteditable="true"]').first().innerText();
+				expect(composed.includes(`queued ${switched}`), 'the earlier restored words are still in the composer');
+				expect(composed.split(`queued ${lost}`).length === 2, 'the words arrived once');
+
+				await mark('restore the server never heard');
+				await page.route(REWIND, (route) => route.abort('connectionreset'));
+				await restoreButton(unheard).click();
+				await composerHas(`queued ${unheard}`);
+				await page.unroute(REWIND);
+				await notSent(unheard).getByRole('alert').filter({ hasText: "Couldn't confirm the restore" }).waitFor({ timeout: 5000 });
+				expect(await notSent(unheard).getByRole('button', { name: 'Restored' }).isDisabled(), 'a second click cannot copy the words again');
 			}
 		}
 	],

@@ -1129,9 +1129,9 @@ function reduceInternal(state, event, observe) {
       };
     // ── User message (+ optimistic reconcile) ───────────────────────
     case "message.user": {
-      const startsAgentTurn = state.pendingAgentWake;
+      const startsAgentTurn = state.pendingAgentWake && !event.not_sent;
       if (startsAgentTurn) state = { ...state, pendingAgentWake: false };
-      if (!syntheticTranscript) state = markAttemptBoundary(state, seq);
+      if (!syntheticTranscript && !event.not_sent) state = markAttemptBoundary(state, seq);
       const content = str(event.content);
       if (content.includes("<task-notification>")) {
         const { blocks, outside } = splitTaggedBlocks(content, "task-notification");
@@ -1199,7 +1199,11 @@ function reduceInternal(state, event, observe) {
         ...turnId2 ? { turnId: turnId2 } : {},
         ...startsAgentTurn || event.not_sent ? { metadata: {
           ...startsAgentTurn ? { agent_wake: true } : {},
-          ...event.not_sent ? { not_sent: true, not_sent_id: event.id } : {}
+          ...event.not_sent ? {
+            not_sent: true,
+            not_sent_id: event.id,
+            ...Array.isArray(event.upload_paths) && event.upload_paths.length ? { upload_paths: event.upload_paths } : {}
+          } : {}
         } } : {},
         ...typeof event.queued_turn_id === "string" ? { queuedTurnId: event.queued_turn_id } : {},
         ...str(event.uuid) ? { jsonlUuid: str(event.uuid) } : {},
@@ -2297,7 +2301,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "fef4cbb37ad9eebe18668ca8206fb572489d7ad1e38b1466849195a1ede9ed7a";
+var REDUCER_FINGERPRINT = "94f3dd580678fa42f3d6da3cd6774e089d172c94e8d40e5684f52605f88fddc6";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {
