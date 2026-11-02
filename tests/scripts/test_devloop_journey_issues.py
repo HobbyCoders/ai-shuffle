@@ -138,6 +138,55 @@ def test_multiple_bot_matches_warn_and_choose_deterministically(issues, target, 
     assert "::warning" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("before,after,first_target", [
+    (("open", "open"), ("closed", "open"), 12),
+    (("closed", "open"), ("closed", "closed"), 30),
+    (("open", "open"), ("open", "open"), 12),
+])
+def test_duplicate_bot_issues_dedupe_across_state_changes(before, after, first_target, monkeypatch, capsys):
+    issues = [existing(before[0], number=12), existing(before[1], number=30)]
+    api = FakeGitHub(issues)
+    history = {12: [], 30: []}
+    reads = []
+    original_request = api.request
+    def comments(number):
+        reads.append(number)
+        return history[number]
+    def request(route, *, method="GET", data=None):
+        response = original_request(route, method=method, data=data)
+        if method == "POST" and route.endswith("/comments"):
+            number = int(route.split("/")[1])
+            history[number].append({"body": data["body"], "user": {"login": "github-actions[bot]"}})
+        return response
+    monkeypatch.setattr(api, "comments", comments)
+    monkeypatch.setattr(api, "request", request)
+    reporter.report(api, RUN, [receipt()])
+    assert api.calls[-1][0] == f"issues/{first_target}/comments"
+    for issue, state in zip(issues, after):
+        issue["state"] = state
+    api.calls.clear()
+    capsys.readouterr()
+    reporter.report(api, RUN, [receipt()])
+    assert api.calls == [], "the same run must not comment or reopen a different duplicate"
+    assert reads == [12, 30, 12, 30], "every matching issue's history must be read before selecting"
+    output = capsys.readouterr().out
+    assert '"action": "skip"' in output and "::warning" in output
+
+
+def test_unselected_bot_issue_body_also_deduplicates_run():
+    api = FakeGitHub([existing("closed", number=12, body=CASE.marker + RUN.marker), existing(number=30)])
+    reporter.report(api, RUN, [receipt()])
+    assert api.calls == []
+
+
+def test_stranger_run_marker_on_unselected_issue_does_not_deduplicate(monkeypatch):
+    api = FakeGitHub([existing("closed", number=12), existing(number=30)])
+    monkeypatch.setattr(api, "comments", lambda number:
+        [{"body": RUN.marker, "user": {"login": "someone-else"}}] if number == 12 else [])
+    reporter.report(api, RUN, [receipt()])
+    assert api.calls[-1][0:2] == ("issues/30/comments", "POST")
+
+
 def test_removed_body_marker_falls_back_to_exact_bot_title():
     api = FakeGitHub([existing(body="Marker removed during editing")])
     reporter.report(api, RUN, [receipt()])

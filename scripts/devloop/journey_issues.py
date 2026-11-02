@@ -114,12 +114,15 @@ def bot_authored(entry: dict) -> bool:
     return (entry.get("user") or {}).get("login") == "github-actions[bot]"
 
 
+def already_reported(run: Run, entries: list[dict]) -> bool:
+    return any(bot_authored(entry) and run.marker in (entry.get("body") or "") for entry in entries)
+
+
 def decide(case: FlakyCase, run: Run, issue: dict | None, comments: list[dict]) -> Decision:
     """Only the bot's own issue body/comments can deduplicate a workflow run."""
     if issue is not None and not bot_authored(issue):
         issue = None
-    if issue is not None and any(bot_authored(entry) and run.marker in (entry.get("body") or "")
-                                 for entry in [issue, *comments]):
+    if issue is not None and already_reported(run, [issue, *comments]):
         return Decision("skip")
     action = "create" if issue is None else "reopen" if issue["state"] == "closed" else "comment"
     lead = ("This flaky UI journey came back after this issue was closed; reopening it."
@@ -216,9 +219,15 @@ def report(api: GitHub, run: Run, receipts, *, dry_run: bool = False) -> None:
                 matches = [issue for issue in issues if bot_authored(issue) and issue.get("title") == case.title]
             if len(matches) > 1:
                 warning("Multiple bot issues match a flaky case; using the lowest-numbered open issue, else the lowest-numbered closed issue.")
-            issue = min(matches, key=lambda item: (item["state"] != "open", item["number"])) if matches else None
-            comments = api.comments(issue["number"]) if issue else []
-            decision = decide(case, run, issue, comments)
+            # Closing a duplicate can change the preferred target between run
+            # attempts. Deduplicate across ALL matches before choosing any target.
+            histories = {match["number"]: api.comments(match["number"]) for match in matches}
+            entries = [entry for match in matches for entry in [match, *histories[match["number"]]]]
+            if already_reported(run, entries):
+                issue, decision = None, Decision("skip")
+            else:
+                issue = min(matches, key=lambda item: (item["state"] != "open", item["number"])) if matches else None
+                decision = decide(case, run, issue, histories[issue["number"]] if issue else [])
             print(json.dumps({"action": decision.action, "journey": case.journey, "case": case.case,
                               "run": run.url, "commit": run.commit, "dry_run": dry_run}), flush=True)
             if dry_run or decision.action == "skip":

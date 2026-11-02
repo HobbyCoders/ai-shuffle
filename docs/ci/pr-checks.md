@@ -955,9 +955,11 @@ is a fallback. Markers in anyone else's issues/comments are ignored. If more
 than one bot issue matches, reporting warns and uses the lowest-numbered open
 issue, or the lowest-numbered closed issue if none is open. Each new workflow
 run adds a comment with the latest run link and commit; a closed issue is
-reopened with a note that it came back. Run-ID markers in the bot's own issue
-body/comments deduplicate reruns, regardless of run attempt. The existing
-`bug` label is used if present; no label is created or required. Public issue text contains only journey/case IDs, both attempt
+reopened with a note that it came back. Before choosing a target, run-ID
+markers in the bot's own bodies/comments across **all matching issues**
+deduplicate reruns, even if a duplicate was closed between attempts. The
+existing `bug` label is used if present; no label is created or required.
+Public issue text contains only journey/case IDs, both attempt
 outcomes, the run link and commit, **never raw logs, errors or evidence paths**.
 The full evidence still expires after 3 days.
 
