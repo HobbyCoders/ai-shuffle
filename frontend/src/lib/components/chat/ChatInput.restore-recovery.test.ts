@@ -32,7 +32,7 @@ const leaveNote = () => sessionStorage.setItem(NOTE_KEY, JSON.stringify({
 const openChat = (state: Record<string, unknown>) => {
 	Object.assign(activeSession.current, { sessionId: 'chat', mode: 'chat', profile: 'coding', messages: [], ...state });
 };
-const editorText = (view: ReturnType<typeof render>) => view.container.querySelector<HTMLElement>('.tiptap')!.textContent;
+const editorText = (view: { container: Element }) => view.container.querySelector<HTMLElement>('.tiptap')!.textContent;
 // Long enough for the composer to have acted on a note if it was going to.
 const settle = () => new Promise((done) => setTimeout(done, 50));
 
