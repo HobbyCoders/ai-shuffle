@@ -162,6 +162,7 @@ from fluid.store.base import (
     SessionMeta,
     SessionNode,
     SessionStore,
+    discard_events,
     flush_events,
     new_id,
     persist_event,
@@ -1566,6 +1567,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         try:
             await self._cancel_abandoned_work()
         finally:
+            if self._session is not None:
+                discard_events(self.store, self._session.session_id)
             try:
                 await self._stop_process(grace=_CANCELLED_EXIT_GRACE_S)
             finally:
@@ -2664,8 +2667,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 self.cli_session_id = mapper.cli_session_id
                 self._persist_cli_session_id(sid, mapper.cli_session_id)
             # Last: a second cancel landing on this await must not cost the
-            # resume handle above. An abandoned turn leaves its held deltas
-            # uncommitted, as a crash does: their numbers may be its replacement's.
+            # resume handle above. An abandoned turn's held deltas are discarded,
+            # as a crash loses them: their numbers may be its replacement's.
             if not self._abandoned:
                 await self._flush_events(sid)
 

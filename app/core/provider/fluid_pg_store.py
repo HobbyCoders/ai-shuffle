@@ -1670,6 +1670,14 @@ class PgFluidStore:
         async with self._event_lock:
             await self._write_pending(session_id)
 
+    def discard_pending_events(self, session_id: str) -> None:
+        """Forget this store's batched deltas: their engine was abandoned, so
+        a later read must not commit numbers its replacement may have issued.
+        The same reconstructible tail a crash loses."""
+        self._pending_events.pop(session_id, None)
+        self._pending_since.pop(session_id, None)
+        self._pending_bytes.pop(session_id, None)
+
     async def last_event_seq(self, session_id: str) -> int:
         await self.flush_events(session_id)
         return await run_sync(_last_event_seq_sync, session_id)

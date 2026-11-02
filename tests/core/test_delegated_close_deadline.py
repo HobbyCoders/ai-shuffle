@@ -20,6 +20,7 @@ import sys
 import time
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fluid.engine import delegated
@@ -29,6 +30,7 @@ from fluid.events.ops import UserTurn
 from fluid.store.base import MemoryStore
 from fluid.tools.registry import ToolOutcome, ToolRegistry, ToolSpec
 
+from app.core.provider.fluid_pg_store import PgFluidStore
 from app.core.provider.harness_adapter import HarnessAdapter
 from app.core.session_pool import SessionPool, SessionState
 
@@ -390,27 +392,32 @@ async def test_dropping_a_session_mid_turn_keeps_its_resume_handle(monkeypatch):
     monkeypatch.setattr(loop, "_flush_events", spy_flush)
     await loop.submit(UserTurn(content="hello"))
     turn = loop._turn_task
-    while loop._live_mapper is None:
-        await asyncio.sleep(0.01)
-    published = len(loop.bus.log(sid))
+    try:
+        async with asyncio.timeout(10):
+            while loop._live_mapper is None:
+                assert not turn.done(), f"the turn never reached its CLI: {loop.bus.log(sid)}"
+                await asyncio.sleep(0.01)
+        published = len(loop.bus.log(sid))
 
-    adapter = HarnessAdapter()
-    adapter._engine = loop
-    pool = SessionPool()
-    pool.put("dead", SessionState(adapter=adapter, is_connected=True))
-    await pool.remove_dead("dead")
-    await asyncio.gather(*pool._background_teardowns)
-    # A turn wrongly left running gets its chance to retry before the checks.
-    await asyncio.sleep(0.2)
-    turn_ended, cli_count = turn.cancelled(), len(spawned)
-    first_cli_exit = spawned[0].returncode
-    # Checked after this, so a failure here cannot hang on what it left running.
-    turn.cancel()
-    await asyncio.gather(turn, return_exceptions=True)
-    for proc in spawned:
-        if proc.returncode is None:
-            proc.kill()
-            await proc.wait()
+        adapter = HarnessAdapter()
+        adapter._engine = loop
+        pool = SessionPool()
+        pool.put("dead", SessionState(adapter=adapter, is_connected=True))
+        await pool.remove_dead("dead")
+        await asyncio.gather(*pool._background_teardowns)
+        # A turn wrongly left running gets its chance to retry before the checks.
+        await asyncio.sleep(0.2)
+        turn_ended, cli_count = turn.cancelled(), len(spawned)
+        first_cli_exit = spawned[0].returncode
+    finally:
+        # Here, so a failure cannot hang on what it left running.
+        turn.cancel()
+        await asyncio.gather(turn, return_exceptions=True)
+        for proc in spawned:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+        loop._release_bridge_resources()
 
     assert turn_ended, "the abandoned turn outlived its session"
     assert cli_count == 1, "dropping the session started another CLI"
@@ -450,6 +457,31 @@ async def test_an_abandoned_loop_starts_and_publishes_nothing_more():
     before = len(loop.bus.log(meta.session_id))
     await loop._emit(ErrorEvent(session_id=meta.session_id, turn_id="turn", message="late"))
     assert len(loop.bus.log(meta.session_id)) == before
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_loops_held_deltas_stay_uncommitted(monkeypatch):
+    """A read flushes the store's batch, and nothing should reach the database
+    from an engine another may have replaced."""
+
+    async def no_write(*args, **kwargs):
+        raise AssertionError("an abandoned loop's deltas reached the database")
+
+    monkeypatch.setattr("app.core.provider.fluid_pg_store.run_event_write", no_write)
+    store = PgFluidStore()
+    loop = DelegatedLoop(store=store, model="opus", registry=_registry(), claude_cmd=["claude"])
+    sid = "abandoned"
+    loop._session = SimpleNamespace(session_id=sid)
+    store._pending_events[sid] = [object()]
+    store._pending_since[sid] = 0.0
+    store._pending_bytes[sid] = 4
+
+    await loop.release_abandoned()
+    await store.flush_events(sid)
+
+    assert sid not in store._pending_events
+    assert sid not in store._pending_since
+    assert sid not in store._pending_bytes
 
 
 async def _turn_with_slow_cleanup() -> None:
