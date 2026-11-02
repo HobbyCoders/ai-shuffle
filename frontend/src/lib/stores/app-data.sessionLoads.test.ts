@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
 	get: vi.fn(),
 	delete: vi.fn(),
 	renameSession: vi.fn(),
+	setSessionActive: vi.fn(),
+	setSessionArchived: vi.fn(),
 }));
 
 vi.mock('$lib/api/client', () => ({
@@ -27,7 +29,8 @@ vi.mock('$lib/api/client', () => ({
 	},
 	searchSessionsPaginated: vi.fn(),
 	renameSession: mocks.renameSession,
-	setSessionActive: vi.fn(),
+	setSessionActive: mocks.setSessionActive,
+	setSessionArchived: mocks.setSessionArchived,
 }));
 
 vi.mock('./active-session', () => ({
@@ -35,6 +38,7 @@ vi.mock('./active-session', () => ({
 		get current() { return { sessionId: null as string | null }; },
 		newChat: vi.fn(),
 		validateSelectedProfile: vi.fn(),
+		snapshotPrompts: vi.fn(() => null),
 	},
 }));
 
@@ -267,11 +271,14 @@ describe('optimistic edits vs in-flight loads (S12)', () => {
 	});
 
 	describe('a pushed task chip count', () => {
-		const chips = () => appData.current.sessions.find((s) => s.id === 's3')?.pending_task_chips;
-		const serverCount = (value: number) => {
-			(page1[3] as Row & { pending_task_chips?: number }).pending_task_chips = value;
+		type Counted = Row & { pending_task_chips?: number };
+		const chips = (id = 's3') => appData.current.sessions.find((s) => s.id === id)?.pending_task_chips;
+		const serverCount = (value: number, row: Row = page1[3]) => {
+			(row as Counted).pending_task_chips = value;
 		};
-		afterEach(() => { delete (page1[3] as Row & { pending_task_chips?: number }).pending_task_chips; });
+		afterEach(() => {
+			for (const row of [...page1, ...page2]) delete (row as Counted).pending_task_chips;
+		});
 
 		it('gives way to a list read started after it, which repairs a late count', async () => {
 			serverCount(1);
@@ -309,6 +316,99 @@ describe('optimistic edits vs in-flight loads (S12)', () => {
 			const row = appData.current.sessions.find((s) => s.id === 's3');
 			expect(row?.pending_task_chips).toBe(1);
 			expect(row?.title).toBe('Pushed');
+		});
+
+		it('keeps a count that arrived while a rename was failing', async () => {
+			serverCount(0);
+			await appData.loadSessions();
+			let fail!: (reason: Error) => void;
+			mocks.renameSession.mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; }));
+			const rename = appData.renameSession('s3', 'Renamed').catch(() => undefined);
+
+			appData.mergeSessionPatch('s3', { pending_task_chips: 1 });
+			serverCount(1);
+			await appData.loadSessions();
+			fail(new Error('offline'));
+			await rename;
+
+			const row = appData.current.sessions.find((s) => s.id === 's3');
+			expect(row?.title).toBe('Session 3');
+			expect(row?.pending_task_chips).toBe(1);
+		});
+
+		it.each([
+			['settling', () => appData.setSessionActive('s3', false), mocks.setSessionActive],
+			['archiving', () => appData.setSessionArchived('s3', true), mocks.setSessionArchived],
+			['deleting', () => appData.deleteSession('s3'), mocks.delete],
+		])('keeps a count that arrived while %s was failing', async (_name, change, api) => {
+			serverCount(0);
+			await appData.loadSessions();
+			let fail!: (reason: Error) => void;
+			api.mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; }));
+			const failing = change().catch(() => undefined);
+			await vi.waitFor(() => expect(fail).toBeTypeOf('function'));
+
+			appData.mergeSessionPatch('s3', { pending_task_chips: 1 });
+			serverCount(1);
+			fail(new Error('offline'));
+			await failing;
+
+			expect(chips()).toBe(1);
+		});
+
+		it('is not pinned by a rename still waiting on the server', async () => {
+			serverCount(1);
+			await appData.loadSessions();
+			appData.mergeSessionPatch('s3', { pending_task_chips: 0 });
+			let finish!: (row: { id: string; title: string }) => void;
+			mocks.renameSession.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+			const rename = appData.renameSession('s3', 'Renamed');
+
+			await appData.loadSessions();
+
+			const row = appData.current.sessions.find((s) => s.id === 's3');
+			expect(row?.pending_task_chips).toBe(1);
+			expect(row?.title).toBe('Renamed');
+			finish({ id: 's3', title: 'Renamed' });
+			await rename;
+		});
+
+		it('gives way to an older page read after it, when its row comes back', async () => {
+			const older = page2[20];
+			await appData.loadSessions(null);
+			await appData.loadMoreSessions();
+			expect(appData.current.sessions.some((s) => s.id === older.id)).toBe(true);
+
+			// A capped refresh drops the row, having started before this late count.
+			listDelayMs = 20;
+			const capped = appData.loadSessions('some-tag');
+			await new Promise((r) => setTimeout(r, 0));
+			appData.mergeSessionPatch(older.id, { pending_task_chips: 0 });
+			serverCount(1, older);
+			await capped;
+			listDelayMs = 0;
+			expect(appData.current.sessions.some((s) => s.id === older.id)).toBe(false);
+
+			await appData.loadMoreSessions();
+
+			expect(chips(older.id)).toBe(1);
+			await appData.loadSessions(null);
+		});
+
+		it('keeps a count over an older page read started before it', async () => {
+			const older = page2[20];
+			await appData.loadSessions(null);
+			serverCount(0, older);
+
+			listDelayMs = 20;
+			const more = appData.loadMoreSessions();
+			await new Promise((r) => setTimeout(r, 0));
+			appData.mergeSessionPatch(older.id, { pending_task_chips: 1 });
+			await more;
+			listDelayMs = 0;
+
+			expect(chips(older.id)).toBe(1);
+			await appData.loadSessions(null);
 		});
 	});
 });
