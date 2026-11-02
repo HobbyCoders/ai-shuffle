@@ -1,7 +1,7 @@
 """Retained, sanitized reasons for preview-access denials (#1002).
 
-One request is checked at the listener, in ``enforce_limits`` and in ``grant``.
-A transient failure answers differently at each: 403, 503 or 401. These tests
+One request is checked at the listener and in ``enforce_limits``; ``grant`` reuses
+that decision. A transient failure answers 403 or 503 by when it lands. These tests
 inject failures to pin the log that tells those stages and causes apart, and
 that the refusals stay closed. They do not establish what failed in CI.
 """
@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import logging
 import time
+from types import SimpleNamespace
 
 import psycopg2
 import pytest
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.testclient import TestClient
 
 from app.api.auth import require_auth
@@ -105,24 +106,72 @@ def test_session_lookup_failing_at_ingress_refuses_and_names_the_stage(monkeypat
     assert "OperationalError" in line
 
 
-def test_session_lookup_failing_only_in_grant_is_a_401_with_its_ordinal(monkeypatch, denials):
-    """The first historical symptom's shape: the listener admitted the request
-    and auth then refused it. The next request needs no special handling."""
+def test_session_lookup_failing_after_the_listener_is_a_503_with_its_ordinal(monkeypatch, denials):
+    """The listener admitted the request and the limits could not then be
+    checked. The next request needs no special handling."""
     client = _signed_in_client()
-    calls = _fail_on_call(monkeypatch, sessions, "get_session", 3, psycopg2.OperationalError(SECRET_TEXT))
+    calls = _fail_on_call(monkeypatch, sessions, "get_session", 2, psycopg2.OperationalError(SECRET_TEXT))
 
     response = client.get("/api/v1/models")
 
-    assert response.status_code == 401
-    assert calls["n"] == 3  # listener, enforce_limits, grant: no retry
+    assert response.status_code == 503
+    assert calls["n"] == 2  # listener, enforce_limits: no retry, and auth stops there
     [line] = denials()
-    assert _field(line, "stage") == "grant"
+    assert _field(line, "stage") == "enforce_limits"
     assert _field(line, "reason") == "session_lookup_unavailable"
-    assert _field(line, "ordinal") == "3"
+    assert _field(line, "ordinal") == "2"
     assert _field(line, "path") == "/api/v1/models"
     assert _field(line, "method") == "GET"
 
     assert client.get("/api/v1/models").status_code == 200
+
+
+def test_grant_reuses_the_decision_instead_of_looking_again(monkeypatch, denials):
+    """Once ``enforce_limits`` has answered, one later failure cannot change it."""
+    client = _signed_in_client()
+    calls = _fail_on_call(monkeypatch, sessions, "get_session", 3, psycopg2.OperationalError(SECRET_TEXT))
+
+    assert client.get("/api/v1/models").status_code == 200
+    assert calls["n"] == 2  # listener, enforce_limits
+    assert denials() == []
+
+
+def test_grant_without_a_decision_names_its_own_stage(monkeypatch, denials):
+    app = FastAPI()
+
+    @app.get("/api/v1/models")
+    def models(request: Request):
+        return {"granted": preview_access.grant(request) is not None}
+
+    client = TestClient(IngressApplication(app, LOCAL, REMOTE, PREVIEW),
+                        base_url=f"http://172.17.0.2:{PREVIEW}", client=("172.17.0.2", 54321))
+    client.cookies.set(preview_access.cookie_name(), preview_access.mint(SESSION))
+    _fail_on_call(monkeypatch, sessions, "get_session", 2, psycopg2.OperationalError(SECRET_TEXT))
+
+    assert client.get("/api/v1/models").json() == {"granted": False}
+    [line] = denials()
+    assert _field(line, "stage") == "grant"
+    assert _field(line, "reason") == "session_lookup_unavailable"
+    assert _field(line, "ordinal") == "2"
+
+
+def test_socket_settling_names_its_stage_and_still_raises(monkeypatch, denials):
+    token = preview_access.mint(SESSION)
+    conn = SimpleNamespace(
+        cookies={preview_access.cookie_name(): token},
+        scope={"type": "websocket", "path": "/api/v1/ws/chat"},
+        state=SimpleNamespace(),
+    )
+    _fail_on_call(monkeypatch, sessions, "get_session", 1, psycopg2.OperationalError(SECRET_TEXT))
+
+    with pytest.raises(psycopg2.OperationalError):
+        preview_access.settle(conn)
+
+    [line] = denials()
+    assert _field(line, "stage") == "settle"
+    assert _field(line, "reason") == "session_lookup_unavailable"
+    assert _field(line, "method") == "WEBSOCKET"
+    assert SECRET_TEXT not in line
 
 
 def test_key_failing_in_enforce_limits_is_a_503_not_an_auth_failure(monkeypatch, denials):
@@ -140,9 +189,9 @@ def test_key_failing_in_enforce_limits_is_a_503_not_an_auth_failure(monkeypatch,
 
 
 def test_key_failing_at_each_stage_gives_that_stages_answer(monkeypatch, denials):
-    """One transient key failure explains all three answers, by when it lands."""
+    """One transient key failure explains both answers, by when it lands."""
     client = _signed_in_client()
-    for failing_call, status, stage in ((1, 403, "ingress"), (2, 503, "enforce_limits"), (3, 401, "grant")):
+    for failing_call, status, stage in ((1, 403, "ingress"), (2, 503, "enforce_limits")):
         preview_access._denial_log.clear()
         with monkeypatch.context() as patch:
             _fail_on_call(patch, preview_access, "_key", failing_call, OSError(9, SECRET_TEXT))
@@ -160,7 +209,7 @@ def test_stages_of_one_request_share_an_id_and_requests_do_not(monkeypatch, deni
     assert client.get("/api/v1/models").status_code == 403
     assert _field(denials()[-1], "request") != first
 
-    # A listener-admitted request reaches enforce_limits and grant with its id.
+    # A listener-admitted request reaches enforce_limits with its id and count.
     monkeypatch.setattr(sessions, "get_session", lambda session_id: {"id": session_id})
     real, calls = sessions.get_session, {"n": 0}
 
@@ -172,11 +221,16 @@ def test_stages_of_one_request_share_an_id_and_requests_do_not(monkeypatch, deni
 
     monkeypatch.setattr(sessions, "get_session", fails_after_ingress)
     preview_access._denial_log.clear()
-    assert client.get("/api/v1/models").status_code == 401
-    enforce, grant = denials()[-2:]
-    assert (_field(enforce, "stage"), _field(grant, "stage")) == ("enforce_limits", "grant")
-    assert _field(enforce, "request") == _field(grant, "request")
-    assert (_field(enforce, "ordinal"), _field(grant, "ordinal")) == ("2", "3")
+    assert client.get("/api/v1/models").status_code == 503
+    assert _field(denials()[-1], "stage") == "enforce_limits"
+    assert _field(denials()[-1], "ordinal") == "2"
+
+    # Every stage of one request shares the id, including ones that denied nothing.
+    scope = {"type": "http", "method": "GET", "path": "/api/v1/models"}
+    one = preview_access._begin_check("enforce_limits", scope, {})
+    two = preview_access._begin_check("grant", scope, {})
+    assert one.request_id == two.request_id
+    assert (one.ordinal, two.ordinal) == (1, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -323,9 +377,11 @@ def test_an_outage_stays_visible_past_the_expected_denial_window(monkeypatch, de
     monkeypatch.setattr(sessions, "get_session", down)
     clock = [1000.0]
     monkeypatch.setattr(preview_access, "_monotonic", lambda: clock[0])
-    preview_access.verify(token)
+    with pytest.raises(psycopg2.OperationalError):
+        preview_access.verify(token)
     clock[0] += preview_access._UNAVAILABLE_LOG_WINDOW_S
-    preview_access.verify(token)
+    with pytest.raises(psycopg2.OperationalError):
+        preview_access.verify(token)
     assert len(denials()) == 2
 
 

@@ -71,7 +71,7 @@ def _preview_cookie_present(conn) -> bool:
     try:
         token = preview_access.cookie_token(getattr(conn, "cookies", None) or {})
         return bool(token) and preview_access.verify(token) is not None
-    except Exception:  # noqa: BLE001 — a key failure cannot lift shell restrictions
+    except Exception:  # noqa: BLE001 — a failed check cannot lift shell restrictions
         return True
 
 

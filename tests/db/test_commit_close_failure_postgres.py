@@ -327,12 +327,13 @@ def preview_app(private_pool, tmp_path, monkeypatch):
 
 @pytest.mark.skipif(os.name == "nt", reason="closes a raw socket descriptor by number")
 @pytest.mark.parametrize("path", ["/api/v1/models", "/api/v1/agents"])
-@pytest.mark.parametrize("lookup", [1, 2, 3], ids=["ingress", "enforce_limits", "grant"])
+@pytest.mark.parametrize("lookup", [1, 2], ids=["ingress", "enforce_limits"])
 def test_stray_close_during_any_lookup_does_not_refuse_a_read(
     preview_app, stray_close_on_arm, path: str, lookup: int,
 ) -> None:
     """Before the fix: ingress answered 403 (the agents symptom), grant 401 (the
-    models symptom). enforce_limits answered 200, having lost its ceiling."""
+    models symptom). enforce_limits answered 200, having lost its ceiling. Grant
+    no longer looks at all; the next test pins that."""
     client, _ = preview_app
     stray_close_on_arm.update(arms=0, target=lookup)
 
@@ -342,8 +343,25 @@ def test_stray_close_during_any_lookup_does_not_refuse_a_read(
     assert response.status_code == 200
 
 
+def test_one_request_looks_up_the_session_only_at_the_listener_and_the_limits(
+    preview_app, stray_close_on_arm,
+) -> None:
+    """Later checks reuse the decision, so no later lookup can change it."""
+    client, _ = preview_app
+    stray_close_on_arm.update(arms=0, target=None)
+
+    assert client.get("/api/v1/models").status_code == 200
+    assert stray_close_on_arm["arms"] == 2
+
+    stray_close_on_arm.update(arms=0)
+    response = client.put("/api/v1/preferences/composer.modelFast.claude-opus-5",
+                          headers={"Origin": f"http://172.17.0.2:{PREVIEW}"})
+    assert response.status_code == 403
+    assert stray_close_on_arm["arms"] == 2
+
+
 @pytest.mark.skipif(os.name == "nt", reason="closes a raw socket descriptor by number")
-@pytest.mark.parametrize("lookup", [1, 2, 3, 4], ids=["ingress", "enforce_limits", "grant", "write_guard"])
+@pytest.mark.parametrize("lookup", [1, 2], ids=["ingress", "enforce_limits"])
 def test_stray_close_during_any_lookup_keeps_preview_writes_refused(
     preview_app, stray_close_on_arm, lookup: int,
 ) -> None:

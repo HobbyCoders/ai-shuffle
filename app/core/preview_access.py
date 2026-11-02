@@ -43,6 +43,9 @@ Threat model, and what the token is NOT:
   ``same_origin`` check the local owner is held to. Account-preference writes
   are also refused by the preferences API, even if the browser independently
   qualifies as a direct LAN owner; test clicks must not sync to the user's UI.
+* A cookie that cannot be checked (unreadable key, failed session lookup) is
+  never read as "no preview here": :func:`verify` raises, ``enforce_limits``
+  answers 503, and its one decision is what the request's later checks reuse.
 * The URL that carries the token lands in the session's system prompt (the
   "# Workspace facts" card) and therefore in transcripts. That is accepted:
   the token is useless off the LAN, dies with the session, and can do nothing
@@ -181,9 +184,14 @@ class Grant:
     expires_at: int
 
 
-# Denial diagnostics (#1002). One request is checked several times (ingress,
-# enforce_limits, grant), and each failing stage answers differently: 403, 503,
-# 401. A retained line names the stage and reason, correlated per request, so a
+#: ``enforce_limits``' decision for one request. ASGI scope, not a header or
+#: cookie, so a client cannot set it; it dies with the request.
+_DECISION_SCOPE_KEY = "shuffle.preview_decision"
+
+
+# Denial diagnostics (#1002). One request is checked at more than one stage
+# (ingress, enforce_limits, grant when no decision exists yet), and each failing
+# stage answers differently. A retained line names the stage and reason, correlated per request, so a
 # transient failure can be classified afterwards. Only allow-listed metadata is
 # logged: never a token, a cookie name or value, a query string or exception text.
 _CHECK_SCOPE_KEY = "shuffle.preview_check"
@@ -398,8 +406,10 @@ def session_token_with_expiry(session_id: str, *, now: float | None = None) -> t
 
 
 def _session_exists(session_id: str) -> bool:
-    """Whether the bound session is a real row the OWNER runs. Fail closed on
-    lookup errors.
+    """Whether the bound session is a real row the OWNER runs.
+
+    A failed lookup raises rather than answering "no": callers applying
+    restrictions must not read it as an absent grant (see :func:`cookie_token`).
 
     A grant authenticates as the owner (``is_admin``, no ``api_user``), so a
     session that runs as an API key (its own ``api_user_id`` or a worker under
@@ -424,14 +434,18 @@ def _session_exists(session_id: str) -> bool:
             _note_denial("session_not_owner")
             return False
         return True
-    except Exception as exc:  # noqa: BLE001 — an unreadable DB is a denial, not a grant
+    except Exception as exc:
         _note_denial("session_lookup_unavailable", exc)
-        return False
+        raise
 
 
 def verify(token: Optional[str], *, now: Optional[float] = None) -> Optional[Grant]:
     """The grant a token carries, or None for anything malformed, forged,
-    expired or bound to a session that no longer exists."""
+    expired or bound to a session that no longer exists.
+
+    Raises when it cannot tell (unreadable key, failed session lookup), so each
+    caller decides what "unknown" means: a denial when admitting, a refusal when
+    restricting. Treating it as None would lift every restriction."""
     if not token:
         return None  # No credential was presented, so nothing was refused.
     if not isinstance(token, str) or len(token) > 512:
@@ -583,6 +597,25 @@ def note_ingress_not_started(scope, exc: BaseException) -> None:
         pass
 
 
+def _remember(conn, found: Optional[Grant]) -> None:
+    conn.state.preview_grant = found
+    conn.scope[_DECISION_SCOPE_KEY] = found
+
+
+def settle(conn) -> None:
+    """Decide a connection's preview cookie before its other credentials count.
+
+    For socket authentication, which offers several credentials and has no
+    ``enforce_limits`` in front of it. :func:`grant` then reuses this answer, so
+    a later failure cannot read as "no preview here". Raises when it cannot
+    tell. A connection without a preview cookie does no key or database work.
+    """
+    with _checking("settle", getattr(conn, "scope", None), conn.cookies):
+        token = _noted_cookie_token(conn.cookies)
+        if token and _DECISION_SCOPE_KEY not in conn.scope:
+            _remember(conn, verify(token))
+
+
 def enforce_limits(request) -> None:
     """A valid preview cookie restricts all HTTP and voice WebSocket auth paths.
 
@@ -599,7 +632,7 @@ def enforce_limits(request) -> None:
             found = verify(token) if token else None
     except Exception as exc:  # noqa: BLE001 — never bypass limits on key failure
         raise HTTPException(503, "Preview access could not be checked. Try again later.") from exc
-    request.state.preview_grant = found
+    _remember(request, found)
     # WebSockets have no HTTP method: never treat an audio upgrade as a safe GET.
     method = "WEBSOCKET" if request.scope.get("type") == "websocket" else request.method
     if found is not None and not mutation_allowed(request.url.path, method):
@@ -618,15 +651,23 @@ def grant(request) -> Optional[Grant]:
         cookies = getattr(request, "cookies", None) or {}
         scope = getattr(request, "scope", {}) or {}
         with _checking("grant", scope, cookies):
-            token = _noted_cookie_token(cookies)
-            if not token:
-                return None
-            if not _private_peer(request):
-                _note_denial("transport_refused")
-                return None
-            found = verify(token)
-            if found is None:
-                return None
+            if _DECISION_SCOPE_KEY in scope:
+                found = scope[_DECISION_SCOPE_KEY]
+                if found is None:
+                    return None
+                if not _private_peer(request):
+                    _note_denial("transport_refused")
+                    return None
+            else:
+                token = _noted_cookie_token(cookies)
+                if not token:
+                    return None
+                if not _private_peer(request):
+                    _note_denial("transport_refused")
+                    return None
+                found = verify(token)
+                if found is None:
+                    return None
             method = str(scope.get("method") or "GET")
             path = str(scope.get("path") or "/")
             if not mutation_allowed(path, method):

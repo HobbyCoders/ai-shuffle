@@ -518,7 +518,10 @@ async def preview_access_redirect(request: Request):
     token = request.query_params.get(preview_access.QUERY_PARAM)
     if not preview_access.transport_ok(request):
         raise HTTPException(403, 'Preview access is only honoured on the local network listener.')
-    found = preview_access.verify(token)
+    try:
+        found = preview_access.verify(token)
+    except Exception as exc:  # noqa: BLE001 - never set a cookie that was not checked
+        raise HTTPException(503, 'Preview access could not be checked. Try again later.') from exc
     if found is None:
         raise HTTPException(403, 'Preview token is invalid, expired, or bound to a session that no longer exists.')
     target = preview_access.safe_next(request.query_params.get('next'))
