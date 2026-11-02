@@ -185,6 +185,11 @@ class ArtifactPolicyTests(unittest.TestCase):
                 steps = job["steps"]
                 emulator = next(s for s in steps if s.get("uses", "").startswith("reactivecircus/android-emulator-runner@"))
                 self.assertEqual("${{ matrix.target }}", emulator["with"]["target"])
+                self.assertEqual("${{ runner.temp }}/ci-webview.apk", emulator["env"]["CI_WEBVIEW_APK"])
+                download = next(s for s in steps if s.get("name") == "Download verified official AOSP WebView for API 36")
+                self.assertEqual("matrix.api == 36", download["if"])
+                self.assertEqual('python3 ci/ci_webview.py "$RUNNER_TEMP/ci-webview.apk"', download["run"])
+                self.assertLess(steps.index(download), steps.index(emulator))
                 avd = next(s for s in steps if "avdmanager create avd" in s.get("run", ""))
                 self.assertIn(";${{ matrix.target }};x86_64", avd["run"])
 

@@ -217,8 +217,8 @@ jobs:
           # Making API 36 gate promotion is a separate owner decision.
           # Internal tracking: #2375.
           - api: 36
-            # The default/AOSP image has the crashing WebView 133. Use the stock
-            # Google APIs image; readiness rejects an unfixed active provider.
+            # Google APIs permits co-installing official com.android.webview as
+            # an absent alternate provider, without replacing a system package.
             target: google_apis
             cores: 4
             memory: 4096
@@ -242,6 +242,9 @@ jobs:
         with:
           name: android-notification-smoke-apks
           path: android/notification-instrumentation-apks
+      - name: Download verified official AOSP WebView for API 36
+        if: matrix.api == 36
+        run: python3 ci/ci_webview.py "$RUNNER_TEMP/ci-webview.apk"
       - name: Free hosted-runner disk before preparing the AVD
         run: |
           df -h
@@ -256,6 +259,7 @@ jobs:
       - name: Check emulator readiness and instrumentation result parsers
         run: |
           python3 ci/test-emulator-readiness.py
+          python3 ci/test-ci-webview.py
           python3 ci/test-instrumentation-parser.py
           python3 ci/test-ui-runner.py
       - name: Enable emulator acceleration
@@ -274,6 +278,8 @@ jobs:
       - name: Exercise native onboarding and tool permissions
         id: emulator_tests
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          CI_WEBVIEW_APK: ${{ runner.temp }}/ci-webview.apk
         with:
           api-level: ${{ matrix.api }}
           target: ${{ matrix.target }}
