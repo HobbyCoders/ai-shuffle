@@ -1,16 +1,18 @@
 """Projection/ingest independence on the isolated shim and native PostgreSQL.
 
-Ingest p95 and timer lag are diagnostic, not shared-runner deadlines. The small
-case budgets p75 maximum synchronous steps of actor.process separately for reset,
-index and fold (including process overhead). It rejects blocking on every third
-quantum; fewer than 25% stalled samples in a stage are not a tail-latency gate.
-The large case proves preparation/ingest independence by order. Native PG also
-holds a real fold commit open while requiring same-session appends to finish.
-No source append hook calls the actor. No timers decide the synchronous budget.
+The small case budgets p75 of the longest event-loop callback per reset, index
+and fold quantum, including child Tasks and call_soon work. It rejects blocking
+on every third quantum but tolerates <25% noisy quanta per stage. Ingest p95 and
+timer lag are diagnostic. This is NOT a GIL/executor-starvation or rare-tail gate.
+The large case proves child-preparation/ingest independence by order. Native PG
+checks same-session appends across reset, index and fold commit calls, holding
+transactions after their bodies and using a server-side lock-wait bound.
+No source append hook calls the actor; perf_counter also works on Windows.
 """
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import math
 import os
 import threading
@@ -37,39 +39,38 @@ def _held_prepare_frames(owner, entered, release, *args, **kwargs):
     return _prepare_frames(*args, **kwargs)
 
 
-class _SynchronousSteps:
-    """Time coroutine send/throw calls, not time suspended on DB/IPC/timers.
+def _measure_handles(monkeypatch):
+    """Measure *all* loop callbacks during an await, including child Tasks.
 
-    perf_counter is high resolution on Python 3.12 Windows too. Unlike a
-    heartbeat, this does not mistake Windows' coarse timer wakeups for blocking.
-    Delegating the raw yields preserves Task/Future and cancellation semantics.
+    The final sleep(0) lets Handle._run record the operation's returning step.
+    perf_counter is high resolution on Windows; suspended DB/IPC time is excluded.
+    Only one measurement is active at a time (baseline, then actor quanta).
     """
+    samples = None
+    run = asyncio.events.Handle._run
 
-    def __init__(self, operation):
-        self.operation = operation
-
-    def __await__(self):
-        iterator = self.operation.__await__()
-        advance, value, longest = iterator.send, None, 0.0
+    def timed_run(handle):
+        start = time.perf_counter()
         try:
-            while True:
-                finished = False
-                start = time.perf_counter()
-                try:
-                    yielded = advance(value)
-                except StopIteration as complete:
-                    result, finished = complete.value, True
-                finally:
-                    longest = max(longest, time.perf_counter() - start)
-                if finished:
-                    return result, longest
-                try:
-                    value = yield yielded
-                    advance = iterator.send
-                except BaseException as error:
-                    advance, value = iterator.throw, error
+            return run(handle)
         finally:
-            iterator.close()
+            if samples is not None:
+                samples.append(time.perf_counter() - start)
+
+    monkeypatch.setattr(asyncio.events.Handle, '_run', timed_run)
+
+    async def measure(operation):
+        nonlocal samples
+        assert samples is None, 'measurements must not overlap'
+        samples = []
+        try:
+            result = await operation
+            await asyncio.sleep(0)
+            return result, max(samples)
+        finally:
+            samples = None
+
+    return measure
 
 
 def _p75(values):
@@ -78,74 +79,47 @@ def _p75(values):
 
 def _assert_nonblocking_stages(baseline_steps, stage_steps):
     before = _p75(baseline_steps)
-    # This budgets synchronous loop occupancy, NOT append latency or timer lag.
-    # The relative allowance plus 3ms floor leaves sub-ms plumbing headroom.
-    # Per-stage p75 rejects every-third blocking while tolerating <25% outliers;
-    # rarer stalls remain diagnostic, not a shared-runner tail-latency guarantee.
+    # Per-stage p75 of the longest callback, not append p95 or timer lag.
+    # Reject every-third blocking but tolerate <25% noisy quanta in each stage.
     limit = max(before * 1.35, before + .003)
     for stage, steps in stage_steps.items():
         during = _p75(steps)
-        print(f'projection synchronous p75: stage={stage} baseline={before * 1000:.3f}ms '
+        print(f'projection handle p75: stage={stage} baseline={before * 1000:.3f}ms '
               f'during={during * 1000:.3f}ms limit={limit * 1000:.3f}ms '
               f'samples={len(steps)} max={max(steps) * 1000:.3f}ms')
-        assert during <= limit, f'{stage} synchronous p75 {during:.6f}s > {limit:.6f}s'
+        assert during <= limit, f'{stage} handle p75 {during:.6f}s > {limit:.6f}s'
 
 
 @pytest.mark.parametrize('outliers', [0, 1, 7])
 def test_stage_budget_tolerates_fewer_than_quarter_synthetic_outliers(outliers):
-    # Synthetic synchronous-slice distributions, not reinterpreted ingest p95s.
     _assert_nonblocking_stages([.001] * 75, {'fold': [.0015] * (30 - outliers) + [.100] * outliers})
 
 
 def test_stage_budget_rejects_every_third_synthetic_stall():
-    with pytest.raises(AssertionError, match='fold synchronous p75'):
+    with pytest.raises(AssertionError, match='fold handle p75'):
         _assert_nonblocking_stages([.001] * 75, {'fold': [.0015] * 20 + [.050] * 10})
 
 
+@pytest.mark.parametrize('callback', [0, .050])
 @pytest.mark.asyncio
-async def test_synchronous_steps_exclude_suspension_and_include_return(monkeypatch):
+async def test_handle_budget_includes_callbacks_and_final_return(monkeypatch, callback):
     clock = [0.0]
     monkeypatch.setattr(time, 'perf_counter', lambda: clock[0])
+    measure = _measure_handles(monkeypatch)
 
     async def operation():
         clock[0] += .001
-        asyncio.get_running_loop().call_soon(lambda: clock.__setitem__(0, clock[0] + 1))
-        await asyncio.sleep(0)
+        asyncio.get_running_loop().call_soon(lambda: clock.__setitem__(0, clock[0] + callback))
+        await asyncio.sleep(.001)  # Suspension is not callback execution time.
         clock[0] += .002
         return 'complete'
 
-    result, longest = await _SynchronousSteps(operation())
+    result, longest = await measure(operation())
     assert result == 'complete'
-    assert longest == pytest.approx(.002)
+    assert longest == pytest.approx(max(.002, callback))
 
 
-@pytest.mark.asyncio
-async def test_synchronous_steps_forward_future_errors_and_cancellation():
-    async def broken():
-        await asyncio.sleep(0)
-        raise ValueError('future failed')
-
-    with pytest.raises(ValueError, match='future failed'):
-        await _SynchronousSteps(asyncio.create_task(broken()))
-
-    entered, exited = asyncio.Event(), asyncio.Event()
-
-    async def waiting():
-        try:
-            entered.set()
-            await asyncio.Future()
-        finally:
-            exited.set()
-
-    task = asyncio.ensure_future(_SynchronousSteps(waiting()))
-    await entered.wait()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert exited.is_set()
-
-
-async def _exercise_projection_stages(monkeypatch):
+async def _exercise_projection_stages(monkeypatch, *, quanta=75):
     from app.core.transcript_views.bridge import ReducerBridge
     from app.core.transcript_views.producer import ProjectionActor, database
     from app.db import session_events as source
@@ -174,40 +148,47 @@ async def _exercise_projection_stages(monkeypatch):
     stage_steps = {'reset': [], 'index': [], 'fold': []}
     appends, fold_windows = 0, []
 
+    measure = _measure_handles(monkeypatch)
+    append_windows = []
+
     async def ingest(*, continuous=False):
         nonlocal appends
         values, steps = [], []
         while len(values) < 75 or (continuous and not stop.is_set()):
             start = time.perf_counter()
-            _, longest = await _SynchronousSteps(database(source.append_events, ingest_sid, [
-                {'type': 'assistant.text_delta', 'payload': {'text': 'small delta'}}]))
-            values.append(time.perf_counter() - start)
-            steps.append(longest)
+            operation = database(source.append_events, ingest_sid, [
+                {'type': 'assistant.text_delta', 'payload': {'text': 'small delta'}}])
+            if continuous:
+                await operation
+            else:
+                _, longest = await measure(operation)
+                steps.append(longest)
+            end = time.perf_counter()
+            values.append(end - start)
+            append_windows.append((start, end))
             appends += 1
         return values, steps
 
     async def background():
         more, completed = False, 0
         try:
-            for _ in range(75):
+            for _ in range(quanta):
                 # Re-fold a stable session; same-session appends otherwise keep
                 # it chasing watermarks. Commit contention is tested by order below.
                 previous = await database(store.load, sid)
                 stage = 'reset' if not more else previous.stage
-                before_appends = appends
-                more, longest = await _SynchronousSteps(actor.process(sid, recheck=not more))
+                start = time.perf_counter()
+                more, longest = await measure(actor.process(sid, recheck=not more))
                 stage_steps[stage].append(longest)
                 if stage == 'fold':
-                    fold_windows.append(appends - before_appends)
+                    fold_windows.append((start, time.perf_counter()))
                 if not more:
                     state = await database(store.load, sid)
                     assert state.ready, f'cycle failed: {state.stage}/{state.error_code}'
                     completed += 1
                 await asyncio.sleep(0)
             assert completed >= 5, 'must exercise repeated ready projections'
-            print(f'projection ingest quanta=75 ready={completed} '
-                  f'overlapped_folds={sum(n > 0 for n in fold_windows)}/{len(fold_windows)} '
-                  f'concurrent_appends={appends - 75}')
+            print(f'projection ingest quanta={quanta} ready={completed} concurrent_appends={appends - 75}')
         finally:
             stop.set()
 
@@ -222,14 +203,18 @@ async def _exercise_projection_stages(monkeypatch):
         ingest_task = asyncio.create_task(ingest(continuous=True))
         task = asyncio.create_task(background())
         await task
-        concurrent, concurrent_steps = await ingest_task
+        concurrent, _ = await ingest_task
         for stage, steps in stage_steps.items():
             assert len(steps) >= 5, f'must sample the real {stage} stage'
-        assert len(fold_windows) >= 5 and all(n > 0 for n in fold_windows), 'ingest must overlap every fold'
+        # An in-flight append overlaps even if one slow DB call spans a whole
+        # fold. Requiring a completion per fold turned that single outlier red.
+        overlaps = sum(any(a < end and b > start for a, b in append_windows)
+                       for start, end in fold_windows)
+        print(f'projection ingest overlap: folds={overlaps}/{len(fold_windows)}')
+        assert len(fold_windows) >= 5 and overlaps == len(fold_windows), 'ingest must overlap every fold'
         p95 = lambda values: sorted(values)[math.ceil(len(values) * .95) - 1]
         print(f'projection ingest p95 (diagnostic): baseline={p95(baseline) * 1000:.3f}ms '
-              f'concurrent={p95(concurrent) * 1000:.3f}ms '
-              f'ingest_sync_p75={_p75(concurrent_steps) * 1000:.3f}ms')
+              f'concurrent={p95(concurrent) * 1000:.3f}ms')
         _assert_nonblocking_stages(baseline_steps, stage_steps)
     finally:
         stop.set()
@@ -246,27 +231,54 @@ async def test_background_projection_keeps_each_stage_nonblocking(monkeypatch):
 
 @pytest.mark.parametrize(('method', 'seconds', 'every'), [
     ('_fold', .010, 1), ('_fold', .050, 1), ('process', .050, 1),
-    ('_index', .050, 1), ('_reset', .050, 1), ('_fold', .050, 3),
-], ids=['fold-10ms', 'fold-50ms', 'process-50ms', 'index-50ms', 'reset-50ms', 'every-third-fold-50ms'])
+    ('_index', .050, 1), ('_reset', .050, 1), ('_fold', .050, 3), ('child', .050, 1),
+], ids=['fold-10ms', 'fold-50ms', 'process-50ms', 'index-50ms', 'reset-50ms', 'every-third-fold-50ms', 'child-50ms'])
 @pytest.mark.asyncio
 async def test_stage_budget_detects_real_blocking(monkeypatch, method, seconds, every):
     from app.core.transcript_views.producer import ProjectionActor
 
-    real = getattr(ProjectionActor, method)
+    target = 'process' if method == 'child' else method
+    real = getattr(ProjectionActor, target)
     calls = 0
+
+    async def stall():
+        time.sleep(seconds)
 
     async def blocking(self, *args, **kwargs):
         nonlocal calls
         calls += 1
         if calls % every == 0:
-            time.sleep(seconds)
+            if method == 'child':
+                await asyncio.create_task(stall())
+            else:
+                time.sleep(seconds)
         return await real(self, *args, **kwargs)
 
-    monkeypatch.setattr(ProjectionActor, method, blocking)
-    stage = 'reset' if method == 'process' else method[1:]
+    monkeypatch.setattr(ProjectionActor, target, blocking)
+    stage = 'reset' if target == 'process' else method[1:]
     print(f'projection negative control: method={method} sleep={seconds * 1000:.0f}ms every={every}')
-    with pytest.raises(AssertionError, match=f'{stage} synchronous p75'):
-        await _exercise_projection_stages(monkeypatch)
+    with pytest.raises(AssertionError, match=f'{stage} handle p75'):
+        await _exercise_projection_stages(monkeypatch, quanta=25)
+
+
+@pytest.mark.asyncio
+async def test_stage_budget_tolerates_one_slow_append(monkeypatch):
+    from app.db import session_events as source
+    from random import Random
+
+    append, calls = source.append_events, 0
+    slow_at = Random(965).randint(76, 150)  # After the 75-append baseline.
+
+    def slow(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == slow_at:
+            time.sleep(.118)  # Off loop: observed #965 outlier, not loop blocking.
+        return append(*args, **kwargs)
+
+    monkeypatch.setattr(source, 'append_events', slow)
+    await _exercise_projection_stages(monkeypatch)
+    assert calls >= slow_at, 'must actually inject the single slow append'
 
 
 @pytest.mark.asyncio
@@ -291,30 +303,50 @@ async def test_stage_budget_rejects_failed_cycles(monkeypatch):
 
 @pytest.mark.skipif(os.environ.get('ALLOW_REAL_PG') != '1',
                     reason='SQLite shim serializes all writers; requires native PostgreSQL row locks')
-@pytest.mark.parametrize('lock_source', [False, True], ids=['independent', 'detect-source-row-lock'])
+@pytest.mark.parametrize('stage', ['reset', 'index', 'fold'])
+@pytest.mark.parametrize('lock_source', [False, True, 'end'], ids=['independent', 'detect-source-row-lock', 'detect-tx-tail-lock'])
 @pytest.mark.asyncio
-async def test_projection_commit_does_not_block_same_session_append(monkeypatch, lock_source):
+async def test_projection_commit_does_not_block_same_session_append(monkeypatch, stage, lock_source):
     from app.db import transcript_projections as store
 
-    print(f'projection commit control: injected_source_lock={lock_source}')
+    print(f'projection commit control: stage={stage} injected_source_lock={lock_source}')
     if lock_source:
-        cas = store._cas
+        cas, get_db, local = store._cas, store.get_db, threading.local()
 
         def locking_cas(cursor, state, previous):
-            if previous is not None and state.scan_seq > previous.scan_seq:
+            local.sid = state.session_id
+            if lock_source != 'end':
                 cursor.execute('SELECT next_seq FROM session_event_counters WHERE session_id=%s FOR UPDATE',
                                (state.session_id,))
             cas(cursor, state, previous)
 
+        @contextmanager
+        def locking_tail():
+            with get_db() as connection:
+                local.sid = None
+                yield connection
+                if local.sid:
+                    connection.cursor().execute(
+                        'SELECT next_seq FROM session_event_counters WHERE session_id=%s FOR UPDATE', (local.sid,))
+                    connection.cursor().execute('SELECT pg_sleep(.05)')
+
         monkeypatch.setattr(store, '_cas', locking_cas)
-        with pytest.raises(AssertionError, match='same-session append waited for projection commit release'):
-            await _exercise_commit_order(monkeypatch)
+        if lock_source == 'end':
+            monkeypatch.setattr(store, 'get_db', locking_tail)
+        with pytest.raises(AssertionError, match='same-session append blocked on projection source lock'):
+            await _exercise_commit_order(monkeypatch, stage)
     else:
-        await _exercise_commit_order(monkeypatch)
+        await _exercise_commit_order(monkeypatch, stage)
 
 
-async def _exercise_commit_order(monkeypatch):
-    """An append must finish BEFORE the real fold's transaction is released."""
+async def _exercise_commit_order(monkeypatch, stage):
+    """Append throughout the selected real commit CALL, including its tx tail.
+
+    Hold after the transaction body, not inside its first statement. A 10ms
+    PostgreSQL lock_timeout budgets only actual lock waits, not CPU scheduling.
+    Keep appending before/after the hold too, covering separate transactions.
+    """
+    from psycopg2.errors import LockNotAvailable
     from app.core.transcript_views.bridge import ReducerBridge
     from app.core.transcript_views.producer import ProjectionActor, database
     from app.db import session_events as source
@@ -330,52 +362,89 @@ async def _exercise_commit_order(monkeypatch):
     source.append_events(sid, [
         {'type': 'message.user', 'payload': {'content': 'real fold'}},
         {'type': 'turn.completed', 'payload': {}}])
-    entered, release = threading.Event(), threading.Event()
-    cas = store._cas
+    started, entered, release, finished = (threading.Event() for _ in range(4))
+    local = threading.local()
+    commit, get_db = store.commit, store.get_db
+    armed = False
 
-    def held_cas(cursor, state, previous):
-        cas(cursor, state, previous)
-        if state.session_id == sid and previous is not None and state.scan_seq > previous.scan_seq:
-            entered.set()
-            assert release.wait(30), 'test never released the fold commit'
+    def observed_commit(state, previous, **kwargs):
+        kind = 'reset' if previous is None or state.generation != previous.generation else previous.stage
+        selected = armed and state.session_id == sid and kind == stage and not started.is_set()
+        local.hold = selected
+        if selected:
+            started.set()
+        try:
+            return commit(state, previous, **kwargs)
+        finally:
+            local.hold = False
+            if selected:
+                finished.set()
 
-    monkeypatch.setattr(store, '_cas', held_cas)
+    @contextmanager
+    def held_transaction():
+        with get_db() as connection:
+            yield connection
+            if getattr(local, 'hold', False):
+                entered.set()
+                assert release.wait(10), 'test never released the commit transaction'
+
+    def append():
+        with source.get_event_db() as connection:
+            connection.cursor().execute("SET LOCAL lock_timeout = '10ms'")
+            return source.append_events(sid, [
+                {'type': 'assistant.text_delta', 'payload': {'text': 'during real commit'}}], _conn=connection)
+
+    monkeypatch.setattr(store, 'commit', observed_commit)
+    monkeypatch.setattr(store, 'get_db', held_transaction)
     bridge = ReducerBridge()
     actor = ProjectionActor(bridge)
-    append_task = None
+    append_task, appends, held_appends = None, 0, 0
 
     async def project():
+        nonlocal armed
         for _ in range(20):
             if not await actor.process(sid):
+                break
+        assert (await database(store.load, sid)).ready
+        armed = True
+        for quantum in range(20):
+            if not await actor.process(sid, recheck=quantum == 0):
                 return
         pytest.fail('projection never finished')
 
     task = asyncio.create_task(project())
     try:
-        assert await asyncio.to_thread(entered.wait, 30), 'fold commit never entered'
-        await asyncio.sleep(0)
-        if task.done():
-            await task
-            pytest.fail('projection finished before the held commit')
-        start = time.perf_counter()
-        append_task = asyncio.create_task(database(source.append_events, sid, [
-            {'type': 'assistant.text_delta', 'payload': {'text': 'while commit held'}}]))
-        # Do not cancel a DB worker on timeout: release and join it in finally.
-        done, _ = await asyncio.wait({append_task}, timeout=10)
-        elapsed = time.perf_counter() - start
-        print(f'projection commit order: append={elapsed * 1000:.3f}ms '
-              f'completed_while_held={bool(done)} deadlock_bound=10000ms')
-        assert done, 'same-session append waited for projection commit release'
-        await append_task
-        assert not release.is_set() and not task.done()
+        assert await asyncio.to_thread(started.wait, 10), f'{stage} commit never entered'
+        deadline = time.perf_counter() + 10  # Broken-test guard, not a latency budget.
+        while not finished.is_set():
+            assert time.perf_counter() < deadline, 'commit call never finished'
+            start = time.perf_counter()
+            append_task = asyncio.create_task(database(append))
+            done, _ = await asyncio.wait({append_task}, timeout=10)
+            assert done, 'same-session append never finished'
+            try:
+                await append_task
+            except LockNotAvailable as error:
+                print(f'projection source lock rejected: stage={stage} '
+                      f'append_ms={(time.perf_counter()-start)*1000:.3f} lock_timeout_ms=10')
+                raise AssertionError('same-session append blocked on projection source lock') from error
+            appends += 1
+            if entered.is_set() and not release.is_set():
+                held_appends += 1
+                print(f'projection commit order: stage={stage} append_ms={(time.perf_counter()-start)*1000:.3f} '
+                      'completed_while_held=True lock_timeout_ms=10')
+                release.set()
+        assert held_appends == 1, 'append must finish before transaction release'
     finally:
         release.set()
         try:
-            await asyncio.gather(*(t for t in (task, append_task) if t is not None))
+            if append_task is not None:
+                await asyncio.gather(append_task, return_exceptions=True)
+            await task
         finally:
             await bridge.close()
     assert (await database(store.load, sid)).ready
-    assert await database(source.get_max_seq, sid) == 3
+    assert await database(source.get_max_seq, sid) == 2 + appends
 
 
 @pytest.mark.asyncio

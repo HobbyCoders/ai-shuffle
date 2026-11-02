@@ -316,11 +316,19 @@ installation-local settled-message records. Enabling production is its own later
 step, after measuring a large real database; do not start a fleet-wide backfill
 with this change. The large-record CI scenario proves that live appends finish
 while preparation is held in its child process, on the SQLite shim and native
-PostgreSQL; ingest p95 and timer lag are diagnostic, not numeric gates. The small
-scenario budgets p75 synchronous loop occupancy separately for reset, index and
-fold, with continuous ingest and a real blocking-fold negative control. Native
-PostgreSQL also requires same-session appends to finish while a fold commit is
-held open (the shim serializes writers and cannot model this row-lock check).
+PostgreSQL; its ingest p95 and timer lag are diagnostic, not numeric gates. The
+small scenario checks p75 of the longest event-loop callback in each reset, index
+and fold quantum, including spawned tasks and callbacks, against the same-run
+baseline with a 3ms allowance. Every fold overlaps a live append (an in-flight
+append counts); real blocking, child-task, failed-cycle and single-slow-append
+controls protect the measurement. Native PostgreSQL appends to the projected
+session throughout reset, index and fold commit calls, holding each transaction
+after its body and bounding actual source-row lock waits with SET LOCAL
+lock_timeout=10ms (not a CPU deadline). The shim cannot model row locks. Controls
+run once; main repeats only the two primary ratchets. Limits: per-stage p75
+tolerates <25% noisy quanta; this does not gate rare stalls or GIL/executor
+starvation. An append median/p75 gate was also insensitive to those regressions,
+because many fast completions dilute the few long appends.
 These checks do not authorize enabling production without the large-database check.
 **Reads are not implemented or negotiated:** opening chat
 still uses the existing event feed and full replay. Unset the switch (or set it
