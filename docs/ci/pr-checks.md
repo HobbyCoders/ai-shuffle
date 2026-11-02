@@ -868,7 +868,7 @@ path filter (no frontend job does).
 `UI journeys (N/4)`: each shard installs the Python and JavaScript
 dependencies (pip/npm caches) and Chromium (browser-mcp's pinned
 playwright-core build, cached), builds and stamps the desktop UI, then runs
-`python -m scripts.devloop.ci journeys --shard N/4`. That starts a fresh dev
+`python -m scripts.devloop.ci journeys --shard N/4 --retry-failures`. That starts a fresh dev
 instance (`python -m scripts.devloop up --ci`: real app, its own throwaway
 PostgreSQL 16 from the runner's `/usr/lib/postgresql/16/bin`, seed data, the
 scripted fake AI, loopback only), waits for its ready line and `status`, runs
@@ -896,11 +896,32 @@ replacing the file. Estimates are not time limits: keep measurements current
 and check headroom against the unchanged 25-minute journey step on the four
 standard hosted runners.
 
+After the shard finishes, CI retries only failed cases, once, on the same
+instance. It passes exact `--case=<id>` selectors (including viewport and
+throttle), never substring `--only`. A journey without a usable per-case
+summary is retried as a whole file. Known-bug verdicts keep their existing
+meaning and are not retry targets. More than **3 failed cases/crashed files
+across the shard** skips retry and fails immediately. The measured hosted
+median is 11.17 seconds/case, so three ordinary retries are about 34 seconds,
+not another 22–25 minute shard. Crashed files count as one target, but all
+retries share a hard **180-second phase budget**, further limited by the
+remaining 25-minute step budget with **180 seconds reserved for teardown**.
+No step/job timeout was increased. A retry that crashes, times out, omits a
+selected case or runs extra cases cannot turn the job green.
+
 Every case's text timeline (marks, state changes, anomalies) is printed in
-the job log; failing ones also go to the job summary. On failure the shard
-uploads `ui-journeys-<N>` (3 days): `journeys/<journey>/<case>.txt`, keyframe
-contact sheets (`.jpg`), error screenshots, `logs/<journey>.log` and the
-instance's whole `devloop.log`. Run the same thing locally with
+the job log; each failed attempt also goes to the job summary. Cases that
+pass only on retry emit a GitHub warning and appear under **Passed on retry
+(flaky journeys)**: investigate these signals just as before (issue #975 was
+a real bootstrap race, not an excuse to ignore a retry). A second failure
+fails the job with both attempts' errors. On failure **or any retry**, even
+when green, the shard uploads `ui-journeys-<N>` (3 days): separate
+`attempt-1/` and `attempt-2/` directories contain
+`journeys/<journey>/<case>.txt`, keyframe contact sheets (`.jpg`), error
+screenshots and `logs/<journey>.log`; root `summary.json` records both
+verdicts, and `devloop.log` is the instance's whole log. A clean first pass
+does not upload an artifact. The retry flag is opt-in: local `run-all.mjs`
+and the CI driver without the flag still run once. Run locally with
 `python -m scripts.devloop.ci journeys --build` (see
 [the dev loop](../internal/dev-loop.md#ci-mode-and-the-journey-driver)), or
 one journey against your own instance as its README says.
