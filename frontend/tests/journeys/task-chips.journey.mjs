@@ -322,7 +322,7 @@ const CLICK = {
 		await openChatLink(page, DOCS).waitFor({ timeout: 60_000 });
 		await page.waitForTimeout(800);
 		expect(starts.length === 1, `a double click sent one start (sent ${starts.length})`);
-		expect(JSON.parse(bodies[0]).shown_access === 'bypassPermissions', `the start names the access on screen (sent ${bodies[0]})`);
+		expect(/^[0-9a-f]{64}$/.test(JSON.parse(bodies[0]).access_fingerprint ?? ''), `the start names the access on screen (sent ${bodies[0]})`);
 		expect(await row(page, DOCS).getByText(FULL_ACCESS).count() === 0, 'a started chip has no access left to approve');
 		expect(await row(page, DOCS).getByRole('alert').count() === 0, 'the old error left with the success');
 	},

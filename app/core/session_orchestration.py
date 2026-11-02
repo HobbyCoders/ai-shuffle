@@ -775,7 +775,10 @@ def _remote_session_id(command_id):
     return str(uuid5(NAMESPACE_URL, "ai-shuffle:" + command_id))
 
 
-def _started_permission_mode(sender, overrides):
+_READ_CONFIG = object()
+
+
+def _started_permission_mode(sender, overrides, *, config=_READ_CONFIG):
     """The permission binding a chat started by ``sender`` is created with.
 
     The sender's CURRENT binding, never the permission mode copied onto its
@@ -791,7 +794,8 @@ def _started_permission_mode(sender, overrides):
     turns run it, so an unbound chat never hands a child a mode the chat
     itself cannot run in (its agent's Accept Edits runs the chat on Ask).
     StartSession takes no permission argument; the owner can change the
-    child afterwards.
+    child afterwards. ``config``: the sender's agent config when the caller
+    already holds it; omitted, it is read here if it is needed.
     """
     from app.core.session_modes import permission_ceiling, session_mode_of, turn_permission_mode
 
@@ -799,10 +803,15 @@ def _started_permission_mode(sender, overrides):
                                  {**sender, "is_worker": False})
     if not ceiling and session_mode_of(sender) != "chat":
         return sender.get("permission_mode")
+    if config is _READ_CONFIG:
+        config = _profile_config(sender)
+    return turn_permission_mode({"_permission_ceiling": ceiling}, sender, config)
+
+
+def _profile_config(row):
     from app.db import database
-    profile = database.get_profile(sender.get("profile_id")) if sender.get("profile_id") else None
-    return turn_permission_mode({"_permission_ceiling": ceiling}, sender,
-                                (profile or {}).get("config") if profile else None)
+    profile = database.get_profile(row.get("profile_id")) if row.get("profile_id") else None
+    return (profile or {}).get("config") if profile else None
 
 
 def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerprint, *,
@@ -1760,24 +1769,68 @@ def chip_lane_refusal(model, provider_id):
     return credential_gate.turn_refusal(leg) or _credential_gap(provider_id)
 
 
-def chip_permission_mode(chip, parent, overrides):
-    """The permission mode a chip's chat would run in if it started now.
+def _chip_chat_row(chip, parent):
+    """``parent`` with the fields a chip's chat is created differently, for working out its lane.
 
-    The chat's own binding comes from :func:`_started_permission_mode`, and each
-    of its turns resolves from that the way this does. ``auto`` exists only on
-    the Claude CLI leg, so the chip's model can lower it.
+    Keeps the parent's id: the new chat is bound to that chat's principal.
+    """
+    project = chip.get("project_v2_id")
+    if not project or project == parent.get("project_v2_id"):
+        return dict(parent)
+    return {**parent, "mode": None, "project_id": None, "project_v2_id": project}
+
+
+def chip_access_reads(chip, parent, overrides):
+    """What :func:`chip_access` needs from other tables, read before any lock is held.
+
+    The lane depends on the chat's stored mode and project, and the leg on the
+    chip's model; both of those are in the fingerprint or fixed on the chip, so
+    a later change to them still shows.
     """
     from app.core import credential_gate
-    from app.core.session_modes import effective_permission_mode, turn_permission_mode
-    from app.db import database
-    profile = database.get_profile(parent.get("profile_id")) if parent.get("profile_id") else None
+    from app.core.session_modes import CALLER_AUTHENTICATED, runtime_session_mode, turn_caller
+    row = _chip_chat_row(chip, parent)
+    # The first turn copies these overrides, so it has the same caller, or none,
+    # and a chat with no recorded caller yet goes on to the owner checks.
+    lane = runtime_session_mode(row, caller=turn_caller(overrides) or CALLER_AUTHENTICATED)
+    return {"leg": credential_gate.leg_for_options(
+                SimpleNamespace(model=chip["model"], aih_provider_id=chip.get("provider_id"))),
+            "lane": lane, "owner_session": lane == "chat" and is_owner_session(row)}
+
+
+def chip_access(chip, parent, overrides, config, reads):
+    """What a chip's chat would run with: ``{mode, tools, fingerprint}``. Reads nothing.
+
+    The mode and tools come from the resolvers its turns use
+    (:func:`~app.core.session_modes.turn_permission_mode`,
+    :func:`~app.core.session_modes.turn_tool_access`), so this cannot drift
+    from the run. ``auto`` exists only on the Claude CLI leg, so the chip's
+    model can lower it. The fingerprint covers everything the click approves;
+    a chip's ``attempt`` is left out, since a retry approves the same thing.
+    """
+    from app.core.session_modes import effective_permission_mode, turn_permission_mode, turn_tool_access
+    if config is None:
+        raise LookupError("The agent this chat runs on no longer exists.")
+    overrides = overrides or {}
+    row = _chip_chat_row(chip, parent)
     mode = turn_permission_mode(
-        {"_permission_ceiling": (overrides or {}).get("_permission_ceiling")},
-        {"permission_mode": _started_permission_mode(parent, overrides)},
-        (profile or {}).get("config") if profile else None)
-    leg = credential_gate.leg_for_options(
-        SimpleNamespace(model=chip["model"], aih_provider_id=chip.get("provider_id")))
-    return effective_permission_mode(mode, delegated=leg == "delegated")
+        {"_permission_ceiling": overrides.get("_permission_ceiling")},
+        {"permission_mode": _started_permission_mode(parent, overrides, config=config), "mode": row.get("mode")},
+        config)
+    mode = effective_permission_mode(mode, delegated=reads["leg"] == "delegated")
+    tools = turn_tool_access(config, overrides, reads["lane"], owner_session=reads["owner_session"])
+    material = {"version": 1, "chip": chip["id"], "model": chip["model"], "provider_id": chip.get("provider_id"),
+                "mode": mode, "lane": reads["lane"], "stored_mode": row.get("mode"),
+                "project_id": row.get("project_id"), "project_v2_id": row.get("project_v2_id"),
+                "allowed": None if tools.allowed is None else sorted(set(tools.allowed)),
+                "disallowed": sorted(set(tools.disallowed or ()))}
+    fingerprint = hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
+    return {"mode": mode, "tools": tools, "fingerprint": fingerprint}
+
+
+def chip_access_now(chip, parent, overrides):
+    """:func:`chip_access` from what is stored now."""
+    return chip_access(chip, parent, overrides, _profile_config(parent), chip_access_reads(chip, parent, overrides))
 
 
 def _chip_model_plan(chip, parent, overrides):
@@ -1805,13 +1858,17 @@ def _chip_model_plan(chip, parent, overrides):
             "baseline": _inherited_model(parent, overrides), "source": model_override.CHIP_APPROVED}
 
 
-def start_suggested_task(chip, shown_access):
+def start_suggested_task(chip, shown_fingerprint):
     """Start a chip's chat because the owner clicked it. Returns the new chat's id.
 
-    ``shown_access`` is the permission mode the chip showed at the click. The
-    chat runs with the parent's access, not the suggesting agent's, so a mode
-    broader than that refuses the start; a narrower one just runs narrower.
-    The lock and recheck below catch a change made after this check.
+    ``shown_fingerprint`` is :func:`chip_access`'s fingerprint as the chip showed
+    it at the click. The chat runs with the parent's access, not the suggesting
+    agent's, so any difference from that refuses the start, a narrower access
+    too. It is checked here and again under the transaction below, against the
+    profile as well as the chat row, and the chat is bound to the mode approved:
+    provisioning a checkout takes a while, and an unbound chat would follow any
+    later change to its agent. :func:`app.core.task_chips.refuse_if_access_changed`
+    says why no per-click receipt is kept.
 
     StartSession's creation path, with these differences because a person asked
     for it and not the chain: it always gets its own checkout in a Git project,
@@ -1844,9 +1901,11 @@ def start_suggested_task(chip, shown_access):
     orchestration_limits.assert_can_start(parent_id)  # The owner's daily spending limit.
     overrides = context.get("overrides") or {}
     plan = _chip_model_plan(chip, parent, overrides)
-    from app.core.task_chips import refuse_if_widened
-    refuse_if_widened(shown_access, chip_permission_mode(chip, parent, overrides))
-    started_mode = _started_permission_mode(parent, overrides)
+    from app.core.task_chips import refuse_if_access_changed
+    from app.db.profiles import lock_profile
+    reads = chip_access_reads(chip, parent, overrides)
+    approved = chip_access(chip, parent, overrides, _profile_config(parent), reads)
+    refuse_if_access_changed(shown_fingerprint, approved["fingerprint"])
     # Deterministic per attempt: a retry after a failure needs a new branch
     # name, since the failed attempt may have left its branch behind.
     new_id = str(uuid5(NAMESPACE_URL, f"ai-shuffle:task-chip:{chip['id']}:{chip['attempt']}"))
@@ -1883,13 +1942,19 @@ def start_suggested_task(chip, shown_access):
             # just made sits on the default branch, which nobody asked for.
             raise ValueError(_CHIP_NO_COMMIT)
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (parent_id,))
+        cursor.execute("SELECT * FROM sessions WHERE id=%s FOR UPDATE", (parent_id,))
+        locked = cursor.fetchone()
+        if locked:
+            locked = dict(locked)
+            profile = lock_profile(cursor, locked.get("profile_id")) if locked.get("profile_id") else None
+            refuse_if_access_changed(shown_fingerprint, chip_access(
+                chip, locked, overrides, (profile or {}).get("config") if profile else None, reads)["fingerprint"])
         try:
             _recheck(cursor, (parent,), {parent_id: principal}, allow_settled=True)
         except ValueError as exc:
             raise ValueError("That chat's settings changed while this task was starting. Try again.") from exc
         target, first_overrides = _create_started_chat(
-            conn, parent, new_id=new_id, title=chip["title"], overrides=overrides, started_mode=started_mode,
+            conn, parent, new_id=new_id, title=chip["title"], overrides=overrides, started_mode=approved["mode"],
             checkout=checkout, principal=principal, workspace=workspace,
             mode=parent.get("mode") if own_project else None, plan=plan, payload=payload,
             explicit_effort=chip.get("effort"),

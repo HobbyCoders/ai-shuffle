@@ -50,7 +50,7 @@ from typing import Any, List, Mapping, Optional, Tuple
 
 from fluid.permissions.modes import ACCEPT_EDITS_TOOLS as _FLUID_ACCEPT_EDITS_TOOLS
 
-from app.core.tool_access import DENY_ALL, ToolAccess, intersect_tool_surfaces
+from app.core.tool_access import DENY_ALL, ToolAccess, intersect_tool_surfaces, resolve_tool_access
 
 # The three sidepanel surfaces. Order is the switcher's order.
 SESSION_MODES: Tuple[str, ...] = ("code", "chat", "voice")
@@ -779,6 +779,64 @@ def narrow_tool_access_for_proactive(access: Any, metadata: dict[str, Any]) -> A
         disallowed=[*(access.disallowed or []), *PROACTIVE_DENIED_TOOLS,
                     *([] if surface else [DENY_ALL])],
     )
+
+
+def lane_tool_access(config: Optional[Mapping[str, Any]], session_mode: Any, *,
+                     owner_session: bool = False, proactive: Any = None) -> ToolAccess:
+    """An agent's own tool lists under its session's lane: what every turn starts from.
+
+    ``build_options_from_profile`` and the permission callback both read this.
+    """
+    access = narrow_tool_access_for_mode(resolve_tool_access(config), session_mode, owner_session=owner_session)
+    return narrow_tool_access_for_proactive(access, proactive)
+
+
+def turn_tool_surface(allowed: Optional[List[str]], disallowed: Optional[List[str]],
+                      overrides: Optional[Mapping[str, Any]]) -> Tuple[Optional[List[str]], Optional[List[str]]]:
+    """``(surface, deny list)`` once a turn's ``tool_allowlist`` and ``tool_denylist`` apply.
+
+    A non-empty ``tool_allowlist`` is a Task-dispatched agent's whole tool
+    surface, and the agent's own allow list composes with it as an intersection.
+    ``disallowed`` comes back unchanged when nothing adds to it.
+    """
+    overrides = overrides or {}
+    listed = overrides.get("tool_allowlist")
+    # An all-blank list degrades to None rather than to an empty allowlist: [] on
+    # the engine would mean "no tools at all", which is never what a malformed
+    # ``tools:`` line asked for.
+    dispatch_surface = ([str(t).strip() for t in listed if str(t).strip()]
+                        if isinstance(listed, (list, tuple)) else []) or None
+    surface = intersect_tool_surfaces(allowed, dispatch_surface)
+    if surface == []:
+        # An empty intersection is a real answer ("the agent and the dispatch
+        # definition have no tool in common"), but an empty list on the engine
+        # degrades to unrestricted. Express it as a total deny instead: deny
+        # beats allow on both legs.
+        surface = None
+        if DENY_ALL not in (disallowed or []):
+            disallowed = [*(disallowed or []), DENY_ALL]
+    # A Task-dispatched file/plugin agent's ``disallowedTools``: deny beats
+    # allow on both legs, so appending is enough to enforce it.
+    denylist = overrides.get("tool_denylist")
+    if isinstance(denylist, (list, tuple)):
+        denied = [str(t).strip() for t in denylist if str(t).strip()]
+        current = list(disallowed or [])
+        disallowed = current + [t for t in denied if t not in current]
+    return surface, disallowed
+
+
+def turn_tool_access(config: Optional[Mapping[str, Any]], overrides: Optional[Mapping[str, Any]], session_mode: Any,
+                     *, owner_session: bool = False) -> ToolAccess:
+    """The tools a turn may use, as ``build_options_from_profile`` resolves them.
+
+    For code that has to say what a turn would run with. Leaves out the deny
+    entries that are about how a run is hosted and not what it was granted: the
+    worker lifecycle tools, and the ``claude-api`` skill on other providers.
+    """
+    access = lane_tool_access(config, session_mode, owner_session=owner_session,
+                              proactive=(overrides or {}).get("_assistant_proactive"))
+    surface, disallowed = turn_tool_surface(access.allowed, access.disallowed, overrides)
+    return ToolAccess(allowed=surface, disallowed=disallowed)
 
 
 def install_proactive_registry_guard(

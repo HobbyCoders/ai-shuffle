@@ -100,6 +100,15 @@ def get_profile(profile_id: str) -> Optional[ProfileRow]:
         return row
 
 
+def lock_profile(cursor, profile_id: str) -> Optional[ProfileRow]:
+    """:func:`get_profile` on the caller's connection, held against changes until it commits."""
+    cursor.execute("SELECT * FROM agents WHERE id = %s FOR SHARE", (profile_id,))
+    row = row_to_dict(cursor.fetchone())
+    if row:
+        _decode_row(row)
+    return row
+
+
 def get_all_profiles() -> List[ProfileRow]:
     """Get all profiles.
 

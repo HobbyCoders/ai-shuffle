@@ -1,6 +1,7 @@
 """Background-task chips, through the real tool handler, start path and git."""
 import asyncio
 import json
+import re
 import subprocess
 from unittest.mock import AsyncMock
 
@@ -101,7 +102,7 @@ async def recorded(sid="root", **overrides):
 async def start_chip(sid, chip_id):
     """As the app does: start with the access the chip shows right now."""
     shown = next((chip["access"] for chip in task_chips.list_chips(sid)["chips"] if chip["id"] == chip_id), None)
-    return await task_chips.start(sid, chip_id, shown["mode"] if shown else None)
+    return await task_chips.start(sid, chip_id, shown["fingerprint"] if shown else None)
 
 
 def child_of(chip):
@@ -1124,7 +1125,7 @@ async def test_an_ask_read_only_subagent_under_a_bypass_root_discloses_the_jump(
     read_only_subagent()
     chip_id = await recorded("reviewer", title="Reviewer's idea")
     row = store.get("root", chip_id)
-    assert row["origin_mode"] == "default" and row["origin_tools_limited"]
+    assert row["origin_mode"] == "default" and json.loads(row["origin_tools"])["allowed"] == ["Read", "Grep"]
     access = shown("root", chip_id)
     assert access["summary"] == "Runs with this chat's access: full permissions"
     assert access["elevated"] is True and access["wider_than_source"] is True
@@ -1149,39 +1150,263 @@ async def test_access_is_worked_out_on_every_read(owner):
     assert shown("root", chip_id)["mode"] == "acceptEdits"
 
 
+def nothing_started(chip_id, attempt=1):
+    new_id = str(orch.uuid5(orch.NAMESPACE_URL, f"ai-shuffle:task-chip:{chip_id}:{attempt}"))
+    assert sessions.get_session(new_id) is None
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS n FROM turns WHERE session_id=%s", (new_id,))
+        assert cursor.fetchone()["n"] == 0
+    return True
+
+
+def refused_as_changed(failed):
+    assert failed["state"] == "failed" and failed["retryable"] and not failed["started_session_id"]
+    assert "access changed" in failed["error"] and "nothing was started" in failed["error"]
+    assert "Check the access it shows now" in failed["error"]
+    return True
+
+
 async def test_a_mode_widened_since_the_chip_was_shown_refuses_the_start(owner):
     chip_id = await recorded()
-    assert shown("root", chip_id)["mode"] == "default"
+    seen = shown("root", chip_id)
+    assert seen["mode"] == "default"
     set_mode("root", "bypassPermissions")
-    failed = await task_chips.start("root", chip_id, "default")
-    assert failed["state"] == "failed" and failed["retryable"] and not failed["started_session_id"]
-    assert "broader access than the chip showed" in failed["error"] and "full permissions" in failed["error"]
-    assert "Nothing was started" in failed["error"]
-    assert sessions.get_session(str(orch.uuid5(orch.NAMESPACE_URL, f"ai-shuffle:task-chip:{chip_id}:1"))) is None
+    failed = await task_chips.start("root", chip_id, seen["fingerprint"])
+    assert refused_as_changed(failed) and nothing_started(chip_id)
     # The failed chip now shows the new access; a click on that is an approval of it.
     assert failed["access"]["mode"] == "bypassPermissions"
-    started = await task_chips.start("root", chip_id, failed["access"]["mode"])
+    started = await task_chips.start("root", chip_id, failed["access"]["fingerprint"])
     assert started["state"] == "started" and child_of(started)["permission_mode"] == "bypassPermissions"
 
 
-async def test_a_mode_narrowed_since_the_chip_was_shown_just_runs_narrower(owner):
+async def test_a_mode_narrowed_since_the_chip_was_shown_needs_a_fresh_look_too(owner):
     set_mode("root", "bypassPermissions")
     chip_id = await recorded()
+    seen = shown("root", chip_id)
     set_mode("root", "default")
-    started = await task_chips.start("root", chip_id, "bypassPermissions")
+    failed = await task_chips.start("root", chip_id, seen["fingerprint"])
+    assert refused_as_changed(failed) and nothing_started(chip_id)
+    started = await task_chips.start("root", chip_id, failed["access"]["fingerprint"])
     assert started["state"] == "started" and child_of(started)["permission_mode"] == "default"
 
 
-async def test_a_start_that_showed_no_access_approved_none(owner):
-    failed = await task_chips.start("root", await recorded(), None)
-    assert failed["state"] == "failed" and "broader access" in failed["error"]
+@pytest.mark.parametrize("sent", [None, "", "default", "bypassPermissions", "0" * 64, 7])
+async def test_only_the_fingerprint_on_show_approves_a_start(owner, sent):
+    chip_id = await recorded()
+    assert refused_as_changed(await task_chips.start("root", chip_id, sent)) and nothing_started(chip_id)
+
+
+async def test_the_fingerprint_says_nothing_and_a_retry_does_not_change_it(owner):
+    chip_id = await recorded()
+    seen = shown("root", chip_id)
+    assert re.fullmatch("[0-9a-f]{64}", seen["fingerprint"]) and seen["fingerprint"] == shown("root", chip_id)["fingerprint"]
+    failed = await task_chips.start("root", chip_id, "wrong")
+    assert failed["access"]["fingerprint"] == seen["fingerprint"]  # A later attempt approves the same access.
+    assert seen["fingerprint"] != shown("root", await recorded(request_id="b", title="B"))["fingerprint"]
+
+
+async def test_tools_turned_on_between_display_and_start_refuse_it(owner):
+    """The mode never moved: an approval of a mode alone would let this through."""
+    database.update_profile("agent", config={"model": "sonnet", "tool_selection_mode": "none"})
+    set_mode("root", "bypassPermissions")
+    chip_id = await recorded()
+    seen = shown("root", chip_id)
+    assert seen["summary"] == "Runs with this chat's access: full permissions; can use no tools"
+    database.update_profile("agent", config={"model": "sonnet", "tool_selection_mode": "all"})
+    failed = await task_chips.start("root", chip_id, seen["fingerprint"])
+    assert refused_as_changed(failed) and nothing_started(chip_id)
+    assert failed["access"]["mode"] == seen["mode"]
+    assert failed["access"]["summary"] == "Runs with this chat's access: full permissions"
+    assert (await task_chips.start("root", chip_id, failed["access"]["fingerprint"]))["state"] == "started"
+
+
+@pytest.mark.parametrize("config", [
+    {"tool_selection_mode": "allow", "allowed_tools": ["Read"]},
+    {"tool_selection_mode": "disallow", "disallowed_tools": ["Bash"]},
+])
+async def test_an_agents_tool_list_changing_changes_what_is_approved(owner, config):
+    chip_id = await recorded()
+    seen = shown("root", chip_id)
+    database.update_profile("agent", config={"model": "sonnet", **config})
+    now = shown("root", chip_id)
+    assert now["mode"] == seen["mode"] and now["fingerprint"] != seen["fingerprint"]
+    assert now["summary"].endswith("; can use only some tools")
+    assert refused_as_changed(await task_chips.start("root", chip_id, seen["fingerprint"]))
+
+
+async def test_a_tool_override_on_the_chats_turn_is_part_of_what_is_approved(owner):
+    """The new chat's first turn copies it, so the disclosure has to count it."""
+    chip_id = await recorded()
+    seen = shown("root", chip_id)
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET overrides=%s WHERE session_id='root'",
+                              (json.dumps({"tool_denylist": ["Bash"]}),))
+    now = shown("root", chip_id)
+    assert now["fingerprint"] != seen["fingerprint"] and now["summary"].endswith("; can use only some tools")
+    child = child_of(await start_chip("root", chip_id))
+    assert first_turn(child["id"])["overrides"]["tool_denylist"] == ["Bash"]
+
+
+@pytest.mark.parametrize("config,overrides", [
+    ({"tool_selection_mode": "all"}, {}),
+    ({"tool_selection_mode": "none"}, {}),
+    ({"tool_selection_mode": "allow", "allowed_tools": ["Read", "Bash"]}, {}),
+    ({"tool_selection_mode": "disallow", "disallowed_tools": ["Bash", "mcp__x__*"]}, {}),
+    ({"tool_selection_mode": "all"}, {"tool_allowlist": ["Read", "Grep"]}),
+    ({"tool_selection_mode": "allow", "allowed_tools": ["Read"]}, {"tool_allowlist": ["Grep"]}),
+    ({"tool_selection_mode": "disallow", "disallowed_tools": ["Bash"]}, {"tool_denylist": ["Write"]}),
+])
+@pytest.mark.parametrize("project", [False, True])
+def test_the_chips_resolver_is_what_a_turn_builds(owner, repo, config, overrides, project):
+    """The options builder itself, so the disclosure cannot drift from the run."""
+    from app.core.query_options import build_options_from_profile
+    from app.core.session_modes import runtime_session_mode, turn_tool_access
+    from app.core.tool_access import DENY_ALL, tool_permitted
+
+    sid = "in-project" if project else "root"
+    if project:
+        in_project(sid, repo)
+    database.update_profile("agent", config={"model": "sonnet", **config})
+    row = sessions.get_session(sid)
+    profile = database.get_profile("agent")
+    options, _ = build_options_from_profile(profile, session_id=sid, overrides={**overrides})
+    disclosed = turn_tool_access(profile["config"], overrides, runtime_session_mode(row))
+    assert disclosed.allowed == options.aih_tool_allowlist
+    assert set(disclosed.disallowed or ()) <= set(options.disallowed_tools or ())
+    # What the build adds beyond the disclosure is about hosting, never one of these tools.
+    for name in ("Read", "Grep", "Bash", "Write", "mcp__x__y"):
+        assert (tool_permitted(name, disclosed.allowed, disclosed.disallowed)
+                == tool_permitted(name, options.aih_tool_allowlist, options.disallowed_tools))
+    assert (DENY_ALL in (disclosed.disallowed or ())) == (DENY_ALL in (options.disallowed_tools or []))
+
+
+async def test_an_agent_changed_during_the_checkout_refuses_with_nothing_started(owner, monkeypatch):
+    """An unbound chat follows its agent, and the row itself never changes."""
+    database.update_profile("agent", config={"model": "sonnet", "permission_mode": "default"})
+    set_mode("root", None)
+    chip_id = await recorded()
+    seen = shown("root", chip_id)
+    assert seen["mode"] == "default"
+    real = orch._start_checkout
+
+    def changed_meanwhile(*args, **kwargs):
+        database.update_profile("agent", config={"model": "sonnet", "permission_mode": "bypassPermissions"})
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(orch, "_start_checkout", changed_meanwhile)
+    failed = await task_chips.start("root", chip_id, seen["fingerprint"])
+    assert refused_as_changed(failed) and nothing_started(chip_id)
+    assert failed["access"]["mode"] == "bypassPermissions"
+    monkeypatch.setattr(orch, "_start_checkout", real)
+    started = await task_chips.start("root", chip_id, failed["access"]["fingerprint"])
+    assert child_of(started)["permission_mode"] == "bypassPermissions"
+
+
+async def test_a_chat_that_follows_its_agent_starts_bound_to_what_was_approved(owner):
+    from app.core.session_modes import turn_permission_mode
+
+    database.update_profile("agent", config={"model": "sonnet", "permission_mode": "acceptEdits"})
+    set_mode("root", None)
+    child = child_of(await start_chip("root", await recorded()))
+    assert child["permission_mode"] == "acceptEdits"
+    database.update_profile("agent", config={"model": "sonnet", "permission_mode": "bypassPermissions"})
+    config = database.get_profile(child["profile_id"])["config"]
+    assert turn_permission_mode(first_turn(child["id"])["overrides"], child, config) == "acceptEdits"
+
+
+async def test_a_chats_mode_changed_during_the_checkout_says_check_the_access(owner, monkeypatch):
+    chip_id = await recorded()
+    seen = shown("root", chip_id)
+    real = orch._start_checkout
+
+    def changed_meanwhile(*args, **kwargs):
+        set_mode("root", "bypassPermissions")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(orch, "_start_checkout", changed_meanwhile)
+    failed = await task_chips.start("root", chip_id, seen["fingerprint"])
+    assert refused_as_changed(failed) and nothing_started(chip_id)
+
+
+async def test_a_subagent_whose_agent_denies_tools_shows_the_chat_has_more(owner):
+    """An agent's deny list limits it just as an allow list does."""
+    database.create_profile("restricted", "Restricted", None, {
+        "model": "sonnet", "tool_selection_mode": "disallow", "disallowed_tools": ["Bash", "Write", "Edit"]})
+    set_mode("root", "bypassPermissions")
+    chat("denied", parent_session_id="root", is_worker=True)
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET profile_id='restricted', permission_mode='bypassPermissions', "
+                              "permission_ceiling='bypassPermissions' WHERE id='denied'")
+    access = shown("root", await recorded("denied"))
+    assert access["wider_than_source"] is True and access["elevated"] is True
+    assert access["source_note"] == "More than the subagent that suggested it, which could use only some tools."
+
+
+async def test_a_subagent_with_the_chats_own_agent_is_not_called_narrower(owner):
+    chat("same", parent_session_id="root", is_worker=True)
+    access = shown("root", await recorded("same"))
+    assert access["wider_than_source"] is False and access["source_note"] is None
+
+
+async def test_a_subagent_is_not_narrower_when_the_chats_new_chat_has_less_than_it(owner):
+    """Compared with what the chat would really get, so an agent with no tools adds none."""
+    read_only_subagent("reviewer")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET permission_ceiling=NULL WHERE id='reviewer'")
+    chip_id = await recorded("reviewer")
+    database.update_profile("agent", config={"model": "sonnet", "tool_selection_mode": "none"})
+    assert shown("root", chip_id)["wider_than_source"] is False
+
+
+@pytest.mark.parametrize("recorded_value", [
+    "not json", "[]", '{"allowed": "Read", "disallowed": null}', '{"allowed": [], "disallowed": null}',
+    '{"allowed": [1], "disallowed": null}', '{"disallowed": null}',
+])
+def test_a_damaged_record_of_a_subagents_tools_reads_as_no_tools(recorded_value):
+    from app.core.tool_access import DENY_ALL
+
+    assert task_chips._recorded_tools(recorded_value).disallowed == [DENY_ALL]
+
+
+@pytest.mark.parametrize("access,limit,exceeds", [
+    (dict(), dict(), False),
+    (dict(), dict(disallowed=["Bash"]), True),
+    (dict(disallowed=["Bash"]), dict(disallowed=["Bash"]), False),
+    (dict(disallowed=["*"]), dict(disallowed=["*"]), False),
+    (dict(disallowed=["*"]), dict(allowed=["Read"]), False),
+    (dict(), dict(disallowed=["*"]), True),
+    (dict(allowed=["Read"]), dict(disallowed=["*"]), True),
+    (dict(), dict(allowed=["Read"]), True),
+    (dict(allowed=["Read"]), dict(allowed=["Read", "Grep"]), False),
+    (dict(allowed=["Read", "Bash"]), dict(allowed=["Read"]), True),
+    (dict(allowed=["Read", "Bash"], disallowed=["Bash"]), dict(allowed=["Read"]), False),
+    (dict(allowed=["mcp__x__*"]), dict(allowed=["mcp__x__y"]), True),
+    (dict(allowed=["mcp__x__y"]), dict(allowed=["mcp__x__*"]), False),
+    (dict(allowed=["mcp__x__y"]), dict(disallowed=["mcp__x__*"]), True),
+    (dict(disallowed=["mcp__x__y"]), dict(disallowed=["mcp__x__*"]), True),
+    (dict(disallowed=["mcp__x__*"]), dict(disallowed=["mcp__x__y"]), False),
+])
+def test_what_counts_as_more_tools(access, limit, exceeds):
+    from app.core.tool_access import ToolAccess, tool_access_exceeds
+
+    assert tool_access_exceeds(ToolAccess(**access), ToolAccess(**limit)) is exceeds
 
 
 async def test_an_access_that_cannot_be_read_never_reads_as_safe(owner, monkeypatch):
     chip_id = await recorded()
-    monkeypatch.setattr(orch, "chip_permission_mode", lambda *args: 1 / 0)
+    monkeypatch.setattr(orch, "chip_access", lambda *args: 1 / 0)
     access = shown("root", chip_id)
     assert access["mode"] is None and access["elevated"] is True and "Could not check" in access["summary"]
+    assert access["fingerprint"] is None
+
+
+async def test_a_chat_whose_agent_is_gone_shows_the_access_could_not_be_checked(owner):
+    chip_id = await recorded()
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET profile_id=NULL WHERE id='root'")
+    access = shown("root", chip_id)
+    assert access["mode"] is None and access["fingerprint"] is None
 
 
 async def test_access_is_only_on_a_chip_that_can_still_start(owner):
@@ -1221,15 +1446,16 @@ async def test_the_route_passes_on_what_the_client_showed(owner, monkeypatch):
 
     monkeypatch.setattr(api, "require_transcript_session", session_row)
     chip_id = await recorded()
+    seen = shown("root", chip_id)
     set_mode("root", "bypassPermissions")
-    body = api.TaskChipStart(shown_access="default")
-    failed = await api.start_task_chip(None, "root", chip_id, body, token="t")
-    assert failed["state"] == "failed" and "broader access" in failed["error"]
-    assert (await api.start_task_chip(None, "root", chip_id, None, token="t"))["state"] == "failed"
+    body = api.TaskChipStart(access_fingerprint=seen["fingerprint"])
+    assert refused_as_changed(await api.start_task_chip(None, "root", chip_id, body, token="t"))
+    assert refused_as_changed(await api.start_task_chip(None, "root", chip_id, None, token="t"))
     listed = await api.list_task_chips(None, "root", token="t")
     assert listed["chips"][0]["access"]["mode"] == "bypassPermissions"
-    body = api.TaskChipStart(shown_access="bypassPermissions")
+    body = api.TaskChipStart(access_fingerprint=listed["chips"][0]["access"]["fingerprint"])
     assert (await api.start_task_chip(None, "root", chip_id, body, token="t"))["state"] == "started"
+    assert "shown_access" not in api.TaskChipStart.model_fields
 
 
 async def test_a_mirror_shows_what_the_owner_says_a_chip_runs_with(owner, monkeypatch):
@@ -1237,7 +1463,8 @@ async def test_a_mirror_shows_what_the_owner_says_a_chip_runs_with(owner, monkey
 
     chip_id = await recorded()
     owner_says = {"mode": "bypassPermissions", "summary": "Runs with this chat's access: full permissions",
-                  "elevated": True, "wider_than_source": False, "source_note": None, "project_note": None}
+                  "elevated": True, "wider_than_source": False, "source_note": None, "project_note": None,
+                  "fingerprint": "owners"}
     call = AsyncMock(return_value={"access": {chip_id: owner_says}})
     monkeypatch.setattr(control, "owner_of", lambda row: "other-device")
     monkeypatch.setattr(control, "call", call)
@@ -1277,9 +1504,12 @@ async def test_the_owner_answers_access_and_a_routed_start_keeps_what_was_shown(
     answer = await handler({"session_id": "root", "action": "access"}, "other-device")
     assert answer["access"][chip_id]["mode"] == "default"
     set_mode("root", "bypassPermissions")
-    failed = await handler({"session_id": "root", "chip_id": chip_id, "action": "start", "shown_access": "default"},
-                           "other-device")
-    assert failed["state"] == "failed" and "broader access" in failed["error"]
+    failed = await handler({"session_id": "root", "chip_id": chip_id, "action": "start",
+                            "access_fingerprint": answer["access"][chip_id]["fingerprint"]}, "other-device")
+    assert refused_as_changed(failed)
+    forged = await handler({"session_id": "root", "chip_id": chip_id, "action": "start",
+                            "shown_access": "bypassPermissions"}, "other-device")
+    assert refused_as_changed(forged)
 
 
 # --- A model's lane that cannot run
@@ -1343,11 +1573,11 @@ async def test_a_chip_from_another_workers_subagent_starts_without_that_agents_r
     created = store.create("root", origin_session_id="on-another-worker", origin_seq=0, request_id="r", title="Relayed",
                            summary="S", prompt="P", base="default", base_commit=None, project_v2_id=None,
                            model="sonnet", origin_label="Remote helper", origin_mode="default",
-                           origin_tools_limited=True)
+                           origin_tools=json.dumps({"allowed": ["Read"], "disallowed": None}))
     chip_id = created["chip"]["id"]
     set_mode("root", "acceptEdits")
     access = shown("root", chip_id)
     assert access["wider_than_source"] is True and access["mode"] == "acceptEdits"
-    started = await task_chips.start("root", chip_id, access["mode"])
+    started = await task_chips.start("root", chip_id, access["fingerprint"])
     assert started["state"] == "started", started.get("error")
     assert child_of(started)["permission_mode"] == "acceptEdits"

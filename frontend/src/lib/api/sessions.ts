@@ -545,7 +545,7 @@ export type TaskChipState = 'pending' | 'starting' | 'started' | 'failed' | 'dis
 
 /** What a chip's chat would run with, as the worker works it out on each read. */
 export interface TaskChipAccess {
-	/** Sent back on Start, so a click only approves what was on screen. Null when it could not be checked. */
+	/** Null when it could not be checked. */
 	mode: string | null;
 	summary: string;
 	/** Full permissions, or unknown: the chip says so more loudly. */
@@ -553,6 +553,8 @@ export interface TaskChipAccess {
 	wider_than_source: boolean;
 	source_note: string | null;
 	project_note: string | null;
+	/** Sent back on Start, so a click only approves what was on screen. Null when it could not be checked. */
+	fingerprint: string | null;
 }
 
 /** Work an agent suggested for a separate chat; the owner's click starts it. */
@@ -601,10 +603,10 @@ export function listTaskChips(sessionId: string): Promise<TaskChipList> {
 
 /**
  * Idempotent. A start that could not happen resolves with the chip in `failed`.
- * `shownAccess` is the mode the chip showed: wider than that now, nothing starts.
+ * `accessFingerprint` is `access.fingerprint` as the chip showed it: any change since, and nothing starts.
  */
-export function startTaskChip(sessionId: string, chipId: string, shownAccess: string | null): Promise<TaskChip> {
-	return api.post<TaskChip>(`${taskChipsPath(sessionId)}/${encodeURIComponent(chipId)}/start`, { shown_access: shownAccess });
+export function startTaskChip(sessionId: string, chipId: string, accessFingerprint: string | null): Promise<TaskChip> {
+	return api.post<TaskChip>(`${taskChipsPath(sessionId)}/${encodeURIComponent(chipId)}/start`, { access_fingerprint: accessFingerprint });
 }
 
 export function dismissTaskChip(sessionId: string, chipId: string): Promise<TaskChip> {

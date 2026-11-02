@@ -2208,7 +2208,7 @@ def _run_column_migrations(cursor: Any) -> None:
             project_v2_id TEXT,
             origin_label TEXT,
             origin_mode TEXT,
-            origin_tools_limited BOOLEAN NOT NULL DEFAULT FALSE,
+            origin_tools TEXT,
             model TEXT NOT NULL,
             provider_id TEXT,
             model_label TEXT,

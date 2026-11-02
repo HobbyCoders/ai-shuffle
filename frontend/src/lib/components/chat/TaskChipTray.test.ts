@@ -6,7 +6,7 @@ import type { TaskChip } from '$lib/api/sessions';
 const chip = (id: string, patch: Partial<TaskChip> = {}): TaskChip => ({
 	id, session_id: 'root', origin_session_id: 'root', origin_label: null, title: `Chip ${id}`, summary: `Summary ${id}`,
 	prompt: `Full brief ${id}`, model: 'prov:x:sonnet', provider_id: 'x', model_label: 'Sonnet', effort: null, base: 'default',
-	access: { mode: 'default', summary: 'Runs with this chat\'s access: asks you before using tools', elevated: false, wider_than_source: false, source_note: null, project_note: null },
+	access: { mode: 'default', summary: 'Runs with this chat\'s access: asks you before using tools', elevated: false, wider_than_source: false, source_note: null, project_note: null, fingerprint: 'print' },
 	state: 'pending', error: null, retryable: false, started_session_id: null, started_session_title: null,
 	created_at: '2026-11-02T00:00:00Z', updated_at: '2026-11-02T00:00:00Z', ...patch
 });
@@ -45,7 +45,7 @@ describe('TaskChipTray', () => {
 		show([chip('a', { access: {
 			mode: 'bypassPermissions', summary: "Runs with this chat's access: full permissions", elevated: true, wider_than_source: true,
 			source_note: 'More than the subagent that suggested it, which asks before using tools.',
-			project_note: "Runs in Other repo, not this chat's project."
+			project_note: "Runs in Other repo, not this chat's project.", fingerprint: 'print'
 		} })]);
 		const line = screen.getByText("Runs with this chat's access: full permissions");
 		const access = line.closest<HTMLElement>('.access')!;

@@ -303,6 +303,26 @@ def tool_permitted(
     return True
 
 
+def tool_access_exceeds(access: "ToolAccess", limit: "ToolAccess") -> bool:
+    """Whether ``access`` permits something ``limit`` does not. Deny lists count.
+
+    Entries may be patterns on either side, so each side's entries are put to
+    the other's lists: ``mcp__x__*`` against ``mcp__x__foo`` exceeds it, the
+    reverse does not.
+    """
+    if DENY_ALL in (access.disallowed or ()):
+        return False
+    if DENY_ALL in (limit.disallowed or ()):
+        return True
+    if limit.allowed and not access.allowed:
+        return True
+    if any(tool_permitted(entry, access.allowed, access.disallowed)
+           and not tool_permitted(entry, limit.allowed, limit.disallowed)
+           for entry in access.allowed or ()):
+        return True
+    return any(tool_permitted(entry, access.allowed, access.disallowed) for entry in limit.disallowed or ())
+
+
 def matches_any(name: str, patterns: Iterable[str]) -> bool:
     """Whether ``name`` matches any exact name or fnmatch pattern in the list."""
     for pattern in patterns or ():

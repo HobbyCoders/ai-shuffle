@@ -878,19 +878,19 @@ async def list_task_chips(
 
 
 async def _task_chip_action(request: Request, session_id: str, chip_id: str, action: str,
-                            shown_access: Optional[str] = None) -> dict:
+                            access_fingerprint: Optional[str] = None) -> dict:
     session = await require_transcript_session(request, session_id)
     from app.core import task_chips
 
     try:
-        return await task_chips.act(session, chip_id, action, shown_access)
+        return await task_chips.act(session, chip_id, action, access_fingerprint)
     except task_chips.ChipError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.message) from exc
 
 
 class TaskChipStart(BaseModel):
-    """``shown_access`` is the chip's ``access.mode`` as shown when the owner clicked."""
-    shown_access: Optional[str] = None
+    """``access_fingerprint`` is the chip's ``access.fingerprint`` as shown when the owner clicked."""
+    access_fingerprint: Optional[str] = None
 
 
 @router.post("/{session_id}/task-chips/{chip_id}/start")
@@ -902,9 +902,9 @@ async def start_task_chip(
 
     A start that fails returns 200 with the chip in ``failed``: the reason is
     chip state every client shows, and starting it again retries. So does one
-    that would run with broader access than ``shown_access``.
+    whose access is no longer exactly what ``access_fingerprint`` says was shown.
     """
-    return await _task_chip_action(request, session_id, chip_id, "start", body.shown_access if body else None)
+    return await _task_chip_action(request, session_id, chip_id, "start", body.access_fingerprint if body else None)
 
 
 @router.post("/{session_id}/task-chips/{chip_id}/dismiss")

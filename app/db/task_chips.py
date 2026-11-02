@@ -4,6 +4,7 @@ Rows live on the worker that owns the chat and reach other workers through the
 same owner-ordered mirror as prompts. Only the owner writes; a mirror's action
 travels over the signed control channel. Nothing here starts work.
 """
+from contextlib import nullcontext
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -25,7 +26,7 @@ STALE_CLAIM_SECONDS = 300
 
 _OPEN_IN = "(%s, %s, %s)"
 _COLUMNS = ("id, session_id, origin_session_id, origin_seq, request_id, title, summary, prompt, base, "
-            "base_commit, project_v2_id, origin_label, origin_mode, origin_tools_limited, model, provider_id, model_label, effort, "
+            "base_commit, project_v2_id, origin_label, origin_mode, origin_tools, model, provider_id, model_label, effort, "
             "state, attempt, error, started_session_id, started_title, "
             "created_at, updated_at, claimed_at")
 
@@ -39,14 +40,16 @@ def create(session_id: str, *, origin_session_id: str, origin_seq: int, request_
            project_v2_id: Optional[str], model: str, provider_id: Optional[str] = None,
            model_label: Optional[str] = None, effort: Optional[str] = None,
            origin_label: Optional[str] = None, origin_mode: Optional[str] = None,
-           origin_tools_limited: bool = False, chip_id: Optional[str] = None) -> Dict[str, Any]:
+           origin_tools: Optional[str] = None, chip_id: Optional[str] = None, _conn=None) -> Dict[str, Any]:
     """Insert a chip, or return the open one it duplicates.
 
     ``{"chip": row, "created": bool}``; ``chip`` is None with ``"limit": True``
     at :data:`MAX_OPEN`. Serialized per chat by a row lock on its session, so
-    two racing calls cannot both pass the checks.
+    two racing calls cannot both pass the checks. ``origin_tools`` is the JSON of
+    the tools the suggesting agent could use; None when the chat itself suggested.
+    ``_conn`` runs it in the caller's transaction.
     """
-    with transaction() as conn:
+    with nullcontext(_conn) if _conn is not None else transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
         cursor.execute(
@@ -68,12 +71,25 @@ def create(session_id: str, *, origin_session_id: str, origin_seq: int, request_
         cursor.execute(
             f"INSERT INTO session_task_chips (id, session_id, origin_session_id, origin_seq, request_id, "
             f"title, summary, prompt, base, base_commit, project_v2_id, origin_label, origin_mode, "
-            f"origin_tools_limited, model, provider_id, model_label, effort, state) "
+            f"origin_tools, model, provider_id, model_label, effort, state) "
             f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_COLUMNS}",
             (chip_id or str(uuid4()), session_id, origin_session_id, origin_seq, request_id, title, summary,
-             prompt, base, base_commit, project_v2_id, origin_label, origin_mode, origin_tools_limited, model,
+             prompt, base, base_commit, project_v2_id, origin_label, origin_mode, origin_tools, model,
              provider_id, model_label, effort, PENDING))
         return {"chip": dict(cursor.fetchone()), "created": True}
+
+
+def find_request(origin_session_id: str, request_id: str, cursor=None) -> Optional[Dict[str, Any]]:
+    """The chip an agent already recorded under this request id, whichever chat shows it."""
+    query = (f"SELECT {_COLUMNS} FROM session_task_chips WHERE origin_session_id=%s AND request_id=%s LIMIT 1",
+             (origin_session_id, request_id))
+    if cursor is not None:
+        cursor.execute(*query)
+        return _dict(cursor.fetchone())
+    with get_db() as conn:
+        read = conn.cursor()
+        read.execute(*query)
+        return _dict(read.fetchone())
 
 
 def get(session_id: str, chip_id: str) -> Optional[Dict[str, Any]]:

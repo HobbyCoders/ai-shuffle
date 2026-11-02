@@ -220,13 +220,14 @@ def _append_system_block(prompt: Any, block: Optional[str]) -> Any:
 # ``session_modes`` imports, so neither can close a cycle.
 from app.core.session_modes import (
     ensure_chat_uploads_dir,
-    narrow_tool_access_for_mode,
+    lane_tool_access,
     owner_chat_cwd,
     owner_workspace_chat,
     permission_mode_for_session_mode,
     runs_in_owner_chat_folder,
     runtime_session_mode,
     turn_caller,
+    turn_tool_surface,
 )
 
 # Tool access. ``resolve_tool_access`` is the one seam both legs read; it lives
@@ -1430,7 +1431,6 @@ def build_options_from_profile(
             context_window = None
 
     from app.core.owner_services import assert_proactive_allowed
-    from app.core.session_modes import narrow_tool_access_for_proactive
     assistant_proactive = overrides.get("_assistant_proactive")
     if assistant_proactive is not None:
         assert_proactive_allowed(assistant_proactive, session_id)
@@ -1464,7 +1464,6 @@ def build_options_from_profile(
     # ``tool_selection_mode`` decides, not list emptiness. ``access`` carries the
     # SURFACE (``allowed``) and the blocklist (``disallowed``); "Disable all
     # tools" is ``disallowed=["*"]`` on both legs, not an empty allow list.
-    access = resolve_tool_access(config)
     # The session's sidepanel mode is a CEILING over whatever the agent allows
     # (see ``app.core.session_modes``): a chat session gets the general web
     # tools plus a ``Read`` fenced to its own uploads directory, and nothing
@@ -1479,8 +1478,8 @@ def build_options_from_profile(
     # (``session_mode`` was resolved with the run binding above, off the same
     # row — the cwd-override spawn has no ``session_row`` but does have a
     # binding row, and both legs must agree on the lane.)
-    access = narrow_tool_access_for_mode(access, session_mode, owner_session=owner_coordinator)
-    access = narrow_tool_access_for_proactive(access, assistant_proactive)
+    access = lane_tool_access(config, session_mode, owner_session=owner_coordinator,
+                              proactive=assistant_proactive)
     allowed_tools = list(access.allowed or [])
     disallowed_tools = list(access.disallowed or [])
 
@@ -2112,17 +2111,7 @@ def build_options_from_profile(
     # prompt, and the delegated leg passes its MCP entries as ``--allowed-tools``
     # grants), so reading it as a surface restriction would strip Read/Bash/Edit
     # from every native session. This one means exactly what it says — a
-    # non-empty list is the whole tool surface.
-    _tool_allowlist = overrides.get("tool_allowlist")
-    _surface = (
-        [str(t).strip() for t in _tool_allowlist if str(t).strip()]
-        if isinstance(_tool_allowlist, (list, tuple))
-        else []
-    )
-    # An all-blank list degrades to None rather than to an empty allowlist: [] on
-    # the engine would mean "no tools at all", which is never what a malformed
-    # ``tools:`` line asked for.
-    _dispatch_surface = _surface or None
+    # non-empty list is the whole tool surface. ``turn_tool_surface`` applies it.
 
     # The AGENT's own ``allow`` list is a surface too, and the two
     # compose — when both exist the session gets the INTERSECTION. This is what
@@ -2141,25 +2130,9 @@ def build_options_from_profile(
     options.aih_owner_coordinator = owner_coordinator
     options.aih_working_record = working_record_context
 
-    options.aih_tool_allowlist = intersect_tool_surfaces(
-        access.allowed, _dispatch_surface
+    options.aih_tool_allowlist, options.disallowed_tools = turn_tool_surface(
+        access.allowed, options.disallowed_tools, overrides
     )
-    if options.aih_tool_allowlist == []:
-        # An empty intersection is a real answer ("the agent and the dispatch
-        # definition have no tool in common"), but an empty list on the engine
-        # degrades to unrestricted. Express it as a total deny instead — deny
-        # beats allow on both legs.
-        options.aih_tool_allowlist = None
-        if DENY_ALL not in (options.disallowed_tools or []):
-            options.disallowed_tools = [*(options.disallowed_tools or []), DENY_ALL]
-
-    # A Task-dispatched file/plugin agent's ``disallowedTools``: deny beats
-    # allow on both legs, so appending is enough to enforce it.
-    _tool_denylist = overrides.get("tool_denylist")
-    if isinstance(_tool_denylist, (list, tuple)):
-        _denied = [str(t).strip() for t in _tool_denylist if str(t).strip()]
-        _current = list(options.disallowed_tools or [])
-        options.disallowed_tools = _current + [t for t in _denied if t not in _current]
 
     # DB agents in the caller's context use the exact same provider-scoped
     # roster as Task's schema and runtime admission. File/plugin definitions are

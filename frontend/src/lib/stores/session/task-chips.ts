@@ -47,8 +47,8 @@ export interface TaskChipsView {
 
 export interface TaskChipDeps {
 	list: (sessionId: string) => Promise<TaskChipList>;
-	/** `shownAccess`: the access mode on screen when the owner clicked. */
-	start: (sessionId: string, chipId: string, shownAccess: string | null) => Promise<TaskChip>;
+	/** `accessFingerprint`: the fingerprint of the access on screen when the owner clicked. */
+	start: (sessionId: string, chipId: string, accessFingerprint: string | null) => Promise<TaskChip>;
 	dismiss: (sessionId: string, chipId: string) => Promise<TaskChip>;
 	storage?: Pick<Storage, 'getItem' | 'setItem'> | null;
 	now?: () => number;
@@ -207,9 +207,9 @@ export function createTaskChips(deps: TaskChipDeps) {
 		entry.errors = errors;
 		publish();
 		try {
-			const shownAccess = entry.chips.find((row) => row.id === chipId)?.access?.mode ?? null;
+			const fingerprint = entry.chips.find((row) => row.id === chipId)?.access?.fingerprint ?? null;
 			const chip = await (action === 'start'
-				? deps.start(entry.sessionId, chipId, shownAccess)
+				? deps.start(entry.sessionId, chipId, fingerprint)
 				: deps.dismiss(entry.sessionId, chipId));
 			if (entries.get(entry.sessionId) === entry) settle(entry, chipId, chip);
 		} catch (error) {
@@ -272,7 +272,7 @@ export function createTaskChips(deps: TaskChipDeps) {
 
 export const taskChips = createTaskChips({
 	list: (sessionId) => listTaskChips(sessionId),
-	start: (sessionId, chipId, shownAccess) => startTaskChip(sessionId, chipId, shownAccess),
+	start: (sessionId, chipId, accessFingerprint) => startTaskChip(sessionId, chipId, accessFingerprint),
 	dismiss: (sessionId, chipId) => dismissTaskChip(sessionId, chipId),
 	storage: typeof localStorage === 'undefined' ? null : localStorage
 });

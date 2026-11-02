@@ -170,17 +170,17 @@ describe('task chips store', () => {
 	});
 
 	it('tells the worker which access the chip showed, and on a retry the access it shows now', async () => {
-		const access = (mode: string | null) => ({ mode, summary: `s ${mode}`, elevated: false, wider_than_source: false, source_note: null, project_note: null });
+		const access = (mode: string | null) => ({ mode, summary: `s ${mode}`, elevated: false, wider_than_source: false, source_note: null, project_note: null, fingerprint: `print ${mode}` });
 		const wider = chip('a', { state: 'failed', retryable: true, error: 'Broader now.', access: access('bypassPermissions') });
 		const start = vi.fn().mockResolvedValueOnce(wider).mockResolvedValueOnce(chip('a', { state: 'started', started_session_id: 'n', access: null }));
 		const { store } = setup({ root: [chip('a', { access: access('default') })] }, { start });
 		store.observe('root');
 		await flush();
 		await store.start('a');
-		expect(start).toHaveBeenLastCalledWith('root', 'a', 'default');
+		expect(start).toHaveBeenLastCalledWith('root', 'a', 'print default');
 		expect(get(store).chips[0].access?.mode).toBe('bypassPermissions');
 		await store.start('a');
-		expect(start).toHaveBeenLastCalledWith('root', 'a', 'bypassPermissions');
+		expect(start).toHaveBeenLastCalledWith('root', 'a', 'print bypassPermissions');
 	});
 
 	it('approves nothing when the chip could not say what it would run with', async () => {

@@ -8,21 +8,26 @@ The chat a chip starts is created by
 A chip's chat runs with the root chat's access, whatever the agent that
 suggested it could do. The owner's click is the approval, so :func:`public`
 says what that access is before the click, worked out on every read because the
-root's mode can change, and a start refuses to run broader than the client
-showed (:func:`refuse_if_widened`).
+root's mode and agent can change, and a start refuses unless the access is still
+exactly what the client showed (:func:`refuse_if_access_changed`).
 
 A subagent running on another worker has no root chat here. Its suggestion
 travels as the signed ``task-chip-suggest`` action to the worker that sent it
 (:func:`relay`, :func:`handle_relayed`), which records the chip on its own chat
-and mirrors it back like any other. Only the owner writes chips.
+and mirrors it back like any other. Only the owner writes chips. When that worker's
+subagent was itself started by another worker, each hop checks the one before it
+and passes the suggestion on, up to the worker that owns the top-level chat.
 """
 import asyncio
+import hashlib
+import json
 import logging
 from typing import Any, Dict, Optional, Set
 
 from fluid.tools.builtins.session_orchestration import EFFORT_PROPERTY
 
 from app.core.session_modes import PERMISSION_MODE_STRICTNESS
+from app.core.tool_access import DENY_ALL, ToolAccess, tool_access_exceeds
 from app.db.async_database import run_sync
 from app.db import task_chips as store
 
@@ -43,9 +48,16 @@ _INTERNAL = "Something went wrong while starting this task. Nothing is running; 
 _RELAY_VERSION = 1
 _RELAY_KEYS = frozenset({
     "version", "worker_session_id", "sender_session_id", "request_id", "title", "summary", "prompt",
-    "model", "effort", "project_v2_id", "origin_label", "origin_mode", "origin_tools_limited",
+    "model", "effort", "project_v2_id", "origin_label", "origin_mode", "origin_tools", "hops", "replay_only",
 })
 _RELAY_TIMEOUT = 30.0
+# How many workers may pass one suggestion on before it reaches its chat.
+_MAX_RELAY_HOPS = 3
+_TOO_MANY_HOPS = ("This suggestion passed through too many workers to reach its chat. Nothing was recorded; "
+                  "mention the issue in your report instead.")
+_TASK_ENDED = ("This subagent's task has already ended, so this suggestion was not recorded. "
+               "Mention the issue in your report instead.")
+_ORIGIN_TOOLS_LIMIT = 500
 _LIST_ACCESS_TIMEOUT = 5.0
 
 # What each permission mode means, in the words a chip shows the owner.
@@ -62,6 +74,8 @@ _SOURCE_WORDS = {
     "default": "asks before using tools",
 }
 _ACCESS_UNKNOWN = "Could not check what access this task would run with."
+_ACCESS_CHANGED = ("This task's access changed after the chip showed it, so nothing was started. "
+                   "Check the access it shows now and start it again if that is what you want.")
 
 
 class ChipError(Exception):
@@ -102,17 +116,47 @@ def _project_note(chip: Dict[str, Any], root: Dict[str, Any]) -> Optional[str]:
     return f"Runs in {name}; this chat has no project."
 
 
-def _source_note(chip: Dict[str, Any], mode: str) -> Optional[str]:
+def _tools_json(tools: ToolAccess) -> str:
+    return json.dumps({"allowed": tools.allowed, "disallowed": tools.disallowed}, sort_keys=True)
+
+
+def _recorded_tools(value: Any) -> ToolAccess:
+    """A recorded ``origin_tools``. Anything unreadable reads as an agent that had no tools.
+
+    So a damaged or missing record can only make a chip say more about what it
+    adds, never less.
+    """
+    none = ToolAccess(allowed=None, disallowed=[DENY_ALL])
+    try:
+        data = json.loads(value)
+        allowed, disallowed = data["allowed"], data["disallowed"]
+    except (TypeError, ValueError, KeyError):
+        return none
+    for names in (allowed, disallowed):
+        if names is not None and (not isinstance(names, list) or len(names) > _ORIGIN_TOOLS_LIMIT
+                                  or not all(isinstance(name, str) and len(name) <= 200 for name in names)):
+            return none
+    return none if allowed == [] else ToolAccess(allowed=allowed, disallowed=disallowed)
+
+
+def _source_note(chip: Dict[str, Any], mode: str, tools: ToolAccess) -> Optional[str]:
     """How the chat would exceed the agent that suggested it, in plain words."""
     limits = []
     origin_mode = chip.get("origin_mode")
     if origin_mode and _rank(mode) > _rank(origin_mode):
         limits.append(_SOURCE_WORDS.get(origin_mode, _SOURCE_WORDS["default"]))
-    if chip.get("origin_tools_limited"):
+    if chip.get("origin_tools") and tool_access_exceeds(tools, _recorded_tools(chip["origin_tools"])):
         limits.append("could use only some tools")
     if not limits:
         return None
     return "More than the subagent that suggested it, which " + " and ".join(limits) + "."
+
+
+def _tool_words(tools: ToolAccess) -> str:
+    """What a limited tool list adds to the mode's words; nothing when every tool is on."""
+    if DENY_ALL in (tools.disallowed or ()):
+        return "; can use no tools"
+    return "; can use only some tools" if tools.allowed or tools.disallowed else ""
 
 
 def _access(chip: Dict[str, Any], scope: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
@@ -123,24 +167,33 @@ def _access(chip: Dict[str, Any], scope: Optional[Dict[str, Any]] = None) -> Opt
         return None
     try:
         scope = scope or _access_scope(chip["session_id"])
-        mode = orch.chip_permission_mode(chip, scope["row"], scope["overrides"])
-        source_note = _source_note(chip, mode)
-        return {"mode": mode, "summary": f"Runs with this chat's access: {_ACCESS_WORDS[mode]}",
+        access = orch.chip_access_now(chip, scope["row"], scope["overrides"])
+        mode, tools = access["mode"], access["tools"]
+        source_note = _source_note(chip, mode, tools)
+        return {"mode": mode, "summary": f"Runs with this chat's access: {_ACCESS_WORDS[mode]}{_tool_words(tools)}",
                 "elevated": mode == "bypassPermissions" or source_note is not None,
                 "wider_than_source": source_note is not None, "source_note": source_note,
-                "project_note": _project_note(chip, scope["row"])}
+                "project_note": _project_note(chip, scope["row"]), "fingerprint": access["fingerprint"]}
     except Exception:  # noqa: BLE001 — a chip that cannot say so must not read as safe
         log.warning("Could not work out the access of task chip %s", chip["id"], exc_info=True)
         return {"mode": None, "summary": _ACCESS_UNKNOWN, "elevated": True, "wider_than_source": False,
-                "source_note": None, "project_note": None}
+                "source_note": None, "project_note": None, "fingerprint": None}
 
 
-def refuse_if_widened(shown: Optional[str], mode: str) -> None:
-    """The click approved the access the chip showed; never run with more than that."""
-    if _rank(mode) > _rank(shown):
-        raise ValueError(f"This task would now run with broader access than the chip showed: "
-                         f"{_ACCESS_WORDS[mode]}. Nothing was started. Check the access it shows now "
-                         "and start it again if that is what you want.")
+def refuse_if_access_changed(shown: Any, current: str) -> None:
+    """The click approved the access the chip showed; run with exactly that or not at all.
+
+    A narrower access refuses too, since what the owner read is no longer true.
+    No receipt of each click is stored. Start is an action only an authenticated
+    owner can take, and the server hands a fingerprint only to a principal who
+    could read that chip, with the access it describes beside it. So holding a
+    current fingerprint already means being someone allowed to read the access
+    and approve it; what the check catches is the access changing after it was
+    read. A paired worker can ask for it too, with the same authority it has to
+    send the start.
+    """
+    if not isinstance(shown, str) or not shown or shown != current:
+        raise ValueError(_ACCESS_CHANGED)
 
 
 def public(chip: Dict[str, Any], scope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -272,22 +325,22 @@ def _origin_limits(origin: Dict[str, Any], root: Dict[str, Any]) -> Dict[str, An
     """What the agent that suggested this could do itself, kept for the chip's disclosure.
 
     Recorded once: the agent may be long gone, or on another worker, when the
-    owner reads the chip. The chat itself has no limits of its own to report.
+    owner reads the chip. From the resolvers its own turns use, on the worker
+    running it. The chat itself has no limits of its own to report.
     """
     from app.core import session_orchestration as orch
-    from app.core.session_modes import turn_permission_mode
-    from app.core.worker_checkout import _tool_surface
-    from app.db import database
+    from app.core.session_modes import runtime_session_mode, turn_caller, turn_permission_mode, turn_tool_access
 
     if origin["id"] == root["id"]:
-        return {"origin_mode": None, "origin_tools_limited": False}
+        return {"origin_mode": None, "origin_tools": None}
     overrides = orch._context(origin["id"], allow_empty=True).get("overrides") or {}
-    profile = database.get_profile(origin.get("profile_id")) if origin.get("profile_id") else None
-    surface = _tool_surface(origin.get("profile_id"), overrides.get("tool_allowlist"))
-    root_surface = _tool_surface(root.get("profile_id"), None)
-    narrower = bool(surface) and (not root_surface or bool(set(root_surface) - set(surface)))
-    return {"origin_mode": turn_permission_mode(overrides, origin, (profile or {}).get("config") if profile else None),
-            "origin_tools_limited": narrower or bool(overrides.get("tool_denylist"))}
+    config = orch._profile_config(origin)
+    if config is None:
+        tools = ToolAccess(allowed=None, disallowed=[DENY_ALL])
+    else:
+        lane = runtime_session_mode(origin, caller=turn_caller(overrides))
+        tools = turn_tool_access(config, overrides, lane, owner_session=lane == "chat" and orch.is_owner_session(origin))
+    return {"origin_mode": turn_permission_mode(overrides, origin, config), "origin_tools": _tools_json(tools)}
 
 
 def _chosen_model(data: Dict[str, Any], origin: Dict[str, Any], root: Dict[str, Any]) -> Dict[str, Any]:
@@ -393,26 +446,19 @@ def _relay_body(sender_id: str, origin: Dict[str, Any], data: Dict[str, Any], wo
             "origin_label": _origin_label(origin, {"id": None}), **limits}
 
 
-async def relay(sender_id: str, origin: Dict[str, Any], data: Dict[str, Any], worker_id: str,
-                parent: Dict[str, Any]) -> Dict[str, Any]:
-    """A subagent another worker started: ask that worker to record the chip on its chat.
-
-    Nothing is written here; the chip arrives through the owner's mirror. The
-    other worker keeps one chip per request id, so a resend after a lost answer
-    is safe.
-    """
+async def _relay_send(parent: Dict[str, Any], body: Dict[str, Any], *, timeout: float = _RELAY_TIMEOUT) -> Dict[str, Any]:
+    """Send a suggestion to the worker that started this chain's subagent; plain words on any failure."""
     from app.core.remote_task import MAY_HAVE_APPLIED
     from app.network import control
 
-    body = await run_sync(_relay_body, sender_id, origin, data, worker_id)
     where = parent["worker_name"]
     try:
         try:
-            answer = await control.call(parent["device_id"], "task-chip-suggest", body, timeout=_RELAY_TIMEOUT)
+            answer = await control.call(parent["device_id"], "task-chip-suggest", body, timeout=timeout)
         except control.RunnerUnreachable as exc:
             if MAY_HAVE_APPLIED not in str(exc):
                 raise
-            answer = await control.call(parent["device_id"], "task-chip-suggest", body, timeout=_RELAY_TIMEOUT)
+            answer = await control.call(parent["device_id"], "task-chip-suggest", body, timeout=timeout)
     except control.RunnerUnreachable as exc:
         raise ValueError(f"Could not reach {where}, the worker running the chat this suggestion belongs to. "
                          "Nothing was recorded; mention the issue in your final report instead.") from exc
@@ -428,10 +474,21 @@ async def relay(sender_id: str, origin: Dict[str, Any], data: Dict[str, Any], wo
     return answer
 
 
-def _record_relayed(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
-    """Owner side of :func:`relay`: only for a subagent this worker sent to the asking worker."""
+async def relay(sender_id: str, origin: Dict[str, Any], data: Dict[str, Any], worker_id: str,
+                parent: Dict[str, Any]) -> Dict[str, Any]:
+    """A subagent another worker started: ask that worker to record the chip on its chat.
+
+    Nothing is written here; the chip arrives through the owner's mirror. The
+    other worker keeps one chip per request id, so a resend after a lost answer
+    is safe.
+    """
+    return await _relay_send(parent, await run_sync(_relay_body, sender_id, origin, data, worker_id))
+
+
+def _relayed_dispatch(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
+    """Every hop's check: the dispatch this worker sent to the asking worker, else raises."""
     from app.core.remote_task import _require_worker_member
-    from app.db import projects_v2, remote_tasks, session_events
+    from app.db import remote_tasks
 
     _require_worker_member(from_device)
     if not isinstance(body, dict) or body.get("version") != _RELAY_VERSION:
@@ -439,15 +496,89 @@ def _record_relayed(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     unknown = set(body) - _RELAY_KEYS
     if unknown:
         raise ValueError(f"Unknown suggestion fields: {', '.join(sorted(unknown))}")
-    worker_id = _text(body, "worker_session_id", 64)
-    dispatch = remote_tasks.get_dispatch(worker_id)
+    hops = body.get("hops", 0)
+    if type(hops) is not int or not 0 <= hops <= _MAX_RELAY_HOPS:
+        raise PermissionError(_TOO_MANY_HOPS)
+    dispatch = remote_tasks.get_dispatch(_text(body, "worker_session_id", 64))
     if dispatch is None or dispatch["target_device_id"] != from_device:
         raise PermissionError("No subagent with this id was sent to the asking worker.")
+    return dispatch
+
+
+def _closed_refusal(dispatch: Dict[str, Any], *, replay_only: bool = False) -> Optional[str]:
+    """Why this dispatch may not add a suggestion, else None. A reopened one is live again."""
     if dispatch.get("stop_requested_at"):
-        raise PermissionError("The user stopped this subagent, so it cannot suggest tasks.")
+        return "The user stopped this subagent, so it cannot suggest tasks."
+    return _TASK_ENDED if dispatch.get("completion_id") or replay_only else None
+
+
+def _next_hop(body: Dict[str, Any], from_device: str) -> Optional[tuple]:
+    """``(body, parent)`` to pass on when this worker's own subagent was started elsewhere, else None.
+
+    The chain is one the workers recorded themselves, one dispatch per hop, and
+    each is checked against the worker that asked. A dispatch that has ended here
+    can only ask for an answer already recorded. That check is as of now: only
+    the last worker can hold its dispatch while it records.
+    """
+    from app.db import sessions
+
+    dispatch = _relayed_dispatch(body, from_device)
+    chain = _remote_chain(sessions.get_session(dispatch["owner_session_id"]))
+    if chain is None:
+        return None
+    hops = body.get("hops", 0) + 1
+    if hops > _MAX_RELAY_HOPS:
+        raise PermissionError(_TOO_MANY_HOPS)
+    child_id, parent = chain
+    _refuse_stopped_or_proactive(dispatch["owner_session_id"], child_id)
+    forward = {**body, "worker_session_id": child_id, "hops": hops}
+    if _closed_refusal(dispatch):
+        forward["replay_only"] = True
+    return forward, parent
+
+
+def _same_suggestion(chip: Dict[str, Any], brief: Dict[str, str], model: Any) -> bool:
+    from app.core import model_override
+
+    if any(chip[key] != brief[key] for key in ("title", "summary", "prompt")):
+        return False
+    if chip["model"] == model:
+        return True
+    try:
+        return model_override.resolve(model, runs_here=True).model == chip["model"]
+    except ValueError:
+        return False
+
+
+def _closed_answer(previous: Optional[Dict[str, Any]], brief: Dict[str, str], body: Dict[str, Any],
+                   refusal: str) -> Dict[str, Any]:
+    """A dispatch that has ended adds nothing; only a resend of what it recorded gets an answer."""
+    if previous and _same_suggestion(previous, brief, body.get("model")):
+        return {"chip": previous, "created": False}
+    raise PermissionError(refusal)
+
+
+def _record_relayed(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
+    """Owner side of :func:`relay`: only for a subagent this worker sent to the asking worker.
+
+    The chip's origin is that dispatch, the one id this worker can check; its
+    ``sender_session_id`` may be a subagent under it, which only the worker
+    running it knows, so that id only keeps two such senders' request ids apart.
+    """
+    from app.db import projects_v2, session_events
+    from app.db.base import transaction
+
+    dispatch = _relayed_dispatch(body, from_device)
+    worker_id = dispatch["worker_session_id"]
     sender_id = _text(body, "sender_session_id", 200)
-    origin, root = _root_chat(dispatch["owner_session_id"])
     brief = _brief(body)
+    if sender_id != worker_id:
+        brief["request_id"] = f"{hashlib.sha256(sender_id.encode()).hexdigest()[:16]}:{brief['request_id']}"
+    replay_only = body.get("replay_only") is True
+    refusal = _closed_refusal(dispatch, replay_only=replay_only)
+    if refusal:
+        return _closed_answer(store.find_request(worker_id, brief["request_id"]), brief, body, refusal)
+    origin, root = _root_chat(dispatch["owner_session_id"])
     chosen = _chosen_model(body, origin, root)
     project = body.get("project_v2_id")
     if project is not None and not isinstance(project, str):
@@ -459,16 +590,31 @@ def _record_relayed(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     mode = body.get("origin_mode")
     label = body.get("origin_label")
     label = label.strip()[:_TITLE_LIMIT] if isinstance(label, str) else ""
-    return store.create(
-        root["id"], origin_session_id=sender_id, origin_seq=session_events.get_max_seq(root["id"]),
-        base="default", base_commit=None, project_v2_id=project or root.get("project_v2_id"),
-        origin_label=label or "Subagent",
-        origin_mode=mode if mode in PERMISSION_MODE_STRICTNESS else "default",
-        origin_tools_limited=bool(body.get("origin_tools_limited")), **brief, **chosen)
+    origin_seq = session_events.get_max_seq(root["id"])
+    with transaction() as conn:
+        # Held until the chip commits, so the report landing cannot slip between
+        # this check and the write.
+        cursor = conn.cursor()
+        cursor.execute("SELECT completion_id, stop_requested_at FROM remote_tasks WHERE worker_session_id=%s "
+                       "FOR UPDATE", (worker_id,))
+        locked = cursor.fetchone()
+        refusal = _closed_refusal(dict(locked)) if locked else _TASK_ENDED
+        if refusal:
+            return _closed_answer(store.find_request(worker_id, brief["request_id"], cursor), brief, body, refusal)
+        return store.create(
+            root["id"], origin_session_id=worker_id, origin_seq=origin_seq,
+            base="default", base_commit=None, project_v2_id=project or root.get("project_v2_id"),
+            origin_label=label or "Subagent",
+            origin_mode=mode if mode in PERMISSION_MODE_STRICTNESS else "default",
+            origin_tools=_tools_json(_recorded_tools(body.get("origin_tools"))), _conn=conn, **brief, **chosen)
 
 
 async def handle_relayed(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     """``task-chip-suggest`` control action; device auth is checked by /peer/control."""
+    hop = await run_sync(_next_hop, body, from_device)
+    if hop is not None:
+        forward, parent = hop
+        return await _relay_send(parent, forward, timeout=max(10.0, _RELAY_TIMEOUT - 10.0 * forward["hops"]))
     return await _recorded(await run_sync(_record_relayed, body, from_device))
 
 
@@ -549,7 +695,7 @@ async def list_view(session: Dict[str, Any]) -> Dict[str, Any]:
 
     Only the owner knows its turn context and its agent settings. An owner that
     cannot answer leaves the mirror's own reading of its rows on show; a start
-    needs that owner anyway, and it refuses to run broader than what was shown.
+    needs that owner anyway, and it refuses unless its own access matches.
     """
     from app.network import control
 
@@ -606,7 +752,7 @@ async def _after_start(session_id: str, new_id: str) -> None:
         log.exception("Task chip chat %s is queued, but the sidebar broadcast failed", new_id)
 
 
-async def _run_start(session_id: str, chip_id: str, shown_access: Optional[str]) -> Dict[str, Any]:
+async def _run_start(session_id: str, chip_id: str, access_fingerprint: Optional[str]) -> Dict[str, Any]:
     from app.core.session_orchestration import start_suggested_task
 
     lock = _locks.setdefault(chip_id, asyncio.Lock())
@@ -624,7 +770,7 @@ async def _run_start(session_id: str, chip_id: str, shown_access: Optional[str])
             failure: Optional[str] = None
             new_id = None
             try:
-                new_id = await asyncio.to_thread(start_suggested_task, chip, shown_access)
+                new_id = await asyncio.to_thread(start_suggested_task, chip, access_fingerprint)
             except (ValueError, PermissionError, LookupError) as exc:
                 failure = str(exc) or _INTERNAL
             except Exception:  # noqa: BLE001 — every failure must reach the chip
@@ -641,13 +787,13 @@ async def _run_start(session_id: str, chip_id: str, shown_access: Optional[str])
             _locks.pop(chip_id, None)
 
 
-async def start(session_id: str, chip_id: str, shown_access: Optional[str]) -> Dict[str, Any]:
+async def start(session_id: str, chip_id: str, access_fingerprint: Optional[str]) -> Dict[str, Any]:
     """Idempotent. Runs to completion even if the requesting client goes away.
 
-    ``shown_access`` is the ``access.mode`` the client showed when the owner
-    clicked; a caller that showed none has approved no access at all.
+    ``access_fingerprint`` is the ``access.fingerprint`` the client showed when
+    the owner clicked; a caller that showed none has approved no access at all.
     """
-    task = asyncio.ensure_future(_run_start(session_id, chip_id, shown_access))
+    task = asyncio.ensure_future(_run_start(session_id, chip_id, access_fingerprint))
     _background.add(task)
     task.add_done_callback(_background.discard)
     return await asyncio.shield(task)
@@ -667,7 +813,7 @@ async def dismiss(session_id: str, chip_id: str) -> Dict[str, Any]:
 
 
 async def act(session: Dict[str, Any], chip_id: str, action: str,
-              shown_access: Optional[str] = None) -> Dict[str, Any]:
+              access_fingerprint: Optional[str] = None) -> Dict[str, Any]:
     """Run ``action`` where the chat runs, as other session actions are routed."""
     from app.network import control
 
@@ -676,14 +822,14 @@ async def act(session: Dict[str, Any], chip_id: str, action: str,
         try:
             return await control.call(owner, "task-chip", {
                 "session_id": session["id"], "chip_id": chip_id, "action": action,
-                "shown_access": shown_access}, timeout=120.0)
+                "access_fingerprint": access_fingerprint}, timeout=120.0)
         except control.RunnerUnreachable as exc:
             raise ChipError(503, "The worker that owns this chat is offline. Nothing was changed; "
                                  "try again when it is back.") from exc
         except control.ControlRefused as exc:
             raise ChipError(409, "The worker that owns this chat refused this: " + str(exc)) from exc
     if action == "start":
-        return await start(session["id"], chip_id, shown_access)
+        return await start(session["id"], chip_id, access_fingerprint)
     return await dismiss(session["id"], chip_id)
 
 
@@ -701,7 +847,7 @@ async def handle_control(body: Dict[str, Any], from_device: str) -> Dict[str, An
         return {"access": await run_sync(_owner_access, session_id)}
     try:
         if action == "start":
-            return await start(session_id, chip_id, body.get("shown_access"))
+            return await start(session_id, chip_id, body.get("access_fingerprint"))
         return await dismiss(session_id, chip_id)
     except ChipError as exc:
         raise ValueError(exc.message) from exc

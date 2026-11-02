@@ -450,7 +450,7 @@ _register(Collection(
 _register(Collection(
     name="session_task_chips", table="session_task_chips", keys=("id",),
     fields=("id", "session_id", "origin_session_id", "origin_seq", "request_id", "title", "summary", "prompt",
-            "base", "base_commit", "project_v2_id", "origin_label", "origin_mode", "origin_tools_limited", "model",
+            "base", "base_commit", "project_v2_id", "origin_label", "origin_mode", "origin_tools", "model",
             "provider_id", "model_label", "effort", "state", "attempt", "error", "started_session_id", "started_title", "created_at", "updated_at",
             "claimed_at"),
     mode=MODE_OWNER_ORDERED, resource="sessions", priority=96,
