@@ -34,6 +34,18 @@ describe('transcript navigation derivation', () => {
 		expect(turnAnchorId(items[0].id)).toBe('user-turn-user%2Fone');
 	});
 
+	it('gives a not-sent row no navigation stop, since it never ran', () => {
+		const notSent = message({ id: 'unsent', role: 'user', content: 'queued', turnId: 't2', metadata: { not_sent: true } });
+		expect(isNavigableUserTurn(notSent)).toBe(false);
+		expect(deriveUserTurnNavigationItems([
+			message({ id: 'sent', role: 'user', content: 'Sent prompt', turnId: 't1' }),
+			notSent,
+			// The row does not end the turn around it: a later steer stays part of t1.
+			message({ id: 'steer', role: 'user', content: 'Steer', turnId: 't1' }),
+			message({ id: 'next', role: 'user', content: 'Next prompt', turnId: 't3' })
+		]).map(({ id }) => id)).toEqual(['sent', 'next']);
+	});
+
 	it('compacts labels and provides an empty-content fallback', () => {
 		expect(compactTurnLabel('   ')).toBe('User message');
 		expect(compactTurnLabel('abcdefgh', 6)).toBe('abcde…');

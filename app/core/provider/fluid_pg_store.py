@@ -660,6 +660,8 @@ def _fold_events(rows: List[Dict[str, Any]]) -> List[RecallMessage]:
         payload = _parse_payload(row.get("payload"))
         ts = _event_ts(payload, row.get("created_at"))
         if etype == "message.user":
+            if payload.get("not_sent"):  # Stopped before it ran; the model never saw it.
+                continue
             text = strip_harness_reminders(str(payload.get("content") or ""))
             out.append(RecallMessage(role="user", text=text, ts=ts))
             open_msg, last_delta = None, False

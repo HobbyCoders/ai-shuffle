@@ -233,7 +233,7 @@ function finish(input: Carry, loaded: Set<string>, seal: boolean): ProjectionDel
 	const margin = new Set(carry.state.messages.slice(-PROJECTION_LIMITS.marginRows).map(message => message.id));
 	// Authoritative implicit operations scan backward for prose and its user
 	// barrier (notably interrupt's [Stopped] edit). Distance is not immutability.
-	const userAnchor = carry.state.messages.findLast(message => message.role === 'user');
+	const userAnchor = carry.state.messages.findLast(message => message.role === 'user' && !message.metadata?.not_sent);
 	const proseAnchor = carry.state.messages.findLast(message =>
 		message.role === 'assistant' && message.type === 'text' && message.content.trim());
 	if (userAnchor) margin.add(userAnchor.id);

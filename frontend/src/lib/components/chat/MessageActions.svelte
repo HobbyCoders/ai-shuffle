@@ -36,7 +36,7 @@
 		onCopy?: (content: string) => void;
 		onRead?: () => void;
 		isReading?: boolean;
-		onRewindComplete?: (warning?: string, rewoundPrompt?: string, uploadPaths?: string[]) => void;  // Optional warning for partial success + the removed user message's text (chat-input restore)
+		onRewindComplete?: (warning?: string, rewoundPrompt?: string, uploadPaths?: string[], unsentRestored?: boolean) => void;  // Optional warning for partial success + the removed user message's text (chat-input restore)
 	}
 
 	let {
@@ -67,6 +67,9 @@
 	let copyError = $state('');
 	let showRewindDialog = $state(false);
 	let isRewinding = $state(false);
+	// A restored not-sent row leaves on its own feed event; until then a second
+	// click would hand the same words to the composer again.
+	let restored = $state(false);
 	let rewindError = $state<string | null>(null);
 
 	/**
@@ -190,7 +193,8 @@
 				const rewoundPrompt = removedPrompt;
 				// Pass warning to parent to show as system message (for partial success)
 				if (result.unsent_restored) {
-					complete?.(result.warning ?? undefined, result.restored_prompt ?? rewoundPrompt, result.restored_upload_paths);
+					restored = true;
+					complete?.(result.warning ?? undefined, result.restored_prompt ?? rewoundPrompt, result.restored_upload_paths, true);
 				} else {
 					complete?.(result.warning ?? undefined, rewoundPrompt);
 				}
@@ -387,13 +391,27 @@
 		</button>
 	{/if}
 
+	<!-- A not-sent row returns its words to the composer. Nothing is removed from
+	     sent history or sent automatically, so it needs no confirmation. -->
+	{#if notSentMessageId}
+		{#if sessionId && !isStreaming}
+			<button
+				type="button"
+				class="restore-btn"
+				onclick={handleRewindConfirm}
+				disabled={isRewinding || restored}
+			>
+				{isRewinding ? 'Restoring…' : restored ? 'Restored' : 'Restore to composer'}
+			</button>
+			{#if rewindError}<span class="restore-error" role="alert">{rewindError}</span>{/if}
+		{/if}
 	<!-- Rewind button - only available for user messages -->
-	{#if sessionId && !isStreaming && messageRole === 'user'}
+	{:else if sessionId && !isStreaming && messageRole === 'user'}
 		<button
 			class="action-btn disabled:opacity-40 disabled:cursor-not-allowed"
 			onclick={handleRewindClick}
 			disabled={!rewindEligible}
-			title={notSentMessageId ? "Restore unsent draft" : rewindEligible ? "Rewind to before this message" : "Mid-turn messages have no independent rewind checkpoint"}
+			title={rewindEligible ? "Rewind to before this message" : "Mid-turn messages have no independent rewind checkpoint"}
 		>
 			<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0019 16V8a1 1 0 00-1.6-.8l-5.333 4zM4.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0011 16V8a1 1 0 00-1.6-.8l-5.334 4z" />
@@ -432,12 +450,10 @@
 			class="relative bg-card border border-border rounded-lg shadow-lg max-w-md w-full mx-4 p-4"
 			aria-labelledby="rewind-dialog-title"
 		>
-			<h3 id="rewind-dialog-title" class="text-lg font-semibold text-foreground mb-2">{notSentMessageId ? 'Restore unsent draft?' : 'Rewind Conversation?'}</h3>
+			<h3 id="rewind-dialog-title" class="text-lg font-semibold text-foreground mb-2">Rewind Conversation?</h3>
 
 			<p class="text-sm text-muted-foreground mb-3">
-				{#if notSentMessageId}
-					Only this not-sent row is removed. Its text and attachments return to the composer. Sent history is unchanged and nothing is sent automatically.
-				{:else if messageRole === 'user'}
+				{#if messageRole === 'user'}
 					This will remove this message and all messages after it. Cannot be undone.
 				{:else}
 					This will keep this response and remove all messages after it. Cannot be undone.
@@ -482,6 +498,29 @@
 {/if}
 
 <style>
+	.restore-btn {
+		padding: 0.125rem 0.5rem;
+		min-height: 1.75rem;
+		border: 1px solid var(--border);
+		border-radius: 0.375rem;
+		background: transparent;
+		color: var(--foreground);
+		font-size: 0.75rem;
+		white-space: nowrap;
+	}
+
+	.restore-btn:hover:not(:disabled) { background: var(--accent); }
+	.restore-btn:disabled { opacity: 0.6; cursor: default; }
+
+	@media (max-width: 639px) {
+		.restore-btn { min-height: 2.75rem; padding-inline: 0.75rem; }
+	}
+
+	.restore-error {
+		color: var(--destructive);
+		font-size: 0.75rem;
+	}
+
 	.action-btn {
 		display: flex;
 		align-items: center;

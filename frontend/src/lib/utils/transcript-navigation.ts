@@ -39,7 +39,8 @@ export function splitTurnPreview(content: string): { title: string; preview: str
 }
 
 export function isNavigableUserTurn(message: ChatMessage): boolean {
-	return message.role === 'user' && message.type !== 'command' && !agentDelivery(message);
+	// A not-sent row never ran: it is not a turn to jump to or to pin the view on.
+	return message.role === 'user' && message.type !== 'command' && !agentDelivery(message) && !message.metadata?.not_sent;
 }
 
 /**
@@ -55,7 +56,7 @@ function createTurnOpenerTracker(): (message: ChatMessage) => boolean {
 	let started = false;
 	return (message) => {
 		const idleAgentWake = !!agentDelivery(message) && message.metadata?.agent_wake === true;
-		const opens = idleAgentWake || (message.role === 'user' && !agentDelivery(message));
+		const opens = idleAgentWake || (message.role === 'user' && !agentDelivery(message) && !message.metadata?.not_sent);
 		if (!opens) return false;
 		const turnId = message.turnId && message.turnId !== 'backfill' ? message.turnId : undefined;
 		const steered = !idleAgentWake && started && !!turnId && turnId === currentTurnId;

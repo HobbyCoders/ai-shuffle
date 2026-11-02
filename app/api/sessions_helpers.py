@@ -1645,7 +1645,8 @@ def project_event_messages(session_id: str, rows, *, epoch=None) -> list[dict]:
         # Exactly the envelope/reminder projection used by SSE replay.
         event = _wire(row)
         kind = event["type"]
-        if not is_transcript_only_turn(event.get("turn_id")) and (
+        not_sent = kind == "message.user" and bool(event.get("not_sent"))
+        if not is_transcript_only_turn(event.get("turn_id")) and not not_sent and (
             kind in ("turn.started", "message.user", "tool.result")
             or (kind == "system.note" and event.get("subtype") == "provider_retry")
         ):
@@ -1653,6 +1654,10 @@ def project_event_messages(session_id: str, rows, *, epoch=None) -> list[dict]:
         if kind == "turn.started":
             open_message = None
             current_profile = event.get("profile_id")
+        elif not_sent:
+            # Written as Stop lands: what the stopped turn is still flushing
+            # keeps growing its own row above this one, as in the reducer.
+            append(event, role="user", content=event.get("content") or "")
         elif kind == "message.user":
             open_message = None
             # A steered user message can have a different sender; it must

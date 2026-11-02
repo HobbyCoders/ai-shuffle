@@ -360,6 +360,33 @@ describe('turn lifecycle', () => {
 		expect(texts[0].content).toBe('first answer');
 	});
 
+	it('[Stopped] still reaches the reply when Stop wrote not-sent rows after it', () => {
+		const s = fold([
+			ev('message.user', { content: 'go' }),
+			ev('turn.started'),
+			ev('assistant.text_delta', { text: 'partial answer' }),
+			ev('message.user', { id: 'unsent-1', content: 'first queued', not_sent: true }),
+			ev('message.user', { id: 'unsent-2', content: 'second queued', not_sent: true }),
+			ev('turn.aborted', { reason: 'interrupt' }),
+		]);
+		const text = s.messages.find((m) => m.role === 'assistant' && m.type === 'text')!;
+		expect(text.content).toBe('partial answer\n\n[Stopped]');
+		expect(s.messages.filter((m) => m.metadata?.not_sent).map((m) => m.content)).toEqual(['first queued', 'second queued']);
+	});
+
+	it('a real message after a stopped turn is still the [Stopped] barrier', () => {
+		const s = fold([
+			ev('message.user', { content: 'go' }),
+			ev('turn.started'),
+			ev('assistant.text_delta', { text: 'earlier reply' }),
+			ev('turn.completed', { usage: {} }),
+			ev('message.user', { content: 'next' }),
+			ev('turn.aborted', { reason: 'interrupt' }),
+		]);
+		const text = s.messages.find((m) => m.role === 'assistant' && m.type === 'text')!;
+		expect(text.content).toBe('earlier reply');
+	});
+
 	it('turn.aborted(error) does not append [Stopped]', () => {
 		const s = fold([
 			ev('message.user', { content: 'go' }),

@@ -21,11 +21,22 @@ describe('MessageActions gating', () => {
 			restored_prompt:prompt, restored_upload_paths:['/uploads/proof.png']});
 		const onRewindComplete = vi.fn();
 		render(MessageActions, {...base, notSentMessageId:'unsent-id', onRewindComplete});
-		await fireEvent.click(screen.getByTitle('Restore unsent draft'));
-		expect(dialog()!.textContent).toContain('Sent history is unchanged');
-		await fireEvent.click(screen.getByRole('button', {name:'Rewind'}));
-		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledWith(undefined, prompt, ['/uploads/proof.png']));
+		await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
+		expect(dialog()).toBeNull();
+		expect(rewindButton()).toBeNull();
+		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledWith(undefined, prompt, ['/uploads/proof.png'], true));
+		// The row leaves on its feed event; a second click in between must not
+		// hand the same words to the composer again.
+		expect((screen.getByRole('button', {name:'Restored'}) as HTMLButtonElement).disabled).toBe(true);
 		expect(rewind).toHaveBeenCalledWith('s1', '', false, 'user', null, null, 'unsent-id');
+	});
+	it('keeps a not-sent row and says why when the restore fails', async () => {
+		rewind.mockResolvedValue({success:false, error:'The unsent row is missing'});
+		const onRewindComplete = vi.fn();
+		render(MessageActions, {...base, notSentMessageId:'unsent-id', onRewindComplete});
+		await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
+		await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('The unsent row is missing'));
+		expect(onRewindComplete).not.toHaveBeenCalled();
 	});
 	it('disables rewind for a steer with an explanation while preserving copy', async () => {
 		render(MessageActions, { ...base, rewindEligible: false, messageUuid: 'not-a-checkpoint' });

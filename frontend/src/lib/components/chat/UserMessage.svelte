@@ -19,7 +19,7 @@
 		userPromptOccurrence?: number | null;  // 0-based occurrence among identical-content user prompts — rewind fallback when uuid is absent
 		rewindEligible?: boolean;
 		streaming?: boolean;
-		onRewindComplete?: (warning?: string, rewoundPrompt?: string, uploadPaths?: string[]) => void;  // Optional warning for partial success
+		onRewindComplete?: (warning?: string, rewoundPrompt?: string, uploadPaths?: string[], unsentRestored?: boolean) => void;  // Optional warning for partial success
 		notSent?: boolean;
 		notSentMessageId?: string | null;
 		midTurn?: boolean;  // Steered into a turn already under way: the time line says so
@@ -31,11 +31,13 @@
 	let expanded = $state(false);
 	const collapsible = $derived(shouldCollapseUserMessage(content));
 	const collapsed = $derived(collapsible && !expanded);
-	const showActions = $derived(isHovered && !streaming);
+	// A not-sent row's restore is the point of the row, so it never hides behind hover.
+	const showActions = $derived((isHovered || notSent) && !streaming);
 </script>
 
 <div
 	class="userrow"
+	data-not-sent={notSent ? 'true' : undefined}
 	onmouseenter={() => isHovered = true}
 	onmouseleave={() => (isHovered = false)}
 	role="article"

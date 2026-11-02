@@ -407,6 +407,11 @@ describe('agent deliveries in settled work', () => {
 		expect(model.rewindEligible[1]).toBe(true);
 		expect(model.promptOccurrence[2]).toBe(1);
 	});
+	it('a not-sent row never becomes the latest prompt', () => {
+		const sent = user('go', undefined, 'sent');
+		const messages = [sent, text('Partial'), {...user('queued', undefined, 'stopped'), metadata:{not_sent:true}, checkpointBacked:false}];
+		expect(buildTranscriptModel(messages, SETTLED).latestUserTurnId).toBe(sent.id);
+	});
 	it('does not consume human checkpoint ordinals or turn navigation', () => {
 		const delivery = { ...peer(), turnId: 'next', checkpointBacked: true, jsonlUuid: 'not-a-human-checkpoint' };
 		const prompt = user('again', undefined, 'first');

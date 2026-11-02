@@ -1046,7 +1046,7 @@ function reduceInternal(state, event, observe) {
         let target = -1;
         for (let i = msgs.length - 1; i >= 0; i--) {
           const m = msgs[i];
-          if (m.role === "user") break;
+          if (m.role === "user" && !m.metadata?.not_sent) break;
           if (m.role === "assistant" && m.type === "text" && m.content.trim()) {
             target = i;
             break;
@@ -1165,7 +1165,7 @@ function reduceInternal(state, event, observe) {
         const held = heldAgentDeliveries(content);
         if (held) return appendAgentDeliveries(state, held, event.id, stampTs(event, createdAt), seq, true, startsAgentTurn);
       }
-      const superseded = supersedeRetryCards(state.messages, state.hasRetryCards);
+      const superseded = event.not_sent ? state.messages : supersedeRetryCards(state.messages, state.hasRetryCards);
       if (superseded !== state.messages) state = { ...state, messages: superseded };
       const commandId = typeof event.command_id === "string" ? event.command_id : null;
       const reconcilable = state.messages.length !== state.messageOriginSeq.size || state.messageOriginSeq.has(event.id);
@@ -2217,7 +2217,7 @@ function finish(input, loaded, seal) {
   const upserts = [];
   const kept = [];
   const margin = new Set(carry.state.messages.slice(-PROJECTION_LIMITS.marginRows).map((message) => message.id));
-  const userAnchor = carry.state.messages.findLast((message) => message.role === "user");
+  const userAnchor = carry.state.messages.findLast((message) => message.role === "user" && !message.metadata?.not_sent);
   const proseAnchor = carry.state.messages.findLast((message) => message.role === "assistant" && message.type === "text" && message.content.trim());
   if (userAnchor) margin.add(userAnchor.id);
   if (proseAnchor) margin.add(proseAnchor.id);
@@ -2297,7 +2297,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "22f8525556a76a9d66a43539ab51f49f2eda4711a37b977879e9d0ee24d0c246";
+var REDUCER_FINGERPRINT = "fef4cbb37ad9eebe18668ca8206fb572489d7ad1e38b1466849195a1ede9ed7a";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {

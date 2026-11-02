@@ -1507,12 +1507,13 @@ function reduceInternal(
 				// (mirrors the legacy end_streaming(interrupted=True) append).
 				// Only mark output produced by THIS turn — scan back no further
 				// than the last user message so a stop-before-first-output never
-				// stamps a previous turn's response.
+				// stamps a previous turn's response. A not-sent row is no barrier:
+				// Stop writes it before this turn's terminal event arrives.
 				const msgs = next.messages;
 				let target = -1;
 				for (let i = msgs.length - 1; i >= 0; i--) {
 					const m = msgs[i];
-					if (m.role === 'user') break;
+					if (m.role === 'user' && !m.metadata?.not_sent) break;
 					if (m.role === 'assistant' && m.type === 'text' && m.content.trim()) {
 						target = i;
 						break;
@@ -1691,7 +1692,8 @@ function reduceInternal(
 			// A real typed message (wake-turn notifications returned above): the
 			// user chose to move on rather than retry, so any spent retry card
 			// retires. Whatever this new prompt gets back is not its recovery.
-			const superseded = supersedeRetryCards(state.messages, state.hasRetryCards);
+			// A not-sent row is not a choice to move on: Stop wrote it, nothing ran.
+			const superseded = event.not_sent ? state.messages : supersedeRetryCards(state.messages, state.hasRetryCards);
 			if (superseded !== state.messages) state = { ...state, messages: superseded };
 
 			const commandId = typeof event.command_id === 'string' ? event.command_id : null;

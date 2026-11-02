@@ -565,7 +565,8 @@ def transcript_text(session_id: str, *, limit: int = 400) -> str:
         if not isinstance(content, str) or not content.strip():
             continue
         if kind == "message.user":
-            lines.append("User: " + content.strip())
+            if not payload.get("not_sent"):  # Stopped before it ran; never part of the conversation.
+                lines.append("User: " + content.strip())
         elif kind == "message.assistant" and payload.get("kind", "text") == "text":
             lines.append("Assistant: " + content.strip())
     return "\n\n".join(lines)

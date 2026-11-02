@@ -55,7 +55,7 @@ async def test_mirror_restores_unsent_row_without_touching_owner_transcript(pair
         before = load_fluid_path(sdk)
         row = turns.enqueue_turn("s-rewind", "user", prompt="Original unsent words", payload={
             "compact_first": True, "upload_paths": ["/uploads/proof.png"], "upload_blob_ids": ["blob-proof"]})
-        turns.remove_queued_turn(row["id"], preserve_compact_first=True)
+        turns.remove_queued_turn(row["id"], keep_unsent_words=True)
         unsent = next(r for r in session_events.get_events("s-rewind") if r["payload"].get("not_sent"))
         catalog.publish_owned()
     converge([owner, mirror])
