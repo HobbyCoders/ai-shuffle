@@ -1,0 +1,35 @@
+{
+  "description": "Commits, then suggests with base=current: the chip keeps that commit and the started chat forks from exactly it.",
+  "steps": [
+    {
+      "text": "Committing first.",
+      "tool_calls": [
+        {
+          "name": "Bash",
+          "input": {
+            "command": "git -c user.name=dev -c user.email=dev@example.invalid commit --allow-empty -m 'dev-loop chip commit' && git rev-parse HEAD && git rev-parse --abbrev-ref HEAD"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Suggesting that one.",
+      "tool_calls": [
+        {
+          "name": "SuggestTask",
+          "input": {
+            "title": "Check from this commit",
+            "summary": "A dev-loop test suggestion.",
+            "prompt": "Fake-AI brief for a background-task chip. In the file docs/README.md, check the first heading reads well and report what you found. This is a test task from the dev-loop scenario; change nothing.",
+            "model": "fake-ai",
+            "base": "current",
+            "request_id": "fake-ai-suggest-current"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Suggested it and carried on."
+    }
+  ]
+}

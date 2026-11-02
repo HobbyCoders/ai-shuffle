@@ -297,6 +297,16 @@ def test_the_roster_lists_routing_memories_under_the_subagent_default(world):
     assert mo.ROUTING_HEADER not in _contract(session_id=None)
 
 
+def test_a_subagent_sees_the_same_routing_as_its_parent(world):
+    """SuggestTask tells a subagent to follow saved routing, so its roster has it."""
+    from app.db import database as db
+
+    memory = _save(M260)
+    db.create_session(session_id="helper", profile_id="caller", title="Helper",
+                      project_id="task-project", parent_session_id="parent", is_worker=True)
+    assert f"- [{memory.id}] {M260}" in _contract(session_id="helper")
+
+
 def test_no_block_when_no_memory_names_a_model(world):
     _save("NEVER use any Fable model")
     assert mo.ROUTING_HEADER not in _contract()

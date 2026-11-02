@@ -1,5 +1,5 @@
 {
-  "description": "The chat calls Task once; the subagent plays tool-suggest-task, so its chip attaches to this root chat.",
+  "description": "A Task subagent suggests on another model, so the chip attaches to this root chat and carries the subagent's choice.",
   "steps": [
     {
       "text": "Delegating this.",
@@ -8,7 +8,7 @@
           "name": "Task",
           "input": {
             "agent": "dev-helper",
-            "prompt": "[script:tool-suggest-task]"
+            "prompt": "[script:tool-suggest-task-other-model]"
           }
         }
       ]

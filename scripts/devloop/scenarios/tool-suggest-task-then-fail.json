@@ -1,0 +1,27 @@
+{
+  "description": "Suggests, then the provider errors, so a subagent playing it fails after raising the chip.",
+  "steps": [
+    {
+      "text": "Suggesting that one.",
+      "tool_calls": [
+        {
+          "name": "SuggestTask",
+          "input": {
+            "title": "Check after a failure",
+            "summary": "A dev-loop test suggestion.",
+            "prompt": "Fake-AI brief for a background-task chip. In the file docs/README.md, check the first heading reads well and report what you found. This is a test task from the dev-loop scenario; change nothing.",
+            "model": "fake-ai",
+            "base": "default",
+            "request_id": "fake-ai-suggest-fail"
+          }
+        }
+      ]
+    },
+    {
+      "error": {
+        "status": 400,
+        "message": "Fake AI: the suggesting subagent fails here."
+      }
+    }
+  ]
+}

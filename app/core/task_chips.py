@@ -9,6 +9,8 @@ import asyncio
 import logging
 from typing import Any, Dict, Optional, Set
 
+from fluid.tools.builtins.session_orchestration import EFFORT_PROPERTY
+
 from app.db.async_database import run_sync
 from app.db import task_chips as store
 
@@ -45,7 +47,10 @@ def public(chip: Dict[str, Any]) -> Dict[str, Any]:
     """The API shape of a chip."""
     return {
         "id": chip["id"], "session_id": chip["session_id"], "origin_session_id": chip["origin_session_id"],
+        "origin_label": chip.get("origin_label"),
         "title": chip["title"], "summary": chip["summary"], "prompt": chip["prompt"],
+        "model": chip["model"], "provider_id": chip.get("provider_id"), "model_label": chip.get("model_label"),
+        "effort": chip.get("effort"),
         "base": chip["base"], "state": chip["state"], "error": chip.get("error"), "retryable": chip["state"] == store.FAILED,
         "started_session_id": chip.get("started_session_id"),
         "started_session_title": chip.get("started_title"),
@@ -131,6 +136,31 @@ def _root_chat(sender_id: str) -> tuple:
     return origin, row
 
 
+def _origin_label(origin: Dict[str, Any], root: Dict[str, Any]) -> Optional[str]:
+    """Which agent raised the chip, so the root chat can say it. None for the root itself."""
+    if origin["id"] == root["id"]:
+        return None
+    return (origin.get("title") or "").strip() or "Subagent"
+
+
+def _chosen_model(data: Dict[str, Any], origin: Dict[str, Any], root: Dict[str, Any]) -> Dict[str, Any]:
+    """The eligible model and effort the agent chose for the new chat, else raises with real choices."""
+    from app.core import model_override, session_orchestration as orch
+    from app.core.model_effort import resolve_child_effort
+
+    effort = data.get("effort")
+    if effort is not None and effort not in EFFORT_PROPERTY["enum"]:
+        raise ValueError(f"effort must be one of: {', '.join(EFFORT_PROPERTY['enum'])}. Nothing was recorded.")
+    try:
+        choice = model_override.resolve(data.get("model"), origin.get("provider_id"), runs_here=True)
+    except ValueError as exc:
+        raise ValueError(f"{exc} Nothing was recorded.") from None
+    overrides = orch._context(root["id"], allow_empty=True).get("overrides") or {}
+    return {"model": choice.model, "provider_id": choice.provider_id, "model_label": model_override.label(choice.model),
+            "effort": resolve_child_effort(choice.model, choice.provider_id, explicit=effort,
+                                           parent=overrides.get("effort", root.get("effort")), caller=root)}
+
+
 def _record(sender_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
     from app.core.worker_checkout import WorkerCheckoutError, origin_head_commit
     from app.db import session_events
@@ -143,6 +173,7 @@ def _record(sender_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
     if base not in BASES:
         raise ValueError("base must be \"default\" or \"current\"")
     origin, root = _root_chat(sender_id)
+    chosen = _chosen_model(data, origin, root)
     base_commit = None
     if base == "current":
         try:
@@ -153,7 +184,8 @@ def _record(sender_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
     result = store.create(
         root["id"], origin_session_id=sender_id, origin_seq=session_events.get_max_seq(root["id"]),
         request_id=request_id, title=title, summary=summary, prompt=prompt, base=base,
-        base_commit=base_commit, project_v2_id=origin.get("project_v2_id") or root.get("project_v2_id"))
+        base_commit=base_commit, project_v2_id=origin.get("project_v2_id") or root.get("project_v2_id"),
+        origin_label=_origin_label(origin, root), **chosen)
     return result
 
 
@@ -168,6 +200,7 @@ async def suggest(sender_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         await run_sync(notify_changed, chip["session_id"])
     return {
         "chip_id": chip["id"], "state": chip["state"], "created": result["created"],
+        "model": chip["model"], "effort": chip.get("effort"),
         "note": ("The owner sees this suggestion as a chip" + ("" if result["created"] else " already")
                  + " and can start it in a separate chat. Do not fix it here. Carry on with your task."),
     }

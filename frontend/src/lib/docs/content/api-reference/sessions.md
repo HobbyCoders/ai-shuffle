@@ -177,9 +177,11 @@ With **Suggest next reply** enabled (**Settings → General**), the latest gener
 
 An agent that spots work outside its task records a suggestion with its `SuggestTask` tool instead of doing it. The owner can start it in a separate chat with its own worktree; the chat it was suggested in keeps running undisturbed. A subagent's suggestion attaches to the top-level chat at the root of its ancestry.
 
+A chip suggested by a subagent, at any depth, belongs to the top-level chat that subagent works under: `session_id` is that chat, its list returns the chip, and start and dismiss are authorised against it. The subagent's own list is empty, and the chip stays startable after the subagent ends. A session started with `StartSession` is its own top-level chat.
+
 Chips live on the worker that owns the chat and are mirrored to other workers. Starting or dismissing from another worker's UI runs on the owner.
 
-**Chip fields:** `id`, `session_id` (the chat showing the chip), `origin_session_id` (the chat or subagent that suggested it), `title`, `summary`, `prompt` (the agent's brief, model-written), `base` (`default` or `current`), `state`, `error` (plain words, set in `failed`), `retryable` (true in `failed`), `started_session_id`, `started_session_title`, `created_at`, `updated_at`.
+**Chip fields:** `id`, `session_id` (the chat showing the chip), `origin_session_id` (the chat or subagent that suggested it), `origin_label` (that subagent's name; null when the chat itself suggested it), `title`, `summary`, `prompt` (the agent's brief, model-written), `model`, `provider_id` (null for Claude models), `model_label` (display name), `effort`, `base` (`default` or `current`), `state`, `error` (plain words, set in `failed`), `retryable` (true in `failed`), `started_session_id`, `started_session_title`, `created_at`, `updated_at`.
 
 | State | Meaning | Next |
 |---|---|---|
@@ -201,7 +203,7 @@ Returns `{ "chips": [ … ], "source": null }`, oldest first. When a chip starte
 
 **Auth:** Required, with the same session access checks as session detail.
 
-Starts the chat and returns the chip. Idempotent: a double click, a second device or a retry after a lost response all get the same chat. Parents in a Git project always give the new chat its own worktree and branch, from a fresh copy of the default branch (`base: default`) or the commit the chat was on when it suggested the task (`base: current`). The chat inherits the parent's agent, provider, model, effort, permission mode and project, and its first message is attributed to the suggesting chat, not to you.
+Starts the chat and returns the chip. Idempotent: a double click, a second device or a retry after a lost response all get the same chat. Parents in a Git project always give the new chat its own worktree and branch, from a fresh copy of the default branch (`base: default`) or the commit the chat was on when it suggested the task (`base: current`). The chat runs on the chip's `model` and `effort`, and inherits the parent's agent, permission mode and project; its first message is attributed to the suggesting chat, not to you. The click on a chip showing the model is the approval, so nothing asks again in any permission mode. If that model is unavailable at the click, or `base: current`'s commit is no longer in the repository, the chip goes to `failed` with the reason and can be retried: no other model or base stands in.
 
 A start that could not happen still returns `200`, with the chip in `failed` and the reason in `error`; call this route again to retry. Errors: `404` for an unknown chip, `409` for a dismissed chip, or `503` when the owning worker is offline (nothing changes).
 

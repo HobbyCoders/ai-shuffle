@@ -1,0 +1,20 @@
+{
+  "description": "The chat calls Task, and that subagent calls Task again (tool-task-nested-suggest-task-inner), so the suggesting agent is two levels below this root chat.",
+  "steps": [
+    {
+      "text": "Delegating this.",
+      "tool_calls": [
+        {
+          "name": "Task",
+          "input": {
+            "agent": "dev-helper",
+            "prompt": "[script:tool-task-nested-suggest-task-inner]"
+          }
+        }
+      ]
+    },
+    {
+      "text": "The subagents finished."
+    }
+  ]
+}

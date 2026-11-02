@@ -650,17 +650,27 @@ async def _project_placement(sender_id, data):
                      f"Checked: {', '.join(checked)}. Ask the owner to open or clone it on a worker first.")
 
 
+def _model_examples():
+    """The owner's subagent default, named as an example by ``model`` inputs."""
+    try:
+        from app.core import subagent_default
+        return tuple(filter(None, (subagent_default.effective().model,)))
+    except Exception:  # noqa: BLE001 — the examples are advisory
+        log.debug("Could not read the subagent default for a model example", exc_info=True)
+        return ()
+
+
 def start_session_spec():
     """StartSession's spec; its ``model`` names the owner's subagent default
     as an example. Any eligible model is accepted and checked (#1830)."""
     from fluid.tools.builtins.session_orchestration import start_session_spec as build
-    try:
-        from app.core import subagent_default
-        examples = tuple(filter(None, (subagent_default.effective().model,)))
-    except Exception:  # noqa: BLE001 — the examples are advisory
-        log.debug("Could not read the subagent default for StartSession", exc_info=True)
-        examples = ()
-    return build(examples)
+    return build(_model_examples())
+
+
+def suggest_task_spec(current_model=None):
+    """SuggestTask's spec, with the same example as :func:`start_session_spec`."""
+    from fluid.tools.builtins.session_orchestration import suggest_task_spec as build
+    return build(_model_examples(), current_model)
 
 
 def _inherited_model(sender, overrides):
@@ -1398,8 +1408,9 @@ def _checkout_note(checkout, *, fresh_default=False):
 
 def _create_started_chat(conn, sender, *, new_id, title, overrides, started_mode, checkout, principal,
                          workspace, mode, plan=None, payload=None, explicit_effort=None, note=None):
-    """The new chat's row, inheriting ``sender``'s agent, provider, model, effort
-    and permission binding: StartSession's and a started task chip's one path.
+    """The new chat's row, inheriting ``sender``'s agent and permission binding,
+    and its provider, model and effort unless ``plan`` names a model:
+    StartSession's and a started task chip's one path.
 
     Runs in the caller's transaction; returns ``(row, first_turn_overrides)``.
     """
@@ -1718,6 +1729,13 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
     return result
 
 
+_CHIP_COMMIT_GONE = ("Commit {commit}, which this task was suggested from, is no longer in this repository, "
+                     "perhaps because its branch or worktree was removed. Nothing was started, and it was "
+                     "not started from any other commit.")
+_CHIP_NO_COMMIT = ("The chat that suggested this task had no commit to start from. Nothing was started, "
+                   "and it was not started from any other commit.")
+
+
 def _suggested_task_text(parent, chip):
     """The new chat's first message: attributed, never words the owner typed."""
     title = (parent.get("title") or "").strip() or parent["id"]
@@ -1728,6 +1746,27 @@ def _suggested_task_text(parent, chip):
         f"report from it, so tell the owner your result here.\n\n{chip['prompt']}")
 
 
+def _chip_model_plan(chip, parent, overrides):
+    """The model a chip's chat runs on, checked again now the owner has clicked.
+
+    The chip showed this model, so the click approved it and nothing asks again.
+    A model that is gone refuses the start; the parent's model never stands in.
+    """
+    from app.core import model_override
+    model = chip["model"]
+    name = chip.get("model_label") or model
+    try:
+        picked = model_override.resolve(model, runs_here=True)
+    except ValueError as exc:
+        raise ValueError(f"{name}, the model this task was suggested for, is not available now: {exc} "
+                         "Nothing was started.") from None
+    if picked.model != model_override.active_account_model(model):
+        raise ValueError(f"{name}, the model this task was suggested for, is not available now. "
+                         "Nothing was started.")
+    return {"model": picked.model, "provider_id": picked.provider_id, "model_id": picked.model_id,
+            "baseline": _inherited_model(parent, overrides), "source": model_override.CHIP_APPROVED}
+
+
 def start_suggested_task(chip):
     """Start a chip's chat because the owner clicked it. Returns the new chat's id.
 
@@ -1736,14 +1775,15 @@ def start_suggested_task(chip):
     and its turn carries no ``orchestration_*`` keys and no ``orchestration:``
     command. So it spends no chain budget, starts a chain of its own, is
     invisible to :func:`started_by_owner` (no report to the parent, and its
-    approvals stay on it), and cannot borrow the parent's model consent. The
-    parent's row is read and locked briefly; its turn is never touched.
+    approvals stay on it), and its model is the chip's: the agent chose it, and
+    the owner's click on a chip showing it approved it. The parent's row is read
+    and locked briefly; its turn is never touched.
     Raises with plain words the chip shows on any refusal.
     """
     from app.db import sessions, task_chips as chips_db, turns
     from app.db.base import transaction
     from app.core import mobile_tool_identity, orchestration_limits, turn_scheduler
-    from app.core.worker_checkout import WorkerCheckoutError, default_branch_commit
+    from app.core.worker_checkout import BaseCommitUnavailable, WorkerCheckoutError, default_branch_commit
     parent_id = chip["session_id"]
     parent = sessions.get_session(parent_id)
     if parent is None:
@@ -1760,6 +1800,7 @@ def start_suggested_task(chip):
         raise PermissionError("Background observation cannot start chats.")
     orchestration_limits.assert_can_start(parent_id)  # The owner's daily spending limit.
     overrides = context.get("overrides") or {}
+    plan = _chip_model_plan(chip, parent, overrides)
     started_mode = _started_permission_mode(parent, overrides)
     # Deterministic per attempt: a retry after a failure needs a new branch
     # name, since the failed attempt may have left its branch behind.
@@ -1776,7 +1817,12 @@ def start_suggested_task(chip):
     except WorkerCheckoutError as exc:
         raise ValueError(f"Could not give the new chat its own checkout: {exc} Nothing was started.") from exc
     bound = own_project and (parent.get("branch") or parent.get("worktree_branch"))
-    checkout = _start_checkout(checkout_parent, new_id, named_project=not bound, base_commit=base_commit)
+    try:
+        checkout = _start_checkout(checkout_parent, new_id, named_project=not bound, base_commit=base_commit)
+    except ValueError as exc:
+        if isinstance(exc.__cause__, BaseCommitUnavailable):
+            raise ValueError(_CHIP_COMMIT_GONE.format(commit=base_commit[:12])) from exc
+        raise
     payload = {key: value for key, value in turn_scheduler._context_payload(context).items()
                if not key.startswith("orchestration_")}
     text = _suggested_task_text(parent, chip)
@@ -1787,6 +1833,10 @@ def start_suggested_task(chip):
         "worktree_id": parent.get("worktree_id"), "worktree_branch": parent.get("worktree_branch"),
         "worktree_path": parent.get("worktree_path")}
     with _UnusedCheckout(checkout) as unused, transaction() as conn:
+        if checkout is not None and not fresh_default and base_commit is None:
+            # The chat it came from had no readable commit then; the checkout
+            # just made sits on the default branch, which nobody asked for.
+            raise ValueError(_CHIP_NO_COMMIT)
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (parent_id,))
         try:
@@ -1796,7 +1846,8 @@ def start_suggested_task(chip):
         target, first_overrides = _create_started_chat(
             conn, parent, new_id=new_id, title=chip["title"], overrides=overrides, started_mode=started_mode,
             checkout=checkout, principal=principal, workspace=workspace,
-            mode=parent.get("mode") if own_project else None,
+            mode=parent.get("mode") if own_project else None, plan=plan, payload=payload,
+            explicit_effort=chip.get("effort"),
             note=_checkout_note(checkout, fresh_default=fresh_default) if checkout is not None else None)
         turns.enqueue_turn(
             new_id, "agent_message", prompt=_peer_prompt(parent_id, text),

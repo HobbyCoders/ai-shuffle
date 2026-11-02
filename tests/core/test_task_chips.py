@@ -86,7 +86,7 @@ async def suggest(sid, **overrides):
     ctx = ToolCtx(cwd=".", session_id=sid)
     ctx.extra["task_chips"] = orch.make_handler(lambda: sid)
     data = {"title": "Fix the flaky test", "summary": "It fails one run in ten, which hides real failures.",
-            "prompt": "Fix tests/x.py, which is flaky.", "request_id": "r1", **overrides}
+            "prompt": "Fix tests/x.py, which is flaky.", "model": "sonnet", "request_id": "r1", **overrides}
     return await handler(data, ctx)
 
 
@@ -320,14 +320,14 @@ async def test_racing_starts_make_one_chat(owner):
 
 def test_only_one_claim_wins(owner):
     chip = store.create("root", origin_session_id="root", origin_seq=0, request_id="r", title="T", summary="S",
-                        prompt="P", base="default", base_commit=None, project_v2_id=None)["chip"]
+                        prompt="P", base="default", base_commit=None, project_v2_id=None, model="sonnet")["chip"]
     assert store.claim("root", chip["id"])["attempt"] == 1
     assert store.claim("root", chip["id"]) is None
 
 
 def test_a_stale_claim_can_be_retaken(owner):
     chip = store.create("root", origin_session_id="root", origin_seq=0, request_id="r", title="T", summary="S",
-                        prompt="P", base="default", base_commit=None, project_v2_id=None)["chip"]
+                        prompt="P", base="default", base_commit=None, project_v2_id=None, model="sonnet")["chip"]
     store.claim("root", chip["id"])
     with get_db() as conn:
         conn.cursor().execute("UPDATE session_task_chips SET claimed_at='2000-01-01 00:00:00'")
@@ -468,13 +468,360 @@ async def test_the_new_chat_links_back_to_its_source(owner):
     assert source["session_id"] == "root" and source["title"] == "root"
 
 
-async def test_the_new_chat_inherits_the_parents_settings(owner):
+async def test_the_new_chat_inherits_agent_and_permissions_but_runs_on_the_chips_model(owner):
     with get_db() as conn:
         conn.cursor().execute("UPDATE sessions SET permission_mode='acceptEdits', effort='high' WHERE id='root'")
-    child = child_of(await task_chips.start("root", await recorded()))
-    assert child["profile_id"] == "agent" and child["model"] == "sonnet"
-    assert child["permission_mode"] == "acceptEdits"
-    assert child["effort"] == "high"
+    chip = await task_chips.start("root", await recorded(model="opus"))
+    child = child_of(chip)
+    assert child["profile_id"] == "agent" and child["permission_mode"] == "acceptEdits"
+    assert child["model"] == chip["model"] == "opus" and child["provider_id"] is None
+    assert child["effort"] == chip["effort"] == "high"
+    assert sessions.get_session("root")["model"] == "sonnet"
+
+
+# --- The model the agent chose
+
+
+async def test_the_chip_shows_the_resolved_model_and_effort(owner):
+    chip = store.get("root", await recorded(model="OPUS", effort="low"))
+    shown = task_chips.public(chip)
+    assert (shown["model"], shown["provider_id"], shown["effort"]) == ("opus", None, "low")
+    assert shown["model_label"] and shown["model_label"] != "no model"
+    assert task_chips.list_chips("root")["chips"][0]["model"] == "opus"
+
+
+async def test_the_tool_result_names_the_model_for_the_agent(owner):
+    outcome = await suggest("root", model="opus")
+    assert json.loads(outcome.text)["model"] == "opus"
+
+
+@pytest.mark.parametrize("model", ["no-such-model-xyz", "", None, 7])
+async def test_an_unusable_model_is_refused_with_no_chip(owner, model):
+    outcome = await suggest("root", model=model)
+    assert outcome.is_error and "Nothing was recorded" in outcome.text
+    assert store.list_for_session("root") == []
+
+
+async def test_an_unknown_model_is_refused_with_the_real_choices_then_can_be_corrected(owner):
+    outcome = await suggest("root", model="no-such-model-xyz")
+    assert outcome.is_error and "Choose one of" in outcome.text and "Nothing was recorded" in outcome.text
+    assert store.list_for_session("root") == []
+    assert await recorded(model="sonnet")  # Same request_id: nothing was burned by the refusal.
+
+
+async def test_a_missing_model_is_refused(owner):
+    from fluid.tools.builtins.session_orchestration import SPECS
+    from fluid.tools.registry import ToolCtx
+
+    handler = next(handler for spec, handler in SPECS if spec.name == "SuggestTask")
+    ctx = ToolCtx(cwd=".", session_id="root")
+    ctx.extra["task_chips"] = orch.make_handler(lambda: "root")
+    outcome = await handler({"title": "T", "summary": "S", "prompt": "P", "request_id": "r"}, ctx)
+    assert outcome.is_error and store.list_for_session("root") == []
+
+
+async def test_an_unknown_effort_is_refused(owner):
+    outcome = await suggest("root", effort="turbo")
+    assert outcome.is_error and "effort" in outcome.text and store.list_for_session("root") == []
+
+
+@pytest.mark.parametrize("mode", ["default", "acceptEdits", "bypassPermissions", "plan"])
+async def test_the_click_is_the_approval_in_every_permission_mode(owner, monkeypatch, mode):
+    from app.core import model_override
+
+    monkeypatch.setattr(model_override, "accept", AsyncMock(side_effect=AssertionError("asked again")))
+    monkeypatch.setattr(model_override, "confirm", AsyncMock(side_effect=AssertionError("asked again")))
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET permission_mode=%s WHERE id='root'", (mode,))
+    chip = await task_chips.start("root", await recorded(model="opus"))
+    assert chip["state"] == store.STARTED, chip["error"]
+    assert child_of(chip)["model"] == "opus"
+
+
+async def test_the_first_turn_cannot_rebind_to_the_parents_model(owner):
+    chip = await task_chips.start("root", await recorded(model="opus", effort="low"))
+    turn = first_turn(chip["started_session_id"])
+    assert turn["overrides"]["model"] == "opus" and turn["overrides"]["effort"] == "low"
+    record = turn["payload"]["model_override"]
+    assert record == {"model": "opus", "provider_id": None, "source": "approved_by_owner_chip",
+                      "instead_of": "sonnet"}
+
+
+async def test_a_chip_on_the_parents_own_model_is_recorded_the_same_way(owner):
+    chip = await task_chips.start("root", await recorded(model="sonnet"))
+    assert first_turn(chip["started_session_id"])["payload"]["model_override"]["source"] == "approved_by_owner_chip"
+
+
+async def test_settings_fall_back_through_the_new_models_support(owner, monkeypatch):
+    from app.core import model_override
+
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET context_window=1000000, fast=TRUE WHERE id='root'")
+    seen = {}
+    real = model_override.settings_for_model
+
+    def spy(model, provider_id, **kwargs):
+        seen.update(model=model, **kwargs)
+        return {**real(model, provider_id, **kwargs), "context_window": None, "fast": None}
+
+    monkeypatch.setattr(model_override, "settings_for_model", spy)
+    child = child_of(await task_chips.start("root", await recorded(model="opus")))
+    assert seen["model"] == "opus" and seen["context_window"] == 1000000
+    assert child["context_window"] is None
+
+
+async def test_a_model_gone_at_click_time_fails_and_never_falls_back(owner, monkeypatch):
+    from app.core import model_override
+
+    chip_id = await recorded(model="opus")
+    real = model_override.resolve
+    monkeypatch.setattr(model_override, "resolve", lambda *a, **k: (_ for _ in ()).throw(
+        ValueError("Model 'opus' is not available. Choose one of: sonnet.")))
+    failed = await task_chips.start("root", chip_id)
+    assert failed["state"] == store.FAILED and failed["retryable"]
+    assert "is not available now" in failed["error"] and "Nothing was started" in failed["error"]
+    assert failed["started_session_id"] is None
+    monkeypatch.setattr(model_override, "resolve", real)
+    retried = await task_chips.start("root", chip_id)
+    assert retried["state"] == store.STARTED and child_of(retried)["model"] == "opus"
+
+
+def lane_provider(monkeypatch):
+    from app.core import task_dispatch
+
+    monkeypatch.setattr(task_dispatch, "_credential_gap", lambda provider: None)
+    database.create_model_provider("lane", "Lane", "openai", "https://example.invalid/v1",
+                                   models=[{"id": "astra", "label": "Astra"}])
+    return "prov:lane:astra"
+
+
+@pytest.mark.parametrize("gone", ["disabled", "deleted", "model removed"])
+async def test_a_real_provider_going_away_fails_the_click_with_no_fallback(owner, monkeypatch, gone):
+    from app.db import model_providers
+
+    chip_id = await recorded(model=lane_provider(monkeypatch))
+    assert store.get("root", chip_id)["provider_id"] == "lane"
+    if gone == "disabled":
+        model_providers.update_model_provider("lane", enabled=False)
+    elif gone == "deleted":
+        model_providers.delete_model_provider("lane")
+    else:
+        model_providers.update_model_provider("lane", models_json=[{"id": "other", "label": "Other"}])
+    failed = await task_chips.start("root", chip_id)
+    assert failed["state"] == store.FAILED and failed["retryable"], failed
+    assert "is not available now" in failed["error"] and "Nothing was started" in failed["error"]
+    assert failed["started_session_id"] is None
+    assert sessions.get_session("root")["model"] == "sonnet"
+    if gone == "disabled":
+        model_providers.update_model_provider("lane", enabled=True)
+        retried = await task_chips.start("root", chip_id)
+        assert retried["state"] == store.STARTED, retried
+        assert (child_of(retried)["model"], child_of(retried)["provider_id"]) == ("prov:lane:astra", "lane")
+
+
+async def test_a_chip_crosses_providers_both_ways(owner, monkeypatch):
+    chip = await task_chips.start("root", await recorded(model=lane_provider(monkeypatch)))
+    child = child_of(chip)
+    assert (child["model"], child["provider_id"]) == ("prov:lane:astra", "lane")
+    record = first_turn(child["id"])["payload"]["model_override"]
+    assert record["provider_id"] == "lane" and record["instead_of"] == "sonnet"
+    back = await task_chips.start(child["id"], await recorded(child["id"], model="sonnet", request_id="back"))
+    assert (child_of(back)["model"], child_of(back)["provider_id"]) == ("sonnet", None)
+
+
+async def test_a_similar_model_cannot_stand_in_at_click_time(owner, monkeypatch):
+    from app.core import model_override
+
+    chip_id = await recorded(model="opus")
+    monkeypatch.setattr(model_override, "resolve", lambda *a, **k: model_override.Choice("sonnet", None, "sonnet"))
+    failed = await task_chips.start("root", chip_id)
+    assert failed["state"] == store.FAILED and "is not available now" in failed["error"]
+
+
+async def test_a_subagents_chosen_model_is_honoured(owner):
+    sessions.create_session("worker", "agent", is_active=True, parent_session_id="root", is_worker=True,
+                            title="Reviewer", model="sonnet")
+    chip = await task_chips.start("root", await recorded("worker", model="opus"))
+    assert chip["origin_label"] == "Reviewer" and child_of(chip)["model"] == "opus"
+
+
+def test_the_spec_requires_a_model_and_does_not_borrow_the_optional_rule():
+    from fluid.tools.builtins.session_orchestration import EFFORT_PROPERTY, MODEL_OVERRIDE_RULE, suggest_task_spec
+
+    schema = suggest_task_spec(("prov:x:y",)).input_schema
+    assert "model" in schema["required"] and "effort" not in schema["required"]
+    assert schema["properties"]["effort"] == EFFORT_PROPERTY
+    text = schema["properties"]["model"]["description"]
+    assert MODEL_OVERRIDE_RULE not in text and "omit" not in text
+    for words in ("routing", "your own current model", "fabricate", "prov:x:y"):
+        assert words in text
+
+
+def test_a_fluid_agent_is_told_its_own_model_and_a_switch_updates_it():
+    """Fluid's system prompt does not state the model, so the tool has to."""
+    from fluid.tools.builtins import register_builtins
+    from fluid.tools.builtins.session_orchestration import suggest_task_spec as build
+
+    from app.core.provider import harness_adapter as ha
+    from app.core.provider.types import SessionOptions
+
+    def named() -> str:
+        return registry.get("SuggestTask").input_schema["properties"]["model"]["description"]
+
+    registry = ha.ToolRegistry()
+    register_builtins(registry)
+    options = SessionOptions(model="fake-ai", extra={"provider_id": "p1"})
+    ha._amend_suggest_task_spec(registry, options)
+    assert "your own current model (prov:p1:fake-ai)." in named()
+    ha._amend_suggest_task_spec(registry, options, "fake-ai-safe")
+    assert "your own current model (prov:p1:fake-ai-safe)." in named()
+    # Without a session to name, the sentence still reads whole.
+    assert "your own current model. Never" in build().input_schema["properties"]["model"]["description"]
+
+
+def test_both_surfaces_get_the_owners_default_as_an_example(owner, monkeypatch):
+    from app.core import subagent_default
+
+    monkeypatch.setattr(subagent_default, "effective", lambda: type("D", (), {"model": "prov:d:default-model"})())
+    spec = orch.suggest_task_spec()
+    assert "prov:d:default-model" in spec.input_schema["properties"]["model"]["description"]
+
+
+# --- The root chat is the chip's home, whoever raised it
+
+
+def nested(*ids, **kwargs):
+    """Subagents each started by the one before, from ``root``."""
+    parent = "root"
+    for sid in ids:
+        sessions.create_session(sid, "agent", is_active=True, parent_session_id=parent, is_worker=True,
+                                title=f"Agent {sid}", model="sonnet", **kwargs)
+        parent = sid
+
+
+async def test_a_nested_subagents_chip_attaches_to_the_root_and_says_who_raised_it(owner):
+    nested("w1", "w2", "w3")
+    chip = store.get("root", await recorded("w3"))
+    assert chip["session_id"] == "root" and chip["origin_session_id"] == "w3"
+    assert task_chips.public(chip)["origin_label"] == "Agent w3"
+    assert [c["id"] for c in task_chips.list_chips("root")["chips"]] == [chip["id"]]
+    assert task_chips.list_chips("w3")["chips"] == []
+
+
+async def test_a_real_worker_row_resolves_to_the_root(owner):
+    """Task and Swarm workers are minted by this one function."""
+    from app.core import provider_agent
+
+    fields = provider_agent.worker_session_fields(
+        worker_session_id="swarm-worker", profile_id="agent", title="Swarm task", parent_session_id="root",
+        provider_id=None, model_id="sonnet", effort=None)
+    assert fields["is_worker"] is True
+    sessions.create_session(**fields)
+    chip = store.get("root", await recorded("swarm-worker"))
+    assert chip["origin_label"] == "Swarm task"
+
+
+async def test_the_roots_own_chip_has_no_origin_label(owner):
+    assert task_chips.public(store.get("root", await recorded()))["origin_label"] is None
+
+
+async def test_a_started_peer_is_its_own_root(owner):
+    """A StartSession peer is an ordinary top-level chat: no worker flag and no parent link."""
+    chat("peer")
+    chip = store.get("peer", await recorded("peer"))
+    assert chip["session_id"] == "peer" and task_chips.public(chip)["origin_label"] is None
+    assert store.list_for_session("root") == []
+
+
+async def test_a_workers_chip_lands_on_a_peer_root_not_the_chat_that_started_the_peer(owner):
+    chat("peer")
+    sessions.create_session("peer-worker", "agent", is_active=True, parent_session_id="peer", is_worker=True,
+                            title="Peer worker", model="sonnet")
+    chip = store.get("peer", await recorded("peer-worker"))
+    assert chip["session_id"] == "peer" and store.list_for_session("root") == []
+
+
+async def test_a_parent_link_above_a_chat_is_lineage_and_is_never_walked(owner):
+    chat("linked", parent_session_id="root")
+    outcome = await suggest("linked")
+    assert outcome.is_error and store.list_for_session("root") == []
+    assert store.list_for_session("linked") == []
+
+
+def test_a_subagent_cannot_start_a_peer_so_no_chip_chain_crosses_one(owner):
+    nested("w1")
+    with pytest.raises(ValueError, match="top-level"):
+        orch._caller("w1")
+
+
+@pytest.mark.parametrize("ending", ["completed", "failed", "stopped", "deleted"])
+async def test_the_chip_stays_startable_after_its_subagent_ended(owner, ending):
+    nested("w1", "w2")
+    chip_id = await recorded("w2")
+    if ending == "deleted":
+        with get_db() as conn:
+            conn.cursor().execute("DELETE FROM sessions WHERE id='w2'")
+    else:
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET status=%s WHERE id='w2'", (ending,))
+    chip = await task_chips.start("root", chip_id)
+    assert chip["state"] == store.STARTED, chip["error"]
+
+
+async def test_actions_are_authorised_against_the_root_not_the_subagent(owner):
+    nested("w1")
+    chip_id = await recorded("w1")
+    with pytest.raises(task_chips.ChipError) as refused:
+        await task_chips.start("w1", chip_id)
+    assert refused.value.status == 404
+    with pytest.raises(task_chips.ChipError):
+        await task_chips.dismiss("w1", chip_id)
+    assert (await task_chips.dismiss("root", chip_id))["state"] == store.DISMISSED
+
+
+# --- base="current" when that commit is gone
+
+
+async def test_a_commit_gone_from_the_repository_fails_and_uses_no_other_base(repo):
+    in_project("feat", repo, branch="feature")
+    chip_id = await recorded("feat", base="current")
+    assert store.get("feat", chip_id)["base_commit"] == repo["feature_tip"]
+    # Really gone: the branch and its worktree removed, then pruned.
+    git(repo["main"], "worktree", "remove", "--force", str(repo["feature"]))
+    git(repo["main"], "branch", "-D", "feature")
+    git(repo["main"], "reflog", "expire", "--expire=now", "--all")
+    git(repo["main"], "gc", "--prune=now")
+    checkouts_before = git(repo["main"], "worktree", "list")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET branch=NULL, worktree_branch=NULL WHERE id='feat'")
+    failed = await task_chips.start("feat", chip_id)
+    assert failed["state"] == store.FAILED and failed["retryable"]
+    assert repo["feature_tip"][:12] in failed["error"] and "no longer in this repository" in failed["error"]
+    assert "not started from any other commit" in failed["error"]
+    assert failed["started_session_id"] is None
+    assert git(repo["main"], "worktree", "list") == checkouts_before
+
+
+async def test_a_removed_worktree_whose_commit_survives_still_starts_from_that_commit(repo):
+    in_project("feat", repo, branch="feature")
+    chip_id = await recorded("feat", base="current")
+    git(repo["main"], "worktree", "remove", "--force", str(repo["feature"]))
+    git(repo["main"], "branch", "-D", "feature")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET branch=NULL, worktree_branch=NULL WHERE id='feat'")
+    chip = await task_chips.start("feat", chip_id)
+    assert chip["state"] == store.STARTED, chip["error"]
+    assert git(child_of(chip)["worktree_path"], "rev-parse", "HEAD") == repo["feature_tip"]
+
+
+async def test_current_with_no_commit_captured_never_runs_on_another_base(repo):
+    in_project("main-chat", repo)
+    chip_id = await recorded("main-chat", base="current")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE session_task_chips SET base_commit=NULL WHERE id=%s", (chip_id,))
+    failed = await task_chips.start("main-chat", chip_id)
+    assert failed["state"] == store.FAILED and "no commit to start from" in failed["error"]
+    assert "chore/chat-" not in git(repo["main"], "worktree", "list")
 
 
 # --- Rewind, dismiss, durability
@@ -620,14 +967,21 @@ def test_prompt_rule_follows_the_tool():
     assert prompt._adjacent_work_section(without) is None
 
 
-def test_scenarios_call_the_real_tool():
-    root = "scripts/devloop/scenarios"
-    for name in ("tool-suggest-task", "tool-suggest-task-slow"):
-        with open(f"{root}/{name}.json", encoding="utf-8") as handle:
-            scenario = json.load(handle)
-        call = scenario["steps"][0]["tool_calls"][0]
-        assert call["name"] == "SuggestTask"
-        assert set(call["input"]) >= {"title", "summary", "prompt", "request_id"}
+def test_scenarios_call_the_real_tool_with_its_required_inputs():
+    from pathlib import Path
+
+    from fluid.tools.builtins.session_orchestration import suggest_task_spec
+
+    required = set(suggest_task_spec().input_schema["required"])
+    calls = 0
+    for root in ("scripts/devloop/scenarios", "scripts/devloop/fake_claude/scenarios"):
+        for path in Path(root).glob("*.json"):
+            for step in json.loads(path.read_text(encoding="utf-8")).get("steps", []):
+                for call in step.get("tool_calls", []):
+                    if call["name"].rsplit("__", 1)[-1] == "SuggestTask":
+                        calls += 1
+                        assert set(call["input"]) >= required, path
+    assert calls >= 7
 
 
 def _compile_native_system(wired):

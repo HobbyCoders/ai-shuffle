@@ -195,7 +195,11 @@ It is chosen by the request alone, so it behaves the same after restarts:
 * Plain messages get a short streamed echo of what you wrote.
 * `[script:NAME]` anywhere in your message plays `scripts/devloop/scenarios/NAME.json`:
   `default`, `long`, `slow`, `tool-bash`, `tool-multi`, `tool-background-stream`, `tool-suggest-task`,
-  `tool-suggest-task-slow`, `tool-task-suggest-task`, `error-500`,
+  `tool-suggest-task-slow`, `tool-suggest-task-other-model`, `tool-suggest-task-claude`,
+  `tool-suggest-task-current`, `tool-suggest-task-bad-model`, `tool-task-suggest-task`,
+  `tool-task-current-suggest-task`, `tool-task-nested-suggest-task`, `tool-task-late-suggest-task`,
+  `tool-task-late-suggest-task-streaming`, `tool-suggest-task-late`, `tool-suggest-task-then-fail`,
+  `tool-task-fail-suggest-task`, `tool-task-stop-suggest-task`, `tool-swarm-suggest-task`, `error-500`,
   `rate-limit-429`, `cut`, `ask-question` and `ask-questions` (below), and
   for voice calls `voice-reply` (a three-paragraph reply) and `voice-wait`
   (an update, a background job and a wait; the job's output tags its wake
@@ -214,7 +218,16 @@ It is chosen by the request alone, so it behaves the same after restarts:
   returns the same chip). `[script:tool-suggest-task-slow]` then keeps streaming
   for about a minute, so the parent is still mid-turn when you click the chip.
   `[script:tool-task-suggest-task]` makes the same call from a Task subagent, so
-  the chip attaches to the root chat. Read chips at
+  the chip attaches to the root chat. `tool-task-nested-suggest-task` does it from a
+  subagent's subagent (**Dev helper** then **Dev nested**), `tool-swarm-suggest-task` from a
+  Swarm task and `tool-task-current-suggest-task` from a subagent with `base="current"`. `tool-task-late-suggest-task` raises
+  it while the root chat is parked on the subagent, and `-streaming` while the root still streams.
+  `tool-task-fail-suggest-task` has the subagent suggest and then fail, `tool-task-stop-suggest-task`
+  suggest and keep running until you stop it, so you can start the chip after either.
+  Every call names a model: `tool-suggest-task-other-model` names `fake-ai-safe`,
+  `tool-suggest-task-claude` crosses to the fake CLI's `sonnet` (a **Dev (Claude Code)** chat
+  plays `tool-suggest-task-fluid` to cross back), and `tool-suggest-task-bad-model` is refused
+  once and then corrects itself in the same turn. Read chips at
   `GET /api/v1/sessions/{id}/task-chips`. Use a native **Dev agent** chat (its
   Task target is the seeded **Dev helper** agent) or, for
   `[script:tool-suggest-task]`, a **Dev (Claude Code)** chat, where the fake CLI calls the

@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 DEV_AGENT_ID = "dev-agent"
 #: A second Fake AI agent, because an agent is never in its own Task roster.
 DEV_HELPER_AGENT_ID = "dev-helper"
+#: A third, so a subagent can start a subagent: a chain never repeats an agent.
+DEV_NESTED_AGENT_ID = "dev-nested"
 PROVIDER_NAME = "Fake AI (dev)"
 MAIN_PROJECT = "dev-sandbox"
 OTHER_PROJECT = "dev-other"
@@ -278,11 +280,10 @@ async def seed_default() -> dict:
     config = dict((get_profile(DEV_AGENT_ID) or {}).get("config") or {})
     config.update(provider=provider_id, model=composite)
     update_profile(DEV_AGENT_ID, config=config)
-    if get_profile(DEV_HELPER_AGENT_ID) is None:
-        create_profile(
-            DEV_HELPER_AGENT_ID, "Dev helper", "Seeded by the dev loop. A Task target on the Fake AI provider.",
-            config, if_absent=True,
-        )
+    for agent_id, name in ((DEV_HELPER_AGENT_ID, "Dev helper"), (DEV_NESTED_AGENT_ID, "Dev nested")):
+        if get_profile(agent_id) is None:
+            create_profile(agent_id, name, "Seeded by the dev loop. A Task target on the Fake AI provider.",
+                           config, if_absent=True)
     await run_sync(make_dev_agent_the_default)
 
     workspace = Path(settings.effective_workspace_dir).resolve()

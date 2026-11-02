@@ -51,12 +51,15 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 # request rather than the code-mode catalog; 919 chars as a delegated bridge
 # schema) and the rule (318 chars). combined_full 133,634 -> 133,952, eager
 # 53,138 -> 53,456, delegated append 14,877 -> 15,195, delegated loaded
-# 7,327 -> 8,246.
+# 7,327 -> 8,246. Then the owner made the suggesting agent choose the new chat's
+# model, so model routing still holds for chips: a required ``model`` and the
+# shared optional ``effort`` on that one always-loaded schema. Delegated loaded
+# 8,246 -> 8,853; nothing else in these numbers moved.
 # These are actual character counts, not tokenizer or provider billing counts.
 MEASURED_FULL = 133_952
 MEASURED_EAGER = 53_456
 MEASURED_DELEGATED_APPEND = 15_195
-MEASURED_DELEGATED_LOADED_TOOLS = 8_246
+MEASURED_DELEGATED_LOADED_TOOLS = 8_853
 
 
 @pytest.mark.parametrize("native", [True, False])

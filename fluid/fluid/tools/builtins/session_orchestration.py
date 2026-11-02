@@ -129,6 +129,34 @@ def start_session_spec(model_examples=()) -> ToolSpec:
         risk="write", requires_extra=("session_orchestration",))
 
 
+def suggest_task_spec(model_examples=(), current_model=None) -> ToolSpec:
+    """SuggestTask's spec. ``model_examples`` are named as StartSession names them;
+    ``current_model`` is for a surface whose prompt does not name the agent's model."""
+    examples = list(dict.fromkeys(str(value) for value in model_examples if value))
+    return ToolSpec(name="SuggestTask", description=(
+        "Show the owner a chip for work outside your task; one click starts it in a separate chat with "
+        "its own worktree. Starts nothing now: do not fix it here, carry on."),
+        input_schema={"type": "object", "properties": {
+            "title": {"type": "string", "maxLength": 80},
+            "summary": {"type": "string", "maxLength": 240, "description": "What is wrong and why it matters."},
+            "prompt": {"type": "string", "maxLength": 8000, "description": "Standalone brief; the new chat has no transcript."},
+            "model": {"type": "string", "description": (
+                "The new chat's model: choose it for this job following the owner's saved model-routing "
+                "memory or roster; if nothing directs a choice, name your own current model"
+                + (f" ({current_model})" if current_model else "") + ". Never "
+                "fabricate an id. Claude names (opus), display names and prov:<providerId>:<modelId> work."
+                + (f" Examples: {', '.join(examples[:8])}." if examples else ""))},
+            "effort": dict(EFFORT_PROPERTY),
+            "base": {"type": "string", "enum": ["default", "current"],
+                     "description": "default: fresh default branch. current: your committed HEAD, only if the work needs it."},
+            "request_id": {"type": "string", "maxLength": 120, "description": "Same on retries."}},
+            "required": ["title", "summary", "prompt", "model", "request_id"], "additionalProperties": False},
+        risk="safe", requires_extra=("task_chips",),
+        # A Python cell always asks in Ask mode; a chip never should, so this
+        # one tool is called directly and never from a cell.
+        code_mode_allowed=False)
+
+
 SPECS = (
     (ToolSpec(name="ListSessions", description=(
         "Find active top-level peer chats owned by the same user, including idle chats "
@@ -169,21 +197,7 @@ SPECS = (
             "required": ["session_id", "message", "request_id", "kind"], "additionalProperties": False},
         risk="write", requires_extra=("session_orchestration",)), _handler("message")),
     (start_session_spec(), _handler("start")),
-    (ToolSpec(name="SuggestTask", description=(
-        "Show the owner a chip for work outside your task; one click starts it in a separate chat with "
-        "its own worktree. Starts nothing now: do not fix it here, carry on."),
-        input_schema={"type": "object", "properties": {
-            "title": {"type": "string", "maxLength": 80},
-            "summary": {"type": "string", "maxLength": 240, "description": "What is wrong and why it matters."},
-            "prompt": {"type": "string", "maxLength": 8000, "description": "Standalone brief; the new chat has no transcript."},
-            "base": {"type": "string", "enum": ["default", "current"],
-                     "description": "default: fresh default branch. current: this chat's committed HEAD, only if the work needs unmerged work here."},
-            "request_id": {"type": "string", "maxLength": 120, "description": "Same on retries."}},
-            "required": ["title", "summary", "prompt", "request_id"], "additionalProperties": False},
-        risk="safe", requires_extra=("task_chips",),
-        # A Python cell always asks in Ask mode; a chip never should, so this
-        # one tool is called directly and never from a cell.
-        code_mode_allowed=False), _suggest_task),
+    (suggest_task_spec(), _suggest_task),
     _management_tool("SettleSession", "settle",
         "Move a chat from Active to Settled, dismissing pending owner prompts without stopping other work. "
         "This also works offline; the execution worker dismisses its waits on reconnect."),

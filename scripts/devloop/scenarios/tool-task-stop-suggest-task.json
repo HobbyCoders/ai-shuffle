@@ -1,0 +1,23 @@
+{
+  "description": "A Task subagent suggests and keeps streaming for a minute, so it can be stopped after raising the chip.",
+  "steps": [
+    {
+      "text": "Delegating this.",
+      "tool_calls": [
+        {
+          "name": "Task",
+          "input": {
+            "agent": "dev-helper",
+            "prompt": "[script:tool-suggest-task-slow]"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Waiting for the subagent."
+    },
+    {
+      "text": "The subagent ended."
+    }
+  ]
+}

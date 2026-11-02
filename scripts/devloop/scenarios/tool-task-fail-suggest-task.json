@@ -1,0 +1,23 @@
+{
+  "description": "A Task subagent suggests and then fails.",
+  "steps": [
+    {
+      "text": "Delegating this.",
+      "tool_calls": [
+        {
+          "name": "Task",
+          "input": {
+            "agent": "dev-helper",
+            "prompt": "[script:tool-suggest-task-then-fail]"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Waiting for the subagent."
+    },
+    {
+      "text": "The subagent ended."
+    }
+  ]
+}

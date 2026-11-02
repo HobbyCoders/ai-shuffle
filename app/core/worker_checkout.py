@@ -77,6 +77,10 @@ class WorkerCheckoutError(RuntimeError):
     """Fail closed rather than launch a coding worker in the caller's tree."""
 
 
+class BaseCommitUnavailable(WorkerCheckoutError):
+    """The exact commit asked for is not in this repository; no other base stands in."""
+
+
 @dataclass(frozen=True)
 class WorkerCheckout:
     path: str
@@ -248,7 +252,7 @@ def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allo
     tip = git_service._run_git(parent_path, ["rev-parse", "--verify", f"{ref}^{{commit}}"], timeout=5)
     sha = tip.stdout.strip()
     if tip.returncode or not _SHA.fullmatch(sha) or (base_commit and sha != base_commit):
-        raise WorkerCheckoutError("The requested base commit is unavailable locally; fetch it before dispatch.")
+        raise BaseCommitUnavailable("The requested base commit is unavailable locally; fetch it before dispatch.")
     with _project_lock(project["id"]):
         # Pin the chosen SHA: add_worktree must not prefer another origin tip.
         if not git_service.create_branch(parent_path, branch, start_point=sha):

@@ -3788,6 +3788,8 @@ class HarnessAdapter(ProviderAdapter):
         self._working_record_held = None
         if request_extra is not None:
             self._engine.request_extra = request_extra
+        if self._registry is not None and self._options is not None:
+            _amend_suggest_task_spec(self._registry, self._options, requested)
         self._record_applied("model", requested)
 
     async def set_run_settings(self, *, effort: Optional[str], fast: bool) -> dict:
@@ -5402,6 +5404,7 @@ class HarnessAdapter(ProviderAdapter):
             except ImportError:
                 pass  # older vendored fluid without the refinement seam
             self._task_roster_signature = _amend_native_task_spec(registry, options)
+            _amend_suggest_task_spec(registry, options)
             # Same split for Monitor: fluid owns its shape, the app owns
             # its supervision — and `wait_seconds` (the inline settle window)
             # is supervision, so the parameter is spliced onto the vendor spec
@@ -7555,7 +7558,9 @@ def _suggest_task_offered(registry: Any, permitted: Optional[frozenset]) -> bool
     """Whether this native surface can call SuggestTask."""
     if permitted is not None:
         return "SuggestTask" in permitted
-    return registry is not None and registry.get("SuggestTask") is not None
+    return registry is not None and any(
+        spec.name == "SuggestTask" for spec in registry.list_tools(loaded_only=False)
+    )
 
 
 def _context_section(tools: Optional[frozenset[str]] = None) -> str:
@@ -8317,6 +8322,25 @@ def _install_task_contract(registry: ToolRegistry, contract: Any) -> None:
     registry.amend_spec(
         "StartSession", description=spec.description, input_schema=spec.input_schema,
     )
+
+
+def _amend_suggest_task_spec(
+    registry: ToolRegistry, options: SessionOptions, model: Optional[str] = None,
+) -> None:
+    """Name this agent's own model in SuggestTask's ``model`` input.
+
+    The tool tells the agent to name its current model when nothing directs a
+    choice, and this lane's system prompt does not state it (the Claude CLI's
+    does). A no-op when this session has no SuggestTask tool.
+    """
+    try:
+        from app.core.model_override import app_id
+        from app.core.session_orchestration import suggest_task_spec
+
+        current = app_id((options.extra or {}).get("provider_id"), model or options.model)
+        registry.amend_spec("SuggestTask", input_schema=suggest_task_spec(current).input_schema)
+    except Exception:  # noqa: BLE001 — the name is advisory; never break connect
+        logger.debug("[HarnessAdapter] could not amend SuggestTask", exc_info=True)
 
 
 def _amend_native_task_spec(
