@@ -73,13 +73,15 @@ def session_memory(session_id: str | None, cwd: str | None = None):
     """
     from fluid.codemode.skills import project_key_for
 
+    from app.core.api_user_scope import session_api_user_id
     from app.db.sessions import get_session, get_session_by_sdk_id
     if not session_id:
         raise ValueError("Cannot resolve memory ownership without a session")
     session = get_session(session_id) or get_session_by_sdk_id(session_id)
     if not session:
         raise ValueError("Memory session does not exist")
-    owner = f"api:{session['api_user_id']}" if session.get("api_user_id") else "local"
+    principal = session_api_user_id(session)
+    owner = f"api:{principal}" if principal else "local"
     project = session.get("project_v2_id") or session.get("project_id")
     return store_for_owner(owner), f"project:{project}" if project else project_key_for(cwd)
 

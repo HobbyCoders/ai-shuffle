@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from fluid.providers.base import ProviderCaps, StreamChunk
 from fluid.state import (
     project_state_root,
     safe_key,
@@ -38,36 +39,36 @@ async def test_standalone_producers_leave_fresh_git_repo_clean(tmp_path):
     assert not scratch_dir(resumed).exists()  # guidance creates nothing
 
 
+class _OneReplyProvider:
+    name = "fixture"
+    caps = ProviderCaps()
+
+    def __init__(self):
+        self.requests = []
+
+    async def stream(self, request):
+        self.requests.append(request)
+        for chunk in (
+            StreamChunk("message_start", {"usage": {}}),
+            StreamChunk("block_start", {"index": 0, "block_type": "text"}),
+            StreamChunk("text_delta", {"index": 0, "text": "ok"}),
+            StreamChunk("block_stop", {"index": 0}),
+            StreamChunk("usage", {"usage": {}, "stop_reason": "end_turn"}),
+            StreamChunk("message_stop", {}),
+        ):
+            yield chunk
+
+
 @pytest.mark.parametrize("hosted", [False, True])
 async def test_native_cli_scratch_reminder_is_scoped_to_cli_host(tmp_path, hosted):
     from fluid.cli.host import CliHost
+    from fluid.codemode.journal import strip_reminders
     from fluid.config.model import HarnessConfig
     from fluid.engine.native import NativeLoop
     from fluid.events import UserTurn
-    from fluid.codemode.journal import strip_reminders
-    from fluid.providers.base import ProviderCaps, StreamChunk
     from fluid.store.base import MemoryStore
 
-    class Provider:
-        name = "fixture"
-        caps = ProviderCaps()
-
-        def __init__(self):
-            self.requests = []
-
-        async def stream(self, request):
-            self.requests.append(request)
-            for chunk in (
-                StreamChunk("message_start", {"usage": {}}),
-                StreamChunk("block_start", {"index": 0, "block_type": "text"}),
-                StreamChunk("text_delta", {"index": 0, "text": "ok"}),
-                StreamChunk("block_stop", {"index": 0}),
-                StreamChunk("usage", {"usage": {}, "stop_reason": "end_turn"}),
-                StreamChunk("message_stop", {}),
-            ):
-                yield chunk
-
-    provider, store = Provider(), MemoryStore()
+    provider, store = _OneReplyProvider(), MemoryStore()
     extra = {"harness_state_root": tmp_path / "host-state"} if hosted else {}
     loop = NativeLoop(provider=provider, model="fixture", store=store,
                       ctx=ToolCtx(cwd=str(tmp_path), extra=extra))
@@ -86,6 +87,31 @@ async def test_native_cli_scratch_reminder_is_scoped_to_cli_host(tmp_path, hoste
         assert not scratch_dir(loop.ctx).exists()
     finally:
         await host.aclose()
+        await loop.aclose()
+
+
+async def test_a_failed_state_root_never_strands_a_native_turn(tmp_path):
+    """The host's root can raise (its session lookup failed). The turn goes on
+    without the reminders; it must not die before its terminal event."""
+    from fluid.codemode.journal import strip_reminders
+    from fluid.engine.native import NativeLoop
+    from fluid.events import TurnComplete, UserTurn
+    from fluid.store.base import MemoryStore
+
+    def lookup_failed():
+        raise RuntimeError("session lookup failed")
+
+    provider = _OneReplyProvider()
+    loop = NativeLoop(provider=provider, model="fixture", store=MemoryStore(),
+                      ctx=ToolCtx(cwd=str(tmp_path), extra={"harness_state_root": lookup_failed}))
+    try:
+        await loop.submit(UserTurn(content="the prompt"))
+        await asyncio.wait_for(loop.wait_turn(), 5)
+        [request] = provider.requests
+        assert strip_reminders(request.messages[-1].text()) == "the prompt"
+        events = await loop.store.events_since(loop.session_id, 0)
+        assert any(isinstance(event, TurnComplete) for event in events)
+    finally:
         await loop.aclose()
 
 

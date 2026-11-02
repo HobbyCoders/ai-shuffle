@@ -93,6 +93,22 @@ def test_api_key_session_keeps_its_own_store(failed_descriptor: Callable[[], Non
         assert _texts(store) == [KEY_FACT]
 
 
+def test_legacy_worker_inherits_the_keys_store(failed_descriptor: Callable[[], None], owner_store) -> None:  # noqa: F811
+    """A worker minted before workers inherited the column has no owner of its
+    own: it belongs to whoever owns the session that spawned it."""
+    parent, owner = _api_key_session()
+    worker_session = _owner_session(is_worker=True, parent_session_id=parent)
+    assert sessions.get_session(worker_session)["api_user_id"] is None
+
+    for fail_file in (False, True):
+        if fail_file:
+            failed_descriptor()
+        store, _ = session_memory(worker_session)
+        assert store._facts.owner == owner
+        assert store.root == owner_root(owner)
+        assert OWNER_FACT not in _texts(store)
+
+
 def test_project_scope_still_follows_the_row(failed_descriptor: Callable[[], None], tmp_path: Path) -> None:  # noqa: F811
     project = projects_v2.upsert_project("local:memory-descriptor-" + uuid4().hex, name="fixture")
     session_id = _owner_session(project_v2_id=project["id"])
