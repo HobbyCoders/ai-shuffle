@@ -130,7 +130,11 @@ def test_stranger_comment_cannot_suppress_reporting(user):
     ([existing(number=30), existing("closed", number=12)], 30, ["POST"]),
     ([existing("closed", number=30), existing("closed", number=12)], 12, ["PATCH", "POST"]),
 ])
-def test_multiple_bot_matches_warn_and_choose_deterministically(issues, target, methods, capsys):
+@pytest.mark.parametrize("remove_marker", [False, True])
+def test_multiple_bot_matches_warn_and_choose_deterministically(issues, target, methods, remove_marker, capsys):
+    issues = [dict(issue) for issue in issues]
+    if remove_marker:
+        next(issue for issue in issues if issue["number"] == 12)["body"] = "Case marker removed; exact title retained"
     api = FakeGitHub(issues)
     reporter.report(api, RUN, [receipt()])
     assert [method for _, method, _ in api.calls] == methods
@@ -169,6 +173,29 @@ def test_duplicate_bot_issues_dedupe_across_state_changes(before, after, first_t
     reporter.report(api, RUN, [receipt()])
     assert api.calls == [], "the same run must not comment or reopen a different duplicate"
     assert reads == [12, 30, 12, 30], "every matching issue's history must be read before selecting"
+    output = capsys.readouterr().out
+    assert '"action": "skip"' in output and "::warning" in output
+
+
+@pytest.mark.parametrize("other_state", ["open", "closed"])
+def test_rerun_reads_title_only_duplicate_history_after_case_marker_removed(other_state, monkeypatch, capsys):
+    issues = [existing(number=12), existing(other_state, number=30)]
+    api = FakeGitHub(issues)
+    history = {12: [], 30: []}
+    reads = []
+    def comments(number):
+        reads.append(number)
+        return history[number]
+    monkeypatch.setattr(api, "comments", comments)
+    reporter.report(api, RUN, [receipt()])
+    assert api.calls[-1][0:2] == ("issues/12/comments", "POST")
+    history[12].append({"body": api.calls[-1][2]["body"], "user": {"login": "github-actions[bot]"}})
+    issues[0]["body"] = "Case marker removed; exact title retained"
+    api.calls.clear()
+    capsys.readouterr()
+    reporter.report(api, RUN, [receipt()])
+    assert api.calls == [], "retained title must keep the already-reported duplicate in the match set"
+    assert reads == [12, 30, 12, 30]
     output = capsys.readouterr().out
     assert '"action": "skip"' in output and "::warning" in output
 

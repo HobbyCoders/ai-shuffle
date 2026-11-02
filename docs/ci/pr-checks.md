@@ -949,9 +949,9 @@ receipt's `(whole journey)` identity. A first-pass success, an unrecovered
 failure, or a skipped retry does not file an issue. The runner's accepted
 `known-bug` verdict on retry remains accepted and is reported as such.
 
-A stable hidden case marker finds open **and closed** issues authored by
-`github-actions[bot]`; if the marker was removed, the exact generated title
-is a fallback. Markers in anyone else's issues/comments are ignored. If more
+Open **and closed** issues authored by `github-actions[bot]` match when
+**either** the stable hidden case marker **or** the exact generated title is
+present. Markers in anyone else's issues/comments are ignored. If more
 than one bot issue matches, reporting warns and uses the lowest-numbered open
 issue, or the lowest-numbered closed issue if none is open. Each new workflow
 run adds a comment with the latest run link and commit; a closed issue is

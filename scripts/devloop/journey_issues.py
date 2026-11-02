@@ -213,10 +213,8 @@ def report(api: GitHub, run: Run, receipts, *, dry_run: bool = False) -> None:
     labels = None
     for case in cases.values():
         try:
-            matches = [issue for issue in issues if bot_authored(issue) and case.marker in (issue.get("body") or "")]
-            if not matches:
-                # An edited-out marker must not make a second bot issue.
-                matches = [issue for issue in issues if bot_authored(issue) and issue.get("title") == case.title]
+            matches = [issue for issue in issues if bot_authored(issue) and (
+                case.marker in (issue.get("body") or "") or issue.get("title") == case.title)]
             if len(matches) > 1:
                 warning("Multiple bot issues match a flaky case; using the lowest-numbered open issue, else the lowest-numbered closed issue.")
             # Closing a duplicate can change the preferred target between run
