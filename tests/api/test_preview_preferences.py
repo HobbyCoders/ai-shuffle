@@ -22,7 +22,7 @@ def clients(tmp_path, monkeypatch):
     # The direct-LAN owner here needs "trusted LAN, no login" (off by default).
     from app.core import owner_auth
     monkeypatch.setattr(owner_auth, "trusted_lan", lambda: True)
-    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: False)
+    monkeypatch.setattr(preview_access, "_session_exists", lambda session_id: True)
     monkeypatch.setattr(preferences, "request_preference_identity", lambda request: ("account", "owner"))
     rows = {}
 

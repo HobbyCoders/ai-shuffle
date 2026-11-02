@@ -19,7 +19,7 @@ Threat model, and what the token is NOT:
 * It is an HMAC over ``session_id.expires`` under a per-install key kept in
   the data dir (``preview-access.key``, created 0600). Any process sharing the
   data dir — the running worker, or an isolated ``AI_SHUFFLE_PREVIEW=1``
-  instance started from a branch — verifies it statelessly; no DB row, no
+  instance started from a branch — checks the signature statelessly: no
   in-memory table that a second process cannot see.
 * It is honoured ONLY on the local ingress listener and ONLY from a private
   network peer (the same address families ``local_access`` trusts). Unlike
@@ -407,14 +407,12 @@ def _session_exists(session_id: str) -> bool:
     undo every key limit (MCP masking, usage refusal, notes scoping). The
     harness does not mint for such sessions; this refuses any token that was.
 
-    Without a managed database (unit tests, isolated runs) there is no row to
-    check and the signature alone decides.
+    The row always decides, never the signature alone. Only a worker verifies
+    grants, and it cannot serve without the pool it opened at startup. The
+    supervisor's descriptor file says nothing about that pool afterwards, and
+    with no database to ask the answer is no.
     """
     try:
-        from app.core.config import settings
-
-        if not settings.managed_database_available():
-            return True
         from app.core.api_user_scope import session_api_user_id
         from app.db.sessions import get_session
 

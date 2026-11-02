@@ -56,7 +56,7 @@ def ctx(mock_db, tmp_path, monkeypatch):
     monkeypatch.setitem(config._runtime_overrides, "workspace_dir", tmp_path)
     monkeypatch.setattr(settings, "cookie_secure", False)
     monkeypatch.setattr(settings, "shuffle_local_access", True)
-    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: False)
+    monkeypatch.setattr(preview_access, "_session_exists", lambda session_id: True)
     monkeypatch.setattr(owner_auth, "trusted_lan", lambda: False)
     monkeypatch.setattr(service, "worker_identity", lambda: dict(WORKER))
     work = tmp_path / "work"

@@ -26,8 +26,8 @@ SESSION = "sess-preview-1"
 @pytest.fixture(autouse=True)
 def _isolated_key(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
-    # No managed DB in unit tests → the signature alone decides.
-    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: False)
+    # Every session asked about is a live owner row unless a test says otherwise.
+    monkeypatch.setattr("app.db.sessions.get_session", lambda session_id: {"id": session_id})
     monkeypatch.setattr(settings, "shuffle_local_access", True)
     # The direct-LAN owner here needs "trusted LAN, no login" (off by default).
     from app.core import owner_auth
@@ -104,7 +104,6 @@ def test_tampered_expired_and_foreign_tokens_are_refused(monkeypatch):
 
 
 def test_token_is_bound_to_a_live_session(monkeypatch):
-    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: True)
     monkeypatch.setattr("app.db.sessions.get_session", lambda sid: {"id": sid} if sid == SESSION else None)
     assert preview_access.verify(preview_access.mint(SESSION)) is not None
     assert preview_access.verify(preview_access.mint("sess-gone")) is None
