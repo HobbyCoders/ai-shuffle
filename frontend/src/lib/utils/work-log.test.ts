@@ -2040,12 +2040,12 @@ describe('live runs', () => {
 		const after = buildDisplayItems([prompt, a, b, narration, ran, c, latest], LIVE);
 		expect(runsOf(liveLog(after)!)).toEqual([[0, [a, b, narration, ran, c]]]);
 		expect(collapsedVisibleMessages(after)).toEqual([prompt, latest]);
-		// While the next prose streams, the last finished prose still ends the
-		// run, so nothing unfolds for the moment the new paragraph arrives.
+		// The next prose takes over as it starts, so nothing unfolds for a moment
+		// and the fold has already happened by the time it finishes.
 		const streaming = msg({ type: 'text', content: 'Writing', streaming: true });
 		const mid = buildDisplayItems([prompt, a, b, narration, streaming], LIVE);
-		expect(runsOf(liveLog(mid)!)).toEqual([[0, [a, b]]]);
-		expect(collapsedVisibleMessages(mid)).toEqual([prompt, narration, streaming]);
+		expect(runsOf(liveLog(mid)!)).toEqual([[0, [a, b, narration]]]);
+		expect(collapsedVisibleMessages(mid)).toEqual([prompt, streaming]);
 	});
 
 	// The owner's coordinator turn (2026-10-11): a failed SendMessage and Bash
@@ -2175,14 +2175,41 @@ describe('live runs', () => {
 		expect(visibleAfter).toContain(steer);
 	});
 
-	it('does not end a run at prose that is still streaming', () => {
+	// A fold above the prose being read moves it up by the height of what folded.
+	// On a phone that alone reached the journeys' layout-shift limit, so the fold
+	// happens as the prose starts, while it has no position to lose.
+	it('folds the work above prose when it starts, and changes nothing when it finishes', () => {
 		const prompt = user('go');
 		const a = tool();
 		const streaming = msg({ type: 'text', content: 'Found it:\n- partial', streaming: true });
-		const items = buildDisplayItems([prompt, a, streaming], LIVE);
-		expect(liveLog(items)!.runs).toEqual([]);
-		const done = buildDisplayItems([prompt, a, { ...streaming, streaming: false }], LIVE);
+		const started = buildDisplayItems([prompt, a, streaming], LIVE);
+		expect(runsOf(liveLog(started)!)).toEqual([[0, [a]]]);
+		expect(collapsedVisibleMessages(started)).toEqual([prompt, streaming]);
+		const finished = { ...streaming, streaming: false };
+		const done = buildDisplayItems([prompt, a, finished], LIVE);
 		expect(runsOf(liveLog(done)!)).toEqual([[0, [a]]]);
+		expect(collapsedVisibleMessages(done)).toEqual([prompt, finished]);
+		expect(liveLog(done)!.key).toBe(liveLog(started)!.key);
+	});
+
+	it('leaves the work on screen until prose has a word to show', () => {
+		const prompt = user('go');
+		const a = tool();
+		const empty = msg({ type: 'text', content: '', streaming: true });
+		const items = buildDisplayItems([prompt, a, empty], LIVE);
+		expect(liveLog(items)!.runs).toEqual([]);
+		expect(collapsedVisibleMessages(items)).toContain(a);
+	});
+
+	it('keeps the last finished prose as the latest while streaming prose is not the tail', () => {
+		const prompt = user('go');
+		const [a, b] = [tool(), tool()];
+		const narration = text('Now the workflow.');
+		const streaming = msg({ type: 'text', content: 'Writing', streaming: true });
+		const running = tool({ toolStatus: 'running', streaming: true });
+		const items = buildDisplayItems([prompt, a, narration, streaming, b, running], LIVE);
+		expect(runsOf(liveLog(items)!)).toEqual([[0, [a]]]);
+		expect(collapsedVisibleMessages(items)).toContain(narration);
 	});
 
 	it('emits no runs and no work log when grouping is off', () => {
