@@ -199,6 +199,7 @@ const STREAM = {
 
 const SUBAGENT = {
 	name: 'subagent',
+	allow: [{ kind: 'failed_requests', status: 409, url: /\/git\/fetch(\?|$)/, reason: 'the git panel refreshes when the turn ends and the server refuses to fetch while the subagent is still working; it has nothing to do with chips' }],
 	setup: async (ctx) => { await openedChat(ctx); },
 	async act({ page, mark, log, variant }) {
 		await mark('delegate to a subagent that suggests while this chat waits');
