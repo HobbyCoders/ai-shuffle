@@ -66,6 +66,58 @@ def existing(state="open", body=None, *, number=17, login="github-actions[bot]")
             "title": CASE.title, "user": {"login": login}}
 
 
+OTHER_CASE_MARKER = reporter.FlakyCase("copy", "copy@desktop-slow", "fail", "pass").marker
+DAMAGED_CASE_MARKERS = {
+    "closing-deleted": CASE.marker.removesuffix("-->"),
+    "hash-truncated": CASE.marker.removesuffix(" -->")[:-1] + " -->",
+    "bare-prefix": "<!-- ui-journey-flake:v1:",
+    "quoted-prefix": "The original hidden marker began with `<!-- ui-journey-flake:v1:`.",
+}
+
+
+@pytest.mark.parametrize("login", ["github-actions[bot]", "someone-else"])
+@pytest.mark.parametrize("exact_title", [False, True])
+@pytest.mark.parametrize("body,owns_marker", [
+    pytest.param(CASE.marker, True, id="own"),
+    pytest.param(OTHER_CASE_MARKER, False, id="other"),
+    pytest.param(CASE.marker + "\n" + OTHER_CASE_MARKER, True, id="own-and-other"),
+    pytest.param("", None, id="no-marker"),
+    pytest.param(None, None, id="null-body"),
+    *[pytest.param(body, None, id=name) for name, body in DAMAGED_CASE_MARKERS.items()],
+])
+def test_case_matching_uses_complete_markers_then_exact_title(body, owns_marker, exact_title, login):
+    issue = existing(number=12, login=login)
+    issue.update(body=body, title=CASE.title if exact_title else "Renamed issue")
+    api = FakeGitHub([issue])
+    reporter.report(api, RUN, [receipt()])
+    matches = login == "github-actions[bot]" and (exact_title if owns_marker is None else owns_marker)
+    route = "issues/12/comments" if matches else "issues"
+    assert [(path, method) for path, method, _ in api.calls] == [(route, "POST")]
+
+
+@pytest.mark.parametrize("later_run", [False, True])
+@pytest.mark.parametrize("damaged_body", DAMAGED_CASE_MARKERS.values(), ids=DAMAGED_CASE_MARKERS.keys())
+def test_damaged_marker_preserves_rerun_history_and_reopens_for_later_run(damaged_body, later_run):
+    issue = existing(number=12)
+    api = FakeGitHub([issue])
+    reporter.report(api, RUN, [receipt()])
+    assert api.calls[-1][0:2] == ("issues/12/comments", "POST")
+    api.history.append({"body": api.calls[-1][2]["body"], "user": {"login": "github-actions[bot]"}})
+    issue.update(body=damaged_body, state="closed")
+    api.calls.clear()
+    run = reporter.Run(RUN.repository, RUN.id + 1, RUN.commit) if later_run else RUN
+    reporter.report(api, run, [receipt()])
+    if later_run:
+        assert [(route, method) for route, method, _ in api.calls] == [
+            ("issues/12", "PATCH"), ("issues/12/comments", "POST")]
+        assert api.calls[0][2] == {"state": "open"}
+        assert "came back" in api.calls[-1][2]["body"]
+        assert CASE.marker in api.calls[-1][2]["body"]
+        assert run.marker in api.calls[-1][2]["body"]
+    else:
+        assert api.calls == [], "a damaged case marker must not hide the already-reported run"
+
+
 def test_new_issue_contains_only_structured_fields_and_existing_label():
     api = FakeGitHub()
     reporter.report(api, RUN, [receipt()])

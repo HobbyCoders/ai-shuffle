@@ -114,6 +114,14 @@ def bot_authored(entry: dict) -> bool:
     return (entry.get("user") or {}).get("login") == "github-actions[bot]"
 
 
+def matches_case(case: FlakyCase, issue: dict) -> bool:
+    """Trust complete body markers; otherwise recover only by exact title."""
+    if not bot_authored(issue):
+        return False
+    markers = re.findall(r"<!-- ui-journey-flake:v1:[0-9a-f]{64} -->", issue.get("body") or "")
+    return case.marker in markers if markers else issue.get("title") == case.title
+
+
 def already_reported(run: Run, entries: list[dict]) -> bool:
     return any(bot_authored(entry) and run.marker in (entry.get("body") or "") for entry in entries)
 
@@ -213,11 +221,7 @@ def report(api: GitHub, run: Run, receipts, *, dry_run: bool = False) -> None:
     labels = None
     for case in cases.values():
         try:
-            # The body's case identity outranks an editable title. A title can
-            # recover a removed marker, but cannot claim another marked case.
-            matches = [issue for issue in issues if bot_authored(issue) and (
-                case.marker in (issue.get("body") or "") or (
-                    issue.get("title") == case.title and "<!-- ui-journey-flake:v1:" not in (issue.get("body") or "")))]
+            matches = [issue for issue in issues if matches_case(case, issue)]
             if len(matches) > 1:
                 warning("Multiple bot issues match a flaky case; using the lowest-numbered open issue, else the lowest-numbered closed issue.")
             # Closing a duplicate can change the preferred target between run
