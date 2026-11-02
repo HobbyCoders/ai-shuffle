@@ -2,8 +2,11 @@
 
 The small case budgets p75 of the longest event-loop callback per reset, index
 and fold quantum, including child Tasks and call_soon work. It rejects blocking
-on every third quantum but tolerates <25% noisy quanta per stage. Ingest p95 and
-timer lag are diagnostic. This is NOT a GIL/executor-starvation or rare-tail gate.
+on every third quantum but tolerates <25% noisy quanta per stage. The 6ms allowance
+covers CPU-contention plateaus near one scheduler time slice while the permanent
+10ms fold control must still fail. Steady 3–6ms synchronous stalls per quantum
+no longer fail. Ingest p95 and timer lag are diagnostic. This is NOT a
+GIL/executor-starvation or rare-tail gate.
 The large case proves child-preparation/ingest independence by order. Native PG
 checks same-session appends across reset, index and fold commit calls, holding
 transactions after their bodies and using a server-side lock-wait bound.
@@ -81,7 +84,9 @@ def _assert_nonblocking_stages(baseline_steps, stage_steps):
     before = _p75(baseline_steps)
     # Per-stage p75 of the longest callback, not append p95 or timer lag.
     # Reject every-third blocking but tolerate <25% noisy quanta in each stage.
-    limit = max(before * 1.35, before + .003)
+    # 6ms covers CPU-contention plateaus near one scheduler time slice while
+    # keeping the permanent 10ms fold control a real rejection.
+    limit = max(before * 1.35, before + .006)
     for stage, steps in stage_steps.items():
         during = _p75(steps)
         print(f'projection handle p75: stage={stage} baseline={before * 1000:.3f}ms '

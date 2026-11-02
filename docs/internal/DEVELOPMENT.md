@@ -319,17 +319,23 @@ while preparation is held in its child process, on the SQLite shim and native
 PostgreSQL; its ingest p95 and timer lag are diagnostic, not numeric gates. The
 small scenario checks p75 of the longest event-loop callback in each reset, index
 and fold quantum, including spawned tasks and callbacks, against the same-run
-baseline with a 3ms allowance. Every fold overlaps a live append (an in-flight
+baseline with a 6ms allowance (keeping the 1.35x term). CPU contention plateaus
+near one scheduler time slice, so 6ms tolerates that noise while the permanent
+10ms fold control must still fail. Every fold overlaps a live append (an in-flight
 append counts); real blocking, child-task, failed-cycle and single-slow-append
 controls protect the measurement. Native PostgreSQL appends to the projected
 session throughout reset, index and fold commit calls, holding each transaction
 after its body and bounding actual source-row lock waits with SET LOCAL
 lock_timeout=10ms (not a CPU deadline). The shim cannot model row locks. Controls
 run once; main repeats only the two primary ratchets. Limits: per-stage p75
-tolerates <25% noisy quanta; this does not gate rare stalls or GIL/executor
-starvation. An append median/p75 gate was also insensitive to those regressions,
-because many fast completions dilute the few long appends.
-These checks do not authorize enabling production without the large-database check.
+tolerates <25% noisy quanta and does not gate rare stalls. A steady 3–6ms
+synchronous stall per quantum no longer fails. Thread and executor starvation
+is not caught: CPU-heavy Python in `to_thread` or `database()` helper threads,
+or executor floods, can still delay appends. An append median/p75 gate was also
+insensitive to those regressions, because many fast completions dilute the few
+long appends. Before anyone enables the default-off transcript producer, the
+required large-database check must measure append latency under real fold load;
+this test does not guard that.
 **Reads are not implemented or negotiated:** opening chat
 still uses the existing event feed and full replay. Unset the switch (or set it
 to `0`) and restart to stop production. Neither setting changes serving, mutates
