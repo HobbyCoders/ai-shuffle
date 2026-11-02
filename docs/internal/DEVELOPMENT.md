@@ -314,11 +314,14 @@ Background production is **default-off**. On an approved worker with Node 22 or
 newer, set `AI_SHUFFLE_TRANSCRIPT_PRODUCER=1` and restart to build
 installation-local settled-message records. Enabling production is its own later
 step, after measuring a large real database; do not start a fleet-wide backfill
-with this change. Enabling it is also blocked by
-[the large-fold ingest regression](https://github.com/HobbyCoders/ai-shuffle/issues/902).
-The large-record CI scenario gates both ingest and loop-lag budgets at their
-original limits against the SQLite shim and native PostgreSQL; the contention
-fix does not authorize enabling production without the large-database check.
+with this change. The large-record CI scenario proves that live appends finish
+while preparation is held in its child process, on the SQLite shim and native
+PostgreSQL; ingest p95 and timer lag are diagnostic, not numeric gates. The small
+scenario budgets p75 synchronous loop occupancy separately for reset, index and
+fold, with continuous ingest and a real blocking-fold negative control. Native
+PostgreSQL also requires same-session appends to finish while a fold commit is
+held open (the shim serializes writers and cannot model this row-lock check).
+These checks do not authorize enabling production without the large-database check.
 **Reads are not implemented or negotiated:** opening chat
 still uses the existing event feed and full replay. Unset the switch (or set it
 to `0`) and restart to stop production. Neither setting changes serving, mutates
