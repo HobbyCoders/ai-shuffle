@@ -3776,7 +3776,11 @@ class NativeLoop(BackgroundLifecycleMixin):
             from fluid.tools.builtins.ledger import read_ledger, render_ledger_reminder
         except ImportError:
             return None
-        text = read_ledger(self.ctx, self._session.session_id if self._session else None)
+        try:
+            text = read_ledger(self.ctx, self._session.session_id if self._session else None)
+        except Exception:  # noqa: BLE001 — a reminder never fails a turn
+            log.warning("reading the session ledger failed", exc_info=True)
+            return None
         if not text:
             return None
         return render_ledger_reminder(text)
@@ -3791,7 +3795,11 @@ class NativeLoop(BackgroundLifecycleMixin):
             from fluid.tools.builtins.note import read_notes, render_notes_reminder
         except ImportError:
             return None
-        text = read_notes(self.ctx, self._session.session_id if self._session else None)
+        try:
+            text = read_notes(self.ctx, self._session.session_id if self._session else None)
+        except Exception:  # noqa: BLE001 — a reminder never fails a turn
+            log.warning("reading the session notes failed", exc_info=True)
+            return None
         if not text:
             return None
         return render_notes_reminder(text)

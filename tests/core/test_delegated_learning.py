@@ -23,7 +23,7 @@ from fluid.providers.base import StreamChunk
 from fluid.tools.registry import ToolRegistry
 
 import app.core.provider.harness_adapter as ha
-from app.core import credential_gate
+from app.core import credential_gate, fluid_memory
 from app.core.config import settings
 from app.core.provider.events import ResultMessage
 from app.core.provider.types import SessionOptions
@@ -52,8 +52,10 @@ def _isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda **_: [sys.executable, str(FAKE)])
     monkeypatch.setattr(settings, "fluid_continual", True)
     monkeypatch.setattr(settings, "fluid_continual_model", None)
-    # No database: session_memory resolves the installation owner's store.
+    # No database, so no session row: these tests run as the installation owner.
     monkeypatch.setattr(type(settings), "managed_database_available", lambda self: False)
+    monkeypatch.setattr(fluid_memory, "session_memory", lambda _session_id, cwd=None: (
+        fluid_memory.store_for_owner("local"), project_key_for(cwd)))
     # Pacing is the daily spread of calls; these tests are about the trigger.
     monkeypatch.setattr(continual_mod, "MIN_PASS_INTERVAL", 0.0)
     monkeypatch.setattr(continual_mod, "PACE_BURST_CALLS", 48)

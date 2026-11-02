@@ -1206,7 +1206,14 @@ class Settings(BaseSettings):
             raise RuntimeError(message) from None
 
     def managed_database_available(self) -> bool:
-        """Availability probe for tools that can operate without a database."""
+        """Availability probe for tools that can operate without a database.
+
+        This validates the descriptor file; it does not look at the pool. A
+        running worker's pool keeps working when the file later fails this
+        check, so False does not mean "no database". Never use it to decide
+        identity, ownership or authorization: ask the database and let a
+        failed lookup refuse.
+        """
         try:
             self.get_database_connection()
             return True

@@ -111,10 +111,16 @@ async def _first_request(monkeypatch, tmp_path, *, code_mode: bool,
                          session_mode: str | None = None, **restrictions):
     import app.core.provider.harness_adapter as ha
     import fluid.context.plugins as fluid_plugins
+    from fluid.codemode.skills import project_key_for
+
+    from app.core import fluid_memory
     from app.core.config import settings
     from app.core.environment import get_security_instructions
     from app.mcp.chat_access_sdk import GUIDANCE
 
+    # No session row here: the priced request is the installation owner's.
+    monkeypatch.setattr(fluid_memory, "session_memory", lambda _session_id, cwd=None: (
+        fluid_memory.store_for_owner("local"), project_key_for(cwd)))
     home = tmp_path / "home"
     cwd = tmp_path / "work"
     home.mkdir()

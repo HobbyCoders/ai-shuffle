@@ -70,6 +70,19 @@ def _claude_cli_on_path(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _owner_session(monkeypatch):
+    """Native connects here have no session row: they run as the installation
+    owner. Row lookups are covered in tests/core/test_user_memory_routing.py and
+    tests/db/test_memory_owner_descriptor_failure_postgres.py."""
+    from fluid.codemode.skills import project_key_for
+
+    from app.core import fluid_memory
+
+    monkeypatch.setattr(fluid_memory, "session_memory", lambda _session_id, cwd=None: (
+        fluid_memory.store_for_owner("local"), project_key_for(cwd)))
+
+
 # ─── Fakes ────────────────────────────────────────────────────────────────────
 
 
