@@ -159,7 +159,8 @@ def parse_journey_log(log: str) -> list[tuple[str, float, int]]:
 
 
 def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS) -> None:
-    """Recompute medians from completed green runs using the GitHub CLI's auth."""
+    """Recompute medians from complete, clean first-attempt runs matching this checkout."""
+    expected = {path.name for path in journey_files(JOURNEYS)}
     repo = subprocess.check_output(["gh", "repo", "view", "--json", "nameWithOwner",
                                     "--jq", ".nameWithOwner"], cwd=ROOT, text=True, timeout=120).strip()
     durations = defaultdict(list)
@@ -167,10 +168,14 @@ def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS) -> None:
     run_ids = sorted(set(run_ids))
     for run_id in run_ids:
         state = json.loads(subprocess.check_output(
-            ["gh", "run", "view", str(run_id), "--repo", repo, "--json", "status,conclusion"],
+            ["gh", "run", "view", str(run_id), "--repo", repo, "--json", "status,conclusion,attempt"],
             cwd=ROOT, text=True, timeout=120))
-        if state != {"status": "completed", "conclusion": "success"}:
+        if state.get("status") != "completed" or state.get("conclusion") != "success":
             raise ValueError(f"Run {run_id} must be completed and green: {state}")
+        if state.get("attempt") != 1:
+            raise ValueError(f"Run {run_id} cannot be used for runtime weights: "
+                             f"attempt {state.get('attempt')} is not 1; re-run logs omit earlier jobs. "
+                             "Choose a clean first-attempt run.")
         logs = subprocess.check_output(
             ["gh", "api", f"repos/{repo}/actions/runs/{run_id}/logs"], cwd=ROOT, timeout=120)
         samples = []
@@ -180,15 +185,20 @@ def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS) -> None:
                         if "/" not in name and "UI journeys" in name and name.endswith(".txt")]
         # Check the entire run before parsing attempt 1's failed/incomplete footer.
         # A whole-file retry's footer must never be mistaken for attempt 1's runtime.
-        if any(re.search(r"(?m)^\S+ \[ci\] retrying \S+\.journey\.mjs:", log) for log in job_logs):
+        if any(re.search(r"\[ci\] retrying \S+\.journey\.mjs:", log) for log in job_logs):
             raise ValueError(f"Run {run_id} contained retries and cannot be used for runtime weights; "
                              "choose a clean first-pass run")
         for log in job_logs:
             samples.extend(parse_journey_log(log))
         if not samples:
             raise ValueError(f"Run {run_id} has no completed UI journey measurements")
-        if len({name for name, _, _ in samples}) != len(samples):
+        measured = {name for name, _, _ in samples}
+        if len(measured) != len(samples):
             raise ValueError(f"Run {run_id} has duplicate journey measurements")
+        if measured != expected:
+            raise ValueError(f"Run {run_id} has mismatched journey coverage: "
+                             f"missing {sorted(expected - measured)}; unexpected {sorted(measured - expected)}. "
+                             "Choose a complete run matching this checkout.")
         for name, seconds, cases in samples:
             durations[name].append(seconds)
             per_case.append(seconds / cases)

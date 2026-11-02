@@ -891,10 +891,16 @@ timestamped whole-job logs from the runs' logs archives, measures each
 `[ci] running <file>` through its own passing case-count footer (including
 the last journey, excluding instance teardown), and stores median seconds per
 journey. The fallback is the median of each sample's seconds divided by its
-case count. Runs containing any journey retry are refused with a clear message,
-even when green: use clean first-pass runs for weights. Failed, incomplete or
-duplicate measurements are also refused before replacing the file; a retried
-run never writes weights. Estimates are not first-attempt time limits: keep
+case count. Use completed green runs on **attempt 1**, with no journey retries.
+All re-runs (`attempt != 1`) are refused: GitHub's logs archive contains only
+the latest attempt's jobs, so it cannot prove earlier attempts had no retries.
+A retry marker anywhere in a journey log, including after unterminated output,
+also refuses the run. Each run must measure every `*.journey.mjs` in the current
+checkout exactly once, with no extra journeys; missing coverage cannot be
+filled by another run or by an already-incomplete weights file. Use complete
+runs whose journey inventory matches this checkout. Failed, incomplete,
+duplicate, partial or retried measurements are refused with a clear message
+before replacing the file. Estimates are not first-attempt time limits: keep
 measurements current and check headroom against the unchanged 25-minute journey
 step on the four standard hosted runners.
 
