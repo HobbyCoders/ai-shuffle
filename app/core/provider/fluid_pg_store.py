@@ -15,6 +15,15 @@ writes ride ``run_sync`` so the event loop never blocks on the driver.
 Event appends are idempotent per (session_id, seq) — ``ON CONFLICT DO
 NOTHING`` — because fluid's EventBus can replay a tail after reconnect and the
 store must not duplicate rows.
+
+Each session has one writer at a time. Cancelling a task does not stop the
+thread running its transaction, so a replaced engine's write can still commit
+after its successor started. ``claim_session`` therefore bumps
+``fluid_sessions.writer_generation``; that row update waits for any write already
+in its transaction, and every later write checks its own generation in the same
+transaction. A replaced store's writes are dropped without an error, because
+its engine has not failed: it is simply no longer the one recording this session.
+A store that never claimed (a reader, or a script) writes unchecked.
 """
 
 from __future__ import annotations
@@ -31,7 +40,7 @@ from psycopg2.extras import Json
 
 from app.core import api_user_scope, artifact_access
 from app.db import session_recall
-from app.db.async_database import run_sync, run_event_write
+from app.db.async_database import run_maintenance, run_sync, run_event_write
 from app.db.base import get_db, get_turn_db, get_event_db
 
 # Same Postgres-illegal code-point scrub the Claude session store applies at its
@@ -80,15 +89,53 @@ def _as_dict(value: Any) -> Dict[str, Any]:
 
 # ─── Sync DB primitives (run under run_sync) ─────────────────────────────────
 
-def _create_session_sync(meta: SessionMeta) -> None:
+# Inside the 60s connect budget, so a stuck writer fails the connect cleanly
+# rather than leaving this update queued behind a caller that has gone.
+_CLAIM_LOCK_TIMEOUT_MS = 15_000
+
+
+class _ClaimAbandoned(Exception):
+    """The connect waiting on a claim was cancelled, so the claim must not land."""
+
+
+def _create_session_sync(meta: SessionMeta) -> int:
+    """Create the row and return this store's generation for it.
+
+    Losing a creation race is a takeover like any other, so the row's existing
+    writer stops rather than sharing the session.
+    """
     with get_db() as conn:
-        conn.cursor().execute(
+        cur = conn.cursor()
+        cur.execute(
             "INSERT INTO fluid_sessions "
             "(session_id, head_node_id, created_at, cli_session_id, project_root) "
-            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (session_id) DO NOTHING",
+            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (session_id) DO UPDATE "
+            "SET writer_generation = fluid_sessions.writer_generation + 1 "
+            "RETURNING writer_generation",
             (meta.session_id, meta.head_node_id, meta.created_at,
              meta.cli_session_id, meta.project_root),
         )
+        return int(cur.fetchone()["writer_generation"])
+
+
+def _claim_session_sync(session_id: str, *, stop: Any) -> Optional[int]:
+    """Become the session's writer; None when there is no such session yet.
+
+    The update waits out every write that holds the row, so all of the previous
+    writer's commits are visible to whatever the caller reads next.
+    """
+    with get_turn_db() as conn:
+        cur = conn.cursor()
+        cur.execute(f"SET LOCAL lock_timeout = '{_CLAIM_LOCK_TIMEOUT_MS}ms'")
+        cur.execute(
+            "UPDATE fluid_sessions SET writer_generation = writer_generation + 1 "
+            "WHERE session_id = %s RETURNING writer_generation", (session_id,),
+        )
+        row = cur.fetchone()
+        # A generation nobody will use would lock out a retry that claimed since.
+        if stop.is_set():
+            raise _ClaimAbandoned(session_id)
+    return int(row["writer_generation"]) if row else None
 
 
 def _load_session_sync(session_id: str, *, include_nodes: bool = True) -> Optional[Dict[str, Any]]:
@@ -388,9 +435,32 @@ def _last_event_seq_sync(session_id: str) -> int:
     return int(row["seq"]) if row else 0
 
 
-def _append_node_sync(session_id: str, node: SessionNode, *, measure_bytes: bool = True) -> int:
+def _writer_generations_sync(session_ids: List[str]) -> Dict[str, int]:
+    placeholders = ", ".join(["%s"] * len(session_ids))
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT session_id, writer_generation FROM fluid_sessions "
+            f"WHERE session_id IN ({placeholders})",
+            tuple(session_ids),
+        )
+        return {row["session_id"]: int(row["writer_generation"]) for row in cur.fetchall()}
+
+
+def _owner_check(generation: Optional[int]) -> tuple[str, tuple]:
+    """The WHERE clause and parameters limiting an update to the current writer."""
+    if generation is None:
+        return "", ()
+    return " AND writer_generation = %s", (generation,)
+
+
+def _append_node_sync(
+    session_id: str, node: SessionNode, *,
+    measure_bytes: bool = True, generation: Optional[int] = None,
+) -> Optional[int]:
     """Insert the node and advance the head in one transaction (JsonlStore
-    parity: append implies head-move)."""
+    parity: append implies head-move). None when another writer took over: the
+    head is updated first so a refused node leaves nothing behind."""
     message = _scrub_pg_illegal(scrub_url_credentials(node.message.to_dict()))
     if node.message.context_pin is not None:
         # The privacy transforms can change lengths before or inside the
@@ -400,6 +470,13 @@ def _append_node_sync(session_id: str, node: SessionNode, *, measure_bytes: bool
         message = Message.from_dict(message).pin_context(pinned).to_dict()
     with get_turn_db() as conn:
         cur = conn.cursor()
+        check, params = _owner_check(generation)
+        cur.execute(
+            f"UPDATE fluid_sessions SET head_node_id = %s WHERE session_id = %s{check}",
+            (node.node_id, session_id, *params),
+        )
+        if generation is not None and cur.rowcount == 0:
+            return None
         cur.execute(
             "INSERT INTO fluid_session_nodes "
             "(session_id, node_id, parent_id, ts, message) "
@@ -407,37 +484,59 @@ def _append_node_sync(session_id: str, node: SessionNode, *, measure_bytes: bool
             "ON CONFLICT (session_id, node_id) DO NOTHING",
             (session_id, node.node_id, node.parent_id, node.ts, Json(message)),
         )
-        cur.execute(
-            "UPDATE fluid_sessions SET head_node_id = %s WHERE session_id = %s",
-            (node.node_id, session_id),
-        )
     # Count raw cached payload off-loop as well as the SQL serialization. A
     # delegated metadata-only store needs neither the count nor another copy.
     return len(json.dumps(node.message.to_dict())) if measure_bytes else 0
 
 
-def _set_head_sync(session_id: str, node_id: Optional[str]) -> None:
+def _set_head_sync(
+    session_id: str, node_id: Optional[str], *, generation: Optional[int] = None,
+) -> bool:
+    check, params = _owner_check(generation)
     with get_db() as conn:
-        conn.cursor().execute(
-            "UPDATE fluid_sessions SET head_node_id = %s WHERE session_id = %s",
-            (node_id, session_id),
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE fluid_sessions SET head_node_id = %s WHERE session_id = %s{check}",
+            (node_id, session_id, *params),
         )
+        return generation is None or cur.rowcount > 0
 
 
-def _set_cli_session_id_sync(session_id: str, cli_session_id: Optional[str]) -> None:
+def _set_cli_session_id_sync(
+    session_id: str, cli_session_id: Optional[str], *, generation: Optional[int] = None,
+) -> bool:
+    check, params = _owner_check(generation)
     with get_turn_db() as conn:
-        conn.cursor().execute(
-            "UPDATE fluid_sessions SET cli_session_id = %s WHERE session_id = %s",
-            (cli_session_id, session_id),
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE fluid_sessions SET cli_session_id = %s WHERE session_id = %s{check}",
+            (cli_session_id, session_id, *params),
         )
+        return generation is None or cur.rowcount > 0
 
 
-def _append_events_sync(session_id: str, events: List[Event]) -> None:
+def _append_events_sync(
+    session_id: str, events: List[Event], *, generation: Optional[int] = None,
+) -> bool:
+    """Commit the events; False when another writer took over and none were.
+
+    ``FOR SHARE`` lets the session's event writes run side by side but makes a
+    takeover wait for them. A share lock is also re-checked against a takeover
+    it waited on, so this cannot see the generation that takeover replaced.
+    """
     # One transaction for consecutive reconstructible deltas and their barrier.
     payloads = [(e.seq, _scrub_pg_illegal(scrub_url_credentials(event_to_dict(e))))
                 for e in events]
     with get_event_db() as conn:
         cur = conn.cursor()
+        if generation is not None:
+            cur.execute(
+                "SELECT 1 FROM fluid_sessions WHERE session_id = %s "
+                "AND writer_generation = %s FOR SHARE",
+                (session_id, generation),
+            )
+            if cur.fetchone() is None:
+                return False
         for seq, payload in payloads:
             cur.execute(
                 "INSERT INTO fluid_session_events (session_id, seq, event) "
@@ -450,6 +549,7 @@ def _append_events_sync(session_id: str, events: List[Event]) -> None:
                     "type=%s (a row with that seq already exists)",
                     session_id, seq, payload.get("_cls"),
                 )
+    return True
 
 
 # ─── Cross-session search ────────────────────────────────────────────────────
@@ -1558,9 +1658,57 @@ class PgFluidStore:
         self._loaded: set = set()
         self._load_lock = asyncio.Lock()
         self._event_lock = asyncio.Lock()
+        # Handle writes are fire-and-forget tasks on separate threads. Keep them
+        # in order: a refused --resume's erase must land before the new handle.
+        self._handle_lock = asyncio.Lock()
         self._resume_trim_pending = False
+        # The generation each claimed session is written under, and the sessions
+        # another writer has since taken over (see the module docstring).
+        self._generations: Dict[str, int] = {}
+        self._replaced: set = set()
+        # Claimed before their row existed, so nothing has been taken over yet.
+        self._claim_when_found: set = set()
+
+    async def claim_session(self, session_id: str) -> None:
+        """Take the session over from any earlier writer, before reading it.
+
+        Raises if the claim fails: carrying on could reuse numbers the previous
+        writer has already issued. No session yet is fine, ``create_session``
+        then records the generation of the row it creates.
+        """
+        generation = await run_maintenance(_claim_session_sync, session_id)
+        if generation is None:
+            self._claim_when_found.add(session_id)
+        else:
+            self._claim_when_found.discard(session_id)
+            self._generations[session_id] = generation
+
+    def lost_ownership(self) -> bool:
+        """Whether a write here was refused because another writer took over."""
+        return bool(self._replaced)
+
+    async def check_ownership(self) -> bool:
+        """Whether another writer took over, including while nothing here wrote.
+
+        A session row that has gone is not a takeover.
+        """
+        if self._generations:
+            current = await run_sync(_writer_generations_sync, list(self._generations))
+            for session_id, generation in self._generations.items():
+                if current.get(session_id, generation) != generation:
+                    self._note_replaced(session_id)
+        return self.lost_ownership()
+
+    def _note_replaced(self, session_id: str) -> None:
+        if session_id not in self._replaced:
+            self._replaced.add(session_id)
+            logger.info("Session %s has a new writer; this engine's writes are ignored", session_id)
+        self.discard_pending_events(session_id)
 
     async def _ensure_loaded(self, session_id: str) -> bool:
+        # Another engine created the row after this store's claim found none.
+        if session_id in self._claim_when_found:
+            await self.claim_session(session_id)
         async with self._load_lock:
             if session_id in self._loaded:
                 return session_id in self._sessions
@@ -1645,7 +1793,13 @@ class PgFluidStore:
         self._events.pop(session_id, None)
         self._event_floor.pop(session_id, None)
         self._event_bytes.pop(session_id, None)
-        await run_event_write(_append_events_sync, session_id, events)
+        accepted = await run_event_write(
+            _append_events_sync, session_id, events,
+            generation=self._generations.get(session_id),
+        )
+        if not accepted:
+            self._note_replaced(session_id)
+            return
         self._pending_events.pop(session_id, None)
         self._pending_since.pop(session_id, None)
         self._pending_bytes.pop(session_id, None)
@@ -1702,7 +1856,8 @@ class PgFluidStore:
             session_id=session_id or new_id("ses"),
             project_root=project_root_for(cwd),
         )
-        await run_sync(_create_session_sync, meta)
+        self._generations[meta.session_id] = await run_sync(_create_session_sync, meta)
+        self._claim_when_found.discard(meta.session_id)
         self._sessions[meta.session_id] = meta
         self._nodes[meta.session_id] = {}
         self._node_json_bytes[meta.session_id] = 0
@@ -1720,7 +1875,15 @@ class PgFluidStore:
     async def append(self, session_id: str, node: SessionNode) -> None:
         await self.flush_events(session_id)
         await self._ensure_loaded(session_id)
-        size = await run_sync(_append_node_sync, session_id, node, measure_bytes=self.cache_nodes)
+        size = await run_sync(
+            _append_node_sync, session_id, node, measure_bytes=self.cache_nodes,
+            generation=self._generations.get(session_id),
+        )
+        if size is None:
+            self._note_replaced(session_id)
+            # Not saved, but the old engine's turn still builds its next prompt
+            # from this cache, so it carries on as if the write had landed.
+            size = len(json.dumps(node.message.to_dict())) if self.cache_nodes else 0
         if self.cache_nodes:
             self._cache_node(session_id, node, size)
         elif session_id in self._memory_paths:
@@ -1872,7 +2035,11 @@ class PgFluidStore:
         await self._ensure_loaded(session_id)
         if session_id in self._sessions:
             self._sessions[session_id].head_node_id = node_id
-        await run_sync(_set_head_sync, session_id, node_id)
+        if not await run_sync(
+            _set_head_sync, session_id, node_id,
+            generation=self._generations.get(session_id),
+        ):
+            self._note_replaced(session_id)
         self._memory_paths.pop(session_id, None)
 
     async def set_cli_session_id(
@@ -1884,11 +2051,16 @@ class PgFluidStore:
         new id. Without it the handle only ever lived on the engine object, so
         a restart resumed the CLI with the fluid session id and the turn died.
         """
-        await self._ensure_loaded(session_id)
-        meta = self._sessions.get(session_id)
-        if meta is not None:
-            meta.cli_session_id = cli_session_id
-        await run_sync(_set_cli_session_id_sync, session_id, cli_session_id)
+        async with self._handle_lock:
+            await self._ensure_loaded(session_id)
+            meta = self._sessions.get(session_id)
+            if meta is not None:
+                meta.cli_session_id = cli_session_id
+            if not await run_sync(
+                _set_cli_session_id_sync, session_id, cli_session_id,
+                generation=self._generations.get(session_id),
+            ):
+                self._note_replaced(session_id)
 
     async def append_event(self, session_id: str, event: Event) -> None:
         async with self._event_lock:

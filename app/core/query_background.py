@@ -24,7 +24,7 @@ from app.db import turns as turns_db
 from app.db.async_database import run_sync
 from app.core.session_title import derive_session_title
 from app.core.session_pool import (
-    SessionState, get_session_pool, is_subprocess_alive,
+    SessionState, get_session_pool, is_subprocess_alive, retire_if_replaced,
     requires_reconnect,
     reconnect_option_names,
 )
@@ -212,6 +212,7 @@ async def _run_background_query_impl(
 
     # --- Session Pool: Acquire or create the pooled adapter ---
     pool = get_session_pool()
+    await retire_if_replaced(pool, session_id)
     existing_state = pool.get(session_id)
     reusing_client = False
 

@@ -78,9 +78,10 @@ def _event_transactions(monkeypatch):
     sizes = []
     original = module._append_events_sync
 
-    def counted(session_id, events):
-        original(session_id, events)
+    def counted(session_id, events, **kwargs):
+        accepted = original(session_id, events, **kwargs)
         sizes.append(len(events))
+        return accepted
 
     monkeypatch.setattr(module, "_append_events_sync", counted)
     return sizes

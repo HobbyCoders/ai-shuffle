@@ -611,6 +611,14 @@ class HarnessAdapter(ProviderAdapter):
         # it is None before connect and after disconnect).
         store = self._build_store(options)
         self._store = store
+        # The one point every new engine passes through, whichever route dropped
+        # the last one. It comes first: the resume handle, head and event numbers
+        # read below must include the old engine's last commit, and its later
+        # writes must be refused.
+        claim = getattr(store, "claim_session", None)
+        claimed_id = options.session_id or options.resume_session_id
+        if claimed_id and inspect.iscoroutinefunction(claim):
+            await claim(claimed_id)
 
         # Decide the leg BEFORE building the registry: the native legs need
         # fluid's builtin file/shell tools registered, the delegated leg must not
@@ -1571,6 +1579,16 @@ class HarnessAdapter(ProviderAdapter):
         release = getattr(self._engine, "release_abandoned", None)
         if release is not None:
             await release()
+
+    async def replaced_by_another_engine(self) -> bool:
+        """Whether another engine owns this session, so nothing here would be saved.
+
+        Separate from :meth:`is_alive`, which the pool reads as "the process is
+        gone": this client still runs, can finish its turn and must be closed
+        properly.
+        """
+        check = getattr(self._store, "check_ownership", None)
+        return inspect.iscoroutinefunction(check) and await check() is True
 
     def is_alive(self) -> bool:
         """Whether the engine exists, is connected, and can still send.

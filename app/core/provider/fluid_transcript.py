@@ -987,6 +987,11 @@ def rewind_fluid_session(
 def _set_head(
     session_id: str, node_id: Optional[str], *, reset_session_id: Optional[str] = None,
 ) -> None:
+    """Move the head and end the previous engine's ownership.
+
+    A rewind evicts the pooled engine first, but that engine's last write can
+    still be on its way, and landing here would undo the rewind.
+    """
     from app.db import turns as turns_db
     from app.db.base import get_cursor, get_db
     from app.db.compat import ph
@@ -994,7 +999,8 @@ def _set_head(
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            f"UPDATE fluid_sessions SET head_node_id = {ph()} "
+            f"UPDATE fluid_sessions SET head_node_id = {ph()}, "
+            f"writer_generation = writer_generation + 1 "
             f"WHERE session_id = {ph()}",
             (node_id, session_id),
         )

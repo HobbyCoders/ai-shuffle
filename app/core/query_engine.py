@@ -51,7 +51,7 @@ from app.db.async_database import run_sync
 from pathlib import Path
 from app.core.config import settings
 from app.core.session_pool import (
-    SessionState, get_session_pool, is_subprocess_alive,
+    SessionState, get_session_pool, is_subprocess_alive, retire_if_replaced,
     requires_reconnect, reconnect_option_names, mark_subprocess_oom_killable,
     subprocess_pid,
 )
@@ -1159,6 +1159,7 @@ async def stream_query(
 
     # --- Session Pool: Acquire or create the pooled adapter ---
     pool = get_session_pool()
+    await retire_if_replaced(pool, session_id)
     existing_state = pool.get(session_id)
     reusing_client = False
 
@@ -1984,6 +1985,7 @@ async def _stream_to_websocket_impl(
             return
 
     # Resolve the pooled state after setup; eviction may run during its awaits.
+    await retire_if_replaced(pool, session_id)
     existing_state = pool.get(session_id)
     if existing_state and existing_state.is_connected and is_subprocess_alive(existing_state):
         # Busy-write guard backstop: a client that is mid-turn must NEVER get a

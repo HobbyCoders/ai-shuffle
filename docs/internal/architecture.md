@@ -92,7 +92,7 @@ auth              → authentication state, admin status
 Key tables:
 - `sessions` — Chat sessions with metadata
 - `session_events` — Ordered event log for each session
-- `fluid_sessions`, `fluid_session_nodes`, `fluid_session_events` — The harness's session tree and event log (`app/core/provider/fluid_pg_store.py`)
+- `fluid_sessions`, `fluid_session_nodes`, `fluid_session_events` — The harness's session tree and event log (`app/core/provider/fluid_pg_store.py`). Each new engine takes the session over by bumping `fluid_sessions.writer_generation`; a replaced engine's later writes are refused inside their own transaction, without an error
 - `agents` — Agent configuration (profile-named functions in `app/db/profiles.py` remain as compatibility names)
 - `projects` — Project directory references
 - `connectors` — Platform connector configs (encrypted)

@@ -229,7 +229,7 @@ def main():
             with get_db() as conn:
                 cur = conn.cursor()
                 cur.execute('CREATE TABLE fluid_sessions (session_id TEXT PRIMARY KEY, head_node_id TEXT, '
-                            'created_at DOUBLE PRECISION NOT NULL, cli_session_id TEXT, project_root TEXT)')
+                            'created_at DOUBLE PRECISION NOT NULL, cli_session_id TEXT, project_root TEXT, writer_generation BIGINT NOT NULL DEFAULT 0)')
                 cur.execute('CREATE TABLE fluid_session_nodes (session_id TEXT NOT NULL, node_id TEXT NOT NULL, '
                             'parent_id TEXT, ts DOUBLE PRECISION NOT NULL, message JSONB NOT NULL, '
                             'PRIMARY KEY (session_id, node_id))')

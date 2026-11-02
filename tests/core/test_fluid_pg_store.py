@@ -414,7 +414,7 @@ async def test_paged_replay_flush_failure_is_explicit_and_never_yields_phantoms(
     store = PgFluidStore()
     await store.create_session("page-fail")
     await store.append_stream_event("page-fail", TextDelta(session_id="page-fail", index=0, text="tail", seq=1))
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise RuntimeError("commit rejected")
     monkeypatch.setattr(module, "_append_events_sync", fail)
     with pytest.raises(RuntimeError, match="commit rejected"):
@@ -537,7 +537,7 @@ async def test_failed_writes_do_not_publish_phantom_events(mock_db, monkeypatch)
     store = PgFluidStore()
     await store.create_session("failed")
     assert await store.events_since("failed", 0) == []
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise RuntimeError("write rejected")
     from app.core.provider import fluid_pg_store as _mod
     monkeypatch.setattr(_mod, "_append_events_sync", fail)
@@ -561,9 +561,9 @@ async def test_native_failed_barrier_retains_accepted_deltas_for_retry(mock_db, 
     try:
         for _ in range(5):
             await loop._emit(TextDelta(session_id="retry-tail", index=0, text="accepted "))
-        def fail(sid, events):
+        def fail(sid, events, **kwargs):
             if committed:
-                original(sid, events)
+                original(sid, events, **kwargs)
             raise RuntimeError("commit acknowledgement lost")
         monkeypatch.setattr(module, "_append_events_sync", fail)
         with pytest.raises(RuntimeError, match="commit acknowledgement lost"):
