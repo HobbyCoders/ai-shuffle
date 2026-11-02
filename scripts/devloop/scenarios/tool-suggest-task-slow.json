@@ -1,0 +1,25 @@
+{
+  "description": "As tool-suggest-task, then streams at four words per second for about a minute, so the turn is still running when the chip is clicked.",
+  "tps": 4,
+  "steps": [
+    {
+      "text": "Suggesting that one.",
+      "tool_calls": [
+        {
+          "name": "SuggestTask",
+          "input": {
+            "title": "Check the docs heading",
+            "summary": "The docs heading may read badly, which confuses new readers.",
+            "prompt": "Fake-AI brief for a background-task chip. In the file docs/README.md, check the first heading reads well and report what you found. This is a test task from the dev-loop scenario; change nothing.",
+            "model": "fake-ai",
+            "base": "default",
+            "request_id": "fake-ai-suggest-task"
+          }
+        }
+      ]
+    },
+    {
+      "text": "The chip is up and this reply keeps arriving a few words at a time, so the turn is still running while you click it. Starting the suggested task must not interrupt this reply, add a message to this chat, or change where this reply is going. Keep watching this text while the new chat appears in the sidebar, and check it finishes here with nothing missing. When this last sentence arrives the turn is done, and this chat should have received nothing from the chat you started."
+    }
+  ]
+}

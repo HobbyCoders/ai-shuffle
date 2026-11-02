@@ -898,6 +898,9 @@ class HarnessAdapter(ProviderAdapter):
                 native_ctx.extra["agent_message"] = make_message(self._resolve_app_session_id)
                 from app.core.session_orchestration import make_handler as session_orchestration_handler
                 native_ctx.extra["session_orchestration"] = session_orchestration_handler(self._resolve_app_session_id)
+                from app.core.task_chips import offered_to as task_chips_offered
+                if task_chips_offered(self._resolve_app_session_id()):
+                    native_ctx.extra["task_chips"] = native_ctx.extra["session_orchestration"]
                 native_ctx.extra["task_dispatch"] = make_fluid_dispatcher(
                     self._resolve_app_session_id,
                     profile_id=(options.extra or {}).get("profile_id"),
@@ -3785,6 +3788,8 @@ class HarnessAdapter(ProviderAdapter):
         self._working_record_held = None
         if request_extra is not None:
             self._engine.request_extra = request_extra
+        if self._registry is not None and self._options is not None:
+            _amend_suggest_task_spec(self._registry, self._options, requested)
         self._record_applied("model", requested)
 
     async def set_run_settings(self, *, effort: Optional[str], fast: bool) -> dict:
@@ -5156,6 +5161,12 @@ class HarnessAdapter(ProviderAdapter):
                 sections.append(
                     PromptSection(kind="extra", text=_context_section(permitted))
                 )
+                # Same reason for the adjacent-work rule: only where SuggestTask
+                # is callable, so API-user and automation chats never read it.
+                if _suggest_task_offered(registry, permitted):
+                    from fluid.cli.prompt import ADJACENT_WORK_RULE
+
+                    sections.append(PromptSection(kind="extra", text=ADJACENT_WORK_RULE))
                 # fluid's model-family guidance ("Act, don't narrate",
                 # "## Execution discipline"). fluid only ever emits these from
                 # its own ``compose_base_prompt``, which the app replaces with
@@ -5393,6 +5404,7 @@ class HarnessAdapter(ProviderAdapter):
             except ImportError:
                 pass  # older vendored fluid without the refinement seam
             self._task_roster_signature = _amend_native_task_spec(registry, options)
+            _amend_suggest_task_spec(registry, options)
             # Same split for Monitor: fluid owns its shape, the app owns
             # its supervision — and `wait_seconds` (the inline settle window)
             # is supervision, so the parameter is spliced onto the vendor spec
@@ -6980,6 +6992,8 @@ _CODE_MODE_CATALOG_SKIP = frozenset({
     # Loads schemas for the JSON-tool path; under code mode every deferred
     # tool is already importable and read_tool_docs serves its docs.
     "ToolSearch",
+    # Sent as its own schema even under code mode, so docs here would repeat it.
+    "SuggestTask",
 })
 
 
@@ -7540,6 +7554,15 @@ CONTEXT_BLOCK_NO_RECALL = """# Context window
 - The latest user message outranks any digest."""
 
 
+def _suggest_task_offered(registry: Any, permitted: Optional[frozenset]) -> bool:
+    """Whether this native surface can call SuggestTask."""
+    if permitted is not None:
+        return "SuggestTask" in permitted
+    return registry is not None and any(
+        spec.name == "SuggestTask" for spec in registry.list_tools(loaded_only=False)
+    )
+
+
 def _context_section(tools: Optional[frozenset[str]] = None) -> str:
     """The context note for this tool surface (None means unrestricted)."""
     if tools is None or {"HistoryExpand", "HistorySearch"} <= tools:
@@ -7839,6 +7862,9 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
             )
     if notes:
         blocks.append("# App tools on this session\n" + "\n".join(notes))
+    if offered("SuggestTask"):
+        from fluid.cli.prompt import ADJACENT_WORK_RULE
+        blocks.append(ADJACENT_WORK_RULE)
     if recall:
         blocks.append(RECALL_BLOCK)
     if memory:
@@ -8296,6 +8322,25 @@ def _install_task_contract(registry: ToolRegistry, contract: Any) -> None:
     registry.amend_spec(
         "StartSession", description=spec.description, input_schema=spec.input_schema,
     )
+
+
+def _amend_suggest_task_spec(
+    registry: ToolRegistry, options: SessionOptions, model: Optional[str] = None,
+) -> None:
+    """Name this agent's own model in SuggestTask's ``model`` input.
+
+    The tool tells the agent to name its current model when nothing directs a
+    choice, and this lane's system prompt does not state it (the Claude CLI's
+    does). A no-op when this session has no SuggestTask tool.
+    """
+    try:
+        from app.core.model_override import app_id
+        from app.core.session_orchestration import suggest_task_spec
+
+        current = app_id((options.extra or {}).get("provider_id"), model or options.model)
+        registry.amend_spec("SuggestTask", input_schema=suggest_task_spec(current).input_schema)
+    except Exception:  # noqa: BLE001 — the name is advisory; never break connect
+        logger.debug("[HarnessAdapter] could not amend SuggestTask", exc_info=True)
 
 
 def _amend_native_task_spec(

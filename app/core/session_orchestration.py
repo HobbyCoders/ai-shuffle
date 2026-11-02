@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import re
+from types import SimpleNamespace
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from fluid.context.peer import format_peer_message
@@ -650,17 +651,27 @@ async def _project_placement(sender_id, data):
                      f"Checked: {', '.join(checked)}. Ask the owner to open or clone it on a worker first.")
 
 
+def _model_examples():
+    """The owner's subagent default, named as an example by ``model`` inputs."""
+    try:
+        from app.core import subagent_default
+        return tuple(filter(None, (subagent_default.effective().model,)))
+    except Exception:  # noqa: BLE001 — the examples are advisory
+        log.debug("Could not read the subagent default for a model example", exc_info=True)
+        return ()
+
+
 def start_session_spec():
     """StartSession's spec; its ``model`` names the owner's subagent default
     as an example. Any eligible model is accepted and checked (#1830)."""
     from fluid.tools.builtins.session_orchestration import start_session_spec as build
-    try:
-        from app.core import subagent_default
-        examples = tuple(filter(None, (subagent_default.effective().model,)))
-    except Exception:  # noqa: BLE001 — the examples are advisory
-        log.debug("Could not read the subagent default for StartSession", exc_info=True)
-        examples = ()
-    return build(examples)
+    return build(_model_examples())
+
+
+def suggest_task_spec(current_model=None):
+    """SuggestTask's spec, with the same example as :func:`start_session_spec`."""
+    from fluid.tools.builtins.session_orchestration import suggest_task_spec as build
+    return build(_model_examples(), current_model)
 
 
 def _inherited_model(sender, overrides):
@@ -764,7 +775,10 @@ def _remote_session_id(command_id):
     return str(uuid5(NAMESPACE_URL, "ai-shuffle:" + command_id))
 
 
-def _started_permission_mode(sender, overrides):
+_READ_CONFIG = object()
+
+
+def _started_permission_mode(sender, overrides, *, config=_READ_CONFIG):
     """The permission binding a chat started by ``sender`` is created with.
 
     The sender's CURRENT binding, never the permission mode copied onto its
@@ -780,7 +794,8 @@ def _started_permission_mode(sender, overrides):
     turns run it, so an unbound chat never hands a child a mode the chat
     itself cannot run in (its agent's Accept Edits runs the chat on Ask).
     StartSession takes no permission argument; the owner can change the
-    child afterwards.
+    child afterwards. ``config``: the sender's agent config when the caller
+    already holds it; omitted, it is read here if it is needed.
     """
     from app.core.session_modes import permission_ceiling, session_mode_of, turn_permission_mode
 
@@ -788,10 +803,15 @@ def _started_permission_mode(sender, overrides):
                                  {**sender, "is_worker": False})
     if not ceiling and session_mode_of(sender) != "chat":
         return sender.get("permission_mode")
+    if config is _READ_CONFIG:
+        config = _profile_config(sender)
+    return turn_permission_mode({"_permission_ceiling": ceiling}, sender, config)
+
+
+def _profile_config(row):
     from app.db import database
-    profile = database.get_profile(sender.get("profile_id")) if sender.get("profile_id") else None
-    return turn_permission_mode({"_permission_ceiling": ceiling}, sender,
-                                (profile or {}).get("config") if profile else None)
+    profile = database.get_profile(row.get("profile_id")) if row.get("profile_id") else None
+    return (profile or {}).get("config") if profile else None
 
 
 def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerprint, *,
@@ -1030,7 +1050,7 @@ async def handle_remote_start(body, from_device):
     return result
 
 
-def _recheck(cursor, snapshots, principals):
+def _recheck(cursor, snapshots, principals, *, allow_settled=False):
     """Recheck eligibility using THIS connection. Nested pool checkouts while
     holding the origin lock can deadlock under concurrent fanout. No model
     input can turn an archived/foreign/worker chat into a peer."""
@@ -1042,7 +1062,7 @@ def _recheck(cursor, snapshots, principals):
     for snapshot in snapshots:
         cursor.execute("SELECT * FROM sessions WHERE id=%s", (snapshot["id"],))
         current = cursor.fetchone()
-        if not _local_top_level(current) or any(
+        if not _local_top_level(current, allow_settled=allow_settled) or any(
             current.get(key) != snapshot.get(key) for key in (
                 "api_user_id", "instance_id", "owner_device_id", "profile_id",
                 "provider_id", "model", "permission_mode", "project_id", "project_v2_id",
@@ -1327,7 +1347,7 @@ async def _wake_peer(session_id):
     return held
 
 
-def _start_checkout(sender, new_id, *, named_project=False):
+def _start_checkout(sender, new_id, *, named_project=False, base_commit=None):
     """The new chat's own worktree and branch, or None when the caller has none.
 
     A chat bound to a branch never hands that branch to the chat it starts:
@@ -1341,7 +1361,7 @@ def _start_checkout(sender, new_id, *, named_project=False):
         return None
     from app.core.worker_checkout import WorkerCheckoutError, chat_branch, prepare_worker_checkout
     try:
-        checkout = prepare_worker_checkout(sender, new_id, sender.get("profile_id"),
+        checkout = prepare_worker_checkout(sender, new_id, sender.get("profile_id"), base_commit=base_commit,
                                            share_read_only=False, branch=chat_branch(new_id))
     except WorkerCheckoutError as exc:
         raise ValueError(f"Could not give the new chat its own checkout: {exc} "
@@ -1374,8 +1394,19 @@ class _UnusedCheckout:
         return False
 
 
-def _checkout_note(checkout):
+_CHECKOUT_NOTE_RE = re.compile(r"# Your checkout\nThis chat runs in its own checkout [^\n]*\n?")
+
+
+def _checkout_note(checkout, *, fresh_default=False):
     """What the new chat is told about its checkout on its first turn."""
+    if fresh_default:
+        return ("# Your checkout\n"
+                f"This chat runs in its own checkout {checkout.path} on branch "
+                f"'{checkout.branch}', forked from commit {checkout.base_commit} of the project's "
+                "default branch, not from the chat that suggested this work. Work and commit here; "
+                "you may rename or switch this checkout's own branch (push only fix/, feat/ or "
+                "chore/ names). Never check out, switch, rename or remove a branch or worktree of "
+                "another chat's checkout: the app refuses it.")
     return ("# Your checkout\n"
             f"This chat runs in its own checkout {checkout.path} on branch "
             f"'{checkout.branch}', forked from commit {checkout.base_commit} of the chat that "
@@ -1383,6 +1414,85 @@ def _checkout_note(checkout):
             "copied. Work and commit here; you may rename or switch this checkout's own branch "
             "(push only fix/, feat/ or chore/ names). Never check out, switch, rename or remove "
             "a branch or worktree of another chat's checkout: the app refuses it.")
+
+
+def _create_started_chat(conn, sender, *, new_id, title, overrides, started_mode, checkout, principal,
+                         workspace, mode, plan=None, payload=None, explicit_effort=None, note=None):
+    """The new chat's row, inheriting ``sender``'s agent and permission binding,
+    and its provider, model and effort unless ``plan`` names a model:
+    StartSession's and a started task chip's one path.
+
+    Runs in the caller's transaction; returns ``(row, first_turn_overrides)``.
+    """
+    from app.db import mobile_tool_identity, sessions
+    from app.core.provider_agent import _caller_fast
+    cursor = conn.cursor()
+    workspace = dict(workspace)
+    if checkout is not None:
+        workspace.update(project_v2_id=checkout.project_v2_id, worktree_id=None,
+                         worktree_branch=checkout.branch, worktree_path=checkout.path)
+    run = {"provider_id": sender.get("provider_id"),
+           "model": overrides.get("model") or sender.get("model"),
+           "effort": overrides.get("effort", sender.get("effort")),
+           "context_window": sender.get("context_window"), "fast": _caller_fast(sender)}
+    parent_effort = run["effort"]
+    if plan:
+        # A model the user asked for (#1830): its provider, and only
+        # the inherited settings that still apply to it.
+        from app.core import model_override
+        mapped = model_override.settings_for_model(
+            plan["model"], plan["provider_id"], effort=run["effort"],
+            context_window=run["context_window"], fast=run["fast"])
+        run.update(provider_id=plan["provider_id"], model=plan["model"], **mapped)
+        overrides = _start_overrides(overrides, plan, mapped)
+        payload["model_override"] = _override_record(plan)
+    from app.core.model_effort import resolve_child_effort, resolve_child_fast
+    run["effort"] = resolve_child_effort(run["model"], run["provider_id"],
+                                         explicit=explicit_effort, parent=parent_effort, caller=sender)
+    run["fast"] = resolve_child_fast(run["model"], run["provider_id"], parent=run["fast"],
+                                     caller=sender, profile_id=sender["profile_id"])
+    # The new chat runs where its own row binds it, never in a cwd
+    # copied from the caller's turn.
+    overrides = {**{k: v for k, v in overrides.items() if k not in ("fast", "cwd")},
+                 "effort": run["effort"]}
+    if run["fast"] is not None:
+        overrides["fast"] = run["fast"]
+    if note:
+        # A caller that was itself started in a checkout carries that note on
+        # its overrides; it describes the caller's folder, not this chat's.
+        append = _CHECKOUT_NOTE_RE.sub("", overrides.get("system_prompt_append") or "").strip()
+        overrides["system_prompt_append"] = f"{append}\n\n{note}" if append else note
+    target = sessions.create_session(
+        session_id=new_id, title=title, profile_id=sender["profile_id"],
+        api_user_id=sender.get("api_user_id"), is_active=True,
+        provider_id=run["provider_id"], derive_provider_from_profile=False,
+        model=run["model"], effort=run["effort"],
+        permission_mode=started_mode,
+        context_window=run["context_window"], fast=run["fast"],
+        mode=mode, _conn=conn, **workspace,
+    )
+    if checkout is not None:
+        cursor.execute("UPDATE sessions SET branch=%s WHERE id=%s", (checkout.branch, new_id))
+    if "workspace_project_ids" in overrides:
+        # The first turn copies the caller's folder list, and a copied
+        # list runs as the chat's STORED one (#1852): store the
+        # caller's current folders on the new chat so it keeps them.
+        from app.core.workspace_folders import normalize_workspace_project_ids
+        try:
+            inherited = normalize_workspace_project_ids(sender.get("workspace_project_ids"))
+        except ValueError:
+            inherited = []
+        # The new chat's own project is its primary, never an extra
+        # folder (as ``PUT /workspace-folders`` saves it).
+        own = {target.get("project_id"), target.get("project_v2_id")} - {None}
+        inherited = [item for item in inherited if item not in own]
+        cursor.execute("UPDATE sessions SET workspace_project_ids=%s WHERE id=%s",
+                       (json.dumps(inherited), new_id))
+    mobile_tool_identity.bind(new_id, principal, new=True, conn=conn)
+    # A sender with only a label (a worker, or a chat run here after a
+    # handoff) passes that on (#1877); a recorded sender's was stamped.
+    mobile_tool_identity.inherit_label(new_id, sender["id"], conn)
+    return target, overrides
 
 
 def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_peer=None):
@@ -1577,7 +1687,6 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
                            "stop_reason='remote_start' WHERE id=%s", (receipt["id"],))
             return {"remote": remote, "receipt_id": receipt["id"], "reserved": True, "body": body}
         if action == "start":
-            title = _text(data, "title", 160)
             # A named project runs in that project's checkout here, never in
             # the caller's workspace.
             workspace = {} if placement is not None else {
@@ -1586,71 +1695,14 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
                 "worktree_path": sender.get("worktree_path")}
             if placement is not None:
                 workspace["project_v2_id"] = project_v2_id
+            target, overrides = _create_started_chat(
+                conn, sender, new_id=new_id, title=_text(data, "title", 160), overrides=overrides,
+                started_mode=started_mode, checkout=checkout, principal=principals[sender_id],
+                workspace=workspace, mode=None if placement is not None else sender.get("mode"),
+                plan=plan, payload=payload, explicit_effort=data.get("effort"),
+                note=_checkout_note(checkout) if checkout is not None else None)
             if checkout is not None:
-                workspace.update(project_v2_id=checkout.project_v2_id, worktree_id=None,
-                                 worktree_branch=checkout.branch, worktree_path=checkout.path)
-            from app.core.provider_agent import _caller_fast
-            run = {"provider_id": sender.get("provider_id"),
-                   "model": overrides.get("model") or sender.get("model"),
-                   "effort": overrides.get("effort", sender.get("effort")),
-                   "context_window": sender.get("context_window"), "fast": _caller_fast(sender)}
-            parent_effort = run["effort"]
-            if plan:
-                # A model the user asked for (#1830): its provider, and only
-                # the inherited settings that still apply to it.
-                from app.core import model_override
-                mapped = model_override.settings_for_model(
-                    plan["model"], plan["provider_id"], effort=run["effort"],
-                    context_window=run["context_window"], fast=run["fast"])
-                run.update(provider_id=plan["provider_id"], model=plan["model"], **mapped)
-                overrides = _start_overrides(overrides, plan, mapped)
-                payload["model_override"] = _override_record(plan)
-            from app.core.model_effort import resolve_child_effort, resolve_child_fast
-            run["effort"] = resolve_child_effort(run["model"], run["provider_id"],
-                                                explicit=data.get("effort"), parent=parent_effort, caller=sender)
-            run["fast"] = resolve_child_fast(run["model"], run["provider_id"], parent=run["fast"],
-                                             caller=sender, profile_id=sender["profile_id"])
-            # The new chat runs where its own row binds it, never in a cwd
-            # copied from the caller's turn.
-            overrides = {**{k: v for k, v in overrides.items() if k not in ("fast", "cwd")},
-                         "effort": run["effort"]}
-            if run["fast"] is not None:
-                overrides["fast"] = run["fast"]
-            if checkout is not None:
-                note = _checkout_note(checkout)
-                append = overrides.get("system_prompt_append")
-                overrides["system_prompt_append"] = f"{append}\n\n{note}" if append else note
-            target = sessions.create_session(
-                session_id=new_id, title=title, profile_id=sender["profile_id"],
-                api_user_id=sender.get("api_user_id"), is_active=True,
-                provider_id=run["provider_id"], derive_provider_from_profile=False,
-                model=run["model"], effort=run["effort"],
-                permission_mode=started_mode,
-                context_window=run["context_window"], fast=run["fast"],
-                mode=None if placement is not None else sender.get("mode"), _conn=conn, **workspace,
-            )
-            if checkout is not None:
-                cursor.execute("UPDATE sessions SET branch=%s WHERE id=%s", (checkout.branch, new_id))
                 unused.kept = True
-            if "workspace_project_ids" in overrides:
-                # The first turn copies the caller's folder list, and a copied
-                # list runs as the chat's STORED one (#1852): store the
-                # caller's current folders on the new chat so it keeps them.
-                from app.core.workspace_folders import normalize_workspace_project_ids
-                try:
-                    inherited = normalize_workspace_project_ids(sender.get("workspace_project_ids"))
-                except ValueError:
-                    inherited = []
-                # The new chat's own project is its primary, never an extra
-                # folder (as ``PUT /workspace-folders`` saves it).
-                own = {target.get("project_id"), target.get("project_v2_id")} - {None}
-                inherited = [item for item in inherited if item not in own]
-                cursor.execute("UPDATE sessions SET workspace_project_ids=%s WHERE id=%s",
-                               (json.dumps(inherited), new_id))
-            mobile_tool_identity.bind(new_id, principals[sender_id], new=True, conn=conn)
-            # A sender with only a label (a worker, or a chat run here after a
-            # handoff) passes that on (#1877); a recorded sender's was stamped.
-            mobile_tool_identity.inherit_label(new_id, sender_id, conn)
         turn = turns.enqueue_turn(
             target["id"], "agent_message", prompt=prompt,
             profile_id=target["profile_id"], project_id=target.get("project_id"),
@@ -1685,6 +1737,242 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
         if project:
             result["project"] = {"id": project["id"], "name": project.get("name")}
     return result
+
+
+_CHIP_COMMIT_GONE = ("Commit {commit}, which this task was suggested from, is no longer in this repository, "
+                     "perhaps because its branch or worktree was removed. Nothing was started, and it was "
+                     "not started from any other commit.")
+_CHIP_NO_COMMIT = ("The chat that suggested this task had no commit to start from. Nothing was started, "
+                   "and it was not started from any other commit.")
+
+
+def _suggested_task_text(parent, chip):
+    """The new chat's first message: attributed, never words the owner typed."""
+    title = (parent.get("title") or "").strip() or parent["id"]
+    return defang_harness_markers(
+        f"Task suggested by the chat \u201c{title}\u201d ({parent['id']}). The owner started it by "
+        "clicking its chip there. The brief below was written by that chat's agent, not typed by "
+        "the owner. This chat is independent: that chat gets no "
+        f"report from it, so tell the owner your result here.\n\n{chip['prompt']}")
+
+
+def chip_lane_refusal(model, provider_id):
+    """Why a chip's chat could not run on this worker now, in plain words, else None.
+
+    The check its first turn would make, so a chat that could only be refused
+    is never created: Claude turned off or signed out, or a provider row without
+    its credential.
+    """
+    from app.core import credential_gate
+    from app.core.task_dispatch import _credential_gap
+    leg = credential_gate.leg_for_options(SimpleNamespace(model=model, aih_provider_id=provider_id))
+    return credential_gate.turn_refusal(leg) or _credential_gap(provider_id)
+
+
+def _chip_chat_row(chip, parent):
+    """``parent`` with the fields a chip's chat is created differently, for working out its lane.
+
+    Keeps the parent's id: the new chat is bound to that chat's principal.
+    """
+    project = chip.get("project_v2_id")
+    if not project or project == parent.get("project_v2_id"):
+        return dict(parent)
+    return {**parent, "mode": None, "project_id": None, "project_v2_id": project}
+
+
+def chip_access_reads(chip, parent, overrides):
+    """What :func:`chip_access` needs from other tables, read before any lock is held.
+
+    The lane depends on the chat's stored mode and project, and the leg on the
+    chip's model; both of those are in the fingerprint or fixed on the chip, so
+    a later change to them still shows.
+    """
+    from app.core import credential_gate
+    from app.core.session_modes import CALLER_AUTHENTICATED, runtime_session_mode, turn_caller
+    row = _chip_chat_row(chip, parent)
+    # The first turn copies these overrides, so it has the same caller, or none,
+    # and a chat with no recorded caller yet goes on to the owner checks.
+    lane = runtime_session_mode(row, caller=turn_caller(overrides) or CALLER_AUTHENTICATED)
+    return {"leg": credential_gate.leg_for_options(
+                SimpleNamespace(model=chip["model"], aih_provider_id=chip.get("provider_id"))),
+            "lane": lane, "owner_session": lane == "chat" and is_owner_session(row)}
+
+
+def chip_access(chip, parent, overrides, config, reads):
+    """What a chip's chat would run with: ``{mode, tools, baseline_tools, fingerprint}``. Reads nothing.
+
+    The mode and tools come from the resolvers its turns use
+    (:func:`~app.core.session_modes.turn_permission_mode`,
+    :func:`~app.core.session_modes.turn_tool_access`), so this cannot drift
+    from the run. ``auto`` exists only on the Claude CLI leg, so the chip's
+    model can lower it. The fingerprint covers everything the click approves;
+    a chip's ``attempt`` is left out, since a retry approves the same thing.
+    ``baseline_tools`` is only for choosing the chip's words, and is not in it.
+    """
+    from app.core.session_modes import (
+        effective_permission_mode, lane_baseline_tools, turn_permission_mode, turn_tool_access)
+    if config is None:
+        raise LookupError("The agent this chat runs on no longer exists.")
+    overrides = overrides or {}
+    row = _chip_chat_row(chip, parent)
+    mode = turn_permission_mode(
+        {"_permission_ceiling": overrides.get("_permission_ceiling")},
+        {"permission_mode": _started_permission_mode(parent, overrides, config=config), "mode": row.get("mode")},
+        config)
+    mode = effective_permission_mode(mode, delegated=reads["leg"] == "delegated")
+    tools = turn_tool_access(config, overrides, reads["lane"], owner_session=reads["owner_session"])
+    material = {"version": 1, "chip": chip["id"], "model": chip["model"], "provider_id": chip.get("provider_id"),
+                "mode": mode, "lane": reads["lane"], "stored_mode": row.get("mode"),
+                "project_id": row.get("project_id"), "project_v2_id": row.get("project_v2_id"),
+                "allowed": None if tools.allowed is None else sorted(set(tools.allowed)),
+                "disallowed": sorted(set(tools.disallowed or ()))}
+    fingerprint = hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
+    return {"mode": mode, "tools": tools, "fingerprint": fingerprint,
+            "baseline_tools": lane_baseline_tools(reads["lane"], owner_session=reads["owner_session"])}
+
+
+def chip_access_now(chip, parent, overrides):
+    """:func:`chip_access` from what is stored now."""
+    return chip_access(chip, parent, overrides, _profile_config(parent), chip_access_reads(chip, parent, overrides))
+
+
+def _chip_model_plan(chip, parent, overrides):
+    """The model a chip's chat runs on, checked again now the owner has clicked.
+
+    The chip showed this model, so the click approved it and nothing asks again.
+    A model that is gone refuses the start; the parent's model never stands in.
+    """
+    from app.core import model_override
+    model = chip["model"]
+    name = chip.get("model_label") or model
+    try:
+        picked = model_override.resolve(model, runs_here=True)
+    except ValueError as exc:
+        raise ValueError(f"{name}, the model this task was suggested for, is not available now: {exc} "
+                         "Nothing was started.") from None
+    if picked.model != model_override.active_account_model(model):
+        raise ValueError(f"{name}, the model this task was suggested for, is not available now. "
+                         "Nothing was started.")
+    refusal = chip_lane_refusal(picked.model, picked.provider_id)
+    if refusal:
+        raise ValueError(f"{name}, the model this task was suggested for, cannot run now: {refusal} "
+                         "Nothing was started.")
+    return {"model": picked.model, "provider_id": picked.provider_id, "model_id": picked.model_id,
+            "baseline": _inherited_model(parent, overrides), "source": model_override.CHIP_APPROVED}
+
+
+def start_suggested_task(chip, shown_fingerprint):
+    """Start a chip's chat because the owner clicked it. Returns the new chat's id.
+
+    ``shown_fingerprint`` is :func:`chip_access`'s fingerprint as the chip showed
+    it at the click. The chat runs with the parent's access, not the suggesting
+    agent's, so any difference from that refuses the start, a narrower access
+    too. It is checked here and again under the transaction below, against the
+    profile as well as the chat row, and the chat is bound to the mode approved:
+    provisioning a checkout takes a while, and an unbound chat would follow any
+    later change to its agent. :func:`app.core.task_chips.refuse_if_access_changed`
+    says why no per-click receipt is kept.
+
+    StartSession's creation path, with these differences because a person asked
+    for it and not the chain: it always gets its own checkout in a Git project,
+    and its turn carries no ``orchestration_*`` keys and no ``orchestration:``
+    command. So it spends no chain budget, starts a chain of its own, is
+    invisible to :func:`started_by_owner` (no report to the parent, and its
+    approvals stay on it), and its model is the chip's: the agent chose it, and
+    the owner's click on a chip showing it approved it. The parent's row is read
+    and locked briefly; its turn is never touched.
+    Raises with plain words the chip shows on any refusal.
+    """
+    from app.db import sessions, task_chips as chips_db, turns
+    from app.db.base import transaction
+    from app.core import mobile_tool_identity, orchestration_limits, turn_scheduler
+    from app.core.worker_checkout import BaseCommitUnavailable, WorkerCheckoutError, default_branch_commit
+    parent_id = chip["session_id"]
+    parent = sessions.get_session(parent_id)
+    if parent is None:
+        raise LookupError("The chat this task was suggested in no longer exists.")
+    if parent.get("status") == "archived":
+        raise ValueError("The chat this task was suggested in is archived. Restore it, then try again.")
+    if not _local_top_level(parent, allow_settled=True) or not is_owner_session(parent):
+        raise PermissionError("Only the owner's own chats on this worker can start suggested tasks.")
+    principal = _principal(parent_id)
+    mobile_tool_identity.validate(principal)
+    context = _context(parent_id, allow_empty=True)
+    if ((context.get("payload") or {}).get("_assistant_proactive") is not None
+            or (context.get("overrides") or {}).get("_assistant_proactive") is not None):
+        raise PermissionError("Background observation cannot start chats.")
+    orchestration_limits.assert_can_start(parent_id)  # The owner's daily spending limit.
+    overrides = context.get("overrides") or {}
+    plan = _chip_model_plan(chip, parent, overrides)
+    from app.core.task_chips import refuse_if_access_changed
+    from app.db.profiles import lock_profile
+    reads = chip_access_reads(chip, parent, overrides)
+    approved = chip_access(chip, parent, overrides, _profile_config(parent), reads)
+    refuse_if_access_changed(shown_fingerprint, approved["fingerprint"])
+    # Deterministic per attempt: a retry after a failure needs a new branch
+    # name, since the failed attempt may have left its branch behind.
+    new_id = str(uuid5(NAMESPACE_URL, f"ai-shuffle:task-chip:{chip['id']}:{chip['attempt']}"))
+    command_id = "task_chip:start:" + hashlib.sha256(f"{chip['id']}:{chip['attempt']}".encode()).hexdigest()
+    # A subagent working in another project than its coordinator suggests work
+    # in that project, so the chip runs there.
+    project = chip.get("project_v2_id")
+    own_project = not project or project == parent.get("project_v2_id")
+    checkout_parent = parent if own_project else {"project_v2_id": project, "profile_id": parent.get("profile_id")}
+    fresh_default = chip.get("base") != "current"
+    try:
+        base_commit = default_branch_commit(checkout_parent) if fresh_default else chip.get("base_commit")
+    except WorkerCheckoutError as exc:
+        raise ValueError(f"Could not give the new chat its own checkout: {exc} Nothing was started.") from exc
+    bound = own_project and (parent.get("branch") or parent.get("worktree_branch"))
+    try:
+        checkout = _start_checkout(checkout_parent, new_id, named_project=not bound, base_commit=base_commit)
+    except ValueError as exc:
+        if isinstance(exc.__cause__, BaseCommitUnavailable):
+            raise ValueError(_CHIP_COMMIT_GONE.format(commit=base_commit[:12])) from exc
+        raise
+    payload = {key: value for key, value in turn_scheduler._context_payload(context).items()
+               if not key.startswith("orchestration_")}
+    text = _suggested_task_text(parent, chip)
+    payload.update(peer_message_content=text, task_chip_id=chip["id"], task_chip_source=parent_id,
+                   peer_sender_label=(parent.get("title") or parent_id))
+    workspace = {"project_v2_id": project} if not own_project else {
+        "project_id": parent.get("project_id"), "project_v2_id": parent.get("project_v2_id"),
+        "worktree_id": parent.get("worktree_id"), "worktree_branch": parent.get("worktree_branch"),
+        "worktree_path": parent.get("worktree_path")}
+    with _UnusedCheckout(checkout) as unused, transaction() as conn:
+        if checkout is not None and not fresh_default and base_commit is None:
+            # The chat it came from had no readable commit then; the checkout
+            # just made sits on the default branch, which nobody asked for.
+            raise ValueError(_CHIP_NO_COMMIT)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM sessions WHERE id=%s FOR UPDATE", (parent_id,))
+        locked = cursor.fetchone()
+        if locked:
+            locked = dict(locked)
+            profile = lock_profile(cursor, locked.get("profile_id")) if locked.get("profile_id") else None
+            refuse_if_access_changed(shown_fingerprint, chip_access(
+                chip, locked, overrides, (profile or {}).get("config") if profile else None, reads)["fingerprint"])
+        try:
+            _recheck(cursor, (parent,), {parent_id: principal}, allow_settled=True)
+        except ValueError as exc:
+            raise ValueError("That chat's settings changed while this task was starting. Try again.") from exc
+        target, first_overrides = _create_started_chat(
+            conn, parent, new_id=new_id, title=chip["title"], overrides=overrides, started_mode=approved["mode"],
+            checkout=checkout, principal=principal, workspace=workspace,
+            mode=parent.get("mode") if own_project else None, plan=plan, payload=payload,
+            explicit_effort=chip.get("effort"),
+            note=_checkout_note(checkout, fresh_default=fresh_default) if checkout is not None else None)
+        turns.enqueue_turn(
+            new_id, "agent_message", prompt=_peer_prompt(parent_id, text),
+            profile_id=target["profile_id"], project_id=target.get("project_id"),
+            worktree_id=None if checkout is not None or not own_project else (
+                context.get("worktree_id") or target.get("worktree_id")),
+            overrides=first_overrides, payload=payload, command_id=command_id, _conn=conn)
+        if not chips_db.mark_started(cursor, chip["id"], chip["attempt"], new_id, chip["title"]):
+            raise ValueError("This task's chip changed while it was starting. Try again.")
+        if checkout is not None:
+            unused.kept = True
+    return new_id
 
 
 def _model_receipt(row, plan, *, model=None, provider_id=None):
@@ -2034,6 +2322,9 @@ def make_handler(supplier):
             sender_id = supplier()
             if action == "list":
                 result = await list_everywhere(sender_id, data)
+            elif action == "suggest":
+                from app.core import task_chips
+                result = await task_chips.suggest(sender_id, data)
             elif action in ("settle", "unsettle", "archive"):
                 from app.core.session_management import manage
                 result = await manage(sender_id, data, action)

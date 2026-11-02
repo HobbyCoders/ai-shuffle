@@ -712,6 +712,14 @@ def materialize(
                 and origin_device_id != ctx.device_id and _owns_session(cursor, ctx, (
                     record.get("session_id"), (existing or {}).get("session_id")))):
             return existing
+    if coll.name == "session_task_chips":
+        # As for prompts below: a chip of a chat owned here changes only here.
+        ctx = cached_context()
+        existing = _read_row(cursor, coll, record_id)
+        if (record is not None and ctx is not None and origin_device_id
+                and origin_device_id != ctx.device_id and _owns_session(cursor, ctx, (
+                    record.get("session_id"), (existing or {}).get("session_id")))):
+            return existing
     if record is None:
         cursor.execute(f"DELETE FROM {coll.table} WHERE {where}", keys)
         return None

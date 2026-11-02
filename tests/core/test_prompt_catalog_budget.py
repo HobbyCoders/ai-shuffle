@@ -44,11 +44,22 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 # Emulator and sandbox removal (Oct 2026): remeasured the combined tree with
 # scripts/measure_prompt_catalog.py on 2026-10-29, without the retired Android
 # tools. Folder file-only/SSH-command guidance replaces the sandbox promises.
+# Background-task chips (Nov 2026): the owner asked for SuggestTask to be
+# always loaded and for one adjacent-work rule on both lanes, so agents stop
+# fixing unrelated problems mid-task. Wording was tightened first; what is left
+# is one tool (a direct schema on the native surface, so it costs the first
+# request rather than the code-mode catalog; 919 chars as a delegated bridge
+# schema) and the rule (318 chars). combined_full 133,634 -> 133,952, eager
+# 53,138 -> 53,456, delegated append 14,877 -> 15,195, delegated loaded
+# 7,327 -> 8,246. Then the owner made the suggesting agent choose the new chat's
+# model, so model routing still holds for chips: a required ``model`` and the
+# shared optional ``effort`` on that one always-loaded schema. Delegated loaded
+# 8,246 -> 8,853; nothing else in these numbers moved.
 # These are actual character counts, not tokenizer or provider billing counts.
-MEASURED_FULL = 132_755
-MEASURED_EAGER = 53_138
-MEASURED_DELEGATED_APPEND = 14_877
-MEASURED_DELEGATED_LOADED_TOOLS = 7_327
+MEASURED_FULL = 133_952
+MEASURED_EAGER = 53_456
+MEASURED_DELEGATED_APPEND = 15_195
+MEASURED_DELEGATED_LOADED_TOOLS = 8_853
 
 
 @pytest.mark.parametrize("native", [True, False])
@@ -63,6 +74,36 @@ def test_source_provenance_guidance_is_bounded_and_not_duplicated(native):
     phrase = "Before diagnosis, compare checkout HEAD/dirty with runtime revision"
     assert combined.count(phrase) == 1
     assert phrase not in compiled.text  # remains deferred on both legs
+
+
+@pytest.mark.parametrize("native", [True, False], ids=["native-code", "delegated-cli"])
+def test_adjacent_work_wording_is_bounded_and_not_duplicated(native):
+    from fluid.cli.prompt import ADJACENT_WORK_RULE
+    from fluid.tools.builtins.session_orchestration import suggest_task_spec
+
+    rule = ADJACENT_WORK_RULE
+    description = suggest_task_spec().description
+    # Shipped wording, measured Nov 2026; allow at most 1% local drift.
+    # A longer wording candidate did not improve chip use and was rejected.
+    assert len(rule) <= 316 * 101 // 100
+    assert len(description) <= 161 * 101 // 100
+    for phrase in (
+        "does not block it, do not fix it",
+        "call SuggestTask with a self-contained brief and keep going",
+        "If it blocks, make the smallest fix and say so",
+        "not nitpicks or work that is part of the request",
+    ):
+        assert phrase in rule
+    assert "one click starts it in a separate chat with its own worktree" in description
+    assert "Starts nothing now: do not fix it here, carry on" in description
+
+    compiled, catalog, _ = compile_fixture(native=native)
+    combined = compiled.text + "\n\n" + "\n\n".join(text for text, _ in catalog)
+    # The rule owns the paragraph, not a second copy in a tool description.
+    assert combined.count(rule) == 1
+    paragraphs = [" ".join(p.split()) for p in combined.split("\n\n")]
+    adjacent = [p for p in paragraphs if "Work outside the request:" in p]
+    assert len(adjacent) == len(set(adjacent)) == 1
 
 
 def test_prompt_catalog_budget():
@@ -202,7 +243,7 @@ def test_measurement_is_repeatable_and_deferred_catalog_is_not_sent() -> None:
     assert measure() == first
     compiled, catalog, specs = compile_fixture()
     # Project tools remain deferred; the two Android emulator schemas are gone.
-    assert len(specs) == 111
+    assert len(specs) == 112
     for leaf in (
         "CreateWatch", "ListWatches", "PauseWatch", "StopWatch", "WorkingRecord",
         "generationPreferences", "listProjects", "createProject",

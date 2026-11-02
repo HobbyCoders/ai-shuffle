@@ -1,0 +1,20 @@
+{
+  "description": "Played by the first subagent of tool-task-nested-suggest-task: delegates to dev-nested, which suggests. The chip still attaches to the root chat.",
+  "steps": [
+    {
+      "text": "Delegating one level down.",
+      "tool_calls": [
+        {
+          "name": "Task",
+          "input": {
+            "agent": "dev-nested",
+            "prompt": "[script:tool-suggest-task]"
+          }
+        }
+      ]
+    },
+    {
+      "text": "The nested subagent finished."
+    }
+  ]
+}

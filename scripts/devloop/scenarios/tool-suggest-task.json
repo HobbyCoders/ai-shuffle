@@ -1,0 +1,24 @@
+{
+  "description": "Turn 1 makes a real SuggestTask call through the real tool path (directly when the request offers it, else from one run_python cell); turn 2 gives the final text. A repeat in the same chat returns the same chip.",
+  "steps": [
+    {
+      "text": "That is outside this request, so I'll suggest it instead of fixing it here.",
+      "tool_calls": [
+        {
+          "name": "SuggestTask",
+          "input": {
+            "title": "Check the docs heading",
+            "summary": "The docs heading may read badly, which confuses new readers.",
+            "prompt": "Fake-AI brief for a background-task chip. In the file docs/README.md, check the first heading reads well and report what you found. This is a test task from the dev-loop scenario; change nothing.",
+            "model": "fake-ai",
+            "base": "default",
+            "request_id": "fake-ai-suggest-task"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Suggested it as a separate task and carried on. All done."
+    }
+  ]
+}

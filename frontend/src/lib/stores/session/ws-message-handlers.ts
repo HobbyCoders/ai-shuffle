@@ -26,6 +26,7 @@ import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 import { pendingQueue, reconcilePendingPeerMessages } from './pending-queue';
 import { queueHydration } from './queue-hydration';
 import { composerSuggestion } from './composer-suggestion';
+import { taskChips } from './task-chips';
 import { swarms } from '../swarms';
 import { setPrivateAccessPending } from '../chat-access';
 import { contextChoiceFromWindow } from '$lib/constants/model-context';
@@ -474,6 +475,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		const eventSessionId = data.session_id as string | undefined;
 		if (msgType === 'swarm.updated' || eventType === 'swarm.updated') {
 			swarms.receive(data.swarm ?? data.payload, eventSessionId);
+			return;
+		}
+		if (msgType === 'task_chips_changed') {
+			taskChips.receive(eventSessionId);
 			return;
 		}
 		if (msgType === 'composer_suggestion') {

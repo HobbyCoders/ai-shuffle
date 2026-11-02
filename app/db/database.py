@@ -2190,6 +2190,45 @@ def _run_column_migrations(cursor: Any) -> None:
     # Existing session-prefixed indexes cover these reads. Allocation of legacy
     # history is lazy, scoped to one session's admission lock (turns.py).
 
+    # Background-task chips: work an agent suggested and the owner may start.
+    # Mirrored like pending_interactions, so no FK: a mirror's row may land
+    # before its session, and delete_session removes them with its runtime rows.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_task_chips (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            origin_session_id TEXT NOT NULL,
+            origin_seq BIGINT NOT NULL DEFAULT 0,
+            request_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            base TEXT NOT NULL DEFAULT 'default',
+            base_commit TEXT,
+            project_v2_id TEXT,
+            origin_label TEXT,
+            origin_mode TEXT,
+            origin_tools TEXT,
+            model TEXT NOT NULL,
+            provider_id TEXT,
+            model_label TEXT,
+            effort TEXT,
+            state TEXT NOT NULL DEFAULT 'pending',
+            attempt INTEGER NOT NULL DEFAULT 0,
+            error TEXT,
+            started_session_id TEXT,
+            started_title TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            claimed_at TIMESTAMPTZ,
+            UNIQUE (session_id, origin_session_id, request_id)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_task_chips_session "
+                   "ON session_task_chips (session_id, created_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_task_chips_started "
+                   "ON session_task_chips (started_session_id) WHERE started_session_id IS NOT NULL")
+
     # Latest generated composer hint; retained even with no watching browser.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS composer_suggestions (

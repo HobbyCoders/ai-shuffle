@@ -1,0 +1,24 @@
+{
+  "description": "A Claude Code chat suggests a chip on the Fake AI model, so the started chat crosses providers the other way.",
+  "steps": [
+    {
+      "text": "That is outside this task, so I will suggest it instead of fixing it.",
+      "tool_calls": [
+        {
+          "name": "mcp__fluid_bundled__mcp__builtins__SuggestTask",
+          "input": {
+            "title": "Check on the Fake AI",
+            "summary": "A dev-loop test suggestion.",
+            "prompt": "Fake-AI brief for a background-task chip. In the file docs/README.md, check the first heading reads well and report what you found. This is a test task from the dev-loop scenario; change nothing.",
+            "model": "fake-ai",
+            "base": "default",
+            "request_id": "fake-claude-suggest-fluid"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Suggested. Back to the task."
+    }
+  ]
+}

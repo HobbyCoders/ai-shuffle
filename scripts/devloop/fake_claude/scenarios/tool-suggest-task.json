@@ -1,0 +1,24 @@
+{
+  "description": "Calls SuggestTask on the app's bundled MCP bridge, so a Claude Code chat gets a background-task chip through the real tool path.",
+  "steps": [
+    {
+      "text": "That is outside this task, so I will suggest it instead of fixing it.",
+      "tool_calls": [
+        {
+          "name": "mcp__fluid_bundled__mcp__builtins__SuggestTask",
+          "input": {
+            "title": "Check the docs heading",
+            "summary": "The docs heading may read badly, which confuses new readers.",
+            "prompt": "Fake-AI brief for a background-task chip. In the file docs/README.md, check the first heading reads well and report what you found. This is a test task from the dev-loop scenario; change nothing.",
+            "model": "sonnet",
+            "base": "default",
+            "request_id": "fake-claude-suggest-task"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Suggested. Back to the task."
+    }
+  ]
+}

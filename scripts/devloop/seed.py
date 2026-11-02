@@ -21,12 +21,22 @@ import logging
 import os
 import subprocess
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 DEV_AGENT_ID = "dev-agent"
+#: A second Fake AI agent, because an agent is never in its own Task roster.
+DEV_HELPER_AGENT_ID = "dev-helper"
+#: A third, so a subagent can start a subagent: a chain never repeats an agent.
+DEV_NESTED_AGENT_ID = "dev-nested"
+#: A Task target whose own deny list makes it narrower than the chat that runs it.
+DEV_DENIED_AGENT_ID = "dev-denied"
+#: An agent with no tools: the state a chat's agent reaches when edited after a chip was suggested.
+DEV_NO_TOOLS_AGENT_ID = "dev-no-tools"
+NO_TOOLS_CHIP_TITLE = "Check the agent with no tools"
 PROVIDER_NAME = "Fake AI (dev)"
 MAIN_PROJECT = "dev-sandbox"
 OTHER_PROJECT = "dev-other"
@@ -43,6 +53,27 @@ def seed_id(kind: str) -> uuid.UUID:
     """The next deterministic id of ``kind`` in this seed run."""
     _id_counters[kind] = _id_counters.get(kind, 0) + 1
     return uuid.uuid5(_ID_NAMESPACE, f"{kind}:{_id_counters[kind]}")
+
+
+def _chip_on_a_chat_without_tools(session_id: str, project_v2_id: str | None, composite: str,
+                                  provider_id: str, label: str) -> None:
+    """The chip a chat keeps when its agent loses every tool after suggesting it.
+
+    Written directly: an agent with no tools cannot call SuggestTask, and the
+    preview cookie may not edit an agent. The chip's access line is worked out
+    when it is read, so it shows what a really edited agent's chip shows. Dated
+    back so this chat sits under the others in the sidebar's newest-first list.
+    """
+    from app.db import task_chips
+    from app.db.base import get_db
+
+    task_chips.create(session_id, origin_session_id=session_id, origin_seq=0, request_id="seeded-no-tools",
+                      title=NO_TOOLS_CHIP_TITLE, summary="This chat's agent lost its tools after suggesting this.",
+                      prompt="Check what this chat can do.", base="default", base_commit=None,
+                      project_v2_id=project_v2_id, model=composite, provider_id=provider_id, model_label=label)
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET updated_at=%s WHERE id=%s",
+                              (datetime(2020, 1, 1, tzinfo=timezone.utc), session_id))
 
 
 def ensure_dev_agent() -> str:
@@ -245,12 +276,13 @@ def _project(project_id: str) -> tuple[str | None, str | None]:
     return (access.get("legacy") or {}).get("id"), (access.get("project_v2") or {}).get("id")
 
 
-def _chat(title: str, composite: str, project_id: str | None = None) -> str:
+def _chat(title: str, composite: str, project_id: str | None = None,
+          profile_id: str = DEV_AGENT_ID) -> str:
     from app.db import database
 
     session_id = str(seed_id("chat"))
     legacy, v2 = _project(project_id) if project_id else (None, None)
-    database.create_session(session_id=session_id, profile_id=DEV_AGENT_ID, project_id=legacy,
+    database.create_session(session_id=session_id, profile_id=profile_id, project_id=legacy,
                             project_v2_id=v2, title=title, is_active=True, model=composite)
     return session_id
 
@@ -263,7 +295,7 @@ async def seed_default() -> dict:
     from app.core.models import ProjectCreate, ProjectSettings
     from app.db import database
     from app.db.async_database import run_sync
-    from app.db.profiles import get_profile, update_profile
+    from app.db.profiles import create_profile, get_profile, update_profile
 
     _id_counters.clear()
     fake_url = os.environ.get("SHUFFLE_DEV_FAKE_AI_URL")
@@ -276,6 +308,17 @@ async def seed_default() -> dict:
     config = dict((get_profile(DEV_AGENT_ID) or {}).get("config") or {})
     config.update(provider=provider_id, model=composite)
     update_profile(DEV_AGENT_ID, config=config)
+    for agent_id, name in ((DEV_HELPER_AGENT_ID, "Dev helper"), (DEV_NESTED_AGENT_ID, "Dev nested")):
+        if get_profile(agent_id) is None:
+            create_profile(agent_id, name, "Seeded by the dev loop. A Task target on the Fake AI provider.",
+                           config, if_absent=True)
+    limited = {DEV_DENIED_AGENT_ID: ("Dev denied", {"tool_selection_mode": "disallow",
+                                                    "disallowed_tools": ["Bash", "Write", "Edit"]}),
+               DEV_NO_TOOLS_AGENT_ID: ("Dev no tools", {"tool_selection_mode": "none"})}
+    for agent_id, (name, tools) in limited.items():
+        if get_profile(agent_id) is None:
+            create_profile(agent_id, name, "Seeded by the dev loop. An agent with limited tools.",
+                           {**config, **tools}, if_absent=True)
     await run_sync(make_dev_agent_the_default)
 
     workspace = Path(settings.effective_workspace_dir).resolve()
@@ -330,6 +373,14 @@ async def seed_default() -> dict:
     loose = transcript("no_project", "Quick question (seeded)")
     loose.turn("What is 2 + 2?", answer="4.")
     await run_sync(loose.save)
+
+    chats["no_tools"] = await run_sync(_chat, "Agent with no tools (seeded)", composite, OTHER_PROJECT,
+                                       DEV_NO_TOOLS_AGENT_ID)
+    no_tools = Transcript(chats["no_tools"], DEV_NO_TOOLS_AGENT_ID, model)
+    no_tools.turn("What can you do?", answer="Nothing that needs a tool.")
+    await run_sync(no_tools.save)
+    _, other_v2 = await run_sync(_project, OTHER_PROJECT)
+    await run_sync(_chip_on_a_chat_without_tools, chats["no_tools"], other_v2, composite, provider_id, model)
 
     # The composer's "new branch session" path: the deterministic checkout of
     # an existing branch under the project's .fluid/worktrees.

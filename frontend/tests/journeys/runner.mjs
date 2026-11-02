@@ -201,7 +201,8 @@ function parseArgs(argv) {
  *              maxValue, reason }]` for a composer move the product makes on
  *              purpose without user input (lib/verdict.mjs designedShifts):
  *              that step must move the composer from → to exactly once, and
- *              only that move's own shift, up to maxValue, is excused.
+ *              only that move's own shift, up to maxValue, is excused. `chips:
+ *              [from, to]` replaces `composer` for a chip tray lifting the composer.
  *   viewports  default DEFAULT_VIEWPORTS
  *   throttles  default Object.keys(THROTTLES)
  *   recorder   extra withRecording options (a case's `recorder` adds to it;
@@ -359,7 +360,7 @@ export async function runJourney(spec) {
 				// around it too (setup's sends, requests, socket frames, console).
 				result.status === 'fail' ? `page trace (unrecorded steps included):\n${trace.text()}` : '',
 				result.designed.length
-					? `designed moves (expectShift):\n${result.designed.map((d) => `  - composer move at ${d.t}ms in "${d.step}" measured ${d.value}  [${d.reason}]`).join('\n')}`
+					? `designed moves (expectShift):\n${result.designed.map((d) => `  - ${d.what} move at ${d.t}ms in "${d.step}" measured ${d.value}  [${d.reason}]`).join('\n')}`
 					: '',
 				result.allowed.length
 					? `allowed (environment noise):\n${result.allowed.map((a) => `  - ${a.message}  [${a.reason}]`).join('\n')}`

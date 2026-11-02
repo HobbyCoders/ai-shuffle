@@ -19,6 +19,11 @@
  *   data-ui-loading    true while history loads (open, boot restore, deep link)
  *   data-ui-streaming  true while the session streams a reply
  *
+ * Second carrier: the suggested-task tray, `data-ui-state="task-chips"`, present
+ * only while it shows a chip:
+ *   data-ui-chip-session  the session tag its chips belong to (as data-ui-session)
+ *   data-ui-chips         each shown chip's state, oldest first, comma separated
+ *
  * Mount markers, `data-ui-mount="<Name>"`, counted as they mount and unmount:
  *   ChatView, ChatInput, NewSessionHero, MessageArea, SidePanel
  *

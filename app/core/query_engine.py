@@ -1787,7 +1787,6 @@ async def _stream_to_websocket_impl(
     # project. Same coercion as build_options_from_profile, applied here
     # because this build is independent.
     from app.core.session_modes import (
-        narrow_tool_access_for_mode,
         permission_mode_for_session_mode,
         session_mode_of,
     )
@@ -1803,10 +1802,7 @@ async def _stream_to_websocket_impl(
     # not list emptiness — "Disable all tools" resolves to disallowed=["*"], so
     # the permission callback below denies everything instead of reading an
     # empty allow list as "unrestricted".
-    from app.core.tool_access import resolve_tool_access
-
-    _tool_access = resolve_tool_access(config)
-    # ...and the session's sidepanel mode narrows that, exactly as
+    # The session's sidepanel mode narrows them, exactly as
     # ``build_options_from_profile`` does. This build is independent of the one
     # inside the options builder, so without the same narrowing the callback
     # would happily approve a tool the options surface excluded — a real
@@ -1829,10 +1825,10 @@ async def _stream_to_websocket_impl(
     if _runtime is not None:
         _runtime.caller_gated_lane = session_mode == "code" and not (
             (session or {}).get("project_id") or (session or {}).get("project_v2_id"))
-    _tool_access = narrow_tool_access_for_mode(_tool_access, session_mode, owner_session=owner_coordinator)
-    from app.core.session_modes import narrow_tool_access_for_proactive
+    from app.core.session_modes import lane_tool_access
     assistant_proactive = (overrides or {}).get("_assistant_proactive")
-    _tool_access = narrow_tool_access_for_proactive(_tool_access, assistant_proactive)
+    _tool_access = lane_tool_access(config, session_mode, owner_session=owner_coordinator,
+                                    proactive=assistant_proactive)
     allowed_tools = list(_tool_access.allowed or [])
     disallowed_tools = list(_tool_access.disallowed or [])
 

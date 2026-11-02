@@ -173,6 +173,60 @@ Returns `{ "session_id": "…", "turn_id": "…", "suggestion": "…" }`, or `nu
 
 With **Suggest next reply** enabled (**Settings → General**), the latest generated hint is saved per code session, even if no browser is watching. The empty composer loads it on return/reconnect and after a turn completes. Switching sessions or reloading does not regenerate it. Starting or continuing a turn, or sending another user message, clears the hint on every watching device. Only the latest completed eligible turn can supply a new hint; reloading cannot restore a superseded hint. A cleared/rewound answer or disabling the feature also prevents the stale hint from being shown. An existing draft is never replaced. Pressing Tab or double-clicking/double-tapping the empty composer accepts the gray hint into the draft; it does not send the message. A single click/tap only focuses the input. Enter does not accept the hint. Escape dismisses it for that browser's current visit.
 
+## Suggested Tasks (Task Chips)
+
+An agent that spots work outside its task records a suggestion with its `SuggestTask` tool instead of doing it. The owner can start it in a separate chat with its own worktree; the chat it was suggested in keeps running undisturbed. A subagent's suggestion attaches to the top-level chat at the root of its ancestry.
+
+A chip suggested by a subagent, at any depth, belongs to the top-level chat that subagent works under: `session_id` is that chat, its list returns the chip, and start and dismiss are authorised against it. The subagent's own list is empty, and the chip stays startable after the subagent ends. A session started with `StartSession` is its own top-level chat.
+
+Chips live on the worker that owns the chat and are mirrored to other workers. Starting or dismissing from another worker's UI runs on the owner. A subagent running on another worker sends its suggestion to the worker that owns its chat over the signed control channel, and only for a subagent that worker sent there; the suggestion is refused if that worker cannot run the named model, or once that subagent's task has ended or been stopped (resending a suggestion already recorded still gets its answer). If that worker's own subagent was started by a third worker, the suggestion is passed on, each worker checking the one before it, up to the worker that owns the top-level chat, at most three times. Such a suggestion can only use `base: default`.
+
+**Chip fields:** `id`, `session_id` (the chat showing the chip), `origin_session_id` (the chat or subagent that suggested it; for a subagent on another worker, the Task child this worker sent there, the one id it can check), `origin_label` (that subagent's name; null when the chat itself suggested it), `title`, `summary`, `prompt` (the agent's brief, model-written), `model`, `provider_id` (null for Claude models), `model_label` (display name), `effort`, `base` (`default` or `current`), `access` (below), `state`, `error` (plain words, set in `failed`), `retryable` (true in `failed`), `started_session_id`, `started_session_title`, `created_at`, `updated_at`.
+
+**Access:** `access` says what the chip's chat would run with. It is worked out on every read, and is null once the chip cannot start. A mirror asks the owning worker and shows its own reading only while that worker is offline.
+
+| Field | Meaning |
+|---|---|
+| `mode` | The permission mode the chat would run in, for example `bypassPermissions`. Null when it could not be checked |
+| `summary` | That in plain words, for example `Runs with this chat's access: full permissions`. It ends `; standard chat tools` when the chat has what its chat mode gives any agent, `; can use only some tools` when it has less, and `; can use no tools` when it has none. Words alone: `fingerprint` still covers the exact tools |
+| `elevated` | True for full permissions, or when it could not be checked |
+| `wider_than_source` | The chat would run with more than the subagent that suggested it could do |
+| `source_note` | Says how, when `wider_than_source` is true; otherwise null |
+| `project_note` | Names the project when the chat would not run in the top-level chat's project; otherwise null |
+| `fingerprint` | An opaque value for everything the chat would run with: permission mode, the agent's allow and deny lists, tool overrides, model and project. Start sends it back. Null when it could not be checked |
+
+| State | Meaning | Next |
+|---|---|---|
+| `pending` | Waiting for the owner | `starting`, `dismissed` |
+| `starting` | A start is running | `started`, `failed` |
+| `started` | The chat exists; `started_session_id` links to it | Final |
+| `failed` | The start did not happen; `error` says why | `starting` (retry), `dismissed` |
+| `dismissed` | The owner hid it | Final |
+
+Rewinding past the turn that suggested a chip, or clearing the chat, removes it while it is still `pending`. A chip that has been acted on stays.
+
+### GET /api/v1/sessions/{session_id}/task-chips
+
+**Auth:** Required, with the same session access checks as session detail.
+
+Returns `{ "chips": [ … ], "source": null }`, oldest first. When a chip started this chat, `source` is `{ "chip_id": "…", "session_id": "…", "title": "…" }`, naming the chat it was suggested in.
+
+### POST /api/v1/sessions/{session_id}/task-chips/{chip_id}/start
+
+**Auth:** Required, with the same session access checks as session detail.
+
+**Body:** `{ "access_fingerprint": "…" }`, the `access.fingerprint` the chip showed when the owner clicked. It must match the chip's access exactly, both at the click and again as the chat is created. Any change since, narrower too, or no fingerprint at all refuses the start with nothing started, and the chip shows its access as it is now.
+
+Starts the chat and returns the chip. Idempotent: a double click, a second device or a retry after a lost response all get the same chat. Parents in a Git project always give the new chat its own worktree and branch, from a fresh copy of the default branch (`base: default`) or the commit the chat was on when it suggested the task (`base: current`). The chat runs on the chip's `model` and `effort`, and inherits the parent's agent, permission mode and project, even when the subagent that suggested it could do less; `access` says so before the click. Its first message is attributed to the suggesting chat, not to you. The click on a chip showing the model and access is the approval, so nothing asks again in any permission mode. If the chat's access is no longer what `access_fingerprint` describes, the chip goes to `failed`, nothing starts, and `access` shows the new reading to approve on a retry; narrower access just runs narrower. If that model is unavailable at the click, including when Claude is turned off or not signed in, or `base: current`'s commit is no longer in the repository, the chip goes to `failed` with the reason and can be retried: no other model or base stands in.
+
+A start that could not happen still returns `200`, with the chip in `failed` and the reason in `error`; call this route again to retry. Errors: `404` for an unknown chip, `409` for a dismissed chip, or `503` when the owning worker is offline (nothing changes).
+
+### POST /api/v1/sessions/{session_id}/task-chips/{chip_id}/dismiss
+
+**Auth:** Required, with the same session access checks as session detail.
+
+Hides the chip and returns it. Dismissing again is a no-op. Errors: `404` for an unknown chip, `409` for a chip that has started or is starting.
+
 ## List Sessions
 
 ### GET /api/v1/sessions
