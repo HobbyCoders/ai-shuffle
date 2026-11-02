@@ -9,6 +9,7 @@ import producer from './__fixtures__/agent-delivery-producer.json';
 import { deriveUserTurnNavigationItems } from './transcript-navigation';
 import { deriveStatus, needsYouCount, openSessionNeeds } from '$lib/components/layout/session-card-data';
 import { initialState, reduce, releaseMessages, type WireEvent } from '$lib/stores/session/v2/reducer';
+import { createAgentMessageProjection } from './agent-message-projection';
 import { longTurn } from '$lib/components/chat/test-fixtures/long-turn';
 import {
 	buildDisplayItems,
@@ -2201,7 +2202,10 @@ describe('live runs', () => {
 		expect(collapsedVisibleMessages(items)).toContain(a);
 	});
 
-	it('keeps the last finished prose as the latest while streaming prose is not the tail', () => {
+	// Rows of the agent's own close a paragraph, so a streaming flag still set
+	// behind one is stale and must not hold the boundary. Rows sent in from outside
+	// are different: see "start, row sent in, growth, finish" below.
+	it('keeps the last finished prose as the latest once the agent moved on from streaming prose', () => {
 		const prompt = user('go');
 		const [a, b] = [tool(), tool()];
 		const narration = text('Now the workflow.');
@@ -2210,6 +2214,118 @@ describe('live runs', () => {
 		const items = buildDisplayItems([prompt, a, narration, streaming, b, running], LIVE);
 		expect(runsOf(liveLog(items)!)).toEqual([[0, [a]]]);
 		expect(collapsedVisibleMessages(items)).toContain(narration);
+		// A steer in between does not bring the stale prose back.
+		const sameTurn = user('go', undefined, 'turn-1');
+		const steer = user('also this', undefined, 'turn-1');
+		const steered = buildDisplayItems([sameTurn, a, narration, streaming, steer, b, running], LIVE);
+		expect(runsOf(liveLog(steered)!)).toEqual([[0, [a]]]);
+		expect(collapsedVisibleMessages(steered)).toContain(narration);
+	});
+
+	describe('start, row sent in, growth, finish', () => {
+		const prompt = user('go', undefined, 'turn-1');
+		const read = tool({ id: 'read-a' });
+		const started = msg({ id: 'prose', type: 'text', content: 'Found it:\n- partial', streaming: true });
+		const grown = { ...started, content: 'Found it:\n- partial, and growing' };
+		const finished = { ...grown, streaming: false };
+		const LIVE_TURN = { ...LIVE, latestTurnUnsettled: true, sessionId: 's1' };
+		const steer = user('Also check prod', undefined, 'turn-1');
+		const peer = { id: 'peer-1', content: 'Review complete.', senderSessionId: 'reviewer', senderLabel: 'Reviewer', queuedAt: 1234 };
+		const delivered = msg({ id: 'peer-2', role: 'system', type: 'system', systemSubtype: 'agent_message', content: '', systemData: { sender: 'Reviewer', content: 'Done.', delivery: 'delivered' } });
+		const notice = msg({ id: 'notice', role: 'system', type: 'system', systemSubtype: 'task_notification', content: '', systemData: { status: 'completed' } });
+		const hiddenIds = (model: ReturnType<typeof buildTranscriptModel>) =>
+			model.items.flatMap((item) => item.kind === 'work_log'
+				? item.sequence.filter((entry) => entry.foldsInRun).map((entry) => entry.message.id) : []);
+
+		/** Every step through the builder a live chat keeps, and through a fresh build. */
+		const walk = (steps: ChatMessage[][]) => {
+			const build = createTranscriptModelBuilder();
+			return steps.map((rows) => {
+				const incremental = build(rows, LIVE_TURN);
+				expect(incremental).toEqual(buildTranscriptModel(rows, LIVE_TURN));
+				return hiddenIds(incremental);
+			});
+		};
+		const FOLDED = ['read-a'];
+
+		it.each([
+			['a human steer', steer],
+			['a delivered peer message', delivered],
+			['a task notice', notice]
+		])('keeps the work folded through %s', (_name, row) => {
+			expect(walk([
+				[prompt, read],
+				[prompt, read, started],
+				[prompt, read, started, row],
+				[prompt, read, grown, row],
+				[prompt, read, finished, row]
+			])).toEqual([[], FOLDED, FOLDED, FOLDED, FOLDED]);
+		});
+
+		it('keeps the work folded through a queued peer message, using the real projection', () => {
+			const project = createAgentMessageProjection();
+			const rows = (messages: ChatMessage[], pendingPeerMessages: (typeof peer)[]) =>
+				project.update({ sessionId: 's1', sessionActive: true, messages, pendingPeerMessages });
+			const steps = [
+				rows([prompt, read], []),
+				rows([prompt, read, started], []),
+				rows([prompt, read, started], [peer]),
+				rows([prompt, read, grown], [peer]),
+				rows([prompt, read, finished], [peer])
+			];
+			expect(steps[2].at(-1)?.systemSubtype).toBe('agent_message');
+			expect(walk(steps)).toEqual([[], FOLDED, FOLDED, FOLDED, FOLDED]);
+		});
+
+		it('keeps the work folded through several rows sent in, whatever order they land', () => {
+			expect(walk([
+				[prompt, read, started],
+				[prompt, read, started, steer],
+				[prompt, read, started, steer, delivered],
+				[prompt, read, grown, steer, delivered, notice],
+				[prompt, read, finished, steer, delivered, notice]
+			])).toEqual([FOLDED, FOLDED, FOLDED, FOLDED, FOLDED]);
+		});
+
+		// The reasoning above rests on the reducer: a steer leaves the text open, and
+		// the agent's next delta keeps writing the same row. Pin it end to end.
+		it('holds through the reducer: a steer leaves the paragraph open and it keeps growing', () => {
+			let n = 0;
+			const event = (type: string, fields: Record<string, unknown> = {}): WireEvent => {
+				n += 1;
+				return { type, id: `ev-${n}`, seq: n, session_id: 's1', turn_id: 'turn-1', created_at: new Date(Date.UTC(2026, 9, 11, 0, 0, n)).toISOString(), ...fields } as WireEvent;
+			};
+			let state = initialState();
+			const apply = (type: string, fields?: Record<string, unknown>) => { state = reduce(state, event(type, fields)); return [...state.messages]; };
+			apply('turn.started');
+			apply('message.user', { content: 'Go' });
+			apply('tool.use', { tool_use_id: 'read-1', name: 'Read', input: { file_path: '/a' } });
+			const before = apply('tool.result', { tool_use_id: 'read-1', output: 'ok' });
+			const start = apply('assistant.text_delta', { text: 'Found it:' });
+			const steered = apply('message.user', { content: 'Also check prod' });
+			const growing = apply('assistant.text_delta', { text: ' more' });
+			const prose = growing.findLast((row) => row.role === 'assistant' && row.type === 'text');
+			expect(prose?.streaming).toBe(true);
+			expect(prose?.content).toBe('Found it: more');
+			expect(growing.at(-1)?.role).toBe('user');
+			const hidden = walk([before, start, steered, growing]);
+			expect(hidden[0]).toEqual([]);
+			expect(hidden[1]).toHaveLength(1);
+			expect(hidden[2]).toEqual(hidden[1]);
+			expect(hidden[3]).toEqual(hidden[1]);
+		});
+
+		it('does not fold because of the steer: without started prose the work stays', () => {
+			expect(walk([[prompt, read], [prompt, read, steer]])).toEqual([[], []]);
+		});
+
+		it('keeps a protected row protected, and the prior finding on screen', () => {
+			const finding = text('Found:\n- a shared token');
+			const worker = msg({ id: 'worker', type: 'subagent', role: 'assistant', agentName: 'Reviewer', agentStatus: 'running', toolId: 'task-1' });
+			const rows = [prompt, read, finding, worker, started, steer];
+			const shown = collapsedVisibleMessages(buildDisplayItems(rows, LIVE));
+			expect(shown).toEqual([prompt, finding, worker, started, steer]);
+		});
 	});
 
 	it('emits no runs and no work log when grouping is off', () => {

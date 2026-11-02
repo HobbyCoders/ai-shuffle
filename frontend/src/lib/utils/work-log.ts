@@ -1020,6 +1020,29 @@ function isTaskWake(message: ChatMessage): boolean {
 	return isTaskResult(message) && message.metadata?.task_wake === true;
 }
 
+/**
+ * Rows sent in from outside the agent. Only these can land in the middle of a
+ * paragraph: the agent's own next row closes the paragraph first (reducer's
+ * `closeOpen`), while these leave it open and it keeps growing above them.
+ */
+const arrivesMidParagraph = (message: ChatMessage) =>
+	message.role === 'user' || !!agentDelivery(message) || isTaskResult(message);
+
+/**
+ * The prose still being written at the end of the turn, past any rows that
+ * landed after it. A row sent in mid-paragraph does not take the paragraph's
+ * place, so the work it folded stays folded. Anything else after the prose means
+ * the agent moved on, and a streaming flag left behind there is not the latest.
+ */
+function proseBeingWritten(response: Positioned[]): Positioned | undefined {
+	for (let index = response.length - 1; index >= 0; index--) {
+		const entry = response[index];
+		if (isAssistantText(entry.message)) return entry.message.streaming ? entry : undefined;
+		if (!arrivesMidParagraph(entry.message)) return undefined;
+	}
+	return undefined;
+}
+
 /** A row the turn's prose answers to: a steer, or a background-task wake. */
 const isSteerLike = (entry: Positioned) => isPromptRow(entry) || isTaskWake(entry.message);
 
@@ -1107,16 +1130,14 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[], sessionId?: stri
 	// The latest prose and the prose each steer replied to stay on screen
 	// whatever they say, exactly as the settled turn keeps them.
 	const terminal = terminalProse(response);
-	// The latest word on screen. Prose arriving at the tail of the turn replaces
-	// the last finished prose as soon as it starts: the rows above it fold while
-	// it has no position to lose. Waiting until it finished would fold them with
-	// the reader on it, and move the text being read up by their whole height.
-	const tail = response[response.length - 1];
-	const latest = tail && isAssistantText(tail.message) && tail.message.streaming
-		? tail
-		: response.findLast((entry) => isAssistantText(entry.message) && !entry.message.streaming);
-	// Rows that end a run and stay visible. Streaming prose other than the latest
-	// only ends a run once it is complete. A steer does NOT end a run: a
+	// The latest word on screen. Prose the agent is still writing replaces the
+	// last finished prose as soon as it starts: the rows above it fold while it
+	// has no position to lose. Waiting until it finished would fold them with the
+	// reader on it, and move the text being read up by their whole height.
+	const latest = proseBeingWritten(response)
+		?? response.findLast((entry) => isAssistantText(entry.message) && !entry.message.streaming);
+	// Rows that end a run and stay visible. Streaming prose the agent has moved
+	// on from only ends a run once it is complete. A steer does NOT end a run: a
 	// turn never folds because the user sent something (spec §1.3); it stays a
 	// visible row in place inside whatever run is current. The agent's own
 	// completed prose does when the reader must keep seeing it: a finding, a
@@ -1261,6 +1282,7 @@ export function createTranscriptModelBuilder() {
 				|| tail[key as keyof ChatMessage] === oldTail[key as keyof ChatMessage]);
 		// A streaming tail never folds, and it ends the run whatever it says, so
 		// its growing text cannot change the runs: only the row itself is swapped.
+		// Prose with a row landed after it is not the tail and takes a full build.
 		const lastRow = lastItem?.kind === 'work_log' && lastItem.mode === 'live' ? lastItem.sequence.at(-1) : undefined;
 		if (onlyTailTextGrew && lastItem?.kind === 'message' && lastItem.message === oldTail
 			&& lastItem.index === messages.length - 1) {

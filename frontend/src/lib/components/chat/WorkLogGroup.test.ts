@@ -5,7 +5,7 @@ import type { ChatMessage } from '$lib/stores/types';
 import WorkLogGroup from './WorkLogGroup.svelte';
 import TranscriptItems from './test-fixtures/TranscriptItems.svelte';
 import QueuedWorkLog from './test-fixtures/QueuedWorkLog.svelte';
-import { buildTranscriptModel, type DisplayItem } from '$lib/utils/work-log';
+import { buildTranscriptModel, createTranscriptModelBuilder, type DisplayItem } from '$lib/utils/work-log';
 import { createFoldState } from '$lib/stores/session/fold-state';
 import { deriveUserTurnNavigationItems, turnAnchorId } from '$lib/utils/transcript-navigation';
 import { readFileSync } from 'node:fs';
@@ -848,6 +848,42 @@ describe('WorkLogGroup', () => {
 			render(WorkLogGroup, { ...logOf(true, [prompt, read, proseA, proseB]), folds: createFoldState(storage) });
 			expect(shown('read-x')).toBe(true);
 			expect(screen.getByRole('button', { name: 'Hide work details: Read 1 file' })).toBeTruthy();
+		});
+
+		// A row sent in mid-paragraph must not bring the folded work back on screen,
+		// through the builder a live chat keeps as well as a fresh build.
+		describe.each([
+			['the live builder', () => createTranscriptModelBuilder()],
+			['a fresh build', () => buildTranscriptModel]
+		])('a row sent in mid-paragraph, through %s', (_name, makeBuilder) => {
+			const prompt = turn[0];
+			const read = { ...message, id: 'read-a', content: 'Read A' };
+			const started: ChatMessage = { id: 'prose', role: 'assistant', type: 'text', content: 'Found it:\n- partial', streaming: true };
+			const grown = { ...started, content: 'Found it:\n- partial, and growing' };
+			const finished = { ...grown, streaming: false };
+			const steer: ChatMessage = { id: 'steer', role: 'user', content: 'Also check prod', turnId: 'turn-1' };
+			const queued: ChatMessage = { id: 'peer', role: 'system', type: 'system', systemSubtype: 'agent_message', content: '', systemData: { sender: 'Reviewer', content: 'Done.', delivery: 'queued' } };
+
+			it.each([['a steer', steer], ['a queued peer message', queued]])('keeps the work hidden through %s', async (_label, row) => {
+				const build = makeBuilder();
+				const props = (messages: ChatMessage[]) => {
+					const item = build(messages, { isStreaming: true, latestTurnUnsettled: true, groupingEnabled: true, sessionId: 's1' }).items
+						.find((entry) => entry.kind === 'work_log') as WorkLog;
+					return { ...item, row: expandableRow };
+				};
+				const view = render(WorkLogGroup, { ...props([prompt, read, started]), folds: createFoldState(memoryStorage()) });
+				const label = () => screen.getByRole('button', { name: 'Show work details: Read 1 file' });
+				const before = label();
+				const steps = [[prompt, read, started, row], [prompt, read, grown, row], [prompt, read, finished, row]];
+				expect(rowEl('read-a')).toBeNull();
+				for (const step of steps) {
+					await view.rerender(props(step));
+					// Same fold row, never unmounted and never opened: no flicker to see.
+					expect(label()).toBe(before);
+					expect(rowEl('read-a')).toBeNull();
+				}
+				expect(shown('prose')).toBe(true);
+			});
 		});
 
 		// Re-review of #2297: runs merge when newer prose replaces the prose
