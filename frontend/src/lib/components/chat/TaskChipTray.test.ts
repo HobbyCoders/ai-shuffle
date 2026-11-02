@@ -6,6 +6,7 @@ import type { TaskChip } from '$lib/api/sessions';
 const chip = (id: string, patch: Partial<TaskChip> = {}): TaskChip => ({
 	id, session_id: 'root', origin_session_id: 'root', origin_label: null, title: `Chip ${id}`, summary: `Summary ${id}`,
 	prompt: `Full brief ${id}`, model: 'prov:x:sonnet', provider_id: 'x', model_label: 'Sonnet', effort: null, base: 'default',
+	access: { mode: 'default', summary: 'Runs with this chat\'s access: asks you before using tools', elevated: false, wider_than_source: false, source_note: null, project_note: null },
 	state: 'pending', error: null, retryable: false, started_session_id: null, started_session_title: null,
 	created_at: '2026-11-02T00:00:00Z', updated_at: '2026-11-02T00:00:00Z', ...patch
 });
@@ -38,6 +39,34 @@ describe('TaskChipTray', () => {
 		show([chip('a'), chip('b', { origin_label: 'Task · Dev helper' })]);
 		expect(screen.getAllByText(/^From /)).toHaveLength(1);
 		expect(screen.getByText('From Task · Dev helper')).toBeTruthy();
+	});
+
+	it('says what the chat will run with before the click, without expanding', () => {
+		show([chip('a', { access: {
+			mode: 'bypassPermissions', summary: "Runs with this chat's access: full permissions", elevated: true, wider_than_source: true,
+			source_note: 'More than the subagent that suggested it, which asks before using tools.',
+			project_note: "Runs in Other repo, not this chat's project."
+		} })]);
+		const line = screen.getByText("Runs with this chat's access: full permissions");
+		const access = line.closest<HTMLElement>('.access')!;
+		expect(access.classList.contains('elevated')).toBe(true);
+		expect(access.closest('.brief')).toBeNull();
+		expect(access.closest('[hidden]')).toBeNull();
+		expect(screen.getByText('More than the subagent that suggested it, which asks before using tools.')).toBeTruthy();
+		expect(screen.getByText("Runs in Other repo, not this chat's project.")).toBeTruthy();
+		// A screen reader hears it with the control it qualifies.
+		expect(screen.getByRole('button', { name: 'Start Chip a' }).getAttribute('aria-describedby')).toBe(access.id);
+	});
+
+	it('keeps an ordinary chip quiet about access', () => {
+		show([chip('a')]);
+		const line = screen.getByText("Runs with this chat's access: asks you before using tools");
+		expect(line.closest('.access')!.classList.contains('elevated')).toBe(false);
+	});
+
+	it('shows no access line once the chip can no longer start', () => {
+		show([chip('a', { state: 'started', access: null, started_session_id: 'n' }), chip('b', { state: 'failed', retryable: false, error: 'No.' })]);
+		expect(document.querySelector('.access')).toBeNull();
 	});
 
 	it('starts and dismisses the chip it belongs to', async () => {

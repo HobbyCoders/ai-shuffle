@@ -179,9 +179,20 @@ An agent that spots work outside its task records a suggestion with its `Suggest
 
 A chip suggested by a subagent, at any depth, belongs to the top-level chat that subagent works under: `session_id` is that chat, its list returns the chip, and start and dismiss are authorised against it. The subagent's own list is empty, and the chip stays startable after the subagent ends. A session started with `StartSession` is its own top-level chat.
 
-Chips live on the worker that owns the chat and are mirrored to other workers. Starting or dismissing from another worker's UI runs on the owner.
+Chips live on the worker that owns the chat and are mirrored to other workers. Starting or dismissing from another worker's UI runs on the owner. A subagent running on another worker sends its suggestion to the worker that owns its chat over the signed control channel, and only for a subagent that worker sent there; the suggestion is refused if that worker cannot run the named model. Such a suggestion can only use `base: default`.
 
-**Chip fields:** `id`, `session_id` (the chat showing the chip), `origin_session_id` (the chat or subagent that suggested it), `origin_label` (that subagent's name; null when the chat itself suggested it), `title`, `summary`, `prompt` (the agent's brief, model-written), `model`, `provider_id` (null for Claude models), `model_label` (display name), `effort`, `base` (`default` or `current`), `state`, `error` (plain words, set in `failed`), `retryable` (true in `failed`), `started_session_id`, `started_session_title`, `created_at`, `updated_at`.
+**Chip fields:** `id`, `session_id` (the chat showing the chip), `origin_session_id` (the chat or subagent that suggested it), `origin_label` (that subagent's name; null when the chat itself suggested it), `title`, `summary`, `prompt` (the agent's brief, model-written), `model`, `provider_id` (null for Claude models), `model_label` (display name), `effort`, `base` (`default` or `current`), `access` (below), `state`, `error` (plain words, set in `failed`), `retryable` (true in `failed`), `started_session_id`, `started_session_title`, `created_at`, `updated_at`.
+
+**Access:** `access` says what the chip's chat would run with. It is worked out on every read, and is null once the chip cannot start. A mirror asks the owning worker and shows its own reading only while that worker is offline.
+
+| Field | Meaning |
+|---|---|
+| `mode` | The permission mode the chat would run in, for example `bypassPermissions`. Null when it could not be checked |
+| `summary` | That in plain words, for example `Runs with this chat's access: full permissions` |
+| `elevated` | True for full permissions, or when it could not be checked |
+| `wider_than_source` | The chat would run with more than the subagent that suggested it could do |
+| `source_note` | Says how, when `wider_than_source` is true; otherwise null |
+| `project_note` | Names the project when the chat would not run in the top-level chat's project; otherwise null |
 
 | State | Meaning | Next |
 |---|---|---|
@@ -203,7 +214,9 @@ Returns `{ "chips": [ … ], "source": null }`, oldest first. When a chip starte
 
 **Auth:** Required, with the same session access checks as session detail.
 
-Starts the chat and returns the chip. Idempotent: a double click, a second device or a retry after a lost response all get the same chat. Parents in a Git project always give the new chat its own worktree and branch, from a fresh copy of the default branch (`base: default`) or the commit the chat was on when it suggested the task (`base: current`). The chat runs on the chip's `model` and `effort`, and inherits the parent's agent, permission mode and project; its first message is attributed to the suggesting chat, not to you. The click on a chip showing the model is the approval, so nothing asks again in any permission mode. If that model is unavailable at the click, or `base: current`'s commit is no longer in the repository, the chip goes to `failed` with the reason and can be retried: no other model or base stands in.
+**Body:** `{ "shown_access": "bypassPermissions" }`, the `access.mode` the chip showed when the owner clicked; `null` or no body means none was shown.
+
+Starts the chat and returns the chip. Idempotent: a double click, a second device or a retry after a lost response all get the same chat. Parents in a Git project always give the new chat its own worktree and branch, from a fresh copy of the default branch (`base: default`) or the commit the chat was on when it suggested the task (`base: current`). The chat runs on the chip's `model` and `effort`, and inherits the parent's agent, permission mode and project, even when the subagent that suggested it could do less; `access` says so before the click. Its first message is attributed to the suggesting chat, not to you. The click on a chip showing the model and access is the approval, so nothing asks again in any permission mode. If the chat would now run with more access than `shown_access`, the chip goes to `failed`, nothing starts, and `access` shows the new reading to approve on a retry; narrower access just runs narrower. If that model is unavailable at the click, including when Claude is turned off or not signed in, or `base: current`'s commit is no longer in the repository, the chip goes to `failed` with the reason and can be retried: no other model or base stands in.
 
 A start that could not happen still returns `200`, with the chip in `failed` and the reason in `error`; call this route again to retry. Errors: `404` for an unknown chip, `409` for a dismissed chip, or `503` when the owning worker is offline (nothing changes).
 

@@ -168,6 +168,20 @@ describe('session-switcher · persistSession (writes both slots)', () => {
 		switcher.destroy();
 	});
 
+	it('saves the tab slot at once, so a reload right after a switch reopens the chat on screen', () => {
+		const fetchMock = vi.fn(async () => ({ ok: true }));
+		global.fetch = fetchMock as unknown as typeof fetch;
+
+		const switcher = makeSwitcher();
+		switcher.persistSession();
+
+		// Nothing has waited: the slot is already this chat, and the server write is still debounced.
+		expect(JSON.parse(sessionStorage.getItem(TAB_ACTIVE_SESSION_KEY) as string).sessionId).toBe('sess-1');
+		expect(fetchMock).not.toHaveBeenCalled();
+
+		switcher.destroy();
+	});
+
 	it('still writes the server device key even if sessionStorage throws', async () => {
 		const fetchMock = vi.fn(async () => ({ ok: true }));
 		global.fetch = fetchMock as unknown as typeof fetch;

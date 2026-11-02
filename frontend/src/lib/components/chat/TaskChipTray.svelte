@@ -3,8 +3,9 @@
 	 * TaskChipTray: work an agent suggested for a separate chat, beside the composer.
 	 *
 	 * Up to three chips, then "and N more". A chip says what the work is, who
-	 * raised it and which model it will run on, because Start is the owner's
-	 * approval of that model. Start never touches this chat: no navigation, and
+	 * raised it, which model it will run on and with what access, because Start
+	 * is the owner's approval of those. The access line is the worker's own words
+	 * and is never behind the expander. Start never touches this chat: no navigation, and
 	 * a pointer press leaves focus in the composer. It renders from the chip list
 	 * alone, so a chip from a subagent that has ended is as usable as any other.
 	 */
@@ -187,6 +188,7 @@
 										data-chip-main
 										aria-disabled={isStarting(chip) || !!busy[chip.id]}
 										aria-label={`${actionLabel(chip)} ${chip.title}`}
+										aria-describedby={chip.access ? `chip-access-${chip.id}` : undefined}
 										title="Starts in a separate chat"
 										onclick={() => start(chip)}
 									>
@@ -210,6 +212,13 @@
 							</div>
 						{/if}
 					</div>
+					{#if chip.access && canRetry(chip)}
+						<div class="access" class:elevated={chip.access.elevated} id={`chip-access-${chip.id}`} data-chip-access={chip.access.mode ?? 'unknown'}>
+							<p class="access-summary">{chip.access.summary}</p>
+							{#if chip.access.source_note}<p>{chip.access.source_note}</p>{/if}
+							{#if chip.access.project_note}<p>{chip.access.project_note}</p>{/if}
+						</div>
+					{/if}
 					{#if trouble}
 						<p class="trouble" role="alert">{trouble}</p>
 					{/if}
@@ -288,11 +297,20 @@
 		.crowded ul {
 			max-height: 4rem;
 		}
+
+		/* The access line must show without scrolling; the summary is a click away. */
+		.crowded .summary:not(.is-open) {
+			display: none;
+		}
 	}
 
 	@media (max-height: 500px) {
 		ul {
 			max-height: 4rem;
+		}
+
+		.summary:not(.is-open) {
+			display: none;
 		}
 	}
 
@@ -500,6 +518,23 @@
 	.dismiss[aria-disabled='true'] {
 		cursor: default;
 		opacity: 0.6;
+	}
+
+	.access {
+		margin: 0 6px 4px;
+		color: var(--muted-foreground);
+		font-size: 11.5px;
+		line-height: 1.4;
+		overflow-wrap: anywhere;
+	}
+
+	.access p {
+		margin: 0;
+	}
+
+	.access.elevated .access-summary {
+		color: var(--warning);
+		font-weight: 500;
 	}
 
 	.trouble {

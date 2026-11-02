@@ -543,6 +543,18 @@ export async function resumeSession(sessionId: string): Promise<ResumeSessionRes
 
 export type TaskChipState = 'pending' | 'starting' | 'started' | 'failed' | 'dismissed';
 
+/** What a chip's chat would run with, as the worker works it out on each read. */
+export interface TaskChipAccess {
+	/** Sent back on Start, so a click only approves what was on screen. Null when it could not be checked. */
+	mode: string | null;
+	summary: string;
+	/** Full permissions, or unknown: the chip says so more loudly. */
+	elevated: boolean;
+	wider_than_source: boolean;
+	source_note: string | null;
+	project_note: string | null;
+}
+
 /** Work an agent suggested for a separate chat; the owner's click starts it. */
 export interface TaskChip {
 	id: string;
@@ -558,6 +570,8 @@ export interface TaskChip {
 	model_label: string | null;
 	effort: string | null;
 	base: 'default' | 'current';
+	/** Only while the chip can still be started. */
+	access: TaskChipAccess | null;
 	state: TaskChipState;
 	error: string | null;
 	retryable: boolean;
@@ -585,9 +599,12 @@ export function listTaskChips(sessionId: string): Promise<TaskChipList> {
 	return api.get<TaskChipList>(taskChipsPath(sessionId));
 }
 
-/** Idempotent. A start that could not happen resolves with the chip in `failed`. */
-export function startTaskChip(sessionId: string, chipId: string): Promise<TaskChip> {
-	return api.post<TaskChip>(`${taskChipsPath(sessionId)}/${encodeURIComponent(chipId)}/start`);
+/**
+ * Idempotent. A start that could not happen resolves with the chip in `failed`.
+ * `shownAccess` is the mode the chip showed: wider than that now, nothing starts.
+ */
+export function startTaskChip(sessionId: string, chipId: string, shownAccess: string | null): Promise<TaskChip> {
+	return api.post<TaskChip>(`${taskChipsPath(sessionId)}/${encodeURIComponent(chipId)}/start`, { shown_access: shownAccess });
 }
 
 export function dismissTaskChip(sessionId: string, chipId: string): Promise<TaskChip> {

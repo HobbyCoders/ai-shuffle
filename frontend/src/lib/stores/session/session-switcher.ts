@@ -551,7 +551,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		return `active_session:${getOrCreateDeviceId()}`;
 	}
 
-	async function doPersist() {
+	/** This tab's own slot: what a reload of this tab reopens. Local and cheap, so it is never debounced. */
+	function writeTabSlot(): PersistedSession {
 		const value = buildPersistValue();
 		// "New chat" tells a reload of this tab to stay on the new-session screen
 		// (setSkipRestore). Once the tab's chat is a real one (the first send
@@ -569,6 +570,11 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		} catch {
 			// sessionStorage unavailable / full — server key still covers restore.
 		}
+		return value;
+	}
+
+	async function doPersist() {
+		const value = writeTabSlot();
 		// (b) Server device key: unchanged behavior (debounce/keepalive intact).
 		try {
 			const prefKey = serverPrefKey();
@@ -583,6 +589,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	}
 
 	function persistSession() {
+		// Only the server write waits: a reload just after switching chats must
+		// reopen the chat on screen, not the one before it (found by the
+		// task-chips journey, reloading 620ms after a switch).
+		writeTabSlot();
 		if (persistTimer) clearTimeout(persistTimer);
 		persistTimer = setTimeout(doPersist, PERSIST_DEBOUNCE_MS);
 		onPersistTimerChanged(persistTimer);

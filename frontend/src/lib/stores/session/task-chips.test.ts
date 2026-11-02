@@ -7,7 +7,7 @@ const NOW = Date.parse('2026-11-02T12:00:00Z');
 
 const chip = (id: string, patch: Partial<TaskChip> = {}): TaskChip => ({
 	id, session_id: 'root', origin_session_id: 'root', origin_label: null, title: `Chip ${id}`, summary: 'Why', prompt: 'Brief',
-	model: 'fake-ai', provider_id: null, model_label: 'Fake AI', effort: null, base: 'default', state: 'pending', error: null,
+	model: 'fake-ai', provider_id: null, model_label: 'Fake AI', effort: null, base: 'default', access: null, state: 'pending', error: null,
 	retryable: false, started_session_id: null, started_session_title: null,
 	created_at: new Date(NOW).toISOString(), updated_at: new Date(NOW).toISOString(), ...patch
 });
@@ -167,6 +167,29 @@ describe('task chips store', () => {
 		stop();
 		expect(states).not.toContain('pending');
 		expect((deps.list as ReturnType<typeof vi.fn>).mock.calls.length).toBe(3);
+	});
+
+	it('tells the worker which access the chip showed, and on a retry the access it shows now', async () => {
+		const access = (mode: string | null) => ({ mode, summary: `s ${mode}`, elevated: false, wider_than_source: false, source_note: null, project_note: null });
+		const wider = chip('a', { state: 'failed', retryable: true, error: 'Broader now.', access: access('bypassPermissions') });
+		const start = vi.fn().mockResolvedValueOnce(wider).mockResolvedValueOnce(chip('a', { state: 'started', started_session_id: 'n', access: null }));
+		const { store } = setup({ root: [chip('a', { access: access('default') })] }, { start });
+		store.observe('root');
+		await flush();
+		await store.start('a');
+		expect(start).toHaveBeenLastCalledWith('root', 'a', 'default');
+		expect(get(store).chips[0].access?.mode).toBe('bypassPermissions');
+		await store.start('a');
+		expect(start).toHaveBeenLastCalledWith('root', 'a', 'bypassPermissions');
+	});
+
+	it('approves nothing when the chip could not say what it would run with', async () => {
+		const start = vi.fn(async () => chip('a', { state: 'failed', retryable: true, error: 'No.' }));
+		const { store } = setup({ root: [chip('a', { access: null })] }, { start });
+		store.observe('root');
+		await flush();
+		await store.start('a');
+		expect(start).toHaveBeenCalledWith('root', 'a', null);
 	});
 
 	it('shows a failed start from the worker as the chip itself', async () => {

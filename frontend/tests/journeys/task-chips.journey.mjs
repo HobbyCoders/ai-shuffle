@@ -90,6 +90,17 @@ async function openedChat(ctx, { first = 'hello', again = false } = {}) {
 	return { token, id };
 }
 
+const FULL_ACCESS = "Runs with this chat's access: full permissions";
+
+/** Inside the scrolling list's visible part, not just rendered below its fold. */
+async function inTrayView(locator) {
+	return locator.evaluate((node) => {
+		const line = node.getBoundingClientRect();
+		const list = node.closest('ul').getBoundingClientRect();
+		return line.height > 0 && line.top >= list.top && line.bottom <= list.bottom + 1;
+	});
+}
+
 /** The reload ends its own step: chat → nothing → chat again is the reload, not a flicker. */
 async function reload(page, mark) {
 	await page.reload({ waitUntil: 'domcontentloaded' });
@@ -270,10 +281,19 @@ const CLICK = {
 	setup: async (ctx) => { await chatWithChip(ctx, 'tool-suggest-task', DOCS); },
 	async act({ page, mark }) {
 		const starts = [];
+		const bodies = [];
 		page.on('request', (request) => {
-			if (request.method() === 'POST' && /\/task-chips\/[^/]+\/start$/.test(request.url())) starts.push(request.url());
+			if (request.method() === 'POST' && /\/task-chips\/[^/]+\/start$/.test(request.url())) {
+				starts.push(request.url());
+				bodies.push(request.postData());
+			}
 		});
 		const route = /\/task-chips\/[^/]+\/start$/;
+
+		// The owner reads what the new chat runs with before the click, without opening anything.
+		const access = row(page, DOCS).getByText(FULL_ACCESS, { exact: true });
+		expect(await access.isVisible(), 'the chip says what the new chat runs with');
+		expect(await inTrayView(access), 'the access line shows without scrolling the tray');
 
 		await mark('press Start with the app out of reach');
 		await page.route(route, (r) => r.abort());
@@ -302,6 +322,8 @@ const CLICK = {
 		await openChatLink(page, DOCS).waitFor({ timeout: 60_000 });
 		await page.waitForTimeout(800);
 		expect(starts.length === 1, `a double click sent one start (sent ${starts.length})`);
+		expect(JSON.parse(bodies[0]).shown_access === 'bypassPermissions', `the start names the access on screen (sent ${bodies[0]})`);
+		expect(await row(page, DOCS).getByText(FULL_ACCESS).count() === 0, 'a started chip has no access left to approve');
 		expect(await row(page, DOCS).getByRole('alert').count() === 0, 'the old error left with the success');
 	},
 	// The two refused presses above are this case's own doing.
@@ -354,6 +376,7 @@ const CROWDED = {
 		const first = row(page, CROWDED_FIRST).first();
 		await first.getByRole('button', { name: /^Start / }).scrollIntoViewIfNeeded();
 		expect(await first.getByRole('button', { name: /^Start / }).isVisible(), 'the first chip can still be started');
+		expect(await inTrayView(first.getByText(FULL_ACCESS, { exact: true })), 'even with the tray squeezed, the first chip says what it runs with');
 	},
 	allow: [{ kind: 'layout_shift', reason: 'the open question lifts the composer, which is what this case sets up to measure' }]
 };
