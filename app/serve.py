@@ -89,14 +89,12 @@ class IngressApplication:
                 and scope.get("method") == "GET":
             return True
         try:
-            from starlette.requests import HTTPConnection
             from app.db.async_database import run_sync
 
-            token = await run_sync(preview_access.cookie_token, HTTPConnection(scope).cookies)
-            if not token:
-                return False
-            return await run_sync(preview_access.verify, token) is not None
-        except Exception:  # noqa: BLE001 - an unreadable grant is a denial
+            return await run_sync(preview_access.admit_ingress, scope)
+        except Exception as exc:  # noqa: BLE001 - an unreadable grant is a denial
+            logging.getLogger(__name__).warning(
+                "Preview ingress check failed: %s", preview_access.describe_error(exc))
             return False
 
     @staticmethod

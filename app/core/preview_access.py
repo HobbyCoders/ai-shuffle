@@ -51,18 +51,25 @@ Threat model, and what the token is NOT:
 from __future__ import annotations
 
 import base64
+import errno
 import hmac
 import ipaddress
 import logging
 import os
 import re
 import secrets
+import threading
 import time
+import traceback
+import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
-from typing import Optional
+from time import monotonic as _monotonic
+from typing import Iterator, Optional
 from urllib.parse import quote, urlsplit
 
 logger = logging.getLogger(__name__)
@@ -172,6 +179,118 @@ def advertised_host(browser_host: Optional[str]) -> Optional[str]:
 class Grant:
     session_id: str
     expires_at: int
+
+
+# Denial diagnostics (#1002). One request is checked several times (ingress,
+# enforce_limits, grant), and each failing stage answers differently: 403, 503,
+# 401. A retained line names the stage and reason, correlated per request, so a
+# transient failure can be classified afterwards. Only allow-listed metadata is
+# logged: never a token, a cookie name or value, a query string or exception text.
+_CHECK_SCOPE_KEY = "shuffle.preview_check"
+_UNAVAILABLE_REASONS = frozenset({"key_unavailable", "session_lookup_unavailable", "check_failed"})
+#: Each (stage, reason) logs at most once per window. An outage should stay
+#: visible; a stale cookie replayed on every request should not flood the log.
+_UNAVAILABLE_LOG_WINDOW_S = 1.0
+_DENIAL_LOG_WINDOW_S = 30.0
+_denial_log: dict[tuple[str, str], tuple[float, int]] = {}
+_denial_log_lock = threading.Lock()
+
+
+@dataclass
+class _Check:
+    """One verification of one request, for the denial log only."""
+    stage: str
+    request_id: str = "-"
+    ordinal: int = 0
+    started: Optional[float] = None
+    method: str = "-"
+    path: str = "-"
+    cookie_present: Optional[bool] = None
+    cookie_count: Optional[int] = None
+    denied: bool = False
+
+
+_active_check: ContextVar[Optional[_Check]] = ContextVar("preview_access_check", default=None)
+
+
+def describe_error(exc: BaseException) -> str:
+    """An exception's class, errno or SQLSTATE and innermost frames, never its
+    message: driver and OS messages can quote connection details and paths.
+    Walks the traceback without reading source files (see #2112)."""
+    parts = [type(exc).__name__]
+    code = getattr(exc, "errno", None)
+    if isinstance(code, int):
+        parts.append(f"errno={errno.errorcode.get(code, code)}")
+    sqlstate = getattr(exc, "pgcode", None)
+    if isinstance(sqlstate, str) and re.fullmatch(r"[0-9A-Z]{5}", sqlstate):
+        parts.append(f"sqlstate={sqlstate}")
+    frames = [f"{os.path.basename(frame.f_code.co_filename)}:{line}:{frame.f_code.co_name}"
+              for frame, line in traceback.walk_tb(exc.__traceback__)]
+    if frames:
+        parts.append("at=" + "<-".join(reversed(frames[-3:])))
+    return " ".join(parts)
+
+
+def _begin_check(stage: str, scope, cookies) -> _Check:
+    """The next check of this request; scope state correlates its stages."""
+    state = scope.get(_CHECK_SCOPE_KEY) if isinstance(scope, dict) else None
+    if state is None:
+        state = {"id": uuid.uuid4().hex[:8], "checks": 0, "started": _monotonic()}
+        if isinstance(scope, dict):
+            scope[_CHECK_SCOPE_KEY] = state
+    state["checks"] += 1
+    details = scope if isinstance(scope, dict) else {}
+    method = "WEBSOCKET" if details.get("type") == "websocket" else str(details.get("method") or "-")
+    return _Check(
+        stage=stage,
+        request_id=state["id"],
+        ordinal=state["checks"],
+        started=state["started"],
+        method=method,
+        # Decoded client input: keep it on one log line.
+        path=re.sub(r"[^\x21-\x7e]", "?", str(details.get("path") or "-"))[:160],
+        cookie_present=any(name == LEGACY_COOKIE_NAME or name.startswith(COOKIE_PREFIX) for name in cookies),
+        cookie_count=len(cookies),
+    )
+
+
+@contextmanager
+def _checking(stage: str, scope, cookies) -> Iterator[_Check]:
+    check = _begin_check(stage, scope, cookies)
+    active = _active_check.set(check)
+    try:
+        yield check
+    except Exception as exc:
+        if not check.denied:  # Anything the verifier did not already classify.
+            _note_denial("check_failed", exc)
+        raise
+    finally:
+        _active_check.reset(active)
+
+
+def _note_denial(reason: str, exc: Optional[BaseException] = None) -> None:
+    """Log why a check said no. Never raises: diagnostics cannot change a decision."""
+    try:
+        check = _active_check.get() or _Check(stage="verify")
+        check.denied = True
+        window = _UNAVAILABLE_LOG_WINDOW_S if reason in _UNAVAILABLE_REASONS else _DENIAL_LOG_WINDOW_S
+        now = _monotonic()
+        with _denial_log_lock:
+            last, suppressed = _denial_log.get((check.stage, reason), (None, 0))
+            if last is not None and now - last < window:
+                _denial_log[(check.stage, reason)] = (last, suppressed + 1)
+                return
+            _denial_log[(check.stage, reason)] = (now, 0)
+        elapsed = "-" if check.started is None else f"{(now - check.started) * 1000:.0f}"
+        logger.warning(
+            "Preview access denied: stage=%s reason=%s request=%s ordinal=%d elapsed_ms=%s "
+            "cookie_present=%s cookie_count=%s method=%s path=%s suppressed=%d error=%s",
+            check.stage, reason, check.request_id, check.ordinal, elapsed,
+            check.cookie_present, check.cookie_count, check.method, check.path, suppressed,
+            describe_error(exc) if exc is not None else "-",
+        )
+    except Exception:  # noqa: BLE001 — a log line must never decide access
+        pass
 
 
 def _key_path() -> Path:
@@ -298,31 +417,57 @@ def _session_exists(session_id: str) -> bool:
         from app.db.sessions import get_session
 
         row = get_session(session_id)
-        return row is not None and session_api_user_id(row) is None
-    except Exception:  # noqa: BLE001 — an unreadable DB is a denial, not a grant
-        logger.debug("preview access: session lookup failed", exc_info=True)
+        if row is None:
+            _note_denial("session_missing")
+            return False
+        if session_api_user_id(row) is not None:
+            _note_denial("session_not_owner")
+            return False
+        return True
+    except Exception as exc:  # noqa: BLE001 — an unreadable DB is a denial, not a grant
+        _note_denial("session_lookup_unavailable", exc)
         return False
 
 
 def verify(token: Optional[str], *, now: Optional[float] = None) -> Optional[Grant]:
     """The grant a token carries, or None for anything malformed, forged,
     expired or bound to a session that no longer exists."""
-    if not token or not isinstance(token, str) or len(token) > 512:
+    if not token:
+        return None  # No credential was presented, so nothing was refused.
+    if not isinstance(token, str) or len(token) > 512:
+        _note_denial("malformed_token")
         return None
     parts = token.split(".")
     if len(parts) != 4 or parts[0] != _VERSION:
+        _note_denial("malformed_token")
         return None
     payload = ".".join(parts[:3])
-    if not parts[3].isascii() or not hmac.compare_digest(_sign(payload), parts[3]):
+    if not parts[3].isascii():
+        _note_denial("bad_signature")
+        return None
+    try:
+        expected = _sign(payload)
+    except Exception as exc:
+        # Propagates: callers applying restrictions must not read an unreadable
+        # key as an absent grant.
+        _note_denial("key_unavailable", exc)
+        raise
+    if not hmac.compare_digest(expected, parts[3]):
+        _note_denial("bad_signature")
         return None
     try:
         session_id = _unb64(parts[1])
         expires = int(parts[2])
     except (ValueError, UnicodeDecodeError):
+        _note_denial("malformed_token")
         return None
     if expires <= (now if now is not None else time.time()):
+        _note_denial("expired_token")
         return None
-    if not session_id or not _session_exists(session_id):
+    if not session_id:
+        _note_denial("malformed_token")
+        return None
+    if not _session_exists(session_id):
         return None
     return Grant(session_id=session_id, expires_at=expires)
 
@@ -401,6 +546,30 @@ def cookie_token(cookies) -> Optional[str]:
     return cookies.get(cookie_name()) or legacy
 
 
+def _noted_cookie_token(cookies) -> Optional[str]:
+    try:
+        return cookie_token(cookies)
+    except Exception as exc:
+        _note_denial("key_unavailable", exc)
+        raise
+
+
+def admit_ingress(scope) -> bool:
+    """Whether the preview listener lets this request reach the app at all."""
+    from starlette.requests import HTTPConnection
+
+    cookies = HTTPConnection(scope).cookies
+    try:
+        with _checking("ingress", scope, cookies) as check:
+            token = _noted_cookie_token(cookies)
+            if not token:
+                _note_denial("other_install_cookie" if check.cookie_present else "missing_cookie")
+                return False
+            return verify(token) is not None
+    except Exception:  # noqa: BLE001 — an unreadable grant is a denial
+        return False
+
+
 def enforce_limits(request) -> None:
     """A valid preview cookie restricts all HTTP and voice WebSocket auth paths.
 
@@ -412,10 +581,10 @@ def enforce_limits(request) -> None:
     from fastapi import HTTPException
 
     try:
-        token = cookie_token(request.cookies)
-        found = verify(token) if token else None
+        with _checking("enforce_limits", getattr(request, "scope", None), request.cookies):
+            token = _noted_cookie_token(request.cookies)
+            found = verify(token) if token else None
     except Exception as exc:  # noqa: BLE001 — never bypass limits on key failure
-        logger.debug("preview access: restriction check unavailable", exc_info=True)
         raise HTTPException(503, "Preview access could not be checked. Try again later.") from exc
     request.state.preview_grant = found
     # WebSockets have no HTTP method: never treat an audio upgrade as a safe GET.
@@ -434,22 +603,23 @@ def grant(request) -> Optional[Grant]:
     """
     try:
         cookies = getattr(request, "cookies", None) or {}
-        token = cookie_token(cookies)
-        if not token:
-            return None
-        if not _private_peer(request):
-            return None
-        found = verify(token)
-        if found is None:
-            return None
         scope = getattr(request, "scope", {}) or {}
-        method = str(scope.get("method") or "GET")
-        path = str(scope.get("path") or "/")
-        if not mutation_allowed(path, method):
-            return None
-        return found
+        with _checking("grant", scope, cookies):
+            token = _noted_cookie_token(cookies)
+            if not token:
+                return None
+            if not _private_peer(request):
+                _note_denial("transport_refused")
+                return None
+            found = verify(token)
+            if found is None:
+                return None
+            method = str(scope.get("method") or "GET")
+            path = str(scope.get("path") or "/")
+            if not mutation_allowed(path, method):
+                return None
+            return found
     except Exception:  # noqa: BLE001 — a broken cookie is a denial
-        logger.debug("preview access: grant check failed", exc_info=True)
         return None
 
 
