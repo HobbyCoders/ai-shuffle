@@ -4,7 +4,8 @@
 //   designedShifts()  the narrowly-scoped exception for a layout move the
 //                     product makes on purpose without user input (a cleared
 //                     chat's composer moving to the centre when it opens by
-//                     link or is cleared by the server). Never a blanket allow.
+//                     link or is cleared by the server, or a suggested-task
+//                     chip arriving above it). Never a blanket allow.
 //   classifyKnownBug() whether a failing case marked `knownBug` may be reported
 //                     as KNOWN BUG instead of FAIL.
 import { detectLayoutShift } from '../../../../browser-mcp/src/recorder/analyze.js';
@@ -29,6 +30,9 @@ export const COMPOSER_LAYOUT_SOURCE = /\sin ChatView$/;
  * expectShift: [{
  *   step:     the mark label of the step the move belongs to,
  *   composer: [from, to], the one data-ui-composer change the step designs,
+ *   chips:    [from, to], or instead the one data-ui-chips change it designs, for
+ *             a tray that lifts the docked composer without changing its position
+ *             (from is null while the tray is not showing),
  *   maxValue: the largest total layout shift that move may measure,
  *   reason:   why the product moves it without user input,
  * }]
@@ -63,17 +67,19 @@ export function designedShifts(recording, anomalies, expectShift = [], { partial
 		}
 		const from = marks[markIndex].t;
 		const to = markIndex + 1 < marks.length ? marks[markIndex + 1].t : Infinity;
-		const [before, after] = design.composer;
+		const what = design.chips ? 'chips' : 'composer';
+		const [before, after] = design[what];
 		const moves = [];
 		for (let i = 1; i < states.length; i++) {
 			const { t, state } = states[i];
-			const previous = states[i - 1].state.composer;
-			if (t < from || t >= to || state.composer === previous) continue;
-			if (previous === before && state.composer === after) moves.push(t);
+			const previous = states[i - 1].state[what] ?? null;
+			const current = state[what] ?? null;
+			if (t < from || t >= to || current === previous) continue;
+			if (previous === before && current === after) moves.push(t);
 		}
 		if (partial && moves.length === 0 && markIndex === marks.length - 1) continue;
 		if (moves.length !== 1) {
-			problems.push(`expectShift "${design.step}": the composer moved ${before} → ${after} ${moves.length} times in that step, not once`);
+			problems.push(`expectShift "${design.step}": the ${what} moved ${before} → ${after} ${moves.length} times in that step, not once`);
 			continue;
 		}
 		const at = moves[0];
@@ -93,7 +99,7 @@ export function designedShifts(recording, anomalies, expectShift = [], { partial
 			continue;
 		}
 		for (const index of own) excusedIndices.add(index);
-		excused.push({ step: design.step, value: Number(total.toFixed(4)), t: at, reason: design.reason });
+		excused.push({ step: design.step, what, value: Number(total.toFixed(4)), t: at, reason: design.reason });
 	}
 	if (!excusedIndices.size) return { anomalies, excused, problems };
 	const excusedTotal = [...excusedIndices].reduce((sum, i) => sum + timeline[i].value, 0);
@@ -119,14 +125,15 @@ export function designedShifts(recording, anomalies, expectShift = [], { partial
 export function checkExpectShift(caseName, expectShift) {
 	if (expectShift === undefined) return;
 	if (!Array.isArray(expectShift)) throw new Error(`case ${caseName}: expectShift must be a list`);
+	const change = (pair, values) =>
+		Array.isArray(pair) && pair.length === 2 && values(pair[0]) && typeof pair[1] === 'string' && pair[0] !== pair[1];
 	for (const design of expectShift) {
 		const ok =
 			design &&
 			typeof design.step === 'string' &&
-			Array.isArray(design.composer) &&
-			design.composer.length === 2 &&
-			design.composer.every((v) => typeof v === 'string') &&
-			design.composer[0] !== design.composer[1] &&
+			(design.chips === undefined
+				? change(design.composer, (v) => typeof v === 'string')
+				: design.composer === undefined && change(design.chips, (v) => v === null || typeof v === 'string')) &&
 			typeof design.maxValue === 'number' &&
 			design.maxValue > 0 &&
 			design.maxValue <= 0.5 &&
@@ -134,7 +141,7 @@ export function checkExpectShift(caseName, expectShift) {
 			design.reason.length > 0;
 		if (!ok) {
 			throw new Error(
-				`case ${caseName}: expectShift needs { step: <mark label>, composer: [from, to], maxValue: (0, 0.5], reason } (got ${JSON.stringify(design)})`
+				`case ${caseName}: expectShift needs { step: <mark label>, composer or chips: [from, to], maxValue: (0, 0.5], reason } (got ${JSON.stringify(design)})`
 			);
 		}
 	}

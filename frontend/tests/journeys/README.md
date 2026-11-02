@@ -166,7 +166,10 @@ Conventions:
   fails). Only the layout-shift entries of the frames around that move
   (150 ms before to 400 ms after) that moved ChatView's own layout are
   excused, and only up to `maxValue` in total; a larger move, a second one,
-  or any other shift still fails ([`lib/verdict.mjs`](lib/verdict.mjs)). The
+  or any other shift still fails ([`lib/verdict.mjs`](lib/verdict.mjs)). A
+  suggested-task chip lifting the docked composer has no composer change to
+  name, so it declares `chips: [null, 'pending']` (the `data-ui-chips` change)
+  instead, under the same rules. The
   report lists each excused move and its size. Pair it with a `verify` that
   names every composer position of the case (`expectComposerPositions`
   below), so an extra move too small or quick to be a shift fails too.

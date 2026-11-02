@@ -489,9 +489,14 @@ const NO_TOOLS = {
 
 const DENIED = {
 	name: 'denied',
-	// Only for the chip's own arrival: the note is one more line, which on a phone
-	// lifts the composer just past the limit. Any other shift still fails.
-	allow: [...SUBAGENT.allow, { kind: 'layout_shift', message: /biggest 0\.05\d? at .*moved: div\.input-slot in ChatView/, reason: 'the chip and its note arrive above the composer, which has no space reserved for them' }],
+	allow: SUBAGENT.allow,
+	expectShift: [{
+		step: 'a subagent whose agent denies tools suggests',
+		chips: [null, 'pending'],
+		// Measured 0.050 on a phone and 0.017 on a desktop.
+		maxValue: 0.06,
+		reason: 'the chip and its extra note line arrive above the composer, which has no space reserved for them'
+	}],
 	setup: async (ctx) => { await openedChat(ctx); },
 	async act({ page, mark, log, variant }) {
 		await mark('a subagent whose agent denies tools suggests');
