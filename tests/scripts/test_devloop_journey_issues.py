@@ -125,6 +125,37 @@ def test_stranger_comment_cannot_suppress_reporting(user):
     assert reporter.decide(CASE, RUN, existing(), [comment]).action == "comment"
 
 
+@pytest.mark.parametrize("later_run", [False, True])
+@pytest.mark.parametrize("reverse_cases", [False, True])
+def test_renamed_issue_cannot_capture_another_cases_reports(later_run, reverse_cases, monkeypatch, capsys):
+    other = reporter.FlakyCase("copy", "copy@desktop-slow", "fail", "pass")
+    issues = [existing(number=12), existing(number=40, body=other.marker)]
+    for issue in issues:
+        issue["title"] = other.title
+    api = FakeGitHub(issues)
+    history = {12: [], 40: []}
+    original_request = api.request
+    def request(route, *, method="GET", data=None):
+        response = original_request(route, method=method, data=data)
+        if method == "POST" and route.endswith("/comments"):
+            history[int(route.split("/")[1])].append({"body": data["body"], "user": {"login": "github-actions[bot]"}})
+        return response
+    monkeypatch.setattr(api, "comments", lambda number: history[number])
+    monkeypatch.setattr(api, "request", request)
+    cases = [other, CASE] if reverse_cases else [CASE, other]
+    reporter.report(api, RUN, [receipt(case) for case in cases])
+    expected = [(40 if case == other else 12, case) for case in cases]
+    if later_run:
+        api.calls.clear()
+        reporter.report(api, reporter.Run(RUN.repository, RUN.id + 1, RUN.commit), [receipt(other)])
+        expected = [(40, other)]
+    assert [(route, method) for route, method, _ in api.calls] == [
+        (f"issues/{number}/comments", "POST") for number, _ in expected]
+    for (_, _, data), (_, case) in zip(api.calls, expected):
+        assert case.marker in data["body"]
+    assert "::warning" not in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("issues,target,methods", [
     ([existing(number=30), existing(number=12)], 12, ["POST"]),
     ([existing(number=30), existing("closed", number=12)], 30, ["POST"]),

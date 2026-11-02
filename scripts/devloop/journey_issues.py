@@ -213,8 +213,11 @@ def report(api: GitHub, run: Run, receipts, *, dry_run: bool = False) -> None:
     labels = None
     for case in cases.values():
         try:
+            # The body's case identity outranks an editable title. A title can
+            # recover a removed marker, but cannot claim another marked case.
             matches = [issue for issue in issues if bot_authored(issue) and (
-                case.marker in (issue.get("body") or "") or issue.get("title") == case.title)]
+                case.marker in (issue.get("body") or "") or (
+                    issue.get("title") == case.title and "<!-- ui-journey-flake:v1:" not in (issue.get("body") or "")))]
             if len(matches) > 1:
                 warning("Multiple bot issues match a flaky case; using the lowest-numbered open issue, else the lowest-numbered closed issue.")
             # Closing a duplicate can change the preferred target between run

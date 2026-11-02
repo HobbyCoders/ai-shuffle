@@ -950,8 +950,10 @@ failure, or a skipped retry does not file an issue. The runner's accepted
 `known-bug` verdict on retry remains accepted and is reported as such.
 
 Open **and closed** issues authored by `github-actions[bot]` match when
-**either** the stable hidden case marker **or** the exact generated title is
-present. Markers in anyone else's issues/comments are ignored. If more
+the body contains that case's stable hidden marker, **or** when the exact
+generated title matches and the body has no `ui-journey-flake:v1:` case marker.
+A renamed title cannot override another case's marker. Markers in anyone
+else's issues/comments are ignored. If more
 than one bot issue matches, reporting warns and uses the lowest-numbered open
 issue, or the lowest-numbered closed issue if none is open. Each new workflow
 run adds a comment with the latest run link and commit; a closed issue is
