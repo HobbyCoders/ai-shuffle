@@ -1116,9 +1116,6 @@ async def get_session(
     from app.db.background_tasks import get_running_task_presence
     presence = await run_sync(get_running_task_presence, [session["id"]])
     session["has_running_tasks"] = presence.get(session["id"], {}).get("has_running_tasks", False)
-    from app.db.task_chips import waiting_counts as task_chip_counts
-    chips = await run_sync(task_chip_counts, [session["id"]])
-    session["pending_task_chips"] = chips.get(session["id"], {}).get("pending_task_chips", 0)
 
     session["messages"] = messages
     session["tags"] = await run_sync(database.get_session_tags, session_id)
