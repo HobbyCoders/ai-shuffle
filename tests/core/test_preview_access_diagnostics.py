@@ -31,7 +31,6 @@ SECRET_TEXT = "driver-message-marker-must-not-reach-the-log"
 @pytest.fixture(autouse=True)
 def _isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
-    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: True)
     monkeypatch.setattr(sessions, "get_session", lambda session_id: {"id": session_id})
     monkeypatch.setattr(settings, "shuffle_local_access", True)
     monkeypatch.setattr(owner_auth, "trusted_lan", lambda: True)

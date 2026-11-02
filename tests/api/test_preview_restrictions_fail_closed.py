@@ -77,7 +77,6 @@ def lookup(mock_db, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     monkeypatch.setattr(settings, "cookie_secure", False)
     monkeypatch.setattr(settings, "shuffle_local_access", True)
-    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: True)
     monkeypatch.setattr(owner_auth, "trusted_lan", lambda: True)
     monkeypatch.setattr(
         owner_auth,

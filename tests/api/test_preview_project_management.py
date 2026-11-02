@@ -40,7 +40,7 @@ def data(tmp_path, monkeypatch, mock_db):
     data_dir.mkdir()
     monkeypatch.setattr(settings, "data_dir", data_dir)
     monkeypatch.setattr(settings, "cookie_secure", False)
-    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: False)
+    monkeypatch.setattr(preview_access, "_session_exists", lambda session_id: True)
     monkeypatch.setattr(owner_auth.settings, "shuffle_local_access", True)
     monkeypatch.setattr(owner_auth, "trusted_lan", lambda: False)
     monkeypatch.delenv("AI_SHUFFLE_PREVIEW", raising=False)

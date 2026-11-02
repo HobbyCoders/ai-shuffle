@@ -297,7 +297,6 @@ def preview_app(private_pool, tmp_path, monkeypatch):
             "is_worker boolean DEFAULT false, parent_session_id text)")
         cursor.execute("INSERT INTO sessions (id) VALUES (%s) ON CONFLICT DO NOTHING", (SESSION,))
     monkeypatch.setattr(settings, "data_dir", tmp_path)
-    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: True)
     monkeypatch.setattr(settings, "shuffle_local_access", True)
     monkeypatch.setattr(owner_auth, "trusted_lan", lambda: True)
     preview_access._denial_log.clear()

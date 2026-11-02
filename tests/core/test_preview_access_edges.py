@@ -23,7 +23,8 @@ SESSION = "sess-edge-1"
 @pytest.fixture(autouse=True)
 def _isolated_key(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
-    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: False)
+    # Every session asked about is a live owner row unless a test says otherwise.
+    monkeypatch.setattr("app.db.sessions.get_session", lambda session_id: {"id": session_id})
 
 
 def _request(*, peer="10.0.0.20", cookies=None, method="GET", path="/", client=True):
@@ -42,7 +43,6 @@ def _request(*, peer="10.0.0.20", cookies=None, method="GET", path="/", client=T
 # ---------------------------------------------------------------------------
 
 def test_session_lookup_error_fails_closed(monkeypatch):
-    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: True)
     from app.db import sessions
 
     def boom(session_id):
@@ -62,7 +62,6 @@ def test_session_lookup_error_fails_closed(monkeypatch):
 
 
 def test_deleted_session_invalidates_its_token(monkeypatch):
-    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: True)
     from app.db import sessions
     live = {SESSION}
     monkeypatch.setattr(sessions, "get_session", lambda sid: {"id": sid} if sid in live else None)
@@ -70,6 +69,27 @@ def test_deleted_session_invalidates_its_token(monkeypatch):
     assert preview_access.verify(token).session_id == SESSION
     live.clear()
     assert preview_access.verify(token) is None
+
+
+def test_unreadable_descriptor_does_not_skip_the_row_check(tmp_path, monkeypatch):
+    """A descriptor the real reader refuses says nothing about the worker's pool.
+
+    tests/db/test_preview_descriptor_failure_postgres.py drives this against
+    real rows, the listener and sockets; this one runs without PostgreSQL."""
+    from app.db import sessions
+
+    descriptor = tmp_path / "managed-postgres.json"
+    descriptor.write_text("{")
+    descriptor.chmod(0o600)
+    assert not settings.managed_database_available()
+    token = preview_access.mint(SESSION)
+
+    monkeypatch.setattr(sessions, "get_session", lambda sid: None)
+    assert preview_access.verify(token) is None
+    monkeypatch.setattr(sessions, "get_session", lambda sid: {"id": sid, "api_user_id": "key-1"})
+    assert preview_access.verify(token) is None
+    monkeypatch.setattr(sessions, "get_session", lambda sid: {"id": sid})
+    assert preview_access.verify(token).session_id == SESSION
 
 
 # ---------------------------------------------------------------------------

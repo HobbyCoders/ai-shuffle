@@ -62,7 +62,7 @@ def test_non_admin_denied_before_git(api, monkeypatch):
 def test_preview_cookie_denied_even_with_independent_owner_identity(api, monkeypatch, tmp_path, dry_run):
     app, url, _, path, _, _ = api
     monkeypatch.setattr(settings, "data_dir", tmp_path / "preview-key")
-    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: False)
+    monkeypatch.setattr(preview_access, "_session_exists", lambda session_id: True)
     monkeypatch.setattr(owner_auth, "local_access", lambda request: True)
     monkeypatch.setattr(owner_auth, "same_origin", lambda request: None)
     token = preview_access.mint("preview-session")

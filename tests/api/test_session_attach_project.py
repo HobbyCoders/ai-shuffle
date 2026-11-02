@@ -357,10 +357,11 @@ def test_a_non_owner_paired_client_is_refused(routed):
     assert _untouched()
 
 
-def test_a_preview_cookie_is_refused_even_alongside_the_owner(routed):
+def test_a_preview_cookie_is_refused_even_alongside_the_owner(routed, monkeypatch):
     from app.core import preview_access
 
     app, owner_token = routed
+    monkeypatch.setattr(preview_access, "_session_exists", lambda session_id: True)
     preview = {preview_access.cookie_name(): preview_access.mint("agent-session")}
     # The agent browser's grant alone, from a LAN peer...
     assert _post(_client(app, cookies=preview)).status_code == 403

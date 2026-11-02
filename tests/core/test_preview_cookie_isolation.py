@@ -13,7 +13,7 @@ from app.serve import IngressApplication
 
 @pytest.mark.parametrize("reverse", [False, True])
 def test_two_instances_share_a_browser_without_overwriting_grants(tmp_path, monkeypatch, reverse):
-    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: False)
+    monkeypatch.setattr(preview_access, "_session_exists", lambda session_id: True)
     monkeypatch.setattr(settings, "instance_id", "cookie-isolation-test")
     api = FastAPI()
     api.include_router(auth.router)
@@ -76,7 +76,7 @@ def test_two_instances_share_a_browser_without_overwriting_grants(tmp_path, monk
 
 def test_cookie_namespace_is_stable_and_does_not_accept_another_instances_name(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", tmp_path / "one")
-    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: False)
+    monkeypatch.setattr(preview_access, "_session_exists", lambda session_id: True)
     first = preview_access.cookie_name()
     token = preview_access.mint("one")
     # A second read uses the persisted key, not a new per-process random name.
@@ -176,7 +176,7 @@ def test_legacy_cookie_keeps_access_and_restrictions(tmp_path, monkeypatch):
     from tests.core.test_preview_access import _request
 
     monkeypatch.setattr(settings, "data_dir", tmp_path)
-    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: False)
+    monkeypatch.setattr(preview_access, "_session_exists", lambda session_id: True)
     token = preview_access.mint("legacy")
     cookies = {"ais_preview": token}
     assert preview_access.grant(_request(cookies=cookies)).session_id == "legacy"
