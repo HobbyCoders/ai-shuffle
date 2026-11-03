@@ -7,7 +7,8 @@
  * so showing rows early moves them, and any bubbles under them, while the person
  * is reading. Instead each stays a bubble of the same size until the turn ends,
  * then they all change in the one update that ends it. The row is already in the
- * transcript's data, so a reload during the wait shows the same thing.
+ * transcript's data, so a reload while the turn still runs replays it and shows
+ * the same bubbles. Once the turn has ended a reload shows rows at once.
  */
 import type { ChatMessage, QueuedMessage } from '$lib/stores/types';
 
@@ -51,19 +52,28 @@ export function createNotSentHold() {
 	};
 }
 
-/**
- * True once a stopped turn has handed its rows to the transcript and is waiting
- * out the settle hold. The settle pin then decides where the reader rests, so
- * rows taller than the room left must not scroll them down first: they would
- * follow on the hand-over and be pulled back up a second later.
- */
-export function restingOnNotSentRows(
-	messages: ChatMessage[],
-	liveTurnId: string | null | undefined,
-	turnUnsettled: boolean
-): boolean {
-	if (liveTurnId || !turnUnsettled) return false;
+/** The chat ends on words Stop refused: nothing below them is coming. */
+export function restingOnNotSentRows(messages: ChatMessage[]): boolean {
 	return messages.findLast(m => m.role === 'user')?.metadata?.not_sent === true;
+}
+
+/**
+ * True on the one update where a chat already on screen comes to rest on not-sent
+ * rows. Opening a chat that rests on them is not an arrival: that reader asked to
+ * see the end of it.
+ */
+export function createNotSentRowsArrival() {
+	let lastSession: string | null | undefined;
+	let wasResting = false;
+	let hadMessages = false;
+	return (sessionId: string | null | undefined, messages: ChatMessage[]): boolean => {
+		const resting = restingOnNotSentRows(messages);
+		const arrived = sessionId === lastSession && hadMessages && !wasResting && resting;
+		lastSession = sessionId;
+		wasResting = resting;
+		hadMessages = messages.length > 0;
+		return arrived;
+	};
 }
 
 /** Held bubbles first (they left the queue's front), without a copy from a late queue snapshot. */
@@ -76,30 +86,68 @@ export function withHeldBubbles(held: QueuedMessage[], queued: QueuedMessage[]):
 /**
  * Stop's queue snapshot and its rows take separate routes to the page, and the
  * snapshot can land first. Left alone the bubbles would vanish a moment before
- * their rows appear, so after this device presses Stop a bubble the snapshot
- * took away stays until its row is held. The stopped turn's end arrives after
- * its rows on the same stream, so nothing outlives the turn.
+ * their rows appear, so what the queue showed when this device pressed Stop stays
+ * until its row is held. Nothing else can get that label: a message sent after
+ * Stop was not there. A row the transcript shows delivered ends the wait too. The
+ * stopped turn's end arrives after its rows on the same stream, so nothing
+ * outlives the turn.
  */
 export function createStopBubbleHold() {
-	let shown: QueuedMessage[] = NOTHING_HELD;
-	let shownSession: string | null | undefined;
-	return (sessionId: string | null | undefined, bubbles: QueuedMessage[], stopPressed: boolean): QueuedMessage[] => {
+	let beforeStop: QueuedMessage[] = NOTHING_HELD;
+	let kept: QueuedMessage[] | null = null;
+	let lastSession: string | null | undefined;
+	return (
+		sessionId: string | null | undefined,
+		bubbles: QueuedMessage[],
+		stopPressed: boolean,
+		messages: ChatMessage[]
+	): QueuedMessage[] => {
 		// One MessageArea serves every chat: another chat's bubbles are not missing here.
-		if (sessionId !== shownSession) shown = NOTHING_HELD;
-		shownSession = sessionId;
-		const missing = !stopPressed ? NOTHING_HELD : shown.filter(
-			m => m.status !== 'cancelling' && m.status !== 'delivered' && !bubbles.some(b => isSameBubble(b, m))
+		if (sessionId !== lastSession) {
+			beforeStop = NOTHING_HELD;
+			kept = null;
+		}
+		lastSession = sessionId;
+		if (!stopPressed) {
+			beforeStop = bubbles;
+			kept = null;
+			return bubbles;
+		}
+		kept ??= beforeStop.filter(isWaiting);
+		// Withdrawn after Stop: the queue taking it away is what the person asked for.
+		const withdrawn = bubbles.filter(m => !isWaiting(m) && m.status !== 'stopped');
+		kept = kept.filter(m => !withdrawn.some(b => isSameBubble(b, m)));
+
+		const unclaimed = [...bubbles];
+		let missing = kept.filter(m => {
+			const answer = unclaimed.findIndex(b => isSameBubble(b, m));
+			if (answer >= 0) unclaimed.splice(answer, 1);
+			return answer < 0;
+		});
+		if (missing.length === 0) return bubbles;
+
+		const inTranscript = new Set(
+			messages.filter(m => m.role === 'user').flatMap(m => [m.queuedTurnId, m.turnId, m.commandId])
 		);
-		shown = missing.length === 0 ? bubbles : [
+		const hasRow = (m: QueuedMessage) => inTranscript.has(m.id) || (!!m.clientMessageId && inTranscript.has(m.clientMessageId));
+		kept = kept.filter(m => !hasRow(m));
+		missing = missing.filter(m => !hasRow(m));
+		if (missing.length === 0) return bubbles;
+		return [
 			...bubbles.filter(m => m.status === 'stopped'),
 			...missing.map(m => ({ ...m, status: 'stopped' as const })),
 			...bubbles.filter(m => m.status !== 'stopped'),
 		];
-		return shown;
 	};
 }
 
+function isWaiting(m: QueuedMessage): boolean {
+	return !m.status;
+}
+
 /** A send the server has not named yet can only be told from its row by its words. */
-function isSameBubble(bubble: QueuedMessage, missing: QueuedMessage): boolean {
-	return bubble.id === missing.id || (missing.id === missing.clientMessageId && bubble.content === missing.content);
+function isSameBubble(bubble: QueuedMessage, kept: QueuedMessage): boolean {
+	return bubble.id === kept.id
+		|| (!!kept.clientMessageId && bubble.clientMessageId === kept.clientMessageId)
+		|| (kept.id === kept.clientMessageId && bubble.content === kept.content);
 }

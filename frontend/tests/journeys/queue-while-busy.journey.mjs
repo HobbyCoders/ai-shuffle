@@ -9,6 +9,7 @@ import {
 	SLOW_REPLY,
 	api,
 	chatIdByToken,
+	composer,
 	countUserRows,
 	expect,
 	gotoApp,
@@ -19,6 +20,7 @@ import {
 	scriptTag,
 	scrollTranscriptTo,
 	seededChatId,
+	sendButton,
 	showSidebar,
 	stopButton,
 	transcriptScroll,
@@ -71,7 +73,12 @@ async function watchStopFrames(page, texts) {
 					const has = (el) => (el.textContent || '').includes(text);
 					const bubbles = [...document.querySelectorAll('.pending-messages [role="article"]')].filter(has);
 					const notSent = [...document.querySelectorAll('[data-not-sent="true"]')].filter(has);
-					return { bubbles: bubbles.length, notSent: notSent.length, top: topOf(bubbles[0] ?? notSent[0] ?? log) };
+					return {
+						bubbles: bubbles.length,
+						notSent: notSent.length,
+						labelledNotSent: bubbles.filter((el) => el.dataset.queueStatus === 'stopped').length,
+						top: topOf(bubbles[0] ?? notSent[0] ?? log)
+					};
 				})
 			});
 			requestAnimationFrame(tick);
@@ -89,8 +96,56 @@ async function watchStopFrames(page, texts) {
 /** One more line of the stopped reply can still arrive and nudge what is below it. */
 const REPLY_LINE_PX = 30;
 
-/** Stop with queued messages must not move what the person is reading. */
-function stopReadingPosition({ scrolled, queued = 3, overflows = false }) {
+/**
+ * The stopped turn settles 1.2s after it ends (settle-hold.ts). The reader once
+ * moved at that moment, so watch well past it.
+ */
+const PAST_SETTLEMENT_MS = 1200 + 3000;
+
+/**
+ * Something in the transcript changes height long after the turn is over, as a
+ * late image does. A reader who is not at the very bottom must not be taken there.
+ */
+function growTranscriptOnePixel(page) {
+	return page.evaluate(() => {
+		const spacer = document.querySelector('.transcript-tail-spacer');
+		spacer.style.marginTop = `${parseFloat(spacer.style.marginTop || '0') + 1}px`;
+	});
+}
+
+const jumpToLatestButton = (page) => page.getByRole('button', { name: 'Jump to latest message' });
+
+/** Send a slow turn and queue messages the server has confirmed, so only Stop can change them from here. */
+async function queueDuringASlowTurn(page, mark, variant, queued) {
+	await mark('send');
+	await typeAndSend(page, `stream tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 2 })}`);
+	await page.getByText(SLOW_REPLY.start, { exact: false }).last().waitFor({ timeout: 60_000 });
+	await waitChat(page, { streaming: 'true' });
+
+	await mark('queue');
+	const texts = Array.from({ length: queued }, () => `tok-${uniq()}`);
+	for (const text of texts) {
+		await typeAndSend(page, `queued ${text}`);
+		await page.locator('.pending-messages [role="article"]').filter({ hasText: text }).waitFor({ timeout: 5000 });
+	}
+	await page.waitForFunction(
+		(n) => document.querySelectorAll('.pending-messages [data-queue-confirmed="true"]').length === n,
+		texts.length,
+		{ timeout: 30_000 }
+	);
+	return texts;
+}
+
+function expectEachOnceInEveryFrame(frames) {
+	frames.forEach((frame, i) => {
+		frame.messages.forEach((message, m) => {
+			expect(message.bubbles + message.notSent === 1, `queued message ${m} shows exactly once in frame ${i}: ${JSON.stringify(message)}`);
+		});
+	});
+}
+
+/** Stop with queued messages must not move what the person is reading, then or later. */
+function stopReadingPosition({ scrolled, queued = 3, overflows = false, rounds = 1 }) {
 	return {
 		async setup(ctx) {
 			await openStopChat(ctx);
@@ -99,71 +154,136 @@ function stopReadingPosition({ scrolled, queued = 3, overflows = false }) {
 			await waitTurnSettled(ctx.page, { text: 'Here is a long answer', messagesAtLeast: 2, timeout: 90_000 });
 		},
 		async act({ page, mark, variant, log }) {
-			await mark('send');
-			await typeAndSend(page, `stream tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 2 })}`);
-			await page.getByText(SLOW_REPLY.start, { exact: false }).first().waitFor({ timeout: 60_000 });
-			await waitChat(page, { streaming: 'true' });
+			for (let round = 0; round < rounds; round++) {
+				const texts = await queueDuringASlowTurn(page, mark, variant, queued);
+				if (scrolled) {
+					await mark('scroll up');
+					await scrollTranscriptTo(page, 0.2);
+					await page.waitForTimeout(400);
+				}
+				const before = await transcriptScroll(page);
+				expect(before.atBottom === !scrolled, `the reader starts ${scrolled ? 'scrolled up' : 'at the bottom'}: ${JSON.stringify(before)}`);
 
-			await mark('queue');
-			const texts = Array.from({ length: queued }, () => `tok-${uniq()}`);
-			for (const text of texts) {
-				await typeAndSend(page, `queued ${text}`);
-				await page.locator('.pending-messages [role="article"]').filter({ hasText: text }).waitFor({ timeout: 5000 });
-			}
-			// Each one known to the server, so only Stop can change them from here.
-			await page.waitForFunction(
-				(n) => document.querySelectorAll('.pending-messages [data-queue-confirmed="true"]').length === n,
-				texts.length,
-				{ timeout: 30_000 }
-			);
-			if (scrolled) {
-				await mark('scroll up');
-				await scrollTranscriptTo(page, 0.2);
-				await page.waitForTimeout(400);
-			}
-			const before = await transcriptScroll(page);
-			expect(before.atBottom === !scrolled, `the reader starts ${scrolled ? 'scrolled up' : 'at the bottom'}: ${JSON.stringify(before)}`);
+				const collect = await watchStopFrames(page, texts);
+				await mark('stop');
+				await stopButton(page).click();
+				await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+				for (const text of texts) {
+					await page.locator('[data-not-sent="true"]').filter({ hasText: text }).waitFor({ timeout: 5000 });
+				}
+				await page.getByText('[Stopped]', { exact: false }).first().waitFor({ timeout: 5000 });
+				await page.waitForTimeout(PAST_SETTLEMENT_MS);
+				await mark('late height change');
+				await growTranscriptOnePixel(page);
+				await page.waitForTimeout(500);
+				const frames = await collect();
+				const after = await transcriptScroll(page);
 
-			const collect = await watchStopFrames(page, texts);
-			await mark('stop');
-			await stopButton(page).click();
-			await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
-			for (const text of texts) {
-				await page.locator('[data-not-sent="true"]').filter({ hasText: text }).waitFor({ timeout: 5000 });
-			}
-			await page.getByText('[Stopped]', { exact: false }).first().waitFor({ timeout: 5000 });
-			await page.waitForTimeout(1000);
-			const frames = await collect();
-			const after = await transcriptScroll(page);
+				expect(frames.length > 10, `watched the frames across Stop (${frames.length})`);
+				const lastFrameAt = frames[frames.length - 1].at;
+				expect(lastFrameAt >= PAST_SETTLEMENT_MS, `watched past settlement (${lastFrameAt}ms)`);
+				const tops = frames.map((f) => f.anchorTop);
+				expect(tops.every((top) => top !== null), 'the row being read stayed mounted');
+				const anchorMoved = Math.max(...tops) - Math.min(...tops);
+				log(`round ${round}: row being read moved ${anchorMoved}px; scrollTop ${before.top} -> ${after.top}; ${frames.length} frames over ${lastFrameAt}ms`);
+				const steps = frames.filter((f, i) => i === 0 || f.anchorTop !== frames[i - 1].anchorTop);
+				log(`row top by time: ${steps.map((f) => `${f.at}ms ${f.anchorTop} (scrollTop ${f.scrollTop})`).join(', ')}`);
+				expect(anchorMoved <= 1, `the row being read stayed put (moved ${anchorMoved}px)`);
+				expect(Math.abs(after.top - before.top) <= 1, `the scroll position held: ${before.top} -> ${after.top}`);
+				if (!overflows) {
+					expect(after.atBottom === !scrolled, `the reader is still ${scrolled ? 'scrolled up' : 'at the bottom'}: ${JSON.stringify(after)}`);
+				} else if (variant.viewport === 'phone') {
+					expect(!after.atBottom, `these rows run past a phone's fold, or this case proves nothing: ${JSON.stringify(after)}`);
+				}
 
-			expect(frames.length > 10, `watched the frames across Stop (${frames.length})`);
-			const tops = frames.map((f) => f.anchorTop);
-			expect(tops.every((top) => top !== null), 'the row being read stayed mounted');
-			const anchorMoved = Math.max(...tops) - Math.min(...tops);
-			log(`row being read moved ${anchorMoved}px; scrollTop ${before.top} -> ${after.top}; ${frames.length} frames`);
-			const steps = frames.filter((f, i) => i === 0 || f.anchorTop !== frames[i - 1].anchorTop);
-			log(`row top by time: ${steps.map((f) => `${f.at}ms ${f.anchorTop} (scrollTop ${f.scrollTop})`).join(', ')}`);
-			expect(anchorMoved <= 1, `the row being read stayed put (moved ${anchorMoved}px)`);
-			expect(Math.abs(after.top - before.top) <= 1, `the scroll position held: ${before.top} -> ${after.top}`);
-			if (!overflows) {
-				expect(after.atBottom === !scrolled, `the reader is still ${scrolled ? 'scrolled up' : 'at the bottom'}: ${JSON.stringify(after)}`);
-			}
-
-			frames.forEach((frame, i) => {
-				frame.messages.forEach((message, m) => {
-					expect(message.bubbles + message.notSent === 1, `queued message ${m} shows exactly once in frame ${i}: ${JSON.stringify(message)}`);
-					const previous = frames[i - 1]?.messages[m];
-					if (!previous || !previous.bubbles !== !message.bubbles) return;
-					// Changing from bubble to row is the one move Stop is meant to make.
-					const moved = Math.abs(message.top - previous.top);
-					expect(moved <= REPLY_LINE_PX, `queued message ${m} did not jump in frame ${i}: moved ${moved}px as a ${message.bubbles ? 'bubble' : 'row'}`);
+				expectEachOnceInEveryFrame(frames);
+				frames.forEach((frame, i) => {
+					frame.messages.forEach((message, m) => {
+						const previous = frames[i - 1]?.messages[m];
+						if (!previous || !previous.bubbles !== !message.bubbles) return;
+						// Changing from bubble to row is the one move Stop is meant to make.
+						const moved = Math.abs(message.top - previous.top);
+						expect(moved <= REPLY_LINE_PX, `queued message ${m} did not jump in frame ${i}: moved ${moved}px as a ${message.bubbles ? 'bubble' : 'row'}`);
+					});
 				});
-			});
-			const kinds = new Set(frames.map((f) => f.messages.map((m) => (m.bubbles ? 'bubble' : 'row')).join()));
-			expect(kinds.size === 2, `all of them changed in the same frame, not one by one: ${[...kinds].join(' | ')}`);
+				const kinds = new Set(frames.map((f) => f.messages.map((m) => (m.bubbles ? 'bubble' : 'row')).join()));
+				expect(kinds.size === 2, `all of them changed in the same frame, not one by one: ${[...kinds].join(' | ')}`);
+
+				// Rows past the fold are one deliberate tap away, and that tap resumes following.
+				if (!scrolled && !after.atBottom) {
+					await mark('jump to the rows');
+					await jumpToLatestButton(page).waitFor({ timeout: 5000 });
+					await jumpToLatestButton(page).click();
+					await page.waitForFunction(() => {
+						const log = document.querySelector('[role="log"][aria-label="Conversation messages"]');
+						return log.scrollHeight - log.clientHeight - log.scrollTop <= 1;
+					}, null, { timeout: 5000 });
+					const last = page.locator('[data-not-sent="true"]').filter({ hasText: texts[texts.length - 1] });
+					expect(await last.isVisible(), 'Jump to latest reached the last row');
+					await growTranscriptOnePixel(page);
+					await page.waitForFunction(() => {
+						const log = document.querySelector('[role="log"][aria-label="Conversation messages"]');
+						return log.scrollHeight - log.clientHeight - log.scrollTop <= 1;
+					}, null, { timeout: 5000 });
+				}
+			}
 		}
 	};
 }
+
+/**
+ * Lets a case make this page miss the end of a turn the server really did end.
+ * Set before the page loads; it starts dropping once `withholdTurnEnd` is on,
+ * and stays on across a reload until it is turned off.
+ */
+async function canWithholdTurnEnd(page) {
+	await page.addInitScript(() => {
+		const withheld = () => sessionStorage.getItem('journey-withhold-turn-end') === '1';
+		const feedTurnEnd = /"(?:type|event_type)"\s*:\s*"turn\.(?:completed|aborted)"/;
+		const socketTurnEnd = /"(?:type|event_type)"\s*:\s*"(?:stopped|interrupted|done|turn\.completed|turn\.aborted)"/;
+		const realFetch = window.fetch;
+		window.fetch = async (input, init) => {
+			const res = await realFetch(input, init);
+			if (!new Headers(init?.headers).get('accept')?.includes('text/event-stream') || !res.body) return res;
+			const decoder = new TextDecoder();
+			const encoder = new TextEncoder();
+			let tail = '';
+			const kept = res.body.pipeThrough(new TransformStream({
+				transform(chunk, out) {
+					tail += decoder.decode(chunk, { stream: true });
+					const frames = tail.split(/\r?\n\r?\n/);
+					tail = frames.pop();
+					for (const frame of frames) {
+						if (!(withheld() && feedTurnEnd.test(frame))) out.enqueue(encoder.encode(`${frame}\n\n`));
+					}
+				}
+			}));
+			return new Response(kept, { status: res.status, statusText: res.statusText, headers: res.headers });
+		};
+		const onmessage = Object.getOwnPropertyDescriptor(WebSocket.prototype, 'onmessage');
+		Object.defineProperty(WebSocket.prototype, 'onmessage', {
+			configurable: true,
+			get: onmessage.get,
+			set(handler) {
+				onmessage.set.call(this, (event) => {
+					if (!(withheld() && typeof event.data === 'string' && socketTurnEnd.test(event.data))) handler.call(this, event);
+				});
+			}
+		});
+	});
+}
+
+const withholdTurnEnd = (page, on) => page.evaluate((value) => sessionStorage.setItem('journey-withhold-turn-end', value), on ? '1' : '0');
+
+/** The recorder's next step starts once it has seen the old page go. */
+async function reloadThePage(page, mark, name) {
+	await mark(`reload: ${name}`);
+	await page.reload({ waitUntil: 'domcontentloaded' });
+	await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+	await mark(`reloaded: ${name}`);
+}
+
+const STOPPED_BUBBLE = '.pending-messages [data-queue-status="stopped"]';
 
 await runJourney({
 	name: 'queue-while-busy',
@@ -349,7 +469,144 @@ await runJourney({
 		// Three rows can run past a phone's fold. The settle pin keeps the prompt at
 		// the top, as at the end of any reply, so what the reader sees must not move.
 		{ name: 'stop-holds-the-reader-when-the-rows-overflow', ...stopReadingPosition({ scrolled: false, overflows: true }) },
+		// More of them, Stop after Stop in one chat with no filler in between.
+		{ name: 'stop-holds-the-reader-with-four-queued', ...stopReadingPosition({ scrolled: false, queued: 4, overflows: true, rounds: 2 }) },
 		{ name: 'stop-holds-the-reader-scrolled-up', ...stopReadingPosition({ scrolled: true }) },
+		{
+			// Only what was queued when Stop was pressed can be not sent. A message
+			// sent right after Stop runs, and must never read "Not sent" on the way.
+			name: 'stop-then-send-is-never-labelled-not-sent',
+			async setup(ctx) {
+				await openStopChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant, log }) {
+				const texts = await queueDuringASlowTurn(page, mark, variant, 2);
+				const fresh = `tok-${uniq()}`;
+				const box = composer(page);
+				await box.click();
+				await box.fill(`fresh ${fresh} ${scriptTag(variant, 'default')}`);
+
+				const collect = await watchStopFrames(page, [...texts, fresh]);
+				await mark('stop');
+				await stopButton(page).click();
+				await sendButton(page).click();
+				await page.getByText(`You said: “fresh ${fresh}`, { exact: false }).first().waitFor({ timeout: 60_000 });
+				await page.waitForTimeout(500);
+				const frames = await collect();
+				const seen = frames.map((f) => f.messages[2]);
+				const firstCopy = seen.findIndex((m) => m.bubbles + m.notSent > 0);
+				log(`the new message: first shown at ${frames[firstCopy]?.at}ms of ${frames.length} frames; as a bubble in ${seen.filter((m) => m.bubbles).length}`);
+				seen.forEach((message, i) => {
+					expect(message.labelledNotSent === 0, `the new message reads "Not sent" in frame ${i} (${frames[i].at}ms)`);
+					expect(message.notSent === 0, `the new message is a not-sent row in frame ${i} (${frames[i].at}ms)`);
+					expect(message.bubbles <= 1, `the new message shows once in frame ${i}: ${JSON.stringify(message)}`);
+				});
+				for (const text of texts) {
+					expect((await page.locator('[data-not-sent="true"]').filter({ hasText: text }).count()) === 1, 'what was queued at Stop is a not-sent row');
+				}
+			}
+		},
+		{
+			// Stop reached the server and the rows came back, but this page never
+			// hears the turn end. Stop's own timeout must not leave words in a
+			// bubble with no way to get them back.
+			name: 'stop-timeout-still-gives-the-words-back',
+			async setup(ctx) {
+				await canWithholdTurnEnd(ctx.page);
+				await openStopChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant, log }) {
+				const texts = await queueDuringASlowTurn(page, mark, variant, 2);
+				const notSent = (text) => page.locator('[data-not-sent="true"]').filter({ hasText: text });
+				await withholdTurnEnd(page, true);
+				const collect = await watchStopFrames(page, texts);
+				await mark('stop');
+				const pressedAt = Date.now();
+				await stopButton(page).click();
+				await page.waitForFunction((sel) => document.querySelectorAll(sel).length === 2, STOPPED_BUBBLE, { timeout: 8000 });
+				log(`labelled bubbles at ${Date.now() - pressedAt}ms`);
+				expect((await notSent(texts[0]).count()) === 0, 'the rows wait in bubbles while the turn looks live');
+				await mark('timeout');
+				await notSent(texts[0]).waitFor({ timeout: 15_000 });
+				const waited = Date.now() - pressedAt;
+				log(`rows at ${waited}ms`);
+				expect(waited >= 8000, `the timeout released them, not the turn ending (${waited}ms)`);
+				await waitChat(page, { streaming: 'false' }, { timeout: 5000 });
+				const frames = await collect();
+				expectEachOnceInEveryFrame(frames);
+				await mark('restore');
+				await notSent(texts[0]).getByRole('button', { name: 'Restore to composer' }).click();
+				await page.waitForFunction((t) => document.querySelector('[role="textbox"][aria-label="Message"]')?.textContent?.includes(t), `queued ${texts[0]}`, { timeout: 10_000 });
+				await notSent(texts[0]).waitFor({ state: 'detached', timeout: 10_000 });
+				await notSent(texts[1]).getByRole('button', { name: 'Restore to composer' }).waitFor({ timeout: 5000 });
+			}
+		},
+		{
+			// A reload while the turn still looks live rebuilds the same hold from the
+			// replayed events: bubbles again, and rows once the turn has ended.
+			name: 'stop-reload-before-the-turn-ends-shows-bubbles',
+			async setup(ctx) {
+				await canWithholdTurnEnd(ctx.page);
+				await openStopChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant, log }) {
+				const texts = await queueDuringASlowTurn(page, mark, variant, 2);
+				const notSent = page.locator('[data-not-sent="true"]');
+				await withholdTurnEnd(page, true);
+				await mark('stop');
+				await stopButton(page).click();
+				await page.waitForFunction((sel) => document.querySelectorAll(sel).length === 2, STOPPED_BUBBLE, { timeout: 8000 });
+
+				await reloadThePage(page, mark, 'turn still looks live');
+				await waitChat(page, { surface: 'active', loading: 'false', session: /^s:/, messagesAtLeast: 1 }, { timeout: 60_000 });
+				await page.waitForFunction((sel) => document.querySelectorAll(sel).length === 2, STOPPED_BUBBLE, { timeout: 30_000 });
+				await page.waitForTimeout(1500);
+				const shown = await page.locator(STOPPED_BUBBLE).allInnerTexts();
+				log(`after the reload: ${shown.length} labelled bubbles, ${await notSent.count()} rows`);
+				expect(texts.every((t) => shown.filter((s) => s.includes(t)).length === 1), `each is one bubble: ${shown.join(' | ')}`);
+				expect((await notSent.count()) === 0, 'no row beside a bubble');
+
+				await withholdTurnEnd(page, false);
+				await reloadThePage(page, mark, 'turn ended');
+				for (const text of texts) {
+					await notSent.filter({ hasText: text }).getByRole('button', { name: 'Restore to composer' }).waitFor({ timeout: 30_000 });
+				}
+				expect((await page.locator(STOPPED_BUBBLE).count()) === 0, 'no bubble beside a row');
+			}
+		},
+		{
+			// The usual reload, with no help: by the time the page is back the turn
+			// has ended, so the words come back as rows that can be restored.
+			name: 'stop-reload-right-away-shows-rows',
+			async setup(ctx) {
+				await openStopChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant, log }) {
+				const texts = await queueDuringASlowTurn(page, mark, variant, 2);
+				const notSent = (text) => page.locator('[data-not-sent="true"]').filter({ hasText: text });
+				await mark('stop');
+				await stopButton(page).click();
+				await reloadThePage(page, mark, 'right after Stop');
+				await page.locator('[role="log"][aria-label="Conversation messages"]').waitFor({ timeout: 60_000 });
+				const collect = await watchStopFrames(page, texts);
+				for (const text of texts) {
+					await notSent(text).getByRole('button', { name: 'Restore to composer' }).waitFor({ timeout: 30_000 });
+				}
+				await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+				await page.waitForTimeout(1500);
+				const frames = await collect();
+				frames.forEach((frame, i) => frame.messages.forEach((m) => {
+					expect(m.bubbles + m.notSent <= 1, `shown twice in frame ${i}: ${JSON.stringify(m)}`);
+				}));
+				const asBubble = frames.filter((f) => f.messages.some((m) => m.bubbles)).length;
+				log(`after the reload: ${asBubble} of ${frames.length} frames showed a bubble before the rows`);
+				expect((await page.locator(STOPPED_BUBBLE).count()) === 0, 'no bubble left beside a row');
+			}
+		},
 		{
 			// The server drops a restored row whether or not this page hears back, so
 			// the words must reach this chat's composer in every one of these cases.

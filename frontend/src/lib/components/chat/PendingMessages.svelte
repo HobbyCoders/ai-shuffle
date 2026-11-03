@@ -85,7 +85,7 @@
 	<div class="pending-messages" class:is-stale={stale}>
 		{#each messages as msg, i (msg.id)}
 			{@const isAnchor = i === anchor}
-			<div class="userrow" role="article" data-queue-confirmed={msg.id !== msg.clientMessageId}>
+			<div class="userrow" role="article" data-queue-confirmed={msg.id !== msg.clientMessageId} data-queue-status={msg.status}>
 				<div class="usercol">
 					<div class="bubble" class:is-cancelling={msg.status === 'cancelling'}>
 						<div class="bubble-text" class:is-clamped={shouldCollapseUserMessage(msg.content)}>{msg.content}</div>

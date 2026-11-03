@@ -156,6 +156,8 @@ export interface ActiveSessionState {
 	liveTurnId: string | null;
 	/** The live turn this device pressed Stop on (see not-sent-hold). */
 	stopRequestedTurnId?: string | null;
+	/** The turn whose Stop was never confirmed (see not-sent-hold). */
+	stopTimedOutTurnId?: string | null;
 	/** The latest turn is parked on background work (v2 feed `turn.parked`,
 	 *  cleared by the next `turn.*`). Keeps the transcript from folding a parked
 	 *  turn in the moment between its last task finishing and the wake turn

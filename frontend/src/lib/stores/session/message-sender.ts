@@ -756,7 +756,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 		stopGeneration() {
 			const _state = getState();
-			if (_state.liveTurnId) update(s => ({ ...s, stopRequestedTurnId: _state.liveTurnId }));
 			if (_state.sessionId) {
 				// The interrupt is always a full stop (the query-scoped SDK interrupt
 				// tears down in-flight background sub-agents too).
@@ -764,11 +763,13 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// turn — a stop that lands after its turn settled then no-ops instead
 				// of interrupting the successor. Omitted when the FE knows no live turn
 				// (legacy session-scoped stop server-side).
-				wsConn.send({
+				const sent = wsConn.send({
 					type: 'stop',
 					session_id: _state.sessionId,
 					...(_state.liveTurnId ? { turn_id: _state.liveTurnId } : {}),
 				});
+				// Only a Stop that left this page can have refused anything.
+				if (sent && _state.liveTurnId) update(s => ({ ...s, stopRequestedTurnId: _state.liveTurnId }));
 			} else if (internal.awaitingNewSession) {
 				// Brand-new session whose id the backend hasn't minted yet, so we
 				// have nothing to address the stop to. Defer it: the session_created
@@ -793,7 +794,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							return m.streaming ? { ...m, streaming: false } : m;
 						});
 						messages = messages.filter(m => !(m.type === 'text' && m.role === 'assistant' && !m.content));
-						return { ...s, messages, isStreaming: false, optimisticStreaming: false };
+						return { ...s, messages, isStreaming: false, optimisticStreaming: false, stopTimedOutTurnId: s.liveTurnId };
 					});
 				}
 				stopTimeout.set(null);

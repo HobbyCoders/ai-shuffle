@@ -874,6 +874,18 @@ describe('message-sender stopGeneration deferral', () => {
 		expect((sends[0][0] as any).turn_id).toBe('turn-9');
 	});
 
+	it('marks the turn only when the stop left this page', () => {
+		const live = baseState({ sessionId: 'sess-1', isStreaming: true, liveTurnId: 'turn-9' });
+		const sent = makeDeps(live);
+		createMessageSender(sent.deps).stopGeneration();
+		expect(sent.getState().stopRequestedTurnId).toBe('turn-9');
+
+		const failed = makeDeps(live);
+		failed.wsConn.send.mockImplementation(() => false);
+		createMessageSender(failed.deps).stopGeneration();
+		expect(failed.getState().stopRequestedTurnId ?? null).toBeNull();
+	});
+
 	it('omits turn_id when no live turn id is known (legacy session-scoped, #585)', () => {
 		const { deps, wsConn } = makeDeps(
 			baseState({ sessionId: 'sess-1', isStreaming: true, liveTurnId: null })
