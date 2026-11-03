@@ -79,9 +79,9 @@ on standard free `ubuntu-latest` runners. Superseded PR runs are cancelled.
 Both Android emulator workflows deliberately use `google_apis` on API 36 again,
 reversing the earlier AOSP-only choice after SystemUI/GMS ANRs. This image permits
 co-installing the signed, absent `com.android.webview` alternate without replacing
-a differently signed system APK. Six first-attempt boots across both workflows
-reached stable launchers without ANR recovery (debug runs 41544019324, 41546528364,
-41548997981; minified runs 41544019247, 41546528197, 41548997948); that is limited
+a differently signed system APK. The initial six first-attempt boots across both
+workflows reached stable launchers without ANR recovery (debug runs 41544019324,
+41546528364, 41548997981; minified runs 41544019247, 41546528197, 41548997948); that is limited
 boot evidence, not proof that Google services can never cause an ANR.
 
 API 36 uses a **co-installed pinned AOSP alternate, not the phone provider**:
@@ -97,9 +97,12 @@ an `actions/cache` key containing its exact SHA-256. A cache saved on a PR's mer
 ref is visible only to that PR, not to other PRs. `android-webview-cache.yml`
 therefore seeds the identical key and path on **main**: a push changing the helper
 or seed workflow triggers it, and two small weekly refreshes (Monday/Thursday,
-04:23 UTC) leave headroom before seven-day inactivity eviction. It uses one free
-standard Ubuntu runner, a 15-minute limit, no emulator or publishing credentials,
-and permits manual runs only on main. GitHub's default-branch cache fallback can
+04:23 UTC) limit inactivity. Cross-PR hits are best effort: repository size pressure
+can evict even a recently used seeded entry within hours, before seven-day
+inactivity eviction. At review time, the repository held 9.66 GiB across 517
+entries, and its oldest entry had last been used 77 minutes earlier. The seeder
+uses one free standard Ubuntu runner, a 15-minute limit, no emulator or publishing
+credentials, and permits manual runs only on main. GitHub's default-branch cache fallback can
 then serve new PRs without their first API 36 runs independently fetching Gitiles.
 Cache hits still verify size and digest, including in the seeder; `actions/cache`
 only saves a miss after successful verification, and `prepare-android-ui.py`
@@ -115,11 +118,12 @@ After merge, check the first `Seed Android WebView cache` main-push job succeeds
 and its log verifies the exact pinned bytes before the cache save. Confirm
 `gh cache list --key aosp-webview-x86_64-8da41a8692c64870dc875a0fa656c59a678aa09902935c5095e7de6fd7c55a87 --json key,ref,lastAccessedAt`
 shows the entry on `refs/heads/main`, not just `refs/pull/.../merge`. On a new PR's
-first run, inspect both API 36 consumer cache restores and the helper's `Verified
-cached AOSP alternate WebView` result (no Gitiles fetch), then confirm a scheduled
-main run refreshes the cache access time. The schedule and cross-PR hits are not
-claimed as observed before merge; missing/evicted entries still use the existing
-verified, bounded-transfer fallback.
+first run, record each API 36 consumer's cache hit or miss. On a hit, check the
+helper's `Verified cached AOSP alternate WebView` result (no Gitiles fetch); on a
+miss, record the verified download fallback rather than assuming seed failure.
+Then confirm a scheduled main run refreshes the cache access time. The schedule
+and cross-PR hits are not claimed as observed before merge; missing/evicted
+entries still use the existing verified, bounded-transfer fallback.
 
 Only build/test and emulator jobs run on PRs. Existing owner/event/ref/input
 predicates still exclude PRs from every Firebase/signing/release-staging step
