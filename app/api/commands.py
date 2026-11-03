@@ -91,18 +91,24 @@ def get_working_dir_for_project(
     worktree_id: Optional[str] = None,
     session_id: Optional[str] = None,
 ) -> str:
-    """Get the working directory for a project, its worktree, or a v2 branch
-    session's own checkout (sessions.branch + project_v2_id).
+    """Resolve the session cwd first (chat lane, worktree or v2 branch).
+
+    Project-only callers retain the legacy project/workspace fallback.
     """
-    if not worktree_id and session_id:
-        from app.core.project_resolver import resolve_existing_cwd
+    if session_id:
+        from app.core.project_resolver import resolve_session_cwd
         from app.db import database
 
         session = database.get_session(session_id)
         if session:
-            cwd = resolve_existing_cwd(session)
+            cwd = resolve_session_cwd(session)
             if cwd:
                 return cwd
+            if session.get("project_id") or session.get("project_v2_id"):
+                # A refused/missing branch checkout is not its base checkout.
+                # Never write a reseed there just because the read resolver
+                # correctly declined the session's actual binding.
+                raise HTTPException(404, "Session checkout is not available on this device")
     result = resolve_project_path(
         project_id,
         check_access=False,
@@ -311,7 +317,9 @@ async def get_rewind_checkpoints(session_id: str, http_request: Request = None):
             )
 
         # Get working directory for project
-        working_dir = get_working_dir_for_project(session.get("project_id"))
+        working_dir = get_working_dir_for_project(
+            session.get("project_id"), session.get("worktree_id"), session_id
+        )
 
         # Get checkpoints from JSONL rewind service
         checkpoints = _get_checkpoints(sdk_session_id, working_dir)
@@ -655,7 +663,10 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
 
     working_dir = None
     if session.get("sdk_session_id") and not request.target_uuid.startswith("db-"):
-        working_dir = await run_sync(get_working_dir_for_project, session.get("project_id"))
+        working_dir = await run_sync(
+            get_working_dir_for_project,
+            session.get("project_id"), session.get("worktree_id"), session_id,
+        )
 
     sdk_session_id = session.get("sdk_session_id")
     if not sdk_session_id:
@@ -1228,7 +1239,9 @@ async def execute_rewind_legacy(session_id: str, request: RewindRequest, http_re
         if http_request is not None:
             check_session_access(http_request, session)
 
-        working_dir = get_working_dir_for_project(session.get("project_id"))
+        working_dir = get_working_dir_for_project(
+            session.get("project_id"), session.get("worktree_id"), session_id
+        )
         return _get_checkpoints(session.get("sdk_session_id"), working_dir)
 
     checkpoints = await run_sync(_load_checkpoints)
