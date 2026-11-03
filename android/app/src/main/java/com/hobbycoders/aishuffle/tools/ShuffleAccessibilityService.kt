@@ -52,6 +52,8 @@ class ShuffleAccessibilityService : AccessibilityService() {
             private set
         /** Test observer between the panel closing and the final fence read; it never authorizes anything. */
         @androidx.annotation.VisibleForTesting @Volatile internal var afterConsentClosed: (suspend () -> Unit)? = null
+        /** Test observer once a final attempt's result is back and before the fence sizes any retry window from it. Outside the attempt's own time limit; it never authorizes anything. */
+        @androidx.annotation.VisibleForTesting @Volatile internal var beforeRetryWindow: (suspend (Reading) -> Unit)? = null
         /** Test observer off the main thread, once a final whole-screen read has finished and before the checks after it. */
         @androidx.annotation.VisibleForTesting @Volatile internal var afterFinalRead: (() -> Unit)? = null
         /** Test delay on the event fence's own check, so a test can show what holds without it. */
@@ -387,7 +389,9 @@ class ShuffleAccessibilityService : AccessibilityService() {
                 running = result == null
                 if (result == null) refusal = "The screen changed or the command expired."
                 else { refusal = result.why; finished = result }
-                result?.reading ?: Reading(FenceRead.CHANGED)
+                val reading = result?.reading ?: Reading(FenceRead.CHANGED)
+                if (com.hobbycoders.aishuffle.BuildConfig.DEBUG) beforeRetryWindow?.invoke(reading)
+                reading
             }
         } finally {
             if (sent) clearSnapshot()

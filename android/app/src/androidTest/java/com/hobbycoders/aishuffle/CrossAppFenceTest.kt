@@ -179,6 +179,7 @@ class CrossAppFenceTest {
     @After fun disarm() {
         ShuffleAccessibilityService.afterConsentClosed = null
         ShuffleAccessibilityService.afterFinalRead = null
+        ShuffleAccessibilityService.beforeRetryWindow = null
         ShuffleAccessibilityService.eventCheckDelayMs = 0
         ShuffleAccessibilityService.afterEventCheckRead = null
         instrumentation.runOnMainSync {
@@ -415,10 +416,21 @@ class CrossAppFenceTest {
         val ref = denseSlowRef()
         holdEventChecks()
         onceClosed("move")
-        val reads = afterFinalRead { fixture("back"); fastEventCheck(underMs = 100) } // Over 500 ms of row delays is not read in 100.
+        val attempts = AtomicInteger(); val bad = AtomicInteger(); val failure = AtomicReference<Throwable?>()
+        // Not in afterFinalRead: that runs inside the attempt's own 2 s limit, and overrunning it is a refusal of its own.
+        ShuffleAccessibilityService.beforeRetryWindow = { reading ->
+            attempts.incrementAndGet()
+            if (reading.verdict == FenceRead.UNCONFIRMED && bad.getAndIncrement() == 0) withContext(Dispatchers.IO) {
+                ShuffleAccessibilityService.eventCheckDelayMs = 0
+                runCatching { fixture("back"); fastEventCheck(underMs = 100) }.onFailure(failure::set) // Over 500 ms of row delays is not read in 100.
+            }
+        }
         val tapping = tap(ref); allow()
-        assertEquals("performed", status(tapping, 25).getString("status"))
-        assertTrue("The bad read must have been retried", reads.get() >= 2) // More if an unrelated event lands in a retry.
+        val outcome = status(tapping, 25).getString("status")
+        assertNull("The fast event check never happened", failure.get())
+        assertTrue("The first read must have been the slow bad one", bad.get() >= 1)
+        assertEquals("performed", outcome)
+        assertTrue("The bad read must have been retried", attempts.get() >= 2)
         assertTapped(1)
     }
     @Test fun denseSlowScreenReadRecoversFromABadRead() {
