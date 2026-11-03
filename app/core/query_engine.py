@@ -984,6 +984,12 @@ async def stream_query(
     pooled or the options require a reconnect.
     """
 
+    # Drop only an unowned Stop, before the first await. A Stop received during
+    # this turn's async setup must survive, even before is_streaming is claimed.
+    idle_state = get_session_pool().peek(session_id) if session_id else None
+    if idle_state is not None and not idle_state.is_streaming:
+        idle_state.interrupt_requested = False
+
     # Get profile. Log at ERROR: consumers may have no surface for this yield
     # (headless path has no 'error' dispatch handler and force-cleans the live
     # store), so the log line can be the only trace of the refusal.
@@ -1605,8 +1611,8 @@ async def stream_query(
 
     finally:
         clear_turn_context(session_id, expected=bound_generation_context)
-        # Consume this turn's Stop before releasing the pooled state. Resetting
-        # at startup could erase a real Stop received during async setup.
+        # Consume this turn's Stop before releasing the pooled state. A later
+        # reset (after async setup) could erase a real Stop for this turn.
         sdk_interrupted = not interrupted and state.interrupt_requested
         state.interrupt_requested = False
         # Mark as not streaming — keep in pool for reuse

@@ -87,6 +87,12 @@ async def _run_background_query(
     ``turn.aborted``. When no recorder is available this wrapper is a pure
     passthrough.
     """
+    # Reset an idle Stop before even recorder setup awaits. Stops received
+    # during this turn's setup belong to this turn, not the next one.
+    idle_state = get_session_pool().peek(session_id)
+    if idle_state is not None and not idle_state.is_streaming:
+        idle_state.interrupt_requested = False
+
     from app.core.turn_recorder import TurnRecorder
 
     recorder = await TurnRecorder.maybe_create(session_id)
@@ -588,6 +594,11 @@ async def _run_background_query_impl(
         metadata["error"] = str(e)
 
     finally:
+        # Soft adapter Stop ends the iterator naturally, without cancellation.
+        # Consume it before releasing the state or awaiting recorder/persistence.
+        if state.interrupt_requested:
+            interrupted = True
+        state.interrupt_requested = False
         clear_turn_context(session_id, expected=bound_generation_context)
         # Mark as not streaming — keep in pool for reuse
         state.is_streaming = False
