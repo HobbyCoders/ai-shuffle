@@ -1,25 +1,20 @@
-"""Ask PostgreSQL about backends from a disposable child process.
+"""Ask PostgreSQL from an isolated child: no answer keeps the checkout counted.
 
-The question exists because something in this process may have lost a connection,
-often through a stray close of a descriptor number, so it cannot be answered from
-this process. libpq can block here holding the GIL, on a descriptor another thread
-replaced, and then no clock, loop or watchdog in this process runs again. A child
-shares none of that, and the kernel can always end it. Every failure here means no
-answer, which means the checkout stays counted.
-
-Using a pipe has the same weakness on a smaller scale: its number can change hands too,
-and then a read can wait on a stranger forever. So every call that uses a descriptor
-number runs on a throwaway thread, and read() itself uses only the clock and the process
-id. Nothing a pipe does can delay the kill, the reap or read() returning.
+libpq can freeze an interpreter on a replaced descriptor. Pipes in the parent have
+that same weakness. Instead, the child opens private files; the parent maps the
+reply before launch and closes every file before starting the lifecycle owner.
+That owner only spawns, polls, signals and reaps. Even a delayed spawn cannot leave
+a reader or closer with authority over a descriptor reused after read() returns.
 """
 from __future__ import annotations
 
 import json
-import logging
 import math
+import mmap
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -27,18 +22,12 @@ from typing import Any, Optional
 
 import psycopg2
 
-logger = logging.getLogger(__name__)
-
 _CHILD = Path(__file__).with_name("backend_probe_child.py")
 # Only what libpq reads and the OS needs: this process's environment holds API keys.
 _ENVIRONMENT = ("PATH", "SYSTEMROOT", "WINDIR", "TMP", "TEMP", "LD_LIBRARY_PATH", "HOME",
                 "APPDATA")
 _REAP_SECONDS = 2.0
 _MAX_ANSWER_BYTES = 1024 * 1024
-# A stranded exchange thread cannot be ended, so this is what bounds them. Each one takes
-# a stray close landing inside a window of milliseconds, and ends if the stranger's peer
-# ever closes. With this many stranded, no more checks run and checkouts stay counted.
-_MAX_STRANDED_EXCHANGES = 8
 
 
 class NoAnswer(Exception):
@@ -57,110 +46,85 @@ def _interpreter() -> str:
 
 
 class BackendProbe:
-    """At most one child at a time, for one pool. Call read() off the event loop."""
+    """One lifecycle owner and at most one child per pool. read() is off the event loop."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._child: Optional[subprocess.Popen] = None
-        self._closed = False
-        self._exchanges = threading.BoundedSemaphore(_MAX_STRANDED_EXCHANGES)
+        self._owner: Optional[threading.Thread] = None
+        self._closed = threading.Event()
 
     def read(self, pids: list[int], args: tuple, kwargs: dict[str, Any], seconds: float) -> dict:
-        """What PostgreSQL shows for these backends, or an exception within the bound."""
-        request = json.dumps({
-            "path": [str(Path(psycopg2.__file__).parents[1])], "pids": pids, "args": list(args),
-            "kwargs": {**kwargs, "application_name": "ai-shuffle-hold-check"},
-        }).encode()
-        self._end_previous()
         deadline = time.monotonic() + seconds
-        started = threading.Event()
-        # Only this call looks at it, so whatever a stranded thread adds later is ignored.
-        exchange: dict[str, Any] = {}
+        with tempfile.TemporaryDirectory(prefix="db-hold-check-") as directory:
+            # mkstemp uses mode 0600, inside a mode-0700 directory. On Windows these
+            # inherit the user's temp-directory ACL. No credential goes in argv.
+            with tempfile.NamedTemporaryFile(dir=directory, delete=False) as request:
+                request.write(json.dumps({
+                    "path": [str(Path(psycopg2.__file__).parents[1])], "pids": pids,
+                    "args": list(args),
+                    "kwargs": {**kwargs, "application_name": "ai-shuffle-hold-check"},
+                }).encode())
+            with tempfile.NamedTemporaryFile(dir=directory, delete=False) as reply:
+                reply.truncate(_MAX_ANSWER_BYTES)
+                answer = mmap.mmap(reply.fileno(), _MAX_ANSWER_BYTES, access=mmap.ACCESS_READ)
+            # No open file is passed to Popen; the mapping needs no read syscall.
+            with answer:
+                done = threading.Event()
+                errors: list[str] = []
 
-        def run() -> None:
-            try:
-                exchange["child"] = self._start(seconds)
-                started.set()
-                exchange["output"] = exchange["child"].communicate(request)[0]
-            except Exception as exc:  # noqa: BLE001 - the type is all anything ever reports
-                exchange["error"] = type(exc).__name__
-            finally:
-                started.set()
-                self._exchanges.release()
+                def run() -> None:
+                    child = None
+                    try:
+                        child = self._start(seconds, request.name, reply.name)
+                        self._child = child
+                        while child.poll() is None:
+                            if self._closed.is_set() or time.monotonic() >= deadline:
+                                errors.append("TimeoutError")
+                                break
+                            time.sleep(0.01)
+                    except Exception as exc:  # noqa: BLE001 - report only a type
+                        errors.append(type(exc).__name__)
+                    finally:
+                        if child is not None:
+                            # Only this owner ever reaps or signals, including close().
+                            if child.poll() is None:
+                                child.kill()
+                            child.wait()
+                            self._child = None
+                        done.set()
 
-        if not self._exchanges.acquire(blocking=False):
-            logger.warning("Long database checkouts cannot be checked: %d probe reads are stuck",
-                           _MAX_STRANDED_EXCHANGES)
-            raise NoAnswer("stranded")
-        thread = threading.Thread(target=run, name="db-hold-check-pipe", daemon=True)
-        try:
-            thread.start()
-        except RuntimeError:
-            self._exchanges.release()
-            raise
-        if not started.wait(seconds):
-            raise TimeoutError("backend probe deadline")
-        child = exchange.get("child")
-        if child is None:
-            raise NoAnswer(exchange.get("error", "unknown"))
-        self._adopt(child)
-        try:
-            child.wait(timeout=max(0.0, deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            raise TimeoutError("backend probe deadline") from None
-        finally:
-            self._end(child)
-        thread.join(_REAP_SECONDS)  # The child is gone, so its pipe has ended.
-        if "output" not in exchange:
-            raise NoAnswer(exchange.get("error", "stranded"))
-        return _parse(exchange["output"], pids)
+                with self._lock:
+                    if self._closed.is_set():
+                        raise NoAnswer("closed")
+                    if self._child is not None or (self._owner is not None and self._owner.is_alive()):
+                        raise NoAnswer("previous child still running")
+                    self._owner = threading.Thread(target=run, name="db-hold-check-child", daemon=True)
+                    self._owner.start()
+                if not done.wait(max(0.0, deadline - time.monotonic()) + _REAP_SECONDS):
+                    raise TimeoutError("backend probe deadline")
+                if "TimeoutError" in errors:
+                    raise TimeoutError("backend probe deadline")
+                if errors:
+                    raise NoAnswer(errors[0])
+                return _parse(answer[:].rstrip(b"\0"), pids)
 
     def close(self) -> None:
-        """End any running child and start no more."""
+        """Request shutdown without competing with the lifecycle owner's signal/reap."""
         with self._lock:
-            self._closed = True
-            if self._child is not None:
-                self._child.kill()
+            self._closed.set()
 
-    def _end_previous(self) -> None:
-        with self._lock:
-            if self._closed:
-                raise NoAnswer("closed")
-            if self._child is not None:
-                # It outlived its kill, so it is still ours to end: no second one meanwhile.
-                self._child.kill()
-                try:
-                    self._child.wait(timeout=_REAP_SECONDS)
-                except subprocess.TimeoutExpired:
-                    raise NoAnswer("previous child still running") from None
-                self._child = None
-
-    def _start(self, seconds: float) -> subprocess.Popen:
-        command = [_interpreter(), "-I", "-S", str(_CHILD), str(int(seconds) + 2)]
+    def _start(self, seconds: float, request: str, reply: str) -> subprocess.Popen:
+        command = [_interpreter(), "-I", "-S", str(_CHILD), str(int(seconds) + 2), request, reply]
         options: dict[str, Any] = {}
         if os.name == "nt":
             options["creationflags"] = subprocess.CREATE_NO_WINDOW
-        return subprocess.Popen(
-            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, close_fds=True,
-            env=_environment(), **options)
-
-    def _adopt(self, child: subprocess.Popen) -> None:
-        with self._lock:
-            self._child = child
-            if self._closed:
-                child.kill()
-
-    def _end(self, child: subprocess.Popen) -> None:
-        try:
-            child.kill()  # No effect once it has exited and been reaped.
-            child.wait(timeout=_REAP_SECONDS)
-        except subprocess.TimeoutExpired:
-            logger.warning("Backend probe process %s did not end after being killed", child.pid)
-            return  # Stays in self._child, which refuses another until this one is gone.
-        with self._lock:
-            if self._child is child:
-                self._child = None
+        # POSIX: force Popen's posix_spawn path, not fork/exec's blocking error-pipe
+        # read. Python's descriptors are non-inheritable (PEP 446). Windows uses
+        # CreateProcess directly, with native handles rather than CRT descriptor I/O.
+        if os.name != "nt" and not subprocess._USE_POSIX_SPAWN:
+            raise NoAnswer("posix_spawn unavailable")
+        return subprocess.Popen(command, close_fds=False, env=_environment(), **options)
 
 
 def _is_number(value: Any) -> bool:
@@ -170,7 +134,7 @@ def _is_number(value: Any) -> bool:
 
 def _is_row(row: Any, pids: list[int]) -> bool:
     return (isinstance(row, list) and len(row) == 6 and row[0] in pids
-            and type(row[0]) is int
+            and type(row[0]) is int and isinstance(row[4], str) and bool(row[4])
             and all(value is None or isinstance(value, str) for value in row[1:5])
             and (row[5] is None or _is_number(row[5])))
 

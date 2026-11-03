@@ -64,10 +64,13 @@ seconds. The checkout stops counting only if its backend has exited or has run n
 for 60 seconds. Exiting is final; an idle answer lasts 30 seconds unless a newer one
 renews it. If the worker cannot get an answer for any reason, including that process
 failing to start or a malformed reply, the checkout counts again and it normally asks
-again 15 seconds after giving up, which can take up to 9 seconds. A check whose reply
-read got stuck can leave one background thread behind. At most 8 are allowed: with all
-8 stuck, or a process that survives being killed, the worker stops asking until that
-clears, and those checkouts keep counting, so new turns can stay queued.
+again 15 seconds after giving up, which can take up to 7 seconds. The child uses
+private temporary files, not pipes; the worker reads the reply from a memory mapping,
+so no abandoned reader can close a later connection and there is no stuck-reader cap.
+One background owner starts, polls, kills and reaps the child, including on shutdown.
+If starting a process stalls, the caller still returns within that bound and removes
+the files. Until that owner finishes, or a process that survives being killed ends,
+no second child starts and those checkouts keep counting.
 Once it stops counting, new turns can start again and its slot still counts toward
 utilization. VACUUM, ANALYZE and online history index builds are declared maintenance
 and never count this way, though slow database latency still holds new turns.

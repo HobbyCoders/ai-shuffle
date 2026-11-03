@@ -85,7 +85,8 @@ _HARNESS = _FREEZE + textwrap.dedent('''
 # Started like the real child, with -I -S, so it finds the driver the same way.
 _FROZEN_CHILD_START = textwrap.dedent('''
     import json, sys
-    request = json.load(sys.stdin)
+    with open(sys.argv[2]) as source:
+        request = json.load(source)
     sys.path.extend(request["path"])
 ''')
 _FROZEN_CHILD_END = 'freeze(request["kwargs"], {marker!r})\n'

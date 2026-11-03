@@ -27,7 +27,8 @@ def _give_up_by_itself(seconds: int) -> None:
 
 def main() -> int:
     _give_up_by_itself(int(sys.argv[1]))
-    request = json.load(sys.stdin)
+    with open(sys.argv[2], encoding="utf-8") as source:
+        request = json.load(source)
     sys.path.extend(request["path"])
     import psycopg2
 
@@ -35,15 +36,23 @@ def main() -> int:
     conn.autocommit = True
     cursor = conn.cursor()
     cursor.execute(QUERY, (request["pids"],))
-    print(json.dumps({"rows": cursor.fetchall()}))
+    _answer({"rows": cursor.fetchall()})
     return 0
+
+
+def _answer(value) -> None:
+    # The parent has mapped this fixed-size file. Never truncate it under the mapping.
+    try:
+        with open(sys.argv[3], "r+b") as result:
+            result.write(json.dumps(value).encode())
+    except OSError:
+        pass  # A late launch can find that the timed-out parent already removed it.
 
 
 if __name__ == "__main__":
     try:
         code = main()
     except Exception as exc:  # noqa: BLE001 - the type is all the parent ever needs
-        print(json.dumps({"error": type(exc).__name__}))
+        _answer({"error": type(exc).__name__})
         code = 1
-    sys.stdout.flush()
     os._exit(code)  # Nothing left to tidy, and a timer thread must not delay this.

@@ -27,7 +27,6 @@ from app.db import turns as turns_db
 from app.db.schema_postgres import create_postgres_schema
 from tests.core.helpers import make_pump
 from tests.core.test_session_runtime import _runtime_env
-from tests.db.test_backend_probe import strand_replies
 from tests.db.test_commit_deadline_postgres import private_db, private_pool  # noqa: F401
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="replaces raw socket descriptors")
@@ -711,41 +710,17 @@ async def test_a_failed_thread_start_holds_the_turn_in_that_same_admission_call(
 
 
 @pytest.mark.asyncio
-async def test_a_stranded_reply_cannot_stop_checks_and_its_late_answer_is_ignored(
-    private_pool, quick_gate, monkeypatch,  # noqa: F811
-) -> None:
-    """The real child on real PostgreSQL, with the read stuck on a real blocking socket."""
-    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.1)
-    monkeypatch.setattr(base, "_HOLD_PROBE_SECONDS", 2.0)
-    monkeypatch.setattr(backend_probe, "_REAP_SECONDS", 0.1)
-    forgotten = private_pool.getconn()
-    children, peers = strand_replies(private_pool._backend_probe, monkeypatch)
-    try:
-        await _until(lambda: len(peers) >= 3, 15)
-        assert all(child.returncode is not None for child in children[:2]), "each one reaped"
-        assert base.pressure_stats()["retained_holds"] == 0
-        assert quick_gate._pressured(time.monotonic()), "no answer must not release anything"
-        for peer in peers:
-            peer.sendall(b'{"rows": []}')
-    finally:
-        for peer in peers:
-            peer.close()
-    await asyncio.sleep(0.3)
-    hold = private_pool._holds[id(forgotten)]
-    assert not hold.exited and not hold.silent(time.monotonic()), "a late answer speaks for nobody"
-    private_pool.putconn(forgotten)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("reply", ['{"rows": {}}', '{"rows": ""}'])
+@pytest.mark.parametrize("reply", ['{"rows": {}}', '{"rows": ""}', "null identity"])
 async def test_a_malformed_reply_does_not_release_a_working_checkout(
     private_pool, quick_gate, monkeypatch, reply, tmp_path,  # noqa: F811
 ) -> None:
     monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.1)
     script = tmp_path / "child.py"
-    script.write_text(f"import sys\nsys.stdout.write({reply!r})\n")
-    monkeypatch.setattr(backend_probe, "_CHILD", script)
     working = private_pool.getconn()
+    if reply == "null identity":
+        reply = '{"rows": [[%d, "active", null, null, null, 0]]}' % working.get_backend_pid()
+    script.write_text(f"import sys\nwith open(sys.argv[3], 'r+b') as f: f.write({reply!r}.encode())\n")
+    monkeypatch.setattr(backend_probe, "_CHILD", script)
     cursor = working.cursor()
     worker = threading.Thread(target=lambda: cursor.execute("SELECT pg_sleep(1.0)"), daemon=True)
     worker.start()

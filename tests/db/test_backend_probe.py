@@ -50,8 +50,8 @@ def strand_replies(
     peers: list[socket.socket] = []
     real_start, real_read = probe._start, os.read
 
-    def start(seconds: float) -> subprocess.Popen:
-        children.append(real_start(seconds))
+    def start(seconds: float, *files: str) -> subprocess.Popen:
+        children.append(real_start(seconds, *files))
         return children[-1]
 
     def read(fd: int, size: int) -> bytes:
@@ -85,59 +85,6 @@ def _read_within(probe: backend_probe.BackendProbe, port: int, seconds: float, b
     return outcome[0]
 
 
-@pytest.mark.skipif(os.name == "nt", reason="replaces a raw socket descriptor")
-@pytest.mark.parametrize("server", ["answers at once", "silent"])
-def test_a_stranded_reply_read_cannot_delay_the_kill_the_reap_or_the_return(
-    server: str, silent_server: int, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(backend_probe, "_REAP_SECONDS", 0.2)
-    probe = backend_probe.BackendProbe()
-    children, peers = strand_replies(probe, monkeypatch)
-    if server == "silent":
-        port = silent_server
-    else:
-        with socket.create_server(("127.0.0.1", 0)) as refusing:
-            port = refusing.getsockname()[1]
-    try:
-        outcome = _read_within(probe, port, 15 if server != "silent" else 0.5, 8)
-        assert outcome == ("NoAnswer" if server != "silent" else "TimeoutError")
-        assert peers, "the read really was stranded"
-        assert children[0].returncode is not None and _gone(children[0].pid)
-        assert probe._child is None
-    finally:
-        for peer in peers:
-            peer.close()
-
-
-@pytest.mark.skipif(os.name == "nt", reason="replaces a raw socket descriptor")
-def test_stranded_reads_are_bounded_and_the_slots_come_back(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(backend_probe, "_REAP_SECONDS", 0.1)
-    monkeypatch.setattr(backend_probe, "_MAX_STRANDED_EXCHANGES", 2)
-    probe = backend_probe.BackendProbe()
-    with socket.create_server(("127.0.0.1", 0)) as refusing:
-        port = refusing.getsockname()[1]
-    with monkeypatch.context() as stranded:
-        children, peers = strand_replies(probe, stranded)
-        try:
-            assert _read_within(probe, port, 15, 8) == "NoAnswer"
-            assert _read_within(probe, port, 15, 8) == "NoAnswer"
-            assert _read_within(probe, port, 15, 8) == "NoAnswer"
-            assert len(children) == 2, "no child and no thread beyond the bound"
-        finally:
-            for peer in peers:
-                peer.close()
-    deadline = time.monotonic() + 5
-    while True:  # Their reads are over: the probe works again without a restart.
-        with pytest.raises(backend_probe.NoAnswer) as caught:
-            probe.read([1], (), _silent_kwargs(port), 15)
-        if str(caught.value) == "OperationalError" or time.monotonic() > deadline:
-            break
-        time.sleep(0.01)
-    assert str(caught.value) == "OperationalError"
-
-
 @pytest.mark.parametrize("reply", [
     '{"rows": {}}', '{"rows": ""}', '{"rows": null}', '{"rows": 0}', '{"rows": false}',
     '[]', '""', '7', 'null', 'not json', '{"rows": []} {"rows": []}',
@@ -158,9 +105,9 @@ def test_stranded_reads_are_bounded_and_the_slots_come_back(
     '{"rows": [[1, "idle", null, null, "tag", NaN]]}',
 ])
 def test_a_malformed_reply_is_no_answer_not_an_exit(reply: str, tmp_path: Path, monkeypatch) -> None:
-    """Through the real pipe. An empty answer means the backends exited, so nothing else may."""
+    """Through the real file transport. Only a complete answer may confirm an exit."""
     script = tmp_path / "child.py"
-    script.write_text(f"import sys\nsys.stdout.write({reply!r})\n")
+    script.write_text(f"import sys\nwith open(sys.argv[3], 'r+b') as f: f.write({reply!r}.encode())\n")
     monkeypatch.setattr(backend_probe, "_CHILD", script)
     with pytest.raises(backend_probe.NoAnswer):
         backend_probe.BackendProbe().read([1], (), {}, 15)
@@ -170,7 +117,7 @@ def test_a_silent_server_ends_in_a_kill_and_a_reap(silent_server: int) -> None:
     probe = backend_probe.BackendProbe()
     seen: list[subprocess.Popen] = []
     real_start = probe._start
-    probe._start = lambda seconds: seen.append(real_start(seconds)) or seen[-1]  # type: ignore
+    probe._start = lambda *a: seen.append(real_start(*a)) or seen[-1]  # type: ignore
     started = time.monotonic()
     with pytest.raises(TimeoutError):
         probe.read([1], (), _silent_kwargs(silent_server), 1.0)
@@ -191,21 +138,209 @@ def test_credentials_reach_the_child_only_on_its_private_channel(
     class Spy(real_popen):  # type: ignore[misc, valid-type]
         def __init__(self, args: Any, **kwargs: Any) -> None:
             captured.update(argv=args, **kwargs)
+            source, reply = map(Path, args[-2:])
+            assert json.loads(source.read_bytes())["kwargs"]["password"] == _SECRET
+            if os.name != "nt":
+                assert source.stat().st_mode & 0o777 == 0o600
+                assert reply.stat().st_mode & 0o777 == 0o600
+                assert source.parent.stat().st_mode & 0o777 == 0o700
+            else:
+                # Python 3.12.10+ gives mode-0700 mkdir an owner/SYSTEM/admin ACL.
+                paths = ",".join("'" + str(p).replace("'", "''") + "'"
+                                 for p in (source.parent, source, reply))
+                script = (
+                    f"foreach ($path in @({paths})) {{ $a = Get-Acl -LiteralPath $path; "
+                    "$owner = $a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value; "
+                    "$a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]) | "
+                    "ForEach-Object { if ($_.IdentityReference.Value -notin "
+                    "@($owner,'S-1-5-18','S-1-5-32-544')) { throw 'Non-private ACL' } } }"
+                )
+                acl = real_popen(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                _, error = acl.communicate(timeout=10)
+                assert acl.returncode == 0, error.decode(errors="replace")
             super().__init__(args, **kwargs)
             if sys.platform == "linux":
                 captured["cmdline"] = Path(f"/proc/{self.pid}/cmdline").read_bytes()
 
     monkeypatch.setattr(subprocess, "Popen", Spy)
     with pytest.raises(TimeoutError):
-        backend_probe.BackendProbe().read([1], (), _silent_kwargs(silent_server), 0.5)
+        seconds = 5 if os.name == "nt" else 0.5
+        backend_probe.BackendProbe().read([1], (), _silent_kwargs(silent_server), seconds)
     assert _SECRET not in " ".join(captured["argv"])
     assert _SECRET.encode() not in captured.get("cmdline", b"")
     assert _SECRET not in json.dumps(captured["env"])
     assert "SOME_API_KEY" not in captured["env"]
     assert captured["env"].get("PGSSLMODE") == "disable", "libpq must connect like the pool does"
-    assert captured["stderr"] == subprocess.DEVNULL
+    assert not any(captured.get(key) == subprocess.PIPE for key in ("stdin", "stdout", "stderr"))
+    for filename in captured["argv"][-2:]:
+        assert not Path(filename).exists(), "request and answer removed after timeout"
+    assert not Path(captured["argv"][-1]).parent.exists()
     if os.name == "nt":
         assert captured["creationflags"] & subprocess.CREATE_NO_WINDOW
+
+
+@pytest.mark.skipif(os.name == "nt", reason="replaces a raw socket descriptor")
+def test_returned_probe_cannot_close_a_reused_descriptor(monkeypatch) -> None:
+    """Reuse AFTER read returns, then wake the old read: it must have no authority left."""
+    monkeypatch.setattr(backend_probe, "_REAP_SECONDS", 0.1)
+    probe = backend_probe.BackendProbe()
+    children, peers = strand_replies(probe, monkeypatch)
+    replacement, unrelated_peer = socket.socketpair()
+    try:
+        with socket.create_server(("127.0.0.1", 0)) as refusing:
+            port = refusing.getsockname()[1]
+        assert _read_within(probe, port, 5, 8) == "NoAnswer"
+        if peers:  # Old pipe transport: its reader is still in the kernel.
+            fd = children[0].stdout.fileno()
+            os.dup2(replacement.fileno(), fd)
+            replacement.close()
+            replacement = socket.socket(fileno=fd)
+            readers = [t for t in threading.enumerate() if t.name == "db-hold-check-pipe"]
+            for peer in peers:
+                peer.close()
+            for reader in readers:
+                reader.join(3)
+            assert not any(t.is_alive() for t in readers)
+        else:
+            # No pipe now exists. Still reuse a number after return, then check it.
+            fd = os.dup(replacement.fileno())
+            os.close(fd)
+            os.dup2(replacement.fileno(), fd)
+            replacement.close()
+            replacement = socket.socket(fileno=fd)
+        replacement.sendall(b"still mine")
+        assert unrelated_peer.recv(10) == b"still mine"
+    finally:
+        for peer in peers:
+            peer.close()
+        # A failing old implementation has already closed this number.
+        try:
+            replacement.close()
+        except OSError:
+            pass
+        unrelated_peer.close()
+
+
+def test_null_identity_is_no_answer() -> None:
+    with pytest.raises(backend_probe.NoAnswer):
+        backend_probe._parse(b'{"rows": [[1, "active", null, null, null, 0]]}', [1])
+
+
+@pytest.mark.parametrize("shutdown", [False, True])
+def test_only_one_lifecycle_owner_can_signal_or_reap(silent_server, monkeypatch, shutdown) -> None:
+    """Include close(): it requests shutdown, it must not signal alongside the reaper."""
+    owners = set()
+    for name in ("poll", "wait", "kill"):
+        original = getattr(subprocess.Popen, name)
+
+        def observed(self, *args, _original=original, **kwargs):
+            owners.add(threading.get_ident())
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(subprocess.Popen, name, observed)
+    probe = backend_probe.BackendProbe()
+    outcome = []
+    caller = threading.Thread(target=lambda: outcome.append(_read_within(probe, silent_server, 0.2, 5)))
+    caller.start()
+    if shutdown:
+        deadline = time.monotonic() + 3
+        while probe._child is None and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert probe._child is not None
+        probe.close()
+    caller.join(6)
+    assert outcome == ["TimeoutError"]
+    assert len(owners) == 1, "a reaper can otherwise free the PID while another owner signals"
+
+
+
+
+@pytest.mark.parametrize("outcome", ["success", "malformed", "process", "thread"])
+def test_private_files_are_removed_on_every_exit(outcome, tmp_path, monkeypatch) -> None:
+    paths = []
+    real_directory = backend_probe.tempfile.TemporaryDirectory
+
+    def directory(*args, **kwargs):
+        result = real_directory(*args, dir=tmp_path, **kwargs)
+        paths.append(Path(result.name))
+        return result
+
+    monkeypatch.setattr(backend_probe.tempfile, "TemporaryDirectory", directory)
+    script = tmp_path / "child.py"
+    reply = '{"rows": []}' if outcome == "success" else "not json"
+    script.write_text(f"import sys\nwith open(sys.argv[3], 'r+b') as f: f.write({reply!r}.encode())\n")
+    monkeypatch.setattr(backend_probe, "_CHILD", script)
+    if outcome in ("process", "thread"):
+        def refuse(*args, **kwargs):
+            raise RuntimeError("unavailable")
+        monkeypatch.setattr(subprocess if outcome == "process" else threading.Thread,
+                            "Popen" if outcome == "process" else "start", refuse)
+    probe = backend_probe.BackendProbe()
+    try:
+        if outcome == "success":
+            assert probe.read([1], (), {"password": _SECRET}, 2) == {}
+        else:
+            with pytest.raises((backend_probe.NoAnswer, RuntimeError)):
+                probe.read([1], (), {"password": _SECRET}, 2)
+    finally:
+        probe.close()
+    assert paths and not any(path.exists() for path in paths)
+
+
+def test_delayed_launch_has_no_late_descriptor_work(tmp_path, monkeypatch) -> None:
+    """Popen may take time, but its owner never holds a pipe or a temporary file handle."""
+    probe = backend_probe.BackendProbe()
+    real_start = probe._start
+    entered, release = threading.Event(), threading.Event()
+    files, children = [], []
+
+    def delayed(seconds, *paths):
+        files.extend(map(Path, paths))
+        entered.set()
+        assert release.wait(5)
+        child = real_start(seconds, *paths)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(probe, "_start", delayed)
+    monkeypatch.setattr(backend_probe, "_REAP_SECONDS", 0.05)
+    try:
+        assert _read_within(probe, 1, 0.05, 1) == "TimeoutError"
+        assert entered.is_set() and not any(path.exists() for path in files)
+        with pytest.raises(backend_probe.NoAnswer, match="still running"):
+            probe.read([1], (), {}, 0.05)
+        probe.close()  # Also bounded while launch is stalled.
+    finally:
+        release.set()
+        probe._owner.join(5)
+    assert not probe._owner.is_alive()
+    assert len(children) == 1 and children[0].returncode is not None
+    assert _gone(children[0].pid)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX spawn path")
+def test_launch_has_no_internal_error_pipe_and_failures_have_no_slot_cap(monkeypatch) -> None:
+    real_spawn = subprocess.Popen._posix_spawn
+    spawned = []
+
+    def spawn(self, *args, **kwargs):
+        spawned.append(1)
+        return real_spawn(self, *args, **kwargs)
+
+    def no_read(*args):
+        pytest.fail("launch or reply must not read a parent descriptor")
+
+    monkeypatch.setattr(subprocess.Popen, "_posix_spawn", spawn)
+    monkeypatch.setattr(os, "read", no_read)
+    probe = backend_probe.BackendProbe()
+    with socket.create_server(("127.0.0.1", 0)) as server:
+        port = server.getsockname()[1]
+    for _ in range(10):
+        with pytest.raises(backend_probe.NoAnswer, match="OperationalError"):
+            probe.read([1], (), _silent_kwargs(port), 2)
+    assert len(spawned) == 10
+    assert probe._child is None
 
 
 def test_a_refused_connection_reports_only_a_type_name() -> None:
@@ -240,7 +375,10 @@ def test_a_child_that_outlives_its_kill_blocks_a_second_one_until_it_is_gone(
         assert len(spawned) == 1, "never two at a time"
     leftover = probe._child
     assert subprocess.Popen.kill is real_kill
-    with pytest.raises(TimeoutError):  # Killable again: it is ended, and a new one runs.
+    deadline = time.monotonic() + 5
+    while probe._child is not None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    with pytest.raises(TimeoutError):  # The same owner ended it; now a new one runs.
         probe.read([1], (), _silent_kwargs(silent_server), 0.3)
     assert leftover.poll() is not None
     assert len(spawned) == 2 and probe._child is None
@@ -252,12 +390,16 @@ def test_a_child_outliving_a_dead_parent_ends_by_itself(silent_server: int) -> N
         "path": [str(Path(backend_probe.psycopg2.__file__).parents[1])], "pids": [1], "args": [],
         "kwargs": _silent_kwargs(silent_server),
     }).encode()
-    child = subprocess.Popen(
-        [backend_probe._interpreter(), "-I", "-S", str(backend_probe._CHILD), "1"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        env=backend_probe._environment())
-    child.communicate(request, timeout=10)  # No kill from here, and it still ends.
-    assert child.returncode != 0
+    import tempfile
+    with tempfile.TemporaryDirectory() as directory:
+        source, reply = Path(directory) / "request", Path(directory) / "reply"
+        source.write_bytes(request)
+        reply.write_bytes(b"\0" * backend_probe._MAX_ANSWER_BYTES)
+        child = subprocess.Popen(
+            [backend_probe._interpreter(), "-I", "-S", str(backend_probe._CHILD), "1",
+             str(source), str(reply)], env=backend_probe._environment())
+        child.wait(timeout=10)  # No kill from here, and it still ends.
+        assert child.returncode != 0
 
 
 def test_the_child_starts_from_a_venv_the_way_an_install_does(tmp_path: Path) -> None:
