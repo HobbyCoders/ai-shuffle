@@ -979,6 +979,7 @@ async def test_monitor_exit_racing_park_queues_exactly_one_wake(
     from app.core.task_registry import task_registry
 
     sid = "s-spawn"
+    _seed_session(sid, "active")
     task, frames = spawner_harness
     terminal_done = asyncio.Event()
     monkeypatch.setattr(monitor_spawn, "_WATCH_POLL_SECONDS", 0.001)
@@ -1165,6 +1166,7 @@ async def test_stopping_one_monitor_keeps_the_park_for_anothers_pending_wake(
     from tests.core.test_monitor_spawn import _FakeTask
 
     sid = "s-two-monitors"
+    _seed_session(sid, "active")
     tasks = {"a": _FakeTask("t-a"), "b": _FakeTask("t-b")}
     order = iter(["a", "b"])
     handoff_pending = asyncio.Event()
