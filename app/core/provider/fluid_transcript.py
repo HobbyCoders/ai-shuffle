@@ -940,6 +940,8 @@ def rewind_fluid_session(
     target_uuid: str,
     include_response: bool = True,
     target_role: str = "user",
+    *,
+    reset_session_id: Optional[str] = None,
 ) -> RewindResult:
     """Rewind a fluid session by moving its head to an earlier node.
 
@@ -971,7 +973,7 @@ def rewind_fluid_session(
         )
 
     new_head = path[keep_count - 1]["node_id"] if keep_count > 0 else None
-    _set_head(sdk_session_id, new_head)
+    _set_head(sdk_session_id, new_head, reset_session_id=reset_session_id)
 
     return RewindResult(
         success=True,
@@ -982,7 +984,10 @@ def rewind_fluid_session(
     )
 
 
-def _set_head(session_id: str, node_id: Optional[str]) -> None:
+def _set_head(
+    session_id: str, node_id: Optional[str], *, reset_session_id: Optional[str] = None,
+) -> None:
+    from app.db import turns as turns_db
     from app.db.base import get_cursor, get_db
     from app.db.compat import ph
 
@@ -993,6 +998,9 @@ def _set_head(session_id: str, node_id: Optional[str]) -> None:
             f"WHERE session_id = {ph()}",
             (node_id, session_id),
         )
+        if reset_session_id:
+            # The move and "that failure no longer applies" land together or not at all.
+            turns_db.mark_conversation_reset(reset_session_id, cursor=cursor)
 
 
 # ─── Deletion ────────────────────────────────────────────────────────────────

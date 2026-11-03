@@ -29,7 +29,7 @@ These workflows retain manual dispatch and also run on unfiltered
   credentials; it never installs or updates a production CLI.
 - `ci-frontend.yml`: four full frontend Vitest shards, production build (including
   mobile postbuild), frontend/mobile typechecks, mobile tests, contracts/docs/audit,
-  tools/WebCrypto vectors, Browser MCP, the five `UI journeys (N/5)` shards
+  tools/WebCrypto vectors, Browser MCP, the six `UI journeys (N/6)` shards
   and `Visual regression (4 viewports)` run in parallel. The stable
   `JavaScript package checks` aggregate requires every branch to succeed, so
   the journeys and the visual comparison are required for merge (see
@@ -879,17 +879,17 @@ path filter (no frontend job does).
 
 ### UI journeys
 
-`UI journeys (N/5)`: each shard installs the Python and JavaScript
+`UI journeys (N/6)`: each shard installs the Python and JavaScript
 dependencies (pip/npm caches) and Chromium (browser-mcp's pinned
 playwright-core build, cached), builds and stamps the desktop UI, then runs
-`python -m scripts.devloop.ci journeys --shard N/5 --retry-failures`. That starts a fresh dev
+`python -m scripts.devloop.ci journeys --shard N/6 --retry-failures`. That starts a fresh dev
 instance (`python -m scripts.devloop up --ci`: real app, its own throwaway
 PostgreSQL 16 from the runner's `/usr/lib/postgresql/16/bin`, seed data, the
 scripted fake AI, loopback only), waits for its ready line and `status`, runs
 the shard's `frontend/tests/journeys/*.journey.mjs` files in Chromium, then
-`down`. The plan step splits the journey files across the five shards by
+`down`. The plan step splits the journey files across the six shards by
 measured hosted runtime, longest first, each file exactly once
-(`python -m scripts.devloop.ci plan --shards 5`). The checked-in medians are
+(`python -m scripts.devloop.ci plan --shards 6`). The checked-in medians are
 in `scripts/devloop/journey_weights.json`; an unmeasured journey uses its
 `--list` case count times the measured median seconds per case. Adding short
 cases to a measured journey therefore cannot reshuffle all the slow journeys

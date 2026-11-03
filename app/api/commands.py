@@ -855,6 +855,7 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
             request.target_uuid,
             request.include_response,
             request.target_role,
+            reset_session_id=session_id,
         )
         if fluid_result.success:
             chat_rewound = True
@@ -959,6 +960,7 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
                 target_uuid=request.target_uuid,
                 include_response=request.include_response,
                 target_role=request.target_role,
+                reset_session_id=session_id,
             )
             store_truncated = True
         except RewindTargetNotFound as store_nf:
@@ -1161,6 +1163,17 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
         message = f"Chat rewound (removed {messages_removed} messages), but file restore was unavailable"
     else:
         message = "Rewind failed"
+
+    # The failure the rewound transcript showed went with it (#1032): the rewind's
+    # own transaction recorded that. Tell the sidebar now it has committed.
+    if request.restore_chat and chat_rewound:
+        spawn_detached(
+            sync_engine.broadcast_user_session_updated(
+                user_id=session.get("api_user_id") or "admin",
+                session_id=session_id,
+                updates={"last_turn_failed": False},
+            )
+        )
 
     # v2 event log: fold the successful chat rewind into the append-only log
     # (unfenced — a rewind happens between turns, with no owning run). A

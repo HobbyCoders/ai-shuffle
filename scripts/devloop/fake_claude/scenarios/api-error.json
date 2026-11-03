@@ -1,0 +1,11 @@
+{
+  "description": "Answers a little, then the CLI reports an API error as the end of its turn (a result frame with is_error), the way the real CLI does after streaming has begun.",
+  "steps": [
+    {
+      "text": "Starting on it."
+    },
+    {
+      "error": {"status": 529, "message": "Overloaded (fake claude)"}
+    }
+  ]
+}

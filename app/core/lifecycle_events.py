@@ -91,18 +91,16 @@ def _payload(kind: str, session_id: str, identity: str, extra: dict) -> tuple[st
                 payload = json.loads(payload)
             payload = payload or {}
             if kind == "aborted":
-                reason = turn.get("stop_reason") or ""
-                if reason.startswith("interrupt") or reason in ("removed_from_queue", "drain_stale_result", "steered"):
+                if not turns.abort_was_failure(turn.get("stop_reason")):
                     return None
                 data["error_message"] = turn.get("error") or "Turn failed"
                 event_type = "session.error"
-            elif payload.get("api_error_status") or payload.get("is_error") or payload.get("errors"):
+            elif provider_error := (turns.provider_result_error(payload)
+                                    or (turn.get("error") if row is None else None)):
                 # A completed pump can carry an unsuccessful provider result.
-                # Do not expose arbitrary provider error details to webhooks.
-                data["error_message"] = (
-                    f"Provider returned status {payload['api_error_status']}"
-                    if payload.get("api_error_status") else "Provider execution failed"
-                )
+                # Do not expose arbitrary provider error details to webhooks. The
+                # turn row holds the same safe text once a clear took the event.
+                data["error_message"] = provider_error
                 event_type = "session.error"
             else:
                 usage = payload.get("usage") or {}

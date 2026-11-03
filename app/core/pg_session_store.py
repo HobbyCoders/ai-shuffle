@@ -1112,7 +1112,7 @@ class RewindTargetNotFound(Exception):
 
 
 def _truncate_main_transcript_to_keep_count_sync(
-    session_id: str, keep_count: int
+    session_id: str, keep_count: int, *, reset_session_id: str | None = None,
 ) -> int:
     """Delete main-transcript (``subpath IS NULL``) rows beyond the first
     ``keep_count``, ordered by ``id ASC``. Returns the number of rows deleted.
@@ -1131,6 +1131,8 @@ def _truncate_main_transcript_to_keep_count_sync(
     reissues an id, so entries appended after a rewind are still strictly above
     it and cannot be skipped).
     """
+    from app.db import turns as turns_db
+
     _forget_fold_state(session_id)
     with get_db() as conn:
         cur = conn.cursor()
@@ -1141,22 +1143,25 @@ def _truncate_main_transcript_to_keep_count_sync(
         )
         ids = [row["id"] for row in cur.fetchall()]
         total = len(ids)
-        if keep_count >= total:
-            return 0
+        removed = 0
         if keep_count <= 0:
             cur.execute(
                 "DELETE FROM session_store_entries "
                 "WHERE session_id = %s AND subpath IS NULL",
                 (session_id,),
             )
-            return cur.rowcount or 0
-        boundary_id = ids[keep_count - 1]
-        cur.execute(
-            "DELETE FROM session_store_entries "
-            "WHERE session_id = %s AND subpath IS NULL AND id > %s",
-            (session_id, boundary_id),
-        )
-        return cur.rowcount or 0
+            removed = cur.rowcount or 0
+        elif keep_count < total:
+            cur.execute(
+                "DELETE FROM session_store_entries "
+                "WHERE session_id = %s AND subpath IS NULL AND id > %s",
+                (session_id, ids[keep_count - 1]),
+            )
+            removed = cur.rowcount or 0
+        if reset_session_id:
+            # The cut and "that failure no longer applies" land together or not at all.
+            turns_db.mark_conversation_reset(reset_session_id, cursor=cur)
+        return removed
 
 
 def _truncate_session_store_to_checkpoint_sync(
@@ -1164,6 +1169,7 @@ def _truncate_session_store_to_checkpoint_sync(
     target_uuid: str,
     include_response: bool,
     target_role: str,
+    reset_session_id: str | None = None,
 ) -> int:
     """Truncate the stored main transcript at a rewind checkpoint.
 
@@ -1192,7 +1198,9 @@ def _truncate_session_store_to_checkpoint_sync(
     if slice_error is not None or keep_count is None:
         raise RewindTargetNotFound(slice_error or "Rewind target could not be resolved")
 
-    return _truncate_main_transcript_to_keep_count_sync(sdk_session_id, keep_count)
+    return _truncate_main_transcript_to_keep_count_sync(
+        sdk_session_id, keep_count, reset_session_id=reset_session_id,
+    )
 
 
 async def truncate_session_store_to_checkpoint(
@@ -1200,6 +1208,7 @@ async def truncate_session_store_to_checkpoint(
     target_uuid: str,
     include_response: bool,
     target_role: str,
+    reset_session_id: str | None = None,
 ) -> int:
     """Async wrapper around :func:`_truncate_session_store_to_checkpoint_sync`.
 
@@ -1214,6 +1223,7 @@ async def truncate_session_store_to_checkpoint(
         target_uuid,
         include_response,
         target_role,
+        reset_session_id,
     )
 
 

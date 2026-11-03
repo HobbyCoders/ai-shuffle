@@ -81,6 +81,7 @@
 		isVisibleSidebarSession,
 		isArchived,
 		sidebarGroup,
+		lastWorkFailed,
 		waitingTaskChips,
 		openSessionNeeds,
 		sessionNeedsInput,
@@ -384,6 +385,7 @@
 						prState: sessionPrState(s),
 						openPr: !s.pr_state && !!(branch && prSet?.has(branch)),
 						isActive: !!s.is_active,
+						failed: lastWorkFailed(s),
 						open: sessionNeedsInput(
 							s.id === openNeedsId,
 							openNeedsNow,
