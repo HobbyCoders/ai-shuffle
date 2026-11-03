@@ -56,7 +56,7 @@ USAGE_COALESCE_SECONDS = 2.0   # at most one turn.usage append per window
 # That error is the server's own answer, on a live connection, that the transaction
 # rolled back, even when COMMIT raised it, so unlike a lost connection a re-send
 # cannot duplicate anything. Each attempt can also wait out lock_timeout (5 s on a
-# worker), which makes this about 45 s: longer than the server's 30 s statement
+# worker), which makes this about 43 s: longer than the server's 30 s statement
 # and idle-in-transaction limits let an ordinary lock holder last.
 _LOCK_RETRY_DELAYS_SECONDS = (0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
 # turn.provider_alive: the first of a turn is always recorded; a later one only
