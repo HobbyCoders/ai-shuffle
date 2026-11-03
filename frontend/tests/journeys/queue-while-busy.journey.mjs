@@ -212,6 +212,15 @@ function stopReadingPosition({ scrolled, queued = 3, overflows = false, rounds =
 					await scrollTranscriptTo(page, 0.2);
 					await page.waitForTimeout(400);
 				}
+				// A new bubble gives its blank reserve back one frame later: the scroll range
+				// is briefly larger with the reader unmoved. Read the start after that frame.
+				// A reader really left above the bottom still fails the check below.
+				if (!scrolled) {
+					await page.waitForFunction(() => {
+						const log = document.querySelector('[role="log"][aria-label="Conversation messages"]');
+						return log.scrollHeight - log.clientHeight - log.scrollTop <= 48;
+					}, null, { timeout: 2000 }).catch(() => {});
+				}
 				const before = await transcriptScroll(page);
 				expect(before.atBottom === !scrolled, `the reader starts ${scrolled ? 'scrolled up' : 'at the bottom'}: ${JSON.stringify(before)}`);
 
