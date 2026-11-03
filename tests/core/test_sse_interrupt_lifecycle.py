@@ -323,7 +323,7 @@ def _assert_route_saved(boundaries, route, interrupted):
 
 
 async def _arrived(count=1):
-    while session_admission._arriving.get(SID, 0) < count:
+    while len(session_admission._waiting.get(SID, ())) < count:
         await asyncio.sleep(0)
 
 
@@ -359,8 +359,22 @@ async def test_a_stop_before_a_waiting_turn_arrived_is_not_its_stop(chat, route)
     assert await lifecycle.interrupt_session(SID)
     turn = asyncio.create_task(_run(route))
     await _arrived()
-    assert chat.state.interrupt_requested is False
     session_admission.close(holder)
+    assert _ended_as(chat, route, await turn) == "done"
+    _assert_route_saved(chat, route, False)
+
+
+@pytest.mark.parametrize("route", ROUTES)
+async def test_a_stop_for_a_turn_that_left_before_it_started_is_not_the_waiting_turns(chat, route):
+    """That Stop went on the engine for the turn holding the chat, and this turn was waiting."""
+    holder = await session_admission.acquire(SID)
+    rewind = await session_admission.begin_rewind(SID)
+    assert await lifecycle.interrupt_session(SID)
+    assert chat.state.interrupt_requested is True
+    turn = asyncio.create_task(_run(route))
+    await _arrived()
+    session_admission.close(holder)
+    session_admission.close(rewind)
     assert _ended_as(chat, route, await turn) == "done"
     _assert_route_saved(chat, route, False)
 
@@ -544,7 +558,77 @@ async def test_only_the_turn_that_gets_the_chat_takes_the_stop(chat):
     assert (await first).stop_requested is True
     with pytest.raises(session_admission.SessionBusyError):
         await second
-    assert not session_admission._waiting_stops
+    session_admission.close(await first)
+    assert (await _turn())[-1]["type"] == "done"
+
+
+@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("left_by", ["cancelled", "timed-out"])
+async def test_a_stop_leaves_with_the_turn_it_was_for_though_a_later_turn_still_waits(
+    chat, monkeypatch, route, left_by,
+):
+    monkeypatch.setattr(session_admission, "_REWIND_WAIT_SECONDS", 0.4)
+    rewind = await _a_holder("rewind")
+    first = asyncio.create_task(session_admission.acquire(SID))
+    await _arrived()
+    assert await lifecycle.interrupt_session(SID)
+    await asyncio.sleep(0.2)
+    second = asyncio.create_task(_run(route))
+    await _arrived(2)
+    if left_by == "cancelled":
+        first.cancel()
+    with pytest.raises(asyncio.CancelledError if left_by == "cancelled" else session_admission.SessionBusyError):
+        await first
+    session_admission.close(rewind)
+    assert _ended_as(chat, route, await second) == "done"
+    _assert_route_saved(chat, route, False)
+
+
+@pytest.mark.parametrize("left_by", ["cancelled", "timed-out"])
+async def test_a_stop_stays_with_a_turn_that_was_there_when_another_leaves(chat, monkeypatch, left_by):
+    monkeypatch.setattr(session_admission, "_REWIND_WAIT_SECONDS", 0.4)
+    rewind = await _a_holder("rewind")
+    first = asyncio.create_task(session_admission.acquire(SID))
+    await asyncio.sleep(0.2)
+    second = asyncio.create_task(_turn())
+    await _arrived(2)
+    assert await lifecycle.interrupt_session(SID)
+    if left_by == "cancelled":
+        first.cancel()
+    with pytest.raises(asyncio.CancelledError if left_by == "cancelled" else session_admission.SessionBusyError):
+        await first
+    session_admission.close(rewind)
+    assert (await second)[-1]["type"] == "interrupted"
+    _assert_saved(chat, True)
+
+
+@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("pooled", [True, False], ids=["engine", "no-engine"])
+async def test_a_stop_goes_past_a_holder_it_cannot_reach_to_the_turn_waiting(chat, route, pooled):
+    if not pooled:
+        await chat.pool.remove(SID)
+        _next_engine_answers(chat)
+    query = await session_admission.acquire(SID, stoppable=False)
+    rewind = await _a_holder("rewind")
+    turn = asyncio.create_task(_run(route))
+    await _arrived()
+    assert await lifecycle.interrupt_session(SID), "that waiting turn has this Stop"
+    chat.state.adapter.interrupt.assert_not_awaited()
+    assert chat.state.interrupt_requested is False
+    session_admission.close(query)
+    session_admission.close(rewind)
+    assert _ended_as(chat, route, await turn) == "interrupted"
+    _assert_route_saved(chat, route, True)
+
+
+async def test_a_stop_while_only_an_unreachable_holder_runs_is_not_the_next_turns(chat):
+    """The answer comes from the idle engine: nothing here will end interrupted."""
+    query = await session_admission.acquire(SID, stoppable=False)
+    assert await lifecycle.interrupt_session(SID)
+    assert [e["message"] for e in await _turn()] == [session_admission.SessionBusyError.MESSAGE]
+    session_admission.close(query)
+    assert (await _turn())[-1]["type"] == "done"
+    _assert_saved(chat, False)
 
 
 async def test_a_stop_for_a_running_turn_is_not_kept_for_the_one_behind_it(chat):

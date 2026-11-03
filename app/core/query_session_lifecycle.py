@@ -52,7 +52,7 @@ async def interrupt_session(session_id: str) -> bool:
     """Interrupt an active streaming session, or the turn waiting for the chat.
 
     True means a turn has this Stop. A waiting turn keeps it wherever it ends up
-    running, and needs no engine yet.
+    running, and needs no engine yet, unless the turn holding the chat is the one to stop.
 
     Otherwise this calls the adapter's interrupt(), which signals the provider to stop
     processing. This is more reliable than just cancelling the

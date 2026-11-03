@@ -232,6 +232,33 @@ async def test_a_rewind_in_the_way_gives_a_waiter_the_longer_limit_from_when_it_
     admission.close(rewind)
 
 
+async def test_a_rewind_beginning_during_a_wait_gives_that_waiter_the_longer_limit(monkeypatch):
+    """Without the ending turn leaving first: the waiter must look again when a rewind begins."""
+    monkeypatch.setattr(admission, "_ENDING_WAIT_SECONDS", 0.2)
+    monkeypatch.setattr(admission, "_REWIND_WAIT_SECONDS", 0.8)
+    turn = await _an_ending_turn()
+    waiting = asyncio.ensure_future(admission.acquire(SID))
+    await asyncio.sleep(0.05)
+    rewind = await admission.begin_rewind(SID)
+    await asyncio.sleep(0.3)
+    assert not waiting.done(), "past the short limit, with the rewind still holding the chat"
+    admission.close(turn)
+    admission.close(rewind)
+    admission.close(await waiting)
+
+
+async def test_a_waiter_looks_again_when_the_holder_it_waited_for_is_replaced(monkeypatch):
+    """The rewind took the chat and finished, and the turn it took has not left yet."""
+    turn = await _an_ending_turn()
+    waiting = asyncio.ensure_future(admission.acquire(SID))
+    await asyncio.sleep(0)
+    rewind = await admission.begin_rewind(SID)
+    admission.take_for_rewind(rewind)
+    admission.close(rewind)
+    admission.close(await asyncio.wait_for(waiting, 1))
+    admission.close(turn)
+
+
 async def test_a_cancelled_wait_for_a_rewind_holds_nothing():
     rewind = await admission.begin_rewind(SID)
     admission.take_for_rewind(rewind)
