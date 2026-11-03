@@ -227,7 +227,7 @@ def test_question_detection_once_per_render_and_cached_by_document_revision(tmp_
     store.render_memory_section()
     assert len(scans) == len(calls) == 1
     store.render_memory_section()
-    assert len(scans) == 1 and len(calls) == 2
+    assert len(scans) == len(calls) == 1  # reuse the entire job plan, not only its pairs
     # A restarted store shares the revision cache. Raw text is in the key too:
     # an imported metadata edit cannot return stale labels even without a bump.
     restarted = SkillStore(tmp_path)

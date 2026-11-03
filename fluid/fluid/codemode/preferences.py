@@ -619,23 +619,61 @@ def owner_questions(entries: list[dict], *, questions: list | None = None) -> li
     to existing exact-pair keys in one locked commit, so legacy closures and
     endpoint-change semantics remain unchanged.
     """
-    pairs = protected_conflicts(entries, grouped=True) if questions is None else questions
+    if questions is None:
+        return list(_cached_owner_questions(_conflict_revision(entries)))
+    if not questions or isinstance(questions[0], dict):
+        return questions
+    return _build_owner_questions(questions)  # compatibility with precomputed pair callers
+
+
+@lru_cache(maxsize=4)
+def _cached_owner_questions(revision: tuple) -> tuple:
+    """Cache the whole job plan, not just pairs: warmed renders must stay O(n).
+
+    Revision keys include raw text/applicability, not usage counters. Retain only
+    four snapshots, just like the existing pair cache; never persist a decision.
+    """
+    rows = [dict(zip(_CONFLICT_FIELDS, values)) for values in revision]
+    return tuple(_build_owner_questions(protected_conflicts(rows, grouped=True)))
+
+
+def _build_owner_questions(pairs: list) -> list[dict]:
+    from fluid.codemode.facts import global_id
     out = []
     for (scope, worker, subject), pairs in list(_question_groups(pairs).items())[:MAX_OPEN_CONFLICTS]:
-        basis = (scope, worker, subject, sorted(coexistence_key(a, b) for a, b, _ in pairs))
+        members = {global_id(e): e for a, b, _ in pairs for e in (a, b)}
+        # Hash each endpoint once, not twice per pair (quadratic at capacity).
+        tokens = {i: _coexistence_token(e) for i, e in members.items()}
+        keys = [COEXIST_KEY_PREFIX + "v2." + ".".join(sorted((tokens[global_id(a)], tokens[global_id(b)])))
+                for a, b, _ in pairs]
+        basis = (scope, worker, subject, sorted(keys))
         digest = hashlib.sha256(json.dumps(basis, ensure_ascii=False).encode()).hexdigest()[:32]
-        out.append(dict(subject=subject, scope=scope, pairs=pairs, key=GROUP_ANSWER_PREFIX + digest))
+        out.append(dict(subject=subject, scope=scope, pairs=pairs, members=list(members.values()),
+                        key=GROUP_ANSWER_PREFIX + digest))
     return out
+
+
+def _question_refs(members: list[dict]) -> str:
+    from fluid.codemode.facts import global_id
+    ids = [global_id(e) for e in members]
+    if len(ids) <= 8:
+        return ", ".join(f"[{i}]" for i in ids)
+    # Lossless source-prefix factoring: never drop members or substitute local
+    # IDs, which could refer to a different fact after moving to another worker.
+    sources: dict[str, list[str]] = {}
+    for full in ids:
+        source, short = full.rsplit(":", 1)
+        sources.setdefault(source, []).append(short)
+    return ("; ".join(f"source {source} IDs [{', '.join(shorts)}]" for source, shorts in sources.items())
+            + " (Recall each as '<source>:<ID>')")
 
 
 def owner_conflict_lines(entries: list[dict], *, questions: list | None = None) -> list[str]:
     """Ask once per job; answers use Remember, not replacement or local state."""
-    from fluid.codemode.facts import global_id
     lines = []
     for question in owner_questions(entries, questions=questions):
-        rows = {global_id(e): e for a, b, _ in question["pairs"] for e in (a, b)}
-        refs = ", ".join(f"[{i}]" for i in rows)
-        both = len(rows) == 2
+        refs = _question_refs(question["members"])
+        both = len(question["members"]) == 2
         lines.append(
             f"- [owner question; unresolved conflict] Saved facts {refs} disagree ({question['subject']}). "
             f"{'Both' if both else 'All'} facts remain usable as context and model-routing authority. "

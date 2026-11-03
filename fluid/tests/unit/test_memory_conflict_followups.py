@@ -55,6 +55,21 @@ def test_one_job_cannot_starve_review_question(tmp_path):
     assert len(lines) == 2, "four code rules and two review rules are two owner questions"
     assert any("review" in line.lower() for line in lines)
     assert all(len(re.findall(r"key='([^']+)'", line)) == 1 for line in lines)
+    # Large groups must name every fact without repeating its 32-char source
+    # prefix per endpoint. The factored IDs must expand losslessly across origins.
+    seed(store, models=("Gemini", "Qwen", "Grok", "Terra", "Astra"))
+    peer = SkillStore(tmp_path / "peer")
+    peer.save_memory("Peer Code work goes to Sol.", protected=True)
+    store._facts.merge(peer._facts.export())
+    rows = store._facts.snapshot()["entries"]
+    lines = pref.owner_conflict_lines(rows)
+    assert len(lines) == 2
+    line = next(line for line in lines if "model routing: code" in line)
+    expanded = {source + ":" + short for source, shorts in
+                re.findall(r"source ([^ ]+) IDs \[([^]]+)\]", line) for short in shorts.split(", ")}
+    from fluid.codemode.facts import global_id
+    assert expanded == {global_id(e) for e in rows if "Code" in e["text"]}
+    assert "Recall each as '<source>:<ID>'" in line
 
 
 @pytest.mark.asyncio
