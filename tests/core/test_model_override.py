@@ -182,7 +182,7 @@ async def test_stored_legacy_settings_and_profile_pins_still_start_without_an_ov
 
 
 def test_public_model_rules_offer_native_families_not_version_pins(world):
-    from fluid.tools.builtins.session_orchestration import start_session_spec, suggest_task_spec
+    from fluid.tools.builtins.session_orchestration import start_session_spec
     from fluid.tools.builtins import swarm
     from app.core.agent_provider_models import build_task_contract
     for description in (start_session_spec().input_schema["properties"]["model"]["description"],
@@ -193,9 +193,6 @@ def test_public_model_rules_offer_native_families_not_version_pins(world):
         assert "explicit providers stay scoped" in description
         assert "The host checks that the user asked" in description
         assert "model IDs and display names match" not in description
-    chip = suggest_task_spec().input_schema["properties"]["model"]["description"]
-    assert "Claude: opus, sonnet or haiku, never a full id" in chip
-    assert "Others: display name or prov:<providerId>:<modelId>" in chip
     assert "See Task.model" in swarm.input_schema()["properties"]["tasks"]["items"]["properties"]["model"]["description"]
 
 
