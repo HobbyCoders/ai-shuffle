@@ -602,3 +602,295 @@ def test_a_deadline_with_a_retained_borrower_names_it_without_private_values(
     assert "transport=replaced" in lines[0]
     assert "test_a_deadline_with_a_retained_borrower" in lines[0]
     assert private_value not in lines[0]
+
+
+# ---------------------------------------------------------------------------
+# The probe itself can never become the barrier
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def silent_server() -> Iterator[int]:
+    """Accepts TCP and never says a word: what a dead network looks like from here."""
+    with socket.create_server(("127.0.0.1", 0)) as server:
+        yield server.getsockname()[1]
+
+
+def _params(pool: base._RetainingThreadedConnectionPool) -> dict[str, Any]:
+    return {k: v for k, v in pool._kwargs.items() if k != "application_name"}
+
+
+@pytest.mark.asyncio
+async def test_a_probe_that_fails_and_cannot_even_log_does_not_stop_later_probes(
+    private_pool, quick_gate, monkeypatch,  # noqa: F811
+) -> None:
+    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.1)
+    forgotten = private_pool.getconn()
+    asked = threading.Event()
+
+    def unreachable(*args: Any, **kwargs: Any) -> None:
+        asked.set()
+        raise psycopg2.OperationalError("connection refused")
+
+    def broken_log(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("log sink failed")
+
+    with monkeypatch.context() as broken:
+        broken.setattr(base.psycopg2, "connect", unreachable)
+        broken.setattr(base.logger, "log", broken_log)
+        await _until(asked.is_set)
+        await _until(lambda: not private_pool._hold_check_running)
+    await asyncio.sleep(0.3)  # It must age past the check age to be idle enough to release.
+    await _until(lambda: base.pressure_stats()["retained_holds"] == 1)
+    private_pool.putconn(forgotten)
+
+
+def test_a_silent_server_cannot_hold_the_probe_past_its_deadline(
+    private_pool, silent_server, monkeypatch,  # noqa: F811
+) -> None:
+    monkeypatch.setattr(base, "_HOLD_PROBE_SECONDS", 0.3)
+    params = {**_params(private_pool), "host": "127.0.0.1", "port": silent_server}
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        base._read_backend_states([1], (), params, "127.0.0.1")
+    assert time.monotonic() - started < 2
+
+
+@pytest.mark.asyncio
+async def test_a_stuck_probe_ends_and_the_next_one_recovers_the_checkout(
+    private_pool, quick_gate, silent_server, monkeypatch,  # noqa: F811
+) -> None:
+    """The review's wedge: without a wall clock this held the flag, and every turn, forever."""
+    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.1)
+    monkeypatch.setattr(base, "_HOLD_PROBE_SECONDS", 0.2)
+    forgotten = private_pool.getconn()
+    real = private_pool._kwargs, private_pool._server_address
+    private_pool._kwargs = {**real[0], "host": "127.0.0.1", "port": silent_server}
+    private_pool._server_address = "127.0.0.1"
+    await _until(lambda: private_pool._hold_check_running)
+    await _until(lambda: not private_pool._hold_check_running, 2)
+    assert base.pressure_stats()["retained_holds"] == 0
+    assert quick_gate._pressured(time.monotonic()), "no answer must not release anything"
+    private_pool._kwargs, private_pool._server_address = real
+    await asyncio.sleep(0.2)
+    await _until(lambda: base.pressure_stats()["retained_holds"] == 1)
+    private_pool.putconn(forgotten)
+
+
+@pytest.mark.parametrize("steal_at", ["before_the_query", "while_waiting_for_the_answer"])
+def test_a_probe_whose_number_changed_hands_never_touches_the_new_owner(
+    private_pool, monkeypatch, steal_at,  # noqa: F811
+) -> None:
+    """No query, no read, no goodbye and no close on someone else's socket."""
+    stranger, stranger_peer = socket.socketpair()
+    stranger_peer.setblocking(False)
+    kept: list[Any] = []
+    monkeypatch.setattr(base, "_probes_kept_open", kept)
+    real_wait = base._BackendProbe.wait
+
+    def wait(self: Any, connecting: bool = False) -> None:
+        if connecting:
+            real_wait(self, connecting)
+            if steal_at == "before_the_query":
+                os.dup2(stranger.fileno(), self.conn.fileno())
+            return
+        os.dup2(stranger.fileno(), self.conn.fileno())
+        real_wait(self)
+
+    monkeypatch.setattr(base._BackendProbe, "wait", wait)
+    with pytest.raises(OSError, match="changed hands"):
+        base._read_backend_states(
+            [1], (), _params(private_pool), private_pool._server_address)
+    assert len(kept) == 1 and not kept[0].closed
+    number = kept[0].fileno()
+    assert commit_deadline._identity(number) == commit_deadline._identity(stranger.fileno())
+    if steal_at == "before_the_query":
+        # The while-waiting case sent its query before the number changed hands.
+        with pytest.raises(BlockingIOError):
+            stranger_peer.recv(1)
+    _peer_still_works(stranger, stranger_peer)
+    _STOLEN_PROBES.extend(kept)  # Freed, it would close the number it no longer owns.
+    stranger.close()
+    stranger_peer.close()
+
+
+_STOLEN_PROBES: list[Any] = []
+
+
+def test_the_probe_stays_bounded_when_it_cannot_see_the_number_was_replaced(
+    private_pool, monkeypatch,  # noqa: F811
+) -> None:
+    """The check can lose a race, and Windows has none: the clock must hold regardless."""
+    stranger, stranger_peer = socket.socketpair()
+    monkeypatch.setattr(base, "_HOLD_PROBE_SECONDS", 0.3)
+    monkeypatch.setattr(base, "_identity", lambda fd: None)
+    real_wait = base._BackendProbe.wait
+
+    def wait(self: Any, connecting: bool = False) -> None:
+        real_wait(self, connecting)
+        if connecting:
+            os.dup2(stranger.fileno(), self.conn.fileno())
+
+    monkeypatch.setattr(base._BackendProbe, "wait", wait)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        base._read_backend_states(
+            [1], (), _params(private_pool), private_pool._server_address)
+    assert time.monotonic() - started < 2
+    stranger.close()
+    stranger_peer.close()
+
+
+def test_the_probe_never_looks_up_a_name_inside_libpq(monkeypatch) -> None:
+    """A lookup would block where no clock reaches: it waits for a known address."""
+    monkeypatch.setattr(base.psycopg2, "connect", lambda *a, **k: pytest.fail("connected"))
+    with pytest.raises(LookupError):
+        base._read_backend_states([1], (), {"host": "db.example"}, None)
+
+
+def test_the_probe_connects_to_the_address_the_pool_already_uses(
+    private_pool, monkeypatch,  # noqa: F811
+) -> None:
+    connections: list[dict[str, Any]] = []
+    real = base.psycopg2.connect
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        connections.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(base.psycopg2, "connect", spy)
+    held = private_pool.getconn()
+    pid = held.info.backend_pid
+    answer = base._read_backend_states(
+        [pid], (), _params(private_pool), private_pool._server_address)
+    assert answer[pid]["tag"].startswith("ai-shuffle-pool-")
+    assert connections[-1].get("hostaddr") == private_pool._server_address
+    private_pool.putconn(held)
+
+
+# ---------------------------------------------------------------------------
+# An idle answer only lasts while it is fresh; only an exit is final
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_failed_recheck_ends_an_idle_answer_for_a_checkout_that_resumed(
+    private_pool, quick_gate, monkeypatch,  # noqa: F811
+) -> None:
+    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.2)
+    resumed = private_pool.getconn()
+    await _until(lambda: base.pressure_stats()["retained_holds"] == 1)
+
+    def unreachable(*args: Any, **kwargs: Any) -> None:
+        raise psycopg2.OperationalError("connection refused")
+
+    monkeypatch.setattr(base.psycopg2, "connect", unreachable)
+    cursor = resumed.cursor()
+    worker = threading.Thread(target=lambda: cursor.execute("SELECT pg_sleep(0.8)"), daemon=True)
+    worker.start()
+    await _until(lambda: base.pressure_stats()["retained_holds"] == 0)
+    assert worker.is_alive(), "the statement was still running when it counted again"
+    assert start_admission.snapshot()["oldest"] >= 0.2
+    assert quick_gate._pressured(time.monotonic())
+    worker.join(5)
+    resumed.rollback()
+    private_pool.putconn(resumed)
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_recheck_lets_the_idle_answer_lapse_without_a_replacement_probe(
+    private_pool, quick_gate, monkeypatch,  # noqa: F811
+) -> None:
+    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.1)
+    monkeypatch.setattr(base, "_HOLD_ANSWER_SECONDS", 0.4)
+    forgotten = private_pool.getconn()
+    await _until(lambda: base.pressure_stats()["retained_holds"] == 1)
+    release = threading.Event()
+    calls: list[int] = []
+
+    def stalled(*args: Any, **kwargs: Any) -> None:
+        calls.append(1)
+        assert release.wait(10)
+        raise psycopg2.OperationalError("gave up")
+
+    monkeypatch.setattr(base, "_read_backend_states", stalled)
+    await _until(lambda: base.pressure_stats()["retained_holds"] == 0)
+    assert start_admission.snapshot()["oldest"] >= 0.1
+    assert private_pool._hold_check_running and len(calls) == 1
+    release.set()
+    await _until(lambda: not private_pool._hold_check_running)
+    private_pool.putconn(forgotten)
+
+
+@pytest.mark.asyncio
+async def test_a_confirmed_exit_stays_final_when_later_probes_fail(
+    private_pool, quick_gate, monkeypatch,  # noqa: F811
+) -> None:
+    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.1)
+    gone = private_pool.getconn()
+    private_pool._holds[id(gone)].exited = True
+    young = private_pool.getconn()
+    private_pool._holds[id(young)].idle_until = time.monotonic() + 60
+    private_pool._check_holds({})  # What every failed probe does, whichever checkout it was for.
+    monkeypatch.setattr(base, "_read_backend_states", lambda *a: 1 / 0)
+    private_pool._check_holds({id(young): private_pool._holds[id(young)]})
+    assert private_pool._holds[id(gone)].exited
+    assert private_pool._holds[id(young)].idle_until == 0.0
+    private_pool.putconn(young)
+    private_pool.putconn(gone, close=True)
+
+
+# ---------------------------------------------------------------------------
+# A reused pid is not the same backend
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_pid_reused_before_any_absence_is_seen_is_not_charged_to_the_dead_checkout(
+    private_pool, quick_gate, monkeypatch, caplog,  # noqa: F811
+) -> None:
+    """A real busy backend's real row, reported under the dead pid: the OS cannot be forced.
+
+    Every probe sees the pid present, so no absence is ever observed. Its work must
+    not keep this checkout, and with it every new turn, counted.
+    """
+    caplog.set_level(logging.WARNING, logger="app.db")
+    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.2)
+    dead = private_pool.getconn()
+    dead_pid = dead.info.backend_pid
+    busy = private_pool.getconn()
+    busy_pid = busy.info.backend_pid
+    cursor = busy.cursor()
+    worker = threading.Thread(target=lambda: cursor.execute("SELECT pg_sleep(1.0)"), daemon=True)
+    real_read = base._read_backend_states
+    answers: list[dict] = []
+
+    def read(pids: list[int], args: Any, kwargs: Any, address: Any) -> dict:
+        rows = real_read([busy_pid], args, kwargs, address)
+        answers.append(rows[busy_pid])
+        return {dead_pid: rows[busy_pid], busy_pid: rows[busy_pid]}
+
+    monkeypatch.setattr(base, "_read_backend_states", read)
+    worker.start()
+    await _until(lambda: private_pool._holds[id(dead)].exited)
+    assert answers[0]["state"] == "active"
+    assert "backend=gone" in caplog.text
+    # The real owner of that row is still its own checkout's work.
+    assert not private_pool._holds[id(busy)].silent(time.monotonic())
+    worker.join(5)
+    busy.rollback()
+    private_pool.putconn(busy)
+    private_pool.putconn(dead, close=True)
+
+
+# ---------------------------------------------------------------------------
+# A commit whose number is gone fails like any lost connection
+# ---------------------------------------------------------------------------
+
+def test_a_commit_whose_number_was_closed_fails_as_a_lost_connection(
+    private_pool,  # noqa: F811
+) -> None:
+    """Callers handle psycopg2 errors; a bare EBADF from arming was none of those."""
+    with pytest.raises(psycopg2.OperationalError, match="statement not sent"):
+        with base.get_db() as conn:
+            conn.cursor().execute("SELECT 1")
+            os.close(conn.fileno())
+    assert not private_pool._used
+    _serve_healthy_reads()

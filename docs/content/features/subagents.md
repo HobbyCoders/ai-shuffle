@@ -59,7 +59,8 @@ work, however long that takes: the 30-second statement limit bounds each stateme
 not the whole transaction. Once a checkout passes 60 seconds the worker asks
 PostgreSQL about it on a separate connection and logs a warning naming the thread and
 the backend's state. The checkout stops counting only if its backend has exited or
-has run nothing for 60 seconds; if PostgreSQL does not answer, it keeps counting.
+has run nothing for 60 seconds. Exiting is final; an idle answer lasts 30 seconds unless
+a newer one renews it. If PostgreSQL does not answer, the checkout counts again.
 Once it stops counting, new turns can start again and its slot still counts toward
 utilization. VACUUM, ANALYZE and online history index builds are declared maintenance
 and never count this way, though slow database latency still holds new turns.

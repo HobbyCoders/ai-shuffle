@@ -291,7 +291,13 @@ def bounded_commit(conn: psycopg2.extensions.connection) -> Iterator[None]:
     if not isinstance(conn, psycopg2.extensions.connection):
         yield
         return
-    sock = _watchdog.arm(conn.fileno(), COMMIT_TIMEOUT_SECONDS)
+    try:
+        sock = _watchdog.arm(conn.fileno(), COMMIT_TIMEOUT_SECONDS)
+    except OSError as exc:
+        # Other code closed this number. Nothing was sent, and sending now could reach
+        # whoever opens it next, with no deadline: fail as any lost connection does.
+        raise psycopg2.OperationalError(
+            "connection socket is gone; statement not sent") from exc
     try:
         _watchdog.bind(sock, _transports.get(conn), conn.info.backend_pid)
         yield

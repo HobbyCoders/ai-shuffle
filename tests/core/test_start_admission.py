@@ -79,7 +79,7 @@ async def test_producing_turn_runs_beside_a_checkout_that_never_returns(
     pool._held_since[id(retained)] -= base._HOLD_CHECK_SECONDS
     # What PostgreSQL's answer records; tests/db/test_retained_checkout_postgres.py
     # drives the same state from a real backend.
-    pool._abandoned_holds.add(id(retained))
+    pool._holds[id(retained)].exited = True
     gate = start_admission.StartAdmission()
     monkeypatch.setattr(start_admission, "admission", gate)
     with patch.multiple(
@@ -108,7 +108,8 @@ def test_a_write_on_an_abandoned_connection_stops_counting_as_event_pressure(
     monkeypatch.setattr(base, "_event_active", active)
     monkeypatch.setattr(base, "_event_connections", {"stuck": 42})
     assert start_admission.snapshot()["oldest"] >= base._HOLD_CHECK_SECONDS
-    pool._abandoned_holds.add(42)
+    pool._held_since[42] = now
+    pool._holds[42] = base._Hold((0, "stuck"), None, exited=True)
     assert start_admission.snapshot()["oldest"] == 0
     assert base.event_pressure_stats()["oldest_write_seconds"] >= base._HOLD_CHECK_SECONDS
     active["young"] = now - 5
