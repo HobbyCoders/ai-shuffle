@@ -55,11 +55,17 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 # model, so model routing still holds for chips: a required ``model`` and the
 # shared optional ``effort`` on that one always-loaded schema. Delegated loaded
 # 8,246 -> 8,853; nothing else in these numbers moved.
+# Anti-offloading limits (Nov 2026, owner approved): SuggestTask's description
+# now owns what a chip may never defer, because it is the one text every caller
+# reads (161 -> 659 chars); the shared rule says necessary work stays with this
+# chat (316 -> 399). combined_full 133,952 -> 134,035, eager 53,456 -> 53,539,
+# delegated append 15,195 -> 15,278, delegated loaded 8,881 -> 9,379 measured.
+# The input schema did not change.
 # These are actual character counts, not tokenizer or provider billing counts.
-MEASURED_FULL = 133_952
-MEASURED_EAGER = 53_456
-MEASURED_DELEGATED_APPEND = 15_195
-MEASURED_DELEGATED_LOADED_TOOLS = 8_853
+MEASURED_FULL = 134_035
+MEASURED_EAGER = 53_539
+MEASURED_DELEGATED_APPEND = 15_278
+MEASURED_DELEGATED_LOADED_TOOLS = 9_379
 
 
 @pytest.mark.parametrize("native", [True, False])
@@ -84,14 +90,16 @@ def test_adjacent_work_wording_is_bounded_and_not_duplicated(native):
     rule = ADJACENT_WORK_RULE
     description = suggest_task_spec().description
     # Shipped wording, measured Nov 2026; allow at most 1% local drift.
-    # A longer wording candidate did not improve chip use and was rejected.
-    assert len(rule) <= 316 * 101 // 100
-    assert len(description) <= 161 * 101 // 100
+    # A longer wording candidate did not improve chip use and was rejected; the
+    # later growth is the owner-approved limits, not a second attempt at that.
+    assert len(rule) <= 399 * 101 // 100
+    assert len(description) <= 659 * 101 // 100
     for phrase in (
         "does not block it, do not fix it",
         "call SuggestTask with a self-contained brief and keep going",
         "If it blocks, make the smallest fix and say so",
         "not nitpicks or work that is part of the request",
+        "What the request needs stays with this chat",
     ):
         assert phrase in rule
     assert "one click starts it in a separate chat with its own worktree" in description
@@ -102,8 +110,12 @@ def test_adjacent_work_wording_is_bounded_and_not_duplicated(native):
     # The rule owns the paragraph, not a second copy in a tool description.
     assert combined.count(rule) == 1
     paragraphs = [" ".join(p.split()) for p in combined.split("\n\n")]
-    adjacent = [p for p in paragraphs if "Work outside the request:" in p]
+    adjacent = [p for p in paragraphs if "Work outside the user's request:" in p]
     assert len(adjacent) == len(set(adjacent)) == 1
+    # The limits belong to the tool description alone: not the prompt, nor
+    # another tool's docs. (SuggestTask is a direct schema, outside this catalog.)
+    assert description.count("Never use it to defer what the request needs") == 1
+    assert "Never use it to defer" not in combined
 
 
 def test_prompt_catalog_budget():

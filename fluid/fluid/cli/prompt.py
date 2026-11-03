@@ -676,11 +676,15 @@ quietly working around it."""
 
 
 # The one wording of the rule; the delegated leg's guidance appends this too.
+# SuggestTask's description owns what a chip may never defer: every caller reads
+# that, including a custom-prompt delegated agent that never receives this rule.
 ADJACENT_WORK_RULE = """\
-Work outside the request: if a problem or improvement you notice does not block \
-it, do not fix it; call SuggestTask with a self-contained brief and keep going. \
-If it blocks, make the smallest fix and say so. Use SuggestTask for concrete \
-things worth a separate chat, not nitpicks or work that is part of the request."""
+Work outside the user's request: if a problem or improvement you notice does \
+not block it, do not fix it; call SuggestTask with a self-contained brief and \
+keep going. If it blocks, make the smallest fix and say so. Use SuggestTask for \
+concrete things worth a separate chat, not nitpicks or work that is part of the \
+request. What the request needs stays with this chat, even when it takes its \
+own PR."""
 
 
 def _adjacent_work_section(p: PromptProfile) -> str | None:

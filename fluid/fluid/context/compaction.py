@@ -193,6 +193,11 @@ class CompactionConfig:
     # verbatim (_PinScan.chain). A newer full block therefore never rewrites
     # an older fold. None turns pinning off.
     pinned_reminder: tuple[str, str] | None = ("# Memory\n", "# Memory changes\n")
+    # Other reminders the host sends once: the newest pinned block of each
+    # header stays in view the same way, on its own, so a session with no
+    # # Memory chain keeps it too. A host may trust a pinned copy on the path
+    # only while its header is listed here (newest_pinned_block).
+    pinned_blocks: tuple[str, ...] | None = ("# Harness scratch\n",)
     # Intake: user Text blocks longer than this always render as a stub.
     intake_stub_chars: int = 25_000
     intake_preview_chars: int = 500
@@ -592,7 +597,7 @@ _PIN_OPEN = "<system-reminder>\n"
 _PIN_CLOSE = "\n</system-reminder>"
 
 
-def _reminder_blocks(node: SessionNode, headers: tuple[str, str]) -> list[tuple[str, str]]:
+def _reminder_blocks(node: SessionNode, headers: tuple[str, ...]) -> list[tuple[str, str]]:
     """``("full" | "changes", block)`` for every pinned-header reminder in a
     user node's text, in order; each block is verbatim, tags included."""
     if node.message.role != "user":
@@ -621,7 +626,7 @@ class _PinScan:
 
     __slots__ = ("blocks", "newest_full")
 
-    def __init__(self, nodes: list[SessionNode], headers: tuple[str, str] | None) -> None:
+    def __init__(self, nodes: list[SessionNode], headers: tuple[str, ...] | None) -> None:
         self.blocks: list[list[tuple[str, str]]] = (
             [_reminder_blocks(n, headers) for n in nodes] if headers else [[] for _ in nodes]
         )
@@ -676,14 +681,38 @@ def pinned_reminder_chain(
     return _PinScan(nodes, headers).chain(0, len(nodes) - 1)
 
 
+def newest_pinned_block(nodes: list[SessionNode], header: str) -> str | None:
+    """The newest host-pinned block under ``header`` on ``nodes``, verbatim.
+
+    The evidence a host reads before re-sending a once-only reminder. Every
+    fold on this path carries the same block (``_PinScan.chain``), so it is in
+    the model's view whether its node is live or folded, as long as the
+    compactor pins ``header`` (``CompactionConfig.pinned_blocks``).
+    """
+    for node in reversed(nodes):
+        blocks = _reminder_blocks(node, (header,))
+        if blocks:
+            return blocks[-1][1]
+    return None
+
+
+def _pin_scans(nodes: list[SessionNode], config: CompactionConfig) -> list[_PinScan]:
+    return [
+        _PinScan(nodes, config.pinned_reminder),
+        *(_PinScan(nodes, (header,)) for header in config.pinned_blocks or ()),
+    ]
+
+
 def _carry_pins(
-    message: Message, pins: _PinScan, first: int, last: int, as_of: int | None = None,
+    message: Message, pins: list[_PinScan], first: int, last: int, as_of: int | None = None,
 ) -> Message:
     """``message`` (rendered from nodes ``first..last``) with every block of
-    the chain as of ``as_of`` that it covers but no longer shows appended,
+    the chains as of ``as_of`` that it covers but no longer shows appended,
     verbatim, in order."""
-    chain = pins.chain(first, last, as_of)
-    blocks = [block for k in sorted(chain) for block in chain[k]]
+    blocks: list[str] = []
+    for scan in pins:
+        chain = scan.chain(first, last, as_of)
+        blocks += [block for k in sorted(chain) for block in chain[k]]
     if not blocks:
         return message
     shown = "\n".join(b.text for b in message.content if isinstance(b, Text))
@@ -1577,6 +1606,12 @@ class Compactor:
                 0,
             )
             keep.update(nodes[k].node_id for k in marked if k >= first)
+        for header in self.config.pinned_blocks or ():
+            # Only the newest block is ever read (newest_pinned_block, _PinScan).
+            newest = next((k for k in range(stop - 1, 0, -1)
+                           if _reminder_blocks(nodes[k], (header,))), None)
+            if newest is not None:
+                keep.add(nodes[newest].node_id)
         return nodes[stop].node_id, frozenset(keep)
 
     def window(self, nodes: list[SessionNode]) -> list[SessionNode]:
@@ -1638,7 +1673,7 @@ class Compactor:
         # A fold must not hide the pinned reminder chain (the host's # Memory
         # snapshot): its message carries the chain as of the path end its
         # decision saw, verbatim, so a later snapshot never rewrites it.
-        pins = _PinScan(nodes, self.config.pinned_reminder)
+        pins = _pin_scans(nodes, self.config)
 
         def as_of(start: str, end: str) -> int | None:
             pin_end = self._span_pin_ends.get((start, end))
