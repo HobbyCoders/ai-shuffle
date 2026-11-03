@@ -74,25 +74,41 @@ function getSkipRestore(): boolean {
 }
 
 /**
- * Whether this page load is going to reopen a chat: a `/?session=` link, or
- * this tab's own saved chat (and no "New chat" told it to stay new). Read
- * synchronously, so the store starts in the restore window and the first frame
- * after a reload shows that chat loading. Waiting for init's first round trip
- * painted the new-chat screen for up to 1.5s first (found by the
- * reload-midstream journey). init clears the window on every path that ends
- * up restoring nothing.
+ * The chat this page load is going to reopen: a `/?session=` link, or this tab's
+ * own saved chat (and no "New chat" told it to stay new). Read synchronously, so
+ * the first frame after a reload can show that chat loading, before init's first
+ * round trip adopts it. The title is the saved one, empty for a link to another
+ * chat.
+ */
+export function tabRestoreTarget(): { sessionId: string; title: string } | null {
+	if (typeof window === 'undefined') return null;
+	const saved = savedTabChat();
+	const linked = new URLSearchParams(window.location.search).get('session');
+	if (linked) return { sessionId: linked, title: linked === saved?.sessionId ? saved.title : '' };
+	return saved && !getSkipRestore() ? saved : null;
+}
+
+/** This tab's saved chat, if the slot holds one that can be read. */
+function savedTabChat(): { sessionId: string; title: string } | null {
+	try {
+		const raw = sessionStorage.getItem(TAB_ACTIVE_SESSION_KEY);
+		const saved = raw ? JSON.parse(raw) : null;
+		if (!saved || typeof saved.sessionId !== 'string' || !saved.sessionId) return null;
+		return { sessionId: saved.sessionId, title: typeof saved.title === 'string' ? saved.title : '' };
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Whether this page load is going to reopen a chat, so the store starts in the
+ * restore window and the first frame after a reload shows that chat loading.
+ * Waiting for init's first round trip painted the new-chat screen for up to 1.5s
+ * first (found by the reload-midstream journey). init clears the window on every
+ * path that ends up restoring nothing.
  */
 export function tabWillRestoreChat(): boolean {
-	if (typeof window === 'undefined') return false;
-	try {
-		if (new URLSearchParams(window.location.search).get('session')) return true;
-		if (getSkipRestore()) return false;
-		const raw = sessionStorage.getItem(TAB_ACTIVE_SESSION_KEY);
-		const saved: unknown = raw ? JSON.parse(raw) : null;
-		return !!(saved && typeof saved === 'object' && (saved as { sessionId?: unknown }).sessionId);
-	} catch {
-		return false;
-	}
+	return tabRestoreTarget() !== null;
 }
 
 export function setSkipRestore(value: boolean) {

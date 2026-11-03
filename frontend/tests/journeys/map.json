@@ -134,6 +134,14 @@
 			]
 		},
 		{
+			"why": "a cold reload paints the composer where the chat will settle",
+			"journeys": ["composer-reload"],
+			"globs": [
+				"frontend/tests/journeys/composer-reload.journey.mjs",
+				"frontend/src/lib/stores/session/empty-chat-memory*"
+			]
+		},
+		{
 			"why": "typing before boot finishes: the composer draft survives boot's New Chat",
 			"journeys": ["type-at-boot"],
 			"globs": [

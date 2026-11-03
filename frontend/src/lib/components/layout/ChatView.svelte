@@ -16,6 +16,8 @@
 	import BackgroundWorkStrip from '$lib/components/chat/BackgroundWorkStrip.svelte';
 	import TaskChipTray from '$lib/components/chat/TaskChipTray.svelte';
 	import { taskChips } from '$lib/stores/session/task-chips';
+	import { tabRestoreTarget } from '$lib/stores/session/session-init';
+	import { rememberEmptyChat, wasLastSeenEmpty } from '$lib/stores/session/empty-chat-memory';
 	import type { TaskChip } from '$lib/api/sessions';
 	import { isAssistantConfirm } from '$lib/utils/assistant-confirm';
 	import { sessionOwnerBoundary } from '$lib/stores/session-owner';
@@ -45,7 +47,7 @@
 	import { voiceCallState, isCallSurfaceActive } from '$lib/services/voiceCall';
 	import { watchCallOutcomes } from '$lib/services/voiceCallOutcome';
 	import { RotateCcw, LoaderCircle, CloudOff } from 'lucide-svelte';
-	import { chatHeaderTitle, chatHeroKind, chatLayoutSurface, classifyChatSurface, createChatLayoutTracker, HISTORY_STALL_MESSAGE } from './chat-empty-state';
+	import { chatHeaderTitle, chatHeroKind, chatLayoutSurface, classifyChatSurface, createChatLayoutTracker, HISTORY_STALL_MESSAGE, initialChatLayout, settledEmptyChat } from './chat-empty-state';
 	import { pendingDeepLink, deepLinkLoading } from '$lib/stores/pending-deep-link';
 	// The phone shell docks prompts above its composer; the web build has none.
 	import { composerShell } from '$lib/components/chat/composer-shell';
@@ -124,11 +126,18 @@
 	// so opening a chat moves the composer at most once (never centre → bottom
 	// → centre for a chat that turns out empty); see createChatLayoutTracker.
 	// A mirrored chat's first sync check is part of its load (chatLayoutSurface).
-	const chatLayout = createChatLayoutTracker();
+	// A reload knows the chat before it is adopted, and whether this tab last saw
+	// it empty, so an empty chat starts centred instead of moving there (#1049).
+	const restoreTarget = tabRestoreTarget();
+	const chatLayout = createChatLayoutTracker(initialChatLayout(wasLastSeenEmpty($activeSession.sessionId ?? restoreTarget?.sessionId)));
 	// What the view presents: a mirrored chat still waiting for its first sync
 	// shows no transcript yet (the hero or the gate's pane), so it reads as
 	// loading, like the history load it is part of.
 	const presentedSurface = $derived(chatLayoutSurface(chatSurface, { mirrorSyncPending: mirrorSync.waiting }));
+	const emptyChatToRemember = $derived(settledEmptyChat(presentedSurface, $activeSession.sessionId));
+	$effect(() => {
+		if (emptyChatToRemember !== undefined) rememberEmptyChat(emptyChatToRemember);
+	});
 	// Diagnostics follow the painted transcript, not the incoming empty store.
 	// Layout/composer binding still follow the live target and existing tracker.
 	let transcriptSurface = $state<typeof presentedSurface | null>(null);
@@ -202,8 +211,9 @@
 	// switcher's placeholder), while it opens.
 	const heroTitle = $derived(
 		chatHeaderTitle({
-			sessionId: $activeSession.sessionId,
-			title: $activeSession.title,
+			// Before boot adopts the chat it is reopening, the hero already names it.
+			sessionId: $activeSession.sessionId ?? (isLoadingHero ? restoreTarget?.sessionId : null),
+			title: $activeSession.sessionId ? $activeSession.title : restoreTarget?.title,
 			messageCount: 0,
 			loading: isLoadingHero,
 			listTitle: activeRow?.title
@@ -318,7 +328,10 @@
 
 	// Animation: Track transition from empty → active state
 	let transitioningFromEmpty = $state(false);
-	let previousIsEmpty = $state(true);
+	// Null until the first look: a view that opens on the message column (every
+	// reload of a chat with history) has not moved from anywhere, so it must not
+	// slide the composer down from the hero (#1049).
+	let previousIsEmpty = $state<boolean | null>(null);
 
 	// Depends only on `isEmptyState`; reading any other store here would re-run
 	// the effect (clearing the timer via teardown) without resetting the flag.
@@ -328,7 +341,7 @@
 		if (wasEmpty === isEmpty) return;
 		previousIsEmpty = isEmpty;
 
-		if (wasEmpty && !isEmpty) {
+		if (wasEmpty === true && !isEmpty) {
 			// Empty → active transition: animate the reveal
 			transitioningFromEmpty = true;
 			const timer = setTimeout(() => {
@@ -491,8 +504,9 @@
 						</div>
 						<h1 class="cleared-title" title={heroTitle}>{heroTitle}</h1>
 						<p class="cleared-hint" class:is-stalled={!!heroStall} role="status" data-history-stall={heroStall ?? undefined}>
-							<!-- One short line in every state (no update count): a hint that
-							     wraps to two lines and back moves the centred composer. -->
+							<!-- Every state holds the room of the cleared hint's two lines (no
+							     update count), so swapping the text never moves the centred
+							     composer. -->
 							{#if heroStall}
 								<span class="hint-text">{heroHint}</span>
 								<button type="button" class="hero-retry" aria-label="Retry loading the conversation" onclick={() => activeSession.reloadSession()}>Retry</button>
@@ -956,6 +970,9 @@
 		color: var(--muted-foreground);
 		line-height: 1.5;
 		max-width: 40ch;
+		/* Two lines at this line-height: the settled hint wraps to two, the
+		   loading and stalled hints take one (#1049). */
+		min-height: 3em;
 	}
 
 	.cleared-badge.is-error { color: var(--warning, var(--subtle-foreground)); }
