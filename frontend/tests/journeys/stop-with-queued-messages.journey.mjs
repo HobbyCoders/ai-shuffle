@@ -322,6 +322,13 @@ await runJourney({
 					await typeAndSend(page, `queued ${text}`);
 					await page.locator('.pending-messages [role="article"]').filter({ hasText: text }).waitFor({ timeout: 5000 });
 				}
+				// Watch from a confirmed queue, as the other Stop cases do. Before that,
+				// a bubble can drop out on its own, with no Stop involved (issue 1052).
+				await page.waitForFunction(
+					(n) => document.querySelectorAll('.pending-messages [data-queue-confirmed="true"]').length === n,
+					texts.length,
+					{ timeout: 30_000 }
+				);
 				const collect = await watchStopFrames(page, texts);
 				await mark('stop');
 				await stopEverything(page);
