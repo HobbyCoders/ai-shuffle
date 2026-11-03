@@ -125,6 +125,9 @@ async function openChatFromTheList(page, title) {
 /** One more line of the stopped reply can still arrive and nudge what is below it. */
 const REPLY_LINE_PX = 30;
 
+/** Measured on a slow phone: at most 0.016 when the follow lands in the same task, 0.149 to 0.245 when it does not. */
+const BUBBLE_SHIFT_TOTAL = 0.1;
+
 /**
  * The stopped turn settles 1.2s after it ends (settle-hold.ts). The reader once
  * moved at that moment, so watch well past it.
@@ -536,6 +539,15 @@ await runJourney({
 				await mark('queue');
 				const texts = [`tok-${uniq()}`, `tok-${uniq()}`];
 				const collect = await watchStopFrames(page, texts);
+				await page.evaluate(() => {
+					const scores = (window.__bubbleShifts = []);
+					new PerformanceObserver((list) => {
+						for (const entry of list.getEntries()) {
+							const moved = entry.sources.some((s) => s.node?.closest?.('.pending-messages'));
+							if (moved) scores.push(Math.round(entry.value * 1000) / 1000);
+						}
+					}).observe({ type: 'layout-shift' });
+				});
 				for (const text of texts) {
 					await typeAndSend(page, `queued ${text}`);
 					await page.locator('.pending-messages [role="article"]').filter({ hasText: text }).waitFor({ timeout: 5000 });
@@ -547,6 +559,13 @@ await runJourney({
 					await page.locator('[data-not-sent="true"]').filter({ hasText: text }).waitFor({ timeout: 15_000 });
 				}
 				const frames = await collect();
+				// A follow that lands after the task that grew the reply can leave the pixels alone and
+				// still score: the browser reads what is below as pushed off screen and back. Close to
+				// input the recorder forgives that, so add up the bubbles' scores here whatever the timing.
+				const scores = await page.evaluate(() => window.__bubbleShifts);
+				const scored = scores.reduce((total, score) => total + score, 0);
+				log(`bubble shift scores: ${scored.toFixed(3)} from ${JSON.stringify(scores)}`);
+				expect(scored <= BUBBLE_SHIFT_TOTAL, `the reply's growth did not score against the bubbles: ${JSON.stringify(scores)}`);
 				// Growth may push the bubbles down and leave them there. Down and straight back is the fault.
 				// Typing and sending resize the composer, which moves them too: that is the person's own
 				// input, which the recorder scores, so only frames with a still composer count here.
