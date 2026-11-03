@@ -133,7 +133,7 @@ def _kick(session_id: str) -> None:
 # "resume" is a person pressing Retry on a failed turn — a newer instruction
 # than an armed wake for the same reason a typed message is, even though it
 # carries no prompt of its own.
-_WAKEUP_SUPERSEDING_SOURCES = ("user", "queue", "resume")
+_WAKEUP_SUPERSEDING_SOURCES = turns.PERSON_INPUT_SOURCES
 
 # Explicit sends (including REST/worktree intake) resume sidebar membership.
 # API keys belong to the owner, so an API send counts as an owner action too.
@@ -448,6 +448,9 @@ def _submit_blocking(
                 "run-binding persist failed for session %s", session_id
             )
     if source in _WAKEUP_SUPERSEDING_SOURCES:
+        # Durable, so the install that holds the session's latch (or a wake this
+        # cancel cannot reach) learns of this message too.
+        payload = {**(payload or {}), turns.PERSON_INPUT_KEY: True}
         _supersede_wakeups(session_id)
         # ...and release the Stop latch. Stop means "nothing wakes this session
         # until the user sends a new message"; this IS that message,

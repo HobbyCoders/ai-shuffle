@@ -7,7 +7,7 @@ Extracted from query_engine.py to isolate session lifecycle management.
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Any, Optional
 
 from app.core.session_pool import get_session_pool
 
@@ -358,41 +358,126 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
     return {"ok": False, "kind": "agent", "detail": "task not found"}
 
 
-@dataclass(frozen=True)
+@dataclass
 class _UserStop:
-    """One Stop, named by the latch it set, and carried through all its work.
+    """One Stop and its receipt: what it applies to, fixed when it was admitted.
 
-    That work can outlast the turn it stops. The person's next message lifts the
-    latch before it enqueues anything, so while this Stop is :meth:`current`
-    everything the session holds is older than that message. A later Stop latches
-    with a new generation and does its own work. Latch once, here: setting it
-    again later would stop a message this Stop never saw.
+    ``app.db.turns.interrupt_turn`` records the receipt in the transaction that
+    admits the Stop, so it holds across installs and through every wait below.
+    Cleanup ends only what the receipt names, and a person's message above its
+    ``input_cutoff`` outlives the Stop (:func:`app.db.turns.outlives_stop`).
+    A Stop with no live turn to record it on reads its own, once (:meth:`bind`).
     """
 
     session_id: str
     generation: int
     first: bool
+    receipt: Optional[dict] = None
 
-    def current(self) -> bool:
+    def _latch_held(self) -> bool:
         from app.core.task_registry import task_registry
 
         return (task_registry.is_user_stopped(self.session_id)
                 and task_registry.stop_generation(self.session_id) == self.generation)
 
+    async def bind(self) -> dict:
+        from app.core.task_registry import task_registry
+        from app.db import turns as turns_db
 
-def _begin_user_stop(session_id: str) -> _UserStop:
+        if self.receipt is None:
+            try:
+                receipt = await asyncio.to_thread(turns_db.read_stop_receipt, self.session_id)
+            except Exception:  # noqa: BLE001 — the runtime gates still hold the queue.
+                logger.warning("Stop: reading what session %s holds failed", self.session_id,
+                               exc_info=True)
+                receipt = {}
+            if not self._latch_held():
+                # A message lifted the latch during that read, and the read may
+                # have seen it. What is older can no longer be told apart.
+                receipt = {}
+            task_registry.note_stop_cutoff(self.session_id, receipt.get("input_cutoff"))
+            self.receipt = receipt
+        return self.receipt
+
+    async def overtaken(self) -> bool:
+        """Whether a person has sent a message since this Stop, on any install.
+
+        Lifts the latch when they have. Asked after latching, so a message this
+        read cannot see yet meets the latch and its cutoff at the runtime's gate.
+        """
+        from app.core.task_registry import task_registry
+        from app.db import turns as turns_db
+
+        if not self._latch_held():
+            return True
+        try:
+            newer = await asyncio.to_thread(
+                turns_db.person_input_after, self.session_id, (self.receipt or {}).get("input_cutoff"),
+            )
+        except Exception:  # noqa: BLE001 — spare what this cannot place.
+            logger.warning("Stop: reading newer input failed for %s", self.session_id, exc_info=True)
+            return True
+        if newer and self._latch_held() and task_registry.clear_user_stop(self.session_id):
+            logger.info("Stop: a newer message reached %s; released the latch", self.session_id)
+        return newer
+
+
+def _begin_user_stop(session_id: str, receipt: Optional[dict] = None) -> _UserStop:
     from app.core.task_registry import task_registry
 
-    first = task_registry.mark_user_stopped(session_id)
-    return _UserStop(session_id, task_registry.stop_generation(session_id), first)
+    first = task_registry.mark_user_stopped(session_id, input_cutoff=(receipt or {}).get("input_cutoff"))
+    return _UserStop(session_id, task_registry.stop_generation(session_id), first, receipt)
 
 
-async def _read_for_stop(read: Callable[[str], list[dict]], session_id: str) -> list[dict]:
+@dataclass(frozen=True)
+class StopScope:
+    """The local work a Stop may end, each run named by its incarnation.
+
+    Only the install running a task can act on it, and a restart ends it, so
+    this is taken on that install, before any wait, not stored with the receipt.
+    """
+
+    active: list[dict]
+    worker_sessions: list[str]
+    worker_shells: dict[str, set[str]]
+    runs: dict[str, Any]
+
+
+def capture_stop_scope(session_id: str) -> StopScope:
+    """Synchronous, so nothing can start between the caller's check and this."""
+    from app.core.task_registry import task_registry
+
+    active = task_registry.get_active(session_id)
+    # Worker sessions to sweep AFTER the kills. A ProviderAgent worker's own
+    # Monitor shells are registered under the WORKER's session id, and killing
+    # the worker does not reach them: the shell is a child of the APP process,
+    # not of the worker's CLI, so evicting the worker's pooled client leaves its
+    # dev server or CI watcher running (and its registry row stranded). Snapshot
+    # the ids now — ``teardown_worker`` unregisters each record as it goes.
+    # ``live_workers`` is keyed on the ROOT session, which is where nested
+    # workers register too (``task_dispatch`` passes ``root_session_id``), so
+    # this covers the whole descendant tree, not just the top level.
+    worker_sessions: list[str] = []
+    worker_shells: dict[str, set[str]] = {}
     try:
-        return await asyncio.to_thread(read, session_id)
-    except Exception:  # noqa: BLE001 — one leg failing must not skip the rest.
-        logger.warning("Stop: reading turns failed for session %s", session_id, exc_info=True)
-        return []
+        from app.core import provider_agent_supervisor
+        from app.mcp.builtin_tools import session_background_shell_ids
+
+        worker_sessions = [
+            r.worker_session_id
+            for r in provider_agent_supervisor.live_workers(session_id)
+            if r.worker_session_id
+        ]
+        worker_shells = {
+            worker: session_background_shell_ids(worker) for worker in worker_sessions
+        }
+    except Exception:  # noqa: BLE001 — never let bookkeeping fail a stop.
+        logger.debug("Stop: could not enumerate workers for %s", session_id, exc_info=True)
+    runs = {
+        task_id: task_registry.task_incarnation(session_id, task_id)
+        for task_id in (*(t.get("id") for t in active if t.get("id")), *worker_sessions)
+    }
+    return StopScope(active, worker_sessions, worker_shells, runs)
 
 
 async def enter_user_stop(session_id: str, *, stop: Optional[_UserStop] = None) -> dict:
@@ -434,9 +519,9 @@ async def enter_user_stop(session_id: str, *, stop: Optional[_UserStop] = None) 
     install actually holds the session's work. Idempotent and best-effort: every
     leg is independently guarded, and a failure in one never skips the others.
 
-    This work can outlast the turn it stops. Each leg below answers to ``stop``
-    (see :class:`_UserStop`), so an old Stop never takes what the session did
-    after the person's next message. Without one, this call is the Stop.
+    This work can outlast the turn it stops, so each leg ends only what the
+    receipt names (see :class:`_UserStop`), and running it again is harmless.
+    Without one, this call is the Stop.
     Returns a small counts dict for the log/tests.
     """
     from app.db import turns as turns_db
@@ -444,34 +529,26 @@ async def enter_user_stop(session_id: str, *, stop: Optional[_UserStop] = None) 
     # (1) FIRST, and synchronously — before any await — so a terminal frame
     #     racing this call is already looking at a stopped session.
     stop = stop or _begin_user_stop(session_id)
-
-    # Read before anything below can stall. If the Stop is still current after
-    # these reads, every row in them is older than the next message.
-    queued = await _read_for_stop(turns_db.get_queued_turns, session_id)
-    parked = await _read_for_stop(turns_db.get_parked_turns, session_id)
-    if not stop.current():
-        queued, parked = [], []
-        logger.info("Stop: a newer message reached %s; leaving its turns alone", session_id)
+    receipt = await stop.bind()
+    await stop.overtaken()
 
     wakeups_cancelled = 0
-    try:
-        from app.core import wakeup_service
+    if receipt.get("wakes") or receipt.get("handoffs"):
+        try:
+            from app.core import wakeup_service
 
-        wakeups_cancelled = await wakeup_service.cancel_session_wakeups_async(
-            session_id, can_cancel=stop.current,
-        )
-    except Exception:  # noqa: BLE001 — one leg failing must not skip the rest.
-        logger.warning(
-            "Stop: cancelling wakeups failed for session %s", session_id,
-            exc_info=True,
-        )
+            wakeups_cancelled = await wakeup_service.cancel_named_wakeups_async(
+                session_id, receipt.get("wakes") or [], receipt.get("handoffs") or [],
+            )
+        except Exception:  # noqa: BLE001 — one leg failing must not skip the rest.
+            logger.warning(
+                "Stop: cancelling wakeups failed for session %s", session_id,
+                exc_info=True,
+            )
 
     queued_aborted = 0
     try:
-        for turn in queued:
-            turn_id = turn.get("id")
-            if not turn_id:
-                continue
+        for turn_id in receipt.get("queued") or []:
             removed = await asyncio.to_thread(
                 turns_db.remove_queued_turn, turn_id, keep_unsent_words=True,
             )
@@ -485,13 +562,11 @@ async def enter_user_stop(session_id: str, *, stop: Optional[_UserStop] = None) 
 
     parked_settled = 0
     try:
-        # By these ids and intervals, with the Stop asked again under the
-        # admission lock the next message's enqueue also takes: a park it reads
-        # above can resume, and the write can wait behind that lock for a while.
-        for park in parked:
+        # By these ids and intervals, rechecked under the admission lock the next
+        # message's enqueue also takes: a park named here can have resumed.
+        for park in receipt.get("parks") or []:
             parked_settled += await asyncio.to_thread(
-                turns_db.settle_parked_turns, session_id,
-                observed_park=park, can_settle=stop.current,
+                turns_db.settle_parked_turns, session_id, observed_park=park,
             )
         if parked_settled:
             # Settling banked the park's working time; show the final total.
@@ -582,6 +657,7 @@ async def _settle_stopped_task(session_id: str, task_id: str, *, source: str = "
 async def stop_all_background_tasks(
     session_id: str, *, include_shells: bool = True, user_stop: bool = False,
     respect_shell_preference: bool = True, source: str = "user_stop",
+    scope: Optional[StopScope] = None, receipt: Optional[dict] = None,
 ) -> list[dict]:
     """Stop EVERY in-flight background task in a session, one at a time.
 
@@ -619,12 +695,14 @@ async def stop_all_background_tasks(
     can survive termination of the worker process tree. Force paths (session delete, eviction reap) don't come through here
     at all — they use ``reap_session_background_shells``, which is unchanged.
 
-    Everything this stop will end is decided in its first step, before any
-    await: the latch, then the list of tasks and workers. A caller may let this
-    run on after signalling the provider, so the turn can be over and the next
-    one running by the time a later step gets its turn. The runs named here still
-    end, and nothing started after this step does: a task resumed under the same
-    id is a new run, left alone (:meth:`TaskRegistry.task_incarnation`).
+    Everything this stop will end is decided before any wait. ``receipt`` names
+    the session's durable work (see :class:`_UserStop`) and ``scope`` this
+    install's running work; a caller that had to wait for the receipt captured
+    the scope first (:func:`capture_stop_scope`). A caller may let this run on
+    after signalling the provider, so the turn can be over and the next one
+    running by the time a later step gets its turn. The runs named here still
+    end, and nothing started after them does: a task resumed under the same id is
+    a new run, left alone (:meth:`TaskRegistry.task_incarnation`).
     Returns one result dict per task attempted, plus a ``skipped`` entry for
     each spared shell. Never raises.
     """
@@ -634,7 +712,7 @@ async def stop_all_background_tasks(
     if user_stop:
         # The latch before the snapshot: a task completing while we work through
         # the list finds a stopped session and enqueues nothing.
-        stop = _begin_user_stop(session_id)
+        stop = _begin_user_stop(session_id, receipt)
         if stop.first:
             logger.info("Stop: latched session %s", session_id)
         if include_shells and respect_shell_preference and _keep_monitor_shells_on_stop():
@@ -649,7 +727,8 @@ async def stop_all_background_tasks(
         except Exception:  # noqa: BLE001 — the per-task stops below still run.
             logger.warning("Stop: latching Swarm workflows failed for %s", session_id, exc_info=True)
 
-    active = task_registry.get_active(session_id)
+    scope = scope or capture_stop_scope(session_id)
+    active = scope.active
     # A worker shutting down (docker stop, quitting the desktop app) ends only
     # its own work: a Task child running on another worker keeps running, and
     # its report reaches this chat when this worker is back (#1808).
@@ -660,50 +739,17 @@ async def stop_all_background_tasks(
         active = [task for task in active if not task.get("worker")]
     task_ids = [task.get("id") for task in active if task.get("id")]
 
-    # Worker sessions to sweep AFTER the kills. A ProviderAgent worker's own
-    # Monitor shells are registered under the WORKER's session id, and killing
-    # the worker does not reach them: the shell is a child of the APP process,
-    # not of the worker's CLI, so evicting the worker's pooled client leaves its
-    # dev server or CI watcher running (and its registry row stranded). Snapshot
-    # the ids now — ``teardown_worker`` unregisters each record as it goes.
-    # ``live_workers`` is keyed on the ROOT session, which is where nested
-    # workers register too (``task_dispatch`` passes ``root_session_id``), so
-    # this covers the whole descendant tree, not just the top level.
-    worker_sessions: list[str] = []
-    worker_shells: dict[str, set[str]] = {}
-    if user_stop:
-        try:
-            from app.core import provider_agent_supervisor
-            from app.mcp.builtin_tools import session_background_shell_ids
+    worker_sessions = scope.worker_sessions if user_stop else []
+    worker_shells = scope.worker_shells
 
-            worker_sessions = [
-                r.worker_session_id
-                for r in provider_agent_supervisor.live_workers(session_id)
-                if r.worker_session_id
-            ]
-            worker_shells = {
-                worker: session_background_shell_ids(worker) for worker in worker_sessions
-            }
-        except Exception:  # noqa: BLE001 — never let bookkeeping fail a stop.
-            logger.debug(
-                "Stop: could not enumerate workers for %s", session_id,
-                exc_info=True,
-            )
-
-    # Each run this stop may end. Asked right before each act below: nothing
-    # suspends from there until a worker's teardown latches ``torn_down``, which
-    # refuses a new continuation from then on.
-    runs = {
-        task_id: task_registry.task_incarnation(session_id, task_id)
-        for task_id in (*task_ids, *worker_sessions)
-    }
-
+    # Asked right before each act below: nothing suspends from there until a
+    # worker's teardown latches ``torn_down``, which refuses a new continuation.
     def same_run(task_id: str) -> bool:
         now = task_registry.task_incarnation(session_id, task_id)
-        return now is None or now == runs[task_id]
+        return now is None or now == scope.runs.get(task_id)
 
-    def still_current() -> bool:
-        return stop is None or stop.current()
+    async def overtaken() -> bool:
+        return stop is not None and await stop.overtaken()
 
     spared: list[dict] = []
     if not include_shells:
@@ -744,7 +790,7 @@ async def stop_all_background_tasks(
     # sessions have no turn runtime to interrupt, but Stop/archive must still
     # cancel their provider call and clear any pending checkpoint. A checkpoint
     # running after the next message belongs to that message.
-    if still_current():
+    if not await overtaken():
         state = get_session_pool().peek(session_id)
         cancel_checkpoint = getattr(getattr(state, "adapter", None), "cancel_checkpoint", None)
         if callable(cancel_checkpoint):
@@ -760,7 +806,7 @@ async def stop_all_background_tasks(
         results.append(await stop_session_task(session_id, task_id,
                                               **({"source": source} if source != "user_stop" else {})))
 
-    if user_stop and not keep_remote and still_current():
+    if user_stop and not keep_remote and not await overtaken():
         # A Task child on another worker whose worker went quiet past the
         # offline notice is no longer in the registry or the supervisor, but may
         # still run there: its stop is recorded and delivered when it answers.
@@ -783,9 +829,10 @@ async def stop_all_background_tasks(
             # A worker can start a shell until it is killed just above, so sweep
             # all of its shells. Once it is running for something newer, only the
             # shells it had when this stop began.
+            newer = await overtaken()
             reaped = await stop_session_background_shells(
                 worker_session_id,
-                **({} if still_current() and same_run(worker_session_id)
+                **({} if not newer and same_run(worker_session_id)
                    else {"only": worker_shells.get(worker_session_id, set())}),
             )
             if reaped:

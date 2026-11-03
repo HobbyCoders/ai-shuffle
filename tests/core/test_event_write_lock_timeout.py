@@ -594,7 +594,8 @@ def _next_message_arrives() -> str:
     wakeups_db.create_wakeup(
         id="newer-wake", session_id=SID, prompt="newer wake", fire_at=time.time() + 60,
     )
-    return turns_db.enqueue_turn(SID, "user", prompt="next", profile_id="default")["id"]
+    return turns_db.enqueue_turn(SID, "user", prompt="next", profile_id="default",
+                                 payload={turns_db.PERSON_INPUT_KEY: True})["id"]
 
 
 async def test_a_stop_paused_at_the_wakeups_spares_the_next_turns_work(monkeypatch, stop_env):
@@ -604,7 +605,8 @@ async def test_a_stop_paused_at_the_wakeups_spares_the_next_turns_work(monkeypat
     from app.db import wakeups as wakeups_db
 
     monkeypatch.setattr(sr, "INTERRUPT_STEP_WAIT_SECONDS", 0.01)
-    reached, resume = _pause_first_call(monkeypatch, wakeups_db, "pop_session_wakeups")
+    reached, resume = _pause_first_call(monkeypatch, wakeups_db, "pop_named_wakeups")
+    wakeups_db.create_wakeup(id="older-wake", session_id=SID, prompt="older", fire_at=time.time() + 60)
     turn = turns_db.enqueue_turn(SID, "user", prompt="hi", profile_id="default")
     turns_db.start_turn(turn["id"], None, "runner")
     turns_db.interrupt_turn(SID, "stop", stop_background=True, source="user_stop")
@@ -621,7 +623,7 @@ async def test_a_stop_paused_at_the_wakeups_spares_the_next_turns_work(monkeypat
     await tr.drain_event_writes(5)
 
     assert stop_env == ["old-task"]
-    assert wakeups_db.get_session_wakeups(SID)
+    assert [row["id"] for row in wakeups_db.get_session_wakeups(SID)] == ["newer-wake"]
     assert turns_db.get_turn(next_turn)["state"] == "queued"
 
 
@@ -629,7 +631,7 @@ async def test_a_stop_paused_at_the_queue_read_leaves_the_new_queue_alone(monkey
     from app.core import query_session_lifecycle as qsl
     from app.db import turns as turns_db
 
-    reached, resume = _pause_first_call(monkeypatch, turns_db, "get_queued_turns")
+    reached, resume = _pause_first_call(monkeypatch, turns_db, "read_stop_receipt")
     stop = asyncio.create_task(qsl.stop_all_background_tasks(SID, user_stop=True))
     await asyncio.to_thread(reached.wait, 5)
 
@@ -659,7 +661,7 @@ async def test_a_stop_outlived_by_the_next_message_reaps_only_the_shells_it_saw(
     from app.db import turns as turns_db
     from app.mcp import builtin_tools
 
-    reached, resume = _pause_first_call(monkeypatch, turns_db, "get_queued_turns")
+    reached, resume = _pause_first_call(monkeypatch, turns_db, "read_stop_receipt")
     monkeypatch.setattr(builtin_tools, "session_background_shell_ids", lambda _sid: {"old-shell"})
     reap = AsyncMock(return_value=0)
     monkeypatch.setattr(builtin_tools, "stop_session_background_shells", reap)
@@ -676,18 +678,6 @@ async def test_a_stop_outlived_by_the_next_message_reaps_only_the_shells_it_saw(
         sup.reset()
 
     reap.assert_awaited_once_with("worker-a", only={"old-shell"})
-
-
-def test_a_wake_that_arrives_after_the_read_is_not_popped():
-    from app.db import wakeups as wakeups_db
-
-    wakeups_db.create_wakeup(
-        id="older-wake", session_id=SID, prompt="older wake", fire_at=time.time() + 60,
-    )
-    answers = iter([True, False])
-
-    assert wakeups_db.pop_session_wakeups(SID, can_pop=lambda: next(answers)) == []
-    assert wakeups_db.get_session_wakeups(SID)
 
 
 async def test_a_stop_overtaken_by_a_newer_turn_does_not_signal_or_halt_it(monkeypatch):
@@ -772,7 +762,7 @@ async def test_an_interrupt_overtaken_during_its_read_does_not_latch_again(monke
     signal.assert_awaited_once()
     assert not task_registry.is_user_stopped(SID)
     assert turns_db.get_turn(next_turn)["state"] == "queued"
-    assert stop_env == []
+    assert stop_env == ["old-task"]  # older than the message; the new task is left alone
 
 
 @pytest.fixture
@@ -793,6 +783,43 @@ def real_worker():
     task_registry.clear_session(SID)
 
 
+async def test_a_stop_paused_at_its_first_read_still_ends_the_older_worker(monkeypatch, real_worker):
+    """The foreground parks and a newer runtime starts during the read: the worker
+    this Stop was for still ends, and nothing of the newer turn does."""
+    from app.core import provider_agent_supervisor as sup
+    from app.core import session_runtime as sr
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    turn = turns_db.enqueue_turn(SID, "user", prompt="hi", profile_id="default")
+    turns_db.start_turn(turn["id"], None, "runner")
+    turns_db.interrupt_turn(SID, "stop", stop_background=True, source="user_stop")
+    reached, resume = _pause_first_call(monkeypatch, turns_db, "get_turn")
+    old = sr.SessionRuntime(turn)
+    sr._live_runtimes[SID] = old
+    signal = AsyncMock()
+    try:
+        with patch("app.core.query_session_lifecycle.interrupt_session", new=signal):
+            interrupt = asyncio.create_task(old.interrupt("stop", escalation_timeout=0.05))
+            await asyncio.to_thread(reached.wait, 5)
+            assert turns_db.park_turn(turn["id"], ["worker-a"])
+            next_turn = _next_message_arrives()
+            sr._live_runtimes[SID] = sr.SessionRuntime(turns_db.get_turn(next_turn))
+            resume.set()
+            assert await interrupt == "interrupting"
+            await tr.drain_event_writes(5)
+    finally:
+        sr._live_runtimes.pop(SID, None)
+
+    assert real_worker.torn_down is True
+    assert sup.get_worker(SID, "worker-a") is None
+    assert task_registry.get_task(SID, "worker-a")["status"] == "killed"
+    assert task_registry.get_task(SID, "new-task")["status"] == "running"
+    assert not task_registry.is_user_stopped(SID)
+    assert turns_db.get_turn(next_turn)["state"] == "queued"
+    signal.assert_not_awaited()
+
+
 @pytest.mark.parametrize("message_lifts_latch", [True, False])
 async def test_a_stop_leaves_a_worker_resumed_while_it_waited(monkeypatch, real_worker, message_lifts_latch):
     from app.core import provider_agent_supervisor as sup
@@ -800,7 +827,7 @@ async def test_a_stop_leaves_a_worker_resumed_while_it_waited(monkeypatch, real_
     from app.core.task_registry import task_registry
     from app.db import turns as turns_db
 
-    reached, resume = _pause_first_call(monkeypatch, turns_db, "get_queued_turns")
+    reached, resume = _pause_first_call(monkeypatch, turns_db, "read_stop_receipt")
     stop = asyncio.create_task(qsl.stop_all_background_tasks(SID, user_stop=True))
     await asyncio.to_thread(reached.wait, 5)
 
@@ -827,7 +854,7 @@ async def test_a_stop_still_ends_the_worker_run_it_named(monkeypatch, real_worke
     from app.core.task_registry import task_registry
     from app.db import turns as turns_db
 
-    reached, resume = _pause_first_call(monkeypatch, turns_db, "get_queued_turns")
+    reached, resume = _pause_first_call(monkeypatch, turns_db, "read_stop_receipt")
     stop = asyncio.create_task(qsl.stop_all_background_tasks(SID, user_stop=True))
     await asyncio.to_thread(reached.wait, 5)
     _next_message_arrives()
@@ -855,29 +882,26 @@ def _handoff_wake() -> dict:
         return dict(cursor.fetchone())
 
 
-@pytest.mark.parametrize("has_wake", [True, False])
-def test_a_refused_wake_cancel_leaves_the_staged_wake_alone(has_wake):
+def test_a_stops_cancel_touches_only_what_it_named():
     from app.db import wakeups as wakeups_db
 
     _stage_handoff_wake()
-    if has_wake:
-        wakeups_db.create_wakeup(
-            id="older-wake", session_id=SID, prompt="older wake", fire_at=time.time() + 60,
+    with base.get_db() as conn:
+        conn.cursor().execute(
+            "INSERT INTO handoff_wakes (token,session_id,source_id,branch,wakes,created_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s)", ("later", SID, "source", None, "[]", time.time()),
         )
-    answers = iter([True, False])
+    for wake in ("older-wake", "newer-wake"):
+        wakeups_db.create_wakeup(id=wake, session_id=SID, prompt=wake, fire_at=time.time() + 60)
 
-    assert wakeups_db.pop_session_wakeups(SID, can_pop=lambda: next(answers)) == []
-    assert not _handoff_wake()["superseded"]
-    assert bool(wakeups_db.get_session_wakeups(SID)) is has_wake
+    assert wakeups_db.pop_named_wakeups(SID, ["older-wake", "gone"], ["staged"]) == ["older-wake"]
 
-
-def test_an_allowed_wake_cancel_still_supersedes_the_staged_wake():
-    from app.db import wakeups as wakeups_db
-
-    _stage_handoff_wake()
-
-    assert wakeups_db.pop_session_wakeups(SID, can_pop=lambda: True) == []
     assert _handoff_wake()["superseded"]
+    assert [row["id"] for row in wakeups_db.get_session_wakeups(SID)] == ["newer-wake"]
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT superseded FROM handoff_wakes WHERE token=%s", ("later",))
+        assert not cursor.fetchone()["superseded"]
 
 
 def _parked_turn() -> str:
@@ -917,7 +941,7 @@ async def test_a_stop_waiting_to_settle_a_park_spares_the_next_turns_park(monkey
     newer = await _stop_paused_at_its_park_write(monkeypatch, next_message_runs_to_a_park)
 
     assert turns_db.get_turn(newer)["state"] == "parked"
-    assert turns_db.get_turn(older)["state"] == "parked"
+    assert turns_db.get_turn(older)["state"] == "completed"
 
 
 async def test_a_stop_settles_only_the_parks_it_observed(monkeypatch, stop_env):

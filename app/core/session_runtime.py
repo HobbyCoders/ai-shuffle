@@ -858,6 +858,7 @@ class SessionRuntime:
         self._last_progress_at: float = time.perf_counter()
         self._progress_watchdog: Optional[asyncio.Task] = None
         self._stop_generation: Optional[int] = None
+        self._claimed_turn: Optional[Dict[str, Any]] = None
 
     def _resolve_principal(self, session_row: Optional[Dict[str, Any]]) -> None:
         """Settle who this turn runs as. Synchronous (DB reads): run off-loop.
@@ -900,7 +901,8 @@ class SessionRuntime:
         runner_id = settings.effective_instance_id
         from app.core.task_registry import task_registry
         self._stop_generation = task_registry.stop_generation(sid)
-        if task_registry.is_user_stopped(sid):
+        self._claimed_turn = self.turn
+        if task_registry.is_user_stopped(sid) and self._stop_applies():
             await asyncio.to_thread(turns_db.remove_queued_turn, tid, keep_unsent_words=True)
             return None
 
@@ -910,14 +912,14 @@ class SessionRuntime:
         from app.core import start_admission
 
         admitted = await start_admission.admission.wait(
-            tid, sid, lambda: task_registry.stop_invalidated(sid, self._stop_generation),
+            tid, sid, self._stop_applies,
         )
         if admitted != "ready":
             if admitted == "deferred":
                 from app.core import turn_scheduler
                 turn_scheduler._kick_at_reset(sid, time.time())
             return None
-        if task_registry.stop_invalidated(sid, self._stop_generation):
+        if self._stop_applies():
             await asyncio.to_thread(turns_db.remove_queued_turn, tid, keep_unsent_words=True)
             return None
 
@@ -980,7 +982,7 @@ class SessionRuntime:
             )
             return None
 
-        if task_registry.stop_invalidated(sid, self._stop_generation):
+        if self._stop_applies():
             await asyncio.to_thread(turns_db.remove_queued_turn, tid, keep_unsent_words=True)
             return None
 
@@ -1059,7 +1061,7 @@ class SessionRuntime:
         outcome: Optional[str] = None
         settled_here = False
         try:
-            if task_registry.stop_invalidated(sid, self._stop_generation):
+            if self._stop_applies():
                 await asyncio.to_thread(turns_db.remove_queued_turn, tid, keep_unsent_words=True)
                 return None
             # 2. Take the session's single live slot.
@@ -1080,7 +1082,7 @@ class SessionRuntime:
             self.turn_id = tid = started["id"]
             self.source = started.get("source") or "user"
 
-            if task_registry.stop_invalidated(sid, self._stop_generation):
+            if self._stop_applies():
                 # Stop may have cleared the queue while start_turn was in flight.
                 # Do not re-arm input or connect a provider for this obsolete turn.
                 # The sweep no longer sees it and nothing has recorded it yet.
@@ -1558,8 +1560,7 @@ class SessionRuntime:
             if self._abort_reason == "recording_failed":
                 return
             from app.core.task_registry import task_registry
-            if (self._stop_generation is not None
-                    and task_registry.stop_invalidated(self.session_id, self._stop_generation)):
+            if self._stop_applies():
                 self._terminal = "interrupted"
                 self._abort_reason = "user_stopped"
                 return
@@ -3043,6 +3044,7 @@ class SessionRuntime:
             # deferred-record marker would make the re-run write it a SECOND
             # time, so it goes and the suppress marker takes its place.
             payload.pop("deferred_user_record", None)
+            payload.pop(turns_db.PERSON_INPUT_KEY, None)
             payload["user_message_already_recorded"] = True
             payload["requeued_from_turn_id"] = row_id
             try:
@@ -3186,55 +3188,59 @@ class SessionRuntime:
         # durable row says (the chat Stop, a usage limit). None stays unknown,
         # never a guessed user Stop.
         recorded_source: Optional[str] = None
-        from app.core.task_registry import task_registry
+        from app.core.query_session_lifecycle import capture_stop_scope, stop_all_background_tasks
 
-        latched_before = task_registry.is_user_stopped(sid)
-        generation_before = task_registry.stop_generation(sid)
-        try:
-            interrupted_row = await asyncio.to_thread(turns_db.get_turn, tid)
-            recorded_source = ((interrupted_row or {}).get("payload") or {}).get("interrupt_source")
-            if self._replaced_by_newer_runtime():
-                # That read let the turn end and the next one start. This Stop
-                # was for the turn that ended; what is running now is not its.
-                logger.info("SessionRuntime: a newer turn runs on %s; not stopping it", sid)
-                return "interrupting"
-            if interrupted_row and interrupted_row.get("stop_background"):
-                from app.core.query_session_lifecycle import stop_all_background_tasks
+        if self._replaced_by_newer_runtime():
+            logger.info("SessionRuntime: a newer turn runs on %s; not stopping it", sid)
+            return "interrupting"
+        # What runs now is this turn's or older. The read below can outlast the
+        # turn, and neither it nor the database may hold up the provider signal.
+        scope = capture_stop_scope(sid)
 
-                # Same semantics as the WebSocket Stop that set the bit (round
-                # 7): end ALL of the session's background work — sub-agents and
-                # their descendants, provider-lane workers, Monitor shells
-                # including serving tasks and watchers — and quiesce the session
-                # so nothing wakes it until the user's next message. Running it
-                # HERE as well as on the WebSocket is what makes that latch
-                # cross-runner correct: the WebSocket may live on an install
-                # whose in-memory registry cannot see this runner's tasks, and
-                # this is the runner that actually owns them. Deliberately
-                # idempotent — the second call finds no active tasks and simply
-                # re-asserts the latch. See handle_stop's STOP SEMANTICS note.
-                # This may outlive the turn. Its first step, which runs before
-                # the provider signal below, fixes what it will end.
-                source = (interrupted_row.get("payload") or {}).get("interrupt_source", "user_stop")
-                user_stop = source in {"user_stop", "user_stopped"}
-                if (user_stop and not task_registry.is_user_stopped(sid)
-                        and (latched_before or task_registry.stop_generation(sid) != generation_before)):
-                    # The WebSocket's Stop already ran and the next message lifted
-                    # its latch during that read. Latching again would stop that
-                    # message; this turn still gets its signal below.
-                    logger.info("SessionRuntime: a newer message reached %s; "
-                                "leaving its work alone", sid)
-                else:
-                    await self._run_interrupt_step(
-                        stop_all_background_tasks(sid, user_stop=user_stop,
-                                                  **({"source": source} if not user_stop else {})),
-                        "background-task stop",
-                    )
-                    logger.info("SessionRuntime: background teardown for %s source=%s", sid, source)
-        except Exception:
-            logger.warning(
-                "SessionRuntime: background-task stop failed for %s", sid,
-                exc_info=True,
+        async def read_row() -> Optional[Dict[str, Any]]:
+            try:
+                return await asyncio.to_thread(turns_db.get_turn, tid)
+            except Exception:
+                logger.warning("SessionRuntime: reading interrupted turn %s failed", tid, exc_info=True)
+                return None
+
+        reading = start_detached(read_row())
+
+        async def background_stop() -> None:
+            # Same semantics as the WebSocket Stop that set the bit (round 7):
+            # end ALL of the session's background work — sub-agents and their
+            # descendants, provider-lane workers, Monitor shells including serving
+            # tasks and watchers — and quiesce the session so nothing wakes it
+            # until the user's next message. Running it HERE as well as on the
+            # WebSocket is what makes that latch cross-runner correct: the
+            # WebSocket may live on an install whose in-memory registry cannot see
+            # this runner's tasks, and this is the runner that actually owns them.
+            # Deliberately idempotent: everything comes from the row's receipt.
+            # See handle_stop's STOP SEMANTICS note.
+            row = await reading
+            if not (row and row.get("stop_background")):
+                return
+            payload = row.get("payload") or {}
+            stop_source = payload.get("interrupt_source", "user_stop")
+            user_stop = stop_source in {"user_stop", "user_stopped"}
+            await stop_all_background_tasks(
+                sid, user_stop=user_stop,
+                **({"source": stop_source} if not user_stop else {}),
+                # Still the live turn: nothing newer exists, so the Stop takes
+                # its list at the latch, which also catches what this turn
+                # started during the read.
+                **({} if _live_runtimes.get(sid) is self else {"scope": scope}),
+                **({"receipt": payload[turns_db.STOP_RECEIPT_KEY]}
+                   if turns_db.STOP_RECEIPT_KEY in payload else {}),
             )
+            logger.info("SessionRuntime: background teardown for %s source=%s", sid, stop_source)
+
+        await self._run_interrupt_step(background_stop(), "background-task stop")
+        if reading.done() and not reading.cancelled():
+            row = reading.result() or {}
+            recorded_source = (row.get("payload") or {}).get("interrupt_source")
+            if row.get("stop_background"):
+                source = recorded_source or "user_stop"
 
         # Each step below answers to this session as it is when the step runs,
         # and the one above may have used its wait.
@@ -3273,10 +3279,13 @@ class SessionRuntime:
         # then ``notify_changed``-es the session's waiters.
         # Settlement already resolved its captured identities atomically.
         # A session-wide sweep here would deny prompts from a newer turn.
-        if recorded_source != "session_settled" and not self._replaced_by_newer_runtime():
-            await self._run_interrupt_step(
-                permission_handler.cancel_all_requests(sid), "pending prompt cancellation",
-            )
+        async def cancel_prompts() -> None:
+            row = await reading
+            if (((row or {}).get("payload") or {}).get("interrupt_source") != "session_settled"
+                    and not self._replaced_by_newer_runtime()):
+                await permission_handler.cancel_all_requests(sid)
+
+        await self._run_interrupt_step(cancel_prompts(), "pending prompt cancellation")
 
         try:
             from app.core.query_session_lifecycle import interrupt_session
@@ -3329,6 +3338,28 @@ class SessionRuntime:
         self._drain_after_cancel = True
         self._cancel_pump()
         return "draining"
+
+    def _stop_applies(self) -> bool:
+        """Whether a Stop reaches this turn.
+
+        Not a person's message sent after it. That lifted the latch only on the
+        install it was sent to, and a Stop can latch here after it, so this is
+        where the latch learns of it. Judged on the row as claimed: starting can
+        absorb it into a parked turn.
+        """
+        from app.core.task_registry import task_registry
+
+        sid = self.session_id
+        if (self._stop_generation is None
+                or not task_registry.stop_invalidated(sid, self._stop_generation)):
+            return False
+        if not turns_db.outlives_stop(self._claimed_turn, task_registry.stop_input_cutoff(sid)):
+            return True
+        if task_registry.clear_user_stop(sid):
+            logger.info("SessionRuntime: turn %s came after the Stop on %s; released the latch",
+                        self.turn_id, sid)
+        self._stop_generation = task_registry.stop_generation(sid)
+        return False
 
     def _replaced_by_newer_runtime(self) -> bool:
         live = _live_runtimes.get(self.session_id)

@@ -38,7 +38,7 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from app.core.config import settings
 from app.db import wakeups as wakeups_db
@@ -314,6 +314,17 @@ def _session_user_stopped(session_id: Optional[str]) -> bool:
         return False
 
 
+async def _superseded_by_person(wakeup_id: Optional[str]) -> bool:
+    """Same fail-open reading as the latch above: no answer leaves the wake to fire."""
+    if not wakeup_id:
+        return False
+    try:
+        return await asyncio.to_thread(wakeups_db.superseded_by_person, wakeup_id)
+    except Exception:  # noqa: BLE001 — never let the check break a wake.
+        logger.warning("wakeup %s: supersession check failed", wakeup_id, exc_info=True)
+        return False
+
+
 async def _fire(row: Dict[str, Any]) -> None:
     """Claim one wakeup (delete its row) and enrol its prompt in the turn queue.
 
@@ -358,6 +369,15 @@ async def _fire(row: Dict[str, Any]) -> None:
         if wakeup_id:
             await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
             _retry_attempts.pop(str(wakeup_id), None)
+        return
+
+    # A person's newer message outranks this wake even when its cancel failed
+    # (a held row, a lock timeout). Dropped for the same reason as above.
+    if await _superseded_by_person(wakeup_id):
+        logger.info("wakeup %s (session %s, source %s) dropped: a person's newer message "
+                    "superseded it", wakeup_id, session_id, row.get("source"))
+        await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
+        _retry_attempts.pop(str(wakeup_id), None)
         return
 
     # An archived chat is read-only until the owner restores it (#1822).
@@ -543,21 +563,30 @@ def cancel_session_wakeups(
     return len(ids)
 
 
-async def cancel_session_wakeups_async(
-    session_id: str, source: Optional[str] = None,
-    *,
-    can_cancel: Optional[Callable[[], bool]] = None,
+async def cancel_named_wakeups_async(
+    session_id: str, wake_ids: "list[str]", handoff_tokens: "list[str]",
 ) -> int:
-    """Async form of :func:`cancel_session_wakeups` (DB hit off the loop).
-
-    ``can_cancel`` is asked in the delete's own transaction: see
-    :func:`app.db.wakeups.pop_session_wakeups`.
-    """
+    """A Stop's cancel: only what its receipt named (never raises)."""
     try:
         ids = await asyncio.to_thread(
-            wakeups_db.pop_session_wakeups, session_id, source,
-            **({"can_pop": can_cancel} if can_cancel is not None else {}),
+            wakeups_db.pop_named_wakeups, session_id, wake_ids, handoff_tokens,
         )
+    except Exception:  # noqa: BLE001
+        logger.exception("wakeup cancel failed for session %s (Stop)", session_id)
+        return 0
+    _disarm(ids)
+    if ids:
+        logger.info("wakeup cancel: Stop dropped %d pending wake(s) for session %s",
+                    len(ids), session_id)
+    return len(ids)
+
+
+async def cancel_session_wakeups_async(
+    session_id: str, source: Optional[str] = None,
+) -> int:
+    """Async form of :func:`cancel_session_wakeups` (DB hit off the loop)."""
+    try:
+        ids = await asyncio.to_thread(wakeups_db.pop_session_wakeups, session_id, source)
     except Exception:  # noqa: BLE001
         logger.exception(
             "wakeup cancel failed for session %s (source=%s)", session_id, source

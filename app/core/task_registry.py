@@ -379,6 +379,7 @@ class TaskRegistry:
         # insertion order gives the cap below something to evict.
         self._user_stopped: Dict[str, float] = {}
         self._stop_generations: Dict[str, int] = {}
+        self._stop_cutoffs: Dict[str, int] = {}
         self._stop_supervisors: Dict[str, set] = {}
         # session_id -> {child_launch_tuid -> owner_launch_tuid} (B-1). A grand-
         # child background task's launch tool_use_id mapped to the launch
@@ -729,7 +730,7 @@ class TaskRegistry:
     # Session-wide user-stop latch
     # ------------------------------------------------------------------
 
-    def mark_user_stopped(self, session_id: str) -> bool:
+    def mark_user_stopped(self, session_id: str, *, input_cutoff: Optional[int] = None) -> bool:
         """Latch "the user pressed Stop on this session". First call wins.
 
         The Stop button's contract is that EVERYTHING this session is doing
@@ -749,7 +750,10 @@ class TaskRegistry:
         if not session_id:
             return False
         if session_id in self._user_stopped:
+            self.note_stop_cutoff(session_id, input_cutoff)
             return False
+        self._stop_cutoffs.pop(session_id, None)
+        self.note_stop_cutoff(session_id, input_cutoff)
         self._stop_generations[session_id] = self.stop_generation(session_id) + 1
         # Bounded: the latch is normally released by the user's very next
         # message, but a session stopped and never returned to would otherwise
@@ -766,6 +770,14 @@ class TaskRegistry:
                 except RuntimeError:
                     logger.debug("Stopped supervisor's loop is already closed", exc_info=True)
         return True
+
+    def note_stop_cutoff(self, session_id: str, input_cutoff: Optional[int]) -> None:
+        """The newest input the latest Stop applies to (``turns.STOP_RECEIPT_KEY``)."""
+        if input_cutoff is not None:
+            self._stop_cutoffs[session_id] = max(input_cutoff, self._stop_cutoffs.get(session_id, 0))
+
+    def stop_input_cutoff(self, session_id: str) -> Optional[int]:
+        return self._stop_cutoffs.get(session_id)
 
     def is_user_stopped(self, session_id: str) -> bool:
         """True while ``session_id`` is under a user Stop with no newer message."""
@@ -1900,6 +1912,7 @@ class TaskRegistry:
         self._wake_suppressed.clear()
         self._user_stopped.clear()
         self._stop_generations.clear()
+        self._stop_cutoffs.clear()
         self._stop_supervisors.clear()
         self._child_owner.clear()
         self._terminal_notified.clear()

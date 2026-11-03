@@ -595,6 +595,75 @@ def block_missing_cwd(session_id: str, turn_id: str, path: str, reason: str) -> 
         return blocked
 
 
+# What a Stop applies to, recorded in the transaction that admits it. Everything
+# it may end is named here, so nothing admitted later can be reached by it, on
+# this install or another. ``input_cutoff`` is the session's newest
+# ``insert_order`` then: only a person's message above it outlives this Stop.
+STOP_RECEIPT_KEY = "stop_receipt"
+# Stamped by ``turn_manager`` on what a person just sent, and never copied to a
+# row re-queued from it: only that lifts a Stop on the install that holds it.
+PERSON_INPUT_KEY = "person_input"
+PERSON_INPUT_SOURCES = ("user", "queue", "resume")
+
+
+def _park_identity(row: Dict[str, Any]) -> Dict[str, Any]:
+    ended_at = row.get("ended_at")
+    return {"id": row["id"], "run_id": row.get("run_id"),
+            "ended_at": ended_at.isoformat() if hasattr(ended_at, "isoformat") else ended_at}
+
+
+def _stop_receipt(cursor: Any, session_id: str) -> Dict[str, Any]:
+    """Plain reads, which no row lock can hold up. ``insert_order`` is assigned
+    under the admission lock, so it follows commit order: each row at or below the
+    cutoff has committed, and each above it was admitted after this read. That
+    gives the receipt a clean cut without waiting on the lock itself."""
+    cursor.execute("SELECT COALESCE(MAX(insert_order), 0) AS cutoff FROM turns WHERE session_id=%s",
+                   (session_id,))
+    cutoff = cursor.fetchone()["cutoff"]
+    cursor.execute("SELECT id FROM turns WHERE session_id=%s AND state='queued' AND insert_order<=%s",
+                   (session_id, cutoff))
+    queued = [row["id"] for row in cursor.fetchall()]
+    cursor.execute("SELECT id, run_id, ended_at FROM turns WHERE session_id=%s AND state='parked' "
+                   "AND insert_order<=%s", (session_id, cutoff))
+    parks = [_park_identity(row) for row in cursor.fetchall()]
+    cursor.execute("SELECT id FROM pending_wakeups WHERE session_id=%s", (session_id,))
+    wakes = [row["id"] for row in cursor.fetchall()]
+    cursor.execute("SELECT token FROM handoff_wakes WHERE session_id=%s AND finalized=FALSE",
+                   (session_id,))
+    handoffs = [row["token"] for row in cursor.fetchall()]
+    return {"input_cutoff": cutoff, "queued": queued, "parks": parks,
+            "wakes": wakes, "handoffs": handoffs}
+
+
+def read_stop_receipt(session_id: str) -> Dict[str, Any]:
+    """The receipt of a Stop with no live turn to record it on."""
+    with get_db() as conn:
+        return _stop_receipt(conn.cursor(), session_id)
+
+
+def person_input_after(session_id: str, input_cutoff: Optional[int]) -> bool:
+    """Whether a person has sent anything since the Stop with this cutoff."""
+    if input_cutoff is None:
+        return False
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 AS newer FROM turns WHERE session_id=%s AND insert_order>%s "
+            "AND payload ->> 'person_input' IS NOT NULL LIMIT 1",
+            (session_id, input_cutoff),
+        )
+        return cursor.fetchone() is not None
+
+
+def outlives_stop(turn: Optional[Dict[str, Any]], input_cutoff: Optional[int]) -> bool:
+    """Whether ``turn`` is a person's message sent after the Stop with this cutoff."""
+    return bool(
+        turn and input_cutoff is not None
+        and (turn.get("payload") or {}).get(PERSON_INPUT_KEY)
+        and int(turn.get("insert_order") or 0) > input_cutoff
+    )
+
+
 def _initialize_insert_order(cursor: Any, session_id: str) -> None:
     """Assign an all-legacy session lazily; caller holds its admission lock.
 
@@ -702,7 +771,7 @@ def enqueue_turn(
                 project_id=project_id, worktree_id=worktree_id, overrides=overrides,
                 explicit_permission=explicit_permission,
                 payload={k: v for k, v in payload.items()
-                         if k in ("api_user_id", "user_id", "forwarded_by_device",
+                         if k in ("api_user_id", "user_id", "forwarded_by_device", PERSON_INPUT_KEY,
                                   COMPACTION_CONTINUATION_KEY, LIMIT_RESUME_KEY)},
                 instance_id=instance_id, _conn=conn,
             )
@@ -1175,11 +1244,16 @@ def interrupt_turn(
                 (mode, bool(stop_background), session_id),
             )
         row = cursor.fetchone()
-        if row is not None and source:
-            # The UPDATE above owns the row lock. Publish provenance in this
-            # same transaction before another runner can observe the interrupt.
+        receipt = mode == "stop" and stop_background
+        if row is not None and (source or receipt):
+            # The UPDATE above owns the row lock. Publish provenance and what a
+            # Stop applies to in this same transaction, before another runner
+            # can observe the interrupt.
             result = _row(row)
-            result["payload"]["interrupt_source"] = source
+            if source:
+                result["payload"]["interrupt_source"] = source
+            if receipt:
+                result["payload"][STOP_RECEIPT_KEY] = _stop_receipt(cursor, session_id)
             cursor.execute("UPDATE turns SET payload=%s WHERE id=%s",
                            (json.dumps(result["payload"]), result["id"]))
             return result
@@ -1911,16 +1985,6 @@ def get_queued_turns(session_id: str) -> List[Dict[str, Any]]:
             "ORDER BY position ASC, insert_order ASC, created_at ASC, id ASC",
             (session_id,),
         )
-        rows = cursor.fetchall()
-    return _rows(rows)
-
-
-def get_parked_turns(session_id: str) -> List[Dict[str, Any]]:
-    """Return a session's ``parked`` turns, each one an ``observed_park`` for
-    :func:`settle_parked_turns`."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM turns WHERE session_id=%s AND state='parked'", (session_id,))
         rows = cursor.fetchall()
     return _rows(rows)
 

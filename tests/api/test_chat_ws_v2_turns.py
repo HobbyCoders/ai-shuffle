@@ -26,7 +26,7 @@ test_chat_ws_handler_queue.py and test_chat_ws_queue_race_gaps.py.
 
 import asyncio
 from contextlib import ExitStack
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 
 import app.api.chat_ws_handler as cwh
@@ -541,7 +541,8 @@ async def test_handle_stop_interrupts_live_turn_and_stops_background(mock_db):
     # STOP SEMANTICS (round 7): Stop kills ALL of the session's work — shells,
     # serving tasks and watchers included — and quiesces the session so nothing
     # wakes it until the user's next message. See handle_stop's note.
-    stop_bg.assert_awaited_once_with("sess-1", user_stop=True)
+    stop_bg.assert_awaited_once_with("sess-1", user_stop=True, scope=ANY,
+                                     receipt=row["payload"]["stop_receipt"])
 
 
 async def test_handle_stop_without_live_turn_quiesces_queued_work(mock_db):

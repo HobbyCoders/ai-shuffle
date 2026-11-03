@@ -11,6 +11,7 @@ import json
 import select
 import socket
 import subprocess
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -530,36 +531,209 @@ async def test_a_stop_settles_the_park_it_read(session_id):
     assert turns_db.get_turn(parked)["state"] == "completed"
 
 
-async def test_a_stop_behind_the_admission_lock_asks_again_before_settling(connect, session_id):
+async def test_a_stop_behind_the_admission_lock_leaves_a_park_that_moved(connect, session_id):
     from app.core.query_session_lifecycle import enter_user_stop
     from app.core.task_registry import task_registry
     from app.db import turns as turns_db
 
     parked = _parked_turn(session_id)
     admission = connect()
-    admission.cursor().execute("SELECT 1 FROM sessions WHERE id = %s FOR UPDATE", (session_id,))
+    cursor = admission.cursor()
+    cursor.execute("SELECT 1 FROM sessions WHERE id = %s FOR UPDATE", (session_id,))
     stop = asyncio.create_task(enter_user_stop(session_id))
     await asyncio.sleep(0.5)
     assert not stop.done()  # its park write is waiting for the lock
-    task_registry.clear_user_stop(session_id)
-    admission.rollback()
+    cursor.execute("UPDATE turns SET ended_at = NOW() WHERE id = %s", (parked,))  # a new interval
+    admission.commit()
 
-    assert (await stop)["parked_settled"] == 0
+    try:
+        assert (await stop)["parked_settled"] == 0
+    finally:
+        task_registry.clear_user_stop(session_id)
     assert turns_db.get_turn(parked)["state"] == "parked"
 
 
-def test_a_refused_wake_cancel_rolls_back_the_supersession(session_id):
-    from app.db import base, wakeups as wakeups_db
+_PEER_INSTALL = """
+import json, sys
+from app.core.config import settings
+from app.db import base
+connection = json.loads(sys.argv[1])
+object.__setattr__(settings, "get_database_connection", lambda: dict(connection))
+base.init_pool(min_conn=1, max_conn=2)
+from app.core import turn_manager
+print(turn_manager._submit_blocking(sys.argv[2], "user", prompt="newer", profile_id="default"))
+base.close_pool()
+"""
 
-    with base.get_db() as conn:
-        conn.cursor().execute(
-            "INSERT INTO handoff_wakes (token,session_id,source_id,branch,wakes,created_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s)", (session_id, session_id, "source", None, "[]", time.time()),
+
+def _peer_install_sends(connection: dict, session_id: str) -> str:
+    """A second Python process, whose stop latch and registry are its own."""
+    done = subprocess.run([sys.executable, "-c", _PEER_INSTALL, json.dumps(connection), session_id],
+                          cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True,
+                          timeout=90)
+    assert done.returncode == 0, done.stderr[-2000:]
+    return done.stdout.strip().splitlines()[-1]
+
+
+async def _interrupted_with_older_queued(session_id: str):
+    """A running turn with a message behind it, and a Stop admitted on it."""
+    from app.core.session_runtime import SessionRuntime
+    from app.db import turns as turns_db
+
+    turn = turns_db.enqueue_turn(session_id, "user", prompt="hi", profile_id="default")
+    turns_db.start_turn(turn["id"], None, "runner")
+    older = turns_db.enqueue_turn(session_id, "user", prompt="older", profile_id="default")["id"]
+    assert turns_db.interrupt_turn(session_id, "stop", stop_background=True, source="user_stop")
+
+    async def provider_stops(_sid):
+        turns_db.settle_turn(turn["id"], "aborted", "interrupted")
+
+    return SessionRuntime(turn), older, provider_stops
+
+
+async def _finish_interrupt(runtime, provider_stops) -> None:
+    from app.core import turn_recorder as tr
+
+    with patch("app.core.query_session_lifecycle.interrupt_session", new=provider_stops):
+        await runtime.interrupt("stop", escalation_timeout=1)
+    await tr.drain_event_writes(5)
+
+
+@pytest.fixture
+def stop_cleared(session_id):
+    from app.core.task_registry import task_registry
+
+    yield
+    task_registry.clear_user_stop(session_id)
+
+
+async def test_a_peer_installs_message_outlives_a_stop_admitted_before_it(cluster, session_id, stop_cleared):
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    runtime, older, provider_stops = await _interrupted_with_older_queued(session_id)
+    newer = await asyncio.to_thread(_peer_install_sends, cluster, session_id)
+    await _finish_interrupt(runtime, provider_stops)
+
+    assert turns_db.get_turn(older)["state"] == "aborted"
+    assert turns_db.get_turn(newer)["state"] == "queued"
+    assert not task_registry.is_user_stopped(session_id)
+
+
+async def test_a_peer_installs_message_clears_the_stop_held_here_when_it_runs(
+    cluster, session_id, stop_cleared,
+):
+    """Its send cannot reach this process's latch, so its start has to."""
+    from app.core import start_admission, turn_scheduler
+    from app.core.session_runtime import SessionRuntime
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    runtime, _older, provider_stops = await _interrupted_with_older_queued(session_id)
+    await _finish_interrupt(runtime, provider_stops)
+    assert task_registry.is_user_stopped(session_id)
+    newer = await asyncio.to_thread(_peer_install_sends, cluster, session_id)
+
+    async def deferred(*_args, **_kwargs):
+        return "deferred"
+
+    with patch.object(start_admission.admission, "wait", new=deferred), \
+            patch.object(turn_scheduler, "_kick_at_reset"):
+        assert await SessionRuntime(turns_db.get_turn(newer)).execute() is None
+
+    assert turns_db.get_turn(newer)["state"] == "queued"
+    assert not task_registry.is_user_stopped(session_id)
+
+
+async def test_a_message_during_the_first_read_outlives_a_stop_with_no_earlier_latch(session_id, stop_cleared):
+    from app.core import turn_manager
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    runtime, older, provider_stops = await _interrupted_with_older_queued(session_id)
+    assert not task_registry.is_user_stopped(session_id)
+    reached, resume = threading.Event(), threading.Event()
+    real = turns_db.get_turn
+
+    def paused(*args, **kwargs):
+        if threading.current_thread() is not threading.main_thread() and not reached.is_set():
+            reached.set()
+            resume.wait(10)
+        return real(*args, **kwargs)
+
+    with patch.object(turns_db, "get_turn", new=paused):
+        interrupt = asyncio.create_task(_finish_interrupt(runtime, provider_stops))
+        await asyncio.to_thread(reached.wait, 5)
+        newer = await asyncio.to_thread(
+            turn_manager._submit_blocking, session_id, "user", prompt="newer", profile_id="default",
         )
-    answers = iter([True, False])
+        resume.set()
+        await interrupt
 
-    assert wakeups_db.pop_session_wakeups(session_id, can_pop=lambda: next(answers)) == []
+    assert turns_db.get_turn(older)["state"] == "aborted"
+    assert turns_db.get_turn(newer)["state"] == "queued"
+    assert not task_registry.is_user_stopped(session_id)
+
+
+def _pending_wake(session_id: str, wake_id: str) -> dict:
+    from app.db import wakeups as wakeups_db
+
+    wakeups_db.create_wakeup(id=wake_id, session_id=session_id, prompt="the old instruction", profile_id="default",
+                             fire_at=time.time() - 1)
+    return next(row for row in wakeups_db.get_session_wakeups(session_id) if row["id"] == wake_id)
+
+
+async def _fire(wake: dict) -> None:
+    """The real firing path; this database has no agents to look the wake's up in."""
+    from app.core import wakeup_service
+
+    async def resolved(_row):
+        return "default"
+
+    with patch.object(wakeup_service, "_resolve_profile_id", new=resolved):
+        await wakeup_service._fire(wake)
+
+
+def _sources(session_id: str) -> list[str]:
+    from app.db import base
+
     with base.get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT superseded FROM handoff_wakes WHERE token = %s", (session_id,))
-        assert cursor.fetchone()["superseded"] is False
+        cursor.execute("SELECT source FROM turns WHERE session_id = %s ORDER BY insert_order", (session_id,))
+        return [row["source"] for row in cursor.fetchall()]
+
+
+async def test_a_wake_both_cancels_timed_out_on_does_not_fire_after_the_newer_message(
+    connect, session_id, stop_cleared,
+):
+    from app.core import turn_manager
+    from app.core.query_session_lifecycle import stop_all_background_tasks
+    from app.db import wakeups as wakeups_db
+
+    wake_id = "wake-" + session_id
+    wake = _pending_wake(session_id, wake_id)
+    holder = connect()
+    holder.cursor().execute("SELECT 1 FROM pending_wakeups WHERE id = %s FOR UPDATE", (wake_id,))
+    await stop_all_background_tasks(session_id, user_stop=True)
+    await asyncio.to_thread(
+        turn_manager._submit_blocking, session_id, "user", prompt="newer", profile_id="default",
+    )
+    holder.rollback()
+    assert wakeups_db.get_session_wakeups(session_id), "both cancels should have timed out"
+
+    await _fire(wake)
+
+    assert _sources(session_id) == ["user"]
+    assert not wakeups_db.get_session_wakeups(session_id)
+
+
+async def test_a_wake_armed_after_the_message_still_fires(session_id, stop_cleared):
+    """Control: only a wake older than the person's message is superseded."""
+    from app.core import turn_manager
+
+    await asyncio.to_thread(
+        turn_manager._submit_blocking, session_id, "user", prompt="newer", profile_id="default",
+    )
+    await _fire(_pending_wake(session_id, "wake-" + session_id))
+
+    assert _sources(session_id) == ["user", "wakeup"]

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import nullcontext
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from app.db.base import get_db, get_cursor, rows_to_list
 from app.db.compat import ph
@@ -91,7 +91,6 @@ def pop_session_wakeups(
     source: Optional[str] = None,
     *,
     exclude_source: Optional[str] = None,
-    can_pop: Optional[Callable[[], bool]] = None,
 ) -> List[str]:
     """Delete a session's pending wakeups and return the deleted row ids.
 
@@ -106,16 +105,9 @@ def pop_session_wakeups(
 
     ``exclude_source`` keeps that source's rows when ``source`` is None.
     A human input (which excludes held_peer_promotion) supersedes timers, not
-    the note-bearing handoff_resume. Stop/delete use no exclusion and retire it.
-
-    ``can_pop`` lets a Stop that may have outlived its turn step aside. It is
-    asked again after the read, because a wake seen there can be a newer turn's,
-    and a refusal undoes the supersession as well. It needs ``exclude_source``
-    to be unset, which no Stop sets.
+    the note-bearing handoff_resume. Delete uses no exclusion and retires it.
     """
     _ph = ph()
-    if can_pop is not None and not can_pop():
-        return []
     with get_db() as conn:
         cursor = get_cursor(conn)
         if source is None:
@@ -150,14 +142,54 @@ def pop_session_wakeups(
                 (session_id, source),
             )
         ids = [r["id"] for r in rows_to_list(list(cursor.fetchall() or []))]
-        if can_pop is not None and not can_pop():
-            conn.rollback()
-            return []
         if not ids:
             return []
         for wakeup_id in ids:
             cursor.execute(f"DELETE FROM pending_wakeups WHERE id = {_ph}", (wakeup_id,))
     return ids
+
+
+def pop_named_wakeups(session_id: str, wake_ids: List[str], handoff_tokens: List[str]) -> List[str]:
+    """A Stop's cancel: only the wakes and staged moves its receipt names.
+
+    Returns the ids it deleted. One the Stop did not name is a newer turn's.
+    """
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        for token in handoff_tokens:
+            cursor.execute(f"UPDATE handoff_wakes SET superseded=TRUE, keep_peer=FALSE "
+                           f"WHERE token={_ph} AND session_id={_ph} AND finalized=FALSE",
+                           (token, session_id))
+        deleted = []
+        for wakeup_id in wake_ids:
+            cursor.execute(f"DELETE FROM pending_wakeups WHERE id={_ph} AND session_id={_ph}",
+                           (wakeup_id, session_id))
+            if cursor.rowcount and cursor.rowcount > 0:
+                deleted.append(wakeup_id)
+    return deleted
+
+
+def superseded_by_person(wakeup_id: str) -> bool:
+    """Whether a person has sent a message since this wake was armed.
+
+    Their send cancels the wake, but that delete can time out behind a held row
+    and the send goes on. This is the same rule read at the wake's own firing,
+    with the same exemptions as the send's cancel. A plain read, so no row lock
+    holds it up.
+    """
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"SELECT 1 AS newer FROM pending_wakeups w JOIN turns t ON t.session_id=w.session_id "
+            f"WHERE w.id={_ph} AND t.created_at>w.created_at "
+            f"AND t.payload ->> 'person_input' IS NOT NULL "
+            f"AND (w.source IS NULL OR w.source NOT IN ('held_peer_promotion', 'handoff_resume')) "
+            f"LIMIT 1",
+            (wakeup_id,),
+        )
+        return cursor.fetchone() is not None
 
 
 def take_session_wakeups(session_id: str, source: str) -> List[Dict[str, Any]]:
