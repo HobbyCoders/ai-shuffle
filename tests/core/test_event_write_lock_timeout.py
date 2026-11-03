@@ -600,9 +600,11 @@ def _next_message_arrives() -> str:
 
 async def _detached_work_done() -> None:
     """A Stop's teardown outlives the interrupt call by design, so wait for it."""
-    others = asyncio.all_tasks() - {asyncio.current_task()}
-    if others:
-        await asyncio.wait(others, timeout=15)
+    steps = [task for task in asyncio.all_tasks()
+             if "_run_interrupt_step" in task.get_coro().__qualname__]
+    if steps:
+        await asyncio.wait(steps, timeout=20)
+    await tr.drain_event_writes(5)
 
 
 async def test_a_stop_paused_at_the_wakeups_spares_the_next_turns_work(monkeypatch, stop_env):
