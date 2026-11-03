@@ -3,6 +3,7 @@
 from pathlib import Path
 import subprocess
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -233,6 +234,44 @@ class PlayWorkflowTests(unittest.TestCase):
         self.assertEqual(2, source.count('tapNative(onView(withText("Exit offline demo")))'))
         self.assertIn("repeat(10) { launch ->", source)
         self.assertIn("listOf(android.view.MotionEvent.ACTION_DOWN to 0, android.view.MotionEvent.ACTION_UP to 0)", source)
+        helper = (ROOT / "android/app/src/androidTest/java/com/hobbycoders/aishuffle/NativeStateIdlingResource.kt").read_text()
+        # Guard the implementation, not just the callers' helper name. A direct
+        # Espresso click inside tapNative would silently remove the WM barrier.
+        body = helper.split("internal fun tapNative(", 1)[1].split("\ninternal fun ", 1)[0]
+        self.assertEqual(2, body.count("automation.injectInputEvent("))
+        for event in ("down", "up"):
+            self.assertIn(f"automation.injectInputEvent({event}, true)", body)
+        self.assertNotRegex(body, r"\b(?:click|performClick)\s*\(")
+        self.assertNotIn("ACTION_CLICK", body)
+
+    def test_offline_demo_barrier_guard_rejects_helper_mutations(self):
+        helper = ROOT / "android/app/src/androidTest/java/com/hobbycoders/aishuffle/NativeStateIdlingResource.kt"
+        read_text = Path.read_text
+        original = helper.read_text()
+        start = original.index("internal fun tapNative(")
+        end = original.index("\ninternal fun ", start)
+        espresso = original[:start] + (
+            "internal fun tapNative(target: androidx.test.espresso.ViewInteraction) {\n"
+            "    target.perform(androidx.test.espresso.action.ViewActions.click())\n}\n"
+        ) + original[end:]
+        mutations = {
+            "Espresso replaces platform barrier": espresso,
+            "DOWN becomes asynchronous": original.replace("injectInputEvent(down, true)", "injectInputEvent(down, false)"),
+            "UP becomes asynchronous": original.replace("injectInputEvent(up, true)", "injectInputEvent(up, false)"),
+            "extra Espresso click": original[:start] + original[start:].replace(
+                "    lateinit var point: FloatArray",
+                "    target.perform(androidx.test.espresso.action.ViewActions.click())\n    lateinit var point: FloatArray", 1),
+        }
+        for name, mutated in mutations.items():
+            with self.subTest(mutation=name):
+                self.assertNotEqual(original, mutated)
+                def read_source(path, *args, **kwargs):
+                    return mutated if path == helper else read_text(path, *args, **kwargs)
+                # Mutate only an in-memory source read: the Kotlin helper and
+                # every call site in the checkout remain untouched.
+                with patch.object(Path, "read_text", new=read_source):
+                    with self.assertRaises(self.failureException):
+                        self.test_offline_demo_navigation_uses_platform_input_barrier()
 
     def test_all_inline_shell_parses(self):
         for job in self.jobs.values():

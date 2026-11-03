@@ -21,6 +21,7 @@ PR_CHECKS = {
 AUTOMATIC = {
     "desktop-source.yml": {"schedule", "workflow_dispatch", "workflow_run"},
     "main-suite.yml": {"push", "workflow_dispatch"},
+    "android-webview-cache.yml": {"push", "schedule", "workflow_dispatch"},
     "android.yml": {"pull_request", "workflow_dispatch", "workflow_call"},
     **{name: {"pull_request", "workflow_dispatch", "workflow_call"} for name in PR_CHECKS},
 }

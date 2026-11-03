@@ -93,11 +93,33 @@ native abort is inferred, not established by a symbolized stack.
 
 On a cache miss each API 36 leg fetches the 274,674,253-byte APK from a pinned
 Google Gitiles source commit using `android/ci/ci_webview.py`. Both workflows share
-an `actions/cache` key containing its exact SHA-256. Cache hits still verify size
-and digest, and `prepare-android-ui.py` verifies again before install. Only bounded
-transient/truncated network transfers are retried, never app tests or a full-size
-checksum mismatch. A corrupt cache fails closed. API 34 retains its stock AOSP
-image/provider; no Chromium crash checks or APK signature checks are disabled.
+an `actions/cache` key containing its exact SHA-256. A cache saved on a PR's merge
+ref is visible only to that PR, not to other PRs. `android-webview-cache.yml`
+therefore seeds the identical key and path on **main**: a push changing the helper
+or seed workflow triggers it, and two small weekly refreshes (Monday/Thursday,
+04:23 UTC) leave headroom before seven-day inactivity eviction. It uses one free
+standard Ubuntu runner, a 15-minute limit, no emulator or publishing credentials,
+and permits manual runs only on main. GitHub's default-branch cache fallback can
+then serve new PRs without their first API 36 runs independently fetching Gitiles.
+Cache hits still verify size and digest, including in the seeder; `actions/cache`
+only saves a miss after successful verification, and `prepare-android-ui.py`
+verifies again before install. Only bounded transient/truncated network transfers
+are retried, never app tests or a full-size checksum mismatch. A corrupt cache
+fails closed. API 34 retains its stock AOSP image/provider; no Chromium crash
+checks or APK signature checks are disabled.
+
+**Post-merge verification is required:** PR tests validate the seed workflow's
+triggers, guards, shared cache version inputs and unconditional verifier; a PR run
+cannot prove a push/scheduled cache publication on main or another PR's restore.
+After merge, check the first `Seed Android WebView cache` main-push job succeeds
+and its log verifies the exact pinned bytes before the cache save. Confirm
+`gh cache list --key aosp-webview-x86_64-8da41a8692c64870dc875a0fa656c59a678aa09902935c5095e7de6fd7c55a87 --json key,ref,lastAccessedAt`
+shows the entry on `refs/heads/main`, not just `refs/pull/.../merge`. On a new PR's
+first run, inspect both API 36 consumer cache restores and the helper's `Verified
+cached AOSP alternate WebView` result (no Gitiles fetch), then confirm a scheduled
+main run refreshes the cache access time. The schedule and cross-PR hits are not
+claimed as observed before merge; missing/evicted entries still use the existing
+verified, bounded-transfer fallback.
 
 Only build/test and emulator jobs run on PRs. Existing owner/event/ref/input
 predicates still exclude PRs from every Firebase/signing/release-staging step
@@ -138,7 +160,7 @@ three desktop shards, not the separate stable-release portability matrix.
 | docs | `android-and-docs` → exact local docs-copy helper; JavaScript contracts also compare copies |
 | desktop | `desktop` → existing typecheck and all unit tests |
 | android-bridge | `android-and-docs` → existing local Node download-bridge tests |
-| android-play | `android-and-docs` → all seven local Python/workflow-shell test scripts |
+| android-play | `android-and-docs` → all eight local Python/workflow-shell test scripts, including the default-branch WebView cache policy |
 | workflows/policy | `policy` → artifact/cost scripts and the complete local eight-file policy set, plus parity regressions |
 | update-reach | `update-reach` → regression set and strict signed-publication/merged-PR readiness (not advisory) |
 | full preflight security | `supply-chain` → offline secret scan and identical report-only dependency audit, including source-publisher |
