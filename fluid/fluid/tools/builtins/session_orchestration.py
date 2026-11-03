@@ -87,16 +87,14 @@ _START_DESCRIPTION = (
 # Shared by StartSession, Task and Swarm: the host enforces it, so the text
 # says so rather than asking the model to police itself.
 MODEL_OVERRIDE_RULE = (
-    "Only for when the user named a model for this work in this chat, or a saved owner "
-    "model-routing memory (see roster) directs this kind of work to it; otherwise "
-    "omit. The host checks that the user asked, in chat or memory, or asks the owner; refusal "
-    "starts nothing. Never fabricate a model id or substitute after a refusal. "
-    "For native Claude use a family name: haiku, sonnet or opus (subject to eligibility); "
-    "never pass a version pin, legacy id or [1m] form. Family names select the runtime's "
-    "current alias, not a fixed version. For provider models, pass the id or display name "
-    "as the user or memory named it; these match ignoring case, spaces and dashes. "
+    "Only for when the user named a model for this work in this chat, or saved owner "
+    "model-routing memory directs it; otherwise omit. The host checks chat/memory "
+    "or asks the owner; refusals start nothing. Never fabricate a model id or substitute after refusal. "
+    "For native Claude use a family name: haiku, sonnet or opus; "
+    "never pass a version pin, legacy id or [1m] form. Families select runtime aliases. "
+    "For provider models, pass the id or display name (case, spaces and dashes ignored). "
     "Unknown names start nothing and return real choices; ambiguous "
-    "names need an exact model id. Claude names (opus) and prov:<providerId>:<modelId> work; "
+    "names need an exact model id. prov:<providerId>:<modelId> works; "
     "explicit providers stay scoped. A switch may cross providers for this start only. "
     "Remote starts also validate the receiving worker's own eligibility."
 )
