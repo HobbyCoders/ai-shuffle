@@ -1,5 +1,5 @@
 // #821: a first send while init awaits preferences owns the chat, not the
-// saved New Chat view. Hold preferences, not the later tags/catalog loads.
+// saved New Chat view. Hold preferences; one additional case holds tags too.
 // #930: a project picked on a fresh browser's new-session screen while init
 // awaits preferences is still the chat's project after boot reconciles.
 import { fakeAiTag, runJourney } from './runner.mjs';
@@ -8,6 +8,7 @@ import {
 	settleServiceWorker, typeAndSend, uniq, waitChat, waitTurnSettled
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
+import { waitForCreatedChat } from './lib/boot.mjs';
 import { STOP_SELECTOR, expectStopFollowsStreaming, markTime } from './lib/timeline.mjs';
 
 const BOOT_HOLD = { path: '/api/v1/preferences/all', ms: 12_000 };
@@ -15,19 +16,19 @@ const BOOT_HOLD = { path: '/api/v1/preferences/all', ms: 12_000 };
 await runJourney({
 	name: 'send-during-init',
 	recorder: { selectors: [STOP_SELECTOR] },
-	cases: [...['first-send', 'first-send-late-catalog'].map(name => ({
+	cases: [...['first-send', 'first-send-late-tags'].map(name => ({
 		name,
 		async setup(ctx) {
 			const { page, status } = ctx;
 			await openNewChat(ctx);
 			await settleServiceWorker(page, status);
-			if (name === 'first-send-late-catalog') {
-				// Regression for #984: an independent boot load completes AFTER
-				// preferences, beyond the old two-second sleep. Keep the real response.
+			if (name === 'first-send-late-tags') {
+				// A possible late independent load, NOT the cause of #984: its hosted
+				// tags response was already in. Keep the real response.
 				// Intercept the page's real fetch, including a service-worker response.
 				await page.addInitScript(() => {
-					if (sessionStorage.getItem('__journeyLateCatalogDone')) return;
-					const hold = window.__journeyLateCatalog = { startedAt: null, releasedAt: null };
+					if (sessionStorage.getItem('__journeyLateTagsDone')) return;
+					const hold = window.__journeyLateTags = { startedAt: null, releasedAt: null };
 					const original = window.fetch.bind(window);
 					window.fetch = async (input, init) => {
 						const url = new URL(typeof input === 'string' ? input : input.url, location.href);
@@ -37,7 +38,7 @@ await runJourney({
 						const response = await original(input, init);
 						await new Promise(resolve => {
 							hold.release = () => setTimeout(() => {
-								sessionStorage.setItem('__journeyLateCatalogDone', 'true');
+								sessionStorage.setItem('__journeyLateTagsDone', 'true');
 								hold.releasedAt = performance.now();
 								resolve();
 							}, 3000);
@@ -71,28 +72,20 @@ await runJourney({
 			expect(beforeRelease.releasedAt === null, 'the first turn finished before preference hydration (not just isStreaming protection)');
 			await mark('preference hydration finishes');
 			await page.evaluate(() => window.__journeyBootHold.release());
-			if (name === 'first-send-late-catalog') {
-				await page.waitForFunction(() => typeof window.__journeyLateCatalog?.release === 'function');
-				await page.evaluate(() => window.__journeyLateCatalog.release());
+			if (name === 'first-send-late-tags') {
+				await page.waitForFunction(() => typeof window.__journeyLateTags?.release === 'function');
+				await page.evaluate(() => window.__journeyLateTags.release());
 			}
-			await page.waitForFunction(() => window.__journeyBootHold?.releasedAt != null, null, { timeout: BOOT_HOLD.ms + 30_000 });
-			// Preference delivery is not boot reconciliation: tags/catalog loads
-			// also precede createdChatToFollow. Wait for that producer's persisted
-			// view, rather than assuming two seconds is enough on a hosted phone.
-			await page.waitForFunction(() => {
-				const view = JSON.parse(localStorage.getItem('ai-shuffle-layout') || 'null')?.activeView;
-				return view?.type === 'session' && typeof view.sessionId === 'string';
-			}, null, { timeout: BOOT_HOLD.ms + 30_000 });
+			await page.waitForFunction(() => window.__journeyBootHold?.releasedAt != null, null, { timeout: BOOT_HOLD.ms });
+			if (name === 'first-send-late-tags') {
+				await page.waitForFunction(() => window.__journeyLateTags?.releasedAt != null, null, { timeout: 5000 });
+			}
+			// Boot can still await init after the HTTP responses have arrived (#984).
+			// Observe reconciliation itself; its hosted delay is not yet attributed.
+			await waitForCreatedChat(page);
 			expect(ctx.closed.length === 0, `boot must not send close_session: ${JSON.stringify(ctx.closed)}`);
 			await waitChat(page, { surface: 'active', session: /^s:/, streaming: 'false', messagesAtLeast: 2 }, { timeout: 5000 });
 			expect(await countUserRows(page, token) === 1, 'the first message stays in the transcript exactly once');
-			const view = await page.evaluate(() => JSON.parse(localStorage.getItem('ai-shuffle-layout') || 'null')?.activeView);
-			expect(view?.type === 'session' && typeof view.sessionId === 'string', `layout follows the created chat: ${JSON.stringify(view)}`);
-			if (name === 'first-send-late-catalog') {
-				const holds = await page.evaluate(() => ({ prefs: window.__journeyBootHold, catalog: window.__journeyLateCatalog }));
-				expect(holds.catalog.releasedAt - holds.prefs.releasedAt > 2000,
-					'the real catalog response followed preference hydration beyond the old fixed sleep');
-			}
 			log(`first send and settled reply completed while preferences were held; released explicitly, no close_session`);
 			const session = await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-session');
 			await mark('reload the created chat');

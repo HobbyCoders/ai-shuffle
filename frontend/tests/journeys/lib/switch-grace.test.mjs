@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { readFileSync } from 'node:fs';
 import { framesDuringSwitchGrace, installSwitchGraceClock } from './switch-grace.mjs';
 
 function fixture() {
@@ -21,6 +22,11 @@ function fixture() {
 }
 
 describe('the switch sampler follows the production grace clock (#941)', () => {
+	it('does not lower the product grace below its 350 ms policy floor', () => {
+		const source = readFileSync(new URL('../../../src/lib/components/chat/TranscriptHydrationBoundary.svelte', import.meta.url), 'utf8');
+		const grace = Number(source.match(/export const TRANSCRIPT_LOADING_GRACE_MS = (\d+);/)?.[1]);
+		assert.ok(grace >= 350, `production switch grace must be at least 350 ms, got ${grace}`);
+	});
 	it('observes ordinary timers without changing their delay or gating their callback', () => {
 		const f = fixture();
 		let received;
@@ -36,9 +42,9 @@ describe('the switch sampler follows the production grace clock (#941)', () => {
 	});
 
 	it('does not restart grace at a late first rAF or use its stale frame timestamp', () => {
-		const early = { loading: 'true', loadingStarted: 10, graceFiredAt: null, t: 350, rafTime: 100 };
+		const early = { loading: 'true', loadingStarted: 10, t: 350, rafTime: 100 };
 		const beforeCallback = { ...early, t: 600, rafTime: 580 };
-		const afterCallback = { ...beforeCallback, graceFiredAt: 610, t: 650, rafTime: 600, loader: true };
+		const afterCallback = { ...beforeCallback, t: 650, rafTime: 600, loader: true };
 		const frames = framesDuringSwitchGrace([early, beforeCallback, afterCallback], 350);
 		assert.deepEqual(frames, [early]);
 		// The old first-frame + 100 ms window wrongly included this skeleton.
@@ -46,7 +52,7 @@ describe('the switch sampler follows the production grace clock (#941)', () => {
 	});
 
 	it('still judges an early skeleton and checks the entire pending grace, not only 100 ms', () => {
-		const early = { loading: 'true', loadingStarted: 10, graceFiredAt: null, t: 300, loader: true };
+		const early = { loading: 'true', loadingStarted: 10, t: 300, loader: true };
 		assert.deepEqual(framesDuringSwitchGrace([early], 350), [early]);
 		assert.equal(framesDuringSwitchGrace([early], 350).every(frame => !frame.loader), false);
 	});

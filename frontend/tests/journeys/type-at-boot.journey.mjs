@@ -8,6 +8,7 @@ import {
 	composer, countUserRows, expect, gotoApp, holdBootLoad, sendButton, settleServiceWorker, uniq, waitChat, waitTurnSettled
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
+import { waitForBootReconciled } from './lib/boot.mjs';
 
 const BOOT_HOLD = { path: '/api/v1/preferences/all', ms: 20_000 };
 
@@ -39,7 +40,7 @@ await runJourney({
 			// Boot finishes inside the draft debounce: the text is in the editor
 			// only, not yet in the session's draft.
 			await page.evaluate(() => window.__journeyBootHold.release());
-			await page.waitForTimeout(2500);
+			await waitForBootReconciled(page);
 			const kept = ((await composer(page).innerText()) || '').trim();
 			expect(kept.includes(token), `the typed text survives boot finishing: composer shows ${JSON.stringify(kept)}`);
 			await mark('send');

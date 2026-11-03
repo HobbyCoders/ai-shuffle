@@ -184,7 +184,7 @@ async function sampleSwitchFrames(page) {
 			const loader = document.querySelector('.loading-transcript');
 			const rows = [...document.querySelectorAll('[role="log"] .msg-virtualized')];
 			window.__switchHydrationFrames.push({
-				t, rafTime, pending, loadingStarted, graceFiredAt: grace?.firedAt ?? null, heldAt: window.__switchHydrationHold.started,
+				t, rafTime, pending, loadingStarted, heldAt: window.__switchHydrationHold.started,
 				loader: !!loader && getComputedStyle(loader).visibility !== 'hidden',
 				visibleRows: rows.filter(row => getComputedStyle(row).visibility !== 'hidden').length,
 				outgoingConnected: !!firstRow?.isConnected,
@@ -231,8 +231,8 @@ async function finishSwitchFrames(page, log, { slow = false } = {}) {
 		window.__switchHydrationSampling = false;
 		return window.__switchHydrationFrames;
 	});
-	// Use the pre-existing live loading signature, not the new wrapper's pending
-	// attribute, so this ratchet also measures (and fails on) the rollback build.
+	// The live loading signature identifies the incoming load. Positive grace
+	// observation also requires its real timer; the rollback fails that check.
 	const pending = frames.filter(frame => frame.loading === 'true' && frame.loadingStarted !== null);
 	// Check all commits/frames inside the actual production grace, not an
 	// invented 100 ms window starting at a late first rAF. Timers are unchanged.
