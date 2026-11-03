@@ -11,11 +11,12 @@ internal enum class FenceRead { SAME, UNCONFIRMED, PENDING, CHANGED }
 /**
  * Settles who decides an attempt whose wait can end while it is still running: it either sends its
  * action or is abandoned first, never both, so the waiter knows whether an action may have gone out.
+ * It also refuses to send at or past [sendBy], even if the waiter's timer has not fired yet.
  */
-internal class DispatchGate {
+internal class DispatchGate(private val sendBy: Long, private val now: () -> Long) {
     private val state = java.util.concurrent.atomic.AtomicInteger(OPEN)
     val sent get() = state.get() == SENT
-    fun send() = state.compareAndSet(OPEN, SENT)
+    fun send() = now() < sendBy && state.compareAndSet(OPEN, SENT)
     fun abandon() = state.compareAndSet(OPEN, ABANDONED)
     private companion object { const val OPEN = 0; const val SENT = 1; const val ABANDONED = 2 }
 }
@@ -68,14 +69,17 @@ internal object AppControlFence {
      *
      * The first PENDING read opens a separate window of [QUIET_MS] to find a read no event landed
      * in. Its exact match, in time, ends the [windowMs] window, since whatever opened that has reverted.
+     *
+     * [read] is given the time on [now]'s clock it must finish by, the earliest of all of these, so
+     * anything it does that can't be undone is held to the same deadline as its verdict.
      */
-    suspend fun settle(limitMs: Long, now: () -> Long, windowMs: Long = SETTLE_MS, wait: suspend (Long) -> Unit = { delay(it) }, read: suspend () -> FenceRead): Boolean {
+    suspend fun settle(limitMs: Long, now: () -> Long, windowMs: Long = SETTLE_MS, wait: suspend (Long) -> Unit = { delay(it) }, read: suspend (until: Long) -> FenceRead): Boolean {
         if (limitMs <= 0) return false
         val end = now() + limitMs
         var retryEnd = Long.MAX_VALUE
         var quietEnd = Long.MAX_VALUE
         while (true) {
-            val verdict = read()
+            val verdict = read(minOf(end, retryEnd, quietEnd))
             val finished = now()
             if (verdict == FenceRead.CHANGED || finished >= minOf(end, retryEnd, quietEnd)) return false
             if (verdict == FenceRead.SAME) return true

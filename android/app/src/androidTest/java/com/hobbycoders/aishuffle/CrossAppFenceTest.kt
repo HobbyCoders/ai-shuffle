@@ -88,12 +88,15 @@ class CrossAppFenceTest {
     private fun onceClosed(command: String) {
         ShuffleAccessibilityService.afterConsentClosed = { withContext(Dispatchers.IO) { fixture(command) } }
     }
-    /** Runs [step] off the main thread once, after the next final whole-screen read, and says how many such reads there were. */
-    private fun afterFinalRead(step: () -> Unit): AtomicInteger {
+    /** Runs [steps] off the main thread, one after each final whole-screen read in turn, and says how many such reads there were. */
+    private fun afterFinalReads(vararg steps: () -> Unit): AtomicInteger {
         val reads = AtomicInteger()
-        ShuffleAccessibilityService.afterFinalRead = { if (reads.incrementAndGet() == 1) step() }
+        ShuffleAccessibilityService.afterFinalRead = { steps.getOrNull(reads.getAndIncrement())?.invoke() }
         return reads
     }
+    private fun afterFinalRead(step: () -> Unit) = afterFinalReads(step)
+    /** The events from a move and the panel closing have all arrived by then, so the next read has none land in it. */
+    private fun undoMoveAndLetEventsArrive() { fixture("back"); Thread.sleep(300) }
     /** Applies [command] and returns once an accessibility event has reached the service. Stops the event fence's own check getting there first. */
     private fun fixtureWithEvent(command: String) {
         val service = requireNotNull(ShuffleAccessibilityService.current)
@@ -467,5 +470,39 @@ class CrossAppFenceTest {
         assertEquals("unconfirmed", result.getString("status"))
         assertFalse(result.optBoolean("ok"))
         assertTapped(1) // A sent action can't be recalled, which is why this isn't reported as not having happened.
+    }
+    @Test fun exactReadCrossingTheSettlingWindowIsRefusedWithNoTap() {
+        val ref = read()
+        holdEventChecks()
+        onceClosed("move") // The first final read sees the move, which opens the 500 ms window.
+        afterFinalRead { undoMoveAndLetEventsArrive(); fixture("stallread:1200") } // The next read is exact, and under the 2 s read limit.
+        val tapping = tap(ref); allow()
+        assertEquals("stale_ref", status(tapping).getString("status"))
+        Thread.sleep(1_500)
+        assertNotTapped()
+    }
+    @Test fun exactReadCrossingTheQuietWindowIsRefusedWithNoTap() {
+        val ref = read()
+        holdEventChecks()
+        afterFinalReads(
+            { fixtureWithEvent("notify") }, // Opens the 2.5 s window.
+            { fixtureWithEvent("notify"); fixture("stallread:1500") }, // Takes up most of it, under the 2 s read limit, and proves nothing.
+            { fixture("stallread:1500") }, // Quiet and exact, also under the read limit, but its re-read of the target ends after the window.
+        )
+        val tapping = tap(ref); allow()
+        assertEquals("stale_ref", status(tapping).getString("status"))
+        Thread.sleep(2_000)
+        assertNotTapped()
+    }
+    @Test fun actionAnsweringPastTheSettlingWindowIsNotASuccess() {
+        val ref = read()
+        holdEventChecks()
+        onceClosed("move")
+        afterFinalRead { undoMoveAndLetEventsArrive(); fixture("stallaction:1200") } // Sent inside the window, under the 2 s read limit, answered after it.
+        val tapping = tap(ref); allow()
+        val result = status(tapping)
+        assertEquals("unconfirmed", result.getString("status"))
+        assertFalse(result.optBoolean("ok"))
+        assertTapped(1)
     }
 }

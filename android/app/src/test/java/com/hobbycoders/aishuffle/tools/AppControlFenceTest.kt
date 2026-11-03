@@ -12,6 +12,9 @@ class AppControlFenceTest {
     private val wait: suspend (Long) -> Unit = { waits += it; clock += it + lateBy }
     private fun settle(limit: Long = AppControlFence.SETTLE_MS, read: () -> FenceRead) =
         runBlocking { AppControlFence.settle(limit, { clock }, wait = wait) { read() } }
+    private fun settleBy(limit: Long, read: (Long) -> FenceRead) =
+        runBlocking { AppControlFence.settle(limit, { clock }, wait = wait) { read(it) } }
+    private fun openGate() = DispatchGate(Long.MAX_VALUE) { clock }
     private fun stable(limit: Long = 20_000, sample: () -> String?) =
         runBlocking { AppControlFence.stable(limit, { clock }, wait) { sample() } }
 
@@ -108,16 +111,51 @@ class AppControlFenceTest {
         assertFalse(settle(limit = 20_000) { val (took, verdict) = reads.removeFirst(); clock += took; verdict })
     }
 
+    @Test fun readIsToldTheBadReadWindowItMustFinishBy() {
+        val seen = mutableListOf<Long>()
+        assertFalse(settleBy(limit = 20_000) { until -> seen += until; clock += 100; if (seen.size == 1) FenceRead.UNCONFIRMED else { clock += 700; FenceRead.SAME } })
+        assertEquals(listOf(20_000L, 100 + AppControlFence.SETTLE_MS), seen)
+    }
+    @Test fun readIsToldTheQuietWindowItMustFinishBy() {
+        val seen = mutableListOf<Long>()
+        assertFalse(settleBy(limit = 20_000) { until -> seen += until; clock += 100; if (seen.size == 1) FenceRead.PENDING else { clock += AppControlFence.QUIET_MS; FenceRead.SAME } })
+        assertEquals(listOf(20_000L, 100 + AppControlFence.QUIET_MS), seen)
+    }
+    @Test fun readIsToldTheLimitWhenItComesBeforeTheWindow() {
+        val seen = mutableListOf<Long>()
+        assertFalse(settleBy(limit = 200) { until -> seen += until; clock += 100; if (seen.size == 1) FenceRead.UNCONFIRMED else { clock += 100; FenceRead.SAME } })
+        assertEquals(listOf(200L, 200L), seen)
+    }
+    @Test fun nothingIsSentByAnExactReadThatCrossedItsWindow() {
+        var gate: DispatchGate? = null
+        assertFalse(settleBy(limit = 20_000) { until ->
+            gate = DispatchGate(until) { clock }
+            clock += 100
+            if (clock == 100L) FenceRead.UNCONFIRMED else { clock += 700; assertFalse(gate!!.send()); FenceRead.SAME }
+        })
+        assertFalse(gate!!.sent)
+    }
+    @Test fun gateRefusesAtItsDeadline() {
+        val gate = DispatchGate(sendBy = 500) { clock }
+        clock = 500
+        assertFalse(gate.send()); assertFalse(gate.sent)
+        assertTrue(gate.abandon())
+    }
+    @Test fun gateSendsJustBeforeItsDeadline() {
+        val gate = DispatchGate(sendBy = 500) { clock }
+        clock = 499
+        assertTrue(gate.send()); assertTrue(gate.sent)
+    }
     @Test fun gateSentCanNotBeAbandoned() {
-        val gate = DispatchGate()
+        val gate = openGate()
         assertTrue(gate.send()); assertFalse(gate.abandon()); assertTrue(gate.sent)
     }
     @Test fun gateAbandonedCanNotSend() {
-        val gate = DispatchGate()
+        val gate = openGate()
         assertTrue(gate.abandon()); assertFalse(gate.send()); assertFalse(gate.sent)
     }
     @Test fun gateSendsOnce() {
-        val gate = DispatchGate()
+        val gate = openGate()
         assertTrue(gate.send()); assertFalse(gate.send())
     }
 

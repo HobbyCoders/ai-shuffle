@@ -266,7 +266,7 @@ class ShuffleAccessibilityService : AccessibilityService() {
         }
         return verdict
     }
-    private suspend fun settled(limit: Long, read: suspend () -> FenceRead): Boolean =
+    private suspend fun settled(limit: Long, read: suspend (until: Long) -> FenceRead): Boolean =
         AppControlFence.settle(limit - System.currentTimeMillis(), SystemClock::elapsedRealtime, read = read)
     /** A baseline must not be one bad read, or the exact match would later refuse a screen that never changed. */
     private suspend fun stableFingerprint(pkg: String, window: Int, deadline: Long): ScreenPrint? =
@@ -347,12 +347,13 @@ class ShuffleAccessibilityService : AccessibilityService() {
          * One attempt, on one thread with no hop before the action, so a stalled target can't hold
          * the main thread. In order: the whole screen; this reference is still the source node it was
          * bound to, in the same place; the target re-read; window, service and lock state; then, in
-         * memory only, no event since this attempt started, the revision, the expiry and the snapshot.
+         * memory only, no event since this attempt started, the revision, the time and the snapshot.
+         * [until] is the earlier of the expiry and any settling or quiet window this attempt is inside.
          */
-        fun attempt(gate: DispatchGate): Attempt {
+        fun attempt(gate: DispatchGate, until: Long): Attempt {
             val started = events
             var bound = false
-            val screen = read(true, limit) { seen, _, ordinal, row ->
+            val screen = read(true, until) { seen, _, ordinal, row ->
                 if (ordinal == target.ordinal) bound = seen == node && row == target.row
                 true
             }
@@ -363,7 +364,7 @@ class ShuffleAccessibilityService : AccessibilityService() {
             if (own != FenceRead.SAME) return Attempt(own, "Target is no longer safe or available.")
             if (withActiveApp { it.id == window } != true) return Attempt(FenceRead.CHANGED, "The screen changed or the command expired.")
             if (events != started) return Attempt(FenceRead.PENDING, "The screen did not stay quiet long enough to prove.")
-            if (revision != version || System.currentTimeMillis() >= limit || snapshot !== before || !valid(before, pkg, window, fingerprint, ref!!)) return Attempt(FenceRead.CHANGED, "The screen changed or the command expired.")
+            if (revision != version || System.currentTimeMillis() >= until || snapshot !== before || !valid(before, pkg, window, fingerprint, ref!!)) return Attempt(FenceRead.CHANGED, "The screen changed or the command expired.")
             val performed = when (name) {
                 "tap_node" -> node.isClickable && gate.send() && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 "scroll" -> node.isScrollable && gate.send() && node.performAction(when (direction) {
@@ -375,17 +376,18 @@ class ShuffleAccessibilityService : AccessibilityService() {
                 "go_back" -> gate.send() && performGlobalAction(GLOBAL_ACTION_BACK)
                 else -> false
             }
-            return Attempt(FenceRead.SAME, "", performed)
+            return Attempt(FenceRead.SAME, "The screen changed or the command expired.", performed)
         }
         var refusal = "Screen changed while awaiting approval."
         var finished: Attempt? = null
         var sent = false
         var running = false
-        try {
-            settled(limit) {
-                val gate = DispatchGate()
+        val proved = try {
+            settled(limit) { windowEnd ->
+                val until = minOf(limit, System.currentTimeMillis() + windowEnd - SystemClock.elapsedRealtime())
+                val gate = DispatchGate(windowEnd, SystemClock::elapsedRealtime)
                 running = true
-                val result = try { offMain(limit) { attempt(gate) } } finally {
+                val result = try { offMain(until) { attempt(gate, until) } } finally {
                     // Also on cancellation. From here this attempt can't send anything it hasn't already.
                     gate.abandon(); sent = gate.sent
                 }
@@ -398,10 +400,10 @@ class ShuffleAccessibilityService : AccessibilityService() {
             if (sent) clearSnapshot()
             if (!running) node.recycle() // A running attempt still holds it; once abandoned it is left to the garbage collector.
         }
-        // Sent, but its answer missed the limit: it can't be called a success, or said not to have happened.
+        // Sent, but its answer missed the limit or window: it can't be called a success, or said not to have happened.
         val performed = finished?.performed
-        if (sent && (performed == null || System.currentTimeMillis() >= limit)) return ToolRegistry.error("unconfirmed", "The app did not answer in time, so the action may or may not have happened. Read the screen before trying again.")
-        if (performed == null) return ToolRegistry.error("stale_ref", refusal)
+        if (sent && (!proved || performed == null)) return ToolRegistry.error("unconfirmed", "The app did not answer in time, so the action may or may not have happened. Read the screen before trying again.")
+        if (!proved || performed == null) return ToolRegistry.error("stale_ref", refusal)
         clearSnapshot()
         return JSONObject().put("ok", performed).put("status", if (performed) "performed" else "unavailable")
     }
