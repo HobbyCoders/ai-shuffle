@@ -46,9 +46,7 @@ public class CoveredTargetActivity extends android.app.Activity {
         ready.setOnClickListener(v -> status.setText(RESTING));
         layout.addView(ready);
         setContentView(layout);
-        android.content.IntentFilter filter = new android.content.IntentFilter(COMMAND);
-        if (android.os.Build.VERSION.SDK_INT >= 33) registerReceiver(commands, filter, RECEIVER_EXPORTED);
-        else registerReceiver(commands, filter);
+        registerReceiver(commands, new android.content.IntentFilter(COMMAND), RECEIVER_EXPORTED);
     }
     @Override public void onDestroy() { unregisterReceiver(commands); super.onDestroy(); }
 }
