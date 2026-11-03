@@ -286,7 +286,7 @@
 
 		// An empty landing is the new-session composer (handleNewSession below);
 		// a surviving draft keeps the composer it was typed in.
-		const hasDraft = hasComposerDraft($activeSession.draft);
+		const hasDraft = false; // Temporary negative control: deliberately wipe the surviving draft.
 		// A first message typed and sent during the loads: its chat (or the send
 		// still creating it) is what the user is looking at now (#811).
 		const changedDuringLoads = hasBootSendClaim(initGeneration) || chatChangedDuringBoot(sessionAfterInit, $activeSession);
@@ -302,7 +302,9 @@
 			} else {
 				// This is the initial landing, not a user navigation. The New Chat
 				// handler would dismiss a phone drawer opened during the loads (#975).
+				console.info('draft-negative-control before newChat', hasDraft, hasComposerDraft($activeSession.draft));
 				activeSession.newChat();
+				console.info('draft-negative-control after newChat', hasComposerDraft($activeSession.draft));
 				layout.openChat(null);
 			}
 		} else if ($activeView.type === 'session' && currentViewSessionId === null && (restoredSessionId || layoutNewChatWon)) {
