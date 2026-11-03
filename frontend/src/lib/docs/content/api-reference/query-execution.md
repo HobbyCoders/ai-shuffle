@@ -155,6 +155,8 @@ data: {"type": "done", "session_id": "sess_abc123", "metadata": {...}}
 
 On failure the stream sends `event: error` with `{"type": "error", "message": "..."}`.
 
+The same `error` frame ends a stream whose client stops reading and falls about 8 MB behind. The reply keeps running and is saved, and fetching the session later returns it. A client that disconnects mid-reply gets the same result: the reply finishes and the session stays busy until then.
+
 ## Conversation Mode
 
 Stateful conversations that maintain context across multiple exchanges.

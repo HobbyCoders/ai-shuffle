@@ -988,6 +988,36 @@ async def test_a_client_that_leaves_never_frees_a_running_engine_and_its_turn_is
     assert not [e for e in frames if e.get("type") == "error"], frames
 
 
+async def test_a_reader_that_fell_behind_is_cut_off_and_the_turn_still_saves(mock_db, monkeypatch):
+    sessions_db.create_session("sess-slow", "default")
+    monkeypatch.setattr(session_admission, "_READER_BUFFER_BYTES", 1)
+    world = _ConnectWorld("turn")
+    world.frames_first = [_words() for _ in range(4)]
+    saved = AsyncMock()
+    with ExitStack() as stack:
+        world.patches(stack, "rest", StubPool())
+        stack.enter_context(patch.object(qe, "_persist_turn_results", new=saved))
+        reader = _reader("rest", "one", "sess-slow")
+        frames = [await asyncio.wait_for(reader.__anext__(), 10)]
+        await asyncio.wait_for(world.reached.wait(), 10)
+        async for frame in reader:  # it stopped reading for a while, and catches up here
+            frames.append(frame)
+        assert frames[-1] == {"type": "error", "message": session_admission._FELL_BEHIND_MESSAGE}
+        assert "sess-slow" in session_admission._holders, "the engine is still running"
+        saved.assert_not_awaited()
+
+        world.proceed.set()
+        await _until_free("sess-slow")
+        saved.assert_awaited_once()
+        assert saved.await_args.kwargs.get("interrupted") in (None, False)
+
+        world.stop_at = None
+        monkeypatch.setattr(session_admission, "_READER_BUFFER_BYTES", 1024 * 1024)
+        frames = await asyncio.wait_for(_start("rest", "two", "sess-slow"), 10)
+    assert "two" in " ".join(world.sent), frames
+    assert frames[-1].get("type") == "done", frames
+
+
 async def test_a_failure_after_the_client_left_still_lets_the_chat_go(mock_db):
     sessions_db.create_session("sess-drop-fail", "default")
     world = _ConnectWorld("turn")
@@ -1089,8 +1119,12 @@ async def test_a_background_turn_finishes_its_session_cleanup_before_any_success
         assert "sess-perm" not in session_admission._holders
 
 
-async def test_a_background_turn_a_rewind_outlasted_leaves_its_successors_permissions_alone(mock_db):
-    """A stopped turn can end after the rewind gave up waiting and a new turn began."""
+@pytest.mark.parametrize("second_rewind", [False, True], ids=["alone", "second-rewind-beginning"])
+async def test_a_background_turn_a_rewind_outlasted_leaves_its_successors_permissions_alone(
+    mock_db, second_rewind,
+):
+    """A stopped turn can end after the rewind gave up waiting and a new turn began,
+    even with another rewind on its way, which may yet be rejected."""
     sessions_db.create_session("sess-late", "default")
     world = _ConnectWorld("turn")
     cancelled, cleared = AsyncMock(), MagicMock()
@@ -1105,12 +1139,15 @@ async def test_a_background_turn_a_rewind_outlasted_leaves_its_successors_permis
         session_admission.take_for_rewind(rewind)
         session_admission.close(rewind)
         successor = await session_admission.acquire("sess-late")
+        later = await session_admission.begin_rewind("sess-late") if second_rewind else None
 
         world.proceed.set()
         await asyncio.wait_for(first, 10)
         cancelled.assert_not_awaited()
         cleared.assert_not_called()
         assert session_admission._holders["sess-late"] is successor
+        if later is not None:
+            session_admission.close(later)
         session_admission.close(successor)
 
 

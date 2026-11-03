@@ -127,6 +127,45 @@ async def test_session_cleanup_is_a_turns_only_while_no_successor_can_exist():
     admission.close(successor)
 
 
+async def test_a_later_rewind_gives_an_older_stopped_turn_no_cleanup_rights():
+    """The turn outlasted the rewind that took the chat. Another rewind beginning, which
+    may yet be rejected, changes nothing: the new turn still holds the chat."""
+    turn = await admission.acquire(SID)
+    first = await admission.begin_rewind(SID)
+    admission.take_for_rewind(first)
+    admission.close(first)
+    assert not admission.holds_chat(turn)
+
+    successor = await admission.acquire(SID)
+    second = await admission.begin_rewind(SID)
+    assert not admission.holds_chat(turn), "the second rewind did not displace that turn"
+    assert admission.holds_chat(successor)
+
+    admission.take_for_rewind(second)
+    assert not admission.holds_chat(turn)
+    assert admission.holds_chat(successor), "the rewind that took it is still running"
+    admission.close(second)
+    assert not admission.holds_chat(successor)
+    admission.close(successor)
+    admission.close(turn)
+
+
+@pytest.mark.parametrize("waiter", [admission.acquire, admission.begin_rewind])
+async def test_waiting_for_a_rewind_that_never_finishes_ends_in_the_busy_error(monkeypatch, waiter):
+    monkeypatch.setattr(admission, "_REWIND_WAIT_SECONDS", 0.01)
+    rewind = await admission.begin_rewind(SID)
+    with pytest.raises(SessionBusyError):
+        await waiter(SID)
+    assert admission._rewinds[SID] is rewind, "it can still act, so it is not let go"
+    assert SID not in admission._holders
+
+    monkeypatch.setattr(admission, "_REWIND_WAIT_SECONDS", 5)
+    waiting = asyncio.ensure_future(waiter(SID))
+    await asyncio.sleep(0.01)
+    admission.close(rewind)
+    admission.close(await asyncio.wait_for(waiting, 5))
+
+
 async def test_a_cancelled_wait_for_a_rewind_holds_nothing():
     rewind = await admission.begin_rewind(SID)
     admission.take_for_rewind(rewind)
@@ -247,6 +286,194 @@ async def test_a_stream_keeps_running_when_its_reader_leaves(leaves):
     proceed.set()
     await asyncio.sleep(0.01)
     assert order == ["reached the end"]
+
+
+@pytest.fixture
+def relays(monkeypatch):
+    """Every relay made, to look at what it still holds."""
+    made = []
+
+    class Watched(admission._Relay):
+        def __init__(self):
+            super().__init__()
+            made.append(self)
+
+    monkeypatch.setattr(admission, "_Relay", Watched)
+    return made
+
+
+def _held(relay) -> list:
+    return list(relay._queue._queue)
+
+
+async def _a_turn(lengths, proceed, order):
+    yield "x"
+    await proceed.wait()
+    for length in lengths:
+        yield "y" * length
+        order.append("produced")
+        await asyncio.sleep(0)
+    order.append("reached the end")
+
+
+@pytest.mark.parametrize("leaves", ["cancelled", "closed"])
+async def test_a_reader_that_left_is_forgotten_and_nothing_more_is_kept(relays, leaves):
+    proceed, order = asyncio.Event(), []
+    stream = admission.outlive_reader(_a_turn([10] * 2048, proceed, order))
+    assert await stream.__anext__() == "x"
+    if leaves == "closed":
+        await stream.aclose()
+    else:
+        waiting = asyncio.ensure_future(stream.__anext__())
+        await asyncio.sleep(0)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+    proceed.set()
+    await _until(lambda: "reached the end" in order)
+    assert order.count("produced") == 2048
+    assert _held(relays[0]) == []
+
+
+async def test_a_reader_leaving_drops_what_it_had_not_read(relays):
+    proceed, order = asyncio.Event(), []
+    stream = admission.outlive_reader(_a_turn([10] * 5, proceed, order))
+    assert await stream.__anext__() == "x"
+    proceed.set()
+    await _until(lambda: "reached the end" in order)
+    assert len(_held(relays[0])) == 6
+    await stream.aclose()
+    assert _held(relays[0]) == []
+
+
+async def test_a_reader_that_stopped_reading_cannot_stall_or_bloat_the_turn(relays, monkeypatch):
+    monkeypatch.setattr(admission, "_READER_BUFFER_BYTES", 10_000)
+    proceed, order, peak = asyncio.Event(), [], [0]
+    stream = admission.outlive_reader(_a_turn([1000] * 200, proceed, order))
+    assert await stream.__anext__() == "x"
+    proceed.set()
+
+    async def watch():
+        while "reached the end" not in order:
+            peak[0] = max(peak[0], relays[0]._size)
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(watch(), 5)  # it never waited for this reader
+    assert order.count("produced") == 200
+    assert 0 < peak[0] <= 10_000
+    assert len(_held(relays[0])) == 1, "only the news that it was cut off"
+
+    assert (await stream.__anext__()) == {
+        "type": "error", "message": admission._FELL_BEHIND_MESSAGE,
+    }
+    with pytest.raises(StopAsyncIteration):
+        await stream.__anext__()
+
+
+async def test_a_reader_cut_off_does_not_wait_for_a_turn_still_running(monkeypatch):
+    monkeypatch.setattr(admission, "_READER_BUFFER_BYTES", 1000)
+    never = asyncio.Event()
+
+    async def turn():
+        yield "x"
+        await asyncio.sleep(0)
+        for _ in range(10):
+            yield "y" * 500
+        await never.wait()
+
+    stream = admission.outlive_reader(turn())
+    assert await stream.__anext__() == "x"
+    await asyncio.sleep(0.01)
+    assert (await stream.__anext__())["type"] == "error"
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(stream.__anext__(), 1)
+    never.set()
+
+
+async def test_a_reader_cut_off_leaves_the_turn_holding_the_chat_until_it_ends(monkeypatch):
+    monkeypatch.setattr(admission, "_READER_BUFFER_BYTES", 1000)
+    proceed, saved = asyncio.Event(), []
+
+    async def turn(_lease):
+        yield "x"
+        await asyncio.sleep(0)
+        for _ in range(10):
+            yield "y" * 500
+        await proceed.wait()
+        saved.append(True)
+
+    stream = admission.outlive_reader(admission.stream_turn(SID, turn))
+    assert await stream.__anext__() == "x"
+    await asyncio.sleep(0.01)
+    assert (await stream.__anext__())["type"] == "error"
+    with pytest.raises(StopAsyncIteration):
+        await stream.__anext__()
+    await asyncio.sleep(0.01)
+    assert SID in admission._holders
+    proceed.set()
+    await _until(lambda: SID not in admission._holders)
+    assert saved == [True]
+
+
+async def test_many_tiny_frames_count_toward_the_limit(relays, monkeypatch):
+    monkeypatch.setattr(admission, "_READER_BUFFER_BYTES", 10_000)
+    proceed, order = asyncio.Event(), []
+    stream = admission.outlive_reader(_a_turn([0] * 1000, proceed, order))
+    assert await stream.__anext__() == "x"
+    proceed.set()
+    await _until(lambda: "reached the end" in order)
+    assert (await stream.__anext__())["type"] == "error"
+
+
+async def test_a_slow_reader_within_the_limit_gets_every_frame_in_order(monkeypatch):
+    monkeypatch.setattr(admission, "_READER_BUFFER_BYTES", 100_000)
+    wanted = [f"frame {n}" for n in range(100)]
+    stream = admission.outlive_reader(_relayed(wanted))
+    assert await stream.__anext__() == wanted[0]
+    await asyncio.sleep(0.01)  # it fell behind for a moment
+    assert [frame async for frame in stream] == wanted[1:]
+
+
+async def test_reading_makes_room_again(relays, monkeypatch):
+    monkeypatch.setattr(admission, "_READER_BUFFER_BYTES", 2000)
+    gate = asyncio.Event()
+
+    async def turn():
+        for _ in range(3):
+            yield "y" * 800
+            await gate.wait()
+            gate.clear()
+
+    stream = admission.outlive_reader(turn())
+    for _ in range(3):
+        assert await stream.__anext__() == "y" * 800
+        gate.set()
+    with pytest.raises(StopAsyncIteration):
+        await stream.__anext__()
+
+
+async def test_a_frame_larger_than_the_limit_reaches_a_reader_that_has_caught_up(monkeypatch):
+    monkeypatch.setattr(admission, "_READER_BUFFER_BYTES", 100)
+    big = "y" * 10_000
+    gate = asyncio.Event()
+
+    async def turn():
+        yield "x"
+        await gate.wait()
+        yield big
+
+    stream = admission.outlive_reader(turn())
+    assert await stream.__anext__() == "x"
+    gate.set()
+    assert await _events_of(stream) == [big]
+
+
+async def test_a_frame_that_cannot_be_measured_does_not_stop_the_turn():
+    circular = {}
+    circular["self"] = circular
+    assert await _events_of(admission.outlive_reader(_relayed([circular, {(1, 2): "tuple key"}, 3]))) == [
+        circular, {(1, 2): "tuple key"}, 3,
+    ]
 
 
 def test_a_stopping_app_ends_those_turns_while_it_can_still_save():
@@ -432,13 +659,16 @@ class _Rewinding:
 
         self.pool = MagicMock(contains=MagicMock(return_value=pooled), remove=remove)
 
-        def default_rewind(*_args, stop):
+        def default_rewind(*_args, stop, **_kwargs):
             self.stop = stop
             self.steps.append("rewound")
             return RewindResult(
                 success=True, message="moved", writer_generation=7, messages_removed=1,
             )
 
+        # Once, for the whole test: rewinds here overlap, so a scope per call would
+        # end out of order and leave the real function replaced for later tests.
+        monkeypatch.setattr("app.api.rewind_owner.forward_rewind", AsyncMock(return_value=None))
         monkeypatch.setattr(commands, "get_session_pool", lambda: self.pool)
         monkeypatch.setattr(commands, "database", MagicMock(get_session=MagicMock(return_value={
             "id": "app-id", "sdk_session_id": SID, "project_id": None, "turn_count": 0,
@@ -453,10 +683,9 @@ class _Rewinding:
     async def run(self, target="n1"):
         from app.api.commands import RewindRequestV2
 
-        with patch("app.api.rewind_owner.forward_rewind", AsyncMock(return_value=None)):
-            return await self.commands.execute_rewind(
-                "app-id", RewindRequestV2(target_uuid=target, restore_chat=True),
-            )
+        return await self.commands.execute_rewind(
+            "app-id", RewindRequestV2(target_uuid=target, restore_chat=True),
+        )
 
     def start(self):
         return asyncio.ensure_future(self.run())
@@ -556,10 +785,21 @@ async def test_a_failing_rewind_still_lets_the_chat_go(monkeypatch):
     admission.close(await admission.acquire("app-id"))
 
 
+async def test_a_rewind_refused_by_one_that_hangs_says_so_and_touches_nothing(monkeypatch):
+    monkeypatch.setattr(admission, "_REWIND_WAIT_SECONDS", 0.01)
+    rewinding = _Rewinding(monkeypatch)
+    hung = await admission.begin_rewind("app-id")
+    result = await rewinding.run()
+    assert result.success is False and "still running" in result.error
+    assert rewinding.steps == []
+    assert admission._rewinds["app-id"] is hung
+    admission.close(hung)
+
+
 async def test_a_rewind_whose_caller_left_finishes_before_anything_else_touches_the_chat(monkeypatch):
     entered, proceed = threading.Event(), threading.Event()
 
-    def slow_rewind(*_args, stop):
+    def slow_rewind(*_args, stop, **_kwargs):
         from app.core.jsonl_rewind import RewindResult
 
         entered.set()
@@ -592,7 +832,7 @@ async def test_overlapping_rewinds_run_one_after_the_other_and_a_new_turn_comes_
     entered, proceed = threading.Event(), threading.Event()
     order = []
 
-    def rewind_step(_sdk_id, target, *_args, stop):
+    def rewind_step(_sdk_id, target, *_args, stop, **_kwargs):
         order.append(f"{target} started")
         if target == "first":
             entered.set()
@@ -623,7 +863,7 @@ async def test_a_stopping_app_abandons_a_rewind_before_its_claim(monkeypatch):
     entered, proceed = threading.Event(), threading.Event()
     stops = []
 
-    def stalled_rewind(*_args, stop):
+    def stalled_rewind(*_args, stop, **_kwargs):
         stops.append(stop)
         entered.set()
         proceed.wait(5)

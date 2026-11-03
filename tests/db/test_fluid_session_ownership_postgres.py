@@ -818,6 +818,22 @@ async def test_rewind_reads_the_old_engines_last_commit_before_cutting():
     assert result.success is True, result.error
 
 
+async def test_rewind_clears_the_old_failure_together_with_moving_the_head(monkeypatch):
+    from app.core.provider import fluid_transcript
+
+    old, sid = await _session()
+    await old.append(sid, _node("n1", None))
+    await old.append(sid, _node("n2", "n1"))
+    marked = MagicMock()
+    monkeypatch.setattr("app.db.turns.mark_conversation_reset", marked)
+
+    result = await asyncio.to_thread(
+        fluid_transcript.rewind_fluid_session, sid, "n1", False, reset_session_id="app-id",
+    )
+    assert result.success is True
+    assert marked.call_args.args == ("app-id",) and marked.call_args.kwargs["cursor"] is not None
+
+
 async def test_rewind_left_running_cannot_move_the_head_under_a_newer_connect(monkeypatch):
     """Its request was cancelled; its thread was not. The newer engine stands."""
     from app.core.provider import fluid_transcript
@@ -836,9 +852,11 @@ async def test_rewind_left_running_cannot_move_the_head_under_a_newer_connect(mo
         return real(*args, **kwargs)
 
     monkeypatch.setattr(fluid_transcript, "compute_rewind_keep_count", held)
-    rewind = asyncio.ensure_future(
-        asyncio.to_thread(fluid_transcript.rewind_fluid_session, sid, "n1", False),
-    )
+    marked = MagicMock()
+    monkeypatch.setattr("app.db.turns.mark_conversation_reset", marked)
+    rewind = asyncio.ensure_future(asyncio.to_thread(
+        fluid_transcript.rewind_fluid_session, sid, "n1", False, reset_session_id="app-id",
+    ))
     while not claimed.is_set():
         await asyncio.sleep(0.005)
 
@@ -849,6 +867,7 @@ async def test_rewind_left_running_cannot_move_the_head_under_a_newer_connect(mo
     result = await rewind
 
     assert result.success is False and "continued" in result.error
+    marked.assert_not_called()  # the failure it clears still applies
     await newer.append(sid, _node("n3", "n2"))
     assert newer.lost_ownership() is False
     assert _session_row(sid)["head_node_id"] == "n3"

@@ -650,7 +650,14 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
         return RewindResponseV2.model_validate(remote)
 
     async def rewind() -> Any:
-        lease = await session_admission.begin_rewind(session_id)
+        try:
+            lease = await session_admission.begin_rewind(session_id)
+        except session_admission.SessionBusyError:
+            return RewindResponseV2(
+                success=False,
+                message="Rewind refused",
+                error="Another rewind of this chat is still running. Try again in a moment.",
+            )
         try:
             return await _execute_rewind(session_id, request, http_request, lease)
         finally:
