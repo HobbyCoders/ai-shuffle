@@ -743,6 +743,12 @@ async def _maybe_recover_failed_wake(
 
     payload = dict(settled.get("payload") or {})
     turn_id = settled.get("id")
+    if await asyncio.to_thread(turns_db.get_turn, turn_id) is None:
+        logger.info(
+            "turn_scheduler: dropped task notification for deleted session %s (turn %s)",
+            session_id, turn_id,
+        )
+        return False
     if payload.get(WAKE_RETRY_KEY):
         logger.warning(
             "turn_scheduler: retried wake %s for %s died too (%s) — surfacing "
@@ -764,6 +770,14 @@ async def _maybe_recover_failed_wake(
 
     await _drop_pooled_client(session_id)
     if task_registry.stop_invalidated(session_id, generation):
+        return False
+    # Deletion removes the settled turn too. The client teardown above awaits
+    # external work, so the settlement we read can have disappeared meanwhile.
+    if await asyncio.to_thread(turns_db.get_turn, turn_id) is None:
+        logger.info(
+            "turn_scheduler: dropped task notification for deleted session %s (turn %s)",
+            session_id, turn_id,
+        )
         return False
     payload[WAKE_RETRY_KEY] = True
     retry = await asyncio.to_thread(
@@ -1995,6 +2009,16 @@ async def _enqueue_context_wake(
         session_row = await asyncio.to_thread(
             sessions_db.get_session, session_id,
         ) or {}
+        if source == "unpark" and not session_row and not context:
+            # Hard deletion removes both the session and its context turns.
+            # Do not turn a late completion into a profile-less orphan wake.
+            # A deletion racing an already-read context is guarded again at
+            # SessionRuntime.execute, before a provider pump can start.
+            logger.info(
+                "turn_scheduler: dropped task notification for deleted session %s (tasks=%s)",
+                session_id, task_ids,
+            )
+            return {"id": None, "session_id": session_id, "source": source}
     if not profile_id:
         # Belt and braces: a profile-less wake is refused downstream ("Profile
         # not found: None") and the task notification is lost for good — the
@@ -2367,6 +2391,8 @@ async def on_task_notification_stranded(
             turn = await _enqueue_context_wake(
                 session_id, "unpark", frames, list(task_ids or []), prompt,
             )
+        if not turn.get("id"):
+            return
         logger.info(
             "turn_scheduler: steered notification for %s (tasks=%s) was never "
             "delivered — enqueued wake turn %s instead",

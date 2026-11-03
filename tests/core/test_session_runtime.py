@@ -1984,6 +1984,7 @@ async def test_run_pump_broadcast_trims_render_frames(mock_db):
 
 
 async def test_unpark_turn_threads_completion_frames_to_provider_overrides(mock_db):
+    _seed_session("s12", "active")
     frames = [{
         "task_id": "worker-1",
         "status": "completed",
@@ -2012,6 +2013,7 @@ async def test_unpark_turn_threads_completion_frames_to_provider_overrides(mock_
 @pytest.mark.parametrize("source", ["user", "unpark", "agent_message", "wakeup", "promotion"])
 async def test_turn_source_threads_to_provider_overrides(mock_db, source):
     """Fluid records the source on TurnStarted; it reaches the adapter here."""
+    _seed_session("s12s", "active")
     turn = turns_db.enqueue_turn("s12s", source, prompt="go")
     captured = {}
 
@@ -2068,6 +2070,7 @@ async def test_unpark_turn_records_terminal_task_events_after_start(mock_db):
     between turns, so it must write the terminal task.updated to the event log —
     right after turn.started, before the pump runs (the FE no longer
     force-settles background shells at turn end, #991)."""
+    _seed_session("s12t", "active")
     frames = [
         {"task_id": "shell-1", "status": "completed", "kind": "shell"},
         {"task_id": "shell-2", "status": "failed", "kind": "shell"},
@@ -2105,6 +2108,7 @@ async def test_plain_turn_records_no_terminal_task_events(mock_db):
 async def test_terminal_task_event_failure_never_kills_the_wake_turn(mock_db):
     """Best-effort: a recorder that blows up on the terminal append still lets
     the wake turn run and settle."""
+    _seed_session("s12v", "active")
     frames = [{"task_id": "shell-9", "status": "completed"}]
     turn = turns_db.enqueue_turn(
         "s12v",
@@ -2450,6 +2454,7 @@ async def test_wake_turn_latches_terminal_notified(mock_db):
     """The other delivery path: a wake turn carrying pending_frames IS the
     delivery of those completions, so it latches terminal_notified too. The flag
     used to stay False forever for every clean completion."""
+    _seed_session("sn5", "active")
     frames = [{"task_id": "shell-5", "status": "completed"}]
     turn = turns_db.enqueue_turn(
         "sn5", "unpark", prompt="background task completed",
