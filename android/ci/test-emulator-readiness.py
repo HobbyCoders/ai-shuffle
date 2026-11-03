@@ -206,6 +206,8 @@ class EmulatorReadinessTest(unittest.TestCase):
         _, evidence = self.run_webview(provider=provider)
         self.assertEqual([True], self.installed)
         self.assertIn("com.android.webview, 136.0.7103.129", evidence)
+        self.assertIn("co-installed pinned AOSP alternate, not the phone provider", self.summary)
+        self.assertIn("link inferred", self.summary)
         self.assertIn("all crash checks enabled", self.summary)
         with self.assertRaisesRegex(RuntimeError, "did not become the active provider"):
             self.run_webview(provider=provider, activate=False)

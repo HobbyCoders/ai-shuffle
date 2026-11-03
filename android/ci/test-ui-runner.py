@@ -44,6 +44,8 @@ if "grant" in args and os.environ["MODE"] == "grant-error":
     sys.exit(23)
 if "instrument" in args:
     phase = ("suite" if "notClass" in args else
+             "allowing-launcher" if any("#allowingLauncher" in arg for arg in args) else
+             "denying-launcher" if any("#denyingLauncher" in arg for arg in args) else
              "allowing" if any("#allowingStartup" in arg for arg in args) else
              "denying" if any("#denyingStartup" in arg for arg in args) else
              "minified" if any("MinifiedReleaseSmokeTest" in arg for arg in args) else "cold")
@@ -131,12 +133,12 @@ if "instrument" in args:
         result, calls = self.run_runner()
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         runs = [call for call in calls if call[0] == "timeout" and "instrument" in call]
-        self.assertEqual(4, len(runs))
-        for call, host, per_test in zip(runs, ("180s", "1200s", "180s", "180s"),
-                                         ("120000", "180000", "120000", "120000")):
+        self.assertEqual(6, len(runs))
+        for call, host, per_test in zip(runs, ("180s", "1200s", "180s", "180s", "180s", "180s"),
+                                         ("120000", "180000", "120000", "120000", "120000", "120000")):
             self.assertEqual(["--kill-after=15s", host], call[1:3])
             self.assertEqual(per_test, call[call.index("timeout_msec") + 1])
-        self.assertEqual(4, result.stdout.count("1 passed; no failed or skipped tests"))
+        self.assertEqual(6, result.stdout.count("1 passed; no failed or skipped tests"))
         self.assertIn("Android emulator verification: PASSED", self.summary)
         excluded = runs[1][runs[1].index("notClass") + 1]
         self.assertEqual("com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#"
@@ -150,12 +152,12 @@ if "instrument" in args:
         self.assertEqual(2, len(smoke_installs))
         smoke_calls = calls[max(smoke_installs) + 1:]
         self.assertFalse(any("grant" in call for call in smoke_calls))
-        self.assertEqual(2, sum("clear" in call for call in smoke_calls))
-        self.assertEqual(2, sum("clear-permission-flags" in call for call in smoke_calls))
+        self.assertEqual(4, sum("clear" in call for call in smoke_calls))
+        self.assertEqual(4, sum("clear-permission-flags" in call for call in smoke_calls))
         runs = [call for call in smoke_calls if call[0] == "adb" and "instrument" in call]
-        self.assertEqual(["allowing", "denying"],
-                         [next(word for word in ("allowing", "denying") if any("#" + word in arg for arg in call))
-                          for call in runs])
+        self.assertEqual(["allowingStartup", "denyingStartup", "allowingLauncher", "denyingLauncher"],
+                         [next(word for word in ("allowingStartup", "denyingStartup", "allowingLauncher", "denyingLauncher")
+                               if any("#" + word in arg for arg in call)) for call in runs])
 
     def test_exit_zero_test_failure_is_not_hidden_by_tee(self):
         result, _ = self.run_runner("failure")
@@ -163,7 +165,7 @@ if "instrument" in args:
         self.assertIn("Failed, skipped or unknown test status: -2", result.stderr)
 
     def test_app_defects_and_unrecovered_webview_crashes_fail_without_retries(self):
-        for phase in ("cold", "suite", "allowing", "denying"):
+        for phase in ("cold", "suite", "allowing", "denying", "allowing-launcher", "denying-launcher"):
             for mode in ("app-crash", "app-anr", "failure", "webview-sigtrap", "adb-error", "timeout"):
                 with self.subTest(phase=phase, mode=mode):
                     result, calls = self.run_runner(mode, phase)
@@ -171,7 +173,8 @@ if "instrument" in args:
                     self.assertIn(f"Android emulator verification: FAILED (exit {result.returncode})", self.summary)
                     self.assertIn("No app failure was retried or excused", self.summary)
                     runs = [call for call in calls if call[0] == "adb" and "instrument" in call]
-                    self.assertEqual({"cold": 1, "suite": 2, "allowing": 3, "denying": 4}[phase], len(runs))
+                    self.assertEqual({"cold": 1, "suite": 2, "allowing": 3, "denying": 4,
+                                      "allowing-launcher": 5, "denying-launcher": 6}[phase], len(runs))
                     if mode in ("app-crash", "app-anr", "webview-sigtrap"):
                         self.assertIn("Incomplete or unsuccessful instrumentation run", result.stderr)
 

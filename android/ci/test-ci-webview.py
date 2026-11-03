@@ -10,6 +10,8 @@ import urllib.error
 
 import ci_webview as provider
 
+PINNED_SHA256 = provider.SHA256  # Preserve the real pin while transfer fixtures patch it.
+
 
 class Response(io.BytesIO):
     status = 200
@@ -31,6 +33,41 @@ class ProviderDownloadTest(unittest.TestCase):
             provider.download(self.apk)
         self.assertEqual(b"abc", self.apk.read_bytes())
         request.assert_called_once_with(provider.URL, timeout=120)
+
+    def test_verified_cached_apk_skips_network_transfer(self):
+        self.apk.write_bytes(b"abc")
+        with patch.object(provider.urllib.request, "urlopen") as request:
+            provider.download(self.apk)
+        request.assert_not_called()
+        self.assertEqual(b"abc", self.apk.read_bytes())
+
+    def test_corrupt_cache_is_rejected_without_network_or_install(self):
+        for data, error in ((b"ab", provider.IncompleteDownload), (b"bad", RuntimeError)):
+            with self.subTest(data=data), patch.object(provider.urllib.request, "urlopen") as request:
+                self.apk.write_bytes(data)
+                with self.assertRaises(error):
+                    provider.download(self.apk)
+                request.assert_not_called()
+
+    def test_workflow_cache_keys_match_the_verified_digest(self):
+        import yaml
+        root = Path(__file__).resolve().parents[2]
+        for name, job in (("android.yml", "android-ui"), ("ci-android-minified.yml", "smoke")):
+            with self.subTest(workflow=name):
+                workflow = yaml.load((root / ".github/workflows" / name).read_text(), Loader=yaml.BaseLoader)
+                steps = workflow["jobs"][job]["steps"]
+                caches = [(i, step) for i, step in enumerate(steps)
+                          if step.get("uses", "").startswith("actions/cache@")]
+                self.assertEqual(1, len(caches))
+                index, cache = caches[0]
+                self.assertEqual("matrix.api == 36", cache["if"])
+                self.assertEqual("aosp-webview-x86_64-" + PINNED_SHA256, cache["with"]["key"])
+                self.assertEqual("${{ runner.temp }}/ci-webview.apk", cache["with"]["path"])
+                verify = next(i for i, step in enumerate(steps) if 'run' in step and
+                              'python3 ci/ci_webview.py "$RUNNER_TEMP/ci-webview.apk"' in step['run'])
+                self.assertLess(index, verify)
+                self.assertEqual("matrix.api == 36", steps[verify]["if"])
+                self.assertNotIn("cache-hit", steps[verify]["if"])
 
     def test_only_a_truncated_transfer_is_recovered(self):
         responses = [Response(base64.b64encode(b"ab")), Response(base64.b64encode(b"abc"))]

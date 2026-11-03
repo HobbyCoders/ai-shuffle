@@ -28,6 +28,25 @@ page does not exercise live worker authentication, OAuth or delivery from FCM;
 those still need the device checks below. The full debug suite is not relabelled
 as minified coverage.
 
+Both debug and minified API 36 jobs use the Google APIs emulator image to permit
+an absent, separately signed AOSP alternate provider. This reverses the earlier
+AOSP-only image choice; six first-attempt hosted boots across the two workflows
+reached stable launchers without ANR recovery, not proof of zero future GMS ANRs.
+The provider is a **co-installed pinned AOSP alternate, not the phone provider**:
+monolithic AOSP WebView 136.0.7103.129 is not Google's auto-updating phone WebView.
+These jobs do not establish compatibility with the current Google provider or
+protect phones still on 133. The native-abort/request-lifetime link is inferred.
+The pinned Gitiles APK is SHA-keyed in `actions/cache`; its size and SHA-256 are
+checked on hits/misses and again before installation, with all crash checks on.
+
+The separate push-enabled debug fixture runs real OS notification permission
+Allow/Deny decisions from both direct chat entry and the production launcher.
+Each starts from cleared app data and permission flags, checks usable chat and a
+physical Refresh action, and never pre-grants notification permission. Launcher
+coverage also requires the real presence probe/parser and automatic worker
+selection to reach chat after dismissing the prompt. Only worker HTTP/page
+responses are fixtures; these checks do not cover Firebase delivery.
+
 To build the same disposable smoke locally (after bundling the offline demo):
 
 ```sh

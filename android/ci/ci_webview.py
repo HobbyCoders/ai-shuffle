@@ -48,6 +48,12 @@ def transfer(apk):
 
 
 def download(apk):
+    # Both workflows restore the exact SHA-keyed file. A hit is never trusted:
+    # fail closed on corrupt cached bytes, and verify again before adb install.
+    if Path(apk).exists():
+        verify(apk)
+        print(f"Verified cached AOSP alternate WebView {VERSION}, SHA256 {SHA256}")
+        return
     # Only retry a failed/truncated NETWORK TRANSFER, never an emulator/test.
     # A full-size checksum mismatch is not transient and must fail immediately.
     for attempt in range(1, 4):

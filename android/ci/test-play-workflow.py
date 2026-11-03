@@ -196,7 +196,7 @@ class PlayWorkflowTests(unittest.TestCase):
         self.assertEqual(summary["env"]["ADVISORY"], "${{ matrix.advisory }}")
         self.assertIn("GITHUB_STEP_SUMMARY", summary["run"])
         checks = next(step["run"] for step in steps if step.get("name") == "Check emulator readiness and instrumentation result parsers")
-        for script in ("test-emulator-readiness.py", "test-instrumentation-parser.py", "test-ui-runner.py"):
+        for script in ("test-emulator-readiness.py", "test-ci-webview.py", "test-instrumentation-parser.py", "test-ui-runner.py"):
             self.assertIn(script, checks)
         reports = next(step for step in steps if step.get("name") == "Upload test reports")
         self.assertEqual(reports["if"], "failure()")

@@ -76,13 +76,38 @@ cost/publication policy tests. The asset paths matter: the APK's offline demo is
 built from `mobile/` and shared `frontend/` dependencies. Drafts and forks run too,
 on standard free `ubuntu-latest` runners. Superseded PR runs are cancelled.
 
+Both Android emulator workflows deliberately use `google_apis` on API 36 again,
+reversing the earlier AOSP-only choice after SystemUI/GMS ANRs. This image permits
+co-installing the signed, absent `com.android.webview` alternate without replacing
+a differently signed system APK. Six first-attempt boots across both workflows
+reached stable launchers without ANR recovery (debug runs 41544019324, 41546528364,
+41548997981; minified runs 41544019247, 41546528197, 41548997948); that is limited
+boot evidence, not proof that Google services can never cause an ANR.
+
+API 36 uses a **co-installed pinned AOSP alternate, not the phone provider**:
+WebView 136.0.7103.129 is a monolithic AOSP APK, whereas real phones typically use
+Google's auto-updating provider. This is not current-Google-WebView compatibility
+coverage; phones still on WebView 133 and provider-specific bugs remain outside
+this workaround. The proposed upstream request-lifetime fix's link to the observed
+native abort is inferred, not established by a symbolized stack.
+
+On a cache miss each API 36 leg fetches the 274,674,253-byte APK from a pinned
+Google Gitiles source commit using `android/ci/ci_webview.py`. Both workflows share
+an `actions/cache` key containing its exact SHA-256. Cache hits still verify size
+and digest, and `prepare-android-ui.py` verifies again before install. Only bounded
+transient/truncated network transfers are retried, never app tests or a full-size
+checksum mismatch. A corrupt cache fails closed. API 34 retains its stock AOSP
+image/provider; no Chromium crash checks or APK signature checks are disabled.
+
 Only build/test and emulator jobs run on PRs. Existing owner/event/ref/input
 predicates still exclude PRs from every Firebase/signing/release-staging step
 and the write-permission publish job, even when evaluated with owner identity
 and publication inputs enabled. `tests/scripts/test_owner_publication_policy.py`
-checks those actual predicates; no release guard is relaxed. API 36 retains its
-existing release-advisory status (tracking #2375); its test-step failures remain
-visible and must be inspected, not treated as an app pass. API 34 gates publication.
+checks those actual predicates; no release guard is relaxed. In `android.yml`,
+API 36 retains its existing release-advisory status (tracking #2375); its failures
+remain visible, not app passes. API 34 gates publication. The separate minified
+API 34 and API 36 checks are both required on every PR, with no advisory bypass;
+the image/provider choice and limited boot evidence above apply to them too.
 
 Cloud service checks and deploy workflows live in the private
 [HobbyCoders/hobbycoders-cloud](https://github.com/HobbyCoders/hobbycoders-cloud)
@@ -113,7 +138,7 @@ three desktop shards, not the separate stable-release portability matrix.
 | docs | `android-and-docs` → exact local docs-copy helper; JavaScript contracts also compare copies |
 | desktop | `desktop` → existing typecheck and all unit tests |
 | android-bridge | `android-and-docs` → existing local Node download-bridge tests |
-| android-play | `android-and-docs` → all six local Python/workflow-shell test scripts |
+| android-play | `android-and-docs` → all seven local Python/workflow-shell test scripts |
 | workflows/policy | `policy` → artifact/cost scripts and the complete local seven-file policy set, plus parity regressions |
 | update-reach | `update-reach` → regression set and strict signed-publication/merged-PR readiness (not advisory) |
 | full preflight security | `supply-chain` → offline secret scan and identical report-only dependency audit, including source-publisher |

@@ -200,12 +200,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # GitHub-hosted runners have 4 vCPUs and 16 GB. The app uses no
-          # Google Play services, so both levels run the plain AOSP image:
-          # API 36 google_apis spent the guest CPU on Play services startup,
-          # hit SystemUI/GMS ANRs before install (run 38343028922) and, with
-          # the whole host, still lost window focus and delivered obscured
-          # taps mid-suite (run 38344827383). API 36 keeps the larger guest.
+          # GitHub-hosted runners have 4 vCPUs and 16 GB. API 34 stays AOSP.
+          # API 36 deliberately reverses the old AOSP-only image decision:
+          # google_apis permits a signed, absent AOSP alternate WebView >=136;
+          # default cannot replace its differently signed, crashing WebView 133.
+          # Earlier google_apis ANRs were recorded in runs 38343028922 and
+          # 38344827383 (now unavailable/404). Six independent first-attempt
+          # boots across both workflows reached a stable launcher without ANR
+          # recovery: debug 41544019324, 41546528364, 41548997981;
+          # minified 41544019247, 41546528197, 41548997948.
+          # This is bounded boot evidence, not proof the GMS risk is eliminated.
+          # API 36 keeps the larger guest; GMS/app failures still fail closed.
           - api: 34
             target: default
             cores: 2
@@ -242,8 +247,15 @@ jobs:
         with:
           name: android-notification-smoke-apks
           path: android/notification-instrumentation-apks
-      - name: Download verified official AOSP WebView for API 36
+      - name: Cache pinned AOSP alternate WebView
         if: matrix.api == 36
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ci-webview.apk
+          key: aosp-webview-x86_64-8da41a8692c64870dc875a0fa656c59a678aa09902935c5095e7de6fd7c55a87
+      - name: Fetch or verify pinned AOSP alternate WebView for API 36
+        if: matrix.api == 36
+        # On cache hits the helper still verifies size/SHA; installation verifies again.
         run: python3 ci/ci_webview.py "$RUNNER_TEMP/ci-webview.apk"
       - name: Free hosted-runner disk before preparing the AVD
         run: |

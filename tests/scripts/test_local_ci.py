@@ -194,7 +194,7 @@ def test_android_safety_suite_includes_emulator_contracts(monkeypatch):
     commands = []
     monkeypatch.setattr(local_ci, "run", lambda argv, **kwargs: commands.append(argv))
     local_ci.android_play(context([".github/workflows/android.yml"]))
-    for script in ("test-emulator-readiness.py", "test-instrumentation-parser.py", "test-ui-runner.py"):
+    for script in ("test-emulator-readiness.py", "test-ci-webview.py", "test-instrumentation-parser.py", "test-ui-runner.py"):
         assert [sys.executable, f"android/ci/{script}"] in commands
     if Path("/bin/bash").exists():
         assert [sys.executable, "android/ci/test-play-workflow.py"] in commands

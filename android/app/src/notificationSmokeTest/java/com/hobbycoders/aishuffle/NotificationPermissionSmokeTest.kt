@@ -17,11 +17,15 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
+import androidx.test.runner.lifecycle.Stage
 import androidx.work.WorkManager
 import com.hobbycoders.aishuffle.data.ServerStore
 import com.hobbycoders.aishuffle.model.Server
 import com.hobbycoders.aishuffle.net.ApiClient
 import com.hobbycoders.aishuffle.ui.ChatActivity
+import com.hobbycoders.aishuffle.ui.ServerListActivity
+import com.hobbycoders.aishuffle.presence.WorkerPresenceProbe
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Response
@@ -69,7 +73,7 @@ class NotificationPermissionSmokeTest {
         return matches
     }
 
-    private fun tap(text: String, permission: Boolean = false) {
+    private fun tap(text: String, permission: Boolean = false, beforeTap: () -> Unit = {}) {
         var target: AccessibilityNodeInfo? = null
         await("Missing ${if (permission) "system notification permission" else "chat"} control: $text") {
             val root = automation.rootInActiveWindow ?: return@await false
@@ -108,6 +112,7 @@ class NotificationPermissionSmokeTest {
         if (permission) println("NOTIFICATION_PERMISSION_CONTROLLER: package=${node.packageName}; button=${node.viewIdResourceName}")
         val bounds = Rect()
         try { node.getBoundsInScreen(bounds) } finally { node.recycle() }
+        beforeTap()
         val now = SystemClock.uptimeMillis()
         for ((action, time) in listOf(MotionEvent.ACTION_DOWN to now, MotionEvent.ACTION_UP to now + 50)) {
             val event = MotionEvent.obtain(now, time, action, bounds.exactCenterX(), bounds.exactCenterY(), 0)
@@ -123,23 +128,31 @@ class NotificationPermissionSmokeTest {
         return (0 until column.childCount).map { column.getChildAt(it) }.filterIsInstance<WebView>().single()
     }
 
-    private fun pageReady(scenario: ActivityScenario<ChatActivity>, token: String): Boolean {
+    private fun pageReady(token: String): Boolean {
         val done = CountDownLatch(1)
         var ready = false
-        scenario.onActivity { activity ->
-            if (!activity.hasWindowFocus()) { done.countDown(); return@onActivity }
-            web(activity).evaluateJavascript("document.readyState === 'complete' && window.__SHUFFLE_MOBILE__?.token === '$token'") {
-                ready = it == "true"; done.countDown()
+        var queried = false
+        instrumentation.runOnMainSync {
+            val activity = ActivityLifecycleMonitorRegistry.getInstance()
+                .getActivitiesInStage(Stage.RESUMED).filterIsInstance<ChatActivity>().singleOrNull()
+            if (activity != null && activity.hasWindowFocus()) {
+                queried = true
+                web(activity).evaluateJavascript("document.readyState === 'complete' && window.__SHUFFLE_MOBILE__?.token === '$token'") {
+                    ready = it == "true"; done.countDown()
+                }
             }
         }
+        if (!queried) return false
         assertTrue("WebView did not answer after the permission decision", done.await(2, TimeUnit.SECONDS))
         return ready
     }
 
     @Test fun allowingStartupNotificationsLeavesChatUsable() = exercise(allow = true)
     @Test fun denyingStartupNotificationsLeavesChatUsable() = exercise(allow = false)
+    @Test fun allowingLauncherNotificationsLeavesChatUsable() = exercise(allow = true, launcher = true)
+    @Test fun denyingLauncherNotificationsLeavesChatUsable() = exercise(allow = false, launcher = true)
 
-    private fun exercise(allow: Boolean) {
+    private fun exercise(allow: Boolean, launcher: Boolean = false) {
         assertTrue("This check must use the push-enabled debug APK", BuildConfig.DEBUG && BuildConfig.PUSH_ENABLED)
         assertTrue(android.os.Build.VERSION.SDK_INT >= 33)
         assertEquals("The runner must not pre-grant notifications", PackageManager.PERMISSION_DENIED,
@@ -153,10 +166,19 @@ class NotificationPermissionSmokeTest {
         val sessions = AtomicInteger()
         val field = ApiClient::class.java.getDeclaredField("client\$delegate").apply { isAccessible = true }
         val previous = field.get(null)
+        // Replace only the HTTP transport, not presence parsing/auto-connect policy.
+        // The fixture host must never be resolved or contacted on the Internet.
+        val presenceField = WorkerPresenceProbe::class.java.getDeclaredField("client").apply { isAccessible = true }
+        val previousPresence = presenceField.get(null)
+        val probes = AtomicInteger()
         val client = OkHttpClient.Builder().addInterceptor { chain ->
             val request = chain.request()
             check(request.url.host == "notification-fixture.example")
             val body = when (request.url.encodedPath) {
+                "/api/v1/health" -> {
+                    probes.incrementAndGet()
+                    """{"status":"healthy","service":"AI Shuffle","version":"fixture","authenticated":false}"""
+                }
                 "/api/v1/mobile/key/renew" -> JSONObject().put("device_id", server.deviceId).put("api_key", server.apiKey)
                     .put("rotated", false).put("expires_at", Instant.now().plusSeconds(3600).toString()).toString()
                 "/api/v1/mobile/web-session/reservations" -> "{\"reservation\":\"wsm_${"a".repeat(43)}\",\"expires_in\":120,\"expires_at\":\"2099-01-01T00:00:00Z\"}"
@@ -168,6 +190,7 @@ class NotificationPermissionSmokeTest {
         }.build()
         instrumentation.runOnMainSync { ServerStore.get(context).add(server) }
         field.set(null, lazyOf(client))
+        presenceField.set(null, client)
         // A worker page fixture, not a fake permission callback. The real shell
         // still reserves/mints a session, installs its bootstrap and handles taps.
         ChatActivity.uiFixture = {
@@ -176,27 +199,46 @@ class NotificationPermissionSmokeTest {
             WebResourceResponse("text/html", "utf-8", ByteArrayInputStream(html.toByteArray()))
         }
         try {
-            ActivityScenario.launch<ChatActivity>(Intent(context, ChatActivity::class.java)
-                .putExtra(ChatActivity.EXTRA_SERVER_ID, server.id)).use { scenario ->
-                tap(if (allow) "Allow" else "Don’t allow", permission = true)
+            val intent = if (launcher) {
+                requireNotNull(context.packageManager.getLaunchIntentForPackage(context.packageName)).also {
+                    assertEquals("Must exercise the manifest launcher", ServerListActivity::class.java.name, it.component?.className)
+                    assertEquals(Intent.ACTION_MAIN, it.action)
+                    assertTrue(it.hasCategory(Intent.CATEGORY_LAUNCHER))
+                }
+            } else Intent(context, ChatActivity::class.java).putExtra(ChatActivity.EXTRA_SERVER_ID, server.id)
+            ActivityScenario.launch<android.app.Activity>(intent).use {
+                tap(if (allow) "Allow" else "Don’t allow", permission = true) {
+                    if (launcher) assertEquals("Launcher connected before the real OS permission decision", 0, sessions.get())
+                }
                 await("Permission result did not reach Android") {
                     context.getSharedPreferences("needs_you_permission", 0).getBoolean("asked", false) &&
                         context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
                         (if (allow) PackageManager.PERMISSION_GRANTED else PackageManager.PERMISSION_DENIED) &&
                         automation.rootInActiveWindow?.packageName?.toString() == context.packageName
                 }
-                await("Chat did not initialize after the permission decision") { pageReady(scenario, "permission-${sessions.get()}") }
+                await("Chat did not initialize after the permission decision") {
+                    sessions.get() > 0 && pageReady("permission-${sessions.get()}")
+                }
+                if (launcher) assertTrue("Launcher must probe then auto-connect without a worker-row tap", probes.get() > 0)
                 val before = sessions.get()
                 tap("More chat options")
                 tap("Refresh chat")
                 await("A real Refresh chat tap did not mint another session") { sessions.get() > before }
-                await("Refreshed chat is not usable") { pageReady(scenario, "permission-${sessions.get()}") }
+                await("Refreshed chat is not usable") { pageReady("permission-${sessions.get()}") }
                 assertEquals(allow, NotificationManagerCompat.from(context).areNotificationsEnabled())
-                println("NOTIFICATION_PERMISSION_PROOF: decision=${if (allow) "allow" else "deny"}; real_system_prompt=true; chat_refresh=ok")
+                println("NOTIFICATION_PERMISSION_PROOF: entry=${if (launcher) "launcher" else "chat"}; decision=${if (allow) "allow" else "deny"}; real_system_prompt=true; chat_refresh=ok")
             }
         } finally {
+            // Closing the launcher scenario does not own the chat it auto-opened.
+            instrumentation.runOnMainSync {
+                val monitor = ActivityLifecycleMonitorRegistry.getInstance()
+                listOf(Stage.RESUMED, Stage.PAUSED, Stage.STOPPED).flatMap { monitor.getActivitiesInStage(it) }
+                    .filterIsInstance<ChatActivity>().distinct().forEach { it.finish() }
+            }
+            instrumentation.waitForIdleSync()
             // Each branch runs in its own instrumentation process with cleared app data.
             WorkManager.getInstance(context).cancelAllWork().result.get(5, TimeUnit.SECONDS)
+            presenceField.set(null, previousPresence)
             field.set(null, previous); ChatActivity.uiFixture = null
             instrumentation.runOnMainSync { ServerStore.get(context).remove(server.id) }
             client.dispatcher.executorService.shutdown()

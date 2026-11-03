@@ -94,8 +94,15 @@ jobs:
         with:
           name: android-minified-smoke-apks
           path: android/minified-apks
-      - name: Download verified official AOSP WebView for API 36
+      - name: Cache pinned AOSP alternate WebView
         if: matrix.api == 36
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ci-webview.apk
+          key: aosp-webview-x86_64-8da41a8692c64870dc875a0fa656c59a678aa09902935c5095e7de6fd7c55a87
+      - name: Fetch or verify pinned AOSP alternate WebView for API 36
+        if: matrix.api == 36
+        # On cache hits the helper still verifies size/SHA; installation verifies again.
         run: python3 ci/ci_webview.py "$RUNNER_TEMP/ci-webview.apk"
       - name: Free disk for the disposable AVD
         run: |

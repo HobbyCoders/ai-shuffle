@@ -123,7 +123,8 @@ def prepare(adb, out: Path, *, deadline_seconds=120, required_samples=3, sleep=t
 
 # Both API 36 SDK images ship WebView 133. Suppressing its dangling-pointer
 # check only moved the native abort to basic_string SIGABRT (41509192630,
-# 41509957738). Chromium's intercepted-request WeakPtr fix is in 136 (74beb528).
+# 41509957738). Chromium's intercepted-request WeakPtr fix is in 136 (74beb528),
+# but its causal link to those unsymbolized aborts is inferred, not established.
 # On google_apis, com.android.webview is an allowed but ABSENT alternate provider
 # (41544019324). Co-install the official signed AOSP package: do not replace a
 # differently signed system package, bypass signatures or disable crash checks.
@@ -158,7 +159,11 @@ def configure_webview(adb, out: Path, installer=install_webview):
             expected = f"Current WebView package (name, version): (com.android.webview, {VERSION})"
             if provider.count(expected) != 1:
                 raise RuntimeError("Verified AOSP WebView did not become the active provider: " + provider.strip())
-        report_workaround(adb, "Official API 36 WebView contains the request-lifetime fix; all crash checks enabled")
+        if int(current[0][1]) < 136:
+            description = "API 36 co-installed pinned AOSP alternate, not the phone provider"
+        else:
+            description = "API 36 retained its existing provider; see exact package/version"
+        report_workaround(adb, description + "; abort/request-lifetime link inferred; all crash checks enabled")
     else:
         print(f"SDK {sdk!r}: keeping stock WebView and all crash checks enabled", flush=True)
 
