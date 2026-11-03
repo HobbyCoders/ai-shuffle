@@ -6,10 +6,10 @@ wait deadline defers a kick, NOT the accepted turn. Callers retry without droppi
 work. FIFO applies to this worker's waiting set; durable overflow retries join its
 tail. Remote dispatch is admitted by the executing worker, never by the sender.
 
-An old checkout blocks starts only while it could still be a stalled operation.
-Past the bound every ordinary operation has, it is a maintenance job or a borrower
-that will never return, and queueing would hold every new turn forever without
-relieving anything (#1020). It still counts in utilization: that capacity is gone.
+An old checkout blocks starts for as long as it could be doing database work, however
+long that is. It stops only when PostgreSQL itself shows no work behind it, or it is
+declared maintenance: queueing then holds every new turn forever without relieving
+anything (#1020). It still counts in utilization: that capacity is gone.
 """
 from __future__ import annotations
 

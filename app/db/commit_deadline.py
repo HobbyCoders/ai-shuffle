@@ -5,10 +5,14 @@ One watchdog disconnects overdue sockets (never retries an uncertain commit).
 It never calls connection.cancel()/close(), which can themselves block in libpq.
 
 Descriptor numbers are not identities. A stray close elsewhere in the process can
-free either number the deadline relies on, and the next open reuses it. So every
-use re-checks the open file behind the number: a stranger on that number is never
-shut down or closed. Shutting one down breaks an unrelated socket, and closing one
-is itself the stray close that wedges the next connection (#1020).
+free any number the deadline relies on, and the next open reuses it. So identities
+come from a descriptor this module owns or from when the connection opened, never
+from a number that could already have changed hands, and every use re-checks the
+open file behind the number. Shutting down a stranger breaks an unrelated socket,
+and closing one is itself the stray close that wedges the next connection (#1020).
+A check and its use are separate calls, so a close landing between them cannot be
+excluded from user space: this narrows that window to microseconds, it does not
+remove it. Windows has no such check (see ``_identity``) and trusts the numbers.
 """
 from __future__ import annotations
 
@@ -20,6 +24,7 @@ import sys
 import threading
 import time
 import traceback
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator
@@ -34,7 +39,13 @@ _close_failure_lock = threading.Lock()
 
 
 def _identity(fd: int) -> tuple[int, int] | None:
-    """The open file behind a number now; None if none, or on Windows sockets."""
+    """The open file behind a number now; None if none, or on Windows.
+
+    Windows socket numbers are Winsock handles, while os.fstat reads C runtime
+    descriptors, a different table: a match there would describe an unrelated file.
+    """
+    if os.name == "nt":
+        return None
     try:
         info = os.fstat(fd)
     except OSError:
@@ -52,14 +63,29 @@ def owner_frames(thread_id: int) -> str:
     return " <- ".join(f"{item.filename}:{item.lineno}:{item.name}" for item in stack)
 
 
+# The socket each pooled connection opened with: the only record that outlives its
+# number changing hands while the connection sits idle in the pool.
+_transports: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def remember_transport(conn: object) -> None:
+    """Record a just-opened connection's socket. Doubles have none."""
+    if isinstance(conn, psycopg2.extensions.connection):
+        _transports[conn] = _identity(conn.fileno())
+
+
 @dataclass
 class _Armed:
     deadline: float
     fd: int
-    # None where the platform cannot say (Windows): the numbers are then trusted.
-    identity: tuple[int, int] | None
+    # Where the platform cannot say (Windows) these are None and numbers are trusted.
+    # What the duplicate is: decides whether closing that number is still ours to do.
+    duplicate: tuple[int, int] | None
+    # What the connection's socket is: decides what may be shut down.
+    transport: tuple[int, int] | None
     thread_id: int
     thread_name: str
+    backend_pid: int | None = None
 
 
 def _close_duplicate(sock: socket.socket, identity: tuple[int, int] | None) -> int | None:
@@ -132,19 +158,23 @@ def _disconnect(sock: socket.socket, armed: _Armed) -> tuple[str, str]:
     number was replaced libpq polls a stranger: shutting down the real transport
     still ends the server's transaction, but nothing can wake that poll, so the
     borrower keeps its checkout until the stranger's peer closes (see
-    ``_RETAINED_HOLD_SECONDS`` in base.py for what limits the damage).
+    ``_HOLD_CHECK_SECONDS`` in base.py for what limits the damage).
     """
-    if armed.identity is None:
+    if armed.transport is None:
         return _shutdown_quietly(sock), "unknown"
-    libpq_intact = _identity(armed.fd) == armed.identity
-    transport = "intact" if libpq_intact else "replaced"
-    if _identity(sock.fileno()) == armed.identity:
+    # Only a label for the log: the shutdown below validates what it actually holds.
+    transport = "intact" if _identity(armed.fd) == armed.transport else "replaced"
+    if _identity(sock.fileno()) == armed.transport:
         return _shutdown_quietly(sock), transport
-    if not libpq_intact:
-        return "unreachable", transport
-    # The duplicate was lost, not the transport: without this the commit has no bound.
+    # The duplicate was lost: without this the commit has no bound. Duplicate first
+    # and validate the copy, since libpq's number can change hands at any moment.
+    # Nothing here may raise: it would end the watchdog and every later deadline.
     try:
-        with socket.socket(fileno=socket.dup(armed.fd)) as fresh:
+        fresh_fd = socket.dup(armed.fd)
+        if _identity(fresh_fd) != armed.transport:
+            socket.close(fresh_fd)
+            return "unreachable", transport
+        with socket.socket(fileno=fresh_fd) as fresh:
             return _shutdown_quietly(fresh), transport
     except OSError as exc:
         return errno.errorcode.get(exc.errno or 0, "failed"), transport
@@ -172,7 +202,11 @@ class _CommitWatchdog:
             socket.close(duplicate_fd)
             raise
         thread = threading.current_thread()
-        armed = _Armed(time.monotonic() + seconds, fd, _identity(fd), thread.ident or 0, thread.name)
+        # Read from the duplicate we own: libpq's number can change hands right after
+        # dup, and recording that stranger would make it the one the deadline shuts down.
+        identity = _identity(duplicate_fd)
+        armed = _Armed(time.monotonic() + seconds, fd, identity, identity,
+                       thread.ident or 0, thread.name)
         with self._condition:
             self._pending[duplicate] = armed
             if not self._started:
@@ -180,6 +214,20 @@ class _CommitWatchdog:
                 self._started = True
             self._condition.notify()
         return duplicate
+
+    def bind(self, sock: socket.socket, transport: tuple[int, int] | None,
+             backend_pid: int | None) -> None:
+        """Say which connection this deadline is for, once the pool knows its socket.
+
+        If libpq's number changed hands before arm, the duplicate is of a stranger:
+        only the identity from when the connection opened can reveal that.
+        """
+        with self._condition:
+            armed = self._pending.get(sock)
+            if armed is not None:
+                armed.backend_pid = backend_pid
+                if transport is not None:
+                    armed.transport = transport
 
     def disarm(self, sock: socket.socket) -> bool:
         # Serialize with shutdown: once disarmed, a returned pooled connection
@@ -189,7 +237,7 @@ class _CommitWatchdog:
             expired = sock in self._expired
             self._expired.discard(sock)
             # An expired duplicate was closed or forgotten by the watchdog.
-            close_failure = None if armed is None else _close_duplicate(sock, armed.identity)
+            close_failure = None if armed is None else _close_duplicate(sock, armed.duplicate)
             self._condition.notify()
         if close_failure is not None:
             _report_close_failure(close_failure)
@@ -209,7 +257,7 @@ class _CommitWatchdog:
                 self._pending.pop(sock)
                 self._expired.add(sock)
                 shutdown, transport = _disconnect(sock, armed)
-                close_failure = _close_duplicate(sock, armed.identity)
+                close_failure = _close_duplicate(sock, armed.duplicate)
             if close_failure is not None:
                 _report_close_failure(close_failure)
             # Otherwise the borrower wakes now and reports the deadline itself.
@@ -224,10 +272,10 @@ class _CommitWatchdog:
         try:
             _warn_best_effort(
                 "Commit deadline expired: shutdown=%s transport=%s duplicate_close=%s "
-                "thread=%s frames=%s",
+                "thread=%s backend_pid=%s frames=%s",
                 shutdown, transport,
                 "ok" if close_failure is None else errno.errorcode.get(close_failure, close_failure),
-                armed.thread_name, owner_frames(armed.thread_id),
+                armed.thread_name, armed.backend_pid, owner_frames(armed.thread_id),
             )
         except Exception:  # noqa: BLE001 - a diagnostic never stops later deadlines
             pass
@@ -245,6 +293,7 @@ def bounded_commit(conn: psycopg2.extensions.connection) -> Iterator[None]:
         return
     sock = _watchdog.arm(conn.fileno(), COMMIT_TIMEOUT_SECONDS)
     try:
+        _watchdog.bind(sock, _transports.get(conn), conn.info.backend_pid)
         yield
     finally:
         expired = _watchdog.disarm(sock)

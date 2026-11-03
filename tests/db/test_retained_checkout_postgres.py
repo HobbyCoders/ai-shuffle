@@ -10,17 +10,22 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import socket
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import psycopg2
 import pytest
 
-from app.core import start_admission
-from app.db import base, commit_deadline
+from app.core import session_runtime, start_admission
+from app.db import base, commit_deadline, database, history_indexing
+from app.db import turns as turns_db
+from app.db.schema_postgres import create_postgres_schema
+from tests.core.helpers import make_pump
+from tests.core.test_session_runtime import _runtime_env
 from tests.db.test_commit_deadline_postgres import private_db, private_pool  # noqa: F401
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="replaces raw socket descriptors")
@@ -35,6 +40,7 @@ def quick_gate(monkeypatch: pytest.MonkeyPatch) -> start_admission.StartAdmissio
     }.items():
         monkeypatch.setattr(start_admission.settings, "db_start_" + key, value)
     monkeypatch.setattr(commit_deadline, "COMMIT_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(base, "_HOLD_RECHECK_SECONDS", 0.05)
     return start_admission.StartAdmission()
 
 
@@ -100,6 +106,26 @@ async def _admit(gate: start_admission.StartAdmission, turn: str) -> str:
     return await asyncio.wait_for(gate.wait(turn, turn, lambda: False), 10)
 
 
+async def _until(condition: Callable[[], Any], seconds: float = 5.0) -> None:
+    """Read the pool's stats while waiting: reading them is what asks PostgreSQL."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        base.pressure_stats()
+        if condition():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition not reached")
+
+
+def _peer_still_works(sock: socket.socket, peer: socket.socket) -> None:
+    peer.settimeout(1)
+    sock.settimeout(1)
+    peer.sendall(b"x")
+    assert sock.recv(1) == b"x"
+    sock.sendall(b"y")
+    assert peer.recv(1) == b"y"
+
+
 def _serve_healthy_reads() -> None:
     with base.get_db() as conn:
         cursor = conn.cursor()
@@ -117,7 +143,7 @@ async def test_new_turn_starts_while_one_checkout_is_retained_forever(
 ) -> None:
     """The incident's state: one held, others idle, no waiters, turns must still run."""
     caplog.set_level(logging.WARNING, logger="app.db")
-    monkeypatch.setattr(base, "_RETAINED_HOLD_SECONDS", 1.0)
+    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 1.0)
     wedge.steal(libpq_fd=True, duplicate=True)
     wedge.start()
 
@@ -140,18 +166,24 @@ async def test_new_turn_starts_while_one_checkout_is_retained_forever(
     assert len(retained) == 1, retained
     assert "wedged-borrower" in retained[0]
     assert "test_retained_checkout_postgres.py" in retained[0]
+    assert "backend=gone" in retained[0]
+    await asyncio.sleep(0.2)
     base.pressure_stats()
     assert len([r for r in caplog.records if "connection retained" in r.getMessage()]) == 1
+    # The deadline and the checkout name the same backend, so a log can join them.
+    expired = [r.getMessage() for r in caplog.records if "deadline expired" in r.getMessage()]
+    pid = re.search(r"backend_pid=(\d+)", retained[0]).group(1)
+    assert len(expired) == 1 and f"backend_pid={pid} " in expired[0]
 
 
 @pytest.mark.asyncio
 async def test_a_younger_stuck_checkout_keeps_turns_queued(
     private_pool, quick_gate, monkeypatch,  # noqa: F811
 ) -> None:
-    """Real pressure beside an old retained hold is still real pressure."""
-    monkeypatch.setattr(base, "_RETAINED_HOLD_SECONDS", 0.2)
-    forgotten = private_pool.getconn()
-    await asyncio.sleep(0.3)
+    """Real pressure beside an abandoned hold is still real pressure."""
+    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.5)
+    forgotten = private_pool.getconn()  # Its thread never touches it: backend stays idle.
+    await _until(lambda: base.pressure_stats()["retained_holds"] == 1)
     assert start_admission.snapshot()["oldest"] == 0
     young = private_pool.getconn()
     await asyncio.sleep(0.08)
@@ -159,6 +191,148 @@ async def test_a_younger_stuck_checkout_keeps_turns_queued(
     assert quick_gate._pressured(time.monotonic())
     private_pool.putconn(young)
     private_pool.putconn(forgotten)
+
+
+# ---------------------------------------------------------------------------
+# Age alone never releases a checkout that is still working
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_progressing_transaction_keeps_turns_queued_past_the_check_age(
+    private_pool, quick_gate, monkeypatch, caplog,  # noqa: F811
+) -> None:
+    """statement_timeout bounds each statement: the transaction can outlive any total."""
+    caplog.set_level(logging.WARNING, logger="app.db")
+    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.4)
+    committed = threading.Event()
+
+    def backfill() -> None:
+        with base.get_db() as conn:
+            cursor = conn.cursor()
+            for _ in range(5):
+                cursor.execute("SELECT pg_sleep(0.25)")
+                time.sleep(0.05)
+        committed.set()
+
+    worker = threading.Thread(target=backfill, name="progressing-borrower", daemon=True)
+    worker.start()
+    await _until(lambda: "still counted" in caplog.text)
+    assert not committed.is_set()
+    assert base.pressure_stats()["oldest_hold_seconds"] >= 0.4
+    assert await _admit(quick_gate, "turn-1") == "ready"
+    assert committed.is_set(), "a turn started while the transaction was still working"
+    assert base.pressure_stats()["retained_holds"] == 0
+    assert "connection retained" not in caplog.text
+    worker.join(5)
+
+
+@pytest.mark.asyncio
+async def test_one_running_statement_counts_however_old_and_reports_its_wait(
+    private_pool, quick_gate, monkeypatch, caplog,  # noqa: F811
+) -> None:
+    caplog.set_level(logging.WARNING, logger="app.db")
+    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.2)
+    secret = "never-log-this-statement"
+
+    def run() -> None:
+        with base.get_db() as conn:
+            conn.cursor().execute(f"SELECT pg_sleep(1.0), '{secret}'")
+
+    worker = threading.Thread(target=run, name="long-statement", daemon=True)
+    worker.start()
+    await _until(lambda: "still counted" in caplog.text)
+    await asyncio.sleep(0.5)  # Well past the check age, and rechecked since.
+    base.pressure_stats()
+    assert start_admission.snapshot()["oldest"] >= 0.5
+    assert base.pressure_stats()["retained_holds"] == 0
+    assert "state=active wait=Timeout:PgSleep" in caplog.text
+    assert "long-statement" in caplog.text and secret not in caplog.text
+    worker.join(5)
+
+
+@pytest.mark.asyncio
+async def test_no_answer_from_postgres_keeps_the_checkout_counted(
+    private_pool, quick_gate, monkeypatch,  # noqa: F811
+) -> None:
+    """A database too stalled to answer is exactly what admission protects."""
+    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.1)
+    forgotten = private_pool.getconn()
+    asked = threading.Event()
+
+    def unreachable(*args: Any, **kwargs: Any) -> None:
+        asked.set()
+        raise psycopg2.OperationalError("connection refused")
+
+    monkeypatch.setattr(base.psycopg2, "connect", unreachable)
+    await _until(asked.is_set)
+    await asyncio.sleep(0.2)
+    assert base.pressure_stats()["retained_holds"] == 0
+    assert start_admission.snapshot()["oldest"] >= 0.1
+    assert quick_gate._pressured(time.monotonic())
+    private_pool.putconn(forgotten)
+
+
+# ---------------------------------------------------------------------------
+# A real turn on the real pool, and declared maintenance
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def schema_pool(
+    private_db, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> Iterator[base._RetainingThreadedConnectionPool]:
+    """Pool size as production has it, with the application's real schema."""
+    params = {k: private_db[k] for k in ("host", "port", "user", "password")}
+    pool = base._RetainingThreadedConnectionPool(1, 10, reserved=2, dbname=private_db["database"], **params)
+    monkeypatch.setattr(base, "_pg_pool", pool)
+    monkeypatch.setattr(base, "get_connection", base._get_pg_connection)
+    monkeypatch.setattr(database, "get_connection", base._get_pg_connection)
+    try:
+        with base.get_db() as conn:
+            create_postgres_schema(conn.cursor())
+        yield pool
+    finally:
+        pool.closeall()
+
+
+@pytest.mark.asyncio
+async def test_a_producing_turn_runs_on_the_real_pool_beside_a_wedged_checkout(
+    schema_pool, quick_gate, wedge, monkeypatch,
+) -> None:
+    """#1020 at the level it hurt: lease, turn store and events on real PostgreSQL."""
+    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 1.0)
+    monkeypatch.setattr(start_admission, "admission", quick_gate)
+    wedge.steal(libpq_fd=True, duplicate=True)
+    wedge.start()
+    with _runtime_env(pump=make_pump([{"type": "done"}])):
+        with base.get_db() as conn:
+            conn.cursor().execute("INSERT INTO sessions (id) VALUES ('retained-pg')")
+        turn = turns_db.enqueue_turn("retained-pg", "user", prompt="hello")
+        running = asyncio.create_task(session_runtime.SessionRuntime(turn).execute())
+        await asyncio.sleep(0.3)
+        assert not running.done(), "the gate must protect until PostgreSQL has answered"
+        assert await asyncio.wait_for(running, 15) == "completed"
+    assert turns_db.get_turn(turn["id"])["state"] == "completed"
+    assert base.pressure_stats()["retained_holds"] == 1
+    assert not wedge.finished.is_set()
+
+
+def test_declared_maintenance_does_not_hold_new_turns(
+    schema_pool, monkeypatch,
+) -> None:
+    declared: list[Any] = []
+    real = schema_pool.exempt_hold
+
+    def exempt(conn: Any) -> None:
+        real(conn)
+        declared.append(base.pressure_stats()["maintenance_holds"])
+        assert start_admission.snapshot()["oldest"] == 0
+
+    monkeypatch.setattr(schema_pool, "exempt_hold", exempt)
+    database.run_database_maintenance()
+    assert declared == [1, 1], "ANALYZE and VACUUM each declare their checkout"
+    with history_indexing._online_cursor():
+        assert declared == [1, 1, 1]
+    assert base.pressure_stats()["maintenance_holds"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +427,100 @@ def test_disarm_does_not_close_a_stranger_on_the_same_number() -> None:
                 os.close(number)
             except OSError:
                 pass
+        for item in (transport, transport_peer, stranger, stranger_peer):
+            item.close()
+
+
+def test_replacing_the_number_while_arming_cannot_aim_the_deadline_at_a_stranger(
+    monkeypatch,
+) -> None:
+    """Identity comes from the duplicate we own, not the number that just changed hands."""
+    watchdog = commit_deadline._CommitWatchdog()
+    transport, transport_peer = socket.socketpair()
+    stranger, stranger_peer = socket.socketpair()
+    real_dup = socket.dup
+
+    def dup_then_replace(fd: int) -> int:
+        duplicate = real_dup(fd)
+        if fd == transport.fileno():
+            os.dup2(stranger.fileno(), fd)
+        return duplicate
+
+    monkeypatch.setattr(commit_deadline.socket, "dup", dup_then_replace)
+    try:
+        sock = watchdog.arm(transport.fileno(), 0.05)
+        number = sock.fileno()
+        real_identity = commit_deadline._identity(number)
+        monkeypatch.setattr(commit_deadline.socket, "dup", real_dup)
+        time.sleep(0.3)
+        assert watchdog.disarm(sock) is True
+        transport_peer.settimeout(1)
+        assert transport_peer.recv(1) == b""  # The armed transport was the one disconnected.
+        _peer_still_works(stranger, stranger_peer)
+        # ...and its private duplicate was closed, not forgotten and leaked.
+        assert commit_deadline._identity(number) != real_identity
+    finally:
+        for item in (transport, transport_peer, stranger, stranger_peer):
+            item.close()
+
+
+def test_a_number_replaced_before_arming_is_never_taken_for_the_transport(caplog) -> None:
+    """Idle in the pool is the widest window: the duplicate itself is then of a stranger."""
+    caplog.set_level(logging.WARNING, logger=commit_deadline.logger.name)
+    watchdog = commit_deadline._CommitWatchdog()
+    transport, transport_peer = socket.socketpair()
+    stranger, stranger_peer = socket.socketpair()
+    try:
+        opened_with = commit_deadline._identity(transport.fileno())
+        os.dup2(stranger.fileno(), transport.fileno())
+        sock = watchdog.arm(transport.fileno(), 0.05)
+        number = sock.fileno()
+        watchdog.bind(sock, opened_with, 4242)
+        time.sleep(0.3)
+        assert watchdog.disarm(sock) is True
+        _peer_still_works(stranger, stranger_peer)
+        # The duplicate was ours to close even though it named the stranger.
+        assert commit_deadline._identity(number) is None or number == stranger.fileno()
+        assert "shutdown=unreachable transport=replaced" in caplog.text
+        assert "backend_pid=4242" in caplog.text
+    finally:
+        for item in (transport, transport_peer, stranger, stranger_peer):
+            item.close()
+
+
+def test_replacing_the_number_during_the_fallback_cannot_reach_a_stranger(
+    monkeypatch, caplog,
+) -> None:
+    """The fallback validates the copy it took, not the number before it took it."""
+    caplog.set_level(logging.WARNING, logger=commit_deadline.logger.name)
+    watchdog = commit_deadline._CommitWatchdog()
+    transport, transport_peer = socket.socketpair()
+    stranger, stranger_peer = socket.socketpair()
+    stranger_identity = commit_deadline._identity(stranger.fileno())
+    real_dup = socket.dup
+    copies: list[int] = []
+
+    def replace_then_dup(fd: int) -> int:
+        if threading.current_thread().name == "db-commit-deadline":
+            os.dup2(stranger.fileno(), fd)  # The number changed hands after any check of it.
+            copies.append(real_dup(fd))
+            return copies[-1]
+        return real_dup(fd)
+
+    monkeypatch.setattr(commit_deadline.socket, "dup", replace_then_dup)
+    try:
+        sock = watchdog.arm(transport.fileno(), 0.05)
+        os.close(sock.fileno())  # The duplicate is lost, which sends expiry to the fallback.
+        time.sleep(0.3)
+        assert watchdog.disarm(sock) is True
+        assert copies, "expiry never reached the fallback"
+        _peer_still_works(stranger, stranger_peer)
+        # The transport= label was read before the number changed hands; what counts
+        # is that the copy was checked and nothing was shut down.
+        assert "shutdown=unreachable" in caplog.text
+        # Its copy of the stranger was closed again, not left open.
+        assert commit_deadline._identity(copies[0]) != stranger_identity
+    finally:
         for item in (transport, transport_peer, stranger, stranger_peer):
             item.close()
 

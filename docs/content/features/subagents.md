@@ -54,12 +54,15 @@ Administrators can tune `DB_START_UTILIZATION` (0.85),
 `DB_START_WAIT_SECONDS` (300), then restart the candidate worker. These do not
 increase pool capacity or allow starts to borrow lease-reserved connections.
 
-A checkout older than 60 seconds stops counting as a stall. Every ordinary
-database operation has ended or been disconnected by then (30-second statement
-limit plus 30-second commit deadline), so an older one is a maintenance job or a
-borrower that will never return, and queueing does not relieve it. New turns start
-again, its slot still counts toward utilization, and the worker logs one warning
-naming where that thread is.
+An old checkout keeps holding new turns for as long as it could be doing database
+work, however long that takes: the 30-second statement limit bounds each statement,
+not the whole transaction. Once a checkout passes 60 seconds the worker asks
+PostgreSQL about it on a separate connection and logs a warning naming the thread and
+the backend's state. The checkout stops counting only if its backend has exited or
+has run nothing for 60 seconds; if PostgreSQL does not answer, it keeps counting.
+Once it stops counting, new turns can start again and its slot still counts toward
+utilization. VACUUM, ANALYZE and online history index builds are declared maintenance
+and never count this way, though slow database latency still holds new turns.
 
 ## Checkout setup and review commits
 

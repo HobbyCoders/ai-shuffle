@@ -76,7 +76,10 @@ async def test_producing_turn_runs_beside_a_checkout_that_never_returns(
     pool._reserved = 2
     monkeypatch.setattr(base, "_close_connection", lambda conn: None)
     retained = pool.getconn()
-    pool._held_since[id(retained)] -= base._RETAINED_HOLD_SECONDS
+    pool._held_since[id(retained)] -= base._HOLD_CHECK_SECONDS
+    # What PostgreSQL's answer records; tests/db/test_retained_checkout_postgres.py
+    # drives the same state from a real backend.
+    pool._abandoned_holds.add(id(retained))
     gate = start_admission.StartAdmission()
     monkeypatch.setattr(start_admission, "admission", gate)
     with patch.multiple(
@@ -95,15 +98,19 @@ async def test_producing_turn_runs_beside_a_checkout_that_never_returns(
             pool.putconn(retained)
 
 
-def test_only_writes_that_can_still_finish_count_as_event_pressure(
-    monkeypatch: pytest.MonkeyPatch,
+def test_a_write_on_an_abandoned_connection_stops_counting_as_event_pressure(
+    retaining_pool: tuple, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
 ) -> None:
-    """A durable event write that never returns stops counting the same way."""
+    """Age alone is not enough: only PostgreSQL's answer about its connection."""
+    pool, _ = retaining_pool
     now = time.monotonic()
-    active = {"stuck": now - base._RETAINED_HOLD_SECONDS - 1}
+    active = {"stuck": now - base._HOLD_CHECK_SECONDS - 1}
     monkeypatch.setattr(base, "_event_active", active)
+    monkeypatch.setattr(base, "_event_connections", {"stuck": 42})
+    assert start_admission.snapshot()["oldest"] >= base._HOLD_CHECK_SECONDS
+    pool._abandoned_holds.add(42)
     assert start_admission.snapshot()["oldest"] == 0
-    assert base.event_pressure_stats()["oldest_write_seconds"] >= base._RETAINED_HOLD_SECONDS
+    assert base.event_pressure_stats()["oldest_write_seconds"] >= base._HOLD_CHECK_SECONDS
     active["young"] = now - 5
     assert 5 <= start_admission.snapshot()["oldest"] < 6
 
