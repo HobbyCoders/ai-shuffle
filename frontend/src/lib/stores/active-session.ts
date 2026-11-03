@@ -154,7 +154,7 @@ export interface ActiveSessionState {
 	 *  targets that turn — a stop delivered after its turn settled then no-ops
 	 *  server-side instead of interrupting the successor turn (GitHub #585). */
 	liveTurnId: string | null;
-	/** The live turn this device pressed Stop on (see not-sent-hold). */
+	/** The turn this device pressed Stop on, or STOP_TURN_NOT_NAMED before the feed names it (see not-sent-hold). */
 	stopRequestedTurnId?: string | null;
 	/** The turn whose Stop was never confirmed (see not-sent-hold). */
 	stopTimedOutTurnId?: string | null;

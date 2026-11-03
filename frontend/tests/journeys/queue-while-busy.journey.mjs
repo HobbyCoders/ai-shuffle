@@ -15,7 +15,10 @@ import {
 	gotoApp,
 	holdBootLoad,
 	openFromSidebar,
+	PROJECT,
+	chatState,
 	openNewChat,
+	pickAccess,
 	pickAgent,
 	scriptTag,
 	scrollTranscriptTo,
@@ -113,7 +116,23 @@ function growTranscriptOnePixel(page) {
 	});
 }
 
+/** How long Stop waits for the server to confirm (message-sender.ts). */
+const STOP_TIMEOUT_MS = 10_000;
+
 const jumpToLatestButton = (page) => page.getByRole('button', { name: 'Jump to latest message' });
+
+/** The composer's Stop: a background job's row has a Stop button of its own. */
+const stopGenerating = (page) => page.getByRole('button', { name: 'Stop generating' });
+
+/** The park-wait scenario: its last words before parking, and how long its job runs. */
+const PARKED_REPLY = "I'll wait for it";
+const PARK_JOB_MS = 20_000;
+
+/** Stop asks first when background work is running, since it ends that too. */
+async function stopEverything(page) {
+	await stopGenerating(page).click();
+	await page.getByRole('button', { name: 'Stop everything' }).click();
+}
 
 /** Send a slow turn and queue messages the server has confirmed, so only Stop can change them from here. */
 async function queueDuringASlowTurn(page, mark, variant, queued) {
@@ -541,6 +560,260 @@ await runJourney({
 				await page.waitForFunction((t) => document.querySelector('[role="textbox"][aria-label="Message"]')?.textContent?.includes(t), `queued ${texts[0]}`, { timeout: 10_000 });
 				await notSent(texts[0]).waitFor({ state: 'detached', timeout: 10_000 });
 				await notSent(texts[1]).getByRole('button', { name: 'Restore to composer' }).waitFor({ timeout: 5000 });
+			}
+		},
+		{
+			// Stop before the feed has named the turn: the queue's own socket empties
+			// the bubbles at once, and the rows are behind the stalled feed. Each
+			// message must still show the whole time.
+			name: 'stop-before-the-turn-is-named-keeps-every-bubble',
+			async setup(ctx) {
+				await ctx.page.addInitScript(() => {
+					const original = window.fetch;
+					window.fetch = async (input, init) => {
+						const url = typeof input === 'string' ? input : input.url;
+						if (/\/sessions\/[^/]+\/events/.test(url)) await window.__feedHeld;
+						return original(input, init);
+					};
+					window.__feedHeld = new Promise((resolve) => { window.__releaseFeed = resolve; });
+				});
+				await openStopChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant, log }) {
+				await mark('send');
+				await typeAndSend(page, `stream tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 2 })}`);
+				await waitChat(page, { streaming: 'true' });
+				await mark('queue');
+				const texts = [`tok-${uniq()}`, `tok-${uniq()}`];
+				for (const text of texts) {
+					await typeAndSend(page, `queued ${text}`);
+					await page.locator('.pending-messages [role="article"]').filter({ hasText: text }).waitFor({ timeout: 5000 });
+				}
+				await page.waitForFunction(
+					(n) => document.querySelectorAll('.pending-messages [data-queue-confirmed="true"]').length === n,
+					texts.length,
+					{ timeout: 30_000 }
+				);
+				const collect = await watchStopFrames(page, texts);
+				await mark('stop');
+				await stopGenerating(page).click();
+				// Long enough for the queue's socket to report it empty.
+				await page.waitForTimeout(1500);
+				await mark('the feed catches up');
+				await page.evaluate(() => window.__releaseFeed());
+				await waitChat(page, { streaming: 'false' }, { timeout: 30_000 });
+				for (const text of texts) await page.locator('[data-not-sent="true"]').filter({ hasText: text }).waitFor({ timeout: 8000 });
+				await page.waitForTimeout(500);
+				const frames = await collect();
+				log(`${frames.length} frames; last: ${JSON.stringify(frames.at(-1).messages)}`);
+				expectEachOnceInEveryFrame(frames);
+			}
+		},
+		{
+			// The server takes the Stop but the page hears nothing back on either route,
+			// so the timeout gives up waiting. Once it can hear again, the words are rows
+			// that can be restored, and they showed exactly once all the way through.
+			name: 'stop-confirmation-times-out-then-rows-can-be-restored',
+			async setup(ctx) {
+				await ctx.page.addInitScript(() => {
+					const original = window.fetch;
+					window.__deaf = null;
+					window.fetch = async (input, init) => {
+						const response = await original(input, init);
+						const url = typeof input === 'string' ? input : input.url;
+						if (!/\/sessions\/[^/]+\/events/.test(url) || !response.body) return response;
+						const reader = response.body.getReader();
+						const body = new ReadableStream({
+							async pull(controller) {
+								const { done, value } = await reader.read();
+								if (window.__deaf) await window.__deaf;
+								if (done) controller.close();
+								else controller.enqueue(value);
+							},
+							cancel: (reason) => reader.cancel(reason)
+						});
+						return new Response(body, { status: response.status, headers: response.headers });
+					};
+					const Native = window.WebSocket;
+					window.WebSocket = class extends Native {
+						constructor(...args) {
+							super(...args);
+							this.addEventListener('message', (event) => {
+								if (window.__deaf) event.stopImmediatePropagation();
+							});
+						}
+					};
+				});
+				await openStopChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant, log }) {
+				const notSent = (text) => page.locator('[data-not-sent="true"]').filter({ hasText: text });
+				const texts = await queueDuringASlowTurn(page, mark, variant, 2);
+				await page.evaluate(() => {
+					window.__deaf = new Promise((resolve) => { window.__hearAgain = resolve; });
+				});
+				const collect = await watchStopFrames(page, texts);
+				await mark('stop');
+				await stopGenerating(page).click();
+				// Streaming ends on this page only because the timeout gave up.
+				await waitChat(page, { streaming: 'false' }, { timeout: STOP_TIMEOUT_MS + 3000 });
+				await page.waitForTimeout(500);
+				const deaf = await collect();
+				log(`at the timeout: ${JSON.stringify(deaf.at(-1).messages)}`);
+				expectEachOnceInEveryFrame(deaf);
+
+				await mark('the page hears again');
+				const resume = await watchStopFrames(page, texts);
+				await page.evaluate(() => { window.__deaf = null; window.__hearAgain(); });
+				for (const text of texts) await notSent(text).waitFor({ timeout: 30_000 });
+				await page.waitForTimeout(500);
+				const heard = await resume();
+				log(`after: ${JSON.stringify(heard.at(-1).messages)}`);
+				expectEachOnceInEveryFrame(heard);
+				for (const text of texts) {
+					await notSent(text).getByRole('button', { name: 'Restore to composer' }).waitFor({ timeout: 5000 });
+				}
+				expect((await page.locator('.pending-messages [role="article"]').count()) === 0, 'no bubble is left behind');
+				expect((await page.getByText(`You said: “queued`, { exact: false }).count()) === 0, 'neither message ran');
+			}
+		},
+		{
+			// The Stop never left: the server still has the turn and the queue. After
+			// the timeout gives up waiting, nothing was refused, so nothing may read
+			// "Not sent": the words stay queued and run when the turn ends.
+			name: 'stop-that-never-arrives-leaves-the-queue-alone',
+			async setup(ctx) {
+				await ctx.page.addInitScript(() => {
+					const send = WebSocket.prototype.send;
+					WebSocket.prototype.send = function (data) {
+						if (sessionStorage.getItem('journey-drop-stop') === '1' && typeof data === 'string' && /"type"\s*:\s*"stop"/.test(data)) return;
+						return send.call(this, data);
+					};
+				});
+				await openStopChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant, log }) {
+				const texts = await queueDuringASlowTurn(page, mark, variant, 1);
+				await page.evaluate(() => sessionStorage.setItem('journey-drop-stop', '1'));
+				const collect = await watchStopFrames(page, texts);
+				await mark('stop');
+				await stopGenerating(page).click();
+				await page.waitForTimeout(STOP_TIMEOUT_MS + 1000);
+				const atTimeout = await collect();
+				const afterTimeout = atTimeout.at(-1).messages;
+				log(`after the timeout: ${JSON.stringify(afterTimeout)}`);
+				expectEachOnceInEveryFrame(atTimeout);
+				atTimeout.forEach((frame, i) => frame.messages.forEach((message, m) => {
+					expect(message.labelledNotSent === 0 && message.notSent === 0, `queued message ${m} reads "Not sent" in frame ${i} (${frame.at}ms)`);
+				}));
+
+				await mark('the turn ends by itself');
+				for (const text of texts) {
+					await page.getByText(`queued ${text}`, { exact: false }).first().waitFor({ timeout: 90_000 });
+				}
+				await page.getByText('You said', { exact: false }).first().waitFor({ timeout: 120_000 });
+				await waitChat(page, { streaming: 'false' }, { timeout: 120_000 });
+				expect((await page.locator('[data-not-sent="true"]').count()) === 0, 'nothing became a not-sent row');
+			}
+		},
+		{
+			// Stop also ends the chat's background work, which must not bring back a
+			// wake turn that sends what Stop refused.
+			name: 'stop-with-a-background-job-keeps-the-words-out',
+			async setup(ctx) {
+				await openNewChat(ctx, { project: PROJECT });
+				await pickAccess(ctx.page, 'Bypass');
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant, log }) {
+				const notSent = (text) => page.locator('[data-not-sent="true"]').filter({ hasText: text });
+				await mark('start a background job');
+				await typeAndSend(page, `job tok-${uniq()} ${scriptTag(variant, 'tool-background-stream', { tps: 2, latency_ms: 0 })}`);
+				await page.locator('[data-ui-mount="MessageArea"]').getByTestId('tasks-toggle').waitFor({ timeout: 60_000 });
+				await waitChat(page, { streaming: 'true' }, { timeout: 30_000 });
+
+				await mark('queue');
+				const texts = [`tok-${uniq()}`, `tok-${uniq()}`];
+				for (const text of texts) {
+					await typeAndSend(page, `queued ${text}`);
+					await page.locator('.pending-messages [role="article"]').filter({ hasText: text }).waitFor({ timeout: 5000 });
+				}
+				const collect = await watchStopFrames(page, texts);
+				await mark('stop');
+				await stopEverything(page);
+				await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+				for (const text of texts) await notSent(text).waitFor({ timeout: 8000 });
+				await page.waitForTimeout(PAST_SETTLEMENT_MS);
+				const frames = await collect();
+				expectEachOnceInEveryFrame(frames);
+				const state = await chatState(page);
+				log(`after Stop: ${JSON.stringify(state)}`);
+				expect(state.streaming === 'false', 'still stopped well after Stop');
+				expect((await page.getByText(`You said: “queued`, { exact: false }).count()) === 0, 'neither message ran');
+				await notSent(texts[0]).getByRole('button', { name: 'Restore to composer' }).waitFor({ timeout: 5000 });
+			}
+		},
+		{
+			// Parked on a job, Stop is still offered, and ends the job: the wake it was
+			// waiting for must not come, and there is no turn left to jump around.
+			name: 'stop-on-a-parked-turn-ends-the-job',
+			async setup(ctx) {
+				await openNewChat(ctx, { project: PROJECT });
+				await pickAccess(ctx.page, 'Bypass');
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant, log }) {
+				await mark('park');
+				await typeAndSend(page, `park tok-${uniq()} ${scriptTag(variant, 'park-wait')}`);
+				await page.getByText(PARKED_REPLY, { exact: false }).first().waitFor({ timeout: 60_000 });
+				await waitChat(page, { streaming: 'false' }, { timeout: 30_000 });
+
+				await mark('stop while parked');
+				await stopEverything(page);
+				await stopGenerating(page).waitFor({ state: 'detached', timeout: 15_000 });
+				await page.waitForTimeout(1000);
+				const before = await chatState(page);
+
+				await mark('past the job');
+				await page.waitForTimeout(PARK_JOB_MS + 5000);
+				const after = await chatState(page);
+				log(`after Stop ${JSON.stringify(before)}; past the job ${JSON.stringify(after)}`);
+				expect(after.streaming === 'false', 'stayed stopped past the job');
+				expect(after.messages === before.messages, `the job did not wake the chat (${before.messages} → ${after.messages} messages)`);
+			}
+		},
+		{
+			// Parked on a job, a new turn with messages queued, then Stop: the job's
+			// wake must not run what Stop refused.
+			name: 'stop-after-a-parked-turn-keeps-the-words-out',
+			async setup(ctx) {
+				await openNewChat(ctx, { project: PROJECT });
+				await pickAccess(ctx.page, 'Bypass');
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant }) {
+				const notSent = (text) => page.locator('[data-not-sent="true"]').filter({ hasText: text });
+				await mark('park');
+				await typeAndSend(page, `park tok-${uniq()} ${scriptTag(variant, 'park-wait')}`);
+				await page.getByText(PARKED_REPLY, { exact: false }).first().waitFor({ timeout: 60_000 });
+				await waitChat(page, { streaming: 'false' }, { timeout: 30_000 });
+
+				const texts = await queueDuringASlowTurn(page, mark, variant, 2);
+				const collect = await watchStopFrames(page, texts);
+				await mark('stop');
+				await stopEverything(page);
+				await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+				for (const text of texts) await notSent(text).waitFor({ timeout: 8000 });
+
+				await mark('past the job');
+				await page.waitForTimeout(PARK_JOB_MS + 5000);
+				const frames = await collect();
+				expectEachOnceInEveryFrame(frames);
+				expect((await page.getByText(`You said: “queued`, { exact: false }).count()) === 0, 'neither message ran');
+				for (const text of texts) expect((await notSent(text).count()) === 1, 'each is still one not-sent row');
 			}
 		},
 		{

@@ -50,7 +50,7 @@
 	import UserMessage from './UserMessage.svelte';
 	import { agentDelivery, agentSender, agentSenderNames } from '$lib/utils/agent-delivery';
 	import { createAgentMessageProjection } from '$lib/utils/agent-message-projection';
-	import { createNotSentHold, createNotSentRowsArrival, createStopBubbleHold, restingOnNotSentRows, withHeldBubbles } from '$lib/utils/not-sent-hold';
+	import { createNotSentHold, createNotSentRowsArrival, createStopBubbleHold, restingOnNotSentRows, stopPressedOn, withHeldBubbles } from '$lib/utils/not-sent-hold';
 	import AgentMessage from './AgentMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import TurnActivity from './TurnActivity.svelte';
@@ -2006,7 +2006,7 @@
 	const pendingMessages = $derived(stopBubbles(
 		$activeSession.sessionId,
 		withHeldBubbles(notSentHold.bubbles, $activeSession.queuedMessages ?? []),
-		!!holdingTurnId && $activeSession.stopRequestedTurnId === holdingTurnId,
+		stopPressedOn($activeSession.stopRequestedTurnId, $activeSession.liveTurnId),
 		$activeSession.messages
 	));
 	const pendingPeerMessages = $derived($activeSession.pendingPeerMessages ?? []);

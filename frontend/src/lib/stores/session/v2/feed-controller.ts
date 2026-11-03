@@ -33,6 +33,7 @@ import type { SdkContextUsage } from '$lib/api/sessions';
 import type { QueuedMessage, Task } from '../../types';
 import { browserPanel } from '../../browser-panel.svelte';
 import { pendingQueue, reconcilePendingPeerMessages } from '../pending-queue';
+import { nameStoppedTurn } from '$lib/utils/not-sent-hold';
 import { swarms } from '../../swarms';
 
 /** MCP browser-tool prefix — a live `tool.use` for one auto-opens the panel. */
@@ -647,6 +648,7 @@ function fold(hydrationComplete = false): void {
 			? {
 					...s,
 					...patch,
+					stopRequestedTurnId: nameStoppedTurn(s.stopRequestedTurnId, reducerState.liveTurnId, patch.isStreaming === true),
 					queuedMessages: reconcileQueuedMessages(s.queuedMessages),
 					pendingPeerMessages: reconcilePendingPeerMessages(s.pendingPeerMessages ?? [], patch.messages ?? s.messages),
 				}

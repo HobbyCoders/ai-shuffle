@@ -52,6 +52,29 @@ export function createNotSentHold() {
 	};
 }
 
+/** What a Stop pressed before the feed named its turn is recorded against. */
+export const STOP_TURN_NOT_NAMED = 'turn-not-named';
+
+/**
+ * Whether the page is still waiting to hear how this device's Stop ended. The turn
+ * id, not streaming: Stop's timeout ends streaming on this page without the feed
+ * having said anything, and the rows are still on their way.
+ */
+export function stopPressedOn(requested: string | null | undefined, liveTurnId: string | null | undefined): boolean {
+	return requested === STOP_TURN_NOT_NAMED || (!!liveTurnId && requested === liveTurnId);
+}
+
+/** The feed names the turn a Stop was for, or ends it. A later turn was never stopped. */
+export function nameStoppedTurn(
+	requested: string | null | undefined,
+	liveTurnId: string | null,
+	streaming: boolean
+): string | null | undefined {
+	if (requested !== STOP_TURN_NOT_NAMED) return requested;
+	if (!streaming) return null;
+	return liveTurnId ?? STOP_TURN_NOT_NAMED;
+}
+
 /** The chat ends on words Stop refused: nothing below them is coming. */
 export function restingOnNotSentRows(messages: ChatMessage[]): boolean {
 	return messages.findLast(m => m.role === 'user')?.metadata?.not_sent === true;

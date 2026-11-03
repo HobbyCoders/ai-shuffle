@@ -16,6 +16,7 @@ import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecuti
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { generateBranchName, generateBranchNameLocal } from '$lib/api/git';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
+import { STOP_TURN_NOT_NAMED } from '$lib/utils/not-sent-hold';
 import { parkedSendTurnId } from '$lib/utils/work-log';
 // V2 Phase 1: SSE-fed reducer — the transcript authority for a session.
 import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
@@ -769,7 +770,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					...(_state.liveTurnId ? { turn_id: _state.liveTurnId } : {}),
 				});
 				// Only a Stop that left this page can have refused anything.
-				if (sent && _state.liveTurnId) update(s => ({ ...s, stopRequestedTurnId: _state.liveTurnId }));
+				if (sent) update(s => ({ ...s, stopRequestedTurnId: s.liveTurnId ?? STOP_TURN_NOT_NAMED }));
 			} else if (internal.awaitingNewSession) {
 				// Brand-new session whose id the backend hasn't minted yet, so we
 				// have nothing to address the stop to. Defer it: the session_created

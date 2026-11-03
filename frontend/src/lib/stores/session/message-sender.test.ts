@@ -7,6 +7,7 @@ import { reopenWorktree } from '$lib/api/git';
 import { api } from '$lib/api/client';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
 import { pendingQueue } from './pending-queue';
+import { STOP_TURN_NOT_NAMED } from '$lib/utils/not-sent-hold';
 import { getPersistedDeviceIntent, setPersistedDeviceIntent } from '../worker-selection';
 import { composerPreferences } from '../composer-preferences';
 const voice = vi.hoisted(() => ({ isCallActiveFor: vi.fn(() => false), sendVoiceText: vi.fn(() => true) }));
@@ -884,6 +885,12 @@ describe('message-sender stopGeneration deferral', () => {
 		failed.wsConn.send.mockImplementation(() => false);
 		createMessageSender(failed.deps).stopGeneration();
 		expect(failed.getState().stopRequestedTurnId ?? null).toBeNull();
+	});
+
+	it('still records a stop sent before the feed named the turn', () => {
+		const { deps, getState } = makeDeps(baseState({ sessionId: 'sess-1', isStreaming: true, liveTurnId: null }));
+		createMessageSender(deps).stopGeneration();
+		expect(getState().stopRequestedTurnId).toBe(STOP_TURN_NOT_NAMED);
 	});
 
 	it('omits turn_id when no live turn id is known (legacy session-scoped, #585)', () => {

@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatMessage } from '$lib/stores/types';
-import { createNotSentHold, createNotSentRowsArrival, createStopBubbleHold, holdNotSentRows, restingOnNotSentRows, withHeldBubbles } from './not-sent-hold';
+import {
+	createNotSentHold,
+	createNotSentRowsArrival,
+	createStopBubbleHold,
+	holdNotSentRows,
+	nameStoppedTurn,
+	restingOnNotSentRows,
+	STOP_TURN_NOT_NAMED,
+	stopPressedOn,
+	withHeldBubbles
+} from './not-sent-hold';
 
 const reply: ChatMessage = { id: 'a', role: 'assistant', type: 'text', content: 'reply' };
 const row = (id: string, duringTurn?: string): ChatMessage => ({
@@ -47,6 +57,31 @@ describe('createNotSentHold', () => {
 		const first = hold(messages, 'live');
 		expect(hold(messages, 'live').messages).toBe(first.messages);
 		expect(hold(messages, null).messages).toBe(messages);
+	});
+});
+
+describe('a Stop pressed before the feed named its turn', () => {
+	it('counts as pressed from the moment it leaves, through the timeout', () => {
+		expect(stopPressedOn(STOP_TURN_NOT_NAMED, null)).toBe(true);
+	});
+
+	it('binds to the turn the feed names, so the next turn was never stopped', () => {
+		const named = nameStoppedTurn(STOP_TURN_NOT_NAMED, 'turn-1', true);
+		expect(named).toBe('turn-1');
+		expect(stopPressedOn(named, 'turn-1')).toBe(true);
+		expect(stopPressedOn(named, 'turn-2')).toBe(false);
+		expect(stopPressedOn(named, null)).toBe(false);
+	});
+
+	it('waits while the feed has not named one, and ends with the turn', () => {
+		expect(nameStoppedTurn(STOP_TURN_NOT_NAMED, null, true)).toBe(STOP_TURN_NOT_NAMED);
+		expect(nameStoppedTurn(STOP_TURN_NOT_NAMED, null, false)).toBeNull();
+	});
+
+	it('leaves a Stop on a named turn alone', () => {
+		expect(nameStoppedTurn('turn-1', 'turn-2', true)).toBe('turn-1');
+		expect(nameStoppedTurn('turn-1', null, false)).toBe('turn-1');
+		expect(nameStoppedTurn(null, 'turn-2', true)).toBeNull();
 	});
 });
 
