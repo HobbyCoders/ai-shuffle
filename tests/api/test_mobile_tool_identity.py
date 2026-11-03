@@ -229,17 +229,30 @@ def test_concurrent_first_bind_no_rebind(world, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_revocation_during_action_wait_cancels(world, monkeypatch):
+@pytest.mark.parametrize('status,claimed', [('pending', False), ('claimed', True), ('completed', True)])
+async def test_revocation_during_action_wait_cancels(world, monkeypatch, status, claimed):
     create('running', identity.principal('paired', 'one', 'shc_one'))
     monkeypatch.setattr(mobile_tools.queue, 'state', lambda _: {'enabled': True, 'tools': '["read_screen"]'})
     def enqueue(*args):
         world[3].add('one')
         return {'id': 'cmd'}
     monkeypatch.setattr(mobile_tools.queue, 'enqueue', enqueue)
-    cancel = Mock()
+    cancel = Mock(return_value={'status': status, 'claimed': claimed, 'result': '{"success": true}'})
     monkeypatch.setattr(mobile_tools.queue, 'cancel', cancel)
     result = await mobile_tools.execute('running', 'one', 'read_screen', {})
-    assert result == {'error': 'device_not_authorized'}
+    if status == 'completed':
+        assert result['error'] == 'device_not_authorized'
+        assert result['completed_on_device'] is True
+        assert 'result' not in result
+    elif claimed:
+        assert result['error'] == 'device_not_authorized'
+        assert result['outcome_unknown'] is True
+        assert 'Verify device state before retrying' in result['message']
+    else:
+        assert result['error'] == 'command_not_delivered'
+        assert result['reason'] == 'device_not_authorized'
+        assert result['outcome_unknown'] is False
+        assert result['safe_to_retry'] is True
     cancel.assert_called_once_with('cmd', 'running')
 
 
