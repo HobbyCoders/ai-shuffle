@@ -133,7 +133,7 @@ const nativeModel = {
 	async act({ page, mark, variant, log }) {
 		const token = `native-model-${uniq()}`;
 		await mark('refuse native version pins and accept the native family name');
-		await typeAndSend(page, `${token} Use opus for the new chat. ${fakeAiTag(variant, 'tool-native-model-override')}`);
+		await typeAndSend(page, `${token}\nUse opus, 2 reviewers.\n${fakeAiTag(variant, 'tool-native-model-override')}`);
 		await waitTurnSettled(page, { text: 'Native model checks complete.', messagesAtLeast: 2 });
 		const parent = await api(page, 'GET', `/sessions/${await chatIdByToken(page, token)}`);
 		const results = parent.messages.filter((m) => m.tool_name === 'StartSession' && m.toolResult);
@@ -161,7 +161,7 @@ const nativePinRetry = {
 	async act({ page, mark, variant, log }) {
 		const token = `native-pin-retry-${uniq()}`;
 		await mark('request a specific native version, then retry its family');
-		await typeAndSend(page, `${token} Use Opus 4.7 for the new chat. ${fakeAiTag(variant, 'tool-native-model-override')}`);
+		await typeAndSend(page, `${token}\nUse the 4.7 version of Opus.\n${fakeAiTag(variant, 'tool-native-model-override')}`);
 		await page.getByText('Reply yes or no in the message box.', { exact: false }).waitFor({ timeout: 20_000 });
 		await mark('decline the current-family substitution');
 		await typeAndSend(page, 'no');
@@ -176,11 +176,37 @@ const nativePinRetry = {
 	}
 };
 
+const nativePrecedence = {
+	name: 'native-precedence',
+	viewports: ['desktop'],
+	async setup(ctx) {
+		await openNewChat(ctx, { project: PROJECT });
+		await pickAccess(ctx.page, 'Bypass');
+	},
+	async act({ page, mark, variant, log }) {
+		const token = `native-precedence-${uniq()}`;
+		await typeAndSend(page, `${token}\nUse opus.\n${fakeAiTag(variant, 'tool-native-model-override')}`);
+		await waitTurnSettled(page, { text: 'Native model checks complete.', messagesAtLeast: 2 });
+		await mark('a newer version request supersedes the saved plain-family naming');
+		await typeAndSend(page, `Now use the 4.7 version of Opus specifically.\n${fakeAiTag(variant, 'tool-native-model-precedence')}`);
+		await page.getByText('Reply yes or no in the message box.', { exact: false }).waitFor({ timeout: 20_000 });
+		await typeAndSend(page, 'no');
+		await waitTurnSettled(page, { text: 'Newer native request checks complete.', messagesAtLeast: 4 });
+		const parent = await api(page, 'GET', `/sessions/${await chatIdByToken(page, token)}`);
+		const results = parent.messages.filter((m) => m.tool_name === 'StartSession' && m.toolResult);
+		expect(results.length === 6, `initial family start and newer refusal/retry: ${JSON.stringify(results)}`);
+		expect(results[3].toolStatus !== 'error', 'earlier plain-family consent started its chat');
+		expect(results[4].toolStatus === 'error' && results[5].toolStatus === 'error', 'newer pin and family substitution did not start');
+		expect(/owner declined/.test(results[5].toolResult), 'saved naming did not skip the new owner agreement');
+		log('newer version request overrides older chat naming and its durable receipt');
+	}
+};
+
 await runJourney({
 	name: 'tool-cards',
 	recorder: {
 		selectors: [STOP_SELECTOR, 'worklog=[role="region"][aria-label="Work log"]']
 	},
-	cases: [toolCase('bash'), toolCase('multi'), workerFollowup, nativeModel, nativePinRetry],
+	cases: [toolCase('bash'), toolCase('multi'), workerFollowup, nativeModel, nativePinRetry, nativePrecedence],
 	allow: [...DEV_INSTANCE_NOISE]
 });

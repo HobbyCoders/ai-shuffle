@@ -7,6 +7,7 @@ or the owner approved it at a prompt. It may move the work to another
 provider, for that one start.
 """
 import json
+import re
 from typing import Any, Dict, Optional
 
 import pytest
@@ -80,7 +81,8 @@ def test_version_qualified_family_words_do_not_name_the_current_alias(family, sp
     assert mo._tokens(text) == [*before, family, *after]
     assert not mo.named_by_user(family, [f"Use {text} for the review"], CATALOG)
     assert not mo.memory_names(family, f"Route reviews to {text}", CATALOG)
-    assert mo.named_by_user(family, [f"Use {text}; use {family} for this instead"], CATALOG)
+    assert not mo.named_by_user(family, [f"Use {text}; use {family} for this instead"], CATALOG)
+    assert mo.named_by_user(family, [text, f"use {family} instead"], CATALOG)
 
 
 # ---------------------------------------------------------------------------
@@ -681,7 +683,7 @@ async def test_the_owners_sentence_names_opus_for_an_unpinned_agent(unpinned, so
     ("use opus", True),
     ("run them on Opus 4", False),
     ("OPUS sub-agents please", True),
-    ("spin up opus-powered agents", True),
+    ("spin up opus-powered agents", False),
     ("Claude Opus for the reviewers", True),
     ("claude-opus-5", False),
 ])
@@ -1041,6 +1043,89 @@ async def _start(args, sender="caller"):
 ARGS = {"title": "Review", "prompt": "Review the change", "request_id": "r1"}
 
 
+VERSION_WORDINGS = [
+    "claude-3-opus", "claude-3-opus-latest", "claude-opus-latest", "use 4.7 opus",
+    "Use the 4.7 version of Opus", "Opus model 4.7", "opus at version 4.7",
+    "opus with 1m context", "Route reviews to claude-3-opus", "Reviews: Opus, 4.7",
+    "Reviews go on the 4.7 version of Opus", "opus build 4.7", "opus release 4.7",
+]
+PLAIN_WORDINGS = [
+    "Use opus.\n1. Fix the bug\n2. Review it", "use opus, 2 reviewers",
+    "Use opus. 3 files changed", "use opus. Version 4.7 of the lib is broken",
+    "Use opus\n\n2 things to check", "use opus 2 reviewers", "Opus please - 4 agents",
+]
+
+
+@pytest.mark.parametrize("family", ["haiku", "sonnet", "opus", "fable"])
+@pytest.mark.parametrize("wording, consent", [(s, False) for s in VERSION_WORDINGS]
+                         + [(s, True) for s in PLAIN_WORDINGS])
+def test_native_sentence_consent_is_shared_by_owner_memory_and_receipts(monkeypatch, family, wording, consent):
+    text = re.sub("opus", family, wording, flags=re.I)
+    assert mo.named_by_user(family, [text]) is consent
+    assert mo.memory_names(family, text) is consent
+    monkeypatch.setattr(mo, "_receipt", lambda *a: {
+        "source": "own_message", "turn_id": "t", "session_id": "caller", "text": text})
+    assert mo._has_named("caller", family) is consent
+
+
+def test_historical_sonnet_name_is_not_current_family_consent():
+    assert not mo.named_by_user("sonnet", ["claude-3-5-sonnet"])
+    assert not mo.memory_names("sonnet", "claude-3-5-sonnet")
+
+
+@pytest.mark.parametrize("entry", ["start", "task"])
+@pytest.mark.parametrize("source", ["owner", "memory"])
+@pytest.mark.parametrize("wording, consent", [(s, False) for s in VERSION_WORDINGS]
+                         + [(s, True) for s in PLAIN_WORDINGS])
+async def test_sentence_rule_through_real_native_start(chats, entry, source, wording, consent):
+    _native_request(chats, entry, source, wording)
+    ok, error = await _native_call(entry, "opus", "sentence-consent")
+    assert ok is consent, error
+    assert len(chats[2]) == int(not consent)
+
+
+@pytest.mark.parametrize("entry", ["start", "task"])
+@pytest.mark.parametrize("source", ["memory", "history", "receipt", "approval", "saved-approval"])
+async def test_latest_owner_version_request_overrides_every_older_consent(chats, entry, source):
+    from tests.core.test_model_override_memory import _save
+
+    _, seen, prompts, answer = chats
+    sid = _native_request(chats, entry, "owner", "a review")
+    profile = "agent" if entry == "start" else "caller"
+    if source == "memory":
+        _save("Risky/cross-cutting code and all UI work: Opus.")
+    elif source in {"history", "receipt"}:
+        _turn(sid, "user", "use opus for the refactor", profile=profile)
+        if source == "receipt":
+            assert (await _native_call(entry, "opus", "earlier-naming"))[0]
+    else:
+        answer["result"] = PermissionResultAllow(updated_input={})
+        assert (await _native_call(entry, "opus", "earlier-yes"))[0]
+        answer["result"] = PermissionResultDeny(message="Denied")
+        if source == "saved-approval":
+            mo._APPROVED.clear()
+    seen.clear()
+    prompts.clear()
+    _turn(sid, "user", "for this review use Opus 4.7 specifically", profile=profile)
+    assert not (await _native_call(entry, "claude-opus-4-7", "new-pin"))[0]
+    ok, error = await _native_call(entry, "opus", "old-consent-denied")
+    assert not ok, error
+    assert len(prompts) == 1 and not seen
+    answer["result"] = PermissionResultAllow(updated_input={})
+    assert (await _native_call(entry, "opus", "new-agreement"))[0]
+    assert len(prompts) == 2
+    mo._APPROVED.clear()
+    assert (await _native_call(entry, "opus", "durable-new-agreement"))[0]
+    assert len(prompts) == 2
+    answer["result"] = PermissionResultDeny(message="Denied")
+    _turn(sid, "user", "now use Opus 5.5 specifically", profile=profile)
+    assert not (await _native_call(entry, "opus", "different-pin"))[0]
+    assert len(prompts) == 3
+    _turn(sid, "user", "use opus for this review", profile=profile)
+    assert (await _native_call(entry, "opus", "newer-plain-consent"))[0]
+    assert len(prompts) == 3
+
+
 async def _native_call(entry, model, request_id):
     if entry == "start":
         outcome = await _start({**ARGS, "model": model, "request_id": request_id})
@@ -1140,12 +1225,38 @@ async def test_swarm_pin_refusal_does_not_authorize_a_family_retry(chats, monkey
 
 
 @pytest.mark.parametrize("entry", ["start", "task"])
-async def test_new_unversioned_family_receipts_still_survive_history_retention(chats, monkeypatch, entry):
+@pytest.mark.parametrize("retained", [True, False])
+async def test_pre_repair_native_receipts_need_verifiable_owner_text(chats, entry, retained):
+    from app.db import interactions
+
+    sid = _native_request(chats, entry, "owner", "opus")
+    evidence = next(e for e in mo._user_evidence(sid) if "opus" in e["text"])
+    assert mo._remember_named(sid, "opus", evidence)
+    receipt = interactions.get_interaction(mo._named_id(sid, "opus"))
+    payload = receipt["payload"]
+    payload.pop("text")
+    payload["native_family_policy"] = "unversioned-v1"
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE pending_interactions SET payload=%s WHERE id=%s",
+                              (json.dumps(payload), receipt["id"]))
+        if not retained:
+            conn.cursor().execute("DELETE FROM turns WHERE id=%s", (evidence["turn_id"],))
+    assert not mo._has_named(sid, "opus")
+    _turn(sid, "user", "start the review", profile="agent" if entry == "start" else "caller")
+    ok, error = await _native_call(entry, "opus", "pre-repair-receipt")
+    assert ok is retained, error
+    assert len(chats[2]) == int(not retained)
+    assert mo._has_named(sid, "opus") is retained
+
+
+@pytest.mark.parametrize("entry", ["start", "task"])
+async def test_new_unversioned_family_receipts_still_survive_history_retention(chats, entry):
     sid = _native_request(chats, entry, "owner", "opus")
     assert (await _native_call(entry, "opus", "first-family"))[0]
     assert mo._has_named(sid, "opus")
-    monkeypatch.setattr(mo, "_find_named", lambda *args, **kwargs:
-                        pytest.fail("a repaired naming receipt must not re-scan retained history"))
+    with get_db() as conn:
+        conn.cursor().execute("DELETE FROM turns WHERE session_id=%s", (sid,))
+    _turn(sid, "user", "start the review", profile="agent" if entry == "start" else "caller")
     ok, error = await _native_call(entry, "opus", "saved-family")
     assert ok, error
     assert not chats[2]
@@ -1159,13 +1270,25 @@ async def test_old_native_naming_receipt_cannot_bypass_pin_agreement(chats, entr
     assert mo._remember_named(sid, "opus", mo._user_evidence(sid)[0])
     receipt = interactions.get_interaction(mo._named_id(sid, "opus"))
     payload = receipt["payload"]
-    payload.pop("native_family_policy", None)  # receipt written by the old matcher
+    payload.pop("text", None)  # old receipt has no original sentence to validate
     with get_db() as conn:
         conn.cursor().execute("UPDATE pending_interactions SET payload=%s WHERE id=%s",
                               (json.dumps(payload), receipt["id"]))
     ok, error = await _native_call(entry, "opus", "old-naming-receipt")
     assert not ok, error
     assert len(chats[2]) == 1 and not chats[1]
+
+
+@pytest.mark.parametrize("text, consent", [(s, False) for s in VERSION_WORDINGS]
+                         + [(s, True) for s in PLAIN_WORDINGS])
+def test_native_receipts_reuse_the_sentence_matcher(chats, text, consent):
+    from app.db import interactions
+
+    sid = _native_request(chats, "start", "owner", text)
+    assert mo._remember_named(sid, "opus", mo._user_evidence(sid)[0])
+    assert mo._has_named(sid, "opus") is consent
+    receipt = interactions.get_interaction(mo._named_id(sid, "opus"))
+    assert receipt["payload"]["text"] == f"Use {text} for the review"
 
 
 @pytest.mark.parametrize("wording", ["gpt 6 astra", "prov:lane:GPT-6-ASTRA"])
