@@ -172,8 +172,8 @@ def _tags(entry: Any, archived: bool, successor: dict[str, str]) -> list[str]:
         shown = successor.get(entry.superseded_by, entry.superseded_by)
         if entry.protected and not entry.supersession_confirmed:
             if entry.superseded_by in successor:
-                tags.append(f"unconfirmed replacement proposal [{shown}]; both facts remain usable as context; "
-                            "neither grants automatic model-routing authority; ask the owner")
+                tags.append(f"unconfirmed replacement proposal [{shown}]; both facts remain usable "
+                            "as context and model-routing authority")
             else:
                 tags.append("proposed successor unavailable; the original rule remains usable")
         else:

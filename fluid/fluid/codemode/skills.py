@@ -1783,7 +1783,8 @@ class SkillStore:
         return self._facts.propose_supersession(old_id, new_id, old_revision=old_revision, new_revision=new_revision,
                                                 protected_conflict=protected_conflict)
 
-    def learner_proposal_footer(self, project: str | None = None, entries: list | None = None) -> str:
+    def learner_proposal_footer(self, project: str | None = None, entries: list | None = None,
+                                *, questions: list | None = None) -> str:
         """The ``# Memory`` footer's lines for open learner proposals (see
         fluid.codemode.preferences): one line per proposed rule update,
         "" when none. Never raises."""
@@ -1792,7 +1793,7 @@ class SkillStore:
         rows = [e if isinstance(e, dict) else vars(e)
                 for e in (self.memories() if entries is None else entries)]
         rows = [e for e in rows if project is None or e.get("scope", "global") in ("global", project)]
-        lines += owner_conflict_lines(rows)
+        lines += owner_conflict_lines(rows, questions=questions)
         return "\n\n" + "\n".join(lines) if lines else ""
 
     def purge_forgotten_evidence(self) -> None:
@@ -1867,8 +1868,12 @@ class SkillStore:
         archived = [self._facts._entry(e) for e in doc["archived"] if visible_on(e, local)]
         if not entries and not archived:
             return EMPTY_MEMORY_SECTION
+        from fluid.codemode.preferences import protected_conflicts
+        visible = [vars(e) for e in entries
+                   if project is None or e.scope in ("global", project)]
+        questions = protected_conflicts(visible)
         plan = self.memory_snapshot_plan(project, checkout=checkout, entries=entries, archived=archived,
-                                         task_query=task_query)
+                                         task_query=task_query, questions=questions)
         shown = plan["lines"]
         other_checkout, out_of_scope = plan["other_checkout"], plan["out_of_scope"]
         over_budget, held = plan["over_budget"], plan["held"]
@@ -1901,7 +1906,7 @@ class SkillStore:
                 f"\n\n({in_archive} archived fact{'' if in_archive == 1 else 's'} not shown; "
                 f"Recall finds {'it' if in_archive == 1 else 'them'} by keyword.)"
             )
-        footer += self.learner_proposal_footer(project, entries)  # learner proposals (preferences.py)
+        footer += self.learner_proposal_footer(project, entries, questions=questions)
         if not shown and not over_budget and not held and not in_archive:
             return EMPTY_MEMORY_SECTION + footer
         if held:
@@ -1935,7 +1940,7 @@ class SkillStore:
     def memory_snapshot_plan(self, project: str | None = None, *, checkout: str | None = None,
                              entries: list[MemoryEntry] | None = None,
                              archived: list[MemoryEntry] | None = None,
-                             task_query: str = "") -> dict:
+                             task_query: str = "", questions: list | None = None) -> dict:
         """Which facts the ``# Memory`` snapshot shows for ``project``, and
         why the rest are left out. :meth:`render_memory_section` renders it;
         the memory health check measures it without building a prompt.
@@ -1997,7 +2002,8 @@ class SkillStore:
         from fluid.codemode.preferences import protected_conflicts
         visible = [vars(e) for e in entries
                    if project is None or e.scope in ("global", project)]
-        questions = protected_conflicts(visible)
+        if questions is None:
+            questions = protected_conflicts(visible)
         question_ids = {e["id"] for old, new, _ in questions for e in (old, new)}
         for entry in entries:
             if project is not None and entry.scope not in ("global", project):

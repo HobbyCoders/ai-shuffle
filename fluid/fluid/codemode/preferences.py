@@ -24,18 +24,25 @@ raise the question, both bounded so they cannot nag:
   two live user-kept facts about the same how-the-agent-works topic where
   the newer one changes the rule. A non-link question in the existing
   memory footer shows both texts and asks the owner to resolve the pair.
-  Neither fact grants automatic model-routing authority while they disagree.
+  Both facts remain usable as context and model-routing authority; agents
+  ask which applies rather than silently choose for the contested job.
   Curation never links, archives or rewrites a user-kept fact. At most
-  :data:`MAX_OPEN_CONFLICTS` such questions are open at once, and a pair is
-  proposed once: after the owner resolves it, it is not raised again.
+  :data:`MAX_OPEN_CONFLICTS` questions are shown at once. An owner-kept
+  Remember decision under the question's version-bound key records that
+  both stand, replicates like any owner fact, and closes that pair until
+  either text (or its applicability) changes. No tool schema is extended.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+from fluid.codemode.routing import affirmed_clauses
 
 PREFERENCE_PROPOSALS_FILE = "pref-proposals.jsonl"
 CONFLICT_CURATION_FILE = "conflict-curation.json"
@@ -49,8 +56,8 @@ _LEGACY_KEY_PREFIX = "pref."
 PROPOSAL_ANSWER_MIN_SHARED = 3
 PROPOSAL_ANSWER_MIN_RATIO = 0.5
 MAX_OPEN_CONFLICTS = 3
-# Pairs already proposed, remembered so a resolved question is not asked
-# again (newest kept).
+# Diagnostic pairs already curated (newest kept), not owner answers. This
+# suppresses repeat curation work only; replicated owner facts close questions.
 MAX_REMEMBERED_PAIRS = 128
 
 _TOPIC_RE = re.compile(r"[a-z][a-z0-9_]{1,40}")
@@ -126,12 +133,11 @@ class PreferenceProposals:
                 entries = []
         from fluid.codemode.facts import is_superseded
         rows = [entry if isinstance(entry, dict) else vars(entry) for entry in entries]
-        blocked = conflicting_owner_ids(rows)
         out = []
         for entry in rows:
             get = entry.get
             if (get("protected") and not is_superseded(entry) and not get("conflicted")
-                    and not get("retired_at") and get("id") not in blocked):
+                    and not get("retired_at")):
                 text = str(get("text") or "")
                 out.append((str(get("key") or ""), str(get("scope") or "global"),
                             float(get("updated_at") or get("created_at") or 0.0),
@@ -256,15 +262,27 @@ _JOB_WORDS: dict[str, frozenset[str]] = {
     "backend": frozenset("backend".split()),
     "docs": frozenset("docs documentation".split()),
 }
-_CLAUSE_RE = re.compile(r"[;\n]|\.(?:\s|$)")
+# Use the authority path's exact negation/list/contrast screen. Keep the
+# sentence's subject beside its positive parts ("backend: Sol"), then require
+# an actual assignment, not an anecdote that merely names a model and a job.
+_CLAUSE_RE = re.compile(r"[;\n—–]|[.!?](?=\s|$)")
+_ROUTING_STATEMENT = re.compile(
+    r"\b(?:use|uses|run|runs|route|routes|send|sends|prefer|prefers|pick|picks|default)\b"
+    r"|\bgo(?:es)?\s+to\b|(?:\bon\s+|:\s*)(?:"
+    + "|".join(sorted(_MODEL_NAMES)) + r")\b", re.I)
 
 
 def model_routing(text: str) -> dict[str, frozenset[str]]:
-    """``{job: models}`` a fact assigns, from clauses that name both."""
+    """Positive routing statements only; mentioning a past model is not one."""
     routes: dict[str, frozenset[str]] = {}
     for clause in _CLAUSE_RE.split((text or "").casefold()):
+        positive = " ".join(affirmed_clauses(clause))
+        if not _ROUTING_STATEMENT.search(positive) and not (
+                ":" in clause and _ROUTING_STATEMENT.search(clause)
+                and positive.strip()):
+            continue
         # "code review" is a review, not code work.
-        words = _words(re.sub(r"\bcode[\s-]+review", "review", clause))
+        words = _words(re.sub(r"\bcode[\s-]+review", "review", positive))
         models = words & _MODEL_NAMES
         models = (models - _MODEL_FAMILIES) or models
         if not models:
@@ -328,9 +346,47 @@ def _pair_key(old: dict, new: dict) -> str:
     return f"{global_id(old)}>{global_id(new)}"
 
 
+# A decision is an ordinary owner-kept fact, not a new local-only queue.
+# Its key includes both global IDs and the exact text/applicability the owner
+# answered about. Recall/Remember/Forget and replication work unchanged.
+COEXIST_KEY_PREFIX = "memory.coexist."
+
+
+def coexistence_key(old: dict, new: dict) -> str:
+    from fluid.codemode.facts import global_id
+    values = sorted((global_id(e), e["text"], e.get("when"), bool(e.get("always")),
+                     e.get("scope", "global"), e.get("worker")) for e in (old, new))
+    digest = hashlib.sha256(json.dumps(values, ensure_ascii=False).encode()).hexdigest()
+    return COEXIST_KEY_PREFIX + digest[:32]
+
+
+# This is a document-revision cache, NOT a time cache: sync, corrections,
+# metadata edits, resolutions and deletion all change its key. Ignore usage
+# counters, which cannot change a question. Four snapshots bound retained text.
+_CONFLICT_FIELDS = ("id", "origin", "revision", "text", "when", "always", "key", "scope", "worker",
+                    "protected", "provenance", "conflicted", "retired_at", "retired_reason",
+                    "superseded_by", "supersession_confirmed", "updated_at")
+
+
 def protected_conflicts(entries: list[dict], *, skip: set[str] | frozenset[str] = frozenset(),
                         limit: int = MAX_OPEN_CONFLICTS,
                         disjoint: bool = True) -> list[tuple[dict, dict, str]]:
+    """Bounded questions for this exact snapshot; return the caller's rows."""
+    revision = tuple(tuple(e.get(f) for f in _CONFLICT_FIELDS) for e in entries)
+    refs = _cached_conflict_refs(revision, frozenset(skip), limit, disjoint)
+    return [(entries[a], entries[b], reason) for a, b, reason in refs]
+
+
+@lru_cache(maxsize=4)
+def _cached_conflict_refs(revision: tuple, skip: frozenset, limit: int, disjoint: bool) -> tuple:
+    rows = [dict(zip(_CONFLICT_FIELDS, values)) for values in revision]
+    indices = {id(e): i for i, e in enumerate(rows)}
+    pairs = _find_protected_conflicts(rows, skip=skip, limit=limit, disjoint=disjoint)
+    return tuple((indices[id(a)], indices[id(b)], why) for a, b, why in pairs)
+
+
+def _find_protected_conflicts(entries: list[dict], *, skip: frozenset[str],
+                             limit: int, disjoint: bool) -> list[tuple[dict, dict, str]]:
     """Same-topic pairs of live user-kept facts where the newer one changes
     the rule: ``[(old, new, reason)]``, strongest first, at most ``limit``.
 
@@ -348,13 +404,39 @@ def protected_conflicts(entries: list[dict], *, skip: set[str] | frozenset[str] 
     from fluid.codemode.facts import fingerprint, global_id, is_superseded
     from fluid.codemode.supersession import conflict_scope_evidence
 
-    live = [e for e in entries
-            if e.get("protected") and not is_superseded(e) and not e.get("conflicted")
-            and not e.get("retired_at") and e.get("provenance") != "tool" and e.get("text")
-            and not str(e.get("key") or "").startswith(_BIOGRAPHY_KEYS)]
+    from fluid.context.screening import screen_findings
+
+    owner = [e for e in entries
+             if e.get("protected") and not is_superseded(e) and not e.get("conflicted")
+             and not e.get("retired_at") and e.get("provenance") != "tool" and e.get("text")]
+    resolved = {e["key"] for e in owner
+                if str(e.get("key") or "").startswith(COEXIST_KEY_PREFIX)
+                and not screen_findings(e["text"])}
+    live = [e for e in owner
+            if not str(e.get("key") or "").startswith((*_BIOGRAPHY_KEYS, COEXIST_KEY_PREFIX))]
     topics = {e["id"]: preference_topics(e["text"]) for e in live}
     routes = {e["id"]: model_routing(e["text"]) for e in live}
     salient = {e["id"]: _salient(e["text"]) for e in live}
+    fingerprints = {e["id"]: fingerprint(e["text"]) for e in live}
+    # These regex screens depend on each text, not on its O(n²) pairings.
+    applicable = {e["id"]: conflict_scope_evidence(e, e) for e in live}
+    # Most documents have no differing values at all. Index possible changes
+    # once, rather than compare every pair of identical-topic/no-topic facts.
+    from collections import Counter, defaultdict
+    keys = Counter(e.get("key") for e in live if e.get("key"))
+    route_values, topic_values = defaultdict(set), defaultdict(set)
+    for entry in live:
+        for job, models in routes[entry["id"]].items():
+            route_values[job].add(models)
+        for topic, values in topics[entry["id"]].items():
+            topic_values[topic].add(values)
+    changed_jobs = {job for job, values in route_values.items() if len(values) > 1}
+    changed_topics = {topic for topic, values in topic_values.items() if len(values) > 1}
+    edges = {global_id(e) for e in live if e.get("superseded_by")}
+    edges.update(e["superseded_by"] for e in live if e.get("superseded_by"))
+    live = [e for e in live if (keys.get(e.get("key"), 0) > 1 or global_id(e) in edges
+            or changed_jobs.intersection(routes[e["id"]])
+            or changed_topics.intersection(topics[e["id"]]))]
     candidates: list[tuple[int, int, float, dict, dict, str]] = []
     for new in live:
         for old in live:
@@ -363,7 +445,7 @@ def protected_conflicts(entries: list[dict], *, skip: set[str] | frozenset[str] 
             if (old.get("scope", "global") != new.get("scope", "global")
                     or old.get("worker") != new.get("worker")):
                 continue
-            if fingerprint(old["text"]) == fingerprint(new["text"]):
+            if fingerprints[old["id"]] == fingerprints[new["id"]]:
                 continue  # a restatement, the duplicate check's business
             same_key = bool(old.get("key")) and old.get("key") == new.get("key")
             reason = ""
@@ -394,7 +476,9 @@ def protected_conflicts(entries: list[dict], *, skip: set[str] | frozenset[str] 
             # Typed disagreement is enough to ASK, never enough to link.
             # Keep the scope/temporary/uncertain screens, not the stricter
             # replacement wording needed for automatic supersession.
-            if not conflict_scope_evidence(old, new):
+            if not applicable[old["id"]] or not applicable[new["id"]]:
+                continue
+            if resolved and coexistence_key(old, new) in resolved:
                 continue
             overlap = len(salient[old["id"]] & salient[new["id"]])
             candidates.append((strength, overlap, float(new.get("updated_at") or 0), old, new, reason))
@@ -412,27 +496,24 @@ def protected_conflicts(entries: list[dict], *, skip: set[str] | frozenset[str] 
     return out
 
 
-def conflicting_owner_ids(entries: list[dict]) -> set[str]:
-    """Every side of every unresolved owner contradiction, not just the
-    bounded questions shown in a prompt. None grants routing authority."""
-    pairs = protected_conflicts(entries, limit=len(entries) ** 2, disjoint=False)
-    return {entry["id"] for old, new, _ in pairs for entry in (old, new)}
-
-
-def owner_conflict_lines(entries: list[dict]) -> list[str]:
-    """Existing memory-question footer; no link or fact mutation."""
+def owner_conflict_lines(entries: list[dict], *, questions: list | None = None) -> list[str]:
+    """Existing footer; answers use Remember, not replacement or local state."""
     from fluid.codemode.facts import global_id
     return [
         f"- [owner question; unresolved conflict] Saved facts [{global_id(old)}] and "
-        f"[{global_id(new)}] disagree ({reason}). Both facts remain usable as context; "
-        "neither grants automatic model-routing authority until resolved. "
-        "Recall both and ask the owner which rule applies; do not silently choose a model."
-        for old, new, reason in protected_conflicts(entries)
+        f"[{global_id(new)}] disagree ({reason}). Both facts remain usable as context "
+        "and model-routing authority. Recall both and ask the owner which rule applies; "
+        "do not silently choose a model for the contested job. If the owner says both stand, "
+        f"Remember their answer with key={coexistence_key(old, new)!r}, user_requested=true, "
+        f"scope={'global' if old.get('scope') in (None, 'global') else 'project'!r}, "
+        'when="When applying these two owner rules"; no replaces. '
+        "This closes this pair on synced workers until either fact changes."
+        for old, new, reason in (protected_conflicts(entries) if questions is None else questions)
     ]
 
 
 def open_conflicts(entries: list[dict]) -> int:
-    """Bounded non-link owner questions, resolved by correction/replacement."""
+    """Bounded non-link questions; correction, replacement or keep-both closes one."""
     return len(protected_conflicts(entries))
 
 
@@ -448,8 +529,9 @@ def curate_protected_conflicts(store: Any, *, now: float | None = None) -> list[
     """Record which bounded owner questions were surfaced. Never link facts.
 
     The existing question footer derives open pairs from the same live
-    snapshot. A confirmed replacement, correction or Forget closes a pair;
-    another candidate can then use its slot. No owner text is hidden.
+    snapshot. A confirmed replacement, correction, Forget or replicated
+    keep-both answer closes a pair; another candidate can then use its slot.
+    No owner text is hidden.
     """
     from fluid.codemode.facts import visible_on
     from fluid.codemode.skills import atomic_write_text

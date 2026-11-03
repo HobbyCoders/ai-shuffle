@@ -297,7 +297,7 @@ def test_routing_overlap_without_explicit_replacement_keeps_every_owner_rule(tmp
         section = store.render_memory_section(None)
         assert "unresolved conflict" in section
         assert "Recall both and ask the owner" in section
-        assert "neither grants automatic model-routing authority" in section
+        assert "and model-routing authority" in section
         assert all(saved[name].id in section for name in saved)
     # An explicit correction is still applied, without deleting the old text.
     corrected = store.save_memory(

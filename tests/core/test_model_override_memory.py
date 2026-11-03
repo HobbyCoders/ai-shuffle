@@ -240,23 +240,61 @@ async def test_unsupported_owner_link_does_not_remove_routing_authority(world):
 
 
 @pytest.mark.parametrize("model", ["gpt 6.1 sol", "opus", "sonnet"])
-async def test_unresolved_owner_contradictions_never_authorize_any_side(world, model):
+async def test_unresolved_owner_questions_preserve_every_side_as_authority(world, model):
     _, prompts = world
     _save("Bounded backend work runs on GPT 6.1 Sol")
     _save("Bounded backend work runs on Opus")
     _save("Bounded backend work runs on Sonnet")
     assert all(not e.superseded_by for e in store_for_owner("local").memories())
-    # A pinned profile is independent authority; use a different default so
-    # none of these requests can be accepted for that unrelated reason.
+    # Use a different default so acceptance proves the owner's facts remain
+    # authority, not an unrelated pinned profile. The prompt still asks.
     from app.db import database as db
     db.create_profile("not_conflicted", "Other default", None,
                       {"provider_models": {"__native__": "haiku"}})
-    assert mo.owner_memories("parent") == []
+    assert len(mo.owner_memories("parent")) == 3
     result = await _task(model, agent="not_conflicted")
-    assert not result["ok"] and len(prompts) == 1
+    assert result["ok"] and not prompts
+    assert result["model_override"]["source"] == mo.REMEMBERED
     section = store_for_owner("local").render_memory_section()
     assert "Recall both and ask the owner" in section
-    assert "neither grants automatic model-routing authority" in section
+    assert "and model-routing authority" in section
+
+
+
+
+@pytest.mark.parametrize("later", [
+    "Never use Fable for code.",
+    "The owner tried Sol on a review last week and it missed a race.",
+    "Speed sprint: code tasks in the perf branch run on Sol.",
+])
+async def test_later_note_never_revokes_uncontested_jobs_from_broad_rule(world, later):
+    _, prompts = world
+    wide = _save("Risky code and all UI work: Opus. Bounded backend on GPT 6.1 Sol.")
+    _save(later)
+    assert wide.id in {e.id for e in mo.owner_memories("parent")}
+    result = await _task("gpt 6.1 sol")
+    assert result["ok"] and not prompts
+    section = store_for_owner("local").render_memory_section()
+    assert ("owner question" in section) == later.startswith("Speed sprint:")
+
+
+async def test_facts_outside_question_cap_still_authorize_and_labels_match_health(world):
+    from fluid.codemode.preferences import MAX_OPEN_CONFLICTS, protected_conflicts
+    from fluid.codemode import memory_health
+    _, prompts = world
+    for i in range(MAX_OPEN_CONFLICTS + 3):
+        _save(f"Team {i} backend code work runs on GPT 6.1 Sol.")
+        _save(f"Team {i} backend code work runs on Opus.")
+    store = store_for_owner("local")
+    pairs = protected_conflicts(store._facts.snapshot()["entries"])
+    assert len(pairs) == MAX_OPEN_CONFLICTS
+    assert len(mo.owner_memories("parent")) == 2 * (MAX_OPEN_CONFLICTS + 3)
+    section = store.render_memory_section()
+    assert section.count("[owner question; unresolved conflict]") == MAX_OPEN_CONFLICTS
+    assert section.count("; owner question]") == 2 * MAX_OPEN_CONFLICTS
+    signal = next(s for s in memory_health.check(store)["signals"] if s["id"] == "proposals")
+    assert signal["detail"]["conflicts"] == MAX_OPEN_CONFLICTS
+    assert (await _task("gpt 6.1 sol"))["ok"] and not prompts
 
 
 async def test_missing_unconfirmed_successor_keeps_original_routing_authority(world):

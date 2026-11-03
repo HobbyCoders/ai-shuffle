@@ -601,7 +601,7 @@ def test_screening_withholds_bad_text_or_when_and_keeps_conflict_lines(tmp_path)
     section = pair.render_memory_section()
     assert "[owner question; unresolved conflict]" in section
     assert "Recall both and ask the owner" in section
-    assert "neither grants automatic model-routing authority" in section
+    assert "and model-routing authority" in section
     assert old.text in section and new.text in section
     assert not next(e for e in pair.memories() if e.id == old.id).superseded_by
 
