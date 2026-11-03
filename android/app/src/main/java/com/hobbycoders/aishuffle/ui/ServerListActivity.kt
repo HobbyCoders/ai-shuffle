@@ -75,7 +75,7 @@ class ServerListActivity : NativeScreen() {
                     val target = reachableFixture?.invoke(observations) ?: WorkerConnections.reachable(this@ServerListActivity, observations = observations)
                     // A request may have started during the search. The lifecycle cannot show it: Android
                     // can report RESUMED after the request, before it pauses this activity for the prompt.
-                    if (isFinishing || notificationDialogOpen || !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return@launch
+                    if (isFinishing || notificationDialogOpen || !autoConnectPending || !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return@launch
                     autoConnectPending = false
                     if (target != null) {
                         openWorker(target)
@@ -119,6 +119,12 @@ class ServerListActivity : NativeScreen() {
                 if (updated != null && !updated.needsAccountAuthorization) openWorker(updated)
             }
         } else startActivity(Intent(this, ChatActivity::class.java).putExtra("server_id", server.id))
+    }
+    /** The owner chose a worker. Coming back from it must not open another one by itself. */
+    private fun chooseWorker(server: Server) {
+        autoConnectPending = false
+        connectionJob?.cancel()
+        openWorker(server)
     }
     private fun addWorker() { startActivity(Intent(this, AddServerActivity::class.java)) }
     private fun render() {
@@ -182,7 +188,7 @@ class ServerListActivity : NativeScreen() {
         }
         for (server in servers) {
             val workerRow = row(server.name, server.host, R.drawable.ic_worker) {
-                openWorker(server)
+                chooseWorker(server)
             }
             val labels = workerRow.getChildAt(1) as LinearLayout
             // Keep the existing row and its options; status has text as well as a color indicator.
@@ -201,7 +207,7 @@ class ServerListActivity : NativeScreen() {
             more.setOnClickListener {
                 if (!busy) PopupMenu(this, more).apply {
                     if (server.needsAccountAuthorization) {
-                        menu.add("Retry authorization").setOnMenuItemClickListener { openWorker(server); true }
+                        menu.add("Retry authorization").setOnMenuItemClickListener { chooseWorker(server); true }
                     } else {
                         menu.add("Phone tools").setOnMenuItemClickListener {
                             startActivity(Intent(this@ServerListActivity, ToolSettingsActivity::class.java).putExtra("server_id", server.id)); true

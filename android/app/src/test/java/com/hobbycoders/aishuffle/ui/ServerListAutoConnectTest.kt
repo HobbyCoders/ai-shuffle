@@ -258,15 +258,69 @@ class ServerListAutoConnectTest {
         assertOpenedOnce(second)
     }
 
+    private fun tap(list: ActivityController<ServerListActivity>, server: Server) {
+        val name = views(list.get().window.decorView).filterIsInstance<TextView>().first { it.text.toString() == server.name }
+        assertTrue(generateSequence<View>(name) { it.parent as? View }.first { it.isClickable }.performClick())
+    }
+
     @Test fun aManualWorkerTapStillOpensWhileARequestIsOpen() {
         val list = launcher().setup()
         requestCode(list)
         settle()
-        val name = views(list.get().window.decorView).filterIsInstance<TextView>().first { it.text.toString() == worker.name }
-        val row = generateSequence<View>(name) { it.parent as? View }.first { it.isClickable }
-        assertTrue(row.performClick())
+        tap(list, worker)
         assertEquals(listOf<String?>(worker.id), openedChats())
         assertFalse("a tap keeps the list underneath, as it always has", list.get().isFinishing)
+    }
+
+    /** Answer the prompt, pick B while the restarted search runs, press Back before B's page loads. */
+    @Test fun comingBackFromAChosenWorkerDoesNotOpenAnother() {
+        val chosen = Server("chosen", "Chosen", "https://127.0.0.1:2", "aim_key", "phone")
+        ServerStore.get(context).add(chosen)
+        val running = CompletableDeferred<Server?>()
+        var cancelled = false
+        ServerListActivity.reachableFixture = {
+            searches++
+            try { running.await() } catch (stopped: kotlinx.coroutines.CancellationException) { cancelled = true; throw stopped }
+        }
+        val list = launcher().setup()
+        val code = requestCode(list)
+        answer(list, code, granted = true)
+        settle()
+        assertEquals("the answer restarted the search", 1, searches)
+        tap(list, chosen)
+        assertEquals(listOf<String?>(chosen.id), openedChats())
+        assertTrue("choosing a worker ends the search", cancelled)
+        running.complete(worker)
+        list.pause().stop().start().resume()
+        assertEquals("only the chosen worker opens", listOf<String?>(chosen.id), openedChats())
+        assertEquals("nothing searches on the way back", 1, searches)
+        assertFalse(list.get().isFinishing)
+    }
+
+    /** Going to Settings and back chooses nothing, so the owed connect still happens. */
+    @Test fun comingBackWithNoChoiceStillConnects() {
+        val never = CompletableDeferred<Server?>()
+        ServerListActivity.reachableFixture = { if (searches++ == 0) never.await() else worker }
+        notifications(enabled = true)
+        val list = launcher().setup()
+        settle()
+        assertEquals("the first search is in flight", 1, searches)
+        list.pause().stop().start().resume()
+        assertOpenedOnce(list)
+    }
+
+    /** A search that outlives the wish to connect must check it again before opening. */
+    @Test fun aSearchThatEndsAfterTheConnectWasCalledOffOpensNothing() {
+        val running = CompletableDeferred<Server?>()
+        ServerListActivity.reachableFixture = { searches++; running.await() }
+        notifications(enabled = true)
+        val list = launcher().setup()
+        settle()
+        assertEquals("the search is in flight", 1, searches)
+        list.newIntent(Intent(context, ServerListActivity::class.java))
+        running.complete(worker)
+        assertEquals(emptyList<String?>(), openedChats())
+        assertFalse(list.get().isFinishing)
     }
 
     /** Robolectric has no Android key store; the real encrypted stores need only these two services. */
