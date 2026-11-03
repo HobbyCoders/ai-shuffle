@@ -56,8 +56,8 @@ class ShuffleAccessibilityService : AccessibilityService() {
         @androidx.annotation.VisibleForTesting @Volatile internal var afterFinalRead: (() -> Unit)? = null
         /** Test delay on the event fence's own check, so a test can show what holds without it. */
         @androidx.annotation.VisibleForTesting @Volatile internal var eventCheckDelayMs = 0L
-        /** Test observer off the main thread, after each read by the event fence's own check: whether it was fresh, and its verdict. */
-        @androidx.annotation.VisibleForTesting @Volatile internal var afterEventCheckRead: ((Boolean, FenceRead) -> Unit)? = null
+        /** Test observer off the main thread, after each read by the event fence's own check: whether it was fresh, and what it found. */
+        @androidx.annotation.VisibleForTesting @Volatile internal var afterEventCheckRead: ((Boolean, Reading) -> Unit)? = null
         internal val sensitive = Regex("password|passcode|sign.?in|log.?in|permission|allow access|credential|payment|purchase|checkout|credit card|verify|verification|one.time|security|pin code|unlock|biometric|fingerprint|account number|routing number|card number|cvv|cvc|send money|transfer money|pay now", RegexOption.IGNORE_CASE)
     }
     override fun onServiceConnected() { current = this; ToolsPreferences(this).setCrossAppEnabled(false) }
@@ -82,7 +82,7 @@ class ShuffleAccessibilityService : AccessibilityService() {
             sentinelEvent = null
             val watch = sentinel() ?: continue
             fun watched() = sentinel()?.key === watch.key
-            fun checked(fresh: Boolean) = watch.read(fresh).also { if (com.hobbycoders.aishuffle.BuildConfig.DEBUG) afterEventCheckRead?.invoke(fresh, it.verdict) }
+            fun checked(fresh: Boolean) = watch.read(fresh).also { if (com.hobbycoders.aishuffle.BuildConfig.DEBUG) afterEventCheckRead?.invoke(fresh, it) }
             val cached = offMain(System.currentTimeMillis() + AppControlFence.READ_MS) { checked(false) }?.verdict ?: FenceRead.UNCONFIRMED
             val holds = cached == FenceRead.SAME || (cached == FenceRead.UNCONFIRMED && AppControlFence.settle(AppControlFence.READ_MS + AppControlFence.QUIET_MS, SystemClock::elapsedRealtime) {
                 if (!watched()) Reading(FenceRead.SAME) else offMain(System.currentTimeMillis() + AppControlFence.READ_MS) { checked(true) } ?: Reading(FenceRead.CHANGED)

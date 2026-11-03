@@ -397,6 +397,30 @@ class CrossAppFenceTest {
         assertEquals("performed", status(tapping, 15).getString("status"))
         assertTapped(1)
     }
+    /** Returns once the event fence has finished a read of the whole cached tree this fast. The read that follows it is not. */
+    private fun fastEventCheck(underMs: Long) {
+        val fast = java.util.concurrent.atomic.AtomicBoolean()
+        val finished = AtomicInteger()
+        ShuffleAccessibilityService.afterEventCheckRead = { fresh, reading ->
+            if (!fresh) { fast.set(reading.verdict == FenceRead.SAME && (reading.readMs ?: Long.MAX_VALUE) < underMs); finished.incrementAndGet() }
+        }
+        await("The event fence never finished a fast cached read", 12_000) {
+            val seen = finished.get()
+            fixture("notify")
+            await("The event fence never read after an event", 5_000) { finished.get() > seen }
+            fast.get()
+        }
+    }
+    @Test fun fastEventCheckBetweenASlowBadReadAndItsRetryWindowDoesNotShrinkIt() {
+        val ref = denseSlowRef()
+        holdEventChecks()
+        onceClosed("move")
+        val reads = afterFinalRead { fixture("back"); fastEventCheck(underMs = 100) } // Over 500 ms of row delays is not read in 100.
+        val tapping = tap(ref); allow()
+        assertEquals("performed", status(tapping, 25).getString("status"))
+        assertEquals("The bad read and its retry", 2, reads.get())
+        assertTapped(1)
+    }
     @Test fun denseSlowScreenReadRecoversFromABadRead() {
         fixture("dense:100"); fixture("delay:5")
         holdEventChecks()
@@ -410,9 +434,9 @@ class CrossAppFenceTest {
         // The move lasts until a fresh read by the event fence has seen it, so this can't pass with nothing to recover from.
         // Undone before that read's verdict is acted on, so the retry reads only the reverted screen.
         val mismatched = CountDownLatch(1); val recovered = CountDownLatch(1)
-        ShuffleAccessibilityService.afterEventCheckRead = { fresh, verdict ->
-            if (fresh && verdict == FenceRead.UNCONFIRMED && mismatched.count == 1L) { runCatching { fixture("back") }; mismatched.countDown() }
-            else if (fresh && verdict == FenceRead.SAME && mismatched.count == 0L) recovered.countDown()
+        ShuffleAccessibilityService.afterEventCheckRead = { fresh, reading ->
+            if (fresh && reading.verdict == FenceRead.UNCONFIRMED && mismatched.count == 1L) { runCatching { fixture("back") }; mismatched.countDown() }
+            else if (fresh && reading.verdict == FenceRead.SAME && mismatched.count == 0L) recovered.countDown()
         }
         fixtureWithEvent("move")
         assertTrue("The event fence never read the move", mismatched.await(10, TimeUnit.SECONDS))
