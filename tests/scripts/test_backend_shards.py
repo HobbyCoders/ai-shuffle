@@ -175,7 +175,8 @@ def test_all_security_commands_flags_and_timing_artifacts_remain_unconditional()
                     "tests/core/test_agent_isolation_root.py",
                     "tests/integration/test_postgres_safety.py", "tests/db/test_usage_budget_postgres.py",
                     "tests/core/test_pg_session_store.py", "tests/core/test_pg_session_store_rewind.py",
-                    "python -m pip_audit --skip-editable", "python -m pip_audit -r requirements-voice.lock",
+                    "python scripts/pip_audit_retry.py --skip-editable",
+                    "python scripts/pip_audit_retry.py -r requirements-voice.lock",
                     "tests/scripts", "tests/test_buyer_docs.py", "tests/core/test_docs_content.py"):
         assert command in text
     for flag in ("AGENT_ISOLATION_ROOT_REQUIRED", "PG_SAFETY_TEST"):

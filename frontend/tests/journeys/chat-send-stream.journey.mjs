@@ -32,6 +32,7 @@ import {
 	waitTurnSettled
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
+import { waitForCreatedChat } from './lib/boot.mjs';
 import { STOP_SELECTOR, expectStopFollowsStreaming, markTime } from './lib/timeline.mjs';
 
 const LONG_END = 'That is the end of the long reply.';
@@ -48,11 +49,7 @@ async function sendAndSettle({ page, mark, log }, { text, replyText, messagesAtL
 	const token = text.split(' ').find((word) => word.startsWith('tok-'));
 	expect((await countUserRows(page, token)) === 1, `the user's message (${token}) shows exactly once`);
 	expect((await composer(page).innerText()).trim() === '', 'the composer is empty after the send');
-	const selection = await page.evaluate(() => ({
-		session: JSON.parse(sessionStorage.getItem('ai-shuffle-active-session') || 'null')?.sessionId,
-		view: JSON.parse(localStorage.getItem('ai-shuffle-layout') || 'null')?.activeView
-	}));
-	expect(!!selection.session && selection.session === selection.view?.sessionId, 'the layout follows the sent chat, including a first send during boot');
+	await waitForCreatedChat(page);
 }
 
 await runJourney({
@@ -134,12 +131,10 @@ await runJourney({
 				await page.waitForFunction(() => window.__journeyBootHold?.releasedAt != null, null, { timeout: BOOT_HOLD.ms + 30_000 });
 				log(`boot load held ${BOOT_HOLD.ms}ms; reply settled before it was let go`);
 				await mark('the boot loads end');
-				await page.waitForTimeout(2000);
+				await waitForCreatedChat(page);
 				await waitChat(page, { surface: 'active', session: /^s:/, streaming: 'false', messagesAtLeast: 2 }, { timeout: 5000 });
 				expect((await countUserRows(page, token)) === 1, `the first message (${token}) shows exactly once`);
-				// The layout follows the created chat, so a reload reopens it.
-				const view = await page.evaluate(() => JSON.parse(localStorage.getItem('ai-shuffle-layout') || 'null')?.activeView);
-				expect(view?.type === 'session' && typeof view.sessionId === 'string', `the layout names the created chat (${JSON.stringify(view)})`);
+				// waitForCreatedChat above proves the persisted view follows this chat.
 			},
 			verify: ({ recording }) => expectStopFollowsStreaming(recording, { from: markTime(recording, 'type and send at once') })
 		},

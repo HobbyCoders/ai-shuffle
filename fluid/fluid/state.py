@@ -101,6 +101,11 @@ def scratch_dir(ctx: ToolCtx) -> Path:
     return project_state_root(ctx) / "scratch" / safe_key(ctx.session_id)
 
 
+#: Opening line of the scratch reminder's body, for hosts that read a pinned
+#: copy back. Listed in ``CompactionConfig.pinned_blocks``.
+SCRATCH_HEADER = "# Harness scratch\n"
+
+
 def scratch_prompt(ctx: ToolCtx) -> str:
     """Render harness context without making it part of the owner's prompt.
 
@@ -109,7 +114,7 @@ def scratch_prompt(ctx: ToolCtx) -> str:
     """
     return (
         "<system-reminder>\n"
-        "# Harness scratch\n"
+        f"{SCRATCH_HEADER}"
         f"Use {scratch_dir(ctx)} (absolute, per-session) for temporary briefs, "
         "artifacts and review evidence; create it only when needed. Never put "
         "harness state or scratch in the working folder's .fluid/. Project "
