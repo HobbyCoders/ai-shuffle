@@ -150,9 +150,9 @@ async function stopEverything(page) {
 }
 
 /** Send a slow turn and queue messages the server has confirmed, so only Stop can change them from here. */
-async function queueDuringASlowTurn(page, mark, variant, queued) {
+async function queueDuringASlowTurn(page, mark, variant, queued, opening = `stream tok-${uniq()}`) {
 	await mark('send');
-	await typeAndSend(page, `stream tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 2 })}`);
+	await typeAndSend(page, `${opening} ${scriptTag(variant, 'slow', { tps: 2 })}`);
 	await page.getByText(SLOW_REPLY.start, { exact: false }).last().waitFor({ timeout: 60_000 });
 	await waitChat(page, { streaming: 'true' });
 
@@ -930,6 +930,41 @@ await runJourney({
 				}));
 				const asBubble = frames.filter((f) => f.messages.some((m) => m.bubbles)).length;
 				log(`after the reload: ${asBubble} of ${frames.length} frames showed a bubble before the rows`);
+				expect((await page.locator(STOPPED_BUBBLE).count()) === 0, 'no bubble left beside a row');
+			}
+		},
+		{
+			// Stop, leave straight away, come back. Stop and the switch are two
+			// actions, so two steps: the chat gaining its rows just before it is left
+			// is not the chat going backwards.
+			name: 'stop-then-switch-away-and-back-keeps-the-rows',
+			async setup(ctx) {
+				await openStopChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant }) {
+				const opening = `stream tok-${uniq()}`;
+				const texts = await queueDuringASlowTurn(page, mark, variant, 2, opening);
+				const notSent = (text) => page.locator('[data-not-sent="true"]').filter({ hasText: text });
+				const { title } = await api(page, 'GET', `/sessions/${await chatIdByToken(page, opening)}`);
+				await mark('stop');
+				await stopButton(page).click();
+				await mark('leave');
+				await openFromSidebar(page, SEEDED.no_project);
+				await waitChatOpen(page, { messagesAtLeast: 2, hold: 500 });
+				await mark('come back');
+				const collect = await watchStopFrames(page, texts);
+				await openFromSidebar(page, title);
+				for (const text of texts) {
+					await notSent(text).getByRole('button', { name: 'Restore to composer' }).waitFor({ timeout: 15_000 });
+				}
+				await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+				await page.waitForTimeout(1500);
+				const frames = await collect();
+				frames.forEach((frame, i) => frame.messages.forEach((m) => {
+					expect(m.bubbles + m.notSent <= 1, `shown twice in frame ${i}: ${JSON.stringify(m)}`);
+				}));
+				for (const text of texts) expect((await notSent(text).count()) === 1, `one row for "${text}"`);
 				expect((await page.locator(STOPPED_BUBBLE).count()) === 0, 'no bubble left beside a row');
 			}
 		},
