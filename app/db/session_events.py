@@ -14,7 +14,8 @@ The log is append-only by design: there are deliberately no delete/truncate
 helpers. Readers tail by ``seq > from_seq``. A best-effort ``pg_notify`` on the
 ``session_events`` channel wakes the gateway; delivery must not depend on it (the
 gateway also polls), and ``pg_notify`` does not exist on the SQLite test shim, so
-the notify is guarded and non-fatal.
+the notify is guarded and non-fatal. It is sent in its own transaction after the
+events commit (:func:`send_wake`), never inside theirs: see that function.
 
 The ONE exception to "append-only" is :func:`compact_session_deltas` — a
 retention pass for idle sessions that is *lossless by construction*: it
@@ -32,6 +33,8 @@ import uuid
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+import psycopg2
 
 from app.db.base import get_db, get_event_db, rows_to_list
 
@@ -72,6 +75,47 @@ def notify_session_write(session_id: Optional[str], collection: str) -> None:
         logger.debug("Session write hook failed for %s", session_id, exc_info=True)
 
 
+def send_wake(session_id: str, max_seq: int, *, recheck_log: bool = False) -> None:
+    """Wake session readers, after the events are committed. Never raises.
+
+    PostgreSQL takes one server-wide lock when a transaction that issued NOTIFY
+    commits and holds it through that commit's WAL flush. A notify inside an
+    event transaction therefore made every other event commit queue behind one
+    slow flush until ``lock_timeout`` cancelled it, ending that agent's turn
+    (#1065). A transaction that only notifies writes no WAL it must flush, so it
+    holds the lock for microseconds and can only ever lose its own wake.
+
+    A commit that is still flushing with the lock held (a mirror apply, see
+    ``catalog.after_event_mirrored``) must not stall the writer sending this, so
+    the wait is short. A wake that cannot be sent still reaches this process's
+    readers directly, because they drop to a slow re-sync while LISTEN is healthy.
+    """
+    body: Dict[str, Any] = {"session_id": session_id, "max_seq": max_seq}
+    if recheck_log:
+        body["recheck_log"] = True
+    payload = json.dumps(body)
+    try:
+        with get_db() as conn:
+            try:
+                conn.cursor().execute(
+                    "SELECT set_config('lock_timeout', '250ms', true), pg_notify(%s, %s)",
+                    (NOTIFY_CHANNEL, payload),
+                )
+            except psycopg2.Error:
+                raise
+            except Exception:  # pg_notify is absent on the SQLite test shim
+                logger.debug("pg_notify on %s failed (non-fatal)", NOTIFY_CHANNEL, exc_info=True)
+    except Exception as exc:
+        logger.debug("pg_notify on %s failed (non-fatal)", NOTIFY_CHANNEL, exc_info=True)
+        if isinstance(exc, psycopg2.Error):
+            try:
+                from app.core.event_gateway import get_gateway
+
+                get_gateway()._handle_payload(payload)
+            except Exception:
+                logger.debug("Local wake failed for %s", session_id, exc_info=True)
+
+
 class FenceViolation(Exception):
     """Raised when an append is rejected because the run fence no longer holds
     (run missing, not active, or token superseded)."""
@@ -98,8 +142,8 @@ def append_events(
 ) -> Tuple[int, int]:
     """Append a batch of events, returning the ``(first_seq, last_seq)`` range.
 
-    All work happens in one transaction: fence check, atomic seq allocation,
-    row inserts, and a best-effort notify. Raises :class:`FenceViolation` if a
+    All work happens in one transaction: fence check, atomic seq allocation and
+    row inserts. A best-effort wake follows the commit. Raises :class:`FenceViolation` if a
     supplied ``run_id`` no longer owns the session, ``ValueError`` if ``events``
     is empty or ``run_id`` is given without ``fence_token``.
 
@@ -117,7 +161,8 @@ def append_events(
         raise ValueError("fence_token is required when run_id is provided")
 
     n = len(events)
-    # With a caller-owned transaction, the caller also sends the post-commit wake.
+    # With a caller-owned transaction, the caller also sends the post-commit
+    # network wake; the reader wake below waits for that caller's commit.
     with (get_event_db() if _conn is None else nullcontext(_conn)) as conn:
         cursor = conn.cursor()
 
@@ -271,21 +316,15 @@ def append_events(
             if completion_seq > activity_seq:
                 composer_suggestions.complete(conn, session_id)
 
-        # 4. Best-effort notify (guarded: pg_notify is absent on the SQLite
-        # shim, and delivery must not depend on it — the gateway also polls).
-        try:
-            cursor.execute(
-                "SELECT pg_notify(%s, %s)",
-                (
-                    NOTIFY_CHANNEL,
-                    json.dumps({"session_id": session_id, "max_seq": last_seq}),
-                ),
-            )
-        except Exception:
-            logger.debug("pg_notify on %s failed (non-fatal)", NOTIFY_CHANNEL, exc_info=True)
+        # 4. Wake readers only once this commits, and never from inside it.
+        if _conn is not None:
+            after_commit(conn, lambda: send_wake(session_id, last_seq))
 
+    # Outside the block: the commit is done, and neither the event write slot
+    # nor a connection is held while the wake runs.
     if _conn is None:
         notify_session_write(session_id, "session_events")
+        send_wake(session_id, last_seq)
     return first_seq, last_seq
 
 
@@ -370,18 +409,7 @@ def append_backfill_events(
             params,
         )
 
-        # Best-effort notify (guarded — absent on the SQLite shim).
-        try:
-            cursor.execute(
-                "SELECT pg_notify(%s, %s)",
-                (
-                    NOTIFY_CHANNEL,
-                    json.dumps({"session_id": session_id, "max_seq": last_seq}),
-                ),
-            )
-        except Exception:
-            logger.debug("pg_notify on %s failed (non-fatal)", NOTIFY_CHANNEL, exc_info=True)
-
+    send_wake(session_id, last_seq)
     return first_seq, last_seq
 
 

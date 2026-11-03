@@ -30,6 +30,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
+from psycopg2.errors import LockNotAvailable
+
 from app.contract import events as contract
 from app.core import artifact_ingest, artifact_store
 from app.core.config import settings
@@ -50,6 +52,13 @@ logger = logging.getLogger(__name__)
 FLUSH_INTERVAL_SECONDS = 0.15  # flush deltas this long after the first buffered
 FLUSH_MAX_BUFFER_CHARS = 2048  # ...or once a kind's buffer reaches this size
 USAGE_COALESCE_SECONDS = 2.0   # at most one turn.usage append per window
+# Waits between re-sends of a batch PostgreSQL refused with a lock timeout (55P03).
+# That error is the server's own answer, on a live connection, that the transaction
+# rolled back, even when COMMIT raised it, so unlike a lost connection a re-send
+# cannot duplicate anything. Each attempt can also wait out lock_timeout (5 s on a
+# worker), which makes this about 45 s: longer than the server's 30 s statement
+# and idle-in-transaction limits let an ordinary lock holder last.
+_LOCK_RETRY_DELAYS_SECONDS = (0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
 # turn.provider_alive: the first of a turn is always recorded; a later one only
 # after this long with nothing appended at all. A turn that streams content
 # therefore records one, and a silent reasoning stream one per window.
@@ -624,6 +633,9 @@ class TurnRecorder:
         self._open_tool_use_id: str = ""  # from the last stream_block_start
         self._open_tool_use_name: str = ""
         self._flush_task: Optional[asyncio.Task] = None
+        # A batch known not to have committed, kept if Stop lands during its
+        # back-off. The next append writes it first, so nothing is lost or reordered.
+        self._lock_retry_batch: List[Dict[str, Any]] = []
 
         # turn.usage coalescing.
         self._last_usage_at: float = float("-inf")
@@ -1374,6 +1386,9 @@ class TurnRecorder:
 
     async def _append(self, events: List[Dict[str, Any]]) -> None:
         """Append a batch under the fence (or unfenced). Never raises."""
+        if self._lock_retry_batch:
+            events = self._lock_retry_batch + events
+            self._lock_retry_batch = []
         if not events:
             return
         if self._recording_failed:
@@ -1404,12 +1419,30 @@ class TurnRecorder:
                          if self.run_id is not None and self.fence_token is not None else {})
                 session_events_db.append_events(self.session_id, current, **fence)
 
-            await run_event_write(append_current_events)
+            # Callers hold self._lock, so no later batch of this turn can pass
+            # one waiting here. Each attempt re-runs both fence checks.
+            for delay in (*_LOCK_RETRY_DELAYS_SECONDS, None):
+                try:
+                    await run_event_write(append_current_events)
+                    break
+                except LockNotAvailable:
+                    if delay is None:
+                        raise
+                    logger.warning(
+                        "[TurnRecorder] lock timeout writing %d event(s) for %s; "
+                        "nothing committed, retrying in %.2fs",
+                        len(events), self.session_id, delay,
+                    )
+                    self._lock_retry_batch = events
+                    await asyncio.sleep(delay)
+                    self._lock_retry_batch = []
             self._last_append_at = time.monotonic()
         except session_events_db.FenceViolation:
             self._mark_superseded(len(events))
         except Exception:
-            # The commit outcome is unknown. Never retry or retain this batch.
+            # Outside a server-reported lock timeout the commit outcome is unknown,
+            # and these events have no stable id, so a retry could duplicate them.
+            # Never retry or retain this batch.
             self._recording_failed = True
             self._cancel_task(self._renew_task)
             self._renew_task = None
@@ -1422,7 +1455,7 @@ class TurnRecorder:
             self._flush_task = None
             logger.warning(
                 "[TurnRecorder] recording failed for %s run %s turn %s "
-                "(%d event(s) dropped; commit outcome unknown)",
+                "(%d event(s) dropped; commit outcome unknown or lock wait exhausted)",
                 self.session_id, self.run_id, self.turn_id, len(events), exc_info=True,
             )
             if self.on_recording_failed is not None:
@@ -1528,7 +1561,14 @@ class TurnRecorder:
 async def _append_unfenced(session_id: str, events: List[Dict[str, Any]]) -> None:
     if not events:
         return
-    await run_event_write(session_events_db.append_events, session_id, events)
+    for delay in (*_LOCK_RETRY_DELAYS_SECONDS, None):
+        try:
+            await run_event_write(session_events_db.append_events, session_id, events)
+            return
+        except LockNotAvailable:
+            if delay is None:
+                raise
+            await asyncio.sleep(delay)
 
 
 async def record_drained_event(session_id: str, event: Dict[str, Any]) -> None:
