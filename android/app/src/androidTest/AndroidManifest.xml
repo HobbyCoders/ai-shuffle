@@ -16,5 +16,6 @@
         <activity android:name="com.hobbycoders.aishuffle.ControlTargetActivity" android:exported="true" android:label="Local media test">
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
         </activity>
+        <activity android:name="com.hobbycoders.aishuffle.CoveredTargetActivity" android:exported="true" />
     </application>
 </manifest>
