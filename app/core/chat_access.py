@@ -1316,7 +1316,7 @@ class Broker:
             return
         from app.db import database, turns
         from app.db.async_database import run_sync
-        from app.core.task_registry import task_registry
+        from app.core.task_registry import task_registry, user_stop_holds
         for child in children:
             try:
                 row = await run_sync(database.get_session, child)
@@ -1345,7 +1345,7 @@ class Broker:
                             and not task_registry.finished_awaiting_report(child)
                             and not await run_sync(user_question_handler.get_pending_questions, child))
             terminal = (row.get("status") in ("archived", "completed", "stopped", "failed", "error", "killed")
-                        or task_registry.is_user_stopped(child)
+                        or await user_stop_holds(child)
                         or finished)
             if terminal:
                 for request in list(self.requests.values()):

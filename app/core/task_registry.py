@@ -381,6 +381,8 @@ class TaskRegistry:
         self._stop_generations: Dict[str, int] = {}
         self._stop_cutoffs: Dict[str, int] = {}
         self._stop_incomplete: set[str] = set()
+        # session_id -> ``insert_order`` of the newest turn to go live here.
+        self._turn_orders: Dict[str, int] = {}
         self._stop_supervisors: Dict[str, set] = {}
         # session_id -> {child_launch_tuid -> owner_launch_tuid} (B-1). A grand-
         # child background task's launch tool_use_id mapped to the launch
@@ -608,6 +610,20 @@ class TaskRegistry:
         """Stable per-start token, already mirrored durably as started_at."""
         record = self._tasks.get(session_id, {}).get(task_id)
         return record.get("started_at") if record else None
+
+    def note_turn_live(self, session_id: str, insert_order: Optional[int]) -> None:
+        """What every task started from now on belongs to (:meth:`task_turn_order`)."""
+        if insert_order:
+            self._turn_orders[session_id] = max(int(insert_order), self._turn_orders.get(session_id, 0))
+
+    def task_turn_order(self, session_id: str, task_id: str) -> Optional[int]:
+        """The ``insert_order`` of the turn this run started under, when it is known.
+
+        The database issued it, so it places a run against any turn on any install,
+        which no clock here can. A resume renews it with the run.
+        """
+        record = self._tasks.get(session_id, {}).get(task_id)
+        return record.get("turn_order") if record else None
 
     def matches_task_incarnation(
         self, session_id: str, task_id: str, incarnation: Optional[str],
@@ -1120,6 +1136,7 @@ class TaskRegistry:
                 if previous_start and now <= previous_start:
                     now = (datetime.fromisoformat(previous_start) + timedelta(microseconds=1)).isoformat()
                 existing["started_at"] = now
+                existing["turn_order"] = self._turn_orders.get(session_id)
                 existing.pop("notification_delivered", None)
                 retained = self._recent_terminal.get(session_id)
                 if retained is not None:
@@ -1157,6 +1174,7 @@ class TaskRegistry:
             "model": model,
             "started_at": now,
             "updated_at": now,
+            "turn_order": self._turn_orders.get(session_id),
         }
         if remote_device_id:
             bucket[task_id]["remote_device_id"] = remote_device_id
@@ -1311,6 +1329,7 @@ class TaskRegistry:
                     in self._terminal_notified.get(session_id, set()),
                     "started_at": record.get("started_at"),
                     "updated_at": record.get("updated_at"),
+                    "turn_order": record.get("turn_order"),
                     "summary": record.get("summary"),
                     "reason": record.get("reason"),
                     "report_path": record.get("report_path"),
@@ -1396,6 +1415,7 @@ class TaskRegistry:
                 "report_path": row.get("report_path"),
                 "report_chars": row.get("report_chars"),
                 "started_at": _iso(row.get("started_at")),
+                "turn_order": row.get("turn_order"),
                 "updated_at": _iso(row.get("updated_at")),
                 "restored": True,
             }
@@ -1814,6 +1834,7 @@ class TaskRegistry:
             "assignment_owner": bool(row.get("assignment_owner", True)),
             "tool_use_id": row.get("tool_use_id"),
             "started_at": _iso(row.get("started_at")),
+                "turn_order": row.get("turn_order"),
             "updated_at": _iso(row.get("updated_at")),
             "summary": row.get("summary"),
             "reason": row.get("reason"),
@@ -1896,6 +1917,7 @@ class TaskRegistry:
         already-expired entries don't linger).
         """
         self._tasks.pop(session_id, None)
+        self._turn_orders.pop(session_id, None)
         self._started_this_turn.pop(session_id, None)
         self._background_launches.pop(session_id, None)
         self._sdk_background_tasks.pop(session_id, None)
@@ -1940,3 +1962,11 @@ class TaskRegistry:
 
 # Global instance
 task_registry = TaskRegistry()
+
+
+async def user_stop_holds(session_id: str) -> bool:
+    """The Stop latch, for anyone able to wait: it asks first whether a person has
+    answered the Stop on another install. Costs nothing unless the session is latched."""
+    from app.core.query_session_lifecycle import reconcile_user_stop
+
+    return not await reconcile_user_stop(session_id)

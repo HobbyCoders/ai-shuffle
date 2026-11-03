@@ -37,7 +37,6 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timezone
 from weakref import WeakValueDictionary
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Coroutine, Dict, List, Optional, Set
@@ -867,7 +866,6 @@ class SessionRuntime:
         self._progress_watchdog: Optional[asyncio.Task] = None
         self._stop_generation: Optional[int] = None
         self._claimed_turn: Optional[Dict[str, Any]] = None
-        self.live_since: Optional[datetime] = None
 
     def _resolve_principal(self, session_row: Optional[Dict[str, Any]]) -> None:
         """Settle who this turn runs as. Synchronous (DB reads): run off-loop.
@@ -1119,7 +1117,7 @@ class SessionRuntime:
             # boot-wired executor → get_live_runtime(sid).interrupt(mode)) can
             # reach us. Self-guarded pop in the outer finally.
             _live_runtimes[sid] = self
-            self.live_since = datetime.now(timezone.utc)
+            task_registry.note_turn_live(sid, self.turn.get("insert_order"))
             from app.core.lifecycle_events import enqueue
             if not (self.turn.get("payload") or {}).get("continued_turn"):
                 enqueue("started", sid, tid)
@@ -1583,7 +1581,6 @@ class SessionRuntime:
                     )
             if self._abort_reason == "recording_failed":
                 return
-            from app.core.task_registry import task_registry
             if self._stop_applies():
                 self._terminal = "interrupted"
                 self._abort_reason = "user_stopped"
@@ -2892,9 +2889,9 @@ class SessionRuntime:
                 # A per-task Stop can suppress the only wake while park_turn
                 # is off-thread. Its cleanup may have run before this write;
                 # re-check AFTER it so we never leave an unwakeable park.
-                from app.core.task_registry import task_registry
+                from app.core.task_registry import task_registry, user_stop_holds
 
-                if (task_registry.is_user_stopped(sid) or any(
+                if (await user_stop_holds(sid) or any(
                     task_registry.is_wake_suppressed(sid, task_id)
                     for task_id in task_ids
                 )):
@@ -3231,7 +3228,7 @@ class SessionRuntime:
         # does not. One whose start this cannot place spares everything.
         successor = _live_runtimes.get(sid) if self._replaced_by_newer_runtime() else None
         scope = capture_stop_scope(sid) if successor is None else capture_stop_scope(
-            sid, older_than=getattr(successor, "live_since", None) or datetime.min.replace(tzinfo=timezone.utc),
+            sid, before_turn=int((getattr(successor, "turn", None) or {}).get("insert_order") or 0),
         )
 
         async def read_row() -> Optional[Dict[str, Any]]:

@@ -18,13 +18,22 @@ from __future__ import annotations
 
 import logging
 from contextlib import nullcontext
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.db.base import get_db, get_cursor, rows_to_list
 from app.db.compat import ph
 
 logger = logging.getLogger(__name__)
+
+#: A session's Stop sequence, for a row being armed now; takes the session id.
+#: A Stop that commits after this read cancels the row, whatever else happens to
+#: it. Read here, never held, so a Stop waiting on anything does not hold up a wake.
+CURRENT_STOP_SEQ = "COALESCE((SELECT stop_seq FROM session_stops WHERE session_id = %s), 0)"
+#: What a Stop has not cancelled, on a query of ``pending_wakeups``.
+_NOT_STOPPED = (
+    "(source = 'profile_cancelled' OR stop_seq IS NULL OR stop_seq >= COALESCE((SELECT s.stop_seq FROM session_stops s "
+    "WHERE s.session_id = pending_wakeups.session_id), 0))"
+)
 
 
 def create_wakeup(
@@ -40,14 +49,16 @@ def create_wakeup(
     source: str = "schedule_wakeup",
     instance_id: Optional[str] = None,
     created_at: Any = None,
+    stop_seq: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Insert a pending wakeup and return the persisted row as a dict.
 
     ``model`` is the scheduling turn's effective model; the wake replays it as a
     query-level model override so it never fires on the profile default.
 
-    ``created_at`` is when the wake was first armed, for a retry of it: every rule
-    that sets a wake against a person's message or a Stop reads this.
+    ``created_at`` and ``stop_seq`` are when the wake was first armed, for a retry
+    of it: every rule that sets a wake against a person's message or a Stop reads
+    them.
     """
     _ph = ph()
     with get_db() as conn:
@@ -55,14 +66,14 @@ def create_wakeup(
         cursor.execute(
             f"""INSERT INTO pending_wakeups
                 (id, session_id, profile_id, project_id, prompt, reason, model,
-                 source, instance_id, fire_at, created_at)
+                 source, instance_id, fire_at, created_at, stop_seq)
                 VALUES ({_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph},
-                        COALESCE({_ph}, NOW()))""",
+                        COALESCE({_ph}, NOW()), COALESCE({_ph}, {CURRENT_STOP_SEQ}))""",
             (id, session_id, profile_id, project_id, prompt, reason, model,
-             source, instance_id, float(fire_at), created_at),
+             source, instance_id, float(fire_at), created_at, stop_seq, session_id),
         )
-        cursor.execute(f"SELECT created_at FROM pending_wakeups WHERE id = {_ph}", (id,))
-        created_at = cursor.fetchone()["created_at"]
+        cursor.execute(f"SELECT created_at, stop_seq FROM pending_wakeups WHERE id = {_ph}", (id,))
+        armed = cursor.fetchone()
     return {
         "id": id,
         "session_id": session_id,
@@ -74,7 +85,8 @@ def create_wakeup(
         "source": source,
         "instance_id": instance_id,
         "fire_at": float(fire_at),
-        "created_at": created_at,
+        "created_at": armed["created_at"],
+        "stop_seq": armed["stop_seq"],
     }
 
 
@@ -85,15 +97,15 @@ def claim_wakeup(wakeup_id: str) -> bool:
     A losing caller (already fired / claimed by a peer install or a rehydrated
     timer) gets False and must NOT fire.
 
-    A wake armed before a Stop is gone too, and also gets False: the Stop's own
-    delete can time out behind a held row, and this is where any install meets
-    what it recorded. A profile-removed notice is not work, and still goes out.
+    A wake a Stop cancelled is gone too, and also gets False: the Stop's own delete
+    can time out behind a held row, and this is where any install meets its record
+    (``session_stops``). A profile-removed notice is not work, and still goes out.
     """
     _ph = ph()
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            f"SELECT session_id, source, created_at FROM pending_wakeups WHERE id = {_ph}",
+            f"SELECT session_id, source, stop_seq FROM pending_wakeups WHERE id = {_ph}",
             (wakeup_id,),
         )
         row = cursor.fetchone()
@@ -103,35 +115,25 @@ def claim_wakeup(wakeup_id: str) -> bool:
         deleted = cursor.rowcount
         if not (deleted and deleted > 0):
             return False
-        if row and row["source"] != "profile_cancelled" and _stopped_since(
-            cursor, row["session_id"], row["created_at"],
-        ):
+        if row and _cancelled_by_stop(cursor, row):
             logger.info("wakeup %s (session %s) dropped: a Stop since it was armed cancelled it",
                         wakeup_id, row["session_id"])
             return False
     return True
 
 
-def _instant(value: Any) -> Optional[datetime]:
-    try:
-        moment = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
-    except ValueError:
-        return None
-    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+def _cancelled_by_stop(cursor: Any, row: Dict[str, Any]) -> bool:
+    """Whether a user Stop came after this wake was armed, and so cancelled it.
 
-
-def _stopped_since(cursor: Any, session_id: str, armed_at: Any) -> bool:
-    """Whether a recorded Stop (``turns.STOP_RECEIPT_KEY``) came after this moment."""
-    armed = _instant(armed_at)
-    if armed is None:
+    No sequence means an older install armed it and could not place it: it fires
+    as it would have there, and a Stop still reaches it by deleting it.
+    """
+    if row.get("source") == "profile_cancelled" or row.get("stop_seq") is None:
         return False
-    cursor.execute(
-        f"SELECT payload -> 'stop_receipt' ->> 'stopped_at' AS stopped_at FROM turns "
-        f"WHERE session_id = {ph()} AND payload -> 'stop_receipt' ->> 'stopped_at' IS NOT NULL",
-        (session_id,),
-    )
-    return any((stopped := _instant(row["stopped_at"])) is not None and stopped > armed
-               for row in rows_to_list(list(cursor.fetchall() or [])))
+    cursor.execute(f"SELECT stop_seq FROM session_stops WHERE session_id = {ph()}",
+                   (row["session_id"],))
+    latest = cursor.fetchone()
+    return latest is not None and int(row["stop_seq"]) < int(latest["stop_seq"])
 
 
 def pop_session_wakeups(
@@ -245,7 +247,7 @@ def take_session_wakeups(session_id: str, source: str) -> List[Dict[str, Any]]:
 
     Oldest ``fire_at`` first. Each row is deleted by id, so a row inserted
     after the read is left for the next caller, and a row a timer already
-    claimed is simply not returned.
+    claimed is simply not returned. Nor is one a Stop cancelled.
     """
     _ph = ph()
     with get_db() as conn:
@@ -261,7 +263,7 @@ def take_session_wakeups(session_id: str, source: str) -> List[Dict[str, Any]]:
             cursor.execute(
                 f"DELETE FROM pending_wakeups WHERE id = {_ph}", (row["id"],)
             )
-            if cursor.rowcount and cursor.rowcount > 0:
+            if cursor.rowcount and cursor.rowcount > 0 and not _cancelled_by_stop(cursor, row):
                 taken.append(row)
     return taken
 
@@ -289,25 +291,29 @@ def merge_session_wakeup(
     is the earliest of theirs, or ``fire_at`` when there were none. A row a
     timer claimed before the delete is not folded in, so its text is never
     written twice; no crash between the delete and the insert can lose the
-    old text. Returns the new row and the ids of the rows it replaced.
+    old text. A row a Stop cancelled is deleted without being folded in: the new
+    row belongs after that Stop, and the old text must not come back with it.
+    Returns the new row and the ids of the rows it replaced.
     ``_conn`` joins a caller's transaction (a queued row moved into the store).
     """
     _ph = ph()
     with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            f"SELECT id, prompt, fire_at FROM pending_wakeups "
+            f"SELECT * FROM pending_wakeups "
             f"WHERE session_id = {_ph} AND source = {_ph} ORDER BY fire_at ASC",
             (session_id, source),
         )
         existing = rows_to_list(list(cursor.fetchall() or []))
-        kept = []
+        replaced, kept = [], []
         for row in existing:
             cursor.execute(
                 f"DELETE FROM pending_wakeups WHERE id = {_ph}", (row["id"],)
             )
             if cursor.rowcount and cursor.rowcount > 0:
-                kept.append(row)
+                replaced.append(row)
+                if not _cancelled_by_stop(cursor, row):
+                    kept.append(row)
         texts = [str(r.get("prompt") or "") for r in kept]
         parts = [prompt, *texts] if prepend else [*texts, prompt]
         text = "\n\n".join(p.strip() for p in parts if p and p.strip())
@@ -316,13 +322,14 @@ def merge_session_wakeup(
         cursor.execute(
             f"""INSERT INTO pending_wakeups
                 (id, session_id, profile_id, project_id, prompt, reason, model,
-                 source, instance_id, fire_at)
-                VALUES ({_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph})""",
+                 source, instance_id, fire_at, stop_seq)
+                VALUES ({_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph},
+                        {CURRENT_STOP_SEQ})""",
             (id, session_id, profile_id, project_id, text, reason, model,
-             source, instance_id, float(fire_at)),
+             source, instance_id, float(fire_at), session_id),
         )
-        cursor.execute(f"SELECT created_at FROM pending_wakeups WHERE id = {_ph}", (id,))
-        created_at = cursor.fetchone()["created_at"]
+        cursor.execute(f"SELECT created_at, stop_seq FROM pending_wakeups WHERE id = {_ph}", (id,))
+        armed = cursor.fetchone()
     row = {
         "id": id,
         "session_id": session_id,
@@ -334,9 +341,10 @@ def merge_session_wakeup(
         "source": source,
         "instance_id": instance_id,
         "fire_at": float(fire_at),
-        "created_at": created_at,
+        "created_at": armed["created_at"],
+        "stop_seq": armed["stop_seq"],
     }
-    return row, [str(r["id"]) for r in kept]
+    return row, [str(r["id"]) for r in replaced]
 
 
 def sessions_with_wakeup_text(source: str, needle: str) -> List[str]:
@@ -354,19 +362,24 @@ def sessions_with_wakeup_text(source: str, needle: str) -> List[str]:
 
 
 def get_session_wakeups(session_id: str, source: Optional[str] = None) -> List[Dict[str, Any]]:
-    """A session's pending wakeups (all, or of one ``source``), oldest ``fire_at`` first."""
+    """A session's pending wakeups (all, or of one ``source``), oldest ``fire_at`` first.
+
+    Not one a Stop cancelled and could not delete: it is not pending, and must not
+    travel with a hand-off to a worker that never saw the Stop.
+    """
     _ph = ph()
     with get_db() as conn:
         cursor = get_cursor(conn)
         if source is None:
             cursor.execute(
-                f"SELECT * FROM pending_wakeups WHERE session_id = {_ph} ORDER BY fire_at ASC",
+                f"SELECT * FROM pending_wakeups WHERE session_id = {_ph} AND {_NOT_STOPPED} "
+                f"ORDER BY fire_at ASC",
                 (session_id,),
             )
         else:
             cursor.execute(
                 f"SELECT * FROM pending_wakeups WHERE session_id = {_ph} "
-                f"AND source = {_ph} ORDER BY fire_at ASC",
+                f"AND source = {_ph} AND {_NOT_STOPPED} ORDER BY fire_at ASC",
                 (session_id, source),
             )
         return rows_to_list(list(cursor.fetchall() or []))

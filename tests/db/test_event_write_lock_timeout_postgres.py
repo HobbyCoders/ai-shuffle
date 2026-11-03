@@ -22,6 +22,7 @@ from uuid import uuid4
 import psycopg2
 import pytest
 from psycopg2.errors import LockNotAvailable
+from psycopg2.extras import RealDictCursor
 
 from tests.db.postgres_harness import requires_real_pg
 from tests.db.schema_lifecycle_helpers import pg16_bindir
@@ -716,7 +717,6 @@ async def test_a_wake_both_cancels_timed_out_on_does_not_fire_after_the_newer_me
 ):
     from app.core import turn_manager
     from app.core.query_session_lifecycle import stop_all_background_tasks
-    from app.db import wakeups as wakeups_db
 
     wake_id = "wake-" + session_id
     wake = _pending_wake(session_id, wake_id)
@@ -727,12 +727,12 @@ async def test_a_wake_both_cancels_timed_out_on_does_not_fire_after_the_newer_me
         turn_manager._submit_blocking, session_id, "user", prompt="newer", profile_id="default",
     )
     holder.rollback()
-    assert wakeups_db.get_session_wakeups(session_id), "both cancels should have timed out"
+    assert _wake_row(wake_id), "both cancels should have timed out"
 
     await _fire(wake)
 
     assert _sources(session_id) == ["user"]
-    assert not wakeups_db.get_session_wakeups(session_id)
+    assert not _wake_row(wake_id)
 
 
 async def test_a_wake_armed_after_the_message_still_fires(session_id, stop_cleared):
@@ -1199,3 +1199,276 @@ async def test_a_stop_reading_its_cutoff_still_holds_until_it_has_one(session_id
 
     assert await qsl.reconcile_user_stop(session_id) is False
     assert task_registry.is_user_stopped(session_id)
+
+
+def _settled_turn(session_id: str) -> dict:
+    from app.db import turns as turns_db
+
+    turn = turns_db.enqueue_turn(session_id, "user", prompt="old", profile_id="default")
+    turns_db.start_turn(turn["id"], None, "runner")
+    turns_db.settle_turn(turn["id"], "completed", "end_turn")
+    return turn
+
+
+def _hold_row(connect, table: str, row_id: str, column: str = "id"):
+    holder = connect()
+    holder.cursor().execute(f"SELECT 1 FROM {table} WHERE {column}=%s FOR UPDATE", (row_id,))
+    return holder
+
+
+async def test_a_stop_holds_on_other_installs_with_its_turn_and_wake_rows_held(
+    connect, cluster, session_id, stop_cleared,
+):
+    """Both rows held: no turn's lock can stand between a Stop and its record."""
+    from app.core import query_session_lifecycle as qsl
+
+    turn = _settled_turn(session_id)
+    wake = _arm_wake(session_id)
+    holders = [_hold_row(connect, "turns", turn["id"]),
+               _hold_row(connect, "pending_wakeups", wake["id"])]
+
+    counts = await qsl.enter_user_stop(session_id)
+    for holder in holders:
+        holder.rollback()
+
+    assert "incomplete" not in counts
+    assert counts["wakeups_cancelled"] == 0
+    assert await asyncio.to_thread(_peer_fires, cluster, wake["id"]) == "DROPPED"
+
+
+async def test_a_stop_that_cannot_write_its_record_reports_it(
+    connect, session_id, stop_cleared, monkeypatch,
+):
+    from app.core import query_session_lifecycle as qsl
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    monkeypatch.setattr(qsl, "_STOP_RECEIPT_RETRY_DELAYS", (0,))
+    turns_db.read_stop_receipt(session_id)
+    attempts = []
+    real = turns_db.read_stop_receipt
+
+    def counted(sid):
+        attempts.append(sid)
+        return real(sid)
+
+    monkeypatch.setattr(turns_db, "read_stop_receipt", counted)
+    holder = _hold_row(connect, "session_stops", session_id, "session_id")
+    try:
+        counts = await qsl.enter_user_stop(session_id)
+    finally:
+        holder.rollback()
+
+    assert len(attempts) == 2
+    assert counts["incomplete"] is True
+    assert task_registry.stop_admission_incomplete(session_id)
+
+
+async def test_a_wake_armed_while_a_stop_waits_for_its_turn_row_stays_cancelled(
+    connect, cluster, session_id, stop_cleared,
+):
+    """It is older than the Stop's record, though the Stop's transaction began first."""
+    from app.core import query_session_lifecycle as qsl
+    from app.db import turns as turns_db
+
+    turn = turns_db.enqueue_turn(session_id, "user", prompt="old", profile_id="default")
+    turns_db.start_turn(turn["id"], None, "runner")
+    holder = _hold_row(connect, "turns", turn["id"])
+    stopper = connect()
+    stopper.cursor_factory = RealDictCursor
+    outcome: dict = {}
+
+    def stop():
+        with stopper:
+            outcome["row"] = turns_db.interrupt_turn(
+                session_id, "stop", stop_background=True, source="user_stop", _conn=stopper,
+            )
+
+    thread = threading.Thread(target=stop)
+    thread.start()
+    observer = connect(autocommit=True)
+
+    def waiting():
+        cursor = observer.cursor()
+        cursor.execute("SELECT wait_event_type FROM pg_stat_activity WHERE pid=%s",
+                       (stopper.get_backend_pid(),))
+        return (cursor.fetchone() or [None])[0] == "Lock"
+
+    await _until(waiting, "the Stop to wait on the held turn row")
+    wake = _arm_wake(session_id)
+    wake_holder = _hold_row(connect, "pending_wakeups", wake["id"])
+    holder.rollback()
+    await asyncio.to_thread(thread.join, 10)
+
+    receipt = outcome["row"]["payload"][turns_db.STOP_RECEIPT_KEY]
+    await qsl.stop_all_background_tasks(session_id, user_stop=True, receipt=receipt)
+    wake_holder.rollback()
+
+    assert wake["id"] in receipt["wakes"]
+    assert await asyncio.to_thread(_peer_fires, cluster, wake["id"]) == "DROPPED"
+
+
+async def test_merging_does_not_bring_back_what_a_stop_cancelled(
+    connect, cluster, session_id, stop_cleared,
+):
+    from app.core import query_session_lifecycle as qsl, turn_scheduler
+    from app.db import wakeups
+
+    _settled_turn(session_id)
+    old = wakeups.create_wakeup(
+        id="merge-" + uuid4().hex, session_id=session_id, profile_id="default",
+        prompt=turn_scheduler._held_entry("OLD stopped instruction", key="hp_old", sender="old-worker"),
+        source="held_peer_promotion", fire_at=time.time() + 3600,
+    )
+    holder = _hold_row(connect, "pending_wakeups", old["id"])
+    await qsl.enter_user_stop(session_id)
+    holder.rollback()
+    await asyncio.to_thread(_peer_install_sends, cluster, session_id)
+    await qsl.reconcile_user_stop(session_id)
+
+    merged, replaced = wakeups.merge_session_wakeup(
+        id="merged-" + uuid4().hex, session_id=session_id, profile_id="default",
+        prompt=turn_scheduler._held_entry("NEW update", key="hp_new", sender="new-worker"),
+        source="held_peer_promotion", fire_at=time.time() + 60,
+    )
+
+    assert replaced == [old["id"]]
+    assert "OLD stopped instruction" not in merged["prompt"]
+    assert "NEW update" in merged["prompt"]
+    assert merged["fire_at"] < old["fire_at"]
+    assert wakeups.claim_wakeup(merged["id"]) is True
+
+
+async def test_what_a_stop_cancelled_is_not_pending_or_taken(connect, session_id, stop_cleared):
+    """Nor can a hand-off carry it to a worker that never saw the Stop."""
+    from app.core import query_session_lifecycle as qsl
+    from app.db import wakeups
+
+    _settled_turn(session_id)
+    old = wakeups.create_wakeup(id="taken-" + uuid4().hex, session_id=session_id, prompt="old",
+                                profile_id="default", source="held_peer_promotion",
+                                fire_at=time.time() + 3600)
+    holder = _hold_row(connect, "pending_wakeups", old["id"])
+    await qsl.enter_user_stop(session_id)
+    holder.rollback()
+    newer = wakeups.create_wakeup(id="taken-" + uuid4().hex, session_id=session_id, prompt="new",
+                                  profile_id="default", source="held_peer_promotion",
+                                  fire_at=time.time() + 3600)
+
+    assert [row["id"] for row in wakeups.get_session_wakeups(session_id)] == [newer["id"]]
+    assert [row["id"] for row in wakeups.take_session_wakeups(session_id, "held_peer_promotion")] == [newer["id"]]
+    assert _wake_row(old["id"]) == {}
+
+
+async def test_a_handed_off_wake_counts_as_armed_when_it_arrives(session_id, stop_cleared):
+    from app.db import base, turns as turns_db, wakeups
+
+    turns_db.read_stop_receipt(session_id)
+    wake_id = "arrived-" + uuid4().hex
+    with base.get_db() as conn:
+        conn.cursor().execute(
+            "INSERT INTO pending_wakeups (id, session_id, prompt, fire_at, stop_seq) "
+            f"VALUES (%s, %s, 'moved', 1, {wakeups.CURRENT_STOP_SEQ})",
+            (wake_id, session_id, session_id),
+        )
+
+    assert _wake_row(wake_id)["stop_seq"] == 1
+    assert wakeups.claim_wakeup(wake_id) is True
+
+
+async def test_a_refusal_asks_the_database_before_refusing(cluster, session_id, stop_cleared, monkeypatch):
+    """With the sweep nowhere near this session: SendMessage must not say "was stopped"."""
+    from app.core import agent_messaging, query_session_lifecycle as qsl, turn_claim
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    _settled_turn(session_id)
+    await qsl.enter_user_stop(session_id)
+    assert task_registry.is_user_stopped(session_id)
+    monkeypatch.setattr(turn_claim, "_next_stop_reconcile", float("inf"))
+    newer = await asyncio.to_thread(_peer_install_sends, cluster, session_id)
+    turns_db.start_turn(newer, None, "other")
+    turns_db.settle_turn(newer, "completed", "end_turn")
+
+    refusal = await agent_messaging.resume_unavailable(session_id, {"status": "completed"})
+
+    assert "stopped" not in (refusal or "")
+    assert not task_registry.is_user_stopped(session_id)
+
+
+async def test_the_sweep_lifts_a_latch_behind_a_full_batch(cluster, session_id, stop_cleared):
+    from app.core import query_session_lifecycle as qsl
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    _settled_turn(session_id)
+    await qsl.enter_user_stop(session_id)
+    others = [f"sweep-{uuid4().hex}" for _ in range(qsl._STOP_SWEEP_BATCH)]
+    for sid in others:
+        task_registry.mark_user_stopped(sid, input_cutoff=0)
+    try:
+        newer = await asyncio.to_thread(_peer_install_sends, cluster, session_id)
+        turns_db.start_turn(newer, None, "other")
+        turns_db.settle_turn(newer, "completed", "end_turn")
+        await qsl.reconcile_user_stops()
+        await qsl.reconcile_user_stops()
+        assert not task_registry.is_user_stopped(session_id)
+    finally:
+        for sid in others:
+            task_registry.clear_user_stop(sid)
+
+
+_UPGRADE_FROM_V94 = """
+import json, sys
+from app.core.config import settings
+from app.db import base, database
+connection = json.loads(sys.argv[1])
+object.__setattr__(settings, "get_database_connection", lambda: dict(connection))
+base.init_pool(min_conn=1, max_conn=2)
+database.init_database()
+base.close_pool()
+print("UPGRADED")
+"""
+
+
+def test_an_install_on_the_previous_schema_upgrades_and_a_stop_cancels_its_wake(cluster):
+    """The real boot path, on a database shaped as version 94 left it."""
+    from app.db.schema_postgres import create_postgres_schema
+
+    admin = psycopg2.connect(host="127.0.0.1", port=cluster["port"], user="postgres", dbname="postgres")
+    admin.autocommit = True
+    database_name = "upgrade_" + uuid4().hex
+    admin.cursor().execute(f"CREATE DATABASE {database_name}")
+    admin.close()
+    conn = psycopg2.connect(host="127.0.0.1", port=cluster["port"], user="postgres", dbname=database_name,
+                            cursor_factory=RealDictCursor)
+    try:
+        with conn, conn.cursor() as cursor:
+            create_postgres_schema(cursor)
+            cursor.execute("DROP TABLE session_stops")
+            cursor.execute("ALTER TABLE pending_wakeups DROP COLUMN stop_seq")
+            cursor.execute("ALTER TABLE background_tasks DROP COLUMN turn_order")
+            cursor.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
+            cursor.execute("DELETE FROM schema_version")
+            cursor.execute("INSERT INTO schema_version (version) VALUES (94)")
+            cursor.execute("INSERT INTO pending_wakeups (id, session_id, prompt, fire_at) "
+                           "VALUES ('kept', 'upgraded', 'armed before the upgrade', 1)")
+
+        done = subprocess.run(
+            [sys.executable, "-c", _UPGRADE_FROM_V94, json.dumps({**cluster, "dbname": database_name})],
+            cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=120,
+        )
+        assert done.returncode == 0, done.stderr[-2000:]
+
+        with conn, conn.cursor() as cursor:
+            cursor.execute("SELECT version FROM schema_version")
+            assert cursor.fetchone()["version"] == 95
+            cursor.execute("SELECT prompt, stop_seq FROM pending_wakeups WHERE id='kept'")
+            assert dict(cursor.fetchone()) == {"prompt": "armed before the upgrade", "stop_seq": 0}
+            cursor.execute("SELECT column_name FROM information_schema.columns "
+                           "WHERE table_name='background_tasks' AND column_name='turn_order'")
+            assert cursor.fetchone() is not None
+            cursor.execute("SELECT count(*) AS stops FROM session_stops")
+            assert cursor.fetchone()["stops"] == 0
+    finally:
+        conn.close()

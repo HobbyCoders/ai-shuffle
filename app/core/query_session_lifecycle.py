@@ -7,7 +7,6 @@ Extracted from query_engine.py to isolate session lifecycle management.
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, Optional
 
 from app.core.session_pool import get_session_pool
@@ -360,9 +359,10 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
 
 
 _STOP_RECEIPT_RETRY_DELAYS = (0.2, 0.5)
-# Lifted by the sweep below at most this many a pass; a session outside it is still
-# lifted when anything acts on it (:func:`reconcile_user_stop`).
+# Lifted by the sweep below at most this many a pass, in turn, so every latch is
+# reached; anything acting on a session asks for it (:func:`reconcile_user_stop`).
 _STOP_SWEEP_BATCH = 200
+_stop_sweep_start = 0
 
 
 async def reconcile_user_stop(session_id: str) -> bool:
@@ -406,7 +406,11 @@ async def reconcile_user_stops() -> None:
     from app.core.task_registry import task_registry
     from app.db import turns as turns_db
 
-    sessions = task_registry.user_stopped_sessions()[-_STOP_SWEEP_BATCH:]
+    global _stop_sweep_start
+    stopped = task_registry.user_stopped_sessions()
+    start = _stop_sweep_start % len(stopped) if stopped else 0
+    sessions = (stopped[start:] + stopped[:start])[:_STOP_SWEEP_BATCH]
+    _stop_sweep_start = start + len(sessions)
     held = {sid: (task_registry.stop_input_cutoff(sid), task_registry.stop_generation(sid))
             for sid in sessions}
     try:
@@ -452,6 +456,10 @@ class _UserStop:
         from app.core.task_registry import task_registry
         from app.db import turns as turns_db
 
+        if self.receipt is None and not self._latch_held():
+            # A message overtook this Stop before it was recorded. Recording it now
+            # would place it after that message, and cancel what that message armed.
+            self.receipt = {}
         if self.receipt is None:
             receipt: Optional[dict] = None
             for delay in (*_STOP_RECEIPT_RETRY_DELAYS, None):
@@ -525,20 +533,14 @@ class StopScope:
     older_only: bool = False
 
 
-def _started_before(started_at: Any, moment: datetime) -> bool:
-    """Unknown is not older: what it cannot place, a Stop leaves running."""
-    try:
-        return datetime.fromisoformat(started_at) < moment
-    except (TypeError, ValueError):
-        return False
-
-
-def capture_stop_scope(session_id: str, *, older_than: Optional[datetime] = None) -> StopScope:
+def capture_stop_scope(session_id: str, *, before_turn: Optional[int] = None) -> StopScope:
     """Synchronous, so nothing can start between the caller's check and this.
 
-    ``older_than`` is when a newer turn took over this session on this install. A
-    run's start token (:meth:`TaskRegistry.task_incarnation`) comes from the same
-    clock and a resume renews it, so a run started before then is the old turn's.
+    ``before_turn`` is the ``insert_order`` of a newer turn that took over this
+    session. Each run knows the turn it started under
+    (:meth:`TaskRegistry.task_turn_order`) and a resume renews that, so a run under
+    an earlier turn is older, whatever any clock says. Unknown is not older: what
+    this cannot place, a Stop leaves running.
     """
     from app.core.task_registry import task_registry
 
@@ -572,9 +574,11 @@ def capture_stop_scope(session_id: str, *, older_than: Optional[datetime] = None
         task_id: task_registry.task_incarnation(session_id, task_id)
         for task_id in (*(t.get("id") for t in active if t.get("id")), *worker_sessions)
     }
-    if older_than is None:
+    if before_turn is None:
         return StopScope(active, worker_sessions, worker_shells, runs)
-    older = {task_id for task_id, started in runs.items() if _started_before(started, older_than)}
+    older = {task_id for task_id in runs
+             if (order := task_registry.task_turn_order(session_id, task_id)) is not None
+             and int(order) < before_turn}
     return StopScope(
         [task for task in active if task.get("id") in older],
         [worker for worker in worker_sessions if worker in older],

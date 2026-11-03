@@ -76,8 +76,8 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
                     task_id, session_id, instance_id, kind, is_sdk_background,
                     tool_use_id, title, status, terminal_notified,
                     started_at, updated_at, summary, reason, report_path, report_chars,
-                    agent, roster_name, model, remote_device_id, assignment_owner
-                ) VALUES ({", ".join([_ph] * 20)})
+                    agent, roster_name, model, remote_device_id, assignment_owner, turn_order
+                ) VALUES ({", ".join([_ph] * 21)})
                 ON CONFLICT (task_id, session_id) DO UPDATE SET
                     instance_id = EXCLUDED.instance_id,
                     kind = EXCLUDED.kind,
@@ -88,6 +88,7 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
                     terminal_notified = EXCLUDED.terminal_notified,
                     started_at = EXCLUDED.started_at,
                     updated_at = EXCLUDED.updated_at,
+                    turn_order = EXCLUDED.turn_order,
                     summary = EXCLUDED.summary,
                     reason = EXCLUDED.reason,
                     report_path = EXCLUDED.report_path,
@@ -118,6 +119,7 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
                 (_task_text(snapshot.get("model")) or "")[:256] or None,
                 snapshot.get("remote_device_id") or None,
                 bool(snapshot.get("assignment_owner", True)),
+                snapshot.get("turn_order"),
             ) for snapshot in snapshots],
         )
 
@@ -212,7 +214,7 @@ def list_session_terminal_background_tasks(
             f"""SELECT task_id, session_id, kind, tool_use_id, title, status,
                        started_at, updated_at, summary, reason, report_path,
                        report_chars, agent, roster_name, model, remote_device_id,
-                       assignment_owner, terminal_notified
+                       assignment_owner, terminal_notified, turn_order
                   FROM background_tasks
                  WHERE session_id = {_ph}
                    AND (status IN ({terminal_list}) OR remote_device_id IS NOT NULL)
@@ -403,7 +405,7 @@ def get_background_task(task_id: str, session_id: str) -> Optional[Dict[str, Any
             f"""SELECT task_id, session_id, kind, tool_use_id, title, status,
                        started_at, updated_at, summary, reason, report_path, report_chars,
                        agent, roster_name, model, remote_device_id,
-                       assignment_owner, terminal_notified
+                       assignment_owner, terminal_notified, turn_order
                   FROM background_tasks
                  WHERE task_id = {_ph} AND session_id = {_ph}""",
             (task_id, session_id),

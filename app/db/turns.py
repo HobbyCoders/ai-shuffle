@@ -599,6 +599,8 @@ def block_missing_cwd(session_id: str, turn_id: str, path: str, reason: str) -> 
 # it may end is named here, so nothing admitted later can be reached by it, on
 # this install or another. ``input_cutoff`` is the session's newest
 # ``insert_order`` then: only a person's message above it outlives this Stop.
+# ``stop_seq`` is its place in the session's Stops (``session_stops``), which is
+# what any install holds a wake against, however that wake's delete went.
 STOP_RECEIPT_KEY = "stop_receipt"
 # Stamped by ``turn_manager`` on what a person just sent, and never copied to a
 # row re-queued from it: only that lifts a Stop on the install that holds it.
@@ -614,10 +616,20 @@ def _park_identity(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _stop_receipt(cursor: Any, session_id: str) -> Dict[str, Any]:
-    """Plain reads, which no row lock can hold up. ``insert_order`` is assigned
-    under the admission lock, so it follows commit order: each row at or below the
+    """Records this Stop, then reads what it applies to.
+
+    The record is its own row, so a held turn or wake cannot block it, and a wake
+    armed at any time before this commits carries an older sequence: that holds
+    for one armed while this transaction waited for its turn row. The rest are
+    plain reads, which no row lock can hold up. ``insert_order`` is assigned under
+    the admission lock, so it follows commit order: each row at or below the
     cutoff has committed, and each above it was admitted after this read. That
     gives the receipt a clean cut without waiting on the lock itself."""
+    cursor.execute("INSERT INTO session_stops (session_id, stop_seq, stopped_at) VALUES (%s, 1, NOW()) "
+                   "ON CONFLICT (session_id) DO UPDATE SET stop_seq = session_stops.stop_seq + 1, "
+                   "stopped_at = NOW()", (session_id,))
+    cursor.execute("SELECT stop_seq FROM session_stops WHERE session_id=%s", (session_id,))
+    stop_seq = cursor.fetchone()["stop_seq"]
     cursor.execute("SELECT COALESCE(MAX(insert_order), 0) AS cutoff FROM turns WHERE session_id=%s",
                    (session_id,))
     cutoff = cursor.fetchone()["cutoff"]
@@ -632,38 +644,18 @@ def _stop_receipt(cursor: Any, session_id: str) -> Dict[str, Any]:
     cursor.execute("SELECT token FROM handoff_wakes WHERE session_id=%s AND finalized=FALSE",
                    (session_id,))
     handoffs = [row["token"] for row in cursor.fetchall()]
-    cursor.execute("SELECT NOW() AS stopped_at")
-    stopped_at = cursor.fetchone()["stopped_at"]
-    return {"input_cutoff": cutoff, "queued": queued, "parks": parks,
-            "wakes": wakes, "handoffs": handoffs,
-            # The database's clock, which also stamps a wake's ``created_at``:
-            # a wake armed before this is cancelled however its delete went.
-            "stopped_at": stopped_at.isoformat() if hasattr(stopped_at, "isoformat") else stopped_at}
+    return {"input_cutoff": cutoff, "stop_seq": stop_seq, "queued": queued, "parks": parks,
+            "wakes": wakes, "handoffs": handoffs}
 
 
 def read_stop_receipt(session_id: str) -> Dict[str, Any]:
-    """The receipt of a Stop with no live turn to record it on.
+    """Record a Stop with no live turn to record it on, and read its receipt.
 
-    Kept on the session's newest turn, however it ended, so a wake's claim can
-    honour it on any install. In its own transaction: a held row must not cost
-    the read, and the Stop still ends what it names here if this write fails.
+    All or nothing, and a failure raises: the Stop did not reach other installs,
+    and its caller retries, then reports it (``_UserStop.bind``).
     """
     with get_db() as conn:
-        receipt = _stop_receipt(conn.cursor(), session_id)
-    try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT id, payload FROM turns WHERE session_id=%s "
-                           "ORDER BY insert_order DESC, created_at DESC, id DESC LIMIT 1 FOR UPDATE",
-                           (session_id,))
-            newest = _row(cursor.fetchone())
-            if newest is not None:
-                cursor.execute("UPDATE turns SET payload=%s WHERE id=%s",
-                               (json.dumps({**newest["payload"], STOP_RECEIPT_KEY: receipt}), newest["id"]))
-    except Exception:  # noqa: BLE001 — the local latch still holds wakes on this install.
-        logger.warning("Stop: recording the receipt of session %s failed; another install "
-                       "could still fire a wake it could not cancel", session_id, exc_info=True)
-    return receipt
+        return _stop_receipt(conn.cursor(), session_id)
 
 
 def person_input_after(session_id: str, input_cutoff: Optional[int]) -> bool:

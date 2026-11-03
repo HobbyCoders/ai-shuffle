@@ -278,6 +278,7 @@ async def _rearm_after_failed_submit(row: Dict[str, Any], reason: str) -> None:
             # The same wake, so it stays older than what a person or a Stop did
             # after it was armed, including while this submit was in flight.
             created_at=row.get("created_at"),
+            stop_seq=row.get("stop_seq"),
         )
     except Exception:  # noqa: BLE001 — a re-arm failure is a real drop.
         logger.exception(

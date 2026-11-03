@@ -781,6 +781,7 @@ def real_worker():
     from app.core.task_registry import task_registry
 
     task_registry.clear_user_stop(SID)
+    task_registry.note_turn_live(SID, OLD_TURN)
     task_registry.start_task(SID, "worker-a", "agent", "worker-a")
     record = sup.register_worker(sup.WorkerRecord(
         parent_session_id=SID, worker_session_id="worker-a", task_id="worker-a",
@@ -1194,7 +1195,11 @@ def test_other_missing_terminals_keep_the_general_message(monkeypatch):
     assert "database" not in message
 
 
-async def _late_stop_reaches_the_old_runtime(*, successor_since):
+# The ``insert_order`` of the two turns the helper below enqueues, in a new session.
+OLD_TURN, NEXT_TURN = 1, 2
+
+
+async def _late_stop_reaches_the_old_runtime(*, successor_order=NEXT_TURN):
     """The next turn is live here before this runtime sees the Stop on the old one."""
     from app.core import session_runtime as sr
     from app.db import turns as turns_db
@@ -1202,11 +1207,11 @@ async def _late_stop_reaches_the_old_runtime(*, successor_since):
     turn = turns_db.enqueue_turn(SID, "user", prompt="hi", profile_id="default")
     turns_db.start_turn(turn["id"], None, "runner")
     turns_db.interrupt_turn(SID, "stop", stop_background=True, source="user_stop")
-    turns_db.enqueue_turn(SID, "user", prompt="next", profile_id="default",
-                          payload={turns_db.PERSON_INPUT_KEY: True})
+    next_turn = turns_db.enqueue_turn(SID, "user", prompt="next", profile_id="default",
+                                      payload={turns_db.PERSON_INPUT_KEY: True})
+    assert (turn["insert_order"], next_turn["insert_order"]) == (OLD_TURN, NEXT_TURN)
     old = sr.SessionRuntime(turn)
-    newer = sr.SessionRuntime(turn)
-    newer.live_since = successor_since
+    newer = sr.SessionRuntime({**next_turn, "insert_order": successor_order})
     signal = AsyncMock()
     sr._live_runtimes[SID] = newer
     try:
@@ -1225,6 +1230,7 @@ def _second_worker():
     from app.core import provider_agent_supervisor as sup
     from app.core.task_registry import task_registry
 
+    task_registry.note_turn_live(SID, NEXT_TURN)
     task_registry.start_task(SID, "worker-b", "agent", "worker-b")
     return sup.register_worker(sup.WorkerRecord(
         parent_session_id=SID, worker_session_id="worker-b", task_id="worker-b",
@@ -1233,16 +1239,11 @@ def _second_worker():
 
 
 async def test_a_stop_seen_after_the_next_turn_ends_only_the_older_worker(real_worker):
-    from datetime import datetime, timezone
-
     from app.core.task_registry import task_registry
 
-    time.sleep(0.002)
-    since = datetime.now(timezone.utc)
-    time.sleep(0.002)
     next_turns_worker = _second_worker()
 
-    signal = await _late_stop_reaches_the_old_runtime(successor_since=since)
+    signal = await _late_stop_reaches_the_old_runtime()
 
     assert real_worker.torn_down is True
     assert task_registry.get_task(SID, "worker-a")["status"] == "killed"
@@ -1254,27 +1255,83 @@ async def test_a_stop_seen_after_the_next_turn_ends_only_the_older_worker(real_w
 
 
 async def test_a_stop_seen_after_the_next_turn_spares_a_worker_it_resumed(real_worker):
-    from datetime import datetime, timezone
-
     from app.core.task_registry import task_registry
 
-    time.sleep(0.002)
-    since = datetime.now(timezone.utc)
-    time.sleep(0.002)
     task_registry.complete_task(SID, "worker-a", "completed")
+    task_registry.note_turn_live(SID, NEXT_TURN)
     task_registry.resume_task(SID, "worker-a")
 
-    await _late_stop_reaches_the_old_runtime(successor_since=since)
+    await _late_stop_reaches_the_old_runtime()
 
     assert real_worker.torn_down is False
     assert task_registry.get_task(SID, "worker-a")["status"] == "running"
 
 
 async def test_a_stop_that_cannot_place_the_next_turn_ends_nothing(real_worker):
-    signal = await _late_stop_reaches_the_old_runtime(successor_since=None)
+    signal = await _late_stop_reaches_the_old_runtime(successor_order=None)
 
     assert real_worker.torn_down is False
     signal.assert_not_awaited()
+
+
+@pytest.mark.parametrize("skew_seconds", [60, -60], ids=["clock-ahead", "clock-behind"])
+async def test_no_clock_decides_what_a_late_stop_ends(real_worker, skew_seconds):
+    """Rows from another install: its clock says nothing about which turn they ran under."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.core.task_registry import task_registry
+
+    next_turns_worker = _second_worker()
+    skewed = (datetime.now(timezone.utc) + timedelta(seconds=skew_seconds)).isoformat()
+    for task_id in ("worker-a", "worker-b"):
+        row = task_registry._tasks[SID].pop(task_id)
+        task_registry.hydrate_rows(SID, [{**row, "remote_device_id": "other-install", "started_at": skewed}])
+
+    await _late_stop_reaches_the_old_runtime()
+
+    assert real_worker.torn_down is True
+    assert next_turns_worker.torn_down is False
+
+
+def test_a_task_keeps_its_turn_when_it_comes_back_from_the_database():
+    from app.core.task_registry import task_registry
+
+    task_registry.note_turn_live(SID, 7)
+    task_registry.start_task(SID, "worker-c", "agent", "worker-c")
+    try:
+        record = task_registry._tasks[SID].pop("worker-c")
+        assert record["turn_order"] == 7
+        task_registry.hydrate_rows(SID, [{**record, "task_id": "worker-c", "remote_device_id": "other-install"}])
+        assert task_registry.task_turn_order(SID, "worker-c") == 7
+    finally:
+        task_registry.clear_session(SID)
+
+
+async def test_the_sweep_reaches_every_latch_in_turn(monkeypatch):
+    from app.core import query_session_lifecycle as qsl
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    latched = [f"sweep-{index}" for index in range(5)]
+    asked: list[str] = []
+
+    def read(cutoffs):
+        asked.extend(cutoffs)
+        return []
+
+    monkeypatch.setattr(qsl, "_STOP_SWEEP_BATCH", 2)
+    monkeypatch.setattr(qsl, "_stop_sweep_start", 0)
+    monkeypatch.setattr(turns_db, "sessions_with_person_input_after", read)
+    for sid in latched:
+        task_registry.mark_user_stopped(sid, input_cutoff=0)
+    try:
+        for _ in range(3):
+            await qsl.reconcile_user_stops()
+    finally:
+        for sid in latched:
+            task_registry.clear_user_stop(sid)
+
+    assert set(asked) == set(latched)
 
 
 async def test_a_stop_retries_a_failed_receipt_read(monkeypatch):

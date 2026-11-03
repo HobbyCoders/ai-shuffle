@@ -1768,6 +1768,7 @@ _SESSION_RUNTIME_TABLES = (
     "pending_interactions",
     "background_tasks",
     "session_task_chips",
+    "session_stops",
 )
 
 

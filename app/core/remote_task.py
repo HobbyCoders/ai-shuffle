@@ -2590,7 +2590,7 @@ async def send_to_child(sender_session_id: str, row: Mapping[str, Any], text: st
     "queued" is never reported as delivered.
     """
     from app.core import agent_messaging
-    from app.core.task_registry import task_registry
+    from app.core.task_registry import user_stop_holds
     from app.db import remote_tasks
 
     worker_id = row["worker_session_id"]
@@ -2602,7 +2602,7 @@ async def send_to_child(sender_session_id: str, row: Mapping[str, Any], text: st
                 "is_error": True}
     # A stop asked for here is durable (S8): refuse even before the target
     # answered it, so a message never resumes what this worker stopped.
-    if (task_registry.is_user_stopped(worker_id) or row.get("status") == "killed"
+    if (await user_stop_holds(worker_id) or row.get("status") == "killed"
             or dispatch.get("stop_requested_at")):
         return {"text": (f"Could not deliver to {who}: it was stopped, and a message cannot restart it. "
                          "Ask the owner to continue it in its chat."), "is_error": True}
@@ -2764,7 +2764,7 @@ _STOPPED_CHILD = "it was stopped on this worker, and a message cannot restart it
 async def _message_child(msg: Mapping[str, Any], from_device: str) -> Dict[str, Any]:
     """Target side: a message from the worker that started this child."""
     from app.core import agent_messaging, provider_agent, turn_scheduler
-    from app.core.task_registry import task_registry
+    from app.core.task_registry import user_stop_holds
     from app.db import remote_tasks
 
     worker_id = msg["worker_session_id"]
@@ -2777,7 +2777,7 @@ async def _message_child(msg: Mapping[str, Any], from_device: str) -> Dict[str, 
     report = child.get("report") if isinstance(child.get("report"), dict) else {}
     # ``stop_requested_at`` is the parent's durable stop (S8): it outlives the
     # in-memory latch, so a restart here does not let a message resume it.
-    if (task_registry.is_user_stopped(worker_id) or report.get("status") == "stopped"
+    if (await user_stop_holds(worker_id) or report.get("status") == "stopped"
             or child.get("stop_requested_at")):
         raise ValueError(_STOPPED_CHILD)
     if child["state"] == remote_tasks.RUNNING:
