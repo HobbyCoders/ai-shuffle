@@ -27,10 +27,12 @@ past a limit, with a last frame saying the reply goes on: dropping frames from t
 middle would look like a whole reply, and waiting for it would let a stuck client
 stall the turn.
 
-A Stop is one flag on the pooled engine, so the lease decides whose it is. It belongs
-to the turn holding the chat, even one still setting up, or else to the turn waiting
-for the chat. Anything older is dropped when a turn arrives, in :func:`acquire`, and
-not later: by then that turn may have been waiting, and the flag would be its own.
+A Stop for the turn holding the chat, even one still setting up, is a flag on the
+pooled engine. A Stop while another turn waits for the chat is that waiting turn's, and
+:func:`stop_waiting_turn` keeps it here instead, because a rewind can replace the engine
+under that turn, or there may be none yet. The turn that gets the chat takes it
+(``Lease.stop_requested``) and :func:`apply_stop` puts it on the engine it runs on.
+Anything else on the flag is older than the arriving turn, and :func:`acquire` drops it.
 
 A rewind on a running reply stops the reply, so :func:`take_for_rewind` takes the
 chat from the current holder rather than being refused. The holder's late
@@ -40,7 +42,8 @@ rewound chat. Rewinds run one at a time and always finish
 (:func:`finish_unattended`), so none can act on a chat that a later rewind or turn
 has moved on from. A rewind whose database write hangs therefore holds its chat, so
 those waits have a limit and end in the busy error. The chat is not freed at that
-limit, because that rewind can still act once the write returns.
+limit, because that rewind can still act once the write returns. Each waiter has one
+limit, counted from when it arrived, however many holders it waits behind.
 
 Another install on the same database never passes through here, so a turn can
 still be lost that way. ``HarnessAdapter.receive_events`` raises
@@ -63,11 +66,12 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-# How long a next message waits for a turn that has announced its end to close.
+# How long a next message waits, from arriving, when only turns that have announced
+# their end are in its way.
 _ENDING_WAIT_SECONDS = 15.0
-# How long a turn or a later rewind waits for a rewind. It covers a healthy rewind's
-# worst case: its wait for the stopped turn and its claim's lock budget, 15 s each,
-# plus closing the engine and re-seeding.
+# How long a turn or a later rewind waits, from arriving, once a rewind is in its way.
+# It covers a healthy rewind's worst case: its wait for the stopped turn and its claim's
+# lock budget, 15 s each, plus closing the engine and re-seeding.
 _REWIND_WAIT_SECONDS = 60.0
 # How long a stopping app gives unfinished turns to save what they have.
 _SHUTDOWN_WAIT_SECONDS = 5.0
@@ -122,6 +126,8 @@ class Lease:
     taken_by: Optional["Lease"] = None
     # The turn has announced its end: a next message waits rather than being refused.
     ending: bool = False
+    # A Stop pressed while this turn waited for the chat.
+    stop_requested: bool = False
     # Set when the route that held this lease has finished, saving included.
     exited: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -133,56 +139,96 @@ class Lease:
 
 _holders: Dict[str, Lease] = {}
 _rewinds: Dict[str, Lease] = {}
-# Turns on their way to the chat, in ``acquire``.
+# Turns on their way to the chat, in ``acquire``, that a Stop can reach once they run.
 _arriving: Dict[str, int] = {}
+# Chats with a Stop for whichever of those turns gets the chat.
+_waiting_stops: Set[str] = set()
 # Turns and rewinds nobody is waiting on any more. Tasks need a strong reference.
 _unattended: Set[asyncio.Task] = set()
 
 
-async def _wait_for_exit(lease: Lease, seconds: float) -> None:
+async def _wait_for_exit(lease: Lease, deadline: float) -> None:
     try:
-        await asyncio.wait_for(lease.exited.wait(), seconds)
+        await asyncio.wait_for(lease.exited.wait(), deadline - asyncio.get_running_loop().time())
     except asyncio.TimeoutError:
         raise SessionBusyError() from None
+
+
+def _turn_holds_chat(session_id: str) -> bool:
+    holder = _holders.get(session_id)
+    return holder is not None and not holder.ending and holder is not _rewinds.get(session_id)
 
 
 def _drop_unowned_stop(session_id: str) -> None:
     """Forget a Stop pressed before this turn arrived: it was not for this turn.
 
-    One from a turn holding the chat stays with that turn, even if it has not
-    started streaming yet, and so does one from a turn already waiting here. The
-    arriving turn owns any Stop from now on, so this must not run again after a wait.
+    One from a turn holding the chat stays with that turn, even if it has not started
+    streaming yet. A Stop from now on is kept for this turn in :func:`stop_waiting_turn`.
     """
-    holder = _holders.get(session_id)
-    turn_holds_chat = (
-        holder is not None and not holder.ending and holder is not _rewinds.get(session_id)
-    )
-    if turn_holds_chat or _arriving.get(session_id):
+    if _turn_holds_chat(session_id):
         return
     state = get_session_pool().peek(session_id)
     if state is not None and not state.is_streaming:
         state.interrupt_requested = False
 
 
-async def acquire(session_id: str) -> Lease:
-    """Hold the chat for one turn, or raise :class:`SessionBusyError`."""
+def stop_waiting_turn(session_id: str) -> bool:
+    """Keep a Stop for the turn waiting for this chat; False if this Stop is not its.
+
+    The engine is left alone: a turn that has ended or a rewind is all that is on it.
+    """
+    if _turn_holds_chat(session_id) or not _arriving.get(session_id):
+        return False
+    _waiting_stops.add(session_id)
+    return True
+
+
+def apply_stop(lease: Lease, state: Any) -> None:
+    """Put a Stop this turn was given while waiting on the engine it runs on."""
+    if lease.stop_requested:
+        state.interrupt_requested = True
+
+
+async def _wait_for_chat(session_id: str) -> None:
+    """Return when nothing holds the chat, or raise :class:`SessionBusyError`.
+
+    The limit is counted from here and does not restart when the holder changes. It
+    is the short one until a rewind gets in the way, then the long one.
+    """
+    started = asyncio.get_running_loop().time()
+    limit = _ENDING_WAIT_SECONDS
+    while True:
+        if (rewind := _rewinds.get(session_id)) is not None:
+            limit = _REWIND_WAIT_SECONDS
+            in_the_way = rewind
+        elif (holder := _holders.get(session_id)) is None:
+            return
+        elif not holder.ending:
+            raise SessionBusyError()
+        else:
+            in_the_way = holder
+        await _wait_for_exit(in_the_way, started + limit)
+
+
+async def acquire(session_id: str, *, stoppable: bool = True) -> Lease:
+    """Hold the chat for one turn, or raise :class:`SessionBusyError`.
+
+    ``stoppable=False`` is for a turn that runs off the pool, so no Stop can reach it:
+    while it waits, a Stop must not report that it will.
+    """
     _drop_unowned_stop(session_id)
-    _arriving[session_id] = _arriving.get(session_id, 0) + 1
-    try:
-        while True:
-            if (rewind := _rewinds.get(session_id)) is not None:
-                await _wait_for_exit(rewind, _REWIND_WAIT_SECONDS)
-            elif (holder := _holders.get(session_id)) is None:
-                break
-            elif not holder.ending:
-                raise SessionBusyError()
-            else:
-                await _wait_for_exit(holder, _ENDING_WAIT_SECONDS)
-    finally:
-        _arriving[session_id] -= 1
-        if not _arriving[session_id]:
-            del _arriving[session_id]
     lease = Lease(session_id)
+    if stoppable:
+        _arriving[session_id] = _arriving.get(session_id, 0) + 1
+    try:
+        await _wait_for_chat(session_id)
+        lease.stop_requested = session_id in _waiting_stops
+    finally:
+        if stoppable:
+            _arriving[session_id] -= 1
+            if not _arriving[session_id]:
+                del _arriving[session_id]
+                _waiting_stops.discard(session_id)
     _holders[session_id] = lease
     return lease
 
@@ -190,10 +236,11 @@ async def acquire(session_id: str) -> Lease:
 async def begin_rewind(session_id: str) -> Lease:
     """Wait for any other rewind of this chat, then hold new turns back from it.
 
-    Raises :class:`SessionBusyError` if the other rewind does not finish in time.
+    Raises :class:`SessionBusyError` if the other rewinds do not finish in time.
     """
+    deadline = asyncio.get_running_loop().time() + _REWIND_WAIT_SECONDS
     while (other := _rewinds.get(session_id)) is not None:
-        await _wait_for_exit(other, _REWIND_WAIT_SECONDS)
+        await _wait_for_exit(other, deadline)
     lease = Lease(session_id)
     _rewinds[session_id] = lease
     return lease
@@ -378,3 +425,5 @@ def clear() -> None:
     """Forget every holder. Tests only: each test starts with an empty process."""
     _holders.clear()
     _rewinds.clear()
+    _arriving.clear()
+    _waiting_stops.clear()

@@ -255,7 +255,7 @@ curl -X POST http://localhost:8000/api/v1/session/sess_abc123/interrupt \
 }
 ```
 
-A Stop applies to the turn running the session or waiting for it, including one still setting up. A Stop sent when no turn is running or waiting has nothing to stop, and it does not carry over to the next turn.
+A Stop applies to the turn running the session or waiting for it, and that turn is saved and ends as `interrupted`. A turn waiting for the session keeps its Stop even if the session has no live connection, or a rewind replaces it. A turn still setting up keeps a Stop once the session has a live connection; before that the answer is `404`. A Stop sent when no turn is running or waiting has nothing to stop, and it does not carry over to the next turn. `POST /api/v1/query` turns do not use a pooled connection, so this route does not stop them.
 
 ### GET /api/v1/streaming/active
 

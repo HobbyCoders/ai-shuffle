@@ -166,6 +166,72 @@ async def test_waiting_for_a_rewind_that_never_finishes_ends_in_the_busy_error(m
     admission.close(await asyncio.wait_for(waiting, 5))
 
 
+async def _next_rewind(rewind):
+    admission.close(rewind)
+    return await admission.begin_rewind(SID)
+
+
+async def _next_ending_turn(turn):
+    admission.close(turn)
+    turn = await admission.acquire(SID)
+    admission.turn_ended(turn)
+    return turn
+
+
+async def _an_ending_turn():
+    turn = await admission.acquire(SID)
+    admission.turn_ended(turn)
+    return turn
+
+
+@pytest.mark.parametrize("waiter", [admission.acquire, admission.begin_rewind])
+async def test_one_limit_covers_every_rewind_a_waiter_waits_behind(monkeypatch, waiter):
+    monkeypatch.setattr(admission, "_REWIND_WAIT_SECONDS", 0.5)
+    rewind = await admission.begin_rewind(SID)
+    waiting = asyncio.ensure_future(waiter(SID))
+    for _ in range(3):  # each finishes well inside the limit, together well past it
+        await asyncio.sleep(0.2)
+        rewind = await _next_rewind(rewind)
+    assert waiting.done(), "the third holder changed nothing: the limit passed during it"
+    with pytest.raises(SessionBusyError):
+        await waiting
+    assert admission._rewinds[SID] is rewind, "the rewind running can still act, so it stays held"
+    assert not rewind.exited.is_set()
+    admission.close(rewind)
+
+
+async def test_one_limit_covers_every_ending_turn_a_message_waits_behind(monkeypatch):
+    monkeypatch.setattr(admission, "_ENDING_WAIT_SECONDS", 0.5)
+    turn = await _an_ending_turn()
+    waiting = asyncio.ensure_future(admission.acquire(SID))
+    await asyncio.sleep(0.2)
+    turn = await _next_ending_turn(turn)
+    await asyncio.sleep(0.2)
+    turn = await _next_ending_turn(turn)
+    await asyncio.sleep(0.2)
+    assert waiting.done()
+    with pytest.raises(SessionBusyError):
+        await waiting
+    admission.close(turn)
+
+
+async def test_a_rewind_in_the_way_gives_a_waiter_the_longer_limit_from_when_it_arrived(monkeypatch):
+    monkeypatch.setattr(admission, "_ENDING_WAIT_SECONDS", 1.0)
+    monkeypatch.setattr(admission, "_REWIND_WAIT_SECONDS", 2.0)
+    turn = await _an_ending_turn()
+    waiting = asyncio.ensure_future(admission.acquire(SID))
+    await asyncio.sleep(0.6)
+    admission.close(turn)
+    rewind = await admission.begin_rewind(SID)
+    await asyncio.sleep(0.8)
+    assert not waiting.done(), "past the short limit, within the long one"
+    await asyncio.sleep(0.8)
+    assert waiting.done(), "the long limit counts from arriving, not from meeting the rewind"
+    with pytest.raises(SessionBusyError):
+        await waiting
+    admission.close(rewind)
+
+
 async def test_a_cancelled_wait_for_a_rewind_holds_nothing():
     rewind = await admission.begin_rewind(SID)
     admission.take_for_rewind(rewind)

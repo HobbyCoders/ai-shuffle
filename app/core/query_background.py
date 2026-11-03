@@ -381,6 +381,7 @@ async def _run_background_query_impl(
 
     # Mark as streaming
     state.is_streaming = True
+    session_admission.apply_stop(lease, state)
     state.streaming_started_at = datetime.now(timezone.utc)
     state.last_activity = datetime.now(timezone.utc)
 

@@ -540,7 +540,7 @@ async def execute_query(
     """Run one headless turn under the chat's lease (see ``session_admission``)."""
     is_new_session = not session_id
     session_id = session_id or str(uuid.uuid4())
-    lease = await session_admission.acquire(session_id)
+    lease = await session_admission.acquire(session_id, stoppable=False)
     try:
         return await _execute_query_turn(
             lease, is_new_session, prompt, profile_id, project_id, overrides,
@@ -1383,6 +1383,7 @@ async def _stream_query_turn(
 
     # Mark as streaming
     state.is_streaming = True
+    session_admission.apply_stop(lease, state)
     state.streaming_started_at = datetime.now(timezone.utc)
     state.last_activity = datetime.now(timezone.utc)
 
@@ -2813,7 +2814,7 @@ async def _stream_to_websocket_turn(
 
     # Mark as streaming (both reuse and create paths)
     state.is_streaming = True
-    state.interrupt_requested = False  # Reset from previous query's interrupt
+    session_admission.apply_stop(lease, state)
     state.streaming_started_at = datetime.now(timezone.utc)
     state.last_activity = datetime.now(timezone.utc)
 
