@@ -119,7 +119,7 @@ events, then the next call (`scenarios/compact-after-tool.json` plays it).
 | A message that opened a turn (wake, queued row) | Pinned in its own budget in an epoch (`peer_pin_chars`), and a larger digest cap, from render version 3. |
 | The session's opening request | Up to `brief_text_cap`, line breaks kept, in digest and epoch; on a model-written checkpoint too. |
 | Any of them, with Claude Code's summarizer | The restoration note repeats them, as nothing says what the summary kept: one extra copy at most. |
-| Any of them, on a re-seed to another worker | Added as a last row when the entries no longer show them. |
+| Any of them, on a re-seed to another worker | Added as a row right after the first when the entries no longer show them. |
 
 Older persisted decisions keep their render version, so old sessions render
 byte for byte as they did.

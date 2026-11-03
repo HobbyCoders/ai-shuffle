@@ -108,8 +108,9 @@ def test_delegated_still_uses_fixed_threshold_and_cli_ratio(monkeypatch, capture
 
 
 @pytest.mark.parametrize("overhead,window,expected_before,expected_projection", [
-    (20_000, 400_000, 370_310, 29_080),
-    (160_000, 1_000_000, 510_310, 169_080),
+    # The first turn is the session's brief: from render version 3 it stays whole.
+    (20_000, 400_000, 370_310, 31_593),
+    (160_000, 1_000_000, 510_310, 171_593),
 ])
 def test_real_projector_with_irreducible_overhead(
     monkeypatch, mock_db, overhead, window, expected_before, expected_projection,

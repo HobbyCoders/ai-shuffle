@@ -2181,15 +2181,15 @@ def _with_what_it_was_told(
     entries: List[Dict[str, Any]],
     nodes: Optional[Sequence[Any]],
 ) -> List[Dict[str, Any]]:
-    """``entries``, ending with the brief and delivered messages they no longer
-    show (#996).
+    """``entries``, with a row repeating the brief and delivered messages they no
+    longer show (#996).
 
     A message delivered on a tool result reached the model through Claude Code's
     hook lane, so it is in no entry, and a compaction can have folded away the
     brief. Added after :func:`_fit_window`, which would archive a row the path
     does not hold. Bounded (``render_told``), and never raises.
     """
-    if not nodes:
+    if not nodes or not entries:
         return entries
     try:
         from fluid.context.compaction import render_told, told_on_path
@@ -2212,7 +2212,12 @@ def _with_what_it_was_told(
         return entries
     if note is None:
         return entries
-    return [*entries, {"type": "user", "message": {"role": "user", "content": note}}]
+    row = {"type": "user", "message": {"role": "user", "content": note}}
+    # Behind the first row, so the file still ends as it did: Claude Code can read
+    # a last user row as a turn that never got its answer. A first assistant row
+    # may hold a call whose result must come next, so then it goes last.
+    at = 1 if entries[0].get("type") == "user" else len(entries)
+    return [*entries[:at], row, *entries[at:]]
 
 
 def _fit_window(

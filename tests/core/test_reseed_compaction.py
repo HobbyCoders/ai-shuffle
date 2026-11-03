@@ -278,8 +278,9 @@ def test_a_message_delivered_on_a_tool_result_comes_back_after_a_reseed(mock_db,
     text = _plain(lines)
     assert text.count("Stop using the staging key.") == 1
     assert text.count("The original brief.") == 1
-    assert lines[-1]["type"] == "user"
-    assert "repeated because the compacted" in str(lines[-1]["message"]["content"])
+    # Behind the first row: the file must not end on a turn with no answer.
+    assert lines[-1]["type"] == "assistant"
+    assert "repeated because the compacted" in str(lines[1]["message"]["content"])
 
 
 def test_a_reseed_after_a_compaction_repeats_the_brief_it_folded(mock_db, tmp_path):
