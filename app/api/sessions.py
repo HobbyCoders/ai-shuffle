@@ -1117,9 +1117,6 @@ async def get_session(
     from app.db.background_tasks import get_running_task_presence
     presence = await run_sync(get_running_task_presence, [session["id"]])
     session["has_running_tasks"] = presence.get(session["id"], {}).get("has_running_tasks", False)
-    from app.db.turns import sessions_with_failed_latest_turn
-    failed = await run_sync(sessions_with_failed_latest_turn, [session["id"]])
-    session["last_turn_failed"] = session["id"] in failed
 
     session["messages"] = messages
     session["tags"] = await run_sync(database.get_session_tags, session_id)
