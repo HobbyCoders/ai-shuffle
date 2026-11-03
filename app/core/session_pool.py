@@ -33,7 +33,6 @@ from typing import Optional, Dict, Any, Callable, Awaitable
 
 from app.core.agent_types import AgentOptions
 
-from app.core.provider import session_admission
 from app.core.provider.protocol import ProviderAdapter
 from app.core.provider.types import mcp_servers_equivalent
 
@@ -955,7 +954,6 @@ class SessionPool:
         """
         self._pool[session_id] = state
         self._pool.move_to_end(session_id)
-        session_admission.bind_state(getattr(state, "adapter", None), state)
         # A query is running against this session, so it is not abandoned:
         # clear any detach stamp left by a probe that ran while no browser
         # happened to be attached (automations, API-driven turns).
@@ -1267,7 +1265,6 @@ class SessionPool:
             return None
         self._pool.pop(session_id)
         clear_turn_context(session_id, expected=context)
-        session_admission.release(getattr(state, "adapter", None))
         return state
 
     async def remove(

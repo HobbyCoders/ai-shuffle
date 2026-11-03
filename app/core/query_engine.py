@@ -51,7 +51,7 @@ from app.db.async_database import run_sync
 from pathlib import Path
 from app.core.config import settings
 from app.core.provider import session_admission
-from app.core.provider.session_admission import SessionBusyError
+from app.core.provider.session_admission import Lease, SessionReplacedError
 from app.core.session_pool import (
     SessionState, get_session_pool, is_subprocess_alive, retire_if_replaced,
     requires_reconnect, reconnect_option_names, mark_subprocess_oom_killable,
@@ -537,6 +537,31 @@ async def execute_query(
     automation_id: Optional[str] = None,
     persist_user_message: bool = True,
 ) -> Dict[str, Any]:
+    """Run one headless turn under the chat's lease (see ``session_admission``)."""
+    is_new_session = not session_id
+    session_id = session_id or str(uuid.uuid4())
+    lease = await session_admission.acquire(session_id)
+    try:
+        return await _execute_query_turn(
+            lease, is_new_session, prompt, profile_id, project_id, overrides,
+            session_id, api_user_id, automation_id, persist_user_message,
+        )
+    finally:
+        session_admission.close(lease)
+
+
+async def _execute_query_turn(
+    lease: Lease,
+    is_new_session: bool,
+    prompt: str,
+    profile_id: str,
+    project_id: Optional[str],
+    overrides: Optional[Dict[str, Any]],
+    session_id: str,
+    api_user_id: Optional[str],
+    automation_id: Optional[str],
+    persist_user_message: bool,
+) -> Dict[str, Any]:
     """Execute a non-streaming query.
 
     ``automation_id`` stamps provenance onto a session this call creates, so
@@ -558,7 +583,7 @@ async def execute_query(
             raise ValueError(f"Project not found: {project_id}")
 
     # Get or create session
-    if session_id:
+    if not is_new_session:
         session = await run_sync(database.get_session, session_id)
         if not session:
             raise ValueError(f"Session not found: {session_id}")
@@ -568,10 +593,7 @@ async def execute_query(
             archive_guard.log_dropped(session_id, "api", "execute_query refused")
             raise archive_guard.SessionArchived(session_id)
         resume_id = session.get("sdk_session_id")
-        # Connect would refuse too, but only after this prompt is in the history.
-        session_admission.refuse_if_busy(resume_id)
     else:
-        session_id = str(uuid.uuid4())
         # Generate title from first message (truncate to 50 chars)
         title = derive_session_title(
             prompt, max_chars=50, word_boundary=False
@@ -685,7 +707,8 @@ async def execute_query(
 
     try:
         await adapter.connect_with_sdk_options(options)
-        session_admission.hold_for_unpooled_turn(adapter)
+        if lease.stopped:
+            raise SessionReplacedError(SessionReplacedError.REWOUND)
         # Headless metadata is created before connect, unlike the pooled paths.
         # Book the credential account actually bound by lazy client construction.
         metadata[USAGE_PROVIDER_KEY] = getattr(options, "aih_provider_id", None)
@@ -801,6 +824,11 @@ async def execute_query(
                     # flag on the ledger row, never subtracted.
                     metadata["usage_estimated"] = bool(message.usage.get("usage_estimated"))
 
+    except SessionReplacedError:
+        # No pool entry for a rewind to evict, so its claim is what stops this turn.
+        if lease.stopped:
+            raise SessionReplacedError(SessionReplacedError.REWOUND) from None
+        raise
     except (Exception, BaseExceptionGroup) as e:
         # Unwrap ExceptionGroup from an anyio.TaskGroup (Python 3.11+)
         if isinstance(e, BaseExceptionGroup) and e.exceptions:
@@ -972,7 +1000,7 @@ async def _emit_api_error_notification(
         logger.debug("api_error notification emit failed", exc_info=True)
 
 
-async def stream_query(
+def stream_query(
     prompt: str,
     profile_id: str,
     project_id: Optional[str] = None,
@@ -981,6 +1009,27 @@ async def stream_query(
     api_user_id: Optional[str] = None,
     device_id: Optional[str] = None,  # Source device for sync
     persist_user_message: bool = True,
+) -> AsyncGenerator[Dict[str, Any], None]:
+    """Run one streamed turn under the chat's lease (see ``session_admission``)."""
+    is_new_session = not session_id
+    session_id = session_id or str(uuid.uuid4())
+    return session_admission.stream_turn(session_id, lambda lease: _stream_query_turn(
+        lease, is_new_session, prompt, profile_id, project_id, overrides,
+        session_id, api_user_id, device_id, persist_user_message,
+    ))
+
+
+async def _stream_query_turn(
+    lease: Lease,
+    is_new_session: bool,
+    prompt: str,
+    profile_id: str,
+    project_id: Optional[str],
+    overrides: Optional[Dict[str, Any]],
+    session_id: str,
+    api_user_id: Optional[str],
+    device_id: Optional[str],
+    persist_user_message: bool,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """Stream a query through the session's pooled provider adapter.
 
@@ -1021,7 +1070,7 @@ async def stream_query(
     _is_new_session = False  # Tracks new vs resumed for potential analytics
     resume_id = None
 
-    if session_id:
+    if not is_new_session:
         session = await run_sync(database.get_session, session_id)
         if not session:
             yield {"type": "error", "message": f"Session not found: {session_id}"}
@@ -1035,7 +1084,6 @@ async def stream_query(
         resume_id = session.get("sdk_session_id")
         logger.debug(f"Resuming session {session_id} with SDK session {resume_id}")
     else:
-        session_id = str(uuid.uuid4())
         # Generate title from first message (truncate to 50 chars)
         title = derive_session_title(
             prompt, max_chars=50, word_boundary=False
@@ -1171,7 +1219,7 @@ async def stream_query(
     if existing_state and existing_state.is_connected and is_subprocess_alive(existing_state):
         # Busy-write guard backstop: never write a second prompt into a client
         # that is mid-turn (kills the CLI, loses the whole in-flight turn).
-        if existing_state.is_streaming or session_admission.held_by_another(existing_state.adapter):
+        if existing_state.is_streaming:
             logger.warning(
                 f"Pooled client for session {session_id} is mid-turn — "
                 f"refusing concurrent query (busy-write guard)"
@@ -1293,10 +1341,6 @@ async def stream_query(
             # Timeout prevents hanging if MCP servers are unreachable
             await asyncio.wait_for(adapter.connect_with_sdk_options(options), timeout=60.0)
             logger.debug(f"Connected to Claude SDK for session {session_id}")
-        except SessionBusyError as e:
-            logger.warning(f"Refused a second connect to busy session {session_id} (busy-write guard)")
-            yield {"type": "error", "message": str(e)}
-            return
         except asyncio.TimeoutError:
             logger.error(f"Timed out connecting to Claude SDK for session {session_id} (60s)")
             yield {"type": "error", "message": "Connection timed out — an MCP server may be unreachable"}
@@ -1314,6 +1358,12 @@ async def stream_query(
             error_msg = _extract_connection_error(e, cli_stderr_lines)
             logger.error(f"User-facing error: {error_msg}")
             yield {"type": "error", "message": error_msg}
+            return
+
+        if lease.stopped:
+            logger.info(f"A rewind took session {session_id} while it connected; not starting")
+            await adapter.disconnect()
+            yield {"type": "interrupted", "message": "Query was interrupted"}
             return
 
         state = SessionState(
@@ -1627,6 +1677,7 @@ async def stream_query(
         state.interrupt_requested = False
         # Mark as not streaming — keep in pool for reuse
         state.is_streaming = False
+        session_admission.turn_ended(lease)
         state.streaming_started_at = None
         state.last_activity = datetime.now(timezone.utc)
 
@@ -1709,7 +1760,7 @@ def pooled_client_lacks_approver(state: Any, broadcast_func: Any) -> bool:
     return bool(broadcast_func) and not getattr(state.adapter, "has_permission_callback", True)
 
 
-async def _stream_to_websocket_impl(
+def _stream_to_websocket_impl(
     prompt: str,
     session_id: str,
     profile_id: str,
@@ -1723,6 +1774,30 @@ async def _stream_to_websocket_impl(
     turn_source: Optional[str] = None,
     loop_guard_turn: Optional[Dict[str, Any]] = None,
     connector_sender: Optional[Dict[str, Any]] = None,
+) -> AsyncGenerator[Dict[str, Any], None]:
+    """Run one pump turn under the chat's lease (see ``session_admission``)."""
+    return session_admission.stream_turn(session_id, lambda lease: _stream_to_websocket_turn(
+        lease, prompt, session_id, profile_id, project_id, overrides, broadcast_func,
+        api_user_id, user_id, upload_blob_ids, resume, turn_source, loop_guard_turn,
+        connector_sender,
+    ))
+
+
+async def _stream_to_websocket_turn(
+    lease: Lease,
+    prompt: str,
+    session_id: str,
+    profile_id: str,
+    project_id: Optional[str],
+    overrides: Optional[Dict[str, Any]],
+    broadcast_func: Optional[callable],
+    api_user_id: Optional[str],
+    user_id: Optional[str],
+    upload_blob_ids: Optional[List[str]],
+    resume: bool,
+    turn_source: Optional[str],
+    loop_guard_turn: Optional[Dict[str, Any]],
+    connector_sender: Optional[Dict[str, Any]],
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Stream Claude response directly to WebSocket.
@@ -2002,7 +2077,7 @@ async def _stream_to_websocket_impl(
         # in message reader" and the whole in-flight turn is lost. The WS
         # handlers enqueue instead of racing us, but this gate is the last line
         # of defence for any caller (REST, background, unpark races).
-        if existing_state.is_streaming or session_admission.held_by_another(existing_state.adapter):
+        if existing_state.is_streaming:
             logger.warning(
                 f"[WS] Pooled client for session {session_id} is mid-turn — "
                 f"refusing concurrent query (busy-write guard)"
@@ -2690,10 +2765,6 @@ async def _stream_to_websocket_impl(
             await asyncio.wait_for(adapter.connect_with_sdk_options(options), timeout=60.0)
             _connect_elapsed = time.monotonic() - _connect_start
             logger.info(f"[WS] SDK connect for session {session_id}: {_connect_elapsed:.1f}s (reuse=False)")
-        except SessionBusyError as e:
-            logger.warning(f"[WS] Refused a second connect to busy session {session_id} (busy-write guard)")
-            yield {"type": "error", "message": str(e)}
-            return
         except ClaudeCliMissingError as e:
             # Setup problem, not a crash: no traceback, the message is the fix.
             logger.warning(f"[WS] Claude CLI missing for session {session_id}: {e}")
@@ -2710,6 +2781,17 @@ async def _stream_to_websocket_impl(
             error_msg = _extract_connection_error(e, cli_stderr_lines)
             logger.error(f"[WS] User-facing error: {error_msg}")
             yield {"type": "error", "message": error_msg}
+            return
+
+        if lease.stopped:
+            logger.info(f"[WS] A rewind took session {session_id} while it connected; not starting")
+            await adapter.disconnect()
+            yield {
+                "type": "interrupted",
+                "session_id": session_id,
+                "message": "Query was interrupted",
+                "metadata": {"terminal_reason": None},
+            }
             return
 
         state = SessionState(
@@ -4138,6 +4220,7 @@ async def _stream_to_websocket_impl(
         clear_turn_context(session_id, expected=bound_generation_context)
         # Mark as not streaming and reset interrupt flag
         state.is_streaming = False
+        session_admission.turn_ended(lease)
         state.streaming_started_at = None
         state.interrupt_requested = False
         state.last_activity = datetime.now(timezone.utc)

@@ -53,6 +53,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 import time
 import uuid as _uuid
 from dataclasses import dataclass
@@ -942,6 +943,7 @@ def rewind_fluid_session(
     target_role: str = "user",
     *,
     reset_session_id: Optional[str] = None,
+    stop: Optional[threading.Event] = None,
 ) -> RewindResult:
     """Rewind a fluid session by moving its head to an earlier node.
 
@@ -954,8 +956,24 @@ def rewind_fluid_session(
     WHERE it cuts is decided by :func:`compute_rewind_keep_count`, the same
     function the JSONL truncation and the session-store truncation use, so a
     rewind lands on the same message under fluid as it does on the legacy path.
+
+    ``stop`` says the request was cancelled. A claim from then on must not land:
+    the chat is free again, and it would take the session from a newer engine.
     """
-    generation = _claim_session(sdk_session_id)
+    # The pooled engine is evicted first, but its last writes can still be on their
+    # way and landing later would undo the rewind. The claim waits them out, so the
+    # path read below includes them, and refuses them from here on.
+    from app.core.provider.fluid_pg_store import _claim_session_sync
+
+    try:
+        generation = _claim_session_sync(sdk_session_id, stop=stop or threading.Event())
+    except Exception as exc:
+        logger.warning("Rewind of %s could not take the session: %r", sdk_session_id, exc)
+        return RewindResult(
+            success=False,
+            message="Fluid rewind failed",
+            error="A write to this chat is still finishing. Try the rewind again in a moment.",
+        )
     path = load_fluid_path(sdk_session_id)
     if not path:
         return RewindResult(
@@ -989,28 +1007,6 @@ def rewind_fluid_session(
         remaining_user_turns=_count_user_prompts(entries[:keep_count]),
         writer_generation=generation,
     )
-
-
-def _claim_session(session_id: str) -> Optional[int]:
-    """Become the session's writer; its new generation, None without a session.
-
-    A rewind evicts the pooled engine first, but that engine's last writes can
-    still be on their way, and landing later would undo the rewind. This update
-    waits them out, so the path a rewind reads includes them, and refuses them
-    from here on.
-    """
-    from app.db.base import get_cursor, get_db
-    from app.db.compat import ph
-
-    with get_db() as conn:
-        cursor = get_cursor(conn)
-        cursor.execute(
-            f"UPDATE fluid_sessions SET writer_generation = writer_generation + 1 "
-            f"WHERE session_id = {ph()} RETURNING writer_generation",
-            (session_id,),
-        )
-        row = cursor.fetchone()
-    return int(dict(row)["writer_generation"]) if row else None
 
 
 def _set_head(

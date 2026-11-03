@@ -1,143 +1,134 @@
-"""Which engine in this process may run a session right now.
+"""Which request may run a chat in this process right now.
 
-The database fence (``fluid_sessions.writer_generation``) keeps a replaced
-engine's late writes off the session, but it cannot save that engine's turn: the
-newest claim always wins, so a turn that is mid-flight when another connect
-claims the session goes on running with nothing saved. Inside one process that
-is avoidable, so a connect is admitted here first, before its claim. While
-another engine is connecting or mid-turn the newcomer is refused with the same
-busy error a pooled client gives. Admission is keyed on the fluid session id,
-the one the claim uses, and is synchronous: two requests cannot both pass.
+Every route that runs a turn takes the chat's lease before it does anything
+else, keyed on the app session id, which exists before any engine does. So one
+lease covers settings, connect, pool entry and the turn, whichever engine or
+fluid id they end up with. A second turn is refused with the same busy error a
+pooled client gives. ``acquire`` has no await on its uncontended path, so two
+requests cannot both pass it.
 
-An idle engine does not hold a session back. It is displaced by the claim and
-retired the next time a reuse gate looks at it (``retire_if_replaced``).
+A lease has one lifetime rule: the route's outermost scope closes it,
+unconditionally. Nothing below that scope can leak it (a connect that fails or is
+cancelled, a cancelled teardown) because nothing below it owns it. The one early
+step is :func:`turn_ended`: when a turn's end is announced, the client may send
+its next message while the route is still saving, so the chat is free from then
+on. Closing afterwards is harmless, it only frees a lease that is still current.
+
+A rewind on a running reply stops the reply, so :func:`take_for_rewind` takes the
+chat from the current holder rather than being refused. The holder's late
+release no longer frees anything, and turns wait for the rewind instead of being
+refused: a message sent right after it must land on the rewound chat.
 
 Another install on the same database never passes through here, so a turn can
 still be lost that way. ``HarnessAdapter.receive_events`` raises
 :class:`SessionReplacedError` for that, so the turn cannot end as a success.
 
-Every function runs on the event loop, and any object that is not a holder is
-ignored, so test doubles need no special handling.
+Every function runs on the event loop.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List
+import asyncio
+from contextlib import aclosing
+from dataclasses import dataclass, field
+from typing import Any, AsyncGenerator, Callable, Dict, Optional
 
 
 class SessionBusyError(RuntimeError):
-    """Another engine in this process is connecting to or running the session."""
+    """Another turn in this process is running the session."""
+
+    MESSAGE = (
+        "Session is busy with another response. "
+        "Wait for it to finish, then send your message again."
+    )
 
     def __init__(self) -> None:
-        super().__init__(
-            "Session is busy with another response. "
-            "Wait for it to finish, then send your message again."
-        )
+        super().__init__(self.MESSAGE)
 
 
 class SessionReplacedError(RuntimeError):
-    """Another install took the session over while this engine's turn was running."""
+    """Another writer took the session over while this engine's turn was running."""
 
-    def __init__(self) -> None:
-        super().__init__(
-            "This chat was continued from another running copy of AI Shuffle, so "
-            "this reply stopped and the rest of it was not saved. Reload the chat "
-            "to see its latest state."
-        )
+    ANOTHER_COPY = (
+        "This chat was continued from another running copy of AI Shuffle, so "
+        "this reply stopped and the rest of it was not saved. Reload the chat "
+        "to see its latest state."
+    )
+    REWOUND = "This chat was rewound, so this reply stopped and the rest of it was not saved."
+
+    def __init__(self, message: str = ANOTHER_COPY) -> None:
+        super().__init__(message)
+
+
+def is_conflict_message(message: object) -> bool:
+    """A turn's recorded failure that is the caller's next step, not a server fault."""
+    return message in (
+        SessionBusyError.MESSAGE, SessionReplacedError.ANOTHER_COPY, SessionReplacedError.REWOUND,
+    )
 
 
 @dataclass(eq=False)
-class _Lease:
+class Lease:
     session_id: str
-    owner: Any
-    connecting: bool = True
-    # What says whether the holder is mid-turn: the pool's SessionState once the
-    # engine is pooled, which happens with no await after its connect returns.
-    state: Any = None
-
-    @property
-    def busy(self) -> bool:
-        return self.connecting or getattr(self.state, "is_streaming", False) is True
+    is_rewind: bool = False
+    # A rewind took the chat: a turn still connecting must not start.
+    stopped: bool = False
+    # Set when the route that held this lease has finished, saving included.
+    exited: asyncio.Event = field(default_factory=asyncio.Event)
 
 
-class _UnpooledTurn:
-    """The whole life of an engine that never joins the pool is one turn."""
-
-    is_streaming = True
+_holders: Dict[str, Lease] = {}
 
 
-# By ``id(owner)``: a holder need not be hashable, and its lease keeps it alive.
-_by_owner: Dict[int, _Lease] = {}
-_by_session: Dict[str, List[_Lease]] = {}
+async def acquire(session_id: str) -> Lease:
+    """Hold the chat for one turn, or raise :class:`SessionBusyError`."""
+    while (holder := _holders.get(session_id)) is not None:
+        if not holder.is_rewind:
+            raise SessionBusyError()
+        await holder.exited.wait()
+    lease = Lease(session_id)
+    _holders[session_id] = lease
+    return lease
 
 
-def admit(session_id: str, owner: Any) -> None:
-    """Hold ``session_id`` for ``owner``, or raise :class:`SessionBusyError`."""
-    current = _by_owner.get(id(owner))
-    if any(lease.busy for lease in _by_session.get(session_id, ()) if lease.owner is not owner):
-        raise SessionBusyError()
-    if current is not None:
-        if current.session_id == session_id:
-            current.connecting = True
-            return
-        release(owner)
-    lease = _Lease(session_id, owner)
-    _by_owner[id(owner)] = lease
-    _by_session.setdefault(session_id, []).append(lease)
+def take_for_rewind(lease: Lease) -> Optional[Lease]:
+    """Take the chat from whoever holds it; returns that holder, told to stop."""
+    previous = _holders.get(lease.session_id)
+    if previous is not None:
+        previous.stopped = True
+    _holders[lease.session_id] = lease
+    return previous
 
 
-def refuse_if_busy(session_id: str) -> None:
-    """Raise :class:`SessionBusyError` if a holder is connecting or mid-turn."""
-    if any(lease.busy for lease in _by_session.get(session_id, ())):
-        raise SessionBusyError()
+def turn_ended(lease: Lease) -> None:
+    """The turn's end is announced, so the client's next message may start."""
+    if _holders.get(lease.session_id) is lease:
+        del _holders[lease.session_id]
 
 
-def connected(owner: Any) -> None:
-    """The holder's connect finished, so only a turn makes it busy from here on."""
-    lease = _by_owner.get(id(owner))
-    if lease is not None:
-        lease.connecting = False
+def close(lease: Lease) -> None:
+    """The route is done. Safe to repeat, and for a lease that was taken over."""
+    turn_ended(lease)
+    lease.exited.set()
 
 
-def bind_state(owner: Any, state: Any) -> None:
-    """The holder joined the pool: from now on ``state`` says whether it is busy."""
-    lease = _by_owner.get(id(owner))
-    if lease is not None:
-        lease.state = state
-
-
-def hold_for_unpooled_turn(owner: Any) -> None:
-    """A headless turn: busy until it releases the session, at its disconnect."""
-    bind_state(owner, _UnpooledTurn)
-
-
-def release(owner: Any) -> None:
-    """Give the session up. Safe to call repeatedly, or for a non-holder."""
-    lease = _by_owner.pop(id(owner), None)
-    if lease is None:
+async def stream_turn(
+    session_id: str, turn: Callable[[Lease], AsyncGenerator[Dict[str, Any], None]],
+) -> AsyncGenerator[Dict[str, Any], None]:
+    """Run a streaming route under the chat's lease; a refusal is its error frame."""
+    try:
+        lease = await acquire(session_id)
+    except SessionBusyError as busy:
+        yield {"type": "error", "message": str(busy)}
         return
-    leases = _by_session[lease.session_id]
-    leases.remove(lease)
-    if not leases:
-        del _by_session[lease.session_id]
-
-
-def holds(owner: Any) -> bool:
-    return id(owner) in _by_owner
-
-
-def held_by_another(owner: Any) -> bool:
-    """Whether another holder is busy on the session ``owner`` holds."""
-    lease = _by_owner.get(id(owner))
-    if lease is None:
-        return False
-    return any(
-        other.busy for other in _by_session[lease.session_id] if other is not lease
-    )
+    try:
+        async with aclosing(turn(lease)) as events:
+            async for event in events:
+                yield event
+    finally:
+        close(lease)
 
 
 def clear() -> None:
     """Forget every holder. Tests only: each test starts with an empty process."""
-    _by_owner.clear()
-    _by_session.clear()
+    _holders.clear()

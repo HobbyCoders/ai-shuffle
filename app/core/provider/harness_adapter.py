@@ -105,7 +105,6 @@ from app.core.guardrail_prompt import (
     guardrail_blocked_note,
 )
 from app.core.provider.protocol import ProviderAdapter
-from app.core.provider import session_admission
 from app.core.provider.session_admission import SessionReplacedError
 from app.core.provider.delegated_saved_rules import SAVED_RULE_DENIAL
 from app.core.session_modes import (
@@ -601,25 +600,6 @@ class HarnessAdapter(ProviderAdapter):
     # ─── Connection Lifecycle ─────────────────────────────────────────
 
     async def connect(self, options: SessionOptions) -> None:
-        """Connect, unless another engine here is connecting to or running the
-        session (:mod:`~app.core.provider.session_admission`)."""
-        admitted = options.session_id or options.resume_session_id
-        if isinstance(admitted, str) and admitted:
-            session_admission.admit(admitted, self)
-        try:
-            await self._connect_engine(options)
-            # A new chat has no id until its engine makes one, and that engine
-            # holds the session like any other from here on. An id nobody has
-            # seen yet cannot be busy.
-            started = self._sdk_session_id
-            if isinstance(started, str) and started and started != admitted:
-                session_admission.admit(started, self)
-        except BaseException:
-            session_admission.release(self)
-            raise
-        session_admission.connected(self)
-
-    async def _connect_engine(self, options: SessionOptions) -> None:
         """Build the fluid engine from SessionOptions and prime its session."""
         from fluid.tools.child_env import scrub_claude_auth_env
 
@@ -1596,7 +1576,6 @@ class HarnessAdapter(ProviderAdapter):
             # timed-out engine close may still be finishing durable writes.
             self._store = None
             self._registry = None
-            session_admission.release(self)
 
     async def release_dead_transport(self) -> None:
         """Free the delegated engine's CLI and bridge; a native one holds neither."""
@@ -1618,10 +1597,10 @@ class HarnessAdapter(ProviderAdapter):
         """Stop a turn another install took over, and fail it.
 
         Finishing it normally would report success for output that was not
-        saved. A client this process already evicted no longer holds the session
-        and was stopped on purpose, so it has nothing to report.
+        saved. A client this process already closed was stopped on purpose (a
+        rewind waits for that before it claims), so it has nothing to report.
         """
-        if not session_admission.holds(self):
+        if self._store is None:
             return
         try:
             await asyncio.wait_for(self.interrupt(), timeout=_REPLACED_INTERRUPT_SECONDS)

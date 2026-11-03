@@ -17,9 +17,8 @@ from pydantic import BaseModel
 
 from app.core.detached_tasks import spawn_detached
 from app.core.provider import session_admission
-from app.core.provider.session_admission import SessionBusyError
 from app.db import database
-from app.db.async_database import run_sync
+from app.db.async_database import run_maintenance, run_sync
 from app.api.auth import require_auth
 from app.api.sessions import check_session_access, check_transcript_access
 from app.api.common import resolve_project_path
@@ -48,6 +47,10 @@ from app.core.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# How long a rewind waits for the reply it stopped to finish saving. Past this the
+# turn is stuck (a slow client holding its stream, a connect that has not returned).
+_REWIND_STOP_WAIT_SECONDS = 15.0
 
 router = APIRouter(
     prefix="/api/v1/commands",
@@ -637,15 +640,18 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     - restore_files: Not supported; reported as an error while the chat rewind still runs
     - include_response: Keep Claude's response to target message
     """
-    lease = object()
+    lease = session_admission.Lease(session_id, is_rewind=True)
     try:
         return await _execute_rewind(session_id, request, http_request, lease)
     finally:
-        session_admission.release(lease)
+        session_admission.close(lease)
 
 
 async def _execute_rewind(
-    session_id: str, request: RewindRequestV2, http_request: Optional[Request], lease: object,
+    session_id: str,
+    request: RewindRequestV2,
+    http_request: Optional[Request],
+    lease: session_admission.Lease,
 ):
     # Authorize and route before inspecting local provider state or resolving a
     # checkout. A mirrored session intentionally has no local resume pointer.
@@ -722,22 +728,6 @@ async def _execute_rewind(
                    "Send a message to recover a missing checkout, or restore the bound branch, "
                    "then retry rewind."),
         )
-
-    # A rewind takes the session from whatever engine holds it, so one connecting
-    # or mid-turn here makes it wait its turn like a message would. Held until the
-    # re-seed is done: a connect in between would resume the pre-rewind history.
-    if fluid_session and request.restore_chat:
-        try:
-            session_admission.admit(sdk_session_id, lease)
-        except SessionBusyError:
-            return RewindResponseV2(
-                success=False,
-                message="Rewind refused",
-                error=(
-                    "A response is still running in this chat. "
-                    "Stop it or wait for it to finish, then rewind."
-                ),
-            )
 
     logger.info(
         f"Rewind requested: session={session_id}, sdk_session={sdk_session_id}, "
@@ -819,7 +809,12 @@ async def _execute_rewind(
     # pool entry first guarantees the transcript is quiescent; the next turn
     # resumes a fresh client from the truncated file. Best-effort: an eviction hiccup must not
     # abort a rewind the user explicitly requested.
+    #
+    # A running reply is stopped by this, as it always was. The lease keeps a new
+    # turn from starting meanwhile, and the wait below lets the stopped turn save
+    # what it has first, or the rows it saves would land after the rewind's cut.
     if request.restore_chat or request.restore_files:
+        stopping = session_admission.take_for_rewind(lease)
         try:
             pool = get_session_pool()
             if pool.contains(session_id):
@@ -833,6 +828,12 @@ async def _execute_rewind(
                 f"Rewind pool eviction failed for session {session_id}: {evict_err}",
                 exc_info=True,
             )
+        if stopping is not None:
+            try:
+                await asyncio.wait_for(stopping.exited.wait(), timeout=_REWIND_STOP_WAIT_SECONDS)
+            except asyncio.TimeoutError:
+                # Its writes are fenced by the claim below, so going on is safe.
+                logger.warning(f"Rewind of session {session_id} went on without the turn ending")
 
     # File restore is not supported. It relied on the Agent SDK resuming the
     # session to replay file checkpoints, and nothing drives the CLI through the
@@ -877,7 +878,7 @@ async def _execute_rewind(
                 exc_info=True,
             )
 
-        fluid_result = await asyncio.to_thread(
+        fluid_result = await run_maintenance(
             rewind_fluid_session,
             sdk_session_id,
             request.target_uuid,

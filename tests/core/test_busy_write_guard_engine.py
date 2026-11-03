@@ -35,7 +35,8 @@ import pytest
 import app.core.query_engine as qe
 import app.core.query_background as qb
 from app.core.provider import session_admission
-from app.core.provider.session_admission import SessionBusyError
+from app.core.provider.harness_adapter import HarnessAdapter
+from app.core.provider.session_admission import SessionBusyError, SessionReplacedError
 from app.core.session_pool import SessionState
 from app.db import session_events as se
 from app.db import sessions as sessions_db
@@ -626,135 +627,363 @@ async def test_background_applies_permission_mode_on_reuse_without_respawn(mock_
     assert state.is_streaming is False  # claim-guard released it on the raise
 
 
-# ─── Cold admission: the gates above only see a client that is already pooled ─
+# ─── The chat's lease: the gates above only see a client that is already pooled ─
 
 
-def _holding_another_engine(state: SessionState, session_id: str = "ses_held") -> None:
-    """``state`` is pooled and idle while another engine connects to its session."""
-    session_admission.admit(session_id, state.adapter)
-    session_admission.connected(state.adapter)
-    session_admission.bind_state(state.adapter, state)
-    session_admission.admit(session_id, object())
+class _PausedConnect(HarnessAdapter):
+    """The real ``connect_with_sdk_options``, stopping at one of its steps."""
+
+    def __init__(self, world: "_ConnectWorld"):
+        super().__init__()
+        self.world = world
+
+    async def connect(self, options):
+        self.world.connects.append(self)
+        self._connected = True
+        await self.world.step("connect")
+
+    async def prepare_background_completions(self, *_args, **_kwargs):
+        await self.world.step("prepare")
+
+    async def reconcile_user_questions(self):
+        await self.world.step("reconcile")
+
+    def is_alive(self):
+        return True
+
+    async def set_permission_mode(self, mode):
+        return None
+
+    async def send_query(self, prompt):
+        self.world.sent.append(prompt)
+
+    async def receive_events(self):
+        await self.world.step("turn")
+        if False:  # pragma: no cover
+            yield None
+
+    async def disconnect(self):
+        self.world.disconnected.append(self)
+        await self.world.step("disconnect")
 
 
-async def test_reuse_gates_refuse_while_another_engine_connects(mock_db):
-    """Reusing the idle client would start a turn the connecting engine's claim ends."""
-    for name, drive in {
-        "chat": lambda: qe._stream_to_websocket_impl("hi", "sess-busy", "claude-code"),
-        "rest": lambda: qe.stream_query("hi", "claude-code", session_id="sess-busy"),
-    }.items():
-        session_admission.clear()
-        state = _fake_state()
-        _holding_another_engine(state)
-        with ExitStack() as stack:
-            (_chat_patches if name == "chat" else _rest_patches)(stack, StubPool(state))
-            events = await collect(drive())
-        assert any("busy" in e.get("message", "").lower() for e in events), (name, events)
-        state.adapter.send_query.assert_not_awaited()
-        assert state.is_streaming is False
+class _ConnectWorld:
+    def __init__(self, stop_at: str | None = None):
+        self.stop_at = stop_at
+        self.reached, self.proceed = asyncio.Event(), asyncio.Event()
+        self.connects: list = []
+        self.sent: list = []
+        self.disconnected: list = []
+
+    async def step(self, name: str) -> None:
+        if name == self.stop_at:
+            self.reached.set()
+            await self.proceed.wait()
+
+    def adapter(self):
+        return _PausedConnect(self)
+
+    def patches(self, stack: ExitStack, route: str, pool: StubPool):
+        if route == "background":
+            stack.enter_context(patch.object(qb, "run_sync", new=AsyncMock(return_value={"id": "row-1"})))
+            stack.enter_context(patch.object(qb, "sync_engine", new=_fake_sync_engine()))
+            stack.enter_context(patch.object(qb, "get_session_pool", return_value=pool))
+            stack.enter_context(patch.object(qb, "get_profile", return_value={"id": "claude-code", "config": {}}))
+            options = MagicMock()
+            stack.enter_context(patch(
+                "app.core.sdk_options.build_options_from_profile", return_value=(options, None),
+            ))
+        else:
+            options = (_chat_patches if route == "chat" else _rest_patches)(stack, pool)
+        # What a chat with no stored SDK id connects with: nothing stable to key on.
+        options.session_id, options.resume_session_id = None, None
+        options.include_partial_messages = False
+        stack.enter_context(patch("app.core.provider.factory.make_adapter", side_effect=self.adapter))
+        return options
 
 
-async def test_background_reuse_gate_refuses_while_another_engine_connects(mock_db):
-    state = _fake_state()
-    _holding_another_engine(state)
-    sessions_db.create_session("sess-busy", "default")
+def _start(route: str, prompt: str, session_id: str):
+    """One request on ``route``; returns a future of its frames."""
+    if route == "chat":
+        return asyncio.ensure_future(collect(qe._stream_to_websocket_impl(prompt, session_id, "claude-code")))
+    if route == "rest":
+        return asyncio.ensure_future(collect(qe.stream_query(prompt, "claude-code", session_id=session_id)))
 
-    await _background_turn(StubPool(state), "sess-busy")
+    async def background():
+        started = await qb.start_background_query(prompt, "claude-code", session_id=session_id)
+        await qb._pending_background_tasks[started["session_id"]]
+        return []
 
-    state.adapter.send_query.assert_not_awaited()
-    assert state.is_streaming is False
-    assert "busy" in (se.get_events("sess-busy")[-1]["payload"].get("message") or "").lower()
+    return asyncio.ensure_future(background())
 
 
-async def _background_turn(pool, session_id: str, *, connecting=None) -> None:
-    async def _fake_run_sync(fn, *a, **k):
-        return {"id": "row-1"}
+async def _second_is_refused(route: str, session_id: str) -> None:
+    if route == "background":
+        with pytest.raises(SessionBusyError):
+            await qb.start_background_query("two", "claude-code", session_id=session_id)
+        return
+    frames = await _start(route, "two", session_id)
+    assert [e["message"] for e in frames if e.get("type") == "error"] == [str(SessionBusyError())]
+    assert not any(e.get("type") == "done" for e in frames)
+
+
+@pytest.mark.parametrize("route", ["chat", "rest", "background"])
+@pytest.mark.parametrize("step", ["connect", "prepare", "reconcile", "turn"])
+async def test_second_request_is_refused_at_every_step_of_the_first_turn(mock_db, route, step):
+    """Two requests, no SDK id, the real connect boundary. Whichever step the first
+    has reached, the second never connects a second engine."""
+    sessions_db.create_session("sess-race", "default")
+    world = _ConnectWorld(step)
+    with ExitStack() as stack:
+        world.patches(stack, route, StubPool())
+        first = _start(route, "one", "sess-race")
+        await asyncio.wait_for(world.reached.wait(), 10)
+
+        await _second_is_refused(route, "sess-race")
+
+        assert len(world.connects) == 1, "the refused request must never reach its claim"
+        assert "two" not in " ".join(world.sent)
+        world.proceed.set()
+        await asyncio.wait_for(first, 10)
+    assert "sess-race" not in session_admission._holders
+
+
+async def test_background_conversation_then_immediate_continue_of_its_returned_id(mock_db):
+    """The reported race: the caller gets the id back and continues it straight away."""
+    world = _ConnectWorld("connect")
+    with ExitStack() as stack:
+        world.patches(stack, "background", StubPool())
+        started = await qb.start_background_query("one", "claude-code")
+        new_id = started["session_id"]
+        assert new_id in session_admission._holders, "held before the caller has the id"
+
+        await _second_is_refused("rest", new_id)
+        await _second_is_refused("background", new_id)
+        await asyncio.wait_for(world.reached.wait(), 10)
+        assert len(world.connects) == 1
+
+        world.proceed.set()
+        await asyncio.wait_for(qb._pending_background_tasks[new_id], 10)
+    await asyncio.sleep(0)
+    assert new_id not in session_admission._holders
+
+
+@pytest.mark.parametrize("route", ["chat", "rest", "background"])
+@pytest.mark.parametrize("step", ["connect", "prepare", "reconcile"])
+async def test_a_connect_cancelled_anywhere_in_its_boundary_lets_the_chat_go(mock_db, route, step):
+    sessions_db.create_session("sess-cancel", "default")
+    world = _ConnectWorld(step)
+    with ExitStack() as stack:
+        world.patches(stack, route, StubPool())
+        first = _start(route, "one", "sess-cancel")
+        await asyncio.wait_for(world.reached.wait(), 10)
+        assert "sess-cancel" in session_admission._holders
+
+        (qb._pending_background_tasks["sess-cancel"] if route == "background" else first).cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(first, 10)
+        await asyncio.sleep(0)
+
+        assert "sess-cancel" not in session_admission._holders
+        world.stop_at = None
+        retry = await asyncio.wait_for(_start(route, "two", "sess-cancel"), 10)
+    assert "two" in " ".join(world.sent), retry
+
+
+@pytest.mark.parametrize("route", ["chat", "rest", "background"])
+async def test_a_connect_that_fails_lets_the_chat_go(mock_db, route):
+    sessions_db.create_session("sess-fail", "default")
+    world = _ConnectWorld()
+    with ExitStack() as stack:
+        world.patches(stack, route, StubPool())
+        with patch.object(_PausedConnect, "connect", new=AsyncMock(side_effect=RuntimeError("no"))):
+            await asyncio.wait_for(_start(route, "one", "sess-fail"), 10)
+        assert "sess-fail" not in session_admission._holders
+
+
+async def test_a_background_task_cancelled_before_its_first_step_lets_the_chat_go(mock_db):
+    world = _ConnectWorld()
+    with ExitStack() as stack:
+        world.patches(stack, "background", StubPool())
+        started = await qb.start_background_query("one", "claude-code")
+        qb._pending_background_tasks[started["session_id"]].cancel()
+        await asyncio.sleep(0.05)
+    assert started["session_id"] not in session_admission._holders
+
+
+async def test_a_background_start_that_fails_before_its_task_lets_the_chat_go(mock_db):
+    with patch.object(qb, "get_profile", return_value=None):
+        with pytest.raises(ValueError):
+            await qb.start_background_query("one", "nobody", session_id="sess-noprofile")
+    assert "sess-noprofile" not in session_admission._holders
+
+
+async def test_failover_retry_of_a_failed_stream_is_not_refused_by_its_own_first_try(mock_db):
+    """``stream_to_websocket`` runs the route again in the same task."""
+    world = _ConnectWorld()
+    with ExitStack() as stack:
+        world.patches(stack, "chat", StubPool())
+        for prompt in ("one", "two"):
+            await collect(qe._stream_to_websocket_impl(prompt, "sess-again", "claude-code"))
+    assert sum("one" in text or "two" in text for text in world.sent) == 2
+
+
+@pytest.mark.parametrize("route", ["chat", "rest", "background"])
+async def test_a_rewind_during_connect_stops_the_turn_before_it_starts(mock_db, route):
+    sessions_db.create_session("sess-rw", "default")
+    world = _ConnectWorld("reconcile")
+    with ExitStack() as stack:
+        world.patches(stack, route, StubPool())
+        turn = _start(route, "one", "sess-rw")
+        await asyncio.wait_for(world.reached.wait(), 10)
+
+        rewind = session_admission.Lease("sess-rw", is_rewind=True)
+        stopping = session_admission.take_for_rewind(rewind)
+        world.proceed.set()
+        await asyncio.wait_for(turn, 10)
+        await asyncio.sleep(0)
+
+        assert stopping.exited.is_set()
+        assert world.sent == [], "a stopped turn must not send its prompt"
+        assert world.disconnected, "its engine is closed, not left running"
+        session_admission.close(rewind)
+
+
+@pytest.mark.parametrize("route", ["chat", "rest", "background"])
+async def test_a_turn_another_install_took_over_reports_it_and_never_says_done(mock_db, route):
+    sessions_db.create_session("sess-lost", "default")
+    world = _ConnectWorld()
+
+    async def replaced(self):
+        raise SessionReplacedError()
+        yield  # pragma: no cover
 
     with ExitStack() as stack:
-        stack.enter_context(patch.object(qb, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)))
-        stack.enter_context(patch.object(qb, "sync_engine", new=_fake_sync_engine()))
-        stack.enter_context(patch(
-            "app.core.sdk_options.build_options_from_profile", return_value=(MagicMock(), None),
-        ))
-        stack.enter_context(patch.object(qb, "get_session_pool", return_value=pool))
-        stack.enter_context(patch.object(qb, "is_subprocess_alive", return_value=True))
-        stack.enter_context(patch.object(qb, "requires_reconnect", return_value=False))
-        if connecting is not None:
-            stack.enter_context(patch(
-                "app.core.provider.factory.make_adapter", return_value=connecting,
-            ))
-        await qb._run_background_query(
-            session_id, "hello", {"id": "claude-code"}, None, None, None, None, None,
-        )
+        world.patches(stack, route, StubPool())
+        with patch.object(_PausedConnect, "receive_events", new=replaced):
+            frames = await asyncio.wait_for(_start(route, "one", "sess-lost"), 10)
+    if route == "background":
+        await asyncio.sleep(0)
+        last = se.get_events("sess-lost")[-1]
+        assert last["event_type"] == "turn.aborted"
+        assert last["payload"].get("message") == SessionReplacedError.ANOTHER_COPY
+    else:
+        assert [e["message"] for e in frames if e.get("type") == "error"] == [SessionReplacedError.ANOTHER_COPY]
+        assert not any(e.get("type") == "done" for e in frames)
+    assert "sess-lost" not in session_admission._holders
 
 
-def _refused_connect() -> MagicMock:
-    adapter = mock_adapter()
-    adapter.connect_with_sdk_options = AsyncMock(side_effect=SessionBusyError())
-    return adapter
+@pytest.mark.parametrize("route", ["chat", "rest", "background"])
+async def test_the_chat_is_free_by_the_time_the_client_hears_the_turn_ended(mock_db, route):
+    """The client's next message can arrive while this route is still saving."""
+    from app.core.turn_recorder import TurnRecorder
 
+    sessions_db.create_session("sess-end", "default")
+    world = _ConnectWorld()
+    held_at_end: list = []
+    real_on_event = TurnRecorder.on_event
 
-async def test_cold_routes_give_the_busy_error_when_connect_is_refused(mock_db):
-    """The same words as the gates, rather than a connection-failure message."""
-    busy = str(SessionBusyError())
-    for name, drive in {
-        "chat": lambda: qe._stream_to_websocket_impl("hi", "sess-cold", "claude-code"),
-        "rest": lambda: qe.stream_query("hi", "claude-code", session_id="sess-cold"),
-    }.items():
-        with ExitStack() as stack:
-            (_chat_patches if name == "chat" else _rest_patches)(stack, StubPool())
-            stack.enter_context(patch(
-                "app.core.provider.factory.make_adapter", return_value=_refused_connect(),
-            ))
-            events = await collect(drive())
-        assert [e["message"] for e in events if e.get("type") == "error"] == [busy], (name, events)
-        assert not any(e.get("type") == "done" for e in events), name
+    async def on_event(self, event):
+        if event.get("type") == "done":
+            held_at_end.append("sess-end" in session_admission._holders)
+        await real_on_event(self, event)
 
-    sessions_db.create_session("sess-cold", "default")
-    await _background_turn(StubPool(), "sess-cold", connecting=_refused_connect())
-    assert se.get_events("sess-cold")[-1]["payload"].get("message") == busy
-
-
-async def test_two_cold_streams_never_displace_the_turn_that_got_there_first():
-    """Both pass the empty-pool check. The first connects and streams; the second
-    is refused before it can claim the session, so the first keeps its turn."""
-    from app.core.provider.harness_adapter import HarnessAdapter
-
-    entered, proceed = asyncio.Event(), asyncio.Event()
-    engines: list = []
-
-    class Adapter(HarnessAdapter):
-        async def _connect_engine(self, options):
-            engines.append(self)
-            entered.set()
-            await proceed.wait()
-
-        def is_alive(self):
-            return True
-
-        async def send_query(self, prompt):
-            return None
-
-        async def receive_events(self):
-            if False:  # pragma: no cover
-                yield None
-
-    def adapter_for_route():
-        adapter = Adapter()
-        adapter.connect_with_sdk_options = adapter.connect
-        return adapter
-
-    pool = StubPool()
     with ExitStack() as stack:
-        options = _rest_patches(stack, pool)
-        options.session_id, options.resume_session_id = None, "ses_race"
-        stack.enter_context(patch(
-            "app.core.provider.factory.make_adapter", side_effect=adapter_for_route,
-        ))
-        first = asyncio.ensure_future(collect(qe.stream_query("one", "claude-code", session_id="sess-race")))
-        await asyncio.wait_for(entered.wait(), 5)
-        second = await collect(qe.stream_query("two", "claude-code", session_id="sess-race"))
-        assert [e["message"] for e in second if e.get("type") == "error"] == [str(SessionBusyError())]
-        assert len(engines) == 1, "the refused request must never reach its claim"
-        proceed.set()
-        await asyncio.wait_for(first, 5)
+        world.patches(stack, route, StubPool())
+        stack.enter_context(patch.object(TurnRecorder, "on_event", new=on_event))
+        if route == "background":
+            await asyncio.wait_for(_start(route, "one", "sess-end"), 10)
+        else:
+            drive = (
+                qe._stream_to_websocket_impl("one", "sess-end", "claude-code") if route == "chat"
+                else qe.stream_query("one", "claude-code", session_id="sess-end")
+            )
+            async for event in drive:
+                if event.get("type") == "done":
+                    held_at_end.append("sess-end" in session_admission._holders)
+    assert held_at_end == [False]
+
+
+# ─── Headless ───────────────────────────────────────────────────────────────
+
+
+def _headless_patches(stack: ExitStack, world: _ConnectWorld) -> None:
+    stack.enter_context(patch.object(qe, "get_profile", return_value={"id": "claude-code", "config": {}}))
+    stack.enter_context(patch.object(qe, "run_sync", new=AsyncMock(return_value={"id": "row-1", "sdk_session_id": None})))
+    options = MagicMock()
+    options.session_id, options.resume_session_id, options.cwd = None, None, None
+    stack.enter_context(patch("app.core.sdk_options.build_options_from_profile", return_value=(options, None)))
+    stack.enter_context(patch("app.core.provider.factory.make_adapter", side_effect=world.adapter))
+    stack.enter_context(patch.object(qe, "sync_engine", new=_fake_sync_engine()))
+
+
+async def _headless(prompt: str, session_id: str):
+    return await qe.execute_query(prompt, "claude-code", session_id=session_id)
+
+
+@pytest.mark.parametrize("step", ["connect", "prepare", "reconcile", "turn", "disconnect"])
+async def test_headless_turn_holds_the_chat_through_teardown(mock_db, step):
+    world = _ConnectWorld(step)
+    with ExitStack() as stack:
+        _headless_patches(stack, world)
+        first = asyncio.ensure_future(_headless("one", "sess-headless"))
+        await asyncio.wait_for(world.reached.wait(), 10)
+        with pytest.raises(SessionBusyError):
+            await _headless("two", "sess-headless")
+        assert len(world.connects) == 1
+        world.proceed.set()
+        await asyncio.wait_for(asyncio.gather(first, return_exceptions=True), 10)
+    assert "sess-headless" not in session_admission._holders
+
+
+async def test_cancelled_teardown_does_not_leave_the_chat_busy_forever(mock_db):
+    """With no pool entry to evict, only the route's own scope can free it."""
+    world = _ConnectWorld("disconnect")
+    with ExitStack() as stack:
+        _headless_patches(stack, world)
+        first = asyncio.ensure_future(_headless("one", "sess-teardown"))
+        await asyncio.wait_for(world.reached.wait(), 10)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert "sess-teardown" not in session_admission._holders
+
+        world.stop_at = None
+        await _headless("two", "sess-teardown")
+    assert any("two" in text for text in world.sent)
+
+
+async def test_a_headless_turn_a_rewind_took_says_it_was_rewound(mock_db):
+    world = _ConnectWorld("turn")
+    with ExitStack() as stack:
+        _headless_patches(stack, world)
+
+        async def replaced(self):
+            await self.world.step("turn")
+            raise SessionReplacedError()
+            yield  # pragma: no cover
+
+        with patch.object(_PausedConnect, "receive_events", new=replaced):
+            first = asyncio.ensure_future(_headless("one", "sess-rewound"))
+            await asyncio.wait_for(world.reached.wait(), 10)
+            rewind = session_admission.Lease("sess-rewound", is_rewind=True)
+            session_admission.take_for_rewind(rewind)
+            world.proceed.set()
+            with pytest.raises(SessionReplacedError, match="rewound"):
+                await asyncio.wait_for(first, 10)
+        session_admission.close(rewind)
+
+
+async def test_a_rewind_during_a_headless_connect_stops_it_before_it_sends(mock_db):
+    world = _ConnectWorld("reconcile")
+    with ExitStack() as stack:
+        _headless_patches(stack, world)
+        first = asyncio.ensure_future(_headless("one", "sess-headless-rw"))
+        await asyncio.wait_for(world.reached.wait(), 10)
+        rewind = session_admission.Lease("sess-headless-rw", is_rewind=True)
+        session_admission.take_for_rewind(rewind)
+        world.proceed.set()
+        with pytest.raises(SessionReplacedError, match="rewound"):
+            await asyncio.wait_for(first, 10)
+        assert world.sent == []
+        session_admission.close(rewind)

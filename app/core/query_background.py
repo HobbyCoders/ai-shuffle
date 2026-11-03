@@ -24,7 +24,7 @@ from app.db import turns as turns_db
 from app.db.async_database import run_sync
 from app.core.session_title import derive_session_title
 from app.core.provider import session_admission
-from app.core.provider.session_admission import SessionBusyError
+from app.core.provider.session_admission import Lease
 from app.core.session_pool import (
     SessionState, get_session_pool, is_subprocess_alive, retire_if_replaced,
     requires_reconnect,
@@ -80,6 +80,7 @@ async def _run_background_query(
     resume_id: Optional[str],
     device_id: Optional[str],
     api_user_id: Optional[str],
+    lease: Optional[Lease] = None,
 ):
     """Recording tap around ``_run_background_query_impl``.
 
@@ -111,6 +112,7 @@ async def _run_background_query(
             device_id=device_id,
             api_user_id=api_user_id,
             recorder=recorder,
+            lease=lease,
         )
     finally:
         if recorder:
@@ -127,6 +129,7 @@ async def _run_background_query_impl(
     device_id: Optional[str],
     api_user_id: Optional[str],
     recorder=None,
+    lease: Optional[Lease] = None,
 ):
     """
     Run a streaming query in the background, independent of HTTP connection.
@@ -139,6 +142,7 @@ async def _run_background_query_impl(
     Events are recorded to the v2 session event log via the TurnRecorder
     created by the ``_run_background_query`` wrapper.
     """
+    lease = lease or Lease(session_id)  # production always passes the one it holds
     # Extract profile_id for per-query tracking
     profile_id = profile.get("id")
     turn_started_at = datetime.now(timezone.utc)
@@ -223,7 +227,7 @@ async def _run_background_query_impl(
         # that is mid-turn (kills the CLI, loses the whole in-flight turn).
         # Fail safe like the connect-failure path — but do NOT cleanup the live
         # session store here: the active turn owns it and is still streaming.
-        if existing_state.is_streaming or session_admission.held_by_another(existing_state.adapter):
+        if existing_state.is_streaming:
             error_msg = (
                 "Session is busy with another response. "
                 "Wait for it to finish, then send your message again."
@@ -348,12 +352,6 @@ async def _run_background_query_impl(
         try:
             await asyncio.wait_for(adapter.connect_with_sdk_options(options), timeout=60.0)
             logger.debug(f"[Background] Connected to Claude SDK for session {session_id}")
-        except SessionBusyError as e:
-            # Same as the gate above: the turn already running owns the store.
-            logger.warning(f"[Background] Refused a second connect to busy session {session_id}")
-            if recorder:
-                await recorder.on_event({"type": "error", "message": str(e)})
-            return
         except asyncio.TimeoutError:
             logger.error(f"[Background] Timed out connecting to Claude SDK for session {session_id} (60s)")
             raise RuntimeError("Connection timed out — an MCP server may be unreachable")
@@ -362,6 +360,13 @@ async def _run_background_query_impl(
             logger.error(f"[Background] Failed to connect to Claude SDK for session {session_id}: {error_msg}")
             if recorder:
                 await recorder.on_event({"type": "error", "message": error_msg})
+            return
+
+        if lease.stopped:
+            logger.info(f"[Background] A rewind took session {session_id} while it connected; not starting")
+            await adapter.disconnect()
+            if recorder:
+                await recorder.on_event({"type": "interrupted", "message": "Query was interrupted"})
             return
 
         state = SessionState(
@@ -611,6 +616,7 @@ async def _run_background_query_impl(
         clear_turn_context(session_id, expected=bound_generation_context)
         # Mark as not streaming — keep in pool for reuse
         state.is_streaming = False
+        session_admission.turn_ended(lease)
         state.streaming_started_at = None
         state.last_activity = datetime.now(timezone.utc)
         state.background_task = None
@@ -717,8 +723,35 @@ async def start_background_query(
     Start a streaming query in a background task.
 
     Returns immediately with session info. Work continues in background.
-    Use interrupt_session() to stop.
+    Use interrupt_session() to stop. Refused with ``SessionBusyError`` while the
+    chat runs another turn. The chat's lease (see ``session_admission``) is held
+    from here on, so a caller continuing the returned id right away is refused
+    too: until the task exists this scope closes it, then the task's end does.
     """
+    is_new_session = not session_id
+    session_id = session_id or str(uuid.uuid4())
+    lease = await session_admission.acquire(session_id)
+    try:
+        return await _start_background_turn(
+            lease, is_new_session, prompt, profile_id, project_id, overrides,
+            session_id, api_user_id, device_id,
+        )
+    except BaseException:
+        session_admission.close(lease)
+        raise
+
+
+async def _start_background_turn(
+    lease: Lease,
+    is_new_session: bool,
+    prompt: str,
+    profile_id: str,
+    project_id: Optional[str],
+    overrides: Optional[Dict[str, Any]],
+    session_id: str,
+    api_user_id: Optional[str],
+    device_id: Optional[str],
+) -> Dict[str, Any]:
     # Get profile
     profile = get_profile(profile_id)
     if not profile:
@@ -734,7 +767,7 @@ async def start_background_query(
     # Get or create session in database
     resume_id = None
 
-    if session_id:
+    if not is_new_session:
         session = await run_sync(database.get_session, session_id)
         if not session:
             raise ValueError(f"Session not found: {session_id}")
@@ -746,7 +779,6 @@ async def start_background_query(
         resume_id = session.get("sdk_session_id")
         logger.debug(f"Resuming session {session_id} with SDK session {resume_id}")
     else:
-        session_id = str(uuid.uuid4())
         title = derive_session_title(
             prompt, max_chars=50, word_boundary=False
         )
@@ -814,8 +846,11 @@ async def start_background_query(
             resume_id=resume_id,
             device_id=device_id,
             api_user_id=api_user_id,
+            lease=lease,
         )
     )
+    # A callback, because a task cancelled before its first step runs no ``finally``.
+    task.add_done_callback(lambda _: session_admission.close(lease))
 
     # Store task reference for interrupt support
     # The background task picks this up after pool.put() creates the state entry

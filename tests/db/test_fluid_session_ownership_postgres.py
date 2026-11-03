@@ -854,6 +854,80 @@ async def test_rewind_left_running_cannot_move_the_head_under_a_newer_connect(mo
     assert _session_row(sid)["head_node_id"] == "n3"
 
 
+async def test_rewind_cancelled_before_its_claim_never_takes_the_session_back():
+    """Its thread is still on the way when the request ends and a new engine connects.
+    Landing now would make it the newest writer and move the head under that engine."""
+    import threading
+
+    from app.core.provider import fluid_pg_store, fluid_transcript
+    from app.core.provider.fluid_pg_store import PgFluidStore
+
+    old, sid = await _session()
+    await old.append(sid, _node("n1", None))
+    await old.append(sid, _node("n2", "n1"))
+
+    stop = threading.Event()
+    held, proceed = threading.Event(), threading.Event()
+    real = fluid_pg_store.get_turn_db
+
+    @contextmanager
+    def delayed(*args, **kwargs):
+        held.set()
+        assert proceed.wait(30)
+        with real(*args, **kwargs) as conn:
+            yield conn
+
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(fluid_pg_store, "get_turn_db", delayed)
+        abandoned = asyncio.ensure_future(asyncio.to_thread(
+            fluid_transcript.rewind_fluid_session, sid, "n1", False, stop=stop,
+        ))
+        while not held.is_set():
+            await asyncio.sleep(0.005)
+
+        # The request is cancelled here; a new engine connects and writes.
+        stop.set()
+        patcher.setattr(fluid_pg_store, "get_turn_db", real)
+        newer = PgFluidStore()
+        await _take_over(newer, sid)
+        await newer.get_session(sid)
+        await newer.append(sid, _node("n3", "n2"))
+        before = _session_row(sid)
+
+        proceed.set()
+        result = await abandoned
+
+    assert result.success is False
+    row = _session_row(sid)
+    assert row["writer_generation"] == before["writer_generation"], "it took the session back"
+    assert row["head_node_id"] == "n3"
+    await newer.append(sid, _node("n4", "n3"))
+    assert newer.lost_ownership() is False
+    assert _session_row(sid)["head_node_id"] == "n4"
+
+
+async def test_rewind_blocked_past_the_lock_budget_fails_without_moving_the_head():
+    """Same budget as connect: a stuck row lock is a retryable failure, not a hang."""
+    from app.core.provider import fluid_pg_store, fluid_transcript
+    from app.db import base
+
+    old, sid = await _session()
+    await old.append(sid, _node("n1", None))
+    await old.append(sid, _node("n2", "n1"))
+
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(fluid_pg_store, "_CLAIM_LOCK_TIMEOUT_MS", 200)
+        with base.get_db() as blocker:
+            blocker.cursor().execute(
+                "SELECT 1 FROM fluid_sessions WHERE session_id=%s FOR UPDATE", (sid,),
+            )
+            result = await asyncio.to_thread(
+                fluid_transcript.rewind_fluid_session, sid, "n1", False,
+            )
+    assert result.success is False and "try the rewind again" in result.error.lower()
+    assert _session_row(sid)["head_node_id"] == "n2"
+
+
 async def _store_owning(sid: str):
     from app.core.provider.fluid_pg_store import PgFluidStore
 
@@ -1077,12 +1151,10 @@ async def test_engine_loses_a_turn_to_another_install_and_says_so():
 
     from fluid.events.model import TurnComplete
 
-    from app.core.provider import session_admission
     from app.core.provider.session_admission import SessionReplacedError
 
     owner, sid = await _session()
     adapter = _adapter_with(owner)
-    session_admission.admit(sid, adapter)
 
     async def stream(since_seq=0):
         await _store_owning(sid)  # another install, on the same database
