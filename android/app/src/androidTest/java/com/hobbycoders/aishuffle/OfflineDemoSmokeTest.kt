@@ -8,7 +8,6 @@ import android.webkit.WebView
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.espresso.Espresso.onView
-import androidx.test.espresso.action.ViewActions.click
 import androidx.test.espresso.action.ViewActions.scrollTo
 import androidx.test.espresso.assertion.ViewAssertions.doesNotExist
 import androidx.test.espresso.assertion.ViewAssertions.matches
@@ -54,10 +53,10 @@ class OfflineDemoSmokeTest {
         }
     }
     private fun openSettings() {
-        // RESUMED/focused is not enough: launch windows can still mark a tap obscured.
-        // Synchronize with platform window events before injecting the single gesture.
-        instrumentation.uiAutomation.waitForIdle(500, 5_000)
-        onView(withContentDescription("Settings")).perform(click())
+        // Espresso's direct injector can beat WindowManager's input/surface
+        // transaction even after focus. Reuse its acknowledged platform barrier
+        // for one real tap, never a guessed quiet interval or a repeated gesture.
+        tapNative(onView(withContentDescription("Settings")))
     }
     @Test fun settingsEntryNeedsNoAccountAndReturnsToSettings() {
         instrumentation.runOnMainSync {
@@ -69,11 +68,11 @@ class OfflineDemoSmokeTest {
             onView(withText("Explore offline demo")).check(doesNotExist())
             openSettings()
             repeat(2) {
-                onView(withText("Explore offline demo")).perform(scrollTo(), click())
-                onView(withText("Exit offline demo")).perform(click())
+                tapNative(onView(withText("Explore offline demo")).perform(scrollTo()))
+                tapNative(onView(withText("Exit offline demo")))
                 onView(withText("Settings")).check(matches(isDisplayed()))
             }
-            onView(withContentDescription("Back")).perform(click())
+            tapNative(onView(withContentDescription("Back")))
             onView(withText("Welcome to Shuffle")).check(matches(isDisplayed()))
             onView(withText("Explore offline demo")).check(doesNotExist())
         }
@@ -146,10 +145,10 @@ class OfflineDemoSmokeTest {
                                 }
                                 TestScreenshots.capture("offline-demo-after-settings-tap")
                             }
-                            onView(withText("Explore offline demo")).perform(scrollTo(), click())
-                            onView(withText("Exit offline demo")).perform(click())
+                            tapNative(onView(withText("Explore offline demo")).perform(scrollTo()))
+                            tapNative(onView(withText("Exit offline demo")))
                             onView(withText("Settings")).check(matches(isDisplayed()))
-                            onView(withContentDescription("Back")).perform(click())
+                            tapNative(onView(withContentDescription("Back")))
                             onView(withText("Workers")).check(matches(isDisplayed()))
                             onView(withText("Explore offline demo")).check(doesNotExist())
                         }

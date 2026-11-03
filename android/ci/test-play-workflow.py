@@ -221,6 +221,19 @@ class PlayWorkflowTests(unittest.TestCase):
         self.assertEqual(1, source.count("automation.injectInputEvent(event, true)"))
         self.assertNotIn("performAction(AccessibilityNodeInfo.ACTION_CLICK)", source)
 
+    def test_offline_demo_navigation_uses_platform_input_barrier(self):
+        source = (ROOT / "android/app/src/androidTest/java/com/hobbycoders/aishuffle/OfflineDemoSmokeTest.kt").read_text()
+        # Espresso's direct InputManager injection can race WindowManager's core
+        # transition even after Settings is focused and its animation has ended.
+        # Keep one physical UiAutomation tap, not a performClick or retry.
+        self.assertNotIn("import androidx.test.espresso.action.ViewActions.click", source)
+        self.assertNotIn(".perform(click())", source)
+        self.assertNotIn("uiAutomation.waitForIdle(", source)
+        self.assertEqual(2, source.count('tapNative(onView(withText("Explore offline demo")).perform(scrollTo()))'))
+        self.assertEqual(2, source.count('tapNative(onView(withText("Exit offline demo")))'))
+        self.assertIn("repeat(10) { launch ->", source)
+        self.assertIn("listOf(android.view.MotionEvent.ACTION_DOWN to 0, android.view.MotionEvent.ACTION_UP to 0)", source)
+
     def test_all_inline_shell_parses(self):
         for job in self.jobs.values():
             for step in job["steps"]:
