@@ -1,10 +1,11 @@
-"""Fail-closed pip-audit with bounded retries for PyPI request timeouts only.
+"""Fail-closed pip-audit with bounded retries for PyPI header ReadTimeout only.
 
 Three attempts share 180 seconds (including 2s/4s backoff); each HTTP request
 has a 30-second timeout. Findings, unknown failures and process deadlines are
 never retried. Process-tree cleanup has its own bounded grace (up to 30 seconds
 on Windows). The CLI preserves both output streams; local reports may redact
-raw diagnostics as before.
+raw diagnostics as before. Connect timeouts and body-read ConnectionErrors
+remain fail-closed without retry.
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ TOTAL_TIMEOUT = 180
 BACKOFF = (2, 4)
 NETWORK_TIMEOUT = 30
 _PYPI_TIMEOUT = re.compile(
-    r"^requests\.exceptions\.(?:ReadTimeout|ConnectTimeout): "
+    r"^requests\.exceptions\.ReadTimeout: "
     r"HTTPSConnectionPool\(host=['\"]pypi\.org['\"], port=443\): .+$"
 )
 

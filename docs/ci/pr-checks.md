@@ -233,8 +233,10 @@ full workflow/publication/security/docs policy regression suite. Required flags,
 Python permission hardening and 35-minute heavy-job timeouts are retained. Every
 hosted pytest phase emits `--durations=50` and JUnit; artifacts expire in seven days.
 Both Python audits use `scripts/pip_audit_retry.py`: only a final PyPI
-`requests.exceptions.ReadTimeout`/`ConnectTimeout` with no findings/output is
-retried, at most three attempts with 2s/4s backoff. Each audit has a shared 180s
+`requests.exceptions.ReadTimeout` before response headers, with no findings/output,
+is retried, at most three attempts with 2s/4s backoff. Connect timeouts and
+body-read timeouts wrapped as `ConnectionError` fail closed without retry.
+Each audit has a shared 180s
 subprocess/backoff budget and a 30s HTTP timeout. Timed-out resolver descendants
 are terminated too, with separate bounded cleanup (up to 30s on Windows).
 Findings, other errors, exhausted retries and process deadlines fail the job;

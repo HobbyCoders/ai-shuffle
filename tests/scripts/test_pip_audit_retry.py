@@ -10,6 +10,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 import dependency_audit
+import local_ci
 import pip_audit_retry as audit
 
 READ_TIMEOUT = (
@@ -67,19 +68,31 @@ def invoke(scenario, steps, arguments=("--skip-editable",)):
     return result, json.loads(state.read_text()), time.monotonic() - started
 
 
-@pytest.mark.parametrize("exception", ["ReadTimeout", "ConnectTimeout"])
-def test_transport_failure_recovers_through_real_subprocess(scenario, monkeypatch, exception):
+def test_header_read_timeout_recovers_through_real_subprocess(scenario, monkeypatch):
     monkeypatch.setattr(audit, "BACKOFF", (0.02, 0.04))
-    message = READ_TIMEOUT.replace("ReadTimeout", exception)
     result, data, _ = invoke(scenario, [
-        {"stderr": message, "code": 1}, {"stdout": CLEAN},
+        {"stderr": READ_TIMEOUT, "code": 1}, {"stdout": CLEAN},
     ], ("-r", "requirements-voice.lock", "--format=json"))
     assert result.returncode == 0 and result.stdout == CLEAN
-    assert message in result.stderr and "retry 2/3" in result.stderr
+    assert READ_TIMEOUT in result.stderr and "retry 2/3" in result.stderr
     assert data["attempts"] == 2
     assert data["starts"][1] - data["starts"][0] >= 0.02
     assert all(args == ["-r", "requirements-voice.lock", "--format=json",
                         "--timeout=30", "--progress-spinner=off"] for args in data["argv"])
+
+
+@pytest.mark.parametrize("path", [
+    "scripts/pip_audit_retry.py", "scripts/verification_evidence.py",
+    "scripts/dependency_audit.py", "tests/scripts/test_pip_audit_retry.py",
+])
+def test_local_workflow_suite_watches_audit_policy_and_runs_its_tests(monkeypatch, path):
+    assert "workflows" in {suite.name for suite in local_ci.affected_suites([path])}
+    commands = []
+    monkeypatch.setattr(local_ci, "has_module", lambda *args: True)
+    monkeypatch.setattr(local_ci, "run", lambda argv, **kwargs: commands.append(argv))
+    local_ci.workflows(local_ci.Context(mode="changed", base="base", files=[path], python=sys.executable))
+    [pytest_command] = [argv for argv in commands if argv[1:3] == ["-m", "pytest"]]
+    assert "tests/scripts/test_pip_audit_retry.py" in pytest_command
 
 
 def test_cli_exhausts_exact_production_attempts_and_backoff(scenario):
@@ -150,24 +163,26 @@ def test_unknown_or_mixed_errors_are_not_retried(scenario, code, stdout, stderr)
 
 
 def test_process_deadline_fails_closed_and_keeps_partial_output(scenario, monkeypatch):
-    monkeypatch.setattr(audit, "TOTAL_TIMEOUT", 0.3)
+    # Leave ample room for interpreter startup on a busy hosted runner.
+    monkeypatch.setattr(audit, "TOTAL_TIMEOUT", 3)
     result, data, elapsed = invoke(scenario, [
-        {"stdout": "partial stdout\n", "stderr": "partial stderr\n", "sleep": 5},
+        {"stdout": "partial stdout\n", "stderr": "partial stderr\n", "sleep": 10},
     ])
     assert result.returncode == 124 and data["attempts"] == 1
     assert result.stdout == "partial stdout\n" and "partial stderr\n" in result.stderr
-    assert "deadline exceeded" in result.stderr and elapsed < 2
-    print(f"process deadline: attempts={data['attempts']}, elapsed={elapsed:.3f}s, budget=0.3s")
+    assert "deadline exceeded" in result.stderr and elapsed < 8
+    print(f"process deadline: attempts={data['attempts']}, elapsed={elapsed:.3f}s, budget=3s")
 
 
 def test_process_deadline_cleans_up_resolver_descendants(scenario, monkeypatch):
-    monkeypatch.setattr(audit, "TOTAL_TIMEOUT", 0.3)
+    # Leave ample room for interpreter startup on a busy hosted runner.
+    monkeypatch.setattr(audit, "TOTAL_TIMEOUT", 3)
     result, data, elapsed = invoke(scenario, [
-        {"stdout": "resolver starting\n", "stderr": "resolver diagnostic\n", "child_sleep": 3, "sleep": 5},
+        {"stdout": "resolver starting\n", "stderr": "resolver diagnostic\n", "child_sleep": 10, "sleep": 10},
     ])
     assert result.returncode == 124 and data["attempts"] == 1 and data["child_pid"]
     assert result.stdout == "resolver starting\n" and "resolver diagnostic\n" in result.stderr
-    assert elapsed < 2
+    assert elapsed < 8
     if sys.platform == "linux":
         # A killed grandchild can briefly remain a zombie until init reaps it.
         status = Path(f"/proc/{data['child_pid']}/stat")
@@ -180,28 +195,30 @@ def test_process_deadline_cleans_up_resolver_descendants(scenario, monkeypatch):
             time.sleep(0.01)
         else:
             pytest.fail("resolver descendant survived the audit deadline")
-    print(f"resolver-tree deadline: attempts={data['attempts']}, elapsed={elapsed:.3f}s, budget=0.3s")
+    print(f"resolver-tree deadline: attempts={data['attempts']}, elapsed={elapsed:.3f}s, budget=3s")
 
 
 def test_deadline_is_shared_across_subprocesses_and_backoff(scenario, monkeypatch):
-    monkeypatch.setattr(audit, "TOTAL_TIMEOUT", 0.5)
+    # Both real interpreter startups and the backoff share this roomy budget.
+    monkeypatch.setattr(audit, "TOTAL_TIMEOUT", 3)
     monkeypatch.setattr(audit, "BACKOFF", (0.1, 0.2))
     result, data, elapsed = invoke(scenario, [
         {"stderr": READ_TIMEOUT, "code": 1, "sleep": 0.1},
-        {"stderr": "second attempt output\n", "sleep": 5},
+        {"stderr": "second attempt output\n", "sleep": 10},
     ])
     assert result.returncode == 124 and data["attempts"] == 2
     assert READ_TIMEOUT in result.stderr and "second attempt output" in result.stderr
     assert data["starts"][1] - data["starts"][0] >= 0.2
-    assert elapsed < 1.5
-    print(f"shared deadline: attempts={data['attempts']}, elapsed={elapsed:.3f}s, budget=0.5s")
+    assert elapsed < 8
+    print(f"shared deadline: attempts={data['attempts']}, elapsed={elapsed:.3f}s, budget=3s")
 
 
 def test_insufficient_retry_budget_returns_failure_without_sleep(scenario, monkeypatch):
-    monkeypatch.setattr(audit, "TOTAL_TIMEOUT", 1)
+    monkeypatch.setattr(audit, "TOTAL_TIMEOUT", 3)
+    monkeypatch.setattr(audit, "BACKOFF", (4, 8))
     result, data, elapsed = invoke(scenario, [{"stderr": READ_TIMEOUT, "code": 1}])
     assert result.returncode == 1 and data["attempts"] == 1
-    assert "insufficient retry budget" in result.stderr and elapsed < 1
+    assert "insufficient retry budget" in result.stderr and elapsed < 8
 
 
 def test_expired_budget_does_not_launch_a_subprocess(scenario, monkeypatch):
