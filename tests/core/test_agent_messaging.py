@@ -45,7 +45,10 @@ async def test_actual_admission_preserves_archive_restore_note(runtime, monkeypa
     target = "archived-worker"
     note = ("Its checkout could not be restored; " +
             worktree_reclaim.archive_note("/fixture/project", "chore/task-" + target))
-    monkeypatch.setattr(sessions, "get_session", lambda sid: {"id": sid})
+    def bound_worker(sid):
+        return {"id": sid, "branch": "chore/task-" + sid, "worktree_path": "/fixture/worker"}
+    monkeypatch.setattr(sessions, "get_session", bound_worker)
+    monkeypatch.setattr(database, "get_session", bound_worker)
     monkeypatch.setattr(turn_scheduler, "_latest_context_turn", lambda sid: {"id": "turn", "profile_id": "coder"})
     monkeypatch.setattr(provider_agent, "final_turn_outcome", lambda sid: {})
     monkeypatch.setattr(turn_scheduler, "_turn_terminal_payload", lambda *args: {})
