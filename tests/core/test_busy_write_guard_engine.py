@@ -849,6 +849,35 @@ async def test_a_rewind_during_connect_stops_the_turn_before_it_starts(mock_db, 
         session_admission.close(rewind)
 
 
+@pytest.mark.parametrize("route", ["chat", "rest", "background", "headless"])
+async def test_a_turn_a_rewind_stopped_before_its_connect_never_claims(mock_db, route):
+    """A rewind can give up waiting on a turn stuck in its preparation. If that
+    turn then connected, its claim would outrank the rewind and whatever follows."""
+    sessions_db.create_session("sess-early", "default")
+    world = _ConnectWorld()
+    rewind = session_admission.Lease("sess-early", is_rewind=True)
+
+    async def rewound_meanwhile(*_args, **_kwargs):
+        session_admission.take_for_rewind(rewind)
+
+    with ExitStack() as stack:
+        if route == "headless":
+            _headless_patches(stack, world)
+        else:
+            world.patches(stack, route, StubPool())
+        stack.enter_context(patch.object(qe, "reconcile_memory", new=rewound_meanwhile))
+        stack.enter_context(patch.object(qb, "reconcile_memory", new=rewound_meanwhile))
+        if route == "headless":
+            with pytest.raises(SessionReplacedError, match="rewound"):
+                await asyncio.wait_for(_headless("one", "sess-early"), 10)
+        else:
+            await asyncio.wait_for(_start(route, "one", "sess-early"), 10)
+    assert world.connects == [], "a stopped turn must not reach its claim"
+    assert world.sent == []
+    assert session_admission._holders["sess-early"] is rewind, "the rewind keeps the chat"
+    session_admission.close(rewind)
+
+
 @pytest.mark.parametrize("route", ["chat", "rest", "background"])
 async def test_a_turn_another_install_took_over_reports_it_and_never_says_done(mock_db, route):
     sessions_db.create_session("sess-lost", "default")

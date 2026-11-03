@@ -706,7 +706,9 @@ async def _execute_query_turn(
     adapter = make_adapter()
 
     try:
-        await adapter.connect_with_sdk_options(options)
+        # A rewind that gave up waiting may hold the chat; a claim now would undo it.
+        if not lease.stopped:
+            await adapter.connect_with_sdk_options(options)
         if lease.stopped:
             raise SessionReplacedError(SessionReplacedError.REWOUND)
         # Headless metadata is created before connect, unlike the pooled paths.
@@ -1339,7 +1341,9 @@ async def _stream_query_turn(
 
         try:
             # Timeout prevents hanging if MCP servers are unreachable
-            await asyncio.wait_for(adapter.connect_with_sdk_options(options), timeout=60.0)
+            # A rewind that gave up waiting may hold the chat; a claim now would undo it.
+            if not lease.stopped:
+                await asyncio.wait_for(adapter.connect_with_sdk_options(options), timeout=60.0)
             logger.debug(f"Connected to Claude SDK for session {session_id}")
         except asyncio.TimeoutError:
             logger.error(f"Timed out connecting to Claude SDK for session {session_id} (60s)")
@@ -2762,7 +2766,9 @@ async def _stream_to_websocket_turn(
 
         try:
             _connect_start = time.monotonic()
-            await asyncio.wait_for(adapter.connect_with_sdk_options(options), timeout=60.0)
+            # A rewind that gave up waiting may hold the chat; a claim now would undo it.
+            if not lease.stopped:
+                await asyncio.wait_for(adapter.connect_with_sdk_options(options), timeout=60.0)
             _connect_elapsed = time.monotonic() - _connect_start
             logger.info(f"[WS] SDK connect for session {session_id}: {_connect_elapsed:.1f}s (reuse=False)")
         except ClaudeCliMissingError as e:

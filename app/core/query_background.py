@@ -350,7 +350,9 @@ async def _run_background_query_impl(
         adapter = make_adapter()
 
         try:
-            await asyncio.wait_for(adapter.connect_with_sdk_options(options), timeout=60.0)
+            # A rewind that gave up waiting may hold the chat; a claim now would undo it.
+            if not lease.stopped:
+                await asyncio.wait_for(adapter.connect_with_sdk_options(options), timeout=60.0)
             logger.debug(f"[Background] Connected to Claude SDK for session {session_id}")
         except asyncio.TimeoutError:
             logger.error(f"[Background] Timed out connecting to Claude SDK for session {session_id} (60s)")
