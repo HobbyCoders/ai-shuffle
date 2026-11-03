@@ -86,8 +86,11 @@ class DeviceToolsHandoffSmokeTest {
         val apiField = ApiClient::class.java.getDeclaredField("client\$delegate").apply { isAccessible = true }
         val previousApi = apiField.get(null)
         val api = OkHttpClient.Builder().addInterceptor { chain ->
-            renewals.incrementAndGet()
-            PresenceFixture.renewDeviceKey(chain.request(), target)
+            val request = chain.request()
+            if (request.url.encodedPath == "/api/v1/mobile/key/renew") {
+                renewals.incrementAndGet()
+                PresenceFixture.renewDeviceKey(request, target)
+            } else PresenceFixture.response(request, 404, "{}")
         }.build()
         val clientField = DeviceToolsApi::class.java.getDeclaredField("client").apply { isAccessible = true }
         val original = clientField.get(null) as OkHttpClient
