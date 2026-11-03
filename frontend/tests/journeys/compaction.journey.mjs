@@ -24,6 +24,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { runJourney } from './runner.mjs';
+import { readdir, readFile } from 'node:fs/promises';
 import {
 	PROJECT,
 	countUserRows,
@@ -227,6 +228,64 @@ function reloadCase(name, spec) {
 	};
 }
 
+// Read only this throwaway fake CLI's transcripts, never an installed worker.
+async function scratchCopies(status, token) {
+	const root = status.scratch_dir;
+	expect(root && status.claude_cli?.mode === 'fake', 'scratch probe requires the isolated fake CLI');
+	async function scan(dir) {
+		const rows = [];
+		for (const entry of await readdir(dir, { withFileTypes: true })) {
+			const path = join(dir, entry.name);
+			if (entry.isDirectory()) rows.push(...await scan(path));
+			else if (entry.name.endsWith('.jsonl')) {
+				for (const line of (await readFile(path, 'utf8')).split('\n').filter(Boolean)) {
+					let row;
+					try { row = JSON.parse(line); } catch { continue; }
+					if (row.type !== 'user' || !row.message) continue;
+					const text = JSON.stringify(row.message.content);
+					if (text.includes(token)) rows.push((text.match(/# Harness scratch/g) || []).length);
+				}
+			}
+		}
+		return rows;
+	}
+	return scan(root);
+}
+
+const scratchCase = {
+	name: 'scratch-once-per-segment',
+	setup: openClaudeChat,
+	async act({ page, status, mark, log }) {
+		const token = `scratch-${uniq()}`;
+		for (let i = 0; i < 3; i++) {
+			await mark(`scratch turn ${i}`);
+			const prompt = `${token}-${i}`;
+			await typeAndSend(page, prompt);
+			await waitTurnSettled(page, { text: `You said: “${prompt}”`, messagesAtLeast: 2 * (i + 1) });
+		}
+		let copies = await scratchCopies(status, token);
+		expect(JSON.stringify(copies) === '[1,0,0]', `one scratch block per CLI segment, got ${JSON.stringify(copies)}`);
+		// Manual compaction correctly skips a tiny echo-only conversation. As
+		// in the existing manual-compaction cases, create reclaimable output
+		// through the real tool path before asking it to fold this segment.
+		for (let i = 0; i < 2; i++) {
+			await mark(`grow scratch segment ${i}`);
+			await typeAndSend(page, `read scratch fixture ${i} [script:bulk-read]`);
+			await waitTurnSettled(page, { text: READ_REPLY, messagesAtLeast: 8 + 2 * i });
+		}
+		await mark('compact scratch segment');
+		await typeAndSend(page, '/compact');
+		await waitTurnSettled(page, { text: 'Context was compacted manually' });
+		const follow = `${token}-after-compact`;
+		await typeAndSend(page, follow);
+		await waitTurnSettled(page, { text: `You said: “${follow}”` });
+		copies = await scratchCopies(status, token);
+		// SessionStart restores scratch; the following user turn must not repeat it.
+		expect(copies.at(-1) === 0, `scratch was already restored by the compaction hook: ${JSON.stringify(copies)}`);
+		log(`scratch user-turn copies: ${JSON.stringify(copies)}`);
+	}
+};
+
 const AUTO = {
 	reads: 2,
 	compact: (token) => `carry on ${token} [script:compact]`,
@@ -273,6 +332,7 @@ const messageBeforeCompact = (name, script) => ({
 await runJourney({
 	name: 'compaction',
 	cases: [
+		scratchCase,
 		compactionCase('auto', AUTO),
 		compactionCase('manual', MANUAL),
 		compactionCase('after-tool', {

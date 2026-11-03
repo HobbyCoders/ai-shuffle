@@ -628,10 +628,17 @@ async def _broadcast_work_time(session_id: str) -> None:
         started = row.get("work_started_at")
         if hasattr(started, "isoformat"):
             started = started.isoformat()
+        # Every turn start and end comes through here, and a sidebar not watching
+        # the chat has no other way to learn that its latest turn failed (#1032).
+        failed = await asyncio.to_thread(turns_db.sessions_with_failed_latest_turn, [session_id])
         await sync_engine.broadcast_user_session_updated(
             user_id=row.get("api_user_id") or "admin",
             session_id=session_id,
-            updates={"work_ms": int(row.get("work_ms") or 0), "work_started_at": started},
+            updates={
+                "work_ms": int(row.get("work_ms") or 0),
+                "work_started_at": started,
+                "last_turn_failed": session_id in failed,
+            },
         )
     except Exception:  # noqa: BLE001
         logger.debug(
@@ -2839,6 +2846,7 @@ class SessionRuntime:
                 self._lease_finalizing = True
                 parked = await asyncio.to_thread(
                     turns_db.park_turn, tid, task_ids, usage=usage, run_id=self._run_id,
+                    error=self._failure_text(),
                 )
             except Exception:
                 logger.warning("SessionRuntime: park_turn failed for %s", tid, exc_info=True)
@@ -2938,7 +2946,7 @@ class SessionRuntime:
         settled = None
         try:
             settled = await asyncio.to_thread(
-                turns_db.settle_turn, tid, "completed", run_id=owned_run,
+                turns_db.settle_turn, tid, "completed", error=self._failure_text(), run_id=owned_run,
             )
         except Exception:
             logger.warning("SessionRuntime: settle_turn(completed) failed for %s", tid, exc_info=True)
@@ -2955,6 +2963,14 @@ class SessionRuntime:
                 )
         await self._snapshot_working_set(sid)
         return "completed", settled is not None
+
+    def _failure_text(self) -> Optional[str]:
+        """What went wrong, for a row that settles completed or parks instead of aborting."""
+        if self._terminal == "error":
+            return self._terminal_error or "Turn failed"
+        if self._terminal == "done":
+            return turns_db.provider_result_error((self._pending_done or {}).get("metadata"))
+        return None
 
     async def _requeue_stranded_steers(self, sid: str) -> None:
         """Put back every steered message this turn swallowed but never answered.

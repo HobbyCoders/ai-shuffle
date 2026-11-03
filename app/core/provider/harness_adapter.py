@@ -425,6 +425,13 @@ class HarnessAdapter(ProviderAdapter):
         self._working_record_held: Optional[str] = None
         self._working_record_turn: Optional[str] = None
         self._working_record_pending: Optional[str] = None
+        # Stable delegated guidance: once per CLI segment, acknowledged only
+        # by model output or a whole compaction-hook receipt. Process-local:
+        # reconnect/resume starts conservatively, never assumes CLI history.
+        self._scratch_held: Optional[str] = None
+        self._scratch_turn: Optional[str] = None
+        self._scratch_pending: Optional[str] = None
+        self._scratch_put_back: Optional[Tuple[str, int]] = None
         # Non-conversation tokens of the latest Claude CLI ``/context``
         # snapshot (see _context_overhead_tokens), or None before one. Puts
         # the delegated leg's compaction card on the meter's basis (#1907).
@@ -1798,6 +1805,7 @@ class HarnessAdapter(ProviderAdapter):
         self._memory_plan = None
         self._memory_turn_section = None
         self._working_record_turn = None
+        self._scratch_turn = None
         self._native_scratch_turn = None
         task_before = self._memory_initial_task
         if command and self._is_delegated and not _COMPACT_COMMAND.match(prompt.strip()):
@@ -1806,6 +1814,9 @@ class HarnessAdapter(ProviderAdapter):
             self._memory_trusted_node = None
             self._memory_put_back = None
             self._working_record_held = None
+            self._scratch_held = None
+            self._scratch_put_back = None
+            self._scratch_pending = None
         if command:
             note = None
         else:
@@ -1845,6 +1856,7 @@ class HarnessAdapter(ProviderAdapter):
         self._pending_away_turn = None
         # Held only once the model is seen reading this turn (see receive_events).
         self._working_record_pending, self._working_record_turn = self._working_record_turn, None
+        self._scratch_pending, self._scratch_turn = self._scratch_turn, None
         self._native_scratch_commit()
         plan, self._memory_plan = self._memory_plan, None
         if plan is not None and plan.kind == "full":
@@ -2072,7 +2084,7 @@ class HarnessAdapter(ProviderAdapter):
             return None
         if self._is_delegated:
             blocks = [self._env_note(), self._memory_turn_note(query), self._working_record_note(),
-                      self._away_note(), self._scratch_note()]
+                      self._away_note(), self._scratch_turn_note()]
         else:
             # Scratch sits right after memory: one message has one pinned range.
             blocks = [self._env_note(), self._memory_turn_note(query), self._native_scratch_note(),
@@ -2201,14 +2213,31 @@ class HarnessAdapter(ProviderAdapter):
         The snapshot stays at the user-message tail. Slash commands must stay
         verbatim; invalidating trust makes their next normal turn carry it.
         """
+        if self._options and self._options.extra.get("one_shot"):
+            return None
         from app.core.memory_reminder import memory_blocks, wrap
 
         from fluid.messages import Message
 
         message = Message(role="user", content=content, context_pin=context_pin)
         text = message.text()
-        if any(kind == "full" for kind, _ in memory_blocks(message.pinned_text())):
+        # The same callback also repairs a partial compaction put-back. Keep
+        # that hook's scratch receipt, but never reuse it for a fresh process.
+        fresh_cli = (getattr(self._engine, "_spawn_resume", None) is None
+                     and not getattr(self._engine, "_proc_results", 0))
+        if fresh_cli:
+            self._scratch_held = None
+            self._scratch_put_back = None
+        if _is_cli_command(text):
             return None
+        scratch = await asyncio.to_thread(self._scratch_turn_note)
+        extra_scratch = scratch if scratch and scratch not in text else None
+        if scratch:
+            # The fresh CLI is about to read either the existing block or this
+            # tail addition; a later model event, not this callback, credits it.
+            self._scratch_pending = hashlib.sha256(scratch.encode("utf-8")).hexdigest()
+        if any(kind == "full" for kind, _ in memory_blocks(message.pinned_text())):
+            return extra_scratch
         self._memory_rehydrated = True
         self._memory_trusted_node = None
         self._memory_put_back = None
@@ -2218,7 +2247,8 @@ class HarnessAdapter(ProviderAdapter):
         if section is None:
             section = await asyncio.to_thread(self._memory_section)
         self._memory_full_pending = section is not None
-        return wrap(section) if section is not None else None
+        parts = [p for p in (extra_scratch, wrap(section) if section is not None else None) if p]
+        return "\n\n".join(parts) or None
 
     def _memory_engine_identity(self) -> Tuple[str, str]:
         engine = self._engine
@@ -2392,6 +2422,10 @@ class HarnessAdapter(ProviderAdapter):
             # Any compaction may summarise the record's user message away; the
             # next turn sends it again (#680).
             self._working_record_held = None
+            # Pending user text may have been folded before any output. It
+            # cannot credit scratch after this boundary; only the hook can.
+            self._scratch_held = None
+            self._scratch_pending = None
             if compaction_may_fold_snapshot(getattr(event, "reason", None)):
                 self._memory_trusted_node = None
                 self._memory_folded_start = self._memory_compacting_seq
@@ -2409,13 +2443,17 @@ class HarnessAdapter(ProviderAdapter):
         self._memory_put_back_section = None
         sections = await asyncio.to_thread(self._compact_note)
         section = self._memory_put_back_section
-        if not section:
-            return sections
-
-        def credit() -> None:
+        def credit_memory() -> None:
             self._memory_put_back = (section, head)
 
-        return [replace(s, on_delivered=credit) if s.name == "memory" else s for s in sections]
+        def credit_scratch(text: str) -> None:
+            self._scratch_put_back = (hashlib.sha256(text.encode("utf-8")).hexdigest(), head)
+
+        return [
+            replace(s, on_delivered=credit_memory) if s.name == "memory" and section else
+            replace(s, on_delivered=lambda text=s.text: credit_scratch(text)) if s.name == "scratch" else s
+            for s in sections
+        ]
 
     def _compact_note(self) -> List[Any]:
         """:meth:`_turn_context_note` as restoration sections, always with
@@ -2452,6 +2490,26 @@ class HarnessAdapter(ProviderAdapter):
                                replaced_by=_holds_full_memory if name == "memory" else None)
             for name, text, priority, bound, cuttable in parts if text
         ]
+
+    def _scratch_turn_note(self) -> Optional[str]:
+        """Delegated scratch once per segment, not once per user turn.
+
+        Native uses its separate path-pinned reminder. A resumed delegated
+        adapter has no process-local trust.
+        """
+        self._scratch_turn = None
+        note = self._scratch_note()
+        if not note or not self._is_delegated:
+            return note
+        digest = hashlib.sha256(note.encode("utf-8")).hexdigest()
+        put_back = self._scratch_put_back
+        start = self._memory_folded_start
+        restored = (put_back is not None and start is not None
+                    and put_back[1] >= start and put_back[0] == digest)
+        if digest == self._scratch_held or restored:
+            return None
+        self._scratch_turn = digest
+        return note
 
     def _scratch_note(self) -> str:
         from fluid.state import scratch_prompt
@@ -2577,9 +2635,8 @@ class HarnessAdapter(ProviderAdapter):
         self._native_scratch_held_for_turn = await self._native_scratch_held()
         try:
             memory_note = await asyncio.to_thread(self._memory_turn_note)
-            scratch_note = (
-                None if self._is_delegated
-                else await asyncio.to_thread(self._native_scratch_note)
+            scratch_note = await asyncio.to_thread(
+                self._scratch_turn_note if self._is_delegated else self._native_scratch_note
             )
         finally:
             self._memory_held_for_turn = None
@@ -2589,6 +2646,7 @@ class HarnessAdapter(ProviderAdapter):
             source=self._take_turn_source(),
             context_note="\n\n".join(n for n in (memory_note, scratch_note) if n) or None,
         ))
+        self._scratch_pending, self._scratch_turn = self._scratch_turn, None
         self._native_scratch_commit()
         plan, self._memory_plan = self._memory_plan, None
         if plan is not None and plan.kind == "full":
@@ -2717,7 +2775,7 @@ class HarnessAdapter(ProviderAdapter):
             if self._is_live(event):
                 self._observe_memory_event(event)
             if (
-                self._working_record_pending
+                (self._working_record_pending or self._scratch_pending)
                 and self._pending_away_turn == getattr(event, "turn_id", None)
                 and (type(event).__name__ == "BlockStart" or (
                     type(event).__name__ == "TurnComplete"
@@ -2726,8 +2784,12 @@ class HarnessAdapter(ProviderAdapter):
             ):
                 # The submitted turn (named by its TurnStarted) reached the
                 # model, so the record it carried is now in the conversation.
-                self._working_record_held = self._working_record_pending
+                if self._working_record_pending:
+                    self._working_record_held = self._working_record_pending
                 self._working_record_pending = None
+                if self._scratch_pending:
+                    self._scratch_held = self._scratch_pending
+                self._scratch_pending = None
             if (
                 self._pending_away_note
                 and self._pending_away_turn == getattr(event, "turn_id", None)
@@ -3866,6 +3928,8 @@ class HarnessAdapter(ProviderAdapter):
         self._memory_rehydrated = True
         self._native_scratch_stale = True
         self._working_record_held = None
+        self._scratch_held = None
+        self._scratch_put_back = None
         if request_extra is not None:
             self._engine.request_extra = request_extra
         if self._registry is not None and self._options is not None:

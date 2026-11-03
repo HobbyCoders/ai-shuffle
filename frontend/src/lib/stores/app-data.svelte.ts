@@ -197,14 +197,214 @@ function recordLocalRemoval(sessionIds: Iterable<string>): void {
  *  carries the change itself, so the edit may retire when that load commits. */
 function confirmLocalEdits(sessionIds: Iterable<string>): void {
 	for (const id of sessionIds) {
+		// The row's edit also carries what a request still out has changed. It
+		// retires when the last of those is answered, not before.
+		if (_rowChanges.some(change => change.sessionId === id)) continue;
 		const edit = _pendingEdits.get(id);
 		if (edit) edit.supersedeAtLoadId = _loadSessionsRequestId + 1;
 	}
 }
 
-/** Drop edits outright (the mutation failed and was rolled back locally). */
-function discardLocalEdits(sessionIds: Iterable<string>): void {
-	for (const id of sessionIds) _pendingEdits.delete(id);
+/**
+ * One change to a session row, shown at once, while its request is out. If the
+ * server refuses it, what goes back is what THIS change touched and nothing else:
+ * other chats and this chat's other fields carry on from wherever they have got
+ * to since (#1034). A snapshot of the list cannot do that, because everything that
+ * arrived while the request was out would go back with it.
+ */
+interface RowChange {
+	sessionId: string;
+	/** Per touched field, the value to give back. Kept current by pushes and list reads. */
+	before: Record<string, unknown>;
+	/** Touched fields a push has set since, which a read started earlier knows less about. */
+	pushed: Set<string>;
+	/** A deletion also holds what it takes to put the row back in the list. */
+	removal: RemovedRow | null;
+}
+
+interface RemovedRow {
+	/** Newest known copy, or null when a list read has since shown it is gone anyway. */
+	row: Session | null;
+	/** The row above it and its position, for putting it back where it was. */
+	afterId: string | null;
+	index: number;
+	/** Fields of the row's edit the removal's tombstone replaced. */
+	heldPatch: Partial<Session> | null;
+	/** Fields a push has set since, which a read started earlier knows less about. */
+	pushed: Set<string>;
+}
+
+/** Requests out, oldest first. Rarely more than a few, so a plain list is enough. */
+const _rowChanges: RowChange[] = [];
+
+function beginRowChange(sessionId: string, patch: Partial<Session>): RowChange {
+	const row = _state.sessions.find(x => x.id === sessionId) as unknown as Record<string, unknown> | undefined;
+	const before: Record<string, unknown> = {};
+	for (const field of Object.keys(patch)) before[field] = row?.[field];
+	const change: RowChange = { sessionId, before, pushed: new Set(), removal: null };
+	_rowChanges.push(change);
+	recordLocalEdit(sessionId, patch);
+	_update(s => ({
+		...s,
+		sessions: s.sessions.map(x => (x.id === sessionId ? { ...x, ...patch } : x)),
+	}));
+	return change;
+}
+
+function beginRowRemoval(sessionId: string): RowChange {
+	const index = _state.sessions.findIndex(x => x.id === sessionId);
+	const change: RowChange = {
+		sessionId,
+		before: {},
+		pushed: new Set(),
+		removal: {
+			row: index >= 0 ? _state.sessions[index] : null,
+			afterId: index > 0 ? _state.sessions[index - 1].id : null,
+			index,
+			heldPatch: _pendingEdits.get(sessionId)?.patch ?? null,
+			pushed: new Set(),
+		},
+	};
+	_rowChanges.push(change);
+	// Tombstone first: a paginated load already in flight still carries the
+	// row, and its commit would put the deleted chat back in the sidebar.
+	recordLocalRemoval([sessionId]);
+	_update(s => ({
+		...s,
+		sessions: s.sessions.filter(x => x.id !== sessionId),
+		sessionsTotal: Math.max(0, s.sessionsTotal - 1),
+	}));
+	return change;
+}
+
+function takeRowChange(change: RowChange): { earlier: RowChange[]; later: RowChange[] } {
+	const at = _rowChanges.indexOf(change);
+	const sameRow = (other: RowChange) => other.sessionId === change.sessionId;
+	const earlier = _rowChanges.slice(0, at).filter(sameRow);
+	const later = _rowChanges.slice(at + 1).filter(sameRow);
+	_rowChanges.splice(at, 1);
+	return { earlier, later };
+}
+
+/** The server took the change. */
+function acceptRowChange(change: RowChange): void {
+	const { earlier } = takeRowChange(change);
+	// An older request on the same field, should it now fail, has nothing to give back.
+	for (const older of earlier) {
+		for (const field of Object.keys(change.before)) delete older.before[field];
+	}
+	confirmLocalEdits([change.sessionId]);
+}
+
+/** The server refused the change: give back what it touched, and only that. */
+function refuseRowChange(change: RowChange): void {
+	const { earlier, later } = takeRowChange(change);
+	const { sessionId } = change;
+	const giveBack: Record<string, unknown> = {};
+	for (const [field, value] of Object.entries(change.before)) {
+		// A newer change on this field is what the row shows; it inherits the value.
+		const newer = later.find(other => field in other.before);
+		if (newer) {
+			newer.before[field] = value;
+			if (change.pushed.has(field)) newer.pushed.add(field);
+			continue;
+		}
+		giveBack[field] = value;
+	}
+
+	const edit = _pendingEdits.get(sessionId);
+	if (edit?.patch) {
+		for (const [field, value] of Object.entries(giveBack)) {
+			// A pushed value is the server's, and an older change still out needs its
+			// own value held. Otherwise nothing is left to protect on this field.
+			const held = change.pushed.has(field) || earlier.some(other => field in other.before);
+			if (held) (edit.patch as Record<string, unknown>)[field] = value;
+			else delete (edit.patch as Record<string, unknown>)[field];
+		}
+	}
+	if (edit && edit.removed) {
+		// A deletion of this row is out, or done: the row is not in the list to edit.
+		const removal = _rowChanges.find(other => other.sessionId === sessionId && other.removal)?.removal;
+		if (removal?.row) removal.row = { ...removal.row, ...giveBack };
+		if (removal?.heldPatch) removal.heldPatch = { ...removal.heldPatch, ...giveBack };
+		return;
+	}
+	if (edit && (!edit.patch || Object.keys(edit.patch).length === 0)) _pendingEdits.delete(sessionId);
+	confirmLocalEdits([sessionId]);
+
+	// A row the list has dropped since stays dropped: the list knows better.
+	if (Object.keys(giveBack).length > 0) {
+		_update(s => ({
+			...s,
+			sessions: s.sessions.map(x => (x.id === sessionId ? { ...x, ...giveBack } : x)),
+		}));
+	}
+}
+
+/** The server refused a deletion: lift the tombstone and put the row back where it was. */
+function refuseRowRemoval(change: RowChange): void {
+	takeRowChange(change);
+	const { sessionId, removal } = change;
+	if (_pendingEdits.get(sessionId)?.removed) _pendingEdits.delete(sessionId);
+	if (removal?.heldPatch && Object.keys(removal.heldPatch).length > 0) {
+		recordLocalEdit(sessionId, removal.heldPatch);
+		confirmLocalEdits([sessionId]);
+	}
+	_update(s => {
+		const sessionsTotal = s.sessionsTotal + 1;
+		if (!removal?.row || s.sessions.some(x => x.id === sessionId)) return { ...s, sessionsTotal };
+		const sessions = [...s.sessions];
+		const above = removal.afterId ? sessions.findIndex(x => x.id === removal.afterId) : -1;
+		const at = above >= 0 ? above + 1 : Math.min(removal.index, sessions.length);
+		sessions.splice(at, 0, ...restoredRows([removal.row]));
+		return { ...s, sessions, sessionsTotal };
+	});
+}
+
+/** A push reached a row with a request out: that is now the value to give back. */
+function notePushedFields(sessionId: string, fields: Partial<Session>): void {
+	for (const change of _rowChanges) {
+		if (change.sessionId !== sessionId) continue;
+		for (const [field, value] of Object.entries(fields)) {
+			if (field in change.before) {
+				change.before[field] = value;
+				change.pushed.add(field);
+			}
+		}
+		if (change.removal?.row) {
+			change.removal.row = { ...change.removal.row, ...fields };
+			for (const field of Object.keys(fields)) change.removal.pushed.add(field);
+		}
+	}
+}
+
+/**
+ * A list read, before local edits go on top: for a field with a request out it says
+ * what the server holds, so that is what to give back. Only the oldest change on a
+ * field holds the server's value; a newer one holds what the older one showed.
+ * `complete` says the read covers the whole list, so a missing row is really gone.
+ */
+function noteServerRows(rows: Session[], { complete }: { complete: boolean }): void {
+	if (_rowChanges.length === 0) return;
+	const byId = new Map(rows.map(row => [row.id, row]));
+	const claimed = new Set<string>();
+	for (const change of _rowChanges) {
+		const row = byId.get(change.sessionId) as unknown as Record<string, unknown> | undefined;
+		if (change.removal) {
+			if (row) {
+				const { pushed } = change.removal;
+				const known = Object.entries(row).filter(([field]) => !pushed.has(field));
+				change.removal.row = { ...change.removal.row, ...Object.fromEntries(known) } as Session;
+			} else if (complete) change.removal.row = null;
+		}
+		if (!row) continue;
+		for (const field of Object.keys(change.before)) {
+			const key = `${change.sessionId}:${field}`;
+			if (claimed.has(key)) continue;
+			claimed.add(key);
+			if (!change.pushed.has(field)) change.before[field] = row[field];
+		}
+	}
 }
 
 /** Re-apply outstanding local edits on top of a server page. */
@@ -236,13 +436,13 @@ function retireSupersededEdits(loadRequestId: number): void {
 
 /**
  * The newest task chip count known for each chat, and when it was learned. Kept
- * apart from the row edits above, which are merged, re-applied and rolled back
- * with whole rows: any of that could bring back a count the server has moved on
- * from. Counts repeat (1, 0, 1), so only the order they were learned in says which
- * is newest. A list read started after a count knows more than it, because the
- * server reads the count after the change it reports. One started before knows less.
- * An entry never outranks a newer read, so old ones are harmless, and a rollback may
- * still need one for a row the list has since dropped. It holds one per chat seen.
+ * apart from the row edits above, which are merged and re-applied with whole rows:
+ * that could bring back a count the server has moved on from. Counts repeat
+ * (1, 0, 1), so only the order they were learned in says which is newest. A list
+ * read started after a count knows more than it, because the server reads the count
+ * after the change it reports. One started before knows less. An entry never
+ * outranks a newer read, so old ones are harmless, and a row put back after a refused
+ * deletion or brought back by a later page still needs one. It holds one per chat seen.
  */
 const _chipCounts = new Map<string, { count: number | null; learnedAt: number }>();
 let _chipCountClock = 0;
@@ -259,7 +459,7 @@ function withNewestChipCounts(rows: Session[], readAt: number): Session[] {
 	});
 }
 
-/** Put back a snapshot taken before a failed change, keeping the counts since. */
+/** Rows put back after a refused deletion, keeping the counts since. */
 function restoredRows(snapshot: Session[]): Session[] {
 	return withNewestChipCounts(snapshot, 0);
 }
@@ -491,6 +691,7 @@ async function fetchSessionList(tagId?: string | null, requestedPages?: number) 
 
 		// Re-apply optimistic local edits the server hasn't caught up with yet,
 		// then retire the ones this load is known to already carry.
+		noteServerRows(all, { complete: !hasMore });
 		const rows = applyPendingEdits(withNewestChipCounts(all, readAt));
 		retireSupersededEdits(requestId);
 
@@ -558,6 +759,7 @@ async function loadMoreSessionsInternal() {
 		// pulled in up front, ahead of its cursor position) are dropped —
 		// duplicate ids would break the sidebar's keyed lists.
 		const existingIds = new Set(_state.sessions.map(row => row.id));
+		noteServerRows(result.items, { complete: false });
 		const appended = applyPendingEdits(withNewestChipCounts(result.items.filter(row => !existingIds.has(row.id)), readAt));
 		_loadedSessionPages++;
 		// Same guard as the full load: a has_more without a cursor that moves
@@ -938,56 +1140,32 @@ export const appData = {
 	},
 
 	async deleteSession(sessionId: string) {
-		// Optimistic removal — splice from local state immediately for instant UI feedback.
-		// Snapshot previous state so we can roll back if the API call fails.
-		const prevSessions = _state.sessions;
-		const prevTotal = _state.sessionsTotal;
-		// Tombstone first: a paginated load already in flight still carries the
-		// row, and its commit would put the deleted chat back in the sidebar.
-		recordLocalRemoval([sessionId]);
-		_update(s => ({
-			...s,
-			sessions: s.sessions.filter(x => x.id !== sessionId),
-			sessionsTotal: Math.max(0, s.sessionsTotal - 1),
-		}));
-
+		// Optimistic removal: the row leaves at once, and only it comes back if the
+		// server refuses.
+		const change = beginRowRemoval(sessionId);
 		try {
 			await api.delete(`/sessions/${sessionId}`);
-			confirmLocalEdits([sessionId]);
 		} catch (err) {
-			// Rollback optimistic removal on error, then resync from server.
-			discardLocalEdits([sessionId]);
-			_update(s => ({ ...s, sessions: restoredRows(prevSessions), sessionsTotal: prevTotal }));
+			refuseRowRemoval(change);
 			await appData.loadSessions();
 			throw err;
 		}
+		acceptRowChange(change);
 	},
 
 	async renameSession(sessionId: string, title: string) {
-		// Optimistic rename — patch the row's title in local state immediately for
-		// instant feedback (mirrors deleteSession's optimistic splice). Snapshot the
-		// previous list so we can roll back if the PATCH fails.
-		//
-		// Registering the edit is what keeps a list load that was ALREADY PAGING
-		// when the user renamed from committing the pre-rename row and snapping
-		// the title back (S12): every commit re-applies it until the server is
-		// known to carry it.
-		const prevSessions = _state.sessions;
-		recordLocalEdit(sessionId, { title });
-		_update(s => ({
-			...s,
-			sessions: s.sessions.map(x => (x.id === sessionId ? { ...x, title } : x)),
-		}));
-
+		// Optimistic rename. Registering the edit is what keeps a list load that was
+		// ALREADY PAGING when the user renamed from committing the pre-rename row and
+		// snapping the title back (S12): every commit re-applies it until the server
+		// is known to carry it.
+		const change = beginRowChange(sessionId, { title });
 		try {
 			await apiRenameSession(sessionId, title);
-			confirmLocalEdits([sessionId]);
 		} catch (err) {
-			// Roll the optimistic title change back and let the caller surface the error.
-			discardLocalEdits([sessionId]);
-			_update(s => ({ ...s, sessions: restoredRows(prevSessions) }));
+			refuseRowChange(change);
 			throw err;
 		}
+		acceptRowChange(change);
 	},
 
 	/** Merge a server-pushed field patch (e.g. is_active from a
@@ -1007,6 +1185,7 @@ export const appData = {
 		if ('pending_task_chips' in patch) {
 			_chipCounts.set(sessionId, { count: chipCount ?? null, learnedAt: ++_chipCountClock });
 		}
+		notePushedFields(sessionId, fields);
 		if (found && Object.keys(fields).length > 0) {
 			// The push came FROM the server, so it is confirmed on arrival — but a
 			// list load that started before it must not commit the pre-patch row
@@ -1018,22 +1197,13 @@ export const appData = {
 	},
 
 	async setSessionActive(sessionId: string, isActive: boolean) {
-		// Optimistic Active-membership flip — patch the row's is_active in local
-		// state immediately (mirrors renameSession's optimistic splice) so it
-		// re-groups between the Active and Recent sections without a full
-		// paginated refetch. Snapshot the previous list to roll back if the PATCH
-		// fails.
-		const prevSessions = _state.sessions;
-		// Register BEFORE the PATCH resolves. A load already in flight when the
-		// user clicked (e.g. the turn-done refresh) carries the PRE-patch row;
-		// re-applying this edit on its commit is what stops the card snapping
-		// back into Active for the length of the round-trip. Unlike the old
-		// invalidate-the-load guard, the in-flight load's OTHER rows still land.
-		recordLocalEdit(sessionId, { is_active: isActive });
-		_update(s => ({
-			...s,
-			sessions: s.sessions.map(x => (x.id === sessionId ? { ...x, is_active: isActive } : x)),
-		}));
+		// Optimistic Active-membership flip, so the row re-groups between the Active
+		// and Recent sections without a full paginated refetch. Registered BEFORE the
+		// PATCH resolves: a load already in flight when the user clicked (e.g. the
+		// turn-done refresh) carries the PRE-patch row, and re-applying this edit on
+		// its commit is what stops the card snapping back into Active for the length
+		// of the round-trip. The in-flight load's OTHER rows still land.
+		const change = beginRowChange(sessionId, { is_active: isActive });
 
 		// Only the waits that exist now are this settle's to dismiss: by the time
 		// the PATCH resolves another device may have unsettled the session and
@@ -1042,19 +1212,17 @@ export const appData = {
 
 		try {
 			await apiSetSessionActive(sessionId, isActive);
-			confirmLocalEdits([sessionId]);
-			// Settling dismisses the session's pending permission/question on the
-			// server (#2324); drop the local copies now rather than waiting for the
-			// echoed frame. Unsettle starts fresh, so it clears nothing.
-			if (promptSnapshot) activeSession.dismissSettledPrompts(sessionId, promptSnapshot);
-			// Reconcile with an authoritative reload.
-			await loadSessionsInternal(_state.sessionsTagFilter);
 		} catch (err) {
-			// Roll the optimistic change back and let the caller surface the error.
-			discardLocalEdits([sessionId]);
-			_update(s => ({ ...s, sessions: restoredRows(prevSessions) }));
+			refuseRowChange(change);
 			throw err;
 		}
+		acceptRowChange(change);
+		// Settling dismisses the session's pending permission/question on the
+		// server (#2324); drop the local copies now rather than waiting for the
+		// echoed frame. Unsettle starts fresh, so it clears nothing.
+		if (promptSnapshot) activeSession.dismissSettledPrompts(sessionId, promptSnapshot);
+		// Reconcile with an authoritative reload.
+		await loadSessionsInternal(_state.sessionsTagFilter);
 	},
 
 	/**
@@ -1063,27 +1231,20 @@ export const appData = {
 	 * undoing an archive puts an Active session back in Active.
 	 */
 	async setSessionArchived(sessionId: string, archived: boolean, isActive = false) {
-		const prevSessions = _state.sessions;
-		const patch: Partial<Session> = archived
+		const change = beginRowChange(sessionId, archived
 			? { status: 'archived', is_active: false }
-			: { status: 'active', is_active: isActive };
-		recordLocalEdit(sessionId, patch);
-		_update(s => ({
-			...s,
-			sessions: s.sessions.map(x => (x.id === sessionId ? { ...x, ...patch } : x)),
-		}));
+			: { status: 'active', is_active: isActive });
 		// An open archived chat loses its composer; a restored one gets it back.
 		archivedChats.mark(sessionId, archived);
 		try {
 			await apiSetSessionArchived(sessionId, archived, isActive);
-			confirmLocalEdits([sessionId]);
-			await loadSessionsInternal(_state.sessionsTagFilter);
 		} catch (err) {
-			discardLocalEdits([sessionId]);
-			_update(s => ({ ...s, sessions: restoredRows(prevSessions) }));
+			refuseRowChange(change);
 			archivedChats.mark(sessionId, !archived);
 			throw err;
 		}
+		acceptRowChange(change);
+		await loadSessionsInternal(_state.sessionsTagFilter);
 	},
 
 	// ── Search ──────────────────────────────────────────────────────────

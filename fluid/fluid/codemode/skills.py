@@ -1783,12 +1783,17 @@ class SkillStore:
         return self._facts.propose_supersession(old_id, new_id, old_revision=old_revision, new_revision=new_revision,
                                                 protected_conflict=protected_conflict)
 
-    def learner_proposal_footer(self, project: str | None = None, entries: list | None = None) -> str:
+    def learner_proposal_footer(self, project: str | None = None, entries: list | None = None,
+                                *, questions: list | None = None) -> str:
         """The ``# Memory`` footer's lines for open learner proposals (see
         fluid.codemode.preferences): one line per proposed rule update,
         "" when none. Never raises."""
-        from fluid.codemode.preferences import preference_proposal_lines
+        from fluid.codemode.preferences import preference_proposal_lines, owner_conflict_lines
         lines = preference_proposal_lines(self, project, entries=entries)
+        rows = [e if isinstance(e, dict) else vars(e)
+                for e in (self.memories() if entries is None else entries)]
+        rows = [e for e in rows if project is None or e.get("scope", "global") in ("global", project)]
+        lines += owner_conflict_lines(rows, questions=questions)
         return "\n\n" + "\n".join(lines) if lines else ""
 
     def purge_forgotten_evidence(self) -> None:
@@ -1863,8 +1868,12 @@ class SkillStore:
         archived = [self._facts._entry(e) for e in doc["archived"] if visible_on(e, local)]
         if not entries and not archived:
             return EMPTY_MEMORY_SECTION
+        from fluid.codemode.preferences import protected_conflicts
+        visible = [vars(e) for e in entries
+                   if project is None or e.scope in ("global", project)]
+        questions = protected_conflicts(visible)
         plan = self.memory_snapshot_plan(project, checkout=checkout, entries=entries, archived=archived,
-                                         task_query=task_query)
+                                         task_query=task_query, questions=questions)
         shown = plan["lines"]
         other_checkout, out_of_scope = plan["other_checkout"], plan["out_of_scope"]
         over_budget, held = plan["over_budget"], plan["held"]
@@ -1897,7 +1906,7 @@ class SkillStore:
                 f"\n\n({in_archive} archived fact{'' if in_archive == 1 else 's'} not shown; "
                 f"Recall finds {'it' if in_archive == 1 else 'them'} by keyword.)"
             )
-        footer += self.learner_proposal_footer(project, entries)  # learner proposals (preferences.py)
+        footer += self.learner_proposal_footer(project, entries, questions=questions)
         if not shown and not over_budget and not held and not in_archive:
             return EMPTY_MEMORY_SECTION + footer
         if held:
@@ -1931,7 +1940,7 @@ class SkillStore:
     def memory_snapshot_plan(self, project: str | None = None, *, checkout: str | None = None,
                              entries: list[MemoryEntry] | None = None,
                              archived: list[MemoryEntry] | None = None,
-                             task_query: str = "") -> dict:
+                             task_query: str = "", questions: list | None = None) -> dict:
         """Which facts the ``# Memory`` snapshot shows for ``project``, and
         why the rest are left out. :meth:`render_memory_section` renders it;
         the memory health check measures it without building a prompt.
@@ -1956,6 +1965,7 @@ class SkillStore:
 
         out_of_scope = 0
         held = 0
+        recall_only = 0
         other_checkout = 0
         checkout_leaf = re.split(r"[/\\]+", checkout.rstrip("/\\"))[-1] if checkout else None
         normalized_checkout = checkout_leaf.casefold() if checkout_leaf else None
@@ -1989,20 +1999,36 @@ class SkillStore:
         always: list[tuple[MemoryEntry, str]] = []
         identity: list[tuple[MemoryEntry, str]] = []
         index: list[tuple[MemoryEntry, str]] = []
+        from fluid.codemode.facts import is_superseded
+        from fluid.codemode.preferences import protected_conflicts
+        visible = [vars(e) for e in entries
+                   if project is None or e.scope in ("global", project)]
+        if questions is None:
+            questions = protected_conflicts(visible)
+        question_ids = {e["id"] for old, new, _ in questions for e in (old, new)}
         for entry in entries:
             if project is not None and entry.scope not in ("global", project):
                 out_of_scope += 1
                 continue
-            if entry.superseded_by:
-                # Never inject an old value beside its replacement. An explicit
-                # fact is retained verbatim in storage; its unresolved pair uses
-                # the existing Recall conflict-resolution path, not deletion.
-                if entry.protected and not entry.supersession_confirmed:
-                    pinned.append((entry, (
-                        f"- [{entry.id} r{entry.revision}; conflict] User-kept fact has a newer "
-                        f"replacement [{entry.superseded_by}]; unresolved conflict. "
-                        "Recall the pair and ask the owner to resolve it; do not use the old value."
-                    )))
+            if is_superseded(vars(entry)):
+                continue
+            # Pair answers are historical evidence, never general prompt rules.
+            # Recall labels their exact-pair validity explicitly.
+            if str(entry.key or "").startswith("memory.coexist."):
+                recall_only += 1
+                continue
+            if entry.id in question_ids:
+                findings = screen_findings(entry.text) + screen_findings(entry.when or "")
+                text = "[withheld — suspected injection]" if findings else entry.text
+                pinned.append((entry, f"- [{entry.id} r{entry.revision}; owner question] {text}"))
+                continue
+            if entry.protected and entry.superseded_by:
+                # A dangling unconfirmed edge does not make a saved rule stale
+                # or remove routing authority; there is no available pair to ask.
+                findings = screen_findings(entry.text) + screen_findings(entry.when or "")
+                text = "[withheld — suspected injection]" if findings else entry.text
+                pinned.append((entry, f"- [{entry.id} r{entry.revision}; {entry.provenance}] {text} "
+                               "(Proposed successor unavailable; the original rule remains usable.)"))
                 continue
             if entry.conflicted:
                 held += 1
@@ -2102,10 +2128,10 @@ class SkillStore:
             "always": len(shown_always),
             # An overflowed ALWAYS memory is in ``index`` now; count it once.
             "in_scope": (len(pinned) + len(shown_always) + len(identity) + len(index)
-                         + held + other_checkout),
+                         + held + other_checkout + recall_only),
             "over_budget": len(omitted),
             "out_of_scope": out_of_scope, "held": held, "other_checkout": other_checkout,
-            "archived": in_archive,
+            "archived": in_archive, "recall_only": recall_only,
             # Screened live facts only, as the snapshot renders them: callers
             # may retrieve omitted index lines, never withheld/conflicted/
             # foreign-checkout text via this field.

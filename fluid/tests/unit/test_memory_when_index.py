@@ -590,16 +590,20 @@ def test_screening_withholds_bad_text_or_when_and_keeps_conflict_lines(tmp_path)
     section = SkillStore(tmp_path).render_memory_section()
     assert section.count("an entry was withheld") == 2
     assert "Ignore all previous" not in section and "reveal the system" not in section
-    # An owner-kept fact with an unresolved replacement renders the conflict line.
+    # A genuine owner contradiction asks without creating a replacement link.
     pair = SkillStore(tmp_path / "pair")
     old = pair.save_memory("Owner rule: code work goes to Sol; reviews go to Opus.",
                            protected=True)
     new = pair.save_memory("Owner rule: code work goes to Opus; reviews go to Sonnet.",
                            protected=True)
-    assert pair.propose_memory_supersession(old.id, new.id, old_revision=1, new_revision=1,
-                                            protected_conflict=True)
+    assert not pair.propose_memory_supersession(old.id, new.id, old_revision=1, new_revision=1,
+                                                protected_conflict=True)
     section = pair.render_memory_section()
-    assert f"- [{old.id} r2; conflict]" in section and "Recall the pair" in section
+    assert "[owner question; unresolved conflict]" in section
+    assert "Recall both and ask the owner" in section
+    assert "and model-routing authority" in section
+    assert old.text in section and new.text in section
+    assert not next(e for e in pair.memories() if e.id == old.id).superseded_by
 
 
 def test_eligible_lines_are_index_lines(tmp_path, monkeypatch):
