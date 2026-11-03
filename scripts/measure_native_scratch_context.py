@@ -25,9 +25,9 @@ import asyncio
 import json
 import logging
 import os
-from pathlib import Path
 import sys
 import tempfile
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -77,12 +77,13 @@ class _Recording:
 
 
 async def _run(turns: int, *, memory: bool, folded: bool) -> dict[str, Any]:
-    from app.core.provider.harness_adapter import HarnessAdapter
-    from app.core.provider.types import SessionOptions
     from fluid.context.compaction import CompactionConfig
     from fluid.engine.native import NativeLoop
     from fluid.events import ContextCompaction
     from fluid.store.base import MemoryStore, iter_events
+
+    from app.core.provider.harness_adapter import HarnessAdapter
+    from app.core.provider.types import SessionOptions
 
     note = fixture_note()
     provider = _Recording("reply " * 300 if folded else "ok")

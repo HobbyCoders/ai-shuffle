@@ -379,10 +379,10 @@ class HarnessAdapter(ProviderAdapter):
         # Native scratch reminder: what the path proves the model holds for the
         # turn being built, what that turn then sends, and whether a model
         # change asks for a fresh copy (see _native_scratch_held).
-        self._native_scratch_held_for_turn: Optional[str] = None
-        self._native_scratch_turn: Optional[str] = None
+        self._native_scratch_held_for_turn: str | None = None
+        self._native_scratch_turn: str | None = None
         self._native_scratch_stale: bool = False
-        self._native_scratch_identity: Optional[Tuple[str, str]] = None
+        self._native_scratch_identity: tuple[str, str] | None = None
         self._memory_initial_task: str = ""  # ephemeral; restored from owner text
         self._memory_identity: Optional[Tuple[str, str]] = None
         # What the model holds for the turn being built, and what the turn's
@@ -2146,7 +2146,7 @@ class HarnessAdapter(ProviderAdapter):
         start = content.rfind(note) if note else -1
         return (start, start + len(note)) if start >= 0 else None
 
-    async def _native_scratch_held(self) -> Optional[str]:
+    async def _native_scratch_held(self) -> str | None:
         """The scratch block the model holds on this native session's active
         path, or None when it must get one.
 
@@ -2171,7 +2171,7 @@ class HarnessAdapter(ProviderAdapter):
             return None
         return await holds(sid, SCRATCH_HEADER)
 
-    def _native_scratch_note(self) -> Optional[str]:
+    def _native_scratch_note(self) -> str | None:
         """The scratch block unless the path shows this exact text is held; a
         changed path (a moved state root, say) goes out again."""
         note = self._scratch_note() or None

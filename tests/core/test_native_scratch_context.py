@@ -13,8 +13,6 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
-
-from app.core import memory_reminder as mr
 from fluid.context.compaction import CompactionConfig
 from fluid.engine.native import NativeLoop
 from fluid.events import ContextCompaction
@@ -26,6 +24,8 @@ from fluid.state import SCRATCH_HEADER
 from fluid.store.base import MemoryStore, SessionNode, iter_events, new_id
 from fluid.tools.inproc import create_inproc_server, tool
 from fluid.tools.registry import ToolRegistry
+
+from app.core import memory_reminder as mr
 from scripts.measure_native_scratch_context import fixture_note, measure
 from tests.core.test_memory_reminder import FACTS, _adapter, _Recording, _section, _turn
 from tests.test_harness_adapter import _collect
@@ -136,7 +136,7 @@ async def test_the_pin_covers_exactly_what_the_host_appended(monkeypatch):
 @pytest.mark.asyncio
 async def test_a_quoted_copy_is_not_evidence(monkeypatch):
     """Owner text and history from before the fix hold no host-pinned range."""
-    provider, loop = _recording_loop()
+    _provider, loop = _recording_loop()
     adapter, loop = await _scratch_adapter(monkeypatch, memory=False, loop=loop)
     await loop.store.append(loop.session_id, SessionNode(
         node_id=new_id("node"), parent_id=None,
@@ -346,7 +346,7 @@ async def test_a_retry_replays_the_request_byte_identically(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_retry_with_nothing_held_restores_it_at_the_tail(monkeypatch):
-    provider, loop = _recording_loop()
+    _provider, loop = _recording_loop()
     adapter, loop = await _scratch_adapter(monkeypatch, memory=False, loop=loop)
     original = f"unfinished from before this fix\n\n{NOTE}"
     await loop.store.append(loop.session_id, SessionNode(
@@ -390,7 +390,7 @@ async def test_a_model_change_sends_one_fresh_copy(monkeypatch, change):
 @pytest.mark.asyncio
 async def test_a_compact_right_after_a_model_change_does_not_use_up_the_fresh_copy(monkeypatch):
     # /compact stores no node, so the copy it was built with never went out.
-    provider, loop = _recording_loop()
+    _provider, loop = _recording_loop()
     adapter, loop = await _scratch_adapter(monkeypatch, memory=False, loop=loop)
     await _turn(adapter, "first")
     await adapter.set_model("other-model")
@@ -403,7 +403,7 @@ async def test_a_compact_right_after_a_model_change_does_not_use_up_the_fresh_co
 
 @pytest.mark.asyncio
 async def test_a_rejected_submit_leaves_nothing_believed_delivered(monkeypatch):
-    provider, loop = _recording_loop()
+    _provider, loop = _recording_loop()
     adapter, loop = await _scratch_adapter(monkeypatch, loop=loop)
     await _turn(adapter, "first")
     await adapter.set_model("other-model")
@@ -426,7 +426,7 @@ async def test_a_rejected_submit_leaves_nothing_believed_delivered(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_an_unreadable_path_sends_it_and_the_turn_goes_on(monkeypatch):
-    import fluid.engine.native as native
+    from fluid.engine import native
 
     provider, loop = _recording_loop()
     adapter, loop = await _scratch_adapter(monkeypatch, loop=loop)
@@ -445,7 +445,7 @@ async def test_an_unreadable_path_sends_it_and_the_turn_goes_on(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_compactor_that_does_not_pin_it_sends_it_every_turn(monkeypatch):
-    provider, loop = _recording_loop(replace(CompactionConfig(), pinned_blocks=None))
+    _provider, loop = _recording_loop(replace(CompactionConfig(), pinned_blocks=None))
     adapter, loop = await _scratch_adapter(monkeypatch, loop=loop)
     await _turn(adapter, "first")
     await _turn(adapter, "second")
@@ -462,7 +462,7 @@ async def test_an_engine_that_cannot_answer_means_send(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_the_delegated_leg_is_untouched(monkeypatch):
-    adapter, loop = await _scratch_adapter(monkeypatch, memory=False)
+    adapter, _loop = await _scratch_adapter(monkeypatch, memory=False)
     await _turn(adapter, "first")
     adapter._is_delegated = True
     assert await adapter._native_scratch_held() is None

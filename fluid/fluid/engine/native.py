@@ -2780,7 +2780,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 else await self.store.load_path(sid, leaf_node_id)
             )
             return newest_pinned_block(nodes, header)
-        except Exception:  # noqa: BLE001 - unknown history: the caller re-sends
+        except Exception:  # unknown history: the caller re-sends
             log.warning("pinned block lookup failed", exc_info=True)
             return None
 
